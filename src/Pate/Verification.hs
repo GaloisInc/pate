@@ -128,20 +128,27 @@ data BinaryContext sym arch = BinaryContext
   , parsedFunctionMap :: ParsedFunctionMap arch
   }
 
-data EquivalenceContext sym ids arch = EquivalenceContext
-  { nonces :: N.NonceGenerator (ST RealWorld) ids
-  , handles :: CFH.HandleAllocator
-  , archVals :: MS.ArchVals arch
-  , exprBuilder :: sym
-  , memTraceVar :: CS.GlobalVar (MT.MemTrace arch)
-  , ipEquivalence :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> IO (W4.Pred sym)
-  
-  }
+data EquivalenceContext sym ids arch where
+  EquivalenceContext :: (ValidArch arch, ValidSym sym) =>
+    { nonces :: N.NonceGenerator (ST RealWorld) ids
+    , handles :: CFH.HandleAllocator
+    , archVals :: MS.ArchVals arch
+    , exprBuilder :: ValidOnlineBackend sym
+    , memTraceVar :: CS.GlobalVar (MT.MemTrace arch)
+    , ipEquivalence :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> IO (W4.Pred sym)
 
--- | Monad for wrapping up equivalence-checking state
+    } -> EquivalenceContext sym ids arch
+
+type ValidArch arch =
+  (arch ~ RP.PPC64, Typeable arch, (KnownNat (MM.ArchAddrWidth arch), 1 <= MM.ArchAddrWidth arch))
+
 
 type ValidSym sym = (W4.IsExprBuilder sym, CB.IsSymInterface sym)
-type ValidSolver sym scope solver fs = (sym ~ CBO.OnlineBackend scope solver fs, W4O.OnlineSolver solver)
+type ValidSolver sym scope solver fs =
+  (sym ~ CBO.OnlineBackend scope solver fs
+  , W4O.OnlineSolver solver
+  , W4W.SMTReadWriter solver
+  )
 
 data ValidOnlineBackend sym where
   ValidOnlineBackend ::
@@ -149,13 +156,14 @@ data ValidOnlineBackend sym where
     , ValidSym sym
     ) => 
     sym ->
+    W4O.SolverProcess scope solver ->
     ValidOnlineBackend sym
 
 data EquivEnv sym arch where
   EquivEnv :: ValidArch arch =>
     { originalCtx :: BinaryContext sym arch
     , rewrittenCtx :: BinaryContext sym arch
-    , envSym :: ValidOnlineBackend sym
+    , envSymProc :: ValidOnlineBackend sym
     } -> EquivEnv sym arch
 
 
@@ -196,23 +204,37 @@ withValidEnv ::
     ValidSolver sym scope solver fs =>
     a) ->
   a
-withValidEnv (EquivEnv _ _ (ValidOnlineBackend _)) f = f
+withValidEnv (EquivEnv _ _ (ValidOnlineBackend _ _)) f = f
 
 withSym ::
   ( forall scope solver fs.
     ValidSolver sym scope solver fs =>
+    ValidArch arch =>
     ValidSym sym =>
     sym ->
    EquivM sym arch a) ->
   EquivM sym arch a
-withSym f = do
-  ValidOnlineBackend sym <- asks envSym
+withSym f = withValid $ do
+  ValidOnlineBackend sym _ <- asks envSymProc
   f sym
+
+withProc ::
+  ( forall scope solver fs.
+    ValidSolver sym scope solver fs =>
+    ValidSym sym =>
+    ValidArch arch =>
+    W4O.SolverProcess scope solver ->
+   EquivM sym arch a) ->
+  EquivM sym arch a
+withProc f = withValid $ do
+  ValidOnlineBackend _ p <- asks envSymProc
+  f p
 
 withSymIO ::
   ( forall scope solver fs.
     sym ~ CBO.OnlineBackend scope solver fs =>
     W4O.OnlineSolver solver =>
+    ValidArch arch =>
     ValidSym sym =>
     sym ->
    IO a ) ->
@@ -252,7 +274,9 @@ errorHere msg = do
 instance MonadFail (EquivM sym arch) where
   fail msg = errorHere $ "Fail: " ++ msg
 
-type ValidArch arch = (arch ~ RP.PPC64, Typeable arch)
+
+_validTest :: (ValidArch RP.PPC64 => f) -> f
+_validTest f = f
 
 verifyPairs ::
   forall arch.
@@ -276,6 +300,7 @@ verifyPairs bin bin' ipMap pairs = do
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
     eval <- lift (MS.withArchEvalTrace vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
+    proc <- liftIO $ CBO.withSolverProcess sym return
     let
       exts = MS.macawTraceExtensions eval model (trivialGlobalMap @_ @arch)
       env = EquivEnv
@@ -291,17 +316,17 @@ verifyPairs bin bin' ipMap pairs = do
             , globalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
             , parsedFunctionMap = pfm'
             }
-        , envSym = ValidOnlineBackend sym
+        , envSymProc = ValidOnlineBackend sym proc
         }
     
     runEquivM env $ do
-      ipEq <- mkIPEquivalence sym ipMap
+      ipEq <- mkIPEquivalence ipMap
 
       let ctxt = EquivalenceContext
             { nonces = gen
             , handles = ha
             , archVals = vals
-            , exprBuilder = sym
+            , exprBuilder = ValidOnlineBackend sym proc
             , memTraceVar = model
             , ipEquivalence = ipEq
             }
@@ -337,15 +362,10 @@ ppEquivalenceStatistics (EquivalenceStatistics checked equiv err) = unlines
   ]
 
 checkAndDisplayRenEquivalence ::
-  ( CB.IsSymInterface sym
-  , W4O.OnlineSolver solver
-  , sym ~ CBO.OnlineBackend scope solver fs
-  , ValidArch arch
-  ) =>
   EquivalenceContext sym ids arch ->
   R.RewritePair arch ->
   EquivM sym arch EquivalenceStatistics
-checkAndDisplayRenEquivalence ctxt pair = do
+checkAndDisplayRenEquivalence ctxt pair = withValid $ do
   liftIO . putStr $ ""
     ++ "Checking equivalence of "
     ++ formatBlock (R.rpOrig pair)
@@ -431,10 +451,7 @@ combineEquivalence act1 act2 = do
     _ -> pure res1
 
 checkRenEquivalence ::
-  forall sym arch ids scope solver fs.
-  ValidArch arch =>
-  ValidSym sym =>
-  ValidSolver sym scope solver fs =>
+  forall sym arch ids.
   EquivalenceContext sym ids arch ->
   R.RewritePair arch ->
   EquivM sym arch (EquivalenceResult arch)
@@ -442,12 +459,12 @@ checkRenEquivalence
   eqCtx@EquivalenceContext
     { archVals = MS.ArchVals { MS.archFunctions = fns }
     , handles = ha
-    , exprBuilder = sym
+    , exprBuilder = ValidOnlineBackend sym _
     , memTraceVar = mem
     }
-  (R.RewritePair rBlock (Just rBlock')) = do
+  (R.RewritePair rBlock (Just rBlock')) = withValid $ do
   unconstrainedRegs_ <- Ctx.traverseWithIndex
-    (unconstrainedRegister sym)
+    unconstrainedRegister
     (CC.knownRepr @_ @(Ctx.Assignment CC.TypeRepr) @(MS.MacawCrucibleRegTypes arch))
   let unconstrainedRegs = CS.assignReg CC.knownRepr unconstrainedRegs_ CS.emptyRegMap
   oCtx <- asks originalCtx
@@ -460,12 +477,11 @@ checkRenEquivalence
   registersEquivalent <- TFC.foldrFC (<&&>) (pure (W4.truePred sym)) preds
   let
     matchTraces ::
-      W4O.SolverProcess scope solver ->
       W4.Pred sym ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
       EquivM sym arch (EquivalenceResult arch)
-    matchTraces proc prevChecks
+    matchTraces prevChecks
       (MT.MergeOps p  traceT  traceF  :< ops )
       (MT.MergeOps p' traceT' traceF' :< ops')
       = combineEquivalence
@@ -476,7 +492,7 @@ checkRenEquivalence
             -- succeed.)
             CB.addAssumption sym (CB.LabeledPred p undefined)
             W4.andPred sym prevChecks p'
-          matchTraces proc prevChecks' (traceT <> ops) (traceT' <> ops')
+          matchTraces prevChecks' (traceT <> ops) (traceT' <> ops')
         )
         (errorFrame sym $ do
           prevChecks' <- liftIO $ do
@@ -484,35 +500,36 @@ checkRenEquivalence
             notp' <- W4.notPred sym p'
             CB.addAssumption sym (CB.LabeledPred notp undefined)
             W4.andPred sym prevChecks notp'
-          matchTraces proc prevChecks' (traceF <> ops) (traceF' <> ops')
+          matchTraces prevChecks' (traceF <> ops) (traceF' <> ops')
         )
-    matchTraces proc prevChecks
+    matchTraces prevChecks
       (MT.MemOp addr  dir  cond_  w  val  end  :< ops )
       (MT.MemOp addr' dir' cond'_ w' val' end' :< ops')
       | Just Refl <- testEquality w w'
       , (dir, end) == (dir', end')
       = do
-        prevChecks'' <- liftIO $ do
-          condPred <- W4.eqPred sym cond cond'
-          addrPred <- llvmPtrEq sym addr addr'
-          prevChecks' <- W4.andPred sym prevChecks =<< W4.andPred sym condPred addrPred
-          eqVal <- llvmPtrEq sym val val'
-          here <- W4.getCurrentProgramLoc sym -- uh...
-          case dir of
-            MT.Read -> prevChecks' <$ CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
-            MT.Write -> W4.andPred sym prevChecks' eqVal
-        matchTraces proc prevChecks'' ops ops'
-        where
-        cond  = memOpCondition sym cond_
-        cond' = memOpCondition sym cond'_
-    matchTraces proc prevChecks Empty Empty = do
+        prevChecks'' <- do
+          cond <- memOpCondition cond_
+          cond' <- memOpCondition cond'_
+          withSymIO $ \_sym -> do
+            condPred <- W4.eqPred sym cond cond'
+            addrPred <- llvmPtrEq sym addr addr'
+            prevChecks' <- W4.andPred sym prevChecks =<< W4.andPred sym condPred addrPred
+            eqVal <- llvmPtrEq sym val val'
+            here <- W4.getCurrentProgramLoc sym -- uh...
+            case dir of
+              MT.Read -> prevChecks' <$ CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
+              MT.Write -> W4.andPred sym prevChecks' eqVal
+        matchTraces prevChecks'' ops ops'
+
+    matchTraces prevChecks Empty Empty = do
       notPrevChecks <- liftIO $ W4.notPred sym prevChecks
       -- TODO: addAssertion sym prevChecks ?
-      checkSatisfiableWithModel proc satResultDescription notPrevChecks $ \case
+      checkSatisfiableWithModel satResultDescription notPrevChecks $ \case
         W4R.Unsat _ -> pure Equivalent
         W4R.Unknown -> throwError InconclusiveSAT
         W4R.Sat (W4G.GroundEvalFn fn) -> pure InequivalentResults
-          <*> groundTraceDiff sym fn memTrace memTrace'
+          <*> groundTraceDiff fn memTrace memTrace'
           <*> Ctx.traverseWithIndex
             (\i repr -> do
               pre <- concreteValue fn repr $ unconstrainedRegs_ Ctx.! i
@@ -529,15 +546,24 @@ checkRenEquivalence
                 }
             )
             regsRepr
-    matchTraces _ _ _ _ = pure (InequivalentOperations (spineOf memTrace) (spineOf memTrace'))
-  withSolverProcess sym $ \proc -> matchTraces proc registersEquivalent memTrace memTrace'
+    matchTraces _ _ _ = pure (InequivalentOperations (spineOf memTrace) (spineOf memTrace'))
+  matchTraces registersEquivalent memTrace memTrace'
   where
-  ppcRepr = CC.knownRepr @_ @_ @(MS.ArchRegStruct arch)
-  evalCFG regs globals exts cfg = id
-    . CS.executeCrucible []
-    . CS.InitialState (simContext exts) globals CS.defaultAbortHandler ppcRepr
-    . CS.runOverrideSim ppcRepr
-    $ CS.regValue <$> CS.callCFG cfg regs
+  evalCFG ::
+    CS.RegMap sym tp ->
+    BinaryContext sym arch ->
+    CC.CFG (MS.MacawExt arch) blocks tp (MS.ArchRegStruct arch) ->
+    EquivM sym arch (CS.ExecResult (MS.MacawSimulatorState sym) sym (MS.MacawExt arch) (CS.RegEntry sym (MS.ArchRegStruct arch)))
+  evalCFG regs binCtx cfg = do
+    archRepr <- getArchRepr
+    let
+      globals = globalMap binCtx
+      exts = extensions binCtx
+    withValidIO $ id
+      . CS.executeCrucible []
+      . CS.InitialState ( simContext exts) globals CS.defaultAbortHandler archRepr
+      . CS.runOverrideSim archRepr
+      $ CS.regValue <$> CS.callCFG cfg regs
   simContext exts = CS.initSimContext
     sym
     MT.memTraceIntrinsicTypes
@@ -596,7 +622,7 @@ checkRenEquivalence
           killEdges = concatMap (externalTransitions internalAddrs) (pb:pbs)
       liftIO $ MS.mkBlockSliceCFG fns ha (W4L.OtherPos . fromString . show) pb nonTerminal terminal killEdges
     -- TODO: constrain the IP and LNK register
-    cres <- liftIO $ evalCFG regs (globalMap binCtx) (extensions binCtx) cfg
+    cres <- evalCFG regs binCtx cfg
     getGPValueAndTrace mem cres
 
   Const p1 <&&> mp2 = mp2 >>= liftIO . W4.andPred sym p1
@@ -617,10 +643,14 @@ checkRenEquivalence eqCtx (R.RewritePair rBlock Nothing) =
     let rBlock' = R.concretizedBlock (R.concreteBlockAddress rBlock) insns repr
     in checkRenEquivalence eqCtx (R.RewritePair rBlock (Just rBlock'))
 
-memOpCondition :: W4.IsExprBuilder sym => sym -> MT.MemOpCondition sym -> W4.Pred sym
-memOpCondition sym = \case
-  MT.Unconditional -> W4.truePred sym
-  MT.Conditional p -> p
+
+getArchRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
+getArchRepr = withValid $ return $ CC.knownRepr @_ @_ @(MS.ArchRegStruct arch)
+
+memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
+memOpCondition = \case
+  MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
+  MT.Conditional p -> return p
 
 runInIO1 :: IO.MonadUnliftIO m => (a -> m b) -> ((a -> IO b) -> IO b) -> m b
 runInIO1 f g = do
@@ -628,22 +658,14 @@ runInIO1 f g = do
   liftIO $ g (\a -> outer_io_ctx (f a))
 
 checkSatisfiableWithModel ::
-  W4W.SMTReadWriter solver =>
-  W4O.SolverProcess scope solver ->
+  ValidSolver sym scope solver fs =>
   String ->
   W4B.BoolExpr scope ->
   (W4R.SatResult (W4G.GroundEvalFn scope) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel proc desc p k =
+checkSatisfiableWithModel desc p k = withProc $ \proc ->
   runInIO1 k $ W4O.checkSatisfiableWithModel proc desc p
 
-  
-withSolverProcess ::
-  W4O.OnlineSolver solver =>
-  CBO.OnlineBackend scope solver fs ->
-  (W4O.SolverProcess scope solver -> EquivM sym arch a) ->
-  EquivM sym arch a
-withSolverProcess b k = runInIO1 k $ CBO.withSolverProcess b
 
 -- | Wrap the argument in an assumption frame in a way that's safe even if it
 -- throws an error.
@@ -693,7 +715,7 @@ externalTransitions internalAddrs pb =
   ]
 
 equivPred ::
-  (CB.IsSymInterface sym, Ctx.KnownContext ctx, ValidArch arch) =>
+  Ctx.KnownContext ctx =>
   EquivalenceContext sym ids arch ->
   Ctx.Assignment CC.TypeRepr ctx ->
   Ctx.Assignment (CS.RegValue' sym) ctx ->
@@ -701,9 +723,9 @@ equivPred ::
   Ctx.Index ctx tp ->
   EquivM sym arch (Const (W4.Pred sym) tp)
 equivPred
-  EquivalenceContext { exprBuilder = sym, ipEquivalence = ipEq }
+  EquivalenceContext { exprBuilder = ValidOnlineBackend sym _, ipEquivalence = ipEq }
   regsRepr regs regs' i
-  = Const <$> case regsRepr Ctx.! i of
+  = withValid $ Const <$> case regsRepr Ctx.! i of
     CLM.LLVMPointerRepr widthRepr -> liftIO $ case (regs Ctx.! i, regs' Ctx.! i) of
       (CS.RV bv, CS.RV bv')
         -- TODO: abstract away the 0 and 64
@@ -739,40 +761,36 @@ concreteValue _ repr _ = throwError (UnsupportedRegisterType (S.Some repr))
 
 -- We assume the two traces have equivalent spines already.
 groundTraceDiff ::
-  (W4.IsExprBuilder sym, KnownNat (MM.ArchAddrWidth arch), 1 <= MM.ArchAddrWidth arch) =>
-  sym ->
   (forall tp. W4B.SymExpr sym tp -> IO (W4G.GroundValue tp)) ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   EquivM sym arch MemTraceDiff
-groundTraceDiff sym fn (MT.MemOp addr dir cond_ w val _ :< ops) (MT.MemOp addr' _ cond'_ w' val' _ :< ops') = do
+groundTraceDiff fn (MT.MemOp addr dir cond_ w val _ :< ops) (MT.MemOp addr' _ cond'_ w' val' _ :< ops') = do
+  cond <- memOpCondition cond_
+  cond' <- memOpCondition cond'_  
   op  <- groundMemOp fn addr  cond  w  val
   op' <- groundMemOp fn addr' cond' w' val'
-  diff <- groundTraceDiff sym fn ops ops'
+  diff <- groundTraceDiff fn ops ops'
   pure (MemOpDiff
     { mDirection = dir
     , mOpOriginal = op
     , mOpRewritten = op'
     } :< diff)
-  where
-  cond  = memOpCondition sym cond_
-  cond' = memOpCondition sym cond'_
-groundTraceDiff sym fn (MT.MergeOps cond traceT traceF :< ops) (MT.MergeOps _cond' traceT' traceF' :< ops') = do
+groundTraceDiff fn (MT.MergeOps cond traceT traceF :< ops) (MT.MergeOps _cond' traceT' traceF' :< ops') = do
   b <- liftIO (fn cond)
   let (trace, trace') = if b then (traceT, traceT') else (traceF, traceF')
-  groundTraceDiff sym fn (trace <> ops) (trace' <> ops')
-groundTraceDiff _sym _fn Empty Empty = pure Empty
-groundTraceDiff _ _ _ _ = error "The impossible happened: groundTraceDiff was called on memory traces that were not equivalent"
+  groundTraceDiff fn (trace <> ops) (trace' <> ops')
+groundTraceDiff _fn Empty Empty = pure Empty
+groundTraceDiff _ _ _ = error "The impossible happened: groundTraceDiff was called on memory traces that were not equivalent"
 
 groundMemOp ::
-  (KnownNat (MM.ArchAddrWidth arch), 1 <= MM.ArchAddrWidth arch) =>
   (forall tp. W4B.SymExpr sym tp -> IO (W4G.GroundValue tp)) ->
   CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
   W4.Pred sym ->
   W4.NatRepr w ->
   CLM.LLVMPtr sym w ->
   EquivM sym arch GroundMemOp
-groundMemOp fn addr cond w val = liftA3 GroundMemOp
+groundMemOp fn addr cond w val = withValid $ liftA3 GroundMemOp
   (groundLLVMPointer fn W4.knownRepr addr)
   (liftIO (fn cond))
   (groundLLVMPointer fn w val)
@@ -912,16 +930,14 @@ ppAbortedResult (CS.AbortedExit code) = show code
 ppAbortedResult (CS.AbortedBranch loc _ t f) = "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
 
 unconstrainedRegister ::
-  CB.IsSymInterface sym =>
-  sym ->
   Ctx.Index ctx tp ->
   CC.TypeRepr tp ->
   EquivM sym arch (CS.RegValue' sym tp)
-unconstrainedRegister sym idx repr = do
+unconstrainedRegister idx repr = do
   let name = "reg" ++ show (Ctx.indexVal idx)
   symbol <- either (throwError . InvalidRegisterName name) pure (W4S.userSymbol name)
   case repr of
-    CLM.LLVMPointerRepr n -> liftIO $ do
+    CLM.LLVMPointerRepr n -> withSymIO $ \sym -> do
       bv <- W4.freshConstant sym symbol (W4.BaseBVRepr n)
       -- TODO: This fixes the region to 0. Is that okay?
       ptr <- CLM.llvmPointer_bv sym bv
@@ -1125,21 +1141,19 @@ blockSize = fromIntegral . R.blockSize isa
     isa = RP.isa @arch
 
 mkIPEquivalence ::
-  CB.IsSymInterface sym =>
-  sym ->
   Map (R.ConcreteAddress arch) (R.ConcreteAddress arch) ->
   EquivM sym arch (
     CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
     CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
     IO (W4.Pred sym)
     )
-mkIPEquivalence sym ipMap = withValid $ do
-  ips' <- traverse (concreteToLLVM sym . fst) assocs
-  ips <- traverse (concreteToLLVM sym . snd) assocs
+mkIPEquivalence ipMap = withValid $ do
+  ips' <- traverse (concreteToLLVM . fst) assocs
+  ips <- traverse (concreteToLLVM . snd) assocs
   [regSS, offSS, regSS', offSS', ipEqSS] <- traverse userSymbol
     ["orig_reg", "orig_off", "rewrite_reg", "rewrite_off", "related_ips"]
 
-  liftIO $ do
+  withSymIO $ \sym -> do
     regionVar  <- W4.freshBoundVar sym regSS  W4.knownRepr
     offsetVar  <- W4.freshBoundVar sym offSS  W4.knownRepr
     regionVar' <- W4.freshBoundVar sym regSS' W4.knownRepr
@@ -1147,7 +1161,10 @@ mkIPEquivalence sym ipMap = withValid $ do
 
     let ipArg  = CLM.LLVMPointer (W4.varExpr sym regionVar ) (W4.varExpr sym offsetVar )
         ipArg' = CLM.LLVMPointer (W4.varExpr sym regionVar') (W4.varExpr sym offsetVar')
-
+        iop <&&> iop' = do
+          p  <- iop
+          p' <- iop'
+          W4.andPred sym p p'
     alternatives <- flipZipWithM ips ips' $ \ip ip' -> llvmPtrEq sym ipArg ip <&&> llvmPtrEq sym ipArg' ip'
     anyAlternative <- foldM (W4.orPred sym) (W4.falsePred sym) alternatives
 
@@ -1161,10 +1178,7 @@ mkIPEquivalence sym ipMap = withValid $ do
       (Ctx.empty `Ctx.extend` region `Ctx.extend` offset `Ctx.extend` region' `Ctx.extend` offset')
   where
   assocs = M.assocs ipMap
-  iop <&&> iop' = do
-    p  <- iop
-    p' <- iop'
-    W4.andPred sym p p'
+
 
 flipZipWithM :: Monad m => [a] -> [b] -> (a -> b -> m c) -> m [c]
 flipZipWithM as bs f = zipWithM f as bs
@@ -1175,13 +1189,12 @@ userSymbol s = case W4.userSymbol s of
   Right ss -> pure ss
 
 concreteToLLVM ::
-  ( CB.IsSymInterface sym
-  , w ~ MM.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
+  ( 
+   w ~ MM.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
   ) =>
-  sym ->
   R.ConcreteAddress arch ->
   EquivM sym arch (CLM.LLVMPtr sym w)
-concreteToLLVM sym c = liftIO $ do
+concreteToLLVM c = withSymIO $ \sym -> do
   region <- W4.natLit sym 0
   offset <- W4.bvLit sym W4.knownRepr (BVS.mkBV W4.knownRepr (toInteger (R.absoluteAddress c)))
   pure (CLM.LLVMPointer region offset)
