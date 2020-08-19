@@ -40,3 +40,6 @@
 [submodule "submodules/dwarf"]
 	path = submodules/dwarf
 	url = git@github.com:GaloisInc/dwarf.git
+[submodule "submodules/renovate"]
+	path = submodules/renovate
+	url = git@github.com:GaloisInc/renovate.git
