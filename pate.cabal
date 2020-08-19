@@ -47,7 +47,9 @@ library
                        renovate,
                        renovate-x86,
                        renovate-ppc,
-                       renovate-aarch32
+                       renovate-aarch32,
+                       unliftio-core,
+                       transformers
                        
   hs-source-dirs:      src
   default-language:    Haskell2010
