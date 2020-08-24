@@ -24,10 +24,11 @@ import           Data.Functor.Const ( Const(..) )
 import qualified Options.Applicative as OA
 import           System.Exit
 
+import qualified Data.Map as Map
 import qualified Data.ElfEdit as E
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.Memory.ElfLoader as MM
-import           Data.Macaw.PPC () -- type instance ArchReg PPC64
+import qualified Data.Macaw.PPC as PPC
 import           Data.Macaw.PPC.PPCReg ()
 import qualified Dismantle.PPC as DP
 import qualified Lang.Crucible.FunctionHandle as CFH
@@ -41,22 +42,27 @@ import           ELF ( parseElfOrDie )
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
-  bs <- BS.readFile (sourceBinary opts)
-  e64 <- parseElfOrDie (error "32") return bs
-  mem <- MBL.loadBinary MM.defaultLoadOptions e64
+  bs_original <- BS.readFile (originalBinary opts)
+  e64_original <- parseElfOrDie (error "32") return bs_original
+
+  bs_patched <- BS.readFile (patchedBinary opts)
+  e64_patched <- parseElfOrDie (error "32") return bs_patched  
+  
+  mem_original <- MBL.loadBinary MM.defaultLoadOptions e64_original
+  mem_patched <- MBL.loadBinary MM.defaultLoadOptions e64_patched
+  
   hdlAlloc <- CFH.newHandleAllocator
-  (e64', Const (), ri, _env) <- R.rewriteElf (config (breakTheRewrite opts)) hdlAlloc e64 mem layout
-  for_ (targetBinary opts) $ \fp -> LBS.writeFile fp (E.renderElf e64')
-  mem' <- MBL.loadBinary MM.defaultLoadOptions e64'
-  v <- runExceptT (V.verifyPairs mem mem' (ri ^. R.riBackwardBlockMapping) (ri ^. R.riRewritePairs))
+  let archInfo = PPC.ppc64_linux_info mem_original
+
+  info <- R.analyzeElf config hdlAlloc
+  v <- runExceptT (V.verifyPairs archInfo mem_original mem_patched Map.empty (ri ^. R.riRewritePairs))
   case v of
     Left err -> die (show err)
     Right _ -> pure ()
 
 data CLIOptions = CLIOptions
-  { sourceBinary :: FilePath
-  , targetBinary :: Maybe FilePath
-  , breakTheRewrite :: Bool
+  { originalBinary :: FilePath
+  , patchedBinary :: FilePath
   } deriving (Eq, Ord, Read, Show)
 
 cliOptions :: OA.ParserInfo CLIOptions
@@ -65,39 +71,27 @@ cliOptions = OA.info (OA.helper <*> parser)
   <> OA.progDesc "Run a quick test of rewrite verification"
   ) where
   parser = pure CLIOptions
-    <*> OA.argument OA.str
-      (  OA.metavar "EXE"
-      <> OA.help "A binary to rewrite"
-      )
-    <*> optional (OA.strOption
-      (  OA.long "output"
+    <*> (OA.strOption
+      (  OA.long "original"
       <> OA.short 'o'
-      <> OA.metavar "FILE"
-      <> OA.help "Dump the rewritten binary to this file"
+      <> OA.metavar "EXE"
+      <> OA.help "Original binary"
       ))
-    <*> OA.switch
-      (  OA.long "break"
-      <> OA.short 'b'
-      <> OA.help "Intentionally insert wrong instructions into the rewritten binary"
-      )
+    <*> (OA.strOption
+      (  OA.long "patched"
+      <> OA.short 'p'
+      <> OA.metavar "EXE"
+      <> OA.help "Patched binary"
+      ))
+
 
 layout :: R.LayoutStrategy
 layout = R.LayoutStrategy R.Parallel R.BlockGrouping R.WholeFunctionTrampoline
 
-config :: Bool -> R.RenovateConfig RP.PPC64 (E.Elf 64) (R.AnalyzeAndRewrite ()) (Const ())
-config = RP.config64 . analysis
+config :: R.RenovateConfig RP.PPC64 (E.Elf 64) R.AnalyzeOnly (Const (R.BlockInfo RP.PPC64))
+config = RP.config64 analysis
 
-analysis :: Bool -> R.AnalyzeAndRewrite () RP.PPC64 binFmt (Const ())
-analysis broken = R.AnalyzeAndRewrite
-  { R.arPreAnalyze = \_ -> return (Const ())
-  , R.arAnalyze = \_ _ -> return (Const ())
-  , R.arPreRewrite = \_ _ -> return (Const ())
-  , R.arRewrite = \_ _ _ b ->
-      R.withSymbolicInstructions b $ \repr insns ->
-        return (Just (R.ModifiedInstructions repr ([i | broken] <>| insns)))
-  }
-  where
-  (4, Just i0) = DP.disassembleInstruction (LBS.pack [0x38, 0x21, 0x00, 0x01])
-  i1 = R.fromGenericInstruction @RP.PPC64 i0
-  i :: R.TaggedInstruction RP.PPC64 tp (R.InstructionAnnotation RP.PPC64)
-  i = R.tagInstruction Nothing $ RP.NoAddress <$ i1
+analysis :: R.AnalyzeOnly RP.PPC64 binFmt (Const (R.BlockInfo RP.PPC64))
+analysis = R.AnalyzeOnly
+  { R.aoAnalyze = \e -> return $ Const $ R.analysisBlockInfo e }
+

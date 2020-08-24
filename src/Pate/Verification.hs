@@ -12,6 +12,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
@@ -20,10 +21,15 @@
 module Pate.Verification
   ( verifyPairs
   , EquivalenceError(..)
+  , ConcreteBlock(..)
+  , ConcreteAddress(..)
+  , PatchPair(..)
+  , BlockMapping(..)
   , checkRenEquivalence
   , mkIPEquivalence
   , EquivalenceContext(..)
   , EquivalenceStatistics(..)
+  , ValidArch
   ) where
 
 import           Prelude hiding ( fail )
@@ -43,11 +49,13 @@ import           Control.Monad.IO.Class ( liftIO )
 import           Control.Applicative
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.ST
+--import           Data.Word ( Word64 )
 import qualified Data.BitVector.Sized as BVS
 import           Data.Foldable
 import           Data.Functor.Compose
 import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
+--import qualified Data.IntervalMap.Generic.Interval as IM ( lowerBound )
 import           Data.List
 import           Data.Map (Map)
 import qualified Data.Map as M
@@ -67,8 +75,10 @@ import qualified Data.ElfEdit as E
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
-import qualified Data.Macaw.PPC as MP
+
+--import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.Symbolic as MS
+
 import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 import qualified Data.Parameterized.Context.Unsafe as Ctx
 import           Data.Parameterized.Map (MapF)
@@ -78,12 +88,14 @@ import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.CFG.Core as CC
+--import qualified Lang.Crucible.CFG.Extension as CE
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
+--import qualified Lang.Crucible.Simulator.Intrinsics as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
-import qualified Renovate.Arch.PPC as RP
-import qualified Renovate as R
+
+--import qualified Renovate as R
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
@@ -94,23 +106,72 @@ import qualified What4.Protocol.SMTWriter as W4W
 import qualified What4.SatResult as W4R
 import qualified What4.Symbol as W4S
 
+import qualified Pate.Binary as PB
+
+
 data WhichBinary = Original | Rewritten deriving (Bounded, Enum, Eq, Ord, Read, Show)
 
+-- Datatypes clagged from Renovate
+newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arch))
+  deriving (Eq, Ord)
+deriving instance Show (ConcreteAddress arch)
+
+data PatchPair arch = PatchPair
+  { pOrig :: ConcreteBlock arch
+  , pPatched :: ConcreteBlock arch
+  }
+
+-- Map from the start of original blocks to patched block addresses
+newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (ConcreteAddress arch))
+
+data ConcreteBlock arch =
+  ConcreteBlock { concreteBlockAddress :: ConcreteAddress arch
+                , concreteBlockSize :: Int
+                --, concreteBlockInstructions :: DLN.NonEmpty (Instruction arch tp ())
+                --, concreteBlockRepr :: InstructionArchRepr arch tp
+                --, concreteDiscoveryBlock :: Some (MD.ParsedBlock arch)
+                }
+
+concreteAddress :: ConcreteBlock arch -> ConcreteAddress arch
+concreteAddress = concreteBlockAddress
+
+blockSize :: ConcreteBlock arch -> Int
+blockSize = concreteBlockSize
+
+absoluteAddress :: (MM.MemWidth (MM.ArchAddrWidth arch)) => ConcreteAddress arch -> MM.MemWord (MM.ArchAddrWidth arch)
+absoluteAddress (ConcreteAddress memAddr) = absAddr
+  where
+    Just absAddr = MM.asAbsoluteAddr memAddr
+
+addressAddOffset :: (MM.MemWidth (MM.ArchAddrWidth arch))
+                 => ConcreteAddress arch
+                 -> MM.MemWord (MM.ArchAddrWidth arch)
+                 -> ConcreteAddress arch
+addressAddOffset (ConcreteAddress memAddr) memWord =
+  ConcreteAddress (MM.incAddr (fromIntegral memWord) memAddr)
+
+concreteFromAbsolute :: (MM.MemWidth (MM.ArchAddrWidth arch))
+                     => MM.MemWord (MM.ArchAddrWidth arch)
+                     -> ConcreteAddress arch
+concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
+
+-- End Clag
+
 data EquivalenceError arch
-  = BytesNotConsumed { disassemblyAddr :: R.ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
-  | AddressOutOfRange { disassemblyAddr :: R.ConcreteAddress arch }
+  = BytesNotConsumed { disassemblyAddr :: ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
+  | AddressOutOfRange { disassemblyAddr :: ConcreteAddress arch }
   | UnsupportedArchitecture
   | InvalidRegisterName String W4S.SolverSymbolError
   | UnsupportedRegisterType (S.Some CC.TypeRepr)
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
-  | IllegalIP String (R.ConcreteAddress arch)
+  | IllegalIP String (ConcreteAddress arch)
   | BadSolverSymbol String W4S.SolverSymbolError
   | EmptyDisassembly
-  | NoUniqueFunctionOwner (IM.Interval (R.ConcreteAddress arch)) [MM.ArchSegmentOff arch]
+  | NoUniqueFunctionOwner (IM.Interval (ConcreteAddress arch)) [MM.ArchSegmentOff arch]
   | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
-  | UndiscoveredBlockPart WhichBinary (R.ConcreteAddress arch) (R.ConcreteAddress arch) (R.ConcreteAddress arch)
+  | UndiscoveredBlockPart WhichBinary (ConcreteAddress arch) (ConcreteAddress arch) (ConcreteAddress arch)
   | NonConcreteParsedBlockAddress WhichBinary (MM.ArchSegmentOff arch)
   | BlockExceedsItsSegment WhichBinary (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
   | BlockEndsMidInstruction WhichBinary
@@ -129,45 +190,55 @@ data BinaryContext sym arch = BinaryContext
   }
 
 data EquivalenceContext sym ids arch where
-  EquivalenceContext :: (ValidArch arch, ValidSym sym) =>
+  EquivalenceContext ::
+    forall sym ids arch scope solver fs.
+    (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
     { nonces :: N.NonceGenerator (ST RealWorld) ids
     , handles :: CFH.HandleAllocator
     , archVals :: MS.ArchVals arch
-    , exprBuilder :: ValidOnlineBackend sym
+    , exprBuilder :: sym
     , memTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , ipEquivalence :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> IO (W4.Pred sym)
-
+    , originalCtx :: BinaryContext sym arch
+    , rewrittenCtx :: BinaryContext sym arch
     } -> EquivalenceContext sym ids arch
 
 type ValidArch arch =
-  (arch ~ RP.PPC64, Typeable arch, (KnownNat (MM.ArchAddrWidth arch), 1 <= MM.ArchAddrWidth arch))
+  ( Typeable arch
+  , KnownNat (MM.ArchAddrWidth arch)
+  , 1 <= MM.ArchAddrWidth arch
+  , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
+  , MM.MemWidth (MM.ArchAddrWidth arch)
+  , MS.MacawArchConstraints arch
+  , MS.ArchInfo arch
+  , MM.PrettyF (MM.ArchReg arch)
+  , W4.KnownRepr (Ctx.Assignment CC.TypeRepr) (MS.MacawCrucibleRegTypes arch)
+  , Ctx.KnownContext (MS.MacawCrucibleRegTypes arch)
+  
+  )
 
 
-type ValidSym sym = (W4.IsExprBuilder sym, CB.IsSymInterface sym)
+type ValidSym sym =
+  ( W4.IsExprBuilder sym
+  , CB.IsSymInterface sym
+  )
+
 type ValidSolver sym scope solver fs =
   (sym ~ CBO.OnlineBackend scope solver fs
   , W4O.OnlineSolver solver
   , W4W.SMTReadWriter solver
   )
 
-data ValidOnlineBackend sym where
-  ValidOnlineBackend ::
-    ( ValidSolver sym scope solver fs
-    , ValidSym sym
-    ) => 
-    sym ->
-    W4O.SolverProcess scope solver ->
-    ValidOnlineBackend sym
-
 data EquivEnv sym arch where
-  EquivEnv :: ValidArch arch =>
-    { originalCtx :: BinaryContext sym arch
-    , rewrittenCtx :: BinaryContext sym arch
-    , envSymProc :: ValidOnlineBackend sym
+  EquivEnv ::
+    forall sym arch scope solver fs.
+    (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
+    { envSym :: sym
+    , envProc :: W4O.SolverProcess scope solver
     } -> EquivEnv sym arch
 
 
-newtype EquivM sym arch a = EquivM { _unEQ :: ReaderT (EquivEnv sym arch) (ExceptT (EquivalenceError arch) IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (ExceptT (EquivalenceError arch) IO) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -176,25 +247,16 @@ newtype EquivM sym arch a = EquivM { _unEQ :: ReaderT (EquivEnv sym arch) (Excep
            , MonadError (EquivalenceError arch)
            )
 
+type EquivM sym arch a = (ValidArch arch, ValidSym sym) => EquivM_ sym arch a
+
 withValid ::
   (forall scope solver fs.
-    ValidArch arch =>
-    ValidSym sym =>
     ValidSolver sym scope solver fs =>
     EquivM sym arch a) ->
-  EquivM sym arch a
+  EquivM_ sym arch a
 withValid f = do
   env <- ask
   withValidEnv env $ f
-
-withValidIO ::
-  (forall scope solver fs.
-    ValidArch arch =>
-    ValidSym sym =>
-    ValidSolver sym scope solver fs =>
-    IO a) ->
-  EquivM sym arch a
-withValidIO f = withValid (liftIO f)
 
 withValidEnv ::
   EquivEnv sym arch ->
@@ -204,30 +266,26 @@ withValidEnv ::
     ValidSolver sym scope solver fs =>
     a) ->
   a
-withValidEnv (EquivEnv _ _ (ValidOnlineBackend _ _)) f = f
+withValidEnv (EquivEnv {}) f = f
 
 withSym ::
   ( forall scope solver fs.
     ValidSolver sym scope solver fs =>
-    ValidArch arch =>
-    ValidSym sym =>
     sym ->
    EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
-  ValidOnlineBackend sym _ <- asks envSymProc
+  sym <- asks envSym
   f sym
 
 withProc ::
   ( forall scope solver fs.
     ValidSolver sym scope solver fs =>
-    ValidSym sym =>
-    ValidArch arch =>
     W4O.SolverProcess scope solver ->
    EquivM sym arch a) ->
   EquivM sym arch a
 withProc f = withValid $ do
-  ValidOnlineBackend _ p <- asks envSymProc
+  EquivEnv { envProc = p } <- ask
   f p
 
 withSymIO ::
@@ -241,7 +299,7 @@ withSymIO ::
   EquivM sym arch a
 withSymIO f = withSym (\sym -> liftIO (f sym))
 
-instance IO.MonadUnliftIO (EquivM sym arch) where
+instance IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- ask
     (liftIO $ catch (Right <$> f (runEquivM' env)) (\(e :: EquivalenceError arch) -> return $ Left e)) >>= \case
@@ -252,48 +310,45 @@ runEquivM' ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   IO a
-runEquivM' env (EquivM f) = (runExceptT $ runReaderT f env) >>= \case
-  Left err -> withValidEnv env $ throwIO err
+runEquivM' env f = withValidEnv env $ (runExceptT $ runReaderT (unEQ f) env) >>= \case
+  Left err -> throwIO err
   Right result -> return $ result
 
 runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   ExceptT (EquivalenceError arch) IO a
-runEquivM env (EquivM f) = runReaderT f env
+runEquivM env f = withValidEnv env $ runReaderT (unEQ f) env
 
 errorHere ::
   HasCallStack =>
   String ->
-  EquivM sym arch a
+  EquivM_ sym arch a
 errorHere msg = do
   let (_, src): _ = getCallStack callStack
   let msg' = "Error Message: " ++ msg ++ " at: " ++ prettySrcLoc src
   throwError $ EquivalenceError msg'
 
-instance MonadFail (EquivM sym arch) where
+instance MonadFail (EquivM_ sym arch) where
   fail msg = errorHere $ "Fail: " ++ msg
 
-
-_validTest :: (ValidArch RP.PPC64 => f) -> f
-_validTest f = f
 
 verifyPairs ::
   forall arch.
   ValidArch arch =>
-  MBL.LoadedBinary arch (E.Elf 64) ->
-  MBL.LoadedBinary arch (E.Elf 64) ->
-  Map (R.ConcreteAddress arch) (R.ConcreteAddress arch) ->
-  [R.RewritePair arch] ->
-  ExceptT (EquivalenceError arch) IO ()
-verifyPairs bin bin' ipMap pairs = do
+  PB.LoadedELF arch ->
+  PB.LoadedELF arch ->
+  BlockMapping arch ->
+  [PatchPair arch] ->
+  ExceptT (EquivalenceError arch) IO Bool
+verifyPairs elf elf' blockMap pPairs = do
   S.Some gen <- liftIO . stToIO $ N.newSTNonceGenerator
   vals <- case MS.archVals @arch Proxy of
     Nothing -> throwError UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  pfm  <- runDiscovery bin
-  pfm' <- runDiscovery bin'
+  pfm  <- runDiscovery elf  
+  pfm' <- runDiscovery elf'
 
   S.Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors
@@ -303,36 +358,43 @@ verifyPairs bin bin' ipMap pairs = do
     proc <- liftIO $ CBO.withSolverProcess sym return
     let
       exts = MS.macawTraceExtensions eval model (trivialGlobalMap @_ @arch)
+      oCtx = BinaryContext
+        { binary = PB.loadedBinary elf
+        , extensions = exts
+        , globalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
+        , parsedFunctionMap = pfm
+        }
+      rCtx = BinaryContext
+        { binary = PB.loadedBinary elf'
+        , extensions = exts
+        , globalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
+        , parsedFunctionMap = pfm'
+        }
       env = EquivEnv
-        { originalCtx = BinaryContext
-            { binary = bin
-            , extensions = exts
-            , globalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
-            , parsedFunctionMap = pfm
-            }
-        , rewrittenCtx = BinaryContext
-            { binary = bin'
-            , extensions = exts
-            , globalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
-            , parsedFunctionMap = pfm'
-            }
-        , envSymProc = ValidOnlineBackend sym proc
+        { envSym = sym
+        , envProc = proc
         }
     
     runEquivM env $ do
-      ipEq <- mkIPEquivalence ipMap
+      ipEq <- mkIPEquivalence blockMap
 
       let ctxt = EquivalenceContext
             { nonces = gen
             , handles = ha
             , archVals = vals
-            , exprBuilder = ValidOnlineBackend sym proc
+            , exprBuilder = sym
             , memTraceVar = model
             , ipEquivalence = ipEq
+            , originalCtx = oCtx
+            , rewrittenCtx = rCtx
             }
 
-      stats <- foldMapA (checkAndDisplayRenEquivalence ctxt) pairs
+      stats <- foldMapA (checkAndDisplayRenEquivalence ctxt) pPairs
       liftIO . putStr $ ppEquivalenceStatistics stats
+      return $ equivSuccess stats
+
+equivSuccess :: EquivalenceStatistics -> Bool
+equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
 
 -- In newer GHCs, this is \f -> getAp . foldMap (Ap . f)
 foldMapA :: (Foldable f, Applicative g, Monoid m) => (a -> g m) -> f a -> g m
@@ -361,19 +423,21 @@ ppEquivalenceStatistics (EquivalenceStatistics checked equiv err) = unlines
   , "\t" ++ show err ++ " skipped due to errors"
   ]
 
+
+
 checkAndDisplayRenEquivalence ::
   EquivalenceContext sym ids arch ->
-  R.RewritePair arch ->
+  PatchPair arch ->
   EquivM sym arch EquivalenceStatistics
-checkAndDisplayRenEquivalence ctxt pair = withValid $ do
+checkAndDisplayRenEquivalence ctxt pPair = do
   liftIO . putStr $ ""
     ++ "Checking equivalence of "
-    ++ formatBlock (R.rpOrig pair)
+    ++ formatBlock (pOrig pPair)
     ++ " and "
-    ++ maybe "itself" formatBlock (R.rpNew pair)
+    ++ formatBlock (pPatched pPair)
     ++ ": "
   liftIO $ hFlush stdout
-  eq <- manifestError $ checkRenEquivalence ctxt pair
+  eq <- manifestError $ checkRenEquivalence ctxt pPair
   liftIO . putStr . ppEquivalenceResult $ eq
   pure $ case eq of
     Left _ -> EquivalenceStatistics 1 0 1
@@ -384,7 +448,7 @@ checkAndDisplayRenEquivalence ctxt pair = withValid $ do
     -- 100k oughta be enough for anybody
     ++ pad 6 (show (blockSize b))
     ++ " bytes at "
-    ++ show (R.absoluteAddress (concreteAddress b))
+    ++ show (absoluteAddress (concreteAddress b))
 
 padWith :: Char -> Int -> String -> String
 padWith c n s = replicate (n-length s) c ++ s
@@ -453,22 +517,22 @@ combineEquivalence act1 act2 = do
 checkRenEquivalence ::
   forall sym arch ids.
   EquivalenceContext sym ids arch ->
-  R.RewritePair arch ->
+  PatchPair arch ->
   EquivM sym arch (EquivalenceResult arch)
 checkRenEquivalence
   eqCtx@EquivalenceContext
     { archVals = MS.ArchVals { MS.archFunctions = fns }
     , handles = ha
-    , exprBuilder = ValidOnlineBackend sym _
+    , exprBuilder = sym
     , memTraceVar = mem
+    , originalCtx = oCtx
+    , rewrittenCtx = rCtx
     }
-  (R.RewritePair rBlock (Just rBlock')) = withValid $ do
+  PatchPair { pOrig = rBlock, pPatched =  rBlock' } = do
   unconstrainedRegs_ <- Ctx.traverseWithIndex
     unconstrainedRegister
     (CC.knownRepr @_ @(Ctx.Assignment CC.TypeRepr) @(MS.MacawCrucibleRegTypes arch))
   let unconstrainedRegs = CS.assignReg CC.knownRepr unconstrainedRegs_ CS.emptyRegMap
-  oCtx <- asks originalCtx
-  rCtx <- asks rewrittenCtx
   (CS.RegEntry (CC.StructRepr regsRepr) regs, memTrace)
     <- simulate oCtx rBlock  Original  unconstrainedRegs
   (CS.RegEntry _ regs', memTrace')
@@ -559,7 +623,7 @@ checkRenEquivalence
     let
       globals = globalMap binCtx
       exts = extensions binCtx
-    withValidIO $ id
+    liftIO $ id
       . CS.executeCrucible []
       . CS.InitialState ( simContext exts) globals CS.defaultAbortHandler archRepr
       . CS.runOverrideSim archRepr
@@ -638,14 +702,13 @@ checkRenEquivalence
 -- check in the future that just looks at the terminal statement of the
 -- block(s) and checks that they go to equivalent locations without fully
 -- symbolically simulating the thing.
-checkRenEquivalence eqCtx (R.RewritePair rBlock Nothing) =
-  R.withConcreteInstructions rBlock $ \repr insns ->
-    let rBlock' = R.concretizedBlock (R.concreteBlockAddress rBlock) insns repr
-    in checkRenEquivalence eqCtx (R.RewritePair rBlock (Just rBlock'))
+--checkRenEquivalence eqCtx (RewritePair rBlock Nothing) =
+--  let rBlock' = ConcretizedBlock (concreteBlockAddress rBlock) (concreteBlockSize rBlock)
+--  in checkRenEquivalence eqCtx (RewritePair rBlock (Just rBlock'))
 
 
 getArchRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
-getArchRepr = withValid $ return $ CC.knownRepr @_ @_ @(MS.ArchRegStruct arch)
+getArchRepr = return $ CC.knownRepr @_ @_ @(MS.ArchRegStruct arch)
 
 memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
@@ -715,6 +778,7 @@ externalTransitions internalAddrs pb =
   ]
 
 equivPred ::
+  forall ctx sym ids arch tp.
   Ctx.KnownContext ctx =>
   EquivalenceContext sym ids arch ->
   Ctx.Assignment CC.TypeRepr ctx ->
@@ -723,15 +787,15 @@ equivPred ::
   Ctx.Index ctx tp ->
   EquivM sym arch (Const (W4.Pred sym) tp)
 equivPred
-  EquivalenceContext { exprBuilder = ValidOnlineBackend sym _, ipEquivalence = ipEq }
+  EquivalenceContext { exprBuilder = sym, ipEquivalence = ipEq }
   regsRepr regs regs' i
-  = withValid $ Const <$> case regsRepr Ctx.! i of
+  = Const <$> case regsRepr Ctx.! i of
     CLM.LLVMPointerRepr widthRepr -> liftIO $ case (regs Ctx.! i, regs' Ctx.! i) of
       (CS.RV bv, CS.RV bv')
         -- TODO: abstract away the 0 and 64
         | Just (CC.Some idx) <- Ctx.intIndex 0 Ctx.knownSize
         , Just Refl <- testEquality i idx
-        , Just Refl <- testEquality widthRepr (W4.knownNat @64) -> ipEq bv bv'
+        , Just Refl <- testEquality widthRepr (W4.knownNat @(MM.RegAddrWidth (MM.ArchReg arch))) -> ipEq bv bv'
         -- TODO: What to do with the link register (index 1 in the current
         -- register struct for PPC64)? Is ipEq good enough? Things to worry
         -- about with that choice:
@@ -790,7 +854,7 @@ groundMemOp ::
   W4.NatRepr w ->
   CLM.LLVMPtr sym w ->
   EquivM sym arch GroundMemOp
-groundMemOp fn addr cond w val = withValid $ liftA3 GroundMemOp
+groundMemOp fn addr cond w val = liftA3 GroundMemOp
   (groundLLVMPointer fn W4.knownRepr addr)
   (liftIO (fn cond))
   (groundLLVMPointer fn w val)
@@ -917,9 +981,9 @@ getGPValueAndTrace ::
     ( CS.RegEntry sym (MS.ArchRegStruct arch)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     )
-getGPValueAndTrace mem (CS.FinishedResult _ pres) = withValid $ case pres ^. CS.partialValue of
+getGPValueAndTrace mem (CS.FinishedResult _ pres) = case pres ^. CS.partialValue of
   CS.GlobalPair val globs -> case CGS.lookupGlobal mem globs of
-    Just mt -> pure (val, mt)
+    Just mt -> withValid $ pure (val, mt)
     Nothing -> throwError undefined
 getGPValueAndTrace _mem (CS.AbortedResult _ ar) = throwError . SymbolicExecutionFailed . ppAbortedResult $ ar
 getGPValueAndTrace _mem (CS.TimeoutResult _) = throwError (SymbolicExecutionFailed "timeout")
@@ -946,13 +1010,13 @@ unconstrainedRegister idx repr = do
 
 -- | Keys: basic block extent; values: parsed blocks
 newtype ParsedBlockMap arch ids = ParsedBlockMap
-  { getParsedBlockMap :: IntervalMap (R.ConcreteAddress arch) [MD.ParsedBlock arch ids]
+  { getParsedBlockMap :: IntervalMap (ConcreteAddress arch) [MD.ParsedBlock arch ids]
   }
 
 -- | basic block extent -> function entry point -> basic block extent again -> parsed block
 --
 -- You should expect (and check) that exactly one key exists at the function entry point level.
-type ParsedFunctionMap arch = IntervalMap (R.ConcreteAddress arch) (Map (MM.ArchSegmentOff arch) (CC.Some (ParsedBlockMap arch)))
+type ParsedFunctionMap arch = IntervalMap (ConcreteAddress arch) (Map (MM.ArchSegmentOff arch) (CC.Some (ParsedBlockMap arch)))
 
 markEntryPoint ::
   MM.ArchSegmentOff arch ->
@@ -960,16 +1024,12 @@ markEntryPoint ::
   ParsedFunctionMap arch
 markEntryPoint segOff blocks = M.singleton segOff (CC.Some blocks) <$ getParsedBlockMap blocks
 
+
 lookupBlocks ::
-  ( MonadError (EquivalenceError arch) m
-  , Concrete b
-  , R.HasConcreteAddresses b
-  , ValidArch arch
-  ) =>
   WhichBinary ->
   ParsedFunctionMap arch ->
-  b arch ->
-  m (CC.Some (Compose [] (MD.ParsedBlock arch)))
+  ConcreteBlock arch ->
+  EquivM sym arch (CC.Some (Compose [] (MD.ParsedBlock arch)))
 lookupBlocks wb pfm b = case M.assocs . M.unions . IM.elems . IM.intersecting pfm $ i of
   [(_, CC.Some (ParsedBlockMap pbm))] -> do
     result <- fmap concat . traverse (pruneBlock wb start end) . concat . IM.elems . IM.intersecting pbm $ i
@@ -978,18 +1038,27 @@ lookupBlocks wb pfm b = case M.assocs . M.unions . IM.elems . IM.intersecting pf
   segoffPBMPairs -> throwError $ NoUniqueFunctionOwner i (fst <$> segoffPBMPairs)
   where
   start = concreteAddress b
-  end = start `R.addressAddOffset` fromIntegral (blockSize b)
+  end = start `addressAddOffset` fromIntegral (blockSize b)
   i = IM.IntervalCO start end
+
 
 -- | Check that the given parsed blocks cover the entire range of bytes described by the given interval.
 sanityCheckBlockCoverage ::
+  WhichBinary ->
+  ConcreteAddress arch ->
+  ConcreteAddress arch ->
+  [MD.ParsedBlock arch ids] ->
+  EquivM sym arch ()
+sanityCheckBlockCoverage wb start end pbs = sanityCheckBlockCoverage_ wb start end pbs
+
+sanityCheckBlockCoverage_ ::
   (MonadError (EquivalenceError arch) m, MM.MemWidth (MM.ArchAddrWidth arch)) =>
   WhichBinary ->
-  R.ConcreteAddress arch ->
-  R.ConcreteAddress arch ->
+  ConcreteAddress arch ->
+  ConcreteAddress arch ->
   [MD.ParsedBlock arch ids] ->
   m ()
-sanityCheckBlockCoverage wb start end pbs = do
+sanityCheckBlockCoverage_ wb start end pbs = do
   is <- sort <$> traverse parsedBlockToInterval pbs
   go start end is
   where
@@ -1018,14 +1087,11 @@ sanityCheckBlockCoverage wb start end pbs = do
 -- partial instructions, and expecting that the block the layout engine chooses
 -- to put afterwards has a sensible continuation of that instruction.
 pruneBlock ::
-  ( MonadError (EquivalenceError arch) m
-  , MM.MemWidth (MM.ArchAddrWidth arch)
-  ) =>
   WhichBinary ->
-  R.ConcreteAddress arch ->
-  R.ConcreteAddress arch ->
+  ConcreteAddress arch ->
+  ConcreteAddress arch ->
   MD.ParsedBlock arch ids ->
-  m [MD.ParsedBlock arch ids]
+  EquivM sym arch [MD.ParsedBlock arch ids]
 pruneBlock wb start_ end_ pb = do
   pblockStart <- liftMaybe (MM.segoffAsAbsoluteAddr (MD.pblockAddr pb)) (NonConcreteParsedBlockAddress wb (MD.pblockAddr pb))
   let pblockEnd = pblockStart + fromIntegral (MD.blockSize pb)
@@ -1086,8 +1152,8 @@ pruneBlock wb start_ end_ pb = do
     (MM.incSegmentOff (MD.pblockAddr pb) (fromIntegral off))
     (BlockExceedsItsSegment wb (MD.pblockAddr pb) off)
 
-  start = R.absoluteAddress start_
-  end = R.absoluteAddress end_
+  start = absoluteAddress start_
+  end = absoluteAddress end_
 
   coerceArchState :: MapF r f -> MM.RegState r f
   coerceArchState = unsafeCoerce
@@ -1098,12 +1164,15 @@ liftMaybe (Just a) _ = pure a
 
 runDiscovery ::
   ValidArch arch =>
-  MBL.LoadedBinary arch (E.Elf 64) ->
+  PB.LoadedELF arch ->
   ExceptT (EquivalenceError arch) IO (ParsedFunctionMap arch)
-runDiscovery bin = do
+runDiscovery elf = do
+  let
+    bin = PB.loadedBinary elf
+    archInfo = PB.archInfo elf
   entries <- toList <$> MBL.entryPoints bin
   goDiscoveryState $
-    MD.cfgFromAddrs (MP.ppc64_linux_info bin) (MBL.memoryImage bin) M.empty entries []
+    MD.cfgFromAddrs archInfo (MBL.memoryImage bin) M.empty entries []
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith M.union)
@@ -1120,34 +1189,21 @@ archSegmentOffToInterval ::
   (MonadError (EquivalenceError arch) m, MM.MemWidth (MM.ArchAddrWidth arch)) =>
   MM.ArchSegmentOff arch ->
   Int ->
-  m (IM.Interval (R.ConcreteAddress arch))
+  m (IM.Interval (ConcreteAddress arch))
 archSegmentOffToInterval segOff size = case MM.segoffAsAbsoluteAddr segOff of
-  Just w -> pure (IM.IntervalCO start (start `R.addressAddOffset` fromIntegral size))
-    where start = R.concreteFromAbsolute w
+  Just w -> pure (IM.IntervalCO start (start `addressAddOffset` fromIntegral size))
+    where start = concreteFromAbsolute w
   Nothing -> throwError (StrangeBlockAddress segOff)
 
-class Concrete b where
-  concreteAddress :: b arch -> R.ConcreteAddress arch
-
-instance Concrete R.ConcreteBlock where
-  concreteAddress = R.concreteBlockAddress
-
-instance Concrete R.ConcretizedBlock where
-  concreteAddress = R.concretizedBlockAddress
-
-blockSize :: forall arch b. ValidArch arch => (R.HasConcreteAddresses b) => b arch -> Int
-blockSize = fromIntegral . R.blockSize isa
-  where
-    isa = RP.isa @arch
 
 mkIPEquivalence ::
-  Map (R.ConcreteAddress arch) (R.ConcreteAddress arch) ->
+  BlockMapping arch ->
   EquivM sym arch (
     CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
     CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
     IO (W4.Pred sym)
     )
-mkIPEquivalence ipMap = withValid $ do
+mkIPEquivalence (BlockMapping blockMap) = do
   ips' <- traverse (concreteToLLVM . fst) assocs
   ips <- traverse (concreteToLLVM . snd) assocs
   [regSS, offSS, regSS', offSS', ipEqSS] <- traverse userSymbol
@@ -1177,8 +1233,7 @@ mkIPEquivalence ipMap = withValid $ do
     pure $ \(CLM.LLVMPointer region offset) (CLM.LLVMPointer region' offset') -> W4.applySymFn sym ipEqSymFn
       (Ctx.empty `Ctx.extend` region `Ctx.extend` offset `Ctx.extend` region' `Ctx.extend` offset')
   where
-  assocs = M.assocs ipMap
-
+    assocs = M.assocs blockMap
 
 flipZipWithM :: Monad m => [a] -> [b] -> (a -> b -> m c) -> m [c]
 flipZipWithM as bs f = zipWithM f as bs
@@ -1192,11 +1247,11 @@ concreteToLLVM ::
   ( 
    w ~ MM.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
   ) =>
-  R.ConcreteAddress arch ->
+  ConcreteAddress arch ->
   EquivM sym arch (CLM.LLVMPtr sym w)
 concreteToLLVM c = withSymIO $ \sym -> do
   region <- W4.natLit sym 0
-  offset <- W4.bvLit sym W4.knownRepr (BVS.mkBV W4.knownRepr (toInteger (R.absoluteAddress c)))
+  offset <- W4.bvLit sym W4.knownRepr (BVS.mkBV W4.knownRepr (toInteger (absoluteAddress c)))
   pure (CLM.LLVMPointer region offset)
 
 llvmPtrEq ::
