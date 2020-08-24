@@ -1204,8 +1204,8 @@ mkIPEquivalence ::
     IO (W4.Pred sym)
     )
 mkIPEquivalence (BlockMapping blockMap) = do
-  ips' <- traverse (concreteToLLVM . fst) assocs
-  ips <- traverse (concreteToLLVM . snd) assocs
+  ips <- traverse (concreteToLLVM . fst) assocs
+  ips' <- traverse (concreteToLLVM . snd) assocs
   [regSS, offSS, regSS', offSS', ipEqSS] <- traverse userSymbol
     ["orig_reg", "orig_off", "rewrite_reg", "rewrite_off", "related_ips"]
 
@@ -1224,10 +1224,18 @@ mkIPEquivalence (BlockMapping blockMap) = do
     alternatives <- flipZipWithM ips ips' $ \ip ip' -> llvmPtrEq sym ipArg ip <&&> llvmPtrEq sym ipArg' ip'
     anyAlternative <- foldM (W4.orPred sym) (W4.falsePred sym) alternatives
 
+    tableEntries <- forM ips $ \ip -> llvmPtrEq sym ipArg ip
+    isInTable <- foldM (W4.orPred sym) (W4.falsePred sym) tableEntries
+
+    plainEq <- llvmPtrEq sym ipArg ipArg'
+    -- only if the first entry is in this table do we consult this table, otherwise
+    -- we require actual pointer equality
+    body <- W4.baseTypeIte sym isInTable anyAlternative plainEq
+
     ipEqSymFn <- W4.definedFn sym
       ipEqSS
       (Ctx.empty `Ctx.extend` regionVar `Ctx.extend` offsetVar `Ctx.extend` regionVar' `Ctx.extend` offsetVar')
-      anyAlternative
+      body
       W4.UnfoldConcrete
 
     pure $ \(CLM.LLVMPointer region offset) (CLM.LLVMPointer region' offset') -> W4.applySymFn sym ipEqSymFn
