@@ -1,0 +1,37 @@
+sudo: false
+language: haskell
+
+cabal: "2.4"
+
+cache:
+  directories:
+  - "$HOME/.cabal/store"
+
+matrix:
+  include:
+  - ghc: 8.4.4
+  - ghc: 8.6.5
+
+# Handle submodules manually, since we don't want a recursive checkouts
+git:
+    submodules: false
+
+before_install:
+- git submodule update --init
+
+install:
+  - ghc --version
+  - cabal --version
+  - git submodule update --init
+  - cabal v2-configure --project-file=cabal.project.dist
+  - cabal v2-update --project-file=cabal.project.dist
+
+addons:
+  apt:
+    sources:
+      - sourceline: 'ppa:sri-csl/formal-methods'
+    packages:
+      - yices2
+
+script:
+  - cabal v2-test --project-file=cabal.project.dist pate-tests
