@@ -14,6 +14,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -78,13 +79,17 @@ import qualified Data.Macaw.Discovery as MD
 
 --import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.Types as MM
 
 import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 import qualified Data.Parameterized.Context.Unsafe as Ctx
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Some as S
+import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
+
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.CFG.Core as CC
@@ -210,11 +215,12 @@ type ValidArch arch =
   , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
   , MM.MemWidth (MM.ArchAddrWidth arch)
   , MS.MacawArchConstraints arch
+  , MS.SymArchConstraints arch
   , MS.ArchInfo arch
   , MM.PrettyF (MM.ArchReg arch)
   , W4.KnownRepr (Ctx.Assignment CC.TypeRepr) (MS.MacawCrucibleRegTypes arch)
   , Ctx.KnownContext (MS.MacawCrucibleRegTypes arch)
-  
+  , ShowF (MM.ArchReg arch)
   )
 
 
@@ -465,14 +471,15 @@ data GroundLLVMPointer = GroundLLVMPointer
 type family ConcreteValue (tp :: CC.CrucibleType)
 type instance ConcreteValue (CLM.LLVMPointerType w) = GroundLLVMPointer
 
-data RegisterDiff tp = RegisterDiff
-  { rIndex :: Int
-  , rTypeRepr :: CC.TypeRepr tp
-  , rPre :: ConcreteValue tp
-  , rPostOriginal :: ConcreteValue tp
-  , rPostRewritten :: ConcreteValue tp
-  , rPostEquivalent :: Bool
-  }
+data RegisterDiff arch tp where
+  RegisterDiff :: ShowF (MM.ArchReg arch) =>
+    { rReg :: MM.ArchReg arch tp
+    , rTypeRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
+    , rPre :: ConcreteValue (MS.ToCrucibleType tp)
+    , rPostOriginal :: ConcreteValue (MS.ToCrucibleType tp)
+    , rPostRewritten :: ConcreteValue (MS.ToCrucibleType tp)
+    , rPostEquivalent :: Bool
+    } -> RegisterDiff arch tp
 
 data MemOpSpine
   = MemOpSpine MT.MemOpDirection Natural MM.Endianness
@@ -501,7 +508,7 @@ type MemTraceDiff = Seq MemOpDiff
 
 data EquivalenceResult arch
   = Equivalent
-  | InequivalentResults MemTraceDiff (Ctx.Assignment RegisterDiff (MS.MacawCrucibleRegTypes arch))
+  | InequivalentResults MemTraceDiff (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
   | InequivalentOperations MemTraceSpine MemTraceSpine
 
 combineEquivalence :: Monad m =>
@@ -529,17 +536,23 @@ checkRenEquivalence
     , rewrittenCtx = rCtx
     }
   PatchPair { pOrig = rBlock, pPatched =  rBlock' } = do
-  unconstrainedRegs_ <- Ctx.traverseWithIndex
-    unconstrainedRegister
-    (CC.knownRepr @_ @(Ctx.Assignment CC.TypeRepr) @(MS.MacawCrucibleRegTypes arch))
-  let unconstrainedRegs = CS.assignReg CC.knownRepr unconstrainedRegs_ CS.emptyRegMap
-  (CS.RegEntry (CC.StructRepr regsRepr) regs, memTrace)
+  initRegState <- MM.mkRegStateM unconstrainedRegister
+  initRegsAsn <- regStateToAsn initRegState
+  
+  let unconstrainedRegs = CS.assignReg CC.knownRepr initRegsAsn CS.emptyRegMap
+  (regs, memTrace)
     <- simulate oCtx rBlock  Original  unconstrainedRegs
-  (CS.RegEntry _ regs', memTrace')
+  (regs', memTrace')
     <- simulate rCtx rBlock' Rewritten unconstrainedRegs
-  preds <- Ctx.traverseWithIndex (\i _ -> equivPred eqCtx regsRepr regs regs' i) regsRepr
-  registersEquivalent <- TFC.foldrFC (<&&>) (pure (W4.truePred sym)) preds
+
+  preds <- MM.traverseRegsWith (\r v -> Const <$> equivPred eqCtx r v (regs' ^. MM.boundValue r)) regs
+  registersEquivalent <- TF.foldrMF (<&&>) (W4.truePred sym) preds
   let
+    getPred :: MM.ArchReg arch tp -> W4.Pred sym
+    getPred r =
+      let Const v = preds ^. MM.boundValue r
+      in v
+    
     matchTraces ::
       W4.Pred sym ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
@@ -594,14 +607,14 @@ checkRenEquivalence
         W4R.Unknown -> throwError InconclusiveSAT
         W4R.Sat (W4G.GroundEvalFn fn) -> pure InequivalentResults
           <*> groundTraceDiff fn memTrace memTrace'
-          <*> Ctx.traverseWithIndex
-            (\i repr -> do
-              pre <- concreteValue fn repr $ unconstrainedRegs_ Ctx.! i
-              post <- concreteValue fn repr $ regs Ctx.! i
-              post' <- concreteValue fn repr $ regs' Ctx.! i
-              equiv <- liftIO . fn . getConst $ preds Ctx.! i
+          <*> MM.traverseRegsWith
+            (\r (MacawRegEntry repr initVal)  -> do
+              pre <- concreteValue fn repr (CS.RV @sym initVal)
+              post <- concreteValue fn repr (boundCVal regs r)
+              post' <- concreteValue fn repr (boundCVal regs' r)
+              equiv <- liftIO . fn . getPred $ r
               pure RegisterDiff
-                { rIndex = Ctx.indexVal i
+                { rReg = r
                 , rTypeRepr = repr
                 , rPre = pre
                 , rPostOriginal = post
@@ -609,7 +622,7 @@ checkRenEquivalence
                 , rPostEquivalent = equiv
                 }
             )
-            regsRepr
+            initRegState
     matchTraces _ _ _ = pure (InequivalentOperations (spineOf memTrace) (spineOf memTrace'))
   matchTraces registersEquivalent memTrace memTrace'
   where
@@ -689,7 +702,8 @@ checkRenEquivalence
     cres <- evalCFG regs binCtx cfg
     getGPValueAndTrace mem cres
 
-  Const p1 <&&> mp2 = mp2 >>= liftIO . W4.andPred sym p1
+  
+  Const p1 <&&> p2 = liftIO $ W4.andPred sym p1 p2
 
 -- Even if we don't rewrite anything, we should still check that the return
 -- addresses are equivalent according to the equivalence relation we've built
@@ -777,25 +791,23 @@ externalTransitions internalAddrs pb =
   , tgt `S.notMember` internalAddrs
   ]
 
+ 
+
 equivPred ::
-  forall ctx sym ids arch tp.
-  Ctx.KnownContext ctx =>
+  forall sym ids arch tp.
   EquivalenceContext sym ids arch ->
-  Ctx.Assignment CC.TypeRepr ctx ->
-  Ctx.Assignment (CS.RegValue' sym) ctx ->
-  Ctx.Assignment (CS.RegValue' sym) ctx ->
-  Ctx.Index ctx tp ->
-  EquivM sym arch (Const (W4.Pred sym) tp)
+  MM.ArchReg arch tp ->
+  MacawRegEntry sym tp ->
+  MacawRegEntry sym tp ->
+  EquivM sym arch (W4.Pred sym)
 equivPred
   EquivalenceContext { exprBuilder = sym, ipEquivalence = ipEq }
-  regsRepr regs regs' i
-  = Const <$> case regsRepr Ctx.! i of
-    CLM.LLVMPointerRepr widthRepr -> liftIO $ case (regs Ctx.! i, regs' Ctx.! i) of
-      (CS.RV bv, CS.RV bv')
-        -- TODO: abstract away the 0 and 64
-        | Just (CC.Some idx) <- Ctx.intIndex 0 Ctx.knownSize
-        , Just Refl <- testEquality i idx
-        , Just Refl <- testEquality widthRepr (W4.knownNat @(MM.RegAddrWidth (MM.ArchReg arch))) -> ipEq bv bv'
+  reg
+  (MacawRegEntry repr bv)
+  (MacawRegEntry _ bv')
+  = case repr of
+    CLM.LLVMPointerRepr _ -> case testEquality reg (MM.ip_reg @(MM.ArchReg arch)) of
+      Just Refl -> liftIO $ ipEq bv bv'
         -- TODO: What to do with the link register (index 1 in the current
         -- register struct for PPC64)? Is ipEq good enough? Things to worry
         -- about with that choice:
@@ -805,8 +817,8 @@ equivPred
         -- with 0 in their LR and didn't change that.
         -- 2. ipEq declares the starts of blocks equivalent. blr tends to come
         -- at the end of blocks, not the start.
-        | otherwise -> llvmPtrEq sym bv bv'
-    repr -> throwError (UnsupportedRegisterType (S.Some repr))
+      _ -> liftIO $ llvmPtrEq sym bv bv'
+    _ -> throwError (UnsupportedRegisterType (S.Some repr))
 
 concreteValue ::
   (forall tp'. W4B.Expr scope tp' -> IO (W4G.GroundValue tp')) ->
@@ -873,7 +885,10 @@ groundLLVMPointer fn w (CLM.LLVMPointer reg off) = liftIO $ do
     , ptrOffset = BVS.asUnsigned goff
     }
 
-ppEquivalenceResult :: MM.MemWidth (MM.ArchAddrWidth arch) => Either (EquivalenceError arch) (EquivalenceResult arch) -> String
+ppEquivalenceResult ::
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  ShowF (MM.ArchReg arch) =>
+  Either (EquivalenceError arch) (EquivalenceResult arch) -> String
 ppEquivalenceResult (Right Equivalent) = "✓\n"
 ppEquivalenceResult (Right (InequivalentResults traceDiff regDiffs)) = "x\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
 ppEquivalenceResult (Right (InequivalentOperations trace trace')) = concat
@@ -936,22 +951,30 @@ ppEndianness :: MM.Endianness -> String
 ppEndianness MM.BigEndian = "→"
 ppEndianness MM.LittleEndian = "←"
 
-ppPreRegs :: Ctx.Assignment RegisterDiff ctx -> String
-ppPreRegs diffs = "\tInitial registers of a counterexample:\n" ++ case TFC.foldMapFC ppPreReg diffs of
+ppPreRegs ::
+  MM.RegState (MM.ArchReg arch) (RegisterDiff arch)
+  -> String
+ppPreRegs diffs = "\tInitial registers of a counterexample:\n" ++ case TF.foldMapF ppPreReg diffs of
   (Sum 0, s) -> s
   (Sum n, s) -> s ++ "\t\t(and " ++ show n ++ " other all-zero slots)\n"
 
-ppPreReg :: RegisterDiff tp -> (Sum Int, String)
+ppPreReg ::
+  RegisterDiff arch tp ->
+  (Sum Int, String)
 ppPreReg diff = case rTypeRepr diff of
   CLM.LLVMPointerRepr _ -> case rPre diff of
     GroundLLVMPointer _ 0 0 -> (1, "")
     _ -> (0, ppSlot diff ++ ppLLVMPointer (rPre diff) ++ "\n")
   _ -> (0, ppSlot diff ++ "unsupported register type in precondition pretty-printer\n")
 
-ppDiffs :: Ctx.Assignment RegisterDiff ctx -> String
-ppDiffs diffs = "\tMismatched resulting registers:\n" ++ TFC.foldMapFC ppDiff diffs
+ppDiffs ::
+  MM.RegState (MM.ArchReg arch) (RegisterDiff arch) ->
+  String
+ppDiffs diffs = "\tMismatched resulting registers:\n" ++ TF.foldMapF ppDiff diffs
 
-ppDiff :: RegisterDiff tp -> String
+ppDiff ::
+  RegisterDiff arch tp ->
+  String
 ppDiff diff | rPostEquivalent diff = ""
 ppDiff diff = ppSlot diff ++ case rTypeRepr diff of
   CLM.LLVMPointerRepr _ -> ""
@@ -961,8 +984,10 @@ ppDiff diff = ppSlot diff ++ case rTypeRepr diff of
     ++ " (rewritten)\n"
   _ -> "unsupported register type in postcondition comparison pretty-printer\n"
 
-ppSlot :: RegisterDiff tp -> String
-ppSlot diff = "\t\tslot " ++ (pad 4 . show . rIndex) diff ++ ": "
+ppSlot ::
+  RegisterDiff arch tp
+  -> String
+ppSlot (RegisterDiff { rReg = reg })  = "\t\tslot " ++ (pad 4 . showF) reg ++ ": "
 
 ppLLVMPointer :: GroundLLVMPointer -> String
 ppLLVMPointer (GroundLLVMPointer bitWidth reg off) = ""
@@ -978,15 +1003,64 @@ getGPValueAndTrace ::
   CS.GlobalVar (MT.MemTrace arch) ->
   CS.ExecResult p sym ext (CS.RegEntry sym (MS.ArchRegStruct arch)) ->
   EquivM sym arch
-    ( CS.RegEntry sym (MS.ArchRegStruct arch)
+    ( MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     )
 getGPValueAndTrace mem (CS.FinishedResult _ pres) = case pres ^. CS.partialValue of
   CS.GlobalPair val globs -> case CGS.lookupGlobal mem globs of
-    Just mt -> withValid $ pure (val, mt)
+    Just mt -> withValid $ do
+      val' <- structToRegState val
+      return $ (val', mt)
     Nothing -> throwError undefined
 getGPValueAndTrace _mem (CS.AbortedResult _ ar) = throwError . SymbolicExecutionFailed . ppAbortedResult $ ar
 getGPValueAndTrace _mem (CS.TimeoutResult _) = throwError (SymbolicExecutionFailed "timeout")
+
+data MacawRegEntry sym tp where
+  MacawRegEntry ::
+    CC.TypeRepr (MS.ToCrucibleType tp) ->
+    CS.RegValue sym (MS.ToCrucibleType tp) ->
+    MacawRegEntry sym tp
+
+macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
+macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
+
+boundCVal ::
+  OrdF (MM.ArchReg arch) =>
+  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  MM.ArchReg arch tp ->
+  CS.RegValue' sym (MS.ToCrucibleType tp)
+boundCVal regs r | MacawRegEntry _ v <- regs ^. MM.boundValue r = CS.RV v
+  
+
+structToRegState :: forall sym arch.
+  CS.RegEntry sym (MS.ArchRegStruct arch) ->
+  EquivM sym arch (MM.RegState (MM.ArchReg arch) (MacawRegEntry sym))
+structToRegState e = withArchVals $ \archVs -> do
+  return $ MM.mkRegState (macawRegEntry . MS.lookupReg archVs e)
+
+
+regStateToAsn :: forall sym arch.
+  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  EquivM sym arch (Ctx.Assignment (CS.RegValue' sym)  (MS.MacawCrucibleRegTypes arch))
+regStateToAsn regs = do
+  allRegsAsn <- withArchFuns $ \archFs -> return $ MS.crucGenRegAssignment archFs
+  return $ MS.macawAssignToCruc (\(MacawRegEntry _ v) -> CS.RV @sym v) $
+    TFC.fmapFC (\r -> regs ^. MM.boundValue r) allRegsAsn
+  
+
+withArchVals :: forall sym arch a.
+  (MS.ArchVals arch -> EquivM sym arch a) ->
+  EquivM sym arch a
+withArchVals f = do
+  Just archVs <- return $ MS.archVals (Proxy @arch)
+  f archVs
+
+withArchFuns :: forall sym arch a.
+  (MS.MacawSymbolicArchFunctions arch -> EquivM sym arch a) ->
+  EquivM sym arch a
+withArchFuns f = withArchVals (\archVs -> f (MS.archFunctions archVs))
+
+
 
 ppAbortedResult :: CS.AbortedResult sym ext -> String
 ppAbortedResult (CS.AbortedExec reason _) = show reason
@@ -994,19 +1068,21 @@ ppAbortedResult (CS.AbortedExit code) = show code
 ppAbortedResult (CS.AbortedBranch loc _ t f) = "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
 
 unconstrainedRegister ::
-  Ctx.Index ctx tp ->
-  CC.TypeRepr tp ->
-  EquivM sym arch (CS.RegValue' sym tp)
-unconstrainedRegister idx repr = do
-  let name = "reg" ++ show (Ctx.indexVal idx)
-  symbol <- either (throwError . InvalidRegisterName name) pure (W4S.userSymbol name)
+  MM.ArchReg arch tp ->
+  EquivM sym arch (MacawRegEntry sym tp)
+unconstrainedRegister reg = do
+  mkName <- withArchFuns $ \archFs -> return $ MS.crucGenArchRegName archFs
+  let
+    symbol = mkName reg
+    repr = MM.typeRepr reg
   case repr of
-    CLM.LLVMPointerRepr n -> withSymIO $ \sym -> do
+    MM.BVTypeRepr n -> 
+      withSymIO $ \sym -> do
       bv <- W4.freshConstant sym symbol (W4.BaseBVRepr n)
       -- TODO: This fixes the region to 0. Is that okay?
       ptr <- CLM.llvmPointer_bv sym bv
-      pure (CS.RV ptr)
-    _ -> throwError (UnsupportedRegisterType (S.Some repr))
+      return $ MacawRegEntry (MS.typeToCrucible repr) ptr
+    _ -> throwError (UnsupportedRegisterType (S.Some (MS.typeToCrucible repr)))
 
 -- | Keys: basic block extent; values: parsed blocks
 newtype ParsedBlockMap arch ids = ParsedBlockMap
