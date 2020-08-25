@@ -57,6 +57,12 @@ jobs:
         cabal v2-configure pkg:pate --write-ghc-environment-files=always -j1
         cabal v2-build pkg:pate
 
+    - name: Install Solvers
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-add-repository ppa:sri-csl/formal-methods
+        sudo apt-get install yices2
+
     - name: Test
       if: runner.os == 'Linux'
       run: |
