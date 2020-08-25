@@ -210,17 +210,9 @@ data EquivalenceContext sym ids arch where
 
 type ValidArch arch =
   ( Typeable arch
-  , KnownNat (MM.ArchAddrWidth arch)
-  , 1 <= MM.ArchAddrWidth arch
   , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
-  , MM.MemWidth (MM.ArchAddrWidth arch)
-  , MS.MacawArchConstraints arch
   , MS.SymArchConstraints arch
-  , MS.ArchInfo arch
-  , MM.PrettyF (MM.ArchReg arch)
-  , W4.KnownRepr (Ctx.Assignment CC.TypeRepr) (MS.MacawCrucibleRegTypes arch)
-  , Ctx.KnownContext (MS.MacawCrucibleRegTypes arch)
-  , ShowF (MM.ArchReg arch)
+  -- , ShowF (MM.ArchReg arch)
   )
 
 
@@ -538,8 +530,9 @@ checkRenEquivalence
   PatchPair { pOrig = rBlock, pPatched =  rBlock' } = do
   initRegState <- MM.mkRegStateM unconstrainedRegister
   initRegsAsn <- regStateToAsn initRegState
+  archRepr <- archStructRepr
   
-  let unconstrainedRegs = CS.assignReg CC.knownRepr initRegsAsn CS.emptyRegMap
+  let unconstrainedRegs = CS.assignReg archRepr initRegsAsn CS.emptyRegMap
   (regs, memTrace)
     <- simulate oCtx rBlock  Original  unconstrainedRegs
   (regs', memTrace')
@@ -632,7 +625,7 @@ checkRenEquivalence
     CC.CFG (MS.MacawExt arch) blocks tp (MS.ArchRegStruct arch) ->
     EquivM sym arch (CS.ExecResult (MS.MacawSimulatorState sym) sym (MS.MacawExt arch) (CS.RegEntry sym (MS.ArchRegStruct arch)))
   evalCFG regs binCtx cfg = do
-    archRepr <- getArchRepr
+    archRepr <- archStructRepr
     let
       globals = globalMap binCtx
       exts = extensions binCtx
@@ -721,8 +714,8 @@ checkRenEquivalence
 --  in checkRenEquivalence eqCtx (RewritePair rBlock (Just rBlock'))
 
 
-getArchRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
-getArchRepr = return $ CC.knownRepr @_ @_ @(MS.ArchRegStruct arch)
+archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
+archStructRepr = withArchFuns $ \archFs -> return $ CC.StructRepr $ MS.crucArchRegTypes archFs
 
 memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
