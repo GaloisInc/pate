@@ -35,4 +35,4 @@ addons:
       - yices2
 
 script:
-  - cabal v2-test --project-file=cabal.project.dist pate-tests
+    - cabal v2-test --project-file=cabal.project.dist pkg:pate

@@ -3,9 +3,11 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
-module Main ( main ) where
+module TestBase
+  ( runTests
+  , ValidArchProxy(..)
+  ) where
 
 import           System.FilePath
 import           System.FilePath.Glob (namesMatching)
@@ -17,8 +19,6 @@ import           Data.Maybe
 import qualified Data.Map as Map
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
---import qualified Test.Tasty.Options as T
---import qualified Test.Tasty.Runners as T
 import           Text.Printf ( PrintfArg, printf )
 import           Text.Read ( readMaybe )
 
@@ -26,25 +26,19 @@ import qualified Data.Macaw.Memory as MM
 
 import qualified Pate.Binary as PB
 import qualified Pate.Verification as V
-import qualified Pate.PPC as PPC
 
 
-main :: IO ()
-main = do
-  ppcTestFiles <- mapMaybe (stripExtension "info") <$> namesMatching "tests/ppc/*.info"
-  T.defaultMain $ T.testGroup "Equivalence Tests" [ ppcTests ppcTestFiles ]
+runTests :: String -> ValidArchProxy arch -> IO ()
+runTests name proxy = do
+  let glob = "tests" </> name </> "*.info"
+  testFiles <- mapMaybe (stripExtension "info") <$> namesMatching glob
+  T.defaultMain $ T.testGroup name $ map (mkTest proxy) testFiles
 
 data ValidArchProxy arch where
   ValidArchProxy :: (V.ValidArch arch, PB.ArchConstraints arch) => ValidArchProxy arch
 
-ppcTests :: [FilePath] -> T.TestTree
-ppcTests files = T.testGroup "PPC" $ map (mkTest proxy) files
-  where
-    proxy = ValidArchProxy @PPC.PPC64
-
 mkTest :: ValidArchProxy arch -> FilePath -> T.TestTree
 mkTest proxy fp = T.testCase fp $ doTest proxy fp
-
 
 doTest :: forall arch. ValidArchProxy arch -> FilePath -> IO ()
 doTest proxy@ValidArchProxy fp = do
@@ -56,7 +50,6 @@ doTest proxy@ValidArchProxy fp = do
   patched <- PB.loadELF @arch Proxy $ fp <.> "patched" <.> "exe"
   testEquivVerification proxy r original patched
 
-  
 
 newtype Hex a = Hex a
   deriving (Eq, Ord, Num, PrintfArg)
