@@ -35,7 +35,6 @@ common shared
                        macaw-aarch32,
                        macaw-symbolic,
                        macaw-x86-symbolic,
-                       macaw-ppc-symbolic,
                        macaw-aarch32-symbolic,
                        macaw-loader,
                        macaw-loader-x86,
@@ -53,12 +52,13 @@ library
   exposed-modules:     Pate,
                        Pate.Binary,
                        Pate.Verification,
+                       Pate.Loader,
                        Pate.Monad,
                        Pate.Types,
                        Pate.Utils
 
 common shared-test
-  ghc-options: -Wall
+  ghc-options: -Wall -Wcompat
   default-language: Haskell2010
   build-depends: base,
                  bytestring,
@@ -85,32 +85,29 @@ test-suite pate-test-ppc
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic
 
-executable pate_exec
-  main-is:             Main.hs
-  other-modules:       ELF
-  -- other-extensions:
-  hs-source-dirs:      tools/pate tools
-  default-language:    Haskell2010
-  ghc-options:         -Wall -Wcompat
+common shared-exec
+  ghc-options: -Wall -Wcompat
+  default-language: Haskell2010
   build-depends: base,
-                 containers >= 0.5 && < 0.7,
-                 binary,
-                 what4,
-                 crucible,
-                 crucible-llvm,
-                 parameterized-utils,
-                 dismantle-ppc,
+                 bytestring,
+                 elf-edit,
+                 containers,
+                 filepath,
+                 filemanip,
                  macaw-base,
                  macaw-loader,
                  macaw-symbolic,
-                 macaw-ppc,
-                 macaw-ppc-symbolic,
-                 elf-edit,
-                 optparse-applicative,
-                 bytestring,
-                 --renovate,
-                 --renovate-ppc,
                  mtl,
-                 lens,
-                 transformers,
-                 pate
+                 optparse-applicative,
+                 parameterized-utils,
+                 text,
+                 pate 
+
+
+executable pate-exec
+  import:              shared-exec
+  main-is:             Main.hs
+  other-modules:       Pate.PPC
+  hs-source-dirs:      tools/pate tools arch
+  build-depends:       macaw-ppc,
+                       macaw-ppc-symbolic

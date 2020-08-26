@@ -14,61 +14,50 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-import           Control.Applicative
-import           Control.Lens hiding ( pre )
-import           Control.Monad.Except
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
-import           Data.Foldable
-import           Data.Functor.Const ( Const(..) )
+
 import qualified Options.Applicative as OA
 import           System.Exit
 
-import qualified Data.Map as Map
-import qualified Data.ElfEdit as E
-import qualified Data.Macaw.BinaryLoader as MBL
-import qualified Data.Macaw.Memory.ElfLoader as MM
-import qualified Data.Macaw.PPC as PPC
-import           Data.Macaw.PPC.PPCReg ()
-import qualified Dismantle.PPC as DP
-import qualified Lang.Crucible.FunctionHandle as CFH
-import qualified Renovate as R
-import qualified Renovate.Arch.PPC as RP
-import qualified Pate.Verification as V
-import           Pate.Utils ( (<>|) )
+import           Data.Parameterized.Some
 
-import           ELF ( parseElfOrDie )
+import qualified Pate.PPC as PPC
+import qualified Pate.Loader as PL
+
 
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
-  bs_original <- BS.readFile (originalBinary opts)
-  e64_original <- parseElfOrDie (error "32") return bs_original
-
-  bs_patched <- BS.readFile (patchedBinary opts)
-  e64_patched <- parseElfOrDie (error "32") return bs_patched  
-  
-  mem_original <- MBL.loadBinary MM.defaultLoadOptions e64_original
-  mem_patched <- MBL.loadBinary MM.defaultLoadOptions e64_patched
-  
-  hdlAlloc <- CFH.newHandleAllocator
-  let archInfo = PPC.ppc64_linux_info mem_original
-
-  info <- R.analyzeElf config hdlAlloc
-  v <- runExceptT (V.verifyPairs archInfo mem_original mem_patched Map.empty (ri ^. R.riRewritePairs))
-  case v of
+  Some proxy <- return $ archKToProxy (archK opts)
+  let
+    cfg = PL.RunConfig
+        { PL.archProxy = proxy
+        , PL.infoPath = Left $ blockInfo opts
+        , PL.origPath = originalBinary opts
+        , PL.patchedPath = patchedBinary opts
+        }
+  PL.runEquivConfig cfg >>= \case
     Left err -> die (show err)
     Right _ -> pure ()
 
 data CLIOptions = CLIOptions
   { originalBinary :: FilePath
   , patchedBinary :: FilePath
+  , blockInfo :: FilePath
+  , archK :: ArchK
   } deriving (Eq, Ord, Read, Show)
+
+data ArchK = PPC | ARM
+  deriving (Eq, Ord, Read, Show)
+
+archKToProxy :: ArchK -> Some PL.ValidArchProxy
+archKToProxy a = case a of
+  PPC -> Some (PL.ValidArchProxy @PPC.PPC64)
+  ARM -> error "ARM not yet supported"
 
 cliOptions :: OA.ParserInfo CLIOptions
 cliOptions = OA.info (OA.helper <*> parser)
   (  OA.fullDesc
-  <> OA.progDesc "Run a quick test of rewrite verification"
+  <> OA.progDesc "Verify the equivalence of two binaries"
   ) where
   parser = pure CLIOptions
     <*> (OA.strOption
@@ -83,15 +72,16 @@ cliOptions = OA.info (OA.helper <*> parser)
       <> OA.metavar "EXE"
       <> OA.help "Patched binary"
       ))
-
-
-layout :: R.LayoutStrategy
-layout = R.LayoutStrategy R.Parallel R.BlockGrouping R.WholeFunctionTrampoline
-
-config :: R.RenovateConfig RP.PPC64 (E.Elf 64) R.AnalyzeOnly (Const (R.BlockInfo RP.PPC64))
-config = RP.config64 analysis
-
-analysis :: R.AnalyzeOnly RP.PPC64 binFmt (Const (R.BlockInfo RP.PPC64))
-analysis = R.AnalyzeOnly
-  { R.aoAnalyze = \e -> return $ Const $ R.analysisBlockInfo e }
+    <*> (OA.strOption
+      (  OA.long "blockinfo"
+      <> OA.short 'b'
+      <> OA.metavar "FILENAME"
+      <> OA.help "Block information relating binaries"
+      ))
+    <*> (OA.option (OA.auto @ArchK)
+      (  OA.long "arch"
+      <> OA.short 'a'
+      <> OA.metavar "ARCH"
+      <> OA.help "Architecture of the given binaries"
+      ))
 
