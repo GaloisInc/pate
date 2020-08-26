@@ -53,6 +53,8 @@ library
   exposed-modules:     Pate,
                        Pate.Binary,
                        Pate.Verification,
+                       Pate.Monad,
+                       Pate.Types,
                        Pate.Utils
 
 common shared-test

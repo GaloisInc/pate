@@ -25,7 +25,9 @@ import           Text.Read ( readMaybe )
 import qualified Data.Macaw.Memory as MM
 
 import qualified Pate.Binary as PB
-import qualified Pate.Verification as V
+import qualified Pate.Types as PT
+import qualified Pate.Monad as PM
+import qualified Pate.Verification as PV
 
 
 runTests :: String -> ValidArchProxy arch -> IO ()
@@ -35,7 +37,7 @@ runTests name proxy = do
   T.defaultMain $ T.testGroup name $ map (mkTest proxy) testFiles
 
 data ValidArchProxy arch where
-  ValidArchProxy :: (V.ValidArch arch, PB.ArchConstraints arch) => ValidArchProxy arch
+  ValidArchProxy :: (PM.ValidArch arch, PB.ArchConstraints arch) => ValidArchProxy arch
 
 mkTest :: ValidArchProxy arch -> FilePath -> T.TestTree
 mkTest proxy fp = T.testCase fp $ doTest proxy fp
@@ -68,23 +70,23 @@ data PatchData =
             }
   deriving (Read, Show, Eq)
 
-hexToAddr :: ValidArchProxy arch -> Hex Word64 -> V.ConcreteAddress arch
-hexToAddr ValidArchProxy (Hex w) = V.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
+hexToAddr :: ValidArchProxy arch -> Hex Word64 -> PT.ConcreteAddress arch
+hexToAddr ValidArchProxy (Hex w) = PT.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
 
-unpackBlockData :: ValidArchProxy arch -> BlockData -> V.ConcreteBlock arch
+unpackBlockData :: ValidArchProxy arch -> BlockData -> PT.ConcreteBlock arch
 unpackBlockData proxy (start, size) =
-  V.ConcreteBlock
-    { V.concreteBlockAddress = (hexToAddr proxy start)
-    , V.concreteBlockSize = fromIntegral $ size
+  PT.ConcreteBlock
+    { PT.concreteAddress = (hexToAddr proxy start)
+    , PT.concreteBlockSize = fromIntegral $ size
     }
 
 
-unpackPatchData :: ValidArchProxy arch -> PatchData -> (V.BlockMapping arch, [V.PatchPair arch])
+unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])
 unpackPatchData proxy (PatchData pairs bmap) =
   let
-    bmap' = V.BlockMapping $ 
+    bmap' = PT.BlockMapping $ 
       Map.fromList $ map (\(addr, addr') -> (hexToAddr proxy addr, hexToAddr proxy addr')) bmap
-    ppairs = map (\(bd, bd') -> V.PatchPair (unpackBlockData proxy bd) (unpackBlockData proxy bd')) pairs
+    ppairs = map (\(bd, bd') -> PT.PatchPair (unpackBlockData proxy bd) (unpackBlockData proxy bd')) pairs
   in (bmap', ppairs)
 
 testEquivVerification ::
@@ -95,7 +97,7 @@ testEquivVerification ::
   IO ()
 testEquivVerification proxy@ValidArchProxy pd original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
-  v <- runExceptT (V.verifyPairs original patched bmap ppairs)
+  v <- runExceptT (PV.verifyPairs original patched bmap ppairs)
   case v of
     Left err -> T.assertFailure (show err)
     Right b -> T.assertBool "Verification did not succeed" b
