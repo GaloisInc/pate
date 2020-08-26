@@ -7,6 +7,7 @@
 
 module TestBase
   ( runTests
+  , PL.ValidArchProxy
   ) where
 
 import           System.FilePath
