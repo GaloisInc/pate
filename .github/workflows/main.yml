@@ -27,9 +27,7 @@ jobs:
           - os: macOS-latest
             ghc: 8.8.3
           - os: windows-latest
-            ghc: 8.8.3
-          - os: windows-latest
-            ghc: 8.10.1
+            arch: ppc
 
     name: GHC ${{ matrix.ghc }} on ${{ matrix.os }} pate-${{ matrix.arch }}
 
