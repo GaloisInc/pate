@@ -257,17 +257,17 @@ checkRenEquivalence
       checkSatisfiableWithModel satResultDescription notPrevChecks $ \case
         W4R.Unsat _ -> pure Equivalent
         W4R.Unknown -> throwError InconclusiveSAT
-        W4R.Sat (W4G.GroundEvalFn fn) -> pure InequivalentResults
+        W4R.Sat fn -> pure InequivalentResults
           <*> groundTraceDiff fn memTrace memTrace'
           <*> MM.traverseRegsWith
-            (\r (MacawRegEntry repr initVal)  -> do
-              pre <- concreteValue fn repr (CS.RV @sym initVal)
-              post <- concreteValue fn repr (boundCVal regs r)
-              post' <- concreteValue fn repr (boundCVal regs' r)
-              equiv <- liftIO . fn . getPred $ r
+            (\r initVal  -> do
+              pre <- concreteValue fn initVal
+              post <- concreteValue fn (regs ^. MM.boundValue r)
+              post' <- concreteValue fn (regs' ^. MM.boundValue r)
+              equiv <- execGroundFn fn $ getPred r
               pure RegisterDiff
                 { rReg = r
-                , rTypeRepr = repr
+                , rTypeRepr = macawRegRepr initVal
                 , rPre = pre
                 , rPostOriginal = post
                 , rPostRewritten = post'
@@ -373,6 +373,12 @@ checkRenEquivalence
 --  in checkRenEquivalence eqCtx (RewritePair rBlock (Just rBlock'))
 
 
+execGroundFn ::
+  SymGroundEvalFn sym  -> 
+  W4.SymExpr sym tp -> 
+  EquivM sym arch (W4G.GroundValue tp)  
+execGroundFn gfn e = liftIO (execGroundFnIO gfn e)
+
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
 archStructRepr = withArchFuns $ \archFs -> return $ CC.StructRepr $ MS.crucArchRegTypes archFs
 
@@ -382,13 +388,13 @@ memOpCondition = \case
   MT.Conditional p -> return p
 
 checkSatisfiableWithModel ::
-  ValidSolver sym scope solver fs =>
   String ->
-  W4B.BoolExpr scope ->
-  (W4R.SatResult (W4G.GroundEvalFn scope) () -> EquivM sym arch a) ->
+  W4.Pred sym ->
+  (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel desc p k = withProc $ \proc ->
-  runInIO1 k $ W4O.checkSatisfiableWithModel proc desc p
+checkSatisfiableWithModel desc p k = withProc $ \proc -> do
+  let mkResult r = W4R.traverseSatResult (pure . SymGroundEvalFn) pure r
+  runInIO1 (mkResult >=> k) $ W4O.checkSatisfiableWithModel proc desc p
 
 isTerminalBlock :: MD.ParsedBlock arch ids -> Bool
 isTerminalBlock pb = case MD.pblockTermStmt pb of
@@ -450,23 +456,24 @@ equivPred
     _ -> throwError (UnsupportedRegisterType (S.Some repr))
 
 concreteValue ::
-  (forall tp'. W4B.Expr scope tp' -> IO (W4G.GroundValue tp')) ->
-  CC.TypeRepr tp ->
-  CS.RegValue' (CBO.OnlineBackend scope solver fs) tp ->
-  EquivM sym arch (ConcreteValue tp)
-concreteValue fn (CLM.LLVMPointerRepr widthRepr) (CS.RV (CLM.LLVMPointer symRegion symOffset)) = liftIO $ do
-  region <- fn symRegion
-  offset <- fn symOffset
-  pure GroundLLVMPointer
-    { ptrWidth = W4.natValue widthRepr
-    , ptrRegion = region
-    , ptrOffset = BVS.asSigned widthRepr offset
-    }
-concreteValue _ repr _ = throwError (UnsupportedRegisterType (S.Some repr))
+  SymGroundEvalFn sym ->
+  MacawRegEntry sym tp ->
+  EquivM sym arch (ConcreteValue (MS.ToCrucibleType tp))
+concreteValue fn e
+  | CLM.LLVMPointerRepr widthRepr <- macawRegRepr e
+  , CLM.LLVMPointer symRegion symOffset <- macawRegValue e = do
+    region <- execGroundFn fn symRegion
+    offset <- execGroundFn fn symOffset
+    pure GroundLLVMPointer
+      { ptrWidth = W4.natValue widthRepr
+      , ptrRegion = region
+      , ptrOffset = BVS.asSigned widthRepr offset
+      }
+concreteValue _ e = throwError (UnsupportedRegisterType (S.Some (macawRegRepr e)))
 
 -- We assume the two traces have equivalent spines already.
 groundTraceDiff ::
-  (forall tp. W4B.SymExpr sym tp -> IO (W4G.GroundValue tp)) ->
+  SymGroundEvalFn sym ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   EquivM sym arch MemTraceDiff
@@ -482,14 +489,14 @@ groundTraceDiff fn (MT.MemOp addr dir cond_ w val _ :< ops) (MT.MemOp addr' _ co
     , mOpRewritten = op'
     } :< diff)
 groundTraceDiff fn (MT.MergeOps cond traceT traceF :< ops) (MT.MergeOps _cond' traceT' traceF' :< ops') = do
-  b <- liftIO (fn cond)
+  b <- execGroundFn fn cond
   let (trace, trace') = if b then (traceT, traceT') else (traceF, traceF')
   groundTraceDiff fn (trace <> ops) (trace' <> ops')
 groundTraceDiff _fn Empty Empty = pure Empty
 groundTraceDiff _ _ _ = error "The impossible happened: groundTraceDiff was called on memory traces that were not equivalent"
 
 groundMemOp ::
-  (forall tp. W4B.SymExpr sym tp -> IO (W4G.GroundValue tp)) ->
+  SymGroundEvalFn sym ->
   CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
   W4.Pred sym ->
   W4.NatRepr w ->
@@ -497,17 +504,17 @@ groundMemOp ::
   EquivM sym arch GroundMemOp
 groundMemOp fn addr cond w val = liftA3 GroundMemOp
   (groundLLVMPointer fn W4.knownRepr addr)
-  (liftIO (fn cond))
+  (execGroundFn fn cond)
   (groundLLVMPointer fn w val)
 
 groundLLVMPointer ::
-  (forall tp. W4B.SymExpr sym tp -> IO (W4G.GroundValue tp)) ->
+  SymGroundEvalFn sym ->
   W4.NatRepr w ->
   CLM.LLVMPtr sym w ->
   EquivM sym arch GroundLLVMPointer
-groundLLVMPointer fn w (CLM.LLVMPointer reg off) = liftIO $ do
-  greg <- fn reg
-  goff <- fn off
+groundLLVMPointer fn w (CLM.LLVMPointer reg off) = do
+  greg <- execGroundFn fn reg
+  goff <- execGroundFn fn off
   pure GroundLLVMPointer
     { ptrWidth = W4.natValue w
     , ptrRegion = greg

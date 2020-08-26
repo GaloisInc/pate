@@ -26,12 +26,13 @@ module Pate.Types
   , ConcreteValue
   , GroundLLVMPointer(..)
   , GroundMemOp(..)
+  , SymGroundEvalFn(..)
+  , execGroundFnIO
   , MemTraceDiff
   , MemTraceSpine
   , MemOpDiff(..)
   , MacawRegEntry(..)
   , macawRegEntry
-  , boundCVal
   , EquivalenceError(..)
   --- reporting
   , EquivalenceStatistics(..)
@@ -48,7 +49,6 @@ module Pate.Types
 where
 
 import           Control.Exception
-import           Control.Lens hiding ( op, pre )
 
 import           Data.Map ( Map )
 import qualified Data.Map as M
@@ -76,8 +76,8 @@ import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 
 import qualified What4.Interface as W4
 import qualified What4.Symbol as W4S
-
-
+import qualified What4.Expr.Builder as W4B
+import qualified What4.Expr.GroundEval as W4G
 
 
 ----------------------------------
@@ -160,6 +160,14 @@ data RegisterDiff arch tp where
     , rPostEquivalent :: Bool
     } -> RegisterDiff arch tp
 
+data SymGroundEvalFn sym where
+  SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
+
+execGroundFnIO ::
+  SymGroundEvalFn sym -> 
+  W4.SymExpr sym tp ->
+  IO (W4G.GroundValue tp)
+execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
 
 ----------------------------------
 data MemOpSpine
@@ -191,22 +199,15 @@ type MemTraceDiff = Seq MemOpDiff
 
 data MacawRegEntry sym tp where
   MacawRegEntry ::
-    CC.TypeRepr (MS.ToCrucibleType tp) ->
-    CS.RegValue sym (MS.ToCrucibleType tp) ->
+    { macawRegRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
+    , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
+    } ->
     MacawRegEntry sym tp
 
 macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
 macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
 
-boundCVal ::
-  OrdF (MM.ArchReg arch) =>
-  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
-  MM.ArchReg arch tp ->
-  CS.RegValue' sym (MS.ToCrucibleType tp)
-boundCVal regs r | MacawRegEntry _ v <- regs ^. MM.boundValue r = CS.RV v
-
-
-----------------------------------
+--------------------
 
 data EquivalenceStatistics = EquivalenceStatistics
   { numPairsChecked :: Int
