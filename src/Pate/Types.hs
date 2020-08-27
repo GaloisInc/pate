@@ -4,7 +4,10 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 module Pate.Types
   ( PatchPair(..)
@@ -24,6 +27,8 @@ module Pate.Types
   , MemOpSpine(..)
   , spineOf
   , ConcreteValue
+  , GroundBV(..)
+  , mkGroundBV
   , GroundLLVMPointer(..)
   , GroundMemOp(..)
   , SymGroundEvalFn(..)
@@ -54,6 +59,7 @@ import           GHC.Stack
 
 import           Control.Exception
 
+import qualified Data.BitVector.Sized as BVS
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
@@ -83,7 +89,6 @@ import qualified What4.Interface as W4
 import qualified What4.Symbol as W4S
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
-
 
 ----------------------------------
 
@@ -146,14 +151,71 @@ concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
 
 ----------------------------------
 
-data GroundLLVMPointer = GroundLLVMPointer
-  { ptrWidth :: Natural
-  , ptrRegion :: Natural
-  , ptrOffset :: Integer
-  } deriving (Eq, Ord, Read, Show)
+data GroundBV n where
+  GroundBV :: W4.NatRepr n -> BVS.BV n -> GroundBV n
+  GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
+  deriving (Eq, Show)
+
+groundBVWidth :: GroundBV n -> W4.NatRepr n
+groundBVWidth gbv = case gbv of
+  GroundBV nr _ -> nr
+  GroundLLVMPointer ptr -> ptrWidth ptr
+
+instance TestEquality GroundBV where
+  testEquality bv bv' = case testEquality (groundBVWidth bv) (groundBVWidth bv') of
+    Just Refl | bv == bv' -> Just Refl
+    _ -> Nothing
+
+instance OrdF GroundBV where
+  compareF (GroundBV w bv) (GroundBV w' bv') =
+    lexCompareF w w' $ fromOrdering $ compare bv bv'
+  compareF (GroundLLVMPointer ptr) (GroundLLVMPointer ptr') = compareF ptr ptr'
+  compareF (GroundBV _ _) _ = LTF
+  compareF (GroundLLVMPointer _) _ = GTF
+
+instance Ord (GroundBV n) where
+  compare bv bv' = toOrdering (compareF bv bv')
+
+data GroundLLVMPointer n where
+  GroundLLVMPointerC :: 1 W4.<= r =>
+      { ptrWidth :: W4.NatRepr n
+      , ptrRegion_ ::  W4.NatRepr r
+      , ptrOffset :: BVS.BV n
+      } -> GroundLLVMPointer n
+
+
+instance TestEquality GroundLLVMPointer where
+  testEquality ptr ptr'
+    | Just Refl <- testEquality (ptrWidth ptr) (ptrWidth ptr')
+    , ptrRegion ptr == ptrRegion ptr'
+    , ptrOffset ptr == ptrOffset ptr'
+    = Just Refl
+  testEquality _ _ = Nothing
+
+ptrRegion :: GroundLLVMPointer n -> Natural
+ptrRegion (GroundLLVMPointerC _ reg _) = W4.natValue reg
+
+instance Eq (GroundLLVMPointer n) where
+  (GroundLLVMPointerC _ reg off) == (GroundLLVMPointerC _ reg' off') = case testEquality reg reg' of
+    Just Refl -> off == off'
+    Nothing -> False
+
+instance OrdF GroundLLVMPointer where
+  compareF (GroundLLVMPointerC w reg off) (GroundLLVMPointerC w' reg' off') =
+    lexCompareF w w' $ lexCompareF reg reg' $ fromOrdering $ compare off off'
+deriving instance Show (GroundLLVMPointer n)
+
+mkGroundBV :: forall n.
+  W4.NatRepr n ->
+  Natural ->
+  BVS.BV n ->
+  GroundBV n
+mkGroundBV nr r bv | Some rr <- W4.mkNatRepr r = case W4.isPosNat rr of
+ Just W4.LeqProof -> GroundLLVMPointer $ GroundLLVMPointerC nr rr bv
+ Nothing -> GroundBV nr bv
 
 type family ConcreteValue (tp :: CC.CrucibleType)
-type instance ConcreteValue (CLM.LLVMPointerType w) = GroundLLVMPointer
+type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
 
 data RegisterDiff arch tp where
   RegisterDiff :: ShowF (MM.ArchReg arch) =>
@@ -186,19 +248,39 @@ spineOf = fmap go where
   go (MT.MemOp _addr dir _cond size _val end) = MemOpSpine dir (W4.natValue size) end
   go (MT.MergeOps _cond traceT traceF) = MergeSpines (spineOf traceT) (spineOf traceF)
 
-data GroundMemOp = GroundMemOp
-  { gAddress :: GroundLLVMPointer
-  , gCondition :: Bool
-  , gValue :: GroundLLVMPointer
-  } deriving (Eq, Ord, Read, Show)
+data GroundMemOp arch where
+  GroundMemOp :: forall arch w.
+    { gAddress :: GroundLLVMPointer (MM.ArchAddrWidth arch)
+    , gCondition :: Bool
+    , gValue_ :: GroundBV w
+    } -> GroundMemOp arch
 
-data MemOpDiff = MemOpDiff
+gValue :: GroundMemOp arch -> Some GroundBV
+gValue (GroundMemOp { gValue_ = v}) = Some v
+
+instance Eq (GroundMemOp arch) where
+  (GroundMemOp addr cond v) == (GroundMemOp addr' cond' v')
+    | Just Refl <- testEquality addr addr'
+    , Just Refl <- testEquality v v'
+    = cond == cond'
+  _ == _ = False
+      
+instance Ord (GroundMemOp arch) where
+  compare (GroundMemOp addr cond v) (GroundMemOp addr' cond' v') =
+    case compare cond cond' of
+      LT -> LT
+      GT -> GT
+      EQ -> toOrdering $ lexCompareF addr addr' $ compareF v v'
+
+deriving instance Show (GroundMemOp arch)
+
+data MemOpDiff arch = MemOpDiff
   { mDirection :: MT.MemOpDirection
-  , mOpOriginal :: GroundMemOp
-  , mOpRewritten :: GroundMemOp
-  } deriving (Eq, Ord, Read, Show)
+  , mOpOriginal :: GroundMemOp arch
+  , mOpRewritten :: GroundMemOp arch
+  } deriving (Eq, Ord, Show)
 
-type MemTraceDiff = Seq MemOpDiff
+type MemTraceDiff arch = Seq (MemOpDiff arch)
 
 ----------------------------------
 
@@ -235,7 +317,7 @@ equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && che
 
 data EquivalenceResult arch
   = Equivalent
-  | InequivalentResults MemTraceDiff (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
+  | InequivalentResults (MemTraceDiff arch) (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
   | InequivalentOperations MemTraceSpine MemTraceSpine
 
 combineEquivalence :: Monad m =>
@@ -273,6 +355,8 @@ data InnerEquivalenceError arch
   | BlockExceedsItsSegment (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
   | BlockEndsMidInstruction
   | PrunedBlockIsEmpty
+  | forall w. ExpectedNonZeroRegion (GroundBV w)
+  | forall w. UnexpectedPointerSize (GroundLLVMPointer w)
   | EquivCheckFailure String -- generic error
 deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (InnerEquivalenceError arch)
 
@@ -323,10 +407,10 @@ ppEquivalenceResult (Right (InequivalentOperations trace trace')) = concat
   ]
 ppEquivalenceResult (Left err) = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the error
 
-ppMemTraceDiff :: MemTraceDiff -> String
+ppMemTraceDiff :: MemTraceDiff arch -> String
 ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDiff (toList diffs)
 
-ppMemOpDiff :: MemOpDiff -> String
+ppMemOpDiff :: MemOpDiff arch -> String
 ppMemOpDiff diff
   =  "\t\t" ++ ppDirectionVerb (mDirection diff) ++ " "
   ++ ppGroundMemOp (mDirection diff) (mOpOriginal diff)
@@ -336,9 +420,10 @@ ppMemOpDiff diff
      )
   ++ "\n"
 
-ppGroundMemOp :: MT.MemOpDirection -> GroundMemOp -> String
+ppGroundMemOp :: MT.MemOpDirection -> GroundMemOp arch -> String
 ppGroundMemOp dir op
-  =  ppLLVMPointer (gValue op)
+  | Some v <- gValue op
+  =  ppGroundBV v
   ++ " " ++ ppDirectionPreposition dir ++ " "
   ++ ppLLVMPointer (gAddress op)
   ++ if gCondition op
@@ -375,6 +460,7 @@ ppEndianness MM.BigEndian = "→"
 ppEndianness MM.LittleEndian = "←"
 
 ppPreRegs ::
+  HasCallStack =>
   MM.RegState (MM.ArchReg arch) (RegisterDiff arch)
   -> String
 ppPreRegs diffs = "\tInitial registers of a counterexample:\n" ++ case TF.foldMapF ppPreReg diffs of
@@ -382,12 +468,13 @@ ppPreRegs diffs = "\tInitial registers of a counterexample:\n" ++ case TF.foldMa
   (Sum n, s) -> s ++ "\t\t(and " ++ show n ++ " other all-zero slots)\n"
 
 ppPreReg ::
+  HasCallStack =>
   RegisterDiff arch tp ->
   (Sum Int, String)
 ppPreReg diff = case rTypeRepr diff of
   CLM.LLVMPointerRepr _ -> case rPre diff of
-    GroundLLVMPointer _ 0 0 -> (1, "")
-    _ -> (0, ppSlot diff ++ ppLLVMPointer (rPre diff) ++ "\n")
+    GroundBV _ bv | 0 <- BVS.asUnsigned bv -> (1, "")
+    _ -> (0, ppSlot diff ++ ppGroundBV (rPre diff) ++ "\n")
   _ -> (0, ppSlot diff ++ "unsupported register type in precondition pretty-printer\n")
 
 ppDiffs ::
@@ -401,9 +488,9 @@ ppDiff ::
 ppDiff diff | rPostEquivalent diff = ""
 ppDiff diff = ppSlot diff ++ case rTypeRepr diff of
   CLM.LLVMPointerRepr _ -> ""
-    ++ ppLLVMPointer (rPostOriginal diff)
+    ++ ppGroundBV (rPostOriginal diff)
     ++ " (original) vs. "
-    ++ ppLLVMPointer (rPostRewritten diff)
+    ++ ppGroundBV (rPostRewritten diff)
     ++ " (rewritten)\n"
   _ -> "unsupported register type in postcondition comparison pretty-printer\n"
 
@@ -412,11 +499,20 @@ ppSlot ::
   -> String
 ppSlot (RegisterDiff { rReg = reg })  = "\t\tslot " ++ (pad 4 . showF) reg ++ ": "
 
-ppLLVMPointer :: GroundLLVMPointer -> String
-ppLLVMPointer (GroundLLVMPointer bitWidth reg off) = ""
+ppGroundBV :: GroundBV w -> String
+ppGroundBV gbv = case gbv of
+  GroundBV w bv -> BVS.ppHex w bv
+  GroundLLVMPointer ptr -> ppLLVMPointer ptr
+
+ppLLVMPointer :: GroundLLVMPointer w -> String
+ppLLVMPointer (GroundLLVMPointerC bitWidthRepr regRepr offBV) = ""
   ++ pad 3 (show reg)
   ++ "+0x"
   ++ padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
+  where
+    reg = W4.natValue regRepr
+    off = BVS.asUnsigned offBV
+    bitWidth = W4.natValue bitWidthRepr
 
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch -> String
 ppBlock b = ""

@@ -475,15 +475,9 @@ concreteValue ::
   MacawRegEntry sym tp ->
   EquivM sym arch (ConcreteValue (MS.ToCrucibleType tp))
 concreteValue fn e
-  | CLM.LLVMPointerRepr widthRepr <- macawRegRepr e
-  , CLM.LLVMPointer symRegion symOffset <- macawRegValue e = do
-    region <- execGroundFn fn symRegion
-    offset <- execGroundFn fn symOffset
-    pure GroundLLVMPointer
-      { ptrWidth = W4.natValue widthRepr
-      , ptrRegion = region
-      , ptrOffset = BVS.asSigned widthRepr offset
-      }
+  | CLM.LLVMPointerRepr _ <- macawRegRepr e
+  , ptr <- macawRegValue e = do
+    groundBV fn ptr
 concreteValue _ e = throwHere (UnsupportedRegisterType (S.Some (macawRegRepr e)))
 
 -- We assume the two traces have equivalent spines already.
@@ -491,12 +485,12 @@ groundTraceDiff ::
   SymGroundEvalFn sym ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
-  EquivM sym arch MemTraceDiff
-groundTraceDiff fn (MT.MemOp addr dir cond_ w val _ :< ops) (MT.MemOp addr' _ cond'_ w' val' _ :< ops') = do
+  EquivM sym arch (MemTraceDiff arch)
+groundTraceDiff fn (MT.MemOp addr dir cond_ _ val _ :< ops) (MT.MemOp addr' _ cond'_ _ val' _ :< ops') = do
   cond <- memOpCondition cond_
-  cond' <- memOpCondition cond'_  
-  op  <- groundMemOp fn addr  cond  w  val
-  op' <- groundMemOp fn addr' cond' w' val'
+  cond' <- memOpCondition cond'_
+  op  <- groundMemOp fn addr  cond  val
+  op' <- groundMemOp fn addr' cond' val'
   diff <- groundTraceDiff fn ops ops'
   pure (MemOpDiff
     { mDirection = dir
@@ -514,28 +508,34 @@ groundMemOp ::
   SymGroundEvalFn sym ->
   CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
   W4.Pred sym ->
-  W4.NatRepr w ->
   CLM.LLVMPtr sym w ->
-  EquivM sym arch GroundMemOp
-groundMemOp fn addr cond w val = liftA3 GroundMemOp
-  (groundLLVMPointer fn W4.knownRepr addr)
+  EquivM sym arch (GroundMemOp arch)
+groundMemOp fn addr cond val = liftA3 GroundMemOp
+  (groundLLVMPointer fn addr)
   (execGroundFn fn cond)
-  (groundLLVMPointer fn w val)
+  (groundBV fn val)
 
-groundLLVMPointer ::
+groundBV ::
   SymGroundEvalFn sym ->
-  W4.NatRepr w ->
   CLM.LLVMPtr sym w ->
-  EquivM sym arch GroundLLVMPointer
-groundLLVMPointer fn w (CLM.LLVMPointer reg off) = do
+  EquivM sym arch (GroundBV w)
+groundBV fn (CLM.LLVMPointer reg off) = do
+  W4.BaseBVRepr w <- return $ W4.exprType off
   greg <- execGroundFn fn reg
   goff <- execGroundFn fn off
-  pure GroundLLVMPointer
-    { ptrWidth = W4.natValue w
-    , ptrRegion = greg
-    , ptrOffset = BVS.asUnsigned goff
-    }
+  return $ mkGroundBV w greg goff
 
+groundLLVMPointer :: forall sym arch w.
+  SymGroundEvalFn sym ->
+  CLM.LLVMPtr sym w ->
+  EquivM sym arch (GroundLLVMPointer (MM.ArchAddrWidth arch))
+groundLLVMPointer fn ptr =
+  groundBV fn ptr >>= \case
+    bv@(GroundBV _ _) -> throwHere $ ExpectedNonZeroRegion bv
+    GroundLLVMPointer p ->
+      case testEquality (ptrWidth p) (CC.knownNat @(MM.ArchAddrWidth arch)) of
+        Just Refl -> return p
+        Nothing -> throwHere $ UnexpectedPointerSize p
 
 
 trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
