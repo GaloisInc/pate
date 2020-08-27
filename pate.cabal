@@ -73,6 +73,7 @@ common shared-test
                  parameterized-utils,
                  tasty,
                  tasty-hunit,
+                 tasty-expected-failure,
                  text,
                  pate 
 

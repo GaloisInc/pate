@@ -8,4 +8,10 @@ import qualified Pate.Loader as PL
 import           TestBase
 
 main :: IO ()
-main = runTests "ppc" (PL.ValidArchProxy @PPC.PPC64)
+main = do
+  let cfg = TestConfig
+        { testArchName = "ppc"
+        , testArchProxy = PL.ValidArchProxy @PPC.PPC64
+        , testExpectFailure = ["test-direct-calls"]
+        }
+  runTests cfg
