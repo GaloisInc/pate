@@ -33,7 +33,9 @@ module Pate.Types
   , MemOpDiff(..)
   , MacawRegEntry(..)
   , macawRegEntry
+  , InnerEquivalenceError(..)
   , EquivalenceError(..)
+  , equivalenceError
   --- reporting
   , EquivalenceStatistics(..)
   , equivSuccess
@@ -48,10 +50,13 @@ module Pate.Types
   )
 where
 
+import           GHC.Stack
+
 import           Control.Exception
 
 import           Data.Map ( Map )
 import qualified Data.Map as M
+import           Data.Maybe ( catMaybes )
 import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
 import           Data.Sequence (Seq)
@@ -249,7 +254,7 @@ data WhichBinary = Original | Rewritten deriving (Bounded, Enum, Eq, Ord, Read, 
 
 ----------------------------------
 
-data EquivalenceError arch
+data InnerEquivalenceError arch
   = BytesNotConsumed { disassemblyAddr :: ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
   | AddressOutOfRange { disassemblyAddr :: ConcreteAddress arch }
   | UnsupportedArchitecture
@@ -263,16 +268,36 @@ data EquivalenceError arch
   | NoUniqueFunctionOwner (IM.Interval (ConcreteAddress arch)) [MM.ArchSegmentOff arch]
   | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
-  | UndiscoveredBlockPart WhichBinary (ConcreteAddress arch) (ConcreteAddress arch) (ConcreteAddress arch)
-  | NonConcreteParsedBlockAddress WhichBinary (MM.ArchSegmentOff arch)
-  | BlockExceedsItsSegment WhichBinary (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
-  | BlockEndsMidInstruction WhichBinary
+  | UndiscoveredBlockPart (ConcreteAddress arch) (ConcreteAddress arch) (ConcreteAddress arch)
+  | NonConcreteParsedBlockAddress (MM.ArchSegmentOff arch)
+  | BlockExceedsItsSegment (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
+  | BlockEndsMidInstruction
   | PrunedBlockIsEmpty
-  | EquivalenceError String -- generic error
-deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (EquivalenceError arch)
+  | EquivCheckFailure String -- generic error
+deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (InnerEquivalenceError arch)
+
+
+data EquivalenceError arch =
+  EquivalenceError
+    { errWhichBinary :: Maybe WhichBinary
+    , errStackTrace :: Maybe CallStack
+    , errEquivError :: InnerEquivalenceError arch
+    }
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (EquivalenceError arch) where
+  show e = unlines $ catMaybes $
+    [ fmap (\b -> "For " ++ show b ++ " binary") (errWhichBinary e)
+    , fmap (\s -> "At " ++ prettyCallStack s) (errStackTrace e)
+    , Just (show (errEquivError e))
+    ]
 
 instance Typeable arch => MM.MemWidth (MM.ArchAddrWidth arch) => Exception (EquivalenceError arch)
 
+equivalenceError :: InnerEquivalenceError arch -> EquivalenceError arch
+equivalenceError err = EquivalenceError
+  { errWhichBinary = Nothing
+  , errStackTrace = Nothing
+  , errEquivError = err
+  }
 ----------------------------------
 
 ppEquivalenceStatistics :: EquivalenceStatistics -> String

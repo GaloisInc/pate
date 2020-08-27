@@ -19,15 +19,17 @@ module Pate.Monad
   , ValidArch
   , EquivalenceContext(..)
   , BinaryContext(..)
+  , withBinary
   , withValid
   , withSymIO
+  , withSym
   , withProc
-  , withArchVals
-  , withArchFuns
+  , archFuns
   , runInIO1
   , errorFrame
   , manifestError
   , implicitError
+  , throwHere
   )
   where
 
@@ -69,24 +71,21 @@ import           Pate.Types
 
 data BinaryContext sym arch = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.Elf (MM.ArchAddrWidth arch))
-  , extensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
-  , globalMap :: CGS.SymGlobalState sym
   , parsedFunctionMap :: ParsedFunctionMap arch
   }
 
-data EquivalenceContext sym ids arch where
+data EquivalenceContext sym arch where
   EquivalenceContext ::
     forall sym ids arch scope solver fs.
     (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
     { nonces :: N.NonceGenerator (ST RealWorld) ids
     , handles :: CFH.HandleAllocator
-    , archVals :: MS.ArchVals arch
     , exprBuilder :: sym
     , memTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , ipEquivalence :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> IO (W4.Pred sym)
     , originalCtx :: BinaryContext sym arch
     , rewrittenCtx :: BinaryContext sym arch
-    } -> EquivalenceContext sym ids arch
+    } -> EquivalenceContext sym arch
 
 type ValidArch arch =
   ( Typeable arch
@@ -111,7 +110,12 @@ data EquivEnv sym arch where
     forall sym arch scope solver fs.
     (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
     { envSym :: sym
+    , envWhichBinary :: Maybe WhichBinary
     , envProc :: W4O.SolverProcess scope solver
+    , envCtx :: EquivalenceContext sym arch
+    , envArchVals :: MS.ArchVals arch
+    , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
+    , envGlobalMap :: CGS.SymGlobalState sym
     } -> EquivEnv sym arch
 
 
@@ -125,6 +129,12 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (Excep
            )
 
 type EquivM sym arch a = (ValidArch arch, ValidSym sym) => EquivM_ sym arch a
+
+withBinary ::
+  WhichBinary ->
+  EquivM sym arch a ->
+  EquivM sym arch a
+withBinary wb f = local (\env -> env { envWhichBinary = Just wb }) f
 
 withValid ::
   (forall scope solver fs.
@@ -165,7 +175,7 @@ withProc f = withValid $ do
   EquivEnv { envProc = p } <- ask
   f p
 
-withSymIO ::
+withSymIO :: forall sym arch a.
   ( forall scope solver fs.
     sym ~ CBO.OnlineBackend scope solver fs =>
     W4O.OnlineSolver solver =>
@@ -176,17 +186,11 @@ withSymIO ::
   EquivM sym arch a
 withSymIO f = withSym (\sym -> liftIO (f sym))
 
-withArchVals :: forall sym arch a.
-  (MS.ArchVals arch -> EquivM sym arch a) ->
-  EquivM sym arch a
-withArchVals f = do
-  Just archVs <- return $ MS.archVals (Proxy @arch)
-  f archVs
-
-withArchFuns :: forall sym arch a.
-  (MS.MacawSymbolicArchFunctions arch -> EquivM sym arch a) ->
-  EquivM sym arch a
-withArchFuns f = withArchVals (\archVs -> f (MS.archFunctions archVs))
+archFuns :: forall sym arch.
+  EquivM sym arch (MS.MacawSymbolicArchFunctions arch)
+archFuns = do
+  archVals <- asks envArchVals
+  return $ MS.archFunctions archVals
 
 instance IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
@@ -214,28 +218,31 @@ runEquivM ::
   ExceptT (EquivalenceError arch) IO a
 runEquivM env f = withValidEnv env $ runReaderT (unEQ f) env
 
-errorHere ::
+throwHere ::
   HasCallStack =>
-  String ->
+  InnerEquivalenceError arch ->
   EquivM_ sym arch a
-errorHere msg = do
-  let (_, src): _ = getCallStack callStack
-  let msg' = "Error Message: " ++ msg ++ " at: " ++ prettySrcLoc src
-  throwError $ EquivalenceError msg'
+throwHere err = do
+  wb <- asks envWhichBinary
+  throwError $ EquivalenceError
+    { errWhichBinary = wb
+    , errStackTrace = Just callStack
+    , errEquivError = err
+    }
 
 instance MonadFail (EquivM_ sym arch) where
-  fail msg = errorHere $ "Fail: " ++ msg
-
-
-
+  fail msg = throwHere $ EquivCheckFailure $ "Fail: " ++ msg
 
 
 -- | Wrap the argument in an assumption frame in a way that's safe even if it
 -- throws an error.
-errorFrame :: (MonadError e m, MonadIO m, CB.IsBoolSolver sym) => sym -> m a -> m a
-errorFrame sym act = do
+errorFrame ::
+  forall sym arch a.
+  EquivM sym arch a ->
+  EquivM sym arch a
+errorFrame f = withSym $ \sym -> do
   frame <- liftIO $ CB.pushAssumptionFrame sym
-  res <- manifestError act
+  res <- manifestError f
   _ <- liftIO $ CB.popAssumptionFrame sym frame
   implicitError res
 
