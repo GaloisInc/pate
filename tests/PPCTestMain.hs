@@ -12,6 +12,6 @@ main = do
   let cfg = TestConfig
         { testArchName = "ppc"
         , testArchProxy = PL.ValidArchProxy @PPC.PPC64
-        , testExpectFailure = ["test-direct-calls"]
+        , testExpectFailure = []
         }
   runTests cfg
