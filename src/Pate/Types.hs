@@ -290,7 +290,7 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (EquivalenceError arch) whe
     , Just (show (errEquivError e))
     ]
 
-instance Typeable arch => MM.MemWidth (MM.ArchAddrWidth arch) => Exception (EquivalenceError arch)
+instance (Typeable arch, MM.MemWidth (MM.ArchAddrWidth arch)) => Exception (EquivalenceError arch)
 
 equivalenceError :: InnerEquivalenceError arch -> EquivalenceError arch
 equivalenceError err = EquivalenceError
