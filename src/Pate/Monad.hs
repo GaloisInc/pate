@@ -49,6 +49,7 @@ import           Data.Typeable
 import qualified Data.ElfEdit as E
 
 import qualified Data.Parameterized.Nonce as N
+import           Data.Parameterized.Classes
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
@@ -97,6 +98,7 @@ type ValidArch arch =
 type ValidSym sym =
   ( W4.IsExprBuilder sym
   , CB.IsSymInterface sym
+  , ShowF (W4.SymExpr sym)
   )
 
 type ValidSolver sym scope solver fs =

@@ -8,6 +8,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Pate.Types
   ( PatchPair(..)
@@ -29,6 +30,7 @@ module Pate.Types
   , ConcreteValue
   , GroundBV(..)
   , mkGroundBV
+  , groundBVAsPointer
   , GroundLLVMPointer(..)
   , GroundMemOp(..)
   , SymGroundEvalFn(..)
@@ -46,6 +48,7 @@ module Pate.Types
   , equivSuccess
   , EquivalenceResult(..)
   , combineEquivalence
+  , ppRegDiff
   , ppEquivalenceResult
   , ppEquivalenceStatistics
   , ppBlock
@@ -58,14 +61,18 @@ where
 import           GHC.Stack
 
 import           Control.Exception
+import           Control.Monad ( foldM )
 
 import qualified Data.BitVector.Sized as BVS
+import           Data.Functor.Const
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
 import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
 import           Data.Sequence (Seq)
+import           Data.Set (Set)
+import qualified Data.Set as S
 import           Data.Typeable
 import           Data.Foldable
 import           Data.Monoid 
@@ -75,6 +82,7 @@ import           Numeric
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.TraversableFC as TFC
 
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -154,7 +162,10 @@ concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
 data GroundBV n where
   GroundBV :: W4.NatRepr n -> BVS.BV n -> GroundBV n
   GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
-  deriving (Eq, Show)
+  deriving Eq
+
+instance Show (GroundBV n) where
+  show = ppGroundBV
 
 groundBVWidth :: GroundBV n -> W4.NatRepr n
 groundBVWidth gbv = case gbv of
@@ -177,11 +188,12 @@ instance Ord (GroundBV n) where
   compare bv bv' = toOrdering (compareF bv bv')
 
 data GroundLLVMPointer n where
-  GroundLLVMPointerC :: 1 W4.<= r =>
+  GroundLLVMPointerC ::
       { ptrWidth :: W4.NatRepr n
-      , ptrRegion_ ::  W4.NatRepr r
+      , ptrRegion :: Natural
       , ptrOffset :: BVS.BV n
       } -> GroundLLVMPointer n
+  deriving Eq
 
 
 instance TestEquality GroundLLVMPointer where
@@ -192,17 +204,10 @@ instance TestEquality GroundLLVMPointer where
     = Just Refl
   testEquality _ _ = Nothing
 
-ptrRegion :: GroundLLVMPointer n -> Natural
-ptrRegion (GroundLLVMPointerC _ reg _) = W4.natValue reg
-
-instance Eq (GroundLLVMPointer n) where
-  (GroundLLVMPointerC _ reg off) == (GroundLLVMPointerC _ reg' off') = case testEquality reg reg' of
-    Just Refl -> off == off'
-    Nothing -> False
 
 instance OrdF GroundLLVMPointer where
   compareF (GroundLLVMPointerC w reg off) (GroundLLVMPointerC w' reg' off') =
-    lexCompareF w w' $ lexCompareF reg reg' $ fromOrdering $ compare off off'
+    lexCompareF w w' $ joinOrderingF (fromOrdering $ compare reg reg') (fromOrdering $ compare off off')
 deriving instance Show (GroundLLVMPointer n)
 
 mkGroundBV :: forall n.
@@ -210,9 +215,14 @@ mkGroundBV :: forall n.
   Natural ->
   BVS.BV n ->
   GroundBV n
-mkGroundBV nr r bv | Some rr <- W4.mkNatRepr r = case W4.isPosNat rr of
- Just W4.LeqProof -> GroundLLVMPointer $ GroundLLVMPointerC nr rr bv
- Nothing -> GroundBV nr bv
+mkGroundBV nr reg bv = case reg > 0 of
+ True -> GroundLLVMPointer $ GroundLLVMPointerC nr reg bv
+ False -> GroundBV nr bv
+
+groundBVAsPointer :: GroundBV n -> GroundLLVMPointer n
+groundBVAsPointer gbv = case gbv of
+  GroundLLVMPointer ptr -> ptr
+  GroundBV w bv -> GroundLLVMPointerC w 0 bv
 
 type family ConcreteValue (tp :: CC.CrucibleType)
 type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
@@ -223,8 +233,9 @@ data RegisterDiff arch tp where
     , rTypeRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
     , rPre :: ConcreteValue (MS.ToCrucibleType tp)
     , rPostOriginal :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostRewritten :: ConcreteValue (MS.ToCrucibleType tp)
+    , rPostPatched :: ConcreteValue (MS.ToCrucibleType tp)
     , rPostEquivalent :: Bool
+    , rDiffDescription :: String
     } -> RegisterDiff arch tp
 
 data SymGroundEvalFn sym where
@@ -235,6 +246,8 @@ execGroundFnIO ::
   W4.SymExpr sym tp ->
   IO (W4G.GroundValue tp)
 execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
+
+
 
 ----------------------------------
 data MemOpSpine
@@ -490,9 +503,26 @@ ppDiff diff = ppSlot diff ++ case rTypeRepr diff of
   CLM.LLVMPointerRepr _ -> ""
     ++ ppGroundBV (rPostOriginal diff)
     ++ " (original) vs. "
-    ++ ppGroundBV (rPostRewritten diff)
+    ++ ppGroundBV (rPostPatched diff)
     ++ " (rewritten)\n"
+    ++ rDiffDescription diff
+    ++ "\n\n"
   _ -> "unsupported register type in postcondition comparison pretty-printer\n"
+
+ppRegEntry :: SymGroundEvalFn sym -> MacawRegEntry sym tp -> IO String
+ppRegEntry fn (MacawRegEntry repr v) = case repr of
+  CLM.LLVMPointerRepr _ | CLM.LLVMPointer _ offset <- v -> showModelForExpr fn offset
+  _ -> return "Unsupported register type"
+
+ppRegDiff ::
+  SymGroundEvalFn sym ->
+  MacawRegEntry sym tp ->
+  MacawRegEntry sym tp ->
+  IO String
+ppRegDiff fn reg1 reg2 = do
+  origStr <- ppRegEntry fn reg1
+  patchedStr <- ppRegEntry fn reg2
+  return $ "Original: \n" ++ origStr ++ "\n\nPatched: \n" ++ patchedStr
 
 ppSlot ::
   RegisterDiff arch tp
@@ -505,12 +535,11 @@ ppGroundBV gbv = case gbv of
   GroundLLVMPointer ptr -> ppLLVMPointer ptr
 
 ppLLVMPointer :: GroundLLVMPointer w -> String
-ppLLVMPointer (GroundLLVMPointerC bitWidthRepr regRepr offBV) = ""
+ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = ""
   ++ pad 3 (show reg)
   ++ "+0x"
   ++ padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
   where
-    reg = W4.natValue regRepr
     off = BVS.asUnsigned offBV
     bitWidth = W4.natValue bitWidthRepr
 
@@ -532,3 +561,63 @@ padWith c n s = replicate (n-length s) c ++ s
 
 pad :: Int -> String -> String
 pad = padWith ' '
+
+
+--------------------------------
+
+freeExprTerms :: forall sym t st fs tp.
+  sym ~ W4B.ExprBuilder t st fs =>
+  W4.SymExpr sym tp ->
+  IO (Set (Some (W4.SymExpr sym)))
+freeExprTerms expr = do
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (Const (Set (Some (W4.SymExpr sym))) tp')
+    go e = W4B.idxCacheEval cache e $ case e of
+      W4B.BoundVarExpr _ -> return $ Const $ S.singleton (Some e)
+      W4B.AppExpr appExpr -> do
+        TFC.foldrMFC collect mempty $ W4B.appExprApp appExpr
+      W4B.NonceAppExpr naeE | W4B.FnApp fn args <- W4B.nonceExprApp naeE ->
+        case W4B.symFnInfo fn of
+          W4B.UninterpFnInfo _ _ -> return $ Const $ S.singleton (Some e)
+          W4B.DefinedFnInfo _ _ _ -> TFC.foldrMFC collect mempty args
+          _ -> return $ mempty
+      _ -> return $ mempty
+    collect ::
+      forall tp' tp''.
+      W4.SymExpr sym tp' ->
+      Const (Set (Some (W4.SymExpr sym))) tp'' ->
+      IO (Const (Set (Some (W4.SymExpr sym))) tp'')
+    collect e (Const s) = do
+      Const s' <- go e
+      return $ Const $ S.union s s'
+  getConst <$> go expr
+
+
+showModelForExpr :: forall sym tp.
+  SymGroundEvalFn sym ->
+  W4.SymExpr sym tp ->
+  IO String
+showModelForExpr fn@(SymGroundEvalFn _) expr = do
+  freeTerms <- freeExprTerms expr
+  v <- execGroundFnIO fn expr
+  let
+    s = "Expression: " ++ show expr ++ "\n" ++
+        "Value: " ++ showGroundValue (W4.exprType expr) v ++ "\n" ++
+        "Environment:"
+
+  foldM go s freeTerms
+  where
+    go :: String -> Some (W4.SymExpr sym)  -> IO String
+    go s (Some e) = do
+      gv <- execGroundFnIO fn e
+      return $ s ++ "\n" ++ show e ++ " :== " ++ showGroundValue (W4.exprType e) gv
+
+showGroundValue ::
+  W4.BaseTypeRepr tp ->
+  W4G.GroundValue tp ->
+  String
+showGroundValue repr gv = case repr of
+  W4.BaseBoolRepr -> show gv
+  W4.BaseBVRepr w -> BVS.ppHex w gv
+  _ -> "Unsupported ground value"

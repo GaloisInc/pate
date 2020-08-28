@@ -64,7 +64,7 @@ import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 import qualified Data.Parameterized.Context.Unsafe as Ctx
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Nonce as N
-import qualified Data.Parameterized.Some as S
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.TraversableF as TF
 
@@ -97,7 +97,7 @@ verifyPairs ::
   [PatchPair arch] ->
   ExceptT (EquivalenceError arch) IO Bool
 verifyPairs elf elf' blockMap pPairs = do
-  S.Some gen <- liftIO . stToIO $ N.newSTNonceGenerator
+  Some gen <- liftIO . stToIO $ N.newSTNonceGenerator
   vals <- case MS.archVals @arch Proxy of
     Nothing -> throwError $ equivalenceError UnsupportedArchitecture
     Just vs -> pure vs
@@ -105,7 +105,7 @@ verifyPairs elf elf' blockMap pPairs = do
   pfm  <- runDiscovery elf  
   pfm' <- runDiscovery elf'
 
-  S.Some gen' <- liftIO N.newIONonceGenerator
+  Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
     eval <- lift (MS.withArchEvalTrace vals sym pure)
@@ -266,21 +266,14 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
           W4R.Unsat _ -> pure Equivalent
           W4R.Unknown -> throwHere InconclusiveSAT
           W4R.Sat fn -> pure InequivalentResults
-            <*> groundTraceDiff fn Empty Empty
+            <*> groundTraceDiff fn (resultMem simResult) (resultMem simResult')
             <*> MM.traverseRegsWith
-              (\r initVal  -> do
-                pre <- concreteValue fn initVal
-                post <- concreteValue fn (regs ^. MM.boundValue r)
-                post' <- concreteValue fn (regs' ^. MM.boundValue r)
-                equiv <- execGroundFn fn $ getPred r
-                pure RegisterDiff
-                  { rReg = r
-                  , rTypeRepr = macawRegRepr initVal
-                  , rPre = pre
-                  , rPostOriginal = post
-                  , rPostRewritten = post'
-                  , rPostEquivalent = equiv
-                  }
+              (\r initVal -> do
+                  let
+                    postO = regs ^. MM.boundValue r
+                    postP = regs' ^. MM.boundValue r
+                    equivE = getPred r
+                  mkRegisterDiff fn r initVal postO postP equivE
               )
               initRegState
       _ -> pure (InequivalentOperations (spineOf memTrace) (spineOf memTrace'))
@@ -468,7 +461,35 @@ equivPred
         -- 2. ipEq declares the starts of blocks equivalent. blr tends to come
         -- at the end of blocks, not the start.
       _ -> withSymIO $ \sym -> llvmPtrEq sym bv bv'
-    _ -> throwHere (UnsupportedRegisterType (S.Some repr))
+    _ -> throwHere (UnsupportedRegisterType (Some repr))
+
+
+mkRegisterDiff ::
+  SymGroundEvalFn sym ->
+  MM.ArchReg arch tp ->
+  MacawRegEntry sym tp ->
+  -- ^ prestate
+  MacawRegEntry sym tp ->
+  -- ^ original post state
+  MacawRegEntry sym tp ->
+  -- ^ patched post state
+  W4.Pred sym ->
+  EquivM sym arch (RegisterDiff arch tp)
+mkRegisterDiff fn reg initVal postO postP equivE = do
+  pre <- concreteValue fn initVal
+  post <- concreteValue fn postO
+  post' <- concreteValue fn postP
+  equiv <- execGroundFn fn equivE
+  desc <- liftIO $ ppRegDiff fn postO postP
+  pure RegisterDiff
+    { rReg = reg
+    , rTypeRepr = macawRegRepr initVal
+    , rPre = pre
+    , rPostOriginal = post
+    , rPostPatched = post'
+    , rPostEquivalent = equiv
+    , rDiffDescription = desc
+    }
 
 concreteValue ::
   SymGroundEvalFn sym ->
@@ -478,7 +499,7 @@ concreteValue fn e
   | CLM.LLVMPointerRepr _ <- macawRegRepr e
   , ptr <- macawRegValue e = do
     groundBV fn ptr
-concreteValue _ e = throwHere (UnsupportedRegisterType (S.Some (macawRegRepr e)))
+concreteValue _ e = throwHere (UnsupportedRegisterType (Some (macawRegRepr e)))
 
 -- We assume the two traces have equivalent spines already.
 groundTraceDiff ::
@@ -520,22 +541,21 @@ groundBV ::
   CLM.LLVMPtr sym w ->
   EquivM sym arch (GroundBV w)
 groundBV fn (CLM.LLVMPointer reg off) = do
+
   W4.BaseBVRepr w <- return $ W4.exprType off
   greg <- execGroundFn fn reg
   goff <- execGroundFn fn off
-  return $ mkGroundBV w greg goff
+  let gbv = mkGroundBV w greg goff
+  -- liftIO $ putStrLn $ "GroundBV: " ++ CC.showF reg ++ " " ++ CC.showF off ++ " " ++ show gbv
+  return gbv
 
-groundLLVMPointer :: forall sym arch w.
+
+
+groundLLVMPointer :: forall sym arch.
   SymGroundEvalFn sym ->
-  CLM.LLVMPtr sym w ->
+  CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
   EquivM sym arch (GroundLLVMPointer (MM.ArchAddrWidth arch))
-groundLLVMPointer fn ptr =
-  groundBV fn ptr >>= \case
-    bv@(GroundBV _ _) -> throwHere $ ExpectedNonZeroRegion bv
-    GroundLLVMPointer p ->
-      case testEquality (ptrWidth p) (CC.knownNat @(MM.ArchAddrWidth arch)) of
-        Just Refl -> return p
-        Nothing -> throwHere $ UnexpectedPointerSize p
+groundLLVMPointer fn ptr = groundBVAsPointer <$> groundBV fn ptr
 
 
 trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
@@ -592,7 +612,7 @@ unconstrainedRegister reg = do
       -- TODO: This fixes the region to 0. Is that okay?
       ptr <- CLM.llvmPointer_bv sym bv
       return $ MacawRegEntry (MS.typeToCrucible repr) ptr
-    _ -> throwHere (UnsupportedRegisterType (S.Some (MS.typeToCrucible repr)))
+    _ -> throwHere (UnsupportedRegisterType (Some (MS.typeToCrucible repr)))
 
 lookupBlocks ::
   ParsedFunctionMap arch ->
