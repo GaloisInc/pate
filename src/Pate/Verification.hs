@@ -229,7 +229,8 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
             -- TODO: Does this do the right thing if we assume false? (The
             -- right thing for our case is for all checkSats in this frame to
             -- succeed.)
-            CB.addAssumption sym (CB.LabeledPred p undefined)
+            here <- W4.getCurrentProgramLoc sym
+            CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here "True case for MergeOps"))
             W4.andPred sym prevChecks p'
           go prevChecks' (traceT <> ops) (traceT' <> ops')
         )
@@ -237,7 +238,8 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
           prevChecks' <- withSymIO $ \sym -> do
             notp <- W4.notPred sym p
             notp' <- W4.notPred sym p'
-            CB.addAssumption sym (CB.LabeledPred notp undefined)
+            here <- W4.getCurrentProgramLoc sym
+            CB.addAssumption sym (CB.LabeledPred notp (CB.AssumptionReason here "False case for MergeOps"))
             W4.andPred sym prevChecks notp'
           go prevChecks' (traceF <> ops) (traceF' <> ops')
         )
