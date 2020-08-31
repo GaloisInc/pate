@@ -97,7 +97,7 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 
 import qualified What4.Interface as W4
-import qualified What4.Symbol as W4S
+
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
