@@ -63,6 +63,7 @@ import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 import qualified Data.Parameterized.Context.Unsafe as Ctx
 import           Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableFC as TFC
@@ -664,7 +665,7 @@ sanityCheckBlockCoverage start end pbs = do
 -- generally shouldn't happen: a renovate rewriter shouldn't be emitting
 -- partial instructions, and expecting that the block the layout engine chooses
 -- to put afterwards has a sensible continuation of that instruction.
-pruneBlock ::
+pruneBlock :: forall sym arch ids.
   ConcreteAddress arch ->
   ConcreteAddress arch ->
   MD.ParsedBlock arch ids ->
@@ -677,7 +678,7 @@ pruneBlock start_ end_ pb = do
     -- strip some instructions off the beginning of the ParsedBlock. But take
     -- some care: the Stmts contain ArchStates that will be invalidated by this
     -- process; these will need to be fixed up.
-    (True, _) -> pure []
+    (True, _) -> throwHere BlockStartsEarly
     (_, True) -> pure [pb]
     _ -> do
       (stmts, updateTermStmt) <- findEnd (end - pblockStart) (MD.pblockStmts pb)
@@ -685,17 +686,19 @@ pruneBlock start_ end_ pb = do
         Nothing -> pure [pb { MD.pblockStmts = stmts }]
         Just (off, archState) -> do
           pblockEndSegOff <- blockOffAsSegOff off
+          finalRegs <- getFinalRegs pb
+          let archState' = coerceArchState finalRegs archState
           pure [pb
             { MD.pblockStmts = stmts
             , MD.blockSize = fromIntegral off
-            , MD.pblockTermStmt = MD.ParsedJump (coerceArchState archState) pblockEndSegOff
+            , MD.pblockTermStmt = MD.ParsedJump archState' pblockEndSegOff
             }]
   where
   findEnd size stmts = do
     archState <- findState stmts
     findEndHelper size archState stmts
 
-  findEndHelper size _archState (stmt@(MM.ArchState _ archState):stmts) = addStmt stmt <$> findEndHelper size archState stmts
+  findEndHelper size preArchState (stmt@(MM.ArchState _ postArchState):stmts) = addStmt stmt <$> findEndHelper size (mergeArchStates preArchState postArchState) stmts
   findEndHelper size archState (stmt@(MM.InstructionStart off _):stmts) = case compare off size of
     LT -> addStmt stmt <$> findEndHelper size archState stmts
     EQ -> pure ([], Just (off, archState))
@@ -725,6 +728,10 @@ pruneBlock start_ end_ pb = do
 
   addStmt stmt (stmts, updateTermStmt) = (stmt:stmts, updateTermStmt)
 
+  mergeArchStates :: MM.RegisterInfo r =>  MapF r f -> MapF r f -> MapF r f
+  mergeArchStates preArchState postArchState =
+   MapF.mergeWithKey (\_reg _pre post -> Just post) id id preArchState postArchState
+
   blockOffAsSegOff off = liftMaybe
     (MM.incSegmentOff (MD.pblockAddr pb) (fromIntegral off))
     (BlockExceedsItsSegment (MD.pblockAddr pb) off)
@@ -732,8 +739,34 @@ pruneBlock start_ end_ pb = do
   start = absoluteAddress start_
   end = absoluteAddress end_
 
-  coerceArchState :: MapF r f -> MM.RegState r f
-  coerceArchState = unsafeCoerce
+  getFinalRegs ::
+    MD.ParsedBlock arch ids ->
+    EquivM sym arch (MM.RegState (MM.ArchReg arch) (MM.Value arch ids))
+  getFinalRegs pb' = case MD.pblockTermStmt pb' of
+    MD.ParsedCall regs _ -> return regs
+    MD.ParsedJump regs _ -> return regs
+    MD.ParsedBranch regs _ _ _ -> return regs
+    MD.ParsedLookupTable regs _ _ -> return regs
+    MD.ParsedReturn regs -> return regs
+    MD.ParsedArchTermStmt _ regs _ -> return regs
+    MD.ParsedTranslateError err -> throwHere $ UnexpectedBlockKind $ "ParsedTranslateError: " ++ show err
+    MD.ClassifyFailure _ msg -> throwHere $ UnexpectedBlockKind $ "ClassifyFailure: " ++ show msg
+    MD.PLTStub _ _ _ -> throwHere $ UnexpectedBlockKind $ "PLTStub"
+
+  getReg ::
+    MM.RegState (MM.ArchReg arch) f ->
+    MapF (MM.ArchReg arch) f ->
+    MM.ArchReg arch tp ->
+    f tp
+  getReg regs m reg = case MapF.lookup reg m of
+    Just v -> v
+    Nothing -> MM.getBoundValue reg regs
+
+  coerceArchState ::
+    MM.RegState (MM.ArchReg arch) (MM.Value arch ids) ->
+    MapF (MM.ArchReg arch) (MM.Value arch ids) ->
+    MM.RegState (MM.ArchReg arch) (MM.Value arch ids)
+  coerceArchState regs m = MM.mkRegState (getReg regs m)
 
 liftMaybe :: Maybe a -> InnerEquivalenceError arch -> EquivM sym arch a
 liftMaybe Nothing e = throwHere e

@@ -9,6 +9,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Pate.Types
   ( PatchPair(..)
@@ -42,6 +43,7 @@ module Pate.Types
   , macawRegEntry
   , InnerEquivalenceError(..)
   , EquivalenceError(..)
+  , pattern MissingRegisterValue
   , equivalenceError
   --- reporting
   , EquivalenceStatistics(..)
@@ -199,8 +201,7 @@ data GroundLLVMPointer n where
 instance TestEquality GroundLLVMPointer where
   testEquality ptr ptr'
     | Just Refl <- testEquality (ptrWidth ptr) (ptrWidth ptr')
-    , ptrRegion ptr == ptrRegion ptr'
-    , ptrOffset ptr == ptrOffset ptr'
+    , ptr == ptr'
     = Just Refl
   testEquality _ _ = Nothing
 
@@ -367,12 +368,25 @@ data InnerEquivalenceError arch
   | NonConcreteParsedBlockAddress (MM.ArchSegmentOff arch)
   | BlockExceedsItsSegment (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
   | BlockEndsMidInstruction
+  | BlockStartsEarly
   | PrunedBlockIsEmpty
+  | MemOpConditionMismatch
   | forall w. ExpectedNonZeroRegion (GroundBV w)
   | forall w. UnexpectedPointerSize (GroundLLVMPointer w)
+  | forall tp. MissingRegisterValue_ (WrappedArchReg arch tp)
+  | UnexpectedBlockKind String
   | EquivCheckFailure String -- generic error
 deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (InnerEquivalenceError arch)
 
+data WrappedArchReg arch tp = ShowF (MM.ArchReg arch) =>
+  WrappedArchReg (MM.ArchReg arch tp)
+
+instance Show (WrappedArchReg arch tp) where
+  show (WrappedArchReg r) = showF r
+
+
+pattern MissingRegisterValue :: ShowF (MM.ArchReg arch) => MM.ArchReg arch tp -> InnerEquivalenceError arch
+pattern MissingRegisterValue r = MissingRegisterValue_ (WrappedArchReg r)
 
 data EquivalenceError arch =
   EquivalenceError
