@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
@@ -10,6 +11,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Pate.Types
   ( PatchPair(..)
@@ -590,15 +592,15 @@ freeExprTerms expr = do
     go e = W4B.idxCacheEval cache e $ case e of
       W4B.BoundVarExpr _ -> return $ Const $ S.singleton (Some e)
       W4B.AppExpr appExpr -> do
-        TFC.foldrMFC collect mempty $ W4B.appExprApp appExpr
+        TFC.foldrMFC (collect @tp') mempty $ W4B.appExprApp appExpr
       W4B.NonceAppExpr naeE | W4B.FnApp fn args <- W4B.nonceExprApp naeE ->
         case W4B.symFnInfo fn of
           W4B.UninterpFnInfo _ _ -> return $ Const $ S.singleton (Some e)
-          W4B.DefinedFnInfo _ _ _ -> TFC.foldrMFC collect mempty args
+          W4B.DefinedFnInfo _ _ _ -> TFC.foldrMFC (collect @tp') mempty args
           _ -> return $ mempty
       _ -> return $ mempty
     collect ::
-      forall tp' tp''.
+      forall tp'' tp'.
       W4.SymExpr sym tp' ->
       Const (Set (Some (W4.SymExpr sym))) tp'' ->
       IO (Const (Set (Some (W4.SymExpr sym))) tp'')
