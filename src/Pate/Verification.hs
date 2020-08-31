@@ -49,7 +49,6 @@ import           Data.String
 import           Data.Type.Equality (testEquality)
 import           GHC.TypeLits
 import           System.IO
-import           Unsafe.Coerce
 import qualified Data.Sequence as Seq
 
 
