@@ -519,10 +519,14 @@ groundTraceDiff fn (MT.MemOp addr dir cond_ _ val _ :< ops) (MT.MemOp addr' _ co
     , mOpOriginal = op
     , mOpRewritten = op'
     } :< diff)
-groundTraceDiff fn (MT.MergeOps cond traceT traceF :< ops) (MT.MergeOps _cond' traceT' traceF' :< ops') = do
+groundTraceDiff fn (MT.MergeOps cond traceT traceF :< ops) (MT.MergeOps cond' traceT' traceF' :< ops') = do
   b <- execGroundFn fn cond
-  let (trace, trace') = if b then (traceT, traceT') else (traceF, traceF')
-  groundTraceDiff fn (trace <> ops) (trace' <> ops')
+  b' <- execGroundFn fn cond'
+  if b == b' then do
+    let (trace, trace') = if b then (traceT, traceT') else (traceF, traceF')
+    groundTraceDiff fn (trace <> ops) (trace' <> ops')
+  else
+    throwHere MemOpConditionMismatch
 groundTraceDiff _fn Empty Empty = pure Empty
 groundTraceDiff _ _ _ = error "The impossible happened: groundTraceDiff was called on memory traces that were not equivalent"
 
