@@ -45,7 +45,6 @@ module Pate.Types
   , macawRegEntry
   , InnerEquivalenceError(..)
   , EquivalenceError(..)
-  , pattern MissingRegisterValue
   , equivalenceError
   --- reporting
   , EquivalenceStatistics(..)
@@ -354,15 +353,10 @@ data WhichBinary = Original | Rewritten deriving (Bounded, Enum, Eq, Ord, Read, 
 
 data InnerEquivalenceError arch
   = BytesNotConsumed { disassemblyAddr :: ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
-  | AddressOutOfRange { disassemblyAddr :: ConcreteAddress arch }
   | UnsupportedArchitecture
-  | InvalidRegisterName String W4S.SolverSymbolError
   | UnsupportedRegisterType (Some CC.TypeRepr)
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
-  | IllegalIP String (ConcreteAddress arch)
-  | BadSolverSymbol String W4S.SolverSymbolError
-  | EmptyDisassembly
   | NoUniqueFunctionOwner (IM.Interval (ConcreteAddress arch)) [MM.ArchSegmentOff arch]
   | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
@@ -373,22 +367,9 @@ data InnerEquivalenceError arch
   | BlockStartsEarly
   | PrunedBlockIsEmpty
   | MemOpConditionMismatch
-  | forall w. ExpectedNonZeroRegion (GroundBV w)
-  | forall w. UnexpectedPointerSize (GroundLLVMPointer w)
-  | forall tp. MissingRegisterValue_ (WrappedArchReg arch tp)
   | UnexpectedBlockKind String
   | EquivCheckFailure String -- generic error
 deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (InnerEquivalenceError arch)
-
-data WrappedArchReg arch tp = ShowF (MM.ArchReg arch) =>
-  WrappedArchReg (MM.ArchReg arch tp)
-
-instance Show (WrappedArchReg arch tp) where
-  show (WrappedArchReg r) = showF r
-
-
-pattern MissingRegisterValue :: ShowF (MM.ArchReg arch) => MM.ArchReg arch tp -> InnerEquivalenceError arch
-pattern MissingRegisterValue r = MissingRegisterValue_ (WrappedArchReg r)
 
 data EquivalenceError arch =
   EquivalenceError
