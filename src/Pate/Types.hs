@@ -49,10 +49,9 @@ module Pate.Types
   --- reporting
   , EquivalenceStatistics(..)
   , equivSuccess
-  , EquivalenceResult(..)
-  , combineEquivalence
+  , InequivalenceResult(..)
   , ppRegDiff
-  , ppEquivalenceResult
+  , ppEquivalenceError
   , ppEquivalenceStatistics
   , ppBlock
   , ppAbortedResult
@@ -330,20 +329,14 @@ instance Monoid EquivalenceStatistics where
 equivSuccess :: EquivalenceStatistics -> Bool
 equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
 
-data EquivalenceResult arch
-  = Equivalent
-  | InequivalentResults (MemTraceDiff arch) (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
+data InequivalenceResult arch
+  = InequivalentResults (MemTraceDiff arch) (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
   | InequivalentOperations MemTraceSpine MemTraceSpine
 
-combineEquivalence :: Monad m =>
-  m (EquivalenceResult arch) ->
-  m (EquivalenceResult arch) ->
-  m (EquivalenceResult arch)
-combineEquivalence act1 act2 = do
-  res1 <- act1
-  case res1 of
-    Equivalent -> act2
-    _ -> pure res1
+instance Show (InequivalenceResult arch) where
+  show r = case r of
+    InequivalentResults _ _ -> "InequivalentResults"
+    InequivalentOperations _ _ -> "InequivalentOperations"
 
 ----------------------------------
 
@@ -369,6 +362,7 @@ data InnerEquivalenceError arch
   | MemOpConditionMismatch
   | UnexpectedBlockKind String
   | EquivCheckFailure String -- generic error
+  | InequivalentError (InequivalenceResult arch)
 deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =
@@ -402,20 +396,20 @@ ppEquivalenceStatistics (EquivalenceStatistics checked equiv err) = unlines
   , "\t" ++ show err ++ " skipped due to errors"
   ]
 
-ppEquivalenceResult ::
+ppEquivalenceError ::
   MM.MemWidth (MM.ArchAddrWidth arch) =>
   ShowF (MM.ArchReg arch) =>
-  Either (EquivalenceError arch) (EquivalenceResult arch) -> String
-ppEquivalenceResult (Right Equivalent) = "✓\n"
-ppEquivalenceResult (Right (InequivalentResults traceDiff regDiffs)) = "x\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
-ppEquivalenceResult (Right (InequivalentOperations trace trace')) = concat
-  [ "x\n\tMismatched memory operations:\n\t\t"
-  , ppMemTraceSpine trace
-  , " (original) vs.\n\t\t"
-  , ppMemTraceSpine trace'
-  , " (rewritten)\n"
-  ]
-ppEquivalenceResult (Left err) = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the error
+  EquivalenceError arch -> String
+ppEquivalenceError err | (InequivalentError ineq)  <- errEquivError err = case ineq of
+  InequivalentResults traceDiff regDiffs -> "x\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
+  InequivalentOperations trace trace' -> concat
+    [ "x\n\tMismatched memory operations:\n\t\t"
+    , ppMemTraceSpine trace
+    , " (original) vs.\n\t\t"
+    , ppMemTraceSpine trace'
+    , " (rewritten)\n"
+    ]
+ppEquivalenceError err = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the error
 
 ppMemTraceDiff :: MemTraceDiff arch -> String
 ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDiff (toList diffs)

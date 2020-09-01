@@ -21,6 +21,7 @@ module Pate.Monad
   , BinaryContext(..)
   , withBinary
   , withValid
+  , withValidEnv
   , withSymIO
   , withSym
   , withProc
@@ -158,10 +159,7 @@ withValidEnv ::
 withValidEnv (EquivEnv {}) f = f
 
 withSym ::
-  ( forall scope solver fs.
-    ValidSolver sym scope solver fs =>
-    sym ->
-   EquivM sym arch a) ->
+  (sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
   sym <- asks envSym
@@ -178,13 +176,7 @@ withProc f = withValid $ do
   f p
 
 withSymIO :: forall sym arch a.
-  ( forall scope solver fs.
-    sym ~ CBO.OnlineBackend scope solver fs =>
-    W4O.OnlineSolver solver =>
-    ValidArch arch =>
-    ValidSym sym =>
-    sym ->
-   IO a ) ->
+  ( sym -> IO a ) ->
   EquivM sym arch a
 withSymIO f = withSym (\sym -> liftIO (f sym))
 
@@ -194,17 +186,26 @@ archFuns = do
   archVals <- asks envArchVals
   return $ MS.archFunctions archVals
 
-instance IO.MonadUnliftIO (EquivM_ sym arch) where
+instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- ask
-    (liftIO $ catch (Right <$> f (runEquivM' env)) (\(e :: EquivalenceError arch) -> return $ Left e)) >>= \case
-      Left err -> throwError err
-      Right result -> return result
+    catchInIO (f (runEquivM' env))
 
-runInIO1 :: IO.MonadUnliftIO m => (a -> m b) -> ((a -> IO b) -> IO b) -> m b
-runInIO1 f g = do
-  IO.UnliftIO outer_io_ctx <- IO.askUnliftIO
-  liftIO $ g (\a -> outer_io_ctx (f a))
+catchInIO ::
+  forall sym arch a.
+  IO a ->
+  EquivM sym arch a
+catchInIO f =
+  (liftIO $ catch (Right <$> f) (\(e :: EquivalenceError arch) -> return $ Left e)) >>= \case
+    Left err -> throwError err
+    Right result -> return result
+
+runInIO1 ::
+  IO.MonadUnliftIO m =>
+  (a -> m b) ->
+  ((a -> IO b) -> IO b) ->
+  m b
+runInIO1 f g = IO.withRunInIO $ \runInIO -> g (\a -> runInIO (f a))
 
 runEquivM' ::
   EquivEnv sym arch ->

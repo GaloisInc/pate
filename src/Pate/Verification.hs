@@ -79,6 +79,7 @@ import qualified Lang.Crucible.Simulator.GlobalState as CGS
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
+import qualified What4.Concrete as W4C
 import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
 import qualified What4.Protocol.Online as W4O
@@ -142,8 +143,8 @@ verifyPairs elf elf' blockMap pPairs = do
         , envGlobalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
         }
     
-    runEquivM env $ do  
-      stats <- foldMapA checkAndDisplayRenEquivalence pPairs
+    liftIO $ do
+      stats <- foldMapA (checkAndDisplayRenEquivalence env) pPairs
       liftIO . putStr $ ppEquivalenceStatistics stats
       return $ equivSuccess stats
 
@@ -151,31 +152,32 @@ verifyPairs elf elf' blockMap pPairs = do
 foldMapA :: (Foldable f, Applicative g, Monoid m) => (a -> g m) -> f a -> g m
 foldMapA f = foldr (liftA2 (<>) . f) (pure mempty)
 
-
-
 checkAndDisplayRenEquivalence ::
+  EquivEnv sym arch ->
   PatchPair arch ->
-  EquivM sym arch EquivalenceStatistics
-checkAndDisplayRenEquivalence pPair = do
-  liftIO . putStr $ ""
+  IO EquivalenceStatistics
+checkAndDisplayRenEquivalence env pPair = withValidEnv env $ do
+  putStr $ ""
     ++ "Checking equivalence of "
     ++ ppBlock (pOrig pPair)
     ++ " and "
     ++ ppBlock (pPatched pPair)
     ++ ": "
-  liftIO $ hFlush stdout
-  eq <- manifestError $ checkRenEquivalence pPair
-  liftIO . putStr . ppEquivalenceResult $ eq
-  pure $ case eq of
+  hFlush stdout
+  result <- runExceptT $ runEquivM env (checkRenEquivalence pPair)
+  case result of
+    Left err -> putStr . ppEquivalenceError $ err
+    Right () -> putStr "✓\n"
+  return $ case result of
+    Left err | InequivalentError _ <- errEquivError err -> EquivalenceStatistics 1 0 0
     Left _ -> EquivalenceStatistics 1 0 1
-    Right Equivalent -> EquivalenceStatistics 1 1 0
-    _ -> EquivalenceStatistics 1 0 0
+    Right _ -> EquivalenceStatistics 1 1 0
 
 
 checkRenEquivalence ::
   forall sym arch.
   PatchPair arch ->
-  EquivM sym arch (EquivalenceResult arch)
+  EquivM sym arch ()
 checkRenEquivalence (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
   initRegState <- MM.mkRegStateM unconstrainedRegister
   initRegsAsn <- regStateToAsn initRegState
@@ -202,13 +204,49 @@ checkRenEquivalence (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
     (<&&>) :: Const (W4.Pred sym) tp -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
     Const p1 <&&> p2 = withSymIO $ \sym -> W4.andPred sym p1 p2
 
+
+-- | Run the given action twice: once assuming the given predicate
+-- and once assuming its negation.
+equivPredCases :: forall sym arch a.
+  W4.Pred sym ->
+  a ->
+  -- ^ argument for true branch
+  a ->
+  -- ^ argument for false branch
+  (a -> EquivM sym arch ()) ->
+  EquivM sym arch ()
+equivPredCases p t_arg f_arg f =
+  equivPredCases' p (f t_arg) (f f_arg)
+
+-- | Run the given actions in a frame where the given predicate
+-- is either assumed to be true or false
+equivPredCases' :: forall sym arch.
+  W4.Pred sym ->
+  EquivM sym arch () ->
+  -- ^ true case
+  EquivM sym arch () ->
+  -- ^ false case
+  EquivM sym arch ()
+equivPredCases' p f_t f_f = do
+  wrapAct p f_t
+  notp <- withSymIO $ \sym -> W4.notPred sym p
+  wrapAct notp f_f
+  where
+    wrapAct :: W4.Pred sym -> EquivM sym arch () -> EquivM sym arch ()
+    wrapAct p' f = case W4.asConcrete p' of
+      Just (W4C.ConcreteBool False) -> return ()
+      _ -> errorFrame $ do
+        here <- withSymIO W4.getCurrentProgramLoc
+        withSymIO $ \sym -> CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here "equivPredCases"))
+        f
+
 matchTraces :: forall sym arch.
   W4.Pred sym ->
   (forall tp. MM.ArchReg arch tp -> W4.Pred sym) ->
   MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
   SimulationResult sym arch ->
   SimulationResult sym arch ->
-  EquivM sym arch (EquivalenceResult arch)
+  EquivM sym arch ()
 matchTraces prevChecks_ getPred initRegState simResult simResult' =
   go prevChecks_ (resultMem simResult) (resultMem simResult')
   where
@@ -219,57 +257,52 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
       W4.Pred sym ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
-      EquivM sym arch (EquivalenceResult arch)
+      EquivM sym arch ()
     go prevChecks memTrace memTrace' = case (memTrace, memTrace') of
-      (MT.MergeOps p  traceT  traceF Seq.:<| ops, MT.MergeOps p' traceT' traceF' Seq.:<| ops') ->
-        combineEquivalence
-        (errorFrame $ do
-          prevChecks' <- withSymIO $ \sym -> do
-            -- TODO: Does this do the right thing if we assume false? (The
-            -- right thing for our case is for all checkSats in this frame to
-            -- succeed.)
-            here <- W4.getCurrentProgramLoc sym
-            CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here "True case for MergeOps"))
-            W4.andPred sym prevChecks p'
-          go prevChecks' (traceT <> ops) (traceT' <> ops')
-        )
-        (errorFrame $ do
-          prevChecks' <- withSymIO $ \sym -> do
-            notp <- W4.notPred sym p
-            notp' <- W4.notPred sym p'
-            here <- W4.getCurrentProgramLoc sym
-            CB.addAssumption sym (CB.LabeledPred notp (CB.AssumptionReason here "False case for MergeOps"))
-            W4.andPred sym prevChecks notp'
-          go prevChecks' (traceF <> ops) (traceF' <> ops')
-        )
+      (MT.MergeOps p  traceT  traceF Seq.:<| ops, MT.MergeOps p' traceT' traceF' Seq.:<| ops') -> do
+        prevChecks' <- withSymIO $ \sym -> do
+          predsEq <- W4.eqPred sym p p'
+          W4.andPred sym prevChecks predsEq
+        equivPredCases p (traceT, traceT') (traceF, traceF') $ \(trace, trace') ->
+          go prevChecks' (trace <> ops) (trace' <> ops')
 
       (MT.MemOp addr  dir  cond_  w  val  end Seq.:<| ops, MT.MemOp addr' dir' cond'_ w' val' end' Seq.:<| ops')
         | Just Refl <- testEquality w w'
         , (dir, end) == (dir', end')
         -> do
-        prevChecks'' <- do
           cond <- memOpCondition cond_
           cond' <- memOpCondition cond'_
-          withSymIO $ \sym -> do
-            condPred <- W4.eqPred sym cond cond'
-            addrPred <- llvmPtrEq sym addr addr'
-            prevChecks' <- W4.andPred sym prevChecks =<< W4.andPred sym condPred addrPred
-            eqVal <- llvmPtrEq sym val val'
-            here <- W4.getCurrentProgramLoc sym -- uh...
-            case dir of
-              MT.Read -> prevChecks' <$ CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
-              MT.Write -> W4.andPred sym prevChecks' eqVal
-        go prevChecks'' ops ops'
+          condPred <- withSymIO $ \sym -> W4.eqPred sym cond cond'
+          prevChecks' <- withSymIO $ \sym -> W4.andPred sym prevChecks condPred
+          here <- withSymIO W4.getCurrentProgramLoc
+          let
+            condTrue :: EquivM sym arch ()
+            condTrue =  do
+              prevChecks''' <- withSymIO $ \sym -> do
+                addrPred <- llvmPtrEq sym addr addr'
+                prevChecks'' <- W4.andPred sym prevChecks' addrPred
+                eqVal <- llvmPtrEq sym val val'
+                case dir of
+                  MT.Read -> do
+                    CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
+                    return prevChecks''
+                  MT.Write -> W4.andPred sym prevChecks'' eqVal
+              go prevChecks''' ops ops'
+
+            condFalse :: EquivM sym arch ()
+            condFalse = go prevChecks' ops ops'
+
+          equivPredCases' cond condTrue condFalse
 
       (Empty, Empty) -> do
         notPrevChecks <- withSymIO $ \sym -> W4.notPred sym prevChecks
         -- TODO: addAssertion sym prevChecks ?
         checkSatisfiableWithModel satResultDescription notPrevChecks $ \case
-          W4R.Unsat _ -> pure Equivalent
+          W4R.Unsat _ -> return ()
           W4R.Unknown -> throwHere InconclusiveSAT
-          W4R.Sat fn -> pure InequivalentResults
-            <*> groundTraceDiff fn (resultMem simResult) (resultMem simResult')
-            <*> MM.traverseRegsWith
+          W4R.Sat fn -> do
+            memdiff <- groundTraceDiff fn (resultMem simResult) (resultMem simResult')
+            regdiff <- MM.traverseRegsWith
               (\r initVal -> do
                   let
                     postO = regs ^. MM.boundValue r
@@ -278,7 +311,8 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
                   mkRegisterDiff fn r initVal postO postP equivE
               )
               initRegState
-      _ -> pure (InequivalentOperations (spineOf memTrace) (spineOf memTrace'))
+            throwHere $ InequivalentError $ InequivalentResults memdiff regdiff
+      _ -> throwHere $ InequivalentError $ InequivalentOperations (spineOf memTrace) (spineOf memTrace')
 
 
     rBlock = resultBlock simResult
@@ -303,7 +337,7 @@ evalCFG regs cfg = do
 
 initSimContext ::
   EquivM sym arch (CS.SimContext (MS.MacawSimulatorState sym) sym (MS.MacawExt arch))
-initSimContext = withSym $ \sym -> do
+initSimContext = withValid $ withSym $ \sym -> do
   exts <- asks envExtensions
   ha <- asks $ handles . envCtx
   return $
