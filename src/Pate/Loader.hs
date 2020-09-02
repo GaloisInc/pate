@@ -8,6 +8,7 @@
 module Pate.Loader
   (
     runEquivVerification
+  , runSelfEquivConfig
   , runEquivConfig
   , RunConfig(..)
   , ValidArchProxy(..)
@@ -90,6 +91,37 @@ data RunConfig arch =
     , origPath :: FilePath
     , patchedPath :: FilePath
     }
+
+-- | Given a patch configuration, check that
+-- either the original or patched binary can be
+-- proven self-equivalent
+runSelfEquivConfig :: forall arch.
+  RunConfig arch ->
+  PT.WhichBinary ->
+  IO (Either String ())
+runSelfEquivConfig cfg wb = runExceptT $ do
+  patchData <- case infoPath cfg of
+    Left fp -> lift (readMaybe <$> readFile fp) >>= \case
+      Nothing -> throwError "Bad patch info file"
+      Just r -> return r
+    Right r -> return r
+  let
+    swapPair :: forall a. (a, a) -> (a, a)
+    swapPair (a1, a2) = case wb of
+      PT.Original -> (a1, a1)
+      PT.Rewritten -> (a2, a2)
+    path = case wb of
+      PT.Original -> origPath cfg
+      PT.Rewritten -> patchedPath cfg
+    pairs' = map swapPair $ patchPairs patchData
+    patchData' = PatchData
+      { patchPairs = pairs'
+      , blockMapping = []
+      }
+  ValidArchProxy <- return $ archProxy cfg
+  bin <- lift $ PB.loadELF @arch Proxy $ path
+  ExceptT $ runEquivVerification (archProxy cfg) patchData' bin bin
+
 
 runEquivConfig :: forall arch.
   RunConfig arch ->

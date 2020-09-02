@@ -93,12 +93,13 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
-import qualified Data.Macaw.Symbolic.MemTraceOps as MT
 
 import qualified What4.Interface as W4
 
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
+
+import qualified Pate.Memory.MemTrace as MT
 
 ----------------------------------
 

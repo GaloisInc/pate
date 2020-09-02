@@ -62,14 +62,14 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
-import qualified Data.Macaw.Symbolic.MemTraceOps as MT
+
 
 import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4O
 import qualified What4.Protocol.SMTWriter as W4W
 
 import           Pate.Types
-
+import qualified Pate.Memory.MemTrace as MT
 
 data BinaryContext sym arch = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.Elf (MM.ArchAddrWidth arch))
@@ -93,6 +93,7 @@ type ValidArch arch =
   ( Typeable arch
   , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
   , MS.SymArchConstraints arch
+  , MS.HasMemoryModel arch MT.MemTraceK
   )
 
 
