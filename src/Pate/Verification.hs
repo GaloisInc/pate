@@ -59,7 +59,7 @@ import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 
-import qualified Data.Macaw.Symbolic.MemTraceOps as MT
+
 import qualified Data.Parameterized.Context.Unsafe as Ctx
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
@@ -88,6 +88,7 @@ import qualified What4.SatResult as W4R
 import qualified Pate.Binary as PB
 import           Pate.Types
 import           Pate.Monad
+import qualified Pate.Memory.MemTrace as MT
 
 verifyPairs ::
   forall arch.
@@ -109,12 +110,12 @@ verifyPairs elf elf' blockMap pPairs = do
   Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
-    eval <- lift (MS.withArchEvalTrace vals sym pure)
+    eval <- lift (MS.withArchEvalGen (Proxy @MT.MemTraceK) sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
     proc <- liftIO $ CBO.withSolverProcess sym return
-    ipEq <- liftIO $ mkIPEquivalence sym blockMap
+    ipEq <- liftIO $ mkIPEquivalence sym (addBlocksToMap pPairs blockMap)
     let
-      exts = MS.macawTraceExtensions eval model (trivialGlobalMap @_ @arch)
+      exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch)
       oCtx = BinaryContext
         { binary = PB.loadedBinary elf
         , parsedFunctionMap = pfm
@@ -843,6 +844,37 @@ archSegmentOffToInterval segOff size = case MM.segoffAsAbsoluteAddr segOff of
   Just w -> pure (IM.IntervalCO start (start `addressAddOffset` fromIntegral size))
     where start = concreteFromAbsolute w
   Nothing -> throwError $ equivalenceError $ StrangeBlockAddress segOff
+
+
+-- | Our instruction pointer relation should allow IPs to match
+-- if they start or end at a known block pair
+addBlocksToMap ::
+  forall arch.
+  ValidArch arch =>
+  [PatchPair arch] ->
+  BlockMapping arch ->
+  BlockMapping arch
+addBlocksToMap pairs bm = foldr go bm pairs
+  where
+    go ::
+      PatchPair arch ->
+      BlockMapping arch ->
+      BlockMapping arch
+    go (PatchPair orig patched) (BlockMapping m) =
+      let
+        endOrigAddr = concreteAddress orig `addressAddOffset` fromIntegral (concreteBlockSize orig)
+        endPatchedAddr = concreteAddress patched `addressAddOffset` fromIntegral (concreteBlockSize patched)
+      in BlockMapping $
+          M.alter (doAdd endPatchedAddr) endOrigAddr $
+          M.alter (doAdd (concreteAddress patched)) (concreteAddress orig) m
+
+    -- | Prefer existing entries
+    doAdd ::
+      ConcreteAddress arch ->
+      Maybe (ConcreteAddress arch) ->
+      Maybe (ConcreteAddress arch)
+    doAdd _ (Just addr) = Just addr
+    doAdd addr Nothing = Just addr
 
 
 mkIPEquivalence ::
