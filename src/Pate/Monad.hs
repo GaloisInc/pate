@@ -245,9 +245,9 @@ errorFrame ::
   EquivM sym arch a ->
   EquivM sym arch a
 errorFrame f = withSym $ \sym -> do
-  frame <- liftIO $ CB.pushAssumptionFrame sym
+  st <- liftIO $ CB.saveAssumptionState sym
   res <- manifestError f
-  _ <- liftIO $ CB.popAssumptionFrame sym frame
+  liftIO $ CB.restoreAssumptionState sym st
   implicitError res
 
 manifestError :: MonadError e m => m a -> m (Either e a)

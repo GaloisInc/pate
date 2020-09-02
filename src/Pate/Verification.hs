@@ -200,6 +200,8 @@ checkRenEquivalence (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
     getPred r =
       let Const v = preds ^. MM.boundValue r
       in v
+
+  withSymIO $ \sym -> CB.resetAssumptionState sym
   matchTraces registersEquivalent getPred initRegState simResult simResult'
   where
     (<&&>) :: Const (W4.Pred sym) tp -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
@@ -238,7 +240,7 @@ equivPredCases' p f_t f_f = do
       Just (W4C.ConcreteBool False) -> return ()
       _ -> errorFrame $ do
         here <- withSymIO W4.getCurrentProgramLoc
-        withSymIO $ \sym -> CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here "equivPredCases"))
+        withSymIO $ \sym -> CB.addAssumption sym (CB.LabeledPred p' (CB.AssumptionReason here "equivPredCases"))
         f
 
 matchTraces :: forall sym arch.
