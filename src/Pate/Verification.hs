@@ -100,17 +100,17 @@ verifyPairs ::
   ExceptT (EquivalenceError arch) IO Bool
 verifyPairs elf elf' blockMap pPairs = do
   Some gen <- liftIO . stToIO $ N.newSTNonceGenerator
-  vals <- case MS.archVals @arch Proxy of
+  vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> throwError $ equivalenceError UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  pfm  <- runDiscovery elf  
+  pfm  <- runDiscovery elf
   pfm' <- runDiscovery elf'
 
   Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
-    eval <- lift (MS.withArchEvalGen (Proxy @MT.MemTraceK) sym pure)
+    eval <- lift (MS.withArchEval vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
     proc <- liftIO $ CBO.withSolverProcess sym return
     ipEq <- liftIO $ mkIPEquivalence sym (addBlocksToMap pPairs blockMap)

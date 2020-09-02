@@ -93,7 +93,7 @@ type ValidArch arch =
   ( Typeable arch
   , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
   , MS.SymArchConstraints arch
-  , MS.HasMemoryModel arch MT.MemTraceK
+  , MS.GenArchInfo MT.MemTraceK arch
   )
 
 
@@ -117,7 +117,7 @@ data EquivEnv sym arch where
     , envWhichBinary :: Maybe WhichBinary
     , envProc :: W4O.SolverProcess scope solver
     , envCtx :: EquivalenceContext sym arch
-    , envArchVals :: MS.ArchVals arch
+    , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envGlobalMap :: CGS.SymGlobalState sym
     } -> EquivEnv sym arch
