@@ -358,7 +358,7 @@ data InnerEquivalenceError arch
   | NonConcreteParsedBlockAddress (MM.ArchSegmentOff arch)
   | BlockExceedsItsSegment (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
   | BlockEndsMidInstruction
-  | BlockStartsEarly
+  | BlockStartsEarly (MM.ArchAddrWord arch) (MM.ArchAddrWord arch)
   | PrunedBlockIsEmpty
   | MemOpConditionMismatch
   | UnexpectedBlockKind String

@@ -720,7 +720,7 @@ pruneBlock start_ end_ pb = do
     -- strip some instructions off the beginning of the ParsedBlock. But take
     -- some care: the Stmts contain ArchStates that will be invalidated by this
     -- process; these will need to be fixed up.
-    (True, _) -> throwHere BlockStartsEarly
+    (True, _) -> throwHere $ BlockStartsEarly pblockStart start
     (_, True) -> pure [pb]
     _ -> do
       (stmts, updateTermStmt) <- findEnd (end - pblockStart) (MD.pblockStmts pb)
