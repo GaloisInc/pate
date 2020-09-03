@@ -74,15 +74,13 @@ runEquivVerification ::
   PatchData ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
-  IO (Either String ())
+  IO (Either String Bool)
 runEquivVerification proxy@ValidArchProxy pd original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
   v <- runExceptT (PV.verifyPairs original patched bmap ppairs)
   case v of
     Left err -> return $ Left $ show err
-    Right False -> return $ Left "Verification did not succeed."
-    Right True -> return $ Right ()
-
+    Right b -> return $ Right b
 
 data RunConfig arch =
   RunConfig
@@ -98,7 +96,7 @@ data RunConfig arch =
 runSelfEquivConfig :: forall arch.
   RunConfig arch ->
   PT.WhichBinary ->
-  IO (Either String ())
+  IO (Either String Bool)
 runSelfEquivConfig cfg wb = runExceptT $ do
   patchData <- case infoPath cfg of
     Left fp -> lift (readMaybe <$> readFile fp) >>= \case
@@ -125,7 +123,7 @@ runSelfEquivConfig cfg wb = runExceptT $ do
 
 runEquivConfig :: forall arch.
   RunConfig arch ->
-  IO (Either String ())
+  IO (Either String Bool)
 runEquivConfig cfg = runExceptT $ do
   patchData <- case infoPath cfg of
     Left fp -> lift (readMaybe <$> readFile fp) >>= \case
