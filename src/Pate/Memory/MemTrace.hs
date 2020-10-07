@@ -17,6 +17,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE IncoherentInstances #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 #if __GLASGOW_HASKELL__ >= 805
 {-# LANGUAGE NoStarIsType #-}
@@ -25,17 +26,14 @@
 module Pate.Memory.MemTrace where
 
 import Unsafe.Coerce
-
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.))
 import           Control.Monad.State
 import qualified Data.BitVector.Sized as BV
-import           Data.List
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
 import           GHC.TypeNats (KnownNat)
-import           Numeric
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
@@ -62,7 +60,6 @@ import Lang.Crucible.Simulator.RegValue (RegValue)
 import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), knownSymbol)
-import What4.Concrete (ConcreteVal(..))
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface -- (NatRepr, knownRepr, BaseTypeRepr(..), SolverSymbol, userSymbol, freshConstant, natLit)
 
@@ -164,10 +161,10 @@ initMemTrace ::
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
 initMemTrace sym Addr32 = do
-  arr <- ioFreshConstant sym "initial memory state" knownRepr
+  arr <- ioFreshConstant sym "InitMem" knownRepr
   return $ MemTraceImpl mempty arr
 initMemTrace sym Addr64 = do
-  arr <- ioFreshConstant sym "initial memory state" knownRepr
+  arr <- ioFreshConstant sym "InitMem" knownRepr
   return $ MemTraceImpl mempty arr
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
@@ -478,6 +475,9 @@ concatPtrs sym endianness (LLVMPointer reg1 off1) (LLVMPointer _ off2) = do
       bvConcat sym off2 off1
   return $ LLVMPointer reg1 bv
 
+proveLeq :: forall c n m. c ~ (n <= m) => LeqProof n m -> LeqProof n m
+proveLeq prf@LeqProof = prf
+
 -- | Take 1 byte from either the front or back of the
 -- given bitvector, according to the given endianness
 chunkBV :: forall sym w.
@@ -490,21 +490,19 @@ chunkBV :: forall sym w.
   SymBV sym (8 * w) ->
   IO (SymBV sym 8, SymBV sym (8 * (w-1)))
 chunkBV sym endianness w bv
-  | _2_le_w <- leqProof (knownNat @2) w
-  , _1_le_1 <- leqRefl (knownNat @1)
-  , LeqProof <- leqSub2 _2_le_w _1_le_1
-  =
-  let
-    sz' = natMultiply (knownNat @8) (decNat w)
-  in multiplicationIsMonotonic @8 sz' $ do
-    _1_le_w <- return $ leqProof (knownNat @1) w
-    _8_le_8 <- return $ leqProof (knownNat @8) (knownNat @8)
-    (LeqProof :: LeqProof 8 (w * 8)) <- return $ leqMulCongr _1_le_w _8_le_8
-    Refl <- return $ mulComm (knownNat @8) w
-    Refl <- return $ mulComm (knownNat @8) (decNat w)
-    Refl <- return $ lemmaMul (knownNat @8) w
-    Refl <- return $ plusComm (knownNat @8) sz'
-
+  | LeqProof <- proveLeq @(1 <= (w-1))
+      $ leqSub2 (leqProof (knownNat @2) w) (leqRefl (knownNat @1))
+  , sz' <- natMultiply (knownNat @8) (decNat w)
+  , LeqProof <- proveLeq @(1 <= (8 * (w-1)))
+      $ mulMono (knownNat @8) (decNat w)
+  , _1_le_w <- leqProof (knownNat @1) w
+  , _8_le_8 <- leqRefl (knownNat @8)
+  , LeqProof  <- proveLeq @(8 <= (w * 8))
+      $ leqMulCongr _1_le_w _8_le_8
+  , Refl <- mulComm (knownNat @8) w
+  , Refl <- mulComm (knownNat @8) (decNat w)
+  , Refl <- lemmaMul (knownNat @8) w
+  , Refl <- plusComm (knownNat @8) sz' = do
     case endianness of
       -- take from the least significant bits
       LittleEndian -> do
@@ -512,9 +510,10 @@ chunkBV sym endianness w bv
         tl <- bvSelect sym (knownNat @8) sz' bv
         return (hd, tl)
       -- take from the most significant bits
-      BigEndian -> do
-        _w_1_le_w <- return $ leqSub (leqRefl w) _1_le_w
-        (LeqProof :: LeqProof (8 * (w-1)) (8 * w)) <- return $ leqMulCongr _w_1_le_w _8_le_8
+      BigEndian
+        | _w_1_le_w <- leqSub (leqRefl w) _1_le_w
+        , LeqProof <- proveLeq @(8 * (w-1) <= (8 * w))
+            $ leqMulCongr _w_1_le_w _8_le_8  -> do
         hd <- bvSelect sym sz' (knownNat @8) bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
@@ -538,23 +537,21 @@ readMemArr sym arr ptr = go 0 where
   go :: Integer -> MemRepr ty' -> IO (RegValue sym (ToCrucibleType ty'))
   go n (BVMemRepr byteWidth endianness) =
     case isZeroOrGT1 (decNat byteWidth) of
-      Left Refl -> do
-        idx <- arrayIdx sym ptr n
-        content <- arrayLookup sym arr idx
-        Refl <- return $ zeroSubEq byteWidth (knownNat @1)
-        llvmPointer_bv sym content
-      Right LeqProof -> do
-        let
-          byteWidth' = decNat byteWidth
-          repr' = BVMemRepr byteWidth' endianness
-          reprHead = BVMemRepr (knownNat @1) endianness
-        hd <- go n reprHead
-        tl <- go (n + 1) repr'
-        Refl <- return $ lemmaMul (knownNat @8) byteWidth
-        Refl <- return $ mulComm (knownNat @8) byteWidth'
-        Refl <- return $ mulComm (knownNat @8) byteWidth
-        let bitWidth = natMultiply (knownNat @8) byteWidth'
-        multiplicationIsMonotonic @8 bitWidth $
+      Left Refl
+        | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
+          idx <- arrayIdx sym ptr n
+          content <- arrayLookup sym arr idx
+          llvmPointer_bv sym content
+      Right LeqProof
+        | byteWidth' <- decNat byteWidth
+        , tailRepr <- BVMemRepr byteWidth' endianness
+        , headRepr <- BVMemRepr (knownNat @1) endianness
+        , Refl <- lemmaMul (knownNat @8) byteWidth
+        , Refl <- mulComm (knownNat @8) byteWidth'
+        , Refl <- mulComm (knownNat @8) byteWidth
+        , LeqProof <- mulMono (knownNat @8) byteWidth' -> do
+          hd <- go n headRepr
+          tl <- go (n + 1) tailRepr
           concatPtrs sym endianness hd tl
 
   go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
@@ -594,32 +591,6 @@ writeMemArr sym arr_init ptr repr val = go 0 repr val arr_init where
         arr1 <- go n reprHead hd arr
         go (n + 1) repr' tl arr1
 
-
-freshRegValue :: forall sym ptrW ty.
-  IsSymInterface sym =>
-  sym ->
-  LLVMPtr sym ptrW ->
-  MemRepr ty ->
-  IO (RegValue sym (ToCrucibleType ty))
-freshRegValue sym (LLVMPointer reg off) = go 0 where
-  go :: Integer -> MemRepr ty' -> IO (RegValue sym (ToCrucibleType ty'))
-  go n (BVMemRepr byteWidth _endianness) = do
-    let bitWidth = natMultiply (knownNat @8) byteWidth
-    content <- multiplicationIsMonotonic @8 bitWidth $ ioFreshConstant sym
-      (intercalate "_" $ describe byteWidth n)
-      (BaseBVRepr bitWidth)
-    llvmPointer_bv sym content
-
-  go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
-
-  go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
-    go (n + memReprByteSize recRepr * fromIntegral i) recRepr
-
-  describe :: NatRepr w -> Integer -> [String]
-  describe = case (asConcrete reg, asConcrete off) of
-    (Just (ConcreteNat regVal), Just (ConcreteBV _ offVal)) -> \byteWidth n ->
-      ["read", show (natValue byteWidth), show regVal, "0x" ++ showHex (BV.asUnsigned offVal + n) ""]
-    _ -> \byteWidth _n -> ["read", show (natValue byteWidth), "symbolic_location"]
 
 doMemOpInternal :: forall sym ptrW ty.
   IsSymInterface sym =>
@@ -681,6 +652,10 @@ logOp op = modify (\(MemTraceImpl s arr) -> MemTraceImpl (s Seq.:|> op) arr)
 addrWidthsArePositive :: AddrWidthRepr w -> (1 <= w => a) -> a
 addrWidthsArePositive Addr32 a = a
 addrWidthsArePositive Addr64 a = a
+
+mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> LeqProof 1 (x*w)
+mulMono _x w = unsafeCoerce (leqRefl w)
+
 
 multiplicationIsMonotonic :: forall x w a. (1 <= x, 1 <= w) => NatRepr (x*w) -> (1 <= x*w => a) -> a
 multiplicationIsMonotonic xw a = case compareNat (knownNat @0) xw of

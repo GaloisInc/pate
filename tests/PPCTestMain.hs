@@ -16,7 +16,6 @@ main = do
                               , "test-direct-calls"
                               , "test-read-reorder"
                               , "test-write-reorder"
-                              , "test-write-then-read"
                               , "test-write2"
                               , "test-stack-variable"
                               ]

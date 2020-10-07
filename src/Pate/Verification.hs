@@ -28,7 +28,7 @@ module Pate.Verification
 import           Prelude hiding ( fail )
 
 import           Data.Typeable
-
+import           Data.Bits
 import           Control.Monad.Trans.Except
 import           Control.Monad.Reader
 
@@ -108,7 +108,7 @@ verifyPairs elf elf' blockMap pPairs = do
   pfm' <- runDiscovery elf'
 
   Some gen' <- liftIO N.newIONonceGenerator
-  let pfeats = W4PF.useBitvectors
+  let pfeats = W4PF.useBitvectors .|. W4PF.useSymbolicArrays
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
     eval <- lift (MS.withArchEval vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
@@ -288,7 +288,7 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
                 eqVal <- llvmPtrEq sym val val'
                 case dir of
                   MT.Read -> do
-                    CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
+                    --CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
                     return prevChecks''
                   MT.Write -> W4.andPred sym prevChecks'' eqVal
               go prevChecks''' ops ops'
