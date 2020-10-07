@@ -258,7 +258,7 @@ data MemOpSpine
 
 type MemTraceSpine = Seq MemOpSpine
 
-spineOf :: MT.MemTraceImpl sym ptrW -> MemTraceSpine
+spineOf :: MT.MemTraceSeq sym ptrW -> MemTraceSpine
 spineOf = fmap go where
   go (MT.MemOp _addr dir _cond size _val end) = MemOpSpine dir (W4.natValue size) end
   go (MT.MergeOps _cond traceT traceF) = MergeSpines (spineOf traceT) (spineOf traceF)

@@ -24,6 +24,8 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.Memory.MemTrace where
 
+import Unsafe.Coerce
+
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.))
 import           Control.Monad.State
@@ -35,8 +37,9 @@ import qualified Data.Vector as V
 import           GHC.TypeNats (KnownNat)
 import           Numeric
 
+import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
-import Data.Macaw.Memory (AddrWidthRepr(..), Endianness, addrWidthClass, addrWidthNatRepr)
+import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), addrWidthClass, addrWidthNatRepr)
 import Data.Macaw.Symbolic.Backend (EvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExt
                            , GlobalMap, MacawSimulatorState(..)
@@ -44,7 +47,7 @@ import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExt
                            , IsMemoryModel(..)
                            )
 import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
-import Data.Parameterized.Context (pattern (:>), pattern Empty)
+import Data.Parameterized.Context (pattern (:>), pattern Empty, Assignment)
 import qualified Data.Parameterized.Map as MapF
 import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, assert)
@@ -57,7 +60,8 @@ import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..
 import Lang.Crucible.Simulator.RegMap (RegEntry(..))
 import Lang.Crucible.Simulator.RegValue (RegValue)
 import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
-import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolRepr, TypeRepr(BVRepr), knownSymbol)
+import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
+                            SymbolRepr, TypeRepr(BVRepr), knownSymbol)
 import What4.Concrete (ConcreteVal(..))
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface -- (NatRepr, knownRepr, BaseTypeRepr(..), SolverSymbol, userSymbol, freshConstant, natLit)
@@ -99,24 +103,43 @@ data MemOp sym ptrW where
     MemOp sym ptrW
   MergeOps ::
     Pred sym ->
-    MemTraceImpl sym ptrW ->
-    MemTraceImpl sym ptrW ->
+    MemTraceSeq sym ptrW ->
+    MemTraceSeq sym ptrW ->
     MemOp sym ptrW
 
-instance Eq (MemOpCondition (ExprBuilder t st fs)) where
+instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
   Unconditional == Unconditional = True
-  Conditional p == Conditional p' = p == p'
+  Conditional p == Conditional p' | Just Refl <- testEquality p p' = True
   _ == _ = False
 
-instance Eq (MemOp (ExprBuilder t st fs) ptrW) where
+instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
   MemOp (LLVMPointer addrR addrO) dir cond repr (LLVMPointer valR valO) end
-    == MemOp (LLVMPointer addrR' addrO') dir' cond' repr' (LLVMPointer valR' valO') end' = case testEquality repr repr' of
-      Nothing -> False
-      Just Refl -> addrR == addrR' && addrO == addrO' && dir == dir' && cond == cond' && valR == valR' && valO == valO' && end == end'
-  MergeOps p opsT opsF == MergeOps p' opsT' opsF' = p == p' && opsT == opsT' && opsF == opsF'
+    == MemOp (LLVMPointer addrR' addrO') dir' cond' repr' (LLVMPointer valR' valO') end'
+     | Just Refl <- testEquality repr repr'
+     , Just Refl <- testEquality addrR addrR'
+     , Just Refl <- testEquality addrO addrO'
+     , Just Refl <- testEquality valR valR'
+     , Just Refl <- testEquality valO valO'
+    = cond == cond' && dir == dir' && end == end'
+  MergeOps p opsT opsF == MergeOps p' opsT' opsF'
+    | Just Refl <- testEquality p p'
+    = opsT == opsT' && opsF == opsF'
   _ == _ = False
 
-type MemTraceImpl sym ptrW = Seq (MemOp sym ptrW)
+data MemTraceImpl sym ptrW = MemTraceImpl
+  { memSeq :: MemTraceSeq sym ptrW
+  , memArr :: MemTraceArr sym ptrW
+  }
+
+instance TestEquality (SymExpr sym) => Eq (MemTraceImpl sym ptrW) where
+  (MemTraceImpl s1 arr1) == (MemTraceImpl s2 arr2)
+    | Just Refl <- testEquality arr1 arr2
+    = s1 == s2
+  _ == _ = False
+
+type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
+type MemTraceArr sym ptrW =
+  RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType ::> (BaseBVType ptrW)) (BaseBVType 8))
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
 data MemTraceK
@@ -135,6 +158,17 @@ mkMemTraceVar ::
   IO (GlobalVar (MemTrace arch))
 mkMemTraceVar ha = freshGlobalVar ha (pack "llvm_memory_trace") knownRepr
 
+initMemTrace ::
+  IsSymInterface sym =>
+  sym ->
+  AddrWidthRepr ptrW ->
+  IO (MemTraceImpl sym ptrW)
+initMemTrace sym Addr32 = do
+  arr <- ioFreshConstant sym "initial memory state" knownRepr
+  return $ MemTraceImpl mempty arr
+initMemTrace sym Addr64 = do
+  arr <- ioFreshConstant sym "initial memory state" knownRepr
+  return $ MemTraceImpl mempty arr
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
 equalPrefixOf s1 s2 = go s1 s2 Seq.empty
@@ -148,9 +182,9 @@ equalPrefixOf s1 s2 = go s1 s2 Seq.empty
 muxTraces ::
   sym ~ (ExprBuilder t st fs) =>
   RegValue sym BoolType ->
-  MemTraceImpl sym ptrW ->
-  MemTraceImpl sym ptrW ->
-  IO (MemTraceImpl sym ptrW)
+  MemTraceSeq sym ptrW ->
+  MemTraceSeq sym ptrW ->
+  IO (MemTraceSeq sym ptrW)
 muxTraces p t f =
   let (pre, (t', f')) = equalPrefixOf t f
   in case (t', f') of
@@ -160,7 +194,10 @@ muxTraces p t f =
 instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
   -- TODO: cover other cases with a TypeError
   type Intrinsic (ExprBuilder t st fs) "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl (ExprBuilder t st fs) ptrW
-  muxIntrinsic _ _ _ (Empty :> BVRepr _) p t f = muxTraces p t f
+  muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
+    s <- muxTraces p (memSeq t) (memSeq f)
+    arr <- baseTypeIte sym p (memArr t) (memArr f)
+    return $ MemTraceImpl s arr
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
 memTraceIntrinsicTypes :: IsSymInterface (ExprBuilder t st fs) => IntrinsicTypes (ExprBuilder t st fs)
@@ -348,6 +385,7 @@ orIOPred sym p1_ p2_ = do
   p2 <- p2_
   orPred sym p1 p2
 
+
 doReadMem ::
   IsSymInterface sym =>
   sym ->
@@ -355,9 +393,10 @@ doReadMem ::
   LLVMPtr sym ptrW ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (ToCrucibleType ty))
-doReadMem sym ptrWidth ptr memRepr = do
-  val <- liftIO $ freshRegValue sym ptr memRepr
-  doMemOpInternal sym Read Unconditional ptrWidth ptr val memRepr
+doReadMem sym ptrW ptr memRepr = addrWidthClass ptrW $ do
+  arr <- gets memArr
+  val <- liftIO $ readMemArr sym arr ptr memRepr
+  doMemOpInternal sym Read Unconditional ptrW ptr val memRepr
   pure val
 
 doCondReadMem ::
@@ -369,9 +408,10 @@ doCondReadMem ::
   LLVMPtr sym ptrW ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (ToCrucibleType ty))
-doCondReadMem sym cond def ptrWidth ptr memRepr = do
-  val <- liftIO $ freshRegValue sym ptr memRepr
-  doMemOpInternal sym Read (Conditional cond) ptrWidth ptr val memRepr
+doCondReadMem sym cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
+  arr <- gets memArr
+  val <- liftIO $ readMemArr sym arr ptr memRepr
+  doMemOpInternal sym Read (Conditional cond) ptrW ptr val memRepr
   liftIO $ iteDeep sym cond val def memRepr
 
 doWriteMem ::
@@ -394,6 +434,166 @@ doCondWriteMem ::
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
 doCondWriteMem sym cond = doMemOpInternal sym Write (Conditional cond)
+
+ptrWidth :: IsExprBuilder sym => LLVMPtr sym w -> NatRepr w
+ptrWidth (LLVMPointer _blk bv) = bvWidth bv
+
+ptrAdd :: (1 <= w, IsExprBuilder sym)
+       => sym
+       -> NatRepr w
+       -> LLVMPtr sym w
+       -> SymBV sym w
+       -> IO (LLVMPtr sym w)
+ptrAdd sym _w (LLVMPointer base off1) off2 =
+  LLVMPointer base <$> bvAdd sym off1 off2
+
+-- | Calculate an index into the memory array from a pointer
+arrayIdx ::
+  1 <= ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  LLVMPtr sym ptrW ->
+  Integer ->
+  IO (Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW))
+arrayIdx sym ptr@(LLVMPointer reg off) off' = do
+  let w = ptrWidth ptr
+  offBV <- bvLit sym w $ BV.mkBV w off'
+  bvIdx <- bvAdd sym off offBV
+  return $ Empty :> reg :> bvIdx
+
+concatPtrs ::
+  1 <= w1 =>
+  1 <= w2 =>
+  IsSymInterface sym =>
+  sym ->
+  Endianness ->
+  LLVMPtr sym w1 ->
+  LLVMPtr sym w2 ->
+  IO (LLVMPtr sym (w1 + w2))
+concatPtrs sym endianness (LLVMPointer reg1 off1) (LLVMPointer _ off2) = do
+  bv <- case endianness of
+    BigEndian -> bvConcat sym off1 off2
+    LittleEndian -> do
+      Refl <- return $ plusComm (bvWidth off1) (bvWidth off2)
+      bvConcat sym off2 off1
+  return $ LLVMPointer reg1 bv
+
+-- | Take 1 byte from either the front or back of the
+-- given bitvector, according to the given endianness
+chunkBV :: forall sym w.
+  1 <= w =>
+  2 <= w =>
+  IsSymInterface sym =>
+  sym ->
+  Endianness ->
+  NatRepr w ->
+  SymBV sym (8 * w) ->
+  IO (SymBV sym 8, SymBV sym (8 * (w-1)))
+chunkBV sym endianness w bv
+  | _2_le_w <- leqProof (knownNat @2) w
+  , _1_le_1 <- leqRefl (knownNat @1)
+  , LeqProof <- leqSub2 _2_le_w _1_le_1
+  =
+  let
+    sz' = natMultiply (knownNat @8) (decNat w)
+  in multiplicationIsMonotonic @8 sz' $ do
+    _1_le_w <- return $ leqProof (knownNat @1) w
+    _8_le_8 <- return $ leqProof (knownNat @8) (knownNat @8)
+    (LeqProof :: LeqProof 8 (w * 8)) <- return $ leqMulCongr _1_le_w _8_le_8
+    Refl <- return $ mulComm (knownNat @8) w
+    Refl <- return $ mulComm (knownNat @8) (decNat w)
+    Refl <- return $ lemmaMul (knownNat @8) w
+    Refl <- return $ plusComm (knownNat @8) sz'
+
+    case endianness of
+      -- take from the least significant bits
+      LittleEndian -> do
+        hd <- bvSelect sym (knownNat @0) (knownNat @8) bv
+        tl <- bvSelect sym (knownNat @8) sz' bv
+        return (hd, tl)
+      -- take from the most significant bits
+      BigEndian -> do
+        _w_1_le_w <- return $ leqSub (leqRefl w) _1_le_w
+        (LeqProof :: LeqProof (8 * (w-1)) (8 * w)) <- return $ leqMulCongr _w_1_le_w _8_le_8
+        hd <- bvSelect sym sz' (knownNat @8) bv
+        tl <- bvSelect sym (knownNat @0) sz' bv
+        return (hd, tl)
+
+zeroSubEq :: forall p q w n. 0 ~ (w - n) => p w -> q n -> w :~: n
+zeroSubEq _w _n = unsafeCoerce Refl
+
+oneSubEq :: forall p w. 1 <= w => 1 <= (w - 1) => p w -> LeqProof 2 w
+oneSubEq w = unsafeCoerce (leqRefl w)
+
+-- | Read a packed value from the underlying array
+readMemArr :: forall sym ptrW ty.
+  1 <= ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  MemTraceArr sym ptrW ->
+  LLVMPtr sym ptrW ->
+  MemRepr ty ->
+  IO (RegValue sym (ToCrucibleType ty))
+readMemArr sym arr ptr = go 0 where
+  go :: Integer -> MemRepr ty' -> IO (RegValue sym (ToCrucibleType ty'))
+  go n (BVMemRepr byteWidth endianness) =
+    case isZeroOrGT1 (decNat byteWidth) of
+      Left Refl -> do
+        idx <- arrayIdx sym ptr n
+        content <- arrayLookup sym arr idx
+        Refl <- return $ zeroSubEq byteWidth (knownNat @1)
+        llvmPointer_bv sym content
+      Right LeqProof -> do
+        let
+          byteWidth' = decNat byteWidth
+          repr' = BVMemRepr byteWidth' endianness
+          reprHead = BVMemRepr (knownNat @1) endianness
+        hd <- go n reprHead
+        tl <- go (n + 1) repr'
+        Refl <- return $ lemmaMul (knownNat @8) byteWidth
+        Refl <- return $ mulComm (knownNat @8) byteWidth'
+        Refl <- return $ mulComm (knownNat @8) byteWidth
+        let bitWidth = natMultiply (knownNat @8) byteWidth'
+        multiplicationIsMonotonic @8 bitWidth $
+          concatPtrs sym endianness hd tl
+
+  go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
+
+  go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
+    go (n + memReprByteSize recRepr * fromIntegral i) recRepr
+
+writeMemArr :: forall sym ptrW w.
+  1 <= ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  MemTraceArr sym ptrW ->
+  LLVMPtr sym ptrW ->
+  MemRepr (MT.BVType w) ->
+  SymBV sym w ->
+  IO (MemTraceArr sym ptrW)
+writeMemArr sym arr_init ptr repr val = go 0 repr val arr_init where
+  go ::
+    Integer ->
+    MemRepr (MT.BVType w') ->
+    SymBV sym w' ->
+    MemTraceArr sym ptrW ->
+    IO (MemTraceArr sym ptrW)
+  go n (BVMemRepr byteWidth endianness) bv arr =
+    case isZeroOrGT1 (decNat byteWidth) of
+      Left Refl -> do
+        idx <- arrayIdx sym ptr n
+        Refl <- return $ zeroSubEq byteWidth (knownNat @1)
+        arrayUpdate sym arr idx bv
+      Right LeqProof -> do
+        let
+          byteWidth' = decNat byteWidth
+          repr' = BVMemRepr byteWidth' endianness
+          reprHead = BVMemRepr (knownNat @1) endianness
+        LeqProof <- return $ oneSubEq byteWidth
+        (hd, tl) <- chunkBV sym endianness byteWidth bv
+        arr1 <- go n reprHead hd arr
+        go (n + 1) repr' tl arr1
+
 
 freshRegValue :: forall sym ptrW ty.
   IsSymInterface sym =>
@@ -431,13 +631,21 @@ doMemOpInternal :: forall sym ptrW ty.
   RegValue sym (ToCrucibleType ty) ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
-doMemOpInternal sym dir cond ptrWidth = go where
+doMemOpInternal sym dir cond ptrW = go where
   go :: LLVMPtr sym ptrW -> RegValue sym (ToCrucibleType ty') -> MemRepr ty' -> StateT (MemTraceImpl sym ptrW) IO ()
   go ptr@(LLVMPointer reg off) regVal = \case
-    BVMemRepr byteWidth endianness -> logOp $ MemOp ptr dir cond bitWidth regVal endianness
+    repr@(BVMemRepr byteWidth endianness) -> addrWidthsArePositive ptrW $ do
+      MemTraceImpl s arr <- get
+      let s' = s Seq.:|> MemOp ptr dir cond bitWidth regVal endianness
+      arr' <- case dir of
+        Read -> return arr
+        Write -> do
+          LLVMPointer _ rawBv <- return regVal
+          liftIO $ writeMemArr sym arr ptr repr rawBv
+      put $ MemTraceImpl s' arr'
       where bitWidth = natMultiply (knownNat @8) byteWidth
     FloatMemRepr _infoRepr _endianness -> fail "reading floats not supported in doMemOpInternal"
-    PackedVecMemRepr _countRepr recRepr -> addrWidthsArePositive ptrWidth $ do
+    PackedVecMemRepr _countRepr recRepr -> addrWidthsArePositive ptrW $ do
       elemSize <- liftIO $ bvLit sym ptrWidthNatRepr (BV.mkBV ptrWidthNatRepr (memReprByteSize recRepr))
       flip V.imapM_ regVal $ \i recRegVal -> do
         off' <- liftIO $ do
@@ -446,7 +654,7 @@ doMemOpInternal sym dir cond ptrWidth = go where
           bvAdd sym off dOff
         go (LLVMPointer reg off') recRegVal recRepr
 
-  ptrWidthNatRepr = addrWidthNatRepr ptrWidth
+  ptrWidthNatRepr = addrWidthNatRepr ptrW
 
 iteDeep ::
   IsSymInterface sym =>
@@ -468,7 +676,7 @@ iteDeep sym cond t f = \case
     iteDeep sym cond (t V.! i) (f V.! i) recRepr
 
 logOp :: (MonadState (MemTraceImpl sym ptrW) m) => MemOp sym ptrW -> m ()
-logOp op = modify (Seq.:|> op)
+logOp op = modify (\(MemTraceImpl s arr) -> MemTraceImpl (s Seq.:|> op) arr)
 
 addrWidthsArePositive :: AddrWidthRepr w -> (1 <= w => a) -> a
 addrWidthsArePositive Addr32 a = a

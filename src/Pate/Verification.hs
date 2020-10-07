@@ -112,6 +112,7 @@ verifyPairs elf elf' blockMap pPairs = do
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
     eval <- lift (MS.withArchEval vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
+    initMem <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
     proc <- liftIO $ CBO.withSolverProcess sym return
     ipEq <- liftIO $ mkIPEquivalence sym (addBlocksToMap pPairs blockMap)
     let
@@ -141,7 +142,7 @@ verifyPairs elf elf' blockMap pPairs = do
         , envCtx = ctxt
         , envArchVals = vals
         , envExtensions = exts
-        , envGlobalMap = CGS.insertGlobal model mempty CGS.emptyGlobals
+        , envGlobalMap = CGS.insertGlobal model initMem CGS.emptyGlobals
         }
     
     liftIO $ do
@@ -251,15 +252,15 @@ matchTraces :: forall sym arch.
   SimulationResult sym arch ->
   EquivM sym arch ()
 matchTraces prevChecks_ getPred initRegState simResult simResult' =
-  go prevChecks_ (resultMem simResult) (resultMem simResult')
+  go prevChecks_ (MT.memSeq (resultMem simResult)) (MT.memSeq (resultMem simResult'))
   where
     regs = resultRegs simResult
     regs' = resultRegs simResult'
  
     go ::
       W4.Pred sym ->
-      MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
-      MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+      MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
+      MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
       EquivM sym arch ()
     go prevChecks memTrace memTrace' = case (memTrace, memTrace') of
       (MT.MergeOps p  traceT  traceF Seq.:<| ops, MT.MergeOps p' traceT' traceF' Seq.:<| ops') -> do
@@ -304,7 +305,7 @@ matchTraces prevChecks_ getPred initRegState simResult simResult' =
           W4R.Unsat _ -> return ()
           W4R.Unknown -> throwHere InconclusiveSAT
           W4R.Sat fn -> do
-            memdiff <- groundTraceDiff fn (resultMem simResult) (resultMem simResult')
+            memdiff <- groundTraceDiff fn (MT.memSeq (resultMem simResult)) (MT.memSeq (resultMem simResult'))
             regdiff <- MM.traverseRegsWith
               (\r initVal -> do
                   let
@@ -543,8 +544,8 @@ concreteValue _ e = throwHere (UnsupportedRegisterType (Some (macawRegRepr e)))
 -- We assume the two traces have equivalent spines already.
 groundTraceDiff ::
   SymGroundEvalFn sym ->
-  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
-  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+  MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
+  MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
   EquivM sym arch (MemTraceDiff arch)
 groundTraceDiff fn (MT.MemOp addr dir cond_ _ val _ :< ops) (MT.MemOp addr' _ cond'_ _ val' _ :< ops') = do
   cond <- memOpCondition cond_
