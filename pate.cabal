@@ -87,7 +87,8 @@ test-suite pate-test-ppc
   other-modules: TestBase, Pate.PPC 
   hs-source-dirs: tests, arch
   build-depends: macaw-ppc,
-                 macaw-ppc-symbolic
+                 macaw-ppc-symbolic,
+                 dismantle-ppc
 
 common shared-exec
   ghc-options: -Wall -Wcompat

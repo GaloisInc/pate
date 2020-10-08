@@ -233,7 +233,8 @@ data RegisterDiff arch tp where
   RegisterDiff :: ShowF (MM.ArchReg arch) =>
     { rReg :: MM.ArchReg arch tp
     , rTypeRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
-    , rPre :: ConcreteValue (MS.ToCrucibleType tp)
+    , rPreOriginal :: ConcreteValue (MS.ToCrucibleType tp)
+    , rPrePatched :: ConcreteValue (MS.ToCrucibleType tp)
     , rPostOriginal :: ConcreteValue (MS.ToCrucibleType tp)
     , rPostPatched :: ConcreteValue (MS.ToCrucibleType tp)
     , rPostEquivalent :: Bool
@@ -485,9 +486,15 @@ ppPreReg ::
   RegisterDiff arch tp ->
   (Sum Int, String)
 ppPreReg diff = case rTypeRepr diff of
-  CLM.LLVMPointerRepr _ -> case rPre diff of
-    GroundBV _ bv | 0 <- BVS.asUnsigned bv -> (1, "")
-    _ -> (0, ppSlot diff ++ ppGroundBV (rPre diff) ++ "\n")
+  CLM.LLVMPointerRepr _
+    | GroundBV _ obv <- rPreOriginal diff
+    , GroundBV _ pbv <- rPrePatched diff ->
+      case (BVS.asUnsigned obv, BVS.asUnsigned pbv) of
+        (0, 0) -> (1, "")
+        _ | obv == pbv -> (0, ppSlot diff ++ ppGroundBV (rPreOriginal diff) ++ "\n")
+        _ -> (0, ppSlot diff ++ ppGroundBV (rPreOriginal diff) ++ "(original) vs. " ++ ppGroundBV (rPrePatched diff) ++ "\n")
+
+
   _ -> (0, ppSlot diff ++ "unsupported register type in precondition pretty-printer\n")
 
 ppDiffs ::

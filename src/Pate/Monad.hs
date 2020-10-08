@@ -16,7 +16,7 @@ module Pate.Monad
   , runEquivM
   , ValidSym
   , ValidSolver
-  , ValidArch
+  , ValidArch(..)
   , EquivalenceContext(..)
   , BinaryContext(..)
   , withBinary
@@ -89,12 +89,19 @@ data EquivalenceContext sym arch where
     , rewrittenCtx :: BinaryContext sym arch
     } -> EquivalenceContext sym arch
 
-type ValidArch arch =
+class
   ( Typeable arch
   , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
   , MS.SymArchConstraints arch
   , MS.GenArchInfo MT.MemTraceK arch
-  )
+  ) => ValidArch arch where
+  funCallStable :: forall tp. MM.ArchReg arch tp -> Bool
+  -- ^ True for registers that are stable across function calls
+  -- These are assumed equivalent between the initial program states
+  funCallArg :: forall tp. MM.ArchReg arch tp -> Bool
+  -- ^ True for registers that are used as function call arguments
+  -- In addition to the stable registers, these must be proven equivalent
+  -- when comparing two program states prior to a function call
 
 
 type ValidSym sym =

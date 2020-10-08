@@ -56,8 +56,13 @@ class
   , 16 <= MC.RegAddrWidth (MC.ArchReg arch)
   ) => ArchConstraints arch where
   binArchInfo :: MBL.LoadedBinary arch (E.Elf (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
-
-
+  funCallStable :: forall tp. MC.ArchReg arch tp -> Bool
+  -- ^ True for registers that are stable across function calls
+  -- These are assumed equivalent between the initial program states
+  funCallArg :: forall tp. MC.ArchReg arch tp -> Bool
+  -- ^ True for registers that are used as function call arguments
+  -- In addition to the stable registers, these must be proven equivalent
+  -- when comparing two program states prior to a function call
 
 loadELF ::
   forall arch.
