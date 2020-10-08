@@ -49,8 +49,6 @@ import           Data.String
 import           Data.Type.Equality (testEquality)
 import           GHC.TypeLits
 import           System.IO
-import qualified Data.Sequence as Seq
-
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
@@ -79,7 +77,6 @@ import qualified Lang.Crucible.Simulator.GlobalState as CGS
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
-import qualified What4.Concrete as W4C
 import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
 import qualified What4.Protocol.Online as W4O
@@ -208,42 +205,6 @@ checkRenEquivalence (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
     (<&&>) :: Const (W4.Pred sym) tp -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
     Const p1 <&&> p2 = withSymIO $ \sym -> W4.andPred sym p1 p2
 
-
--- | Run the given action twice: once assuming the given predicate
--- and once assuming its negation.
-equivPredCases :: forall sym arch a.
-  W4.Pred sym ->
-  a ->
-  -- ^ argument for true branch
-  a ->
-  -- ^ argument for false branch
-  (a -> EquivM sym arch ()) ->
-  EquivM sym arch ()
-equivPredCases p t_arg f_arg f =
-  equivPredCases' p (f t_arg) (f f_arg)
-
--- | Run the given actions in a frame where the given predicate
--- is either assumed to be true or false
-equivPredCases' :: forall sym arch.
-  W4.Pred sym ->
-  EquivM sym arch () ->
-  -- ^ true case
-  EquivM sym arch () ->
-  -- ^ false case
-  EquivM sym arch ()
-equivPredCases' p f_t f_f = do
-  wrapAct p f_t
-  notp <- withSymIO $ \sym -> W4.notPred sym p
-  wrapAct notp f_f
-  where
-    wrapAct :: W4.Pred sym -> EquivM sym arch () -> EquivM sym arch ()
-    wrapAct p' f = case W4.asConcrete p' of
-      Just (W4C.ConcreteBool False) -> return ()
-      _ -> errorFrame $ do
-        here <- withSymIO W4.getCurrentProgramLoc
-        withSymIO $ \sym -> CB.addAssumption sym (CB.LabeledPred p' (CB.AssumptionReason here "equivPredCases"))
-        f
-
 matchTraces :: forall sym arch.
   W4.Pred sym ->
   (forall tp. MM.ArchReg arch tp -> W4.Pred sym) ->
@@ -251,72 +212,35 @@ matchTraces :: forall sym arch.
   SimulationResult sym arch ->
   SimulationResult sym arch ->
   EquivM sym arch ()
-matchTraces prevChecks_ getPred initRegState simResult simResult' =
-  go prevChecks_ (MT.memSeq (resultMem simResult)) (MT.memSeq (resultMem simResult'))
+matchTraces prevChecks getPred initRegState simResult simResult' = do
+  eqWrites <- withSymIO $ \sym -> do
+    let
+      eqRel :: forall w. CLM.LLVMPtr sym w -> CLM.LLVMPtr sym w -> IO (W4.Pred sym)
+      eqRel = llvmPtrEq sym
+    MT.equivWrites sym eqRel (resultMem simResult) (resultMem simResult')
+
+  checks <- withSymIO $ \sym -> W4.andPred sym eqWrites prevChecks
+  notChecks <- withSymIO $ \sym -> W4.notPred sym checks
+
+  checkSatisfiableWithModel satResultDescription notChecks $ \case
+    W4R.Unsat _ -> return ()
+    W4R.Unknown -> throwHere InconclusiveSAT
+    W4R.Sat fn -> do
+      memdiff <- groundTraceDiff fn (resultMem simResult) (resultMem simResult')
+      regdiff <- MM.traverseRegsWith
+        (\r initVal -> do
+            let
+              postO = regs ^. MM.boundValue r
+              postP = regs' ^. MM.boundValue r
+              equivE = getPred r
+            mkRegisterDiff fn r initVal postO postP equivE
+        )
+        initRegState
+      throwHere $ InequivalentError $ InequivalentResults memdiff regdiff
+
   where
     regs = resultRegs simResult
     regs' = resultRegs simResult'
- 
-    go ::
-      W4.Pred sym ->
-      MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
-      MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
-      EquivM sym arch ()
-    go prevChecks memTrace memTrace' = case (memTrace, memTrace') of
-      (MT.MergeOps p  traceT  traceF Seq.:<| ops, MT.MergeOps p' traceT' traceF' Seq.:<| ops') -> do
-        prevChecks' <- withSymIO $ \sym -> do
-          predsEq <- W4.eqPred sym p p'
-          W4.andPred sym prevChecks predsEq
-        equivPredCases p (traceT, traceT') (traceF, traceF') $ \(trace, trace') ->
-          go prevChecks' (trace <> ops) (trace' <> ops')
-
-      (MT.MemOp addr  dir  cond_  w  val  end Seq.:<| ops, MT.MemOp addr' dir' cond'_ w' val' end' Seq.:<| ops')
-        | Just Refl <- testEquality w w'
-        , (dir, end) == (dir', end')
-        -> do
-          cond <- memOpCondition cond_
-          cond' <- memOpCondition cond'_
-          condPred <- withSymIO $ \sym -> W4.eqPred sym cond cond'
-          prevChecks' <- withSymIO $ \sym -> W4.andPred sym prevChecks condPred
-          here <- withSymIO W4.getCurrentProgramLoc
-          let
-            condTrue :: EquivM sym arch ()
-            condTrue =  do
-              prevChecks''' <- withSymIO $ \sym -> do
-                addrPred <- llvmPtrEq sym addr addr'
-                prevChecks'' <- W4.andPred sym prevChecks' addrPred
-                eqVal <- llvmPtrEq sym val val'
-                case dir of
-                  MT.Read -> do
-                    --CB.addAssumption sym (CB.LabeledPred eqVal (CB.AssumptionReason here "Equivalent reads give equal results"))
-                    return prevChecks''
-                  MT.Write -> W4.andPred sym prevChecks'' eqVal
-              go prevChecks''' ops ops'
-
-            condFalse :: EquivM sym arch ()
-            condFalse = go prevChecks' ops ops'
-
-          equivPredCases' cond condTrue condFalse
-
-      (Empty, Empty) -> do
-        notPrevChecks <- withSymIO $ \sym -> W4.notPred sym prevChecks
-        -- TODO: addAssertion sym prevChecks ?
-        checkSatisfiableWithModel satResultDescription notPrevChecks $ \case
-          W4R.Unsat _ -> return ()
-          W4R.Unknown -> throwHere InconclusiveSAT
-          W4R.Sat fn -> do
-            memdiff <- groundTraceDiff fn (MT.memSeq (resultMem simResult)) (MT.memSeq (resultMem simResult'))
-            regdiff <- MM.traverseRegsWith
-              (\r initVal -> do
-                  let
-                    postO = regs ^. MM.boundValue r
-                    postP = regs' ^. MM.boundValue r
-                    equivE = getPred r
-                  mkRegisterDiff fn r initVal postO postP equivE
-              )
-              initRegState
-            throwHere $ InequivalentError $ InequivalentResults memdiff regdiff
-      _ -> throwHere $ InequivalentError $ InequivalentOperations (spineOf memTrace) (spineOf memTrace')
 
 
     rBlock = resultBlock simResult
@@ -541,33 +465,32 @@ concreteValue fn e
     groundBV fn ptr
 concreteValue _ e = throwHere (UnsupportedRegisterType (Some (macawRegRepr e)))
 
--- We assume the two traces have equivalent spines already.
-groundTraceDiff ::
+groundTraceDiff :: forall sym arch.
   SymGroundEvalFn sym ->
-  MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
-  MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
+  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   EquivM sym arch (MemTraceDiff arch)
-groundTraceDiff fn (MT.MemOp addr dir cond_ _ val _ :< ops) (MT.MemOp addr' _ cond'_ _ val' _ :< ops') = do
-  cond <- memOpCondition cond_
-  cond' <- memOpCondition cond'_
-  op  <- groundMemOp fn addr  cond  val
-  op' <- groundMemOp fn addr' cond' val'
-  diff <- groundTraceDiff fn ops ops'
-  pure (MemOpDiff
-    { mDirection = dir
-    , mOpOriginal = op
-    , mOpRewritten = op'
-    } :< diff)
-groundTraceDiff fn (MT.MergeOps cond traceT traceF :< ops) (MT.MergeOps cond' traceT' traceF' :< ops') = do
-  b <- execGroundFn fn cond
-  b' <- execGroundFn fn cond'
-  if b == b' then do
-    let (trace, trace') = if b then (traceT, traceT') else (traceF, traceF')
-    groundTraceDiff fn (trace <> ops) (trace' <> ops')
-  else
-    throwHere MemOpConditionMismatch
-groundTraceDiff _fn Empty Empty = pure Empty
-groundTraceDiff _ _ _ = error "The impossible happened: groundTraceDiff was called on memory traces that were not equivalent"
+groundTraceDiff fn mem1 mem2 = do
+  foot1 <- withSymIO $ \sym -> MT.traceFootprint sym (MT.memSeq mem1)
+  foot2 <- withSymIO $ \sym -> MT.traceFootprint sym (MT.memSeq mem2)
+  let foot = S.union foot1 foot2
+  (S.toList . S.fromList) <$> mapM checkFootprint (S.toList foot)
+  where
+    checkFootprint ::
+      MT.WriteFootprint sym (MM.ArchAddrWidth arch) ->
+      EquivM sym arch (MemOpDiff arch)
+    checkFootprint (MT.WriteFootprint ptr w cond) = do
+      let repr = MM.BVMemRepr w MM.BigEndian
+      val1 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
+      val2 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
+      cond' <- memOpCondition cond
+      op1  <- groundMemOp fn ptr cond' val1
+      op2  <- groundMemOp fn ptr cond' val2
+      return $ MemOpDiff { mDirection = MT.Write
+                         , mOpOriginal = op1
+                         , mOpRewritten = op2
+                         }
+
 
 groundMemOp ::
   SymGroundEvalFn sym ->

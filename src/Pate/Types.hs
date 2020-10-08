@@ -295,7 +295,7 @@ data MemOpDiff arch = MemOpDiff
   , mOpRewritten :: GroundMemOp arch
   } deriving (Eq, Ord, Show)
 
-type MemTraceDiff arch = Seq (MemOpDiff arch)
+type MemTraceDiff arch = [MemOpDiff arch]
 
 ----------------------------------
 
@@ -417,6 +417,7 @@ ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDif
 
 ppMemOpDiff :: MemOpDiff arch -> String
 ppMemOpDiff diff
+  | shouldPrintMemOp diff
   =  "\t\t" ++ ppDirectionVerb (mDirection diff) ++ " "
   ++ ppGroundMemOp (mDirection diff) (mOpOriginal diff)
   ++ (if mOpOriginal diff == mOpRewritten diff
@@ -424,6 +425,13 @@ ppMemOpDiff diff
       else " (original) vs. " ++ ppGroundMemOp (mDirection diff) (mOpRewritten diff) ++ " (rewritten)"
      )
   ++ "\n"
+ppMemOpDiff _ = ""
+
+shouldPrintMemOp :: MemOpDiff arch -> Bool
+shouldPrintMemOp diff =
+  mOpOriginal diff /= mOpRewritten diff ||
+  gCondition (mOpOriginal diff) ||
+  gCondition (mOpRewritten diff)
 
 ppGroundMemOp :: MT.MemOpDirection -> GroundMemOp arch -> String
 ppGroundMemOp dir op

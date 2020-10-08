@@ -12,11 +12,9 @@ main = do
   let cfg = TestConfig
         { testArchName = "ppc"
         , testArchProxy = PL.ValidArchProxy @PPC.PPC64
-        , testExpectFailure = [ "test-conditional"
-                              , "test-direct-calls"
+        , testExpectFailure = [ "test-direct-calls"
                               , "test-read-reorder"
                               , "test-write-reorder"
-                              , "test-write2"
                               , "test-stack-variable"
                               ]
         }

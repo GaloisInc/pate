@@ -23,9 +23,14 @@
 {-# LANGUAGE NoStarIsType #-}
 #endif
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+
+
+
 module Pate.Memory.MemTrace where
 
 import Unsafe.Coerce
+
+import           Data.Foldable
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.))
 import           Control.Monad.State
@@ -33,7 +38,11 @@ import qualified Data.BitVector.Sized as BV
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import           GHC.TypeNats (KnownNat)
+
+import           Data.Parameterized.Classes
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
@@ -82,20 +91,22 @@ data MemOpCondition sym
   = Unconditional
   | Conditional (Pred sym)
 
+
 deriving instance Show (Pred sym) => Show (MemOpCondition sym)
 
 data MemOpDirection = Read | Write deriving (Bounded, Enum, Eq, Ord, Read, Show)
 
 data MemOp sym ptrW where
   MemOp ::
+    1 <= w =>
     -- The address of the operation
     LLVMPtr sym ptrW ->
     MemOpDirection ->
     MemOpCondition sym ->
-    -- The size of the operation in bits
+    -- The size of the operation in bytes
     NatRepr w ->
     -- The value read or written during the operation
-    LLVMPtr sym w ->
+    LLVMPtr sym (8*w) ->
     Endianness ->
     MemOp sym ptrW
   MergeOps ::
@@ -108,6 +119,12 @@ instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
   Unconditional == Unconditional = True
   Conditional p == Conditional p' | Just Refl <- testEquality p p' = True
   _ == _ = False
+
+instance OrdF (SymExpr sym) => Ord (MemOpCondition sym) where
+  compare Unconditional Unconditional = EQ
+  compare (Conditional p) (Conditional p') = toOrdering $ compareF p p'
+  compare Unconditional _ = GT
+  compare _ Unconditional = LT
 
 instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
   MemOp (LLVMPointer addrR addrO) dir cond repr (LLVMPointer valR valO) end
@@ -475,6 +492,9 @@ concatPtrs sym endianness (LLVMPointer reg1 off1) (LLVMPointer _ off2) = do
       bvConcat sym off2 off1
   return $ LLVMPointer reg1 bv
 
+-- | Annotate nat proofs with the associated inequality that
+-- is being proven to provide documentation about
+-- each proof step.
 proveLeq :: forall c n m. c ~ (n <= m) => LeqProof n m -> LeqProof n m
 proveLeq prf@LeqProof = prf
 
@@ -517,12 +537,6 @@ chunkBV sym endianness w bv
         hd <- bvSelect sym sz' (knownNat @8) bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
-
-zeroSubEq :: forall p q w n. 0 ~ (w - n) => p w -> q n -> w :~: n
-zeroSubEq _w _n = unsafeCoerce Refl
-
-oneSubEq :: forall p w. 1 <= w => 1 <= (w - 1) => p w -> LeqProof 2 w
-oneSubEq w = unsafeCoerce (leqRefl w)
 
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
@@ -605,16 +619,17 @@ doMemOpInternal :: forall sym ptrW ty.
 doMemOpInternal sym dir cond ptrW = go where
   go :: LLVMPtr sym ptrW -> RegValue sym (ToCrucibleType ty') -> MemRepr ty' -> StateT (MemTraceImpl sym ptrW) IO ()
   go ptr@(LLVMPointer reg off) regVal = \case
-    repr@(BVMemRepr byteWidth endianness) -> addrWidthsArePositive ptrW $ do
+    repr@(BVMemRepr byteWidth endianness)
+      | LeqProof <- mulMono (knownNat @8) byteWidth
+      -> addrWidthsArePositive ptrW $ do
       MemTraceImpl s arr <- get
-      let s' = s Seq.:|> MemOp ptr dir cond bitWidth regVal endianness
+      let s' = s Seq.:|> MemOp ptr dir cond byteWidth regVal endianness
       arr' <- case dir of
         Read -> return arr
         Write -> do
           LLVMPointer _ rawBv <- return regVal
           liftIO $ writeMemArr sym arr ptr repr rawBv
       put $ MemTraceImpl s' arr'
-      where bitWidth = natMultiply (knownNat @8) byteWidth
     FloatMemRepr _infoRepr _endianness -> fail "reading floats not supported in doMemOpInternal"
     PackedVecMemRepr _countRepr recRepr -> addrWidthsArePositive ptrW $ do
       elemSize <- liftIO $ bvLit sym ptrWidthNatRepr (BV.mkBV ptrWidthNatRepr (memReprByteSize recRepr))
@@ -646,15 +661,9 @@ iteDeep sym cond t f = \case
   PackedVecMemRepr countRepr recRepr -> V.generateM (fromInteger (intValue countRepr)) $ \i ->
     iteDeep sym cond (t V.! i) (f V.! i) recRepr
 
-logOp :: (MonadState (MemTraceImpl sym ptrW) m) => MemOp sym ptrW -> m ()
-logOp op = modify (\(MemTraceImpl s arr) -> MemTraceImpl (s Seq.:|> op) arr)
-
 addrWidthsArePositive :: AddrWidthRepr w -> (1 <= w => a) -> a
 addrWidthsArePositive Addr32 a = a
 addrWidthsArePositive Addr64 a = a
-
-mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> LeqProof 1 (x*w)
-mulMono _x w = unsafeCoerce (leqRefl w)
 
 
 multiplicationIsMonotonic :: forall x w a. (1 <= x, 1 <= w) => NatRepr (x*w) -> (1 <= x*w => a) -> a
@@ -674,3 +683,156 @@ ioFreshConstant :: IsSymExprBuilder sym => sym -> String -> BaseTypeRepr tp -> I
 ioFreshConstant sym nm ty = do
   symbol <- ioSolverSymbol nm
   freshConstant sym symbol ty
+
+--------------------------------------------------------
+-- Axioms on type-level naturals
+
+mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> LeqProof 1 (x*w)
+mulMono _x w = unsafeCoerce (leqRefl w)
+
+zeroSubEq :: forall p q w n. 0 ~ (w - n) => p w -> q n -> w :~: n
+zeroSubEq _w _n = unsafeCoerce Refl
+
+oneSubEq :: forall p w. 1 <= w => 1 <= (w - 1) => p w -> LeqProof 2 w
+oneSubEq w = unsafeCoerce (leqRefl w)
+
+--------------------------------------------------------
+-- Equivalence check
+
+data WriteOp sym ptrW where
+  WriteOp ::
+    1 <= w =>
+    LLVMPtr sym ptrW ->
+    MemOpCondition sym ->
+    Endianness ->
+    NatRepr w ->
+    LLVMPtr sym (8*w) ->
+    WriteOp sym ptrW
+
+andCond ::
+  IsSymInterface sym =>
+  sym ->
+  MemOpCondition sym ->
+  MemOpCondition sym ->
+  IO (MemOpCondition sym)
+andCond sym cond1 cond2 = case (cond1, cond2) of
+  (Unconditional, _) -> return cond2
+  (_, Unconditional) -> return cond1
+  (Conditional cond1', Conditional cond2') ->
+    Conditional <$> andPred sym cond1' cond2'
+
+mconcatSeq :: Monoid a => Seq a -> a
+mconcatSeq = foldl' (<>) mempty
+
+-- | Extract the write operations from a given 'MemOp', adding
+-- conditions as necessary
+asWriteOps ::
+  IsSymInterface sym =>
+  sym ->
+  MemOpCondition sym ->
+  MemOp sym ptrW ->
+  IO (Seq (WriteOp sym ptrW))
+asWriteOps sym outer_cond mop = case mop of
+  MemOp ptr Write cond w val endianness -> do
+    cond' <- andCond sym outer_cond cond
+    let wop = WriteOp ptr cond' endianness w val
+    return $ Seq.singleton wop
+  MergeOps cond seqT seqF -> do
+    cond' <- andCond sym outer_cond (Conditional cond)
+    seqT' <- mconcatSeq <$> traverse (asWriteOps sym cond') seqT
+    notcond <- notPred sym cond
+    notcond' <- andCond sym outer_cond (Conditional notcond)
+    seqF' <- mconcatSeq <$> traverse (asWriteOps sym notcond') seqF
+    return $ seqT' Seq.>< seqF'
+  _ -> return $ Seq.empty
+
+-- | Collapse a 'MemTraceSeq' into a sequence of conditional write operations
+allWrites ::
+  IsSymInterface sym =>
+  sym ->
+  MemTraceSeq sym ptrW ->
+  IO (Seq (WriteOp sym ptrW))
+allWrites sym mem = mconcatSeq <$> traverse (asWriteOps sym Unconditional) mem
+
+-- | A wrapped value indicating that the given memory address has been modified
+-- by a given write sequence, with a given word size (in bytes)
+data WriteFootprint sym ptrW where
+  WriteFootprint ::
+    1 <= w =>
+    LLVMPtr sym ptrW ->
+    NatRepr w ->
+    MemOpCondition sym ->
+    WriteFootprint sym ptrW
+
+instance TestEquality (SymExpr sym) => Eq (WriteFootprint sym ptrW) where
+  (WriteFootprint (LLVMPointer reg1 off1) sz1 cond1) == (WriteFootprint (LLVMPointer reg2 off2) sz2 cond2)
+   | Just Refl <- testEquality reg1 reg2
+   , Just Refl <- testEquality off1 off2
+   , Just Refl <- testEquality sz1 sz2
+   = cond1 == cond2
+  _ == _ = False
+
+instance OrdF (SymExpr sym) => Ord (WriteFootprint sym ptrW) where
+  compare (WriteFootprint (LLVMPointer reg1 off1) sz1 cond1) (WriteFootprint (LLVMPointer reg2 off2) sz2 cond2) =
+    (toOrdering $ compareF reg1 reg2) <>
+    (toOrdering $ compareF off1 off2) <>
+    (toOrdering $ compareF sz1 sz2) <>
+    compare cond1 cond2
+
+writeOpFootprint ::
+  WriteOp sym ptrW ->
+  WriteFootprint sym ptrW
+writeOpFootprint (WriteOp ptr cond _ w _) = WriteFootprint ptr w cond
+
+traceFootprint ::
+  IsSymInterface sym =>
+  sym ->
+  MemTraceSeq sym ptrW ->
+  IO (Set (WriteFootprint sym ptrW))
+traceFootprint sym mem = do
+  writes <- (fmap writeOpFootprint) <$> allWrites sym mem
+  return $ foldl' (\a b -> Set.insert b a) mempty writes
+
+equalAt :: IsSymInterface sym =>
+  1 <= ptrW =>
+  sym ->
+  (forall w. LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) ->
+  MemTraceArr sym ptrW ->
+  MemTraceArr sym ptrW ->
+  WriteFootprint sym ptrW ->
+  IO (Pred sym)
+equalAt sym eqRel arr1 arr2 (WriteFootprint ptr w cond) = do
+  let repr = BVMemRepr w BigEndian
+  val1 <- readMemArr sym arr1 ptr repr
+  val2 <- readMemArr sym arr2 ptr repr
+  cond' <- case cond of
+    Unconditional -> return $ truePred sym
+    Conditional c -> return c
+  eqP <- eqRel val1 val2
+  impliesPred sym cond' eqP
+
+-- | Return a predicate that is true if the resulting memory
+-- states are equivalent, up to reordering of individual writes
+-- and the given equivalence relation
+equivWrites ::
+  forall sym ptrW.
+  IsSymInterface sym =>
+  1 <= ptrW =>
+  sym ->
+  (forall w. LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) ->
+  MemTraceImpl sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  IO (Pred sym)
+equivWrites sym eqRel mem1 mem2 = do
+  foot1 <- traceFootprint sym (memSeq mem1)
+  foot2 <- traceFootprint sym (memSeq mem2)
+  let foot = Set.union foot1 foot2
+  foldM addFoot (truePred sym) foot
+  where
+    addFoot ::
+      Pred sym ->
+      WriteFootprint sym ptrW ->
+      IO (Pred sym)
+    addFoot p f = do
+      p' <- equalAt sym eqRel (memArr mem1) (memArr mem2) f
+      andPred sym p p'
