@@ -699,16 +699,6 @@ oneSubEq w = unsafeCoerce (leqRefl w)
 --------------------------------------------------------
 -- Equivalence check
 
-data WriteOp sym ptrW where
-  WriteOp ::
-    1 <= w =>
-    LLVMPtr sym ptrW ->
-    MemOpCondition sym ->
-    Endianness ->
-    NatRepr w ->
-    LLVMPtr sym (8*w) ->
-    WriteOp sym ptrW
-
 andCond ::
   IsSymInterface sym =>
   sym ->
@@ -724,74 +714,79 @@ andCond sym cond1 cond2 = case (cond1, cond2) of
 mconcatSeq :: Monoid a => Seq a -> a
 mconcatSeq = foldl' (<>) mempty
 
--- | Extract the write operations from a given 'MemOp', adding
--- conditions as necessary
-asWriteOps ::
+-- | Flatten a 'MemOp' into a sequence of atomic operations
+flatMemOp ::
   IsSymInterface sym =>
   sym ->
   MemOpCondition sym ->
   MemOp sym ptrW ->
-  IO (Seq (WriteOp sym ptrW))
-asWriteOps sym outer_cond mop = case mop of
-  MemOp ptr Write cond w val endianness -> do
+  IO (Seq (MemOp sym ptrW))
+flatMemOp sym outer_cond mop = case mop of
+  MemOp ptr dir cond w val endianness -> do
     cond' <- andCond sym outer_cond cond
-    let wop = WriteOp ptr cond' endianness w val
+    let wop = MemOp ptr dir cond' w val endianness
     return $ Seq.singleton wop
   MergeOps cond seqT seqF -> do
     cond' <- andCond sym outer_cond (Conditional cond)
-    seqT' <- mconcatSeq <$> traverse (asWriteOps sym cond') seqT
+    seqT' <- mconcatSeq <$> traverse (flatMemOp sym cond') seqT
     notcond <- notPred sym cond
     notcond' <- andCond sym outer_cond (Conditional notcond)
-    seqF' <- mconcatSeq <$> traverse (asWriteOps sym notcond') seqF
+    seqF' <- mconcatSeq <$> traverse (flatMemOp sym notcond') seqF
     return $ seqT' Seq.>< seqF'
-  _ -> return $ Seq.empty
 
 -- | Collapse a 'MemTraceSeq' into a sequence of conditional write operations
-allWrites ::
+flatMemOps ::
   IsSymInterface sym =>
   sym ->
   MemTraceSeq sym ptrW ->
-  IO (Seq (WriteOp sym ptrW))
-allWrites sym mem = mconcatSeq <$> traverse (asWriteOps sym Unconditional) mem
+  IO (Seq (MemOp sym ptrW))
+flatMemOps sym mem = mconcatSeq <$> traverse (flatMemOp sym Unconditional) mem
 
 -- | A wrapped value indicating that the given memory address has been modified
 -- by a given write sequence, with a given word size (in bytes)
-data WriteFootprint sym ptrW where
-  WriteFootprint ::
+data MemFootprint sym ptrW where
+  MemFootprint ::
     1 <= w =>
     LLVMPtr sym ptrW ->
     NatRepr w ->
+    MemOpDirection ->
     MemOpCondition sym ->
-    WriteFootprint sym ptrW
+    MemFootprint sym ptrW
 
-instance TestEquality (SymExpr sym) => Eq (WriteFootprint sym ptrW) where
-  (WriteFootprint (LLVMPointer reg1 off1) sz1 cond1) == (WriteFootprint (LLVMPointer reg2 off2) sz2 cond2)
+memFootDir :: MemFootprint sym ptrW -> MemOpDirection
+memFootDir (MemFootprint _ _ dir _) = dir
+
+instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
+  (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2)
    | Just Refl <- testEquality reg1 reg2
    , Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
-   = cond1 == cond2
+   = cond1 == cond2 && dir1 == dir2
   _ == _ = False
 
-instance OrdF (SymExpr sym) => Ord (WriteFootprint sym ptrW) where
-  compare (WriteFootprint (LLVMPointer reg1 off1) sz1 cond1) (WriteFootprint (LLVMPointer reg2 off2) sz2 cond2) =
+instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
+  compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2) =
+    compare dir1 dir2 <>
     (toOrdering $ compareF reg1 reg2) <>
     (toOrdering $ compareF off1 off2) <>
     (toOrdering $ compareF sz1 sz2) <>
     compare cond1 cond2
 
-writeOpFootprint ::
-  WriteOp sym ptrW ->
-  WriteFootprint sym ptrW
-writeOpFootprint (WriteOp ptr cond _ w _) = WriteFootprint ptr w cond
+
+memOpFootprint ::
+  MemOp sym ptrW ->
+  MemFootprint sym ptrW
+memOpFootprint (MemOp ptr dir cond w _ _) = MemFootprint ptr w dir cond
+memOpFootprint _ = error "Unexpected merge op"
 
 traceFootprint ::
   IsSymInterface sym =>
   sym ->
   MemTraceSeq sym ptrW ->
-  IO (Set (WriteFootprint sym ptrW))
+  IO (Set (MemFootprint sym ptrW))
 traceFootprint sym mem = do
-  writes <- (fmap writeOpFootprint) <$> allWrites sym mem
-  return $ foldl' (\a b -> Set.insert b a) mempty writes
+  footprints <- (fmap memOpFootprint) <$> flatMemOps sym mem
+  return $ foldl' (\a b -> Set.insert b a) mempty footprints
 
 equalAt :: IsSymInterface sym =>
   1 <= ptrW =>
@@ -799,9 +794,9 @@ equalAt :: IsSymInterface sym =>
   (forall w. LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) ->
   MemTraceArr sym ptrW ->
   MemTraceArr sym ptrW ->
-  WriteFootprint sym ptrW ->
+  MemFootprint sym ptrW ->
   IO (Pred sym)
-equalAt sym eqRel arr1 arr2 (WriteFootprint ptr w cond) = do
+equalAt sym eqRel arr1 arr2 (MemFootprint ptr w _ cond) = do
   let repr = BVMemRepr w BigEndian
   val1 <- readMemArr sym arr1 ptr repr
   val2 <- readMemArr sym arr2 ptr repr
@@ -831,8 +826,9 @@ equivWrites sym eqRel mem1 mem2 = do
   where
     addFoot ::
       Pred sym ->
-      WriteFootprint sym ptrW ->
+      MemFootprint sym ptrW ->
       IO (Pred sym)
-    addFoot p f = do
+    addFoot p f | Write <- memFootDir f = do
       p' <- equalAt sym eqRel (memArr mem1) (memArr mem2) f
       andPred sym p p'
+    addFoot _ _ = return $ truePred sym

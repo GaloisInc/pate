@@ -477,16 +477,16 @@ groundTraceDiff fn mem1 mem2 = do
   (S.toList . S.fromList) <$> mapM checkFootprint (S.toList foot)
   where
     checkFootprint ::
-      MT.WriteFootprint sym (MM.ArchAddrWidth arch) ->
+      MT.MemFootprint sym (MM.ArchAddrWidth arch) ->
       EquivM sym arch (MemOpDiff arch)
-    checkFootprint (MT.WriteFootprint ptr w cond) = do
+    checkFootprint (MT.MemFootprint ptr w dir cond) = do
       let repr = MM.BVMemRepr w MM.BigEndian
       val1 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
       val2 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
       cond' <- memOpCondition cond
       op1  <- groundMemOp fn ptr cond' val1
       op2  <- groundMemOp fn ptr cond' val2
-      return $ MemOpDiff { mDirection = MT.Write
+      return $ MemOpDiff { mDirection = dir
                          , mOpOriginal = op1
                          , mOpRewritten = op2
                          }
