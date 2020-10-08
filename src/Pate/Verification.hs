@@ -482,7 +482,7 @@ groundTraceDiff fn mem1 mem2 = do
     checkFootprint (MT.MemFootprint ptr w dir cond) = do
       let repr = MM.BVMemRepr w MM.BigEndian
       val1 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
-      val2 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
+      val2 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem2) ptr repr
       cond' <- memOpCondition cond
       op1  <- groundMemOp fn ptr cond' val1
       op2  <- groundMemOp fn ptr cond' val2
