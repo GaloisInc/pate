@@ -42,6 +42,7 @@ import           Data.Foldable
 import           Data.Functor.Compose
 import qualified Data.IntervalMap as IM
 import           Data.List
+import           Data.Maybe (catMaybes)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
@@ -177,26 +178,30 @@ checkRenEquivalence ::
   forall sym arch.
   PatchPair arch ->
   EquivM sym arch ()
-checkRenEquivalence (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
+checkRenEquivalence ppair@(PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
   initRegState1 <- MM.mkRegStateM (unconstrainedRegister rBlock)
   initRegState2 <- MM.mkRegStateM (initialRegisterState rBlock' initRegState1)
 
   initRegsAsn1 <- regStateToAsn initRegState1
   initRegsAsn2 <- regStateToAsn initRegState2
+
+  
   archRepr <- archStructRepr
   
   let
     unconstrainedRegs1 = CS.assignReg archRepr initRegsAsn1 CS.emptyRegMap
     unconstrainedRegs2 = CS.assignReg archRepr initRegsAsn2 CS.emptyRegMap
   oCtx <- asks $ originalCtx . envCtx
-  simResult <- withBinary Original $ simulate oCtx rBlock unconstrainedRegs1
   rCtx <- asks $ rewrittenCtx . envCtx
+   
+  simResult <- withBinary Original $ simulate oCtx rBlock unconstrainedRegs1
   simResult' <- withBinary Rewritten $ simulate rCtx rBlock' unconstrainedRegs2
   let
     regs = resultRegs simResult
     regs' = resultRegs simResult'
 
-  preds <- MM.traverseRegsWith (\r v -> Const <$> equivPred r v (regs' ^. MM.boundValue r)) regs
+  RegEquivCheck eqPred <- mkRegEquivCheck ppair regs regs'
+  preds <- MM.traverseRegsWith (\r v -> Const <$> eqPred r v (regs' ^. MM.boundValue r)) regs
   registersEquivalent <- withSym $ \sym -> TF.foldrMF (<&&>) (W4.truePred sym) preds
   let
     getPred :: MM.ArchReg arch tp -> W4.Pred sym
@@ -387,6 +392,11 @@ isTerminalBlock pb = case MD.pblockTermStmt pb of
   MD.ParsedTranslateError{} -> True
   MD.ClassifyFailure{} -> True
 
+printTerminalStmt ::
+  MD.ParsedBlock arch ids ->
+  EquivM sym arch ()
+printTerminalStmt pb = liftIO $ putStrLn $ (show (MD.pblockTermStmt pb))
+
 externalTransitions ::
   Set (MM.ArchSegmentOff arch) ->
   MD.ParsedBlock arch ids ->
@@ -406,17 +416,6 @@ externalTransitions internalAddrs pb =
   , tgt `S.notMember` internalAddrs
   ]
 
-
--- | True if this register should be checked for equivalence
--- FIXME: Argument registers are only needed if this is a function call
--- TODO: Stack pointer need not be equivalent in general, but we need to treat stack-allocated
--- variables specially to reason about how they may be offset
-postStableReg ::
-  forall arch tp.
-  ValidArch arch =>
-  MM.ArchReg arch tp ->
-  Bool
-postStableReg reg = funCallStable reg || funCallArg reg
 -- | True if this register can be assumed equivalent at the start of
 -- a block
 -- TODO: Stack pointer need not be equivalent in general, but we need to treat stack-allocated
@@ -427,35 +426,6 @@ preStableReg ::
   MM.ArchReg arch tp ->
   Bool
 preStableReg reg = funCallStable reg || funCallArg reg
-
-equivPred ::
-  forall sym arch tp.
-  MM.ArchReg arch tp ->
-  MacawRegEntry sym tp ->
-  MacawRegEntry sym tp ->
-  EquivM sym arch (W4.Pred sym)
-equivPred
-  reg
-  (MacawRegEntry repr bv)
-  (MacawRegEntry _ bv')
-  = case repr of
-    CLM.LLVMPointerRepr _ -> case testEquality reg (MM.ip_reg @(MM.ArchReg arch)) of
-      Just Refl -> do
-        ipEq <- asks $ ipEquivalence . envCtx
-        liftIO $ ipEq bv bv'
-        -- TODO: What to do with the link register (index 1 in the current
-        -- register struct for PPC64)? Is ipEq good enough? Things to worry
-        -- about with that choice:
-        -- 1. We should probably initialize the link register somehow for both
-        -- blocks so that the register starts out equivalent. Would be sort of
-        -- a shame to declare blocks inequivalent because they both started
-        -- with 0 in their LR and didn't change that.
-        -- 2. ipEq declares the starts of blocks equivalent. blr tends to come
-        -- at the end of blocks, not the start.
-      _ | postStableReg reg -> withSymIO $ \sym -> llvmPtrEq sym bv bv'
-      _ -> withSymIO $ \sym -> return $ W4.truePred sym
-    _ -> throwHere (UnsupportedRegisterType (Some repr))
-
 
 mkRegisterDiff ::
   SymGroundEvalFn sym ->
@@ -851,6 +821,48 @@ addBlocksToMap pairs bm = foldr go bm pairs
     doAdd addr Nothing = Just addr
 
 
+-- | Predicate that is true when the provided pointer
+-- is a function call targe from the given block
+mkIPIsFunCall ::
+  forall arch sym.
+  BinaryContext sym arch ->
+  ConcreteBlock arch ->
+  EquivM sym arch (
+    CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
+    IO (W4.Pred sym)
+    )
+mkIPIsFunCall binCtx blk = do
+  CC.Some (Compose pbs) <- lookupBlocks (parsedFunctionMap binCtx) blk
+  addrs <- catMaybes <$> mapM callAddr pbs
+  withSym $ \sym -> do
+    let ret ::
+          CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
+          IO (W4.Pred sym)
+        ret ip = foldM (isCallAddr sym ip) (W4.falsePred sym) addrs
+    return ret
+  where
+    callAddr ::
+      MD.ParsedBlock arch ids ->
+      EquivM sym arch (Maybe (CLM.LLVMPtr sym (MM.ArchAddrWidth arch)))
+    callAddr pb = do
+      case MD.pblockTermStmt pb of
+        MD.ParsedCall _ (Just segOff) ->
+          case MM.segoffAsAbsoluteAddr segOff of
+            Just w -> withSymIO $ \sym -> Just <$> do
+              let conc :: ConcreteAddress arch = concreteFromAbsolute w
+              concreteToLLVM sym conc
+            Nothing -> throwError $ equivalenceError $ StrangeBlockAddress segOff
+        _ -> return Nothing
+    isCallAddr ::
+      sym ->
+      CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
+      W4.Pred sym ->
+      CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
+      IO (W4.Pred sym)
+    isCallAddr sym ip prevChecks target = do
+      check <- llvmPtrEq sym ip target
+      W4.orPred sym prevChecks check 
+
 mkIPEquivalence ::
   ( 
    w ~ MM.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
@@ -901,6 +913,67 @@ mkIPEquivalence sym (BlockMapping blockMap) = do
     (Ctx.empty `Ctx.extend` region `Ctx.extend` offset `Ctx.extend` region' `Ctx.extend` offset')
   where
     assocs = M.assocs blockMap
+
+
+data RegEquivCheck sym arch where
+  RegEquivCheck ::
+    (forall tp.
+      MM.ArchReg arch tp ->
+      MacawRegEntry sym tp ->
+      MacawRegEntry sym tp ->
+      EquivM_ sym arch (W4.Pred sym)) ->
+    RegEquivCheck sym arch
+
+mkRegEquivCheck ::
+  forall sym arch.
+  PatchPair arch ->
+  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  EquivM sym arch (RegEquivCheck sym arch)
+mkRegEquivCheck (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) regsO regsP = do
+  oCtx <- asks $ originalCtx . envCtx
+  rCtx <- asks $ rewrittenCtx . envCtx
+  isFunCallO <- mkIPIsFunCall oCtx rBlock
+  isFunCallP <- mkIPIsFunCall rCtx rBlock'
+  ipEq <- asks $ ipEquivalence . envCtx
+  return $ RegEquivCheck $ \reg (MacawRegEntry repr bvO) (MacawRegEntry _ bvP) -> do
+    case repr of
+        CLM.LLVMPointerRepr _ -> case testEquality reg ipReg of
+          Just Refl -> liftIO $ ipEq bvO bvP
+            -- TODO: What to do with the link register (index 1 in the current
+            -- register struct for PPC64)? Is ipEq good enough? Things to worry
+            -- about with that choice:
+            -- 1. We should probably initialize the link register somehow for both
+            -- blocks so that the register starts out equivalent. Would be sort of
+            -- a shame to declare blocks inequivalent because they both started
+            -- with 0 in their LR and didn't change that.
+            -- 2. ipEq declares the starts of blocks equivalent. blr tends to come
+            -- at the end of blocks, not the start.
+
+            -- TODO: Stack pointer need not be equivalent in general, but we need to treat stack-allocated
+            -- variables specially to reason about how they may be offset
+
+          -- | For registers used for function arguments, we assert equivalence when
+          -- the jump target is known to be a function call
+          _ | funCallArg reg -> withSymIO $ \sym -> do
+                ptrsEq <- llvmPtrEq sym bvO bvP
+                let
+                  MacawRegEntry _ ipO = regsO ^. MM.boundValue ipReg
+                  MacawRegEntry _ ipP = regsP ^. MM.boundValue ipReg
+                funCallO <- isFunCallO ipO
+                funCallP <- isFunCallP ipP
+                funCallsEq <- W4.isEq sym funCallO funCallP
+                eqIfFunCall <- W4.impliesPred sym funCallO ptrsEq
+                W4.andPred sym funCallsEq eqIfFunCall
+          -- | For registers that should be preserved across function calls, we
+          -- currently require that these are established to be the same.
+          _ | funCallStable reg -> withSymIO $ \sym -> llvmPtrEq sym bvO bvP
+
+          _ -> withSymIO $ \sym -> return $ W4.truePred sym
+        _ -> throwHere (UnsupportedRegisterType (Some repr))
+  where
+    ipReg = MM.ip_reg @(MM.ArchReg arch)
+    
 
 flipZipWithM :: Monad m => [a] -> [b] -> (a -> b -> m c) -> m [c]
 flipZipWithM as bs f = zipWithM f as bs
