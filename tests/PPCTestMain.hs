@@ -13,7 +13,6 @@ main = do
         { testArchName = "ppc"
         , testArchProxy = PL.ValidArchProxy @PPC.PPC64
         , testExpectFailure = [ "test-direct-calls"
-                              , "test-write-reorder"
                               , "test-stack-variable"
                               ]
         }

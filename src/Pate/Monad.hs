@@ -52,6 +52,7 @@ import qualified Data.ElfEdit as E
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Classes
 
+import qualified Lang.Crucible.Types as CT
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.Simulator as CS
@@ -83,7 +84,6 @@ data EquivalenceContext sym arch where
     { nonces :: N.NonceGenerator (ST RealWorld) ids
     , handles :: CFH.HandleAllocator
     , exprBuilder :: sym
-    , memTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , ipEquivalence :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> IO (W4.Pred sym)
     , originalCtx :: BinaryContext sym arch
     , rewrittenCtx :: BinaryContext sym arch
@@ -127,6 +127,9 @@ data EquivEnv sym arch where
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envGlobalMap :: CGS.SymGlobalState sym
+    , envStackRegion :: W4.SymNat sym
+    , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
+    , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
     } -> EquivEnv sym arch
 
 

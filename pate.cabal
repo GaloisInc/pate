@@ -115,4 +115,5 @@ executable pate-exec
   other-modules:       Pate.PPC
   hs-source-dirs:      tools/pate tools arch
   build-depends:       macaw-ppc,
-                       macaw-ppc-symbolic
+                       macaw-ppc-symbolic,
+                       dismantle-ppc

@@ -52,6 +52,7 @@ import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExt
                            , GlobalMap, MacawSimulatorState(..)
                            , ToCrucibleType, evalMacawExprExtension
                            , IsMemoryModel(..)
+                           , MacawBlockEnd(..)
                            )
 import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
 import Data.Parameterized.Context (pattern (:>), pattern Empty, Assignment)
@@ -70,7 +71,89 @@ import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
+import qualified What4.Expr.GroundEval as W4G
 import What4.Interface -- (NatRepr, knownRepr, BaseTypeRepr(..), SolverSymbol, userSymbol, freshConstant, natLit)
+
+----------------------------------
+-- Reify jump kind as a crucible global
+
+
+
+type ExitClassify arch = IntrinsicType "exit_classify" EmptyCtx
+
+data ExitClassifyImpl sym =
+  ExitClassifyImpl (SymExpr sym (BaseStructType (EmptyCtx ::> BaseBoolType ::> BaseBoolType)))
+
+instance IsExprBuilder sym => IntrinsicClass sym "exit_classify" where
+  type Intrinsic sym "exit_classify" EmptyCtx = ExitClassifyImpl sym
+  muxIntrinsic sym _ _ Empty p (ExitClassifyImpl t) (ExitClassifyImpl f) = do
+    muxed <- baseTypeIte sym p t f
+    return $ ExitClassifyImpl muxed
+  muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in exit_classify mux"
+
+exitCaseToImpl ::
+  IsSymInterface sym =>
+  sym ->
+  ExitCase ->
+  IO (ExitClassifyImpl sym)
+exitCaseToImpl sym classk = ExitClassifyImpl <$> case classk of
+  ExitCall -> mkStruct sym (Empty :> truePred sym :> falsePred sym)
+  ExitReturn -> mkStruct sym (Empty :> falsePred sym :> truePred sym)
+  ExitArch -> mkStruct sym (Empty :> truePred sym :> truePred sym)
+  ExitUnknown -> mkStruct sym (Empty :> falsePred sym :> falsePred sym)
+
+
+groundExitCase ::
+  sym ~ (ExprBuilder t s f) =>
+  W4G.GroundEvalFn t ->
+  ExitClassifyImpl sym ->
+  IO ExitCase
+groundExitCase (W4G.GroundEvalFn fn) (ExitClassifyImpl e) = do
+  (Empty :> W4G.GVW b1 :> W4G.GVW b2) <- fn e
+  return $ case (b1, b2) of
+    (True, False) -> ExitCall
+    (False, True) -> ExitReturn
+    (True, True) -> ExitArch
+    (False, False) -> ExitUnknown
+
+data ExitCase = ExitCall | ExitReturn | ExitArch | ExitUnknown
+  deriving (Eq, Ord, Show)
+
+blockEndToExitCase :: MacawBlockEnd arch -> ExitCase
+blockEndToExitCase blkend = case blkend of
+  MacawBlockEndCall -> ExitCall
+  MacawBlockEndReturn -> ExitReturn
+  MacawBlockEndArch -> ExitArch
+  _ -> ExitUnknown
+
+
+exitCases ::
+  IsSymInterface sym =>
+  sym ->
+  ExitClassifyImpl sym ->
+  BaseTypeRepr tp ->
+  (ExitCase -> IO (SymExpr sym tp)) ->
+  IO (SymExpr sym tp)
+exitCases sym (ExitClassifyImpl jclass) repr f = do
+  let
+    mkCase classk = do
+      ExitClassifyImpl jclass' <- exitCaseToImpl sym classk
+      test <- isEq sym jclass jclass'
+      expr <- f classk
+      return (test, expr)
+
+  (testUnknown, exprUnknown) <- mkCase ExitUnknown
+  (testCall, exprCall) <- mkCase ExitCall
+  (testReturn, exprReturn) <- mkCase ExitReturn
+  (testArch, exprArch) <- mkCase ExitArch
+
+  default_ <- ioFreshConstant sym "impossible" repr
+
+  unknownCase <- baseTypeIte sym testUnknown exprUnknown default_
+  callCase <- baseTypeIte sym testCall exprCall unknownCase
+  returnCase <- baseTypeIte sym testReturn exprReturn callCase
+  baseTypeIte sym testArch exprArch returnCase
+
 
 
 -- | Like 'macawExtensions', but with an alternative memory model that records
@@ -80,12 +163,15 @@ macawTraceExtensions ::
   (IsSymInterface sym, KnownNat (ArchAddrWidth arch), sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn sym (MemTrace arch) arch ->
   GlobalVar (MemTrace arch) ->
+  GlobalVar (ExitClassify arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
-macawTraceExtensions archStmtFn mvar globs = ExtensionImpl
-  { extensionEval = evalMacawExprExtension
-  , extensionExec = execMacawStmtExtension archStmtFn mvar globs
-  }
+macawTraceExtensions archStmtFn mvar evar globs =
+  ExtensionImpl
+    { extensionEval = evalMacawExprExtension
+    , extensionExec = execMacawStmtExtension archStmtFn mvar evar globs
+    }
+
 
 data MemOpCondition sym
   = Unconditional
@@ -172,6 +258,12 @@ mkMemTraceVar ::
   IO (GlobalVar (MemTrace arch))
 mkMemTraceVar ha = freshGlobalVar ha (pack "llvm_memory_trace") knownRepr
 
+mkExitClassVar ::
+  forall arch.
+  HandleAllocator ->
+  IO (GlobalVar (ExitClassify arch))
+mkExitClassVar ha = freshGlobalVar ha (pack "exit_classify") knownRepr
+
 initMemTrace ::
   IsSymInterface sym =>
   sym ->
@@ -183,6 +275,14 @@ initMemTrace sym Addr32 = do
 initMemTrace sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   return $ MemTraceImpl mempty arr
+
+initExitClass ::
+  IsSymInterface sym =>
+  sym ->
+  IO (ExitClassifyImpl sym)
+initExitClass sym = do
+  bs <- ioFreshConstant sym "InitExitClass" knownRepr
+  return $ ExitClassifyImpl bs
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
 equalPrefixOf s1 s2 = go s1 s2 Seq.empty
@@ -216,6 +316,7 @@ instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
 
 memTraceIntrinsicTypes :: IsSymInterface (ExprBuilder t st fs) => IntrinsicTypes (ExprBuilder t st fs)
 memTraceIntrinsicTypes = id
+  . MapF.insert (knownSymbol :: SymbolRepr "exit_classify") IntrinsicMuxFn
   . MapF.insert (knownSymbol :: SymbolRepr "memory_trace") IntrinsicMuxFn
   . MapF.insert (knownSymbol :: SymbolRepr "LLVM_pointer") IntrinsicMuxFn
   $ MapF.empty
@@ -226,9 +327,10 @@ execMacawStmtExtension ::
   forall sym arch t st fs. (IsSymInterface sym, KnownNat (ArchAddrWidth arch), sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn sym (MemTrace arch) arch ->
   GlobalVar (MemTrace arch) ->
+  GlobalVar (ExitClassify arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   MacawTraceEvalStmtFunc sym arch
-execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar globs stmt
+execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar jvar globs stmt
   = case stmt of
     MacawReadMem addrWidth memRepr addr
       -> liftToCrucibleState mvar $ \sym ->
@@ -254,6 +356,11 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar globs stmt
 
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
     MacawInstructionStart{} -> \cst -> pure ((), cst)
+
+    MacawBlockEnd blkend -> liftToCrucibleState jvar $ \sym -> do
+      let classk = blockEndToExitCase blkend
+      eImpl <- liftIO $ exitCaseToImpl sym classk
+      put eImpl
 
     PtrEq w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
       regEq <- natEq sym reg reg'

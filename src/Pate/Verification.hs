@@ -110,11 +110,15 @@ verifyPairs elf elf' blockMap pPairs = do
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
     eval <- lift (MS.withArchEval vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
+    evar <- lift (MT.mkExitClassVar @arch ha)
     initMem <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+    initEClass <- liftIO $ MT.initExitClass sym
     proc <- liftIO $ CBO.withSolverProcess sym return
     ipEq <- liftIO $ mkIPEquivalence sym (addBlocksToMap pPairs blockMap)
+    stackRegion <- liftIO $ W4.natLit sym 1
     let
-      exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch)
+      exts = MT.macawTraceExtensions eval model evar (trivialGlobalMap @_ @arch)
+
       oCtx = BinaryContext
         { binary = PB.loadedBinary elf
         , parsedFunctionMap = pfm
@@ -127,12 +131,14 @@ verifyPairs elf elf' blockMap pPairs = do
         { nonces = gen
         , handles = ha
         , exprBuilder = sym
-        , memTraceVar = model
         , ipEquivalence = ipEq
         , originalCtx = oCtx
         , rewrittenCtx = rCtx
         
         }
+      globs =
+        CGS.insertGlobal evar initEClass
+        $ CGS.insertGlobal model initMem CGS.emptyGlobals
       env = EquivEnv
         { envSym = sym
         , envProc = proc
@@ -140,7 +146,10 @@ verifyPairs elf elf' blockMap pPairs = do
         , envCtx = ctxt
         , envArchVals = vals
         , envExtensions = exts
-        , envGlobalMap = CGS.insertGlobal model initMem CGS.emptyGlobals
+        , envGlobalMap = globs
+        , envStackRegion = stackRegion
+        , envMemTraceVar = model
+        , envExitClassVar = evar
         }
     
     liftIO $ do
@@ -178,76 +187,70 @@ checkRenEquivalence ::
   forall sym arch.
   PatchPair arch ->
   EquivM sym arch ()
-checkRenEquivalence ppair@(PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
-  initRegState1 <- MM.mkRegStateM (unconstrainedRegister rBlock)
-  initRegState2 <- MM.mkRegStateM (initialRegisterState rBlock' initRegState1)
+checkRenEquivalence (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = do
+  initRegStateO <- MM.mkRegStateM (unconstrainedRegister rBlock)
+  initRegStateP <- MM.mkRegStateM (initialRegisterState rBlock' initRegStateO)
 
-  initRegsAsn1 <- regStateToAsn initRegState1
-  initRegsAsn2 <- regStateToAsn initRegState2
-
-  
-  archRepr <- archStructRepr
-  
-  let
-    unconstrainedRegs1 = CS.assignReg archRepr initRegsAsn1 CS.emptyRegMap
-    unconstrainedRegs2 = CS.assignReg archRepr initRegsAsn2 CS.emptyRegMap
   oCtx <- asks $ originalCtx . envCtx
   rCtx <- asks $ rewrittenCtx . envCtx
    
-  simResult <- withBinary Original $ simulate oCtx rBlock unconstrainedRegs1
-  simResult' <- withBinary Rewritten $ simulate rCtx rBlock' unconstrainedRegs2
+  simResult <- withBinary Original $ simulate oCtx rBlock initRegStateO
+  simResult' <- withBinary Rewritten $ simulate rCtx rBlock' initRegStateP
   let
     regs = resultRegs simResult
     regs' = resultRegs simResult'
 
-  RegEquivCheck eqPred <- mkRegEquivCheck ppair regs regs'
-  preds <- MM.traverseRegsWith (\r v -> Const <$> eqPred r v (regs' ^. MM.boundValue r)) regs
-  registersEquivalent <- withSym $ \sym -> TF.foldrMF (<&&>) (W4.truePred sym) preds
-  let
-    getPred :: MM.ArchReg arch tp -> W4.Pred sym
-    getPred r =
-      let Const v = preds ^. MM.boundValue r
-      in v
+  regEq@(RegEquivCheck eqPred) <- mkRegEquivCheck simResult simResult'
+  registersEquivalent <- withSymIO $ \sym -> MT.exitCases sym (resultExit simResult) W4.knownRepr $ \ecase -> do
+    preds <- MM.traverseRegsWith (\r v -> Const <$> eqPred ecase r v (regs' ^. MM.boundValue r)) regs
+    TF.foldrMF (\(Const p1) p2 -> W4.andPred sym p1 p2) (W4.truePred sym) preds
 
   withSymIO $ \sym -> CB.resetAssumptionState sym
-  matchTraces registersEquivalent getPred initRegState1 initRegState2 simResult simResult'
+  matchTraces registersEquivalent regEq simResult simResult'
   where
-    (<&&>) :: Const (W4.Pred sym) tp -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
-    Const p1 <&&> p2 = withSymIO $ \sym -> W4.andPred sym p1 p2
+
 
 matchTraces :: forall sym arch.
   W4.Pred sym ->
-  (forall tp. MM.ArchReg arch tp -> W4.Pred sym) ->
-  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
-   MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  RegEquivCheck sym arch ->
   SimulationResult sym arch ->
   SimulationResult sym arch ->
   EquivM sym arch ()
-matchTraces prevChecks getPred initRegsO initRegsP simResult simResult' = do
+matchTraces prevChecks regEq simResult simResult' = do
   eqWrites <- withSymIO $ \sym -> do
     let
       eqRel :: forall w. CLM.LLVMPtr sym w -> CLM.LLVMPtr sym w -> IO (W4.Pred sym)
       eqRel = llvmPtrEq sym
     MT.equivWrites sym eqRel (resultMem simResult) (resultMem simResult')
 
-  checks <- withSymIO $ \sym -> W4.andPred sym eqWrites prevChecks
+  eqExits <- withSymIO $ \sym -> do
+    let
+      MT.ExitClassifyImpl exitO = resultExit simResult
+      MT.ExitClassifyImpl exitP = resultExit simResult'
+    W4.isEq sym exitO exitP
+
+  checks <- withSymIO $ \sym -> do
+    eqState <- W4.andPred sym eqWrites eqExits
+    W4.andPred sym eqState prevChecks
   notChecks <- withSymIO $ \sym -> W4.notPred sym checks
 
   checkSatisfiableWithModel satResultDescription notChecks $ \case
     W4R.Unsat _ -> return ()
     W4R.Unknown -> throwHere InconclusiveSAT
-    W4R.Sat fn -> do
+    W4R.Sat fn@(SymGroundEvalFn fn') -> do
+      let RegEquivCheck eqPred = regEq
+      ecase <- liftIO $ MT.groundExitCase fn' (resultExit simResult)
       memdiff <- groundTraceDiff fn (resultMem simResult) (resultMem simResult')
       regdiff <- MM.traverseRegsWith
         (\r preO -> do
             let
-              preP = initRegsP ^. MM.boundValue r
+              preP = (resultPreRegs simResult') ^. MM.boundValue r
               postO = regs ^. MM.boundValue r
               postP = regs' ^. MM.boundValue r
-              equivE = getPred r
+            equivE <- liftIO $ eqPred ecase r postO postP
             mkRegisterDiff fn r preO preP postO postP equivE
         )
-        initRegsO
+        (resultPreRegs simResult)
       throwHere $ InequivalentError $ InequivalentResults memdiff regdiff
 
   where
@@ -260,6 +263,8 @@ matchTraces prevChecks getPred initRegsO initRegsP simResult simResult' = do
     satResultDescription = ""
       ++ "equivalence of the blocks at " ++ show (concreteAddress rBlock) ++ " in the original binary "
       ++ "and at " ++ show (concreteAddress rBlock') ++ " in the rewritten binary"
+
+
 
 evalCFG ::
   CS.RegMap sym tp ->
@@ -292,17 +297,19 @@ initSimContext = withValid $ withSym $ \sym -> do
 
 data SimulationResult sym arch where
   SimulationResult ::
-    { resultRegs :: MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+    { resultPreRegs :: MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+    , resultRegs :: MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
     , resultMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+    , resultExit :: MT.ExitClassifyImpl sym
     , resultBlock :: ConcreteBlock arch
     } -> SimulationResult sym arch
 
 simulate ::
   BinaryContext sym arch ->
   ConcreteBlock arch ->
-  CS.RegMap sym (MS.MacawFunctionArgs arch) ->
+  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
   EquivM sym arch (SimulationResult sym arch)
-simulate binCtx rb regs = errorFrame $ do
+simulate binCtx rb preRegs = errorFrame $ do
   -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
   CC.SomeCFG cfg <- do
     CC.Some (Compose pbs_) <- lookupBlocks (parsedFunctionMap binCtx) rb
@@ -350,10 +357,12 @@ simulate binCtx rb regs = errorFrame $ do
     ha <- asks $ handles . envCtx
     liftIO $ MS.mkBlockSliceCFG fns ha (W4L.OtherPos . fromString . show) pb nonTerminal terminal killEdges
   -- TODO: constrain the IP and LNK register
+  preRegsAsn <- regStateToAsn preRegs
+  archRepr <- archStructRepr
+  let regs = CS.assignReg archRepr preRegsAsn CS.emptyRegMap
   cres <- evalCFG regs cfg
-  mem <- asks $ memTraceVar . envCtx
-  (resregs, memTrace) <- getGPValueAndTrace mem cres
-  return $ SimulationResult resregs memTrace rb
+  (postRegs, memTrace, jumpClass) <- getGPValueAndTrace cres
+  return $ SimulationResult preRegs postRegs memTrace jumpClass rb
 
 execGroundFn ::
   SymGroundEvalFn sym  -> 
@@ -418,14 +427,16 @@ externalTransitions internalAddrs pb =
 
 -- | True if this register can be assumed equivalent at the start of
 -- a block
--- TODO: Stack pointer need not be equivalent in general, but we need to treat stack-allocated
--- variables specially to reason about how they may be offset
+-- FIXME: Stack pointers need not be equal in general
+-- FIXME: argument registers are only equal for blocks that start a function
 preStableReg ::
   forall arch tp.
   ValidArch arch =>
   MM.ArchReg arch tp ->
   Bool
-preStableReg reg = funCallStable reg || funCallArg reg
+preStableReg reg | Just _ <- testEquality reg (MM.sp_reg @(MM.ArchReg arch)) = True
+preStableReg reg = funCallArg reg || funCallStable reg
+
 
 mkRegisterDiff ::
   SymGroundEvalFn sym ->
@@ -533,20 +544,25 @@ trivialGlobalMap _ _ reg off = pure (CLM.LLVMPointer reg off)
 
 -- TODO: What should happen if the Pred sym in a PartialRes in pres or pres' is false?
 getGPValueAndTrace ::
-  CS.GlobalVar (MT.MemTrace arch) ->
+  forall sym arch p ext.
   CS.ExecResult p sym ext (CS.RegEntry sym (MS.ArchRegStruct arch)) ->
   EquivM sym arch
     ( MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+    , MT.ExitClassifyImpl sym
     )
-getGPValueAndTrace mem (CS.FinishedResult _ pres) = case pres ^. CS.partialValue of
-  CS.GlobalPair val globs -> case CGS.lookupGlobal mem globs of
-    Just mt -> withValid $ do
-      val' <- structToRegState val
-      return $ (val', mt)
-    Nothing -> throwError undefined
-getGPValueAndTrace _mem (CS.AbortedResult _ ar) = throwHere . SymbolicExecutionFailed . ppAbortedResult $ ar
-getGPValueAndTrace _mem (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "timeout")
+getGPValueAndTrace (CS.FinishedResult _ pres) = do
+  mem <- asks envMemTraceVar
+  eclass <- asks envExitClassVar
+  case pres ^. CS.partialValue of
+    CS.GlobalPair val globs
+      | Just mt <- CGS.lookupGlobal mem globs
+      , Just jc <- CGS.lookupGlobal eclass globs -> withValid $ do
+        val' <- structToRegState @sym @arch val
+        return $ (val', mt, jc)
+    _ -> throwError undefined
+getGPValueAndTrace (CS.AbortedResult _ ar) = throwHere . SymbolicExecutionFailed . ppAbortedResult $ ar
+getGPValueAndTrace (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "timeout")
 
 
 structToRegState :: forall sym arch.
@@ -567,6 +583,7 @@ regStateToAsn regs = do
     TFC.fmapFC (\r -> regs ^. MM.boundValue r) allRegsAsn
 
 
+
 unconstrainedRegister ::
   forall sym arch tp.
   ConcreteBlock arch ->
@@ -577,18 +594,25 @@ unconstrainedRegister blk reg = do
   let
     symbol = MS.crucGenArchRegName archFs reg
     repr = MM.typeRepr reg
-  case testEquality reg (MM.ip_reg @(MM.ArchReg arch)) of
-    Just Refl -> withSymIO $ \sym -> do
-      ptr <- concreteToLLVM sym $ concreteAddress blk
-      return $ MacawRegEntry (MS.typeToCrucible repr) ptr
-    _ -> case repr of
-      MM.BVTypeRepr n ->
-        withSymIO $ \sym -> do
-        bv <- W4.freshConstant sym symbol (W4.BaseBVRepr n)
-        -- TODO: This fixes the region to 0. Is that okay?
-        ptr <- CLM.llvmPointer_bv sym bv
+  case repr of
+    -- | Instruction pointers are exactly the start of the block
+    _ | Just Refl <- testEquality reg (MM.ip_reg @(MM.ArchReg arch)) ->
+      withSymIO $ \sym -> do
+        ptr <- concreteToLLVM sym $ concreteAddress blk
         return $ MacawRegEntry (MS.typeToCrucible repr) ptr
-      _ -> throwHere (UnsupportedRegisterType (Some (MS.typeToCrucible repr)))
+    -- | Stack pointer is in a unique region
+    _ | Just Refl <- testEquality reg (MM.sp_reg @(MM.ArchReg arch)) -> do
+        stackRegion <- asks envStackRegion
+        withSymIO $ \sym -> do
+          bv <- W4.freshConstant sym symbol W4.knownRepr
+          let ptr = CLM.LLVMPointer stackRegion bv
+          return $ MacawRegEntry (MS.typeToCrucible repr) ptr
+    MM.BVTypeRepr n -> withSymIO $ \sym -> do
+      bv <- W4.freshConstant sym symbol (W4.BaseBVRepr n)
+      -- TODO: This fixes the region to 0. Is that okay?
+      ptr <- CLM.llvmPointer_bv sym bv
+      return $ MacawRegEntry (MS.typeToCrucible repr) ptr
+    _ -> throwHere (UnsupportedRegisterType (Some (MS.typeToCrucible repr)))
 
 initialRegisterState ::
   ConcreteBlock arch ->
@@ -821,48 +845,6 @@ addBlocksToMap pairs bm = foldr go bm pairs
     doAdd addr Nothing = Just addr
 
 
--- | Predicate that is true when the provided pointer
--- is a function call targe from the given block
-mkIPIsFunCall ::
-  forall arch sym.
-  BinaryContext sym arch ->
-  ConcreteBlock arch ->
-  EquivM sym arch (
-    CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-    IO (W4.Pred sym)
-    )
-mkIPIsFunCall binCtx blk = do
-  CC.Some (Compose pbs) <- lookupBlocks (parsedFunctionMap binCtx) blk
-  addrs <- catMaybes <$> mapM callAddr pbs
-  withSym $ \sym -> do
-    let ret ::
-          CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-          IO (W4.Pred sym)
-        ret ip = foldM (isCallAddr sym ip) (W4.falsePred sym) addrs
-    return ret
-  where
-    callAddr ::
-      MD.ParsedBlock arch ids ->
-      EquivM sym arch (Maybe (CLM.LLVMPtr sym (MM.ArchAddrWidth arch)))
-    callAddr pb = do
-      case MD.pblockTermStmt pb of
-        MD.ParsedCall _ (Just segOff) ->
-          case MM.segoffAsAbsoluteAddr segOff of
-            Just w -> withSymIO $ \sym -> Just <$> do
-              let conc :: ConcreteAddress arch = concreteFromAbsolute w
-              concreteToLLVM sym conc
-            Nothing -> throwError $ equivalenceError $ StrangeBlockAddress segOff
-        _ -> return Nothing
-    isCallAddr ::
-      sym ->
-      CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-      W4.Pred sym ->
-      CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-      IO (W4.Pred sym)
-    isCallAddr sym ip prevChecks target = do
-      check <- llvmPtrEq sym ip target
-      W4.orPred sym prevChecks check 
-
 mkIPEquivalence ::
   ( 
    w ~ MM.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
@@ -918,28 +900,25 @@ mkIPEquivalence sym (BlockMapping blockMap) = do
 data RegEquivCheck sym arch where
   RegEquivCheck ::
     (forall tp.
+      MT.ExitCase ->
       MM.ArchReg arch tp ->
       MacawRegEntry sym tp ->
       MacawRegEntry sym tp ->
-      EquivM_ sym arch (W4.Pred sym)) ->
+      IO (W4.Pred sym)) ->
     RegEquivCheck sym arch
 
 mkRegEquivCheck ::
   forall sym arch.
-  PatchPair arch ->
-  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
-  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  SimulationResult sym arch ->
+  SimulationResult sym arch ->
   EquivM sym arch (RegEquivCheck sym arch)
-mkRegEquivCheck (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) regsO regsP = do
-  oCtx <- asks $ originalCtx . envCtx
-  rCtx <- asks $ rewrittenCtx . envCtx
-  isFunCallO <- mkIPIsFunCall oCtx rBlock
-  isFunCallP <- mkIPIsFunCall rCtx rBlock'
+mkRegEquivCheck simResultO simResultP = do
   ipEq <- asks $ ipEquivalence . envCtx
-  return $ RegEquivCheck $ \reg (MacawRegEntry repr bvO) (MacawRegEntry _ bvP) -> do
+
+  withSymIO $ \sym -> return $ RegEquivCheck $ \ecase reg (MacawRegEntry repr bvO) (MacawRegEntry _ bvP) -> do
     case repr of
         CLM.LLVMPointerRepr _ -> case testEquality reg ipReg of
-          Just Refl -> liftIO $ ipEq bvO bvP
+          Just Refl -> ipEq bvO bvP
             -- TODO: What to do with the link register (index 1 in the current
             -- register struct for PPC64)? Is ipEq good enough? Things to worry
             -- about with that choice:
@@ -955,22 +934,23 @@ mkRegEquivCheck (PatchPair { pOrig = rBlock, pPatched =  rBlock' }) regsO regsP 
 
           -- | For registers used for function arguments, we assert equivalence when
           -- the jump target is known to be a function call
-          _ | funCallArg reg -> withSymIO $ \sym -> do
-                ptrsEq <- llvmPtrEq sym bvO bvP
+          _ | funCallArg reg -> case ecase of
+                MT.ExitCall -> llvmPtrEq sym bvO bvP
+                _ -> return $ W4.truePred sym
+          -- | For returns, we only require that the registers
+          _ | funCallStable reg -> do
                 let
-                  MacawRegEntry _ ipO = regsO ^. MM.boundValue ipReg
-                  MacawRegEntry _ ipP = regsP ^. MM.boundValue ipReg
-                funCallO <- isFunCallO ipO
-                funCallP <- isFunCallP ipP
-                funCallsEq <- W4.isEq sym funCallO funCallP
-                eqIfFunCall <- W4.impliesPred sym funCallO ptrsEq
-                W4.andPred sym funCallsEq eqIfFunCall
-          -- | For registers that should be preserved across function calls, we
-          -- currently require that these are established to be the same.
-          _ | funCallStable reg -> withSymIO $ \sym -> llvmPtrEq sym bvO bvP
+                  MacawRegEntry _ preBvO = (resultPreRegs simResultO) ^. MM.boundValue reg
+                  MacawRegEntry _ preBvP = (resultPreRegs simResultP) ^. MM.boundValue reg
+                case ecase of
+                  MT.ExitReturn -> do
+                    eqO <- llvmPtrEq sym preBvO bvO
+                    eqP <- llvmPtrEq sym preBvP bvP
+                    W4.andPred sym eqO eqP
+                  _ -> return $ W4.truePred sym
 
-          _ -> withSymIO $ \sym -> return $ W4.truePred sym
-        _ -> throwHere (UnsupportedRegisterType (Some repr))
+          _ -> return $ W4.truePred sym
+        _ -> error "Unsupported register type"
   where
     ipReg = MM.ip_reg @(MM.ArchReg arch)
     
