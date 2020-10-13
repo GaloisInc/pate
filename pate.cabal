@@ -9,8 +9,8 @@ synopsis:            A tool for building assurance for patches applied to binari
 -- bug-reports:
 license:             BSD-3-Clause
 license-file:        LICENSE
-author:              Tristan Ravitch
-maintainer:          tristan@galois.com
+author:              Tristan Ravitch, Daniel Matichuk
+maintainer:          tristan@galois.com, dmatichuk@galois.com
 -- copyright:
 category:            Verification
 build-type:          Simple
