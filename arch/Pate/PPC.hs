@@ -8,6 +8,7 @@ module Pate.PPC
   ( PPC.PPC64 )
 where
 
+import           Data.Type.Equality
 import qualified Pate.Binary as PB
 import qualified Pate.Monad as PM
 import qualified Data.Macaw.PPC as PPC
@@ -29,3 +30,6 @@ instance PM.ValidArch PPC.PPC64 where
   funCallArg reg = case reg of
     PPC.PPC_GP (PPC.GPR i) -> 3 <= i && i <= 10
     _ -> False
+  funCallIP reg = case reg of
+    PPC.PPC_LNK -> Just Refl
+    _ -> Nothing

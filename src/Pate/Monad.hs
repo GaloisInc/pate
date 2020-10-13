@@ -8,6 +8,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -52,16 +53,15 @@ import qualified Data.ElfEdit as E
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Classes
 
-import qualified Lang.Crucible.Types as CT
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 import qualified Lang.Crucible.FunctionHandle as CFH
-import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic as MS
 
 
@@ -84,7 +84,6 @@ data EquivalenceContext sym arch where
     { nonces :: N.NonceGenerator (ST RealWorld) ids
     , handles :: CFH.HandleAllocator
     , exprBuilder :: sym
-    , ipEquivalence :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> CLM.LLVMPtr sym (MM.ArchAddrWidth arch) -> IO (W4.Pred sym)
     , originalCtx :: BinaryContext sym arch
     , rewrittenCtx :: BinaryContext sym arch
     } -> EquivalenceContext sym arch
@@ -102,6 +101,8 @@ class
   -- ^ True for registers that are used as function call arguments
   -- In addition to the stable registers, these must be proven equivalent
   -- when comparing two program states prior to a function call
+  funCallIP :: forall tp. MM.ArchReg arch tp -> Maybe (tp :~: (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch))))
+  -- ^ Registers used to store an instruction pointer (i.e. the link register on PPC)
 
 
 type ValidSym sym =
@@ -130,6 +131,7 @@ data EquivEnv sym arch where
     , envStackRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
+    , envBlockMapping :: BlockMapping arch
     } -> EquivEnv sym arch
 
 
@@ -150,7 +152,7 @@ withBinary ::
   EquivM sym arch a
 withBinary wb f = local (\env -> env { envWhichBinary = Just wb }) f
 
-withValid ::
+withValid :: forall a sym arch.
   (forall scope solver fs.
     ValidSolver sym scope solver fs =>
     EquivM sym arch a) ->
@@ -158,6 +160,8 @@ withValid ::
 withValid f = do
   env <- ask
   withValidEnv env $ f
+
+
 
 withValidEnv ::
   EquivEnv sym arch ->

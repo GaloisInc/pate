@@ -16,7 +16,6 @@
 module Pate.Types
   ( PatchPair(..)
   , ConcreteBlock(..)
-  , blockSize
   , BlockMapping(..)
   , ConcreteAddress(..)
   , absoluteAddress
@@ -137,11 +136,11 @@ newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (Concrete
 
 data ConcreteBlock arch =
   ConcreteBlock { concreteAddress :: ConcreteAddress arch
-                , concreteBlockSize :: Int
+                -- , concreteBlockSize :: Int
                 }
 
-blockSize :: ConcreteBlock arch -> Int
-blockSize = concreteBlockSize
+--blockSize :: ConcreteBlock arch -> Int
+--blockSize = concreteBlockSize
 
 absoluteAddress :: (MM.MemWidth (MM.ArchAddrWidth arch)) => ConcreteAddress arch -> MM.MemWord (MM.ArchAddrWidth arch)
 absoluteAddress (ConcreteAddress memAddr) = absAddr
@@ -332,12 +331,12 @@ equivSuccess :: EquivalenceStatistics -> Bool
 equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
 
 data InequivalenceResult arch
-  = InequivalentResults (MemTraceDiff arch) (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
+  = InequivalentResults (MemTraceDiff arch) MT.ExitCase (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
   | InequivalentOperations MemTraceSpine MemTraceSpine
 
 instance Show (InequivalenceResult arch) where
   show r = case r of
-    InequivalentResults _ _ -> "InequivalentResults"
+    InequivalentResults _ _ _ -> "InequivalentResults"
     InequivalentOperations _ _ -> "InequivalentOperations"
 
 ----------------------------------
@@ -363,9 +362,10 @@ data InnerEquivalenceError arch
   | PrunedBlockIsEmpty
   | MemOpConditionMismatch
   | UnexpectedBlockKind String
+  | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
   | EquivCheckFailure String -- generic error
   | InequivalentError (InequivalenceResult arch)
-deriving instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (InnerEquivalenceError arch)
+deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =
   EquivalenceError
@@ -373,14 +373,14 @@ data EquivalenceError arch =
     , errStackTrace :: Maybe CallStack
     , errEquivError :: InnerEquivalenceError arch
     }
-instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (EquivalenceError arch) where
+instance MS.SymArchConstraints arch => Show (EquivalenceError arch) where
   show e = unlines $ catMaybes $
     [ fmap (\b -> "For " ++ show b ++ " binary") (errWhichBinary e)
     , fmap (\s -> "At " ++ prettyCallStack s) (errStackTrace e)
     , Just (show (errEquivError e))
     ]
 
-instance (Typeable arch, MM.MemWidth (MM.ArchAddrWidth arch)) => Exception (EquivalenceError arch)
+instance (Typeable arch, MS.SymArchConstraints arch) => Exception (EquivalenceError arch)
 
 equivalenceError :: InnerEquivalenceError arch -> EquivalenceError arch
 equivalenceError err = EquivalenceError
@@ -399,11 +399,11 @@ ppEquivalenceStatistics (EquivalenceStatistics checked equiv err) = unlines
   ]
 
 ppEquivalenceError ::
-  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  MS.SymArchConstraints arch =>
   ShowF (MM.ArchReg arch) =>
   EquivalenceError arch -> String
 ppEquivalenceError err | (InequivalentError ineq)  <- errEquivError err = case ineq of
-  InequivalentResults traceDiff regDiffs -> "x\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
+  InequivalentResults traceDiff exitCase regDiffs -> "x\n" ++ show exitCase ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
   InequivalentOperations trace trace' -> concat
     [ "x\n\tMismatched memory operations:\n\t\t"
     , ppMemTraceSpine trace
@@ -553,8 +553,8 @@ ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = ""
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch -> String
 ppBlock b = ""
   -- 100k oughta be enough for anybody
-  ++ pad 6 (show (blockSize b))
-  ++ " bytes at "
+  -- ++ pad 6 (show (blockSize b))
+  -- ++ " bytes at "
   ++ show (absoluteAddress (concreteAddress b))
 
 ppAbortedResult :: CS.AbortedResult sym ext -> String

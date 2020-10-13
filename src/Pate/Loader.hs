@@ -43,7 +43,7 @@ instance (Num a, Show a, PrintfArg a) => Show (Hex a) where
 instance (Read a) => Read (Hex a) where
   readsPrec i s = [ (Hex a, s') | (a, s') <- readsPrec i s ]
 
-type BlockData = (Hex Word64, Word64)
+type BlockData = Hex Word64
 
 data PatchData =
   PatchData { patchPairs :: [(BlockData, BlockData)]
@@ -55,10 +55,10 @@ hexToAddr :: ValidArchProxy arch -> Hex Word64 -> PT.ConcreteAddress arch
 hexToAddr ValidArchProxy (Hex w) = PT.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
 
 unpackBlockData :: ValidArchProxy arch -> BlockData -> PT.ConcreteBlock arch
-unpackBlockData proxy (start, size) =
+unpackBlockData proxy start =
   PT.ConcreteBlock
     { PT.concreteAddress = (hexToAddr proxy start)
-    , PT.concreteBlockSize = fromIntegral $ size
+    -- , PT.concreteBlockSize = fromIntegral $ size
     }
 
 unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])

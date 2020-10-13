@@ -131,10 +131,10 @@ exitCases ::
   IsSymInterface sym =>
   sym ->
   ExitClassifyImpl sym ->
-  BaseTypeRepr tp ->
+  --BaseTypeRepr tp ->
   (ExitCase -> IO (SymExpr sym tp)) ->
   IO (SymExpr sym tp)
-exitCases sym (ExitClassifyImpl jclass) repr f = do
+exitCases sym (ExitClassifyImpl jclass) f = do
   let
     mkCase classk = do
       ExitClassifyImpl jclass' <- exitCaseToImpl sym classk
@@ -142,15 +142,12 @@ exitCases sym (ExitClassifyImpl jclass) repr f = do
       expr <- f classk
       return (test, expr)
 
-  (testUnknown, exprUnknown) <- mkCase ExitUnknown
+  (_, exprUnknown) <- mkCase ExitUnknown
   (testCall, exprCall) <- mkCase ExitCall
   (testReturn, exprReturn) <- mkCase ExitReturn
   (testArch, exprArch) <- mkCase ExitArch
 
-  default_ <- ioFreshConstant sym "impossible" repr
-
-  unknownCase <- baseTypeIte sym testUnknown exprUnknown default_
-  callCase <- baseTypeIte sym testCall exprCall unknownCase
+  callCase <- baseTypeIte sym testCall exprCall exprUnknown
   returnCase <- baseTypeIte sym testReturn exprReturn callCase
   baseTypeIte sym testArch exprArch returnCase
 
