@@ -30,16 +30,8 @@ common shared
                        crucible,
                        crucible-llvm,
                        macaw-base,
-                       --macaw-x86,
-                       --macaw-ppc,
-                       --macaw-aarch32,
                        macaw-symbolic,
-                       --macaw-x86-symbolic,
-                       --macaw-aarch32-symbolic,
                        macaw-loader,
-                       --macaw-loader-x86,
-                       --macaw-loader-ppc,
-                       --macaw-loader-aarch32,
                        unliftio-core,
                        text,
                        transformers,
@@ -113,7 +105,16 @@ executable pate-exec
   import:              shared-exec
   main-is:             Main.hs
   other-modules:       Pate.PPC
+                       Pate.AArch32
   hs-source-dirs:      tools/pate tools arch
-  build-depends:       macaw-ppc,
+  build-depends:       parameterized-utils,
+                       macaw-ppc,
                        macaw-ppc-symbolic,
-                       dismantle-ppc
+                       dismantle-ppc,
+                       semmc-aarch32,
+                       macaw-loader-aarch32,
+                       macaw-aarch32,
+                       macaw-aarch32-symbolic,
+                       asl-translator
+  default-language: Haskell2010
+  ghc-options: -Wall -Wcompat
