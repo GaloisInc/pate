@@ -20,6 +20,7 @@ import           System.Exit
 
 import           Data.Parameterized.Some
 
+import qualified Pate.AArch32 as AArch32
 import qualified Pate.PPC as PPC
 import qualified Pate.Loader as PL
 
@@ -52,7 +53,7 @@ data ArchK = PPC | ARM
 archKToProxy :: ArchK -> Some PL.ValidArchProxy
 archKToProxy a = case a of
   PPC -> Some (PL.ValidArchProxy @PPC.PPC64)
-  ARM -> error "ARM not yet supported"
+  ARM -> Some (PL.ValidArchProxy @AArch32.AArch32)
 
 cliOptions :: OA.ParserInfo CLIOptions
 cliOptions = OA.info (OA.helper <*> parser)
