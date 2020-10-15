@@ -81,6 +81,7 @@ import qualified Pate.Memory.MemTrace as MT
 data BinaryContext sym arch = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.Elf (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
+  , binEntry :: MM.ArchSegmentOff arch
   }
 
 data EquivalenceContext sym arch where
@@ -142,6 +143,7 @@ data EquivEnv sym arch where
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
     , envBlockMapping :: BlockMapping arch
+    , envDiscoveryCfg :: DiscoveryConfig
     } -> EquivEnv sym arch
 
 data EquivState sym arch where

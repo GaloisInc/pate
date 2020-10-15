@@ -97,16 +97,17 @@ verifyPairs ::
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   BlockMapping arch ->
+  DiscoveryConfig ->
   [PatchPair arch] ->
   ExceptT (EquivalenceError arch) IO Bool
-verifyPairs elf elf' blockMap pPairs = do
+verifyPairs elf elf' blockMap dcfg pPairs = do
   Some gen <- liftIO . stToIO $ N.newSTNonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> throwError $ equivalenceError UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  pfm  <- runDiscovery elf
-  pfm' <- runDiscovery elf'
+  (mainO, pfmO)  <- runDiscovery elf
+  (mainP, pfmP) <- runDiscovery elf'
 
   Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors .|. W4PF.useSymbolicArrays
@@ -124,11 +125,13 @@ verifyPairs elf elf' blockMap pPairs = do
 
       oCtx = BinaryContext
         { binary = PB.loadedBinary elf
-        , parsedFunctionMap = pfm
+        , parsedFunctionMap = pfmO
+        , binEntry = mainO
         }
       rCtx = BinaryContext
         { binary = PB.loadedBinary elf'
-        , parsedFunctionMap = pfm'
+        , parsedFunctionMap = pfmP
+        , binEntry = mainP
         }
       ctxt = EquivalenceContext
         { nonces = gen
@@ -153,6 +156,7 @@ verifyPairs elf elf' blockMap pPairs = do
         , envMemTraceVar = model
         , envExitClassVar = evar
         , envBlockMapping = buildBlockMap pPairs blockMap
+        , envDiscoveryCfg = dcfg
         }
 
     liftIO $ do
@@ -174,12 +178,22 @@ runVerificationLoop env pPairs = do
           , stVerifiedPairs = S.empty
           , stFailedPairs = S.empty
           }
-  result <- runExceptT $ runEquivM env st (go mempty)
+  result <- runExceptT $ runEquivM env st doVerify
   case result of
     Left err -> withValidEnv env $ error (show err)
     Right r -> return r
 
   where
+    doVerify :: EquivM sym arch EquivalenceStatistics
+    doVerify = do
+      whenM (asks $ cfgPairMain . envDiscoveryCfg) $ do
+        mainO <- asks $ binEntry . originalCtx . envCtx
+        mainP <- asks $ binEntry . rewrittenCtx . envCtx
+        blkO <- mkConcreteBlock BlockEntryInitFunction <$> segOffToAddr mainO
+        blkP <- mkConcreteBlock BlockEntryInitFunction <$> segOffToAddr mainP
+        addOpenPairs $ S.singleton (PatchPair blkO blkP)
+      go mempty
+
     go :: EquivalenceStatistics -> EquivM sym arch EquivalenceStatistics
     go stats = gets (S.toList . S.take 1 . stOpenPairs) >>= \case
       [pPair] -> do
@@ -196,6 +210,11 @@ runVerificationLoop env pPairs = do
         go (stats <> normResult)
 
       _ -> return stats
+
+whenM :: Monad m => m Bool -> m () -> m ()
+whenM p f = p >>= \case
+  True -> f
+  False -> return ()
 
 printPreamble :: PatchPair arch -> EquivM sym arch ()
 printPreamble pPair = liftIO $ putStr $ ""
@@ -965,14 +984,15 @@ liftMaybe (Just a) _ = pure a
 runDiscovery ::
   ValidArch arch =>
   PB.LoadedELF arch ->
-  ExceptT (EquivalenceError arch) IO (ParsedFunctionMap arch)
+  ExceptT (EquivalenceError arch) IO (MM.MemSegmentOff (MM.ArchAddrWidth arch), ParsedFunctionMap arch)
 runDiscovery elf = do
   let
     bin = PB.loadedBinary elf
     archInfo = PB.archInfo elf
   entries <- toList <$> MBL.entryPoints bin
-  goDiscoveryState $
+  pfm <- goDiscoveryState $
     MD.cfgFromAddrs archInfo (MBL.memoryImage bin) M.empty entries []
+  return (head entries, pfm)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith M.union)

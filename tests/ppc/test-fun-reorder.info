@@ -1,3 +1,0 @@
-PatchData { patchPairs = [ (0x100001b8, 0x100001b8)  ]
-          , blockMapping = [ ]
-          }

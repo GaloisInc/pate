@@ -14,7 +14,9 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Pate.Types
-  ( PatchPair(..)
+  ( DiscoveryConfig(..)
+  , defaultDiscoveryCfg
+  , PatchPair(..)
   , ConcreteBlock(..)
   , BlockMapping(..)
   , ConcreteAddress(..)
@@ -102,6 +104,20 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Memory.MemTrace as MT
+
+----------------------------------
+-- Verification configuration
+data DiscoveryConfig =
+  DiscoveryConfig
+    { cfgPairMain :: Bool
+    -- ^ start by pairing the entry points of the binaries
+    , cfgDiscoverFuns :: Bool
+    -- ^ discover additional functions pairs during analysis
+    }
+
+defaultDiscoveryCfg :: DiscoveryConfig
+defaultDiscoveryCfg = DiscoveryConfig True True
+
 
 ----------------------------------
 
@@ -396,6 +412,7 @@ data InnerEquivalenceError arch
   | PrunedBlockIsEmpty
   | MemOpConditionMismatch
   | UnexpectedBlockKind String
+  | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
   | EquivCheckFailure String -- generic error
   | InequivalentError (InequivalenceResult arch)

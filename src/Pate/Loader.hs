@@ -10,6 +10,8 @@ module Pate.Loader
     runEquivVerification
   , runSelfEquivConfig
   , runEquivConfig
+  , PatchData(..)
+  , noPatchData
   , RunConfig(..)
   , ValidArchProxy(..)
   )
@@ -51,6 +53,9 @@ data PatchData =
             }
   deriving (Read, Show, Eq)
 
+noPatchData :: PatchData
+noPatchData = PatchData [] []
+
 hexToAddr :: ValidArchProxy arch -> Hex Word64 -> PT.ConcreteAddress arch
 hexToAddr ValidArchProxy (Hex w) = PT.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
 
@@ -73,12 +78,13 @@ unpackPatchData proxy (PatchData pairs bmap) =
 runEquivVerification ::
   ValidArchProxy arch ->
   PatchData ->
+  PT.DiscoveryConfig ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   IO (Either String Bool)
-runEquivVerification proxy@ValidArchProxy pd original patched = do
+runEquivVerification proxy@ValidArchProxy pd dcfg original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
-  v <- runExceptT (PV.verifyPairs original patched bmap ppairs)
+  v <- runExceptT (PV.verifyPairs original patched bmap dcfg ppairs)
   case v of
     Left err -> return $ Left $ show err
     Right b -> return $ Right b
@@ -89,6 +95,7 @@ data RunConfig arch =
     , infoPath :: Either FilePath PatchData
     , origPath :: FilePath
     , patchedPath :: FilePath
+    , discoveryCfg :: PT.DiscoveryConfig
     }
 
 -- | Given a patch configuration, check that
@@ -119,7 +126,7 @@ runSelfEquivConfig cfg wb = runExceptT $ do
       }
   ValidArchProxy <- return $ archProxy cfg
   bin <- lift $ PB.loadELF @arch Proxy $ path
-  ExceptT $ runEquivVerification (archProxy cfg) patchData' bin bin
+  ExceptT $ runEquivVerification (archProxy cfg) patchData' (discoveryCfg cfg) bin bin
 
 
 runEquivConfig :: forall arch.
@@ -134,4 +141,4 @@ runEquivConfig cfg = runExceptT $ do
   ValidArchProxy <- return $ archProxy cfg
   original <- lift $ PB.loadELF @arch Proxy $ (origPath cfg)
   patched <- lift $ PB.loadELF @arch Proxy $ (patchedPath cfg)
-  ExceptT $ runEquivVerification (archProxy cfg) patchData original patched
+  ExceptT $ runEquivVerification (archProxy cfg) patchData (discoveryCfg cfg) original patched

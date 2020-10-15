@@ -59,6 +59,7 @@ common shared-test
                  bytestring,
                  elf-edit,
                  containers,
+                 directory,
                  filepath,
                  filemanip,
                  macaw-base,
