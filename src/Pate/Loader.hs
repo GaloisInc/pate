@@ -58,7 +58,8 @@ unpackBlockData :: ValidArchProxy arch -> BlockData -> PT.ConcreteBlock arch
 unpackBlockData proxy start =
   PT.ConcreteBlock
     { PT.concreteAddress = (hexToAddr proxy start)
-    -- , PT.concreteBlockSize = fromIntegral $ size
+      -- we assume that all provided blocks begin a function
+    , PT.concreteBlockEntry = PT.BlockEntryInitFunction
     }
 
 unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])
