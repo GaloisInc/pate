@@ -1,0 +1,11 @@
+.sat-equivalent {
+    color: green;
+}
+
+.sat-indeterminate {
+    color: magenta;
+}
+
+.sat-inequivalent {
+    color: red;
+}

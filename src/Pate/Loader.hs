@@ -20,12 +20,14 @@ import           Control.Monad.Except
 import           Data.Word ( Word64 )
 import           Data.Proxy
 import qualified Data.Map as Map
+import qualified Lumberjack as LJ
 import           Text.Printf ( PrintfArg, printf )
 import           Text.Read ( readMaybe )
 
 import qualified Data.Macaw.Memory as MM
 
 import qualified Pate.Binary as PB
+import qualified Pate.Event as PE
 import qualified Pate.Types as PT
 import qualified Pate.Monad as PM
 import qualified Pate.Verification as PV
@@ -71,13 +73,14 @@ unpackPatchData proxy (PatchData pairs bmap) =
 
 runEquivVerification ::
   ValidArchProxy arch ->
+  LJ.LogAction IO (PE.Event arch) ->
   PatchData ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   IO (Either String Bool)
-runEquivVerification proxy@ValidArchProxy pd original patched = do
+runEquivVerification proxy@ValidArchProxy logAction pd original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
-  v <- runExceptT (PV.verifyPairs original patched bmap ppairs)
+  v <- runExceptT (PV.verifyPairs logAction original patched bmap ppairs)
   case v of
     Left err -> return $ Left $ show err
     Right b -> return $ Right b
@@ -88,6 +91,7 @@ data RunConfig arch =
     , infoPath :: Either FilePath PatchData
     , origPath :: FilePath
     , patchedPath :: FilePath
+    , logger :: LJ.LogAction IO (PE.Event arch)
     }
 
 -- | Given a patch configuration, check that
@@ -118,7 +122,7 @@ runSelfEquivConfig cfg wb = runExceptT $ do
       }
   ValidArchProxy <- return $ archProxy cfg
   bin <- lift $ PB.loadELF @arch Proxy $ path
-  ExceptT $ runEquivVerification (archProxy cfg) patchData' bin bin
+  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData' bin bin
 
 
 runEquivConfig :: forall arch.
@@ -133,4 +137,4 @@ runEquivConfig cfg = runExceptT $ do
   ValidArchProxy <- return $ archProxy cfg
   original <- lift $ PB.loadELF @arch Proxy $ (origPath cfg)
   patched <- lift $ PB.loadELF @arch Proxy $ (patchedPath cfg)
-  ExceptT $ runEquivVerification (archProxy cfg) patchData original patched
+  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData original patched

@@ -32,6 +32,7 @@ module Pate.Monad
   , manifestError
   , implicitError
   , throwHere
+  , emitEvent
   )
   where
 
@@ -53,6 +54,8 @@ import qualified Data.ElfEdit as E
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Classes
 
+import qualified Lumberjack as LJ
+
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.Simulator as CS
@@ -69,6 +72,7 @@ import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4O
 import qualified What4.Protocol.SMTWriter as W4W
 
+import qualified Pate.Event as PE
 import           Pate.Types
 import qualified Pate.Memory.MemTrace as MT
 
@@ -132,8 +136,13 @@ data EquivEnv sym arch where
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
     , envBlockMapping :: BlockMapping arch
+    , envLogger :: LJ.LogAction IO (PE.Event arch)
     } -> EquivEnv sym arch
 
+emitEvent :: PE.Event arch -> EquivM sym arch ()
+emitEvent evt = do
+  logAction <- asks envLogger
+  IO.liftIO $ LJ.writeLog logAction evt
 
 newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (ExceptT (EquivalenceError arch) IO) a }
   deriving (Functor
