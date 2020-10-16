@@ -8,6 +8,4 @@ void _start() {
       g = g + 1;
     }
   }
-
-  EXIT();
 }

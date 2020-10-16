@@ -6,6 +6,4 @@ void _start() {
   if(g > 0) {
     g = g + 1;
   }
-
-  EXIT();
 }

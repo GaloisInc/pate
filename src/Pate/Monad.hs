@@ -12,6 +12,7 @@
 
 module Pate.Monad
   ( EquivEnv(..)
+  , EquivState(..)
   , EquivM
   , EquivM_
   , runEquivM
@@ -47,6 +48,11 @@ import           Control.Monad.Trans.Reader ( ReaderT, runReaderT )
 import           Control.Monad.Reader
 import           Control.Monad.Trans.Except
 import           Control.Monad.Except
+import           Control.Monad.Trans.State ( StateT, runStateT, evalStateT )
+import           Control.Monad.State
+
+import           Data.Set (Set)
+import qualified Data.Set as Set
 
 import           Data.Typeable
 import qualified Data.ElfEdit as E
@@ -79,6 +85,7 @@ import qualified Pate.Memory.MemTrace as MT
 data BinaryContext sym arch = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.Elf (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
+  , binEntry :: MM.ArchSegmentOff arch
   }
 
 data EquivalenceContext sym arch where
@@ -105,6 +112,10 @@ class
   -- ^ True for registers that are used as function call arguments
   -- In addition to the stable registers, these must be proven equivalent
   -- when comparing two program states prior to a function call
+  funCallRet :: forall tp. MM.ArchReg arch tp -> Bool
+  -- ^ True for registers used for function return values.
+  -- These must be proven equivalent when returning from a function
+  -- and are assumed initially equivalent at intermediate function blocks
   funCallIP :: forall tp. MM.ArchReg arch tp -> Maybe (tp :~: (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch))))
   -- ^ Registers used to store an instruction pointer (i.e. the link register on PPC)
 
@@ -137,6 +148,7 @@ data EquivEnv sym arch where
     , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
+    , envDiscoveryCfg :: DiscoveryConfig
     } -> EquivEnv sym arch
 
 emitEvent :: PE.Event arch -> EquivM sym arch ()
@@ -144,13 +156,22 @@ emitEvent evt = do
   logAction <- asks envLogger
   IO.liftIO $ LJ.writeLog logAction evt
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (ExceptT (EquivalenceError arch) IO) a }
+data EquivState sym arch where
+  EquivState ::
+    { stOpenPairs :: Set (PatchPair arch)
+    , stVerifiedPairs :: Set (PatchPair arch)
+    , stFailedPairs :: Set (PatchPair arch)
+    } -> EquivState sym arch
+
+
+newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (EquivalenceError arch) IO))) a }
   deriving (Functor
            , Applicative
            , Monad
            , IO.MonadIO
            , MonadReader (EquivEnv sym arch)
            , MonadError (EquivalenceError arch)
+           , MonadState (EquivState sym arch)
            )
 
 type EquivM sym arch a = (ValidArch arch, ValidSym sym) => EquivM_ sym arch a
@@ -210,10 +231,12 @@ archFuns = do
   archVals <- asks envArchVals
   return $ MS.archFunctions archVals
 
+-- FIXME: state updates are not preserved
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- ask
-    catchInIO (f (runEquivM' env))
+    st <- get
+    catchInIO (f (runEquivM' env st))
 
 catchInIO ::
   forall sym arch a.
@@ -233,17 +256,19 @@ runInIO1 f g = IO.withRunInIO $ \runInIO -> g (\a -> runInIO (f a))
 
 runEquivM' ::
   EquivEnv sym arch ->
+  EquivState sym arch ->
   EquivM sym arch a ->
   IO a
-runEquivM' env f = withValidEnv env $ (runExceptT $ runReaderT (unEQ f) env) >>= \case
+runEquivM' env st f = withValidEnv env $ (runExceptT $ evalStateT (runReaderT (unEQ f) env) st) >>= \case
   Left err -> throwIO err
   Right result -> return $ result
 
 runEquivM ::
   EquivEnv sym arch ->
+  EquivState sym arch ->
   EquivM sym arch a ->
   ExceptT (EquivalenceError arch) IO a
-runEquivM env f = withValidEnv env $ runReaderT (unEQ f) env
+runEquivM env st f = withValidEnv env $ evalStateT (runReaderT (unEQ f) env) st
 
 throwHere ::
   HasCallStack =>

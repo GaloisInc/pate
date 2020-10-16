@@ -10,6 +10,8 @@ module Pate.Loader
     runEquivVerification
   , runSelfEquivConfig
   , runEquivConfig
+  , PatchData(..)
+  , noPatchData
   , RunConfig(..)
   , ValidArchProxy(..)
   )
@@ -53,6 +55,9 @@ data PatchData =
             }
   deriving (Read, Show, Eq)
 
+noPatchData :: PatchData
+noPatchData = PatchData [] []
+
 hexToAddr :: ValidArchProxy arch -> Hex Word64 -> PT.ConcreteAddress arch
 hexToAddr ValidArchProxy (Hex w) = PT.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
 
@@ -60,7 +65,8 @@ unpackBlockData :: ValidArchProxy arch -> BlockData -> PT.ConcreteBlock arch
 unpackBlockData proxy start =
   PT.ConcreteBlock
     { PT.concreteAddress = (hexToAddr proxy start)
-    -- , PT.concreteBlockSize = fromIntegral $ size
+      -- we assume that all provided blocks begin a function
+    , PT.concreteBlockEntry = PT.BlockEntryInitFunction
     }
 
 unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])
@@ -75,12 +81,13 @@ runEquivVerification ::
   ValidArchProxy arch ->
   LJ.LogAction IO (PE.Event arch) ->
   PatchData ->
+  PT.DiscoveryConfig ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   IO (Either String Bool)
-runEquivVerification proxy@ValidArchProxy logAction pd original patched = do
+runEquivVerification proxy@ValidArchProxy logAction pd dcfg original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
-  v <- runExceptT (PV.verifyPairs logAction original patched bmap ppairs)
+  v <- runExceptT (PV.verifyPairs logAction original patched bmap dcfg ppairs)
   case v of
     Left err -> return $ Left $ show err
     Right b -> return $ Right b
@@ -92,6 +99,7 @@ data RunConfig arch =
     , origPath :: FilePath
     , patchedPath :: FilePath
     , logger :: LJ.LogAction IO (PE.Event arch)
+    , discoveryCfg :: PT.DiscoveryConfig
     }
 
 -- | Given a patch configuration, check that
@@ -122,7 +130,8 @@ runSelfEquivConfig cfg wb = runExceptT $ do
       }
   ValidArchProxy <- return $ archProxy cfg
   bin <- lift $ PB.loadELF @arch Proxy $ path
-  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData' bin bin
+  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData' (discoveryCfg cfg) bin bin
+
 
 
 runEquivConfig :: forall arch.
@@ -137,4 +146,4 @@ runEquivConfig cfg = runExceptT $ do
   ValidArchProxy <- return $ archProxy cfg
   original <- lift $ PB.loadELF @arch Proxy $ (origPath cfg)
   patched <- lift $ PB.loadELF @arch Proxy $ (patchedPath cfg)
-  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData original patched
+  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData (discoveryCfg cfg) original patched

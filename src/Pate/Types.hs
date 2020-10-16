@@ -14,10 +14,13 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Pate.Types
-  ( PatchPair(..)
+  ( DiscoveryConfig(..)
+  , defaultDiscoveryCfg
+  , PatchPair(..)
   , ConcreteBlock(..)
   , BlockMapping(..)
   , ConcreteAddress(..)
+  , BlockEntryKind(..)
   , absoluteAddress
   , addressAddOffset
   , concreteFromAbsolute
@@ -43,6 +46,7 @@ module Pate.Types
   , MacawRegEntry(..)
   , macawRegEntry
   , InnerEquivalenceError(..)
+  , InequivalenceReason(..)
   , EquivalenceError(..)
   , equivalenceError
   --- reporting
@@ -63,6 +67,7 @@ import           GHC.Stack
 
 import           Control.Exception
 import           Control.Monad ( foldM )
+import           Control.Lens hiding ( op, pre )
 
 import qualified Data.BitVector.Sized as BVS
 import           Data.Functor.Const
@@ -101,6 +106,20 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified Pate.Memory.MemTrace as MT
 
 ----------------------------------
+-- Verification configuration
+data DiscoveryConfig =
+  DiscoveryConfig
+    { cfgPairMain :: Bool
+    -- ^ start by pairing the entry points of the binaries
+    , cfgDiscoverFuns :: Bool
+    -- ^ discover additional functions pairs during analysis
+    }
+
+defaultDiscoveryCfg :: DiscoveryConfig
+defaultDiscoveryCfg = DiscoveryConfig True True
+
+
+----------------------------------
 
 -- | Keys: basic block extent; values: parsed blocks
 newtype ParsedBlockMap arch ids = ParsedBlockMap
@@ -129,15 +148,36 @@ data PatchPair arch = PatchPair
   { pOrig :: ConcreteBlock arch
   , pPatched :: ConcreteBlock arch
   }
+  deriving (Eq, Ord)
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (PatchPair arch) where
+  show (PatchPair blk1 blk2) = ppBlock blk1 ++ " vs. " ++ ppBlock blk2
 
 -- | Map from the start of original blocks to patched block addresses
 newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (ConcreteAddress arch))
 
 
+-- | The way this block is entered dictates the initial equivalence relation we can assume
+data BlockEntryKind arch =
+    BlockEntryInitFunction
+    -- ^ block starts a new function
+  | BlockEntryPostFunction
+    -- ^ block is an intermediate point in a function, after a function call
+  | BlockEntryPostArch
+    -- ^ block is an intermediate point in a function, after an arch function call
+  | BlockEntryJump
+    -- ^ block was entered by an arbitrary jump -- we should not see this in verificaiton
+    -- problems
+  deriving (Eq, Ord, Show)
+
 data ConcreteBlock arch =
   ConcreteBlock { concreteAddress :: ConcreteAddress arch
-                -- , concreteBlockSize :: Int
+                , concreteBlockEntry :: BlockEntryKind arch
                 }
+  deriving (Eq, Ord)
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (ConcreteBlock arch) where
+  show blk = ppBlock blk
 
 --blockSize :: ConcreteBlock arch -> Int
 --blockSize = concreteBlockSize
@@ -330,14 +370,23 @@ instance Monoid EquivalenceStatistics where
 equivSuccess :: EquivalenceStatistics -> Bool
 equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
 
+data InequivalenceReason =
+  InequivalentRegisters | InequivalentMemory | InvalidCallPair | InvalidPostState
+  deriving (Eq, Ord, Show)
+
+type ExitCaseDiff = (MT.ExitCase, MT.ExitCase)
+
+
 data InequivalenceResult arch
-  = InequivalentResults (MemTraceDiff arch) MT.ExitCase (MM.RegState (MM.ArchReg arch) (RegisterDiff arch))
+  = InequivalentResults (MemTraceDiff arch) ExitCaseDiff (MM.RegState (MM.ArchReg arch) (RegisterDiff arch)) InequivalenceReason
   | InequivalentOperations MemTraceSpine MemTraceSpine
+
+
 
 instance Show (InequivalenceResult arch) where
   show r = case r of
-    InequivalentResults _ _ _ -> "InequivalentResults"
-    InequivalentOperations _ _ -> "InequivalentOperations"
+    InequivalentResults{} -> "InequivalentResults"
+    InequivalentOperations{} -> "InequivalentOperations"
 
 ----------------------------------
 
@@ -352,6 +401,7 @@ data InnerEquivalenceError arch
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
   | NoUniqueFunctionOwner (IM.Interval (ConcreteAddress arch)) [MM.ArchSegmentOff arch]
+  | LookupNotAtFunctionStart (ConcreteAddress arch)
   | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (ConcreteAddress arch) (ConcreteAddress arch) (ConcreteAddress arch)
@@ -362,6 +412,7 @@ data InnerEquivalenceError arch
   | PrunedBlockIsEmpty
   | MemOpConditionMismatch
   | UnexpectedBlockKind String
+  | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
   | EquivCheckFailure String -- generic error
   | InequivalentError (InequivalenceResult arch)
@@ -403,7 +454,7 @@ ppEquivalenceError ::
   ShowF (MM.ArchReg arch) =>
   EquivalenceError arch -> String
 ppEquivalenceError err | (InequivalentError ineq)  <- errEquivError err = case ineq of
-  InequivalentResults traceDiff exitCase regDiffs -> "x\n" ++ show exitCase ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
+  InequivalentResults traceDiff exitDiffs regDiffs reason -> "x\n" ++ ppReason reason ++ "\n" ++ ppExitCaseDiff exitDiffs ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
   InequivalentOperations trace trace' -> concat
     [ "x\n\tMismatched memory operations:\n\t\t"
     , ppMemTraceSpine trace
@@ -412,6 +463,28 @@ ppEquivalenceError err | (InequivalentError ineq)  <- errEquivError err = case i
     , " (rewritten)\n"
     ]
 ppEquivalenceError err = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the error
+
+
+ppReason :: InequivalenceReason -> String
+ppReason r = "\tEquivalence Check Failed: " ++ case r of
+  InequivalentRegisters -> "Final registers diverge."
+  InequivalentMemory -> "Final memory states diverge."
+  InvalidCallPair -> "Unexpected next IPs."
+  InvalidPostState -> "Post state is invalid."
+
+ppExitCaseDiff :: ExitCaseDiff -> String
+ppExitCaseDiff (eO, eP) | eO == eP = "\tBlock Exited with " ++ ppExitCase eO
+ppExitCaseDiff (eO, eP) =
+  "\tBlocks have different exit conditions: "
+  ++ ppExitCase eO ++ " (original) vs. "
+  ++ ppExitCase eP ++ " (rewritten)"
+
+ppExitCase :: MT.ExitCase -> String
+ppExitCase ec = case ec of
+  MT.ExitCall -> "function call"
+  MT.ExitReturn -> "function return"
+  MT.ExitArch -> "syscall"
+  MT.ExitUnknown -> "unknown"
 
 ppMemTraceDiff :: MemTraceDiff arch -> String
 ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDiff (toList diffs)
@@ -498,9 +571,16 @@ ppPreReg diff = case rTypeRepr diff of
   _ -> (0, ppSlot diff ++ "unsupported register type in precondition pretty-printer\n")
 
 ppDiffs ::
+  MS.SymArchConstraints arch =>
   MM.RegState (MM.ArchReg arch) (RegisterDiff arch) ->
   String
-ppDiffs diffs = "\tMismatched resulting registers:\n" ++ TF.foldMapF ppDiff diffs
+ppDiffs diffs =
+  "\tFinal IPs: "
+  ++ ppGroundBV (rPostOriginal (diffs ^. MM.curIP))
+  ++ " (original) vs. "
+  ++ ppGroundBV (rPostPatched (diffs ^. MM.curIP))
+  ++ " (rewritten)\n"
+  ++ "\tMismatched resulting registers:\n" ++ TF.foldMapF ppDiff diffs
 
 ppDiff ::
   RegisterDiff arch tp ->

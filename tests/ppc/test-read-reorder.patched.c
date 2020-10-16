@@ -5,6 +5,4 @@ int b = 0;
 
 void _start() {
   b = g < 10 && g > 0;
-
-  EXIT();
 }

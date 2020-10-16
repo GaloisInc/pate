@@ -10,6 +10,7 @@ module TestBase
   , TestConfig(..)
   ) where
 
+import           System.Directory
 import           System.FilePath
 import           System.FilePath.Glob (namesMatching)
 
@@ -34,11 +35,11 @@ runTests :: TestConfig -> IO ()
 runTests cfg = do
   let
     name = testArchName cfg
-    glob = "tests" </> name </> "*.info"
-    globUnequal = "tests" </> name </> "unequal" </> "*.info"
+    glob = "tests" </> name </> "*.original.exe"
+    globUnequal = "tests" </> name </> "unequal" </> "*.original.exe"
 
-  equivTestFiles <- mapMaybe (stripExtension "info") <$> namesMatching glob
-  inequivTestFiles <- mapMaybe (stripExtension "info") <$> namesMatching globUnequal
+  equivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching glob
+  inequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globUnequal
 
   T.defaultMain $ T.testGroup name $
     [ T.testGroup "equivalence" $ map (mkTest cfg) equivTestFiles
@@ -74,15 +75,19 @@ doTest ::
   FilePath ->
   IO ()
 doTest mwb sv proxy fp = do
-  let rcfg = PL.RunConfig
-        { PL.archProxy = proxy
-        , PL.infoPath = Left $ fp <.> "info"
-        , PL.origPath = fp <.> "original" <.> "exe"
-        , PL.patchedPath = fp <.> "patched" <.> "exe"
-        , PL.logger =
+  infoCfgExists <- doesFileExist (fp <.> "info")
+  let
+    infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PL.noPatchData
+    rcfg = PL.RunConfig
+      { PL.archProxy = proxy
+      , PL.infoPath = infoPath
+      , PL.origPath = fp <.> "original" <.> "exe"
+      , PL.patchedPath = fp <.> "patched" <.> "exe"
+      , PL.discoveryCfg = PT.defaultDiscoveryCfg
+      , PL.logger =
           -- We discard logs while testing
           LJ.LogAction $ \_ -> return ()
-        }
+      }
   result <- case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg
