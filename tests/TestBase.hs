@@ -15,6 +15,7 @@ import           System.FilePath
 import           System.FilePath.Glob (namesMatching)
 
 import           Data.Maybe
+import qualified Lumberjack as LJ
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import qualified Test.Tasty.ExpectedFailure as T
@@ -83,6 +84,9 @@ doTest mwb sv proxy fp = do
       , PL.origPath = fp <.> "original" <.> "exe"
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.discoveryCfg = PT.defaultDiscoveryCfg
+      , PL.logger =
+          -- We discard logs while testing
+          LJ.LogAction $ \_ -> return ()
       }
   result <- case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb

@@ -33,10 +33,10 @@ import           Control.Monad.Trans.Except
 import           Control.Monad.Reader
 import           Control.Monad.State
 
-import           Control.Monad.Except
-import           Control.Monad.IO.Class ( liftIO )
 import           Control.Applicative
 import           Control.Lens hiding ( op, pre )
+import           Control.Monad.Except
+import           Control.Monad.IO.Class ( liftIO )
 import           Control.Monad.ST
 
 import qualified Data.BitVector.Sized as BVS
@@ -49,8 +49,10 @@ import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.String
+import qualified Data.Time as TM
 import           Data.Type.Equality (testEquality)
 import           GHC.TypeLits
+import qualified Lumberjack as LJ
 import           System.IO
 
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -87,6 +89,7 @@ import qualified What4.Protocol.Online as W4O
 import qualified What4.SatResult as W4R
 
 import qualified Pate.Binary as PB
+import qualified Pate.Event as PE
 import           Pate.Types
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
@@ -94,13 +97,14 @@ import qualified Pate.Memory.MemTrace as MT
 verifyPairs ::
   forall arch.
   ValidArch arch =>
+  LJ.LogAction IO (PE.Event arch) ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   BlockMapping arch ->
   DiscoveryConfig ->
   [PatchPair arch] ->
   ExceptT (EquivalenceError arch) IO Bool
-verifyPairs elf elf' blockMap dcfg pPairs = do
+verifyPairs logAction elf elf' blockMap dcfg pPairs = do
   Some gen <- liftIO . stToIO $ N.newSTNonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> throwError $ equivalenceError UnsupportedArchitecture
@@ -156,6 +160,7 @@ verifyPairs elf elf' blockMap dcfg pPairs = do
         , envMemTraceVar = model
         , envExitClassVar = evar
         , envBlockMapping = buildBlockMap pPairs blockMap
+        , envLogger = logAction
         , envDiscoveryCfg = dcfg
         }
 
@@ -247,6 +252,11 @@ checkRenEquivalence pPair@(PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = 
 
   oCtx <- asks $ originalCtx . envCtx
   rCtx <- asks $ rewrittenCtx . envCtx
+
+  CC.Some (Compose opbs) <- lookupBlocks (parsedFunctionMap oCtx) rBlock
+  let oBlocks = PE.Blocks (concreteAddress rBlock) opbs
+  CC.Some (Compose ppbs) <- lookupBlocks (parsedFunctionMap rCtx) rBlock'
+  let pBlocks = PE.Blocks (concreteAddress rBlock') ppbs
    
   simResult <- withBinary Original $ simulate oCtx rBlock initRegStateO
   simResult' <- withBinary Rewritten $ simulate rCtx rBlock' initRegStateP
@@ -260,8 +270,10 @@ checkRenEquivalence pPair@(PatchPair { pOrig = rBlock, pPatched =  rBlock' }) = 
     TF.foldrMF (\(Const p1) p2 -> W4.andPred sym p1 p2) (W4.truePred sym) preds
 
   withSymIO $ \sym -> CB.resetAssumptionState sym
+
   assertPrecondition simResult simResult'
-  matchTraces pPair registersEquivalent regEq simResult simResult'
+  matchTraces pPair registersEquivalent regEq (oBlocks, simResult) (pBlocks, simResult')
+
 
 
 isIPAligned ::
@@ -303,8 +315,9 @@ throwInequivalenceResult ::
   SimulationResult sym arch ->
   SimulationResult sym arch ->
   SymGroundEvalFn sym ->
+  (InequivalenceResult arch -> EquivM sym arch ()) ->
   EquivM sym arch a
-throwInequivalenceResult defaultReason regEq simResult simResult' fn@(SymGroundEvalFn fn') = do
+throwInequivalenceResult defaultReason regEq simResult simResult' fn@(SymGroundEvalFn fn') emit = do
   let
     RegEquivCheck eqPred = regEq
     regsO = resultRegs simResult
@@ -327,7 +340,9 @@ throwInequivalenceResult defaultReason regEq simResult simResult' fn@(SymGroundE
         if isMemoryDifferent memdiff then InequivalentMemory
         else if areRegistersDifferent regdiff then InequivalentRegisters
         else defaultReason
-  throwHere $ InequivalentError $ InequivalentResults memdiff (ecaseO, ecaseP) regdiff reason
+  let ir = InequivalentResults memdiff (ecaseO, ecaseP) regdiff reason
+  emit ir
+  throwHere $ InequivalentError ir
 
 isMemoryDifferent :: forall arch. MemTraceDiff arch -> Bool
 isMemoryDifferent diffs = any go diffs
@@ -347,10 +362,10 @@ matchTraces :: forall sym arch.
   PatchPair arch ->
   W4.Pred sym ->
   RegEquivCheck sym arch ->
-  SimulationResult sym arch ->
-  SimulationResult sym arch ->
+  (PE.Blocks arch, SimulationResult sym arch) ->
+  (PE.Blocks arch, SimulationResult sym arch) ->
   EquivM sym arch ()
-matchTraces pPair prevChecks regEq simResult simResult' = do
+matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = do
   eqWrites <- withSymIO $ \sym -> do
     let
       eqRel :: forall w. CLM.LLVMPtr sym w -> CLM.LLVMPtr sym w -> IO (W4.Pred sym)
@@ -370,10 +385,20 @@ matchTraces pPair prevChecks regEq simResult simResult' = do
     W4.andPred sym eqState prevChecks
   notChecks <- withSymIO $ \sym -> W4.notPred sym checks
 
-  checkSatisfiableWithModel satResultDescription notChecks $ \case
-    W4R.Unsat _ -> return ()
-    W4R.Unknown -> throwHere InconclusiveSAT
-    W4R.Sat fn -> throwInequivalenceResult InvalidPostState regEq simResult simResult' fn
+  startedAt <- liftIO TM.getCurrentTime
+  checkSatisfiableWithModel satResultDescription notChecks $ \satRes -> do
+    finishedBy <- liftIO TM.getCurrentTime
+    let duration = TM.diffUTCTime finishedBy startedAt
+    case satRes of
+      W4R.Unsat _ -> do
+        emitEvent (PE.CheckedEquivalence oBlocks pBlocks PE.Equivalent duration)
+        return ()
+      W4R.Unknown -> do
+        emitEvent (PE.CheckedEquivalence oBlocks pBlocks PE.Inconclusive duration)
+        throwHere InconclusiveSAT
+      W4R.Sat fn@(SymGroundEvalFn fn') -> do
+        let emit ir = emitEvent (PE.CheckedEquivalence oBlocks pBlocks (PE.Inequivalent ir) duration)
+        throwInequivalenceResult InvalidPostState regEq simResult simResult' fn emit
 
   -- compute possible call targets and add them to the set of open pairs
   withSymIO $ \sym -> do
@@ -419,9 +444,10 @@ matchTraces pPair prevChecks regEq simResult simResult' = do
 
     W4.notPred sym validCall
 
+  -- FIXME: Stream results out from this SAT check
   checkSatisfiableWithModel "check" notValidCall $ \case
     W4R.Unsat _ -> return ()
-    W4R.Sat fn -> throwInequivalenceResult InvalidCallPair regEq simResult simResult' fn
+    W4R.Sat fn -> throwInequivalenceResult InvalidCallPair regEq simResult simResult' fn (\_ -> return ())
     W4R.Unknown -> throwHere InconclusiveSAT
 
   markPairVerified pPair

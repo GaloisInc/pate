@@ -25,6 +25,7 @@ common shared
                        IntervalMap >= 0.6 && < 0.7,
                        lens,
                        mtl,
+                       lumberjack >= 0.1 && < 0.2,
                        parameterized-utils,
                        what4 >= 1 && < 2,
                        crucible,
@@ -34,6 +35,7 @@ common shared
                        macaw-loader,
                        unliftio-core,
                        text,
+                       time >= 1 && < 2,
                        transformers,
                        vector
                        
@@ -47,6 +49,7 @@ library
                        Pate.Binary,
                        Pate.Verification,
                        Pate.Loader,
+                       Pate.Event,
                        Pate.Monad,
                        Pate.Memory.MemTrace,
                        Pate.Types,
@@ -62,6 +65,7 @@ common shared-test
                  directory,
                  filepath,
                  filemanip,
+                 lumberjack,
                  macaw-base,
                  macaw-loader,
                  macaw-symbolic,
@@ -103,12 +107,23 @@ common shared-exec
 
 
 executable pate-exec
-  import:              shared-exec
+  import:              shared-exec, shared
   main-is:             Main.hs
-  other-modules:       Pate.PPC
-                       Pate.AArch32
+  other-modules:       Pate.PPC,
+                       Pate.AArch32,
+                       Interactive,
+                       Interactive.State
   hs-source-dirs:      tools/pate tools arch
-  build-depends:       parameterized-utils,
+  build-depends:       async >= 2.2 && < 2.3,
+                       prettyprinter >= 1 && < 1.8,
+                       prettyprinter-ansi-terminal >= 1.1 && < 1.2,
+                       utf8-string >= 1 && < 2,
+                       file-embed >= 0.0.12 && < 0.0.14,
+                       time,
+                       ansi-wl-pprint,
+                       lumberjack,
+                       threepenny-gui >= 0.9 && < 0.10,
+                       parameterized-utils,
                        macaw-ppc,
                        macaw-ppc-symbolic,
                        dismantle-ppc,
