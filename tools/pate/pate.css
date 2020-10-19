@@ -9,3 +9,12 @@
 .sat-inequivalent {
     color: red;
 }
+
+.basic-block {
+    border-style: solid;
+    margin-bottom: 10px;
+}
+
+.source-listing {
+    padding: 10px;
+}

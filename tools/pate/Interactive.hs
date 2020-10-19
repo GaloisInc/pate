@@ -11,20 +11,25 @@ module Interactive (
   ) where
 
 import qualified Control.Concurrent as CC
+import           Control.Lens ( (^.), (%~), (&), (.~) )
 import qualified Control.Lens as L
-import           Control.Lens ( (^.), (%~), (&) )
 import           Control.Monad ( void )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.FileEmbed as DFE
+import qualified Data.Foldable as F
 import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
+import           Data.Maybe ( fromMaybe )
 import qualified Data.String.UTF8 as UTF8
-import qualified Graphics.UI.Threepenny as TP
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
+import qualified Graphics.UI.Threepenny as TP
+import qualified Language.C as LC
 import qualified Text.PrettyPrint.ANSI.Leijen as PPL
 
+import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
 
+import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
 
@@ -40,9 +45,9 @@ data StateRef arch =
            , stateChangeEmitter :: () -> IO ()
            }
 
-newState :: IO (StateRef arch)
-newState = do
-  r <- IOR.newIORef emptyState
+newState :: Maybe (SourcePair LC.CTranslUnit) -> IO (StateRef arch)
+newState ms = do
+  r <- IOR.newIORef (emptyState ms)
   (evt, emitter) <- TP.newEvent
   return StateRef { stateRef = r
                   , stateChangeEvent = evt
@@ -56,6 +61,9 @@ consumeEvents chan r0 = do
     Nothing -> return ()
     Just evt -> do
       case evt of
+        PE.LoadedBinaries (oelf, omap) (pelf, pmap) -> do
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just (oelf, omap)
+                                                          & patchedBinary .~ Just (pelf, pmap), ())
         PE.CheckedEquivalence origBlock@(PE.Blocks addr _) patchedBlock res duration -> do
           let et = EquivalenceTest origBlock patchedBlock duration
           case res of
@@ -80,12 +88,12 @@ addRecent n elt elts = elt : take (n - 1) elts
 
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier
-startInterface :: (MC.ArchConstraints arch) => StateRef arch -> IO ()
+startInterface :: (PB.ArchConstraints arch) => StateRef arch -> IO ()
 startInterface r = do
   let uiConf = TP.defaultConfig
   TP.startGUI uiConf (uiSetup r)
 
-uiSetup :: (MC.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
+uiSetup :: (PB.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
 uiSetup r wd = do
   st0 <- liftIO $ IOR.readIORef (stateRef r)
   void $ return wd # TP.set TP.title "PATE Verifier"
@@ -103,7 +111,7 @@ uiSetup r wd = do
   void $ liftIO $ TP.register (stateChangeEvent r) (updateConsole r wd consoleDiv summaryDiv detailDiv)
   return ()
 
-updateConsole :: (MC.ArchConstraints arch)
+updateConsole :: (PB.ArchConstraints arch)
               => StateRef arch
               -> TP.Window
               -> TP.Element
@@ -124,21 +132,22 @@ updateConsole r wd consoleDiv summaryDiv detailDiv () = do
 --
 -- The most recent event will be on the bottom (as in a normal scrolling
 -- terminal), which requires us to reverse the events list
-renderConsole :: (MC.ArchConstraints arch)
+renderConsole :: (PB.ArchConstraints arch)
               => StateRef arch
               -> TP.Element
               -> TP.UI TP.Element
 renderConsole r detailDiv = do
   state <- liftIO $ IOR.readIORef (stateRef r)
-  TP.ul #+ (map (\evt -> TP.li #+ [renderEvent detailDiv evt]) (reverse (state ^. recentEvents)))
+  TP.ul #+ (map (\evt -> TP.li #+ [renderEvent state detailDiv evt]) (reverse (state ^. recentEvents)))
 
-renderEvent :: (MC.ArchConstraints arch) => TP.Element -> PE.Event arch -> TP.UI TP.Element
-renderEvent detailDiv evt =
+renderEvent :: (PB.ArchConstraints arch) => State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
+renderEvent st detailDiv evt =
   case evt of
-    PE.CheckedEquivalence ob@(PE.Blocks origAddr _) pb@(PE.Blocks patchedAddr _) res duration -> do
+    PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
+    PE.CheckedEquivalence ob@(PE.Blocks (PT.ConcreteAddress origAddr) _) pb@(PE.Blocks (PT.ConcreteAddress patchedAddr) _) res duration -> do
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
-      TP.on TP.click blockLink (showBlockPairDetail detailDiv ob pb)
+      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb)
       TP.span #+ [ TP.string "Checking original block at "
                  , return blockLink
                  , TP.string " against patched block at "
@@ -148,22 +157,60 @@ renderEvent detailDiv evt =
                  ]
 
 -- | Show the original block at the given address (as well as its corresponding patched block)
-showBlockPairDetail :: (MC.ArchConstraints arch)
-                    => TP.Element
+showBlockPairDetail :: (PB.ArchConstraints arch)
+                    => State arch
+                    -> TP.Element
                     -> PE.Blocks arch
                     -> PE.Blocks arch
                     -> a
                     -> TP.UI ()
-showBlockPairDetail detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) _ = do
-  g <- TP.grid [ [renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr]
-               , [renderCode opbs, renderCode ppbs]
+showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) _ = do
+  g <- TP.grid [ concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
+               , concat [[renderCode opbs, renderCode ppbs], renderSource st originalSource origAddr, renderSource st patchedSource origAddr]
                ]
   void $ return detailDiv # TP.set TP.children [g]
   return ()
   where
     renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
-    renderCode pbs = TP.code #+ [TP.pre # TP.set TP.text (renderBlocks pbs)]
-    renderBlocks pbs = show (PPL.vcat (map PPL.pretty pbs))
+    renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PPL.pretty pb)) #. "basic-block"
+                                | pb <- pbs
+                                ]
+
+-- | Note that we always look up the original address because we key the
+-- function name off of that... we could do better
+renderSource :: (PB.ArchConstraints arch)
+             => State arch
+             -> (SourcePair LC.CTranslUnit -> LC.CTranslUnit)
+             -> MC.MemAddr (MC.ArchAddrWidth arch)
+             -> [TP.UI TP.Element]
+renderSource st getSource origAddr = fromMaybe [] $ do
+  (lelf, _) <- st ^. originalBinary
+  bname <- MBL.symbolFor (PB.loadedBinary lelf) origAddr
+  let sname = UTF8.toString (UTF8.fromRep bname)
+  LC.CTranslUnit decls _ <- getSource <$> st ^. sources
+  fundef <- F.find (matchingFunctionName sname) decls
+  return [ TP.code #+ [ TP.pre # TP.set TP.text (show (LC.pretty fundef)) #. "source-listing" ] ]
+
+-- | Find the declaration matching the given function name
+matchingFunctionName :: String -> LC.CExternalDeclaration LC.NodeInfo -> Bool
+matchingFunctionName sname def =
+  case def of
+    LC.CDeclExt {} -> False
+    LC.CAsmExt {} -> False
+    LC.CFDefExt (LC.CFunDef _declspecs declr _decls _stmts _annot) ->
+      case declr of
+        LC.CDeclr (Just ident) _ _ _ _ -> LC.identToString ident == sname
+        LC.CDeclr Nothing _ _ _ _ -> False
+
+renderFunctionName :: (PB.ArchConstraints arch)
+                   => State arch
+                   -> MC.MemAddr (MC.ArchAddrWidth arch)
+                   -> [TP.UI TP.Element]
+renderFunctionName st origAddr = fromMaybe [] $ do
+  (lelf, _) <- st ^. originalBinary
+  bname <- MBL.symbolFor (PB.loadedBinary lelf) origAddr
+  let sname = UTF8.toString (UTF8.fromRep bname)
+  return [TP.string ("(Function: " ++ sname ++ ")")]
 
 renderEquivalenceResult :: PE.EquivalenceResult arch -> TP.UI TP.Element
 renderEquivalenceResult res =
