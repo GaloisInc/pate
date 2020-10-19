@@ -1143,49 +1143,21 @@ mkRegEquivCheck ::
 mkRegEquivCheck _simResultO _simResultP = do
 
   withSymIO $ \sym -> return $ RegEquivCheck $ \ecase reg (MacawRegEntry repr bvO) (MacawRegEntry _ bvP) -> do
+     -- TODO: Stack pointer need not be equivalent in general, but we need to treat stack-allocated
     case repr of
-        CLM.LLVMPointerRepr _ -> case testEquality reg ipReg of
-          Just Refl ->
-            -- IP equivalence is checked in the post-state through function discovery
-
-            return $ W4.truePred sym
-            -- TODO: What to do with the link register (index 1 in the current
-            -- register struct for PPC64)? Is ipEq good enough? Things to worry
-            -- about with that choice:
-            -- 1. We should probably initialize the link register somehow for both
-            -- blocks so that the register starts out equivalent. Would be sort of
-            -- a shame to declare blocks inequivalent because they both started
-            -- with 0 in their LR and didn't change that.
-            -- 2. ipEq declares the starts of blocks equivalent. blr tends to come
-            -- at the end of blocks, not the start.
-
-            -- TODO: Stack pointer need not be equivalent in general, but we need to treat stack-allocated
-            -- variables specially to reason about how they may be offset
-
+      CLM.LLVMPointerRepr _ -> 
+        case ecase of
           -- | For registers used for function arguments, we assert equivalence when
           -- the jump target is known to be a function call
-          _ | funCallArg reg -> case ecase of
-                MT.ExitCall -> llvmPtrEq sym bvO bvP
-                _ -> return $ W4.truePred sym
-          _ | funCallRet reg -> case ecase of
-                MT.ExitReturn -> llvmPtrEq sym bvO bvP
-                _ -> return $ W4.truePred sym
-          _ | funCallStable reg -> llvmPtrEq sym bvO bvP
+          MT.ExitCall
+            | funCallArg reg -> llvmPtrEq sym bvO bvP
+          MT.ExitReturn
+            | funCallRet reg -> llvmPtrEq sym bvO bvP
           -- FIXME: We need to calculate the equivalence condition on functions based on
           -- how they are used
-          --_ | False, funCallStable reg -> do
-          --      let
-          --        preBvO = (resultPreRegs simResultO) ^. MM.boundValue reg
-          --        preBvP = (resultPreRegs simResultP) ^. MM.boundValue reg
-          --      case ecase of
-          --        MT.ExitReturn -> do
-          --          eqO <- llvmPtrEq sym (macawRegValue preBvO) bvO
-          --          eqP <- llvmPtrEq sym (macawRegValue preBvP) bvP
-          --          W4.andPred sym eqO eqP
-          --        _ -> return $ W4.truePred sym
-
+          _ | funCallStable reg -> llvmPtrEq sym bvO bvP
           _ -> return $ W4.truePred sym
-        _ -> error "Unsupported register type"
+      _ -> error "Unsupported register type"
   where
     ipReg = MM.ip_reg @(MM.ArchReg arch)
     
