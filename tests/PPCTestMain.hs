@@ -12,9 +12,13 @@ main = do
   let cfg = TestConfig
         { testArchName = "ppc"
         , testArchProxy = PL.ValidArchProxy @PPC.PPC64
-        , testExpectFailure = [ "test-direct-calls"
-                              , "test-indirect-calls"
+        , testExpectFailure = [
+                              -- see: https://github.com/GaloisInc/pate/issues/10
+                                "test-direct-calls"
+                              -- see: https://github.com/GaloisInc/pate/issues/9
                               , "test-stack-variable"
+                              -- see: https://github.com/GaloisInc/pate/issues/17
+                              , "test-int-ref-ref"
                               ]
         }
   runTests cfg
