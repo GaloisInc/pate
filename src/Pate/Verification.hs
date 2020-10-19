@@ -379,9 +379,7 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
     let
       MT.ExitClassifyImpl exitO = resultExit simResult
       MT.ExitClassifyImpl exitP = resultExit simResult'
-    MT.exitCases sym (resultExit simResult) $ \case
-      MT.ExitUnknown -> return $ W4.falsePred sym
-      _ -> W4.isEq sym exitO exitP
+    W4.isEq sym exitO exitP
 
   checks <- withSymIO $ \sym -> do
     eqState <- W4.andPred sym eqWrites validExits
@@ -484,6 +482,7 @@ validExit :: MT.ExitCase -> BlockEntryKind arch -> Bool
 validExit ecase blkK = case (ecase, blkK) of
   (MT.ExitCall, BlockEntryInitFunction) -> True
   (MT.ExitArch, BlockEntryPostArch) -> True
+  (MT.ExitUnknown, BlockEntryJump) -> True
   _ -> False
 
 allTargets ::
@@ -618,7 +617,9 @@ simulate binCtx rb preRegs = errorFrame $ do
         internalAddrs = S.delete (MD.pblockAddr pb) $ S.fromList [MD.pblockAddr b | b <- pbs]
         (terminal_, nonTerminal) = partition isTerminalBlock pbs
         terminal = [pb | isTerminalBlock pb] ++ terminal_
-        killEdges = concatMap (externalTransitions internalAddrs) (pb:pbs)
+        killEdges =
+          concatMap (backJumps internalAddrs) (pb : pbs) ++
+          concatMap (externalTransitions internalAddrs) (pb:pbs)
     fns <- archFuns
     ha <- asks $ handles . envCtx
     liftIO $ MS.mkBlockSliceCFG fns ha (W4L.OtherPos . fromString . show) pb nonTerminal terminal killEdges
@@ -666,6 +667,24 @@ isTerminalBlock pb = case MD.pblockTermStmt pb of
   MD.ParsedTranslateError{} -> True
   MD.ClassifyFailure{} -> True
 
+-- FIXME: this is hardly rigorous
+-- | Kill back jumps within the function
+backJumps ::
+  Set (MM.ArchSegmentOff arch) ->
+  MD.ParsedBlock arch ids ->
+  [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
+backJumps internalAddrs pb =
+  [ (MD.pblockAddr pb, tgt)
+  | tgt <- case MD.pblockTermStmt pb of
+     MD.ParsedJump _ tgt -> [tgt]
+     MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
+     MD.ParsedLookupTable _ _ tgts -> toList tgts
+     _ -> []
+  , tgt < MD.pblockAddr pb
+  , tgt `S.member` internalAddrs
+  ]
+
+
 externalTransitions ::
   Set (MM.ArchSegmentOff arch) ->
   MD.ParsedBlock arch ids ->
@@ -700,7 +719,7 @@ preStableReg blk reg = case concreteBlockEntry blk of
   BlockEntryPostFunction -> funCallRet reg || funCallStable reg
   -- FIXME: not entirely true, needs proper dependency analysis
   BlockEntryPostArch -> funCallStable reg
-  _ -> False
+  BlockEntryJump -> True
 
 
 mkRegisterDiff ::
@@ -925,25 +944,28 @@ getSubBlocks ::
 getSubBlocks pfm b = case M.assocs $ M.unions $ fmap snd $ IM.lookupLE i pfm of
   [(_, CC.Some (ParsedBlockMap pbm))] -> do
     let pbs = concat $ IM.elems $ IM.intersecting pbm i
-    concat <$> mapM (concreteExternalJumpTargets pbs) pbs
+    concat <$> mapM (concreteValidJumpTargets pbs) pbs
   blks -> throwHere $ NoUniqueFunctionOwner i (fst <$> blks)
   where
   start@(ConcreteAddress saddr) = concreteAddress b
   end = ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
   i = IM.OpenInterval start end
 
-concreteExternalJumpTargets ::
+concreteValidJumpTargets ::
   forall sym arch ids.
   ValidArch arch =>
   [MD.ParsedBlock arch ids] ->
   MD.ParsedBlock arch ids ->
   EquivM sym arch [BlockTarget arch]
-concreteExternalJumpTargets allPbs pb = do
+concreteValidJumpTargets allPbs pb = do
   targets <- concreteJumpTargets pb
+  thisAddr <- segOffToAddr (MD.pblockAddr pb)
   addrs <- mapM (segOffToAddr . MD.pblockAddr) allPbs
   let
     isTargetExternal btgt = not ((concreteAddress (targetCall btgt)) `elem` addrs)
-  return $ filter isTargetExternal targets
+    isTargetBackJump btgt = (concreteAddress (targetCall btgt)) < thisAddr
+    isTargetValid btgt = isTargetExternal btgt || isTargetBackJump btgt
+  return $ filter isTargetValid targets
 
 mkConcreteBlock ::
   BlockEntryKind arch ->
@@ -1153,6 +1175,7 @@ mkRegEquivCheck _simResultO _simResultP = do
             | funCallArg reg -> llvmPtrEq sym bvO bvP
           MT.ExitReturn
             | funCallRet reg -> llvmPtrEq sym bvO bvP
+
           -- FIXME: We need to calculate the equivalence condition on functions based on
           -- how they are used
           _ | funCallStable reg -> llvmPtrEq sym bvO bvP
