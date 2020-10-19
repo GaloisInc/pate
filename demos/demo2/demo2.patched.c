@@ -1,13 +1,13 @@
 int min;
 int max;
 
-int f(int i, int j) {
-  if (i > j) {
-    min = j;
-    max = i;
-  } else {
+void f(int i, int j) {
+  if (j > i) {
     min = i;
     max = j;
+  } else {
+    min = j;
+    max = i;
   }
 }
 
