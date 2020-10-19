@@ -1,4 +1,5 @@
 int leq(int i, int j) {
+  // diverges if i == j
   if (i <= j) {
     return 1;
   } else {

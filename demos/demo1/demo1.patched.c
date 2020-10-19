@@ -7,7 +7,9 @@ int g(int i){
 }
 
 int f(int i) {
+  // negated conditional
   if (i <= 0) {
+    // functions are automatically matched
     return h(i);
   } else {
     return g(i);

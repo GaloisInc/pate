@@ -2,11 +2,11 @@ int min;
 int max;
 
 void f(int i, int j) {
-  max = j;
-  min = i;
-
-  if (j < i) {
-    min = max;
+  if (j > i) {
+    min = i;
+    max = j;
+  } else {
+    min = j;
     max = i;
   }
 }

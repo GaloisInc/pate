@@ -2,11 +2,14 @@ int min;
 int max;
 
 void f(int i, int j) {
-  if (j > i) {
-    min = i;
-    max = j;
-  } else {
-    min = j;
+  // extra unconditional writes
+  max = j;
+  min = i;
+
+  // swapped conditional
+  if (j < i) {
+    // equivalence requires 'max == j'
+    min = max;
     max = i;
   }
 }
