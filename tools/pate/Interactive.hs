@@ -189,8 +189,9 @@ renderSource st getSource origAddr = fromMaybe [] $ do
   let sname = UTF8.toString (UTF8.fromRep bname)
   LC.CTranslUnit decls _ <- getSource <$> st ^. sources
   fundef <- F.find (matchingFunctionName sname) decls
-  return [ TP.code #+ [ TP.pre # TP.set TP.text (show (LC.pretty fundef)) ] ]
+  return [ TP.code #+ [ TP.pre # TP.set TP.text (show (LC.pretty fundef)) #. "source-listing" ] ]
 
+-- | Find the declaration matching the given function name
 matchingFunctionName :: String -> LC.CExternalDeclaration LC.NodeInfo -> Bool
 matchingFunctionName sname def =
   case def of
