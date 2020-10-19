@@ -135,7 +135,7 @@ renderConsole r detailDiv = do
 renderEvent :: (MC.ArchConstraints arch) => TP.Element -> PE.Event arch -> TP.UI TP.Element
 renderEvent detailDiv evt =
   case evt of
-    PE.CheckedEquivalence ob@(PE.Blocks origAddr _) pb@(PE.Blocks patchedAddr _) res duration -> do
+    PE.CheckedEquivalence ob@(PE.Blocks (PT.ConcreteAddress origAddr) _) pb@(PE.Blocks (PT.ConcreteAddress patchedAddr) _) res duration -> do
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
       TP.on TP.click blockLink (showBlockPairDetail detailDiv ob pb)
