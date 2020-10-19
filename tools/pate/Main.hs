@@ -146,6 +146,7 @@ layout = PP.layoutPretty PP.defaultLayoutOptions
 terminalFormatEvent :: PE.Event arch -> PP.SimpleDocStream PPRT.AnsiStyle
 terminalFormatEvent evt =
   case evt of
+    PE.LoadedBinaries {} -> layout "Loaded original and patched binaries"
     PE.CheckedEquivalence (PE.Blocks origAddr _) (PE.Blocks patchedAddr _) res duration ->
       let pfx = mconcat [ "Checking original block at "
                         , PP.viaShow origAddr

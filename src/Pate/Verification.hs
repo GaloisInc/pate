@@ -113,6 +113,8 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
   (mainO, pfmO)  <- runDiscovery elf
   (mainP, pfmP) <- runDiscovery elf'
 
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, pfmO) (elf', pfmP))
+
   Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors .|. W4PF.useSymbolicArrays
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
