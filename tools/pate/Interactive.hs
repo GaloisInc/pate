@@ -166,7 +166,10 @@ showBlockPairDetail :: (PB.ArchConstraints arch)
                     -> TP.UI ()
 showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) _ = do
   g <- TP.grid [ concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
-               , concat [[renderCode opbs, renderCode ppbs], renderSource st originalSource origAddr, renderSource st patchedSource origAddr]
+               , concat [ [renderCode opbs, renderCode ppbs]
+                        , renderSource st originalSource originalBinary origAddr
+                        , renderSource st patchedSource patchedBinary patchedAddr
+                        ]
                ]
   void $ return detailDiv # TP.set TP.children [g]
   return ()
@@ -181,11 +184,12 @@ showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) 
 renderSource :: (PB.ArchConstraints arch)
              => State arch
              -> (SourcePair LC.CTranslUnit -> LC.CTranslUnit)
+             -> L.Getter (State arch) (Maybe (PB.LoadedELF arch, b))
              -> MC.MemAddr (MC.ArchAddrWidth arch)
              -> [TP.UI TP.Element]
-renderSource st getSource origAddr = fromMaybe [] $ do
-  (lelf, _) <- st ^. originalBinary
-  bname <- MBL.symbolFor (PB.loadedBinary lelf) origAddr
+renderSource st getSource binL addr = fromMaybe [] $ do
+  (lelf, _) <- st ^. binL
+  bname <- MBL.symbolFor (PB.loadedBinary lelf) addr
   let sname = UTF8.toString (UTF8.fromRep bname)
   LC.CTranslUnit decls _ <- getSource <$> st ^. sources
   fundef <- F.find (matchingFunctionName sname) decls
