@@ -170,8 +170,9 @@ showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) 
   return ()
   where
     renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
-    renderCode pbs = TP.code #+ [TP.pre # TP.set TP.text (renderBlocks pbs)]
-    renderBlocks pbs = show (PPL.vcat (map PPL.pretty pbs))
+    renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PPL.pretty pb)) #. "basic-block"
+                                | pb <- pbs
+                                ]
 
 renderFunctionName :: (PB.ArchConstraints arch)
                    => State arch

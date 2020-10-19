@@ -9,3 +9,8 @@
 .sat-inequivalent {
     color: red;
 }
+
+.basic-block {
+    border-style: solid;
+    margin-bottom: 10px;
+}
