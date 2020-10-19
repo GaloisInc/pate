@@ -3,7 +3,10 @@
 CC=powerpc64-linux-gnu-gcc
 OD=powerpc64-linux-gnu-objdump
 
-all: $(patsubst %c,%exe,$(wildcard *.c))
+all: $(patsubst %c,%exe,$(wildcard *.c)) $(patsubst %c,%i,$(wildcard *.c))
+
+%.i: %.c
+	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
 
 %.exe: %.s
 	$(CC) -fno-stack-protector -nostdlib $< -o $@

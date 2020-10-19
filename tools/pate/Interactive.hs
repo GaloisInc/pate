@@ -16,12 +16,14 @@ import qualified Control.Lens as L
 import           Control.Monad ( void )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.FileEmbed as DFE
+import qualified Data.Foldable as F
 import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( fromMaybe )
 import qualified Data.String.UTF8 as UTF8
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
+import qualified Language.C as LC
 import qualified Text.PrettyPrint.ANSI.Leijen as PPL
 
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -43,9 +45,9 @@ data StateRef arch =
            , stateChangeEmitter :: () -> IO ()
            }
 
-newState :: IO (StateRef arch)
-newState = do
-  r <- IOR.newIORef emptyState
+newState :: Maybe (SourcePair LC.CTranslUnit) -> IO (StateRef arch)
+newState ms = do
+  r <- IOR.newIORef (emptyState ms)
   (evt, emitter) <- TP.newEvent
   return StateRef { stateRef = r
                   , stateChangeEvent = evt
@@ -164,7 +166,7 @@ showBlockPairDetail :: (PB.ArchConstraints arch)
                     -> TP.UI ()
 showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) _ = do
   g <- TP.grid [ concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
-               , [renderCode opbs, renderCode ppbs]
+               , concat [[renderCode opbs, renderCode ppbs], renderSource st originalSource origAddr, renderSource st patchedSource origAddr]
                ]
   void $ return detailDiv # TP.set TP.children [g]
   return ()
@@ -173,6 +175,31 @@ showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) 
     renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PPL.pretty pb)) #. "basic-block"
                                 | pb <- pbs
                                 ]
+
+-- | Note that we always look up the original address because we key the
+-- function name off of that... we could do better
+renderSource :: (PB.ArchConstraints arch)
+             => State arch
+             -> (SourcePair LC.CTranslUnit -> LC.CTranslUnit)
+             -> MC.MemAddr (MC.ArchAddrWidth arch)
+             -> [TP.UI TP.Element]
+renderSource st getSource origAddr = fromMaybe [] $ do
+  (lelf, _) <- st ^. originalBinary
+  bname <- MBL.symbolFor (PB.loadedBinary lelf) origAddr
+  let sname = UTF8.toString (UTF8.fromRep bname)
+  LC.CTranslUnit decls _ <- getSource <$> st ^. sources
+  fundef <- F.find (matchingFunctionName sname) decls
+  return [ TP.code #+ [ TP.pre # TP.set TP.text (show (LC.pretty fundef)) ] ]
+
+matchingFunctionName :: String -> LC.CExternalDeclaration LC.NodeInfo -> Bool
+matchingFunctionName sname def =
+  case def of
+    LC.CDeclExt {} -> False
+    LC.CAsmExt {} -> False
+    LC.CFDefExt (LC.CFunDef _declspecs declr _decls _stmts _annot) ->
+      case declr of
+        LC.CDeclr (Just ident) _ _ _ _ -> LC.identToString ident == sname
+        LC.CDeclr Nothing _ _ _ _ -> False
 
 renderFunctionName :: (PB.ArchConstraints arch)
                    => State arch

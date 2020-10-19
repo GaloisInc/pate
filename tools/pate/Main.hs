@@ -18,7 +18,10 @@
 import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
+import           Control.Monad ( join )
 import qualified Data.Foldable as F
+import qualified Data.Traversable as T
+import qualified Language.C as LC
 import qualified Lumberjack as LJ
 import qualified Options.Applicative as OA
 import qualified Prettyprinter as PP
@@ -36,6 +39,7 @@ import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
 
 import qualified Interactive as I
+import qualified Interactive.State as IS
 
 main :: IO ()
 main = do
@@ -82,8 +86,12 @@ data CLIOptions = CLIOptions
 data ArchK = PPC | ARM
   deriving (Eq, Ord, Read, Show)
 
-data LogTarget = Interactive
+data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
                -- ^ Logs will go to an interactive viewer
+               --
+               -- If source files (corresponding to the original and patched
+               -- source) are provided, their contents are displayed when
+               -- appropriate (on a per-function basis).
                | LogFile FilePath
                -- ^ Logs will go to a file (if present)
                | StdoutLogger
@@ -112,7 +120,7 @@ startLogger PL.ValidArchProxy lt chan =
       hdl <- IO.openFile fp IO.WriteMode
       IO.hSetBuffering hdl IO.LineBuffering
       logToHandle hdl
-    Interactive -> do
+    Interactive mSourceFiles -> do
       -- This odd structure makes all of the threading explicit at this top
       -- level so that there is no thread creation hidden in the Interactive
       -- module
@@ -120,7 +128,8 @@ startLogger PL.ValidArchProxy lt chan =
       -- The data producer/manager and the UI communicate via an IORef, which
       -- contains the up-to-date version of the state
       consumer <- CCA.async $ do
-        stateRef <- I.newState
+        mSourceContent <- join <$> T.traverse parseSources mSourceFiles
+        stateRef <- I.newState mSourceContent
         watcher <- CCA.async $ I.consumeEvents chan stateRef
         ui <- CCA.async $ I.startInterface stateRef
         CCA.wait watcher
@@ -139,6 +148,21 @@ startLogger PL.ValidArchProxy lt chan =
 
       consumer <- CCA.async consumeLogs
       return (logAct, Just consumer)
+
+parseSources :: IS.SourcePair FilePath -> IO (Maybe (IS.SourcePair LC.CTranslUnit))
+parseSources (IS.SourcePair os ps) = do
+  eos' <- LC.parseCFilePre os
+  eps' <- LC.parseCFilePre ps
+  case (eos', eps') of
+    (Right ou, Right pu) -> return (Just (IS.SourcePair ou pu))
+    (Left e, _) -> do
+      IO.hPutStrLn IO.stderr ("Error parsing " ++ os)
+      IO.hPutStrLn IO.stderr (show e)
+      return Nothing
+    (_, Left e) -> do
+      IO.hPutStrLn IO.stderr ("Error parsing " ++ os)
+      IO.hPutStrLn IO.stderr (show e)
+      return Nothing
 
 layout :: PP.Doc ann -> PP.SimpleDocStream ann
 layout = PP.layoutPretty PP.defaultLayoutOptions
@@ -174,11 +198,20 @@ archKToProxy a = case a of
 logParser :: OA.Parser LogTarget
 logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure StdoutLogger
   where
-    interactiveParser = OA.flag' Interactive
-                     (  OA.long "interactive"
-                     <> OA.short 'i'
-                     <> OA.help "Start a web server providing an interactive view of results"
-                     )
+    interactiveParser = Interactive <$  OA.flag' ()
+                                     (  OA.long "interactive"
+                                     <> OA.short 'i'
+                                     <> OA.help "Start a web server providing an interactive view of results"
+                                     )
+                                    <*> OA.optional parseSourceFiles
+    parseSourceFiles = IS.SourcePair <$> OA.strOption (  OA.long "original-source"
+                                                      <> OA.metavar "FILE"
+                                                      <> OA.help "The source file for the original program"
+                                                      )
+                                     <*> OA.strOption ( OA.long "patched-source"
+                                                      <> OA.metavar "FILE"
+                                                      <> OA.help "The source file for the patched program"
+                                                      )
     nullLoggerParser = OA.flag' NullLogger
                     (  OA.long "discard-logs"
                     <> OA.help "Discard all logging information"
