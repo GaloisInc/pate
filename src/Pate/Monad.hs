@@ -145,6 +145,7 @@ data EquivEnv sym arch where
     , envGlobalMap :: CGS.SymGlobalState sym
     , envStackRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
+    , envInitMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)

@@ -161,6 +161,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envGlobalMap = globs
         , envStackRegion = stackRegion
         , envMemTraceVar = model
+        , envInitMem = initMem
         , envExitClassVar = evar
         , envBlockMapping = buildBlockMap pPairs blockMap
         , envLogger = logAction
@@ -772,22 +773,31 @@ groundTraceDiff fn mem1 mem2 = do
   foot1 <- withSymIO $ \sym -> MT.traceFootprint sym (MT.memSeq mem1)
   foot2 <- withSymIO $ \sym -> MT.traceFootprint sym (MT.memSeq mem2)
   let foot = S.union foot1 foot2
-  (S.toList . S.fromList) <$> mapM checkFootprint (S.toList foot)
+  (S.toList . S.fromList . catMaybes) <$> mapM checkFootprint (S.toList foot)
   where
     checkFootprint ::
       MT.MemFootprint sym (MM.ArchAddrWidth arch) ->
-      EquivM sym arch (MemOpDiff arch)
+      EquivM sym arch (Maybe (MemOpDiff arch))
     checkFootprint (MT.MemFootprint ptr w dir cond) = do
       let repr = MM.BVMemRepr w MM.BigEndian
-      val1 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem1) ptr repr
-      val2 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr mem2) ptr repr
+      -- "reads" here are simply the memory pre-state
+      (oMem, pMem) <- case dir of
+            MT.Read -> do
+              preMem <- asks envInitMem
+              return $ (preMem, preMem)
+            MT.Write -> return $ (mem1, mem2)
+      val1 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr oMem) ptr repr
+      val2 <- withSymIO $ \sym -> MT.readMemArr sym (MT.memArr pMem) ptr repr
       cond' <- memOpCondition cond
-      op1  <- groundMemOp fn ptr cond' val1
-      op2  <- groundMemOp fn ptr cond' val2
-      return $ MemOpDiff { mDirection = dir
-                         , mOpOriginal = op1
-                         , mOpRewritten = op2
-                         }
+      execGroundFn fn cond' >>= \case
+        True -> do
+          op1  <- groundMemOp fn ptr cond' val1
+          op2  <- groundMemOp fn ptr cond' val2
+          return $ Just $ MemOpDiff { mDirection = dir
+                                    , mOpOriginal = op1
+                                    , mOpRewritten = op2
+                                    }
+        False -> return Nothing
 
 
 groundMemOp ::
