@@ -58,7 +58,6 @@ import           System.IO
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
-import qualified Data.Macaw.Discovery.State as MD
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
@@ -83,6 +82,7 @@ import qualified Lang.Crucible.Simulator.GlobalState as CGS
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
+import qualified What4.Partial as W4P
 import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
 import qualified What4.Protocol.Online as W4O
@@ -121,14 +121,16 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
     eval <- lift (MS.withArchEval vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
     evar <- lift (MT.mkExitClassVar @arch ha)
+    pvar <- lift (MT.mkReturnIPVar @arch ha)
     initMem <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
     initEClass <- liftIO $ MT.initExitClass sym
+    initRet <- liftIO $ MT.initRetAddr @_ @arch sym
     proc <- liftIO $ CBO.withSolverProcess sym return
     -- FIXME: we should be able to lift this from the ELF, and it may differ between
     -- binaries
     stackRegion <- liftIO $ W4.natLit sym 1
     let
-      exts = MT.macawTraceExtensions eval model evar (trivialGlobalMap @_ @arch)
+      exts = MT.macawTraceExtensions eval model evar pvar (trivialGlobalMap @_ @arch)
 
       oCtx = BinaryContext
         { binary = PB.loadedBinary elf
@@ -149,7 +151,8 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         
         }
       globs =
-        CGS.insertGlobal evar initEClass
+          CGS.insertGlobal pvar initRet
+        $ CGS.insertGlobal evar initEClass
         $ CGS.insertGlobal model initMem CGS.emptyGlobals
       env = EquivEnv
         { envSym = sym
@@ -163,6 +166,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envMemTraceVar = model
         , envInitMem = initMem
         , envExitClassVar = evar
+        , envReturnIPVar = pvar
         , envBlockMapping = buildBlockMap pPairs blockMap
         , envLogger = logAction
         , envDiscoveryCfg = dcfg
@@ -340,11 +344,14 @@ throwInequivalenceResult defaultReason regEq simResult simResult' fn@(SymGroundE
         mkRegisterDiff fn r preO preP postO postP equivE
     )
     (resultPreRegs simResult)
+  retO <- groundReturnPtr fn (resultReturn simResult)
+  retP <- groundReturnPtr fn (resultReturn simResult')
+
   let reason =
         if isMemoryDifferent memdiff then InequivalentMemory
         else if areRegistersDifferent regdiff then InequivalentRegisters
         else defaultReason
-  let ir = InequivalentResults memdiff (ecaseO, ecaseP) regdiff reason
+  let ir = InequivalentResults memdiff (ecaseO, ecaseP) regdiff (retO, retP) reason
   emit ir
   throwHere $ InequivalentError ir
 
@@ -398,7 +405,7 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
       W4R.Unknown -> do
         emitEvent (PE.CheckedEquivalence oBlocks pBlocks PE.Inconclusive duration)
         throwHere InconclusiveSAT
-      W4R.Sat fn@(SymGroundEvalFn fn') -> do
+      W4R.Sat fn -> do
         let emit ir = emitEvent (PE.CheckedEquivalence oBlocks pBlocks (PE.Inequivalent ir) duration)
         throwInequivalenceResult InvalidPostState regEq simResult simResult' fn emit
 
@@ -421,7 +428,7 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
 
   validTargets <- fmap catMaybes $
     forM allCalls $ \(blktO, blktP) -> do
-      ptrsEq <- withSymIO $ \sym -> matchesBlockTarget sym (targetCall blktO) (targetCall blktP)
+      ptrsEq <- withSymIO $ \sym -> matchesBlockTarget sym blktO blktP
       checkSatisfiableWithModel "check" ptrsEq $ \case
           W4R.Sat _ -> return $ Just $ (blktO, blktP)
           W4R.Unsat _ -> return Nothing
@@ -433,7 +440,7 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
     let addTarget e p (blktO, blktP) = do
           case validExit e (concreteBlockEntry (targetCall blktO)) of
             True -> do
-              matches <- matchesBlockTarget sym (targetCall blktO) (targetCall blktP)
+              matches <- matchesBlockTarget sym blktO blktP
               W4.orPred sym matches p
             False -> return p
     validCall <- MT.exitCases sym (resultExit simResult) $ \ecase -> do
@@ -442,6 +449,10 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
         -- initially satisfies the IP equivalence relation in order to prove
         -- that this return satisfies it
         MT.ExitReturn -> return $ W4.truePred sym
+        -- TODO: It's not clear how to calculate a valid jump pair for
+        -- arbitrary jumps if we don't have any statically valid targets
+        MT.ExitUnknown | [] <- allCalls -> return $ W4.truePred sym
+
         _ -> foldM (addTarget ecase) (W4.falsePred sym) validTargets
 
     W4.notPred sym validCall
@@ -459,6 +470,9 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
     ipO = regsO ^. MM.curIP
     ipP = regsP ^. MM.curIP
 
+    retO = resultReturn simResult
+    retP = resultReturn simResult'
+
     rBlock = resultBlock simResult
     rBlock' = resultBlock simResult'
     satResultDescription = ""
@@ -467,17 +481,44 @@ matchTraces pPair prevChecks regEq (oBlocks, simResult) (pBlocks, simResult') = 
 
     matchesBlockTarget ::
       sym ->
-      ConcreteBlock arch ->
-      ConcreteBlock arch ->
+      BlockTarget arch ->
+      BlockTarget arch ->
       IO (W4.Pred sym)
-    matchesBlockTarget sym blkO blkP = do
-      ptrO <- concreteToLLVM sym (concreteAddress blkO)
-      ptrP <- concreteToLLVM sym (concreteAddress blkP)
+    matchesBlockTarget sym blktO blktP = do
+      -- true when the resulting IPs call the given block targets
+      ptrO <- concreteToLLVM sym (concreteAddress $ targetCall blktO)
+      ptrP <- concreteToLLVM sym (concreteAddress $ targetCall blktP)
 
       eqO <- llvmPtrEq sym ptrO (macawRegValue ipO)
       eqP <- llvmPtrEq sym ptrP (macawRegValue ipP)
-      W4.andPred sym eqO eqP
+      eqCall <- W4.andPred sym eqO eqP
 
+      -- true when the resulting return IPs match the given block return addresses
+      targetRetO <- targetReturnPtr sym blktO
+      targetRetP <- targetReturnPtr sym blktP
+
+      eqRetO <- liftPartialRel sym (llvmPtrEq sym) retO targetRetO
+      eqRetP <- liftPartialRel sym (llvmPtrEq sym) retP targetRetP
+      eqRet <-  W4.andPred sym eqRetO eqRetP
+      W4.andPred sym eqCall eqRet
+
+-- | Lift an equivalence relation over two partial expressions
+liftPartialRel ::
+  CB.IsSymInterface sym =>
+  sym ->
+  (a -> a -> IO (W4.Pred sym)) ->
+  W4P.PartExpr (W4.Pred sym) a ->
+  W4P.PartExpr (W4.Pred sym) a ->
+  IO (W4.Pred sym)
+liftPartialRel sym rel (W4P.PE p1 e1) (W4P.PE p2 e2) = do
+  eqPreds <- W4.isEq sym p1 p2
+  bothConds <- W4.andPred sym p1 p2
+  rel' <- rel e1 e2
+  justCase <- W4.impliesPred sym bothConds rel'
+  W4.andPred sym eqPreds justCase
+liftPartialRel sym _ W4P.Unassigned W4P.Unassigned = return $ W4.truePred sym
+liftPartialRel sym _ W4P.Unassigned (W4P.PE p2 _) = W4.notPred sym p2
+liftPartialRel sym _ (W4P.PE p1 _) W4P.Unassigned = W4.notPred sym p1
 
 validExit :: MT.ExitCase -> BlockEntryKind arch -> Bool
 validExit ecase blkK = case (ecase, blkK) of
@@ -567,6 +608,7 @@ data SimulationResult sym arch where
     , resultRegs :: MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
     , resultMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     , resultExit :: MT.ExitClassifyImpl sym
+    , resultReturn :: CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
     , resultBlock :: ConcreteBlock arch
     } -> SimulationResult sym arch
 
@@ -628,8 +670,8 @@ simulate binCtx rb preRegs = errorFrame $ do
   archRepr <- archStructRepr
   let regs = CS.assignReg archRepr preRegsAsn CS.emptyRegMap
   cres <- evalCFG regs cfg
-  (postRegs, memTrace, jumpClass) <- getGPValueAndTrace cres
-  return $ SimulationResult preRegs postRegs memTrace jumpClass rb
+  (postRegs, memTrace, jumpClass, returnIP) <- getGPValueAndTrace cres
+  return $ SimulationResult preRegs postRegs memTrace jumpClass returnIP rb
 
 execGroundFn ::
   SymGroundEvalFn sym  -> 
@@ -764,6 +806,16 @@ concreteValue fn e
     groundBV fn ptr
 concreteValue _ e = throwHere (UnsupportedRegisterType (Some (macawRegRepr e)))
 
+groundReturnPtr ::
+  SymGroundEvalFn sym ->
+  CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch))) ->
+  EquivM sym arch (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)))
+groundReturnPtr fn (W4P.PE p e) = execGroundFn fn p >>= \case
+  True -> Just <$> groundLLVMPointer fn e
+  False -> return Nothing
+groundReturnPtr _ W4P.Unassigned = return Nothing
+
+
 groundTraceDiff :: forall sym arch.
   SymGroundEvalFn sym ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
@@ -842,16 +894,19 @@ getGPValueAndTrace ::
     ( MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     , MT.ExitClassifyImpl sym
+    , CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
     )
 getGPValueAndTrace (CS.FinishedResult _ pres) = do
   mem <- asks envMemTraceVar
   eclass <- asks envExitClassVar
+  rpv <- asks envReturnIPVar
   case pres ^. CS.partialValue of
     CS.GlobalPair val globs
       | Just mt <- CGS.lookupGlobal mem globs
-      , Just jc <- CGS.lookupGlobal eclass globs -> withValid $ do
+      , Just jc <- CGS.lookupGlobal eclass globs
+      , Just rp <- CGS.lookupGlobal rpv globs -> withValid $ do
         val' <- structToRegState @sym @arch val
-        return $ (val', mt, jc)
+        return $ (val', mt, jc, rp)
     _ -> throwError undefined
 getGPValueAndTrace (CS.AbortedResult _ ar) = throwHere . SymbolicExecutionFailed . ppAbortedResult $ ar
 getGPValueAndTrace (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "timeout")
@@ -941,6 +996,17 @@ data BlockTarget arch =
     , targetReturn :: Maybe (ConcreteBlock arch)
     }
 
+targetReturnPtr ::
+  ValidSym sym =>
+  ValidArch arch =>
+  sym ->
+  BlockTarget arch ->
+  IO (CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch))))
+targetReturnPtr sym blkt | Just blk <- targetReturn blkt = do
+  ptr <- concreteToLLVM sym (concreteAddress blk)
+  return $ W4P.justPartExpr sym ptr
+targetReturnPtr sym _ = return $ W4P.maybePartExpr sym Nothing
+
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch) where
   show (BlockTarget a b) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
 
@@ -974,7 +1040,9 @@ concreteValidJumpTargets allPbs pb = do
   let
     isTargetExternal btgt = not ((concreteAddress (targetCall btgt)) `elem` addrs)
     isTargetBackJump btgt = (concreteAddress (targetCall btgt)) < thisAddr
-    isTargetValid btgt = isTargetExternal btgt || isTargetBackJump btgt
+    isTargetArch btgt = concreteBlockEntry (targetCall btgt) == BlockEntryPostArch
+
+    isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
   return $ filter isTargetValid targets
 
 mkConcreteBlock ::
@@ -1018,8 +1086,9 @@ concreteJumpTargets pb = case MD.pblockTermStmt pb of
     blk_f <- mkConcreteBlock BlockEntryJump <$> segOffToAddr f
     return $ [ BlockTarget blk_t Nothing, BlockTarget blk_f Nothing ]
   MD.ParsedLookupTable st _ _ -> go (concreteNextIPs st) Nothing
-  MD.ParsedArchTermStmt _ st _ -> do
-    return $ [ BlockTarget (mkConcreteBlock BlockEntryPostArch next) Nothing
+  MD.ParsedArchTermStmt _ st ret -> do
+    ret_blk <- fmap (mkConcreteBlock BlockEntryPostArch) <$> mapM segOffToAddr ret
+    return $ [ BlockTarget (mkConcreteBlock BlockEntryPostArch next) ret_blk
              | next <- (concreteNextIPs st) ]
   _ -> return []
   where
@@ -1191,8 +1260,6 @@ mkRegEquivCheck _simResultO _simResultP = do
           _ | funCallStable reg -> llvmPtrEq sym bvO bvP
           _ -> return $ W4.truePred sym
       _ -> error "Unsupported register type"
-  where
-    ipReg = MM.ip_reg @(MM.ArchReg arch)
     
 
 flipZipWithM :: Monad m => [a] -> [b] -> (a -> b -> m c) -> m [c]

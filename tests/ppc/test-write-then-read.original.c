@@ -1,10 +1,10 @@
 #include "util.h"
 
-int g = -11;
+int f() {
+  int i = 1;
+  return i * 2;
+}
 
 void _start() {
-  g = 1;
-  g = g*2;
-
-  EXIT();
+  f();
 }

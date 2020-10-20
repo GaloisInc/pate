@@ -30,8 +30,6 @@ module Pate.Types
 
   , WhichBinary(..)
   , RegisterDiff(..)
-  , MemOpSpine(..)
-  , spineOf
   , ConcreteValue
   , GroundBV(..)
   , mkGroundBV
@@ -41,7 +39,6 @@ module Pate.Types
   , SymGroundEvalFn(..)
   , execGroundFnIO
   , MemTraceDiff
-  , MemTraceSpine
   , MemOpDiff(..)
   , MacawRegEntry(..)
   , macawRegEntry
@@ -58,7 +55,7 @@ module Pate.Types
   , ppEquivalenceStatistics
   , ppBlock
   , ppAbortedResult
-  
+  , ppLLVMPointer
   
   )
 where
@@ -70,13 +67,11 @@ import           Control.Monad ( foldM )
 import           Control.Lens hiding ( op, pre )
 
 import qualified Data.BitVector.Sized as BVS
-import           Data.Functor.Const
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
 import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
-import           Data.Sequence (Seq)
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Typeable
@@ -166,7 +161,7 @@ data BlockEntryKind arch =
   | BlockEntryPostArch
     -- ^ block is an intermediate point in a function, after an arch function call
   | BlockEntryJump
-    -- ^ block was entered by an arbitrary jump -- we should not see this in verificaiton
+    -- ^ block was entered by an arbitrary jump
     -- problems
   deriving (Eq, Ord, Show)
 
@@ -237,7 +232,6 @@ data GroundLLVMPointer n where
       } -> GroundLLVMPointer n
   deriving Eq
 
-
 instance TestEquality GroundLLVMPointer where
   testEquality ptr ptr'
     | Just Refl <- testEquality (ptrWidth ptr) (ptrWidth ptr')
@@ -249,7 +243,9 @@ instance TestEquality GroundLLVMPointer where
 instance OrdF GroundLLVMPointer where
   compareF (GroundLLVMPointerC w reg off) (GroundLLVMPointerC w' reg' off') =
     lexCompareF w w' $ joinOrderingF (fromOrdering $ compare reg reg') (fromOrdering $ compare off off')
-deriving instance Show (GroundLLVMPointer n)
+
+instance Show (GroundLLVMPointer n) where
+  show ptr = ppLLVMPointer ptr
 
 mkGroundBV :: forall n.
   W4.NatRepr n ->
@@ -267,6 +263,7 @@ groundBVAsPointer gbv = case gbv of
 
 type family ConcreteValue (tp :: CC.CrucibleType)
 type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
+type instance ConcreteValue (CC.MaybeType (CLM.LLVMPointerType w)) = Maybe (GroundBV w)
 
 data RegisterDiff arch tp where
   RegisterDiff :: ShowF (MM.ArchReg arch) =>
@@ -292,17 +289,6 @@ execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
 
 
 ----------------------------------
-data MemOpSpine
-  = MemOpSpine MT.MemOpDirection Natural MM.Endianness
-  | MergeSpines MemTraceSpine MemTraceSpine
-
-type MemTraceSpine = Seq MemOpSpine
-
-spineOf :: MT.MemTraceSeq sym ptrW -> MemTraceSpine
-spineOf = fmap go where
-  go (MT.MemOp _addr dir _cond size _val end) = MemOpSpine dir (W4.natValue size) end
-  go (MT.MergeOps _cond traceT traceF) = MergeSpines (spineOf traceT) (spineOf traceF)
-
 data GroundMemOp arch where
   GroundMemOp :: forall arch w.
     { gAddress :: GroundLLVMPointer (MM.ArchAddrWidth arch)
@@ -375,18 +361,21 @@ data InequivalenceReason =
   deriving (Eq, Ord, Show)
 
 type ExitCaseDiff = (MT.ExitCase, MT.ExitCase)
+type ReturnAddrDiff arch = (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)), (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))))
 
-
-data InequivalenceResult arch
-  = InequivalentResults (MemTraceDiff arch) ExitCaseDiff (MM.RegState (MM.ArchReg arch) (RegisterDiff arch)) InequivalenceReason
-  | InequivalentOperations MemTraceSpine MemTraceSpine
+data InequivalenceResult arch =
+  InequivalentResults
+    { diffMem :: MemTraceDiff arch
+    , diffExit :: ExitCaseDiff
+    , diffRegs :: MM.RegState (MM.ArchReg arch) (RegisterDiff arch)
+    , diffRetAddr :: ReturnAddrDiff arch
+    , diffReason :: InequivalenceReason
+    }
 
 
 
 instance Show (InequivalenceResult arch) where
-  show r = case r of
-    InequivalentResults{} -> "InequivalentResults"
-    InequivalentOperations{} -> "InequivalentOperations"
+  show _ = "InequivalenceResult"
 
 ----------------------------------
 
@@ -454,14 +443,7 @@ ppEquivalenceError ::
   ShowF (MM.ArchReg arch) =>
   EquivalenceError arch -> String
 ppEquivalenceError err | (InequivalentError ineq)  <- errEquivError err = case ineq of
-  InequivalentResults traceDiff exitDiffs regDiffs reason -> "x\n" ++ ppReason reason ++ "\n" ++ ppExitCaseDiff exitDiffs ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
-  InequivalentOperations trace trace' -> concat
-    [ "x\n\tMismatched memory operations:\n\t\t"
-    , ppMemTraceSpine trace
-    , " (original) vs.\n\t\t"
-    , ppMemTraceSpine trace'
-    , " (rewritten)\n"
-    ]
+  InequivalentResults traceDiff exitDiffs regDiffs _retDiffs reason -> "x\n" ++ ppReason reason ++ "\n" ++ ppExitCaseDiff exitDiffs ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
 ppEquivalenceError err = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the error
 
 
@@ -524,23 +506,6 @@ ppDirectionVerb MT.Write = "wrote"
 ppDirectionPreposition :: MT.MemOpDirection -> String
 ppDirectionPreposition MT.Read = "from"
 ppDirectionPreposition MT.Write = "to"
-
-ppMemTraceSpine :: MemTraceSpine -> String
-ppMemTraceSpine = unwords . map ppMemOpSpine . toList
-
-ppMemOpSpine :: MemOpSpine -> String
-ppMemOpSpine (MemOpSpine dir size end) = concat
-  [ take 1 (ppDirectionVerb dir)
-  , ppEndianness end
-  , show size
-  ]
-ppMemOpSpine (MergeSpines spineT spineF) = concat
-  [ "("
-  , ppMemTraceSpine spineT
-  , "/"
-  , ppMemTraceSpine spineF
-  , ")"
-  ]
 
 ppEndianness :: MM.Endianness -> String
 ppEndianness MM.BigEndian = "→"
