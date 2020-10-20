@@ -36,6 +36,14 @@ demo4: demo4/demo4.original.i demo4/demo4.patched.i
                                 --original-source demo4/demo4.original.i \
                                 --patched-source demo4/demo4.patched.i
 
+.PHONY: inlining
+inlining: ../tests/ppc/test-direct-calls.original.i ../tests/ppc/test-direct-calls.patched.i
+	cabal v2-run exe:pate-exec -- --arch PPC \
+                                --original ../tests/ppc/test-direct-calls.original.exe \
+                                --patched ../tests/ppc/test-direct-calls.patched.exe \
+                                --interactive \
+                                --original-source ../tests/ppc/test-direct-calls.original.i \
+                                --patched-source ../tests/ppc/test-direct-calls.patched.i
 
 %.i: %.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
