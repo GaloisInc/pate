@@ -58,7 +58,7 @@ module Pate.Types
   , ppEquivalenceStatistics
   , ppBlock
   , ppAbortedResult
-  
+  , ppPreRegs
   
   )
 where
@@ -70,7 +70,6 @@ import           Control.Monad ( foldM )
 import           Control.Lens hiding ( op, pre )
 
 import qualified Data.BitVector.Sized as BVS
-import           Data.Functor.Const
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
