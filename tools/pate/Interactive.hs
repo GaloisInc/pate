@@ -147,7 +147,7 @@ renderEvent st detailDiv evt =
     PE.CheckedEquivalence ob@(PE.Blocks (PT.ConcreteAddress origAddr) _) pb@(PE.Blocks (PT.ConcreteAddress patchedAddr) _) res duration -> do
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
-      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb)
+      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb res)
       TP.span #+ [ TP.string "Checking original block at "
                  , return blockLink
                  , TP.string " against patched block at "
@@ -162,10 +162,12 @@ showBlockPairDetail :: (PB.ArchConstraints arch)
                     -> TP.Element
                     -> PE.Blocks arch
                     -> PE.Blocks arch
+                    -> PE.EquivalenceResult arch
                     -> a
                     -> TP.UI ()
-showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) _ = do
-  g <- TP.grid [ concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
+showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) res _ = do
+  g <- TP.grid [ renderCounterexample res
+               , concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
                , concat [ [renderCode opbs, renderCode ppbs]
                         , renderSource st originalSource originalBinary origAddr
                         , renderSource st patchedSource patchedBinary patchedAddr
@@ -178,6 +180,20 @@ showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) 
     renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PPL.pretty pb)) #. "basic-block"
                                 | pb <- pbs
                                 ]
+
+renderCounterexample :: PE.EquivalenceResult arch -> [TP.UI TP.Element]
+renderCounterexample er =
+  case er of
+    PE.Equivalent -> []
+    PE.Inconclusive -> []
+    PE.Inequivalent ir ->
+      case ir of
+        PT.InequivalentResults _traceDiff _exitDiff regs _retAddrs rsn ->
+          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show rsn)
+                               , TP.pre #+ [TP.string (PT.ppPreRegs regs)]
+                               ]
+                   ]
+          ]
 
 -- | Note that we always look up the original address because we key the
 -- function name off of that... we could do better

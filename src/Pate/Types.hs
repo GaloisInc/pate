@@ -56,7 +56,7 @@ module Pate.Types
   , ppBlock
   , ppAbortedResult
   , ppLLVMPointer
-  
+  , ppPreRegs  
   )
 where
 
