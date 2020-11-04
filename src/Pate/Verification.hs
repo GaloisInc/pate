@@ -125,7 +125,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
     initMem <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
     initEClass <- liftIO $ MT.initExitClass sym
     initRet <- liftIO $ MT.initRetAddr @_ @arch sym
-    proc <- liftIO $ CBO.withSolverProcess sym return
+    proc <- liftIO $ CBO.withSolverProcess sym (fail "no live solver") return
     -- FIXME: we should be able to lift this from the ELF, and it may differ between
     -- binaries
     stackRegion <- liftIO $ W4.natLit sym 1
