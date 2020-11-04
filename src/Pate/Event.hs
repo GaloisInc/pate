@@ -6,6 +6,7 @@ module Pate.Event (
   Event(..)
   ) where
 
+import qualified Data.ElfEdit as DEE
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Time as TM
 
@@ -25,5 +26,6 @@ data EquivalenceResult arch = Equivalent
 -- This can include traditional logging information, but also statistics about
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
+  ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: Blocks arch -> Blocks arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch

@@ -10,15 +10,19 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( join )
+import qualified Data.Binary.Get as DB
+import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import qualified Data.Traversable as T
 import qualified Language.C as LC
@@ -26,16 +30,16 @@ import qualified Lumberjack as LJ
 import qualified Options.Applicative as OA
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Terminal as PPRT
-import           System.Exit
+import qualified System.Exit as SE
 import qualified System.IO as IO
 
+import qualified Data.ElfEdit as DEE
 import           Data.Parameterized.Some ( Some(..) )
 
 import qualified Pate.AArch32 as AArch32
 import qualified Pate.Event as PE
 import qualified Pate.PPC as PPC
 import qualified Pate.Loader as PL
-
 import qualified Pate.Types as PT
 
 import qualified Interactive as I
@@ -44,47 +48,47 @@ import qualified Interactive.State as IS
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
-  Some proxy <- return $ archKToProxy (archK opts)
-  chan <- CC.newChan
-  (logger, mConsumer) <- startLogger proxy (logTarget opts) chan
-  let
-    infoPath = case blockInfo opts of
-      Just path -> Left path
-      Nothing -> Right PL.noPatchData
-    discoverCfg =
-      PT.defaultDiscoveryCfg
-        { PT.cfgPairMain = not $ noPairMain opts
-        , PT.cfgDiscoverFuns = not $ noDiscoverFuns opts
-        }
-    cfg = PL.RunConfig
-        { PL.archProxy = proxy
-        , PL.infoPath = infoPath
-        , PL.origPath = originalBinary opts
-        , PL.patchedPath = patchedBinary opts
-        , PL.logger = logger
-        , PL.discoveryCfg = discoverCfg
-        }
-  PL.runEquivConfig cfg >>= \case
-    Left err -> die (show err)
-    Right _ -> pure ()
+  ep <- archToProxy (originalBinary opts) (patchedBinary opts)
+  case ep of
+    Left err -> SE.die (show err)
+    Right (elfErrs, Some proxy) -> do
+      chan <- CC.newChan
+      (logger, mConsumer) <- startLogger proxy (logTarget opts) chan
+      LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
+      let
+        infoPath = case blockInfo opts of
+          Just path -> Left path
+          Nothing -> Right PL.noPatchData
+        discoverCfg =
+          PT.defaultDiscoveryCfg
+            { PT.cfgPairMain = not $ noPairMain opts
+            , PT.cfgDiscoverFuns = not $ noDiscoverFuns opts
+            }
+        cfg = PL.RunConfig
+            { PL.archProxy = proxy
+            , PL.infoPath = infoPath
+            , PL.origPath = originalBinary opts
+            , PL.patchedPath = patchedBinary opts
+            , PL.logger = logger
+            , PL.discoveryCfg = discoverCfg
+            }
+      PL.runEquivConfig cfg >>= \case
+        Left err -> SE.die (show err)
+        Right _ -> pure ()
 
-  -- Shut down the logger cleanly (if we can - the interactive logger will be
-  -- persistent until the user kills it)
-  CC.writeChan chan Nothing
-  F.forM_ mConsumer CCA.wait
+      -- Shut down the logger cleanly (if we can - the interactive logger will be
+      -- persistent until the user kills it)
+      CC.writeChan chan Nothing
+      F.forM_ mConsumer CCA.wait
 
 data CLIOptions = CLIOptions
   { originalBinary :: FilePath
   , patchedBinary :: FilePath
   , blockInfo :: Maybe FilePath
-  , archK :: ArchK
   , logTarget :: LogTarget
   , noPairMain :: Bool
   , noDiscoverFuns :: Bool
   } deriving (Eq, Ord, Read, Show)
-
-data ArchK = PPC | ARM
-  deriving (Eq, Ord, Read, Show)
 
 data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
                -- ^ Logs will go to an interactive viewer
@@ -171,6 +175,9 @@ terminalFormatEvent :: PE.Event arch -> PP.SimpleDocStream PPRT.AnsiStyle
 terminalFormatEvent evt =
   case evt of
     PE.LoadedBinaries {} -> layout "Loaded original and patched binaries"
+    PE.ElfLoaderWarnings pes ->
+      let msg = "Warnings during ELF loading:"
+      in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
     PE.CheckedEquivalence (PE.Blocks origAddr _) (PE.Blocks patchedAddr _) res duration ->
       let pfx = mconcat [ "Checking original block at "
                         , PP.viaShow origAddr
@@ -190,10 +197,44 @@ terminalFormatEvent evt =
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
           in layout (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
 
-archKToProxy :: ArchK -> Some PL.ValidArchProxy
-archKToProxy a = case a of
-  PPC -> Some (PL.ValidArchProxy @PPC.PPC64)
-  ARM -> Some (PL.ValidArchProxy @AArch32.AArch32)
+data LoadError where
+  ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
+  ElfArchitectureMismatch :: [DEE.ElfParseError] -> DEE.ElfMachine -> DEE.ElfMachine -> LoadError
+  UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
+
+deriving instance Show LoadError
+
+-- | Examine the input files to determine the architecture
+archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PL.ValidArchProxy))
+archToProxy origBinaryPath patchedBinaryPath = do
+  origBin <- BS.readFile origBinaryPath
+  patchedBin <- BS.readFile patchedBinaryPath
+  case (DEE.parseElf origBin, DEE.parseElf patchedBin) of
+    (DEE.ElfHeaderError off msg, _) -> return (Left (ElfHeaderParseError origBinaryPath off msg))
+    (_, DEE.ElfHeaderError off msg) -> return (Left (ElfHeaderParseError patchedBinaryPath off msg))
+    (DEE.Elf32Res errs32 e32, DEE.Elf64Res errs64 e64) ->
+      return (Left (ElfArchitectureMismatch (errs32 ++ errs64) (DEE.elfMachine e32) (DEE.elfMachine e64)))
+    (DEE.Elf64Res errs64 e64, DEE.Elf32Res errs32 e32) ->
+      return (Left (ElfArchitectureMismatch (errs64 ++ errs32) (DEE.elfMachine e64) (DEE.elfMachine e32)))
+    (DEE.Elf32Res origErrs (DEE.elfMachine -> origMachine), DEE.Elf32Res patchedErrs (DEE.elfMachine -> patchedMachine))
+      | origMachine == patchedMachine ->
+        return (fmap (origErrs ++ patchedErrs,) (machineToProxy origMachine))
+      | otherwise ->
+        return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
+    (DEE.Elf64Res origErrs (DEE.elfMachine -> origMachine), DEE.Elf64Res patchedErrs (DEE.elfMachine -> patchedMachine))
+      | origMachine == patchedMachine ->
+        return (fmap (origErrs ++ patchedErrs,) (machineToProxy origMachine))
+      | otherwise ->
+        return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
+
+machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PL.ValidArchProxy)
+machineToProxy em =
+  case em of
+    DEE.EM_PPC -> Right (Some (PL.ValidArchProxy @PPC.PPC32))
+    DEE.EM_PPC64 -> Right (Some (PL.ValidArchProxy @PPC.PPC64))
+    DEE.EM_ARM -> Right (Some (PL.ValidArchProxy @AArch32.AArch32))
+    _ -> Left (UnsupportedArchitecture em)
+
 
 logParser :: OA.Parser LogTarget
 logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure StdoutLogger
@@ -245,14 +286,7 @@ cliOptions = OA.info (OA.helper <*> parser)
       <> OA.short 'b'
       <> OA.metavar "FILENAME"
       <> OA.help "Block information relating binaries"
-      -- <> OA.value Nothing
       )))
-    <*> (OA.option (OA.auto @ArchK)
-      (  OA.long "arch"
-      <> OA.short 'a'
-      <> OA.metavar "ARCH"
-      <> OA.help "Architecture of the given binaries"
-      ))
     <*> logParser
     <*> (OA.switch
       (  OA.long "ignoremain"
