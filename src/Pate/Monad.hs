@@ -88,6 +88,8 @@ data BinaryContext sym arch = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.Elf (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
+  , binInitMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+  , binGlobalMap :: CGS.SymGlobalState sym
   }
 
 data EquivalenceContext sym arch where
@@ -144,10 +146,10 @@ data EquivEnv sym arch where
     , envCtx :: EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
-    , envGlobalMap :: CGS.SymGlobalState sym
+    
     , envStackRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
-    , envInitMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+
     , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
     , envReturnIPVar :: CS.GlobalVar (CT.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
     , envBlockMapping :: BlockMapping arch
@@ -215,6 +217,7 @@ withSym f = withValid $ do
   f sym
 
 withProc ::
+  forall a sym arch.
   ( forall scope solver fs.
     ValidSolver sym scope solver fs =>
     W4O.SolverProcess scope solver ->
@@ -297,9 +300,9 @@ errorFrame ::
   EquivM sym arch a ->
   EquivM sym arch a
 errorFrame f = withSym $ \sym -> do
-  st <- liftIO $ CB.saveAssumptionState sym
+  fr <- liftIO $ CB.pushAssumptionFrame sym
   res <- manifestError f
-  liftIO $ CB.restoreAssumptionState sym st
+  liftIO $ CB.popUntilAssumptionFrame sym fr
   implicitError res
 
 manifestError :: MonadError e m => m a -> m (Either e a)

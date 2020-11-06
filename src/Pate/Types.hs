@@ -316,7 +316,7 @@ instance Ord (GroundMemOp arch) where
 deriving instance Show (GroundMemOp arch)
 
 data MemOpDiff arch = MemOpDiff
-  { mDirection :: MT.MemOpDirection
+  { mIsRead :: Bool
   , mOpOriginal :: GroundMemOp arch
   , mOpRewritten :: GroundMemOp arch
   } deriving (Eq, Ord, Show)
@@ -474,11 +474,11 @@ ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDif
 ppMemOpDiff :: MemOpDiff arch -> String
 ppMemOpDiff diff
   | shouldPrintMemOp diff
-  =  "\t\t" ++ ppDirectionVerb (mDirection diff) ++ " "
-  ++ ppGroundMemOp (mDirection diff) (mOpOriginal diff)
+  =  "\t\t" ++ ppDirectionVerb (mIsRead diff) ++ " "
+  ++ ppGroundMemOp (mIsRead diff) (mOpOriginal diff)
   ++ (if mOpOriginal diff == mOpRewritten diff
       then ""
-      else " (original) vs. " ++ ppGroundMemOp (mDirection diff) (mOpRewritten diff) ++ " (rewritten)"
+      else " (original) vs. " ++ ppGroundMemOp (mIsRead diff) (mOpRewritten diff) ++ " (rewritten)"
      )
   ++ "\n"
 ppMemOpDiff _ = ""
@@ -489,23 +489,23 @@ shouldPrintMemOp diff =
   gCondition (mOpOriginal diff) ||
   gCondition (mOpRewritten diff)
 
-ppGroundMemOp :: MT.MemOpDirection -> GroundMemOp arch -> String
-ppGroundMemOp dir op
+ppGroundMemOp :: Bool -> GroundMemOp arch -> String
+ppGroundMemOp isRead op
   | Some v <- gValue op
   =  ppGroundBV v
-  ++ " " ++ ppDirectionPreposition dir ++ " "
+  ++ " " ++ ppDirectionPreposition isRead ++ " "
   ++ ppLLVMPointer (gAddress op)
   ++ if gCondition op
      then ""
      else " (skipped)"
 
-ppDirectionVerb :: MT.MemOpDirection -> String
-ppDirectionVerb MT.Read = "read"
-ppDirectionVerb MT.Write = "wrote"
+ppDirectionVerb :: Bool -> String
+ppDirectionVerb True = "read"
+ppDirectionVerb False = "wrote"
 
-ppDirectionPreposition :: MT.MemOpDirection -> String
-ppDirectionPreposition MT.Read = "from"
-ppDirectionPreposition MT.Write = "to"
+ppDirectionPreposition :: Bool -> String
+ppDirectionPreposition True = "from"
+ppDirectionPreposition False = "to"
 
 ppEndianness :: MM.Endianness -> String
 ppEndianness MM.BigEndian = "→"
