@@ -50,8 +50,8 @@ runTests cfg = do
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
   T.testGroup fp $
-    [ T.testCase "original-self" $ doTest (Just PT.Original) ShouldVerify proxy fp
-    , T.testCase "patched-self" $ doTest (Just PT.Rewritten) ShouldVerify proxy fp
+    [ T.testCase "original-self" $ doTest (Just PT.OriginalRepr) ShouldVerify proxy fp
+    , T.testCase "patched-self" $ doTest (Just PT.PatchedRepr) ShouldVerify proxy fp
     , mkEquivTest cfg ShouldVerify fp
     ]
 
@@ -68,8 +68,8 @@ mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
     wrap t = if shouldFail then T.expectFail t else t
 
 doTest ::
-  forall arch.
-  Maybe PT.WhichBinary ->
+  forall arch bin.
+  Maybe (PT.WhichBinaryRepr bin) ->
   ShouldVerify ->
   PL.ValidArchProxy arch ->
   FilePath ->

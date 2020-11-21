@@ -28,6 +28,7 @@ import           Text.Read ( readMaybe )
 
 import qualified Data.Macaw.Memory as MM
 
+import           Data.Parameterized.Classes
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
@@ -61,12 +62,13 @@ noPatchData = PatchData [] []
 hexToAddr :: ValidArchProxy arch -> Hex Word64 -> PT.ConcreteAddress arch
 hexToAddr ValidArchProxy (Hex w) = PT.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
 
-unpackBlockData :: ValidArchProxy arch -> BlockData -> PT.ConcreteBlock arch
+unpackBlockData :: PT.KnownBinary bin => ValidArchProxy arch -> BlockData -> PT.ConcreteBlock arch bin
 unpackBlockData proxy start =
   PT.ConcreteBlock
     { PT.concreteAddress = (hexToAddr proxy start)
       -- we assume that all provided blocks begin a function
     , PT.concreteBlockEntry = PT.BlockEntryInitFunction
+    , PT.blockBinRepr = knownRepr
     }
 
 unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])
@@ -105,9 +107,9 @@ data RunConfig arch =
 -- | Given a patch configuration, check that
 -- either the original or patched binary can be
 -- proven self-equivalent
-runSelfEquivConfig :: forall arch.
+runSelfEquivConfig :: forall arch bin.
   RunConfig arch ->
-  PT.WhichBinary ->
+  PT.WhichBinaryRepr bin ->
   IO (Either String Bool)
 runSelfEquivConfig cfg wb = runExceptT $ do
   patchData <- case infoPath cfg of
@@ -118,11 +120,11 @@ runSelfEquivConfig cfg wb = runExceptT $ do
   let
     swapPair :: forall a. (a, a) -> (a, a)
     swapPair (a1, a2) = case wb of
-      PT.Original -> (a1, a1)
-      PT.Rewritten -> (a2, a2)
-    path = case wb of
-      PT.Original -> origPath cfg
-      PT.Rewritten -> patchedPath cfg
+      PT.OriginalRepr -> (a1, a1)
+      PT.PatchedRepr -> (a2, a2)
+    path :: String = case wb of
+      PT.OriginalRepr -> origPath cfg
+      PT.PatchedRepr -> patchedPath cfg
     pairs' = map swapPair $ patchPairs patchData
     patchData' = PatchData
       { patchPairs = pairs'

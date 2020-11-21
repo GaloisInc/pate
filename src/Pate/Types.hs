@@ -12,15 +12,47 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE IncoherentInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE LambdaCase #-}
+
+-- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
+{-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Types
   ( DiscoveryConfig(..)
   , defaultDiscoveryCfg
   , PatchPair(..)
+  , SimState(..)
+  , SimInput(..)
+  , simInMem
+  , simInRegs
+  , SimOutput(..)
+  , simOutMem
+  , simOutRegs
+  , SimSpec(..)
+  , SimBundle(..)
+  , simPair
+  , bindSpec
+  , bindSpec'
+  , MemFootprints
+  , MemFootprintsSpec
+  , SimVars(..)
+  , flatVars
+  , ExprMappable(..)
+  , ExprImplyable(..)
   , ConcreteBlock(..)
   , BlockMapping(..)
+  , BlockTarget(..)
   , ConcreteAddress(..)
   , BlockEntryKind(..)
+  , MemStamp(..)
+  , MemStamps(..)
+  , StatePred(..)
+  , StatePredSpec
+  , EquivRelation(..)
   , absoluteAddress
   , addressAddOffset
   , concreteFromAbsolute
@@ -28,7 +60,11 @@ module Pate.Types
   , ParsedFunctionMap
   , markEntryPoint
 
-  , WhichBinary(..)
+  , type WhichBinary
+  , KnownBinary
+  , Original
+  , Patched
+  , WhichBinaryRepr(..)
   , RegisterDiff(..)
   , ConcreteValue
   , GroundBV(..)
@@ -41,6 +77,7 @@ module Pate.Types
   , MemTraceDiff
   , MemOpDiff(..)
   , MacawRegEntry(..)
+  , MacawRegVar(..)
   , macawRegEntry
   , InnerEquivalenceError(..)
   , InequivalenceReason(..)
@@ -56,19 +93,25 @@ module Pate.Types
   , ppBlock
   , ppAbortedResult
   , ppLLVMPointer
-  , ppPreRegs  
+  , ppPreRegs
+  , ppDiff
+  , ppMemDiff
+  , showModelForExpr
   )
 where
 
 import           GHC.Stack
+import           GHC.TypeNats
 
 import           Control.Exception
-import           Control.Monad ( foldM )
+import           Control.Monad ( foldM, forM )
 import           Control.Lens hiding ( op, pre )
+import qualified Control.Monad.IO.Class as IO
 
 import qualified Data.BitVector.Sized as BVS
 import           Data.Map ( Map )
 import qualified Data.Map as M
+import qualified Data.Map.Merge.Strict as M
 import           Data.Maybe ( catMaybes )
 import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
@@ -82,12 +125,17 @@ import           Numeric
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
+import           Data.Parameterized.Context hiding ( replicate )
+import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.Map as MapF
 
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.Simulator.Intrinsics as CS
+import qualified Lang.Crucible.Utils.MuxTree as MX
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
@@ -140,13 +188,344 @@ newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arc
 deriving instance Show (ConcreteAddress arch)
 
 data PatchPair arch = PatchPair
-  { pOrig :: ConcreteBlock arch
-  , pPatched :: ConcreteBlock arch
+  { pOrig :: ConcreteBlock arch 'Original
+  , pPatched :: ConcreteBlock arch 'Patched
   }
   deriving (Eq, Ord)
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (PatchPair arch) where
   show (PatchPair blk1 blk2) = ppBlock blk1 ++ " vs. " ++ ppBlock blk2
+
+
+data SimState sym arch (bin :: WhichBinary) = SimState
+  {
+    simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+  , simRegs :: MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+  }
+
+data SimVars sym arch bin = SimVars
+  {
+    simVarMem :: MT.MemTraceVar sym (MM.ArchAddrWidth arch)
+  , simVarRegs :: MM.RegState (MM.ArchReg arch) (MacawRegVar sym)
+  , simVarState :: SimState sym arch bin
+  }
+
+data SimInput sym arch bin = SimInput
+  {
+    simInState :: SimState sym arch bin
+  , simInBlock :: ConcreteBlock arch bin
+  }
+
+
+simInMem ::
+  SimInput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+simInMem simIn = simMem $ simInState simIn
+
+simInRegs ::
+  SimInput sym arch bin -> MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+simInRegs simIn = simRegs $ simInState simIn
+
+data SimOutput sym arch bin = SimOutput
+  {
+    simOutState :: SimState sym arch bin
+  , simOutExit :: MT.ExitClassifyImpl sym
+  , simOutReturn :: CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
+  }
+
+simOutMem ::
+  SimOutput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+simOutMem simIn = simMem $ simOutState simIn
+
+simOutRegs ::
+  SimOutput sym arch bin -> MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+simOutRegs simIn = simRegs $ simOutState simIn
+
+data SimSpec sym arch f = SimSpec
+  {
+    specVarsO :: SimVars sym arch Original
+  , specVarsP :: SimVars sym arch Patched
+  , specAsm :: W4.Pred sym
+  , specBody :: f
+  }
+
+data SimBundle sym arch = SimBundle
+  {
+    simInO :: SimInput sym arch Original
+  , simInP :: SimInput sym arch Patched
+  , simOutO :: SimOutput sym arch Original
+  , simOutP :: SimOutput sym arch Patched
+  , simFootprints :: MemFootprints sym arch
+  }
+
+simPair :: SimBundle sym arch -> PatchPair arch
+simPair bundle = PatchPair (simInBlock $ simInO bundle) (simInBlock $ simInP bundle)
+
+type MemFootprints sym arch = Set (MT.MemFootprint sym (MM.ArchAddrWidth arch))
+type MemFootprintsSpec sym arch = SimSpec sym arch (MemFootprints sym arch)
+
+data MemStamp sym arch w where
+  MemStamp ::
+    1 <= w =>
+    { stampPtr :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch)
+    , stampWidth :: W4.NatRepr w
+    } -> MemStamp sym arch w
+
+instance TestEquality (W4.SymExpr sym) => TestEquality (MemStamp sym arch) where
+  testEquality (MemStamp (CLM.LLVMPointer reg1 off1) sz1) (MemStamp (CLM.LLVMPointer reg2 off2) sz2)
+   | Just Refl <- testEquality reg1 reg2
+   , Just Refl <- testEquality off1 off2
+   , Just Refl <- testEquality sz1 sz2
+   = Just Refl
+  testEquality _ _ = Nothing
+
+instance OrdF (W4.SymExpr sym) => OrdF (MemStamp sym arch) where
+  compareF (MemStamp (CLM.LLVMPointer reg1 off1) sz1) (MemStamp (CLM.LLVMPointer reg2 off2) sz2) =
+    lexCompareF reg1 reg2 $
+     lexCompareF off1 off2 $
+     compareF sz1 sz2
+
+instance TestEquality (W4.SymExpr sym) => Eq (MemStamp sym arch w) where
+  stamp1 == stamp2 | Just Refl <- testEquality stamp1 stamp2 = True
+  _ == _ = False
+
+instance OrdF (W4.SymExpr sym) => Ord (MemStamp sym arch w) where
+  compare stamp1 stamp2  = toOrdering $ compareF stamp1 stamp2
+
+newtype MemStamps sym arch w = MemStamps (Map (MemStamp sym arch w) (W4.Pred sym))
+
+mapStampPreds ::
+  (W4.Pred sym -> IO (W4.Pred sym)) ->
+  MemStamps sym arch w ->
+  IO (MemStamps sym arch w)
+mapStampPreds f (MemStamps stamps) = MemStamps <$> mapM f stamps
+
+data MemPred sym arch =
+    MemPred
+      { memPredLocs :: MapF.MapF W4.NatRepr (MemStamps sym arch)
+      -- ^ predicate status at these locations according to polarity
+      , memPredPolarity :: W4.Pred sym
+      -- ^ if true, then predicate is true at exactly the locations
+      -- if false, then predicate is true everywhere but these locations
+      }
+
+muxMemStamps ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  W4.Pred sym ->
+  MemStamps sym arch w ->
+  MemStamps sym arch w ->
+  IO (MemStamps sym arch w)  
+muxMemStamps sym p (MemStamps stampsT) (MemStamps stampsF) = do
+  notp <- W4.notPred sym p
+  MemStamps <$>
+    M.mergeA
+      (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
+      (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
+      (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
+      stampsT
+      stampsF
+
+muxMemStampsMap ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF f =>
+  sym ->
+  W4.Pred sym ->
+  MapF.MapF f (MemStamps sym arch) ->
+  MapF.MapF f (MemStamps sym arch) ->
+  IO (MapF.MapF f (MemStamps sym arch))  
+muxMemStampsMap sym p stampsMapT stampsMapF = do
+  notp <- W4.notPred sym p
+  MapF.mergeWithKeyM
+       (\_ stampsT stampsF -> Just <$> muxMemStamps sym p stampsT stampsF)
+       (MapF.traverseWithKey (\_ -> mapStampPreds (W4.andPred sym p)))
+       (MapF.traverseWithKey (\_ -> mapStampPreds (W4.andPred sym notp)))
+       stampsMapT
+       stampsMapF
+
+muxMemPred ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  W4.Pred sym ->
+  MemPred sym arch ->
+  MemPred sym arch ->
+  IO (MemPred sym arch)
+muxMemPred sym p predT predF = do
+  pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
+  locs <- muxMemStampsMap sym p (memPredLocs predT) (memPredLocs predF)
+  return $ MemPred locs pol
+
+inStamps ::
+  forall sym arch w.
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  MemStamp sym arch w ->
+  MemStamps sym arch w ->
+  IO (W4.Pred sym) 
+inStamps sym stamp (MemStamps stamps) =
+  case M.lookup stamp stamps of
+    Just cond | Just True <- W4.asConstantPred cond -> return $ W4.truePred sym
+    _ -> go (W4.falsePred sym) (M.toList stamps)
+  where
+    go :: W4.Pred sym -> [(MemStamp sym arch w, W4.Pred sym)] -> IO (W4.Pred sym)
+    go p ((stamp', cond) : stamps') = do
+      eqPtrs <- MT.llvmPtrEq sym (stampPtr stamp) (stampPtr stamp')
+      case W4.asConstantPred eqPtrs of
+        Just True | Just True <- W4.asConstantPred cond -> return $ W4.truePred sym
+        Just False -> go p stamps'
+        _ -> do
+          matches <- W4.andPred sym eqPtrs cond
+          p' <- W4.orPred sym p matches
+          go p' stamps'
+    go p [] = return p
+
+
+memPredAt ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  MemPred sym arch ->
+  MemStamp sym arch w ->
+  IO (W4.Pred sym)
+memPredAt sym mempred stamp = do
+  isInLocs <- case MapF.lookup (stampWidth stamp) (memPredLocs mempred) of
+    Just stamps -> inStamps sym stamp stamps
+    Nothing -> return $ W4.falsePred sym
+  W4.isEq sym isInLocs (memPredPolarity mempred)
+
+-- | Trivial predicate that is true on all of memory
+memPredTrue :: W4.IsExprBuilder sym => sym -> MemPred sym arch
+memPredTrue sym = MemPred MapF.empty (W4.falsePred sym)
+
+-- | Predicate that is false on all of memory
+memPredFalse :: W4.IsExprBuilder sym => sym -> MemPred sym arch
+memPredFalse sym = MemPred MapF.empty (W4.truePred sym)
+
+-- instance TestEquality (W4.SymExpr sym) => Eq (MemPred sym arch) where
+--   (MemPred locs1 pol1) == (MemPred locs2 pol2) =
+--     locs1 == locs2 && pol1 == pol2
+
+-- instance OrdF (W4.SymExpr sym) => Ord (MemPred sym arch) where
+--   compare (MemPred locs1 pol1) (MemPred locs2 pol2) =
+--     compare locs1 locs2 <>
+--     compare pol1 pol2
+
+data StatePred sym arch =
+  StatePred
+    { predRegs :: Map (Some (MM.ArchReg arch)) (W4.Pred sym)
+    -- ^ predicate is trivially true on missing entries
+    , predStack :: MemPred sym arch
+    , predMem :: MemPred sym arch
+    }
+
+type StatePredSpec sym arch = SimSpec sym arch (StatePred sym arch)
+
+muxStatePred ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  sym ->
+  W4.Pred sym ->
+  StatePred sym arch ->
+  StatePred sym arch ->
+  IO (StatePred sym arch)
+muxStatePred sym p predT predF = do
+  notp <- W4.notPred sym p
+  regs <- M.mergeA
+    (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
+    (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
+    (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
+    (predRegs predT)
+    (predRegs predF)  
+  stack <- muxMemPred sym p (predStack predT) (predStack predF)
+  mem <- muxMemPred sym p (predMem predT) (predMem predF)
+  return $ StatePred regs stack mem
+
+statePredTrue :: W4.IsExprBuilder sym => sym -> StatePred sym arch
+statePredTrue sym = StatePred M.empty (memPredTrue sym) (memPredTrue sym)
+
+impliesStatePred ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  sym ->  
+  W4.Pred sym ->
+  StatePred sym arch ->
+  IO (StatePred sym arch)
+impliesStatePred sym asm stPred = muxStatePred sym asm stPred (statePredTrue sym)
+
+
+-- instance (TestEquality (W4.SymExpr sym), TestEquality (MM.ArchReg arch))  => Eq (StatePred sym arch) where
+--   (StatePred regs1 stack1 mem1) == (StatePred regs2 stack2 mem2) =
+--     regs1 == regs2 && stack1 == stack2 && mem1 == mem2
+
+-- instance (OrdF (W4.SymExpr sym), OrdF (MM.ArchReg arch)) => Ord (StatePred sym arch) where
+--   compare (StatePred regs1 stack1 mem1) (StatePred regs2 stack2 mem2) =
+--     compare regs1 regs2 <>
+--     compare stack1 stack2 <>
+--     compare mem1 mem2
+
+data EquivRelation sym arch =
+  EquivRelation
+    { eqRelRegs ::
+        forall tp. MM.ArchReg arch tp -> MacawRegEntry sym tp -> MacawRegEntry sym tp -> IO (W4.Pred sym)
+    , eqRelStack ::
+        forall w. MemStamp sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)
+    , eqRelMem ::
+        forall w. MemStamp sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)
+    }
+
+-- | Weaken the given equivalence relation to be conditional on the given predicate 
+condEquivRelation ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  sym ->
+  StatePred sym arch ->
+  EquivRelation sym arch ->
+  EquivRelation sym arch
+condEquivRelation sym stPred eqRel =
+  let
+    regsFn r v1 v2 = do
+      case M.lookup (Some r) (predRegs stPred) of
+        Just cond -> do
+          p <- (eqRelRegs eqRel) r v1 v2
+          W4.impliesPred sym cond p
+        Nothing -> return $ W4.truePred sym
+    stackFn stamp v1 v2 = do
+      cond <- memPredAt sym (predStack stPred) stamp
+      p <- (eqRelStack eqRel) stamp v1 v2
+      W4.impliesPred sym cond p
+    memFn stamp v1 v2 = do
+      cond <- memPredAt sym (predMem stPred) stamp
+      p <- (eqRelMem eqRel) stamp v1 v2
+      W4.impliesPred sym cond p
+  in EquivRelation regsFn stackFn memFn
+
+-- newtype ArchPtr sym arch = ArchPtr (CLM.LLVMPtr sym (MM.ArchAddrWidth arch))
+
+-- instance W4.IsSymExprBuilder sym => Eq (ArchPtr sym arch) where
+--   (ArchPtr (CLM.LLVMPointer reg1 off1)) == (ArchPtr (CLM.LLVMPointer reg2 off2))
+--     | Just Refl <- testEquality reg1 reg2
+--     , Just Refl <- testEquality off1 off2
+--     = True
+--   _ == _ = False
+
+-- instance W4.IsSymExprBuilder sym => Ord (ArchPtr sym arch) where
+--   compare (ArchPtr (CLM.LLVMPointer reg1 off1)) (ArchPtr (CLM.LLVMPointer reg2 off2)) =
+--     toOrdering $ lexCompareF reg1 reg2 (compareF off1 off2)
+
+data BlockTarget arch bin =
+  BlockTarget
+    { targetCall :: ConcreteBlock arch bin
+    , targetReturn :: Maybe (ConcreteBlock arch bin)
+    }
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
+  show (BlockTarget a b) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
 
 -- | Map from the start of original blocks to patched block addresses
 newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (ConcreteAddress arch))
@@ -165,13 +544,32 @@ data BlockEntryKind arch =
     -- problems
   deriving (Eq, Ord, Show)
 
-data ConcreteBlock arch =
+data ConcreteBlock arch (bin :: WhichBinary) =
   ConcreteBlock { concreteAddress :: ConcreteAddress arch
                 , concreteBlockEntry :: BlockEntryKind arch
+                , blockBinRepr :: WhichBinaryRepr bin
                 }
-  deriving (Eq, Ord)
 
-instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (ConcreteBlock arch) where
+instance TestEquality (ConcreteBlock arch) where
+  testEquality (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
+    case testEquality binrepr1 binrepr2 of
+      Just Refl | addr1 == addr2 && entry1 == entry2 -> Just Refl
+      _ -> Nothing
+
+instance Eq (ConcreteBlock arch bin) where
+  blk1 == blk2 | Just Refl <- testEquality blk1 blk2 = True
+  _ == _ = False
+
+instance OrdF (ConcreteBlock arch) where
+  compareF (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
+    lexCompareF binrepr1 binrepr2 $ fromOrdering $
+      compare addr1 addr2 <>
+      compare entry1 entry2
+
+instance Ord (ConcreteBlock arch bin) where
+  compare blk1 blk2 = toOrdering $ compareF blk1 blk2
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (ConcreteBlock arch bin) where
   show blk = ppBlock blk
 
 --blockSize :: ConcreteBlock arch -> Int
@@ -319,6 +717,8 @@ data MemOpDiff arch = MemOpDiff
   { mIsRead :: Bool
   , mOpOriginal :: GroundMemOp arch
   , mOpRewritten :: GroundMemOp arch
+  , mIsValid :: Bool
+  , mDesc :: String
   } deriving (Eq, Ord, Show)
 
 type MemTraceDiff arch = [MemOpDiff arch]
@@ -330,7 +730,23 @@ data MacawRegEntry sym tp where
     { macawRegRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
     , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
     } ->
-    MacawRegEntry sym tp
+    MacawRegEntry sym tp       
+
+data MacawRegVar sym tp where
+  MacawRegVar ::
+    { macawVarEntry :: MacawRegEntry sym tp
+    , macawVarBVs :: Assignment (W4.BoundVar sym) (CrucBaseTypes (MS.ToCrucibleType tp))
+    } ->
+    MacawRegVar sym tp
+
+type family CrucBaseTypes (tp :: CC.CrucibleType) :: Ctx W4.BaseType
+type instance CrucBaseTypes (CLM.LLVMPointerType w) = (CC.EmptyCtx CC.::> W4.BaseNatType CC.::> W4.BaseBVType w)
+
+
+instance CC.ShowF (W4.SymExpr sym) => Show (MacawRegEntry sym tp) where
+  show (MacawRegEntry repr v) = case repr of
+    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> CC.showF rg ++ ":" ++ CC.showF bv
+    _ -> "macawRegEntry: unsupported"
 
 macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
 macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
@@ -357,7 +773,11 @@ equivSuccess :: EquivalenceStatistics -> Bool
 equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
 
 data InequivalenceReason =
-  InequivalentRegisters | InequivalentMemory | InvalidCallPair | InvalidPostState
+    InequivalentRegisters
+  | InequivalentMemory
+  | InvalidCallPair
+  | InvalidPostState
+  | PostRelationUnsat
   deriving (Eq, Ord, Show)
 
 type ExitCaseDiff = (MT.ExitCase, MT.ExitCase)
@@ -379,9 +799,312 @@ instance Show (InequivalenceResult arch) where
 
 ----------------------------------
 
-data WhichBinary = Original | Rewritten deriving (Bounded, Enum, Eq, Ord, Read, Show)
+data WhichBinary = Original | Patched deriving (Bounded, Enum, Eq, Ord, Read, Show)
+
+type Original = 'Original
+type Patched = 'Patched
+
+data WhichBinaryRepr (bin :: WhichBinary) where
+  OriginalRepr :: WhichBinaryRepr 'Original
+  PatchedRepr :: WhichBinaryRepr 'Patched
+
+instance TestEquality WhichBinaryRepr where
+  testEquality repr1 repr2 = case (repr1, repr2) of
+    (OriginalRepr, OriginalRepr) -> Just Refl
+    (PatchedRepr, PatchedRepr) -> Just Refl
+    _ -> Nothing
+
+instance OrdF WhichBinaryRepr where
+  compareF repr1 repr2 = case (repr1, repr2) of
+    (OriginalRepr, OriginalRepr) -> EQF
+    (PatchedRepr, PatchedRepr) -> EQF
+    (OriginalRepr, PatchedRepr) -> LTF
+    (PatchedRepr, OriginalRepr) -> GTF
+
+instance Show (WhichBinaryRepr bin) where
+  show OriginalRepr = "Original"
+  show PatchedRepr = "Patched"
+
+instance KnownRepr WhichBinaryRepr Original where
+  knownRepr = OriginalRepr
+
+instance KnownRepr WhichBinaryRepr Patched where
+  knownRepr = PatchedRepr
+
+type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
 
 ----------------------------------
+
+-- Expression binding
+
+
+rebindExpr ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  Assignment (VarBinding sym) ctx ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+rebindExpr sym binds expr = do
+  let vars = TFC.fmapFC bindVar binds
+  let vals = TFC.fmapFC bindVal binds
+  fn <- W4.definedFn sym W4.emptySymbol vars expr W4.AlwaysUnfold
+  W4.applySymFn sym fn vals
+
+class ExprMappable sym f where
+  mapExpr ::
+    W4.IsSymExprBuilder sym =>
+    sym ->
+    (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
+    f ->
+    IO f
+
+class ExprImplyable sym f where
+  implyExpr ::
+    W4.IsSymExprBuilder sym =>
+    sym ->
+    W4.Pred sym ->
+    f ->
+    IO f
+
+data VarBinding sym tp =
+  VarBinding
+   {
+     bindVar :: W4.BoundVar sym tp
+   , bindVal :: W4.SymExpr sym tp
+   }
+
+flatVars ::
+  SimVars sym arch bin -> [Some (W4.BoundVar sym)]
+flatVars simVars =
+  let
+    regVarPairs =
+      MapF.toList $
+      MM.regStateMap $
+      (simVarRegs simVars)
+    regVars = concat $ map (\(MapF.Pair _ (MacawRegVar _ vars)) -> TFC.toListFC Some vars) regVarPairs
+    MT.MemTraceVar memVar = simVarMem simVars
+  in ((Some memVar):regVars)
+
+flatVarBinds ::
+  forall sym arch bin.
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimVars sym arch bin ->
+  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  IO [Some (VarBinding sym)]
+flatVarBinds _sym simVars mem regs = do
+  let
+    regBinds =
+      MapF.toList $
+      MM.regStateMap $
+      MM.zipWithRegState (\(MacawRegVar _ vars) val -> MacawRegVar val vars) (simVarRegs simVars) regs
+  regVarBinds <- fmap concat $ forM regBinds $ \(MapF.Pair _ (MacawRegVar val vars)) -> do
+    case macawRegRepr val of
+      CLM.LLVMPointerRepr{} -> do
+        CLM.LLVMPointer region off <- return $ macawRegValue val
+        (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
+        return $ [Some (VarBinding regVar region), Some (VarBinding offVar off)]
+      _ -> fail "flatVarBinds: unsupported type"
+
+  MT.MemTraceVar memVar <- return $ simVarMem simVars
+  let memBind = VarBinding memVar (MT.memArr mem)   
+  return $ ((Some memBind):regVarBinds)
+
+bindSpec' ::
+  ExprMappable sym f =>
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym -> 
+  SimState sym arch Original ->
+  SimState sym arch Patched ->
+  SimSpec sym arch f ->
+  IO (W4.Pred sym, f)
+bindSpec' sym stO stP spec = do
+  flatO <- flatVarBinds sym (specVarsO spec) (simMem stO) (simRegs stO)
+  flatP <- flatVarBinds sym (specVarsP spec) (simMem stP) (simRegs stP)
+  Some flatCtx <- return $ Ctx.fromList (flatO ++ flatP)
+  body <- mapExpr sym (rebindExpr sym flatCtx) (specBody spec)
+  asm <- rebindExpr sym flatCtx (specAsm spec)
+  return $ (asm, body)
+
+bindSpec ::
+  ExprMappable sym f =>
+  ExprImplyable sym f =>
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym -> 
+  SimState sym arch Original ->
+  SimState sym arch Patched ->
+  SimSpec sym arch f ->
+  IO f
+bindSpec sym stO stP spec = do
+  (asm, body) <- bindSpec' sym stO stP spec
+  implyExpr sym asm body
+
+-- instance ExprMappable sym (EquivRelation sym arch) where
+--   mapExpr sym f eqRel = case eqRel of
+--     EquivRelationEqMem asm predRegs_ -> do
+--       asm' <- f asm
+--       predRegs' <- mapM f predRegs_
+--       return $ EquivRelationEqMem asm' predRegs'
+--     EquivRelationPred stPred -> EquivRelationPred <$> mapExpr sym f stPred
+
+-- instance ExprImplyable sym (EquivRelation sym arch) where
+--   implyExpr sym asm = \case
+--     EquivRelationEqMem asm' regsEq -> do
+--       asm'' <- W4.andPred sym asm asm'
+--       return $ EquivRelationEqMem asm'' regsEq
+--     EquivRelationPred stPred -> EquivRelationPred <$> implyExpr sym asm stPred
+
+-- instance ExprMappable sym (StatePred sym arch) where
+--   mapExpr = mapExprStatePred
+
+-- instance ExprImplyable sym (StatePred sym arch) where
+--   implyExpr sym asm stPred = do
+--     regs <- mapM (W4.impliesPred sym asm) (predRegs stPred)
+--     mem <- mapM (W4.impliesPred sym asm) (predMem stPred)
+--     return $ StatePred regs mem
+
+instance
+  ( W4.IsExprBuilder sym
+  , OrdF (W4.SymExpr sym)
+  , OrdF (MM.ArchReg arch)) =>
+  ExprImplyable sym (StatePred sym arch) where
+  implyExpr = impliesStatePred
+
+instance ExprMappable sym (MT.MemOpCondition sym) where
+  mapExpr _sym f = \case
+    MT.Conditional p -> MT.Conditional <$> f p
+    MT.Unconditional -> return MT.Unconditional
+
+instance ExprMappable sym (MT.MemOp sym w) where
+  mapExpr sym f = \case
+    MT.MemOp ptr dir cond w val endian -> do
+      ptr' <- mapExprPtr sym f ptr
+      val' <- mapExprPtr sym f val
+      cond' <- mapExpr sym f cond
+      return $ MT.MemOp ptr' dir cond' w val' endian
+    MT.MergeOps p seq1 seq2 -> do
+      p' <- f p
+      seq1' <- traverse (mapExpr sym f) seq1
+      seq2' <- traverse (mapExpr sym f) seq2
+      return $ MT.MergeOps p' seq1' seq2'
+
+instance ExprMappable sym (MT.MemTraceImpl sym w) where
+  mapExpr sym f mem = do
+    memSeq' <- traverse (mapExpr sym f) $ MT.memSeq mem
+    memArr' <- f $ MT.memArr mem
+    return $ MT.MemTraceImpl memSeq' memArr'
+
+instance ExprMappable sym (MacawRegEntry sym tp) where
+  mapExpr sym f entry = do
+    case macawRegRepr entry of
+      CLM.LLVMPointerRepr{} -> do
+        val' <- mapExprPtr sym f $ macawRegValue entry
+        return $ entry { macawRegValue = val' }
+      _ -> fail "mapExpr: unsupported macaw type"
+
+instance ExprMappable sym (SimState sym arch bin) where
+  mapExpr sym f st = do
+    simMem' <- mapExpr sym f $ simMem st
+    simRegs' <- MM.traverseRegsWith (\_ -> mapExpr sym f) $ simRegs st
+    return $ SimState simMem' simRegs'
+
+instance ExprMappable sym (SimInput sym arch bin) where
+  mapExpr sym f simIn = do
+    st <- mapExpr sym f (simInState simIn)
+    return $ simIn { simInState = st }
+
+instance ExprMappable sym (SimOutput sym arch bin) where
+  mapExpr sym f simOut = do
+    st <- mapExpr sym f (simOutState simOut)
+    ret <- traverse (mapExprPtr sym f) $ simOutReturn simOut
+    return $ simOut { simOutState = st, simOutReturn = ret }
+
+instance ExprMappable sym (MT.MemFootprint sym arch) where
+  mapExpr sym f (MT.MemFootprint ptr w dir cond) = do
+    ptr' <- mapExprPtr sym f ptr
+    cond' <- mapExpr sym f cond
+    return $ MT.MemFootprint ptr' w dir cond'
+
+instance ExprMappable sym (SimBundle sym arch) where
+  mapExpr sym f bundle = do
+    simInO' <- mapExpr sym f $ simInO bundle
+    simInP' <- mapExpr sym f $ simInP bundle
+    simOutO' <- mapExpr sym f $ simOutO bundle
+    simOutP' <- mapExpr sym f $ simOutP bundle
+    simFootprints' <- S.fromList <$> mapM (mapExpr sym f) (S.toList $ simFootprints bundle)
+    return $ SimBundle simInO' simInP' simOutO' simOutP' simFootprints'
+
+instance ExprMappable sym (MemStamp sym arch w) where
+  mapExpr sym f (MemStamp ptr w) = do
+    ptr' <- mapExprPtr sym f ptr
+    return $ MemStamp ptr' w
+
+instance ExprMappable sym (MemStamps sym arch w) where
+  mapExpr sym f (MemStamps stamps) =
+    fmap (MemStamps . M.fromList) $ forM (M.toList stamps) $ \(stamp, p) -> do
+      stamp' <- mapExpr sym f stamp
+      p' <- f p
+      return $ (stamp', p')
+
+instance ExprMappable sym (MemPred sym arch) where
+  mapExpr sym f memPred = do
+    locs <- MapF.traverseWithKey (\_ -> mapExpr sym f) (memPredLocs memPred)
+    pol <- f (memPredPolarity memPred)
+    return $ MemPred locs pol
+
+instance ExprMappable sym (StatePred sym arch) where
+  mapExpr sym f stPred = do
+    regs <- mapM f (predRegs stPred)
+    stack <- mapExpr sym f (predStack stPred)
+    mem <- mapExpr sym f (predMem stPred)
+    return $ StatePred regs stack mem
+
+mapExprPtr ::
+  forall sym w.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
+  CLM.LLVMPtr sym w ->
+  IO (CLM.LLVMPtr sym w)  
+mapExprPtr _sym f (CLM.LLVMPointer reg off) = do
+  reg' <- f reg
+  off' <- f off
+  return $ CLM.LLVMPointer reg' off'  
+
+-- mapExprStatePred ::
+--   forall sym arch.
+--   W4.IsSymExprBuilder sym =>
+--   sym ->
+--   (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
+--   StatePred sym arch ->
+--   IO (StatePred sym arch)
+-- mapExprStatePred sym f stPred = do
+--   regs <- mapM f (predRegs stPred)
+--   let mergePreds ::
+--         IO (W4.Pred sym) ->
+--         IO (W4.Pred sym) ->
+--         IO (W4.Pred sym)
+--       mergePreds p1 p2 = do
+--         p1' <- p1
+--         p2' <- p2
+--         W4.andPred sym p1' p2'
+--   mem <- mapM go (M.assocs (predMem stPred))
+--   memMap <- sequenceA $ M.fromListWith mergePreds mem
+--   return $ StatePred regs memMap
+--   where
+--     go ::
+--       (ArchPtr sym arch, W4.Pred sym) ->
+--       IO (ArchPtr sym arch, IO (W4.Pred sym))
+--     go (ArchPtr (CLM.LLVMPointer reg off), p) = do
+--       reg' <- f reg
+--       off' <- f off
+--       return $ (ArchPtr (CLM.LLVMPointer reg' off'), f p)
+
+-----------------------------
 
 data InnerEquivalenceError arch
   = BytesNotConsumed { disassemblyAddr :: ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
@@ -403,19 +1126,24 @@ data InnerEquivalenceError arch
   | UnexpectedBlockKind String
   | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
+  | MissingPatchPairResult (PatchPair arch)
   | EquivCheckFailure String -- generic error
+  | ImpossibleEquivalence
+  | AssumedFalse
+  | BlockExitMismatch
+  | InvalidSMTModel
   | InequivalentError (InequivalenceResult arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =
   EquivalenceError
-    { errWhichBinary :: Maybe WhichBinary
+    { errWhichBinary :: Maybe (Some WhichBinaryRepr)
     , errStackTrace :: Maybe CallStack
     , errEquivError :: InnerEquivalenceError arch
     }
 instance MS.SymArchConstraints arch => Show (EquivalenceError arch) where
   show e = unlines $ catMaybes $
-    [ fmap (\b -> "For " ++ show b ++ " binary") (errWhichBinary e)
+    [ fmap (\(Some b) -> "For " ++ show b ++ " binary") (errWhichBinary e)
     , fmap (\s -> "At " ++ prettyCallStack s) (errStackTrace e)
     , Just (show (errEquivError e))
     ]
@@ -453,6 +1181,7 @@ ppReason r = "\tEquivalence Check Failed: " ++ case r of
   InequivalentMemory -> "Final memory states diverge."
   InvalidCallPair -> "Unexpected next IPs."
   InvalidPostState -> "Post state is invalid."
+  PostRelationUnsat -> "Post-equivalence relation cannot be satisifed"
 
 ppExitCaseDiff :: ExitCaseDiff -> String
 ppExitCaseDiff (eO, eP) | eO == eP = "\tBlock Exited with " ++ ppExitCase eO
@@ -478,7 +1207,9 @@ ppMemOpDiff diff
   ++ ppGroundMemOp (mIsRead diff) (mOpOriginal diff)
   ++ (if mOpOriginal diff == mOpRewritten diff
       then ""
-      else " (original) vs. " ++ ppGroundMemOp (mIsRead diff) (mOpRewritten diff) ++ " (rewritten)"
+      else
+        " (original) vs. " ++ ppGroundMemOp (mIsRead diff) (mOpRewritten diff) ++ " (rewritten)"
+         ++ "\n" ++ mDesc diff
      )
   ++ "\n"
 ppMemOpDiff _ = ""
@@ -571,6 +1302,28 @@ ppRegEntry fn (MacawRegEntry repr v) = case repr of
   CLM.LLVMPointerRepr _ | CLM.LLVMPointer _ offset <- v -> showModelForExpr fn offset
   _ -> return "Unsupported register type"
 
+
+showModelForPtr :: forall sym w.
+  SymGroundEvalFn sym ->
+  CLM.LLVMPtr sym w ->
+  IO String
+showModelForPtr fn (CLM.LLVMPointer reg off) = do
+  regStr <- showModelForExpr fn reg
+  offStr <- showModelForExpr fn off
+  return $ "Region:\n" ++ regStr ++ "\n" ++ offStr
+
+ppMemDiff ::
+  SymGroundEvalFn sym ->
+  CLM.LLVMPtr sym ptrW ->
+  CLM.LLVMPtr sym w ->
+  CLM.LLVMPtr sym w ->
+  IO String
+ppMemDiff fn ptr val1 val2 = do
+  ptrStr <- showModelForPtr fn ptr
+  val1Str <- showModelForPtr fn val1
+  val2Str <- showModelForPtr fn val2
+  return $ "Pointer: " ++ ptrStr ++ "\nValue (original)" ++ val1Str ++ "\nValue (patched)" ++ val2Str
+
 ppRegDiff ::
   SymGroundEvalFn sym ->
   MacawRegEntry sym tp ->
@@ -600,7 +1353,7 @@ ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = ""
     off = BVS.asUnsigned offBV
     bitWidth = W4.natValue bitWidthRepr
 
-ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch -> String
+ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> String
 ppBlock b = ""
   -- 100k oughta be enough for anybody
   -- ++ pad 6 (show (blockSize b))
@@ -677,4 +1430,6 @@ showGroundValue ::
 showGroundValue repr gv = case repr of
   W4.BaseBoolRepr -> show gv
   W4.BaseBVRepr w -> BVS.ppHex w gv
+  W4.BaseNatRepr -> show gv
   _ -> "Unsupported ground value"
+

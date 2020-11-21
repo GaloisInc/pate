@@ -90,6 +90,9 @@ type ExitClassify arch = IntrinsicType "exit_classify" EmptyCtx
 data ExitClassifyImpl sym =
   ExitClassifyImpl (SymExpr sym (BaseStructType (EmptyCtx ::> BaseBoolType ::> BaseBoolType)))
 
+data ExitClassifyVar sym =
+  ExitClassifyVar (BoundVar sym (BaseStructType (EmptyCtx ::> BaseBoolType ::> BaseBoolType)))
+
 instance IsExprBuilder sym => IntrinsicClass sym "exit_classify" where
   type Intrinsic sym "exit_classify" EmptyCtx = ExitClassifyImpl sym
   muxIntrinsic sym _ _ Empty p (ExitClassifyImpl t) (ExitClassifyImpl f) = do
@@ -164,6 +167,15 @@ memAddrToPtr sym addr = do
   offset <- bvLit sym knownRepr (BV.mkBV knownRepr (toInteger (addrOffset addr)))
   return $ LLVMPointer region offset
 
+isExitCase ::
+  IsSymInterface sym =>
+  sym ->
+  ExitClassifyImpl sym ->
+  ExitCase ->
+  IO (Pred sym)
+isExitCase sym (ExitClassifyImpl jclass) ecase = do
+  ExitClassifyImpl jclass' <- exitCaseToImpl sym ecase
+  isEq sym jclass jclass'
 
 exitCases ::
   IsSymInterface sym =>
@@ -216,28 +228,18 @@ data MemOpCondition sym
 
 deriving instance Show (Pred sym) => Show (MemOpCondition sym)
 
-data MemOpDirection sym =
-    Read (Pred sym)
-    -- ^ predicate is true when this read is shadowed be a previous write
+data MemOpDirection =
+    Read
   | Write
+  deriving (Eq, Ord, Show)
 
-instance TestEquality (SymExpr sym) => Eq (MemOpDirection sym) where
-  Write == Write = True
-  Read p == Read p' | Just Refl <- testEquality p p' = True
-  _ == _ = False
-
-instance OrdF (SymExpr sym) => Ord (MemOpDirection sym) where
-  compare Write Write = EQ
-  compare (Read p) (Read p') = toOrdering $ compareF p p'
-  compare Write _ = GT
-  compare _ Write = LT
 
 data MemOp sym ptrW where
   MemOp ::
     1 <= w =>
     -- The address of the operation
     LLVMPtr sym ptrW ->
-    MemOpDirection sym ->
+    MemOpDirection ->
     MemOpCondition sym ->
     -- The size of the operation in bytes
     NatRepr w ->
@@ -283,10 +285,14 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ the logical contents of memory
   }
 
+data MemTraceVar sym ptrW = MemTraceVar (BoundVar sym (MemArrBaseType ptrW))
+
 type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
 
 type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType ::> (BaseBVType ptrW)) tp)
+
+type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseNatType ::> (BaseBVType ptrW)) (BaseBVType 8)
 
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
@@ -333,6 +339,19 @@ initMemTrace sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   return $ MemTraceImpl mempty arr
 
+initMemTraceVar ::
+  forall sym ptrW.
+  IsSymInterface sym =>
+  sym ->
+  AddrWidthRepr ptrW ->
+  IO (MemTraceImpl sym ptrW, MemTraceVar sym ptrW)
+initMemTraceVar sym Addr32 = do
+  arr <- ioFreshVar sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+initMemTraceVar sym Addr64 = do
+  arr <- ioFreshVar sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+
 initExitClass ::
   IsSymInterface sym =>
   sym ->
@@ -340,6 +359,14 @@ initExitClass ::
 initExitClass sym = do
   bs <- ioFreshConstant sym "InitExitClass" knownRepr
   return $ ExitClassifyImpl bs
+
+initExitClassVar ::
+  IsSymInterface sym =>
+  sym ->
+  IO (ExitClassifyImpl sym, ExitClassifyVar sym)
+initExitClassVar sym = do
+  bs <- ioFreshVar sym "InitExitClass" knownRepr
+  return $ (ExitClassifyImpl (varExpr sym bs), ExitClassifyVar bs)
 
 initRetAddr ::
   forall sym arch.
@@ -370,13 +397,14 @@ muxTraces p t f =
     (Seq.Empty, Seq.Empty) -> return pre
     _ -> return $ pre Seq.:|> MergeOps p t' f'
 
+
 instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
   -- TODO: cover other cases with a TypeError
   type Intrinsic (ExprBuilder t st fs) "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl (ExprBuilder t st fs) ptrW
   muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
     s <- muxTraces p (memSeq t) (memSeq f)
     arr <- baseTypeIte sym p (memArr t) (memArr f)
-    return $ MemTraceImpl s arr  
+    return $ MemTraceImpl s arr
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -595,7 +623,7 @@ doReadMem ::
 doReadMem sym ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
   val <- liftIO $ readMemArr sym mem ptr memRepr
-  doMemOpInternal sym (Read (falsePred sym)) Unconditional ptrW ptr val memRepr
+  doMemOpInternal sym Read Unconditional ptrW ptr val memRepr
   pure val
 
 doCondReadMem ::
@@ -610,7 +638,7 @@ doCondReadMem ::
 doCondReadMem sym cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
   val <- liftIO $ readMemArr sym mem ptr memRepr
-  doMemOpInternal sym (Read (falsePred sym)) (Conditional cond) ptrW ptr val memRepr
+  doMemOpInternal sym Read (Conditional cond) ptrW ptr val memRepr
   liftIO $ iteDeep sym cond val def memRepr
 
 doWriteMem ::
@@ -870,7 +898,7 @@ doMemOpInternal :: forall sym ptrW ty.
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
-  MemOpDirection sym ->
+  MemOpDirection ->
   MemOpCondition sym ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
@@ -884,16 +912,9 @@ doMemOpInternal sym dir cond ptrW = go where
       | LeqProof <- mulMono (knownNat @8) byteWidth
       -> addrWidthsArePositive ptrW $ do
      
-      dir' <- case dir of
-        Read _ -> do
-          s <- gets memSeq
-          shadowed <- liftIO $ isReadShadowed sym s (MemFootprint ptr byteWidth dir cond) (truePred sym)
-          return $ Read shadowed
-        Write -> return dir
-
-      modify $ \mem -> mem { memSeq = (memSeq mem) Seq.:|> MemOp ptr dir' cond byteWidth regVal endianness }
+      modify $ \mem -> mem { memSeq = (memSeq mem) Seq.:|> MemOp ptr dir cond byteWidth regVal endianness }
       case dir of
-        Read _ -> return ()
+        Read -> return ()
         Write -> do
           LLVMPointer _ rawBv <- return regVal
           mem <- get
@@ -953,6 +974,11 @@ ioFreshConstant :: IsSymExprBuilder sym => sym -> String -> BaseTypeRepr tp -> I
 ioFreshConstant sym nm ty = do
   symbol <- ioSolverSymbol nm
   freshConstant sym symbol ty
+
+ioFreshVar :: IsSymExprBuilder sym => sym -> String -> BaseTypeRepr tp -> IO (BoundVar sym tp)
+ioFreshVar sym nm ty = do
+  symbol <- ioSolverSymbol nm
+  freshBoundVar sym symbol ty
 
 --------------------------------------------------------
 -- Axioms on type-level naturals
@@ -1019,11 +1045,11 @@ data MemFootprint sym ptrW where
     1 <= w =>
     LLVMPtr sym ptrW ->
     NatRepr w ->
-    MemOpDirection sym ->
+    MemOpDirection ->
     MemOpCondition sym ->
     MemFootprint sym ptrW
 
-memFootDir :: MemFootprint sym ptrW -> MemOpDirection sym
+memFootDir :: MemFootprint sym ptrW -> MemOpDirection
 memFootDir (MemFootprint _ _ dir _) = dir
 
 instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
@@ -1084,7 +1110,7 @@ equalAt sym eqRel mem1 mem2 (MemFootprint ptr w _ cond) = do
   impliesPred sym cond' eqP
 
 llvmPtrEq ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   LLVMPtr sym w ->
   LLVMPtr sym w ->
@@ -1217,7 +1243,7 @@ equivOps ::
   IsSymInterface sym =>
   1 <= ptrW =>
   sym ->
-  (forall w. MemOpDirection sym -> MemOpResult sym ptrW w -> IO (Pred sym)) ->
+  (forall w. MemOpDirection -> MemOpResult sym ptrW w -> IO (Pred sym)) ->
   MemTraceImpl sym ptrW ->
   MemTraceImpl sym ptrW ->
   IO (Pred sym)

@@ -38,3 +38,4 @@ instance PM.ValidArch PPC.PPC64 where
   funCallIP reg = case reg of
     PPC.PPC_LNK -> Just Refl
     _ -> Nothing
+  toc_reg = Just (PPC.PPC_GP (PPC.GPR 2))
