@@ -36,9 +36,12 @@ module Pate.Types
   , SimBundle(..)
   , simPair
   , bindSpec
-  , bindSpec'
   , MemFootprints
   , MemFootprintsSpec
+  , MemPred(..)
+  , mapMemPred
+  , memPredTrue
+  , memPredFalse
   , SimVars(..)
   , flatVars
   , ExprMappable(..)
@@ -48,11 +51,13 @@ module Pate.Types
   , BlockTarget(..)
   , ConcreteAddress(..)
   , BlockEntryKind(..)
-  , MemStamp(..)
-  , MemStamps(..)
+  , MemCell(..)
+  , MemCells(..)
   , StatePred(..)
   , StatePredSpec
   , EquivRelation(..)
+  , MemEquivRelation(..)
+  , RegEquivRelation(..)
   , absoluteAddress
   , addressAddOffset
   , concreteFromAbsolute
@@ -97,6 +102,20 @@ module Pate.Types
   , ppDiff
   , ppMemDiff
   , showModelForExpr
+ --- pre and post conditions
+  , muxStatePred
+  , getPostcondition
+  , getPrecondition
+  , impliesPrecondition
+  , weakenEquivRelation
+  , footPrintsToPred
+  , resolveCellEquiv
+  , statePredFalse
+ --- term helpers
+  , andM
+  , iteM
+  , impM
+  , zipRegStates
   )
 where
 
@@ -117,6 +136,7 @@ import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
 import           Data.Set (Set)
 import qualified Data.Set as S
+import           Data.Traversable ( for )
 import           Data.Typeable
 import           Data.Foldable
 import           Data.Monoid 
@@ -254,7 +274,6 @@ data SimBundle sym arch = SimBundle
   , simInP :: SimInput sym arch Patched
   , simOutO :: SimOutput sym arch Original
   , simOutP :: SimOutput sym arch Patched
-  , simFootprints :: MemFootprints sym arch
   }
 
 simPair :: SimBundle sym arch -> PatchPair arch
@@ -263,86 +282,154 @@ simPair bundle = PatchPair (simInBlock $ simInO bundle) (simInBlock $ simInP bun
 type MemFootprints sym arch = Set (MT.MemFootprint sym (MM.ArchAddrWidth arch))
 type MemFootprintsSpec sym arch = SimSpec sym arch (MemFootprints sym arch)
 
-data MemStamp sym arch w where
-  MemStamp ::
+data MemCell sym arch w where
+  MemCell ::
     1 <= w =>
-    { stampPtr :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch)
-    , stampWidth :: W4.NatRepr w
-    } -> MemStamp sym arch w
+    { cellPtr :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch)
+    , cellWidth :: W4.NatRepr w
+    } -> MemCell sym arch w
 
-instance TestEquality (W4.SymExpr sym) => TestEquality (MemStamp sym arch) where
-  testEquality (MemStamp (CLM.LLVMPointer reg1 off1) sz1) (MemStamp (CLM.LLVMPointer reg2 off2) sz2)
+instance TestEquality (W4.SymExpr sym) => TestEquality (MemCell sym arch) where
+  testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1) (MemCell (CLM.LLVMPointer reg2 off2) sz2)
    | Just Refl <- testEquality reg1 reg2
    , Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
    = Just Refl
   testEquality _ _ = Nothing
 
-instance OrdF (W4.SymExpr sym) => OrdF (MemStamp sym arch) where
-  compareF (MemStamp (CLM.LLVMPointer reg1 off1) sz1) (MemStamp (CLM.LLVMPointer reg2 off2) sz2) =
+instance OrdF (W4.SymExpr sym) => OrdF (MemCell sym arch) where
+  compareF (MemCell (CLM.LLVMPointer reg1 off1) sz1) (MemCell (CLM.LLVMPointer reg2 off2) sz2) =
     lexCompareF reg1 reg2 $
      lexCompareF off1 off2 $
      compareF sz1 sz2
 
-instance TestEquality (W4.SymExpr sym) => Eq (MemStamp sym arch w) where
+instance TestEquality (W4.SymExpr sym) => Eq (MemCell sym arch w) where
   stamp1 == stamp2 | Just Refl <- testEquality stamp1 stamp2 = True
   _ == _ = False
 
-instance OrdF (W4.SymExpr sym) => Ord (MemStamp sym arch w) where
+instance OrdF (W4.SymExpr sym) => Ord (MemCell sym arch w) where
   compare stamp1 stamp2  = toOrdering $ compareF stamp1 stamp2
 
-newtype MemStamps sym arch w = MemStamps (Map (MemStamp sym arch w) (W4.Pred sym))
+newtype MemCells sym arch w = MemCells (Map (MemCell sym arch w) (W4.Pred sym))
 
-mapStampPreds ::
+mapCellPreds ::
   (W4.Pred sym -> IO (W4.Pred sym)) ->
-  MemStamps sym arch w ->
-  IO (MemStamps sym arch w)
-mapStampPreds f (MemStamps stamps) = MemStamps <$> mapM f stamps
+  MemCells sym arch w ->
+  IO (MemCells sym arch w)
+mapCellPreds f (MemCells stamps) = MemCells <$> mapM f stamps
 
 data MemPred sym arch =
     MemPred
-      { memPredLocs :: MapF.MapF W4.NatRepr (MemStamps sym arch)
+      { memPredLocs :: MapF.MapF W4.NatRepr (MemCells sym arch)
       -- ^ predicate status at these locations according to polarity
       , memPredPolarity :: W4.Pred sym
       -- ^ if true, then predicate is true at exactly the locations
       -- if false, then predicate is true everywhere but these locations
       }
 
-muxMemStamps ::
+mapMemPred ::
+  Monad m =>
+  W4.IsExprBuilder sym =>
+  MemPred sym arch ->
+  (forall w. MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
+  m (MemPred sym arch)
+mapMemPred memPred f = do
+  let f' cell p = do
+        p' <- f cell p
+        case W4.asConstantPred p' of
+          Just False -> return Nothing
+          _ -> return $ Just p'
+  locs <- TF.traverseF (\(MemCells cells) -> MemCells <$> M.traverseMaybeWithKey f' cells) (memPredLocs memPred)
+  return $ memPred { memPredLocs = locs }
+
+memPredToList ::
+  MemPred sym arch ->
+  [(Some (MemCell sym arch), W4.Pred sym)]
+memPredToList memPred =
+  concat $
+  map (\(MapF.Pair _ (MemCells cells)) -> map (\(cell, p) -> (Some cell, p)) $ M.toList cells) $
+  MapF.toList (memPredLocs memPred)
+
+listToMemPred ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  [(Some (MemCell sym arch), W4.Pred sym)] ->
+  W4.Pred sym ->
+  IO (MemPred sym arch)
+listToMemPred sym cells pol = do
+  let
+    maps = map (\(Some cell, p) -> MapF.singleton (cellWidth cell) (MemCells (M.singleton cell p))) cells
+  locs <- foldM (mergeMemCellsMap sym) MapF.empty maps
+  return $ MemPred locs pol
+
+mergeMemCells ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  MemCells sym arch w ->
+  MemCells sym arch w ->
+  IO (MemCells sym arch w)  
+mergeMemCells sym (MemCells cells1) (MemCells cells2) = do
+  MemCells <$>
+    M.mergeA
+      M.preserveMissing
+      M.preserveMissing
+      (M.zipWithAMatched (\_ p1 p2 -> W4.orPred sym p1 p2))
+      cells1
+      cells2
+                                                       
+muxMemCells ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
   W4.Pred sym ->
-  MemStamps sym arch w ->
-  MemStamps sym arch w ->
-  IO (MemStamps sym arch w)  
-muxMemStamps sym p (MemStamps stampsT) (MemStamps stampsF) = do
+  MemCells sym arch w ->
+  MemCells sym arch w ->
+  IO (MemCells sym arch w)  
+muxMemCells sym p (MemCells cellsT) (MemCells cellsF) = do
   notp <- W4.notPred sym p
-  MemStamps <$>
+  MemCells <$>
     M.mergeA
       (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
       (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
       (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
-      stampsT
-      stampsF
+      cellsT
+      cellsF
 
-muxMemStampsMap ::
+muxMemCellsMap ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   OrdF f =>
   sym ->
   W4.Pred sym ->
-  MapF.MapF f (MemStamps sym arch) ->
-  MapF.MapF f (MemStamps sym arch) ->
-  IO (MapF.MapF f (MemStamps sym arch))  
-muxMemStampsMap sym p stampsMapT stampsMapF = do
+  MapF.MapF f (MemCells sym arch) ->
+  MapF.MapF f (MemCells sym arch) ->
+  IO (MapF.MapF f (MemCells sym arch))  
+muxMemCellsMap sym p cellsMapT cellsMapF = do
   notp <- W4.notPred sym p
   MapF.mergeWithKeyM
-       (\_ stampsT stampsF -> Just <$> muxMemStamps sym p stampsT stampsF)
-       (MapF.traverseWithKey (\_ -> mapStampPreds (W4.andPred sym p)))
-       (MapF.traverseWithKey (\_ -> mapStampPreds (W4.andPred sym notp)))
-       stampsMapT
-       stampsMapF
+       (\_ cellsT cellsF -> Just <$> muxMemCells sym p cellsT cellsF)
+       (TF.traverseF (mapCellPreds (W4.andPred sym p)))
+       (TF.traverseF (mapCellPreds (W4.andPred sym notp)))
+       cellsMapT
+       cellsMapF
+
+mergeMemCellsMap ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF f =>
+  sym ->
+  MapF.MapF f (MemCells sym arch) ->
+  MapF.MapF f (MemCells sym arch) ->
+  IO (MapF.MapF f (MemCells sym arch))  
+mergeMemCellsMap sym cellsMap1 cellsMap2 = do
+  MapF.mergeWithKeyM
+       (\_ cells1 cells2 -> Just <$> mergeMemCells sym cells1 cells2)
+       return
+       return
+       cellsMap1
+       cellsMap2
 
 muxMemPred ::
   W4.IsExprBuilder sym =>
@@ -354,32 +441,34 @@ muxMemPred ::
   IO (MemPred sym arch)
 muxMemPred sym p predT predF = do
   pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
-  locs <- muxMemStampsMap sym p (memPredLocs predT) (memPredLocs predF)
+  locs <- muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
   return $ MemPred locs pol
 
-inStamps ::
+-- | True if this cell is logically equivalent to any cell in the given
+-- collection
+inCells ::
   forall sym arch w.
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
-  MemStamp sym arch w ->
-  MemStamps sym arch w ->
+  MemCell sym arch w ->
+  MemCells sym arch w ->
   IO (W4.Pred sym) 
-inStamps sym stamp (MemStamps stamps) =
-  case M.lookup stamp stamps of
+inCells sym cell (MemCells cells) =
+  case M.lookup cell cells of
     Just cond | Just True <- W4.asConstantPred cond -> return $ W4.truePred sym
-    _ -> go (W4.falsePred sym) (M.toList stamps)
+    _ -> go (W4.falsePred sym) (M.toList cells)
   where
-    go :: W4.Pred sym -> [(MemStamp sym arch w, W4.Pred sym)] -> IO (W4.Pred sym)
-    go p ((stamp', cond) : stamps') = do
-      eqPtrs <- MT.llvmPtrEq sym (stampPtr stamp) (stampPtr stamp')
+    go :: W4.Pred sym -> [(MemCell sym arch w, W4.Pred sym)] -> IO (W4.Pred sym)
+    go p ((cell', cond) : cells') = do
+      eqPtrs <- MT.llvmPtrEq sym (cellPtr cell) (cellPtr cell')
       case W4.asConstantPred eqPtrs of
         Just True | Just True <- W4.asConstantPred cond -> return $ W4.truePred sym
-        Just False -> go p stamps'
+        Just False -> go p cells'
         _ -> do
           matches <- W4.andPred sym eqPtrs cond
           p' <- W4.orPred sym p matches
-          go p' stamps'
+          go p' cells'
     go p [] = return p
 
 
@@ -388,11 +477,11 @@ memPredAt ::
   OrdF (W4.SymExpr sym) =>
   sym ->
   MemPred sym arch ->
-  MemStamp sym arch w ->
+  MemCell sym arch w ->
   IO (W4.Pred sym)
 memPredAt sym mempred stamp = do
-  isInLocs <- case MapF.lookup (stampWidth stamp) (memPredLocs mempred) of
-    Just stamps -> inStamps sym stamp stamps
+  isInLocs <- case MapF.lookup (cellWidth stamp) (memPredLocs mempred) of
+    Just stamps -> inCells sym stamp stamps
     Nothing -> return $ W4.falsePred sym
   W4.isEq sym isInLocs (memPredPolarity mempred)
 
@@ -416,7 +505,7 @@ memPredFalse sym = MemPred MapF.empty (W4.truePred sym)
 data StatePred sym arch =
   StatePred
     { predRegs :: Map (Some (MM.ArchReg arch)) (W4.Pred sym)
-    -- ^ predicate is trivially true on missing entries
+    -- ^ predicate is considered false on missing entries
     , predStack :: MemPred sym arch
     , predMem :: MemPred sym arch
     }
@@ -444,18 +533,18 @@ muxStatePred sym p predT predF = do
   mem <- muxMemPred sym p (predMem predT) (predMem predF)
   return $ StatePred regs stack mem
 
-statePredTrue :: W4.IsExprBuilder sym => sym -> StatePred sym arch
-statePredTrue sym = StatePred M.empty (memPredTrue sym) (memPredTrue sym)
+statePredFalse :: W4.IsExprBuilder sym => sym -> StatePred sym arch
+statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
 
-impliesStatePred ::
-  W4.IsExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
-  sym ->  
-  W4.Pred sym ->
-  StatePred sym arch ->
-  IO (StatePred sym arch)
-impliesStatePred sym asm stPred = muxStatePred sym asm stPred (statePredTrue sym)
+-- impliesStatePred ::
+--   W4.IsExprBuilder sym =>
+--   OrdF (W4.SymExpr sym) =>
+--   OrdF (MM.ArchReg arch) =>
+--   sym ->  
+--   W4.Pred sym ->
+--   StatePred sym arch ->
+--   IO (StatePred sym arch)
+-- impliesStatePred sym asm stPred = muxStatePred sym asm stPred (statePredTrue sym)
 
 
 -- instance (TestEquality (W4.SymExpr sym), TestEquality (MM.ArchReg arch))  => Eq (StatePred sym arch) where
@@ -468,18 +557,308 @@ impliesStatePred sym asm stPred = muxStatePred sym asm stPred (statePredTrue sym
 --     compare stack1 stack2 <>
 --     compare mem1 mem2
 
+newtype MemEquivRelation sym arch =
+  MemEquivRelation { applyMemEquivRelation :: (forall w. MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
+
+
+newtype RegEquivRelation sym arch =
+  RegEquivRelation { applyRegEquivRelation :: (forall tp. MM.ArchReg arch tp -> MacawRegEntry sym tp -> MacawRegEntry sym tp -> IO (W4.Pred sym)) }
+
+
 data EquivRelation sym arch =
   EquivRelation
-    { eqRelRegs ::
-        forall tp. MM.ArchReg arch tp -> MacawRegEntry sym tp -> MacawRegEntry sym tp -> IO (W4.Pred sym)
-    , eqRelStack ::
-        forall w. MemStamp sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)
-    , eqRelMem ::
-        forall w. MemStamp sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)
+    { eqRelRegs :: RegEquivRelation sym arch
+    , eqRelStack :: MemEquivRelation sym arch
+    , eqRelMem :: MemEquivRelation sym arch
     }
 
--- | Weaken the given equivalence relation to be conditional on the given predicate 
-condEquivRelation ::
+
+footPrintsToPred ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  MemFootprints sym arch ->
+  W4.Pred sym ->
+  IO (MemPred sym arch)
+footPrintsToPred sym foots polarity = do
+  locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond) -> do
+    dirpolarity <- case dir of
+      MT.Read -> return $ W4.truePred sym
+      MT.Write -> return $ W4.falsePred sym
+    polarityMatches <- W4.isEq sym polarity dirpolarity
+    cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
+    case W4.asConstantPred cond' of
+      Just False -> return Nothing
+      _ -> return $ Just (Some (MemCell ptr w), cond')
+  listToMemPred sym locs (W4.truePred sym)
+
+
+memPredPost ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimOutput sym arch Original ->
+  SimOutput sym arch Patched ->
+  MemEquivRelation sym arch ->
+  MemPred sym arch ->
+  IO (W4.Pred sym)
+memPredPost sym outO outP memEq memPred = do
+  iteM sym (return $ (memPredPolarity memPred))
+    (positiveMemPred sym stO stP memEq memPred) negativePolarity
+  where
+    stO = simOutState outO
+    stP = simOutState outP
+    
+    memO = simOutMem outO
+    memP = simOutMem outP
+
+    -- | Cell equivalence that is conditional on whether or not this
+    -- cell is in the domain of the given predicate
+    resolveCell ::
+      MemCell sym arch w ->
+      W4.Pred sym ->
+      IO (W4.Pred sym)
+    resolveCell cell cond = do
+      impM sym (memPredAt sym memPred cell) $
+        resolveCellEquiv sym stO stP memEq cell cond
+
+    -- | For the negative case, we need to consider the domain of the state itself -
+    -- we assure that all writes are equivalent when they have not been excluded
+    negativePolarity :: IO (W4.Pred sym)
+    negativePolarity = do
+      footO <- MT.traceFootprint sym (MT.memSeq $ memO)
+      footP <- MT.traceFootprint sym (MT.memSeq $ memP)
+      let foot = S.union footO footP
+      footCells <- memPredToList <$> footPrintsToPred sym foot (W4.falsePred sym)
+      foldr (\(Some cell, cond) -> andM sym (resolveCell cell cond)) (return $ W4.truePred sym) footCells
+
+positiveMemPred :: 
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimState sym arch Original ->
+  SimState sym arch Patched ->  
+  MemEquivRelation sym arch ->
+  MemPred sym arch ->
+  IO (W4.Pred sym)
+positiveMemPred sym stO stP memEq memPred = do
+  let
+    memCells = memPredToList memPred
+    resolveCellPos = resolveCellEquiv sym stO stP memEq
+  foldr (\(Some cell, cond) -> andM sym (resolveCellPos cell cond)) (return $ W4.truePred sym) memCells
+
+resolveCellEquiv ::
+  forall sym arch w.
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimState sym arch Original ->
+  SimState sym arch Patched ->  
+  MemEquivRelation sym arch ->
+  MemCell sym arch w ->
+  W4.Pred sym ->
+  IO (W4.Pred sym)
+resolveCellEquiv sym stO stP eqRel cell@(MemCell{})  cond = do
+  let repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
+  val1 <- MT.readMemArr sym memO (cellPtr cell) repr
+  val2 <- MT.readMemArr sym memP (cellPtr cell) repr      
+  impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
+  where
+    memO = simMem stO
+    memP = simMem stP
+
+freshPtr ::
+  W4.IsSymExprBuilder sym =>
+  1 <= w =>
+  sym ->
+  W4.NatRepr w ->
+  IO (CLM.LLVMPtr sym (8 W4.* w))
+freshPtr sym w
+  | bvwidth <- W4.natMultiply (W4.knownNat @8) w
+  , W4.LeqProof <- MT.mulMono (W4.knownNat @8) w
+  , tyrepr <- W4.BaseBVRepr bvwidth = do
+    off <- W4.freshConstant sym W4.emptySymbol tyrepr
+    reg <- W4.freshConstant sym W4.emptySymbol W4.BaseNatRepr
+    return $ CLM.LLVMPointer reg off
+    
+-- | Compute a precondition that is sufficiently strong to imply the given
+-- equivalence relation on the given domain for the given input state
+-- This predicate is meant to be *assumed* true.
+memPredPre ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimInput sym arch Original ->
+  SimInput sym arch Patched ->
+  MemEquivRelation sym arch ->
+  MemPred sym arch ->
+  IO (W4.Pred sym)
+memPredPre sym inO inP memEq memPred  = do
+  iteM sym (return $ (memPredPolarity memPred))
+    (positiveMemPred sym stO stP memEq memPred) negativePolarity
+  where
+    stO = simInState inO
+    stP = simInState inP
+    
+    memO = simInMem inO
+    memP = simInMem inP
+
+    -- | Conditionally write a fresh value to the given memory location
+    -- FIXME: update for when memory model supports regions
+    freshWrite ::
+      MemCell sym arch w ->
+      W4.Pred sym ->
+      MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+      IO (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
+    freshWrite cell@(MemCell{}) cond mem = do
+      let
+        ptr = cellPtr cell
+        repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
+      case W4.asConstantPred cond of
+        Just False -> return mem
+        _ -> do
+          CLM.LLVMPointer _ fresh <- MT.readMemArr sym memP ptr repr
+          CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
+          val <- W4.baseTypeIte sym cond fresh original
+          MT.writeMemArr sym mem ptr repr val
+
+    -- | For the negative case, we assume that the patched trace is equivalent
+    -- to the original trace with arbitrary modifications to excluded addresses
+    negativePolarity :: IO (W4.Pred sym)
+    negativePolarity = do
+      mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') memO (memPredToList memPred)
+      W4.isEq sym (MT.memArr mem') (MT.memArr memP)
+
+regPredRel ::
+  forall sym arch.
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimState sym arch Original ->
+  SimState sym arch Patched ->
+  RegEquivRelation sym arch ->
+  Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
+  IO (W4.Pred sym)
+regPredRel sym stO stP regEquiv regPred  = do
+  let
+    regsO = simRegs stO
+    regsP = simRegs stP
+    regRel r p =
+      impM sym (return p) $ applyRegEquivRelation regEquiv r (regsO ^. MM.boundValue r) (regsP ^. MM.boundValue r)
+  foldr (\(Some r, p) -> andM sym (regRel r p)) (return $ W4.truePred sym) (M.toList regPred)
+
+statePredPre ::
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimInput sym arch Original ->
+  SimInput sym arch Patched ->
+  EquivRelation sym arch ->
+  StatePred sym arch ->
+  IO (W4.Pred sym)
+statePredPre sym inO inP eqRel stPred  = do
+  let
+    stO = simInState inO
+    stP = simInState inP
+    
+    regsEq = regPredRel sym stO stP (eqRelRegs eqRel) (predRegs stPred) 
+    stacksEq = memPredPre sym inO inP (eqRelStack eqRel) (predStack stPred) 
+    memEq = memPredPre sym inO inP (eqRelMem eqRel) (predMem stPred) 
+  andM sym regsEq (andM sym stacksEq memEq)
+
+statePredPost ::
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimOutput sym arch Original ->
+  SimOutput sym arch Patched ->
+  EquivRelation sym arch ->
+  StatePred sym arch ->
+  IO (W4.Pred sym)
+statePredPost sym outO outP eqRel stPred  = do
+  let
+    stO = simOutState outO
+    stP = simOutState outP
+    
+    regsEq = regPredRel sym stO stP (eqRelRegs eqRel) (predRegs stPred) 
+    stacksEq = memPredPost sym outO outP (eqRelStack eqRel) (predStack stPred) 
+    memEq = memPredPost sym outO outP (eqRelMem eqRel) (predMem stPred) 
+  andM sym regsEq (andM sym stacksEq memEq)
+
+zipRegStates :: Monad m
+             => MM.RegisterInfo r
+             => MM.RegState r f
+             -> MM.RegState r g
+             -> (forall u. r u -> f u -> g u -> m h)
+             -> m [h]
+zipRegStates regs1 regs2 f = do
+  regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
+  return $ map (\(MapF.Pair _ (Const v)) -> v) $ MapF.toList $ MM.regStateMap regs'
+
+iteM ::
+  W4.IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  m (W4.Pred sym) ->
+  m (W4.SymExpr sym tp) ->
+  m (W4.SymExpr sym tp) ->
+  m (W4.SymExpr sym tp)
+iteM sym p fT fF = do
+  p' <- p
+  case W4.asConstantPred p' of
+    Just True -> fT
+    Just False -> fF
+    Nothing -> do
+      fT' <- fT
+      fF' <- fF
+      IO.liftIO $ W4.baseTypeIte sym p' fT' fF'
+
+impM ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  IO (W4.Pred sym) ->
+  IO (W4.Pred sym) ->
+  IO (W4.Pred sym)
+impM sym pPre pPost = do
+  pPre' <- pPre
+  case W4.asConstantPred pPre' of
+    Just True -> pPost
+    Just False -> return $ W4.truePred sym
+    _ -> do
+      pPost' <- pPost
+      W4.impliesPred sym pPre' pPost'
+  
+andM ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  IO (W4.Pred sym) ->
+  IO (W4.Pred sym) ->
+  IO (W4.Pred sym)
+andM sym p1 p2 = do
+  p1' <- p1
+  case W4.asConstantPred p1' of
+    Just True -> p2
+    Just False -> return $ W4.falsePred sym
+    _ -> do
+      p2' <- p2
+      W4.andPred sym p1' p2'
+
+
+weakenEquivRelation ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   OrdF (MM.ArchReg arch) =>
@@ -487,23 +866,72 @@ condEquivRelation ::
   StatePred sym arch ->
   EquivRelation sym arch ->
   EquivRelation sym arch
-condEquivRelation sym stPred eqRel =
+weakenEquivRelation sym stPred eqRel =
   let
-    regsFn r v1 v2 = do
+    regsFn = RegEquivRelation $ \r v1 v2 -> do
       case M.lookup (Some r) (predRegs stPred) of
-        Just cond -> do
-          p <- (eqRelRegs eqRel) r v1 v2
-          W4.impliesPred sym cond p
+        Just cond ->
+          impM sym (return cond) $
+            applyRegEquivRelation (eqRelRegs eqRel) r v1 v2
         Nothing -> return $ W4.truePred sym
-    stackFn stamp v1 v2 = do
-      cond <- memPredAt sym (predStack stPred) stamp
-      p <- (eqRelStack eqRel) stamp v1 v2
-      W4.impliesPred sym cond p
-    memFn stamp v1 v2 = do
-      cond <- memPredAt sym (predMem stPred) stamp
-      p <- (eqRelMem eqRel) stamp v1 v2
-      W4.impliesPred sym cond p
+    stackFn = MemEquivRelation $ \cell v1 v2 -> do
+      impM sym (memPredAt sym (predStack stPred) cell) $
+        applyMemEquivRelation (eqRelStack eqRel) cell v1 v2
+    memFn = MemEquivRelation $ \cell v1 v2 -> do
+      impM sym (memPredAt sym (predMem stPred) cell) $
+        applyMemEquivRelation (eqRelMem eqRel) cell v1 v2
   in EquivRelation regsFn stackFn memFn
+
+-- | Resolve a domain predicate and equivalence relation into a precondition
+getPrecondition ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  StatePred sym arch ->
+  IO (W4.Pred sym)
+getPrecondition sym bundle eqRel stPred = do
+  statePredPre sym (simInO bundle) (simInP bundle) eqRel stPred
+
+-- | True if the first precondition implies the second under the given
+-- equivalence relation
+impliesPrecondition ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimInput sym arch Original ->
+  SimInput sym arch Patched ->
+  EquivRelation sym arch ->
+  StatePred sym arch ->
+  StatePred sym arch ->
+  IO (W4.Pred sym)  
+impliesPrecondition sym inO inP eqRel stPredAsm stPredConcl = do
+  asm <- statePredPre sym inO inP eqRel stPredAsm
+  concl <- statePredPre sym inO inP eqRel stPredConcl
+  W4.impliesPred sym asm concl
+
+-- | Resolve a domain predicate and equivalence relation into a postcondition and associated
+-- structured equivalence relation (for reporting counterexamples)
+getPostcondition ::
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  StatePred sym arch ->  
+  IO (EquivRelation sym arch, W4.Pred sym)
+getPostcondition sym bundle eqRel stPred = do
+  post <- statePredPost sym (simOutO bundle) (simOutP bundle) eqRel stPred
+  return (weakenEquivRelation sym stPred eqRel, post)
 
 -- newtype ArchPtr sym arch = ArchPtr (CLM.LLVMPtr sym (MM.ArchAddrWidth arch))
 
@@ -912,7 +1340,7 @@ flatVarBinds _sym simVars mem regs = do
   let memBind = VarBinding memVar (MT.memArr mem)   
   return $ ((Some memBind):regVarBinds)
 
-bindSpec' ::
+bindSpec ::
   ExprMappable sym f =>
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
@@ -921,7 +1349,7 @@ bindSpec' ::
   SimState sym arch Patched ->
   SimSpec sym arch f ->
   IO (W4.Pred sym, f)
-bindSpec' sym stO stP spec = do
+bindSpec sym stO stP spec = do
   flatO <- flatVarBinds sym (specVarsO spec) (simMem stO) (simRegs stO)
   flatP <- flatVarBinds sym (specVarsP spec) (simMem stP) (simRegs stP)
   Some flatCtx <- return $ Ctx.fromList (flatO ++ flatP)
@@ -929,19 +1357,6 @@ bindSpec' sym stO stP spec = do
   asm <- rebindExpr sym flatCtx (specAsm spec)
   return $ (asm, body)
 
-bindSpec ::
-  ExprMappable sym f =>
-  ExprImplyable sym f =>
-  W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
-  sym -> 
-  SimState sym arch Original ->
-  SimState sym arch Patched ->
-  SimSpec sym arch f ->
-  IO f
-bindSpec sym stO stP spec = do
-  (asm, body) <- bindSpec' sym stO stP spec
-  implyExpr sym asm body
 
 -- instance ExprMappable sym (EquivRelation sym arch) where
 --   mapExpr sym f eqRel = case eqRel of
@@ -967,12 +1382,6 @@ bindSpec sym stO stP spec = do
 --     mem <- mapM (W4.impliesPred sym asm) (predMem stPred)
 --     return $ StatePred regs mem
 
-instance
-  ( W4.IsExprBuilder sym
-  , OrdF (W4.SymExpr sym)
-  , OrdF (MM.ArchReg arch)) =>
-  ExprImplyable sym (StatePred sym arch) where
-  implyExpr = impliesStatePred
 
 instance ExprMappable sym (MT.MemOpCondition sym) where
   mapExpr _sym f = \case
@@ -1035,20 +1444,20 @@ instance ExprMappable sym (SimBundle sym arch) where
     simInP' <- mapExpr sym f $ simInP bundle
     simOutO' <- mapExpr sym f $ simOutO bundle
     simOutP' <- mapExpr sym f $ simOutP bundle
-    simFootprints' <- S.fromList <$> mapM (mapExpr sym f) (S.toList $ simFootprints bundle)
-    return $ SimBundle simInO' simInP' simOutO' simOutP' simFootprints'
+    return $ SimBundle simInO' simInP' simOutO' simOutP'
 
-instance ExprMappable sym (MemStamp sym arch w) where
-  mapExpr sym f (MemStamp ptr w) = do
+instance ExprMappable sym (MemCell sym arch w) where
+  mapExpr sym f (MemCell ptr w) = do
     ptr' <- mapExprPtr sym f ptr
-    return $ MemStamp ptr' w
+    return $ MemCell ptr' w
 
-instance ExprMappable sym (MemStamps sym arch w) where
-  mapExpr sym f (MemStamps stamps) =
-    fmap (MemStamps . M.fromList) $ forM (M.toList stamps) $ \(stamp, p) -> do
-      stamp' <- mapExpr sym f stamp
+instance OrdF (W4.SymExpr sym) => ExprMappable sym (MemCells sym arch w) where
+  mapExpr sym f (MemCells cells) = do
+    maps <- forM (M.toList cells) $ \(cell, p) -> do
+      cell' <- mapExpr sym f cell
       p' <- f p
-      return $ (stamp', p')
+      return $ MemCells $ M.singleton cell' p'
+    foldM (mergeMemCells sym) (MemCells M.empty) maps
 
 instance ExprMappable sym (MemPred sym arch) where
   mapExpr sym f memPred = do

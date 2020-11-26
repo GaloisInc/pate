@@ -39,9 +39,10 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
 import           Data.List
+import           Data.IORef
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           GHC.TypeNats (KnownNat)
+import           GHC.TypeNats (KnownNat, type Nat)
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableFC as FC
@@ -51,13 +52,16 @@ import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
 import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemAddr(..), MemSegmentOff, MemWidth, memWidthNatRepr, addrWidthClass, addrWidthNatRepr, addrOffset, segoffAddr)
 import Data.Macaw.Symbolic.Backend (EvalStmtFunc, MacawArchEvalFn(..))
-import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExt
+import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
+                           , MacawOverflowOp(..)
                            , GlobalMap, MacawSimulatorState(..)
-                           , ToCrucibleType, evalMacawExprExtension
+                           , ToCrucibleType
                            , IsMemoryModel(..)
                            , MacawBlockEnd(..)
                            , SymArchConstraints
+                           , evalMacawExprExtension
                            )
+
 import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
 
 import Data.Parameterized.Context (pattern (:>), pattern Empty, Assignment, curryAssignment, uncurryAssignment)
@@ -202,6 +206,219 @@ exitCases sym (ExitClassifyImpl jclass) f = do
   baseTypeIte sym testArch exprArch returnCase
 
 
+------
+-- Wrapping undefined pointer operations with uninterpreted functions.
+-- To ensure that we can preserve equality relationships, we re-used cached uninterpreted functions
+-- for each operation and for each bitvector width.
+data UndefinedPtrOps sym =
+  UndefinedPtrOps
+    { undefPtrOff :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w))
+    , undefPtrLt :: UndefinedPtrPredOp sym
+    , undefPtrLeq :: UndefinedPtrPredOp sym
+    , undefPtrAdd :: UndefinedPtrBinOp sym
+    , undefPtrSub :: UndefinedPtrBinOp sym
+    , undefPtrAnd :: UndefinedPtrBinOp sym
+    }
+
+newtype UndefinedPtrBinOp sym = UndefinedPtrBinOp { mkUndefPtr :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> LLVMPtr sym w -> IO (LLVMPtr sym w)) }
+
+newtype UndefinedPtrPredOp sym = UndefinedPtrPredOp { mkUndefPred :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) }
+
+type BasePtrType w = BaseStructType (EmptyCtx ::> BaseNatType ::> BaseBVType w)
+type SymPtr sym w = SymExpr sym (BasePtrType w)
+
+asSymPtr ::
+  IsSymInterface sym =>
+  sym ->
+  LLVMPtr sym w ->
+  IO (SymPtr sym w)
+asSymPtr sym (LLVMPointer reg off) = mkStruct sym (Empty :> reg :> off)
+
+fromSymPtr ::
+  IsSymInterface sym =>
+  sym ->
+  SymPtr sym w ->
+  IO (LLVMPtr sym w )  
+fromSymPtr sym sptr = do
+  reg <- structField sym sptr Ctx.i1of2
+  off <- structField sym sptr Ctx.i2of2
+  return $ LLVMPointer reg off
+
+polySymbol ::
+  String ->
+  NatRepr w ->
+  SolverSymbol
+polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
+
+data PtrArgsK = OnePtr | TwoPtrs | PtrAssert | PredAssert | BVAssert
+
+type family PtrArgs (k :: PtrArgsK) w :: Ctx.Ctx BaseType where
+  PtrArgs 'TwoPtrs w = (EmptyCtx ::> BasePtrType w ::> BasePtrType w)
+  PtrArgs 'OnePtr w = EmptyCtx ::> BasePtrType w
+  PtrArgs 'PtrAssert w = EmptyCtx ::> BasePtrType w ::> BaseBoolType
+  PtrArgs 'BVAssert w = EmptyCtx ::> BaseBVType w ::> BaseBoolType
+  PtrArgs 'PredAssert w = EmptyCtx ::> BaseBoolType ::> BaseBoolType
+
+data PtrRetK = RetPtr | RetPred | RetBV
+
+type family PtrRet (k :: PtrRetK) w :: BaseType where
+  PtrRet 'RetPtr w = BasePtrType w
+  PtrRet 'RetPred _w = BaseBoolType
+  PtrRet 'RetBV w = BaseBVType w
+
+
+mkBinUF ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym 'TwoPtrs 'RetPtr
+mkBinUF nm  = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr :> ptrRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
+
+mkPtrAssert ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym 'PtrAssert 'RetPtr
+mkPtrAssert nm = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr :> BaseBoolRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
+
+mkBVAssert ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym 'BVAssert 'RetBV
+mkBVAssert nm = PolyFunMaker $ \sym w -> do
+  let
+    repr = Empty :> BaseBVRepr w :> BaseBoolRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
+
+mkPredAssert ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym 'PredAssert 'RetPred
+mkPredAssert nm = PolyFunMaker $ \sym w -> do
+  let
+    repr = Empty :> BaseBoolRepr :> BaseBoolRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
+
+mkPredUF ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym 'TwoPtrs 'RetPred
+mkPredUF nm = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr :> ptrRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
+
+mkOffUF ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym 'OnePtr 'RetBV
+mkOffUF nm = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
+
+newtype PolyFunMaker sym f g =
+  PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym f g w))
+
+newtype PolyFun sym (f :: PtrArgsK) (g :: PtrRetK) (w :: Nat) = PolyFun (SymFn sym (PtrArgs f w) (PtrRet g w))
+
+cachedPolyFun ::
+  forall sym f g.
+  sym ->
+  PolyFunMaker sym f g ->
+  IO (PolyFunMaker sym f g)
+cachedPolyFun _sym (PolyFunMaker f) = do
+  ref <- newIORef (MapF.empty :: MapF.MapF NatRepr (PolyFun sym f g))
+  return $ PolyFunMaker $ \sym' nr -> do
+    m <- readIORef ref
+    case MapF.lookup nr m of
+      Just a -> return a
+      Nothing -> do
+        result <- f sym' nr
+        let m' = MapF.insert nr result m
+        writeIORef ref m'
+        return result
+
+withPtrWidth :: IsExprBuilder sym => LLVMPtr sym w -> (1 <= w => NatRepr w -> a) -> a
+withPtrWidth (LLVMPointer _blk bv) f | BaseBVRepr w <- exprType bv = f w
+withPtrWidth _ _ = error "impossible"
+
+mkBinOp ::
+  forall sym.
+  IsSymInterface sym =>
+  sym ->
+  String ->
+  PolyFunMaker sym 'PtrAssert 'RetPtr ->
+  IO (UndefinedPtrBinOp sym)
+mkBinOp sym nm (PolyFunMaker mkAssert) = do
+  PolyFunMaker fn' <- cachedPolyFun sym $ mkBinUF nm
+  return $ UndefinedPtrBinOp $ \sym' cond ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+    sptr1 <- asSymPtr sym' ptr1
+    sptr2 <- asSymPtr sym' ptr2
+    PolyFun resultfn <- fn' sym' w
+    sptrResult <- applySymFn sym' resultfn (Empty :> sptr1 :> sptr2)
+    PolyFun doAssert <- mkAssert sym' w
+    sptrResult' <- applySymFn sym' doAssert (Empty :> sptrResult :> cond)
+    fromSymPtr sym' sptrResult'
+
+mkPredOp ::
+  IsSymInterface sym =>
+  sym ->
+  String ->
+  PolyFunMaker sym 'PredAssert 'RetPred -> 
+  IO (UndefinedPtrPredOp sym)
+mkPredOp sym nm (PolyFunMaker mkAssert) = do
+  PolyFunMaker fn' <- cachedPolyFun sym $ mkPredUF nm
+  return $ UndefinedPtrPredOp $ \sym' cond ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+    sptr1 <- asSymPtr sym' ptr1
+    sptr2 <- asSymPtr sym' ptr2
+    PolyFun resultfn <- fn' sym' w
+    result <- applySymFn sym' resultfn (Empty :> sptr1 :> sptr2)
+    PolyFun doAssert <- mkAssert sym' w
+    applySymFn sym' doAssert (Empty :> result :> cond)
+
+mkUndefinedPtrOps ::
+  forall sym.
+  IsSymInterface sym =>
+  sym ->
+  IO (UndefinedPtrOps sym)
+mkUndefinedPtrOps sym = do
+  ptrAssert <- cachedPolyFun sym $ mkPtrAssert "assert"
+  predAssert <- cachedPolyFun sym $ mkPredAssert "assert"
+  PolyFunMaker bvAssert <- cachedPolyFun sym $ mkBVAssert "assert"
+  PolyFunMaker offFn <- cachedPolyFun sym $ mkOffUF "undefPtrOff"
+  let
+    offPtrFn :: forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w)
+    offPtrFn sym' cond ptr = withPtrWidth ptr $ \w -> do
+      sptr <- asSymPtr sym' ptr
+      PolyFun resultfn <- offFn sym' w
+      result <- applySymFn sym' resultfn (Empty :> sptr)
+      PolyFun doAssert <- bvAssert sym' w
+      applySymFn sym' doAssert (Empty :> result :> cond)
+
+  undefPtrLt' <- mkPredOp sym "undefPtrLt" predAssert
+  undefPtrLeq' <- mkPredOp sym "undefPtrLeq'" predAssert
+  undefPtrAdd' <- mkBinOp sym "undefPtrAdd" ptrAssert
+  undefPtrSub' <- mkBinOp sym "undefPtrSub" ptrAssert
+  undefPtrAnd' <- mkBinOp sym "undefPtrAnd" ptrAssert
+  return $
+    UndefinedPtrOps
+      { undefPtrOff = offPtrFn
+      , undefPtrLt = undefPtrLt'
+      , undefPtrLeq = undefPtrLeq'
+      , undefPtrAdd = undefPtrAdd'
+      , undefPtrSub = undefPtrSub'
+      , undefPtrAnd = undefPtrAnd'
+      }
+  
 
 -- | Like 'macawExtensions', but with an alternative memory model that records
 -- memory operations without trying to carefully guess the results of
@@ -213,11 +430,12 @@ macawTraceExtensions ::
   GlobalVar (ExitClassify arch) ->
   GlobalVar (MaybeType (LLVMPointerType (ArchAddrWidth arch))) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
+  UndefinedPtrOps sym ->
   ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
-macawTraceExtensions archStmtFn mvar evar pvar globs =
+macawTraceExtensions archStmtFn mvar evar pvar globs undefptr =
   ExtensionImpl
-    { extensionEval = evalMacawExprExtension
-    , extensionExec = execMacawStmtExtension archStmtFn mvar evar pvar globs
+    { extensionEval = evalMacawExprExtensionTrace undefptr
+    , extensionExec = execMacawStmtExtension archStmtFn undefptr mvar evar pvar globs
     }
 
 
@@ -328,7 +546,7 @@ mkReturnIPVar ha = freshGlobalVar ha (pack "ret_ip") knownRepr
 
 initMemTrace ::
   forall sym ptrW.
-  IsSymInterface sym =>
+  IsSymExprBuilder sym =>
   sym ->
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
@@ -420,12 +638,13 @@ type MacawTraceEvalStmtFunc sym arch = EvalStmtFunc (MacawStmtExtension arch) (M
 execMacawStmtExtension ::
   forall sym arch t st fs. (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn sym (MemTrace arch) arch ->
+  UndefinedPtrOps sym ->
   GlobalVar (MemTrace arch) ->
   GlobalVar (ExitClassify arch) ->
   GlobalVar (MaybeType (LLVMPointerType (ArchAddrWidth arch))) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   MacawTraceEvalStmtFunc sym arch
-execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar jvar pvar globs stmt
+execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar jvar pvar globs stmt
   = case stmt of
     MacawReadMem addrWidth memRepr addr
       -> liftToCrucibleState mvar $ \sym ->
@@ -465,79 +684,67 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar jvar pvar globs stmt
       offEq <- bvEq sym off off'
       andPred sym regEq offEq
 
-    PtrLeq w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
-      whoKnows <- ioFreshConstant sym "PtrLeq_across_allocations" knownRepr
-      regEq <- natEq sym reg reg'
-      offLeq <- bvUle sym off off'
-      itePred sym regEq offLeq whoKnows
+    PtrLeq w x y -> ptrOp w x y $ ptrPredOp (undefPtrLeq mkundef) (RegionConstraint natEq) $ \sym _reg off _reg' off' -> bvUle sym off off'
 
-    PtrLt w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
-      whoKnows <- ioFreshConstant sym "PtrLt_across_allocations" knownRepr
-      regEq <- natEq sym reg reg'
-      offLt <- bvUlt sym off off'
-      itePred sym regEq offLt whoKnows
+
+    PtrLt w x y -> ptrOp w x y $ ptrPredOp (undefPtrLt mkundef) (RegionConstraint natEq) $ \sym _reg off _reg' off' -> bvUlt sym off off'
 
     PtrMux w (RegEntry _ p) x y -> ptrOp w x y $ \sym reg off reg' off' -> do
       reg'' <- natIte sym p reg reg'
       off'' <- bvIte sym p off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAdd w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
+    PtrAdd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAdd mkundef) someZero $ \sym reg off reg' off' -> do
       regZero <- isZero sym reg
-      regZero' <- isZero sym reg'
-      someZero <- orPred sym regZero regZero'
-      assert sym someZero $ AssertFailureSimError
-        "PtrAdd: expected ptr+constant, saw ptr+ptr"
-        "When doing pointer addition, we expect at least one of the two arguments to the addition to have a region of 0 (i.e. not be the result of allocating memory). Both arguments had non-0 regions."
 
-      reg'' <- cases sym
-        [ (pure regZero, pure reg')
-        , (pure regZero', pure reg)
-        ]
-        (ioFreshConstant sym "PtrAdd_both_ptrs_region" knownRepr)
-      off'' <- cases sym
-        [ (pure someZero, bvAdd sym off off')
-        ]
-        (ioFreshConstant sym "PtrAdd_both_ptrs_offset" knownRepr)
+      reg'' <- natIte sym regZero reg' reg
+      off'' <- bvAdd sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrSub w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
-      regZero' <- isZero sym reg'
+    PtrSub w x y -> ptrOp w x y $ ptrBinOp (undefPtrSub mkundef) compatSub $ \sym reg off reg' off' -> do
       regEq <- natEq sym reg reg'
-      compatSub <- orPred sym regZero' regEq
-      assert sym compatSub $ AssertFailureSimError
-        "PtrSub: strange mix of allocation regions"
-        "When doing pointer subtraction, we expect that either the two pointers are from the same allocation region or the negated one is actually a constant. Other mixings of allocation regions have arbitrary behavior."
+      zero <- natLit sym 0
 
-      reg'' <- cases sym
-        [ (pure regZero', pure reg)
-        , (pure regEq, natLit sym 0)
-        ]
-        (ioFreshConstant sym "PtrSub_region_mismatch" knownRepr)
-      off'' <- cases sym
-        [ (pure compatSub, bvSub sym off off')
-        ]
-        (ioFreshConstant sym "PtrSub_region_mismatch" knownRepr)
+      reg'' <- natIte sym regEq zero reg
+      off'' <- bvSub sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAnd w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
+    PtrAnd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAnd mkundef) someZero $ \sym reg off reg' off' -> do
       regZero <- isZero sym reg
-      regZero' <- isZero sym reg'
-      someZero <- orPred sym regZero regZero'
-      assert sym someZero $ AssertFailureSimError
-        "PtrAnd: expected ptr&constant, saw ptr&ptr"
-        "When doing pointer addition, we expect at least one of the two arguments to the addition to have a region of 0 (i.e. not be the result of allocating memory). Both arguments had non-0 regions."
 
-      reg'' <- cases sym
-        [ (pure regZero, pure reg')
-        , (pure regZero', pure reg)
-        ]
-        (ioFreshConstant sym "PtrAnd_both_ptrs_region" knownRepr)
-      off'' <- cases sym
-        [ (pure someZero, bvAndBits sym off off')
-        ]
-        (ioFreshConstant sym "PtrAnd_both_ptrs_offset" knownRepr)
+      reg'' <- natIte sym regZero reg' reg
+      off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
+
+evalMacawExprExtensionTrace :: forall sym arch f tp
+                       .  IsSymInterface sym
+                       => UndefinedPtrOps sym
+                       -> sym
+                       -> IntrinsicTypes sym
+                       -> (Int -> String -> IO ())
+                       -> (forall utp . f utp -> IO (RegValue sym utp))
+                       -> MacawExprExtension arch f tp
+                       -> IO (RegValue sym tp)
+evalMacawExprExtensionTrace undefptr sym iTypes logFn f e0 =
+  case e0 of
+    PtrToBits _w x  -> doPtrToBits sym undefptr =<< f x
+    _ -> evalMacawExprExtension sym iTypes logFn f e0
+
+doPtrToBits ::
+  (IsSymInterface sym, 1 <= w) =>
+  sym ->
+  UndefinedPtrOps sym ->
+  LLVMPtr sym w ->
+  IO (SymBV sym w)
+doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
+  case asNat base of
+    Just 0 -> return off
+    _ -> do
+      notPtr <- natEq sym base =<< natLit sym 0
+      assert sym notPtr $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
+      return off
+      --undef <- undefPtrOff mkundef sym notPtr ptr
+      --bvIte sym notPtr off undef
 
 liftToCrucibleState ::
   GlobalVar mem ->
@@ -571,7 +778,32 @@ getGlobalVar cst gv = case lookupGlobal gv (cst ^. stateTree . actFrame . gpGlob
 setGlobalVar :: CrucibleState s sym ext rtp blocks r ctx -> GlobalVar mem -> RegValue sym mem -> CrucibleState s sym ext rtp blocks r ctx
 setGlobalVar cst gv val = cst & stateTree . actFrame . gpGlobals %~ insertGlobal gv val
 
+newtype RegionConstraint sym =
+  RegionConstraint { evalRegionConstraint :: (sym -> SymNat sym -> SymNat sym  -> IO (Pred sym)) }
+
+natAny ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+natAny = RegionConstraint $ \sym _ _ -> return $ truePred sym
+
+someZero ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+someZero = RegionConstraint $ \sym reg1 reg2 -> do
+  regZero1 <- isZero sym reg1
+  regZero2 <- isZero sym reg2
+  orPred sym regZero1 regZero2
+
+compatSub ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+compatSub = RegionConstraint $ \sym reg1 reg2 -> do
+  regZero1 <- isZero sym reg1
+  regEq <- natEq sym reg1 reg2
+  orPred sym regZero1 regEq
+
 ptrOp ::
+  IsSymInterface sym =>
   AddrWidthRepr w ->
   RegEntry sym (LLVMPointerType w) ->
   RegEntry sym (LLVMPointerType w) ->
@@ -579,7 +811,57 @@ ptrOp ::
   CrucibleState p sym ext rtp blocks r ctx ->
   IO (a, CrucibleState p sym ext rtp blocks r ctx)
 ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region' offset')) f =
-  addrWidthsArePositive w $ readOnlyWithSym $ \sym -> f sym region offset region' offset'
+  addrWidthsArePositive w $ readOnlyWithSym $ \sym -> do
+    f sym region offset region' offset'
+        
+ptrPredOp ::
+  1 <= w =>
+  IsSymInterface sym =>
+  UndefinedPtrPredOp sym ->
+  RegionConstraint sym ->
+  (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)) ->
+  sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)
+ptrPredOp mkundef regconstraint f sym reg1 off1 reg2 off2  = do
+  cond <- evalRegionConstraint regconstraint sym reg1 reg2
+  result <- f sym reg1 off1 reg2 off2
+  case asConstantPred cond of
+    Just True -> return result
+    _ -> do
+      assert sym cond $ AssertFailureSimError "ptrPredOp" "ptrPredOp"
+      return result
+      --undef <- mkUndefPred mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      --itePred sym cond result undef
+
+muxPtr ::
+  IsSymInterface sym =>
+  sym ->
+  Pred sym ->
+  LLVMPtr sym w ->
+  LLVMPtr sym w ->
+  IO (LLVMPtr sym w)
+muxPtr sym p (LLVMPointer region offset) (LLVMPointer region' offset') = do
+  BaseBVRepr _ <- return $ exprType offset
+  reg'' <- natIte sym p region region'
+  off'' <- bvIte sym p offset offset'
+  return $ LLVMPointer reg'' off''
+
+ptrBinOp ::
+  1 <= w => 
+  IsSymInterface sym =>
+  UndefinedPtrBinOp sym ->
+  RegionConstraint sym ->
+  (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)) ->
+  sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)
+ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
+  cond <- evalRegionConstraint regconstraint sym reg1 reg2
+  result <- f sym reg1 off1 reg2 off2
+  case asConstantPred cond of
+    Just True -> return result
+    _ -> do
+      assert sym cond $ AssertFailureSimError "ptrBinOp" "ptrBinOp"
+      return result
+      --undef <- mkUndefPtr mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      --muxPtr sym cond result undef
 
 cases ::
   IsExprBuilder sym =>
@@ -679,7 +961,7 @@ ptrAdd sym _w (LLVMPointer base off1) off2 =
 -- | Calculate an index into the memory array from a pointer
 arrayIdx ::
   1 <= ptrW =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   LLVMPtr sym ptrW ->
   Integer ->
@@ -717,7 +999,7 @@ leIdx sym (_ :> reg1 :> off1) (_ :> reg2 :> off2) = do
 concatPtrs ::
   1 <= w1 =>
   1 <= w2 =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   Endianness ->
   LLVMPtr sym w1 ->
@@ -742,7 +1024,7 @@ proveLeq prf@LeqProof = prf
 chunkBV :: forall sym w.
   1 <= w =>
   2 <= w =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   Endianness ->
   NatRepr w ->
@@ -814,7 +1096,7 @@ mergeReadStatus sym st1 st2 = do
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
   1 <= ptrW =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
@@ -829,7 +1111,8 @@ readMemArr sym mem ptr repr = go 0 repr
         | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
           idx <- arrayIdx sym ptr n
           content <- arrayLookup sym (memArr mem) idx
-          llvmPointer_bv sym content
+          blk0 <- natLit sym 0
+          return $ LLVMPointer blk0 content
       Right LeqProof
         | byteWidth' <- decNat byteWidth
         , tailRepr <- BVMemRepr byteWidth' endianness
@@ -851,7 +1134,7 @@ readMemArr sym mem ptr repr = go 0 repr
 -- any written addresses
 writeMemArr :: forall sym ptrW w.
   1 <= ptrW =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   MemWidth ptrW =>
   sym ->
   MemTraceImpl sym ptrW ->
@@ -996,7 +1279,7 @@ oneSubEq w = unsafeCoerce (leqRefl w)
 -- Equivalence check
 
 andCond ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemOpCondition sym ->
   MemOpCondition sym ->
@@ -1012,7 +1295,7 @@ mconcatSeq = foldl' (<>) mempty
 
 -- | Flatten a 'MemOp' into a sequence of atomic operations
 flatMemOp ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemOpCondition sym ->
   MemOp sym ptrW ->
@@ -1032,7 +1315,7 @@ flatMemOp sym outer_cond mop = case mop of
 
 -- | Collapse a 'MemTraceSeq' into a sequence of conditional write operations
 flatMemOps ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemTraceSeq sym ptrW ->
   IO (Seq (MemOp sym ptrW))
@@ -1076,7 +1359,8 @@ memOpFootprint (MemOp ptr dir cond w _ _) = MemFootprint ptr w dir cond
 memOpFootprint _ = error "Unexpected merge op"
 
 traceFootprint ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
   sym ->
   MemTraceSeq sym ptrW ->
   IO (Set (MemFootprint sym ptrW))
@@ -1149,7 +1433,7 @@ traceFootprints sym mem1 mem2 = do
   return $ Set.toList (Set.union foot1 foot2)
 
 getCond ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemOpCondition sym ->
   Pred sym
