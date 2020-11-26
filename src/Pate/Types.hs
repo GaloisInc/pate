@@ -116,6 +116,9 @@ module Pate.Types
   , iteM
   , impM
   , zipRegStates
+  , rebindExpr
+  , freshPtr
+  , VarBinding(..)
   )
 where
 
@@ -328,17 +331,20 @@ data MemPred sym arch =
       }
 
 mapMemPred ::
+  forall sym arch m.
   Monad m =>
   W4.IsExprBuilder sym =>
   MemPred sym arch ->
-  (forall w. MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
+  (forall w. 1 <= w => MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
   m (MemPred sym arch)
 mapMemPred memPred f = do
-  let f' cell p = do
-        p' <- f cell p
-        case W4.asConstantPred p' of
-          Just False -> return Nothing
-          _ -> return $ Just p'
+  let
+    f' :: (forall w. MemCell sym arch w -> W4.Pred sym -> m (Maybe (W4.Pred sym)))
+    f' cell@(MemCell{}) p = do
+      p' <- f cell p
+      case W4.asConstantPred p' of
+        Just False -> return Nothing
+        _ -> return $ Just p'
   locs <- TF.traverseF (\(MemCells cells) -> MemCells <$> M.traverseMaybeWithKey f' cells) (memPredLocs memPred)
   return $ memPred { memPredLocs = locs }
 
@@ -583,10 +589,9 @@ footPrintsToPred ::
   IO (MemPred sym arch)
 footPrintsToPred sym foots polarity = do
   locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond) -> do
-    dirpolarity <- case dir of
+    polarityMatches <- case dir of
       MT.Read -> return $ W4.truePred sym
-      MT.Write -> return $ W4.falsePred sym
-    polarityMatches <- W4.isEq sym polarity dirpolarity
+      MT.Write -> W4.notPred sym polarity
     cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
     case W4.asConstantPred cond' of
       Just False -> return Nothing
@@ -726,9 +731,11 @@ memPredPre sym inO inP memEq memPred  = do
         Just False -> return mem
         _ -> do
           CLM.LLVMPointer _ fresh <- MT.readMemArr sym memP ptr repr
-          CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
-          val <- W4.baseTypeIte sym cond fresh original
-          MT.writeMemArr sym mem ptr repr val
+          --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
+          --val <- W4.baseTypeIte sym cond fresh original
+          mem' <- MT.writeMemArr sym mem ptr repr fresh
+          mem'' <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
+          return $ mem { MT.memArr = mem'' }
 
     -- | For the negative case, we assume that the patched trace is equivalent
     -- to the original trace with arbitrary modifications to excluded addresses
@@ -1358,6 +1365,7 @@ bindSpec sym stO stP spec = do
   return $ (asm, body)
 
 
+
 -- instance ExprMappable sym (EquivRelation sym arch) where
 --   mapExpr sym f eqRel = case eqRel of
 --     EquivRelationEqMem asm predRegs_ -> do
@@ -1541,6 +1549,7 @@ data InnerEquivalenceError arch
   | AssumedFalse
   | BlockExitMismatch
   | InvalidSMTModel
+  | UnexpectedNonBoundVar
   | InequivalentError (InequivalenceResult arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 

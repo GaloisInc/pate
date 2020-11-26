@@ -725,12 +725,13 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
           precond <- provePostcondition (PatchPair blkO blkP) postcondSpec
           proveLocalPostcondition bundle precond
         _ -> throwHere $ BlockExitMismatch
- 
-  precondReturn <- withSatAssumption (statePredFalse sym) (matchingExits bundle MT.ExitReturn) $ do
+  let noResult = (W4.falsePred sym, statePredFalse sym)
+    
+  precondReturn <- withSatAssumption noResult (matchingExits bundle MT.ExitReturn) $ do
     liftIO $ putStrLn "Checking exit return.."
     proveLocalPostcondition bundle postcondSpec
 
-  precondUnknown <- withSatAssumption (statePredFalse sym) (matchingExits bundle MT.ExitUnknown) $ do
+  precondUnknown <- withSatAssumption noResult (matchingExits bundle MT.ExitUnknown) $ do
     liftIO $ putStrLn "Checking exit unknown.."
     univDom <- universalDomainSpec
     proveLocalPostcondition bundle univDom
@@ -739,7 +740,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   
   liftIO $ putStrLn "Confirming totality.."
   checkCasesTotal bundle allPreconds
-  foldM (\stPred (p, stPred') -> liftIO $ muxStatePred sym p stPred' stPred) (statePredFalse sym) allPreconds
+  foldM (\stPred (p, (_, stPred')) -> liftIO $ muxStatePred sym p stPred' stPred) (statePredFalse sym) allPreconds
 
 
 matchingExits ::
@@ -754,14 +755,10 @@ matchingExits bundle ecase = withSym $ \sym -> do
 -- | Ensure that the given predicates completely describe all possibilities
 checkCasesTotal ::
   SimBundle sym arch ->
-  [(W4.Pred sym, StatePred sym arch)] ->
+  [(W4.Pred sym, (W4.Pred sym, StatePred sym arch))] ->
   EquivM sym arch ()
-checkCasesTotal bundle cases = withSym $ \sym -> do
-  eqRel <- baseEquivRelation
-  
-  let mkCase (p, stPred) = do
-        preEq <- getPrecondition sym bundle eqRel stPred
-        W4.impliesPred sym preEq p
+checkCasesTotal bundle cases = withSym $ \sym -> do  
+  let mkCase (p, (preEq, _)) = W4.impliesPred sym preEq p
   somecase <- liftIO $ foldM (\p case_ -> mkCase case_ >>= W4.orPred sym p) (W4.falsePred sym) cases
   notSomeCase <- liftIO $ W4.notPred sym somecase
   trivialEq <- trivialEquivRelation
@@ -771,21 +768,6 @@ checkCasesTotal bundle cases = withSym $ \sym -> do
       throwInequivalenceResult InvalidCallPair trivialEq bundle fn (\_ -> return ())
     W4R.Unsat _ -> return ()
     W4R.Unknown -> throwHere InconclusiveSAT
-
-
-equivAllButHere ::
-  SimBundle sym arch ->
-  MemCell sym arch w ->
-  EquivM sym arch (W4.Pred sym)
-equivAllButHere bundle cell@(MemCell{}) = withSymIO $ \sym -> do
-  CLM.LLVMPointer _ fresh <- MT.readMemArr sym memP ptr repr
-  memP' <- MT.writeMemArr sym memO ptr repr fresh
-  W4.isEq sym (MT.memArr memP) (MT.memArr memP')
-  where
-    memO = simInMem $ simInO bundle
-    memP = simInMem $ simInP bundle
-    ptr = cellPtr cell
-    repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
     
 -- | Guess a sufficient memory domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relation
@@ -795,43 +777,33 @@ guessMemoryDomain ::
   SimBundle sym arch ->
   W4.Pred sym ->
   MemPred sym arch ->
-  MemEquivRelation sym arch ->
   EquivM sym arch (MemPred sym arch)
-guessMemoryDomain bundle goal memPred memEq = withSym $ \sym -> do
-  eqRel <- baseEquivRelation
+guessMemoryDomain bundle goal memPred = withSym $ \sym -> do
   foots <- getFootprints bundle
   cells <- liftIO $ footPrintsToPred sym foots polarity
-  regsEqs <- liftIO $ zipRegStates regsO regsP (applyRegEquivRelation (eqRelRegs eqRel))
-  regsEq <- liftIO $ allPreds sym regsEqs
   
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
   memPred' <- mapMemPred cells $ \cell p -> do
+    let repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
     localgoal <- liftIO $ W4.andPred sym goal p
-    case W4.asConstantPred polarity of
-      Just True -> do
-        memEqAt <- liftIO $ resolveCellEquiv sym stO stP memEq cell (W4.truePred sym)
-        goalImpliesRel <- liftIO $ W4.impliesPred sym localgoal memEqAt
-        isPredTrue goalImpliesRel >>= \case
-          True -> return p
-          False -> return $ W4.falsePred sym
-      Just False -> do
-        allButCell <- equivAllButHere bundle cell
-        asms <- liftIO $ allPreds sym [allButCell,p,regsEq]
-        check <- liftIO $ W4.impliesPred sym asms goal
-        isPredTrue check >>= \case
-          True -> return p
-          False -> return $ W4.falsePred sym
-      _ -> throwHere InvalidSMTModel
+    
+    CLM.LLVMPointer _ freshO <- liftIO $ freshPtr sym (cellWidth cell)
+    CLM.LLVMPointer _ freshP <- liftIO $ freshPtr sym (cellWidth cell)
+    memO' <- liftIO $ MT.writeMemArr sym memO (cellPtr cell) repr freshO
+    memP' <- liftIO $ MT.writeMemArr sym memP (cellPtr cell) repr freshP
+    localgoal' <- bindMemory memO memO' localgoal >>= bindMemory memP memP'
+    
+    check <- liftIO $ W4.impliesPred sym localgoal' localgoal
+    isPredTrue check >>= \case
+      True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
+      False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
  
   return $ memPred' { memPredPolarity = polarity }
   where
     polarity = memPredPolarity memPred
-    stO = simInState $ simInO bundle
-    stP = simInState $ simInP bundle
-    regsO = simInRegs $ simInO bundle
-    regsP = simInRegs $ simInP bundle
-
+    memO = simInMem $ simInO bundle
+    memP = simInMem $ simInP bundle
 
 guessEquivalenceDomain ::
   forall sym arch.
@@ -840,8 +812,6 @@ guessEquivalenceDomain ::
   StatePred sym arch ->
   EquivM sym arch (StatePred sym arch)
 guessEquivalenceDomain bundle goal postcond = withSym $ \sym -> do
-  eqRel <- baseEquivRelation
-  
   ExprFilter isBoundInGoal <- getIsBoundFilter goal
     
   regsDom <- fmap (M.fromList . catMaybes) $
@@ -850,17 +820,20 @@ guessEquivalenceDomain bundle goal postcond = withSym $ \sym -> do
       isInP <- liftFilterMacaw isBoundInGoal vP
       case registerCase r of
         RegG | isInO || isInP -> do
-          eqReg <- liftIO $ applyRegEquivRelation (eqRelRegs eqRel) r vO vP
-          check <- liftIO $ W4.impliesPred sym goal eqReg
-          
+          freshO <- freshRegEntry vO
+          freshP <- freshRegEntry vP
+
+          goal' <- bindMacawReg vO freshO goal >>= bindMacawReg vP freshP
+          check <- liftIO $ W4.impliesPred sym goal' goal
+
           isPredTrue check >>= \case
-            True -> return $ Just (Some r, W4.truePred sym) 
-            False -> return $ Nothing
+            True -> return $ Nothing
+            False -> return $ Just (Some r, W4.truePred sym) 
         RegSP -> return (Just (Some r, W4.truePred sym))
         _ -> return Nothing
 
-  stackDom <- guessMemoryDomain bundle goal (predStack postcond) (eqRelStack eqRel)
-  memDom <- guessMemoryDomain bundle goal (predMem postcond) (eqRelMem eqRel)
+  stackDom <- guessMemoryDomain bundle goal (predStack postcond)
+  memDom <- guessMemoryDomain bundle goal (predMem postcond)
   return $ StatePred
     { predRegs = regsDom
     , predStack = stackDom
@@ -941,7 +914,7 @@ validInitState mpPair stO stP = withSym $ \sym -> do
 proveLocalPostcondition ::
   SimBundle sym arch ->
   StatePredSpec sym arch ->
-  EquivM sym arch (StatePred sym arch)
+  EquivM sym arch (W4.Pred sym, StatePred sym arch)
 proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   eqRel <- baseEquivRelation
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
@@ -956,9 +929,11 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   fullPostCond <- liftIO $ W4.andPred sym postcondPred validExits
 
+  liftIO $ putStrLn "Guessing precondition.."
   (_, eqInputs) <- withAssumption (return asm) $
     guessEquivalenceDomain bundle fullPostCond postcond
-
+  liftIO $ putStrLn "Done"
+  
   checkedPostCond <- liftIO $ W4.impliesPred sym asm fullPostCond
   --minEqInputs <- minimizePrecondition bundle checkedPostCond eqInputs
   eqInputsPred <- liftIO $ getPrecondition sym bundle eqRel eqInputs 
@@ -986,7 +961,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
         liftIO $ putStrLn $ "postcondition did not verify"
         let emit ir = emitEvent (PE.CheckedEquivalence oBlocks pBlocks (PE.Inequivalent ir) duration)
         throwInequivalenceResult InvalidPostState postEqRel bundle fn emit
-  return eqInputs
+  return (eqInputsPred, eqInputs)
   where
     blkO = simInBlock $ simInO bundle
     blkP = simInBlock $ simInP bundle
@@ -1156,6 +1131,42 @@ equalValuesIO sym entry1 entry2 = case (macawRegRepr entry1, macawRegRepr entry2
       Just Refl -> liftIO $ MT.llvmPtrEq sym (macawRegValue entry1) (macawRegValue entry2)
       Nothing -> return $ W4.falsePred sym
   _ -> fail "equalValues: unsupported type"
+
+
+asVar ::
+  W4.SymExpr sym tp' ->
+  EquivM sym arch (W4.BoundVar sym tp')
+asVar expr = withValid $ case expr of
+  W4B.BoundVarExpr bv' -> return bv'
+  _ -> throwHere UnexpectedNonBoundVar
+
+bindMacawReg ::
+  MacawRegEntry sym tp ->
+  -- ^ value to rebind
+  MacawRegEntry sym tp ->
+  -- ^ new value
+  W4.SymExpr sym tp' ->
+  EquivM sym arch (W4.SymExpr sym tp')
+bindMacawReg var val expr = withSym $ \sym -> do
+  case macawRegRepr var of
+    CLM.LLVMPointerRepr _ -> do
+      CLM.LLVMPointer regVar offVar <- return $ macawRegValue var
+      CLM.LLVMPointer regVal offVal <- return $ macawRegValue val
+      regVar' <- asVar regVar
+      offVar' <- asVar offVar
+      liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding regVar' regVal Ctx.:> VarBinding offVar' offVal) expr
+    repr -> throwHere $ UnsupportedRegisterType (Some repr)
+
+bindMemory ::
+  MT.MemTraceImpl sym ptrW ->
+  -- ^ value to rebind
+  MT.MemTraceImpl sym ptrW ->
+  -- ^ new value
+  W4.SymExpr sym tp' ->
+  EquivM sym arch (W4.SymExpr sym tp')  
+bindMemory memVar memVal expr = withSym $ \sym -> do
+  memVar' <- asVar (MT.memArr memVar)
+  liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding memVar' (MT.memArr memVal)) expr
 
 isBoundInEntry ::
   forall sym arch tp tp'.
@@ -1815,6 +1826,17 @@ unconstrainedRegister reg = do
       return $ MacawRegVar (MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
+
+freshRegEntry ::
+  MacawRegEntry sym tp ->
+  EquivM sym arch (MacawRegEntry sym tp)
+freshRegEntry entry = withSym $ \sym -> case macawRegRepr entry of
+  CLM.LLVMPointerRepr w -> liftIO $ do
+    reg <- W4.freshConstant sym W4.emptySymbol W4.BaseNatRepr
+    off <- W4.freshConstant sym W4.emptySymbol (W4.BaseBVRepr w)
+    let ptr = CLM.LLVMPointer reg off
+    return $ MacawRegEntry (macawRegRepr entry) ptr
+  repr -> throwHere $ UnsupportedRegisterType $ Some repr
 
 lookupBlocks ::
   forall sym arch bin.
