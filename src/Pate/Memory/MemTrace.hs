@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
@@ -18,6 +19,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
+
 
 #if __GLASGOW_HASKELL__ >= 805
 {-# LANGUAGE NoStarIsType #-}
@@ -228,14 +230,14 @@ type BasePtrType w = BaseStructType (EmptyCtx ::> BaseNatType ::> BaseBVType w)
 type SymPtr sym w = SymExpr sym (BasePtrType w)
 
 asSymPtr ::
-  IsSymInterface sym =>
+  IsSymExprBuilder sym =>
   sym ->
   LLVMPtr sym w ->
   IO (SymPtr sym w)
 asSymPtr sym (LLVMPointer reg off) = mkStruct sym (Empty :> reg :> off)
 
 fromSymPtr ::
-  IsSymInterface sym =>
+  IsSymExprBuilder sym =>
   sym ->
   SymPtr sym w ->
   IO (LLVMPtr sym w )  
@@ -250,27 +252,42 @@ polySymbol ::
   SolverSymbol
 polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
 
-data PtrArgsK = OnePtr | TwoPtrs | PtrAssert | PredAssert | BVAssert
+class HasNatAbs (tp :: k) where
+  type NatAbs tp (w :: Nat) :: k
 
-type family PtrArgs (k :: PtrArgsK) w :: Ctx.Ctx BaseType where
-  PtrArgs 'TwoPtrs w = (EmptyCtx ::> BasePtrType w ::> BasePtrType w)
-  PtrArgs 'OnePtr w = EmptyCtx ::> BasePtrType w
-  PtrArgs 'PtrAssert w = EmptyCtx ::> BasePtrType w ::> BaseBoolType
-  PtrArgs 'BVAssert w = EmptyCtx ::> BaseBVType w ::> BaseBoolType
-  PtrArgs 'PredAssert w = EmptyCtx ::> BaseBoolType ::> BaseBoolType
+type AnyNat = 0
 
-data PtrRetK = RetPtr | RetPred | RetBV
+instance HasNatAbs (BasePtrType AnyNat) where
+  type NatAbs (BasePtrType AnyNat) w' = BasePtrType w'
 
-type family PtrRet (k :: PtrRetK) w :: BaseType where
-  PtrRet 'RetPtr w = BasePtrType w
-  PtrRet 'RetPred _w = BaseBoolType
-  PtrRet 'RetBV w = BaseBVType w
+instance AnyNat + 1 <= w => HasNatAbs (BasePtrType w) where
+  type NatAbs (BasePtrType w) w' = BasePtrType w'
 
+instance HasNatAbs (BaseBVType AnyNat) where
+  type NatAbs (BaseBVType AnyNat) w' = BaseBVType w'
+
+instance AnyNat + 1 <= w => HasNatAbs (BaseBVType w) where
+  type NatAbs (BaseBVType w) w' = BaseBVType w'
+
+instance HasNatAbs BaseBoolType where
+  type NatAbs BaseBoolType _ = BaseBoolType
+
+instance HasNatAbs EmptyCtx where
+  type NatAbs EmptyCtx w = EmptyCtx
+
+instance (HasNatAbs ctx, HasNatAbs tp) => HasNatAbs (ctx Ctx.::> tp) where
+  type NatAbs (ctx Ctx.::> tp) w' = NatAbs ctx w' Ctx.::> NatAbs tp w'
+
+data PolyFun sym args ret (w :: Nat) where
+  PolyFun ::
+    (HasNatAbs args, HasNatAbs ret) =>
+    (SymFn sym (NatAbs args w) (NatAbs ret w)) ->
+    PolyFun sym args ret w
 
 mkBinUF ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym 'TwoPtrs 'RetPtr
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) (BasePtrType AnyNat)
 mkBinUF nm  = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
@@ -280,7 +297,7 @@ mkBinUF nm  = PolyFunMaker $ \sym w -> do
 mkPtrAssert ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym 'PtrAssert 'RetPtr
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat)
 mkPtrAssert nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
@@ -290,7 +307,7 @@ mkPtrAssert nm = PolyFunMaker $ \sym w -> do
 mkBVAssert ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym 'BVAssert 'RetBV
+  PolyFunMaker sym (EmptyCtx ::> BaseBVType AnyNat Ctx.::> BaseBoolType) (BaseBVType AnyNat)
 mkBVAssert nm = PolyFunMaker $ \sym w -> do
   let
     repr = Empty :> BaseBVRepr w :> BaseBoolRepr
@@ -299,7 +316,7 @@ mkBVAssert nm = PolyFunMaker $ \sym w -> do
 mkPredAssert ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym 'PredAssert 'RetPred
+  PolyFunMaker sym (EmptyCtx ::> BaseBoolType Ctx.::> BaseBoolType) BaseBoolType
 mkPredAssert nm = PolyFunMaker $ \sym w -> do
   let
     repr = Empty :> BaseBoolRepr :> BaseBoolRepr
@@ -308,7 +325,7 @@ mkPredAssert nm = PolyFunMaker $ \sym w -> do
 mkPredUF ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym 'TwoPtrs 'RetPred
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) BaseBoolType
 mkPredUF nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
@@ -318,17 +335,16 @@ mkPredUF nm = PolyFunMaker $ \sym w -> do
 mkOffUF ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym 'OnePtr 'RetBV
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat) (BaseBVType AnyNat)
 mkOffUF nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
 
-newtype PolyFunMaker sym f g =
-  PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym f g w))
+newtype PolyFunMaker sym args ret =
+  PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym args ret w))
 
-newtype PolyFun sym (f :: PtrArgsK) (g :: PtrRetK) (w :: Nat) = PolyFun (SymFn sym (PtrArgs f w) (PtrRet g w))
 
 cachedPolyFun ::
   forall sym f g.
@@ -356,7 +372,7 @@ mkBinOp ::
   IsSymInterface sym =>
   sym ->
   String ->
-  PolyFunMaker sym 'PtrAssert 'RetPtr ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat) ->
   IO (UndefinedPtrBinOp sym)
 mkBinOp sym nm (PolyFunMaker mkAssert) = do
   PolyFunMaker fn' <- cachedPolyFun sym $ mkBinUF nm
@@ -373,7 +389,7 @@ mkPredOp ::
   IsSymInterface sym =>
   sym ->
   String ->
-  PolyFunMaker sym 'PredAssert 'RetPred -> 
+  PolyFunMaker sym (EmptyCtx ::> BaseBoolType Ctx.::> BaseBoolType) BaseBoolType -> 
   IO (UndefinedPtrPredOp sym)
 mkPredOp sym nm (PolyFunMaker mkAssert) = do
   PolyFunMaker fn' <- cachedPolyFun sym $ mkPredUF nm
@@ -742,9 +758,8 @@ doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
     _ -> do
       notPtr <- natEq sym base =<< natLit sym 0
       assert sym notPtr $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
-      return off
-      --undef <- undefPtrOff mkundef sym notPtr ptr
-      --bvIte sym notPtr off undef
+      undef <- undefPtrOff mkundef sym notPtr ptr
+      bvIte sym notPtr off undef
 
 liftToCrucibleState ::
   GlobalVar mem ->

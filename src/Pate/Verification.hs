@@ -31,6 +31,7 @@ import           Prelude hiding ( fail )
 import           GHC.Stack
 import           Data.Typeable
 import           Data.Bits
+import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Trans.Except
 import           Control.Monad.Trans.Maybe
 import           Control.Monad.Reader
@@ -517,20 +518,26 @@ checkEquivalence pPair precondSpec postcondSpec = withSym $ \sym -> do
 
   -- prove that the generated precondition is implied by the given precondition
   void $ withSimSpec precondSpec $ \stO stP precond -> do
-    notCheck <- liftIO $ do
-      let
-        inO = SimInput stO (pOrig pPair)
-        inP = SimInput stP (pPatched pPair)
-      (asms, genPrecond) <- bindSpec sym stO stP genPrecondSpec
-      preImpliesGen <- impliesPrecondition sym inO inP eqRel precond genPrecond
- 
-      check <- W4.andPred sym preImpliesGen asms
-      W4.notPred sym check
+    let
+      inO = SimInput stO (pOrig pPair)
+      inP = SimInput stP (pPatched pPair)
+    (asms, genPrecond) <- liftIO $ do bindSpec sym stO stP genPrecondSpec
+      --genPrecondStrong <- flattenStatePred sym genPrecond
+      
+    preImpliesGen <- liftIO $ impliesPrecondition sym inO inP eqRel precond genPrecond
+
+    liftIO $ putStrLn "Proving final postcondition.."
+    isPredTrue preImpliesGen >>= \case
+      True -> return ()
+      False -> throwHere ImpossibleEquivalence
+    liftIO $ putStrLn "Done"
+
+    liftIO $ putStrLn "Validating assumptions"
+    isPredTrue asms >>= \case
+     True -> return ()
+     False -> throwHere UnsatisfiableAssumptions
+    liftIO $ putStrLn "Done"
     
-    checkSatisfiableWithModel "check" notCheck $ \case
-        W4R.Sat _ -> throwHere ImpossibleEquivalence
-        W4R.Unsat _ -> return ()
-        W4R.Unknown -> throwHere InconclusiveSAT
   return ()
 
 withAssumption' ::
@@ -554,6 +561,14 @@ withAssumption ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption asmf f =
   withSym $ \sym -> withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
+
+withAssumption_ ::
+  HasCallStack =>
+  EquivM sym arch (W4.Pred sym) ->
+  EquivM sym arch f ->
+  EquivM sym arch f
+withAssumption_ asmf f =
+  fmap snd $ withSym $ \sym -> withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
 
 withSatAssumption ::
   HasCallStack =>
@@ -740,6 +755,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   
   liftIO $ putStrLn "Confirming totality.."
   checkCasesTotal bundle allPreconds
+  liftIO $ putStrLn "Confirmed!"
   foldM (\stPred (p, (_, stPred')) -> liftIO $ muxStatePred sym p stPred' stPred) (statePredFalse sym) allPreconds
 
 
@@ -758,52 +774,60 @@ checkCasesTotal ::
   [(W4.Pred sym, (W4.Pred sym, StatePred sym arch))] ->
   EquivM sym arch ()
 checkCasesTotal bundle cases = withSym $ \sym -> do  
-  let mkCase (p, (preEq, _)) = W4.impliesPred sym preEq p
-  somecase <- liftIO $ foldM (\p case_ -> mkCase case_ >>= W4.orPred sym p) (W4.falsePred sym) cases
-  notSomeCase <- liftIO $ W4.notPred sym somecase
+  mergedCases <- liftIO $ foldM (\stPred (p, (_, stPred')) -> muxStatePred sym p stPred' stPred) (statePredFalse sym) cases
+  eqRel <- baseEquivRelation
+  someEqRelPred <- liftIO $ getPrecondition sym bundle eqRel mergedCases
+  someCasePred <- liftIO $ foldM (\p (p', _) -> liftIO $ W4.orPred sym p p') (W4.falsePred sym) cases
   trivialEq <- trivialEquivRelation
-  checkSatisfiableWithModel "checkCasesTotal" notSomeCase $ \case
-    W4R.Sat fn -> do
-      liftIO $ putStrLn $ "cases not total"
-      throwInequivalenceResult InvalidCallPair trivialEq bundle fn (\_ -> return ())
-    W4R.Unsat _ -> return ()
-    W4R.Unknown -> throwHere InconclusiveSAT
-    
+  
+  withAssumption_ (return someEqRelPred) $ do  
+    notSomeCase <- liftIO $ W4.notPred sym someCasePred
+    checkSatisfiableWithModel "checkCasesTotal" notSomeCase $ \case
+      W4R.Sat fn -> do
+        liftIO $ putStrLn $ "cases not total"
+        throwInequivalenceResult InvalidCallPair trivialEq bundle fn (\_ -> return ())
+      W4R.Unsat _ -> return ()
+      W4R.Unknown -> throwHere InconclusiveSAT
+
 -- | Guess a sufficient memory domain that will cause the
--- given postcondition to be satisfied on the given equivalence relation
--- TODO: we need to make a mux of this based on the branches in the memory trace
--- otherwise it is not going to create strong enough conditions
+-- given postcondition to be satisfied on the given equivalence relations
 guessMemoryDomain ::
+  forall sym arch.
   SimBundle sym arch ->
   W4.Pred sym ->
+  (MT.MemTraceImpl sym (MM.ArchAddrWidth arch), W4.Pred sym) ->
   MemPred sym arch ->
+  (forall w. MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
   EquivM sym arch (MemPred sym arch)
-guessMemoryDomain bundle goal memPred = withSym $ \sym -> do
+guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
   foots <- getFootprints bundle
-  cells <- liftIO $ footPrintsToPred sym foots polarity
-  
+  cells <- do
+    localPred <- liftIO $ addFootPrintsToPred sym foots memPred
+    mapMemPred localPred $ \cell p -> do
+      isFiltered <- cellFilter cell
+      liftIO $ W4.andPred sym p isFiltered
+
+
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
-  memPred' <- mapMemPred cells $ \cell p -> do
+  mapMemPred cells $ \cell p -> do
     let repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
-    localgoal <- liftIO $ W4.andPred sym goal p
-    
-    CLM.LLVMPointer _ freshO <- liftIO $ freshPtr sym (cellWidth cell)
+    p' <- bindMemory memP memP' p
+    -- clobber the "patched" memory at exactly this cell
     CLM.LLVMPointer _ freshP <- liftIO $ freshPtr sym (cellWidth cell)
-    memO' <- liftIO $ MT.writeMemArr sym memO (cellPtr cell) repr freshO
-    memP' <- liftIO $ MT.writeMemArr sym memP (cellPtr cell) repr freshP
-    localgoal' <- bindMemory memO memO' localgoal >>= bindMemory memP memP'
-    
-    check <- liftIO $ W4.impliesPred sym localgoal' localgoal
+    memP'' <- liftIO $ MT.writeMemArr sym memP (cellPtr cell) repr freshP
+    eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
+
+    -- see if we can prove that the goal is independent of this clobbering
+    asm <- liftIO $ allPreds sym [p, p', eqMemP, goal']
+    check <- liftIO $ W4.impliesPred sym asm goal
     isPredTrue check >>= \case
       True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
       False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
- 
-  return $ memPred' { memPredPolarity = polarity }
   where
     polarity = memPredPolarity memPred
-    memO = simInMem $ simInO bundle
     memP = simInMem $ simInP bundle
+
 
 guessEquivalenceDomain ::
   forall sym arch.
@@ -813,7 +837,9 @@ guessEquivalenceDomain ::
   EquivM sym arch (StatePred sym arch)
 guessEquivalenceDomain bundle goal postcond = withSym $ \sym -> do
   ExprFilter isBoundInGoal <- getIsBoundFilter goal
-    
+  eqRel <- baseEquivRelation
+
+  liftIO $ putStrLn "Guessing register domain."
   regsDom <- fmap (M.fromList . catMaybes) $
     zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
@@ -823,23 +849,54 @@ guessEquivalenceDomain bundle goal postcond = withSym $ \sym -> do
           freshO <- freshRegEntry vO
           freshP <- freshRegEntry vP
 
-          goal' <- bindMacawReg vO freshO goal >>= bindMacawReg vP freshP
-          check <- liftIO $ W4.impliesPred sym goal' goal
+          goal' <- bindMacawReg vO freshO goal -- >>= bindMacawReg vP freshP
+          goalIgnoresReg <- liftIO $ W4.impliesPred sym goal' goal
 
-          isPredTrue check >>= \case
+          isPredTrue goalIgnoresReg >>= \case
             True -> return $ Nothing
             False -> return $ Just (Some r, W4.truePred sym) 
         RegSP -> return (Just (Some r, W4.truePred sym))
         _ -> return Nothing
+  liftIO $ putStrLn "Done"
+  stackRegion <- asks envStackRegion
+  let
+    isStackCell cell = do
+      let CLM.LLVMPointer region _ = cellPtr cell
+      liftIO $ W4.isEq sym region stackRegion
+    isNotStackCell cell = do
+      p <- isStackCell cell
+      liftIO $ W4.notPred sym p
 
-  stackDom <- guessMemoryDomain bundle goal (predStack postcond)
-  memDom <- guessMemoryDomain bundle goal (predMem postcond)
-  return $ StatePred
-    { predRegs = regsDom
-    , predStack = stackDom
-    , predMem = memDom
-    }
+  ExprMapper doEquate <- equateRegisters regsDom bundle
+   
+  liftIO $ putStrLn "Rebinding state.."
+  -- rewrite the state elements to explicitly equate registers we have assumed equivalent
+  bundle_regsEq <- liftIO $ mapExpr sym doEquate bundle
+  goal_regsEq <- liftIO $ doEquate goal
+  postcond_regsEq <- liftIO $ mapExpr sym doEquate postcond
+  --bundle_regsEq <- return bundle
+  --goal_regsEq <- return goal
+  --postcond_regsEq <- return postcond
+  
+  memP' <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+  goal' <- bindMemory memP memP' goal_regsEq
+  liftIO $ putStrLn "Done"
+  liftIO $ putStrLn "Guessing stack domain."
+  withAssumption_ (liftIO $ regPredRel sym inStO inStP (eqRelRegs eqRel) regsDom) $ do
+    stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predStack postcond_regsEq) isStackCell
+    liftIO $ putStrLn "Guessing memory domain."
+    withAssumption_ (liftIO $ memPredPre sym inO inP (eqRelStack eqRel) stackDom) $ do
+      memDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
+      liftIO $ putStrLn "Done"
+      return $ StatePred
+        { predRegs = regsDom
+        , predStack = stackDom
+        , predMem = memDom
+        }
   where
+    memP = simInMem $ simInP bundle
+    inO = simInO bundle
+    inP = simInP bundle
     inStO = simInState $ simInO bundle
     inStP = simInState $ simInP bundle
 
@@ -1140,6 +1197,22 @@ asVar expr = withValid $ case expr of
   W4B.BoundVarExpr bv' -> return bv'
   _ -> throwHere UnexpectedNonBoundVar
 
+macawRegBinding ::
+  MacawRegEntry sym tp ->
+  -- ^ value to rebind
+  MacawRegEntry sym tp ->
+  -- ^ new value
+  EquivM sym arch ([Some (VarBinding sym)])
+macawRegBinding var val = withSym $ \sym -> do
+  case macawRegRepr var of
+    CLM.LLVMPointerRepr _ -> do
+      CLM.LLVMPointer regVar offVar <- return $ macawRegValue var
+      CLM.LLVMPointer regVal offVal <- return $ macawRegValue val
+      regVar' <- asVar regVar
+      offVar' <- asVar offVar
+      return $ [Some $ VarBinding regVar' regVal, Some $ VarBinding offVar' offVal]
+    repr -> throwHere $ UnsupportedRegisterType (Some repr)
+
 bindMacawReg ::
   MacawRegEntry sym tp ->
   -- ^ value to rebind
@@ -1148,14 +1221,39 @@ bindMacawReg ::
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')
 bindMacawReg var val expr = withSym $ \sym -> do
-  case macawRegRepr var of
-    CLM.LLVMPointerRepr _ -> do
-      CLM.LLVMPointer regVar offVar <- return $ macawRegValue var
-      CLM.LLVMPointer regVal offVal <- return $ macawRegValue val
-      regVar' <- asVar regVar
-      offVar' <- asVar offVar
-      liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding regVar' regVal Ctx.:> VarBinding offVar' offVal) expr
-    repr -> throwHere $ UnsupportedRegisterType (Some repr)
+  Some binds <- Ctx.fromList <$> macawRegBinding var val
+  liftIO $ rebindExpr sym binds expr
+
+mapExpr' ::
+  ExprMappable sym f =>
+  (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
+  f ->
+  EquivM sym arch f
+mapExpr' f e = withSym $ \sym ->
+  IO.withRunInIO $ \runInIO -> mapExpr sym (\a -> runInIO (f a)) e
+
+newtype ExprMapper sym = ExprMapper (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp'))
+
+equateRegisters ::
+  M.Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
+  SimBundle sym arch ->
+  EquivM sym arch (ExprMapper sym)
+equateRegisters regRel bundle = withSym $ \sym -> do
+  eqRel <- baseEquivRelation
+  
+  Some binds <- fmap (Ctx.fromList . concat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
+     p <- liftIO $ applyRegEquivRelation (eqRelRegs eqRel) r vO vP
+     case M.lookup (Some r) regRel of
+       Just cond | Just True <- W4.asConstantPred cond -> do
+         eqVals <- equalValues vO vP
+         (W4.asConstantPred <$> liftIO (W4.isEq sym p eqVals)) >>= \case
+           Just True -> macawRegBinding vO vP
+           _ -> return []
+       _ -> return []
+  return $ ExprMapper $ rebindExpr sym binds
+  where
+    inStO = simInState $ simInO bundle
+    inStP = simInState $ simInP bundle
 
 bindMemory ::
   MT.MemTraceImpl sym ptrW ->

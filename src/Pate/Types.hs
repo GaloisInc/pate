@@ -109,8 +109,14 @@ module Pate.Types
   , impliesPrecondition
   , weakenEquivRelation
   , footPrintsToPred
+  , addFootPrintsToPred
   , resolveCellEquiv
   , statePredFalse
+  , flattenStatePred
+  , memPredToList
+  , listToMemPred
+  , regPredRel
+  , memPredPre
  --- term helpers
   , andM
   , iteM
@@ -477,7 +483,6 @@ inCells sym cell (MemCells cells) =
           go p' cells'
     go p [] = return p
 
-
 memPredAt ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
@@ -591,13 +596,25 @@ footPrintsToPred sym foots polarity = do
   locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond) -> do
     polarityMatches <- case dir of
       MT.Read -> return $ W4.truePred sym
-      MT.Write -> W4.notPred sym polarity
+      MT.Write -> return $ W4.falsePred sym
     cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
     case W4.asConstantPred cond' of
       Just False -> return Nothing
       _ -> return $ Just (Some (MemCell ptr w), cond')
-  listToMemPred sym locs (W4.truePred sym)
+  listToMemPred sym locs polarity
 
+addFootPrintsToPred ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  MemFootprints sym arch ->
+  MemPred sym arch ->
+  IO (MemPred sym arch)
+addFootPrintsToPred sym foots memPred = do
+  memPred' <- footPrintsToPred sym foots (memPredPolarity memPred)
+  memLocs' <- mergeMemCellsMap sym (memPredLocs memPred) (memPredLocs memPred')
+  return $ memPred { memPredLocs = memLocs' }
 
 memPredPost ::
   forall sym arch.
@@ -923,6 +940,39 @@ impliesPrecondition sym inO inP eqRel stPredAsm stPredConcl = do
   asm <- statePredPre sym inO inP eqRel stPredAsm
   concl <- statePredPre sym inO inP eqRel stPredConcl
   W4.impliesPred sym asm concl
+
+-- | Drop conditionals where possible, strengthening the predicate
+flattenStatePred ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  OrdF (MM.ArchReg arch) =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  StatePred sym arch ->
+  IO (StatePred sym arch)  
+flattenStatePred sym stPred = do
+  let
+    triviallyTrue :: W4.Pred sym -> W4.Pred sym
+    triviallyTrue p = case W4.asConstantPred p of
+      Just False ->  W4.falsePred sym
+      _ -> W4.truePred sym
+
+    filterFalse :: W4.Pred sym -> Maybe (W4.Pred sym)
+    filterFalse p = case W4.asConstantPred p of
+      Just False -> Nothing
+      _ -> Just p
+      
+    triviallyFalse :: W4.Pred sym -> W4.Pred sym
+    triviallyFalse p = case W4.asConstantPred p of
+      Just True -> W4.truePred sym
+      _ -> W4.falsePred sym
+      
+    predRegs' = M.mapMaybe (filterFalse . triviallyTrue) (predRegs stPred)
+  predStack' <- mapMemPred (predStack stPred) (\_ p -> iteM sym (return $ memPredPolarity $ predStack stPred) (return $ triviallyTrue p) (return $ triviallyFalse p))
+  predMem' <- mapMemPred (predMem stPred) (\_ p -> iteM sym (return $ memPredPolarity $ predMem stPred) (return $ triviallyTrue p) (return $ triviallyFalse p)) 
+  return $ StatePred predRegs' predStack' predMem'
+
 
 -- | Resolve a domain predicate and equivalence relation into a postcondition and associated
 -- structured equivalence relation (for reporting counterexamples)
@@ -1550,6 +1600,7 @@ data InnerEquivalenceError arch
   | BlockExitMismatch
   | InvalidSMTModel
   | UnexpectedNonBoundVar
+  | UnsatisfiableAssumptions
   | InequivalentError (InequivalenceResult arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
