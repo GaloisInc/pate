@@ -146,7 +146,6 @@ import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.Traversable ( for )
 import           Data.Typeable
 import           Data.Foldable
 import           Data.Monoid 
@@ -164,8 +163,6 @@ import qualified Data.Parameterized.Map as MapF
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.Simulator.Intrinsics as CS
-import qualified Lang.Crucible.Utils.MuxTree as MX
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
@@ -1723,9 +1720,9 @@ ppDirectionPreposition :: Bool -> String
 ppDirectionPreposition True = "from"
 ppDirectionPreposition False = "to"
 
-ppEndianness :: MM.Endianness -> String
-ppEndianness MM.BigEndian = "→"
-ppEndianness MM.LittleEndian = "←"
+_ppEndianness :: MM.Endianness -> String
+_ppEndianness MM.BigEndian = "→"
+_ppEndianness MM.LittleEndian = "←"
 
 ppPreRegs ::
   HasCallStack =>
