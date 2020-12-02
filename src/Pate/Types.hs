@@ -121,6 +121,7 @@ module Pate.Types
   , andM
   , iteM
   , impM
+  , orM
   , zipRegStates
   , rebindExpr
   , freshPtr
@@ -881,6 +882,21 @@ andM sym p1 p2 = do
       p2' <- p2
       W4.andPred sym p1' p2'
 
+
+orM ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  IO (W4.Pred sym) ->
+  IO (W4.Pred sym) ->
+  IO (W4.Pred sym)
+orM sym p1 p2 = do
+  p1' <- p1
+  case W4.asConstantPred p1' of
+    Just True -> return $ W4.truePred sym
+    Just False -> p2
+    _ -> do
+      p2' <- p2
+      W4.orPred sym p1' p2'
 
 weakenEquivRelation ::
   W4.IsExprBuilder sym =>

@@ -25,6 +25,7 @@ module Pate.Monad
   , ValidArch(..)
   , EquivalenceContext(..)
   , BinaryContext(..)
+  , PreconditionPropagation(..)
   , SimBundle(..)
   , PrePostMap
   , withBinary
@@ -166,8 +167,13 @@ data EquivEnv sym arch where
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envDiscoveryCfg :: DiscoveryConfig
+    , envPrecondProp :: PreconditionPropagation
     , envFreeVars :: [Some (W4.BoundVar sym)]
     } -> EquivEnv sym arch
+
+data PreconditionPropagation =
+    PropagateExactEquality
+  | PropagateComputedDomains
 
 emitEvent :: PE.Event arch -> EquivM sym arch ()
 emitEvent evt = do
