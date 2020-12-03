@@ -364,12 +364,10 @@ ppPreReg diff = case rTypeRepr diff of
         (0, 0) -> (1, "")
         _ | obv == pbv -> (0, ppSlot diff ++ show (rPreOriginal diff) ++ "\n")
         _ -> (0, ppSlot diff ++ show (rPreOriginal diff) ++ "(original) vs. " ++ show (rPrePatched diff) ++ "\n")
-  CLM.LLVMPointerRepr _
-    | GroundLLVMPointer optr <- rPreOriginal diff
-    , GroundLLVMPointer pptr <- rPrePatched diff ->
-      case optr == pptr of
-        True -> (0, ppSlot diff ++ ppLLVMPointer optr ++ "\n")
-        False -> (0, ppSlot diff ++ ppLLVMPointer optr ++ "(original) vs. " ++ ppLLVMPointer pptr ++ "\n")
+  CLM.LLVMPointerRepr _ ->
+    case (rPreOriginal diff) == (rPrePatched diff) of
+      True -> (0, ppSlot diff ++ show (rPreOriginal diff)  ++ "\n")
+      False -> (0, ppSlot diff ++ show (rPreOriginal diff)  ++ "(original) vs. " ++ show (rPrePatched diff) ++ "\n")
 
   _ -> (0, ppSlot diff ++ "unsupported register type in precondition pretty-printer\n")
 
