@@ -5,6 +5,8 @@ int f() {
   return i * 2;
 }
 
+int g;
+
 void _start() {
-  f();
+  g = f();
 }

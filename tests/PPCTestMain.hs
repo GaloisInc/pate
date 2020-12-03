@@ -15,6 +15,8 @@ main = do
         , testExpectFailure = [
                               -- see: https://github.com/GaloisInc/pate/issues/10
                                 "test-direct-calls"
+                              -- see: https://github.com/GaloisInc/pate/issues/17
+                              , "test-int-ref-ref"
                               ]
         }
   runTests cfg

@@ -756,10 +756,13 @@ doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
   case asNat base of
     Just 0 -> return off
     _ -> do
-      notPtr <- natEq sym base =<< natLit sym 0
-      assert sym notPtr $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
-      undef <- undefPtrOff mkundef sym notPtr ptr
-      bvIte sym notPtr off undef
+      cond <- natEq sym base =<< natLit sym 0
+      case asConstantPred cond of
+        Just True -> return off
+        _ -> do
+          assert sym cond $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
+          undef <- undefPtrOff mkundef sym cond ptr
+          bvIte sym cond off undef
 
 liftToCrucibleState ::
   GlobalVar mem ->
@@ -843,9 +846,8 @@ ptrPredOp mkundef regconstraint f sym reg1 off1 reg2 off2  = do
     Just True -> return result
     _ -> do
       assert sym cond $ AssertFailureSimError "ptrPredOp" "ptrPredOp"
-      return result
-      --undef <- mkUndefPred mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
-      --itePred sym cond result undef
+      undef <- mkUndefPred mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      itePred sym cond result undef
 
 muxPtr ::
   IsSymInterface sym =>
@@ -874,9 +876,8 @@ ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
     Just True -> return result
     _ -> do
       assert sym cond $ AssertFailureSimError "ptrBinOp" "ptrBinOp"
-      return result
-      --undef <- mkUndefPtr mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
-      --muxPtr sym cond result undef
+      undef <- mkUndefPtr mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      muxPtr sym cond result undef
 
 cases ::
   IsExprBuilder sym =>

@@ -125,6 +125,7 @@ module Pate.Types
   , zipRegStates
   , rebindExpr
   , freshPtr
+  , mkSafeAsserts
   , VarBinding(..)
   )
 where
@@ -133,9 +134,13 @@ import           GHC.Stack
 import           GHC.TypeNats
 
 import           Control.Exception
+import           Control.Monad.Trans ( lift )
 import           Control.Monad ( foldM, forM )
 import           Control.Lens hiding ( op, pre )
 import qualified Control.Monad.IO.Class as IO
+import           Control.Monad.Trans.Maybe
+import           Control.Monad.Trans.Except
+import           Control.Monad.Except
 
 import qualified Data.BitVector.Sized as BVS
 import           Data.Map ( Map )
@@ -152,6 +157,7 @@ import           Data.Monoid
 import           Numeric.Natural
 import           Numeric
 
+import qualified Data.Text as T
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Context hiding ( replicate )
@@ -169,7 +175,7 @@ import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified What4.Interface as W4
-
+import qualified What4.Symbol as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
@@ -592,9 +598,10 @@ footPrintsToPred ::
   IO (MemPred sym arch)
 footPrintsToPred sym foots polarity = do
   locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond) -> do
-    polarityMatches <- case dir of
+    dirPolarity <- case dir of
       MT.Read -> return $ W4.truePred sym
       MT.Write -> return $ W4.falsePred sym
+    polarityMatches <- W4.isEq sym polarity dirPolarity
     cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
     case W4.asConstantPred cond' of
       Just False -> return Nothing
@@ -1176,13 +1183,85 @@ data RegisterDiff arch tp where
 data SymGroundEvalFn sym where
   SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
 
+isAssert :: W4.SolverSymbol -> Bool
+isAssert symbol = T.isPrefixOf (T.pack "assert") $ W4.solverSymbolAsText symbol
+
+
+type GroundM t a = ExceptT (W4B.Expr t W4.BaseBoolType) IO a
+
+-- | Pop any asserts up to the nearest mux that cases on it, and erase
+-- the assertion by taking the other case
+stripAsserts ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.IdxCache t (W4B.Expr t) ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+stripAsserts sym cache e_outer = do
+  let
+    go :: forall tp'. W4B.Expr t tp' -> GroundM t (W4B.Expr t tp')
+    go e = W4B.idxCacheEval cache e $ case e of
+      _
+        | Just (W4B.FnApp efn args) <- W4B.asNonceApp e
+        , isAssert (W4B.symFnName efn)
+        , W4B.UninterpFnInfo argtps _ <- W4B.symFnInfo efn
+        , Ctx.Empty Ctx.:> _ Ctx.:> cond <- args
+        , Ctx.Empty Ctx.:> _ Ctx.:> W4.BaseBoolRepr <- argtps
+        -> throwError cond
+      W4B.AppExpr a0
+        | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+        -> do
+            cond' <- go cond
+            notcond <- lift $ W4.notPred sym cond
+            eT' <- lift $ runExceptT $ go eT
+            eF' <- lift $ runExceptT $ go eF
+            case (eT', eF') of
+              -- FIXME: It'd be better to key this more precisely
+              (Left condT, Right eF'') ->
+                (W4.asConstantPred <$> (lift $ W4.isEq sym condT notcond)) >>= \case
+                  Just True -> return eF''
+                  _ -> throwError condT
+              (Right eT'', Left condF) -> do          
+                (W4.asConstantPred <$> (lift $ W4.isEq sym condF cond)) >>= \case
+                  Just True -> return eT''
+                  _ -> throwError condF
+              (Right eT'', Right eF'') ->
+                if cond' == cond && eT'' == eT && eF'' == eF then return e
+                else lift $ W4.baseTypeIte sym cond' eT'' eF''
+              (Left condT, Left _) -> throwError condT
+      W4B.AppExpr a0 -> do
+        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+        if (W4B.appExprApp a0) == a0' then return e
+        else lift $ W4B.sbMakeExpr sym a0'
+      W4B.NonceAppExpr a0 -> do
+        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+        if (W4B.nonceExprApp a0) == a0' then return e
+        else lift $ W4B.sbNonceExpr sym a0'
+      _ -> return e
+  (runExceptT $ go e_outer) >>= \case
+    Left _ -> fail ""
+    Right x -> return x
+
+-- | Peel off any "assert" uninterpreted functions while evaluating to a ground
+-- value
+mkSafeAsserts ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4G.GroundEvalFn t ->
+  IO (W4G.GroundEvalFn t)
+mkSafeAsserts sym (W4G.GroundEvalFn fn) = do
+  cache <- W4B.newIdxCache
+  return $ W4G.GroundEvalFn (\e -> stripAsserts sym cache e >>= fn)
+
 execGroundFnIO ::
+  forall sym tp.
   SymGroundEvalFn sym -> 
   W4.SymExpr sym tp ->
   IO (W4G.GroundValue tp)
 execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
-
-
+    
 
 ----------------------------------
 data GroundMemOp arch where
@@ -1871,7 +1950,8 @@ freeExprTerms expr = do
         TFC.foldrMFC (collect @tp') mempty $ W4B.appExprApp appExpr
       W4B.NonceAppExpr naeE | W4B.FnApp fn args <- W4B.nonceExprApp naeE ->
         case W4B.symFnInfo fn of
-          W4B.UninterpFnInfo _ _ -> return $ Const $ S.singleton (Some e)
+          W4B.UninterpFnInfo _ _ -> TFC.foldrMFC (collect @tp') mempty args
+          -- FIXME : collect terms from function body as well?
           W4B.DefinedFnInfo _ _ _ -> TFC.foldrMFC (collect @tp') mempty args
           _ -> return $ mempty
       _ -> return $ mempty
