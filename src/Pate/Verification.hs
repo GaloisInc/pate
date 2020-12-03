@@ -33,7 +33,6 @@ import           Data.Typeable
 import           Data.Bits
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Trans.Except
-import           Control.Monad.Trans.Maybe
 import           Control.Monad.Reader
 import           Control.Monad.State
 import           Control.Exception
@@ -44,7 +43,6 @@ import           Control.Monad.Except
 import           Control.Monad.IO.Class ( liftIO )
 import           Control.Monad.ST
 
-import qualified Data.IORef as IO
 import qualified Data.BitVector.Sized as BVS
 import           Data.Foldable
 import           Data.Functor.Compose
@@ -91,7 +89,6 @@ import qualified What4.SemiRing as SR
 
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
-import qualified What4.Symbol as W4
 import qualified What4.Partial as W4P
 import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
@@ -108,7 +105,6 @@ import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 
 import qualified What4.Config as W4C
-import qualified Data.Text as T
 
 verifyPairs ::
   forall arch.
@@ -527,15 +523,22 @@ checkEquivalence pPair precondSpec postcondSpec = withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   eqRel <- baseEquivRelation
 
+  -- first try proving equivalence by assuming that exact equality
+  -- is the only condition we are propagating backwards, so we
+  -- don't do any work to try to intelligently narrow this down
+
+  -- TODO: it's unclear how fine-grained to make this, or if it's even
+  -- a good idea, but it makes the tests finish in about 1/3 the time
   result <- manifestError $
     local (\env -> env { envPrecondProp = PropagateExactEquality }) $
     provePostcondition pPair postcondSpec
 
+  -- if the previous attempt fails, fall back to intelligent precondition
+  -- propagation
   genPrecondSpec <- case result of
     Left _ -> provePostcondition pPair postcondSpec
     Right spec -> return spec
-  --genPrecondSpec <- provePostcondition pPair postcondSpec
-  -- prove that the generated precondition is implied by the given precondition
+
   void $ withSimSpec precondSpec $ \stO stP precond -> do
     let
       inO = SimInput stO (pOrig pPair)
@@ -543,16 +546,14 @@ checkEquivalence pPair precondSpec postcondSpec = withSym $ \sym -> do
     (asms, genPrecond) <- liftIO $ bindSpec sym stO stP genPrecondSpec      
     preImpliesGen <- liftIO $ impliesPrecondition sym inO inP eqRel precond genPrecond
 
+    -- prove that the generated precondition is implied by the given precondition
     isPredTrue preImpliesGen >>= \case
       True -> return ()
       False -> throwHere ImpossibleEquivalence
-
-    --FIXME these are slightly too strong to be provable
-    
+    -- prove any generated side conditions
     isPredTrue asms >>= \case
       True -> return ()
       False -> throwHere UnsatisfiableAssumptions
-    
   return ()
 
 withAssumption' ::
@@ -617,13 +618,7 @@ withSimBundle pPair f = withSym $ \sym -> do
         withAssumption' (validInitState (Just pPair) stO stP) $ do
           (asmO, simOutO_) <- simulate simInO_
           (asmP, simOutP_) <- simulate simInP_
-          -- FIXME: these are embedded side conditions that end up unsolvable at the top level
-          -- We already assert in-place that they should be satisified, so this should be
-          -- unnecessary regardless
-          --asmO' <- getAsserts simOutO_
-          --asmP' <- getAsserts simOutP_
-          
-          asm <- liftIO $ allPreds sym [ asmO, asmP] --[asmO', asmP']
+          asm <- liftIO $ allPreds sym [asmO, asmP]
           return $ (asm, SimBundle simInO_ simInP_ simOutO_ simOutP_)
       modify $ \st -> st { stSimResults = M.insert pPair bundleSpec (stSimResults st) }
       return bundleSpec
@@ -747,20 +742,6 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
 
   checkCasesTotal bundle allPreconds
   foldM (\stPred (p, (_, stPred')) -> liftIO $ muxStatePred sym p stPred' stPred) (statePredFalse sym) allPreconds
-
-confirmSat ::
-  EquivM sym arch ()
-confirmSat = withSym $ \sym -> do
-  checkSatisfiableWithModel "checkCasesTotal" (W4.truePred sym) $ \satRes -> do
-    case satRes of
-      W4R.Sat _ -> return ()
-      W4R.Unsat _ -> throwHere InconclusiveSAT
-      W4R.Unknown -> throwHere InconclusiveSAT
-  checkSatisfiableWithModel "checkCasesTotal" (W4.falsePred sym) $ \satRes -> do
-    case satRes of
-      W4R.Sat _ -> throwHere InconclusiveSAT 
-      W4R.Unsat _ -> return ()
-      W4R.Unknown -> throwHere InconclusiveSAT
 
 matchingExits ::
   SimBundle sym arch ->
@@ -1094,95 +1075,6 @@ boundVars' visited (W4B.BoundVarExpr v)
         return (S.singleton (Some v))
 boundVars' _ _ = return S.empty
 -- End Clag
-
--- Collect embedded assertions inside expressions as uninterpreted functions
--- In theory, this allows us to assume that undefined pointers won't occur in in any models we produce
-type EmbeddedAssertMap t = H.HashTable RealWorld Word64 (Set (W4B.Expr t W4.BaseBoolType))
-
-isAssert :: W4.SolverSymbol -> Bool
-isAssert symbol = T.isPrefixOf (T.pack "assert") $ W4.solverSymbolAsText symbol
-
-getAsserts' ::
-  sym ~ W4B.ExprBuilder t st fs =>
-  sym ->
-  EmbeddedAssertMap t ->
-  W4B.Expr t tp ->
-  IO (Set (W4B.Expr t W4.BaseBoolType))
-getAsserts' sym visited e
-  | W4B.NonceAppExpr e' <- e
-  , Just (W4B.FnApp fn args) <- W4B.asNonceApp e
-  , W4B.UninterpFnInfo argtps _ <- W4B.symFnInfo fn
-  , isAssert (W4B.symFnName fn)
-  , _ Ctx.:> W4.BaseBoolRepr <- argtps
-  , body Ctx.:> cond <- args = do
-    let idx = N.indexValue (W4B.nonceExprId e')
-    cache visited idx $ do
-      bodyAsserts <- mapM (\(Some e'') -> getAsserts' sym visited e'') (TFC.toListFC Some body)
-      return $ S.insert cond (S.unions bodyAsserts)
-getAsserts' sym visited e
-  | Just (W4B.FnApp fn args) <- W4B.asNonceApp e
-  , W4B.DefinedFnInfo vars body _ <- W4B.symFnInfo fn = do
-    argAsserts <- S.unions <$> mapM (\(Some e') -> getAsserts' sym visited e') (TFC.toListFC Some args)
-    asserts <- S.toList <$> getAsserts' sym visited body
-    bindings <- return $ Ctx.zipWith VarBinding vars args
-    bodyAsserts <- S.fromList <$> mapM (rebindExpr sym bindings) asserts
-    return $ S.union argAsserts bodyAsserts
-getAsserts' sym visited (W4B.AppExpr e) = do
-  let idx = N.indexValue (W4B.appExprId e)
-  cache visited idx $ do
-    sums <- sequence (TFC.toListFC (getAsserts' sym visited) (W4B.appExprApp e))
-    return $ foldl' S.union S.empty sums
-getAsserts' sym visited (W4B.NonceAppExpr e) = do
-  let idx = N.indexValue (W4B.nonceExprId e)
-  cache visited idx $ do
-    sums <- sequence (TFC.toListFC (getAsserts' sym visited) (W4B.nonceExprApp e))
-    return $ foldl' S.union S.empty sums
-getAsserts' _ _ _ = return S.empty
-
-extractAssertions ::
-  ExprMappable sym f =>
-  sym ->
-  f ->
-  IO f
-extractAssertions sym f = do
-  cache <- W4B.newIdxCache
-  return $ error ""
-
-getSubExprs ::
-  forall sym f.
-  W4.IsSymExprBuilder sym =>
-  ExprMappable sym f =>
-  sym ->
-  f ->
-  IO ([Some (W4.SymExpr sym)])
-getSubExprs sym f = do
-  ref <- IO.newIORef []
-  let
-    docollect :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    docollect e = do
-      IO.modifyIORef ref (\es -> (Some e) : es)
-      return e
-  _ <- mapExpr sym docollect f
-  IO.readIORef ref
-
-getAssertsIO ::
-  sym ~ W4B.ExprBuilder t st fs =>
-  ExprMappable sym f =>
-  sym ->
-  f ->
-  IO (Set (W4B.Expr t W4.BaseBoolType))
-getAssertsIO sym f = do
-  visited <- stToIO $ H.new
-  exprs <- getSubExprs sym f
-  foldM (\s (Some e) -> S.union s <$> getAsserts' sym visited e) S.empty exprs
-
-getAsserts ::
-  ExprMappable sym f =>
-  f ->
-  EquivM sym arch (W4.Pred sym)
-getAsserts f = withValid $ withSymIO $ \sym -> do
-  asms <- getAssertsIO sym f
-  allPreds sym (S.toList asms)
 
 newtype ExprFilter sym = ExprFilter (forall tp'. W4.SymExpr sym tp' -> IO Bool)
 
