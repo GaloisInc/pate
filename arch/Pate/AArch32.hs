@@ -21,35 +21,5 @@ instance PB.ArchConstraints SA.AArch32 where
   binArchInfo = const ARM.arm_linux_info
 
 instance PM.ValidArch SA.AArch32 where
-  funCallStable reg =
-    case reg of
-      ARMReg.ARMGlobalBV (ASL.GPRRef gpr) ->
-        ASL.withGPRRef gpr $ \n ->
-          let i = NR.intValue n
-          in
-            -- Local registers (caller save)
-            (4 <= i && i <= 11) ||
-            -- Stack pointer
-            i == 13 ||
-            -- Link register
-            i == 14
-      _ -> False
-  funCallArg reg =
-    case reg of
-      ARMReg.ARMGlobalBV (ASL.GPRRef gpr) ->
-        ASL.withGPRRef gpr $ \n ->
-          let i = NR.intValue n
-          in 0 <= i && i <= 3
-      _ -> False
-  funCallRet reg =
-    case reg of
-      ARMReg.ARMGlobalBV (ASL.GPRRef gpr) ->
-        ASL.withGPRRef gpr $ \n ->
-          let i = NR.intValue n
-          in 0 <= i && i <= 3
-      _ -> False
-  funCallIP reg =
-    case reg of
-      ARMReg.ARMGlobalBV ref
-        | Just Refl <- testEquality ref (ASL.knownGlobalRef @"_R14") -> Just Refl
-      _ -> Nothing
+  -- FIXME: generalize this properly for ARM
+  toc_reg = Nothing

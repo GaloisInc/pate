@@ -55,7 +55,11 @@ library
                        Pate.Monad,
                        Pate.Memory.MemTrace,
                        Pate.Types,
-                       Pate.Utils
+                       Pate.Utils,
+                       What4.ExprHelpers,
+                       Pate.CounterExample,
+                       Pate.SimState,
+                       Pate.Equivalence
 
 common shared-test
   ghc-options: -Wall -Wcompat

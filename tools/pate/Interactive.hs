@@ -32,6 +32,7 @@ import qualified Data.Macaw.CFG as MC
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
+import qualified Pate.CounterExample as PC
 
 import           Interactive.State
 
@@ -76,6 +77,8 @@ consumeEvents chan r0 = do
             PE.Inequivalent model ->
               IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & failure %~ Map.insert addr (Failure model et)
                                                               & recentEvents %~ addRecent recentEventCount evt, ())
+        -- FIXME: what to do with additional events?
+        _ -> return ()
       -- Notify the UI that we got a new result
       stateChangeEmitter r0 ()
       consumeEvents chan r0
@@ -155,6 +158,8 @@ renderEvent st detailDiv evt =
                  , TP.string (" (in " ++ show duration ++ ")")
                  , renderEquivalenceResult res
                  ]
+    -- FIXME: handle other events
+    _ -> TP.string ""
 
 -- | Show the original block at the given address (as well as its corresponding patched block)
 showBlockPairDetail :: (PB.ArchConstraints arch)
@@ -190,7 +195,7 @@ renderCounterexample er =
       case ir of
         PT.InequivalentResults _traceDiff _exitDiff regs _retAddrs rsn ->
           [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show rsn)
-                               , TP.pre #+ [TP.string (PT.ppPreRegs regs)]
+                               , TP.pre #+ [TP.string (PC.ppPreRegs regs)]
                                ]
                    ]
           ]
