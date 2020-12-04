@@ -303,6 +303,7 @@ checkEquivalence ::
 checkEquivalence pPair precondSpec postcondSpec = withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   eqRel <- asks envBaseEquiv
+  stackRegion <- asks envStackRegion
 
   -- first try proving equivalence by assuming that exact equality
   -- is the only condition we are propagating backwards, so we
@@ -325,7 +326,7 @@ checkEquivalence pPair precondSpec postcondSpec = withSym $ \sym -> do
       inO = SimInput stO (pOrig pPair)
       inP = SimInput stP (pPatched pPair)
     (asms, genPrecond) <- liftIO $ bindSpec sym stO stP genPrecondSpec      
-    preImpliesGen <- liftIO $ impliesPrecondition sym inO inP eqRel precond genPrecond
+    preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond genPrecond
 
     -- prove that the generated precondition is implied by the given precondition
     isPredTrue preImpliesGen >>= \case
@@ -679,7 +680,9 @@ proveLocalPostcondition bundle branchCase postcondSpec = withSym $ \sym -> do
   fullPostCond <- liftIO $ allPreds sym [postcondPred, validExits, branchCase]  
   eqInputs <- withAssumption_ (return asm) $
     guessEquivalenceDomain bundle fullPostCond postcond
-  eqInputsPred <- liftIO $ getPrecondition sym bundle eqRel eqInputs 
+
+  stackRegion <- asks envStackRegion
+  eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
   notChecks <- liftIO $ W4.notPred sym fullPostCond
   (oBlocks, pBlocks) <- getBlocks bundle
@@ -823,7 +826,8 @@ guessEquivalenceDomain bundle goal postcond = withSym $ \sym -> do
   goal' <- bindMemory memP memP' goal_regsEq
  
   stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predStack postcond_regsEq) isStackCell
-  memDom <- withAssumption_ (liftIO $ memPredPre sym inO inP (eqRelStack eqRel) stackDom) $ do
+  let stackEq = liftIO $ memPredPre sym (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) stackDom
+  memDom <- withAssumption_ stackEq $ do
     guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
 
   finishedBy <- liftIO TM.getCurrentTime

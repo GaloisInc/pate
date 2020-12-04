@@ -53,7 +53,8 @@ module Pate.Equivalence
   , equalValuesIO
   , registerEquivalence
   , stateEquivalence
-
+  , memEqAtRegion
+  , memEqOutsideRegion
   ) where
 
 import           GHC.TypeNats
@@ -71,6 +72,7 @@ import           Data.Maybe (catMaybes)
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.Map as MapF
 
@@ -330,12 +332,14 @@ getPrecondition ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  W4.SymExpr sym W4.BaseNatType ->
+  -- ^ stack memory region
   SimBundle sym arch ->
   EquivRelation sym arch ->
   StatePred sym arch ->
   IO (W4.Pred sym)
-getPrecondition sym bundle eqRel stPred = do
-  statePredPre sym (simInO bundle) (simInP bundle) eqRel stPred
+getPrecondition sym stackRegion bundle eqRel stPred = do
+  statePredPre sym stackRegion (simInO bundle) (simInP bundle) eqRel stPred
 
 -- | True if the first precondition implies the second under the given
 -- equivalence relation
@@ -346,15 +350,17 @@ impliesPrecondition ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  W4.SymExpr sym W4.BaseNatType ->
+  -- ^ stack memory region
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->
   StatePred sym arch ->
   StatePred sym arch ->
   IO (W4.Pred sym)  
-impliesPrecondition sym inO inP eqRel stPredAsm stPredConcl = do
-  asm <- statePredPre sym inO inP eqRel stPredAsm
-  concl <- statePredPre sym inO inP eqRel stPredConcl
+impliesPrecondition sym stackRegion inO inP eqRel stPredAsm stPredConcl = do
+  asm <- statePredPre sym stackRegion inO inP eqRel stPredAsm
+  concl <- statePredPre sym stackRegion inO inP eqRel stPredConcl
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate and equivalence relation into a postcondition and associated
@@ -490,12 +496,13 @@ memPredPre ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  MemRegionEquality sym arch ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   MemEquivRelation sym arch ->
   MemPred sym arch ->
   IO (W4.Pred sym)
-memPredPre sym inO inP memEq memPred  = do
+memPredPre sym memEqRegion inO inP memEq memPred  = do
   iteM sym (return $ (memPredPolarity memPred))
     (positiveMemPred sym stO stP memEq memPred) negativePolarity
   where
@@ -531,7 +538,41 @@ memPredPre sym inO inP memEq memPred  = do
     negativePolarity :: IO (W4.Pred sym)
     negativePolarity = do
       mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') memO (memPredToList memPred)
-      W4.isEq sym (MT.memArr mem') (MT.memArr memP)
+      getRegionEquality memEqRegion mem' memP
+
+newtype MemRegionEquality sym arch =
+  MemRegionEquality
+    { getRegionEquality ::
+        MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+        MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+        IO (W4.Pred sym)
+    }
+
+-- | Memory states are equivalent everywhere but the given region.
+memEqOutsideRegion ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  W4.SymExpr sym W4.BaseNatType ->
+  MemRegionEquality sym arch
+memEqOutsideRegion sym region = MemRegionEquality $ \mem1 mem2 -> do
+  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton region)
+  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton region) mem1Stack
+  W4.isEq sym (MT.memArr mem1) mem2'
+
+
+-- | Memory states are equivalent in the given region.
+memEqAtRegion ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  W4.SymExpr sym W4.BaseNatType ->
+  -- ^ stack memory region
+  MemRegionEquality sym arch
+memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
+  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton stackRegion)
+  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton stackRegion)
+  W4.isEq sym mem1Stack mem2Stack
 
 regPredRel ::
   forall sym arch.
@@ -559,19 +600,23 @@ statePredPre ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  W4.SymExpr sym W4.BaseNatType ->
+  -- ^ stack memory region
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->
   StatePred sym arch ->
   IO (W4.Pred sym)
-statePredPre sym inO inP eqRel stPred  = do
+statePredPre sym stackRegion inO inP eqRel stPred  = do
   let
     stO = simInState inO
     stP = simInState inP
     
     regsEq = regPredRel sym stO stP (eqRelRegs eqRel) (predRegs stPred) 
-    stacksEq = memPredPre sym inO inP (eqRelStack eqRel) (predStack stPred) 
-    memEq = memPredPre sym inO inP (eqRelMem eqRel) (predMem stPred) 
+    stacksEq =
+      memPredPre sym (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) (predStack stPred)
+    memEq =
+      memPredPre sym (memEqOutsideRegion sym stackRegion) inO inP (eqRelMem eqRel) (predMem stPred)
   andM sym regsEq (andM sym stacksEq memEq)
 
 statePredPost ::

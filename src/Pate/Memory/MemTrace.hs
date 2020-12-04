@@ -524,9 +524,9 @@ data MemTraceVar sym ptrW = MemTraceVar (BoundVar sym (MemArrBaseType ptrW))
 type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
 
-type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType ::> (BaseBVType ptrW)) tp)
+type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
 
-type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseNatType ::> (BaseBVType ptrW)) (BaseBVType 8)
+type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseNatType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) (BaseBVType 8))
 
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
@@ -1125,8 +1125,9 @@ readMemArr sym mem ptr repr = go 0 repr
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl
         | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
-          idx <- arrayIdx sym ptr n
-          content <- arrayLookup sym (memArr mem) idx
+          (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
+          regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+          content <- arrayLookup sym regArray (Ctx.singleton off)
           blk0 <- natLit sym 0
           return $ LLVMPointer blk0 content
       Right LeqProof
@@ -1169,9 +1170,11 @@ writeMemArr sym mem_init ptr repr val = go 0 repr val mem_init
   go n (BVMemRepr byteWidth endianness) bv mem =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl -> do
-        idx <- arrayIdx sym ptr n
+        (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
         Refl <- return $ zeroSubEq byteWidth (knownNat @1)
-        arr <- arrayUpdate sym (memArr mem) idx bv
+        regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+        regArray' <- arrayUpdate sym regArray (Ctx.singleton off) bv
+        arr <- arrayUpdate sym (memArr mem) (Ctx.singleton reg) regArray'
         return $ mem { memArr = arr }
       Right LeqProof -> do
         let
