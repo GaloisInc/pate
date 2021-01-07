@@ -8,6 +8,7 @@ module Pate.Event (
   Event(..)
   ) where
 
+import qualified Data.ElfEdit as DEE
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Time as TM
 
@@ -38,5 +39,6 @@ data Event arch where
   CheckedBranchCompleteness :: Blocks arch -> Blocks arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
   DiscoverBlockPair :: Blocks arch -> Blocks arch -> PT.BlockTarget arch PT.Original -> PT.BlockTarget arch PT.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: Blocks arch -> Blocks arch -> TM.NominalDiffTime -> Event arch
+  ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: Blocks arch -> Blocks arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch

@@ -65,6 +65,8 @@ consumeEvents chan r0 = do
         PE.LoadedBinaries (oelf, omap) (pelf, pmap) -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just (oelf, omap)
                                                           & patchedBinary .~ Just (pelf, pmap), ())
+        PE.ElfLoaderWarnings {} ->
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
         PE.CheckedEquivalence origBlock@(PE.Blocks addr _) patchedBlock res duration -> do
           let et = EquivalenceTest origBlock patchedBlock duration
           case res of
@@ -147,6 +149,8 @@ renderEvent :: (PB.ArchConstraints arch) => State arch -> TP.Element -> PE.Event
 renderEvent st detailDiv evt =
   case evt of
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
+    PE.ElfLoaderWarnings pes ->
+      TP.ul #+ (map (\w -> TP.li #+ [TP.string (show w)]) pes)
     PE.CheckedEquivalence ob@(PE.Blocks (PT.ConcreteAddress origAddr) _) pb@(PE.Blocks (PT.ConcreteAddress patchedAddr) _) res duration -> do
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)

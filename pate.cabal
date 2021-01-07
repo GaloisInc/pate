@@ -99,6 +99,7 @@ common shared-exec
   build-depends: base,
                  bytestring,
                  elf-edit >= 0.39,
+                 binary,
                  containers,
                  filepath,
                  filemanip,
