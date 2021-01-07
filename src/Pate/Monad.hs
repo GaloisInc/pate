@@ -91,7 +91,6 @@ import           Data.Parameterized.Some
 import qualified Lumberjack as LJ
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Types as CT
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.Simulator as CS
@@ -171,8 +170,7 @@ data EquivEnv sym arch where
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envStackRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
-    , envExitClassVar :: CS.GlobalVar (MT.ExitClassify arch)
-    , envReturnIPVar :: CS.GlobalVar (CT.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
+    , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envDiscoveryCfg :: DiscoveryConfig

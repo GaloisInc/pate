@@ -50,7 +50,7 @@ data LoadedELF arch =
 
 class
   ( MC.MemWidth (MC.ArchAddrWidth arch)
-  , MBL.BinaryLoader arch (E.Elf (MC.ArchAddrWidth arch))
+  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
   , E.ElfWidthConstraints (MC.ArchAddrWidth arch)
   , MS.SymArchConstraints arch
   , 16 <= MC.RegAddrWidth (MC.ArchReg arch)

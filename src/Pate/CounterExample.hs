@@ -38,6 +38,7 @@ module Pate.CounterExample
 
 import           GHC.Stack
 
+import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.Reader
@@ -47,13 +48,14 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as S
 import           Data.Maybe (catMaybes)
 import           Data.Monoid
+import           Data.Proxy
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableF as TF
 
+import qualified Lang.Crucible.Utils.MuxTree as C
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.Simulator as CS
 
 import qualified Data.Macaw.Symbolic as MS
@@ -82,9 +84,9 @@ getInequivalenceResult ::
   SimBundle sym arch ->
   SymGroundEvalFn sym ->
   EquivM sym arch (InequivalenceResult arch)
-getInequivalenceResult defaultReason eqRel bundle fn@(SymGroundEvalFn fn')  = do
-  ecaseO <- liftIO $ MT.groundExitCase fn' (simOutExit $ simOutO $ bundle)
-  ecaseP <- liftIO $ MT.groundExitCase fn' (simOutExit $ simOutP $ bundle)
+getInequivalenceResult defaultReason eqRel bundle fn  = do
+  ecaseO <- groundBlockEndCase fn (simOutBlockEnd $ simOutO $ bundle)
+  ecaseP <- groundBlockEndCase fn (simOutBlockEnd $ simOutP $ bundle)
   
   memdiff <- groundTraceDiff fn eqRel bundle
   regdiff <- MM.traverseRegsWith
@@ -98,8 +100,8 @@ getInequivalenceResult defaultReason eqRel bundle fn@(SymGroundEvalFn fn')  = do
         return d
     ) preRegsO
     
-  retO <- groundReturnPtr fn (simOutReturn $ simOutO bundle)
-  retP <- groundReturnPtr fn (simOutReturn $ simOutP bundle)
+  retO <- groundReturnPtr fn (simOutBlockEnd $ simOutO bundle)
+  retP <- groundReturnPtr fn (simOutBlockEnd $ simOutP bundle)
 
   let reason =
         if isMemoryDifferent memdiff then InequivalentMemory
@@ -124,6 +126,25 @@ areRegistersDifferent regs = case MM.traverseRegsWith_ go regs of
     go :: forall tp. MM.ArchReg arch tp -> RegisterDiff arch tp -> Maybe ()
     go _ diff = if rPostEquivalent diff then Just () else Nothing
 
+
+groundMuxTree ::
+  SymGroundEvalFn sym ->
+  C.MuxTree sym a ->
+  EquivM sym arch a
+groundMuxTree fn mt =
+  withSym $ \sym ->
+  IO.withRunInIO $ \runInIO -> do
+    C.collapseMuxTree sym (\p a b -> do
+                              p' <- runInIO (execGroundFn fn p)
+                              return $ if p' then a else b) mt
+groundBlockEndCase ::
+  forall sym arch.
+  SymGroundEvalFn sym ->
+  CS.RegValue sym (MS.MacawBlockEndType arch) ->
+  EquivM sym arch MS.MacawBlockEndCase
+groundBlockEndCase fn blkend = withSym $ \sym -> do
+  blkend_tree <- liftIO $ MS.blockEndCase (Proxy @arch) sym blkend
+  groundMuxTree fn blkend_tree
 
 groundTraceDiff :: forall sym arch.
   SymGroundEvalFn sym ->
@@ -250,14 +271,16 @@ concreteValue fn e
 concreteValue _ e = throwHere (UnsupportedRegisterType (Some (macawRegRepr e)))
 
 groundReturnPtr ::
+  forall sym arch.
   HasCallStack =>
   SymGroundEvalFn sym ->
-  CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch))) ->
+  CS.RegValue sym (MS.MacawBlockEndType arch) ->
   EquivM sym arch (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)))
-groundReturnPtr fn (W4P.PE p e) = execGroundFn fn p >>= \case
-  True -> Just <$> groundLLVMPointer fn e
-  False -> return Nothing
-groundReturnPtr _ W4P.Unassigned = return Nothing
+groundReturnPtr fn blkend = case MS.blockEndReturn (Proxy @arch) blkend of
+  W4P.PE p e -> execGroundFn fn p >>= \case
+    True -> Just <$> groundLLVMPointer fn e
+    False -> return Nothing
+  W4P.Unassigned -> return Nothing
 
 -------------------------------------------------
 -- Printing
@@ -292,12 +315,14 @@ ppExitCaseDiff (eO, eP) =
   ++ ppExitCase eO ++ " (original) vs. "
   ++ ppExitCase eP ++ " (rewritten)"
 
-ppExitCase :: MT.ExitCase -> String
+ppExitCase :: MS.MacawBlockEndCase -> String
 ppExitCase ec = case ec of
-  MT.ExitCall -> "function call"
-  MT.ExitReturn -> "function return"
-  MT.ExitArch -> "syscall"
-  MT.ExitUnknown -> "unknown"
+  MS.MacawBlockEndJump -> "arbitrary jump"
+  MS.MacawBlockEndCall -> "function call"
+  MS.MacawBlockEndReturn -> "function return"
+  MS.MacawBlockEndBranch -> "branch"
+  MS.MacawBlockEndArch -> "syscall"
+  MS.MacawBlockEndFail -> "analysis failure"
 
 ppMemTraceDiff :: MemTraceDiff arch -> String
 ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDiff diffs

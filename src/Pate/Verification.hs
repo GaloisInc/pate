@@ -51,6 +51,7 @@ import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.String
+import qualified Data.Text as T
 import qualified Data.Time as TM
 import           GHC.TypeLits
 import qualified Lumberjack as LJ
@@ -138,15 +139,14 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
     
     eval <- lift (MS.withArchEval vals sym pure)
     model <- lift (MT.mkMemTraceVar @arch ha)
-    evar <- lift (MT.mkExitClassVar @arch ha)
-    pvar <- lift (MT.mkReturnIPVar @arch ha)
+    bvar <- lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
     undefops <- liftIO $ MT.mkUndefinedPtrOps sym
     
     -- FIXME: we should be able to lift this from the ELF, and it may differ between
     -- binaries
     stackRegion <- liftIO $ W4.natLit sym 1
     let
-      exts = MT.macawTraceExtensions eval model evar pvar (trivialGlobalMap @_ @arch) undefops
+      exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
       oCtx = BinaryContext
         { binary = PB.loadedBinary elf
@@ -175,8 +175,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envExtensions = exts
         , envStackRegion = stackRegion
         , envMemTraceVar = model
-        , envExitClassVar = evar
-        , envReturnIPVar = pvar
+        , envBlockEndVar = bvar
         , envBlockMapping = buildBlockMap pPairs blockMap
         , envLogger = logAction
         , envDiscoveryCfg = dcfg
@@ -394,15 +393,16 @@ simulate simInput = withBinary @bin $ do
           concatMap (externalTransitions internalAddrs) (pb:pbs)
     fns <- archFuns
     ha <- asks $ handles . envCtx
-    liftIO $ MS.mkBlockSliceCFG fns ha (W4L.OtherPos . fromString . show) pb nonTerminal terminal killEdges
+    be <- asks envBlockEndVar
+    liftIO $ MS.mkBlockSliceCFG fns ha (W4L.OtherPos . fromString . show) pb nonTerminal terminal killEdges (Just be)
   let preRegs = simInRegs simInput
   preRegsAsn <- regStateToAsn preRegs
   archRepr <- archStructRepr
   let regs = CS.assignReg archRepr preRegsAsn CS.emptyRegMap
   globals <- getGlobals simInput
   cres <- evalCFG globals regs cfg
-  (asm, postRegs, memTrace, jumpClass, returnIP) <- getGPValueAndTrace cres
-  return $ (asm, SimOutput (SimState memTrace postRegs) jumpClass returnIP)
+  (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
+  return $ (asm, SimOutput (SimState memTrace postRegs) exitClass)
 
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
 archStructRepr = do
@@ -496,13 +496,11 @@ getGPValueAndTrace ::
     ( W4.Pred sym
     , MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-    , MT.ExitClassifyImpl sym
-    , CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
+    , CS.RegValue sym (MS.MacawBlockEndType arch)
     )
 getGPValueAndTrace (CS.FinishedResult _ pres) = do
   mem <- asks envMemTraceVar
-  eclass <- asks envExitClassVar
-  rpv <- asks envReturnIPVar
+  eclass <- asks envBlockEndVar
   asm <- case pres of
     CS.TotalRes _ -> withSym $ \sym -> return $ W4.truePred sym
     CS.PartialRes _ p _ _ -> return p
@@ -510,10 +508,9 @@ getGPValueAndTrace (CS.FinishedResult _ pres) = do
   case pres ^. CS.partialValue of
     CS.GlobalPair val globs
       | Just mt <- CGS.lookupGlobal mem globs
-      , Just jc <- CGS.lookupGlobal eclass globs
-      , Just rp <- CGS.lookupGlobal rpv globs -> withValid $ do
+      , Just ec <- CGS.lookupGlobal eclass globs -> withValid $ do
         val' <- structToRegState @sym @arch val
-        return $ (asm, val', mt, jc, rp)
+        return $ (asm, val', mt, ec)
     _ -> throwError undefined
 getGPValueAndTrace (CS.AbortedResult _ ar) = throwHere . SymbolicExecutionFailed . ppAbortedResult $ ar
 getGPValueAndTrace (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "timeout")
@@ -542,12 +539,10 @@ getGlobals ::
   EquivM sym arch (CS.SymGlobalState sym)
 getGlobals simInput = do
   env <- ask
-  ret <- withSymIO $ MT.initRetAddr @_ @arch
-  eclass <- withSymIO $ MT.initExitClass
+  blkend <- withSymIO $ MS.initBlockEnd (Proxy @arch)
   withValid $ return $
       CGS.insertGlobal (envMemTraceVar env) (simInMem simInput)
-    $ CGS.insertGlobal (envReturnIPVar env) ret
-    $ CGS.insertGlobal (envExitClassVar env) eclass
+    $ CGS.insertGlobal (envBlockEndVar env) blkend
     $ CGS.emptyGlobals
 
 evalCFG ::
@@ -633,13 +628,13 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   let noResult = (W4.falsePred sym, statePredFalse sym)
 
   -- if we have a "return" exit, prove that it satisfies the postcondition
-  isReturn <- matchingExits bundle MT.ExitReturn
+  isReturn <- matchingExits bundle MS.MacawBlockEndReturn
   precondReturn <- withSatAssumption noResult (return isReturn) $ do
     proveLocalPostcondition bundle isReturn postcondSpec
 
   -- an "unknown" exit (currently caused by a syscall) collapses to requiring exact
   -- equivalence before the exit
-  isUnknown <- matchingExits bundle MT.ExitUnknown
+  isUnknown <- matchingExits bundle MS.MacawBlockEndJump
   precondUnknown <- withSatAssumption noResult (return isUnknown) $ do
     univDom <- universalDomainSpec
     proveLocalPostcondition bundle isUnknown univDom
@@ -650,12 +645,13 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   foldM (\stPred (p, (_, stPred')) -> liftIO $ muxStatePred sym p stPred' stPred) (statePredFalse sym) allPreconds
 
 matchingExits ::
+  forall sym arch.
   SimBundle sym arch ->
-  MT.ExitCase ->
+  MS.MacawBlockEndCase ->
   EquivM sym arch (W4.Pred sym)
 matchingExits bundle ecase = withSym $ \sym -> do
-  case1 <- liftIO $ MT.isExitCase sym (simOutExit $ simOutO bundle) ecase
-  case2 <- liftIO $ MT.isExitCase sym (simOutExit $ simOutP bundle) ecase
+  case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutO bundle) ecase
+  case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) ecase
   liftIO $ W4.andPred sym case1 case2  
 
 -- | Prove a local postcondition (i.e. it must hold when the slice exits) for a pair of slices
@@ -671,13 +667,7 @@ proveLocalPostcondition bundle branchCase postcondSpec = withSym $ \sym -> do
   -- this weakened equivalence relation is only used for error reporting
   (postEqRel, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
   
-  validExits <- liftIO $ do
-    let
-      MT.ExitClassifyImpl exitO = simOutExit $ simOutO bundle
-      MT.ExitClassifyImpl exitP = simOutExit $ simOutP bundle
-    W4.isEq sym exitO exitP
-  
-  fullPostCond <- liftIO $ allPreds sym [postcondPred, validExits, branchCase]  
+  fullPostCond <- liftIO $ allPreds sym [postcondPred, branchCase]
   eqInputs <- withAssumption_ (return asm) $
     guessEquivalenceDomain bundle fullPostCond postcond
 
@@ -996,6 +986,7 @@ exactEquivalence inO inP = withSym $ \sym -> do
   liftIO $ W4.andPred sym regsEq memEq
 
 matchesBlockTarget ::
+  forall sym arch.
   SimBundle sym arch ->
   BlockTarget arch Original ->
   BlockTarget arch Patched ->
@@ -1024,8 +1015,8 @@ matchesBlockTarget bundle blktO blktP = withSymIO $ \sym -> do
     ipO = regsO ^. MM.curIP
     ipP = regsP ^. MM.curIP
 
-    retO = simOutReturn $ simOutO bundle
-    retP = simOutReturn $ simOutP bundle
+    retO = MS.blockEndReturn (Proxy @arch) $ simOutBlockEnd $ simOutO bundle
+    retP = MS.blockEndReturn (Proxy @arch) $ simOutBlockEnd $ simOutP bundle
 
 liftPartialRel ::
   CB.IsSymInterface sym =>

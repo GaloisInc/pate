@@ -16,6 +16,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
@@ -96,6 +98,7 @@ import           Data.Typeable
 import           Numeric.Natural
 import           Numeric
 
+import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
@@ -110,12 +113,14 @@ import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 
+import qualified What4.Partial as PE
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Memory.MemTrace as MT
 import           What4.ExprHelpers
+
 ----------------------------------
 -- Verification configuration
 data DiscoveryConfig =
@@ -447,7 +452,7 @@ data InequivalenceReason =
   | PostRelationUnsat
   deriving (Eq, Ord, Show)
 
-type ExitCaseDiff = (MT.ExitCase, MT.ExitCase)
+type ExitCaseDiff = (MS.MacawBlockEndCase, MS.MacawBlockEndCase)
 type ReturnAddrDiff arch = (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)), (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))))
 
 data InequivalenceResult arch =
@@ -532,6 +537,8 @@ zipRegStates regs1 regs2 f = do
 
 -- Expression binding
 
+-- Declares a type as being expression-containing, where the given traversal
+-- occurs shallowly on all embedded expressions
 class ExprMappable sym f where
   mapExpr ::
     W4.IsSymExprBuilder sym =>
@@ -540,6 +547,30 @@ class ExprMappable sym f where
     f ->
     IO f
 
+instance ExprMappable sym (CS.RegValue' sym (CC.BaseToType bt)) where
+  mapExpr _ f (CS.RV x) = CS.RV <$> f x
+
+instance ExprMappable sym (CS.RegValue' sym (CLM.LLVMPointerType w)) where
+  mapExpr sym f (CS.RV x) = CS.RV <$> mapExprPtr sym f x
+
+instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue' sym (CC.MaybeType tp)) where
+  mapExpr sym f (CS.RV pe) = CS.RV <$> case pe of
+    PE.PE p e -> do
+      p' <- f p
+      CS.RV e' <- mapExpr sym f (CS.RV @sym @tp e)
+      return $ PE.PE p' e'
+    PE.Unassigned -> return PE.Unassigned
+
+instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
+  mapExpr _ _ = return
+
+instance
+  (ExprMappable sym (Ctx.Assignment f ctx), ExprMappable sym (f tp)) =>
+  ExprMappable sym (Ctx.Assignment f (ctx Ctx.::> tp)) where
+  mapExpr sym f (asn Ctx.:> x) = do
+    asn' <- mapExpr sym f asn
+    x' <- mapExpr sym f x
+    return $ asn' Ctx.:> x'
 
 instance ExprMappable sym (MT.MemOpCondition sym) where
   mapExpr _sym f = \case

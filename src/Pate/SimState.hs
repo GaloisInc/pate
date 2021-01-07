@@ -114,8 +114,7 @@ simInRegs simIn = simRegs $ simInState simIn
 data SimOutput sym arch bin = SimOutput
   {
     simOutState :: SimState sym arch bin
-  , simOutExit :: MT.ExitClassifyImpl sym
-  , simOutReturn :: CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch)))
+  , simOutBlockEnd :: CS.RegValue sym (MS.MacawBlockEndType arch)
   }
 
 simOutMem ::
@@ -370,13 +369,13 @@ instance PT.ExprMappable sym (SimState sym arch bin) where
 instance PT.ExprMappable sym (SimInput sym arch bin) where
   mapExpr sym f simIn = do
     st <- PT.mapExpr sym f (simInState simIn)
-    return $ simIn { simInState = st }
+    return $ SimInput { simInState = st, simInBlock = (simInBlock simIn) }
 
 instance PT.ExprMappable sym (SimOutput sym arch bin) where
   mapExpr sym f simOut = do
     st <- PT.mapExpr sym f (simOutState simOut)
-    ret <- traverse (PT.mapExprPtr sym f) $ simOutReturn simOut
-    return $ simOut { simOutState = st, simOutReturn = ret }
+    blend <- PT.mapExpr sym f (simOutBlockEnd simOut)
+    return $ SimOutput { simOutState = st, simOutBlockEnd = blend }
 
 instance PT.ExprMappable sym (SimBundle sym arch) where
   mapExpr sym f bundle = do
