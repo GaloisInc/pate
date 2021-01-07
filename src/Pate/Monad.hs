@@ -119,7 +119,7 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.Equivalence
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
-  { binary :: MBL.LoadedBinary arch (E.Elf (MM.ArchAddrWidth arch))
+  { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
   }
@@ -137,9 +137,10 @@ data EquivalenceContext sym arch where
 
 class
   ( Typeable arch
-  , MBL.BinaryLoader arch (E.Elf (MM.ArchAddrWidth arch))
+  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , MS.SymArchConstraints arch
   , MS.GenArchInfo MT.MemTraceK arch
+  , MM.ArchConstraints arch
   ) => ValidArch arch where
   toc_reg :: Maybe (MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch))))
   -- ^ FIXME: the table of contents register on PPC. Required in order to assert that it is stable

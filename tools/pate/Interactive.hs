@@ -24,7 +24,7 @@ import qualified Data.String.UTF8 as UTF8
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
-import qualified Text.PrettyPrint.ANSI.Leijen as PPL
+import qualified Prettyprinter as PP
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -182,7 +182,7 @@ showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) 
   return ()
   where
     renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
-    renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PPL.pretty pb)) #. "basic-block"
+    renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PP.pretty pb)) #. "basic-block"
                                 | pb <- pbs
                                 ]
 
