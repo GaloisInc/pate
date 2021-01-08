@@ -76,12 +76,22 @@ throwInequivalenceResult ::
 throwInequivalenceResult Nothing = return ()
 throwInequivalenceResult (Just ir) = throwHere $ InequivalentError ir
 
+
+-- | Takes a model resulting from a failed equivalence check, and evaluates
+-- it on the symbolic program state to produce an 'InequivalenceResult', representing
+-- a structured description of a counterexample.
 getInequivalenceResult ::
   forall sym arch.
   HasCallStack =>
+  -- | the default reason to report why equality does not hold, to be used
+  -- when memory and registers are otherwise equivalent
   InequivalenceReason ->
+  -- | the equality relation that was used when attempting to prove equivalence.
+  -- Generally this is exact equality, relaxed to be only over a restricted domain.
   EquivRelation sym arch ->
+  -- | the input and symbolic output states of the block pair that was evaluated
   SimBundle sym arch ->
+  -- | the model representing the counterexample from the solver
   SymGroundEvalFn sym ->
   EquivM sym arch (InequivalenceResult arch)
 getInequivalenceResult defaultReason eqRel bundle fn  = do
@@ -163,8 +173,8 @@ groundTraceDiff fn eqRel bundle = do
     checkFootprint ::
       MT.MemFootprint sym (MM.ArchAddrWidth arch) ->
       EquivM sym arch (Maybe (MemOpDiff arch))
-    checkFootprint (MT.MemFootprint ptr w dir cond) = do
-      let repr = MM.BVMemRepr w MM.BigEndian
+    checkFootprint (MT.MemFootprint ptr w dir cond end) = do
+      let repr = MM.BVMemRepr w end
       stackRegion <- asks envStackRegion
       gstackRegion <- execGroundFn fn stackRegion
       -- "reads" here are simply the memory pre-state
@@ -177,7 +187,7 @@ groundTraceDiff fn eqRel bundle = do
       execGroundFn fn cond' >>= \case
         True -> do
           gptr <- groundLLVMPointer fn ptr
-          let cell = MemCell ptr w
+          let cell = MemCell ptr w end
           memRel <- case ptrRegion gptr == gstackRegion of
             True -> return $ eqRelStack eqRel
             False -> return $ eqRelMem eqRel
@@ -230,14 +240,14 @@ mkRegisterDiff ::
   HasCallStack =>
   SymGroundEvalFn sym ->
   MM.ArchReg arch tp ->
+  -- | original prestate
   MacawRegEntry sym tp ->
-  -- ^ original prestate
+  -- | patched prestate
   MacawRegEntry sym tp ->
-  -- ^ patched prestate
+  -- | original post state
   MacawRegEntry sym tp ->
-  -- ^ original post state
+  -- | patched post state
   MacawRegEntry sym tp ->
-  -- ^ patched post state
   W4.Pred sym ->
   EquivM sym arch (RegisterDiff arch tp)
 mkRegisterDiff fn reg preO preP postO postP equivE = do

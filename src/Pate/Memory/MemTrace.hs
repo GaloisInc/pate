@@ -78,12 +78,22 @@ import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, Sy
                             SymbolRepr, TypeRepr(BVRepr), MaybeType, knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface -- (NatRepr, knownRepr, BaseTypeRepr(..), SolverSymbol, userSymbol, freshConstant, natLit)
-
+import What4.ExprHelpers (assertPrefix)
 
 ------
--- Wrapping undefined pointer operations with uninterpreted functions.
--- To ensure that we can preserve equality relationships, we re-used cached uninterpreted functions
--- for each operation and for each bitvector width.
+-- * Undefined pointers
+
+-- | Wrapping undefined pointer operations with uninterpreted functions.
+-- Pointer operations are generally partial due to potential incompatibilities in their regions.
+-- In cases where the result of an operating is undefined, rather than yielding a fresh constant, we
+-- instead yield an uninterpreted function that takes the original operands as arguments.
+-- This allows us to prove, for example, that a = x, b = y ==> a + b == x + y, without necessarily
+-- proving that this operation is defined. i.e. if it is not defined then we end up with undefPtrAdd(a, b) == undefPtrAdd(x, y).
+--
+-- To ensure that this is still true, we need to make sure that we only generate fresh uninterpreted
+-- functions when necessary, which is complicated by the fact that unintepreted functions must be monomorphic. We therefore lazily generate and cache each monomorphic variant of the uninterpreted function as they are needed.
+
+-- | A collection of functions used to produce undefined values for each pointer operation.
 data UndefinedPtrOps sym =
   UndefinedPtrOps
     { undefPtrOff :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w))
@@ -94,10 +104,38 @@ data UndefinedPtrOps sym =
     , undefPtrAnd :: UndefinedPtrBinOp sym
     }
 
-newtype UndefinedPtrBinOp sym = UndefinedPtrBinOp { mkUndefPtr :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> LLVMPtr sym w -> IO (LLVMPtr sym w)) }
+-- | Wraps a function which is used to produce an "undefined" pointer that
+-- may result from a binary pointer operation.
+-- The given predicate is true when the operation is defined. i.e if this predicate
+-- is true then this undefined value is unused. The two other arguments are the original inputs to the binary pointer operation.
+newtype UndefinedPtrBinOp sym =
+  UndefinedPtrBinOp
+    { mkUndefPtr ::
+        forall w.
+        sym ->
+        Pred sym ->
+        LLVMPtr sym w ->
+        LLVMPtr sym w ->
+        IO (LLVMPtr sym w)
+    }
 
-newtype UndefinedPtrPredOp sym = UndefinedPtrPredOp { mkUndefPred :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) }
+-- | Wraps a function which is used to produce an "undefined" predicate that
+-- may result from a binary pointer operation.
+-- The given predicate is true when the operation is defined. i.e if this predicate
+-- is true then this undefined value is unused. The two other arguments are the original inputs to the binary pointer operation.
+newtype UndefinedPtrPredOp sym =
+  UndefinedPtrPredOp
+    { mkUndefPred ::
+        forall w.
+        sym ->
+        Pred sym ->
+        LLVMPtr sym w ->
+        LLVMPtr sym w ->
+        IO (Pred sym)
+    }
 
+-- | Wrapping a pointer as a struct, so that it may be represented as the
+-- result of an uninterpreted function.
 type BasePtrType w = BaseStructType (EmptyCtx ::> BaseNatType ::> BaseBVType w)
 type SymPtr sym w = SymExpr sym (BasePtrType w)
 
@@ -124,7 +162,11 @@ polySymbol ::
   SolverSymbol
 polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
 
+-- | Defines how a given type can be concretized to a specific type-level nat.
+-- This allows us to easily describe a type that is polymorphic in one natural,
+-- using existing type constructors.
 class HasNatAbs (tp :: k) where
+  -- | 'Apply' a specific type-level nat to the type
   type NatAbs tp (w :: Nat) :: k
 
 type AnyNat = 0
@@ -149,6 +191,9 @@ data PolyFun sym args ret (w :: Nat) where
     (HasNatAbs args, HasNatAbs ret) =>
     (SymFn sym (NatAbs args w) (NatAbs ret w)) ->
     PolyFun sym args ret w
+
+newtype PolyFunMaker sym args ret =
+  PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym args ret w))
 
 mkBinUF ::
   IsSymInterface sym =>
@@ -207,9 +252,6 @@ mkOffUF nm = PolyFunMaker $ \sym w -> do
     ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
-
-newtype PolyFunMaker sym args ret =
-  PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym args ret w))
 
 
 cachedPolyFun ::
@@ -273,9 +315,9 @@ mkUndefinedPtrOps ::
   sym ->
   IO (UndefinedPtrOps sym)
 mkUndefinedPtrOps sym = do
-  ptrAssert <- cachedPolyFun sym $ mkPtrAssert "assert"
-  predAssert <- cachedPolyFun sym $ mkPredAssert "assert"
-  PolyFunMaker bvAssert <- cachedPolyFun sym $ mkBVAssert "assert"
+  ptrAssert <- cachedPolyFun sym $ mkPtrAssert assertPrefix
+  predAssert <- cachedPolyFun sym $ mkPredAssert assertPrefix
+  PolyFunMaker bvAssert <- cachedPolyFun sym $ mkBVAssert assertPrefix
   PolyFunMaker offFn <- cachedPolyFun sym $ mkOffUF "undefPtrOff"
   let
     offPtrFn :: forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w)
@@ -300,7 +342,8 @@ mkUndefinedPtrOps sym = do
       , undefPtrSub = undefPtrSub'
       , undefPtrAnd = undefPtrAnd'
       }
-  
+
+-- * Memory trace model
 
 -- | Like 'macawExtensions', but with an alternative memory model that records
 -- memory operations without trying to carefully guess the results of
@@ -1171,32 +1214,34 @@ data MemFootprint sym ptrW where
     NatRepr w ->
     MemOpDirection ->
     MemOpCondition sym ->
+    Endianness ->
     MemFootprint sym ptrW
 
 memFootDir :: MemFootprint sym ptrW -> MemOpDirection
-memFootDir (MemFootprint _ _ dir _) = dir
+memFootDir (MemFootprint _ _ dir _ _) = dir
 
 instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
-  (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2)
+  (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
    | Just Refl <- testEquality reg1 reg2
    , Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
-   = cond1 == cond2 && dir1 == dir2
+   = cond1 == cond2 && dir1 == dir2 && end1 == end2
   _ == _ = False
 
 instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
-  compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2) =
+  compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2) =
     compare dir1 dir2 <>
     (toOrdering $ compareF reg1 reg2) <>
     (toOrdering $ compareF off1 off2) <>
     (toOrdering $ compareF sz1 sz2) <>
-    compare cond1 cond2
+    compare cond1 cond2 <>
+    compare end1 end2
 
 
 memOpFootprint ::
   MemOp sym ptrW ->
   MemFootprint sym ptrW
-memOpFootprint (MemOp ptr dir cond w _ _) = MemFootprint ptr w dir cond
+memOpFootprint (MemOp ptr dir cond w _ end) = MemFootprint ptr w dir cond end
 memOpFootprint _ = error "Unexpected merge op"
 
 traceFootprint ::
@@ -1224,8 +1269,8 @@ equalAt :: IsSymInterface sym =>
   MemTraceImpl sym ptrW ->
   MemFootprint sym ptrW ->
   IO (Pred sym)
-equalAt sym eqRel mem1 mem2 (MemFootprint ptr w _ cond) = do
-  let repr = BVMemRepr w BigEndian
+equalAt sym eqRel mem1 mem2 (MemFootprint ptr w _ cond end) = do
+  let repr = BVMemRepr w end
   val1 <- readMemArr sym mem1 ptr repr
   val2 <- readMemArr sym mem2 ptr repr
   cond' <- case cond of
@@ -1251,9 +1296,10 @@ staticEqFootprint ::
   MemFootprint sym ptrW ->
   MemFootprint sym ptrW ->
   IO Bool
-staticEqFootprint sym (MemFootprint ptr1 w1 dir1 cond1) (MemFootprint ptr2 w2 dir2 cond2)
+staticEqFootprint sym (MemFootprint ptr1 w1 dir1 cond1 end1) (MemFootprint ptr2 w2 dir2 cond2 end2)
   | Just Refl <- testEquality w1 w2
   , dir1 == dir2
+  , end1 == end2
   = do
     ptrEq <- llvmPtrEq sym ptr1 ptr2
     condEq <- isEq sym (getCond sym cond1) (getCond sym cond2)
@@ -1341,7 +1387,7 @@ isReadShadowed ::
   MemFootprint sym ptrW ->
   Pred sym ->
   IO (Pred sym)
-isReadShadowed sym (pre Seq.:|> mop) foot@(MemFootprint ptr w _ cond) precond = case mop of
+isReadShadowed sym (pre Seq.:|> mop) foot@(MemFootprint ptr w _ cond _) precond = case mop of
   MemOp ptr' Write cond' w' _ _
     | (intValue w) <= (intValue w') -> do
     condImp <- impliesPred sym (getCond sym cond) (getCond sym cond')

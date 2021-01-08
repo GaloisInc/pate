@@ -227,14 +227,7 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (ConcreteBlock arch bin) wh
   show blk = ppBlock blk
 
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> String
-ppBlock b = ""
-  -- 100k oughta be enough for anybody
-  -- ++ pad 6 (show (blockSize b))
-  -- ++ " bytes at "
-  ++ show (absoluteAddress (concreteAddress b))
-
---blockSize :: ConcreteBlock arch -> Int
---blockSize = concreteBlockSize
+ppBlock b = show (absoluteAddress (concreteAddress b))
 
 absoluteAddress :: (MM.MemWidth (MM.ArchAddrWidth arch)) => ConcreteAddress arch -> MM.MemWord (MM.ArchAddrWidth arch)
 absoluteAddress (ConcreteAddress memAddr) = absAddr
@@ -275,10 +268,11 @@ ppGroundBV gbv = case gbv of
   GroundLLVMPointer ptr -> ppLLVMPointer ptr
 
 ppLLVMPointer :: GroundLLVMPointer w -> String
-ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = ""
-  ++ pad 3 (show reg)
-  ++ "+0x"
-  ++ padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
+ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = concat
+  [ pad 3 (show reg)
+  , "+0x"
+  , padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
+  ]
   where
     off = BVS.asUnsigned offBV
     bitWidth = W4.natValue bitWidthRepr
@@ -507,9 +501,14 @@ type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
 
 ----------------------------------
 -- Register helpers
+
+-- | Helper for doing a case-analysis on registers
 data RegisterCase arch tp where
+  -- | instruction pointer
   RegIP :: RegisterCase arch (MM.BVType (MM.ArchAddrWidth arch))
+  -- | stack pointer
   RegSP :: RegisterCase arch (MM.BVType (MM.ArchAddrWidth arch))
+  -- | non-specific GPR
   RegG :: RegisterCase arch tp
 
 registerCase ::
@@ -537,8 +536,8 @@ zipRegStates regs1 regs2 f = do
 
 -- Expression binding
 
--- Declares a type as being expression-containing, where the given traversal
--- occurs shallowly on all embedded expressions
+-- | Declares a type as being expression-containing, where the given traversal
+--   occurs shallowly (i.e. not applied recursively to sub-expressions) on all embedded expressions.
 class ExprMappable sym f where
   mapExpr ::
     W4.IsSymExprBuilder sym =>
@@ -605,10 +604,10 @@ instance ExprMappable sym (MacawRegEntry sym tp) where
       _ -> fail "mapExpr: unsupported macaw type"
 
 instance ExprMappable sym (MT.MemFootprint sym arch) where
-  mapExpr sym f (MT.MemFootprint ptr w dir cond) = do
+  mapExpr sym f (MT.MemFootprint ptr w dir cond end) = do
     ptr' <- mapExprPtr sym f ptr
     cond' <- mapExpr sym f cond
-    return $ MT.MemFootprint ptr' w dir cond'
+    return $ MT.MemFootprint ptr' w dir cond' end
 
 -----------------------------
 

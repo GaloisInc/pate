@@ -148,27 +148,31 @@ simPair bundle = PT.PatchPair (simInBlock $ simInO bundle) (simInBlock $ simInP 
 -----------------------------------------
 -- Memory
 
--- | A pointer with an attached width, representing the size of the "cell" in bytes
+-- | A pointer with an attached width, representing the size of the "cell" in bytes.
+-- It represents a discrete read or write, used as the key when forming a 'Pate.Equivalence.MemPred'
 data MemCell sym arch w where
   MemCell ::
     1 <= w =>
     { cellPtr :: CLM.LLVMPtr sym (MM.ArchAddrWidth arch)
     , cellWidth :: W4.NatRepr w
+    , cellEndian :: MM.Endianness
     } -> MemCell sym arch w
 
 instance TestEquality (W4.SymExpr sym) => TestEquality (MemCell sym arch) where
-  testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1) (MemCell (CLM.LLVMPointer reg2 off2) sz2)
+  testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2)
    | Just Refl <- testEquality reg1 reg2
    , Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
+   , end1 == end2
    = Just Refl
   testEquality _ _ = Nothing
 
 instance OrdF (W4.SymExpr sym) => OrdF (MemCell sym arch) where
-  compareF (MemCell (CLM.LLVMPointer reg1 off1) sz1) (MemCell (CLM.LLVMPointer reg2 off2) sz2) =
+  compareF (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2) =
     lexCompareF reg1 reg2 $
-     lexCompareF off1 off2 $
-     compareF sz1 sz2
+    lexCompareF off1 off2 $
+    lexCompareF sz1 sz2 $
+    fromOrdering $ compare end1 end2
 
 instance TestEquality (W4.SymExpr sym) => Eq (MemCell sym arch w) where
   stamp1 == stamp2 | Just Refl <- testEquality stamp1 stamp2 = True
@@ -219,6 +223,8 @@ muxMemCells sym p (MemCells cellsT) (MemCells cellsF) = do
       cellsT
       cellsF
 
+-- | Mux two 'MemCells' maps, where entries that appear in only one map
+-- are made conditional on the given predicate.
 muxMemCellsMap ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
@@ -237,6 +243,7 @@ muxMemCellsMap sym p cellsMapT cellsMapF = do
        cellsMapT
        cellsMapF
 
+-- | Unconditionally merge two 'MemCells' maps.
 mergeMemCellsMap ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
@@ -298,8 +305,10 @@ data MacawRegVar sym tp where
     } ->
     MacawRegVar sym tp
 
-type family CrucBaseTypes (tp :: CC.CrucibleType) :: Ctx.Ctx W4.BaseType
-type instance CrucBaseTypes (CLM.LLVMPointerType w) = (Ctx.EmptyCtx Ctx.::> W4.BaseNatType Ctx.::> W4.BaseBVType w)
+-- | Type family that indicates the 'W4.BaseType' of the sub-expressions of a given 'CC.CrucibleType'.
+-- Requires defining a bijection between the two types.
+type family CrucBaseTypes (tp :: CC.CrucibleType) :: Ctx.Ctx W4.BaseType where
+  CrucBaseTypes (CLM.LLVMPointerType w) = (Ctx.EmptyCtx Ctx.::> W4.BaseNatType Ctx.::> W4.BaseBVType w)
 
 flatVars ::
   SimVars sym arch bin -> [Some (W4.BoundVar sym)]
@@ -386,9 +395,9 @@ instance PT.ExprMappable sym (SimBundle sym arch) where
     return $ SimBundle simInO' simInP' simOutO' simOutP'
 
 instance PT.ExprMappable sym (MemCell sym arch w) where
-  mapExpr sym f (MemCell ptr w) = do
+  mapExpr sym f (MemCell ptr w end) = do
     ptr' <- mapExprPtr sym f ptr
-    return $ MemCell ptr' w
+    return $ MemCell ptr' w end
 
 instance OrdF (W4.SymExpr sym) => PT.ExprMappable sym (MemCells sym arch w) where
   mapExpr sym f (MemCells cells) = do

@@ -95,9 +95,14 @@ data MemPred sym arch =
       -- ^ predicate status at these locations according to polarity
       , memPredPolarity :: W4.Pred sym
       -- ^ if true, then predicate is true at exactly the locations
-      -- if false, then predicate is true everywhere but these locations
+      -- if false, then predicate is true everywhere but these locations.
+      -- Currently this is always concrete, but alternate strategies
+      -- for computing pre-domains may decide to use symbolic polarities,
+      -- and there is no fundamental reason to exclude this case.
       }
 
+-- | Map the internal 'MemCells' representing the locations of a 'MemPred', preserving
+-- its polarity.
 mapMemPred ::
   forall sym arch m.
   Monad m =>
@@ -184,7 +189,7 @@ footPrintsToPred ::
   W4.Pred sym ->
   IO (MemPred sym arch)
 footPrintsToPred sym foots polarity = do
-  locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond) -> do
+  locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond end) -> do
     dirPolarity <- case dir of
       MT.Read -> return $ W4.truePred sym
       MT.Write -> return $ W4.falsePred sym
@@ -192,7 +197,7 @@ footPrintsToPred sym foots polarity = do
     cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
     case W4.asConstantPred cond' of
       Just False -> return Nothing
-      _ -> return $ Just (Some (MemCell ptr w), cond')
+      _ -> return $ Just (Some (MemCell ptr w end), cond')
   listToMemPred sym locs polarity
 
 addFootPrintsToPred ::
@@ -306,8 +311,8 @@ stateEquivalence ::
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
-  -- ^ stack memory region
   EquivRelation sym arch
 stateEquivalence sym stackRegion =
   let
@@ -332,8 +337,8 @@ getPrecondition ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
-  -- ^ stack memory region
   SimBundle sym arch ->
   EquivRelation sym arch ->
   StatePred sym arch ->
@@ -350,8 +355,8 @@ impliesPrecondition ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
-  -- ^ stack memory region
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->
@@ -477,7 +482,7 @@ resolveCellEquiv ::
   W4.Pred sym ->
   IO (W4.Pred sym)
 resolveCellEquiv sym stO stP eqRel cell@(MemCell{})  cond = do
-  let repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
+  let repr = MM.BVMemRepr (cellWidth cell) (cellEndian cell)
   val1 <- MT.readMemArr sym memO (cellPtr cell) repr
   val2 <- MT.readMemArr sym memP (cellPtr cell) repr      
   impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
@@ -522,7 +527,7 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
     freshWrite cell@(MemCell{}) cond mem = do
       let
         ptr = cellPtr cell
-        repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
+        repr = MM.BVMemRepr (cellWidth cell) (cellEndian cell)
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do
@@ -566,8 +571,8 @@ memEqAtRegion ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   sym ->
+  -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
-  -- ^ stack memory region
   MemRegionEquality sym arch
 memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
   mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton stackRegion)
@@ -600,8 +605,8 @@ statePredPre ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
-  -- ^ stack memory region
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->

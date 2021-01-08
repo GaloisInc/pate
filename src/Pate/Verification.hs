@@ -294,10 +294,10 @@ printResult (Right ()) = liftIO $ putStr "✓\n"
 -- it returns normally.
 checkEquivalence ::
   PatchPair arch ->
+  -- | precondition
   StatePredSpec sym arch ->
-  -- ^ precondition
+  -- | postcondition
   StatePredSpec sym arch ->
-  -- ^ postcondition
   EquivM sym arch ()
 checkEquivalence pPair precondSpec postcondSpec = withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
@@ -747,10 +747,10 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     memP = simInMem $ simInP bundle
 
 bindMemory ::
+  -- | value to rebind
   MT.MemTraceImpl sym ptrW ->
-  -- ^ value to rebind
+  -- | new value
   MT.MemTraceImpl sym ptrW ->
-  -- ^ new value
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')  
 bindMemory memVar memVal expr = withSym $ \sym -> do
@@ -891,10 +891,10 @@ asVar expr = withValid $ case expr of
   _ -> throwHere UnexpectedNonBoundVar
 
 macawRegBinding ::
+  -- | value to rebind
   MacawRegEntry sym tp ->
-  -- ^ value to rebind
+  -- | new value
   MacawRegEntry sym tp ->
-  -- ^ new value
   EquivM sym arch ([Some (VarBinding sym)])
 macawRegBinding var val = do
   case macawRegRepr var of
@@ -907,10 +907,10 @@ macawRegBinding var val = do
     repr -> throwHere $ UnsupportedRegisterType (Some repr)
 
 bindMacawReg ::
+  -- | value to rebind
   MacawRegEntry sym tp ->
-  -- ^ value to rebind
+  -- | new value
   MacawRegEntry sym tp ->
-  -- ^ new value
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')
 bindMacawReg var val expr = withSym $ \sym -> do
