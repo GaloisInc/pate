@@ -126,6 +126,9 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
 
   Some gen' <- liftIO N.newIONonceGenerator
   let pfeats = W4PF.useBitvectors .|. W4PF.useSymbolicArrays .|. W4PF.useIntegerArithmetic .|. W4PF.useStructs
+  -- TODO: the online backend is not strictly necessary, however we are currently using
+  -- 'What4.Protocol.Online.checkSatisfiableWithModel' to invoke the solver. Additionally
+  -- we are using What4.Protocol.Online.inNewFrameWithVars' to treat bound variables as free.
   CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
     let cfg = W4.getConfiguration sym
     --pathSetter <- liftIO $ W4C.getOptionSetting CBO.solverInteractionFile cfg
@@ -192,11 +195,35 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
 ---------------------------------------------
 -- Top-level loop
 
--- | Verify equivalence of the given pairs, as well as any
--- resulting pairs that emerge
+-- | Verify equivalence of the given function pairs.
+--
+-- The set of "open" pairs is defined by the 'stOpenTriples' field of the underlying
+-- 'EquivState'. This is initially populated by the given list of function pairs (i.e. function
+-- we explicitly want to check the equivalence of), as well as the main entry points for
+-- each program (given that 'cfgPairMain' is set on the 'DiscoveryConfig' of the given 'EquivEnv').
+--
+-- Each "triple" represents an equivalence pre-domain (exact equivalence on the entire machine state,
+-- by default, for all the given pairs), a pair of functions,
+-- and a post-domain (exact equivalence on global memory, by default).
+--
+-- Verification proceeds by taking some open triple an attempting to verify its equivalence.
+-- This occurs through a bottom-up analysis of all the intermediate blocks between the start of
+-- the function and all possible exits. This traversal is defined by 'checkEquivalence', which
+-- either returns normally on success or throws an error if equivalence cannot be proven.
+--
+-- After a check is completed, the open triple is removed from  and either added to the set
+-- of "successful" proofs (i.e. 'stProvenTriples') or "failed" proofs ('stFailedTriples').
+-- The next open triple is then popped from 'stOpenTriples' and checked, repeating until
+-- no open triples are left.
+--
+-- Currently the set of open triples is unchanged during 'checkEquivalence':
+-- emerging problems are internally solved by a recursive descent rather than this loop.
+-- This traversal is therefore more complicated than strictly necessary, however it supports
+-- the likely future requirement for equivalence checks to emit deferred equivalence
 runVerificationLoop ::
   forall sym arch.
   EquivEnv sym arch ->
+  -- | A list of block pairs to test for equivalence. They must be the start of a function.
   [PatchPair arch] ->
   IO EquivalenceStatistics
 runVerificationLoop env pPairs = do
@@ -703,13 +730,36 @@ proveLocalPostcondition bundle branchCase postcondSpec = withSym $ \sym -> do
 -- Propagating preconditions
 
 -- | Guess a sufficient memory domain that will cause the
--- given postcondition to be satisfied on the given equivalence relations
+-- given postcondition to be satisfied on the given equivalence relations.
+--
+-- We consider each 'MemCell' present in both the given target post-domain (the given 'MemPred')
+-- as well as the trace of memory operations from the 'SimBundle'. For each cell we try to prove
+-- that the goal is independent of its initial value - that is, the goal predicate implies
+-- the same predicate where the initial value of that cell has been assigned an arbitary value.
+-- Each cell is either proven to be irrelevant, and therefore excluded from the guessed pre-domain, or failed
+-- to be proven irrelevant, and therefore included.
+--
+-- This is an imprecise guess for multiple reasons:
+-- (1) It does not attempt to determine the exact conditions under which the memory cells may be
+-- irrelevant. We assume the branch condition of the cell, and try to prove its irrelevance.
+-- If this proof fails, we include it in the domain under the same condition. More precise
+-- conditions may allow us to refine this - i.e. a memory cell may be unconditionally read, but
+-- only copied to relevant state under some condition.
+--
+-- (2) If this proof times out, we conservatively include the cell in the domain.
+
 guessMemoryDomain ::
   forall sym arch.
   SimBundle sym arch ->
+  -- | the target postcondition that we are trying to satisfy
   W4.Pred sym ->
+  -- | the same goal expression, but with its 'patched' memory array rebound to the given
+  -- 'MT.MemTraceImpl'
   (MT.MemTraceImpl sym (MM.ArchAddrWidth arch), W4.Pred sym) ->
+  -- | the target memory domain used to generate the postcondition
   MemPred sym arch ->
+  -- | filter for whether or not memory cells can possibly belong to
+  -- the given domain
   (forall w. MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
   EquivM sym arch (MemPred sym arch)
 guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
@@ -765,6 +815,23 @@ mapExpr' ::
 mapExpr' f e = withSym $ \sym ->
   IO.withRunInIO $ \runInIO -> mapExpr sym (\a -> runInIO (f a)) e
 
+-- | Guess a sufficient domain that will cause the
+-- given postcondition to be satisfied on the given equivalence relations.
+-- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.
+--
+-- Each register is guessed by attempting to prove that the goal is independent of
+-- its initial value.
+-- See 'guessMemoryDomain' for an explanation for how the memory domains are guessed.
+--
+-- This guess is an over-approximation of the state that must be equal in order to
+-- prove the given goal. The risk of getting this wrong is incidentally including state
+-- that is actually irrelevant, and later cannot be proven equal when used as the post-domain
+-- in a preceeding block. In other words, we may assume a precondition that is too strong when
+-- it must be later proven as postcondition.
+--
+-- Importantly, the output of this function is not trusted. Once the guess is made, it is later used to
+-- assemble and prove the precise equivalence property that we are interested in. If this guess
+-- is incorrect (i.e. we incorrectly exclude some memory location) then that proof will fail.
 guessEquivalenceDomain ::
   forall sym arch.
   SimBundle sym arch ->

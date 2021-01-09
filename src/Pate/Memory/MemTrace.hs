@@ -77,7 +77,7 @@ import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), MaybeType, knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
-import What4.Interface -- (NatRepr, knownRepr, BaseTypeRepr(..), SolverSymbol, userSymbol, freshConstant, natLit)
+import What4.Interface
 import What4.ExprHelpers (assertPrefix)
 
 ------
@@ -565,10 +565,10 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       offEq <- bvEq sym off off'
       andPred sym regEq offEq
 
-    PtrLeq w x y -> ptrOp w x y $ ptrPredOp (undefPtrLeq mkundef) (RegionConstraint natEq) $ \sym _reg off _reg' off' -> bvUle sym off off'
+    PtrLeq w x y -> ptrOp w x y $ ptrPredOp (undefPtrLeq mkundef) natEqConstraint $ \sym _reg off _reg' off' -> bvUle sym off off'
 
 
-    PtrLt w x y -> ptrOp w x y $ ptrPredOp (undefPtrLt mkundef) (RegionConstraint natEq) $ \sym _reg off _reg' off' -> bvUlt sym off off'
+    PtrLt w x y -> ptrOp w x y $ ptrPredOp (undefPtrLt mkundef) natEqConstraint $ \sym _reg off _reg' off' -> bvUlt sym off off'
 
     PtrMux w (RegEntry _ p) x y -> ptrOp w x y $ \sym reg off reg' off' -> do
       reg'' <- natIte sym p reg reg'
@@ -661,29 +661,48 @@ getGlobalVar cst gv = case lookupGlobal gv (cst ^. stateTree . actFrame . gpGlob
 setGlobalVar :: CrucibleState s sym ext rtp blocks r ctx -> GlobalVar mem -> RegValue sym mem -> CrucibleState s sym ext rtp blocks r ctx
 setGlobalVar cst gv val = cst & stateTree . actFrame . gpGlobals %~ insertGlobal gv val
 
-newtype RegionConstraint sym =
-  RegionConstraint { evalRegionConstraint :: (sym -> SymNat sym -> SymNat sym  -> IO (Pred sym)) }
+-- | A wrapped function that produces a predicate indicating that two pointer regions are
+-- compatible for some pointer operation. If this predicate is false, then the
+-- operation is undefined and yields an uninterpreted function.
+data RegionConstraint sym =
+  RegionConstraint
+    {
+      regConstraintMsg :: String
+    , regConstraintEval :: (sym -> SymNat sym -> SymNat sym  -> IO (Pred sym))
+    }
 
+-- | A 'RegionConstraint' that permits pointers from any two regions.
 natAny ::
   IsSymInterface sym =>
   RegionConstraint sym
-natAny = RegionConstraint $ \sym _ _ -> return $ truePred sym
+natAny = RegionConstraint "impossible" $ \sym _ _ -> return $ truePred sym
 
+-- | A 'RegionConstraint' that permits pointers from any two regions.
+natEqConstraint ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+natEqConstraint = RegionConstraint "both regions must be equal" $ natEq
+
+-- | A 'RegionConstraint' that requires one of the regions to be zero.
 someZero ::
   IsSymInterface sym =>
   RegionConstraint sym
-someZero = RegionConstraint $ \sym reg1 reg2 -> do
+someZero = RegionConstraint "one pointer region must be zero" $ \sym reg1 reg2 -> do
   regZero1 <- isZero sym reg1
   regZero2 <- isZero sym reg2
   orPred sym regZero1 regZero2
 
+-- | A 'RegionConstraint' that defines when regions are compatible for subtraction:
+-- either the regions are equal or the first region is zero.
 compatSub ::
   IsSymInterface sym =>
   RegionConstraint sym
-compatSub = RegionConstraint $ \sym reg1 reg2 -> do
+compatSub = RegionConstraint msg $ \sym reg1 reg2 -> do
   regZero1 <- isZero sym reg1
   regEq <- natEq sym reg1 reg2
   orPred sym regZero1 regEq
+  where
+    msg = "first pointer region must be zero, or both regions must be equal"
 
 ptrOp ::
   IsSymInterface sym =>
@@ -705,12 +724,12 @@ ptrPredOp ::
   (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)) ->
   sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)
 ptrPredOp mkundef regconstraint f sym reg1 off1 reg2 off2  = do
-  cond <- evalRegionConstraint regconstraint sym reg1 reg2
+  cond <- regConstraintEval regconstraint sym reg1 reg2
   result <- f sym reg1 off1 reg2 off2
   case asConstantPred cond of
     Just True -> return result
     _ -> do
-      assert sym cond $ AssertFailureSimError "ptrPredOp" "ptrPredOp"
+      assert sym cond $ AssertFailureSimError "ptrPredOp" $ "ptrPredOp: " ++ regConstraintMsg regconstraint
       undef <- mkUndefPred mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       itePred sym cond result undef
 
@@ -735,12 +754,12 @@ ptrBinOp ::
   (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)) ->
   sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)
 ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
-  cond <- evalRegionConstraint regconstraint sym reg1 reg2
+  cond <- regConstraintEval regconstraint sym reg1 reg2
   result <- f sym reg1 off1 reg2 off2
   case asConstantPred cond of
     Just True -> return result
     _ -> do
-      assert sym cond $ AssertFailureSimError "ptrBinOp" "ptrBinOp"
+      assert sym cond $ AssertFailureSimError "ptrBinOp" $ "ptrBinOp: " ++ regConstraintMsg regconstraint
       undef <- mkUndefPtr mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       muxPtr sym cond result undef
 
@@ -1254,31 +1273,6 @@ traceFootprint sym mem = do
   footprints <- (fmap memOpFootprint) <$> flatMemOps sym mem
   return $ foldl' (\a b -> Set.insert b a) mempty footprints
 
-data MemOpResult sym ptrW w =
-  MemOpResult
-    { resPtr :: LLVMPtr sym ptrW
-    , resOVal :: LLVMPtr sym w
-    , resPVal :: LLVMPtr sym w
-    }
-
-equalAt :: IsSymInterface sym =>
-  1 <= ptrW =>
-  sym ->
-  (forall w. MemOpResult sym ptrW w -> IO (Pred sym)) ->
-  MemTraceImpl sym ptrW ->
-  MemTraceImpl sym ptrW ->
-  MemFootprint sym ptrW ->
-  IO (Pred sym)
-equalAt sym eqRel mem1 mem2 (MemFootprint ptr w _ cond end) = do
-  let repr = BVMemRepr w end
-  val1 <- readMemArr sym mem1 ptr repr
-  val2 <- readMemArr sym mem2 ptr repr
-  cond' <- case cond of
-    Unconditional -> return $ truePred sym
-    Conditional c -> return c
-  eqP <- eqRel $ MemOpResult ptr val1 val2
-  impliesPred sym cond' eqP
-
 llvmPtrEq ::
   IsExprBuilder sym =>
   sym ->
@@ -1290,23 +1284,6 @@ llvmPtrEq sym (LLVMPointer region offset) (LLVMPointer region' offset') = do
   offsetsEq <- isEq sym offset offset'
   andPred sym regionsEq offsetsEq
 
-staticEqFootprint ::
-  IsSymInterface sym =>
-  sym ->
-  MemFootprint sym ptrW ->
-  MemFootprint sym ptrW ->
-  IO Bool
-staticEqFootprint sym (MemFootprint ptr1 w1 dir1 cond1 end1) (MemFootprint ptr2 w2 dir2 cond2 end2)
-  | Just Refl <- testEquality w1 w2
-  , dir1 == dir2
-  , end1 == end2
-  = do
-    ptrEq <- llvmPtrEq sym ptr1 ptr2
-    condEq <- isEq sym (getCond sym cond1) (getCond sym cond2)
-    (asConstantPred <$> andPred sym ptrEq condEq) >>= \case
-      Just True -> return True
-      _ -> return False
-staticEqFootprint _ _ _ = return $ False
 
 traceFootprints ::
   IsSymInterface sym =>
@@ -1326,106 +1303,3 @@ getCond ::
   Pred sym
 getCond sym Unconditional = truePred sym
 getCond _sym (Conditional p) = p
-
-condStaticImplies ::
-  IsSymInterface sym =>
-  sym ->
-  MemOpCondition sym ->
-  MemOpCondition sym ->
-  IO Bool
-condStaticImplies sym condpre condpost = do
-  p <- impliesPred sym (getCond sym condpre) (getCond sym condpost)
-  case asConstantPred p of
-    Just True -> return True
-    _ -> return False
-
-ptrStaticEq ::
-  IsSymInterface sym =>
-  sym ->
-  LLVMPtr sym w ->
-  LLVMPtr sym w ->
-  IO Bool
-ptrStaticEq sym ptr1 ptr2 = (asConstantPred <$> llvmPtrEq sym ptr1 ptr2) >>= \case
-  Just True -> return True
-  _ -> return False
-
-orM ::
-  IsSymInterface sym =>
-  sym ->
-  IO (Pred sym) -> IO (Pred sym) -> IO (Pred sym) 
-orM sym l r = do
-  bl <- l
-  case asConstantPred bl of
-    Just True -> return $ truePred sym
-    Just False -> r
-    Nothing -> do
-      br <- r
-      orPred sym bl br
-
-andM ::
-  IsSymInterface sym =>
-  sym ->
-  IO (Pred sym) -> IO (Pred sym) -> IO (Pred sym) 
-andM sym l r = do
-  bl <- l
-  case asConstantPred bl of
-    Just True -> r
-    Just False -> return $ falsePred sym
-    Nothing -> do
-      br <- r
-      andPred sym bl br
-
-
--- | Is this read shadowed by a previous write?
--- FIXME: there are tradeoffs here with respect to how much we want to
--- hammer the solver asking this question precisely.
-isReadShadowed ::
-  forall sym ptrW.
-  IsSymInterface sym =>
-  sym ->
-  MemTraceSeq sym ptrW ->
-  MemFootprint sym ptrW ->
-  Pred sym ->
-  IO (Pred sym)
-isReadShadowed sym (pre Seq.:|> mop) foot@(MemFootprint ptr w _ cond _) precond = case mop of
-  MemOp ptr' Write cond' w' _ _
-    | (intValue w) <= (intValue w') -> do
-    condImp <- impliesPred sym (getCond sym cond) (getCond sym cond')
-    eqPtr <- llvmPtrEq sym ptr ptr'
-    shadowed <- andPred sym condImp eqPtr
-    orM sym (impliesPred sym precond shadowed) rest
-  MergeOps p seqT seqF -> do
-    notp <- notPred sym p
-    precondT <- andPred sym precond p
-    precondF <- andPred sym precond notp
-    
-    andM sym (isReadShadowed sym seqT foot precondT) (isReadShadowed sym seqF foot precondF)
-  _ -> rest
-  where
-    rest :: IO (Pred sym)
-    rest = isReadShadowed sym pre foot precond
-isReadShadowed sym Seq.Empty _ _ = return $ falsePred sym
-
--- | Return a predicate that is true if the memory
--- states are equivalent, up to reordering of individual writes
--- and the given equivalence relation
-equivOps ::
-  forall sym ptrW.
-  IsSymInterface sym =>
-  1 <= ptrW =>
-  sym ->
-  (forall w. MemOpDirection -> MemOpResult sym ptrW w -> IO (Pred sym)) ->
-  MemTraceImpl sym ptrW ->
-  MemTraceImpl sym ptrW ->
-  IO (Pred sym)
-equivOps sym eqRel mem1 mem2 = do
-  foot <- traceFootprints sym mem1 mem2
-  foldM addFoot (truePred sym) foot
-  where
-    addFoot ::
-      Pred sym ->
-      MemFootprint sym ptrW ->
-      IO (Pred sym)
-    addFoot p f  = do
-      p' <- equalAt sym (eqRel (memFootDir f)) mem1 mem2 f
-      andPred sym p p'
