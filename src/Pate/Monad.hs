@@ -67,13 +67,10 @@ import           GHC.Stack
 import           Control.Monad.Fail
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Exception hiding ( try )
-import           Control.Monad.ST
 import           Control.Monad.Catch hiding ( catch, catches, Handler )
-import           Control.Monad.Trans.Reader ( ReaderT, runReaderT )
 import           Control.Monad.Reader
 import           Control.Monad.Trans.Except
 import           Control.Monad.Except
-import           Control.Monad.Trans.State ( StateT, evalStateT )
 import           Control.Monad.State
 
 
@@ -128,7 +125,7 @@ data EquivalenceContext sym arch where
   EquivalenceContext ::
     forall sym ids arch scope solver fs.
     (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
-    { nonces :: N.NonceGenerator (ST RealWorld) ids
+    { nonces :: N.NonceGenerator IO ids
     , handles :: CFH.HandleAllocator
     , exprBuilder :: sym
     , originalCtx :: BinaryContext sym arch Original

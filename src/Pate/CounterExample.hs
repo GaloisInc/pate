@@ -36,21 +36,21 @@ module Pate.CounterExample
   , ppMemDiff
   ) where
 
-import           GHC.Stack
+import           GHC.Stack ( HasCallStack )
 
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import           Control.Lens hiding ( op, pre )
-import           Control.Monad.Reader
+import qualified Control.Monad.Reader as CMR
 import           Control.Applicative
 
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as S
 import           Data.Maybe (catMaybes)
-import           Data.Monoid
-import           Data.Proxy
+import           Data.Monoid ( Sum(..) )
+import           Data.Proxy ( Proxy(..) )
 
-import           Data.Parameterized.Some
+import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableF as TF
 
@@ -175,7 +175,7 @@ groundTraceDiff fn eqRel bundle = do
       EquivM sym arch (Maybe (MemOpDiff arch))
     checkFootprint (MT.MemFootprint ptr w dir cond end) = do
       let repr = MM.BVMemRepr w end
-      stackRegion <- asks envStackRegion
+      stackRegion <- CMR.asks envStackRegion
       gstackRegion <- execGroundFn fn stackRegion
       -- "reads" here are simply the memory pre-state
       (oMem, pMem) <- case dir of

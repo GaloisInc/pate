@@ -8,7 +8,6 @@ module Pate.PPC
   ( PPC.PPC64, PPC.PPC32 )
 where
 
-import           Data.Type.Equality
 import qualified Pate.Binary as PB
 import qualified Pate.Monad as PM
 import qualified Data.Macaw.PPC as PPC
