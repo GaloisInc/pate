@@ -640,6 +640,7 @@ data InnerEquivalenceError arch
   | UnexpectedNonBoundVar
   | UnsatisfiableAssumptions
   | InequivalentError (InequivalenceResult arch)
+  | MissingCrucibleGlobals
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =

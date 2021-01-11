@@ -540,7 +540,7 @@ getGPValueAndTrace (CS.FinishedResult _ pres) = do
       , Just ec <- CGS.lookupGlobal eclass globs -> withValid $ do
         val' <- structToRegState @sym @arch val
         return $ (asm, val', mt, ec)
-    _ -> CME.throwError undefined
+    _ -> throwHere MissingCrucibleGlobals
 getGPValueAndTrace (CS.AbortedResult _ ar) = throwHere . SymbolicExecutionFailed . ppAbortedResult $ ar
 getGPValueAndTrace (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "timeout")
 
