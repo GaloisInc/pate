@@ -22,6 +22,7 @@ import qualified Test.Tasty.ExpectedFailure as T
 
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
+import qualified Pate.Event as PE
 
 data TestConfig where
   TestConfig ::
@@ -43,15 +44,15 @@ runTests cfg = do
 
   T.defaultMain $ T.testGroup name $
     [ T.testGroup "equivalence" $ map (mkTest cfg) equivTestFiles
-    , T.testGroup "inequivalence" $ map (mkEquivTest cfg ShouldNotVerify) inequivTestFiles
+    , T.testGroup "inequivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldNotVerify fp]) inequivTestFiles
     ]
 
 
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
   T.testGroup fp $
-    [ T.testCase "original-self" $ doTest (Just PT.Original) ShouldVerify proxy fp
-    , T.testCase "patched-self" $ doTest (Just PT.Rewritten) ShouldVerify proxy fp
+    [ T.testCase "original-self" $ doTest (Just PT.OriginalRepr) ShouldVerify proxy fp
+    , T.testCase "patched-self" $ doTest (Just PT.PatchedRepr) ShouldVerify proxy fp
     , mkEquivTest cfg ShouldVerify fp
     ]
 
@@ -68,8 +69,8 @@ mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
     wrap t = if shouldFail then T.expectFail t else t
 
 doTest ::
-  forall arch.
-  Maybe PT.WhichBinary ->
+  forall arch bin.
+  Maybe (PT.WhichBinaryRepr bin) ->
   ShouldVerify ->
   PL.ValidArchProxy arch ->
   FilePath ->
@@ -85,8 +86,16 @@ doTest mwb sv proxy fp = do
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.discoveryCfg = PT.defaultDiscoveryCfg
       , PL.logger =
-          -- We discard logs while testing
-          LJ.LogAction $ \_ -> return ()
+          LJ.LogAction $ \e -> case e of
+            PE.CheckedEquivalence _ _ PE.Equivalent time -> do
+              putStrLn $ "Successful equivalence check: " ++ show time
+            PE.CheckedEquivalence _ _ _ time -> do
+              putStrLn $ "Failed equivalence check: " ++ show time
+            PE.CheckedBranchCompleteness _ _ PE.BranchesComplete time -> do
+              putStrLn $ "Branch completeness check: " ++ show time
+            PE.ComputedPrecondition _ _ time -> do
+              putStrLn $ "Precondition propagation: " ++ show time
+            _ -> return ()
       }
   result <- case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb

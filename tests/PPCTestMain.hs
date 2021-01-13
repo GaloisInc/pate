@@ -15,8 +15,6 @@ main = do
         , testExpectFailure = [
                               -- see: https://github.com/GaloisInc/pate/issues/10
                                 "test-direct-calls"
-                              -- see: https://github.com/GaloisInc/pate/issues/9
-                              , "test-stack-variable"
                               -- see: https://github.com/GaloisInc/pate/issues/17
                               , "test-int-ref-ref"
                               ]

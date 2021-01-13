@@ -196,6 +196,8 @@ terminalFormatEvent evt =
         PE.Inequivalent _mdl ->
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
           in layout (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
+    -- FIXME: handle other events
+    _ -> layout "Unsupported event."
 
 data LoadError where
   ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError

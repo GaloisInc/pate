@@ -40,22 +40,20 @@ import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.BinaryLoader as MBL
 
-import           Data.ElfEdit ( parseElf, ElfGetResult(..) )
-
 data LoadedELF arch =
   LoadedELF
     { archInfo :: MI.ArchitectureInfo arch
-    , loadedBinary :: MBL.LoadedBinary arch (E.Elf (MC.ArchAddrWidth arch))
+    , loadedBinary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
     }
 
 class
   ( MC.MemWidth (MC.ArchAddrWidth arch)
-  , MBL.BinaryLoader arch (E.Elf (MC.ArchAddrWidth arch))
+  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
   , E.ElfWidthConstraints (MC.ArchAddrWidth arch)
   , MS.SymArchConstraints arch
   , 16 <= MC.RegAddrWidth (MC.ArchReg arch)
   ) => ArchConstraints arch where
-  binArchInfo :: MBL.LoadedBinary arch (E.Elf (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
+  binArchInfo :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
 
 loadELF ::
   forall arch.
@@ -75,16 +73,14 @@ loadELF _ path = do
     archWidthRepr :: MC.AddrWidthRepr (MC.ArchAddrWidth arch)
     archWidthRepr = MC.addrWidthRepr (Proxy @(MC.ArchAddrWidth arch))
 
-    doParse :: BS.ByteString -> IO (E.Elf (MC.ArchAddrWidth arch))
-    doParse bs = case parseElf bs of
-      ElfHeaderError off msg -> error $ "Error while parsing ELF header at " ++ show off ++ ": " ++ msg
-      Elf32Res [] e32 -> return $ getElf e32
-      Elf64Res [] e64 -> return $ getElf e64
-      Elf32Res errs _ -> error $ "Errors while parsing ELF file: " ++ show errs
-      Elf64Res errs _ -> error $ "Errors while parsing ELF file: " ++ show errs
-    
+    doParse :: BS.ByteString -> IO (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
+    doParse bs = case E.decodeElfHeaderInfo bs of
+      Left (off, msg) -> error $ "Error while parsing ELF header at " ++ show off ++ ": " ++ msg
+      Right (E.SomeElf h) -> case E.headerClass (E.header h) of
+        E.ELFCLASS32 -> return $ getElf h
+        E.ELFCLASS64 -> return $ getElf h
       
-    getElf :: forall w. MC.MemWidth w => E.Elf w -> E.Elf (MC.ArchAddrWidth arch)
+    getElf :: forall w. MC.MemWidth w => E.ElfHeaderInfo w -> E.ElfHeaderInfo (MC.ArchAddrWidth arch)
     getElf e = case testEquality (MC.addrWidthRepr e) archWidthRepr of
       Just Refl -> e
       Nothing -> error "Unexpected arch"

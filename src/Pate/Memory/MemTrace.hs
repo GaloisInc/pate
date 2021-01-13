@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
@@ -19,6 +20,7 @@
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
 
+
 #if __GLASGOW_HASKELL__ >= 805
 {-# LANGUAGE NoStarIsType #-}
 #endif
@@ -29,7 +31,6 @@
 module Pate.Memory.MemTrace where
 
 import Unsafe.Coerce
-import           GHC.Natural
 import           Data.Foldable
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.))
@@ -38,31 +39,35 @@ import qualified Data.BitVector.Sized as BV
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
+import           Data.IORef
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           GHC.TypeNats (KnownNat)
+import           GHC.TypeNats (KnownNat, type Nat)
 
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
-import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemAddr(..), MemSegmentOff, addrWidthClass, addrWidthNatRepr, addrOffset, segoffAddr)
+import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthNatRepr)
 import Data.Macaw.Symbolic.Backend (EvalStmtFunc, MacawArchEvalFn(..))
-import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExt
+import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap, MacawSimulatorState(..)
-                           , ToCrucibleType, evalMacawExprExtension
+                           , ToCrucibleType
                            , IsMemoryModel(..)
-                           , MacawBlockEnd(..)
                            , SymArchConstraints
+                           , evalMacawExprExtension
                            )
+
 import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
+
 import Data.Parameterized.Context (pattern (:>), pattern Empty, Assignment)
 import qualified Data.Parameterized.Map as MapF
 import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator)
-import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, llvmPointer_bv)
+import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer)
 import Lang.Crucible.Simulator.ExecutionTree (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree)
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
 import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..), IntrinsicTypes)
@@ -72,120 +77,273 @@ import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), MaybeType, knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
-import qualified What4.Expr.GroundEval as W4G
-import What4.Interface -- (NatRepr, knownRepr, BaseTypeRepr(..), SolverSymbol, userSymbol, freshConstant, natLit)
-import What4.Partial ( maybePartExpr, justPartExpr )
+import What4.Interface
+import What4.ExprHelpers (assertPrefix)
 
-----------------------------------
--- Reify jump kind as a crucible global
+------
+-- * Undefined pointers
 
+-- | Wrapping undefined pointer operations with uninterpreted functions.
+-- Pointer operations are generally partial due to potential incompatibilities in their regions.
+-- In cases where the result of an operating is undefined, rather than yielding a fresh constant, we
+-- instead yield an uninterpreted function that takes the original operands as arguments.
+-- This allows us to prove, for example, that a = x, b = y ==> a + b == x + y, without necessarily
+-- proving that this operation is defined. i.e. if it is not defined then we end up with undefPtrAdd(a, b) == undefPtrAdd(x, y).
+--
+-- To ensure that this is still true, we need to make sure that we only generate fresh uninterpreted
+-- functions when necessary, which is complicated by the fact that unintepreted functions must be monomorphic. We therefore lazily generate and cache each monomorphic variant of the uninterpreted function as they are needed.
 
+-- | A collection of functions used to produce undefined values for each pointer operation.
+data UndefinedPtrOps sym =
+  UndefinedPtrOps
+    { undefPtrOff :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w))
+    , undefPtrLt :: UndefinedPtrPredOp sym
+    , undefPtrLeq :: UndefinedPtrPredOp sym
+    , undefPtrAdd :: UndefinedPtrBinOp sym
+    , undefPtrSub :: UndefinedPtrBinOp sym
+    , undefPtrAnd :: UndefinedPtrBinOp sym
+    }
 
-type ExitClassify arch = IntrinsicType "exit_classify" EmptyCtx
+-- | Wraps a function which is used to produce an "undefined" pointer that
+-- may result from a binary pointer operation.
+-- The given predicate is true when the operation is defined. i.e if this predicate
+-- is true then this undefined value is unused. The two other arguments are the original inputs to the binary pointer operation.
+newtype UndefinedPtrBinOp sym =
+  UndefinedPtrBinOp
+    { mkUndefPtr ::
+        forall w.
+        sym ->
+        Pred sym ->
+        LLVMPtr sym w ->
+        LLVMPtr sym w ->
+        IO (LLVMPtr sym w)
+    }
 
-data ExitClassifyImpl sym =
-  ExitClassifyImpl (SymExpr sym (BaseStructType (EmptyCtx ::> BaseBoolType ::> BaseBoolType)))
+-- | Wraps a function which is used to produce an "undefined" predicate that
+-- may result from a binary pointer operation.
+-- The given predicate is true when the operation is defined. i.e if this predicate
+-- is true then this undefined value is unused. The two other arguments are the original inputs to the binary pointer operation.
+newtype UndefinedPtrPredOp sym =
+  UndefinedPtrPredOp
+    { mkUndefPred ::
+        forall w.
+        sym ->
+        Pred sym ->
+        LLVMPtr sym w ->
+        LLVMPtr sym w ->
+        IO (Pred sym)
+    }
 
-instance IsExprBuilder sym => IntrinsicClass sym "exit_classify" where
-  type Intrinsic sym "exit_classify" EmptyCtx = ExitClassifyImpl sym
-  muxIntrinsic sym _ _ Empty p (ExitClassifyImpl t) (ExitClassifyImpl f) = do
-    muxed <- baseTypeIte sym p t f
-    return $ ExitClassifyImpl muxed
-  muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in exit_classify mux"
+-- | Wrapping a pointer as a struct, so that it may be represented as the
+-- result of an uninterpreted function.
+type BasePtrType w = BaseStructType (EmptyCtx ::> BaseNatType ::> BaseBVType w)
+type SymPtr sym w = SymExpr sym (BasePtrType w)
 
-exitCaseToImpl ::
-  IsSymInterface sym =>
+asSymPtr ::
+  IsSymExprBuilder sym =>
   sym ->
-  ExitCase ->
-  IO (ExitClassifyImpl sym)
-exitCaseToImpl sym classk = ExitClassifyImpl <$> case classk of
-  ExitCall -> mkStruct sym (Empty :> truePred sym :> falsePred sym)
-  ExitReturn -> mkStruct sym (Empty :> falsePred sym :> truePred sym)
-  ExitArch -> mkStruct sym (Empty :> truePred sym :> truePred sym)
-  ExitUnknown -> mkStruct sym (Empty :> falsePred sym :> falsePred sym)
+  LLVMPtr sym w ->
+  IO (SymPtr sym w)
+asSymPtr sym (LLVMPointer reg off) = mkStruct sym (Empty :> reg :> off)
 
-
-groundExitCase ::
-  sym ~ (ExprBuilder t s f) =>
-  W4G.GroundEvalFn t ->
-  ExitClassifyImpl sym ->
-  IO ExitCase
-groundExitCase (W4G.GroundEvalFn fn) (ExitClassifyImpl e) = do
-  (Empty :> W4G.GVW b1 :> W4G.GVW b2) <- fn e
-  return $ case (b1, b2) of
-    (True, False) -> ExitCall
-    (False, True) -> ExitReturn
-    (True, True) -> ExitArch
-    (False, False) -> ExitUnknown
-
-data ExitCase = ExitCall | ExitReturn | ExitArch | ExitUnknown
-  deriving (Eq, Ord, Show)
-
-blockEndToExitCase :: MacawBlockEnd arch -> ExitCase
-blockEndToExitCase blkend = case blkend of
-  MacawBlockEndCall{} -> ExitCall
-  MacawBlockEndReturn -> ExitReturn
-  MacawBlockEndArch{} -> ExitArch
-  _ -> ExitUnknown
-
-
-blockEndReturnAddr :: MacawBlockEnd arch -> Maybe (MemSegmentOff (ArchAddrWidth arch))
-blockEndReturnAddr blkend = case blkend of
-  MacawBlockEndCall mret -> mret
-  MacawBlockEndArch mret -> mret
-  _ -> Nothing
-
-blockEndToReturn ::
-  forall sym arch.
-  SymArchConstraints arch =>
-  IsSymInterface sym =>
+fromSymPtr ::
+  IsSymExprBuilder sym =>
   sym ->
-  MacawBlockEnd arch ->
-  IO (RegValue sym (MaybeType (LLVMPointerType (ArchAddrWidth arch))))
-blockEndToReturn sym blkend | Just ret <- blockEndReturnAddr blkend = do
-  ptr <- memAddrToPtr @_ @arch sym (segoffAddr @(ArchAddrWidth arch) ret)
-  return $ justPartExpr sym ptr
-blockEndToReturn sym _ = return $ maybePartExpr sym Nothing
+  SymPtr sym w ->
+  IO (LLVMPtr sym w )  
+fromSymPtr sym sptr = do
+  reg <- structField sym sptr Ctx.i1of2
+  off <- structField sym sptr Ctx.i2of2
+  return $ LLVMPointer reg off
 
+polySymbol ::
+  String ->
+  NatRepr w ->
+  SolverSymbol
+polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
 
-memAddrToPtr ::
-  forall sym arch.
-  SymArchConstraints arch =>
+-- | Defines how a given type can be concretized to a specific type-level nat.
+-- This allows us to easily describe a type that is polymorphic in one natural,
+-- using existing type constructors.
+class HasNatAbs (tp :: k) where
+  -- | 'Apply' a specific type-level nat to the type
+  type NatAbs tp (w :: Nat) :: k
+
+type AnyNat = 0
+
+instance HasNatAbs (BasePtrType AnyNat) where
+  type NatAbs (BasePtrType AnyNat) w' = BasePtrType w'
+
+instance HasNatAbs (BaseBVType AnyNat) where
+  type NatAbs (BaseBVType AnyNat) w' = BaseBVType w'
+
+instance HasNatAbs BaseBoolType where
+  type NatAbs BaseBoolType _ = BaseBoolType
+
+instance HasNatAbs EmptyCtx where
+  type NatAbs EmptyCtx w = EmptyCtx
+
+instance (HasNatAbs ctx, HasNatAbs tp) => HasNatAbs (ctx Ctx.::> tp) where
+  type NatAbs (ctx Ctx.::> tp) w' = NatAbs ctx w' Ctx.::> NatAbs tp w'
+
+data PolyFun sym args ret (w :: Nat) where
+  PolyFun ::
+    (HasNatAbs args, HasNatAbs ret) =>
+    (SymFn sym (NatAbs args w) (NatAbs ret w)) ->
+    PolyFun sym args ret w
+
+newtype PolyFunMaker sym args ret =
+  PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym args ret w))
+
+mkBinUF ::
   IsSymInterface sym =>
-  sym ->
-  MemAddr (ArchAddrWidth arch) ->
-  IO (RegValue sym (LLVMPointerType (ArchAddrWidth arch)))
-memAddrToPtr sym addr = do
-  region <- natLit sym (intToNatural (addrBase addr))
-  offset <- bvLit sym knownRepr (BV.mkBV knownRepr (toInteger (addrOffset addr)))
-  return $ LLVMPointer region offset
-
-
-exitCases ::
-  IsSymInterface sym =>
-  sym ->
-  ExitClassifyImpl sym ->
-  --BaseTypeRepr tp ->
-  (ExitCase -> IO (SymExpr sym tp)) ->
-  IO (SymExpr sym tp)
-exitCases sym (ExitClassifyImpl jclass) f = do
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) (BasePtrType AnyNat)
+mkBinUF nm  = PolyFunMaker $ \sym w -> do
   let
-    mkCase classk = do
-      ExitClassifyImpl jclass' <- exitCaseToImpl sym classk
-      test <- isEq sym jclass jclass'
-      expr <- f classk
-      return (test, expr)
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr :> ptrRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
 
-  (_, exprUnknown) <- mkCase ExitUnknown
-  (testCall, exprCall) <- mkCase ExitCall
-  (testReturn, exprReturn) <- mkCase ExitReturn
-  (testArch, exprArch) <- mkCase ExitArch
+mkPtrAssert ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat)
+mkPtrAssert nm = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr :> BaseBoolRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
 
-  callCase <- baseTypeIte sym testCall exprCall exprUnknown
-  returnCase <- baseTypeIte sym testReturn exprReturn callCase
-  baseTypeIte sym testArch exprArch returnCase
+mkBVAssert ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BaseBVType AnyNat Ctx.::> BaseBoolType) (BaseBVType AnyNat)
+mkBVAssert nm = PolyFunMaker $ \sym w -> do
+  let
+    repr = Empty :> BaseBVRepr w :> BaseBoolRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
+
+mkPredAssert ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BaseBoolType Ctx.::> BaseBoolType) BaseBoolType
+mkPredAssert nm = PolyFunMaker $ \sym w -> do
+  let
+    repr = Empty :> BaseBoolRepr :> BaseBoolRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
+
+mkPredUF ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) BaseBoolType
+mkPredUF nm = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr :> ptrRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
+
+mkOffUF ::
+  IsSymInterface sym =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat) (BaseBVType AnyNat)
+mkOffUF nm = PolyFunMaker $ \sym w -> do
+  let
+    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr
+  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
 
 
+cachedPolyFun ::
+  forall sym f g.
+  sym ->
+  PolyFunMaker sym f g ->
+  IO (PolyFunMaker sym f g)
+cachedPolyFun _sym (PolyFunMaker f) = do
+  ref <- newIORef (MapF.empty :: MapF.MapF NatRepr (PolyFun sym f g))
+  return $ PolyFunMaker $ \sym' nr -> do
+    m <- readIORef ref
+    case MapF.lookup nr m of
+      Just a -> return a
+      Nothing -> do
+        result <- f sym' nr
+        let m' = MapF.insert nr result m
+        writeIORef ref m'
+        return result
+
+withPtrWidth :: IsExprBuilder sym => LLVMPtr sym w -> (1 <= w => NatRepr w -> a) -> a
+withPtrWidth (LLVMPointer _blk bv) f | BaseBVRepr w <- exprType bv = f w
+withPtrWidth _ _ = error "impossible"
+
+mkBinOp ::
+  forall sym.
+  IsSymInterface sym =>
+  sym ->
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat) ->
+  IO (UndefinedPtrBinOp sym)
+mkBinOp sym nm (PolyFunMaker mkAssert) = do
+  PolyFunMaker fn' <- cachedPolyFun sym $ mkBinUF nm
+  return $ UndefinedPtrBinOp $ \sym' cond ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+    sptr1 <- asSymPtr sym' ptr1
+    sptr2 <- asSymPtr sym' ptr2
+    PolyFun resultfn <- fn' sym' w
+    sptrResult <- applySymFn sym' resultfn (Empty :> sptr1 :> sptr2)
+    PolyFun doAssert <- mkAssert sym' w
+    sptrResult' <- applySymFn sym' doAssert (Empty :> sptrResult :> cond)
+    fromSymPtr sym' sptrResult'
+
+mkPredOp ::
+  IsSymInterface sym =>
+  sym ->
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BaseBoolType Ctx.::> BaseBoolType) BaseBoolType -> 
+  IO (UndefinedPtrPredOp sym)
+mkPredOp sym nm (PolyFunMaker mkAssert) = do
+  PolyFunMaker fn' <- cachedPolyFun sym $ mkPredUF nm
+  return $ UndefinedPtrPredOp $ \sym' cond ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+    sptr1 <- asSymPtr sym' ptr1
+    sptr2 <- asSymPtr sym' ptr2
+    PolyFun resultfn <- fn' sym' w
+    result <- applySymFn sym' resultfn (Empty :> sptr1 :> sptr2)
+    PolyFun doAssert <- mkAssert sym' w
+    applySymFn sym' doAssert (Empty :> result :> cond)
+
+mkUndefinedPtrOps ::
+  forall sym.
+  IsSymInterface sym =>
+  sym ->
+  IO (UndefinedPtrOps sym)
+mkUndefinedPtrOps sym = do
+  ptrAssert <- cachedPolyFun sym $ mkPtrAssert assertPrefix
+  predAssert <- cachedPolyFun sym $ mkPredAssert assertPrefix
+  PolyFunMaker bvAssert <- cachedPolyFun sym $ mkBVAssert assertPrefix
+  PolyFunMaker offFn <- cachedPolyFun sym $ mkOffUF "undefPtrOff"
+  let
+    offPtrFn :: forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w)
+    offPtrFn sym' cond ptr = withPtrWidth ptr $ \w -> do
+      sptr <- asSymPtr sym' ptr
+      PolyFun resultfn <- offFn sym' w
+      result <- applySymFn sym' resultfn (Empty :> sptr)
+      PolyFun doAssert <- bvAssert sym' w
+      applySymFn sym' doAssert (Empty :> result :> cond)
+
+  undefPtrLt' <- mkPredOp sym "undefPtrLt" predAssert
+  undefPtrLeq' <- mkPredOp sym "undefPtrLeq'" predAssert
+  undefPtrAdd' <- mkBinOp sym "undefPtrAdd" ptrAssert
+  undefPtrSub' <- mkBinOp sym "undefPtrSub" ptrAssert
+  undefPtrAnd' <- mkBinOp sym "undefPtrAnd" ptrAssert
+  return $
+    UndefinedPtrOps
+      { undefPtrOff = offPtrFn
+      , undefPtrLt = undefPtrLt'
+      , undefPtrLeq = undefPtrLeq'
+      , undefPtrAdd = undefPtrAdd'
+      , undefPtrSub = undefPtrSub'
+      , undefPtrAnd = undefPtrAnd'
+      }
+
+-- * Memory trace model
 
 -- | Like 'macawExtensions', but with an alternative memory model that records
 -- memory operations without trying to carefully guess the results of
@@ -194,14 +352,13 @@ macawTraceExtensions ::
   (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn sym (MemTrace arch) arch ->
   GlobalVar (MemTrace arch) ->
-  GlobalVar (ExitClassify arch) ->
-  GlobalVar (MaybeType (LLVMPointerType (ArchAddrWidth arch))) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
+  UndefinedPtrOps sym ->
   ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
-macawTraceExtensions archStmtFn mvar evar pvar globs =
+macawTraceExtensions archStmtFn mvar globs undefptr =
   ExtensionImpl
-    { extensionEval = evalMacawExprExtension
-    , extensionExec = execMacawStmtExtension archStmtFn mvar evar pvar globs
+    { extensionEval = evalMacawExprExtensionTrace undefptr
+    , extensionExec = execMacawStmtExtension archStmtFn undefptr mvar globs
     }
 
 
@@ -212,7 +369,11 @@ data MemOpCondition sym
 
 deriving instance Show (Pred sym) => Show (MemOpCondition sym)
 
-data MemOpDirection = Read | Write deriving (Bounded, Enum, Eq, Ord, Read, Show)
+data MemOpDirection =
+    Read
+  | Write
+  deriving (Eq, Ord, Show)
+
 
 data MemOp sym ptrW where
   MemOp ::
@@ -260,18 +421,20 @@ instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
 
 data MemTraceImpl sym ptrW = MemTraceImpl
   { memSeq :: MemTraceSeq sym ptrW
+  -- ^ the sequence of memory operations in execution order
   , memArr :: MemTraceArr sym ptrW
+  -- ^ the logical contents of memory
   }
 
-instance TestEquality (SymExpr sym) => Eq (MemTraceImpl sym ptrW) where
-  (MemTraceImpl s1 arr1) == (MemTraceImpl s2 arr2)
-    | Just Refl <- testEquality arr1 arr2
-    = s1 == s2
-  _ == _ = False
+data MemTraceVar sym ptrW = MemTraceVar (BoundVar sym (MemArrBaseType ptrW))
 
 type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
-type MemTraceArr sym ptrW =
-  RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType ::> (BaseBVType ptrW)) (BaseBVType 8))
+type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
+
+type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
+
+type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseNatType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) (BaseBVType 8))
+
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
 data MemTraceK
@@ -290,13 +453,6 @@ mkMemTraceVar ::
   IO (GlobalVar (MemTrace arch))
 mkMemTraceVar ha = freshGlobalVar ha (pack "llvm_memory_trace") knownRepr
 
-mkExitClassVar ::
-  forall arch.
-  HandleAllocator ->
-  IO (GlobalVar (ExitClassify arch))
-mkExitClassVar ha = freshGlobalVar ha (pack "exit_classify") knownRepr
-
-
 mkReturnIPVar ::
   forall arch.
   (KnownNat (ArchAddrWidth arch), 1 <= ArchAddrWidth arch) =>
@@ -305,7 +461,8 @@ mkReturnIPVar ::
 mkReturnIPVar ha = freshGlobalVar ha (pack "ret_ip") knownRepr
 
 initMemTrace ::
-  IsSymInterface sym =>
+  forall sym ptrW.
+  IsSymExprBuilder sym =>
   sym ->
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
@@ -316,21 +473,18 @@ initMemTrace sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   return $ MemTraceImpl mempty arr
 
-initExitClass ::
+initMemTraceVar ::
+  forall sym ptrW.
   IsSymInterface sym =>
   sym ->
-  IO (ExitClassifyImpl sym)
-initExitClass sym = do
-  bs <- ioFreshConstant sym "InitExitClass" knownRepr
-  return $ ExitClassifyImpl bs
-
-initRetAddr ::
-  forall sym arch.
-  IsSymInterface sym =>
-  (KnownNat (ArchAddrWidth arch), 1 <= ArchAddrWidth arch) =>
-  sym ->
-  IO (RegValue sym (MaybeType (LLVMPointerType (ArchAddrWidth arch))))
-initRetAddr sym = return $ maybePartExpr sym Nothing
+  AddrWidthRepr ptrW ->
+  IO (MemTraceImpl sym ptrW, MemTraceVar sym ptrW)
+initMemTraceVar sym Addr32 = do
+  arr <- ioFreshVar sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+initMemTraceVar sym Addr64 = do
+  arr <- ioFreshVar sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
 equalPrefixOf s1 s2 = go s1 s2 Seq.empty
@@ -353,6 +507,7 @@ muxTraces p t f =
     (Seq.Empty, Seq.Empty) -> return pre
     _ -> return $ pre Seq.:|> MergeOps p t' f'
 
+
 instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
   -- TODO: cover other cases with a TypeError
   type Intrinsic (ExprBuilder t st fs) "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl (ExprBuilder t st fs) ptrW
@@ -360,11 +515,11 @@ instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
     s <- muxTraces p (memSeq t) (memSeq f)
     arr <- baseTypeIte sym p (memArr t) (memArr f)
     return $ MemTraceImpl s arr
+
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
 memTraceIntrinsicTypes :: IsSymInterface (ExprBuilder t st fs) => IntrinsicTypes (ExprBuilder t st fs)
 memTraceIntrinsicTypes = id
-  . MapF.insert (knownSymbol :: SymbolRepr "exit_classify") IntrinsicMuxFn
   . MapF.insert (knownSymbol :: SymbolRepr "memory_trace") IntrinsicMuxFn
   . MapF.insert (knownSymbol :: SymbolRepr "LLVM_pointer") IntrinsicMuxFn
   $ MapF.empty
@@ -374,12 +529,11 @@ type MacawTraceEvalStmtFunc sym arch = EvalStmtFunc (MacawStmtExtension arch) (M
 execMacawStmtExtension ::
   forall sym arch t st fs. (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn sym (MemTrace arch) arch ->
+  UndefinedPtrOps sym ->
   GlobalVar (MemTrace arch) ->
-  GlobalVar (ExitClassify arch) ->
-  GlobalVar (MaybeType (LLVMPointerType (ArchAddrWidth arch))) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   MacawTraceEvalStmtFunc sym arch
-execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar jvar pvar globs stmt
+execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
   = case stmt of
     MacawReadMem addrWidth memRepr addr
       -> liftToCrucibleState mvar $ \sym ->
@@ -406,92 +560,74 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mvar jvar pvar globs stmt
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
     MacawInstructionStart{} -> \cst -> pure ((), cst)
 
-    MacawBlockEnd blkend -> asCrucibleStateT $ \sym -> do
-      let
-        classk = blockEndToExitCase blkend
-      eImpl <- liftIO $ exitCaseToImpl sym classk
-      modify $ \cst -> setGlobalVar cst jvar eImpl
-      mret <- liftIO $ blockEndToReturn sym blkend
-      modify $ \cst -> setGlobalVar cst pvar mret
-
     PtrEq w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
       regEq <- natEq sym reg reg'
       offEq <- bvEq sym off off'
       andPred sym regEq offEq
 
-    PtrLeq w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
-      whoKnows <- ioFreshConstant sym "PtrLeq_across_allocations" knownRepr
-      regEq <- natEq sym reg reg'
-      offLeq <- bvUle sym off off'
-      itePred sym regEq offLeq whoKnows
+    PtrLeq w x y -> ptrOp w x y $ ptrPredOp (undefPtrLeq mkundef) natEqConstraint $ \sym _reg off _reg' off' -> bvUle sym off off'
 
-    PtrLt w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
-      whoKnows <- ioFreshConstant sym "PtrLt_across_allocations" knownRepr
-      regEq <- natEq sym reg reg'
-      offLt <- bvUlt sym off off'
-      itePred sym regEq offLt whoKnows
+
+    PtrLt w x y -> ptrOp w x y $ ptrPredOp (undefPtrLt mkundef) natEqConstraint $ \sym _reg off _reg' off' -> bvUlt sym off off'
 
     PtrMux w (RegEntry _ p) x y -> ptrOp w x y $ \sym reg off reg' off' -> do
       reg'' <- natIte sym p reg reg'
       off'' <- bvIte sym p off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAdd w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
+    PtrAdd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAdd mkundef) someZero $ \sym reg off reg' off' -> do
       regZero <- isZero sym reg
-      regZero' <- isZero sym reg'
-      someZero <- orPred sym regZero regZero'
-      assert sym someZero $ AssertFailureSimError
-        "PtrAdd: expected ptr+constant, saw ptr+ptr"
-        "When doing pointer addition, we expect at least one of the two arguments to the addition to have a region of 0 (i.e. not be the result of allocating memory). Both arguments had non-0 regions."
 
-      reg'' <- cases sym
-        [ (pure regZero, pure reg')
-        , (pure regZero', pure reg)
-        ]
-        (ioFreshConstant sym "PtrAdd_both_ptrs_region" knownRepr)
-      off'' <- cases sym
-        [ (pure someZero, bvAdd sym off off')
-        ]
-        (ioFreshConstant sym "PtrAdd_both_ptrs_offset" knownRepr)
+      reg'' <- natIte sym regZero reg' reg
+      off'' <- bvAdd sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrSub w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
-      regZero' <- isZero sym reg'
+    PtrSub w x y -> ptrOp w x y $ ptrBinOp (undefPtrSub mkundef) compatSub $ \sym reg off reg' off' -> do
       regEq <- natEq sym reg reg'
-      compatSub <- orPred sym regZero' regEq
-      assert sym compatSub $ AssertFailureSimError
-        "PtrSub: strange mix of allocation regions"
-        "When doing pointer subtraction, we expect that either the two pointers are from the same allocation region or the negated one is actually a constant. Other mixings of allocation regions have arbitrary behavior."
+      zero <- natLit sym 0
 
-      reg'' <- cases sym
-        [ (pure regZero', pure reg)
-        , (pure regEq, natLit sym 0)
-        ]
-        (ioFreshConstant sym "PtrSub_region_mismatch" knownRepr)
-      off'' <- cases sym
-        [ (pure compatSub, bvSub sym off off')
-        ]
-        (ioFreshConstant sym "PtrSub_region_mismatch" knownRepr)
+      reg'' <- natIte sym regEq zero reg
+      off'' <- bvSub sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAnd w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
+    PtrAnd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAnd mkundef) someZero $ \sym reg off reg' off' -> do
       regZero <- isZero sym reg
-      regZero' <- isZero sym reg'
-      someZero <- orPred sym regZero regZero'
-      assert sym someZero $ AssertFailureSimError
-        "PtrAnd: expected ptr&constant, saw ptr&ptr"
-        "When doing pointer addition, we expect at least one of the two arguments to the addition to have a region of 0 (i.e. not be the result of allocating memory). Both arguments had non-0 regions."
 
-      reg'' <- cases sym
-        [ (pure regZero, pure reg')
-        , (pure regZero', pure reg)
-        ]
-        (ioFreshConstant sym "PtrAnd_both_ptrs_region" knownRepr)
-      off'' <- cases sym
-        [ (pure someZero, bvAndBits sym off off')
-        ]
-        (ioFreshConstant sym "PtrAnd_both_ptrs_offset" knownRepr)
+      reg'' <- natIte sym regZero reg' reg
+      off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
+
+evalMacawExprExtensionTrace :: forall sym arch f tp
+                       .  IsSymInterface sym
+                       => UndefinedPtrOps sym
+                       -> sym
+                       -> IntrinsicTypes sym
+                       -> (Int -> String -> IO ())
+                       -> (forall utp . f utp -> IO (RegValue sym utp))
+                       -> MacawExprExtension arch f tp
+                       -> IO (RegValue sym tp)
+evalMacawExprExtensionTrace undefptr sym iTypes logFn f e0 =
+  case e0 of
+    PtrToBits _w x  -> doPtrToBits sym undefptr =<< f x
+    _ -> evalMacawExprExtension sym iTypes logFn f e0
+
+doPtrToBits ::
+  (IsSymInterface sym, 1 <= w) =>
+  sym ->
+  UndefinedPtrOps sym ->
+  LLVMPtr sym w ->
+  IO (SymBV sym w)
+doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
+  case asNat base of
+    Just 0 -> return off
+    _ -> do
+      cond <- natEq sym base =<< natLit sym 0
+      case asConstantPred cond of
+        Just True -> return off
+        _ -> do
+          assert sym cond $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
+          undef <- undefPtrOff mkundef sym cond ptr
+          bvIte sym cond off undef
 
 liftToCrucibleState ::
   GlobalVar mem ->
@@ -525,7 +661,51 @@ getGlobalVar cst gv = case lookupGlobal gv (cst ^. stateTree . actFrame . gpGlob
 setGlobalVar :: CrucibleState s sym ext rtp blocks r ctx -> GlobalVar mem -> RegValue sym mem -> CrucibleState s sym ext rtp blocks r ctx
 setGlobalVar cst gv val = cst & stateTree . actFrame . gpGlobals %~ insertGlobal gv val
 
+-- | A wrapped function that produces a predicate indicating that two pointer regions are
+-- compatible for some pointer operation. If this predicate is false, then the
+-- operation is undefined and yields an uninterpreted function.
+data RegionConstraint sym =
+  RegionConstraint
+    {
+      regConstraintMsg :: String
+    , regConstraintEval :: (sym -> SymNat sym -> SymNat sym  -> IO (Pred sym))
+    }
+
+-- | A 'RegionConstraint' that permits pointers from any two regions.
+natAny ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+natAny = RegionConstraint "impossible" $ \sym _ _ -> return $ truePred sym
+
+-- | A 'RegionConstraint' that permits pointers from any two regions.
+natEqConstraint ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+natEqConstraint = RegionConstraint "both regions must be equal" $ natEq
+
+-- | A 'RegionConstraint' that requires one of the regions to be zero.
+someZero ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+someZero = RegionConstraint "one pointer region must be zero" $ \sym reg1 reg2 -> do
+  regZero1 <- isZero sym reg1
+  regZero2 <- isZero sym reg2
+  orPred sym regZero1 regZero2
+
+-- | A 'RegionConstraint' that defines when regions are compatible for subtraction:
+-- either the regions are equal or the first region is zero.
+compatSub ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+compatSub = RegionConstraint msg $ \sym reg1 reg2 -> do
+  regZero1 <- isZero sym reg1
+  regEq <- natEq sym reg1 reg2
+  orPred sym regZero1 regEq
+  where
+    msg = "first pointer region must be zero, or both regions must be equal"
+
 ptrOp ::
+  IsSymInterface sym =>
   AddrWidthRepr w ->
   RegEntry sym (LLVMPointerType w) ->
   RegEntry sym (LLVMPointerType w) ->
@@ -533,7 +713,55 @@ ptrOp ::
   CrucibleState p sym ext rtp blocks r ctx ->
   IO (a, CrucibleState p sym ext rtp blocks r ctx)
 ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region' offset')) f =
-  addrWidthsArePositive w $ readOnlyWithSym $ \sym -> f sym region offset region' offset'
+  addrWidthsArePositive w $ readOnlyWithSym $ \sym -> do
+    f sym region offset region' offset'
+        
+ptrPredOp ::
+  1 <= w =>
+  IsSymInterface sym =>
+  UndefinedPtrPredOp sym ->
+  RegionConstraint sym ->
+  (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)) ->
+  sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)
+ptrPredOp mkundef regconstraint f sym reg1 off1 reg2 off2  = do
+  cond <- regConstraintEval regconstraint sym reg1 reg2
+  result <- f sym reg1 off1 reg2 off2
+  case asConstantPred cond of
+    Just True -> return result
+    _ -> do
+      assert sym cond $ AssertFailureSimError "ptrPredOp" $ "ptrPredOp: " ++ regConstraintMsg regconstraint
+      undef <- mkUndefPred mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      itePred sym cond result undef
+
+muxPtr ::
+  IsSymInterface sym =>
+  sym ->
+  Pred sym ->
+  LLVMPtr sym w ->
+  LLVMPtr sym w ->
+  IO (LLVMPtr sym w)
+muxPtr sym p (LLVMPointer region offset) (LLVMPointer region' offset') = do
+  BaseBVRepr _ <- return $ exprType offset
+  reg'' <- natIte sym p region region'
+  off'' <- bvIte sym p offset offset'
+  return $ LLVMPointer reg'' off''
+
+ptrBinOp ::
+  1 <= w => 
+  IsSymInterface sym =>
+  UndefinedPtrBinOp sym ->
+  RegionConstraint sym ->
+  (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)) ->
+  sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)
+ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
+  cond <- regConstraintEval regconstraint sym reg1 reg2
+  result <- f sym reg1 off1 reg2 off2
+  case asConstantPred cond of
+    Just True -> return result
+    _ -> do
+      assert sym cond $ AssertFailureSimError "ptrBinOp" $ "ptrBinOp: " ++ regConstraintMsg regconstraint
+      undef <- mkUndefPtr mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      muxPtr sym cond result undef
 
 cases ::
   IsExprBuilder sym =>
@@ -575,8 +803,8 @@ doReadMem ::
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (ToCrucibleType ty))
 doReadMem sym ptrW ptr memRepr = addrWidthClass ptrW $ do
-  arr <- gets memArr
-  val <- liftIO $ readMemArr sym arr ptr memRepr
+  mem <- get
+  val <- liftIO $ readMemArr sym mem ptr memRepr
   doMemOpInternal sym Read Unconditional ptrW ptr val memRepr
   pure val
 
@@ -590,13 +818,14 @@ doCondReadMem ::
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (ToCrucibleType ty))
 doCondReadMem sym cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
-  arr <- gets memArr
-  val <- liftIO $ readMemArr sym arr ptr memRepr
+  mem <- get
+  val <- liftIO $ readMemArr sym mem ptr memRepr
   doMemOpInternal sym Read (Conditional cond) ptrW ptr val memRepr
   liftIO $ iteDeep sym cond val def memRepr
 
 doWriteMem ::
   IsSymInterface sym =>
+  MemWidth ptrW =>
   sym ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
@@ -607,6 +836,7 @@ doWriteMem sym = doMemOpInternal sym Write Unconditional
 
 doCondWriteMem ::
   IsSymInterface sym =>
+  MemWidth ptrW =>
   sym ->
   RegValue sym BoolType ->
   AddrWidthRepr ptrW ->
@@ -631,7 +861,7 @@ ptrAdd sym _w (LLVMPointer base off1) off2 =
 -- | Calculate an index into the memory array from a pointer
 arrayIdx ::
   1 <= ptrW =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   LLVMPtr sym ptrW ->
   Integer ->
@@ -642,10 +872,34 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   bvIdx <- bvAdd sym off offBV
   return $ Empty :> reg :> bvIdx
 
+eqIdx ::
+  1 <= ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
+  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
+  IO (Pred sym)
+eqIdx sym (_ :> reg1 :> off1) (_ :> reg2 :> off2) = do
+  eqReg <- isEq sym reg1 reg2
+  eqOff <- isEq sym off1 off2
+  andPred sym eqReg eqOff
+
+leIdx ::
+  1 <= ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
+  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
+  IO (Pred sym)
+leIdx sym (_ :> reg1 :> off1) (_ :> reg2 :> off2) = do
+  eqReg <- isEq sym reg1 reg2
+  eqOff <- bvUle sym off1 off2
+  andPred sym eqReg eqOff
+
 concatPtrs ::
   1 <= w1 =>
   1 <= w2 =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   Endianness ->
   LLVMPtr sym w1 ->
@@ -670,7 +924,7 @@ proveLeq prf@LeqProof = prf
 chunkBV :: forall sym w.
   1 <= w =>
   2 <= w =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   Endianness ->
   NatRepr w ->
@@ -705,24 +959,61 @@ chunkBV sym endianness w bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
 
+data ReadStatus sym =
+  ReadStatus
+    { readDirty :: Pred sym
+    -- ^ all bytes reads are dirty
+    , readFresh :: Pred sym
+    -- ^ all bytes reads are fresh
+    }
+
+-- | True when the 'ReadStatus' indicates that at least one
+-- byte of the read may be fresh
+readAnyFresh ::
+  IsSymInterface sym =>
+  sym ->    
+  ReadStatus sym ->
+  IO (Pred sym)
+readAnyFresh sym st = notPred sym (readDirty st)
+
+initReadStatus ::
+  IsSymInterface sym =>
+  sym ->  
+  ReadStatus sym
+initReadStatus sym = ReadStatus (truePred sym) (truePred sym)
+
+mergeReadStatus ::
+  IsSymInterface sym =>
+  sym ->
+  ReadStatus sym ->
+  ReadStatus sym ->
+  IO (ReadStatus sym)
+mergeReadStatus sym st1 st2 = do
+  dirty <- andPred sym (readDirty st1) (readDirty st2)
+  fresh <- andPred sym (readFresh st1) (readFresh st2)
+  return $ ReadStatus dirty fresh
+
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
   1 <= ptrW =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
-  MemTraceArr sym ptrW ->
+  MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
   IO (RegValue sym (ToCrucibleType ty))
-readMemArr sym arr ptr = go 0 where
+readMemArr sym mem ptr repr = go 0 repr
+  where
   go :: Integer -> MemRepr ty' -> IO (RegValue sym (ToCrucibleType ty'))
   go n (BVMemRepr byteWidth endianness) =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl
         | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
-          idx <- arrayIdx sym ptr n
-          content <- arrayLookup sym arr idx
-          llvmPointer_bv sym content
+          (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
+          regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+          content <- arrayLookup sym regArray (Ctx.singleton off)
+          blk0 <- natLit sym 0
+          return $ LLVMPointer blk0 content
       Right LeqProof
         | byteWidth' <- decNat byteWidth
         , tailRepr <- BVMemRepr byteWidth' endianness
@@ -738,30 +1029,37 @@ readMemArr sym arr ptr = go 0 where
   go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
 
   go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
-    go (n + memReprByteSize recRepr * fromIntegral i) recRepr
+      go (n + memReprByteSize recRepr * fromIntegral i) recRepr
 
+-- | Write to the memory array and set the dirty bits on
+-- any written addresses
 writeMemArr :: forall sym ptrW w.
   1 <= ptrW =>
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
+  MemWidth ptrW =>
   sym ->
-  MemTraceArr sym ptrW ->
+  MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr (MT.BVType w) ->
   SymBV sym w ->
-  IO (MemTraceArr sym ptrW)
-writeMemArr sym arr_init ptr repr val = go 0 repr val arr_init where
+  IO (MemTraceImpl sym ptrW)
+writeMemArr sym mem_init ptr repr val = go 0 repr val mem_init
+  where
   go ::
     Integer ->
     MemRepr (MT.BVType w') ->
     SymBV sym w' ->
-    MemTraceArr sym ptrW ->
-    IO (MemTraceArr sym ptrW)
-  go n (BVMemRepr byteWidth endianness) bv arr =
+    MemTraceImpl sym ptrW ->
+    IO (MemTraceImpl sym ptrW)
+  go n (BVMemRepr byteWidth endianness) bv mem =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl -> do
-        idx <- arrayIdx sym ptr n
+        (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
         Refl <- return $ zeroSubEq byteWidth (knownNat @1)
-        arrayUpdate sym arr idx bv
+        regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+        regArray' <- arrayUpdate sym regArray (Ctx.singleton off) bv
+        arr <- arrayUpdate sym (memArr mem) (Ctx.singleton reg) regArray'
+        return $ mem { memArr = arr }
       Right LeqProof -> do
         let
           byteWidth' = decNat byteWidth
@@ -769,12 +1067,22 @@ writeMemArr sym arr_init ptr repr val = go 0 repr val arr_init where
           reprHead = BVMemRepr (knownNat @1) endianness
         LeqProof <- return $ oneSubEq byteWidth
         (hd, tl) <- chunkBV sym endianness byteWidth bv
-        arr1 <- go n reprHead hd arr
-        go (n + 1) repr' tl arr1
+        mem1 <- go n reprHead hd mem
+        go (n + 1) repr' tl mem1
 
+ifCond ::
+  IsSymInterface sym =>
+  sym ->  
+  MemOpCondition sym ->
+  SymExpr sym tp ->
+  SymExpr sym tp ->
+  IO (SymExpr sym tp)
+ifCond _ Unconditional eT _ = return eT
+ifCond sym (Conditional p) eT eF = baseTypeIte sym p eT eF
 
 doMemOpInternal :: forall sym ptrW ty.
   IsSymInterface sym =>
+  MemWidth ptrW =>
   sym ->
   MemOpDirection ->
   MemOpCondition sym ->
@@ -789,14 +1097,16 @@ doMemOpInternal sym dir cond ptrW = go where
     repr@(BVMemRepr byteWidth endianness)
       | LeqProof <- mulMono (knownNat @8) byteWidth
       -> addrWidthsArePositive ptrW $ do
-      MemTraceImpl s arr <- get
-      let s' = s Seq.:|> MemOp ptr dir cond byteWidth regVal endianness
-      arr' <- case dir of
-        Read -> return arr
+     
+      modify $ \mem -> mem { memSeq = (memSeq mem) Seq.:|> MemOp ptr dir cond byteWidth regVal endianness }
+      case dir of
+        Read -> return ()
         Write -> do
           LLVMPointer _ rawBv <- return regVal
-          liftIO $ writeMemArr sym arr ptr repr rawBv
-      put $ MemTraceImpl s' arr'
+          mem <- get
+          mem' <- liftIO $ writeMemArr sym mem ptr repr rawBv
+          arr <- liftIO $ ifCond sym cond (memArr mem') (memArr mem)
+          put $ mem { memArr = arr }
     FloatMemRepr _infoRepr _endianness -> fail "reading floats not supported in doMemOpInternal"
     PackedVecMemRepr _countRepr recRepr -> addrWidthsArePositive ptrW $ do
       elemSize <- liftIO $ bvLit sym ptrWidthNatRepr (BV.mkBV ptrWidthNatRepr (memReprByteSize recRepr))
@@ -851,6 +1161,11 @@ ioFreshConstant sym nm ty = do
   symbol <- ioSolverSymbol nm
   freshConstant sym symbol ty
 
+ioFreshVar :: IsSymExprBuilder sym => sym -> String -> BaseTypeRepr tp -> IO (BoundVar sym tp)
+ioFreshVar sym nm ty = do
+  symbol <- ioSolverSymbol nm
+  freshBoundVar sym symbol ty
+
 --------------------------------------------------------
 -- Axioms on type-level naturals
 
@@ -867,7 +1182,7 @@ oneSubEq w = unsafeCoerce (leqRefl w)
 -- Equivalence check
 
 andCond ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemOpCondition sym ->
   MemOpCondition sym ->
@@ -883,7 +1198,7 @@ mconcatSeq = foldl' (<>) mempty
 
 -- | Flatten a 'MemOp' into a sequence of atomic operations
 flatMemOp ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemOpCondition sym ->
   MemOp sym ptrW ->
@@ -903,7 +1218,7 @@ flatMemOp sym outer_cond mop = case mop of
 
 -- | Collapse a 'MemTraceSeq' into a sequence of conditional write operations
 flatMemOps ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   MemTraceSeq sym ptrW ->
   IO (Seq (MemOp sym ptrW))
@@ -918,36 +1233,39 @@ data MemFootprint sym ptrW where
     NatRepr w ->
     MemOpDirection ->
     MemOpCondition sym ->
+    Endianness ->
     MemFootprint sym ptrW
 
 memFootDir :: MemFootprint sym ptrW -> MemOpDirection
-memFootDir (MemFootprint _ _ dir _) = dir
+memFootDir (MemFootprint _ _ dir _ _) = dir
 
 instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
-  (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2)
+  (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
    | Just Refl <- testEquality reg1 reg2
    , Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
-   = cond1 == cond2 && dir1 == dir2
+   = cond1 == cond2 && dir1 == dir2 && end1 == end2
   _ == _ = False
 
 instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
-  compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2) =
+  compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2) =
     compare dir1 dir2 <>
     (toOrdering $ compareF reg1 reg2) <>
     (toOrdering $ compareF off1 off2) <>
     (toOrdering $ compareF sz1 sz2) <>
-    compare cond1 cond2
+    compare cond1 cond2 <>
+    compare end1 end2
 
 
 memOpFootprint ::
   MemOp sym ptrW ->
   MemFootprint sym ptrW
-memOpFootprint (MemOp ptr dir cond w _ _) = MemFootprint ptr w dir cond
+memOpFootprint (MemOp ptr dir cond w _ end) = MemFootprint ptr w dir cond end
 memOpFootprint _ = error "Unexpected merge op"
 
 traceFootprint ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
   sym ->
   MemTraceSeq sym ptrW ->
   IO (Set (MemFootprint sym ptrW))
@@ -955,47 +1273,33 @@ traceFootprint sym mem = do
   footprints <- (fmap memOpFootprint) <$> flatMemOps sym mem
   return $ foldl' (\a b -> Set.insert b a) mempty footprints
 
-equalAt :: IsSymInterface sym =>
-  1 <= ptrW =>
+llvmPtrEq ::
+  IsExprBuilder sym =>
   sym ->
-  (forall w. LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) ->
-  MemTraceArr sym ptrW ->
-  MemTraceArr sym ptrW ->
-  MemFootprint sym ptrW ->
+  LLVMPtr sym w ->
+  LLVMPtr sym w ->
   IO (Pred sym)
-equalAt sym eqRel arr1 arr2 (MemFootprint ptr w _ cond) = do
-  let repr = BVMemRepr w BigEndian
-  val1 <- readMemArr sym arr1 ptr repr
-  val2 <- readMemArr sym arr2 ptr repr
-  cond' <- case cond of
-    Unconditional -> return $ truePred sym
-    Conditional c -> return c
-  eqP <- eqRel val1 val2
-  impliesPred sym cond' eqP
+llvmPtrEq sym (LLVMPointer region offset) (LLVMPointer region' offset') = do
+  regionsEq <- isEq sym region region'
+  offsetsEq <- isEq sym offset offset'
+  andPred sym regionsEq offsetsEq
 
--- | Return a predicate that is true if the resulting memory
--- states are equivalent, up to reordering of individual writes
--- and the given equivalence relation
-equivWrites ::
-  forall sym ptrW.
+
+traceFootprints ::
   IsSymInterface sym =>
-  1 <= ptrW =>
   sym ->
-  (forall w. LLVMPtr sym w -> LLVMPtr sym w -> IO (Pred sym)) ->
   MemTraceImpl sym ptrW ->
   MemTraceImpl sym ptrW ->
-  IO (Pred sym)
-equivWrites sym eqRel mem1 mem2 = do
+  IO [MemFootprint sym ptrW]
+traceFootprints sym mem1 mem2 = do
   foot1 <- traceFootprint sym (memSeq mem1)
   foot2 <- traceFootprint sym (memSeq mem2)
-  let foot = Set.union foot1 foot2
-  foldM addFoot (truePred sym) foot
-  where
-    addFoot ::
-      Pred sym ->
-      MemFootprint sym ptrW ->
-      IO (Pred sym)
-    addFoot p f | Write <- memFootDir f = do
-      p' <- equalAt sym eqRel (memArr mem1) (memArr mem2) f
-      andPred sym p p'
-    addFoot _ _ = return $ truePred sym
+  return $ Set.toList (Set.union foot1 foot2)
+
+getCond ::
+  IsExprBuilder sym =>
+  sym ->
+  MemOpCondition sym ->
+  Pred sym
+getCond sym Unconditional = truePred sym
+getCond _sym (Conditional p) = p
