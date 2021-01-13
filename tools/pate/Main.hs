@@ -178,14 +178,17 @@ terminalFormatEvent evt =
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
-    PE.CheckedEquivalence (PE.Blocks origAddr _) (PE.Blocks patchedAddr _) res duration ->
-      let pfx = mconcat [ "Checking original block at "
-                        , PP.viaShow origAddr
-                        , " against patched block at "
-                        , PP.viaShow patchedAddr
-                        , " "
-                        , PP.parens (PP.viaShow duration)
-                        ]
+    PE.CheckedEquivalence (PE.BlocksPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
+      let
+        origAddr = PT.concreteAddress blkO
+        patchedAddr = PT.concreteAddress blkP
+        pfx = mconcat [ "Checking original block at "
+                      , PP.viaShow origAddr
+                      , " against patched block at "
+                      , PP.viaShow patchedAddr
+                      , " "
+                      , PP.parens (PP.viaShow duration)
+                      ]
       in case res of
         PE.Equivalent ->
           let okStyle = PPRT.color PPRT.Green <> PPRT.bold

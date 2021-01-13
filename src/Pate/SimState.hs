@@ -36,6 +36,7 @@ module Pate.SimState
   , SimInput(..)
   , SimOutput(..)
   , SimSpec(..)
+  , specMap
   , SimBundle(..)
   , simInMem
   , simInRegs
@@ -133,6 +134,15 @@ data SimSpec sym arch f = SimSpec
   , specAsm :: W4.Pred sym
   , specBody :: f
   }
+
+instance PT.ExprMappable sym f => PT.ExprMappable sym (SimSpec sym arch f) where
+  mapExpr sym f spec = do
+    specAsm' <- f (specAsm spec)
+    specBody' <- PT.mapExpr sym f (specBody spec)
+    return $ SimSpec (specVarsO spec) (specVarsP spec) specAsm' specBody'
+
+specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
+specMap f spec = spec { specBody = f (specBody spec) }
 
 data SimBundle sym arch = SimBundle
   {

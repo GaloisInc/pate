@@ -36,6 +36,16 @@ module Pate.Equivalence
   , EquivRelation(..)
   , MemEquivRelation(..)
   , RegEquivRelation(..)
+  , EquivTripleBody(..)
+  , EquivTriple
+  , SomeProofBlockSlice(..)
+  , VerificationStatus(..)
+  , ProofBlockSliceBody(..)
+  , ProofBlockSlice
+  , ProofFunctionCall(..)
+  , trivialSliceBody
+  , prfPre
+  , prfBodyPre
   , muxStatePred
   , mapMemPred
   , memPredTrue
@@ -80,11 +90,117 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Data.Macaw.CFG as MM
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Types as PT
 import           Pate.SimState
 import           What4.ExprHelpers
+
+---------------------------------------------
+
+data VerificationStatus arch =
+    Unverified
+  | VerificationSuccess
+  | VerificationFail (PT.InequivalenceResult arch)
+
+-- | The body of an 'EquivTriple'.
+data EquivTripleBody sym arch where
+  EquivTripleBody ::
+    {
+      eqPair :: PT.PatchPair arch
+      -- ^ the entry points that yield equivalent states on the post-domain
+      -- after execution, assuming initially equivalent states on the pre-domain
+    , eqPreDomain :: StatePred sym arch
+      -- ^ the pre-domain: the state that was assumed initially equivalent
+      -- closed over the bound variables representing the initial state
+    , eqPostDomain :: StatePredSpec sym arch
+      -- ^ the post-domain: the state that was proven equivalent after execution
+      -- abstracted over the bound variables representing the final state
+    , eqStatus :: VerificationStatus arch
+      -- ^ flag indicating whether or not this triple has passed verification
+    } -> EquivTripleBody sym arch
+
+instance PT.ExprMappable sym (EquivTripleBody sym arch) where
+  mapExpr sym f triple = do
+    eqPreDomain' <- PT.mapExpr sym f (eqPreDomain triple)
+    eqPostDomain' <- PT.mapExpr sym f (eqPostDomain triple)
+    return $ EquivTripleBody (eqPair triple) eqPreDomain' eqPostDomain' (eqStatus triple)
+
+-- | An triple representing the equivalence conditions for a block pair. Abstracted
+-- over the initial machine state.
+type EquivTriple sym arch = SimSpec sym arch (EquivTripleBody sym arch)
+
+data ProofFunctionCall sym arch =
+    ProofFunctionCall
+      {
+        -- | proof that the correct pre-domain is established equivalent
+        -- prior to the function call
+        prfFunPre :: EquivTripleBody sym arch
+        -- | proof that the function itself establishes equivalence on the target
+        -- post-domain. Note that it is a 'ProofBlockSlice' since we do not need to
+        -- bind the initial machine state that was in scope for this call.
+      , prfFunBody :: ProofBlockSlice sym arch
+        -- | proof that the target post-domain following the function call
+        -- establishes the overall target post-domain equivalence. Again this does not
+        -- bind the initial state.
+      , prfFunCont :: ProofBlockSlice sym arch
+      }
+  | ProofTailCall
+      { prfFunPre :: EquivTripleBody sym arch
+      , prfFunCont :: ProofBlockSlice sym arch
+      }   
+
+instance PT.ExprMappable sym (ProofFunctionCall sym arch) where
+  mapExpr sym f prf = do
+    prfFunPre' <- PT.mapExpr sym f (prfFunPre prf)
+    prfFunCont' <- PT.mapExpr sym f (prfFunCont prf)
+    case prf of
+      ProofFunctionCall{} -> do
+        prfFunBody' <- PT.mapExpr sym f (prfFunBody prf)
+        return $ ProofFunctionCall prfFunPre' prfFunBody' prfFunCont'
+      ProofTailCall{} -> return $ ProofTailCall prfFunPre' prfFunCont'
+        
+
+-- | Trace of the proof that a pair of block "slices" satisfy the
+-- given triple. 
+data ProofBlockSliceBody sym arch =
+  ProofBlockSliceBody
+      { -- | the top-level triple for this slice, stating that
+        -- all possible exits satisfy equivalence on the post-domain
+        -- given equivalence on the pre-domain
+        prfTriple :: EquivTripleBody sym arch
+        -- | all jumps which exit the slice with a function call
+      , prfFunCalls :: [ProofFunctionCall sym arch]
+      , prfReturn :: Maybe (EquivTripleBody sym arch)
+      , prfUnknownExit :: Maybe (EquivTripleBody sym arch)
+      }
+
+instance PT.ExprMappable sym (ProofBlockSliceBody sym arch) where
+  mapExpr sym f prf = do
+    prfTriple' <- PT.mapExpr sym f (prfTriple prf)
+    prfFunCalls' <- mapM (PT.mapExpr sym f) (prfFunCalls prf)
+    prfReturn' <- mapM (PT.mapExpr sym f) (prfReturn prf)
+    prfUnknownExit' <- mapM (PT.mapExpr sym f) (prfUnknownExit prf)
+    return $ ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit'
+
+trivialSliceBody :: EquivTripleBody sym arch -> ProofBlockSliceBody sym arch
+trivialSliceBody triple = ProofBlockSliceBody triple [] Nothing Nothing
+
+prfBodyPre :: ProofBlockSliceBody sym arch -> StatePred sym arch
+prfBodyPre = eqPreDomain . prfTriple
+
+-- | A trace for the proof of a given triple, abstracted over an initial machine state.
+type ProofBlockSlice sym arch = SimSpec sym arch (ProofBlockSliceBody sym arch)
+
+prfPre :: ProofBlockSlice sym arch -> StatePredSpec sym arch
+prfPre = specMap prfBodyPre
+
+-- | 'EquivTriple' abstracted over the specific expression builder. Used for reporting.
+data SomeProofBlockSlice arch where
+  SomeProofBlockSlice ::
+    forall t st fs arch.
+    ProofBlockSlice (W4B.ExprBuilder t st fs) arch -> SomeProofBlockSlice arch
 
 ---------------------------------------------
 -- Memory predicate

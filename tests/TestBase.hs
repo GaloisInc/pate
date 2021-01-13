@@ -87,13 +87,13 @@ doTest mwb sv proxy fp = do
       , PL.discoveryCfg = PT.defaultDiscoveryCfg
       , PL.logger =
           LJ.LogAction $ \e -> case e of
-            PE.CheckedEquivalence _ _ PE.Equivalent time -> do
+            PE.CheckedEquivalence _ PE.Equivalent time -> do
               putStrLn $ "Successful equivalence check: " ++ show time
-            PE.CheckedEquivalence _ _ _ time -> do
+            PE.CheckedEquivalence _ _ time -> do
               putStrLn $ "Failed equivalence check: " ++ show time
-            PE.CheckedBranchCompleteness _ _ PE.BranchesComplete time -> do
+            PE.CheckedBranchCompleteness _ PE.BranchesComplete time -> do
               putStrLn $ "Branch completeness check: " ++ show time
-            PE.ComputedPrecondition _ _ time -> do
+            PE.ComputedPrecondition _ time -> do
               putStrLn $ "Precondition propagation: " ++ show time
             _ -> return ()
       }

@@ -29,6 +29,7 @@ module Pate.Types
   , PatchPair(..)
   , ExprMappable(..)
   , ConcreteBlock(..)
+  , blockMemAddr
   , BlockMapping(..)
   , BlockTarget(..)
   , ConcreteAddress(..)
@@ -170,8 +171,6 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (PatchPair arch) where
   show (PatchPair blk1 blk2) = ppBlock blk1 ++ " vs. " ++ ppBlock blk2
 
 
-
-
 data BlockTarget arch bin =
   BlockTarget
     { targetCall :: ConcreteBlock arch bin
@@ -203,6 +202,9 @@ data ConcreteBlock arch (bin :: WhichBinary) =
                 , concreteBlockEntry :: BlockEntryKind arch
                 , blockBinRepr :: WhichBinaryRepr bin
                 }
+
+blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
+blockMemAddr (ConcreteBlock (ConcreteAddress addr) _ _) = addr
 
 instance TestEquality (ConcreteBlock arch) where
   testEquality (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
@@ -641,6 +643,7 @@ data InnerEquivalenceError arch
   | UnsatisfiableAssumptions
   | InequivalentError (InequivalenceResult arch)
   | MissingCrucibleGlobals
+  | UnexpectedUnverifiedTriple
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =

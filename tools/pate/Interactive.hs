@@ -67,8 +67,10 @@ consumeEvents chan r0 = do
                                                           & patchedBinary .~ Just (pelf, pmap), ())
         PE.ElfLoaderWarnings {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.CheckedEquivalence origBlock@(PE.Blocks addr _) patchedBlock res duration -> do
-          let et = EquivalenceTest origBlock patchedBlock duration
+        PE.CheckedEquivalence bpair@(PE.BlocksPair (PE.Blocks blk _) _) res duration -> do
+          let
+            addr = PT.concreteAddress blk
+            et = EquivalenceTest bpair duration
           case res of
             PE.Equivalent ->
               IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & successful %~ Map.insert addr et
@@ -151,7 +153,10 @@ renderEvent st detailDiv evt =
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       TP.ul #+ (map (\w -> TP.li #+ [TP.string (show w)]) pes)
-    PE.CheckedEquivalence ob@(PE.Blocks (PT.ConcreteAddress origAddr) _) pb@(PE.Blocks (PT.ConcreteAddress patchedAddr) _) res duration -> do
+    PE.CheckedEquivalence (PE.BlocksPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
+      let
+        origAddr = PT.blockMemAddr blkO
+        patchedAddr = PT.blockMemAddr blkP
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
       TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb res)
@@ -169,12 +174,15 @@ renderEvent st detailDiv evt =
 showBlockPairDetail :: (PB.ArchConstraints arch)
                     => State arch
                     -> TP.Element
-                    -> PE.Blocks arch
-                    -> PE.Blocks arch
+                    -> PE.Blocks arch PT.Original
+                    -> PE.Blocks arch PT.Patched
                     -> PE.EquivalenceResult arch
                     -> a
                     -> TP.UI ()
-showBlockPairDetail st detailDiv (PE.Blocks (PT.ConcreteAddress origAddr) opbs) (PE.Blocks (PT.ConcreteAddress patchedAddr) ppbs) res _ = do
+showBlockPairDetail st detailDiv (PE.Blocks blkO opbs) (PE.Blocks blkP ppbs) res _ = do
+  let
+    origAddr = PT.blockMemAddr blkO
+    patchedAddr = PT.blockMemAddr blkP
   g <- TP.grid [ renderCounterexample res
                , concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
                , concat [ [renderCode opbs, renderCode ppbs]

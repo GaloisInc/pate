@@ -26,8 +26,8 @@ module Pate.Monad
   , EquivalenceContext(..)
   , BinaryContext(..)
   , PreconditionPropagation(..)
+  , VerificationFailureMode(..)
   , SimBundle(..)
-  , PrePostMap
   , withBinary
   , withValid
   , withValidEnv
@@ -173,12 +173,19 @@ data EquivEnv sym arch where
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envDiscoveryCfg :: DiscoveryConfig
     , envPrecondProp :: PreconditionPropagation
+    , envFailureMode :: VerificationFailureMode
     , envBaseEquiv :: EquivRelation sym arch
+    , envGoalTriples :: [EquivTriple sym arch]
+    -- ^ input equivalence problems to solve
     } -> EquivEnv sym arch
 
 data PreconditionPropagation =
     PropagateExactEquality
   | PropagateComputedDomains
+
+data VerificationFailureMode =
+    ThrowOnAnyFailure
+  | ContinueAfterFailure
 
 emitEvent :: PE.Event arch -> EquivM sym arch ()
 emitEvent evt = do
@@ -189,17 +196,12 @@ emitEvent evt = do
 
 data EquivState sym arch where
   EquivState ::
-    {
-   
-      stOpenTriples :: PrePostMap sym arch
-    , stProvenTriples :: PrePostMap sym arch
-    , stFailedTriples :: PrePostMap sym arch
-    -- ^ proven function equivalence pre and postconditions
+    { stProofs :: [ProofBlockSlice sym arch]
+    -- ^ all intermediate triples that were proven for each block slice
     , stSimResults ::  Map (PatchPair arch) (SimSpec sym arch (SimBundle sym arch))
-    
+    -- ^ cached results of symbolic execution for a given block pair
+    , stEqStats :: EquivalenceStatistics
     } -> EquivState sym arch
-
-type PrePostMap sym arch = Map (PatchPair arch) [(StatePredSpec sym arch, StatePredSpec sym arch)]
 
 newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (EquivalenceError arch) IO))) a }
   deriving (Functor
