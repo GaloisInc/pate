@@ -58,10 +58,14 @@ import qualified Data.Traversable as DT
 import           GHC.TypeLits
 import qualified Lumberjack as LJ
 import qualified System.IO as IO
+import qualified Data.Word.Indexed as W
 
+import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..))
+import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
+
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
@@ -194,6 +198,9 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envGoalTriples = [] -- populated in runVerificationLoop
         , envValidSym = Sym sym
         , envStartTime = startedAt
+        , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
+        -- TODO: restructure EquivEnv to avoid this
+        , envCurrentFunc = error "no function under analysis"
         }
 
     liftIO $ do
@@ -255,8 +262,8 @@ runVerificationLoop env pPairs = do
         True -> do
           mainO <- CMR.asks $ binEntry . originalCtx . envCtx
           mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
-          blkO <- mkConcreteBlock BlockEntryInitFunction <$> segOffToAddr mainO
-          blkP <- mkConcreteBlock BlockEntryInitFunction <$> segOffToAddr mainP
+          blkO <- mkConcreteBlock BlockEntryInitFunction mainO
+          blkP <- mkConcreteBlock BlockEntryInitFunction mainP
           let pPair = PatchPair blkO blkP
           return $ pPair : pPairs
         False -> return pPairs
@@ -1205,9 +1212,18 @@ concreteValidJumpTargets allPbs pb = do
 mkConcreteBlock ::
   KnownBinary bin =>
   BlockEntryKind arch ->
+  MM.ArchSegmentOff arch ->
+  EquivM sym arch (ConcreteBlock arch bin)
+mkConcreteBlock k a = case getConcreteBlock a k W4.knownRepr of
+  Just blk -> return blk
+  _ -> throwHere $ NonConcreteParsedBlockAddress a
+
+mkConcreteBlock' ::
+  KnownBinary bin =>
+  BlockEntryKind arch ->
   ConcreteAddress arch ->
   ConcreteBlock arch bin
-mkConcreteBlock k a = ConcreteBlock a k W4.knownRepr
+mkConcreteBlock' k a = ConcreteBlock a k W4.knownRepr
 
 concreteNextIPs ::
   ValidArch arch =>
@@ -1238,16 +1254,16 @@ concreteJumpTargets pb = case MD.pblockTermStmt pb of
     Just addr -> go (concreteValueAddress addr) Nothing
     _ -> return $ []
   MD.ParsedJump _ tgt -> do
-    blk <- mkConcreteBlock BlockEntryJump <$> segOffToAddr tgt
+    blk <- mkConcreteBlock BlockEntryJump tgt
     return $ [ BlockTarget blk Nothing ]
   MD.ParsedBranch _ _ t f -> do
-    blk_t <- mkConcreteBlock BlockEntryJump <$> segOffToAddr t
-    blk_f <- mkConcreteBlock BlockEntryJump <$> segOffToAddr f
+    blk_t <- mkConcreteBlock BlockEntryJump t
+    blk_f <- mkConcreteBlock BlockEntryJump f
     return $ [ BlockTarget blk_t Nothing, BlockTarget blk_f Nothing ]
   MD.ParsedLookupTable st _ _ -> go (concreteNextIPs st) Nothing
   MD.ParsedArchTermStmt _ st ret -> do
-    ret_blk <- fmap (mkConcreteBlock BlockEntryPostArch) <$> mapM segOffToAddr ret
-    return $ [ BlockTarget (mkConcreteBlock BlockEntryPostArch next) ret_blk
+    ret_blk <- mapM (mkConcreteBlock BlockEntryPostArch) ret
+    return $ [ BlockTarget (mkConcreteBlock' BlockEntryPostArch next) ret_blk
              | next <- (concreteNextIPs st) ]
   _ -> return []
   where
@@ -1256,8 +1272,8 @@ concreteJumpTargets pb = case MD.pblockTermStmt pb of
       Maybe (MM.ArchSegmentOff arch) ->
       EquivM sym arch [BlockTarget arch bin]
     go next_ips ret = do
-      ret_blk <- fmap (mkConcreteBlock BlockEntryPostFunction) <$> mapM segOffToAddr ret
-      return $ [ BlockTarget (mkConcreteBlock BlockEntryInitFunction next) ret_blk | next <- next_ips ]
+      ret_blk <- mapM (mkConcreteBlock BlockEntryPostFunction) ret
+      return $ [ BlockTarget (mkConcreteBlock' BlockEntryInitFunction next) ret_blk | next <- next_ips ]
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map
@@ -1327,6 +1343,13 @@ getBlocks pPair = do
     blkO = pOrig pPair
     blkP = pPatched pPair
 
+functionSegOffs ::
+  PatchPair arch ->
+  EquivM sym arch (MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)
+functionSegOffs pPair = do
+  PE.BlocksPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- getBlocks pPair
+  return $ (MD.pblockAddr pblkO, MD.pblockAddr pblkP)
+
 lookupBlocks ::
   forall sym arch bin.
   KnownBinary bin =>
@@ -1351,6 +1374,21 @@ lookupBlocks b = do
   end = ConcreteAddress (MM.MemAddr (MM.addrBase addr) maxBound)
   i = IM.OpenInterval start end
 
+wLit :: (1 <= w) => W.W w -> EquivM sym arch (W4.SymBV sym w)
+wLit w = withSymIO $ \sym -> W4.bvLit sym (W.rep w) (BVS.mkBV (W.rep w) (W.unW w))
+
+getCurrentTOCs :: HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
+getCurrentTOCs = do
+  (tocO, tocP) <- CMR.asks envTocs
+  curFuncs <- CMR.asks envCurrentFunc
+  (addrO, addrP) <- functionSegOffs curFuncs
+  wO <- case TOC.lookupTOC tocO addrO of
+    Just w -> return w
+    Nothing -> throwHere $ MissingTOCEntry addrO
+  wP <- case TOC.lookupTOC tocP addrP of
+    Just w -> return w
+    Nothing -> throwHere $ MissingTOCEntry addrP
+  return $ (wO, wP)
 
 segOffToAddr ::
   MM.ArchSegmentOff arch ->
@@ -1414,25 +1452,35 @@ spValidRegion stO stP = withSym $ \sym -> do
     eqP <- W4.isEq sym regionP stackRegion
     W4.andPred sym eqO eqP
 
-tocValidRegion ::
+tocValidPred ::
   forall sym arch.
   SimState sym arch Original ->
   SimState sym arch Patched ->
   EquivM sym arch (W4.Pred sym)
-tocValidRegion stO stP = withSym $ \sym ->
-  case toc_reg @arch of
-    Just r -> do      
-      let
-        regsO = simRegs stO
-        regsP = simRegs stP
-        CLM.LLVMPointer regionO _ = (macawRegValue $ regsO ^. MM.boundValue r)
-        CLM.LLVMPointer regionP _ = (macawRegValue $ regsP ^. MM.boundValue r)
-      stackRegion <- CMR.asks envStackRegion
-      liftIO $ do
-        eqO <- W4.notPred sym =<< W4.isEq sym regionO stackRegion
-        eqP <- W4.notPred sym =<< W4.isEq sym regionP stackRegion
-        W4.andPred sym eqO eqP
-    _ -> return $ W4.truePred sym
+tocValidPred stO stP = withSym $ \sym ->
+  withTOCCases @arch (return $ W4.truePred sym) $ do
+    let
+      r = toc_reg @arch
+      regsO = simRegs stO
+      regsP = simRegs stP
+      CLM.LLVMPointer regionO valO = (macawRegValue $ regsO ^. MM.boundValue r)
+      CLM.LLVMPointer regionP valP = (macawRegValue $ regsP ^. MM.boundValue r)
+    stackRegion <- CMR.asks envStackRegion
+    -- global memory (i.e. the region of the TOC) is distinct from the stack
+    notStack <- liftIO $ do
+      eqO <- W4.notPred sym =<< W4.isEq sym regionO stackRegion
+      eqP <- W4.notPred sym =<< W4.isEq sym regionP stackRegion
+      W4.andPred sym eqO eqP
+    -- the register value should always be equal to the expected TOC according
+    -- to the loaded ELF, which is based on the function we are considering
+    (tocO, tocP) <- getCurrentTOCs
+    tocOBV <- wLit tocO
+    tocPBV <- wLit tocP
+    tocsLit <- liftIO $ do
+      eqO <- W4.isEq sym valO tocOBV
+      eqP <- W4.isEq sym valP tocPBV
+      W4.andPred sym eqO eqP      
+    liftIO $ allPreds sym [notStack, tocsLit]
 
 validInitState ::
   Maybe (PatchPair arch) ->
@@ -1444,7 +1492,7 @@ validInitState mpPair stO stP = withSym $ \sym -> do
     Just pPair -> ipValidPred pPair stO stP
     Nothing -> return $ W4.truePred sym
   spValid <- spValidRegion stO stP
-  tocValid <- tocValidRegion stO stP
+  tocValid <- tocValidPred stO stP
   liftIO $ allPreds sym [ipValid, spValid, tocValid]
 
 --------------------------------------------------------
@@ -1467,9 +1515,7 @@ topLevelPostRegisterDomain ::
   forall sym arch.
   EquivM sym arch (M.Map (Some (MM.ArchReg arch)) (W4.Pred sym))
 topLevelPostRegisterDomain = withSym $ \sym ->
-  case toc_reg @arch of
-    Just r -> return $ M.singleton (Some r) (W4.truePred sym)
-    Nothing -> return M.empty
+  return $ withTOCCases @arch M.empty (M.singleton (Some (toc_reg @arch)) (W4.truePred sym))
 
 -- | Default toplevel post-domain:
 --   table of contents register (if present)

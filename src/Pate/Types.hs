@@ -29,6 +29,7 @@ module Pate.Types
   , PatchPair(..)
   , ExprMappable(..)
   , ConcreteBlock(..)
+  , getConcreteBlock
   , blockMemAddr
   , BlockMapping(..)
   , BlockTarget(..)
@@ -46,6 +47,9 @@ module Pate.Types
   , Patched
   , WhichBinaryRepr(..)
   , ValidArch(..)
+  , HasTOCReg(..)
+  , HasTOCDict(..)
+  , withTOCCases
   , ValidSym
   , Sym(..)
   , RegisterDiff(..)
@@ -114,6 +118,8 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 
+import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..)) 
+import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Discovery as MD
@@ -207,6 +213,16 @@ data ConcreteBlock arch (bin :: WhichBinary) =
                 , concreteBlockEntry :: BlockEntryKind arch
                 , blockBinRepr :: WhichBinaryRepr bin
                 }
+
+getConcreteBlock ::
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  MM.ArchSegmentOff arch ->
+  BlockEntryKind arch ->
+  WhichBinaryRepr bin ->
+  Maybe (ConcreteBlock arch bin)
+getConcreteBlock off k bin = case MM.segoffAsAbsoluteAddr off of
+  Just addr -> Just $ ConcreteBlock (ConcreteAddress (MM.absoluteAddr addr)) k bin
+  _ -> Nothing
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
 blockMemAddr (ConcreteBlock (ConcreteAddress addr) _ _) = addr
@@ -685,6 +701,7 @@ data InnerEquivalenceError arch
   | InequivalentError (InequivalenceResult arch)
   | MissingCrucibleGlobals
   | UnexpectedUnverifiedTriple
+  | MissingTOCEntry (MM.ArchSegmentOff arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =
