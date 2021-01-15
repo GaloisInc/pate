@@ -16,6 +16,7 @@ import qualified Data.Time as TM
 import qualified Pate.Binary as PB
 import qualified Pate.Types as PT
 import qualified Pate.Equivalence as PE
+import qualified Pate.Proof as PP
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
@@ -44,7 +45,10 @@ data BranchCompletenessResult arch = BranchesComplete
 -- This can include traditional logging information, but also statistics about
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
-  ProvenTriple :: BlocksPair arch -> PE.SomeProofBlockSlice arch -> TM.NominalDiffTime -> Event arch
+  -- | top-level result
+  ProvenGoal :: BlocksPair arch -> PP.SomeProofGoal arch -> TM.NominalDiffTime -> Event arch
+  -- | intermediate result
+  ProvenTriple :: BlocksPair arch -> PP.SomeProofBlockSlice arch -> TM.NominalDiffTime -> Event arch
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
   DiscoverBlockPair :: BlocksPair arch -> PT.BlockTarget arch PT.Original -> PT.BlockTarget arch PT.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch

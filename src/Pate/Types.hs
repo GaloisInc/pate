@@ -45,6 +45,9 @@ module Pate.Types
   , Original
   , Patched
   , WhichBinaryRepr(..)
+  , ValidArch(..)
+  , ValidSym
+  , Sym(..)
   , RegisterDiff(..)
   , ConcreteValue
   , GroundBV(..)
@@ -98,6 +101,7 @@ import qualified Data.Set as S
 import           Data.Typeable
 import           Numeric.Natural
 import           Numeric
+import qualified Data.ElfEdit as E
 
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some
@@ -105,6 +109,7 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
 
+import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
@@ -533,6 +538,42 @@ zipRegStates :: Monad m
 zipRegStates regs1 regs2 f = do
   regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
   return $ map (\(MapF.Pair _ (Const v)) -> v) $ MapF.toList $ MM.regStateMap regs'
+
+----------------------------------
+
+class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where
+  toc_reg :: MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch)))
+
+data HasTOCDict arch where
+  HasTOCDict :: HasTOCReg arch => HasTOCDict arch
+
+class
+  ( Typeable arch
+  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
+  , MS.SymArchConstraints arch
+  , MS.GenArchInfo MT.MemTraceK arch
+  , MM.ArchConstraints arch
+  ) => ValidArch arch where
+  tocProof :: Maybe (HasTOCDict arch)
+
+withTOCCases ::
+  forall arch a.
+  ValidArch arch =>
+  a ->
+  ((HasTOCReg arch, TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))) => a) ->
+  a
+withTOCCases noToc hasToc = case tocProof @arch of
+  Just HasTOCDict -> hasToc
+  Nothing -> noToc
+
+type ValidSym sym =
+  ( W4.IsExprBuilder sym
+  , CB.IsSymInterface sym
+  , ShowF (W4.SymExpr sym)
+  )
+
+data Sym sym where
+  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> Sym sym
 
 ----------------------------------
 

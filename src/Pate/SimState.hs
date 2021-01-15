@@ -37,6 +37,8 @@ module Pate.SimState
   , SimOutput(..)
   , SimSpec(..)
   , specMap
+  , specMapList
+  , attachSpec
   , SimBundle(..)
   , simInMem
   , simInRegs
@@ -143,6 +145,12 @@ instance PT.ExprMappable sym f => PT.ExprMappable sym (SimSpec sym arch f) where
 
 specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
 specMap f spec = spec { specBody = f (specBody spec) }
+
+attachSpec :: SimSpec sym arch f -> g -> SimSpec sym arch g
+attachSpec spec g = spec { specBody = g }
+
+specMapList :: (f -> [g]) -> SimSpec sym arch f -> [SimSpec sym arch g]
+specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBody spec))
 
 data SimBundle sym arch = SimBundle
   {

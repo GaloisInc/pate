@@ -75,7 +75,7 @@ doTest ::
   PL.ValidArchProxy arch ->
   FilePath ->
   IO ()
-doTest mwb sv proxy fp = do
+doTest mwb sv proxy@PL.ValidArchProxy fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
   let
     infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PL.noPatchData
@@ -95,6 +95,8 @@ doTest mwb sv proxy fp = do
               putStrLn $ "Branch completeness check: " ++ show time
             PE.ComputedPrecondition _ time -> do
               putStrLn $ "Precondition propagation: " ++ show time
+            PE.ProvenGoal _ goal time -> do
+              putStrLn $ "Proof result: " ++ show time ++ "\n" ++ show goal
             _ -> return ()
       }
   result <- case mwb of

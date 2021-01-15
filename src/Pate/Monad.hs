@@ -39,6 +39,7 @@ module Pate.Monad
   , manifestError
   , implicitError
   , throwHere
+  , startTimer
   , emitEvent
   , getBinCtx
   , freshRegEntry
@@ -79,11 +80,15 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Typeable
 import qualified Data.ElfEdit as E
+import qualified Data.Time as TM
+
+import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
+import qualified Data.Word.Indexed as W
 
 import qualified Lumberjack as LJ
 
@@ -114,6 +119,7 @@ import           Pate.Types
 import           Pate.SimState
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Equivalence
+import qualified Pate.Proof as PP
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
@@ -131,24 +137,6 @@ data EquivalenceContext sym arch where
     , originalCtx :: BinaryContext sym arch Original
     , rewrittenCtx :: BinaryContext sym arch Patched
     } -> EquivalenceContext sym arch
-
-class
-  ( Typeable arch
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , MS.SymArchConstraints arch
-  , MS.GenArchInfo MT.MemTraceK arch
-  , MM.ArchConstraints arch
-  ) => ValidArch arch where
-  toc_reg :: Maybe (MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch))))
-  -- ^ FIXME: the table of contents register on PPC. Required in order to assert that it is stable
-  -- at the top-level.
-
-
-type ValidSym sym =
-  ( W4.IsExprBuilder sym
-  , CB.IsSymInterface sym
-  , ShowF (W4.SymExpr sym)
-  )
 
 type ValidSolver sym scope solver fs =
   (sym ~ CBO.OnlineBackend scope solver fs
@@ -175,9 +163,20 @@ data EquivEnv sym arch where
     , envPrecondProp :: PreconditionPropagation
     , envFailureMode :: VerificationFailureMode
     , envBaseEquiv :: EquivRelation sym arch
-    , envGoalTriples :: [EquivTriple sym arch]
+    , envGoalTriples :: [PP.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
+    , envValidSym :: Sym sym
+    -- ^ expression builder, wrapped with a validity proof
+    , envStartTime :: TM.UTCTime
+    -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
+    , envTocs :: HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
+    -- ^ table of contents for the original and patched binaries, if defined by the
+    -- architecture
+    , envCurrentFunc :: PatchPair arch
+    -- ^ start of the function currently under analysis
     } -> EquivEnv sym arch
+
+
 
 data PreconditionPropagation =
     PropagateExactEquality
@@ -187,16 +186,25 @@ data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
 
-emitEvent :: PE.Event arch -> EquivM sym arch ()
-emitEvent evt = do
-  logAction <- asks envLogger
-  IO.liftIO $ LJ.writeLog logAction evt
+-- | Start the timer to be used as the initial time when computing
+-- the duration in a nested 'emitEvent'
+startTimer :: EquivM sym arch a -> EquivM sym arch a
+startTimer f = do
+  startTime <- liftIO TM.getCurrentTime
+  local (\env -> env { envStartTime = startTime}) f
 
+emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
+emitEvent evt = do
+  startedAt <- asks envStartTime
+  finishedBy <- liftIO TM.getCurrentTime
+  let duration = TM.diffUTCTime finishedBy startedAt
+  logAction <- asks envLogger
+  IO.liftIO $ LJ.writeLog logAction (evt duration)
 
 
 data EquivState sym arch where
   EquivState ::
-    { stProofs :: [ProofBlockSlice sym arch]
+    { stProofs :: [PP.ProofBlockSlice sym arch]
     -- ^ all intermediate triples that were proven for each block slice
     , stSimResults ::  Map (PatchPair arch) (SimSpec sym arch (SimBundle sym arch))
     -- ^ cached results of symbolic execution for a given block pair
