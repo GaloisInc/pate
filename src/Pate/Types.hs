@@ -528,22 +528,27 @@ type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
 -- | Helper for doing a case-analysis on registers
 data RegisterCase arch tp where
   -- | instruction pointer
-  RegIP :: RegisterCase arch (MM.BVType (MM.ArchAddrWidth arch))
+  RegIP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | stack pointer
-  RegSP :: RegisterCase arch (MM.BVType (MM.ArchAddrWidth arch))
-  -- | non-specific GPR
-  RegG :: RegisterCase arch tp
-
+  RegSP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
+  -- | non-specific pointer (or bitvector) register
+  RegGPtr :: RegisterCase arch (CLM.LLVMPointerType w)
+  -- | non-specific non-pointer reguster
+  RegElse :: RegisterCase arch tp
+  
 registerCase ::
   forall arch tp.
   MM.RegisterInfo (MM.ArchReg arch) =>
+  CC.TypeRepr (MS.ToCrucibleType tp) ->
   MM.ArchReg arch tp ->
-  RegisterCase arch tp
-registerCase r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
+  RegisterCase arch (MS.ToCrucibleType tp)
+registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
   Just Refl -> RegIP
   _ -> case testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
     Just Refl -> RegSP
-    _ -> RegG
+    _ -> case repr of
+      CLM.LLVMPointerRepr{} -> RegGPtr
+      _ -> RegElse
 
 zipRegStates :: Monad m
              => MM.RegisterInfo r
@@ -570,7 +575,11 @@ class
   , MS.GenArchInfo MT.MemTraceK arch
   , MM.ArchConstraints arch
   ) => ValidArch arch where
+  -- | an optional witness that the architecture has a table of contents
   tocProof :: Maybe (HasTOCDict arch)
+  -- | Registers which are used for "raw" bitvectors (i.e. they are not
+  -- used for pointers). These are assumed to always have region 0.
+  rawBVReg :: forall tp. MM.ArchReg arch tp -> Bool
 
 withTOCCases ::
   forall arch a.

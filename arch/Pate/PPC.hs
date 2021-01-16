@@ -31,7 +31,20 @@ instance PT.HasTOCReg PPC.PPC32 where
 
 instance PM.ValidArch PPC.PPC32 where
   tocProof = Just PT.HasTOCDict
+  rawBVReg r = case r of
+    PPC.PPC_FR _ -> True
+    PPC.PPC_CR -> True
+    PPC.PPC_FPSCR -> True
+    PPC.PPC_VSCR -> True
+    PPC.PPC_XER -> True
+    _ -> False
 
 instance PM.ValidArch PPC.PPC64 where
   tocProof = Just PT.HasTOCDict
-
+  rawBVReg r = case r of
+    PPC.PPC_FR _ -> True
+    PPC.PPC_CR -> True
+    PPC.PPC_FPSCR -> True
+    PPC.PPC_VSCR -> True
+    PPC.PPC_XER -> True
+    _ -> False

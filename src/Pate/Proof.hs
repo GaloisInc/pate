@@ -309,7 +309,7 @@ ppStatePredSpec vsym@(PT.Sym _) stpred =
       ppStack :: ProofDoc
       ppStack = case ppMemPred (PE.predStack stPredBody) of
         (Just stack, pol) -> "Stack:" <+> ppPolarity pol <> PP.line <> stack <> PP.line
-        (Nothing, Just False) -> PP.line <> "All Stack Memory"
+        (Nothing, Just False) -> PP.line <> "All Stack Memory" <> PP.line
         (Nothing, _) -> PP.emptyDoc
 
       ppMem :: ProofDoc

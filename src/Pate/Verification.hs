@@ -195,6 +195,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envPrecondProp = PropagateComputedDomains
         , envBaseEquiv = stateEquivalence sym stackRegion
         , envFailureMode = ThrowOnAnyFailure
+        , envProofPostprocess = ProofSimplifyConstants
         , envGoalTriples = [] -- populated in runVerificationLoop
         , envValidSym = Sym sym
         , envStartTime = startedAt
@@ -352,7 +353,12 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       False -> throwHere UnsatisfiableAssumptions
   vsym <- CMR.asks envValidSym
   blocks <- getBlocks pPair
-  proof' <- withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
+
+  
+  proof' <- CMR.asks envProofPostprocess >>= \case
+    ProofSimplifyConstants ->
+      withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
+    ProofNoPostProcess -> return proof
   emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof'))
   return ()
   where
@@ -653,6 +659,7 @@ branchMaybeTriple (cond, br) = case W4.asConstantPred cond of
 -- this address. Returns the computer pre-domain as well as any intermediate
 -- triples that were proven.
 provePostcondition' ::
+  forall sym arch.
   SimBundle sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (PP.ProofBlockSliceBody sym arch)
@@ -705,6 +712,12 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   isReturn <- matchingExits bundle MS.MacawBlockEndReturn
   precondReturn <- withSatAssumption noResult (return isReturn) $ do
     proveLocalPostcondition bundle isReturn postcondSpec
+  let
+    -- for simplicitly, we drop the condition on the return case, and assume
+    -- it is taken if all other cases are false, which is checked by 'checkCasesTotal'
+    returnByDefault = case W4.asConstantPred (fst precondReturn) of
+      Just False -> statePredFalse sym
+      _ -> branchPreDomain (snd precondReturn)
 
   -- an "unknown" exit (currently caused by a syscall) collapses to requiring exact
   -- equivalence before the exit
@@ -716,7 +729,14 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   let allPreconds = precondReturn:precondUnknown:funCallCases
   
   status <- checkCasesTotal bundle allPreconds
-  precond <- F.foldlM (\stPred (p, br) -> liftIO $ muxStatePred sym p (branchPreDomain br) stPred) (statePredFalse sym) allPreconds
+  precond' <- F.foldrM (\(p, br) stPred -> liftIO $ muxStatePred sym p (branchPreDomain br) stPred)  returnByDefault (precondUnknown:funCallCases)
+
+  precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $ 
+    startTimer $  do
+      precond <- simplifySubPreds precond'
+      duration <- getDuration
+      liftIO $ putStrLn $ "Sub pred time: " ++ show duration
+      return precond
 
   triple <- mkTriple (simPair bundle) precond postcondSpec status
   return $ PP.ProofBlockSliceBody
@@ -725,6 +745,24 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     , PP.prfReturn = branchMaybeTriple precondReturn
     , PP.prfUnknownExit = branchMaybeTriple precondUnknown
     }
+
+simplifyPred' ::
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+simplifyPred' e = case W4.exprType e of
+  W4.BaseBoolRepr -> simplifyPred e
+  _ -> return e
+
+simplifySubPreds ::
+  forall sym arch f.
+  ExprMappable sym f =>
+  f ->
+  EquivM sym arch f
+simplifySubPreds a = withValid $ do
+  cache <- W4B.newIdxCache
+  EM a' <- mapExprEq (\e -> W4B.idxCacheEval cache e (simplifyPred' e)) (EM @sym a)
+  return a'
+  
 
 statePredSpecFalse :: EquivM sym arch (StatePredSpec sym arch)
 statePredSpecFalse = withSym $ \sym -> withFreshVars $ \_ _ -> return $ (W4.truePred sym, statePredFalse sym)
@@ -975,7 +1013,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
     zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
-      case registerCase r of
+      case registerCase (macawRegRepr vO) r of
         RegSP -> return (Just (Some r, W4.truePred sym))
         RegIP -> return Nothing
         _ | isInO || isInP -> do
@@ -1054,27 +1092,15 @@ equateRegisters ::
   SimBundle sym arch ->
   EquivM sym arch (ExprMapper sym)
 equateRegisters regRel bundle = withSym $ \sym -> do
-  eqRel <- CMR.asks envBaseEquiv
-  
-  Some binds <- fmap (Ctx.fromList . concat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
-     p <- liftIO $ applyRegEquivRelation (eqRelRegs eqRel) r vO vP
-     case M.lookup (Some r) regRel of
-       Just cond | Just True <- W4.asConstantPred cond -> do
-         eqVals <- equalValues vO vP
-         (W4.asConstantPred <$> liftIO (W4.isEq sym p eqVals)) >>= \case
-           Just True -> macawRegBinding vO vP
-           _ -> return []
-       _ -> return []
+  Some binds <- fmap (Ctx.fromList . concat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case registerCase (macawRegRepr vO) r of
+    RegIP -> return []
+    _ -> case M.lookup (Some r) regRel of
+      Just cond | Just True <- W4.asConstantPred cond -> macawRegBinding vO vP
+      _ -> return []
   return $ ExprMapper $ rebindExpr sym binds
   where
     inStO = simInState $ simInO bundle
     inStP = simInState $ simInP bundle
-
-equalValues ::
-  MacawRegEntry sym tp ->
-  MacawRegEntry sym tp' ->
-  EquivM sym arch (W4.Pred sym)
-equalValues entry1 entry2 = withSymIO $ \sym -> equalValuesIO sym entry1 entry2
 
 asVar ::
   W4.SymExpr sym tp' ->
@@ -1548,6 +1574,27 @@ tocValidPred stO stP = withSym $ \sym ->
       W4.andPred sym eqO eqP      
     liftIO $ allPreds sym [validRegion, tocsLit]
 
+-- | "raw" bitvector registers always have a zero region,
+-- and therefore extracting their offset is always defined
+rawBVValidPred ::
+  forall sym arch.
+  SimState sym arch Original ->
+  SimState sym arch Patched ->
+  EquivM sym arch (W4.Pred sym)
+rawBVValidPred stO stP = withSymIO $ \sym -> do
+  preds <- zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP ->
+    case registerCase (macawRegRepr vO) r of
+      RegGPtr | rawBVReg r -> do
+        let
+          CLM.LLVMPointer regionO _ = macawRegValue vO
+          CLM.LLVMPointer regionP _ = macawRegValue vP
+        zero <- W4.natLit sym 0
+        eqO <- W4.isEq sym regionO zero
+        eqP <- W4.isEq sym regionP zero
+        W4.andPred sym eqO eqP
+      _ -> return $ W4.truePred sym
+  allPreds sym preds
+
 validInitState ::
   Maybe (PatchPair arch) ->
   SimState sym arch Original ->
@@ -1559,7 +1606,8 @@ validInitState mpPair stO stP = withSym $ \sym -> do
     Nothing -> return $ W4.truePred sym
   spValid <- spValidRegion stO stP
   tocValid <- tocValidPred stO stP
-  liftIO $ allPreds sym [ipValid, spValid, tocValid]
+  rawBVValid <- rawBVValidPred stO stP
+  liftIO $ allPreds sym [ipValid, spValid, tocValid, rawBVValid]
 
 --------------------------------------------------------
 -- Toplevel preconditions and postconditions

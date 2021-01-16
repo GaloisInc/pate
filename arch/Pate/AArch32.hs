@@ -17,3 +17,5 @@ instance PB.ArchConstraints SA.AArch32 where
 instance PM.ValidArch SA.AArch32 where
   -- FIXME: generalize this properly for ARM
   tocProof = Nothing
+  -- FIXME: define these
+  rawBVReg _r = False

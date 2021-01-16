@@ -153,10 +153,13 @@ muxMemPred ::
   MemPred sym arch ->
   MemPred sym arch ->
   IO (MemPred sym arch)
-muxMemPred sym p predT predF = do
-  pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
-  locs <- muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
-  return $ MemPred locs pol
+muxMemPred sym p predT predF = case W4.asConstantPred p of
+  Just True -> return predT
+  Just False -> return predF
+  _ -> do
+    pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
+    locs <- muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
+    return $ MemPred locs pol
 
 
 memPredAt ::
@@ -237,17 +240,20 @@ muxStatePred ::
   StatePred sym arch ->
   StatePred sym arch ->
   IO (StatePred sym arch)
-muxStatePred sym p predT predF = do
-  notp <- W4.notPred sym p
-  regs <- M.mergeA
-    (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
-    (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
-    (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
-    (predRegs predT)
-    (predRegs predF)  
-  stack <- muxMemPred sym p (predStack predT) (predStack predF)
-  mem <- muxMemPred sym p (predMem predT) (predMem predF)
-  return $ StatePred regs stack mem
+muxStatePred sym p predT predF = case W4.asConstantPred p of
+  Just True -> return predT
+  Just False -> return predF
+  _ -> do
+    notp <- W4.notPred sym p
+    regs <- M.mergeA
+      (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
+      (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
+      (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
+      (predRegs predT)
+      (predRegs predF)  
+    stack <- muxMemPred sym p (predStack predT) (predStack predF)
+    mem <- muxMemPred sym p (predMem predT) (predMem predF)
+    return $ StatePred regs stack mem
 
 statePredFalse :: W4.IsExprBuilder sym => sym -> StatePred sym arch
 statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
@@ -296,7 +302,7 @@ registerEquivalence ::
   sym ->
   RegEquivRelation sym arch
 registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
-  case PT.registerCase r of
+  case PT.registerCase (PT.macawRegRepr vO) r of
     PT.RegIP -> return $ W4.truePred sym
     PT.RegSP -> do
       let

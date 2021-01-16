@@ -28,6 +28,7 @@ module Pate.Monad
   , BinaryContext(..)
   , PreconditionPropagation(..)
   , VerificationFailureMode(..)
+  , ProofPostProcess(..)
   , SimBundle(..)
   , ExprMappableEquiv(..)
   , FromExprMappable(..)
@@ -44,6 +45,7 @@ module Pate.Monad
   , manifestError
   , implicitError
   , throwHere
+  , getDuration
   , startTimer
   , emitEvent
   , getBinCtx
@@ -167,6 +169,7 @@ data EquivEnv sym arch where
     , envDiscoveryCfg :: DiscoveryConfig
     , envPrecondProp :: PreconditionPropagation
     , envFailureMode :: VerificationFailureMode
+    , envProofPostprocess :: ProofPostProcess
     , envBaseEquiv :: EquivRelation sym arch
     , envGoalTriples :: [PP.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
@@ -193,6 +196,10 @@ data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
 
+data ProofPostProcess =
+    ProofSimplifyConstants
+  | ProofNoPostProcess
+
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'
 startTimer :: EquivM sym arch a -> EquivM sym arch a
@@ -200,11 +207,16 @@ startTimer f = do
   startTime <- liftIO TM.getCurrentTime
   local (\env -> env { envStartTime = startTime}) f
 
-emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
-emitEvent evt = do
+-- | Time since the most recent 'startTimer'
+getDuration :: EquivM sym arch TM.NominalDiffTime
+getDuration = do
   startedAt <- asks envStartTime
   finishedBy <- liftIO TM.getCurrentTime
-  let duration = TM.diffUTCTime finishedBy startedAt
+  return $ TM.diffUTCTime finishedBy startedAt
+
+emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
+emitEvent evt = do
+  duration <- getDuration
   logAction <- asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
