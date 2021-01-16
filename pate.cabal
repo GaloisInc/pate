@@ -93,6 +93,18 @@ test-suite pate-test-ppc
                  macaw-ppc-symbolic,
                  dismantle-ppc
 
+test-suite pate-test-aarch32
+  import: shared-test
+  type: exitcode-stdio-1.0
+  main-is: AArch32TestMain.hs
+  other-modules: TestBase, Pate.AArch32
+  hs-source-dirs: tests, arch
+  build-depends: semmc-aarch32,
+                 macaw-aarch32,
+                 macaw-aarch32-symbolic,
+                 macaw-loader-aarch32,
+                 dismantle-arm-xml
+
 common shared-exec
   ghc-options: -Wall -Wcompat
   default-language: Haskell2010
