@@ -304,6 +304,7 @@ archFuns = do
 
 unconstrainedRegister ::
   forall sym arch tp.
+  HasCallStack =>
   MM.ArchReg arch tp ->
   EquivM sym arch (MacawRegVar sym tp)
 unconstrainedRegister reg = do
