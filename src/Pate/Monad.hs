@@ -87,11 +87,12 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
-import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.FunctionHandle as CFH
+import qualified Lang.Crucible.LLVM.MemModel as CLM
+import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.Types as CT
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
@@ -99,13 +100,15 @@ import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic as MS
 
 
-import qualified What4.Interface as W4
+import qualified What4.BaseTypes as WT
 import qualified What4.Expr.Builder as W4B
+import qualified What4.Expr.GroundEval as W4G
+import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4O
 import qualified What4.Protocol.SMTWriter as W4W
-import qualified What4.SemiRing as SR
 import qualified What4.SatResult as W4R
-import qualified What4.Expr.GroundEval as W4G
+import qualified What4.SemiRing as SR
+import qualified What4.Symbol as WS
 
 import           What4.ExprHelpers
 
@@ -312,6 +315,9 @@ unconstrainedRegister reg = do
     MM.BVTypeRepr n -> withSymIO $ \sym -> do
       (ptr, regVar, offVar) <- freshPtrVar sym n symbol
       return $ MacawRegVar (MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
+    MM.BoolTypeRepr -> withSymIO $ \sym -> do
+      var <- W4.freshBoundVar sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
+      return $ MacawRegVar (MacawRegEntry (CT.baseToType WT.BaseBoolRepr) (W4.varExpr sym var)) (Ctx.empty Ctx.:> var)
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 freshRegEntry ::

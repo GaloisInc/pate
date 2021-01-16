@@ -79,6 +79,7 @@ import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Interface as W4
 
@@ -309,6 +310,7 @@ data MacawRegVar sym tp where
 -- Requires defining a bijection between the two types.
 type family CrucBaseTypes (tp :: CC.CrucibleType) :: Ctx.Ctx W4.BaseType where
   CrucBaseTypes (CLM.LLVMPointerType w) = (Ctx.EmptyCtx Ctx.::> W4.BaseNatType Ctx.::> W4.BaseBVType w)
+  CrucBaseTypes CT.BoolType = (Ctx.EmptyCtx Ctx.::> W4.BaseBoolType)
 
 flatVars ::
   SimVars sym arch bin -> [Some (W4.BoundVar sym)]
