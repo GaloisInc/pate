@@ -13,6 +13,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -28,6 +29,10 @@ module Pate.Monad
   , PreconditionPropagation(..)
   , VerificationFailureMode(..)
   , SimBundle(..)
+  , ExprMappableEquiv(..)
+  , FromExprMappable(..)
+  , FromSpecExprMappable(..)
+  , bindSpecEq
   , withBinary
   , withValid
   , withValidEnv
@@ -88,7 +93,6 @@ import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
-import qualified Data.Word.Indexed as W
 
 import qualified Lumberjack as LJ
 
@@ -155,6 +159,7 @@ data EquivEnv sym arch where
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envStackRegion :: W4.SymNat sym
+    , envGlobalRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
     , envBlockMapping :: BlockMapping arch
@@ -174,6 +179,8 @@ data EquivEnv sym arch where
     -- architecture
     , envCurrentFunc :: PatchPair arch
     -- ^ start of the function currently under analysis
+    , envCurrentAsm :: W4.Pred sym
+    -- ^ conjunction of all assumptions currently in scope
     } -> EquivEnv sym arch
 
 
@@ -334,13 +341,13 @@ freshRegEntry entry = withSym $ \sym -> case macawRegRepr entry of
   repr -> throwHere $ UnsupportedRegisterType $ Some repr
 
 withSimSpec ::
-  ExprMappable sym f =>
+  ExprMappableEquiv sym arch f =>
   SimSpec sym arch f ->
   (SimState sym arch Original -> SimState sym arch Patched -> f -> EquivM sym arch g) ->
   EquivM sym arch (SimSpec sym arch g)
-withSimSpec spec f = withSym $ \sym -> do
+withSimSpec spec f = do
   withFreshVars $ \stO stP -> do
-    (asm, body) <- liftIO $ bindSpec sym stO stP spec
+    (asm, body) <- bindSpecEq stO stP spec
     withAssumption (return asm) $ f stO stP body
 
 freshSimVars ::
@@ -411,9 +418,11 @@ withAssumption' ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption' asmf f = withSym $ \sym -> do
   asm <- asmf
+  envAsms <- asks envCurrentAsm
+  allAsms <- liftIO $ W4.andPred sym asm envAsms
   fr <- liftIO $ CB.pushAssumptionFrame sym
   addAssumption asm "withAssumption"
-  result <- manifestError f
+  result <- local (\env -> env { envCurrentAsm = allAsms }) $ manifestError f
   _ <- liftIO $ CB.popAssumptionFrame sym fr
   case result of
     Left err -> throwError err
@@ -524,6 +533,86 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
+--------------------------------------
+
+
+-- | Mapping under a 'SimSpec' requires re-establishing the correct logical context, which
+-- currently is best supported in the 'EquivM' monad, so we specialize 'ExprMappable' to
+-- it here.
+class ExprMappableEquiv sym arch f where
+  mapExprEq ::
+    (forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)) ->
+    f ->
+    EquivM_ sym arch f
+
+bindSpecEq ::
+  ExprMappableEquiv sym arch f =>
+  SimState sym arch Original ->
+  SimState sym arch Patched ->
+  SimSpec sym arch f ->
+  EquivM sym arch (W4.Pred sym, f)
+bindSpecEq stO stP spec = withSym $ \sym -> do
+  ul <- IO.askUnliftIO
+  (asm, TM _ body) <- liftIO $ bindSpec sym stO stP (spec { specBody = TM ul (specBody spec) })
+  return (asm, body)
+
+instance ExprMappableEquiv sym arch f => ExprMappableEquiv sym arch (SimSpec sym arch f) where
+  mapExprEq f spec = withValid $ withFreshVars $ \stO stP -> do
+    (asm, body) <- bindSpecEq stO stP spec
+    asm' <- f asm
+    withAssumption (return asm') $ mapExprEq f body
+
+data FromExprMappable sym f where
+  EM :: ExprMappable sym f => { unEM :: f } -> FromExprMappable sym f
+
+data FromSpecExprMappable sym arch f where
+  SEM :: forall sym arch f. ExprMappable sym f => SimSpec sym arch f -> FromSpecExprMappable sym arch f
+
+data ToExprMappable sym arch f where
+  TM :: ExprMappableEquiv sym arch f =>
+    IO.UnliftIO (EquivM_ sym arch) -> f -> ToExprMappable sym arch f
+
+instance ExprMappableEquiv sym arch (FromExprMappable sym f) where
+  mapExprEq f (EM x) = withValid $ do
+    x' <- withSym $ \sym -> IO.withRunInIO $ \runInIO ->  mapExpr sym (\e -> runInIO (f e)) x
+    return $ EM x'
+
+instance ExprMappableEquiv sym arch (FromSpecExprMappable sym arch f) where
+  mapExprEq f (SEM x) = withValid $ do
+    x' <- mapExprEq f (specMap (EM @sym) x)
+    return $ SEM (specMap unEM x')
+
+instance ExprMappable sym (ToExprMappable sym arch f) where
+  mapExpr _ f (TM ul@(IO.UnliftIO runInIO) x) = do
+    x' <- runInIO $ mapExprEq (\e -> liftIO (f e)) x
+    return $ TM ul x'
+
+instance ExprMappableEquiv sym arch (SimBundle sym arch) where
+  mapExprEq f bundle = unEM <$> mapExprEq f (EM @sym bundle)
+
+instance ExprMappableEquiv sym arch (PP.EquivTripleBody sym arch) where
+  mapExprEq f triple = do
+    EM eqPreDomain' <- mapExprEq f (EM @sym (PP.eqPreDomain triple))
+    SEM eqPostDomain' <- mapExprEq f (SEM @sym @arch (PP.eqPostDomain triple))
+    return $ PP.EquivTripleBody (PP.eqPair triple) eqPreDomain' eqPostDomain' (PP.eqStatus triple) (PP.eqValidSym triple)
+
+instance ExprMappableEquiv sym arch (PP.ProofFunctionCall sym arch) where
+  mapExprEq f prf = do
+    prfFunPre' <- mapExprEq f (PP.prfFunPre prf)
+    prfFunCont' <- mapExprEq f (PP.prfFunCont prf)
+    case prf of
+      PP.ProofFunctionCall{} -> do
+        prfFunBody' <- mapExprEq f (PP.prfFunBody prf)
+        return $ PP.ProofFunctionCall prfFunPre' prfFunBody' prfFunCont'
+      PP.ProofTailCall{} -> return $ PP.ProofTailCall prfFunPre' prfFunCont'
+
+instance ExprMappableEquiv sym arch (PP.ProofBlockSliceBody sym arch) where
+  mapExprEq f prf = do
+    prfTriple' <- mapExprEq f (PP.prfTriple prf)
+    prfFunCalls' <- mapM (mapExprEq f) (PP.prfFunCalls prf)
+    prfReturn' <- mapM (mapExprEq f) (PP.prfReturn prf)
+    prfUnknownExit' <- mapM (mapExprEq f) (PP.prfUnknownExit prf)
+    return $ PP.ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit'
 
 --------------------------------------
 -- UnliftIO

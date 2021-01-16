@@ -49,7 +49,11 @@ import           Data.Parameterized.Classes
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
+import qualified Data.Parameterized.Map as MapF
+
 import qualified Data.Macaw.CFG as MM
+
+import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Types as PT
 import qualified Pate.Equivalence as PE
@@ -84,11 +88,6 @@ data EquivTripleBody sym arch where
     , eqValidSym :: PT.Sym sym
     } -> EquivTripleBody sym arch
 
-instance PT.ExprMappable sym (EquivTripleBody sym arch) where
-  mapExpr sym f triple = do
-    eqPreDomain' <- PT.mapExpr sym f (eqPreDomain triple)
-    eqPostDomain' <- PT.mapExpr sym f (eqPostDomain triple)
-    return $ EquivTripleBody (eqPair triple) eqPreDomain' eqPostDomain' (eqStatus triple) (eqValidSym triple)
 
 -- | An triple representing the equivalence conditions for a block pair. Abstracted
 -- over the initial machine state.
@@ -114,16 +113,6 @@ data ProofFunctionCall sym arch =
       , prfFunBody :: ProofBlockSlice sym arch
       } 
 
-instance PT.ExprMappable sym (ProofFunctionCall sym arch) where
-  mapExpr sym f prf = do
-    prfFunPre' <- PT.mapExpr sym f (prfFunPre prf)
-    prfFunCont' <- PT.mapExpr sym f (prfFunCont prf)
-    case prf of
-      ProofFunctionCall{} -> do
-        prfFunBody' <- PT.mapExpr sym f (prfFunBody prf)
-        return $ ProofFunctionCall prfFunPre' prfFunBody' prfFunCont'
-      ProofTailCall{} -> return $ ProofTailCall prfFunPre' prfFunCont'
-
 -- | Trace of the proof that a pair of block "slices" satisfy the
 -- given triple. 
 data ProofBlockSliceBody sym arch =
@@ -138,13 +127,6 @@ data ProofBlockSliceBody sym arch =
       , prfUnknownExit :: Maybe (EquivTripleBody sym arch)
       }
 
-instance PT.ExprMappable sym (ProofBlockSliceBody sym arch) where
-  mapExpr sym f prf = do
-    prfTriple' <- PT.mapExpr sym f (prfTriple prf)
-    prfFunCalls' <- mapM (PT.mapExpr sym f) (prfFunCalls prf)
-    prfReturn' <- mapM (PT.mapExpr sym f) (prfReturn prf)
-    prfUnknownExit' <- mapM (PT.mapExpr sym f) (prfUnknownExit prf)
-    return $ ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit'
 
 trivialSliceBody :: EquivTripleBody sym arch -> ProofBlockSliceBody sym arch
 trivialSliceBody triple = ProofBlockSliceBody triple [] Nothing Nothing
@@ -196,6 +178,7 @@ ppProofGoal ::
 ppProofGoal vsym triple prf =
   PP.vsep
     [ "Top-level equivalence goal: "
+    , ppPatchPairReturn (eqPair $ PS.specBody triple)
     , PP.indent 2 $ ppEquivTriple vsym triple
     , "Equivalence proof:"
     , PP.indent 2 $ ppProofBlockSlice vsym prf
@@ -211,8 +194,11 @@ ppProofBlockSlice vsym prf =
     [ ppEquivTriple vsym (PS.specMap prfTriple prf)
     , "Proof:"
     , PP.indent 4 $ PP.vsep
-      [ "Function Calls: "
-      , PP.indent 4 $ PP.list (map (ppProofFunctionCallSpec vsym . PS.attachSpec prf) (prfFunCalls prfBody))
+      [ case funCalls of
+          [] -> PP.emptyDoc
+          _ -> "Function Calls: "
+               <> PP.line
+               <> PP.indent 4 (PP.vsep (map (ppProofFunctionCallSpec vsym . PS.attachSpec prf) funCalls))
       , ppMaybe (prfReturn prfBody) $ \trip ->
           PP.vsep
             [ "Function Return: "
@@ -226,6 +212,7 @@ ppProofBlockSlice vsym prf =
       ]
     ]
   where
+    funCalls = prfFunCalls prfBody
     prfBody = PS.specBody prf
 
 -- we need to plumb through the initial variables, since they
@@ -239,23 +226,32 @@ ppProofFunctionCallSpec ::
 ppProofFunctionCallSpec vsym prfCallSpec =
   PP.vsep $ 
     [ "Function pre-domain is satisfied before call:"
-    , PP.indent 4 $ ppEquivTriple vsym $ PS.specMap prfFunPre prfCallSpec
+    , PP.indent 4 $ ppPatchPairTarget startPair funPair
+    , PP.indent 4 $ ppEquivTriple vsym prfPreTriple
     , "Function satisfies post-domain upon return:"
+    , PP.indent 4 $ ppPatchPairReturn funPair
     , PP.indent 4 $ ppProofBlockSlice vsym $ prfFunBody prfCall
     ] ++ case prfCall of
       ProofFunctionCall{} ->
         [ "Continuing after function return satisfies post-domain for caller."
-        , PP.indent 4 $ ppProofBlockSlice vsym $ prfFunBody prfCall
+        , PP.indent 4 $ ppPatchPairReturn contPair
+        , PP.indent 4 $ ppProofBlockSlice vsym $ prfFunCont prfCall
         ]
       ProofTailCall{} -> []
   where
+    startPair = eqPair $ PS.specBody prfPreTriple
+    funPair = eqPair $ prfTriple $ PS.specBody $ prfFunBody prfCall
+    contPair = eqPair $ prfTriple $ PS.specBody $ prfFunCont prfCall
+
+    prfPreTriple = PS.specMap prfFunPre prfCallSpec
     prfCall = PS.specBody prfCallSpec
+
+
 
 ppEquivTriple :: PT.ValidArch arch => PT.Sym sym -> EquivTriple sym arch -> ProofDoc
 ppEquivTriple vsym triple =
   PP.vsep
-    [ "Block Pair:" <+> (ppPatchPair (eqPair tripleBody))
-    , "Pre-domain:"
+    [ "Pre-domain:"
     , PP.indent 4 $ ppStatePredSpec vsym (PS.specMap eqPreDomain triple)
     , "Post-domain:"
     , PP.indent 4 $ ppStatePredSpec vsym (eqPostDomain tripleBody)
@@ -269,12 +265,8 @@ ppStatePredSpec ::
   PT.Sym sym ->
   PE.StatePredSpec sym arch ->
   ProofDoc
-ppStatePredSpec (PT.Sym _sym) stpred =
-  PP.vsep
-    [ ppRegs
-    , ppStack
-    , ppMem
-    ]
+ppStatePredSpec vsym@(PT.Sym _) stpred =
+  ppRegs <> PP.line <> ppStack <> ppMem
     where
       stPredBody = PS.specBody stpred
       regs = PE.predRegs stPredBody
@@ -282,17 +274,56 @@ ppStatePredSpec (PT.Sym _sym) stpred =
       ppReg :: (Some (MM.ArchReg arch), W4.Pred sym) -> ProofDoc
       ppReg (Some reg, p) = case W4.asConstantPred p of
         Just False -> PP.emptyDoc
-        _ -> PP.pretty $ showF reg
+        Just True -> PP.pretty $ showF reg
+        _ -> PP.pretty (showF reg) <> PP.line <> PP.indent 1 "Condition:" <> ppExpr vsym p
       
       ppRegs :: ProofDoc
       ppRegs = "Registers: " <> PP.line <> PP.indent 2 (PP.vsep (map ppReg (Map.toList regs)))
 
+      ppCell :: forall w. PS.MemCell sym arch w -> W4.Pred sym -> ProofDoc
+      ppCell cell p = case W4.asConstantPred p of
+        Just False -> PP.emptyDoc
+        Just True -> cellpp
+        _ -> cellpp <> PP.line <> PP.indent 1 "Condition:" <> ppExpr vsym p
+        where
+          cellpp =
+            let CLM.LLVMPointer reg off = PS.cellPtr cell
+            in ppExpr vsym reg <> "+" <> ppBV off
+
+      ppMemPred :: PE.MemPred sym arch -> (Maybe ProofDoc, Maybe Bool)
+      ppMemPred mempred = case cells of
+        [] -> (Nothing, polarity)
+        _ -> (Just $ PP.indent 2 (PP.vsep ppCells), polarity)
+        where
+          cells = PE.memPredToList mempred
+          polarity = W4.asConstantPred (PE.memPredPolarity mempred)
+
+          ppCells = map (\(Some cell, p) -> ppCell cell p) cells
+
+      ppPolarity :: Maybe Bool -> ProofDoc
+      ppPolarity pol = case pol of
+        Just True -> PP.parens "inclusive"
+        Just False -> PP.parens "exclusive"
+        _ -> PP.parens "symbolic polarity"
+
       ppStack :: ProofDoc
-      ppStack = "Stack:" <> PP.line <> PP.indent 2 "dummy"
+      ppStack = case ppMemPred (PE.predStack stPredBody) of
+        (Just stack, pol) -> "Stack:" <+> ppPolarity pol <> PP.line <> stack <> PP.line
+        (Nothing, Just False) -> PP.line <> "All Stack Memory"
+        (Nothing, _) -> PP.emptyDoc
 
       ppMem :: ProofDoc
-      ppMem = "Global Memory:" <> PP.line <> PP.indent 2 "dummy"      
-        
+      ppMem = case ppMemPred (PE.predMem stPredBody) of
+        (Just global, pol) -> "Global Memory:" <+> ppPolarity pol <> PP.line <> global <> PP.line
+        (Nothing, Just False) -> "All Global Memory" <> PP.line
+        (Nothing, _) -> PP.emptyDoc
+
+      ppBV :: W4.SymBV sym w -> ProofDoc
+      ppBV e = PP.pretty $ showF e
+
+ppExpr :: PT.Sym sym -> W4.SymExpr sym tp -> ProofDoc
+ppExpr (PT.Sym _) e = PP.pretty $ showF e
+
 ppPatchPair :: PT.ValidArch arch => PT.PatchPair arch -> ProofDoc
 ppPatchPair pPair =
   PP.hsep
@@ -301,4 +332,20 @@ ppPatchPair pPair =
     , "vs."
     , "Patched:"
     , PP.pretty $ PT.ppBlock (PT.pPatched pPair)
+    ]
+
+ppPatchPairReturn :: PT.ValidArch arch => PT.PatchPair arch -> ProofDoc
+ppPatchPairReturn pPair =
+  PP.hsep
+    [ PP.parens (PP.pretty (PT.ppBlock (PT.pOrig pPair)) <+> "-> return")
+    , "vs."
+    , PP.parens (PP.pretty (PT.ppBlock (PT.pPatched pPair)) <+> "-> return")
+    ]
+
+ppPatchPairTarget :: PT.ValidArch arch => PT.PatchPair arch -> PT.PatchPair arch -> ProofDoc
+ppPatchPairTarget srcPair tgtPir =
+  PP.hsep
+    [ PP.parens (PP.pretty (PT.ppBlock (PT.pOrig srcPair)) <+> "->" <+> PP.pretty (PT.ppBlock (PT.pOrig tgtPir)))
+    , "vs."
+    , PP.parens (PP.pretty (PT.ppBlock (PT.pPatched srcPair)) <+> "->" <+> PP.pretty (PT.ppBlock (PT.pPatched tgtPir)))
     ]

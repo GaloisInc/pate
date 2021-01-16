@@ -86,10 +86,11 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 
 import qualified What4.Expr.Builder as W4B
-
+import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
 import qualified What4.ProblemFeatures as W4PF
+import qualified What4.Protocol.Online as W4O
 import qualified What4.ProgramLoc as W4L
 import qualified What4.Solver.Yices as W4Y
 --import qualified What4.Protocol.SMTWriter as W4O
@@ -151,13 +152,11 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
     model <- CMT.lift (MT.mkMemTraceVar @arch ha)
     bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
     undefops <- liftIO $ MT.mkUndefinedPtrOps sym
-    
-    -- FIXME: we should be able to lift this from the ELF, and it may differ between
-    -- binaries
+
     stackRegion <- liftIO $ W4.natLit sym 1
+    globalRegion <- liftIO $ W4.natLit sym 2
+
     startedAt <- liftIO TM.getCurrentTime
-
-
     let
       exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -187,6 +186,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envArchVals = vals
         , envExtensions = exts
         , envStackRegion = stackRegion
+        , envGlobalRegion = globalRegion
         , envMemTraceVar = model
         , envBlockEndVar = bvar
         , envBlockMapping = buildBlockMap pPairs blockMap
@@ -201,6 +201,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
         -- TODO: restructure EquivEnv to avoid this
         , envCurrentFunc = error "no function under analysis"
+        , envCurrentAsm = W4.truePred sym
         }
 
     liftIO $ do
@@ -338,7 +339,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       inO = SimInput stO (pOrig pPair)
       inP = SimInput stP (pPatched pPair)
       precond = PP.eqPreDomain tripleBody
-    (asms, proofBody) <- liftIO $ bindSpec sym stO stP proof      
+    (asms, proofBody) <- bindSpecEq stO stP proof
     preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond (PP.prfBodyPre proofBody)
 
     -- prove that the generated precondition is implied by the given precondition
@@ -351,7 +352,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       False -> throwHere UnsatisfiableAssumptions
   vsym <- CMR.asks envValidSym
   blocks <- getBlocks pPair
-  emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof))
+  proof' <- withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
+  emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof'))
   return ()
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
@@ -484,7 +486,7 @@ externalTransitions internalAddrs pb =
 -- simulation. Execute the given function in a context where the given 'SimBundle'
 -- is valid (i.e. its bound variables are marked free and its preconditions are assumed).
 withSimBundle ::
-  ExprMappable sym f =>
+  ExprMappableEquiv sym arch f =>
   PatchPair arch ->
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)
@@ -715,6 +717,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   
   status <- checkCasesTotal bundle allPreconds
   precond <- F.foldlM (\stPred (p, br) -> liftIO $ muxStatePred sym p (branchPreDomain br) stPred) (statePredFalse sym) allPreconds
+
   triple <- mkTriple (simPair bundle) precond postcondSpec status
   return $ PP.ProofBlockSliceBody
     { PP.prfTriple = triple
@@ -750,7 +753,7 @@ proveLocalPostcondition bundle branchCase postcondSpec = withSym $ \sym -> do
   (postEqRel, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
   
   fullPostCond <- liftIO $ allPreds sym [postcondPred, branchCase]
-  eqInputs <- withAssumption_ (return asm) $
+  eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle fullPostCond postcond
 
   
@@ -776,6 +779,7 @@ proveLocalPostcondition bundle branchCase postcondSpec = withSym $ \sym -> do
 
   checkVerificationStatus result
   triple <- mkTriple (simPair bundle) eqInputs postcondSpec result
+
   return $ BranchCase eqInputsPred triple
 
 checkVerificationStatus ::
@@ -831,7 +835,8 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     localPred <- liftIO $ addFootPrintsToPred sym foots memPred
     mapMemPred localPred $ \cell p -> do
       isFiltered <- cellFilter cell
-      liftIO $ W4.andPred sym p isFiltered
+      pathCond <- liftIO $ W4.andPred sym p isFiltered
+      simplifyPred pathCond
 
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
@@ -858,6 +863,67 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
   where
     polarity = memPredPolarity memPred
     memP = simInMem $ simInP bundle
+
+-- | Under the current assumptions, attempt to collapse a predicate
+-- into either trivially true or false
+simplifyPred ::
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+simplifyPred p = withSym $ \sym -> do
+  isPredSat p >>= \case
+    True -> isPredTrue' p >>= \case
+      True -> return $ W4.truePred sym
+      False -> return p
+    False -> return $ W4.falsePred sym
+
+-- | Extract a bound variable binding environment that binds any constant
+-- values according to the current set of assumptions.
+-- FIXME: there is probably a better way of querying the model for this. It's expensive
+-- and only used in proof printing currently.
+getCurrentBindings ::
+  EquivM sym arch (BoundVarBinding sym)
+getCurrentBindings =
+  withSym $ \sym ->
+  withProc $ \proc -> do
+  asm <- CMR.asks envCurrentAsm
+  ExprFilter isBound <- liftIO $ getIsBoundFilter asm
+  return $ BoundVarBinding $ \bv -> do
+    let e = W4.varExpr sym bv
+    isBound e >>= \case
+      True -> do
+        fresh <- W4.freshConstant sym W4.emptySymbol (W4.exprType e)
+        trivial <- W4.isEq sym e fresh
+        me <- CBO.checkSatisfiableWithModel proc "bvConstant" trivial $ \res ->
+          case res of
+            W4R.Sat fn -> do
+              gv <- W4G.groundEval fn e
+              let mcv = groundToConcrete (W4.exprType e) gv
+              mapM (W4.concreteToSym sym) mcv
+            _ -> return Nothing
+        case me of
+          Just e' -> do
+            p <- W4.notPred sym =<< W4.isEq sym e e'
+            CBO.checkSatisfiableWithModel proc "bvConstant" p $ \res ->
+              case res of
+                W4R.Sat _ -> do
+                  return Nothing
+                W4R.Unsat _ -> do
+                  return $ Just e'
+                W4R.Unknown -> do
+                  return Nothing
+          Nothing -> do
+            return Nothing
+      False -> return Nothing
+
+
+simplifyExpr ::
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+simplifyExpr e = withSym $ \sym -> do
+  binds <- getCurrentBindings
+  withValid $ do
+    e' <- liftIO $ expandVars sym binds e
+    liftIO $ fixMux sym e'
 
 bindMemory ::
   -- | value to rebind
@@ -950,8 +1016,8 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
     guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
 
   blocks <- getBlocks $ simPair bundle
-  emitEvent (PE.ComputedPrecondition blocks)
   
+  emitEvent (PE.ComputedPrecondition blocks)
   return $ StatePred
     { predRegs = regsDom
     , predStack = stackDom
@@ -1465,22 +1531,22 @@ tocValidPred stO stP = withSym $ \sym ->
       regsP = simRegs stP
       CLM.LLVMPointer regionO valO = (macawRegValue $ regsO ^. MM.boundValue r)
       CLM.LLVMPointer regionP valP = (macawRegValue $ regsP ^. MM.boundValue r)
-    stackRegion <- CMR.asks envStackRegion
+    globalRegion <- CMR.asks envGlobalRegion
     -- global memory (i.e. the region of the TOC) is distinct from the stack
-    notStack <- liftIO $ do
-      eqO <- W4.notPred sym =<< W4.isEq sym regionO stackRegion
-      eqP <- W4.notPred sym =<< W4.isEq sym regionP stackRegion
+    validRegion <- liftIO $ do
+      eqO <- W4.isEq sym regionO globalRegion
+      eqP <- W4.isEq sym regionP globalRegion
       W4.andPred sym eqO eqP
     -- the register value should always be equal to the expected TOC according
-    -- to the loaded ELF, which is based on the function we are considering
+    -- to the loaded ELF, which takes the address of the start of the function
     (tocO, tocP) <- getCurrentTOCs
     tocOBV <- wLit tocO
     tocPBV <- wLit tocP
     tocsLit <- liftIO $ do
-      eqO <- W4.isEq sym valO tocOBV
-      eqP <- W4.isEq sym valP tocPBV
+      eqO <- W4.isEq sym tocOBV valO
+      eqP <- W4.isEq sym tocPBV valP
       W4.andPred sym eqO eqP      
-    liftIO $ allPreds sym [notStack, tocsLit]
+    liftIO $ allPreds sym [validRegion, tocsLit]
 
 validInitState ::
   Maybe (PatchPair arch) ->
