@@ -58,6 +58,7 @@ module Pate.SimState
   , inMemCells
   ) where
 
+import           GHC.Stack ( HasCallStack )
 import           GHC.TypeNats
 
 import           Control.Monad ( forM, foldM )
@@ -326,6 +327,7 @@ flatVars simVars =
 
 flatVarBinds ::
   forall sym arch bin.
+  HasCallStack =>
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
