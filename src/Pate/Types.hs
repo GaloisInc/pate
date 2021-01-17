@@ -399,7 +399,9 @@ type MemTraceDiff arch = [MemOpDiff arch]
 
 ----------------------------------
 
-data MacawRegEntry sym tp where
+-- | This is an analog of the Crucible 'CS.RegEntry' type in terms of the macaw
+-- type system
+data MacawRegEntry sym (tp :: MM.Type) where
   MacawRegEntry ::
     { macawRegRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
     , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
