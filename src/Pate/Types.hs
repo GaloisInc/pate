@@ -523,6 +523,7 @@ instance KnownRepr WhichBinaryRepr Patched where
 type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
 
 ----------------------------------
+
 -- Register helpers
 
 -- | Helper for doing a case-analysis on registers
@@ -531,14 +532,18 @@ data RegisterCase arch tp where
   RegIP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | stack pointer
   RegSP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
-  -- | non-specific pointer (or bitvector) register
+  -- | table of contents register (if defined)
+  RegTOC :: HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
+  -- | non-specific bitvector (zero-region pointer) register
+  RegBV :: RegisterCase arch (CLM.LLVMPointerType w)
+  -- | non-specific pointer register
   RegGPtr :: RegisterCase arch (CLM.LLVMPointerType w)
   -- | non-specific non-pointer reguster
   RegElse :: RegisterCase arch tp
   
 registerCase ::
   forall arch tp.
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  ValidArch arch =>
   CC.TypeRepr (MS.ToCrucibleType tp) ->
   MM.ArchReg arch tp ->
   RegisterCase arch (MS.ToCrucibleType tp)
@@ -546,8 +551,16 @@ registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
   Just Refl -> RegIP
   _ -> case testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
     Just Refl -> RegSP
-    _ -> case repr of
-      CLM.LLVMPointerRepr{} -> RegGPtr
+    _ -> withTOCCases @arch nontoc $
+      case testEquality r (toc_reg @arch) of
+        Just Refl -> RegTOC
+        _ -> nontoc
+  where
+    nontoc :: RegisterCase arch (MS.ToCrucibleType tp)
+    nontoc = case repr of
+      CLM.LLVMPointerRepr{} -> case rawBVReg r of
+        True -> RegBV
+        False -> RegGPtr
       _ -> RegElse
 
 zipRegStates :: Monad m

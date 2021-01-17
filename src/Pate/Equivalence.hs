@@ -297,7 +297,7 @@ equalValuesIO sym entry1 entry2 = case (PT.macawRegRepr entry1, PT.macawRegRepr 
 -- Explicitly ignores the region of the stack pointer register, as this is checked elsewhere.
 registerEquivalence ::
   forall sym arch.
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PT.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
   sym ->
   RegEquivRelation sym arch
@@ -317,7 +317,7 @@ registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
 stateEquivalence ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PT.ValidArch arch =>
   sym ->
   -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->

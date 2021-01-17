@@ -90,7 +90,6 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
 import qualified What4.ProblemFeatures as W4PF
-import qualified What4.Protocol.Online as W4O
 import qualified What4.ProgramLoc as W4L
 import qualified What4.Solver.Yices as W4Y
 --import qualified What4.Protocol.SMTWriter as W4O
@@ -1019,10 +1018,20 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
       case registerCase (macawRegRepr vO) r of
+        -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
+        -- to include them in the pre-domain
         RegIP -> return Nothing
-        _ | isInO || isInP -> do
+        RegTOC -> return Nothing
+        rcase | isInO || isInP -> do
           CMR.asks envPrecondProp >>= \case
             PropagateExactEquality -> return $ Just (Some r, W4.truePred sym)
+            -- this requires some more careful consideration. We don't want to include
+            -- the stack pointer in computed domains, because this unreasonably
+            -- restricts preceding blocks from having different numbers of stack allocations.
+            -- However our equivalence relation is not strong enough to handle mismatches in
+            -- values written to memory that happen to be stack addresses, if those
+            -- addresses were computed with different stack bases.
+            PropagateComputedDomains | RegSP <- rcase -> return Nothing
             PropagateComputedDomains -> do
               (isFreshValid, freshO) <- freshRegEntry (pPatched $ simPair bundle) r vO
 
@@ -1550,25 +1559,23 @@ validRegister mblockStart entry r = withSym $ \sym ->
       let
         CLM.LLVMPointer region _ = macawRegValue entry
       liftIO $ W4.isEq sym region stackRegion
-    RegGPtr | rawBVReg r -> liftIO $ do
+    RegBV -> liftIO $ do
       let
         CLM.LLVMPointer region _ = macawRegValue entry
       zero <- W4.natLit sym 0
       W4.isEq sym region zero
-    _ -> withTOCCases @arch (return $ W4.truePred sym) $ do
-      case W4.testEquality r (toc_reg @arch) of
-        Just Refl -> do
-          let
-            CLM.LLVMPointer region val = macawRegValue entry
-          globalRegion <- CMR.asks envGlobalRegion
-          validRegion <- liftIO $ W4.isEq sym region globalRegion
-          (tocO, tocP) <- getCurrentTOCs
-          tocBV <- case W4.knownRepr :: WhichBinaryRepr bin of
-            OriginalRepr -> wLit tocO
-            PatchedRepr -> wLit tocP
-          tocLit <- liftIO $ W4.isEq sym tocBV val
-          liftIO $ W4.andPred sym validRegion tocLit
-        Nothing -> return $ W4.truePred sym
+    RegTOC -> do
+      let
+        CLM.LLVMPointer region val = macawRegValue entry
+      globalRegion <- CMR.asks envGlobalRegion
+      validRegion <- liftIO $ W4.isEq sym region globalRegion
+      (tocO, tocP) <- getCurrentTOCs
+      tocBV <- case W4.knownRepr :: WhichBinaryRepr bin of
+        OriginalRepr -> wLit tocO
+        PatchedRepr -> wLit tocP
+      tocLit <- liftIO $ W4.isEq sym tocBV val
+      liftIO $ W4.andPred sym validRegion tocLit
+    _ -> return $ W4.truePred sym
 
 
 validInitState ::
