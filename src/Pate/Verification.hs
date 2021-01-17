@@ -554,6 +554,7 @@ structToRegState e = do
 
 
 regStateToAsn :: forall sym arch.
+  HasCallStack =>
   MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
   EquivM sym arch (Ctx.Assignment (CS.RegValue' sym)  (MS.MacawCrucibleRegTypes arch))
 regStateToAsn regs = do
