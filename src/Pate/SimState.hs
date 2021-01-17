@@ -340,17 +340,6 @@ flatVarBinds _sym simVars mem regs = do
         return [Some (VarBinding var (PSR.macawRegValue val))]
       CT.StructRepr Ctx.Empty -> return []
       repr -> error ("flatVarBinds: unsupported type " ++ show repr)
-      -- PSR.MacaStructRegVar val var -> do
-      --   case PSR.macawRegRepr val of
-      --     CT.StructRepr Ctx.Empty -> do
-      --       -- FIXME: This probably isn't right in the long term. The problem is
-      --       -- that there is no correspondence between the Crucible Struct type and
-      --       -- the What4 BaseStruct type, so the 'CrucBaseTypes', 'MacawRegVar', and
-      --       -- 'MacawRegEntry' types don't quite align.  On the other hand, this
-      --       -- value should ever be used for anything so it might not matter what we
-      --       -- plug in here.
-      --       -- Ctx.Empty Ctx.:> var <- return vars
-      --       return [Some (VarBinding var (PSR.macawRegValue val))]
 
   MT.MemTraceVar memVar <- return $ simVarMem simVars
   let memBind = VarBinding memVar (MT.memArr mem)   
