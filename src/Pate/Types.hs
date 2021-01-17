@@ -603,7 +603,7 @@ instance ExprMappable sym (MacawRegEntry sym tp) where
       CLM.LLVMPointerRepr{} -> do
         val' <- mapExprPtr sym f $ macawRegValue entry
         return $ entry { macawRegValue = val' }
-      _ -> fail "mapExpr: unsupported macaw type"
+      rep -> error ("mapExpr: unsupported macaw type " ++ show rep)
 
 instance ExprMappable sym (MT.MemFootprint sym arch) where
   mapExpr sym f (MT.MemFootprint ptr w dir cond end) = do
