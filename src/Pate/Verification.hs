@@ -192,7 +192,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envBlockMapping = buildBlockMap pPairs blockMap
         , envLogger = logAction
         , envDiscoveryCfg = dcfg
-        , envPrecondProp = PropagateComputedDomains
+        , envPrecondProp = PropagateExactEquality
         , envBaseEquiv = stateEquivalence sym stackRegion
         , envFailureMode = ThrowOnAnyFailure
         , envProofEmitMode = ProofEmitAll
@@ -328,13 +328,13 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   proof <- CMR.asks envPrecondProp >>= \case
     PropagateComputedDomains -> provePostcondition pPair postcondSpec
     PropagateExactEquality -> do
-      result <- manifestError $
-        CMR.local (\env -> env { envPrecondProp = PropagateExactEquality }) $
-        provePostcondition pPair postcondSpec
+      result <- manifestError $ provePostcondition pPair postcondSpec
       -- if the previous attempt fails, fall back to intelligent precondition
       -- propagation
       case result of
-        Left _ -> provePostcondition pPair postcondSpec
+        Left _ ->
+          CMR.local (\env -> env { envPrecondProp = PropagateComputedDomains }) $
+            provePostcondition pPair postcondSpec
         Right spec -> return spec
 
   void $ withSimSpec triple $ \stO stP tripleBody -> do
