@@ -195,7 +195,7 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envPrecondProp = PropagateComputedDomains
         , envBaseEquiv = stateEquivalence sym stackRegion
         , envFailureMode = ThrowOnAnyFailure
-        , envProofPostprocess = ProofSimplifyConstants
+        , envProofEmitMode = ProofEmitAll
         , envGoalTriples = [] -- populated in runVerificationLoop
         , envValidSym = Sym sym
         , envStartTime = startedAt
@@ -325,15 +325,17 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
 
   -- TODO: it's unclear how fine-grained to make this, or if it's even
   -- a good idea, but it makes the tests finish in about 1/3 the time
-  result <- manifestError $
-    CMR.local (\env -> env { envPrecondProp = PropagateExactEquality }) $
-    provePostcondition pPair postcondSpec
-
-  -- if the previous attempt fails, fall back to intelligent precondition
-  -- propagation
-  proof <- case result of
-    Left _ -> provePostcondition pPair postcondSpec
-    Right spec -> return spec
+  proof <- CMR.asks envPrecondProp >>= \case
+    PropagateComputedDomains -> provePostcondition pPair postcondSpec
+    PropagateExactEquality -> do
+      result <- manifestError $
+        CMR.local (\env -> env { envPrecondProp = PropagateExactEquality }) $
+        provePostcondition pPair postcondSpec
+      -- if the previous attempt fails, fall back to intelligent precondition
+      -- propagation
+      case result of
+        Left _ -> provePostcondition pPair postcondSpec
+        Right spec -> return spec
 
   void $ withSimSpec triple $ \stO stP tripleBody -> do
     let
@@ -355,11 +357,11 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   blocks <- getBlocks pPair
 
   
-  proof' <- CMR.asks envProofPostprocess >>= \case
-    ProofSimplifyConstants ->
-      withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
-    ProofNoPostProcess -> return proof
-  emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof'))
+  CMR.asks envProofEmitMode >>= \case
+    ProofEmitAll -> do
+      proof' <- withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
+      emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof'))
+    ProofEmitNone -> return ()
   return ()
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
@@ -668,8 +670,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
   vsym <- CMR.asks envValidSym
   -- find all possible exits and propagate the postcondition backwards from them
   funCallProofCases <- DT.forM pairs $ \(blktO, blktP) -> do
-    isTarget <- matchesBlockTarget bundle blktO blktP
-    withAssumption (return isTarget) $ do
+    withAssumption (matchesBlockTarget bundle blktO blktP) $ do
       let
         blkO = targetCall blktO
         blkP = targetCall blktP
@@ -693,12 +694,12 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
                 provePostcondition' bundleCall (PP.prfPre contprf)
               _ -> throwHere $ BlockExitMismatch
           -- equivalence condition for the function entry
-          branchCase <- proveLocalPostcondition bundle isTarget (PP.prfPre funCallprf)
+          branchCase <- proveLocalPostcondition bundle (PP.prfPre funCallprf)
           return $ (branchPrePred branchCase, PP.ProofFunctionCall (branchTriple branchCase) funCallprf contprf)
 
         (Nothing, Nothing) -> do
           contprf <- provePostcondition (PatchPair blkO blkP) postcondSpec
-          branchCase <- proveLocalPostcondition bundle isTarget (PP.prfPre contprf)
+          branchCase <- proveLocalPostcondition bundle (PP.prfPre contprf)
           return $ (branchPrePred branchCase, PP.ProofTailCall (branchTriple branchCase) contprf)
         _ -> throwHere $ BlockExitMismatch
   falseSpec <- statePredSpecFalse
@@ -709,9 +710,8 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     noResult = BranchCase (W4.falsePred sym) falseTriple
 
   -- if we have a "return" exit, prove that it satisfies the postcondition
-  isReturn <- matchingExits bundle MS.MacawBlockEndReturn
-  precondReturn <- withSatAssumption noResult (return isReturn) $ do
-    proveLocalPostcondition bundle isReturn postcondSpec
+  precondReturn <- withSatAssumption noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
+    proveLocalPostcondition bundle postcondSpec
   let
     -- for simplicitly, we drop the condition on the return case, and assume
     -- it is taken if all other cases are false, which is checked by 'checkCasesTotal'
@@ -719,24 +719,29 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
       Just False -> statePredFalse sym
       _ -> branchPreDomain (snd precondReturn)
 
-  -- an "unknown" exit (currently caused by a syscall) collapses to requiring exact
+  -- an exit due to a syscall collapses to requiring exact
   -- equivalence before the exit
-  isUnknown <- matchingExits bundle MS.MacawBlockEndJump
+  precondArch <- withSatAssumption noResult (matchingExits bundle MS.MacawBlockEndArch) $ do
+    univDom <- universalDomainSpec
+    proveLocalPostcondition bundle univDom
+
+  -- an exit that was not classified
+  isUnknown <- do
+    isJump <- matchingExits bundle MS.MacawBlockEndJump
+    isFail <- matchingExits bundle MS.MacawBlockEndFail
+    isBranch <- matchingExits bundle MS.MacawBlockEndBranch
+    liftIO $ anyPred sym [isJump, isFail, isBranch]
   precondUnknown <- withSatAssumption noResult (return isUnknown) $ do
     univDom <- universalDomainSpec
-    proveLocalPostcondition bundle isUnknown univDom
+    proveLocalPostcondition bundle univDom
 
-  let allPreconds = precondReturn:precondUnknown:funCallCases
+  let allPreconds = precondReturn:precondArch:precondUnknown:funCallCases
   
   status <- checkCasesTotal bundle allPreconds
-  precond' <- F.foldrM (\(p, br) stPred -> liftIO $ muxStatePred sym p (branchPreDomain br) stPred)  returnByDefault (precondUnknown:funCallCases)
+  precond' <- F.foldrM (\(p, br) stPred -> liftIO $ muxStatePred sym p (branchPreDomain br) stPred)  returnByDefault (precondArch:precondUnknown:funCallCases)
 
-  precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $ 
-    startTimer $  do
-      precond <- simplifySubPreds precond'
-      duration <- getDuration
-      liftIO $ putStrLn $ "Sub pred time: " ++ show duration
-      return precond
+  precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
+    simplifySubPreds precond'
 
   triple <- mkTriple (simPair bundle) precond postcondSpec status
   return $ PP.ProofBlockSliceBody
@@ -744,25 +749,28 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     , PP.prfFunCalls = funCallProofs
     , PP.prfReturn = branchMaybeTriple precondReturn
     , PP.prfUnknownExit = branchMaybeTriple precondUnknown
+    , PP.prfArchExit = branchMaybeTriple precondArch
     }
 
-simplifyPred' ::
-  W4.SymExpr sym tp ->
-  EquivM sym arch (W4.SymExpr sym tp)
-simplifyPred' e = case W4.exprType e of
-  W4.BaseBoolRepr -> simplifyPred e
-  _ -> return e
 
 simplifySubPreds ::
   forall sym arch f.
+  HasCallStack =>
   ExprMappable sym f =>
   f ->
   EquivM sym arch f
 simplifySubPreds a = withValid $ do
-  cache <- W4B.newIdxCache
-  EM a' <- mapExprEq (\e -> W4B.idxCacheEval cache e (simplifyPred' e)) (EM @sym a)
+  (cache :: W4B.IdxCache t (W4B.Expr t)) <- W4B.newIdxCache
+  let
+    simplifyPred' ::
+      W4B.Expr t tp ->
+      EquivM sym arch (W4B.Expr t tp)
+    simplifyPred' e = case W4.exprType e of
+      W4.BaseBoolRepr ->  W4B.idxCacheEval cache e $ simplifyPred e
+      _ -> return e
+  EM a' <- mapExprEq simplifyPred' (EM @sym a)
   return a'
-  
+
 
 statePredSpecFalse :: EquivM sym arch (StatePredSpec sym arch)
 statePredSpecFalse = withSym $ \sym -> withFreshVars $ \_ _ -> return $ (W4.truePred sym, statePredFalse sym)
@@ -781,24 +789,21 @@ matchingExits bundle ecase = withSym $ \sym -> do
 proveLocalPostcondition ::
   HasCallStack =>
   SimBundle sym arch ->
-  W4.Pred sym ->
   StatePredSpec sym arch ->
   EquivM sym arch (BranchCase sym arch)
-proveLocalPostcondition bundle branchCase postcondSpec = withSym $ \sym -> do
+proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   eqRel <- CMR.asks envBaseEquiv
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   -- this weakened equivalence relation is only used for error reporting
   (postEqRel, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
   
-  fullPostCond <- liftIO $ allPreds sym [postcondPred, branchCase]
   eqInputs <- withAssumption_ (return asm) $ do
-    guessEquivalenceDomain bundle fullPostCond postcond
+    guessEquivalenceDomain bundle postcondPred postcond
 
-  
   stackRegion <- CMR.asks envStackRegion
   eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
-  notChecks <- liftIO $ W4.notPred sym fullPostCond
+  notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- getBlocks $ simPair bundle
 
   result <- startTimer $ withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ do
@@ -1014,20 +1019,20 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
       case registerCase (macawRegRepr vO) r of
-        RegSP -> return (Just (Some r, W4.truePred sym))
         RegIP -> return Nothing
         _ | isInO || isInP -> do
           CMR.asks envPrecondProp >>= \case
             PropagateExactEquality -> return $ Just (Some r, W4.truePred sym)
             PropagateComputedDomains -> do
-              freshO <- freshRegEntry vO
+              (isFreshValid, freshO) <- freshRegEntry (pPatched $ simPair bundle) r vO
 
               goal' <- bindMacawReg vO freshO goal
               goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
 
-              isPredTrue' goalIgnoresReg >>= \case
-                True -> return $ Nothing
-                False -> return $ Just (Some r, W4.truePred sym)         
+              withAssumption_ (return isFreshValid) $
+                isPredTrue' goalIgnoresReg >>= \case
+                  True -> return $ Nothing
+                  False -> return $ Just (Some r, W4.truePred sym)
         _ -> return Nothing
   stackRegion <- CMR.asks envStackRegion
   let
@@ -1067,6 +1072,21 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
     inP = simInP bundle
     inStO = simInState $ simInO bundle
     inStP = simInState $ simInP bundle
+
+freshRegEntry ::
+  KnownBinary bin =>
+  ConcreteBlock arch bin ->
+  MM.ArchReg arch tp ->
+  MacawRegEntry sym tp ->
+  EquivM sym arch (W4.Pred sym, MacawRegEntry sym tp)
+freshRegEntry initBlk r entry = withSym $ \sym -> do
+  fresh <- case macawRegRepr entry of
+    CLM.LLVMPointerRepr w -> liftIO $ do
+      ptr <- freshPtr sym w
+      return $ MacawRegEntry (macawRegRepr entry) ptr
+    repr -> throwHere $ UnsupportedRegisterType $ Some repr
+  isValid <- validRegister (Just initBlk) fresh r
+  return (isValid, fresh)
 
 getIsBoundFilter' ::
   W4.SymExpr sym tp ->
@@ -1509,91 +1529,47 @@ concreteToLLVM sym c = do
 --------------------------------------------------------
 -- Initial state validity
 
-
-ipValidPred ::
-  forall sym arch.
-  PatchPair arch ->
-  SimState sym arch Original ->
-  SimState sym arch Patched ->
+validRegister ::
+  forall bin sym arch tp.
+  KnownBinary bin =>
+  -- | if this register is an initial state, the corresponding
+  -- starting block
+  Maybe (ConcreteBlock arch bin) ->
+  MacawRegEntry sym tp ->
+  MM.ArchReg arch tp ->
   EquivM sym arch (W4.Pred sym)
-ipValidPred pPair stO stP = withSymIO $ \sym -> do
-  let
-    regsO = simRegs stO
-    regsP = simRegs stP
-  ptrO <- concreteToLLVM sym $ concreteAddress $ (pOrig pPair)
-  eqO <- MT.llvmPtrEq sym ptrO (macawRegValue $ regsO ^. MM.boundValue (MM.ip_reg @(MM.ArchReg arch)))
+validRegister mblockStart entry r = withSym $ \sym ->
+  case registerCase (macawRegRepr entry) r of
+    RegIP -> case mblockStart of
+      Just blockStart -> liftIO $ do
+        ptrO <- concreteToLLVM sym $ concreteAddress $ blockStart
+        MT.llvmPtrEq sym ptrO (macawRegValue entry)
+      Nothing -> return $ W4.truePred sym
+    RegSP -> do
+      stackRegion <- CMR.asks envStackRegion
+      let
+        CLM.LLVMPointer region _ = macawRegValue entry
+      liftIO $ W4.isEq sym region stackRegion
+    RegGPtr | rawBVReg r -> liftIO $ do
+      let
+        CLM.LLVMPointer region _ = macawRegValue entry
+      zero <- W4.natLit sym 0
+      W4.isEq sym region zero
+    _ -> withTOCCases @arch (return $ W4.truePred sym) $ do
+      case W4.testEquality r (toc_reg @arch) of
+        Just Refl -> do
+          let
+            CLM.LLVMPointer region val = macawRegValue entry
+          globalRegion <- CMR.asks envGlobalRegion
+          validRegion <- liftIO $ W4.isEq sym region globalRegion
+          (tocO, tocP) <- getCurrentTOCs
+          tocBV <- case W4.knownRepr :: WhichBinaryRepr bin of
+            OriginalRepr -> wLit tocO
+            PatchedRepr -> wLit tocP
+          tocLit <- liftIO $ W4.isEq sym tocBV val
+          liftIO $ W4.andPred sym validRegion tocLit
+        Nothing -> return $ W4.truePred sym
 
-  ptrP <- concreteToLLVM sym $ concreteAddress $ (pPatched pPair)
-  eqP <- MT.llvmPtrEq sym ptrP (macawRegValue $ regsP ^. MM.boundValue (MM.ip_reg @(MM.ArchReg arch)))
-  W4.andPred sym eqO eqP
-
-spValidRegion ::
-  forall sym arch.
-  SimState sym arch Original ->
-  SimState sym arch Patched ->
-  EquivM sym arch (W4.Pred sym)
-spValidRegion stO stP = withSym $ \sym -> do
-  let
-    regsO = simRegs stO
-    regsP = simRegs stP
-    CLM.LLVMPointer regionO _ = (macawRegValue $ regsO ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch)))
-    CLM.LLVMPointer regionP _ = (macawRegValue $ regsP ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch)))
-  stackRegion <- CMR.asks envStackRegion
-  liftIO $ do
-    eqO <-  W4.isEq sym regionO stackRegion
-    eqP <- W4.isEq sym regionP stackRegion
-    W4.andPred sym eqO eqP
-
-tocValidPred ::
-  forall sym arch.
-  SimState sym arch Original ->
-  SimState sym arch Patched ->
-  EquivM sym arch (W4.Pred sym)
-tocValidPred stO stP = withSym $ \sym ->
-  withTOCCases @arch (return $ W4.truePred sym) $ do
-    let
-      r = toc_reg @arch
-      regsO = simRegs stO
-      regsP = simRegs stP
-      CLM.LLVMPointer regionO valO = (macawRegValue $ regsO ^. MM.boundValue r)
-      CLM.LLVMPointer regionP valP = (macawRegValue $ regsP ^. MM.boundValue r)
-    globalRegion <- CMR.asks envGlobalRegion
-    -- global memory (i.e. the region of the TOC) is distinct from the stack
-    validRegion <- liftIO $ do
-      eqO <- W4.isEq sym regionO globalRegion
-      eqP <- W4.isEq sym regionP globalRegion
-      W4.andPred sym eqO eqP
-    -- the register value should always be equal to the expected TOC according
-    -- to the loaded ELF, which takes the address of the start of the function
-    (tocO, tocP) <- getCurrentTOCs
-    tocOBV <- wLit tocO
-    tocPBV <- wLit tocP
-    tocsLit <- liftIO $ do
-      eqO <- W4.isEq sym tocOBV valO
-      eqP <- W4.isEq sym tocPBV valP
-      W4.andPred sym eqO eqP      
-    liftIO $ allPreds sym [validRegion, tocsLit]
-
--- | "raw" bitvector registers always have a zero region,
--- and therefore extracting their offset is always defined
-rawBVValidPred ::
-  forall sym arch.
-  SimState sym arch Original ->
-  SimState sym arch Patched ->
-  EquivM sym arch (W4.Pred sym)
-rawBVValidPred stO stP = withSymIO $ \sym -> do
-  preds <- zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP ->
-    case registerCase (macawRegRepr vO) r of
-      RegGPtr | rawBVReg r -> do
-        let
-          CLM.LLVMPointer regionO _ = macawRegValue vO
-          CLM.LLVMPointer regionP _ = macawRegValue vP
-        zero <- W4.natLit sym 0
-        eqO <- W4.isEq sym regionO zero
-        eqP <- W4.isEq sym regionP zero
-        W4.andPred sym eqO eqP
-      _ -> return $ W4.truePred sym
-  allPreds sym preds
 
 validInitState ::
   Maybe (PatchPair arch) ->
@@ -1601,13 +1577,11 @@ validInitState ::
   SimState sym arch Patched ->
   EquivM sym arch (W4.Pred sym)
 validInitState mpPair stO stP = withSym $ \sym -> do
-  ipValid <- case mpPair of
-    Just pPair -> ipValidPred pPair stO stP
-    Nothing -> return $ W4.truePred sym
-  spValid <- spValidRegion stO stP
-  tocValid <- tocValidPred stO stP
-  rawBVValid <- rawBVValidPred stO stP
-  liftIO $ allPreds sym [ipValid, spValid, tocValid, rawBVValid]
+  preds <- zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP -> do
+    validO <- validRegister (fmap pOrig mpPair) vO r
+    validP <- validRegister (fmap pPatched mpPair) vP r
+    liftIO $ W4.andPred sym validO validP
+  liftIO $ allPreds sym preds
 
 --------------------------------------------------------
 -- Toplevel preconditions and postconditions
@@ -1620,19 +1594,14 @@ trivialEquivRelation = withSym $ \sym -> do
     (MemEquivRelation (\_ _ _-> return $ W4.truePred sym))
     (MemEquivRelation (\_ _ _-> return $ W4.truePred sym))
 
--- | Defaul toplevel register post-domain: Only require that the table
--- of contents agree.
--- FIXME: this is a bit too strong, but is necessary for the memory accesses
--- to line up sensibly, since it propagates backwards to require equality on the
--- table of contents register on all functions.
+-- | Default toplevel register post-domain: no registers are required to be
+-- equivalent
 topLevelPostRegisterDomain ::
   forall sym arch.
   EquivM sym arch (M.Map (Some (MM.ArchReg arch)) (W4.Pred sym))
-topLevelPostRegisterDomain = withSym $ \sym ->
-  return $ withTOCCases @arch M.empty (M.singleton (Some (toc_reg @arch)) (W4.truePred sym))
+topLevelPostRegisterDomain = return M.empty
 
 -- | Default toplevel post-domain:
---   table of contents register (if present)
 --   global (non-stack) memory
 topLevelPostDomain ::
   HasCallStack =>
@@ -1664,7 +1633,6 @@ allRegistersDomain = withSym $ \sym -> do
 --   all registers, stack, and memory
 --   IPs match given patchpair
 -- postdomain:
---   table of contents register (if present)
 --   global (non-stack) memory  
 topLevelTriple ::
   HasCallStack =>

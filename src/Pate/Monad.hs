@@ -28,7 +28,7 @@ module Pate.Monad
   , BinaryContext(..)
   , PreconditionPropagation(..)
   , VerificationFailureMode(..)
-  , ProofPostProcess(..)
+  , ProofEmitMode(..)
   , SimBundle(..)
   , ExprMappableEquiv(..)
   , FromExprMappable(..)
@@ -49,7 +49,6 @@ module Pate.Monad
   , startTimer
   , emitEvent
   , getBinCtx
-  , freshRegEntry
   , execGroundFn
   , getFootprints
   , memOpCondition
@@ -169,7 +168,7 @@ data EquivEnv sym arch where
     , envDiscoveryCfg :: DiscoveryConfig
     , envPrecondProp :: PreconditionPropagation
     , envFailureMode :: VerificationFailureMode
-    , envProofPostprocess :: ProofPostProcess
+    , envProofEmitMode :: ProofEmitMode
     , envBaseEquiv :: EquivRelation sym arch
     , envGoalTriples :: [PP.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
@@ -196,9 +195,9 @@ data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
 
-data ProofPostProcess =
-    ProofSimplifyConstants
-  | ProofNoPostProcess
+data ProofEmitMode =
+    ProofEmitAll
+  | ProofEmitNone
 
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'
@@ -343,15 +342,6 @@ unconstrainedRegister reg = do
       return $ MacawRegVar (MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
-freshRegEntry ::
-  MacawRegEntry sym tp ->
-  EquivM sym arch (MacawRegEntry sym tp)
-freshRegEntry entry = withSym $ \sym -> case macawRegRepr entry of
-  CLM.LLVMPointerRepr w -> liftIO $ do
-    ptr <- freshPtr sym w
-    return $ MacawRegEntry (macawRegRepr entry) ptr
-  repr -> throwHere $ UnsupportedRegisterType $ Some repr
-
 withSimSpec ::
   ExprMappableEquiv sym arch f =>
   SimSpec sym arch f ->
@@ -417,7 +407,9 @@ addAssumption ::
 addAssumption p msg = withSym $ \sym -> do
   here <- liftIO $ W4.getCurrentProgramLoc sym
   (liftIO $ try (CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here msg)))) >>= \case
-    Left (_ :: CB.AbortExecReason) -> throwHere $ InvalidSMTModel
+    Left (reason :: CB.AbortExecReason) -> do
+      liftIO $ putStrLn $ "Invalid SMT model:" ++ show reason
+      throwHere $ InvalidSMTModel
     Right _ -> return ()
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
@@ -433,8 +425,9 @@ withAssumption' asmf f = withSym $ \sym -> do
   envAsms <- asks envCurrentAsm
   allAsms <- liftIO $ W4.andPred sym asm envAsms
   fr <- liftIO $ CB.pushAssumptionFrame sym
-  addAssumption asm "withAssumption"
-  result <- local (\env -> env { envCurrentAsm = allAsms }) $ manifestError f
+  result <- local (\env -> env { envCurrentAsm = allAsms }) $ manifestError $ do
+    addAssumption asm "withAssumption"
+    f
   _ <- liftIO $ CB.popAssumptionFrame sym fr
   case result of
     Left err -> throwError err
@@ -624,7 +617,8 @@ instance ExprMappableEquiv sym arch (PP.ProofBlockSliceBody sym arch) where
     prfFunCalls' <- mapM (mapExprEq f) (PP.prfFunCalls prf)
     prfReturn' <- mapM (mapExprEq f) (PP.prfReturn prf)
     prfUnknownExit' <- mapM (mapExprEq f) (PP.prfUnknownExit prf)
-    return $ PP.ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit'
+    prfArchExit' <- mapM (mapExprEq f) (PP.prfArchExit prf)
+    return $ PP.ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit' prfArchExit'
 
 --------------------------------------
 -- UnliftIO

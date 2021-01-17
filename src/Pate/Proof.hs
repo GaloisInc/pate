@@ -124,12 +124,13 @@ data ProofBlockSliceBody sym arch =
         -- | all jumps which exit the slice with a function call
       , prfFunCalls :: [ProofFunctionCall sym arch]
       , prfReturn :: Maybe (EquivTripleBody sym arch)
+      , prfArchExit :: Maybe (EquivTripleBody sym arch)
       , prfUnknownExit :: Maybe (EquivTripleBody sym arch)
       }
 
 
 trivialSliceBody :: EquivTripleBody sym arch -> ProofBlockSliceBody sym arch
-trivialSliceBody triple = ProofBlockSliceBody triple [] Nothing Nothing
+trivialSliceBody triple = ProofBlockSliceBody triple [] Nothing Nothing Nothing
 
 prfBodyPre :: ProofBlockSliceBody sym arch -> PE.StatePred sym arch
 prfBodyPre = eqPreDomain . prfTriple

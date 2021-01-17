@@ -705,6 +705,7 @@ data InnerEquivalenceError arch
   | AssumedFalse
   | BlockExitMismatch
   | InvalidSMTModel
+  | MismatchedAssumptionsPanic
   | UnexpectedNonBoundVar
   | UnsatisfiableAssumptions
   | InequivalentError (InequivalenceResult arch)
