@@ -53,11 +53,11 @@ import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidth
 import Data.Macaw.Symbolic.Backend (EvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap, MacawSimulatorState(..)
-                           , ToCrucibleType
                            , IsMemoryModel(..)
                            , SymArchConstraints
                            , evalMacawExprExtension
                            )
+import qualified Data.Macaw.Symbolic as MS
 
 import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
 
@@ -77,8 +77,12 @@ import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), MaybeType, knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
-import What4.Interface
 import What4.ExprHelpers (assertPrefix)
+import What4.Interface
+
+
+import qualified Pate.ExprMappable as PEM
+import qualified What4.ExprHelpers as WEH
 
 ------
 -- * Undefined pointers
@@ -801,7 +805,7 @@ doReadMem ::
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
-  StateT (MemTraceImpl sym ptrW) IO (RegValue sym (ToCrucibleType ty))
+  StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doReadMem sym ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
   val <- liftIO $ readMemArr sym mem ptr memRepr
@@ -812,11 +816,11 @@ doCondReadMem ::
   IsSymInterface sym =>
   sym ->
   RegValue sym BoolType ->
-  RegValue sym (ToCrucibleType ty) ->
+  RegValue sym (MS.ToCrucibleType ty) ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
-  StateT (MemTraceImpl sym ptrW) IO (RegValue sym (ToCrucibleType ty))
+  StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doCondReadMem sym cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
   val <- liftIO $ readMemArr sym mem ptr memRepr
@@ -829,7 +833,7 @@ doWriteMem ::
   sym ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
-  RegValue sym (ToCrucibleType ty) ->
+  RegValue sym (MS.ToCrucibleType ty) ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
 doWriteMem sym = doMemOpInternal sym Write Unconditional
@@ -841,7 +845,7 @@ doCondWriteMem ::
   RegValue sym BoolType ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
-  RegValue sym (ToCrucibleType ty) ->
+  RegValue sym (MS.ToCrucibleType ty) ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
 doCondWriteMem sym cond = doMemOpInternal sym Write (Conditional cond)
@@ -1001,10 +1005,10 @@ readMemArr :: forall sym ptrW ty.
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
-  IO (RegValue sym (ToCrucibleType ty))
+  IO (RegValue sym (MS.ToCrucibleType ty))
 readMemArr sym mem ptr repr = go 0 repr
   where
-  go :: Integer -> MemRepr ty' -> IO (RegValue sym (ToCrucibleType ty'))
+  go :: Integer -> MemRepr ty' -> IO (RegValue sym (MS.ToCrucibleType ty'))
   go n (BVMemRepr byteWidth endianness) =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl
@@ -1088,11 +1092,11 @@ doMemOpInternal :: forall sym ptrW ty.
   MemOpCondition sym ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
-  RegValue sym (ToCrucibleType ty) ->
+  RegValue sym (MS.ToCrucibleType ty) ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
 doMemOpInternal sym dir cond ptrW = go where
-  go :: LLVMPtr sym ptrW -> RegValue sym (ToCrucibleType ty') -> MemRepr ty' -> StateT (MemTraceImpl sym ptrW) IO ()
+  go :: LLVMPtr sym ptrW -> RegValue sym (MS.ToCrucibleType ty') -> MemRepr ty' -> StateT (MemTraceImpl sym ptrW) IO ()
   go ptr@(LLVMPointer reg off) regVal = \case
     repr@(BVMemRepr byteWidth endianness)
       | LeqProof <- mulMono (knownNat @8) byteWidth
@@ -1123,10 +1127,10 @@ iteDeep ::
   IsSymInterface sym =>
   sym ->
   Pred sym ->
-  RegValue sym (ToCrucibleType ty) ->
-  RegValue sym (ToCrucibleType ty) ->
+  RegValue sym (MS.ToCrucibleType ty) ->
+  RegValue sym (MS.ToCrucibleType ty) ->
   MemRepr ty ->
-  IO (RegValue sym (ToCrucibleType ty))
+  IO (RegValue sym (MS.ToCrucibleType ty))
 iteDeep sym cond t f = \case
   BVMemRepr byteWidth _endianness -> let
     bitWidth = natMultiply (knownNat @8) byteWidth
@@ -1303,3 +1307,33 @@ getCond ::
   Pred sym
 getCond sym Unconditional = truePred sym
 getCond _sym (Conditional p) = p
+
+instance PEM.ExprMappable sym (MemOpCondition sym) where
+  mapExpr _sym f = \case
+    Conditional p -> Conditional <$> f p
+    Unconditional -> return Unconditional
+
+instance PEM.ExprMappable sym (MemOp sym w) where
+  mapExpr sym f = \case
+    MemOp ptr dir cond w val endian -> do
+      ptr' <- WEH.mapExprPtr sym f ptr
+      val' <- WEH.mapExprPtr sym f val
+      cond' <- PEM.mapExpr sym f cond
+      return $ MemOp ptr' dir cond' w val' endian
+    MergeOps p seq1 seq2 -> do
+      p' <- f p
+      seq1' <- traverse (PEM.mapExpr sym f) seq1
+      seq2' <- traverse (PEM.mapExpr sym f) seq2
+      return $ MergeOps p' seq1' seq2'
+
+instance PEM.ExprMappable sym (MemTraceImpl sym w) where
+  mapExpr sym f mem = do
+    memSeq' <- traverse (PEM.mapExpr sym f) $ memSeq mem
+    memArr' <- f $ memArr mem
+    return $ MemTraceImpl memSeq' memArr'
+
+instance PEM.ExprMappable sym (MemFootprint sym arch) where
+  mapExpr sym f (MemFootprint ptr w dir cond end) = do
+    ptr' <- WEH.mapExprPtr sym f ptr
+    cond' <- PEM.mapExpr sym f cond
+    return $ MemFootprint ptr' w dir cond' end

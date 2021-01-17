@@ -80,6 +80,7 @@ import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
+import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Expr.Builder as W4B
 
@@ -93,14 +94,16 @@ import qualified What4.SatResult as W4R
 --import qualified What4.Protocol.SMTLib2 as SMT2
 
 import qualified Pate.Binary as PB
+import           Pate.CounterExample
+import           Pate.Equivalence
 import qualified Pate.Event as PE
-import           Pate.Types
+import qualified Pate.ExprMappable as PEM
+import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import           Pate.SimState
-import           Pate.Equivalence
-import           Pate.CounterExample
+import qualified Pate.SimulatorRegisters as PSR
+import           Pate.Types
 import           What4.ExprHelpers
-import qualified Pate.Memory.MemTrace as MT
 
 import qualified What4.Config as W4C
 
@@ -491,7 +494,7 @@ externalTransitions internalAddrs pb =
 -- simulation. Execute the given function in a context where the given 'SimBundle'
 -- is valid (i.e. its bound variables are marked free and its preconditions are assumed).
 withSimBundle ::
-  ExprMappable sym f =>
+  PEM.ExprMappable sym f =>
   PatchPair arch ->
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)
@@ -523,7 +526,7 @@ getGPValueAndTrace ::
   CS.ExecResult p sym ext (CS.RegEntry sym (MS.ArchRegStruct arch)) ->
   EquivM sym arch
     ( W4.Pred sym
-    , MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+    , MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     , CS.RegValue sym (MS.MacawBlockEndType arch)
     )
@@ -547,20 +550,19 @@ getGPValueAndTrace (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "ti
 
 structToRegState :: forall sym arch.
   CS.RegEntry sym (MS.ArchRegStruct arch) ->
-  EquivM sym arch (MM.RegState (MM.ArchReg arch) (MacawRegEntry sym))
+  EquivM sym arch (MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym))
 structToRegState e = do
   archVs <- CMR.asks $ envArchVals
-  return $ MM.mkRegState (macawRegEntry . MS.lookupReg archVs e)
-
+  return $ MM.mkRegState (PSR.macawRegEntry . MS.lookupReg archVs e)
 
 regStateToAsn :: forall sym arch.
   HasCallStack =>
-  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   EquivM sym arch (Ctx.Assignment (CS.RegValue' sym)  (MS.MacawCrucibleRegTypes arch))
 regStateToAsn regs = do
   archFs <- archFuns
   let allRegsAsn = MS.crucGenRegAssignment archFs
-  return $ MS.macawAssignToCruc (\(MacawRegEntry _ v) -> CS.RV @sym v) $
+  return $ MS.macawAssignToCruc (\(PSR.MacawRegEntry _ v) -> CS.RV @sym v) $
     TFC.fmapFC (\r -> regs ^. MM.boundValue r) allRegsAsn
 
 getGlobals ::
@@ -811,12 +813,12 @@ bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding memVar' (MT.memArr memVal)) expr
 
 mapExpr' ::
-  ExprMappable sym f =>
+  PEM.ExprMappable sym f =>
   (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
   f ->
   EquivM sym arch f
 mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> mapExpr sym (\a -> runInIO (f a)) e
+  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a)) e
 
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
@@ -878,9 +880,9 @@ guessEquivalenceDomain bundle goal postcond = withSym $ \sym -> do
   ExprMapper doEquate <- equateRegisters regsDom bundle
    
   -- rewrite the state elements to explicitly equate registers we have assumed equivalent
-  bundle_regsEq <- liftIO $ mapExpr sym doEquate bundle
+  bundle_regsEq <- liftIO $ PEM.mapExpr sym doEquate bundle
   goal_regsEq <- liftIO $ doEquate goal
-  postcond_regsEq <- liftIO $ mapExpr sym doEquate postcond
+  postcond_regsEq <- liftIO $ PEM.mapExpr sym doEquate postcond
   
   memP' <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   goal' <- bindMemory memP memP' goal_regsEq
@@ -914,14 +916,16 @@ getIsBoundFilter' e = withValid $ liftIO $ getIsBoundFilter e
 
 liftFilterMacaw ::
   (forall tp'. W4.SymExpr sym tp' -> IO Bool) ->
-  MacawRegEntry sym tp -> EquivM sym arch Bool
+  PSR.MacawRegEntry sym tp -> EquivM sym arch Bool
 liftFilterMacaw f entry = do
-  case macawRegRepr entry of
+  case PSR.macawRegRepr entry of
     CLM.LLVMPointerRepr{} -> liftIO $ do
-      let CLM.LLVMPointer reg off = macawRegValue entry
+      let CLM.LLVMPointer reg off = PSR.macawRegValue entry
       reg' <- f reg
       off' <- f off
       return $ reg' || off'
+    CT.BoolRepr -> liftIO $ f (PSR.macawRegValue entry)
+    CT.StructRepr Ctx.Empty -> return False
     repr -> throwHere $ UnsupportedRegisterType (Some repr)
 
 newtype ExprMapper sym = ExprMapper (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp'))
@@ -948,8 +952,8 @@ equateRegisters regRel bundle = withSym $ \sym -> do
     inStP = simInState $ simInP bundle
 
 equalValues ::
-  MacawRegEntry sym tp ->
-  MacawRegEntry sym tp' ->
+  PSR.MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp' ->
   EquivM sym arch (W4.Pred sym)
 equalValues entry1 entry2 = withSymIO $ \sym -> equalValuesIO sym entry1 entry2
 
@@ -962,15 +966,15 @@ asVar expr = withValid $ case expr of
 
 macawRegBinding ::
   -- | value to rebind
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | new value
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   EquivM sym arch ([Some (VarBinding sym)])
 macawRegBinding var val = do
-  case macawRegRepr var of
+  case PSR.macawRegRepr var of
     CLM.LLVMPointerRepr _ -> do
-      CLM.LLVMPointer regVar offVar <- return $ macawRegValue var
-      CLM.LLVMPointer regVal offVal <- return $ macawRegValue val
+      CLM.LLVMPointer regVar offVar <- return $ PSR.macawRegValue var
+      CLM.LLVMPointer regVal offVal <- return $ PSR.macawRegValue val
       regVar' <- asVar regVar
       offVar' <- asVar offVar
       return $ [Some $ VarBinding regVar' regVal, Some $ VarBinding offVar' offVal]
@@ -978,9 +982,9 @@ macawRegBinding var val = do
 
 bindMacawReg ::
   -- | value to rebind
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | new value
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')
 bindMacawReg var val expr = withSym $ \sym -> do
@@ -1066,8 +1070,8 @@ matchesBlockTarget bundle blktO blktP = withSymIO $ \sym -> do
   ptrO <- concreteToLLVM sym (concreteAddress $ targetCall blktO)
   ptrP <- concreteToLLVM sym (concreteAddress $ targetCall blktP)
 
-  eqO <- MT.llvmPtrEq sym ptrO (macawRegValue ipO)
-  eqP <- MT.llvmPtrEq sym ptrP (macawRegValue ipP)
+  eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue ipO)
+  eqP <- MT.llvmPtrEq sym ptrP (PSR.macawRegValue ipP)
   eqCall <- W4.andPred sym eqO eqP
 
   -- true when the resulting return IPs match the given block return addresses
@@ -1344,10 +1348,10 @@ ipValidPred pPair stO stP = withSymIO $ \sym -> do
     regsO = simRegs stO
     regsP = simRegs stP
   ptrO <- concreteToLLVM sym $ concreteAddress $ (pOrig pPair)
-  eqO <- MT.llvmPtrEq sym ptrO (macawRegValue $ regsO ^. MM.boundValue (MM.ip_reg @(MM.ArchReg arch)))
+  eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue $ regsO ^. MM.boundValue (MM.ip_reg @(MM.ArchReg arch)))
 
   ptrP <- concreteToLLVM sym $ concreteAddress $ (pPatched pPair)
-  eqP <- MT.llvmPtrEq sym ptrP (macawRegValue $ regsP ^. MM.boundValue (MM.ip_reg @(MM.ArchReg arch)))
+  eqP <- MT.llvmPtrEq sym ptrP (PSR.macawRegValue $ regsP ^. MM.boundValue (MM.ip_reg @(MM.ArchReg arch)))
   W4.andPred sym eqO eqP
 
 spValidRegion ::
@@ -1359,8 +1363,8 @@ spValidRegion stO stP = withSym $ \sym -> do
   let
     regsO = simRegs stO
     regsP = simRegs stP
-    CLM.LLVMPointer regionO _ = (macawRegValue $ regsO ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch)))
-    CLM.LLVMPointer regionP _ = (macawRegValue $ regsP ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch)))
+    CLM.LLVMPointer regionO _ = (PSR.macawRegValue $ regsO ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch)))
+    CLM.LLVMPointer regionP _ = (PSR.macawRegValue $ regsP ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch)))
   stackRegion <- CMR.asks envStackRegion
   liftIO $ do
     eqO <-  W4.isEq sym regionO stackRegion
@@ -1378,8 +1382,8 @@ tocValidRegion stO stP = withSym $ \sym ->
       let
         regsO = simRegs stO
         regsP = simRegs stP
-        CLM.LLVMPointer regionO _ = (macawRegValue $ regsO ^. MM.boundValue r)
-        CLM.LLVMPointer regionP _ = (macawRegValue $ regsP ^. MM.boundValue r)
+        CLM.LLVMPointer regionO _ = (PSR.macawRegValue $ regsO ^. MM.boundValue r)
+        CLM.LLVMPointer regionP _ = (PSR.macawRegValue $ regsP ^. MM.boundValue r)
       stackRegion <- CMR.asks envStackRegion
       liftIO $ do
         eqO <- W4.notPred sym =<< W4.isEq sym regionO stackRegion

@@ -61,10 +61,9 @@ module Pate.Monad
   )
   where
 
-import           Prelude hiding ( fail )
-import           GHC.Stack
+import           GHC.Stack ( HasCallStack, callStack )
 
-import           Control.Monad.Fail
+import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, Handler )
@@ -80,9 +79,10 @@ import qualified Data.Set as S
 import           Data.Typeable
 import qualified Data.ElfEdit as E
 
-import qualified Data.Parameterized.Nonce as N
-import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.List as PL
+import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
@@ -100,7 +100,6 @@ import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic as MS
 
 
-import qualified What4.BaseTypes as WT
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
@@ -112,11 +111,13 @@ import qualified What4.Symbol as WS
 
 import           What4.ExprHelpers
 
-import qualified Pate.Event as PE
-import           Pate.Types
-import           Pate.SimState
-import qualified Pate.Memory.MemTrace as MT
 import           Pate.Equivalence
+import qualified Pate.Event as PE
+import qualified Pate.ExprMappable as PEM
+import qualified Pate.Memory.MemTrace as MT
+import           Pate.SimState
+import qualified Pate.SimulatorRegisters as PSR
+import           Pate.Types
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
@@ -306,7 +307,7 @@ unconstrainedRegister ::
   forall sym arch tp.
   HasCallStack =>
   MM.ArchReg arch tp ->
-  EquivM sym arch (MacawRegVar sym tp)
+  EquivM sym arch (PSR.MacawRegVar sym tp)
 unconstrainedRegister reg = do
   archFs <- archFuns
   let
@@ -315,23 +316,29 @@ unconstrainedRegister reg = do
   case repr of
     MM.BVTypeRepr n -> withSymIO $ \sym -> do
       (ptr, regVar, offVar) <- freshPtrVar sym n symbol
-      return $ MacawRegVar (MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
       var <- W4.freshBoundVar sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
-      return $ MacawRegVar (MacawRegEntry (CT.baseToType WT.BaseBoolRepr) (W4.varExpr sym var)) (Ctx.empty Ctx.:> var)
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) (W4.varExpr sym var)) (Ctx.empty Ctx.:> var)
+    MM.TupleTypeRepr PL.Nil -> do
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 freshRegEntry ::
-  MacawRegEntry sym tp ->
-  EquivM sym arch (MacawRegEntry sym tp)
-freshRegEntry entry = withSym $ \sym -> case macawRegRepr entry of
+  PSR.MacawRegEntry sym tp ->
+  EquivM sym arch (PSR.MacawRegEntry sym tp)
+freshRegEntry entry = withSym $ \sym -> case PSR.macawRegRepr entry of
   CLM.LLVMPointerRepr w -> liftIO $ do
     ptr <- freshPtr sym w
-    return $ MacawRegEntry (macawRegRepr entry) ptr
+    return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
+  CT.BoolRepr -> liftIO $ do
+    b <- W4.freshConstant sym (WS.safeSymbol "freshBool") W4.BaseBoolRepr
+    return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) b
+  CT.StructRepr Ctx.Empty -> return (PSR.MacawRegEntry (PSR.macawRegRepr entry) Ctx.empty)
   repr -> throwHere $ UnsupportedRegisterType $ Some repr
 
 withSimSpec ::
-  ExprMappable sym f =>
+  PEM.ExprMappable sym f =>
   SimSpec sym arch f ->
   (SimState sym arch Original -> SimState sym arch Patched -> f -> EquivM sym arch g) ->
   EquivM sym arch (SimSpec sym arch g)
@@ -346,7 +353,7 @@ freshSimVars ::
 freshSimVars = do
   (memtrace, memtraceVar) <- withSymIO $ \sym -> MT.initMemTraceVar sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   regs <- MM.mkRegStateM unconstrainedRegister
-  return $ SimVars memtraceVar regs (SimState memtrace (MM.mapRegsWith (\_ -> macawVarEntry) regs))
+  return $ SimVars memtraceVar regs (SimState memtrace (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
 withFreshVars ::
@@ -584,7 +591,7 @@ throwHere err = do
     }
 
 
-instance MonadFail (EquivM_ sym arch) where
+instance MF.MonadFail (EquivM_ sym arch) where
   fail msg = throwHere $ EquivCheckFailure $ "Fail: " ++ msg
 
 manifestError :: MonadError e m => m a -> m (Either e a)

@@ -57,6 +57,7 @@ module Pate.Equivalence
   , memEqOutsideRegion
   ) where
 
+import           GHC.Stack ( HasCallStack )
 import           GHC.TypeNats
 
 import           Control.Monad ( forM, foldM )
@@ -76,14 +77,17 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.Map as MapF
 
-import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Data.Macaw.CFG as MM
+import qualified Lang.Crucible.LLVM.MemModel as CLM
+import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Interface as W4
 
+import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Types as PT
 import           Pate.SimState
+import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Types as PT
 import           What4.ExprHelpers
 
 ---------------------------------------------
@@ -262,7 +266,7 @@ newtype MemEquivRelation sym arch =
 
 
 newtype RegEquivRelation sym arch =
-  RegEquivRelation { applyRegEquivRelation :: (forall tp. MM.ArchReg arch tp -> PT.MacawRegEntry sym tp -> PT.MacawRegEntry sym tp -> IO (W4.Pred sym)) }
+  RegEquivRelation { applyRegEquivRelation :: (forall tp. MM.ArchReg arch tp -> PSR.MacawRegEntry sym tp -> PSR.MacawRegEntry sym tp -> IO (W4.Pred sym)) }
 
 
 data EquivRelation sym arch =
@@ -273,17 +277,20 @@ data EquivRelation sym arch =
     }
 
 equalValuesIO ::
+  HasCallStack =>
   W4.IsExprBuilder sym =>
   sym ->
-  PT.MacawRegEntry sym tp ->
-  PT.MacawRegEntry sym tp' ->
+  PSR.MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp' ->
   IO (W4.Pred sym)
-equalValuesIO sym entry1 entry2 = case (PT.macawRegRepr entry1, PT.macawRegRepr entry2) of
+equalValuesIO sym entry1 entry2 = case (PSR.macawRegRepr entry1, PSR.macawRegRepr entry2) of
   (CLM.LLVMPointerRepr w1, CLM.LLVMPointerRepr w2) ->
     case testEquality w1 w2 of
-      Just Refl -> liftIO $ MT.llvmPtrEq sym (PT.macawRegValue entry1) (PT.macawRegValue entry2)
+      Just Refl -> liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue entry1) (PSR.macawRegValue entry2)
       Nothing -> return $ W4.falsePred sym
-  _ -> fail "equalValues: unsupported type"
+  (CT.BoolRepr, CT.BoolRepr) -> liftIO $ W4.isEq sym (PSR.macawRegValue entry1) (PSR.macawRegValue entry2)
+  (CT.StructRepr Ctx.Empty, CT.StructRepr Ctx.Empty) -> return (W4.truePred sym)
+  (tp1, tp2) -> error ("equalValues: unsupported types: " ++ show (tp1, tp2))
 
 -- | Base register equivalence relation. Equates all registers, except the instruction pointer.
 -- Explicitly ignores the region of the stack pointer register, as this is checked elsewhere.
@@ -298,8 +305,8 @@ registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
     PT.RegIP -> return $ W4.truePred sym
     PT.RegSP -> do
       let
-        CLM.LLVMPointer _ offO = PT.macawRegValue vO
-        CLM.LLVMPointer _ offP = PT.macawRegValue vP
+        CLM.LLVMPointer _ offO = PSR.macawRegValue vO
+        CLM.LLVMPointer _ offP = PSR.macawRegValue vP
       W4.isEq sym offO offP
     _ -> equalValuesIO sym vO vP
 
@@ -648,15 +655,15 @@ statePredPost sym outO outP eqRel stPred  = do
 -----------------------------------------
 -- ExprMappable instances
 
-instance PT.ExprMappable sym (MemPred sym arch) where
+instance PEM.ExprMappable sym (MemPred sym arch) where
   mapExpr sym f memPred = do
-    locs <- MapF.traverseWithKey (\_ -> PT.mapExpr sym f) (memPredLocs memPred)
+    locs <- MapF.traverseWithKey (\_ -> PEM.mapExpr sym f) (memPredLocs memPred)
     pol <- f (memPredPolarity memPred)
     return $ MemPred locs pol
 
-instance PT.ExprMappable sym (StatePred sym arch) where
+instance PEM.ExprMappable sym (StatePred sym arch) where
   mapExpr sym f stPred = do
     regs <- mapM f (predRegs stPred)
-    stack <- PT.mapExpr sym f (predStack stPred)
-    mem <- PT.mapExpr sym f (predMem stPred)
+    stack <- PEM.mapExpr sym f (predStack stPred)
+    mem <- PEM.mapExpr sym f (predMem stPred)
     return $ StatePred regs stack mem
