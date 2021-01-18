@@ -57,6 +57,7 @@ library
                        Pate.Loader,
                        Pate.Event,
                        Pate.Monad,
+                       Pate.MemCell,
                        Pate.Memory.MemTrace,
                        Pate.SimulatorRegisters,
                        Pate.Proof,

@@ -85,6 +85,7 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as W4
 
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
@@ -96,7 +97,7 @@ import           What4.ExprHelpers
 
 data MemPred sym arch =
     MemPred
-      { memPredLocs :: MapF.MapF W4.NatRepr (MemCells sym arch)
+      { memPredLocs :: MapF.MapF W4.NatRepr (PMC.MemCells sym arch)
       -- ^ predicate status at these locations according to polarity
       , memPredPolarity :: W4.Pred sym
       -- ^ if true, then predicate is true at exactly the locations
@@ -106,46 +107,46 @@ data MemPred sym arch =
       -- and there is no fundamental reason to exclude this case.
       }
 
--- | Map the internal 'MemCells' representing the locations of a 'MemPred', preserving
+-- | Map the internal 'PMC.MemCells' representing the locations of a 'MemPred', preserving
 -- its polarity.
 mapMemPred ::
   forall sym arch m.
   Monad m =>
   W4.IsExprBuilder sym =>
   MemPred sym arch ->
-  (forall w. 1 <= w => MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
   m (MemPred sym arch)
 mapMemPred memPred f = do
   let
-    f' :: (forall w. MemCell sym arch w -> W4.Pred sym -> m (Maybe (W4.Pred sym)))
-    f' cell@(MemCell{}) p = do
+    f' :: (forall w. PMC.MemCell sym arch w -> W4.Pred sym -> m (Maybe (W4.Pred sym)))
+    f' cell@(PMC.MemCell{}) p = do
       p' <- f cell p
       case W4.asConstantPred p' of
         Just False -> return Nothing
         _ -> return $ Just p'
-  locs <- TF.traverseF (\(MemCells cells) -> MemCells <$> M.traverseMaybeWithKey f' cells) (memPredLocs memPred)
+  locs <- TF.traverseF (\(PMC.MemCells cells) -> PMC.MemCells <$> M.traverseMaybeWithKey f' cells) (memPredLocs memPred)
   return $ memPred { memPredLocs = locs }
 
 
 memPredToList ::
   MemPred sym arch ->
-  [(Some (MemCell sym arch), W4.Pred sym)]
+  [(Some (PMC.MemCell sym arch), W4.Pred sym)]
 memPredToList memPred =
   concat $
-  map (\(MapF.Pair _ (MemCells cells)) -> map (\(cell, p) -> (Some cell, p)) $ M.toList cells) $
+  map (\(MapF.Pair _ (PMC.MemCells cells)) -> map (\(cell, p) -> (Some cell, p)) $ M.toList cells) $
   MapF.toList (memPredLocs memPred)
 
 listToMemPred ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
-  [(Some (MemCell sym arch), W4.Pred sym)] ->
+  [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
   W4.Pred sym ->
   IO (MemPred sym arch)
 listToMemPred sym cells pol = do
   let
-    maps = map (\(Some cell, p) -> MapF.singleton (cellWidth cell) (MemCells (M.singleton cell p))) cells
-  locs <- foldM (mergeMemCellsMap sym) MapF.empty maps
+    maps = map (\(Some cell, p) -> MapF.singleton (PMC.cellWidth cell) (PMC.MemCells (M.singleton cell p))) cells
+  locs <- foldM (PMC.mergeMemCellsMap sym) MapF.empty maps
   return $ MemPred locs pol
 
 muxMemPred ::
@@ -161,7 +162,7 @@ muxMemPred sym p predT predF = case W4.asConstantPred p of
   Just False -> return predF
   _ -> do
     pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
-    locs <- muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
+    locs <- PMC.muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
     return $ MemPred locs pol
 
 
@@ -170,11 +171,11 @@ memPredAt ::
   OrdF (W4.SymExpr sym) =>
   sym ->
   MemPred sym arch ->
-  MemCell sym arch w ->
+  PMC.MemCell sym arch w ->
   IO (W4.Pred sym)
 memPredAt sym mempred stamp = do
-  isInLocs <- case MapF.lookup (cellWidth stamp) (memPredLocs mempred) of
-    Just stamps -> inMemCells sym stamp stamps
+  isInLocs <- case MapF.lookup (PMC.cellWidth stamp) (memPredLocs mempred) of
+    Just stamps -> PMC.inMemCells sym stamp stamps
     Nothing -> return $ W4.falsePred sym
   W4.isEq sym isInLocs (memPredPolarity mempred)
 
@@ -205,7 +206,7 @@ footPrintsToPred sym foots polarity = do
     cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
     case W4.asConstantPred cond' of
       Just False -> return Nothing
-      _ -> return $ Just (Some (MemCell ptr w end), cond')
+      _ -> return $ Just (Some (PMC.MemCell ptr w end), cond')
   listToMemPred sym locs polarity
 
 addFootPrintsToPred ::
@@ -218,7 +219,7 @@ addFootPrintsToPred ::
   IO (MemPred sym arch)
 addFootPrintsToPred sym foots memPred = do
   memPred' <- footPrintsToPred sym foots (memPredPolarity memPred)
-  memLocs' <- mergeMemCellsMap sym (memPredLocs memPred) (memPredLocs memPred')
+  memLocs' <- PMC.mergeMemCellsMap sym (memPredLocs memPred) (memPredLocs memPred')
   return $ memPred { memPredLocs = memLocs' }
 
 ---------------------------------------------
@@ -269,7 +270,7 @@ statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
 
 
 newtype MemEquivRelation sym arch =
-  MemEquivRelation { applyMemEquivRelation :: (forall w. MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
+  MemEquivRelation { applyMemEquivRelation :: (forall w. PMC.MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
 
 
 newtype RegEquivRelation sym arch =
@@ -331,7 +332,7 @@ stateEquivalence ::
 stateEquivalence sym stackRegion =
   let
     isStackCell cell = do
-      let CLM.LLVMPointer region _ = cellPtr cell
+      let CLM.LLVMPointer region _ = PMC.cellPtr cell
       W4.isEq sym region stackRegion
 
     memEq = MemEquivRelation $ \cell vO vP -> do
@@ -451,7 +452,7 @@ memPredPost sym outO outP memEq memPred = do
     -- | Cell equivalence that is conditional on whether or not this
     -- cell is in the domain of the given predicate
     resolveCell ::
-      MemCell sym arch w ->
+      PMC.MemCell sym arch w ->
       W4.Pred sym ->
       IO (W4.Pred sym)
     resolveCell cell cond = do
@@ -492,13 +493,13 @@ resolveCellEquiv ::
   SimState sym arch PT.Original ->
   SimState sym arch PT.Patched ->  
   MemEquivRelation sym arch ->
-  MemCell sym arch w ->
+  PMC.MemCell sym arch w ->
   W4.Pred sym ->
   IO (W4.Pred sym)
-resolveCellEquiv sym stO stP eqRel cell@(MemCell{})  cond = do
-  let repr = MM.BVMemRepr (cellWidth cell) (cellEndian cell)
-  val1 <- MT.readMemArr sym memO (cellPtr cell) repr
-  val2 <- MT.readMemArr sym memP (cellPtr cell) repr      
+resolveCellEquiv sym stO stP eqRel cell@(PMC.MemCell{})  cond = do
+  let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
+  val1 <- MT.readMemArr sym memO (PMC.cellPtr cell) repr
+  val2 <- MT.readMemArr sym memP (PMC.cellPtr cell) repr
   impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
   where
     memO = simMem stO
@@ -534,14 +535,14 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
     -- | Conditionally write a fresh value to the given memory location
     -- FIXME: update for when memory model supports regions
     freshWrite ::
-      MemCell sym arch w ->
+      PMC.MemCell sym arch w ->
       W4.Pred sym ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
       IO (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
-    freshWrite cell@(MemCell{}) cond mem = do
+    freshWrite cell@(PMC.MemCell{}) cond mem = do
       let
-        ptr = cellPtr cell
-        repr = MM.BVMemRepr (cellWidth cell) (cellEndian cell)
+        ptr = PMC.cellPtr cell
+        repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do

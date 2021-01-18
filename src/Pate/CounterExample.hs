@@ -67,6 +67,7 @@ import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
 
 import           Pate.Equivalence
+import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import           Pate.SimState
@@ -190,7 +191,7 @@ groundTraceDiff fn eqRel bundle = do
       execGroundFn fn cond' >>= \case
         True -> do
           gptr <- groundLLVMPointer fn ptr
-          let cell = MemCell ptr w end
+          let cell = PMC.MemCell ptr w end
           memRel <- case ptrRegion gptr == gstackRegion of
             True -> return $ eqRelStack eqRel
             False -> return $ eqRelMem eqRel

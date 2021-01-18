@@ -104,9 +104,10 @@ import           Pate.CounterExample
 import           Pate.Equivalence
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Proof as PP
 import           Pate.Monad
+import qualified Pate.Proof as PP
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Types
@@ -874,7 +875,7 @@ guessMemoryDomain ::
   MemPred sym arch ->
   -- | filter for whether or not memory cells can possibly belong to
   -- the given domain
-  (forall w. MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
+  (forall w. PMC.MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
   EquivM sym arch (MemPred sym arch)
 guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
   foots <- getFootprints bundle
@@ -888,13 +889,13 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
   mapMemPred cells $ \cell p -> do
-    let repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
+    let repr = MM.BVMemRepr (PMC.cellWidth cell) MM.BigEndian
     p' <- bindMemory memP memP' p
     -- clobber the "patched" memory at exactly this cell
-    CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym (cellWidth cell)
+    CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym (PMC.cellWidth cell)
     cell' <- mapExpr' (bindMemory memP memP') cell
     
-    memP'' <- liftIO $ MT.writeMemArr sym memP (cellPtr cell') repr freshP
+    memP'' <- liftIO $ MT.writeMemArr sym memP (PMC.cellPtr cell') repr freshP
     eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
 
     -- see if we can prove that the goal is independent of this clobbering
@@ -1051,7 +1052,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   stackRegion <- CMR.asks envStackRegion
   let
     isStackCell cell = do
-      let CLM.LLVMPointer region _ = cellPtr cell
+      let CLM.LLVMPointer region _ = PMC.cellPtr cell
       liftIO $ W4.isEq sym region stackRegion
     isNotStackCell cell = do
       p <- isStackCell cell
