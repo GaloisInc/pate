@@ -53,6 +53,7 @@ library
   hs-source-dirs:      src
   exposed-modules:     Pate,
                        Pate.Binary,
+                       Pate.Discovery,
                        Pate.Verification,
                        Pate.Loader,
                        Pate.Event,
