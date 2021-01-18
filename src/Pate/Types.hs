@@ -29,6 +29,8 @@ module Pate.Types
   , PatchPair(..)
   , ExprMappable(..)
   , ConcreteBlock(..)
+  , getConcreteBlock
+  , blockMemAddr
   , BlockMapping(..)
   , BlockTarget(..)
   , ConcreteAddress(..)
@@ -44,6 +46,12 @@ module Pate.Types
   , Original
   , Patched
   , WhichBinaryRepr(..)
+  , ValidArch(..)
+  , HasTOCReg(..)
+  , HasTOCDict(..)
+  , withTOCCases
+  , ValidSym
+  , Sym(..)
   , RegisterDiff(..)
   , ConcreteValue
   , GroundBV(..)
@@ -97,6 +105,7 @@ import qualified Data.Set as S
 import           Data.Typeable
 import           Numeric.Natural
 import           Numeric
+import qualified Data.ElfEdit as E
 
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some
@@ -104,10 +113,13 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
 
+import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 
+import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..)) 
+import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Discovery as MD
@@ -170,8 +182,6 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (PatchPair arch) where
   show (PatchPair blk1 blk2) = ppBlock blk1 ++ " vs. " ++ ppBlock blk2
 
 
-
-
 data BlockTarget arch bin =
   BlockTarget
     { targetCall :: ConcreteBlock arch bin
@@ -203,6 +213,19 @@ data ConcreteBlock arch (bin :: WhichBinary) =
                 , concreteBlockEntry :: BlockEntryKind arch
                 , blockBinRepr :: WhichBinaryRepr bin
                 }
+
+getConcreteBlock ::
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  MM.ArchSegmentOff arch ->
+  BlockEntryKind arch ->
+  WhichBinaryRepr bin ->
+  Maybe (ConcreteBlock arch bin)
+getConcreteBlock off k bin = case MM.segoffAsAbsoluteAddr off of
+  Just addr -> Just $ ConcreteBlock (ConcreteAddress (MM.absoluteAddr addr)) k bin
+  _ -> Nothing
+
+blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
+blockMemAddr (ConcreteBlock (ConcreteAddress addr) _ _) = addr
 
 instance TestEquality (ConcreteBlock arch) where
   testEquality (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
@@ -500,27 +523,45 @@ instance KnownRepr WhichBinaryRepr Patched where
 type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
 
 ----------------------------------
+
 -- Register helpers
 
 -- | Helper for doing a case-analysis on registers
 data RegisterCase arch tp where
   -- | instruction pointer
-  RegIP :: RegisterCase arch (MM.BVType (MM.ArchAddrWidth arch))
+  RegIP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | stack pointer
-  RegSP :: RegisterCase arch (MM.BVType (MM.ArchAddrWidth arch))
-  -- | non-specific GPR
-  RegG :: RegisterCase arch tp
-
+  RegSP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
+  -- | table of contents register (if defined)
+  RegTOC :: HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
+  -- | non-specific bitvector (zero-region pointer) register
+  RegBV :: RegisterCase arch (CLM.LLVMPointerType w)
+  -- | non-specific pointer register
+  RegGPtr :: RegisterCase arch (CLM.LLVMPointerType w)
+  -- | non-specific non-pointer reguster
+  RegElse :: RegisterCase arch tp
+  
 registerCase ::
   forall arch tp.
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  ValidArch arch =>
+  CC.TypeRepr (MS.ToCrucibleType tp) ->
   MM.ArchReg arch tp ->
-  RegisterCase arch tp
-registerCase r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
+  RegisterCase arch (MS.ToCrucibleType tp)
+registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
   Just Refl -> RegIP
   _ -> case testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
     Just Refl -> RegSP
-    _ -> RegG
+    _ -> withTOCCases @arch nontoc $
+      case testEquality r (toc_reg @arch) of
+        Just Refl -> RegTOC
+        _ -> nontoc
+  where
+    nontoc :: RegisterCase arch (MS.ToCrucibleType tp)
+    nontoc = case repr of
+      CLM.LLVMPointerRepr{} -> case rawBVReg r of
+        True -> RegBV
+        False -> RegGPtr
+      _ -> RegElse
 
 zipRegStates :: Monad m
              => MM.RegisterInfo r
@@ -531,6 +572,46 @@ zipRegStates :: Monad m
 zipRegStates regs1 regs2 f = do
   regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
   return $ map (\(MapF.Pair _ (Const v)) -> v) $ MapF.toList $ MM.regStateMap regs'
+
+----------------------------------
+
+class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where
+  toc_reg :: MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch)))
+
+data HasTOCDict arch where
+  HasTOCDict :: HasTOCReg arch => HasTOCDict arch
+
+class
+  ( Typeable arch
+  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
+  , MS.SymArchConstraints arch
+  , MS.GenArchInfo MT.MemTraceK arch
+  , MM.ArchConstraints arch
+  ) => ValidArch arch where
+  -- | an optional witness that the architecture has a table of contents
+  tocProof :: Maybe (HasTOCDict arch)
+  -- | Registers which are used for "raw" bitvectors (i.e. they are not
+  -- used for pointers). These are assumed to always have region 0.
+  rawBVReg :: forall tp. MM.ArchReg arch tp -> Bool
+
+withTOCCases ::
+  forall arch a.
+  ValidArch arch =>
+  a ->
+  ((HasTOCReg arch, TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))) => a) ->
+  a
+withTOCCases noToc hasToc = case tocProof @arch of
+  Just HasTOCDict -> hasToc
+  Nothing -> noToc
+
+type ValidSym sym =
+  ( W4.IsExprBuilder sym
+  , CB.IsSymInterface sym
+  , ShowF (W4.SymExpr sym)
+  )
+
+data Sym sym where
+  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> Sym sym
 
 ----------------------------------
 
@@ -637,10 +718,13 @@ data InnerEquivalenceError arch
   | AssumedFalse
   | BlockExitMismatch
   | InvalidSMTModel
+  | MismatchedAssumptionsPanic
   | UnexpectedNonBoundVar
   | UnsatisfiableAssumptions
   | InequivalentError (InequivalenceResult arch)
   | MissingCrucibleGlobals
+  | UnexpectedUnverifiedTriple
+  | MissingTOCEntry (MM.ArchSegmentOff arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =

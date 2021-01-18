@@ -36,6 +36,9 @@ module Pate.SimState
   , SimInput(..)
   , SimOutput(..)
   , SimSpec(..)
+  , specMap
+  , specMapList
+  , attachSpec
   , SimBundle(..)
   , simInMem
   , simInRegs
@@ -134,6 +137,17 @@ data SimSpec sym arch f = SimSpec
   , specBody :: f
   }
 
+
+
+specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
+specMap f spec = spec { specBody = f (specBody spec) }
+
+attachSpec :: SimSpec sym arch f -> g -> SimSpec sym arch g
+attachSpec spec g = spec { specBody = g }
+
+specMapList :: (f -> [g]) -> SimSpec sym arch f -> [SimSpec sym arch g]
+specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBody spec))
+
 data SimBundle sym arch = SimBundle
   {
     simInO :: SimInput sym arch PT.Original
@@ -213,15 +227,18 @@ muxMemCells ::
   MemCells sym arch w ->
   MemCells sym arch w ->
   IO (MemCells sym arch w)  
-muxMemCells sym p (MemCells cellsT) (MemCells cellsF) = do
-  notp <- W4.notPred sym p
-  MemCells <$>
-    M.mergeA
-      (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
-      (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
-      (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
-      cellsT
-      cellsF
+muxMemCells sym p (MemCells cellsT) (MemCells cellsF) = case W4.asConstantPred p of
+  Just True -> return $ MemCells cellsT
+  Just False -> return $ MemCells cellsF
+  _ -> do
+    notp <- W4.notPred sym p
+    MemCells <$>
+      M.mergeA
+        (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
+        (M.traverseMissing (\_ pF -> W4.andPred sym pF notp))
+        (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
+        cellsT
+        cellsF
 
 -- | Mux two 'MemCells' maps, where entries that appear in only one map
 -- are made conditional on the given predicate.
@@ -234,14 +251,17 @@ muxMemCellsMap ::
   MapF.MapF f (MemCells sym arch) ->
   MapF.MapF f (MemCells sym arch) ->
   IO (MapF.MapF f (MemCells sym arch))  
-muxMemCellsMap sym p cellsMapT cellsMapF = do
-  notp <- W4.notPred sym p
-  MapF.mergeWithKeyM
-       (\_ cellsT cellsF -> Just <$> muxMemCells sym p cellsT cellsF)
-       (TF.traverseF (mapCellPreds (W4.andPred sym p)))
-       (TF.traverseF (mapCellPreds (W4.andPred sym notp)))
-       cellsMapT
-       cellsMapF
+muxMemCellsMap sym p cellsMapT cellsMapF = case W4.asConstantPred p of
+  Just True -> return cellsMapT
+  Just False -> return cellsMapF
+  _ -> do
+    notp <- W4.notPred sym p
+    MapF.mergeWithKeyM
+         (\_ cellsT cellsF -> Just <$> muxMemCells sym p cellsT cellsF)
+         (TF.traverseF (mapCellPreds (W4.andPred sym p)))
+         (TF.traverseF (mapCellPreds (W4.andPred sym notp)))
+         cellsMapT
+         cellsMapF
 
 -- | Unconditionally merge two 'MemCells' maps.
 mergeMemCellsMap ::
@@ -404,7 +424,9 @@ instance OrdF (W4.SymExpr sym) => PT.ExprMappable sym (MemCells sym arch w) wher
     maps <- forM (M.toList cells) $ \(cell, p) -> do
       cell' <- PT.mapExpr sym f cell
       p' <- f p
-      return $ MemCells $ M.singleton cell' p'
+      case W4.asConstantPred p' of
+        Just False -> return $ MemCells $ M.empty
+        _ -> return $ MemCells $ M.singleton cell' p'
     foldM (mergeMemCells sym) (MemCells M.empty) maps
 
 

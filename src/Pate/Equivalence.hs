@@ -36,6 +36,7 @@ module Pate.Equivalence
   , EquivRelation(..)
   , MemEquivRelation(..)
   , RegEquivRelation(..)
+
   , muxStatePred
   , mapMemPred
   , memPredTrue
@@ -80,6 +81,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Data.Macaw.CFG as MM
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Types as PT
@@ -151,10 +153,13 @@ muxMemPred ::
   MemPred sym arch ->
   MemPred sym arch ->
   IO (MemPred sym arch)
-muxMemPred sym p predT predF = do
-  pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
-  locs <- muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
-  return $ MemPred locs pol
+muxMemPred sym p predT predF = case W4.asConstantPred p of
+  Just True -> return predT
+  Just False -> return predF
+  _ -> do
+    pol <- W4.baseTypeIte sym p (memPredPolarity predT) (memPredPolarity predF)
+    locs <- muxMemCellsMap sym p (memPredLocs predT) (memPredLocs predF)
+    return $ MemPred locs pol
 
 
 memPredAt ::
@@ -235,17 +240,20 @@ muxStatePred ::
   StatePred sym arch ->
   StatePred sym arch ->
   IO (StatePred sym arch)
-muxStatePred sym p predT predF = do
-  notp <- W4.notPred sym p
-  regs <- M.mergeA
-    (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
-    (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
-    (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
-    (predRegs predT)
-    (predRegs predF)  
-  stack <- muxMemPred sym p (predStack predT) (predStack predF)
-  mem <- muxMemPred sym p (predMem predT) (predMem predF)
-  return $ StatePred regs stack mem
+muxStatePred sym p predT predF = case W4.asConstantPred p of
+  Just True -> return predT
+  Just False -> return predF
+  _ -> do
+    notp <- W4.notPred sym p
+    regs <- M.mergeA
+      (M.traverseMissing (\_ pT -> W4.andPred sym pT p))
+      (M.traverseMissing (\_ pF -> W4.andPred sym pF notp)) 
+      (M.zipWithAMatched (\_ p1 p2 -> W4.baseTypeIte sym p p1 p2))
+      (predRegs predT)
+      (predRegs predF)  
+    stack <- muxMemPred sym p (predStack predT) (predStack predF)
+    mem <- muxMemPred sym p (predMem predT) (predMem predF)
+    return $ StatePred regs stack mem
 
 statePredFalse :: W4.IsExprBuilder sym => sym -> StatePred sym arch
 statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
@@ -289,12 +297,12 @@ equalValuesIO sym entry1 entry2 = case (PT.macawRegRepr entry1, PT.macawRegRepr 
 -- Explicitly ignores the region of the stack pointer register, as this is checked elsewhere.
 registerEquivalence ::
   forall sym arch.
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PT.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
   sym ->
   RegEquivRelation sym arch
 registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
-  case PT.registerCase r of
+  case PT.registerCase (PT.macawRegRepr vO) r of
     PT.RegIP -> return $ W4.truePred sym
     PT.RegSP -> do
       let
@@ -309,7 +317,7 @@ registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
 stateEquivalence ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PT.ValidArch arch =>
   sym ->
   -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
