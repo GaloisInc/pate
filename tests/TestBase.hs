@@ -75,7 +75,7 @@ doTest ::
   PL.ValidArchProxy arch ->
   FilePath ->
   IO ()
-doTest mwb sv proxy fp = do
+doTest mwb sv proxy@PL.ValidArchProxy fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
   let
     infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PL.noPatchData
@@ -87,14 +87,16 @@ doTest mwb sv proxy fp = do
       , PL.discoveryCfg = PT.defaultDiscoveryCfg
       , PL.logger =
           LJ.LogAction $ \e -> case e of
-            PE.CheckedEquivalence _ _ PE.Equivalent time -> do
+            PE.CheckedEquivalence _ PE.Equivalent time -> do
               putStrLn $ "Successful equivalence check: " ++ show time
-            PE.CheckedEquivalence _ _ _ time -> do
+            PE.CheckedEquivalence _ _ time -> do
               putStrLn $ "Failed equivalence check: " ++ show time
-            PE.CheckedBranchCompleteness _ _ PE.BranchesComplete time -> do
+            PE.CheckedBranchCompleteness _ PE.BranchesComplete time -> do
               putStrLn $ "Branch completeness check: " ++ show time
-            PE.ComputedPrecondition _ _ time -> do
+            PE.ComputedPrecondition _ time -> do
               putStrLn $ "Precondition propagation: " ++ show time
+            PE.ProvenGoal _ goal time -> do
+              putStrLn $ "Proof result: " ++ show time ++ "\n" ++ show goal
             _ -> return ()
       }
   result <- case mwb of

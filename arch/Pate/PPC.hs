@@ -9,6 +9,7 @@ module Pate.PPC
 where
 
 import qualified Pate.Binary as PB
+import qualified Pate.Types as PT
 import qualified Pate.Monad as PM
 import qualified Data.Macaw.PPC as PPC
 import qualified Dismantle.PPC as PPC
@@ -22,12 +23,28 @@ instance PB.ArchConstraints PPC.PPC64 where
 instance PB.ArchConstraints PPC.PPC32 where
   binArchInfo = PPC.ppc32_linux_info
 
--- | Calling convention details, see:
---
--- https://www.ibm.com/support/knowledgecenter/en/ssw_aix_72/assembler/idalangref_reg_use_conv.html
-instance PM.ValidArch PPC.PPC64 where
-  toc_reg = Just (PPC.PPC_GP (PPC.GPR 2))
+instance PT.HasTOCReg PPC.PPC64 where
+  toc_reg = PPC.PPC_GP (PPC.GPR 2)
 
--- | The 32 bit and 64 bit architectures have the same calling convention
+instance PT.HasTOCReg PPC.PPC32 where
+  toc_reg = PPC.PPC_GP (PPC.GPR 2)
+
 instance PM.ValidArch PPC.PPC32 where
-  toc_reg = Just (PPC.PPC_GP (PPC.GPR 2))
+  tocProof = Just PT.HasTOCDict
+  rawBVReg r = case r of
+    PPC.PPC_FR _ -> True
+    PPC.PPC_CR -> True
+    PPC.PPC_FPSCR -> True
+    PPC.PPC_VSCR -> True
+    PPC.PPC_XER -> True
+    _ -> False
+
+instance PM.ValidArch PPC.PPC64 where
+  tocProof = Just PT.HasTOCDict
+  rawBVReg r = case r of
+    PPC.PPC_FR _ -> True
+    PPC.PPC_CR -> True
+    PPC.PPC_FPSCR -> True
+    PPC.PPC_VSCR -> True
+    PPC.PPC_XER -> True
+    _ -> False

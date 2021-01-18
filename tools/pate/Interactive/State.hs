@@ -30,7 +30,7 @@ data SourcePair f = SourcePair { originalSource :: f
                   deriving (Eq, Ord, Read, Show)
 
 data EquivalenceTest arch where
-  EquivalenceTest :: PE.Blocks arch -> PE.Blocks arch -> TM.NominalDiffTime -> EquivalenceTest arch
+  EquivalenceTest :: PE.BlocksPair arch -> TM.NominalDiffTime -> EquivalenceTest arch
 
 data Failure arch where
   Failure :: PT.InequivalenceResult arch -> EquivalenceTest arch -> Failure arch

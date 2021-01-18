@@ -43,6 +43,10 @@ module What4.ExprHelpers (
   , ExprFilter(..)
   , getIsBoundFilter
   , assertPrefix
+  , expandVars
+  , BoundVarBinding(..)
+  , groundToConcrete
+  , fixMux
   ) where
 
 import           GHC.TypeNats
@@ -58,6 +62,7 @@ import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.List ( foldl' )
+import           Data.Maybe ( catMaybes )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -70,6 +75,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
+import qualified What4.Concrete as W4C
 import qualified What4.Symbol as W4
 
 iteM ::
@@ -228,11 +234,16 @@ mulMono _x w = unsafeCoerce (W4.leqRefl w)
 -- Clagged from What4.Builder
 type BoundVarMap t = H.HashTable RealWorld Word64 (Set (Some (W4B.ExprBoundVar t)))
 
-boundVars :: W4B.Expr t tp -> IO (BoundVarMap t)
-boundVars e0 = do
+boundVarsMap :: W4B.Expr t tp -> IO (BoundVarMap t)
+boundVarsMap e0 = do
   visited <- stToIO $ H.new
   _ <- boundVars' visited e0
   return visited
+
+boundVars :: W4B.Expr t tp -> IO (Set (Some (W4B.ExprBoundVar t)))
+boundVars e0 = do
+  visited <- stToIO $ H.new
+  boundVars' visited e0
 
 cacheExec :: (Eq k, CC.Hashable k) => H.HashTable RealWorld k r -> k -> IO r -> IO r
 cacheExec h k m = do
@@ -278,7 +289,7 @@ getIsBoundFilter ::
   W4.SymExpr sym tp ->
   IO (ExprFilter sym)
 getIsBoundFilter expr = do
-  bvs <- liftIO $ boundVars expr
+  bvs <- liftIO $ boundVarsMap expr
   return $ ExprFilter $ \bv -> do
     case bv of
       W4B.BoundVarExpr bv' -> do
@@ -287,6 +298,82 @@ getIsBoundFilter expr = do
           Just bvs' -> return $ S.member (Some bv') bvs'
           _ -> return False
       _ -> return False
+
+
+newtype BoundVarBinding sym = BoundVarBinding (forall tp'. W4.BoundVar sym tp' -> IO (Maybe (W4.SymExpr sym tp')))
+
+-- | expand any bound variables contained in the expression
+-- according to the given expansion function
+expandVars ::
+  forall sym tp t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  BoundVarBinding sym ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+expandVars sym (BoundVarBinding f) e = do
+  bvs <- boundVars e
+  let
+    getBinding (Some bv) = f bv >>= \case
+      Just e' -> return $ Just $ (Some (VarBinding @sym bv e'))
+      Nothing -> return Nothing
+  Some binds <- (Ctx.fromList . catMaybes) <$> mapM getBinding (S.toList bvs)
+  rebindExpr sym binds e
+
+-- | Simplify 'ite (eq y x) y x' into 'x'
+fixMux ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+fixMux sym e = do
+  cache <- W4B.newIdxCache
+  fixMux' sym cache e
+
+fixMux' ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.IdxCache t (W4B.Expr t) ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+fixMux' sym cache e_outer = do
+  let
+    go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
+    go e = W4B.idxCacheEval cache e $ case e of
+      W4B.AppExpr a0
+        | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+        , Just (W4B.BaseEq _ eT' eF') <- W4B.asApp cond
+        , Just W4.Refl <- W4.testEquality eT eT'
+        , Just W4.Refl <- W4.testEquality eF eF'
+        -> return eF
+      W4B.AppExpr a0 -> do
+        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+        if (W4B.appExprApp a0) == a0' then return e
+        else W4B.sbMakeExpr sym a0'
+      W4B.NonceAppExpr a0 -> do
+        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+        if (W4B.nonceExprApp a0) == a0' then return e
+        else W4B.sbNonceExpr sym a0'
+      _ -> return e
+  go e_outer
+
+
+groundToConcrete ::
+  W4.BaseTypeRepr tp ->
+  W4G.GroundValue tp ->
+  Maybe (W4C.ConcreteVal tp)
+groundToConcrete repr gv = case repr of
+  W4.BaseBoolRepr -> return $ W4C.ConcreteBool gv
+  W4.BaseBVRepr w -> return $ W4C.ConcreteBV w gv
+  W4.BaseNatRepr -> return $ W4C.ConcreteNat gv
+  W4.BaseIntegerRepr -> return $ W4C.ConcreteInteger gv
+  W4.BaseStructRepr srepr -> do
+    let
+      go (W4G.GVW gv') repr' = groundToConcrete repr' gv'
+    W4C.ConcreteStruct <$> Ctx.zipWithM go gv srepr
+  _ -> fail "Unsupported ground value"
 
 assertPrefix :: String
 assertPrefix = "assert"

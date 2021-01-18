@@ -13,6 +13,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -26,8 +27,13 @@ module Pate.Monad
   , EquivalenceContext(..)
   , BinaryContext(..)
   , PreconditionPropagation(..)
+  , VerificationFailureMode(..)
+  , ProofEmitMode(..)
   , SimBundle(..)
-  , PrePostMap
+  , ExprMappableEquiv(..)
+  , FromExprMappable(..)
+  , FromSpecExprMappable(..)
+  , bindSpecEq
   , withBinary
   , withValid
   , withValidEnv
@@ -39,9 +45,10 @@ module Pate.Monad
   , manifestError
   , implicitError
   , throwHere
+  , getDuration
+  , startTimer
   , emitEvent
   , getBinCtx
-  , freshRegEntry
   , execGroundFn
   , getFootprints
   , memOpCondition
@@ -78,6 +85,9 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Typeable
 import qualified Data.ElfEdit as E
+import qualified Data.Time as TM
+
+import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
@@ -90,9 +100,7 @@ import qualified Lumberjack as LJ
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.FunctionHandle as CFH
-import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.Types as CT
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
@@ -118,6 +126,7 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Types
+import qualified Pate.Proof as PP
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
@@ -136,24 +145,6 @@ data EquivalenceContext sym arch where
     , rewrittenCtx :: BinaryContext sym arch Patched
     } -> EquivalenceContext sym arch
 
-class
-  ( Typeable arch
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , MS.SymArchConstraints arch
-  , MS.GenArchInfo MT.MemTraceK arch
-  , MM.ArchConstraints arch
-  ) => ValidArch arch where
-  toc_reg :: Maybe (MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch))))
-  -- ^ FIXME: the table of contents register on PPC. Required in order to assert that it is stable
-  -- at the top-level.
-
-
-type ValidSym sym =
-  ( W4.IsExprBuilder sym
-  , CB.IsSymInterface sym
-  , ShowF (W4.SymExpr sym)
-  )
-
 type ValidSolver sym scope solver fs =
   (sym ~ CBO.OnlineBackend scope solver fs
   , W4O.OnlineSolver solver
@@ -171,39 +162,74 @@ data EquivEnv sym arch where
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envStackRegion :: W4.SymNat sym
+    , envGlobalRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envDiscoveryCfg :: DiscoveryConfig
     , envPrecondProp :: PreconditionPropagation
+    , envFailureMode :: VerificationFailureMode
+    , envProofEmitMode :: ProofEmitMode
     , envBaseEquiv :: EquivRelation sym arch
+    , envGoalTriples :: [PP.EquivTriple sym arch]
+    -- ^ input equivalence problems to solve
+    , envValidSym :: Sym sym
+    -- ^ expression builder, wrapped with a validity proof
+    , envStartTime :: TM.UTCTime
+    -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
+    , envTocs :: HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
+    -- ^ table of contents for the original and patched binaries, if defined by the
+    -- architecture
+    , envCurrentFunc :: PatchPair arch
+    -- ^ start of the function currently under analysis
+    , envCurrentAsm :: W4.Pred sym
+    -- ^ conjunction of all assumptions currently in scope
     } -> EquivEnv sym arch
+
+
 
 data PreconditionPropagation =
     PropagateExactEquality
   | PropagateComputedDomains
 
-emitEvent :: PE.Event arch -> EquivM sym arch ()
-emitEvent evt = do
-  logAction <- asks envLogger
-  IO.liftIO $ LJ.writeLog logAction evt
+data VerificationFailureMode =
+    ThrowOnAnyFailure
+  | ContinueAfterFailure
 
+data ProofEmitMode =
+    ProofEmitAll
+  | ProofEmitNone
+
+-- | Start the timer to be used as the initial time when computing
+-- the duration in a nested 'emitEvent'
+startTimer :: EquivM sym arch a -> EquivM sym arch a
+startTimer f = do
+  startTime <- liftIO TM.getCurrentTime
+  local (\env -> env { envStartTime = startTime}) f
+
+-- | Time since the most recent 'startTimer'
+getDuration :: EquivM sym arch TM.NominalDiffTime
+getDuration = do
+  startedAt <- asks envStartTime
+  finishedBy <- liftIO TM.getCurrentTime
+  return $ TM.diffUTCTime finishedBy startedAt
+
+emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
+emitEvent evt = do
+  duration <- getDuration
+  logAction <- asks envLogger
+  IO.liftIO $ LJ.writeLog logAction (evt duration)
 
 
 data EquivState sym arch where
   EquivState ::
-    {
-   
-      stOpenTriples :: PrePostMap sym arch
-    , stProvenTriples :: PrePostMap sym arch
-    , stFailedTriples :: PrePostMap sym arch
-    -- ^ proven function equivalence pre and postconditions
+    { stProofs :: [PP.ProofBlockSlice sym arch]
+    -- ^ all intermediate triples that were proven for each block slice
     , stSimResults ::  Map (PatchPair arch) (SimSpec sym arch (SimBundle sym arch))
-    
+    -- ^ cached results of symbolic execution for a given block pair
+    , stEqStats :: EquivalenceStatistics
     } -> EquivState sym arch
-
-type PrePostMap sym arch = Map (PatchPair arch) [(StatePredSpec sym arch, StatePredSpec sym arch)]
 
 newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (EquivalenceError arch) IO))) a }
   deriving (Functor
@@ -324,27 +350,14 @@ unconstrainedRegister reg = do
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
-freshRegEntry ::
-  PSR.MacawRegEntry sym tp ->
-  EquivM sym arch (PSR.MacawRegEntry sym tp)
-freshRegEntry entry = withSym $ \sym -> case PSR.macawRegRepr entry of
-  CLM.LLVMPointerRepr w -> liftIO $ do
-    ptr <- freshPtr sym w
-    return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
-  CT.BoolRepr -> liftIO $ do
-    b <- W4.freshConstant sym (WS.safeSymbol "freshBool") W4.BaseBoolRepr
-    return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) b
-  CT.StructRepr Ctx.Empty -> return (PSR.MacawRegEntry (PSR.macawRegRepr entry) Ctx.empty)
-  repr -> throwHere $ UnsupportedRegisterType $ Some repr
-
 withSimSpec ::
-  PEM.ExprMappable sym f =>
+  ExprMappableEquiv sym arch f =>
   SimSpec sym arch f ->
   (SimState sym arch Original -> SimState sym arch Patched -> f -> EquivM sym arch g) ->
   EquivM sym arch (SimSpec sym arch g)
-withSimSpec spec f = withSym $ \sym -> do
+withSimSpec spec f = do
   withFreshVars $ \stO stP -> do
-    (asm, body) <- liftIO $ bindSpec sym stO stP spec
+    (asm, body) <- bindSpecEq stO stP spec
     withAssumption (return asm) $ f stO stP body
 
 freshSimVars ::
@@ -402,7 +415,9 @@ addAssumption ::
 addAssumption p msg = withSym $ \sym -> do
   here <- liftIO $ W4.getCurrentProgramLoc sym
   (liftIO $ try (CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here msg)))) >>= \case
-    Left (_ :: CB.AbortExecReason) -> throwHere $ InvalidSMTModel
+    Left (reason :: CB.AbortExecReason) -> do
+      liftIO $ putStrLn $ "Invalid SMT model:" ++ show reason
+      throwHere $ InvalidSMTModel
     Right _ -> return ()
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
@@ -415,9 +430,12 @@ withAssumption' ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption' asmf f = withSym $ \sym -> do
   asm <- asmf
+  envAsms <- asks envCurrentAsm
+  allAsms <- liftIO $ W4.andPred sym asm envAsms
   fr <- liftIO $ CB.pushAssumptionFrame sym
-  addAssumption asm "withAssumption"
-  result <- manifestError f
+  result <- local (\env -> env { envCurrentAsm = allAsms }) $ manifestError $ do
+    addAssumption asm "withAssumption"
+    f
   _ <- liftIO $ CB.popAssumptionFrame sym fr
   case result of
     Left err -> throwError err
@@ -528,6 +546,87 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
+--------------------------------------
+
+
+bindSpecEq ::
+  ExprMappableEquiv sym arch f =>
+  SimState sym arch Original ->
+  SimState sym arch Patched ->
+  SimSpec sym arch f ->
+  EquivM sym arch (W4.Pred sym, f)
+bindSpecEq stO stP spec = withSym $ \sym -> do
+  ul <- IO.askUnliftIO
+  (asm, TM _ body) <- liftIO $ bindSpec sym stO stP (spec { specBody = TM ul (specBody spec) })
+  return (asm, body)
+
+instance ExprMappableEquiv sym arch f => ExprMappableEquiv sym arch (SimSpec sym arch f) where
+  mapExprEq f spec = withValid $ withFreshVars $ \stO stP -> do
+    (asm, body) <- bindSpecEq stO stP spec
+    asm' <- f asm
+    withAssumption (return asm') $ mapExprEq f body
+
+data FromExprMappable sym f where
+  EM :: PEM.ExprMappable sym f => { unEM :: f } -> FromExprMappable sym f
+
+data FromSpecExprMappable sym arch f where
+  SEM :: forall sym arch f. PEM.ExprMappable sym f => SimSpec sym arch f -> FromSpecExprMappable sym arch f
+
+instance ExprMappableEquiv sym arch (FromExprMappable sym f) where
+  mapExprEq f (EM x) = withValid $ do
+    x' <- withSym $ \sym -> IO.withRunInIO $ \runInIO ->  PEM.mapExpr sym (\e -> runInIO (f e)) x
+    return $ EM x'
+
+instance ExprMappableEquiv sym arch (FromSpecExprMappable sym arch f) where
+  mapExprEq f (SEM x) = withValid $ do
+    x' <- mapExprEq f (specMap (EM @sym) x)
+    return $ SEM (specMap unEM x')
+
+instance ExprMappableEquiv sym arch (SimBundle sym arch) where
+  mapExprEq f bundle = unEM <$> mapExprEq f (EM @sym bundle)
+
+instance ExprMappableEquiv sym arch (PP.EquivTripleBody sym arch) where
+  mapExprEq f triple = do
+    EM eqPreDomain' <- mapExprEq f (EM @sym (PP.eqPreDomain triple))
+    SEM eqPostDomain' <- mapExprEq f (SEM @sym @arch (PP.eqPostDomain triple))
+    return $ PP.EquivTripleBody (PP.eqPair triple) eqPreDomain' eqPostDomain' (PP.eqStatus triple) (PP.eqValidSym triple)
+
+instance ExprMappableEquiv sym arch (PP.ProofFunctionCall sym arch) where
+  mapExprEq f prf = do
+    prfFunPre' <- mapExprEq f (PP.prfFunPre prf)
+    prfFunCont' <- mapExprEq f (PP.prfFunCont prf)
+    case prf of
+      PP.ProofFunctionCall{} -> do
+        prfFunBody' <- mapExprEq f (PP.prfFunBody prf)
+        return $ PP.ProofFunctionCall prfFunPre' prfFunBody' prfFunCont'
+      PP.ProofTailCall{} -> return $ PP.ProofTailCall prfFunPre' prfFunCont'
+
+instance ExprMappableEquiv sym arch (PP.ProofBlockSliceBody sym arch) where
+  mapExprEq f prf = do
+    prfTriple' <- mapExprEq f (PP.prfTriple prf)
+    prfFunCalls' <- mapM (mapExprEq f) (PP.prfFunCalls prf)
+    prfReturn' <- mapM (mapExprEq f) (PP.prfReturn prf)
+    prfUnknownExit' <- mapM (mapExprEq f) (PP.prfUnknownExit prf)
+    prfArchExit' <- mapM (mapExprEq f) (PP.prfArchExit prf)
+    return $ PP.ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit' prfArchExit'
+
+-- | Mapping under a 'SimSpec' requires re-establishing the correct logical context, which
+-- currently is best supported in the 'EquivM' monad, so we specialize 'ExprMappable' to
+-- it here.
+class ExprMappableEquiv sym arch f where
+  mapExprEq ::
+    (forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)) ->
+    f ->
+    EquivM_ sym arch f
+
+data ToExprMappable sym arch f where
+  TM :: ExprMappableEquiv sym arch f =>
+    IO.UnliftIO (EquivM_ sym arch) -> f -> ToExprMappable sym arch f
+
+instance PEM.ExprMappable sym (ToExprMappable sym arch f) where
+  mapExpr _ f (TM ul@(IO.UnliftIO runInIO) x) = do
+    x' <- runInIO $ mapExprEq (\e -> liftIO (f e)) x
+    return $ TM ul x'
 
 --------------------------------------
 -- UnliftIO
