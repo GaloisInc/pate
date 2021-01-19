@@ -20,6 +20,18 @@ main = do
             , "test-int-ref-ref"
             -- see: https://github.com/GaloisInc/pate/issues/31
             , "test-write-reorder-call"
+            , "test-call-twice"
+            , "test-fun-reorder"
+            -- see: https://github.com/GaloisInc/pate/issues/33
+            , "test-read-reorder"
+            , "test-int-ref"
+            -- see: https://github.com/GaloisInc/pate/issues/32
+            , "test-global-alias"
+            , "test-masked-write"
+            , "test-write2"
+            , "test-partialmask-args"
+            , "test-masked-args"
+            -- see: https://github.com/GaloisInc/pate/issues/31
             ]
         , testExpectSelfEquivalenceFailure =
            [

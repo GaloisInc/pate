@@ -1,7 +1,12 @@
 #include "util.h"
 
 int g = -11;
+void f(int* g);
 
 void _start() {
-  g = 56;
+  f(&g);
+}
+
+void f(int* g) {
+  *g = 56;
 }

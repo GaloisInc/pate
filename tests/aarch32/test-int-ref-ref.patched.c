@@ -7,5 +7,5 @@ int g;
 
 void _start() {
   int *i = &g;
-  f(&i);
+  g = f(&i);
 }
