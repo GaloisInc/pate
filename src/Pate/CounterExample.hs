@@ -202,7 +202,8 @@ groundTraceDiff fn eqRel bundle = do
           return $ Just $ MemOpDiff { mIsRead = case dir of {MT.Write -> False; _ -> True}
                                     , mOpOriginal = op1
                                     , mOpRewritten = op2
-                                    , mIsValid = groundIsValid
+                                    -- all reads are valid, only writes can diverge
+                                    , mIsValid = case dir of {MT.Write -> groundIsValid; _ -> True}
                                     , mDesc = ""
                                     }
         False -> return Nothing

@@ -708,7 +708,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     funCallCases = map (\(p, (casepred, prf)) -> (p, BranchCase casepred (PP.prfFunPre prf))) funCallProofCases
     funCallProofs = map (\(_, (_, prf)) -> prf) funCallProofCases
     falseTriple = PP.EquivTripleBody (simPair bundle) (statePredFalse sym) falseSpec PP.Unverified vsym
-    noResult = BranchCase (W4.falsePred sym) falseTriple
+    noResult = BranchCase (W4.truePred sym) falseTriple
 
   -- if we have a "return" exit, prove that it satisfies the postcondition
   precondReturn <- withSatAssumption noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
@@ -797,7 +797,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   -- this weakened equivalence relation is only used for error reporting
   (postEqRel, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
-  
+
   eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle postcondPred postcond
 

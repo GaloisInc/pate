@@ -247,10 +247,15 @@ concreteNextIPs ::
 concreteNextIPs st = concreteValueAddress $ st ^. MC.curIP
 
 concreteValueAddress ::
+  forall arch ids.
+  ValidArch arch =>
   MC.Value arch ids (MT.BVType (MC.ArchAddrWidth arch)) ->
   [ConcreteAddress arch]
 concreteValueAddress = \case
   MC.RelocatableValue _ addr -> [ConcreteAddress addr]
+  MC.BVValue w bv |
+    Just WI.Refl <- WI.testEquality w (MM.memWidthNatRepr @(MC.ArchAddrWidth arch)) ->
+      [ConcreteAddress (MM.absoluteAddr (MM.memWord (fromIntegral bv)))]
   MC.AssignedValue (MC.Assignment _ rhs) -> case rhs of
     MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress b1 ++ concreteValueAddress b2
     _ -> []
@@ -264,7 +269,6 @@ concreteJumpTargets ::
   EquivM sym arch [BlockTarget arch bin]
 concreteJumpTargets pb = case MD.pblockTermStmt pb of
   MD.ParsedCall st ret -> go (concreteNextIPs st) ret
-
   MD.PLTStub st _ _ -> case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
     Just addr -> go (concreteValueAddress addr) Nothing
     _ -> return $ []

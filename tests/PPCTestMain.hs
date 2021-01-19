@@ -12,11 +12,13 @@ main = do
   let cfg = TestConfig
         { testArchName = "ppc"
         , testArchProxy = PL.ValidArchProxy @PPC.PPC64
-        , testExpectFailure = [
-                              -- see: https://github.com/GaloisInc/pate/issues/10
-                                "test-direct-calls"
-                              -- see: https://github.com/GaloisInc/pate/issues/17
-                              , "test-int-ref-ref"
-                              ]
+        , testExpectEquivalenceFailure =
+            [
+            -- see: https://github.com/GaloisInc/pate/issues/10
+              "test-direct-calls"
+            -- see: https://github.com/GaloisInc/pate/issues/17
+            , "test-int-ref-ref"
+            ]
+        , testExpectSelfEquivalenceFailure = []
         }
   runTests cfg

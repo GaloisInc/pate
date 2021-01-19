@@ -4,6 +4,8 @@ int g = -11;
 int h = -12;
 
 void _start() {
-  g = 1;
-  h = 2;
+  if (g != h) {
+    g = 2;
+    h = 1;
+  }
 }
