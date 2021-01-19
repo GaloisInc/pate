@@ -288,7 +288,7 @@ runVerificationLoop env pPairs = do
 
 
 printPreamble :: PatchPair arch -> EquivM sym arch ()
-printPreamble pPair = liftIO $ putStr $ ""
+printPreamble pPair = liftIO $ putStrLn $ ""
     ++ "Checking equivalence of "
     ++ ppBlock (pOrig pPair)
     ++ " and "
@@ -631,7 +631,6 @@ provePostcondition ::
   EquivM sym arch (PP.ProofBlockSlice sym arch)
 provePostcondition pPair postcondSpec = startTimer $ withPair pPair $ do
   printPreamble pPair
-  liftIO $ putStr "\n"
   blocks <- PD.getBlocks pPair
   prf <- withSimBundle pPair $ \bundle -> provePostcondition' bundle postcondSpec
   CMS.modify' $ \st -> st { stProofs = prf : (stProofs st) }
@@ -663,6 +662,7 @@ branchMaybeTriple (cond, br) = case W4.asConstantPred cond of
 -- triples that were proven.
 provePostcondition' ::
   forall sym arch.
+  HasCallStack =>
   SimBundle sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (PP.ProofBlockSliceBody sym arch)
@@ -733,6 +733,8 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     isBranch <- matchingExits bundle MS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
   precondUnknown <- withSatAssumption noResult (return isUnknown) $ do
+    blocks <- PD.getBlocks (simPair bundle)
+    emitWarning blocks BlockEndClassificationFailure
     univDom <- universalDomainSpec
     proveLocalPostcondition bundle univDom
 

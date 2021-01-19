@@ -629,6 +629,8 @@ data InnerEquivalenceError arch
   | MissingCrucibleGlobals
   | UnexpectedUnverifiedTriple
   | MissingTOCEntry (MM.ArchSegmentOff arch)
+  | BlockEndClassificationFailure
+  | InvalidCallTarget (ConcreteAddress arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =

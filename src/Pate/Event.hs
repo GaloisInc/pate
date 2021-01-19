@@ -44,6 +44,7 @@ data BranchCompletenessResult arch = BranchesComplete
 -- This can include traditional logging information, but also statistics about
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
+  Warning :: BlocksPair arch -> PT.EquivalenceError arch -> Event arch
   -- | top-level result
   ProvenGoal :: BlocksPair arch -> PP.SomeProofGoal arch -> TM.NominalDiffTime -> Event arch
   -- | intermediate result

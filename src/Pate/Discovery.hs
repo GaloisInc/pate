@@ -193,7 +193,7 @@ getSubBlocks ::
   KnownBinary bin =>
   ConcreteBlock arch bin ->
   EquivM sym arch [BlockTarget arch bin]
-getSubBlocks b = do
+getSubBlocks b = withBinary @bin $ do
   pfm <- parsedFunctionMap <$> getBinCtx @bin
   case Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm of
     [(_, Some (ParsedBlockMap pbm))] -> do
@@ -222,7 +222,22 @@ concreteValidJumpTargets allPbs pb = do
     isTargetArch btgt = concreteBlockEntry (targetCall btgt) == BlockEntryPostArch
 
     isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
-  return $ filter isTargetValid targets
+  let validTargets = filter isTargetValid targets
+  mapM_ validateBlockTarget validTargets
+  return validTargets
+
+validateBlockTarget ::
+  KnownBinary bin =>
+  BlockTarget arch bin ->
+  EquivM sym arch ()
+validateBlockTarget tgt = do
+  let blk = targetCall tgt
+  case concreteBlockEntry blk of
+    BlockEntryInitFunction -> do
+      (manifestError $ lookupBlocks blk) >>= \case
+        Left _ -> throwHere $ InvalidCallTarget $ concreteAddress blk
+        Right _ -> return ()
+    _ -> return ()
 
 mkConcreteBlock ::
   KnownBinary bin =>

@@ -48,6 +48,7 @@ module Pate.Monad
   , getDuration
   , startTimer
   , emitEvent
+  , emitWarning
   , getBinCtx
   , execGroundFn
   , getFootprints
@@ -214,6 +215,20 @@ getDuration = do
   startedAt <- asks envStartTime
   finishedBy <- liftIO TM.getCurrentTime
   return $ TM.diffUTCTime finishedBy startedAt
+
+emitWarning ::
+  HasCallStack =>
+  PE.BlocksPair arch ->
+  InnerEquivalenceError arch ->
+  EquivM sym arch ()
+emitWarning blks innererr = do
+  wb <- asks envWhichBinary
+  let err = EquivalenceError
+        { errWhichBinary = wb
+        , errStackTrace = Just callStack
+        , errEquivError = innererr
+        }
+  emitEvent (\_ -> PE.Warning blks err)
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
