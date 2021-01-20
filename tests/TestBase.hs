@@ -23,6 +23,7 @@ import qualified Test.Tasty.ExpectedFailure as T
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
 import qualified Pate.Event as PE
+import qualified Pate.CounterExample as PCE
 
 data TestConfig where
   TestConfig ::
@@ -96,9 +97,20 @@ doTest mwb sv proxy@PL.ValidArchProxy fp = do
       , PL.infoPath = infoPath
       , PL.origPath = fp <.> "original" <.> "exe"
       , PL.patchedPath = fp <.> "patched" <.> "exe"
-      , PL.discoveryCfg = PT.defaultDiscoveryCfg
+      , PL.verificationCfg =
+          -- avoid frame computations for self-tests
+          PT.defaultVerificationCfg { PT.cfgComputeEquivalenceFrames = False }
       , PL.logger =
           LJ.LogAction $ \e -> case e of
+            PE.AnalysisStart pPair -> do
+              putStrLn $ concat $
+                [ "Checking equivalence of "
+                , PT.ppBlock (PT.pOrig pPair)
+                , " and "
+                , PT.ppBlock (PT.pPatched pPair)
+                , " (" ++ PT.ppBlockEntry (PT.concreteBlockEntry (PT.pOrig pPair)) ++ ") "
+                , ": "
+                ]
             PE.CheckedEquivalence _ PE.Equivalent time -> do
               putStrLn $ "Successful equivalence check: " ++ show time
             PE.CheckedEquivalence _ _ time -> do
@@ -111,6 +123,7 @@ doTest mwb sv proxy@PL.ValidArchProxy fp = do
               putStrLn $ "Proof result: " ++ show time ++ "\n" ++ show goal
             PE.Warning _ err -> do
               putStrLn $ "WARNING: " ++ show err
+            PE.ErrorRaised err -> putStrLn $ "Error: " ++ PCE.ppEquivalenceError err
             _ -> return ()
       }
   result <- case mwb of

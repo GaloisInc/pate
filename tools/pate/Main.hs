@@ -41,6 +41,7 @@ import qualified Pate.Event as PE
 import qualified Pate.PPC as PPC
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
+import qualified Pate.CounterExample as PCE
 
 import qualified Interactive as I
 import qualified Interactive.State as IS
@@ -59,10 +60,12 @@ main = do
         infoPath = case blockInfo opts of
           Just path -> Left path
           Nothing -> Right PL.noPatchData
-        discoverCfg =
-          PT.defaultDiscoveryCfg
+        verificationCfg =
+          PT.defaultVerificationCfg
             { PT.cfgPairMain = not $ noPairMain opts
             , PT.cfgDiscoverFuns = not $ noDiscoverFuns opts
+            , PT.cfgComputeEquivalenceFrames = not $ trySimpleFrames opts
+            , PT.cfgEmitProofs = not $ noProofs opts
             }
         cfg = PL.RunConfig
             { PL.archProxy = proxy
@@ -70,7 +73,7 @@ main = do
             , PL.origPath = originalBinary opts
             , PL.patchedPath = patchedBinary opts
             , PL.logger = logger
-            , PL.discoveryCfg = discoverCfg
+            , PL.verificationCfg = verificationCfg
             }
       PL.runEquivConfig cfg >>= \case
         Left err -> SE.die (show err)
@@ -88,6 +91,8 @@ data CLIOptions = CLIOptions
   , logTarget :: LogTarget
   , noPairMain :: Bool
   , noDiscoverFuns :: Bool
+  , noProofs :: Bool
+  , trySimpleFrames :: Bool
   } deriving (Eq, Ord, Read, Show)
 
 data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
@@ -171,10 +176,13 @@ parseSources (IS.SourcePair os ps) = do
 layout :: PP.Doc ann -> PP.SimpleDocStream ann
 layout = PP.layoutPretty PP.defaultLayoutOptions
 
+layoutLn :: PP.Doc ann -> PP.SimpleDocStream ann
+layoutLn doc = layout (doc <> PP.line)
+
 terminalFormatEvent :: PE.Event arch -> PP.SimpleDocStream PPRT.AnsiStyle
 terminalFormatEvent evt =
   case evt of
-    PE.LoadedBinaries {} -> layout "Loaded original and patched binaries"
+    PE.LoadedBinaries {} -> layoutLn "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
@@ -192,15 +200,17 @@ terminalFormatEvent evt =
       in case res of
         PE.Equivalent ->
           let okStyle = PPRT.color PPRT.Green <> PPRT.bold
-          in layout (pfx <> " " <> PP.brackets (PP.annotate okStyle "✓"))
+          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate okStyle "✓"))
         PE.Inconclusive ->
           let qStyle = PPRT.color PPRT.Magenta <> PPRT.bold
-          in layout (pfx <> " " <> PP.brackets (PP.annotate qStyle "?"))
+          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate qStyle "?"))
         PE.Inequivalent _mdl ->
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
-          in layout (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
+          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
+    PE.ErrorRaised err -> layout (PP.pretty $ PCE.ppEquivalenceError err)
+    PE.ProvenGoal _ prf _ -> layout (PP.viaShow prf)
     -- FIXME: handle other events
-    _ -> layout "Unsupported event."
+    _ -> layout ""
 
 data LoadError where
   ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
@@ -302,4 +312,12 @@ cliOptions = OA.info (OA.helper <*> parser)
       (  OA.long "nodiscovery"
       <> OA.short 'd'
       <> OA.help "Don't dynamically discover function pairs based on calls."
+      ))
+    <*> (OA.switch
+      (  OA.long "noproofs"
+      <> OA.help "Don't print structured proofs after checking."
+      ))
+    <*> (OA.switch
+      (  OA.long "try-simple-frames"
+      <> OA.help "Attempt simple frame propagation first, falling back to heuristic analysis upon failure."
       ))

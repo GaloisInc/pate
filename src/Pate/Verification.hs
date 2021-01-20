@@ -119,10 +119,10 @@ verifyPairs ::
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   BlockMapping arch ->
-  DiscoveryConfig ->
+  VerificationConfig ->
   [PatchPair arch] ->
   CME.ExceptT (EquivalenceError arch) IO Bool
-verifyPairs logAction elf elf' blockMap dcfg pPairs = do
+verifyPairs logAction elf elf' blockMap vcfg pPairs = do
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> CME.throwError $ equivalenceError UnsupportedArchitecture
@@ -192,11 +192,9 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         , envBlockEndVar = bvar
         , envBlockMapping = buildBlockMap pPairs blockMap
         , envLogger = logAction
-        , envDiscoveryCfg = dcfg
-        , envPrecondProp = PropagateExactEquality
+        , envConfig = vcfg
         , envBaseEquiv = stateEquivalence sym stackRegion
         , envFailureMode = ThrowOnAnyFailure
-        , envProofEmitMode = ProofEmitAll
         , envGoalTriples = [] -- populated in runVerificationLoop
         , envValidSym = Sym sym
         , envStartTime = startedAt
@@ -207,9 +205,8 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
         }
 
     liftIO $ do
-      putStr "\n"
       stats <- runVerificationLoop env pPairs
-      liftIO . putStr $ ppEquivalenceStatistics stats
+      IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats)
       return $ equivSuccess stats
 
 ---------------------------------------------
@@ -261,15 +258,13 @@ runVerificationLoop env pPairs = do
   where
     doVerify :: EquivM sym arch EquivalenceStatistics
     doVerify = do
-      pPairs' <- (CMR.asks $ cfgPairMain . envDiscoveryCfg) >>= \case
-        True -> do
-          mainO <- CMR.asks $ binEntry . originalCtx . envCtx
-          mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
-          blkO <- PD.mkConcreteBlock BlockEntryInitFunction mainO
-          blkP <- PD.mkConcreteBlock BlockEntryInitFunction mainP
-          let pPair = PatchPair blkO blkP
-          return $ pPair : pPairs
-        False -> return pPairs
+      pPairs' <- ifConfig (not . cfgPairMain) (return pPairs) $ do
+        mainO <- CMR.asks $ binEntry . originalCtx . envCtx
+        mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
+        blkO <- PD.mkConcreteBlock BlockEntryInitFunction mainO
+        blkP <- PD.mkConcreteBlock BlockEntryInitFunction mainP
+        let pPair = PatchPair blkO blkP
+        return $ pPair : pPairs
       triples <- DT.forM pPairs' $ topLevelTriple
       CMR.local (\env' -> env' { envGoalTriples = triples } ) $
         F.forM_ triples go
@@ -279,35 +274,28 @@ runVerificationLoop env pPairs = do
       PP.EquivTriple sym arch -> EquivM sym arch ()
     go triple = do
       result <- manifestError $ checkEquivalence triple
-      printResult result
+      emitResult result
       normResult <- return $ case result of
         Left err | InequivalentError _ <- errEquivError err -> EquivalenceStatistics 1 0 0
         Left _ -> EquivalenceStatistics 1 0 1
         Right _ -> EquivalenceStatistics 1 1 0
       CMS.modify' $ \st -> st { stEqStats = normResult <> (stEqStats st) }
 
+ifConfig ::
+  (VerificationConfig -> Bool) ->
+  EquivM sym arch a ->
+  EquivM sym arch a ->
+  EquivM sym arch a
+ifConfig checkCfg ifT ifF = (CMR.asks $ checkCfg . envConfig) >>= \case
+  True -> ifT
+  False -> ifF
 
-printPreamble :: PatchPair arch -> EquivM sym arch ()
-printPreamble pPair = liftIO $ putStrLn $ ""
-    ++ "Checking equivalence of "
-    ++ ppBlock (pOrig pPair)
-    ++ " and "
-    ++ ppBlock (pPatched pPair)
-    ++ " (" ++ ppBlockEntry (concreteBlockEntry (pOrig pPair)) ++ ") "
-    ++ ": "
+emitPreamble :: PatchPair arch -> EquivM sym arch ()
+emitPreamble pPair = emitEvent (\_ -> PE.AnalysisStart pPair)
 
-ppBlockEntry :: BlockEntryKind arch -> String
-ppBlockEntry be = case be of
-  BlockEntryInitFunction -> "function entry point"
-  BlockEntryPostFunction -> "intermediate function point"
-  BlockEntryPostArch -> "intermediate function point (after syscall)"
-  BlockEntryJump -> "unknown program point"
-
-printResult :: Either (EquivalenceError arch) () -> EquivM sym arch ()
-printResult (Left err) = liftIO $ putStr . ppEquivalenceError $ err
-printResult (Right ()) = liftIO $ putStr "✓\n"
-
-
+emitResult :: Either (EquivalenceError arch) () -> EquivM sym arch ()
+emitResult (Left err) = emitEvent (\_ -> PE.ErrorRaised err)
+emitResult (Right ()) = return ()
 
 -- | Verify that the given triple: that a pair of blocks yield equivalent
 -- states on the post-domain, assuming equality on the pre-domain.
@@ -326,17 +314,16 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
 
   -- TODO: it's unclear how fine-grained to make this, or if it's even
   -- a good idea, but it makes the tests finish in about 1/3 the time
-  proof <- CMR.asks envPrecondProp >>= \case
-    PropagateComputedDomains -> provePostcondition pPair postcondSpec
-    PropagateExactEquality -> do
-      result <- manifestError $ provePostcondition pPair postcondSpec
-      -- if the previous attempt fails, fall back to intelligent precondition
-      -- propagation
-      case result of
-        Left _ ->
-          CMR.local (\env -> env { envPrecondProp = PropagateComputedDomains }) $
-            provePostcondition pPair postcondSpec
-        Right spec -> return spec
+  let doProof = provePostcondition pPair postcondSpec
+  proof <- ifConfig cfgComputeEquivalenceFrames doProof $ do
+    result <- manifestError $ doProof
+    -- if the previous attempt fails, fall back to intelligent precondition
+    -- propagation
+    case result of
+      Left _ ->
+        CMR.local (\env -> env { envConfig = (envConfig env){cfgComputeEquivalenceFrames = True} }) $
+          doProof
+      Right spec -> return spec
 
   void $ withSimSpec triple $ \stO stP tripleBody -> do
     let
@@ -357,13 +344,9 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   vsym <- CMR.asks envValidSym
   blocks <- PD.getBlocks pPair
 
-  
-  CMR.asks envProofEmitMode >>= \case
-    ProofEmitAll -> do
-      proof' <- withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
-      emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof'))
-    ProofEmitNone -> return ()
-  return ()
+  ifConfig (not . cfgEmitProofs) (return ()) $ do
+    proof' <- withSimSpec proof $ \_stO _stP proofBody -> mapExprEq simplifyExpr proofBody
+    emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof'))
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
     -- the bound terms
@@ -630,7 +613,7 @@ provePostcondition ::
   StatePredSpec sym arch ->
   EquivM sym arch (PP.ProofBlockSlice sym arch)
 provePostcondition pPair postcondSpec = startTimer $ withPair pPair $ do
-  printPreamble pPair
+  emitPreamble pPair
   blocks <- PD.getBlocks pPair
   prf <- withSimBundle pPair $ \bundle -> provePostcondition' bundle postcondSpec
   CMS.modify' $ \st -> st { stProofs = prf : (stProofs st) }
@@ -690,7 +673,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
                 preUniv <- universalDomain
                 return $ PP.trivialSliceBody $ PP.EquivTripleBody pPair preUniv (PP.prfPre contprf) PP.Unverified vsym
               (entryO, entryP) | entryO == entryP -> do
-                printPreamble pPair
+                emitPreamble pPair
                 -- equivalence condition for calling this function
                 provePostcondition' bundleCall (PP.prfPre contprf)
               _ -> throwHere $ BlockExitMismatch
@@ -899,13 +882,11 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     -- see if we can prove that the goal is independent of this clobbering
     asm <- liftIO $ allPreds sym [p, p', eqMemP, goal]
     check <- liftIO $ W4.impliesPred sym asm goal'
-
-    CMR.asks envPrecondProp >>= \case
-      PropagateExactEquality -> return polarity
-      PropagateComputedDomains ->
-        isPredTrue' check >>= \case
-          True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
-          False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
+    
+    ifConfig (not . cfgComputeEquivalenceFrames) (return polarity) $ do
+      isPredTrue' check >>= \case
+        True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
+        False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
   where
     polarity = memPredPolarity memPred
     memP = simInMem $ simInP bundle
@@ -1021,31 +1002,32 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
     zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
+      let
+        include = return $ Just (Some r, W4.truePred sym)
+        exclude = return Nothing
       case registerCase (PSR.macawRegRepr vO) r of
         -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
         -- to include them in the pre-domain
         RegIP -> return Nothing
         RegTOC -> return Nothing
-        rcase | isInO || isInP -> do
-          CMR.asks envPrecondProp >>= \case
-            PropagateExactEquality -> return $ Just (Some r, W4.truePred sym)
-            -- this requires some more careful consideration. We don't want to include
-            -- the stack pointer in computed domains, because this unreasonably
-            -- restricts preceding blocks from having different numbers of stack allocations.
-            -- However our equivalence relation is not strong enough to handle mismatches in
-            -- values written to memory that happen to be stack addresses, if those
-            -- addresses were computed with different stack bases.
-            PropagateComputedDomains | RegSP <- rcase -> return Nothing
-            PropagateComputedDomains -> do
-              (isFreshValid, freshO) <- freshRegEntry (pPatched $ simPair bundle) r vO
+        -- this requires some more careful consideration. We don't want to include
+        -- the stack pointer in computed domains, because this unreasonably
+        -- restricts preceding blocks from having different numbers of stack allocations.
+        -- However our equivalence relation is not strong enough to handle mismatches in
+        -- values written to memory that happen to be stack addresses, if those
+        -- addresses were computed with different stack bases.
+        RegSP -> ifConfig cfgComputeEquivalenceFrames exclude include
+        _ | isInO || isInP ->
+          ifConfig (not . cfgComputeEquivalenceFrames) include $ do
+            (isFreshValid, freshO) <- freshRegEntry (pPatched $ simPair bundle) r vO
 
-              goal' <- bindMacawReg vO freshO goal
-              goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
+            goal' <- bindMacawReg vO freshO goal
+            goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
 
-              withAssumption_ (return isFreshValid) $
-                isPredTrue' goalIgnoresReg >>= \case
-                  True -> return $ Nothing
-                  False -> return $ Just (Some r, W4.truePred sym)
+            withAssumption_ (return isFreshValid) $
+              isPredTrue' goalIgnoresReg >>= \case
+                True -> exclude
+                False -> include
         _ -> return Nothing
   stackRegion <- CMR.asks envStackRegion
   let

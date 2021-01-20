@@ -304,11 +304,9 @@ groundReturnPtr fn blkend = case MS.blockEndReturn (Proxy @arch) blkend of
 -- Printing
 
 ppEquivalenceError ::
-  MS.SymArchConstraints arch =>
-  ShowF (MM.ArchReg arch) =>
   EquivalenceError arch -> String
-ppEquivalenceError err | (InequivalentError ineq)  <- errEquivError err =
- "x\n" ++ ppInequivalenceResult ineq
+ppEquivalenceError err@(EquivalenceError{}) | (InequivalentError ineq)  <- errEquivError err =
+  ppInequivalenceResult ineq
 ppEquivalenceError err = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the error
 
 ppInequivalenceResult ::
@@ -316,7 +314,7 @@ ppInequivalenceResult ::
   ShowF (MM.ArchReg arch) =>
   InequivalenceResult arch -> String
 ppInequivalenceResult (InequivalentResults traceDiff exitDiffs regDiffs _retDiffs reason) =
-  "x\n" ++ ppReason reason ++ "\n" ++ ppExitCaseDiff exitDiffs ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
+  ppReason reason ++ "\n" ++ ppExitCaseDiff exitDiffs ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
 
 ppReason :: InequivalenceReason -> String
 ppReason r = "\tEquivalence Check Failed: " ++ case r of
@@ -354,7 +352,7 @@ ppMemOpDiff diff
       then ""
       else
         " (original) vs. " ++ ppGroundMemOp (mIsRead diff) (mOpRewritten diff) ++ " (rewritten)"
-         ++ "\n" ++ mDesc diff
+         ++ mDesc diff
      )
   ++ "\n"
 ppMemOpDiff _ = ""
