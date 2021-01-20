@@ -63,7 +63,6 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.List ( foldl' )
 import           Data.Maybe ( catMaybes )
-import qualified Data.BitVector.Sized as BVS
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some

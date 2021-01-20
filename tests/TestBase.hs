@@ -28,8 +28,10 @@ data TestConfig where
   TestConfig ::
     { testArchName :: String
     , testArchProxy :: PL.ValidArchProxy arch
-    , testExpectFailure :: [String]
+    , testExpectEquivalenceFailure :: [String]
     -- ^ tests which are failing now but eventually should succeed
+    , testExpectSelfEquivalenceFailure :: [String]
+    -- ^ tests which fail to prove self-equivalence
     } -> TestConfig
 
 runTests :: TestConfig -> IO ()
@@ -47,14 +49,27 @@ runTests cfg = do
     , T.testGroup "inequivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldNotVerify fp]) inequivTestFiles
     ]
 
+expectSelfEquivalenceFailure :: TestConfig -> FilePath -> Bool
+expectSelfEquivalenceFailure cfg fp = baseName `elem` (testExpectSelfEquivalenceFailure cfg)
+  where
+     (_, baseName) = splitFileName fp
+
+expectEquivalenceFailure :: TestConfig -> FilePath -> Bool
+expectEquivalenceFailure cfg fp =
+  expectSelfEquivalenceFailure cfg fp || baseName `elem` (testExpectEquivalenceFailure cfg)
+  where
+     (_, baseName) = splitFileName fp
 
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
   T.testGroup fp $
-    [ T.testCase "original-self" $ doTest (Just PT.OriginalRepr) ShouldVerify proxy fp
-    , T.testCase "patched-self" $ doTest (Just PT.PatchedRepr) ShouldVerify proxy fp
+    [ wrap $ T.testCase "original-self" $ doTest (Just PT.OriginalRepr) ShouldVerify proxy fp
+    , wrap $ T.testCase "patched-self" $ doTest (Just PT.PatchedRepr) ShouldVerify proxy fp
     , mkEquivTest cfg ShouldVerify fp
     ]
+  where
+    wrap :: T.TestTree -> T.TestTree
+    wrap t = if (expectSelfEquivalenceFailure cfg fp) then T.expectFail t else t    
 
 data ShouldVerify = ShouldVerify | ShouldNotVerify
 
@@ -62,11 +77,8 @@ mkEquivTest :: TestConfig -> ShouldVerify -> FilePath -> T.TestTree
 mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
   wrap $ T.testCase "equivalence" $ doTest Nothing sv proxy fp
   where
-    (_, baseName) = splitFileName fp
-    shouldFail = baseName `elem` (testExpectFailure cfg)
-
     wrap :: T.TestTree -> T.TestTree
-    wrap t = if shouldFail then T.expectFail t else t
+    wrap t = if (expectEquivalenceFailure cfg fp) then T.expectFail t else t
 
 doTest ::
   forall arch bin.
@@ -97,6 +109,8 @@ doTest mwb sv proxy@PL.ValidArchProxy fp = do
               putStrLn $ "Precondition propagation: " ++ show time
             PE.ProvenGoal _ goal time -> do
               putStrLn $ "Proof result: " ++ show time ++ "\n" ++ show goal
+            PE.Warning _ err -> do
+              putStrLn $ "WARNING: " ++ show err
             _ -> return ()
       }
   result <- case mwb of

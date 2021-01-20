@@ -83,4 +83,4 @@ loadELF _ path = do
     getElf :: forall w. MC.MemWidth w => E.ElfHeaderInfo w -> E.ElfHeaderInfo (MC.ArchAddrWidth arch)
     getElf e = case testEquality (MC.addrWidthRepr e) archWidthRepr of
       Just Refl -> e
-      Nothing -> error "Unexpected arch"
+      Nothing -> error ("Unexpected arch pointer width; expected " ++ show archWidthRepr ++ " but got " ++ show (MC.addrWidthRepr e))

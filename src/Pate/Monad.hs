@@ -48,6 +48,7 @@ module Pate.Monad
   , getDuration
   , startTimer
   , emitEvent
+  , emitWarning
   , getBinCtx
   , execGroundFn
   , getFootprints
@@ -68,10 +69,9 @@ module Pate.Monad
   )
   where
 
-import           Prelude hiding ( fail )
-import           GHC.Stack
+import           GHC.Stack ( HasCallStack, callStack )
 
-import           Control.Monad.Fail
+import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, Handler )
@@ -90,18 +90,18 @@ import qualified Data.Time as TM
 
 import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
-import qualified Data.Parameterized.Nonce as N
-import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.List as PL
+import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
-import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.FunctionHandle as CFH
+import qualified Lang.Crucible.Simulator as CS
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
@@ -109,21 +109,24 @@ import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic as MS
 
 
-import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
+import qualified What4.Expr.GroundEval as W4G
+import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4O
 import qualified What4.Protocol.SMTWriter as W4W
-import qualified What4.SemiRing as SR
 import qualified What4.SatResult as W4R
-import qualified What4.Expr.GroundEval as W4G
+import qualified What4.SemiRing as SR
+import qualified What4.Symbol as WS
 
 import           What4.ExprHelpers
 
-import qualified Pate.Event as PE
-import           Pate.Types
-import           Pate.SimState
-import qualified Pate.Memory.MemTrace as MT
 import           Pate.Equivalence
+import qualified Pate.Event as PE
+import qualified Pate.ExprMappable as PEM
+import qualified Pate.Memory.MemTrace as MT
+import           Pate.SimState
+import qualified Pate.SimulatorRegisters as PSR
+import           Pate.Types
 import qualified Pate.Proof as PP
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
@@ -212,6 +215,20 @@ getDuration = do
   startedAt <- asks envStartTime
   finishedBy <- liftIO TM.getCurrentTime
   return $ TM.diffUTCTime finishedBy startedAt
+
+emitWarning ::
+  HasCallStack =>
+  PE.BlocksPair arch ->
+  InnerEquivalenceError arch ->
+  EquivM sym arch ()
+emitWarning blks innererr = do
+  wb <- asks envWhichBinary
+  let err = EquivalenceError
+        { errWhichBinary = wb
+        , errStackTrace = Just callStack
+        , errEquivError = innererr
+        }
+  emitEvent (\_ -> PE.Warning blks err)
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
@@ -329,8 +346,9 @@ archFuns = do
 
 unconstrainedRegister ::
   forall sym arch tp.
+  HasCallStack =>
   MM.ArchReg arch tp ->
-  EquivM sym arch (MacawRegVar sym tp)
+  EquivM sym arch (PSR.MacawRegVar sym tp)
 unconstrainedRegister reg = do
   archFs <- archFuns
   let
@@ -339,7 +357,12 @@ unconstrainedRegister reg = do
   case repr of
     MM.BVTypeRepr n -> withSymIO $ \sym -> do
       (ptr, regVar, offVar) <- freshPtrVar sym n symbol
-      return $ MacawRegVar (MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
+    MM.BoolTypeRepr -> withSymIO $ \sym -> do
+      var <- W4.freshBoundVar sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) (W4.varExpr sym var)) (Ctx.empty Ctx.:> var)
+    MM.TupleTypeRepr PL.Nil -> do
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 withSimSpec ::
@@ -358,7 +381,7 @@ freshSimVars ::
 freshSimVars = do
   (memtrace, memtraceVar) <- withSymIO $ \sym -> MT.initMemTraceVar sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   regs <- MM.mkRegStateM unconstrainedRegister
-  return $ SimVars memtraceVar regs (SimState memtrace (MM.mapRegsWith (\_ -> macawVarEntry) regs))
+  return $ SimVars memtraceVar regs (SimState memtrace (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
 withFreshVars ::
@@ -541,15 +564,6 @@ memOpCondition = \case
 --------------------------------------
 
 
--- | Mapping under a 'SimSpec' requires re-establishing the correct logical context, which
--- currently is best supported in the 'EquivM' monad, so we specialize 'ExprMappable' to
--- it here.
-class ExprMappableEquiv sym arch f where
-  mapExprEq ::
-    (forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)) ->
-    f ->
-    EquivM_ sym arch f
-
 bindSpecEq ::
   ExprMappableEquiv sym arch f =>
   SimState sym arch Original ->
@@ -568,29 +582,20 @@ instance ExprMappableEquiv sym arch f => ExprMappableEquiv sym arch (SimSpec sym
     withAssumption (return asm') $ mapExprEq f body
 
 data FromExprMappable sym f where
-  EM :: ExprMappable sym f => { unEM :: f } -> FromExprMappable sym f
+  EM :: PEM.ExprMappable sym f => { unEM :: f } -> FromExprMappable sym f
 
 data FromSpecExprMappable sym arch f where
-  SEM :: forall sym arch f. ExprMappable sym f => SimSpec sym arch f -> FromSpecExprMappable sym arch f
-
-data ToExprMappable sym arch f where
-  TM :: ExprMappableEquiv sym arch f =>
-    IO.UnliftIO (EquivM_ sym arch) -> f -> ToExprMappable sym arch f
+  SEM :: forall sym arch f. PEM.ExprMappable sym f => SimSpec sym arch f -> FromSpecExprMappable sym arch f
 
 instance ExprMappableEquiv sym arch (FromExprMappable sym f) where
   mapExprEq f (EM x) = withValid $ do
-    x' <- withSym $ \sym -> IO.withRunInIO $ \runInIO ->  mapExpr sym (\e -> runInIO (f e)) x
+    x' <- withSym $ \sym -> IO.withRunInIO $ \runInIO ->  PEM.mapExpr sym (\e -> runInIO (f e)) x
     return $ EM x'
 
 instance ExprMappableEquiv sym arch (FromSpecExprMappable sym arch f) where
   mapExprEq f (SEM x) = withValid $ do
     x' <- mapExprEq f (specMap (EM @sym) x)
     return $ SEM (specMap unEM x')
-
-instance ExprMappable sym (ToExprMappable sym arch f) where
-  mapExpr _ f (TM ul@(IO.UnliftIO runInIO) x) = do
-    x' <- runInIO $ mapExprEq (\e -> liftIO (f e)) x
-    return $ TM ul x'
 
 instance ExprMappableEquiv sym arch (SimBundle sym arch) where
   mapExprEq f bundle = unEM <$> mapExprEq f (EM @sym bundle)
@@ -619,6 +624,24 @@ instance ExprMappableEquiv sym arch (PP.ProofBlockSliceBody sym arch) where
     prfUnknownExit' <- mapM (mapExprEq f) (PP.prfUnknownExit prf)
     prfArchExit' <- mapM (mapExprEq f) (PP.prfArchExit prf)
     return $ PP.ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit' prfArchExit'
+
+-- | Mapping under a 'SimSpec' requires re-establishing the correct logical context, which
+-- currently is best supported in the 'EquivM' monad, so we specialize 'ExprMappable' to
+-- it here.
+class ExprMappableEquiv sym arch f where
+  mapExprEq ::
+    (forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)) ->
+    f ->
+    EquivM_ sym arch f
+
+data ToExprMappable sym arch f where
+  TM :: ExprMappableEquiv sym arch f =>
+    IO.UnliftIO (EquivM_ sym arch) -> f -> ToExprMappable sym arch f
+
+instance PEM.ExprMappable sym (ToExprMappable sym arch f) where
+  mapExpr _ f (TM ul@(IO.UnliftIO runInIO) x) = do
+    x' <- runInIO $ mapExprEq (\e -> liftIO (f e)) x
+    return $ TM ul x'
 
 --------------------------------------
 -- UnliftIO
@@ -682,7 +705,7 @@ throwHere err = do
     }
 
 
-instance MonadFail (EquivM_ sym arch) where
+instance MF.MonadFail (EquivM_ sym arch) where
   fail msg = throwHere $ EquivCheckFailure $ "Fail: " ++ msg
 
 manifestError :: MonadError e m => m a -> m (Either e a)

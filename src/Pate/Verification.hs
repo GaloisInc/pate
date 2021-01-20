@@ -29,7 +29,7 @@ import           Prelude hiding ( fail )
 
 import           GHC.Stack ( HasCallStack )
 import           Data.Bits
-import           Control.Monad ( when, void )
+import           Control.Monad ( void )
 import qualified Control.Monad.Fail as CMF
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
@@ -44,7 +44,6 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import qualified Data.Functor.Compose as DFC
-import qualified Data.IntervalMap as IM
 import qualified Data.List as DL
 import           Data.Maybe (catMaybes)
 import qualified Data.Map as M
@@ -62,13 +61,11 @@ import qualified Data.Word.Indexed as W
 
 import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..))
 import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
 
 
 import qualified Data.Macaw.Symbolic as MS
-import qualified Data.Macaw.Types as MM
 
 
 import qualified Data.Parameterized.Context as Ctx
@@ -77,37 +74,42 @@ import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.Map as MapF
 
-import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
+import qualified Lang.Crucible.Types as CT
 
+import qualified What4.BaseTypes as WT
+import qualified What4.Config as W4C
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
-import qualified What4.Partial as W4P
 import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
 import qualified What4.Solver.Yices as W4Y
+import qualified What4.Symbol as WS
 --import qualified What4.Protocol.SMTWriter as W4O
 import qualified What4.SatResult as W4R
 --import qualified What4.Protocol.SMTLib2 as SMT2
 
 import qualified Pate.Binary as PB
-import qualified Pate.Event as PE
-import qualified Pate.Proof as PP
-import           Pate.Types
-import           Pate.Monad
-import           Pate.SimState
-import           Pate.Equivalence
 import           Pate.CounterExample
-import           What4.ExprHelpers
+import qualified Pate.Discovery as PD
+import           Pate.Equivalence
+import qualified Pate.Event as PE
+import qualified Pate.ExprMappable as PEM
+import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
+import           Pate.Monad
+import qualified Pate.Proof as PP
+import           Pate.SimState
+import qualified Pate.SimulatorRegisters as PSR
+import           Pate.Types
+import           What4.ExprHelpers
 
-import qualified What4.Config as W4C
 
 -- | Verify equality of the given binaries.
 verifyPairs ::
@@ -126,8 +128,8 @@ verifyPairs logAction elf elf' blockMap dcfg pPairs = do
     Nothing -> CME.throwError $ equivalenceError UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  (oMain, oPfm)  <- runDiscovery elf
-  (pMain, pPfm) <- runDiscovery elf'
+  (oMain, oPfm)  <- PD.runDiscovery elf
+  (pMain, pPfm) <- PD.runDiscovery elf'
 
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
 
@@ -263,8 +265,8 @@ runVerificationLoop env pPairs = do
         True -> do
           mainO <- CMR.asks $ binEntry . originalCtx . envCtx
           mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
-          blkO <- mkConcreteBlock BlockEntryInitFunction mainO
-          blkP <- mkConcreteBlock BlockEntryInitFunction mainP
+          blkO <- PD.mkConcreteBlock BlockEntryInitFunction mainO
+          blkP <- PD.mkConcreteBlock BlockEntryInitFunction mainP
           let pPair = PatchPair blkO blkP
           return $ pPair : pPairs
         False -> return pPairs
@@ -286,7 +288,7 @@ runVerificationLoop env pPairs = do
 
 
 printPreamble :: PatchPair arch -> EquivM sym arch ()
-printPreamble pPair = liftIO $ putStr $ ""
+printPreamble pPair = liftIO $ putStrLn $ ""
     ++ "Checking equivalence of "
     ++ ppBlock (pOrig pPair)
     ++ " and "
@@ -353,7 +355,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       True -> return ()
       False -> throwHere UnsatisfiableAssumptions
   vsym <- CMR.asks envValidSym
-  blocks <- getBlocks pPair
+  blocks <- PD.getBlocks pPair
 
   
   CMR.asks envProofEmitMode >>= \case
@@ -379,7 +381,7 @@ simulate ::
 simulate simInput = withBinary @bin $ do
   -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
   CC.SomeCFG cfg <- do
-    CC.Some (DFC.Compose pbs_) <- lookupBlocks (simInBlock simInput)
+    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (simInBlock simInput)
     let pb:pbs = DL.sortOn MD.pblockAddr pbs_
         -- There's a slight hack here.
         --
@@ -524,7 +526,7 @@ getGPValueAndTrace ::
   CS.ExecResult p sym ext (CS.RegEntry sym (MS.ArchRegStruct arch)) ->
   EquivM sym arch
     ( W4.Pred sym
-    , MM.RegState (MM.ArchReg arch) (MacawRegEntry sym)
+    , MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     , CS.RegValue sym (MS.MacawBlockEndType arch)
     )
@@ -548,19 +550,19 @@ getGPValueAndTrace (CS.TimeoutResult _) = throwHere (SymbolicExecutionFailed "ti
 
 structToRegState :: forall sym arch.
   CS.RegEntry sym (MS.ArchRegStruct arch) ->
-  EquivM sym arch (MM.RegState (MM.ArchReg arch) (MacawRegEntry sym))
+  EquivM sym arch (MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym))
 structToRegState e = do
   archVs <- CMR.asks $ envArchVals
-  return $ MM.mkRegState (macawRegEntry . MS.lookupReg archVs e)
-
+  return $ MM.mkRegState (PSR.macawRegEntry . MS.lookupReg archVs e)
 
 regStateToAsn :: forall sym arch.
-  MM.RegState (MM.ArchReg arch) (MacawRegEntry sym) ->
+  HasCallStack =>
+  MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   EquivM sym arch (Ctx.Assignment (CS.RegValue' sym)  (MS.MacawCrucibleRegTypes arch))
 regStateToAsn regs = do
   archFs <- archFuns
   let allRegsAsn = MS.crucGenRegAssignment archFs
-  return $ MS.macawAssignToCruc (\(MacawRegEntry _ v) -> CS.RV @sym v) $
+  return $ MS.macawAssignToCruc (\(PSR.MacawRegEntry _ v) -> CS.RV @sym v) $
     TFC.fmapFC (\r -> regs ^. MM.boundValue r) allRegsAsn
 
 getGlobals ::
@@ -629,8 +631,7 @@ provePostcondition ::
   EquivM sym arch (PP.ProofBlockSlice sym arch)
 provePostcondition pPair postcondSpec = startTimer $ withPair pPair $ do
   printPreamble pPair
-  liftIO $ putStr "\n"
-  blocks <- getBlocks pPair
+  blocks <- PD.getBlocks pPair
   prf <- withSimBundle pPair $ \bundle -> provePostcondition' bundle postcondSpec
   CMS.modify' $ \st -> st { stProofs = prf : (stProofs st) }
   vsym <- CMR.asks envValidSym
@@ -661,15 +662,16 @@ branchMaybeTriple (cond, br) = case W4.asConstantPred cond of
 -- triples that were proven.
 provePostcondition' ::
   forall sym arch.
+  HasCallStack =>
   SimBundle sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (PP.ProofBlockSliceBody sym arch)
 provePostcondition' bundle postcondSpec = withSym $ \sym -> do
-  pairs <- discoverPairs bundle
+  pairs <- PD.discoverPairs bundle
   vsym <- CMR.asks envValidSym
   -- find all possible exits and propagate the postcondition backwards from them
   funCallProofCases <- DT.forM pairs $ \(blktO, blktP) -> do
-    withAssumption (matchesBlockTarget bundle blktO blktP) $ do
+    withAssumption (PD.matchesBlockTarget bundle blktO blktP) $ do
       let
         blkO = targetCall blktO
         blkP = targetCall blktP
@@ -706,7 +708,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     funCallCases = map (\(p, (casepred, prf)) -> (p, BranchCase casepred (PP.prfFunPre prf))) funCallProofCases
     funCallProofs = map (\(_, (_, prf)) -> prf) funCallProofCases
     falseTriple = PP.EquivTripleBody (simPair bundle) (statePredFalse sym) falseSpec PP.Unverified vsym
-    noResult = BranchCase (W4.falsePred sym) falseTriple
+    noResult = BranchCase (W4.truePred sym) falseTriple
 
   -- if we have a "return" exit, prove that it satisfies the postcondition
   precondReturn <- withSatAssumption noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
@@ -731,6 +733,8 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     isBranch <- matchingExits bundle MS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
   precondUnknown <- withSatAssumption noResult (return isUnknown) $ do
+    blocks <- PD.getBlocks (simPair bundle)
+    emitWarning blocks BlockEndClassificationFailure
     univDom <- universalDomainSpec
     proveLocalPostcondition bundle univDom
 
@@ -755,7 +759,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
 simplifySubPreds ::
   forall sym arch f.
   HasCallStack =>
-  ExprMappable sym f =>
+  PEM.ExprMappable sym f =>
   f ->
   EquivM sym arch f
 simplifySubPreds a = withValid $ do
@@ -795,7 +799,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   -- this weakened equivalence relation is only used for error reporting
   (postEqRel, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
-  
+
   eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle postcondPred postcond
 
@@ -803,7 +807,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
   notChecks <- liftIO $ W4.notPred sym postcondPred
-  blocks <- getBlocks $ simPair bundle
+  blocks <- PD.getBlocks $ simPair bundle
 
   result <- startTimer $ withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ do
     checkSatisfiableWithModel "check" notChecks $ \satRes -> do        
@@ -869,7 +873,7 @@ guessMemoryDomain ::
   MemPred sym arch ->
   -- | filter for whether or not memory cells can possibly belong to
   -- the given domain
-  (forall w. MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
+  (forall w. PMC.MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
   EquivM sym arch (MemPred sym arch)
 guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
   foots <- getFootprints bundle
@@ -883,13 +887,13 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
   mapMemPred cells $ \cell p -> do
-    let repr = MM.BVMemRepr (cellWidth cell) MM.BigEndian
+    let repr = MM.BVMemRepr (PMC.cellWidth cell) MM.BigEndian
     p' <- bindMemory memP memP' p
     -- clobber the "patched" memory at exactly this cell
-    CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym (cellWidth cell)
+    CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym (PMC.cellWidth cell)
     cell' <- mapExpr' (bindMemory memP memP') cell
     
-    memP'' <- liftIO $ MT.writeMemArr sym memP (cellPtr cell') repr freshP
+    memP'' <- liftIO $ MT.writeMemArr sym memP (PMC.cellPtr cell') repr freshP
     eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
 
     -- see if we can prove that the goal is independent of this clobbering
@@ -979,12 +983,12 @@ bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding memVar' (MT.memArr memVal)) expr
 
 mapExpr' ::
-  ExprMappable sym f =>
+  PEM.ExprMappable sym f =>
   (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
   f ->
   EquivM sym arch f
 mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> mapExpr sym (\a -> runInIO (f a)) e
+  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a)) e
 
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
@@ -1017,7 +1021,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
     zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
-      case registerCase (macawRegRepr vO) r of
+      case registerCase (PSR.macawRegRepr vO) r of
         -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
         -- to include them in the pre-domain
         RegIP -> return Nothing
@@ -1046,7 +1050,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   stackRegion <- CMR.asks envStackRegion
   let
     isStackCell cell = do
-      let CLM.LLVMPointer region _ = cellPtr cell
+      let CLM.LLVMPointer region _ = PMC.cellPtr cell
       liftIO $ W4.isEq sym region stackRegion
     isNotStackCell cell = do
       p <- isStackCell cell
@@ -1055,9 +1059,9 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   ExprMapper doEquate <- equateRegisters regsDom bundle
    
   -- rewrite the state elements to explicitly equate registers we have assumed equivalent
-  bundle_regsEq <- liftIO $ mapExpr sym doEquate bundle
+  bundle_regsEq <- liftIO $ PEM.mapExpr sym doEquate bundle
   goal_regsEq <- liftIO $ doEquate goal
-  postcond_regsEq <- liftIO $ mapExpr sym doEquate postcond
+  postcond_regsEq <- liftIO $ PEM.mapExpr sym doEquate postcond
   
   memP' <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   goal' <- bindMemory memP memP' goal_regsEq
@@ -1067,7 +1071,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   memDom <- withAssumption_ stackEq $ do
     guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
 
-  blocks <- getBlocks $ simPair bundle
+  blocks <- PD.getBlocks $ simPair bundle
   
   emitEvent (PE.ComputedPrecondition blocks)
   return $ StatePred
@@ -1086,13 +1090,17 @@ freshRegEntry ::
   KnownBinary bin =>
   ConcreteBlock arch bin ->
   MM.ArchReg arch tp ->
-  MacawRegEntry sym tp ->
-  EquivM sym arch (W4.Pred sym, MacawRegEntry sym tp)
+  PSR.MacawRegEntry sym tp ->
+  EquivM sym arch (W4.Pred sym, PSR.MacawRegEntry sym tp)
 freshRegEntry initBlk r entry = withSym $ \sym -> do
-  fresh <- case macawRegRepr entry of
+  fresh <- case PSR.macawRegRepr entry of
     CLM.LLVMPointerRepr w -> liftIO $ do
       ptr <- freshPtr sym w
-      return $ MacawRegEntry (macawRegRepr entry) ptr
+      return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
+    CT.BoolRepr -> liftIO $ do
+      b <- W4.freshConstant sym (WS.safeSymbol "freshBoolRegister") WT.BaseBoolRepr
+      return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) b
+    CT.StructRepr Ctx.Empty -> return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) Ctx.Empty
     repr -> throwHere $ UnsupportedRegisterType $ Some repr
   isValid <- validRegister (Just initBlk) fresh r
   return (isValid, fresh)
@@ -1104,14 +1112,16 @@ getIsBoundFilter' e = withValid $ liftIO $ getIsBoundFilter e
 
 liftFilterMacaw ::
   (forall tp'. W4.SymExpr sym tp' -> IO Bool) ->
-  MacawRegEntry sym tp -> EquivM sym arch Bool
+  PSR.MacawRegEntry sym tp -> EquivM sym arch Bool
 liftFilterMacaw f entry = do
-  case macawRegRepr entry of
+  case PSR.macawRegRepr entry of
     CLM.LLVMPointerRepr{} -> liftIO $ do
-      let CLM.LLVMPointer reg off = macawRegValue entry
+      let CLM.LLVMPointer reg off = PSR.macawRegValue entry
       reg' <- f reg
       off' <- f off
       return $ reg' || off'
+    CT.BoolRepr -> liftIO $ f (PSR.macawRegValue entry)
+    CT.StructRepr Ctx.Empty -> return False
     repr -> throwHere $ UnsupportedRegisterType (Some repr)
 
 newtype ExprMapper sym = ExprMapper (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp'))
@@ -1121,7 +1131,7 @@ equateRegisters ::
   SimBundle sym arch ->
   EquivM sym arch (ExprMapper sym)
 equateRegisters regRel bundle = withSym $ \sym -> do
-  Some binds <- fmap (Ctx.fromList . concat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case registerCase (macawRegRepr vO) r of
+  Some binds <- fmap (Ctx.fromList . concat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case registerCase (PSR.macawRegRepr vO) r of
     RegIP -> return []
     _ -> case M.lookup (Some r) regRel of
       Just cond | Just True <- W4.asConstantPred cond -> macawRegBinding vO vP
@@ -1130,6 +1140,7 @@ equateRegisters regRel bundle = withSym $ \sym -> do
   where
     inStO = simInState $ simInO bundle
     inStP = simInState $ simInP bundle
+
 
 asVar ::
   W4.SymExpr sym tp' ->
@@ -1140,363 +1151,44 @@ asVar expr = withValid $ case expr of
 
 macawRegBinding ::
   -- | value to rebind
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | new value
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   EquivM sym arch ([Some (VarBinding sym)])
 macawRegBinding var val = do
-  case macawRegRepr var of
+  case PSR.macawRegRepr var of
     CLM.LLVMPointerRepr _ -> do
-      CLM.LLVMPointer regVar offVar <- return $ macawRegValue var
-      CLM.LLVMPointer regVal offVal <- return $ macawRegValue val
+      CLM.LLVMPointer regVar offVar <- return $ PSR.macawRegValue var
+      CLM.LLVMPointer regVal offVal <- return $ PSR.macawRegValue val
       regVar' <- asVar regVar
       offVar' <- asVar offVar
       return $ [Some $ VarBinding regVar' regVal, Some $ VarBinding offVar' offVal]
+    CT.BoolRepr -> do
+      var' <- asVar (PSR.macawRegValue var)
+      return [Some (VarBinding var' (PSR.macawRegValue val))]
     repr -> throwHere $ UnsupportedRegisterType (Some repr)
 
 bindMacawReg ::
   -- | value to rebind
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | new value
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')
 bindMacawReg var val expr = withSym $ \sym -> do
   Some binds <- Ctx.fromList <$> macawRegBinding var val
   liftIO $ rebindExpr sym binds expr
 
---------------------------------------------------------
--- Block pair matching
 
--- | Compute all possible valid exit pairs from the given slice.
-discoverPairs ::
-  forall sym arch.
-  SimBundle sym arch ->
-  EquivM sym arch [(BlockTarget arch Original, BlockTarget arch Patched)]
-discoverPairs bundle = do
-  precond <- exactEquivalence (simInO bundle) (simInP bundle)
-  
-  blksO <- getSubBlocks (simInBlock $ simInO $ bundle)
-  blksP <- getSubBlocks (simInBlock $ simInP $ bundle)
-
-  let
-    allCalls = [ (blkO, blkP)
-               | blkO <- blksO
-               , blkP <- blksP
-               , compatibleTargets blkO blkP]
-
-  blocks <- getBlocks $ simPair bundle
-  
-  validTargets <- fmap catMaybes $
-    DT.forM allCalls $ \(blktO, blktP) -> do
-      matches <- matchesBlockTarget bundle blktO blktP
-      check <- withSymIO $ \sym -> W4.andPred sym precond matches
-      startTimer $ checkSatisfiableWithModel "check" check $ \satRes -> do
-        let
-          emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
-        case satRes of
-          W4R.Sat _ -> do
-            emit PE.Reachable
-            return $ Just $ (blktO, blktP)
-          W4R.Unsat _ -> do
-            emit PE.Unreachable
-            return Nothing
-          W4R.Unknown -> do
-            emit PE.InconclusiveTarget
-            throwHere InconclusiveSAT
-  return validTargets
-
--- | True for a pair of original and patched block targets that represent a valid pair of
--- jumps
-compatibleTargets ::
-  BlockTarget arch Original ->
-  BlockTarget arch Patched ->
-  Bool
-compatibleTargets blkt1 blkt2 =
-  concreteBlockEntry (targetCall blkt1) == concreteBlockEntry (targetCall blkt2) &&
-  case (targetReturn blkt1, targetReturn blkt2) of
-    (Just blk1, Just blk2) -> concreteBlockEntry blk1 == concreteBlockEntry blk2
-    (Nothing, Nothing) -> True
-    _ -> False
-
-exactEquivalence ::
-  SimInput sym arch Original ->
-  SimInput sym arch Patched ->
-  EquivM sym arch (W4.Pred sym)
-exactEquivalence inO inP = withSym $ \sym -> do
-  eqRel <- CMR.asks envBaseEquiv
-  regsEqs <- liftIO $ zipRegStates (simInRegs inO) (simInRegs inP) (applyRegEquivRelation (eqRelRegs eqRel))
-  regsEq <- liftIO $ allPreds sym regsEqs
-  memEq <- liftIO $ W4.isEq sym (MT.memArr (simInMem inO)) (MT.memArr (simInMem inP))
-  liftIO $ W4.andPred sym regsEq memEq
-
-matchesBlockTarget ::
-  forall sym arch.
-  SimBundle sym arch ->
-  BlockTarget arch Original ->
-  BlockTarget arch Patched ->
-  EquivM sym arch (W4.Pred sym)
-matchesBlockTarget bundle blktO blktP = withSymIO $ \sym -> do
-  -- true when the resulting IPs call the given block targets
-  ptrO <- concreteToLLVM sym (concreteAddress $ targetCall blktO)
-  ptrP <- concreteToLLVM sym (concreteAddress $ targetCall blktP)
-
-  eqO <- MT.llvmPtrEq sym ptrO (macawRegValue ipO)
-  eqP <- MT.llvmPtrEq sym ptrP (macawRegValue ipP)
-  eqCall <- W4.andPred sym eqO eqP
-
-  -- true when the resulting return IPs match the given block return addresses
-  targetRetO <- targetReturnPtr sym blktO
-  targetRetP <- targetReturnPtr sym blktP
-
-  eqRetO <- liftPartialRel sym (MT.llvmPtrEq sym) retO targetRetO
-  eqRetP <- liftPartialRel sym (MT.llvmPtrEq sym) retP targetRetP
-  eqRet <-  W4.andPred sym eqRetO eqRetP
-  W4.andPred sym eqCall eqRet
-  where
-    regsO = simOutRegs $ simOutO bundle
-    regsP = simOutRegs $ simOutP bundle
-    
-    ipO = regsO ^. MM.curIP
-    ipP = regsP ^. MM.curIP
-
-    retO = MS.blockEndReturn (Proxy @arch) $ simOutBlockEnd $ simOutO bundle
-    retP = MS.blockEndReturn (Proxy @arch) $ simOutBlockEnd $ simOutP bundle
-
-liftPartialRel ::
-  CB.IsSymInterface sym =>
-  sym ->
-  (a -> a -> IO (W4.Pred sym)) ->
-  W4P.PartExpr (W4.Pred sym) a ->
-  W4P.PartExpr (W4.Pred sym) a ->
-  IO (W4.Pred sym)
-liftPartialRel sym rel (W4P.PE p1 e1) (W4P.PE p2 e2) = do
-  eqPreds <- W4.isEq sym p1 p2
-  bothConds <- W4.andPred sym p1 p2
-  rel' <- rel e1 e2
-  justCase <- W4.impliesPred sym bothConds rel'
-  W4.andPred sym eqPreds justCase
-liftPartialRel sym _ W4P.Unassigned W4P.Unassigned = return $ W4.truePred sym
-liftPartialRel sym _ W4P.Unassigned (W4P.PE p2 _) = W4.notPred sym p2
-liftPartialRel sym _ (W4P.PE p1 _) W4P.Unassigned = W4.notPred sym p1
-
-targetReturnPtr ::
-  ValidSym sym =>
-  ValidArch arch =>
-  sym ->
-  BlockTarget arch bin ->
-  IO (CS.RegValue sym (CC.MaybeType (CLM.LLVMPointerType (MM.ArchAddrWidth arch))))
-targetReturnPtr sym blkt | Just blk <- targetReturn blkt = do
-  ptr <- concreteToLLVM sym (concreteAddress blk)
-  return $ W4P.justPartExpr sym ptr
-targetReturnPtr sym _ = return $ W4P.maybePartExpr sym Nothing
-
-
--- | From the given starting point, find all of the accessible
--- blocks
-getSubBlocks ::
-  forall sym arch bin.
-  KnownBinary bin =>
-  ConcreteBlock arch bin ->
-  EquivM sym arch [BlockTarget arch bin]
-getSubBlocks b = do
-  pfm <- parsedFunctionMap <$> getBinCtx @bin
-  case M.assocs $ M.unions $ fmap snd $ IM.lookupLE i pfm of
-    [(_, CC.Some (ParsedBlockMap pbm))] -> do
-      let pbs = concat $ IM.elems $ IM.intersecting pbm i
-      concat <$> mapM (concreteValidJumpTargets pbs) pbs
-    blks -> throwHere $ NoUniqueFunctionOwner i (fst <$> blks)
-  where
-  start@(ConcreteAddress saddr) = concreteAddress b
-  end = ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
-  i = IM.OpenInterval start end
-
-concreteValidJumpTargets ::
-  forall bin sym arch ids.
-  KnownBinary bin =>
-  ValidArch arch =>
-  [MD.ParsedBlock arch ids] ->
-  MD.ParsedBlock arch ids ->
-  EquivM sym arch [BlockTarget arch bin]
-concreteValidJumpTargets allPbs pb = do
-  targets <- concreteJumpTargets pb
-  thisAddr <- segOffToAddr (MD.pblockAddr pb)
-  addrs <- mapM (segOffToAddr . MD.pblockAddr) allPbs
-  let
-    isTargetExternal btgt = not ((concreteAddress (targetCall btgt)) `elem` addrs)
-    isTargetBackJump btgt = (concreteAddress (targetCall btgt)) < thisAddr
-    isTargetArch btgt = concreteBlockEntry (targetCall btgt) == BlockEntryPostArch
-
-    isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
-  return $ filter isTargetValid targets
-
-mkConcreteBlock ::
-  KnownBinary bin =>
-  BlockEntryKind arch ->
-  MM.ArchSegmentOff arch ->
-  EquivM sym arch (ConcreteBlock arch bin)
-mkConcreteBlock k a = case getConcreteBlock a k W4.knownRepr of
-  Just blk -> return blk
-  _ -> throwHere $ NonConcreteParsedBlockAddress a
-
-mkConcreteBlock' ::
-  KnownBinary bin =>
-  BlockEntryKind arch ->
-  ConcreteAddress arch ->
-  ConcreteBlock arch bin
-mkConcreteBlock' k a = ConcreteBlock a k W4.knownRepr
-
-concreteNextIPs ::
-  ValidArch arch =>
-  MM.RegState (MM.ArchReg arch) (MM.Value arch ids) ->
-  [ConcreteAddress arch]
-concreteNextIPs st = concreteValueAddress $ st ^. MM.curIP
-
-concreteValueAddress ::
-  MM.Value arch ids (MM.BVType (MM.ArchAddrWidth arch)) ->
-  [ConcreteAddress arch]
-concreteValueAddress = \case
-  MM.RelocatableValue _ addr -> [ConcreteAddress addr]
-  MM.AssignedValue (MM.Assignment _ rhs) -> case rhs of
-    MM.EvalApp (MM.Mux _ _ b1 b2) -> concreteValueAddress b1 ++ concreteValueAddress b2
-    _ -> []
-  _ -> []
-
-concreteJumpTargets ::
-  forall bin sym arch ids.
-  KnownBinary bin =>
-  ValidArch arch =>
-  MD.ParsedBlock arch ids ->
-  EquivM sym arch [BlockTarget arch bin]
-concreteJumpTargets pb = case MD.pblockTermStmt pb of
-  MD.ParsedCall st ret -> go (concreteNextIPs st) ret
-
-  MD.PLTStub st _ _ -> case MapF.lookup (MM.ip_reg @(MM.ArchReg arch)) st of
-    Just addr -> go (concreteValueAddress addr) Nothing
-    _ -> return $ []
-  MD.ParsedJump _ tgt -> do
-    blk <- mkConcreteBlock BlockEntryJump tgt
-    return $ [ BlockTarget blk Nothing ]
-  MD.ParsedBranch _ _ t f -> do
-    blk_t <- mkConcreteBlock BlockEntryJump t
-    blk_f <- mkConcreteBlock BlockEntryJump f
-    return $ [ BlockTarget blk_t Nothing, BlockTarget blk_f Nothing ]
-  MD.ParsedLookupTable st _ _ -> go (concreteNextIPs st) Nothing
-  MD.ParsedArchTermStmt _ st ret -> do
-    ret_blk <- mapM (mkConcreteBlock BlockEntryPostArch) ret
-    return $ [ BlockTarget (mkConcreteBlock' BlockEntryPostArch next) ret_blk
-             | next <- (concreteNextIPs st) ]
-  _ -> return []
-  where
-    go ::
-      [ConcreteAddress arch] ->
-      Maybe (MM.ArchSegmentOff arch) ->
-      EquivM sym arch [BlockTarget arch bin]
-    go next_ips ret = do
-      ret_blk <- mapM (mkConcreteBlock BlockEntryPostFunction) ret
-      return $ [ BlockTarget (mkConcreteBlock' BlockEntryInitFunction next) ret_blk | next <- next_ips ]
-
--------------------------------------------------------
--- Driving macaw to generate the initial block map
-
-runDiscovery ::
-  ValidArch arch =>
-  PB.LoadedELF arch ->
-  CME.ExceptT (EquivalenceError arch) IO (MM.MemSegmentOff (MM.ArchAddrWidth arch), ParsedFunctionMap arch)
-runDiscovery elf = do
-  let
-    bin = PB.loadedBinary elf
-    archInfo = PB.archInfo elf
-  entries <- F.toList <$> MBL.entryPoints bin
-  pfm <- goDiscoveryState $
-    MD.cfgFromAddrs archInfo (MBL.memoryImage bin) M.empty entries []
-  return (head entries, pfm)
-  where
-  goDiscoveryState ds = id
-    . fmap (IM.unionsWith M.union)
-    . mapM goSomeDiscoveryFunInfo
-    . M.assocs
-    $ ds ^. MD.funInfo
-  goSomeDiscoveryFunInfo (entrySegOff, CC.Some dfi) = markEntryPoint entrySegOff <$> goDiscoveryFunInfo dfi
-  goDiscoveryFunInfo dfi = fmap (ParsedBlockMap . IM.fromListWith (++)) . sequence $
-    [ (\addrs -> (addrs, [pb])) <$> archSegmentOffToInterval blockSegOff (MD.blockSize pb)
-    | (blockSegOff, pb) <- M.assocs (dfi ^. MD.parsedBlocks)
-    ]
-
-archSegmentOffToInterval ::
-  (CME.MonadError (EquivalenceError arch) m, MM.MemWidth (MM.ArchAddrWidth arch)) =>
-  MM.ArchSegmentOff arch ->
-  Int ->
-  m (IM.Interval (ConcreteAddress arch))
-archSegmentOffToInterval segOff size = case MM.segoffAsAbsoluteAddr segOff of
-  Just w -> pure (IM.IntervalCO start (start `addressAddOffset` fromIntegral size))
-    where start = concreteFromAbsolute w
-  Nothing -> CME.throwError $ equivalenceError $ StrangeBlockAddress segOff
-
-buildBlockMap ::
-  [PatchPair arch] ->
-  BlockMapping arch ->
-  BlockMapping arch
-buildBlockMap pairs bm = foldr go bm pairs
-  where
-    go :: PatchPair arch -> BlockMapping arch -> BlockMapping arch
-    go (PatchPair orig patched) (BlockMapping m) =
-      BlockMapping $ M.alter (doAddAddr (concreteAddress patched)) (concreteAddress orig) m
-
--- | Prefer existing entries
-doAddAddr ::
-  ConcreteAddress arch ->
-  Maybe (ConcreteAddress arch) ->
-  Maybe (ConcreteAddress arch)
-doAddAddr _ (Just addr) = Just addr
-doAddAddr addr Nothing = Just addr
-
-getBlocks ::
-  PatchPair arch ->
-  EquivM sym arch (PE.BlocksPair arch)
-getBlocks pPair = do
-  CC.Some (DFC.Compose opbs) <- lookupBlocks blkO
-  let oBlocks = PE.Blocks blkO opbs
-  CC.Some (DFC.Compose ppbs) <- lookupBlocks blkP
-  let pBlocks = PE.Blocks blkP ppbs
-  return $ PE.BlocksPair oBlocks pBlocks
-  where
-    blkO = pOrig pPair
-    blkP = pPatched pPair
+wLit :: (1 <= w) => W.W w -> EquivM sym arch (W4.SymBV sym w)
+wLit w = withSymIO $ \sym -> W4.bvLit sym (W.rep w) (BVS.mkBV (W.rep w) (W.unW w))
 
 functionSegOffs ::
   PatchPair arch ->
   EquivM sym arch (MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)
 functionSegOffs pPair = do
-  PE.BlocksPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- getBlocks pPair
+  PE.BlocksPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- PD.getBlocks pPair
   return $ (MD.pblockAddr pblkO, MD.pblockAddr pblkP)
-
-lookupBlocks ::
-  forall sym arch bin.
-  KnownBinary bin =>
-  ConcreteBlock arch bin ->
-  EquivM sym arch (CC.Some (DFC.Compose [] (MD.ParsedBlock arch)))
-lookupBlocks b = do
-  binCtx <- getBinCtx @bin
-  let pfm = parsedFunctionMap binCtx
-  case M.assocs $ M.unions $ fmap snd $ IM.lookupLE i pfm of
-    [(start', CC.Some (ParsedBlockMap pbm))] -> do
-      case concreteBlockEntry b of
-        BlockEntryInitFunction -> do
-          funAddr <- segOffToAddr start'
-          when (funAddr /= start) $
-            throwHere $ LookupNotAtFunctionStart start
-        _ -> return ()
-      let result = concat $ IM.elems $ IM.intersecting pbm i
-      return $ CC.Some (DFC.Compose result)
-    blks -> throwHere $ NoUniqueFunctionOwner i (fst <$> blks)
-  where
-  start@(ConcreteAddress addr) = concreteAddress b
-  end = ConcreteAddress (MM.MemAddr (MM.addrBase addr) maxBound)
-  i = IM.OpenInterval start end
-
-wLit :: (1 <= w) => W.W w -> EquivM sym arch (W4.SymBV sym w)
-wLit w = withSymIO $ \sym -> W4.bvLit sym (W.rep w) (BVS.mkBV (W.rep w) (W.unW w))
 
 getCurrentTOCs :: HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
 getCurrentTOCs = do
@@ -1511,30 +1203,6 @@ getCurrentTOCs = do
     Nothing -> throwHere $ MissingTOCEntry addrP
   return $ (wO, wP)
 
-segOffToAddr ::
-  MM.ArchSegmentOff arch ->
-  EquivM sym arch (ConcreteAddress arch)
-segOffToAddr off = concreteFromAbsolute <$>
-  liftMaybe (MM.segoffAsAbsoluteAddr off) (NonConcreteParsedBlockAddress off)
-
-liftMaybe :: Maybe a -> InnerEquivalenceError arch -> EquivM sym arch a
-liftMaybe Nothing e = throwHere e
-liftMaybe (Just a) _ = pure a
-
-concreteToLLVM ::
-  ( 
-   w ~ MM.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
-  , W4.IsExprBuilder sym
-  ) =>
-  sym ->
-  ConcreteAddress arch ->
-  IO (CLM.LLVMPtr sym w)
-concreteToLLVM sym c = do
-  region <- W4.natLit sym 0
-  offset <- W4.bvLit sym W4.knownRepr (BVS.mkBV W4.knownRepr (toInteger (absoluteAddress c)))
-  pure (CLM.LLVMPointer region offset)
-
-
 --------------------------------------------------------
 -- Initial state validity
 
@@ -1544,29 +1212,29 @@ validRegister ::
   -- | if this register is an initial state, the corresponding
   -- starting block
   Maybe (ConcreteBlock arch bin) ->
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   MM.ArchReg arch tp ->
   EquivM sym arch (W4.Pred sym)
 validRegister mblockStart entry r = withSym $ \sym ->
-  case registerCase (macawRegRepr entry) r of
+  case registerCase (PSR.macawRegRepr entry) r of
     RegIP -> case mblockStart of
       Just blockStart -> liftIO $ do
-        ptrO <- concreteToLLVM sym $ concreteAddress $ blockStart
-        MT.llvmPtrEq sym ptrO (macawRegValue entry)
+        ptrO <- PD.concreteToLLVM sym $ concreteAddress $ blockStart
+        MT.llvmPtrEq sym ptrO (PSR.macawRegValue entry)
       Nothing -> return $ W4.truePred sym
     RegSP -> do
       stackRegion <- CMR.asks envStackRegion
       let
-        CLM.LLVMPointer region _ = macawRegValue entry
+        CLM.LLVMPointer region _ = PSR.macawRegValue entry
       liftIO $ W4.isEq sym region stackRegion
     RegBV -> liftIO $ do
       let
-        CLM.LLVMPointer region _ = macawRegValue entry
+        CLM.LLVMPointer region _ = PSR.macawRegValue entry
       zero <- W4.natLit sym 0
       W4.isEq sym region zero
     RegTOC -> do
       let
-        CLM.LLVMPointer region val = macawRegValue entry
+        CLM.LLVMPointer region val = PSR.macawRegValue entry
       globalRegion <- CMR.asks envGlobalRegion
       validRegion <- liftIO $ W4.isEq sym region globalRegion
       (tocO, tocP) <- getCurrentTOCs
@@ -1692,7 +1360,7 @@ checkCasesTotal ::
   EquivM sym arch (PP.VerificationStatus arch)
 checkCasesTotal bundle cases = withSym $ \sym -> do
   trivialEq <- trivialEquivRelation
-  blocks <- getBlocks $ simPair bundle
+  blocks <- PD.getBlocks $ simPair bundle
   someCase <- do
     casePreds <- mapM getCase cases
     liftIO $ anyPred sym casePreds
@@ -1719,3 +1387,21 @@ checkCasesTotal bundle cases = withSym $ \sym -> do
     getCase :: (W4.Pred sym, BranchCase sym arch) -> EquivM sym arch (W4.Pred sym)
     getCase (cond, br) = withSym $ \sym ->
       liftIO $ W4.impliesPred sym (branchPrePred br) cond
+
+-- | Prefer existing entries
+doAddAddr ::
+  ConcreteAddress arch ->
+  Maybe (ConcreteAddress arch) ->
+  Maybe (ConcreteAddress arch)
+doAddAddr _ (Just addr) = Just addr
+doAddAddr addr Nothing = Just addr
+
+buildBlockMap ::
+  [PatchPair arch] ->
+  BlockMapping arch ->
+  BlockMapping arch
+buildBlockMap pairs bm = foldr go bm pairs
+  where
+    go :: PatchPair arch -> BlockMapping arch -> BlockMapping arch
+    go (PatchPair orig patched) (BlockMapping m) =
+      BlockMapping $ M.alter (doAddAddr (concreteAddress patched)) (concreteAddress orig) m

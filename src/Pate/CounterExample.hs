@@ -50,13 +50,15 @@ import           Data.Maybe (catMaybes)
 import           Data.Monoid ( Sum(..) )
 import           Data.Proxy ( Proxy(..) )
 
-import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.Context as Ctx
+import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
 
-import qualified Lang.Crucible.Utils.MuxTree as C
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.Types as CT
+import qualified Lang.Crucible.Utils.MuxTree as C
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
@@ -65,10 +67,12 @@ import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
 
 import           Pate.Equivalence
+import qualified Pate.MemCell as PMC
+import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import           Pate.SimState
+import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Types
-import qualified Pate.Memory.MemTrace as MT
 
 throwInequivalenceResult ::
   Maybe (InequivalenceResult arch) ->
@@ -187,7 +191,7 @@ groundTraceDiff fn eqRel bundle = do
       execGroundFn fn cond' >>= \case
         True -> do
           gptr <- groundLLVMPointer fn ptr
-          let cell = MemCell ptr w end
+          let cell = PMC.MemCell ptr w end
           memRel <- case ptrRegion gptr == gstackRegion of
             True -> return $ eqRelStack eqRel
             False -> return $ eqRelMem eqRel
@@ -198,7 +202,8 @@ groundTraceDiff fn eqRel bundle = do
           return $ Just $ MemOpDiff { mIsRead = case dir of {MT.Write -> False; _ -> True}
                                     , mOpOriginal = op1
                                     , mOpRewritten = op2
-                                    , mIsValid = groundIsValid
+                                    -- all reads are valid, only writes can diverge
+                                    , mIsValid = case dir of {MT.Write -> groundIsValid; _ -> True}
                                     , mDesc = ""
                                     }
         False -> return Nothing
@@ -241,13 +246,13 @@ mkRegisterDiff ::
   SymGroundEvalFn sym ->
   MM.ArchReg arch tp ->
   -- | original prestate
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | patched prestate
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | original post state
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   -- | patched post state
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   W4.Pred sym ->
   EquivM sym arch (RegisterDiff arch tp)
 mkRegisterDiff fn reg preO preP postO postP equivE = do
@@ -260,7 +265,7 @@ mkRegisterDiff fn reg preO preP postO postP equivE = do
   desc <- liftIO $ ppRegDiff fn postO postP
   pure RegisterDiff
     { rReg = reg
-    , rTypeRepr = macawRegRepr preP
+    , rTypeRepr = PSR.macawRegRepr preP
     , rPreOriginal = pre
     , rPrePatched = pre'
     , rPostOriginal = post
@@ -272,13 +277,16 @@ mkRegisterDiff fn reg preO preP postO postP equivE = do
 concreteValue ::
   HasCallStack =>
   SymGroundEvalFn sym ->
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   EquivM sym arch (ConcreteValue (MS.ToCrucibleType tp))
 concreteValue fn e
-  | CLM.LLVMPointerRepr _ <- macawRegRepr e
-  , ptr <- macawRegValue e = do
+  | CLM.LLVMPointerRepr _ <- PSR.macawRegRepr e
+  , ptr <- PSR.macawRegValue e = do
     groundBV fn ptr
-concreteValue _ e = throwHere (UnsupportedRegisterType (Some (macawRegRepr e)))
+  | CT.BoolRepr <- PSR.macawRegRepr e
+  , val <- PSR.macawRegValue e = execGroundFn fn val
+  | CT.StructRepr Ctx.Empty <- PSR.macawRegRepr e = return ()
+concreteValue _ e = throwHere (UnsupportedRegisterType (Some (PSR.macawRegRepr e)))
 
 groundReturnPtr ::
   forall sym arch.
@@ -403,7 +411,10 @@ ppPreReg diff = case rTypeRepr diff of
     case (rPreOriginal diff) == (rPrePatched diff) of
       True -> (0, ppSlot diff ++ show (rPreOriginal diff)  ++ "\n")
       False -> (0, ppSlot diff ++ show (rPreOriginal diff)  ++ "(original) vs. " ++ show (rPrePatched diff) ++ "\n")
-
+  CT.BoolRepr
+    | rPreOriginal diff == rPrePatched diff -> (0, ppSlot diff ++ show (rPreOriginal diff) ++ "\n")
+    | otherwise -> (0, ppSlot diff ++ show (rPreOriginal diff)  ++ "(original) vs. " ++ show (rPrePatched diff) ++ "\n")
+  CT.StructRepr Ctx.Empty -> (0, ppSlot diff ++ show (rPreOriginal diff) ++ "\n")
   _ -> (0, ppSlot diff ++ "unsupported register type in precondition pretty-printer\n")
 
 ppDiffs ::
@@ -432,8 +443,8 @@ ppDiff diff = ppSlot diff ++ case rTypeRepr diff of
     ++ "\n\n"
   _ -> "unsupported register type in postcondition comparison pretty-printer\n"
 
-ppRegEntry :: SymGroundEvalFn sym -> MacawRegEntry sym tp -> IO String
-ppRegEntry fn (MacawRegEntry repr v) = case repr of
+ppRegEntry :: SymGroundEvalFn sym -> PSR.MacawRegEntry sym tp -> IO String
+ppRegEntry fn (PSR.MacawRegEntry repr v) = case repr of
   CLM.LLVMPointerRepr _ | CLM.LLVMPointer _ offset <- v -> showModelForExpr fn offset
   _ -> return "Unsupported register type"
 
@@ -461,8 +472,8 @@ ppMemDiff fn ptr val1 val2 = do
 
 ppRegDiff ::
   SymGroundEvalFn sym ->
-  MacawRegEntry sym tp ->
-  MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
   IO String
 ppRegDiff fn reg1 reg2 = do
   origStr <- ppRegEntry fn reg1

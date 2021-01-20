@@ -49,18 +49,16 @@ import           Data.Parameterized.Classes
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
-import qualified Data.Parameterized.Map as MapF
-
 import qualified Data.Macaw.CFG as MM
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Types as PT
 import qualified Pate.Equivalence as PE
+import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
 
 import qualified What4.Interface as W4
-import qualified What4.Expr.Builder as W4B
 
 ---------------------------------------------
 -- proof objects
@@ -281,14 +279,14 @@ ppStatePredSpec vsym@(PT.Sym _) stpred =
       ppRegs :: ProofDoc
       ppRegs = "Registers: " <> PP.line <> PP.indent 2 (PP.vsep (map ppReg (Map.toList regs)))
 
-      ppCell :: forall w. PS.MemCell sym arch w -> W4.Pred sym -> ProofDoc
+      ppCell :: forall w. PMC.MemCell sym arch w -> W4.Pred sym -> ProofDoc
       ppCell cell p = case W4.asConstantPred p of
         Just False -> PP.emptyDoc
         Just True -> cellpp
         _ -> cellpp <> PP.line <> PP.indent 1 "Condition:" <> ppExpr vsym p
         where
           cellpp =
-            let CLM.LLVMPointer reg off = PS.cellPtr cell
+            let CLM.LLVMPointer reg off = PMC.cellPtr cell
             in ppExpr vsym reg <> "+" <> ppBV off
 
       ppMemPred :: PE.MemPred sym arch -> (Maybe ProofDoc, Maybe Bool)

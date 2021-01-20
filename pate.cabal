@@ -53,14 +53,18 @@ library
   hs-source-dirs:      src
   exposed-modules:     Pate,
                        Pate.Binary,
+                       Pate.Discovery,
                        Pate.Verification,
                        Pate.Loader,
                        Pate.Event,
                        Pate.Monad,
+                       Pate.MemCell,
                        Pate.Memory.MemTrace,
+                       Pate.SimulatorRegisters,
                        Pate.Proof,
                        Pate.Types,
                        Pate.Utils,
+                       Pate.ExprMappable,
                        What4.ExprHelpers,
                        Pate.CounterExample,
                        Pate.SimState,
@@ -97,6 +101,18 @@ test-suite pate-test-ppc
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic,
                  dismantle-ppc
+
+test-suite pate-test-aarch32
+  import: shared-test
+  type: exitcode-stdio-1.0
+  main-is: AArch32TestMain.hs
+  other-modules: TestBase, Pate.AArch32
+  hs-source-dirs: tests, arch
+  build-depends: semmc-aarch32,
+                 macaw-aarch32,
+                 macaw-aarch32-symbolic,
+                 macaw-loader-aarch32,
+                 dismantle-arm-xml
 
 common shared-exec
   ghc-options: -Wall -Wcompat

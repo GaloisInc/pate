@@ -27,7 +27,6 @@ module Pate.Types
   ( DiscoveryConfig(..)
   , defaultDiscoveryCfg
   , PatchPair(..)
-  , ExprMappable(..)
   , ConcreteBlock(..)
   , getConcreteBlock
   , blockMemAddr
@@ -64,8 +63,6 @@ module Pate.Types
   , execGroundFnIO
   , MemTraceDiff
   , MemOpDiff(..)
-  , MacawRegEntry(..)
-  , macawRegEntry
   , InnerEquivalenceError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
@@ -107,7 +104,6 @@ import           Numeric.Natural
 import           Numeric
 import qualified Data.ElfEdit as E
 
-import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
@@ -116,7 +112,6 @@ import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Simulator as CS
 
 import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..)) 
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -125,7 +120,6 @@ import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 
-import qualified What4.Partial as PE
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
@@ -360,6 +354,8 @@ groundBVAsPointer gbv = case gbv of
 type family ConcreteValue (tp :: CC.CrucibleType)
 type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
 type instance ConcreteValue (CC.MaybeType (CLM.LLVMPointerType w)) = Maybe (GroundBV w)
+type instance ConcreteValue CC.BoolType = Bool
+type instance ConcreteValue (CC.StructType CC.EmptyCtx) = ()
 
 data RegisterDiff arch tp where
   RegisterDiff :: ShowF (MM.ArchReg arch) =>
@@ -422,23 +418,6 @@ type MemTraceDiff arch = [MemOpDiff arch]
 
 ----------------------------------
 
-data MacawRegEntry sym tp where
-  MacawRegEntry ::
-    { macawRegRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
-    , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
-    } ->
-    MacawRegEntry sym tp       
-
-
-
-
-instance CC.ShowF (W4.SymExpr sym) => Show (MacawRegEntry sym tp) where
-  show (MacawRegEntry repr v) = case repr of
-    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> CC.showF rg ++ ":" ++ CC.showF bv
-    _ -> "macawRegEntry: unsupported"
-
-macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
-macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
 
 --------------------
 
@@ -615,81 +594,6 @@ data Sym sym where
 
 ----------------------------------
 
--- Expression binding
-
--- | Declares a type as being expression-containing, where the given traversal
---   occurs shallowly (i.e. not applied recursively to sub-expressions) on all embedded expressions.
-class ExprMappable sym f where
-  mapExpr ::
-    W4.IsSymExprBuilder sym =>
-    sym ->
-    (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
-    f ->
-    IO f
-
-instance ExprMappable sym (CS.RegValue' sym (CC.BaseToType bt)) where
-  mapExpr _ f (CS.RV x) = CS.RV <$> f x
-
-instance ExprMappable sym (CS.RegValue' sym (CLM.LLVMPointerType w)) where
-  mapExpr sym f (CS.RV x) = CS.RV <$> mapExprPtr sym f x
-
-instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue' sym (CC.MaybeType tp)) where
-  mapExpr sym f (CS.RV pe) = CS.RV <$> case pe of
-    PE.PE p e -> do
-      p' <- f p
-      CS.RV e' <- mapExpr sym f (CS.RV @sym @tp e)
-      return $ PE.PE p' e'
-    PE.Unassigned -> return PE.Unassigned
-
-instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
-  mapExpr _ _ = return
-
-instance
-  (ExprMappable sym (Ctx.Assignment f ctx), ExprMappable sym (f tp)) =>
-  ExprMappable sym (Ctx.Assignment f (ctx Ctx.::> tp)) where
-  mapExpr sym f (asn Ctx.:> x) = do
-    asn' <- mapExpr sym f asn
-    x' <- mapExpr sym f x
-    return $ asn' Ctx.:> x'
-
-instance ExprMappable sym (MT.MemOpCondition sym) where
-  mapExpr _sym f = \case
-    MT.Conditional p -> MT.Conditional <$> f p
-    MT.Unconditional -> return MT.Unconditional
-
-instance ExprMappable sym (MT.MemOp sym w) where
-  mapExpr sym f = \case
-    MT.MemOp ptr dir cond w val endian -> do
-      ptr' <- mapExprPtr sym f ptr
-      val' <- mapExprPtr sym f val
-      cond' <- mapExpr sym f cond
-      return $ MT.MemOp ptr' dir cond' w val' endian
-    MT.MergeOps p seq1 seq2 -> do
-      p' <- f p
-      seq1' <- traverse (mapExpr sym f) seq1
-      seq2' <- traverse (mapExpr sym f) seq2
-      return $ MT.MergeOps p' seq1' seq2'
-
-instance ExprMappable sym (MT.MemTraceImpl sym w) where
-  mapExpr sym f mem = do
-    memSeq' <- traverse (mapExpr sym f) $ MT.memSeq mem
-    memArr' <- f $ MT.memArr mem
-    return $ MT.MemTraceImpl memSeq' memArr'
-
-instance ExprMappable sym (MacawRegEntry sym tp) where
-  mapExpr sym f entry = do
-    case macawRegRepr entry of
-      CLM.LLVMPointerRepr{} -> do
-        val' <- mapExprPtr sym f $ macawRegValue entry
-        return $ entry { macawRegValue = val' }
-      _ -> fail "mapExpr: unsupported macaw type"
-
-instance ExprMappable sym (MT.MemFootprint sym arch) where
-  mapExpr sym f (MT.MemFootprint ptr w dir cond end) = do
-    ptr' <- mapExprPtr sym f ptr
-    cond' <- mapExpr sym f cond
-    return $ MT.MemFootprint ptr' w dir cond' end
-
 -----------------------------
 
 data InnerEquivalenceError arch
@@ -725,6 +629,8 @@ data InnerEquivalenceError arch
   | MissingCrucibleGlobals
   | UnexpectedUnverifiedTriple
   | MissingTOCEntry (MM.ArchSegmentOff arch)
+  | BlockEndClassificationFailure
+  | InvalidCallTarget (ConcreteAddress arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch =
