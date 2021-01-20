@@ -44,6 +44,15 @@ inlining: ../tests/ppc/test-direct-calls.original.i ../tests/ppc/test-direct-cal
                                 --interactive \
                                 --original-source ../tests/ppc/test-direct-calls.original.i \
                                 --patched-source ../tests/ppc/test-direct-calls.patched.i
+.PHONY: challenge02
+challenge02: challenge02/challenge02.original.exe challenge02/challenge02.patched.exe
+	cabal v2-run exe:pate-exec -- --arch PPC \
+                                --original challenge02/challenge02.original.exe \
+                                --patched challenge02/challenge02.patched.exe \
+				-- interactive \
+                                --original-source challenge02/challenge02.original.i \
+                                --patched-source challenge02/challenge02.patched.i
+
 
 %.i: %.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
