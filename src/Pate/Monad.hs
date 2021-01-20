@@ -26,9 +26,7 @@ module Pate.Monad
   , ValidArch(..)
   , EquivalenceContext(..)
   , BinaryContext(..)
-  , PreconditionPropagation(..)
   , VerificationFailureMode(..)
-  , ProofEmitMode(..)
   , SimBundle(..)
   , ExprMappableEquiv(..)
   , FromExprMappable(..)
@@ -168,10 +166,8 @@ data EquivEnv sym arch where
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
-    , envDiscoveryCfg :: DiscoveryConfig
-    , envPrecondProp :: PreconditionPropagation
+    , envConfig :: VerificationConfig
     , envFailureMode :: VerificationFailureMode
-    , envProofEmitMode :: ProofEmitMode
     , envBaseEquiv :: EquivRelation sym arch
     , envGoalTriples :: [PP.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
@@ -188,19 +184,9 @@ data EquivEnv sym arch where
     -- ^ conjunction of all assumptions currently in scope
     } -> EquivEnv sym arch
 
-
-
-data PreconditionPropagation =
-    PropagateExactEquality
-  | PropagateComputedDomains
-
 data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
-
-data ProofEmitMode =
-    ProofEmitAll
-  | ProofEmitNone
 
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'
@@ -696,7 +682,7 @@ throwHere ::
   HasCallStack =>
   InnerEquivalenceError arch ->
   EquivM_ sym arch a
-throwHere err = do
+throwHere err = withValid $ do
   wb <- asks envWhichBinary
   throwError $ EquivalenceError
     { errWhichBinary = wb

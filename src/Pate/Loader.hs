@@ -83,7 +83,7 @@ runEquivVerification ::
   ValidArchProxy arch ->
   LJ.LogAction IO (PE.Event arch) ->
   PatchData ->
-  PT.DiscoveryConfig ->
+  PT.VerificationConfig ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   IO (Either String Bool)
@@ -101,7 +101,7 @@ data RunConfig arch =
     , origPath :: FilePath
     , patchedPath :: FilePath
     , logger :: LJ.LogAction IO (PE.Event arch)
-    , discoveryCfg :: PT.DiscoveryConfig
+    , verificationCfg :: PT.VerificationConfig
     }
 
 -- | Given a patch configuration, check that
@@ -132,7 +132,7 @@ runSelfEquivConfig cfg wb = runExceptT $ do
       }
   ValidArchProxy <- return $ archProxy cfg
   bin <- lift $ PB.loadELF @arch Proxy $ path
-  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData' (discoveryCfg cfg) bin bin
+  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData' (verificationCfg cfg) bin bin
 
 
 
@@ -148,4 +148,4 @@ runEquivConfig cfg = runExceptT $ do
   ValidArchProxy <- return $ archProxy cfg
   original <- lift $ PB.loadELF @arch Proxy $ (origPath cfg)
   patched <- lift $ PB.loadELF @arch Proxy $ (patchedPath cfg)
-  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData (discoveryCfg cfg) original patched
+  ExceptT $ runEquivVerification (archProxy cfg) (logger cfg) patchData (verificationCfg cfg) original patched

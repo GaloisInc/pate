@@ -24,8 +24,8 @@
 {-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Types
-  ( DiscoveryConfig(..)
-  , defaultDiscoveryCfg
+  ( VerificationConfig(..)
+  , defaultVerificationCfg
   , PatchPair(..)
   , ConcreteBlock(..)
   , getConcreteBlock
@@ -34,6 +34,7 @@ module Pate.Types
   , BlockTarget(..)
   , ConcreteAddress(..)
   , BlockEntryKind(..)
+  , ppBlockEntry
   , absoluteAddress
   , addressAddOffset
   , concreteFromAbsolute
@@ -129,16 +130,23 @@ import           What4.ExprHelpers
 
 ----------------------------------
 -- Verification configuration
-data DiscoveryConfig =
-  DiscoveryConfig
+data VerificationConfig =
+  VerificationConfig
     { cfgPairMain :: Bool
     -- ^ start by pairing the entry points of the binaries
     , cfgDiscoverFuns :: Bool
     -- ^ discover additional functions pairs during analysis
+    , cfgComputeEquivalenceFrames :: Bool
+    -- ^ compute fine-grained equivalence frames using heuristics
+    -- if false, pre-domains will simply be computed as any possible
+    -- relevant state. A failed result in this mode will fallback
+    -- to attempting to use fine-grained domains.
+    , cfgEmitProofs :: Bool
+    -- ^ emit a structured spine of the equivalence proofs
     }
 
-defaultDiscoveryCfg :: DiscoveryConfig
-defaultDiscoveryCfg = DiscoveryConfig True True
+defaultVerificationCfg :: VerificationConfig
+defaultVerificationCfg = VerificationConfig True True True True
 
 
 ----------------------------------
@@ -201,6 +209,13 @@ data BlockEntryKind arch =
     -- ^ block was entered by an arbitrary jump
     -- problems
   deriving (Eq, Ord, Show)
+
+ppBlockEntry :: BlockEntryKind arch -> String
+ppBlockEntry be = case be of
+  BlockEntryInitFunction -> "function entry point"
+  BlockEntryPostFunction -> "intermediate function point"
+  BlockEntryPostArch -> "intermediate function point (after syscall)"
+  BlockEntryJump -> "unknown program point"
 
 data ConcreteBlock arch (bin :: WhichBinary) =
   ConcreteBlock { concreteAddress :: ConcreteAddress arch
@@ -633,14 +648,15 @@ data InnerEquivalenceError arch
   | InvalidCallTarget (ConcreteAddress arch)
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
-data EquivalenceError arch =
-  EquivalenceError
-    { errWhichBinary :: Maybe (Some WhichBinaryRepr)
-    , errStackTrace :: Maybe CallStack
-    , errEquivError :: InnerEquivalenceError arch
-    }
-instance MS.SymArchConstraints arch => Show (EquivalenceError arch) where
-  show e = unlines $ catMaybes $
+data EquivalenceError arch where
+  EquivalenceError ::
+    ValidArch arch =>
+      { errWhichBinary :: Maybe (Some WhichBinaryRepr)
+      , errStackTrace :: Maybe CallStack
+      , errEquivError :: InnerEquivalenceError arch
+      } -> EquivalenceError arch
+instance Show (EquivalenceError arch) where
+  show e@(EquivalenceError{}) = unlines $ catMaybes $
     [ fmap (\(Some b) -> "For " ++ show b ++ " binary") (errWhichBinary e)
     , fmap (\s -> "At " ++ prettyCallStack s) (errStackTrace e)
     , Just (show (errEquivError e))
@@ -648,7 +664,7 @@ instance MS.SymArchConstraints arch => Show (EquivalenceError arch) where
 
 instance (Typeable arch, MS.SymArchConstraints arch) => Exception (EquivalenceError arch)
 
-equivalenceError :: InnerEquivalenceError arch -> EquivalenceError arch
+equivalenceError :: ValidArch arch => InnerEquivalenceError arch -> EquivalenceError arch
 equivalenceError err = EquivalenceError
   { errWhichBinary = Nothing
   , errStackTrace = Nothing

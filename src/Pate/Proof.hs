@@ -149,11 +149,12 @@ instance PT.ValidArch arch => Show (SomeProofBlockSlice arch) where
 
 data SomeProofGoal arch where
   SomeProofGoal ::
+    PT.ValidArch arch =>
     PT.Sym sym ->
     EquivTriple sym arch ->
     ProofBlockSlice sym arch ->
     SomeProofGoal arch
-instance PT.ValidArch arch => Show (SomeProofGoal arch) where
+instance Show (SomeProofGoal arch) where
   show (SomeProofGoal vsym triple prf) = show (ppProofGoal vsym triple prf)
 
 ----------------------------------------------
@@ -192,23 +193,24 @@ ppProofBlockSlice vsym prf =
   PP.vsep
     [ ppEquivTriple vsym (PS.specMap prfTriple prf)
     , "Proof:"
-    , PP.indent 4 $ PP.vsep
-      [ case funCalls of
+    , PP.indent 4 $ 
+        (case funCalls of
           [] -> PP.emptyDoc
           _ -> "Function Calls: "
                <> PP.line
                <> PP.indent 4 (PP.vsep (map (ppProofFunctionCallSpec vsym . PS.attachSpec prf) funCalls))
-      , ppMaybe (prfReturn prfBody) $ \trip ->
+               <> PP.line
+        )
+        <> (ppMaybe (prfReturn prfBody) $ \trip ->
           PP.vsep
             [ "Function Return: "
             , PP.indent 4 $ ppEquivTriple vsym (PS.attachSpec prf trip)
-            ]
-      , ppMaybe (prfUnknownExit prfBody) $ \trip ->
+            ])
+        <> (ppMaybe (prfUnknownExit prfBody) $ \trip ->
           PP.vsep
             [ "Unknown function exit: "
             , PP.indent 4 $ ppEquivTriple vsym (PS.attachSpec prf trip)
-            ]
-      ]
+            ])
     ]
   where
     funCalls = prfFunCalls prfBody
@@ -265,25 +267,27 @@ ppStatePredSpec ::
   PE.StatePredSpec sym arch ->
   ProofDoc
 ppStatePredSpec vsym@(PT.Sym _) stpred =
-  ppRegs <> PP.line <> ppStack <> ppMem
+  ppRegs <> ppStack <> ppMem
     where
       stPredBody = PS.specBody stpred
-      regs = PE.predRegs stPredBody
 
       ppReg :: (Some (MM.ArchReg arch), W4.Pred sym) -> ProofDoc
       ppReg (Some reg, p) = case W4.asConstantPred p of
         Just False -> PP.emptyDoc
         Just True -> PP.pretty $ showF reg
-        _ -> PP.pretty (showF reg) <> PP.line <> PP.indent 1 "Condition:" <> ppExpr vsym p
+        _ -> PP.pretty (showF reg) <> PP.line <> PP.indent 1 "Conditional"
       
       ppRegs :: ProofDoc
-      ppRegs = "Registers: " <> PP.line <> PP.indent 2 (PP.vsep (map ppReg (Map.toList regs)))
+      ppRegs = case Map.toList (PE.predRegs stPredBody) of
+        [] -> PP.emptyDoc
+        regs | length regs == length (MM.archRegs @(MM.ArchReg arch)) -> "All Registers" <> PP.line
+        regs -> "Registers: " <> PP.line <> PP.indent 2 (PP.vsep (map ppReg regs)) <> PP.line
 
       ppCell :: forall w. PMC.MemCell sym arch w -> W4.Pred sym -> ProofDoc
       ppCell cell p = case W4.asConstantPred p of
         Just False -> PP.emptyDoc
         Just True -> cellpp
-        _ -> cellpp <> PP.line <> PP.indent 1 "Condition:" <> ppExpr vsym p
+        _ -> cellpp <> PP.line <> PP.indent 1 "Conditional"
         where
           cellpp =
             let CLM.LLVMPointer reg off = PMC.cellPtr cell
@@ -308,7 +312,7 @@ ppStatePredSpec vsym@(PT.Sym _) stpred =
       ppStack :: ProofDoc
       ppStack = case ppMemPred (PE.predStack stPredBody) of
         (Just stack, pol) -> "Stack:" <+> ppPolarity pol <> PP.line <> stack <> PP.line
-        (Nothing, Just False) -> PP.line <> "All Stack Memory" <> PP.line
+        (Nothing, Just False) -> "All Stack Memory" <> PP.line
         (Nothing, _) -> PP.emptyDoc
 
       ppMem :: ProofDoc

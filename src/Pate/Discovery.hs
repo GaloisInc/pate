@@ -337,6 +337,7 @@ runDiscovery elf = do
     ]
 
 archSegmentOffToInterval ::
+  ValidArch arch =>
   (CME.MonadError (EquivalenceError arch) m, MM.MemWidth (MC.ArchAddrWidth arch)) =>
   MC.ArchSegmentOff arch ->
   Int ->
