@@ -28,10 +28,6 @@ module Pate.Monad
   , BinaryContext(..)
   , VerificationFailureMode(..)
   , SimBundle(..)
-  , ExprMappableEquiv(..)
-  , FromExprMappable(..)
-  , FromSpecExprMappable(..)
-  , bindSpecEq
   , withBinary
   , withValid
   , withValidEnv
@@ -64,6 +60,9 @@ module Pate.Monad
   , withAssumption
   , withAssumption'
   , withSatAssumption
+  , withAssumptionFrame
+  , withAssumptionFrame'
+  , withAssumptionFrame_
   )
   where
 
@@ -162,6 +161,7 @@ data EquivEnv sym arch where
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envStackRegion :: W4.SymNat sym
     , envGlobalRegion :: W4.SymNat sym
+    , envPCRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
     , envBlockMapping :: BlockMapping arch
@@ -352,13 +352,13 @@ unconstrainedRegister reg = do
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 withSimSpec ::
-  ExprMappableEquiv sym arch f =>
+  PEM.ExprMappable sym f =>
   SimSpec sym arch f ->
   (SimState sym arch Original -> SimState sym arch Patched -> f -> EquivM sym arch g) ->
   EquivM sym arch (SimSpec sym arch g)
-withSimSpec spec f = do
+withSimSpec spec f = withSym $ \sym -> do
   withFreshVars $ \stO stP -> do
-    (asm, body) <- bindSpecEq stO stP spec
+    (asm, body) <- liftIO $ bindSpec sym stO stP spec
     withAssumption (return asm) $ f stO stP body
 
 freshSimVars ::
@@ -452,6 +452,47 @@ withAssumption ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption asmf f =
   withSym $ \sym -> withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
+
+-- | Run the given function under the given assumption frame, and rebind the resulting
+-- value according to any explicit bindings. The returned predicate is the conjunction of
+-- the given assumption frame and the frame produced by the function.
+withAssumptionFrame' ::
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  EquivM sym arch (AssumptionFrame sym) ->
+  EquivM sym arch (AssumptionFrame sym, f) ->
+  EquivM sym arch (W4.Pred sym, f)
+withAssumptionFrame' asmf f = withValid $ withSym $ \sym -> do
+  asm <- asmf
+  asm_pred <- liftIO $ getAssumedPred sym asm
+  withAssumption' (return asm_pred) $ do
+    (asm', a) <- f
+    cache <- W4B.newIdxCache
+    let
+      doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
+      doRebind = rebindWithFrame' sym cache (asm <> asm')
+    a' <- liftIO $ PEM.mapExpr sym doRebind a
+    asm_pred' <- liftIO $ getAssumedPred sym asm'
+    return (asm_pred', a')
+
+-- | Run the given function under the given assumption frame, and rebind the resulting
+-- value according to any explicit bindings. The returned predicate is the conjunction
+-- of all the assumptions in the given frame.
+withAssumptionFrame ::
+  PEM.ExprMappable sym f =>
+  EquivM sym arch (AssumptionFrame sym) ->
+  EquivM sym arch f ->
+  EquivM sym arch (W4.Pred sym, f)
+withAssumptionFrame asmf f = withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
+
+-- | Run the given function under the given assumption frame, and rebind the resulting
+-- value according to any explicit bindings.
+withAssumptionFrame_ ::
+  PEM.ExprMappable sym f =>
+  EquivM sym arch (AssumptionFrame sym) ->
+  EquivM sym arch f ->
+  EquivM sym arch f
+withAssumptionFrame_ asmf f = fmap snd $ withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 withAssumption_ ::
@@ -547,87 +588,6 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
---------------------------------------
-
-
-bindSpecEq ::
-  ExprMappableEquiv sym arch f =>
-  SimState sym arch Original ->
-  SimState sym arch Patched ->
-  SimSpec sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-bindSpecEq stO stP spec = withSym $ \sym -> do
-  ul <- IO.askUnliftIO
-  (asm, TM _ body) <- liftIO $ bindSpec sym stO stP (spec { specBody = TM ul (specBody spec) })
-  return (asm, body)
-
-instance ExprMappableEquiv sym arch f => ExprMappableEquiv sym arch (SimSpec sym arch f) where
-  mapExprEq f spec = withValid $ withFreshVars $ \stO stP -> do
-    (asm, body) <- bindSpecEq stO stP spec
-    asm' <- f asm
-    withAssumption (return asm') $ mapExprEq f body
-
-data FromExprMappable sym f where
-  EM :: PEM.ExprMappable sym f => { unEM :: f } -> FromExprMappable sym f
-
-data FromSpecExprMappable sym arch f where
-  SEM :: forall sym arch f. PEM.ExprMappable sym f => SimSpec sym arch f -> FromSpecExprMappable sym arch f
-
-instance ExprMappableEquiv sym arch (FromExprMappable sym f) where
-  mapExprEq f (EM x) = withValid $ do
-    x' <- withSym $ \sym -> IO.withRunInIO $ \runInIO ->  PEM.mapExpr sym (\e -> runInIO (f e)) x
-    return $ EM x'
-
-instance ExprMappableEquiv sym arch (FromSpecExprMappable sym arch f) where
-  mapExprEq f (SEM x) = withValid $ do
-    x' <- mapExprEq f (specMap (EM @sym) x)
-    return $ SEM (specMap unEM x')
-
-instance ExprMappableEquiv sym arch (SimBundle sym arch) where
-  mapExprEq f bundle = unEM <$> mapExprEq f (EM @sym bundle)
-
-instance ExprMappableEquiv sym arch (PP.EquivTripleBody sym arch) where
-  mapExprEq f triple = do
-    EM eqPreDomain' <- mapExprEq f (EM @sym (PP.eqPreDomain triple))
-    SEM eqPostDomain' <- mapExprEq f (SEM @sym @arch (PP.eqPostDomain triple))
-    return $ PP.EquivTripleBody (PP.eqPair triple) eqPreDomain' eqPostDomain' (PP.eqStatus triple) (PP.eqValidSym triple)
-
-instance ExprMappableEquiv sym arch (PP.ProofFunctionCall sym arch) where
-  mapExprEq f prf = do
-    prfFunPre' <- mapExprEq f (PP.prfFunPre prf)
-    prfFunCont' <- mapExprEq f (PP.prfFunCont prf)
-    case prf of
-      PP.ProofFunctionCall{} -> do
-        prfFunBody' <- mapExprEq f (PP.prfFunBody prf)
-        return $ PP.ProofFunctionCall prfFunPre' prfFunBody' prfFunCont'
-      PP.ProofTailCall{} -> return $ PP.ProofTailCall prfFunPre' prfFunCont'
-
-instance ExprMappableEquiv sym arch (PP.ProofBlockSliceBody sym arch) where
-  mapExprEq f prf = do
-    prfTriple' <- mapExprEq f (PP.prfTriple prf)
-    prfFunCalls' <- mapM (mapExprEq f) (PP.prfFunCalls prf)
-    prfReturn' <- mapM (mapExprEq f) (PP.prfReturn prf)
-    prfUnknownExit' <- mapM (mapExprEq f) (PP.prfUnknownExit prf)
-    prfArchExit' <- mapM (mapExprEq f) (PP.prfArchExit prf)
-    return $ PP.ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit' prfArchExit'
-
--- | Mapping under a 'SimSpec' requires re-establishing the correct logical context, which
--- currently is best supported in the 'EquivM' monad, so we specialize 'ExprMappable' to
--- it here.
-class ExprMappableEquiv sym arch f where
-  mapExprEq ::
-    (forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)) ->
-    f ->
-    EquivM_ sym arch f
-
-data ToExprMappable sym arch f where
-  TM :: ExprMappableEquiv sym arch f =>
-    IO.UnliftIO (EquivM_ sym arch) -> f -> ToExprMappable sym arch f
-
-instance PEM.ExprMappable sym (ToExprMappable sym arch f) where
-  mapExpr _ f (TM ul@(IO.UnliftIO runInIO) x) = do
-    x' <- runInIO $ mapExprEq (\e -> liftIO (f e)) x
-    return $ TM ul x'
 
 --------------------------------------
 -- UnliftIO

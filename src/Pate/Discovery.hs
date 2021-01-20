@@ -130,23 +130,26 @@ matchesBlockTarget ::
   BlockTarget arch Original ->
   BlockTarget arch Patched ->
   EquivM sym arch (WI.Pred sym)
-matchesBlockTarget bundle blktO blktP = withSymIO $ \sym -> do
+matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
   -- true when the resulting IPs call the given block targets
-  ptrO <- concreteToLLVM sym (concreteAddress $ targetCall blktO)
-  ptrP <- concreteToLLVM sym (concreteAddress $ targetCall blktP)
+  ptrO <- concreteToLLVM (targetCall blktO)
+  ptrP <- concreteToLLVM (targetCall blktP)
 
-  eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue ipO)
-  eqP <- MT.llvmPtrEq sym ptrP (PSR.macawRegValue ipP)
-  eqCall <- WI.andPred sym eqO eqP
+  eqCall <- liftIO $ do
+    eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue ipO)
+    eqP <- MT.llvmPtrEq sym ptrP (PSR.macawRegValue ipP)
+    WI.andPred sym eqO eqP
 
   -- true when the resulting return IPs match the given block return addresses
-  targetRetO <- targetReturnPtr sym blktO
-  targetRetP <- targetReturnPtr sym blktP
+  targetRetO <- targetReturnPtr blktO
+  targetRetP <- targetReturnPtr blktP
 
-  eqRetO <- liftPartialRel sym (MT.llvmPtrEq sym) retO targetRetO
-  eqRetP <- liftPartialRel sym (MT.llvmPtrEq sym) retP targetRetP
-  eqRet <-  WI.andPred sym eqRetO eqRetP
-  WI.andPred sym eqCall eqRet
+  eqRet <- liftIO $ do
+    eqRetO <- liftPartialRel sym (MT.llvmPtrEq sym) retO targetRetO
+    eqRetP <- liftPartialRel sym (MT.llvmPtrEq sym) retP targetRetP
+    WI.andPred sym eqRetO eqRetP
+
+  liftIO $ WI.andPred sym eqCall eqRet
   where
     regsO = PSS.simOutRegs $ PSS.simOutO bundle
     regsP = PSS.simOutRegs $ PSS.simOutP bundle
@@ -175,15 +178,12 @@ liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = WI.notPred sym p2
 liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = WI.notPred sym p1
 
 targetReturnPtr ::
-  ValidSym sym =>
-  ValidArch arch =>
-  sym ->
   BlockTarget arch bin ->
-  IO (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MC.ArchAddrWidth arch))))
-targetReturnPtr sym blkt | Just blk <- targetReturn blkt = do
-  ptr <- concreteToLLVM sym (concreteAddress blk)
+  EquivM sym arch (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MC.ArchAddrWidth arch))))
+targetReturnPtr blkt | Just blk <- targetReturn blkt = withSym $ \sym -> do
+  ptr <- concreteToLLVM blk
   return $ WP.justPartExpr sym ptr
-targetReturnPtr sym _ = return $ WP.maybePartExpr sym Nothing
+targetReturnPtr _ = withSym $ \sym -> return $ WP.maybePartExpr sym Nothing
 
 
 -- | From the given starting point, find all of the accessible
@@ -396,14 +396,12 @@ liftMaybe Nothing e = throwHere e
 liftMaybe (Just a) _ = pure a
 
 concreteToLLVM ::
-  (
-   w ~ MC.ArchAddrWidth arch, MM.MemWidth w, KnownNat w, 1 <= w
-  , WI.IsExprBuilder sym
-  ) =>
-  sym ->
-  ConcreteAddress arch ->
-  IO (CLM.LLVMPtr sym w)
-concreteToLLVM sym c = do
-  region <- WI.natLit sym 0
-  offset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger (absoluteAddress c)))
-  pure (CLM.LLVMPointer region offset)
+  ConcreteBlock arch bin ->
+  EquivM sym arch (CLM.LLVMPtr sym (MC.ArchAddrWidth arch))
+concreteToLLVM blk = withSym $ \sym -> do
+  -- we assume a distinct region for all executable code
+  region <- CMR.asks envPCRegion
+  let addr = absoluteAddress (concreteAddress blk)
+  liftIO $ do
+    offset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger addr))
+    pure (CLM.LLVMPointer region offset)

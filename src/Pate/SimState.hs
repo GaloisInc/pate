@@ -49,13 +49,24 @@ module Pate.SimState
   , SimVars(..)
   , bindSpec
   , flatVars
+  -- assumption frames
+  , AssumptionFrame
+  , exprBinding
+  , macawRegBinding
+  , frameAssume
+  , getAssumedPred
+  , rebindWithFrame
+  , rebindWithFrame'
   ) where
 
 import           GHC.Stack ( HasCallStack )
 
 import           Control.Monad ( forM )
+import           Data.Set (Set)
+import qualified Data.Set as Set
 
 import           Data.Parameterized.Some
+import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
@@ -68,6 +79,7 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
@@ -115,6 +127,159 @@ simOutRegs ::
 simOutRegs simIn = simRegs $ simOutState simIn
 
 
+newtype ExprSet sym tp where
+  ExprSet :: Set (AsOrd (W4.SymExpr sym) tp) -> ExprSet sym tp
+
+data AsOrd f tp where
+  AsOrd :: OrdF f => { unAsOrd :: f tp } -> AsOrd f tp
+
+instance Eq (AsOrd f tp) where
+  (AsOrd a) == (AsOrd b) = case compareF a b of
+    EQF -> True
+    _ -> False
+
+instance Ord (AsOrd f tp) where
+  compare (AsOrd a) (AsOrd b) = toOrdering $ compareF a b
+
+deriving instance Semigroup (ExprSet sym tp)
+deriving instance Monoid (ExprSet sym tp)
+
+singletonExpr :: OrdF (W4.SymExpr sym) => W4.SymExpr sym tp -> ExprSet sym tp
+singletonExpr e = ExprSet (Set.singleton (AsOrd e))
+
+
+data AssumptionFrame sym where
+  AssumptionFrame ::
+    { asmPreds :: [W4.Pred sym]
+    -- | equivalence on sub-expressions. In the common case where an expression maps
+    -- to a single expression (i.e. a singleton 'ExprSet') we can apply the rewrite
+    -- inline.
+    , asmBinds :: MapF.MapF (W4.SymExpr sym) (ExprSet sym)
+    } -> AssumptionFrame sym
+
+instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionFrame sym) where
+  asm1 <> asm2 = let
+    preds = (asmPreds asm1) <> (asmPreds asm2)
+    binds =
+      MapF.mergeWithKey
+        (\_ eset1 eset2 -> Just (eset1 <> eset2))
+        id
+        id
+        (asmBinds asm1)
+        (asmBinds asm2)
+    in AssumptionFrame preds binds
+
+instance OrdF (W4.SymExpr sym) => Monoid (AssumptionFrame sym) where
+  mempty = AssumptionFrame mempty MapF.empty
+
+exprBinding ::
+  W4.IsSymExprBuilder sym =>
+  -- | source expression
+  W4.SymExpr sym tp ->
+  -- | target expression
+  W4.SymExpr sym tp ->
+  AssumptionFrame sym
+exprBinding eSrc eTgt = case testEquality eSrc eTgt of
+  Just Refl -> mempty
+  _ -> mempty { asmBinds = (MapF.singleton eSrc (singletonExpr eTgt)) }
+
+macawRegBinding ::
+  W4.IsSymExprBuilder sym =>
+  MS.ToCrucibleType tp ~ MS.ToCrucibleType tp' =>
+  -- | value to rebind
+  PSR.MacawRegEntry sym tp ->
+  -- | new value
+  PSR.MacawRegEntry sym tp' ->
+  AssumptionFrame sym
+macawRegBinding var val = do
+  case PSR.macawRegRepr var of
+    CLM.LLVMPointerRepr _ ->
+      let
+        CLM.LLVMPointer regVar offVar = PSR.macawRegValue var
+        CLM.LLVMPointer regVal offVal = PSR.macawRegValue val
+        regBind = exprBinding regVar regVal
+        offBind = exprBinding offVar offVal
+      in regBind <> offBind
+    CT.BoolRepr -> exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
+    _ -> mempty
+
+frameAssume ::
+  W4.Pred sym ->
+  AssumptionFrame sym
+frameAssume p = AssumptionFrame [p] MapF.empty
+
+getUniqueBinding ::
+  W4.IsSymExprBuilder sym =>
+  AssumptionFrame sym ->
+  W4.SymExpr sym tp ->
+  Maybe (W4.SymExpr sym tp)
+getUniqueBinding asm e = case MapF.lookup e (asmBinds asm) of
+  Just (ExprSet es)
+    | Set.size es == 1
+    , [AsOrd e'] <- Set.toList es -> Just e'
+  _ -> Nothing
+
+-- | Compute a predicate that collects the individual assumptions in the frame, including
+-- equality on all bindings.
+getAssumedPred ::
+  forall sym.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  AssumptionFrame sym ->
+  IO (W4.Pred sym)
+getAssumedPred sym asm = do
+  bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
+  allPreds sym ((asmPreds asm) ++ bindsAsm)
+  where
+    assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> IO [W4.Pred sym]
+    assumeBinds (MapF.Pair eSrc (ExprSet eTgts)) = do
+      let eTgts' = map unAsOrd (Set.toList eTgts)
+      forM eTgts' $ \eTgt -> W4.isEq sym eSrc eTgt
+
+-- | Explicitly rebind any known sub-expressions that are in the frame.
+rebindWithFrame ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  AssumptionFrame sym ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+rebindWithFrame sym asm e = do
+  cache <- W4B.newIdxCache
+  rebindWithFrame' sym cache asm e
+
+rebindWithFrame' ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.IdxCache t (W4B.Expr t) ->
+  AssumptionFrame sym ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+rebindWithFrame' sym cache asm e_outer = do
+  let
+    go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
+    go e = W4B.idxCacheEval cache e $ case getUniqueBinding asm e of
+      Just e' -> return e'
+      _ -> case e of
+        -- fixing a common trivial mux case
+        W4B.AppExpr a0
+          | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+          , Just (W4B.BaseEq _ eT' eF') <- W4B.asApp cond
+          , Just W4.Refl <- W4.testEquality eT eT'
+          , Just W4.Refl <- W4.testEquality eF eF'
+          -> go eF
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else W4B.sbNonceExpr sym a0'
+        _ -> return e
+  go e_outer
+
 data SimSpec sym arch f = SimSpec
   {
     specVarsO :: SimVars sym arch PT.Original
@@ -123,7 +288,15 @@ data SimSpec sym arch f = SimSpec
   , specBody :: f
   }
 
-
+instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) where
+  mapExpr sym f spec = do
+    -- it's not really obvious how to map the bound variables in general
+    -- we're going to leave it up the clients to not clobber any relevant bindings
+    --specVarsO' <- PEM.mapExpr sym f (specVarsO spec)
+    --specVarsP' <- PEM.mapExpr sym f (specVarsP spec)
+    specAsm' <- f (specAsm spec)
+    specBody' <- PEM.mapExpr sym f (specBody spec)
+    return $ SimSpec (specVarsO spec) (specVarsP spec) specAsm' specBody'
 
 specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
 specMap f spec = spec { specBody = f (specBody spec) }
@@ -154,7 +327,6 @@ data SimVars sym arch bin = SimVars
   , simVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
   , simVarState :: SimState sym arch bin
   }
-
 
 flatVars ::
   SimVars sym arch bin -> [Some (W4.BoundVar sym)]

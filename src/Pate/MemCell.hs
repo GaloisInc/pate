@@ -16,6 +16,8 @@ module Pate.MemCell (
   , muxMemCells
   , muxMemCellsMap
   , inMemCells
+  , readMemCell
+  , writeMemCell
   ) where
 
 import           Control.Monad ( foldM, forM )
@@ -31,6 +33,7 @@ import           GHC.TypeLits ( type (<=) )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified What4.Interface as WI
 
+import qualified Pate.SimState as PS
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
 import qualified What4.ExprHelpers as WEH
@@ -180,6 +183,33 @@ inMemCells sym cell (MemCells cells) =
           p' <- WI.orPred sym p matches
           go p' cells'
     go p [] = return p
+
+
+readMemCell ::
+  WI.IsSymExprBuilder sym =>
+  MC.RegisterInfo (MC.ArchReg arch) =>
+  sym ->
+  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
+  MemCell sym arch w ->
+  IO (CLM.LLVMPtr sym (8 WI.* w))
+readMemCell sym mem cell@(MemCell{}) = do
+  let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
+  PMT.readMemArr sym mem (cellPtr cell) repr
+
+-- FIXME: this currently drops the region due to weaknesses in the memory model
+writeMemCell ::
+  WI.IsSymExprBuilder sym =>
+  MC.RegisterInfo (MC.ArchReg arch) =>
+  sym ->
+  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
+  MemCell sym arch w ->
+  CLM.LLVMPtr sym (8 WI.* w) ->
+  IO (PMT.MemTraceImpl sym (MC.ArchAddrWidth arch))
+writeMemCell sym mem cell@(MemCell{}) valPtr = do
+  let
+    repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
+    CLM.LLVMPointer _ val = valPtr
+  PMT.writeMemArr sym mem (cellPtr cell) repr val
 
 instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do

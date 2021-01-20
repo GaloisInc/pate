@@ -496,14 +496,10 @@ resolveCellEquiv ::
   PMC.MemCell sym arch w ->
   W4.Pred sym ->
   IO (W4.Pred sym)
-resolveCellEquiv sym stO stP eqRel cell@(PMC.MemCell{})  cond = do
-  let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
-  val1 <- MT.readMemArr sym memO (PMC.cellPtr cell) repr
-  val2 <- MT.readMemArr sym memP (PMC.cellPtr cell) repr
+resolveCellEquiv sym stO stP eqRel cell cond = do
+  val1 <- PMC.readMemCell sym (simMem stO) cell
+  val2 <- PMC.readMemCell sym (simMem stP) cell
   impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
-  where
-    memO = simMem stO
-    memP = simMem stP
 
 
 -- | Compute a precondition that is sufficiently strong to imply the given
@@ -546,10 +542,10 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do
-          CLM.LLVMPointer _ fresh <- MT.readMemArr sym memP ptr repr
+          fresh <- PMC.readMemCell sym memP cell
           --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
           --val <- W4.baseTypeIte sym cond fresh original
-          mem' <- MT.writeMemArr sym mem ptr repr fresh
+          mem' <- PMC.writeMemCell sym mem cell fresh
           mem'' <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
           return $ mem { MT.memArr = mem'' }
 
