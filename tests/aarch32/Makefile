@@ -8,8 +8,8 @@ all: $(patsubst %c,%exe,$(wildcard *.c)) $(patsubst %c,%i,$(wildcard *.c))
 %.i: %.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
 
-%.exe: %.s
-	$(CC) -fno-stack-protector -nostdlib $< -o $@
+%.exe: %.s link.ld
+	$(CC) -fno-stack-protector -nostdlib link.ld $< -o $@
 
 %.s: %.c
 	$(CC) -fno-stack-protector -S -c $< -o $@
