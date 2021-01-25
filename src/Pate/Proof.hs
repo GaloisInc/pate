@@ -57,6 +57,7 @@ import qualified Pate.Types as PT
 import qualified Pate.Equivalence as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
+import qualified Pate.ExprMappable as PEM
 
 import qualified What4.Interface as W4
 
@@ -86,6 +87,11 @@ data EquivTripleBody sym arch where
     , eqValidSym :: PT.Sym sym
     } -> EquivTripleBody sym arch
 
+instance PEM.ExprMappable sym (EquivTripleBody sym arch) where
+  mapExpr sym f triple = do
+    eqPreDomain' <- PEM.mapExpr sym f (eqPreDomain triple)
+    eqPostDomain' <- PEM.mapExpr sym f (eqPostDomain triple)
+    return $ EquivTripleBody (eqPair triple) eqPreDomain' eqPostDomain' (eqStatus triple) (eqValidSym triple)
 
 -- | An triple representing the equivalence conditions for a block pair. Abstracted
 -- over the initial machine state.
@@ -111,6 +117,16 @@ data ProofFunctionCall sym arch =
       , prfFunBody :: ProofBlockSlice sym arch
       } 
 
+instance PEM.ExprMappable sym (ProofFunctionCall sym arch) where
+  mapExpr sym f prf = do
+    prfFunPre' <- PEM.mapExpr sym f (prfFunPre prf)
+    prfFunCont' <- PEM.mapExpr sym f (prfFunCont prf)
+    case prf of
+      ProofFunctionCall{} -> do
+        prfFunBody' <- PEM.mapExpr sym f (prfFunBody prf)
+        return $ ProofFunctionCall prfFunPre' prfFunBody' prfFunCont'
+      ProofTailCall{} -> return $ ProofTailCall prfFunPre' prfFunCont'
+
 -- | Trace of the proof that a pair of block "slices" satisfy the
 -- given triple. 
 data ProofBlockSliceBody sym arch =
@@ -122,13 +138,20 @@ data ProofBlockSliceBody sym arch =
         -- | all jumps which exit the slice with a function call
       , prfFunCalls :: [ProofFunctionCall sym arch]
       , prfReturn :: Maybe (EquivTripleBody sym arch)
-      , prfArchExit :: Maybe (EquivTripleBody sym arch)
       , prfUnknownExit :: Maybe (EquivTripleBody sym arch)
       }
 
+instance PEM.ExprMappable sym (ProofBlockSliceBody sym arch) where
+  mapExpr sym f prf = do
+    prfTriple' <- PEM.mapExpr sym f (prfTriple prf)
+    prfFunCalls' <- mapM (PEM.mapExpr sym f) (prfFunCalls prf)
+    prfReturn' <- mapM (PEM.mapExpr sym f) (prfReturn prf)
+    prfUnknownExit' <- mapM (PEM.mapExpr sym f) (prfUnknownExit prf)
+    return $ ProofBlockSliceBody prfTriple' prfFunCalls' prfReturn' prfUnknownExit'
+
 
 trivialSliceBody :: EquivTripleBody sym arch -> ProofBlockSliceBody sym arch
-trivialSliceBody triple = ProofBlockSliceBody triple [] Nothing Nothing Nothing
+trivialSliceBody triple = ProofBlockSliceBody triple [] Nothing Nothing
 
 prfBodyPre :: ProofBlockSliceBody sym arch -> PE.StatePred sym arch
 prfBodyPre = eqPreDomain . prfTriple

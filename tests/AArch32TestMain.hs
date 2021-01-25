@@ -24,19 +24,11 @@ main = do
             , "test-fun-reorder"
             -- see: https://github.com/GaloisInc/pate/issues/33
             , "test-read-reorder"
-            , "test-int-ref"
-            -- see: https://github.com/GaloisInc/pate/issues/32
-            , "test-global-alias"
-            , "test-masked-write"
-            , "test-write2"
-            , "test-partialmask-args"
-            , "test-masked-args"
-            -- see: https://github.com/GaloisInc/pate/issues/31
+             -- see: https://github.com/GaloisInc/pate/issues/30
+            -- test is now passing, although the classification bug
+            -- still causes a warning
+             --, "test-write-reorder"
             ]
-        , testExpectSelfEquivalenceFailure =
-           [
-           -- see: https://github.com/GaloisInc/pate/issues/30
-             "test-write-reorder"
-           ]
+        , testExpectSelfEquivalenceFailure = [ ]
         }
   runTests cfg

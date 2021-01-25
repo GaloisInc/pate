@@ -12,7 +12,8 @@ module Pate.SimulatorRegisters (
   CrucBaseTypes,
   MacawRegVar(..),
   MacawRegEntry(..),
-  macawRegEntry
+  macawRegEntry,
+  ptrToEntry
   ) where
 
 import qualified Data.Macaw.Symbolic as MS
@@ -62,6 +63,13 @@ instance PC.ShowF (WI.SymExpr sym) => Show (MacawRegEntry sym tp) where
 
 macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
 macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
+
+ptrToEntry ::
+  WI.IsExprBuilder sym =>
+  CLM.LLVMPtr sym w ->
+  MacawRegEntry sym (MT.BVType w)
+ptrToEntry ptr@(CLM.LLVMPointer _ bv) = case WI.exprType bv of
+  WI.BaseBVRepr w -> MacawRegEntry (CLM.LLVMPointerRepr w) ptr
 
 instance PEM.ExprMappable sym (MacawRegEntry sym tp) where
   mapExpr sym f entry = do

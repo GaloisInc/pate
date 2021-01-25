@@ -92,14 +92,18 @@ doTest mwb sv proxy@PL.ValidArchProxy fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
   let
     infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PL.noPatchData
+    -- avoid frame computations for self-tests
+    computeFrames = case mwb of
+      Just _ -> False
+      Nothing -> True
     rcfg = PL.RunConfig
       { PL.archProxy = proxy
       , PL.infoPath = infoPath
       , PL.origPath = fp <.> "original" <.> "exe"
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.verificationCfg =
-          -- avoid frame computations for self-tests
-          PT.defaultVerificationCfg { PT.cfgComputeEquivalenceFrames = False }
+
+          PT.defaultVerificationCfg { PT.cfgComputeEquivalenceFrames = computeFrames }
       , PL.logger =
           LJ.LogAction $ \e -> case e of
             PE.AnalysisStart pPair -> do
@@ -119,8 +123,10 @@ doTest mwb sv proxy@PL.ValidArchProxy fp = do
               putStrLn $ "Branch completeness check: " ++ show time
             PE.ComputedPrecondition _ time -> do
               putStrLn $ "Precondition propagation: " ++ show time
+            PE.ProvenTriple _ _ time -> do
+              putStrLn $ "Intermediate Proof result: " ++ show time
             PE.ProvenGoal _ goal time -> do
-              putStrLn $ "Proof result: " ++ show time ++ "\n" ++ show goal
+              putStrLn $ "Toplevel Proof result: " ++ show time ++ "\n" ++ show goal
             PE.Warning _ err -> do
               putStrLn $ "WARNING: " ++ show err
             PE.ErrorRaised err -> putStrLn $ "Error: " ++ PCE.ppEquivalenceError err
