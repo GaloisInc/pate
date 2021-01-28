@@ -86,7 +86,6 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.BaseTypes as WT
 import qualified What4.Config as W4C
 import qualified What4.Expr.Builder as W4B
-import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
@@ -453,7 +452,7 @@ backJumps internalAddrs pb =
   | tgt <- case MD.pblockTermStmt pb of
      MD.ParsedJump _ tgt -> [tgt]
      MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
-     MD.ParsedLookupTable _ _ tgts -> F.toList tgts
+     MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
      _ -> []
   , tgt < MD.pblockAddr pb
   , tgt `S.member` internalAddrs
@@ -471,7 +470,7 @@ externalTransitions internalAddrs pb =
       MD.PLTStub{} -> []
       MD.ParsedJump _ tgt -> [tgt]
       MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
-      MD.ParsedLookupTable _ _ tgts -> F.toList tgts
+      MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
       MD.ParsedReturn{} -> []
       MD.ParsedArchTermStmt{} -> [] -- TODO: think harder about this
       MD.ParsedTranslateError{} -> []

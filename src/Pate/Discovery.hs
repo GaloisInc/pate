@@ -294,7 +294,7 @@ concreteJumpTargets pb = case MD.pblockTermStmt pb of
     blk_t <- mkConcreteBlock BlockEntryJump t
     blk_f <- mkConcreteBlock BlockEntryJump f
     return $ [ BlockTarget blk_t Nothing, BlockTarget blk_f Nothing ]
-  MD.ParsedLookupTable st _ _ -> go (concreteNextIPs st) Nothing
+  MD.ParsedLookupTable _jt st _ _ -> go (concreteNextIPs st) Nothing
   MD.ParsedArchTermStmt _ st ret -> do
     ret_blk <- mapM (mkConcreteBlock BlockEntryPostArch) ret
     return $ [ BlockTarget (mkConcreteBlock' BlockEntryPostArch next) ret_blk

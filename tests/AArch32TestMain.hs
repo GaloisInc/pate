@@ -20,14 +20,10 @@ main = do
             , "test-int-ref-ref"
             -- see: https://github.com/GaloisInc/pate/issues/31
             , "test-write-reorder-call"
-            , "test-call-twice"
-            , "test-fun-reorder"
-            -- see: https://github.com/GaloisInc/pate/issues/33
-            , "test-read-reorder"
              -- see: https://github.com/GaloisInc/pate/issues/30
             -- test is now passing, although the classification bug
             -- still causes a warning
-             --, "test-write-reorder"
+             , "test-write-reorder"
             ]
         , testExpectSelfEquivalenceFailure = [ ]
         }
