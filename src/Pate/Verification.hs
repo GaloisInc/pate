@@ -28,9 +28,7 @@ module Pate.Verification
 import           Prelude hiding ( fail )
 
 import           GHC.Stack ( HasCallStack )
-import           Data.Bits
 import           Control.Monad ( void )
-import qualified Control.Monad.Fail as CMF
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
@@ -75,7 +73,7 @@ import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.Map as MapF
 
-import qualified Lang.Crucible.Backend.Online as CBO
+import qualified Lang.Crucible.Backend.Simple as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -87,13 +85,11 @@ import qualified What4.BaseTypes as WT
 import qualified What4.Config as W4C
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
-import qualified What4.ProblemFeatures as W4PF
 import qualified What4.ProgramLoc as W4L
+import qualified What4.Solver as WS
 import qualified What4.Solver.Yices as W4Y
 import qualified What4.Symbol as WS
---import qualified What4.Protocol.SMTWriter as W4O
 import qualified What4.SatResult as W4R
---import qualified What4.Protocol.SMTLib2 as SMT2
 
 import qualified Pate.Binary as PB
 import           Pate.CounterExample
@@ -132,85 +128,80 @@ verifyPairs logAction elf elf' blockMap vcfg pPairs = do
   (pMain, pPfm) <- PD.runDiscovery elf'
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
 
-  Some gen' <- liftIO N.newIONonceGenerator
-  let pfeats = W4PF.useBitvectors .|. W4PF.useSymbolicArrays .|. W4PF.useIntegerArithmetic .|. W4PF.useStructs
-  -- TODO: the online backend is not strictly necessary, however we are currently using
-  -- 'What4.Protocol.Online.checkSatisfiableWithModel' to invoke the solver. Additionally
-  -- we are using What4.Protocol.Online.inNewFrameWithVars' to treat bound variables as free.
-  CBO.withYicesOnlineBackend W4B.FloatRealRepr gen' CBO.NoUnsatFeatures pfeats $ \sym -> do
-    let cfg = W4.getConfiguration sym
-    --pathSetter <- liftIO $ W4C.getOptionSetting CBO.solverInteractionFile cfg
-    timeout <- liftIO $ W4C.getOptionSetting W4Y.yicesGoalTimeout cfg
-    void $ liftIO $ W4C.setOpt timeout 5
-    
-    
-    --[] <- liftIO $ W4C.setOpt pathSetter (T.pack "./solver.out")
-    proc <- liftIO $ CBO.withSolverProcess sym (CMF.fail "invalid") return
+  sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
+  let cfg = W4.getConfiguration sym
+  liftIO $ W4C.extendConfig W4Y.yicesOptions cfg
 
-    eval <- CMT.lift (MS.withArchEval vals sym pure)
-    model <- CMT.lift (MT.mkMemTraceVar @arch ha)
-    bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
-    undefops <- liftIO $ MT.mkUndefinedPtrOps sym
+  -- FIXME: We can set more granular timeouts for different types of goals now
+  -- timeout <- liftIO $ W4C.getOptionSetting W4Y.yicesGoalTimeout cfg
+  -- void $ liftIO $ W4C.setOpt timeout 5
 
-    -- PC values are assumed to be absolute
-    pcRegion <- liftIO $ W4.natLit sym 0
+  eval <- CMT.lift (MS.withArchEval vals sym pure)
+  model <- CMT.lift (MT.mkMemTraceVar @arch ha)
+  bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
+  undefops <- liftIO $ MT.mkUndefinedPtrOps sym
 
-    -- we arbitrarily assign disjoint regions for each area of memory
-    stackRegion <- liftIO $ W4.natLit sym 1
-    globalRegion <- liftIO $ W4.natLit sym 2
+  -- PC values are assumed to be absolute
+  pcRegion <- liftIO $ W4.natLit sym 0
 
-    startedAt <- liftIO TM.getCurrentTime
-    let
-      exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
+  -- we arbitrarily assign disjoint regions for each area of memory
+  stackRegion <- liftIO $ W4.natLit sym 1
+  globalRegion <- liftIO $ W4.natLit sym 2
 
-      oCtx = BinaryContext
-        { binary = PB.loadedBinary elf
-        , parsedFunctionMap = oPfm
-        , binEntry = oMain
-        }
-      rCtx = BinaryContext
-        { binary = PB.loadedBinary elf'
-        , parsedFunctionMap = pPfm
-        , binEntry = pMain
-        }
-      ctxt = EquivalenceContext
-        { nonces = gen
-        , handles = ha
-        , exprBuilder = sym
-        , originalCtx = oCtx
-        , rewrittenCtx = rCtx
-        
-        }
-      env = EquivEnv
-        { envSym = sym
-        , envProc = proc
-        , envWhichBinary = Nothing
-        , envCtx = ctxt
-        , envArchVals = vals
-        , envExtensions = exts
-        , envStackRegion = stackRegion
-        , envGlobalRegion = globalRegion
-        , envPCRegion = pcRegion
-        , envMemTraceVar = model
-        , envBlockEndVar = bvar
-        , envBlockMapping = buildBlockMap pPairs blockMap
-        , envLogger = logAction
-        , envConfig = vcfg
-        , envBaseEquiv = stateEquivalence sym stackRegion
-        , envFailureMode = ThrowOnAnyFailure
-        , envGoalTriples = [] -- populated in runVerificationLoop
-        , envValidSym = Sym sym
-        , envStartTime = startedAt
-        , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
-        -- TODO: restructure EquivEnv to avoid this
-        , envCurrentFunc = error "no function under analysis"
-        , envCurrentAsm = W4.truePred sym
-        }
+  startedAt <- liftIO TM.getCurrentTime
+  let
+    exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
-    liftIO $ do
-      stats <- runVerificationLoop env pPairs
-      IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats)
-      return $ equivSuccess stats
+    oCtx = BinaryContext
+      { binary = PB.loadedBinary elf
+      , parsedFunctionMap = oPfm
+      , binEntry = oMain
+      }
+    rCtx = BinaryContext
+      { binary = PB.loadedBinary elf'
+      , parsedFunctionMap = pPfm
+      , binEntry = pMain
+      }
+    ctxt = EquivalenceContext
+      { nonces = gen
+      , handles = ha
+      , exprBuilder = sym
+      , originalCtx = oCtx
+      , rewrittenCtx = rCtx
+
+      }
+    env = EquivEnv
+      { envWhichBinary = Nothing
+      , envCtx = ctxt
+      , envArchVals = vals
+      , envExtensions = exts
+      , envStackRegion = stackRegion
+      , envGlobalRegion = globalRegion
+      , envPCRegion = pcRegion
+      , envMemTraceVar = model
+      , envBlockEndVar = bvar
+      , envBlockMapping = buildBlockMap pPairs blockMap
+      , envLogger = logAction
+      , envConfig = vcfg
+      , envBaseEquiv = stateEquivalence sym stackRegion
+      , envFailureMode = ThrowOnAnyFailure
+      , envGoalTriples = [] -- populated in runVerificationLoop
+
+        -- FIXME: Make the adapter a parameter (it might need to be an
+      -- un-typed ADT that makes the choice here, as the st parameter won't be
+      -- in scope in the function arguments
+      , envValidSym = Sym sym WS.yicesAdapter
+      , envStartTime = startedAt
+      , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
+      -- TODO: restructure EquivEnv to avoid this
+      , envCurrentFunc = error "no function under analysis"
+      , envCurrentAsm = W4.truePred sym
+      }
+
+  liftIO $ do
+    stats <- runVerificationLoop env pPairs
+    IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats)
+    return $ equivSuccess stats
 
 ---------------------------------------------
 -- Top-level loop
@@ -422,6 +413,10 @@ simulate simInput = withBinary @bin $ do
   globals <- getGlobals simInput
   cres <- evalCFG globals regs cfg
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
+
+  -- FIXME: Use CB.resetAssumptionState after each symbolic execution run so
+  -- that we don't carry any constraints between slices
+
   return $ (asm, SimOutput (SimState memTrace postRegs) exitClass)
 
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
@@ -520,11 +515,11 @@ getGPValueAndTrace ::
     , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
     , CS.RegValue sym (MS.MacawBlockEndType arch)
     )
-getGPValueAndTrace (CS.FinishedResult _ pres) = do
+getGPValueAndTrace (CS.FinishedResult _ pres) = withSym $ \sym -> do
   mem <- CMR.asks envMemTraceVar
   eclass <- CMR.asks envBlockEndVar
   asm <- case pres of
-    CS.TotalRes _ -> withSym $ \sym -> return $ W4.truePred sym
+    CS.TotalRes _ -> return $ W4.truePred sym
     CS.PartialRes _ p _ _ -> return p
 
   case pres ^. CS.partialValue of
@@ -559,10 +554,10 @@ getGlobals ::
   forall sym arch bin.
   SimInput sym arch bin ->
   EquivM sym arch (CS.SymGlobalState sym)
-getGlobals simInput = do
+getGlobals simInput = withValid $ withSym $ \sym -> do
   env <- CMR.ask
-  blkend <- withSymIO $ MS.initBlockEnd (Proxy @arch)
-  withValid $ return $
+  blkend <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
+  return $
       CGS.insertGlobal (envMemTraceVar env) (simInMem simInput)
     $ CGS.insertGlobal (envBlockEndVar env) blkend
     $ CGS.emptyGlobals

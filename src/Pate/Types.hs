@@ -124,6 +124,7 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
+import qualified What4.Solver as WS
 
 import qualified Pate.Memory.MemTrace as MT
 import           What4.ExprHelpers
@@ -605,7 +606,7 @@ type ValidSym sym =
   )
 
 data Sym sym where
-  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> Sym sym
+  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> WS.SolverAdapter st -> Sym sym
 
 ----------------------------------
 

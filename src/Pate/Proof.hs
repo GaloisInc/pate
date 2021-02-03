@@ -289,7 +289,7 @@ ppStatePredSpec ::
   PT.Sym sym ->
   PE.StatePredSpec sym arch ->
   ProofDoc
-ppStatePredSpec vsym@(PT.Sym _) stpred =
+ppStatePredSpec vsym@(PT.Sym _ _) stpred =
   ppRegs <> ppStack <> ppMem
     where
       stPredBody = PS.specBody stpred
@@ -348,7 +348,7 @@ ppStatePredSpec vsym@(PT.Sym _) stpred =
       ppBV e = PP.pretty $ showF e
 
 ppExpr :: PT.Sym sym -> W4.SymExpr sym tp -> ProofDoc
-ppExpr (PT.Sym _) e = PP.pretty $ showF e
+ppExpr (PT.Sym _ _) e = PP.pretty $ showF e
 
 ppPatchPair :: PT.ValidArch arch => PT.PatchPair arch -> ProofDoc
 ppPatchPair pPair =

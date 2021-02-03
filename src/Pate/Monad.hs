@@ -22,7 +22,6 @@ module Pate.Monad
   , EquivM_
   , runEquivM
   , ValidSym
-  , ValidSolver
   , ValidArch(..)
   , EquivalenceContext(..)
   , BinaryContext(..)
@@ -33,7 +32,6 @@ module Pate.Monad
   , withValidEnv
   , withSymIO
   , withSym
-  , withProc
   , archFuns
   , runInIO1
   , manifestError
@@ -96,7 +94,6 @@ import           Data.Parameterized.Some
 import qualified Lumberjack as LJ
 
 import qualified Lang.Crucible.Backend as CB
-import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.Simulator as CS
 
@@ -109,10 +106,8 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as W4O
-import qualified What4.Protocol.SMTWriter as W4W
 import qualified What4.SatResult as W4R
-import qualified What4.SemiRing as SR
+import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
 
 import           What4.ExprHelpers
@@ -134,8 +129,8 @@ data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
 
 data EquivalenceContext sym arch where
   EquivalenceContext ::
-    forall sym ids arch scope solver fs.
-    (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
+    forall sym ids arch.
+    (ValidArch arch, ValidSym sym) =>
     { nonces :: N.NonceGenerator IO ids
     , handles :: CFH.HandleAllocator
     , exprBuilder :: sym
@@ -143,19 +138,11 @@ data EquivalenceContext sym arch where
     , rewrittenCtx :: BinaryContext sym arch Patched
     } -> EquivalenceContext sym arch
 
-type ValidSolver sym scope solver fs =
-  (sym ~ CBO.OnlineBackend scope solver fs
-  , W4O.OnlineSolver solver
-  , W4W.SMTReadWriter solver
-  )
-
 data EquivEnv sym arch where
   EquivEnv ::
-    forall sym arch scope solver fs.
-    (ValidArch arch, ValidSym sym, ValidSolver sym scope solver fs) =>
-    { envSym :: sym
-    , envWhichBinary :: Maybe (Some WhichBinaryRepr)
-    , envProc :: W4O.SolverProcess scope solver
+    forall sym arch .
+    (ValidArch arch, ValidSym sym) =>
+    { envWhichBinary :: Maybe (Some WhichBinaryRepr)
     , envCtx :: EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
@@ -278,9 +265,7 @@ getBinCtx' repr = case repr of
   PatchedRepr -> asks (rewrittenCtx . envCtx)
 
 withValid :: forall a sym arch.
-  (forall scope solver fs.
-    ValidSolver sym scope solver fs =>
-    EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, ValidArch arch, ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
   env <- ask
@@ -290,31 +275,23 @@ withValid f = do
 
 withValidEnv ::
   EquivEnv sym arch ->
-  (forall scope solver fs.
-    ValidArch arch =>
-    ValidSym sym =>
-    ValidSolver sym scope solver fs =>
-    a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, ValidArch arch, ValidSym sym) => a) ->
   a
-withValidEnv (EquivEnv {}) f = f
+withValidEnv (EquivEnv { envValidSym = Sym {}}) f = f
+
+withSymSolver ::
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
+  EquivM sym arch a
+withSymSolver f = withValid $ do
+  Sym sym adapter <- asks envValidSym
+  f sym adapter
 
 withSym ::
-  (sym -> EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
-  sym <- asks envSym
+  Sym sym _ <- asks envValidSym
   f sym
-
-withProc ::
-  forall a sym arch.
-  ( forall scope solver fs.
-    ValidSolver sym scope solver fs =>
-    W4O.SolverProcess scope solver ->
-   EquivM sym arch a) ->
-  EquivM sym arch a
-withProc f = withValid $ do
-  EquivEnv { envProc = p } <- ask
-  f p
 
 withSymIO :: forall sym arch a.
   ( sym -> IO a ) ->
@@ -376,35 +353,17 @@ withFreshVars ::
 withFreshVars f = do
   varsO <- freshSimVars @Original
   varsP <- freshSimVars @Patched
-  withSimVars varsO varsP $ do
+  withSimVars $ do
     (asm, result) <- f (simVarState varsO) (simVarState varsP)
     return $ SimSpec varsO varsP asm result
 
--- FIXME: what4 bug fails to correctly emit axioms for Natural numbers for bound variables
-initVar :: W4.BoundVar sym tp -> EquivM sym arch ()
-initVar bv = withSym $ \sym -> case W4.exprType (W4.varExpr sym bv) of
-  W4.BaseNatRepr -> withValid $ do
-    let e = W4.varExpr sym bv
-    zero <- liftIO $ W4.natLit sym 0    
-    isPos <- liftIO $ W4B.sbMakeExpr sym $ W4B.SemiRingLe SR.OrderedSemiRingNatRepr zero e
-    addAssumption isPos "natural numbers are positive"
-  _ -> return ()
-
 withSimVars ::
-  SimVars sym arch Original ->
-  SimVars sym arch Patched ->
   EquivM sym arch a ->
   EquivM sym arch a
-withSimVars varsO varsP f = withProc $ \proc -> withSym $ \sym -> do
-  let
-    flatO = flatVars varsO
-    flatP = flatVars varsP
-    vars = flatO ++ flatP
-
+withSimVars f = withSym $ \sym -> do
+  -- FIXME: Do we even need this frame anymore?
   fr <- liftIO $ CB.pushAssumptionFrame sym
-  a <- W4O.inNewFrameWithVars proc vars $ do
-    mapM_ (\(Some var) -> initVar var) vars
-    manifestError $ f
+  a <- manifestError f
   _ <- liftIO $ CB.popAssumptionFrame sym fr
   implicitError a
 
@@ -501,7 +460,7 @@ withAssumption_ ::
   EquivM sym arch f ->
   EquivM sym arch f
 withAssumption_ asmf f =
-  fmap snd $ withSym $ \sym -> withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
+  withSym $ \sym -> fmap snd $ withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return the given default value under the "false" assumption.
@@ -520,14 +479,30 @@ withSatAssumption default_ asmf f = withSym $ \sym -> do
 --------------------------------------
 -- Sat helpers
 
+-- | Check a predicate for satisfiability (in our monad)
+--
+-- FIXME: Add a facility for saving the SMT problem under the given name
 checkSatisfiableWithModel ::
   String ->
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel desc p k = withSym $ \sym -> withProc $ \proc -> do
+checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
   let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> (liftIO $ mkSafeAsserts sym r')) pure r
-  runInIO1 (mkResult >=> k) $ W4O.checkSatisfiableWithModel proc desc p
+  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter p
+
+checkSatisfiableWithoutBindings
+  :: W4B.ExprBuilder t st fs
+  -> WSA.SolverAdapter st
+  -> W4B.BoolExpr t
+  -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
+  -> IO a
+checkSatisfiableWithoutBindings sym adapter p k = do
+  WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
+    case sr of
+      W4R.Unsat core -> k (W4R.Unsat core)
+      W4R.Unknown -> k W4R.Unknown
+      W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
 isPredSat ::
   W4.Pred sym ->

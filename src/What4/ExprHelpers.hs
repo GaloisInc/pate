@@ -34,7 +34,6 @@ module What4.ExprHelpers (
   , allPreds
   , anyPred
   , VarBinding(..)
-  , rebindExpr
   , mapExprPtr
   , freshPtr
   , freshPtrVar
@@ -43,7 +42,6 @@ module What4.ExprHelpers (
   , ExprFilter(..)
   , getIsBoundFilter
   , assertPrefix
-  , expandVars
   , BoundVarBinding(..)
   , groundToConcrete
   , fixMux
@@ -62,7 +60,6 @@ import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.List ( foldl' )
-import           Data.Maybe ( catMaybes )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -167,19 +164,6 @@ data VarBinding sym tp =
    , bindVal :: W4.SymExpr sym tp
    }
 
-rebindExpr ::
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  Ctx.Assignment (VarBinding sym) ctx ->
-  W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-rebindExpr sym binds expr = do
-  let vars = TFC.fmapFC bindVar binds
-  let vals = TFC.fmapFC bindVal binds
-  fn <- W4.definedFn sym W4.emptySymbol vars expr W4.AlwaysUnfold
-  W4.applySymFn sym fn vals
-
-
 mapExprPtr ::
   forall sym w.
   W4.IsSymExprBuilder sym =>
@@ -240,11 +224,6 @@ boundVarsMap e0 = do
   _ <- boundVars' visited e0
   return visited
 
-boundVars :: W4B.Expr t tp -> IO (Set (Some (W4B.ExprBoundVar t)))
-boundVars e0 = do
-  visited <- stToIO $ H.new
-  boundVars' visited e0
-
 cacheExec :: (Eq k, CC.Hashable k) => H.HashTable RealWorld k r -> k -> IO r -> IO r
 cacheExec h k m = do
   mr <- stToIO $ H.lookup h k
@@ -301,24 +280,6 @@ getIsBoundFilter expr = do
 
 
 newtype BoundVarBinding sym = BoundVarBinding (forall tp'. W4.BoundVar sym tp' -> IO (Maybe (W4.SymExpr sym tp')))
-
--- | expand any bound variables contained in the expression
--- according to the given expansion function
-expandVars ::
-  forall sym tp t solver fs.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  sym ->
-  BoundVarBinding sym ->
-  W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-expandVars sym (BoundVarBinding f) e = do
-  bvs <- boundVars e
-  let
-    getBinding (Some bv) = f bv >>= \case
-      Just e' -> return $ Just $ (Some (VarBinding @sym bv e'))
-      Nothing -> return Nothing
-  Some binds <- (Ctx.fromList . catMaybes) <$> mapM getBinding (S.toList bvs)
-  rebindExpr sym binds e
 
 -- | Simplify 'ite (eq y x) y x' into 'x'
 fixMux ::

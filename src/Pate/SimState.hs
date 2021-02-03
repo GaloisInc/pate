@@ -55,6 +55,7 @@ module Pate.SimState
   , macawRegBinding
   , frameAssume
   , getAssumedPred
+  , rebindExpr
   , rebindWithFrame
   , rebindWithFrame'
   ) where
@@ -236,6 +237,21 @@ getAssumedPred sym asm = do
       let eTgts' = map unAsOrd (Set.toList eTgts)
       forM eTgts' $ \eTgt -> W4.isEq sym eSrc eTgt
 
+rebindExpr
+  :: ( sym ~ W4B.ExprBuilder t st fs )
+  => sym
+  -> Ctx.Assignment (VarBinding sym) ctx
+  -> W4.SymExpr sym tp
+  -> IO (W4.SymExpr sym tp)
+rebindExpr sym bindings expr =
+  rebindWithFrame sym frame expr
+  where
+    frame = AssumptionFrame { asmPreds = []
+                            , asmBinds = TFC.foldrFC addSingletonBinding MapF.empty bindings
+                            }
+    addSingletonBinding varBinding =
+      MapF.insert (W4.varExpr sym (bindVar varBinding)) (singletonExpr (bindVal varBinding))
+
 -- | Explicitly rebind any known sub-expressions that are in the frame.
 rebindWithFrame ::
   forall sym t solver fs tp.
@@ -375,8 +391,8 @@ flatVarBinds _sym simVars mem regs = do
 
 bindSpec ::
   PEM.ExprMappable sym f =>
-  W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ~ W4B.ExprBuilder s st fs =>
   sym -> 
   SimState sym arch PT.Original ->
   SimState sym arch PT.Patched ->
