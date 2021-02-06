@@ -56,11 +56,9 @@ module Pate.Monad
   -- assumption management
   , withAssumption_
   , withAssumption
-  , withAssumption'
   , withSatAssumption
   , withAssumptionFrame
   , withAssumptionFrame'
-  , withAssumptionFrame_
   )
   where
 
@@ -76,18 +74,20 @@ import           Control.Monad.Except
 import           Control.Monad.State
 
 
+import qualified Data.ElfEdit as E
+import qualified Data.Foldable as F
 import           Data.Map (Map)
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.Typeable
-import qualified Data.ElfEdit as E
 import qualified Data.Time as TM
+import           Data.Typeable
 
 import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
+import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
@@ -107,6 +107,7 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
+import qualified What4.SemiRing as SR
 import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
 
@@ -169,6 +170,11 @@ data EquivEnv sym arch where
     -- ^ start of the function currently under analysis
     , envCurrentAsm :: W4.Pred sym
     -- ^ conjunction of all assumptions currently in scope
+    , envCurrentVars :: [Some (W4.BoundVar sym)]
+    -- ^ The variables currently introduced by a call to 'withFreshVars' that
+    -- *must* be bound before an SMT query is issued (because we cannot pass
+    -- unbound variables to the solver).  These will be concretized to arbitrary
+    -- values when invoking the SMT solver.
     } -> EquivEnv sym arch
 
 data VerificationFailureMode =
@@ -353,19 +359,40 @@ withFreshVars ::
 withFreshVars f = do
   varsO <- freshSimVars @Original
   varsP <- freshSimVars @Patched
-  withSimVars $ do
+  withSimVars varsO varsP $ do
     (asm, result) <- f (simVarState varsO) (simVarState varsP)
     return $ SimSpec varsO varsP asm result
 
+-- | Add an assumption that the given variable is in fact a natural if its declared type is Nat
+--
+-- This is required because what4 does not correctly manage all of the axioms
+-- necessary for natural numbers.  Naturals are not an SMT type, so what4
+-- emulates them by emitting axioms (sometimes).  To solvers, they are just
+-- Integers.  If they generate a negative counterexample, the ground term
+-- evaluator will throw an error.  To work around that, we assume (in our local
+-- frame) that these variables are in fact positive.
+initVar :: W4.BoundVar sym tp -> EquivM sym arch ()
+initVar bv = withSym $ \sym -> case W4.exprType (W4.varExpr sym bv) of
+  W4.BaseNatRepr -> withValid $ do
+    let e = W4.varExpr sym bv
+    zero <- liftIO $ W4.natLit sym 0
+    isPos <- liftIO $ W4B.sbMakeExpr sym $ W4B.SemiRingLe SR.OrderedSemiRingNatRepr zero e
+    addAssumption isPos "natural numbers are positive"
+  _ -> return ()
+
 withSimVars ::
+  SimVars sym arch Original ->
+  SimVars sym arch Patched ->
   EquivM sym arch a ->
   EquivM sym arch a
-withSimVars f = withSym $ \sym -> do
-  -- FIXME: Do we even need this frame anymore?
-  fr <- liftIO $ CB.pushAssumptionFrame sym
-  a <- manifestError f
-  _ <- liftIO $ CB.popAssumptionFrame sym fr
-  implicitError a
+withSimVars varsO varsP f = withSym $ \sym -> do
+  let vars = flatVars varsO ++ flatVars varsP
+  local (\env -> env { envCurrentVars = vars ++ envCurrentVars env }) $ do
+    fr <- liftIO $ CB.pushAssumptionFrame sym
+    mapM_ (\(Some var) -> initVar var) vars
+    a <- manifestError f
+    _ <- liftIO $ CB.popAssumptionFrame sym fr
+    implicitError a
 
 addAssumption ::
   HasCallStack =>
@@ -444,15 +471,6 @@ withAssumptionFrame ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumptionFrame asmf f = withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
 
--- | Run the given function under the given assumption frame, and rebind the resulting
--- value according to any explicit bindings.
-withAssumptionFrame_ ::
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch f
-withAssumptionFrame_ asmf f = fmap snd $ withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
-
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 withAssumption_ ::
   HasCallStack =>
@@ -488,8 +506,19 @@ checkSatisfiableWithModel ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
 checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
+  -- Bind all of our introduced variables in this scope to defaults
+  unboundVars <- asks envCurrentVars
+  bindings <- F.foldrM (addSingletonBinding sym) MapF.empty unboundVars
+  let frame = AssumptionFrame { asmPreds = []
+                              , asmBinds = bindings
+                              }
+  p' <- liftIO $ rebindWithFrame sym frame p
   let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> (liftIO $ mkSafeAsserts sym r')) pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter p
+  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter p'
+  where
+    addSingletonBinding sym (Some boundVar) m = do
+      fresh <- liftIO $ W4.freshConstant sym (WS.safeSymbol "freeVar") (W4.exprType (W4.varExpr sym boundVar))
+      return (MapF.insert (W4.varExpr sym boundVar) (singletonExpr fresh) m)
 
 checkSatisfiableWithoutBindings
   :: W4B.ExprBuilder t st fs
@@ -544,8 +573,8 @@ execGroundFn ::
   EquivM sym arch (W4G.GroundValue tp)  
 execGroundFn gfn e = do  
   result <- liftIO $ (Just <$> execGroundFnIO gfn e) `catches`
-    [ Handler (\(_ :: ArithException) -> return Nothing)
-    , Handler (\(_ :: IOException) -> return Nothing)
+    [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
+    , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
     ]
   case result of
     Just a -> return a

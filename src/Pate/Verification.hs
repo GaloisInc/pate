@@ -196,6 +196,7 @@ verifyPairs logAction elf elf' blockMap vcfg pPairs = do
       -- TODO: restructure EquivEnv to avoid this
       , envCurrentFunc = error "no function under analysis"
       , envCurrentAsm = W4.truePred sym
+      , envCurrentVars = []
       }
 
   liftIO $ do

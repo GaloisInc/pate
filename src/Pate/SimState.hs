@@ -50,7 +50,8 @@ module Pate.SimState
   , bindSpec
   , flatVars
   -- assumption frames
-  , AssumptionFrame
+  , AssumptionFrame(..)
+  , singletonExpr
   , exprBinding
   , macawRegBinding
   , frameAssume
