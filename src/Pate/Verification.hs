@@ -297,6 +297,7 @@ emitResult (Right ()) = return ()
 -- Throws an exception if there is an inequality result, otherwise
 -- it returns normally.
 checkEquivalence ::
+  HasCallStack =>
   PP.EquivTriple sym arch ->
   EquivM sym arch ()
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
@@ -612,6 +613,7 @@ withPair pPair f = case concreteBlockEntry $ pOrig pPair of
   _ -> f
 
 provePostcondition ::
+  HasCallStack =>
   PatchPair arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (PP.ProofBlockSlice sym arch)
