@@ -57,6 +57,7 @@ library
                        Pate.Verification,
                        Pate.Loader,
                        Pate.Event,
+                       Pate.Hints,
                        Pate.Monad,
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
