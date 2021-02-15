@@ -505,7 +505,7 @@ checkSatisfiableWithModel ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
+checkSatisfiableWithModel _desc p k = withSymSolver $ \(sym :: W4B.ExprBuilder t st fs) adapter -> do
   -- Bind all of our introduced variables in this scope to defaults
   unboundVars <- asks envCurrentVars
   bindings <- F.foldrM (addSingletonBinding sym) MapF.empty unboundVars
@@ -513,7 +513,16 @@ checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
                               , asmBinds = bindings
                               }
   p' <- liftIO $ rebindWithFrame sym frame p
-  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> (liftIO $ mkSafeAsserts sym r')) pure r
+  let groundEvalWrapper groundEval0 = liftIO $ do
+        -- First strip out any assertions that we added
+        W4G.GroundEvalFn groundEval1 <- mkSafeAsserts sym groundEval0
+        -- Next replace any free variables with the chosen distinguished fresh variables
+        let groundEval2 :: forall tp . W4B.Expr t tp -> IO (W4G.GroundValue tp)
+            groundEval2 e0 = do
+              e1 <- rebindWithFrame sym frame e0
+              groundEval1 e1
+        return (W4G.GroundEvalFn groundEval2)
+  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> groundEvalWrapper r') pure r
   runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter p'
   where
     addSingletonBinding sym (Some boundVar) m = do
