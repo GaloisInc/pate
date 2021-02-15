@@ -18,7 +18,7 @@ jobs:
     strategy:
       matrix:
         arch: [ 'ppc' ]
-        ghc: ['8.6.5', '8.8.3', '8.10.1']
+        ghc: ['8.6.5', '8.8.4', '8.10.3']
         cabal: ['3.2.0.0']
         os: [ubuntu-latest]
 
@@ -37,14 +37,14 @@ jobs:
         cabal-version: ${{ matrix.cabal }}
 
     - uses: actions/cache@v2
-      name: Cache cabal-store
+      name: Cache cabal store
       with:
         path: |
-          ${{ steps.setup-haskell-cabal.outputs.cabal-store }}
+          ${{ steps.setup-haskell.outputs.cabal-store }}
           dist-newstyle
-        key: ${{ runner.os }}-${{ matrix.ghc }}-${{ github.sha }}-v2
-        restore-keys: ${{ runner.os }}-${{ matrix.ghc }}-
-
+        key: cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles(format('cabal.GHC-{0}.config', matrix.ghc)) }}-${{ github.sha }}
+        restore-keys: |
+          cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles(format('cabal.GHC-{0}.config', matrix.ghc)) }}-
 
     - name: Build
       run: |
@@ -53,12 +53,14 @@ jobs:
         cabal v2-build pkg:pate
 
     - name: Install Solvers
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-add-repository ppa:sri-csl/formal-methods
-        sudo apt-get install yices2
+      run: .github/ci.sh install_system_deps
+      env:
+        Z3_VERSION: "4.8.8"
+        YICES_VERSION: "2.6.2"
+        CVC4_VERSION: "4.1.8"
+
 
     - name: Test
       if: runner.os == 'Linux'
       run: |
-        cabal v2-test test:pate-test-${{ matrix.arch }}
+        cabal v2-test pkg:pate
