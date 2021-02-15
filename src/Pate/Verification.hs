@@ -416,9 +416,6 @@ simulate simInput = withBinary @bin $ do
   cres <- evalCFG globals regs cfg
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
 
-  -- FIXME: Use CB.resetAssumptionState after each symbolic execution run so
-  -- that we don't carry any constraints between slices
-
   return $ (asm, SimOutput (SimState memTrace postRegs) exitClass)
 
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
