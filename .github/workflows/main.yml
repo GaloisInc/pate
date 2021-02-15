@@ -57,6 +57,7 @@ jobs:
       env:
         Z3_VERSION: "4.8.8"
         YICES_VERSION: "2.6.2"
+        CVC4_VERSION: "4.1.8"
 
 
     - name: Test
