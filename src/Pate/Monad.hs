@@ -512,7 +512,10 @@ checkSatisfiableWithModel _desc p k = withSymSolver $ \(sym :: W4B.ExprBuilder t
   let frame = AssumptionFrame { asmPreds = []
                               , asmBinds = bindings
                               }
-  p' <- liftIO $ rebindWithFrame sym frame p
+
+  assumptions <- liftIO $ CB.getPathCondition sym
+  goal <- liftIO $ W4.andPred sym assumptions p
+  goal' <- liftIO $ rebindWithFrame sym frame goal
   let groundEvalWrapper groundEval0 = liftIO $ do
         -- First strip out any assertions that we added
         W4G.GroundEvalFn groundEval1 <- mkSafeAsserts sym groundEval0
@@ -523,14 +526,15 @@ checkSatisfiableWithModel _desc p k = withSymSolver $ \(sym :: W4B.ExprBuilder t
               groundEval1 e1
         return (W4G.GroundEvalFn groundEval2)
   let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> groundEvalWrapper r') pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter p'
+  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter goal'
   where
     addSingletonBinding sym (Some boundVar) m = do
       fresh <- liftIO $ W4.freshConstant sym (WS.safeSymbol "freeVar") (W4.exprType (W4.varExpr sym boundVar))
       return (MapF.insert (W4.varExpr sym boundVar) (singletonExpr fresh) m)
 
 checkSatisfiableWithoutBindings
-  :: W4B.ExprBuilder t st fs
+  :: (sym ~ W4B.ExprBuilder t st fs)
+  => sym
   -> WSA.SolverAdapter st
   -> W4B.BoolExpr t
   -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
