@@ -505,32 +505,52 @@ checkSatisfiableWithModel ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel _desc p k = withSymSolver $ \(sym :: W4B.ExprBuilder t st fs) adapter -> do
-  -- Bind all of our introduced variables in this scope to defaults
+checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
+  -- Bind all of our introduced variables in this scope to defaults (i.e., fresh
+  -- variables that are unconstrained)
   unboundVars <- asks envCurrentVars
   bindings <- F.foldrM (addSingletonBinding sym) MapF.empty unboundVars
   let frame = AssumptionFrame { asmPreds = []
                               , asmBinds = bindings
                               }
 
+  -- Bring the path condition into scope so that we respect any assumptions in
+  -- the current frame
   assumptions <- liftIO $ CB.getPathCondition sym
   goal <- liftIO $ W4.andPred sym assumptions p
   goal' <- liftIO $ rebindWithFrame sym frame goal
-  let groundEvalWrapper groundEval0 = liftIO $ do
-        -- First strip out any assertions that we added
-        W4G.GroundEvalFn groundEval1 <- mkSafeAsserts sym groundEval0
-        -- Next replace any free variables with the chosen distinguished fresh variables
-        let groundEval2 :: forall tp . W4B.Expr t tp -> IO (W4G.GroundValue tp)
-            groundEval2 e0 = do
-              e1 <- rebindWithFrame sym frame e0
-              groundEval1 e1
-        return (W4G.GroundEvalFn groundEval2)
-  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> groundEvalWrapper r') pure r
+
+  -- Set up a wrapper around the ground evaluation function that removes some
+  -- unwanted terms and performs an equivalent substitution step to remove
+  -- unbound variables (consistent with the initial query)
+  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkGroundEvalWrapper sym (rebindWithFrame sym frame) r')) pure r
   runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter goal'
   where
     addSingletonBinding sym (Some boundVar) m = do
       fresh <- liftIO $ W4.freshConstant sym (WS.safeSymbol "freeVar") (W4.exprType (W4.varExpr sym boundVar))
       return (MapF.insert (W4.varExpr sym boundVar) (singletonExpr fresh) m)
+
+-- | Given a 'W4G.GroundEvalFn' from the solver library, wrap it with extra layers to:
+--
+-- 1. Strip out assertion uninterpreted functions
+--
+-- 2. Substitute 'WI.BoundVar's with the appropriate fresh variables
+--    (corresponding to those used in the creation of the formula sent
+--    to the solver)
+mkGroundEvalWrapper
+  :: forall sym t st fs
+   . (sym ~ W4B.ExprBuilder t st fs)
+  => sym
+  -> (forall tp . W4B.Expr t tp -> IO (W4B.Expr t tp))
+  -> W4G.GroundEvalFn t
+  -> IO (W4G.GroundEvalFn t)
+mkGroundEvalWrapper sym rebind groundEval0 = do
+  W4G.GroundEvalFn groundEval1 <- mkSafeAsserts sym groundEval0
+  let groundEval2 :: forall tp . W4B.Expr t tp -> IO (W4G.GroundValue tp)
+      groundEval2 e0 = do
+        e1 <- rebind e0
+        groundEval1 e1
+  return (W4G.GroundEvalFn groundEval2)
 
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
