@@ -51,6 +51,7 @@ module Pate.SimState
   , flatVars
   -- assumption frames
   , AssumptionFrame(..)
+  , isAssumedPred
   , singletonExpr
   , exprBinding
   , macawRegBinding
@@ -149,10 +150,15 @@ deriving instance Monoid (ExprSet sym tp)
 singletonExpr :: OrdF (W4.SymExpr sym) => W4.SymExpr sym tp -> ExprSet sym tp
 singletonExpr e = ExprSet (Set.singleton (AsOrd e))
 
+listToExprSet :: W4.IsSymExprBuilder sym => [W4.SymExpr sym tp] -> ExprSet sym tp
+listToExprSet l = ExprSet $ Set.fromList $ map AsOrd l
+
+exprSetToList :: ExprSet sym tp -> [W4.SymExpr sym tp]
+exprSetToList (ExprSet es) = map unAsOrd $ Set.toList es
 
 data AssumptionFrame sym where
   AssumptionFrame ::
-    { asmPreds :: [W4.Pred sym]
+    { asmPreds :: ExprSet sym W4.BaseBoolType
     -- | equivalence on sub-expressions. In the common case where an expression maps
     -- to a single expression (i.e. a singleton 'ExprSet') we can apply the rewrite
     -- inline.
@@ -206,20 +212,24 @@ macawRegBinding var val = do
     _ -> mempty
 
 frameAssume ::
+  W4.IsSymExprBuilder sym =>
   W4.Pred sym ->
   AssumptionFrame sym
-frameAssume p = AssumptionFrame [p] MapF.empty
+frameAssume p = AssumptionFrame (singletonExpr p) MapF.empty
 
 getUniqueBinding ::
   W4.IsSymExprBuilder sym =>
+  sym ->
   AssumptionFrame sym ->
   W4.SymExpr sym tp ->
   Maybe (W4.SymExpr sym tp)
-getUniqueBinding asm e = case MapF.lookup e (asmBinds asm) of
+getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
   Just (ExprSet es)
     | Set.size es == 1
     , [AsOrd e'] <- Set.toList es -> Just e'
-  _ -> Nothing
+  _ -> case W4.exprType e of
+    W4.BaseBoolRepr | isAssumedPred asm e -> Just $ W4.truePred sym
+    _ -> Nothing
 
 -- | Compute a predicate that collects the individual assumptions in the frame, including
 -- equality on all bindings.
@@ -231,13 +241,21 @@ getAssumedPred ::
   IO (W4.Pred sym)
 getAssumedPred sym asm = do
   bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
-  allPreds sym ((asmPreds asm) ++ bindsAsm)
+  let predList = exprSetToList $ (asmPreds asm) <> (listToExprSet bindsAsm)
+  allPreds sym predList
   where
     assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> IO [W4.Pred sym]
-    assumeBinds (MapF.Pair eSrc (ExprSet eTgts)) = do
-      let eTgts' = map unAsOrd (Set.toList eTgts)
-      forM eTgts' $ \eTgt -> W4.isEq sym eSrc eTgt
+    assumeBinds (MapF.Pair eSrc eTgts) = forM (exprSetToList eTgts) $ \eTgt ->
+      W4.isEq sym eSrc eTgt
 
+isAssumedPred ::
+  W4.IsSymExprBuilder sym =>
+  AssumptionFrame sym ->
+  W4.Pred sym ->
+  Bool
+isAssumedPred frame asm =
+  let ExprSet asms = asmPreds frame
+  in Set.member (AsOrd asm) asms
 
 rebindExpr
   :: ( sym ~ W4B.ExprBuilder t st fs )
@@ -248,7 +266,7 @@ rebindExpr
 rebindExpr sym bindings expr =
   rebindWithFrame sym frame expr
   where
-    frame = AssumptionFrame { asmPreds = []
+    frame = AssumptionFrame { asmPreds = mempty
                             , asmBinds = TFC.foldrFC addSingletonBinding MapF.empty bindings
                             }
     addSingletonBinding varBinding =
@@ -277,7 +295,7 @@ rebindWithFrame' ::
 rebindWithFrame' sym cache asm e_outer = do
   let
     go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
-    go e = W4B.idxCacheEval cache e $ case getUniqueBinding asm e of
+    go e = W4B.idxCacheEval cache e $ case getUniqueBinding sym asm e of
       Just e' -> return e'
       _ -> case e of
         -- fixing a common trivial mux case

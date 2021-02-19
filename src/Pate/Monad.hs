@@ -488,8 +488,12 @@ isPredTrue ::
 isPredTrue p = case W4.asConstantPred p of
   Just True -> return True
   _ -> do
-    notp <- withSymIO $ \sym -> W4.notPred sym p
-    not <$> isPredSat notp
+    frame <- asks envCurrentFrame
+    case isAssumedPred frame p of
+      True -> return True
+      False -> do
+        notp <- withSymIO $ \sym -> W4.notPred sym p
+        not <$> isPredSat notp
 
 -- | Same as 'isPredTrue' but does not throw an error if the result is inconclusive
 isPredTrue' ::
@@ -498,11 +502,15 @@ isPredTrue' ::
 isPredTrue' p = case W4.asConstantPred p of
   Just b -> return b
   _ -> do
-    notp <- withSymIO $ \sym -> W4.notPred sym p
-    checkSatisfiableWithModel "isPredTrue'" notp $ \case
-        W4R.Sat _ -> return False
-        W4R.Unsat _ -> return True
-        W4R.Unknown -> return False
+    frame <- asks envCurrentFrame
+    case isAssumedPred frame p of
+      True -> return True
+      False -> do
+        notp <- withSymIO $ \sym -> W4.notPred sym p
+        checkSatisfiableWithModel "isPredTrue'" notp $ \case
+            W4R.Sat _ -> return False
+            W4R.Unsat _ -> return True
+            W4R.Unknown -> return False
 
 execGroundFn ::
   forall sym arch tp.
