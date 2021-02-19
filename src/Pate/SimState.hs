@@ -238,6 +238,7 @@ getAssumedPred sym asm = do
       let eTgts' = map unAsOrd (Set.toList eTgts)
       forM eTgts' $ \eTgt -> W4.isEq sym eSrc eTgt
 
+
 rebindExpr
   :: ( sym ~ W4B.ExprBuilder t st fs )
   => sym
@@ -251,7 +252,7 @@ rebindExpr sym bindings expr =
                             , asmBinds = TFC.foldrFC addSingletonBinding MapF.empty bindings
                             }
     addSingletonBinding varBinding =
-      MapF.insert (W4.varExpr sym (bindVar varBinding)) (singletonExpr (bindVal varBinding))
+      MapF.insert (bindVar varBinding) (singletonExpr (bindVal varBinding))
 
 -- | Explicitly rebind any known sub-expressions that are in the frame.
 rebindWithFrame ::
@@ -346,7 +347,7 @@ data SimVars sym arch bin = SimVars
   }
 
 flatVars ::
-  SimVars sym arch bin -> [Some (W4.BoundVar sym)]
+  SimVars sym arch bin -> [Some (W4.SymExpr sym)]
 flatVars simVars =
   let
     regVarPairs =

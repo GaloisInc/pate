@@ -36,7 +36,6 @@ module What4.ExprHelpers (
   , VarBinding(..)
   , mapExprPtr
   , freshPtr
-  , freshPtrVar
   , freshPtrBytes
   , mkSafeAsserts
   , ExprFilter(..)
@@ -160,7 +159,7 @@ anyPred sym preds = foldr (\p -> orM sym (return p)) (return $ W4.falsePred sym)
 data VarBinding sym tp =
   VarBinding
    {
-     bindVar :: W4.BoundVar sym tp
+     bindVar :: W4.SymExpr sym tp
    , bindVal :: W4.SymExpr sym tp
    }
 
@@ -198,18 +197,6 @@ freshPtr sym w = do
   reg <- W4.freshConstant sym W4.emptySymbol W4.BaseNatRepr
   return $ CLM.LLVMPointer reg off
 
-freshPtrVar ::
-  W4.IsSymExprBuilder sym =>
-  1 <= w =>
-  sym ->
-  W4.NatRepr w ->
-  W4.SolverSymbol ->
-  IO (CLM.LLVMPtr sym w, W4.BoundVar sym W4.BaseNatType, W4.BoundVar sym (W4.BaseBVType w))
-freshPtrVar sym w nm = do
-  offVar <- W4.freshBoundVar sym nm (W4.BaseBVRepr w)
-  regVar <- W4.freshBoundVar sym nm W4.BaseNatRepr
-  let ptr = CLM.LLVMPointer (W4.varExpr sym regVar) (W4.varExpr sym offVar)
-  return $ (ptr, regVar, offVar)
 
 mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> W4.LeqProof 1 (x W4.* w)
 mulMono _x w = unsafeCoerce (W4.leqRefl w)
@@ -247,12 +234,10 @@ boundVars' visited (W4B.NonceAppExpr e) = do
   cacheExec visited idx $ do
     sums <- sequence (TFC.toListFC (boundVars' visited) (W4B.nonceExprApp e))
     return $ foldl' S.union S.empty sums
-boundVars' visited (W4B.BoundVarExpr v)
-  | W4B.QuantifierVarKind <- W4B.bvarKind v = do
+boundVars' visited (W4B.BoundVarExpr v) = do
       let idx = N.indexValue (W4B.bvarId v)
       cacheExec visited idx $
         return (S.singleton (Some v))
-boundVars' _ (W4B.BoundVarExpr{}) = return S.empty
 boundVars' _ (W4B.SemiRingLiteral{}) = return S.empty
 boundVars' _ (W4B.BoolExpr{}) = return S.empty
 boundVars' _ (W4B.StringExpr{}) = return S.empty

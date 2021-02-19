@@ -195,8 +195,7 @@ verifyPairs logAction elf elf' blockMap vcfg pPairs = do
       , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
       -- TODO: restructure EquivEnv to avoid this
       , envCurrentFunc = error "no function under analysis"
-      , envCurrentAsm = W4.truePred sym
-      , envCurrentVars = []
+      , envCurrentFrame = mempty
       }
 
   liftIO $ do
@@ -933,8 +932,7 @@ bindMemory ::
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')  
 bindMemory memVar memVal expr = withSym $ \sym -> do
-  memVar' <- asVar (MT.memArr memVar)
-  liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding memVar' (MT.memArr memVal)) expr
+  liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
 
 mapExpr' ::
   PEM.ExprMappable sym f =>
@@ -1097,13 +1095,6 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
     inStO = simInState $ simInO bundle
     inStP = simInState $ simInP bundle
 
-
-asVar ::
-  W4.SymExpr sym tp' ->
-  EquivM sym arch (W4.BoundVar sym tp')
-asVar expr = withValid $ case expr of
-  W4B.BoundVarExpr bv' -> return bv'
-  _ -> throwHere UnexpectedNonBoundVar
 
 bindMacawReg ::
   -- | value to rebind

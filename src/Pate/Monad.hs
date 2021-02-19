@@ -96,6 +96,7 @@ import qualified Lumberjack as LJ
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
@@ -168,13 +169,8 @@ data EquivEnv sym arch where
     -- architecture
     , envCurrentFunc :: PatchPair arch
     -- ^ start of the function currently under analysis
-    , envCurrentAsm :: W4.Pred sym
-    -- ^ conjunction of all assumptions currently in scope
-    , envCurrentVars :: [Some (W4.BoundVar sym)]
-    -- ^ The variables currently introduced by a call to 'withFreshVars' that
-    -- *must* be bound before an SMT query is issued (because we cannot pass
-    -- unbound variables to the solver).  These will be concretized to arbitrary
-    -- values when invoking the SMT solver.
+    , envCurrentFrame :: AssumptionFrame sym
+    -- ^ the current assumption frame, accumulated as assumptions are added
     } -> EquivEnv sym arch
 
 data VerificationFailureMode =
@@ -319,17 +315,14 @@ unconstrainedRegister ::
   MM.ArchReg arch tp ->
   EquivM sym arch (PSR.MacawRegVar sym tp)
 unconstrainedRegister reg = do
-  archFs <- archFuns
-  let
-    symbol = MS.crucGenArchRegName archFs reg
-    repr = MM.typeRepr reg
+  let repr = MM.typeRepr reg
   case repr of
     MM.BVTypeRepr n -> withSymIO $ \sym -> do
-      (ptr, regVar, offVar) <- freshPtrVar sym n symbol
-      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> regVar Ctx.:> offVar)
+      ptr@(CLM.LLVMPointer region off) <- freshPtr sym n
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> region Ctx.:> off)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
-      var <- W4.freshBoundVar sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
-      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) (W4.varExpr sym var)) (Ctx.empty Ctx.:> var)
+      var <- W4.freshConstant sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) var) (Ctx.empty Ctx.:> var)
     MM.TupleTypeRepr PL.Nil -> do
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
     _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
@@ -359,53 +352,8 @@ withFreshVars ::
 withFreshVars f = do
   varsO <- freshSimVars @Original
   varsP <- freshSimVars @Patched
-  withSimVars varsO varsP $ do
-    (asm, result) <- f (simVarState varsO) (simVarState varsP)
-    return $ SimSpec varsO varsP asm result
-
--- | Add an assumption that the given variable is in fact a natural if its declared type is Nat
---
--- This is required because what4 does not correctly manage all of the axioms
--- necessary for natural numbers.  Naturals are not an SMT type, so what4
--- emulates them by emitting axioms (sometimes).  To solvers, they are just
--- Integers.  If they generate a negative counterexample, the ground term
--- evaluator will throw an error.  To work around that, we assume (in our local
--- frame) that these variables are in fact positive.
-initVar :: W4.BoundVar sym tp -> EquivM sym arch ()
-initVar bv = withSym $ \sym -> case W4.exprType (W4.varExpr sym bv) of
-  W4.BaseNatRepr -> withValid $ do
-    let e = W4.varExpr sym bv
-    zero <- liftIO $ W4.natLit sym 0
-    isPos <- liftIO $ W4B.sbMakeExpr sym $ W4B.SemiRingLe SR.OrderedSemiRingNatRepr zero e
-    addAssumption isPos "natural numbers are positive"
-  _ -> return ()
-
-withSimVars ::
-  SimVars sym arch Original ->
-  SimVars sym arch Patched ->
-  EquivM sym arch a ->
-  EquivM sym arch a
-withSimVars varsO varsP f = withSym $ \sym -> do
-  let vars = flatVars varsO ++ flatVars varsP
-  local (\env -> env { envCurrentVars = vars ++ envCurrentVars env }) $ do
-    fr <- liftIO $ CB.pushAssumptionFrame sym
-    mapM_ (\(Some var) -> initVar var) vars
-    a <- manifestError f
-    _ <- liftIO $ CB.popAssumptionFrame sym fr
-    implicitError a
-
-addAssumption ::
-  HasCallStack =>
-  W4.Pred sym ->
-  String ->
-  EquivM sym arch ()
-addAssumption p msg = withSym $ \sym -> do
-  here <- liftIO $ W4.getCurrentProgramLoc sym
-  (liftIO $ try (CB.addAssumption sym (CB.LabeledPred p (CB.AssumptionReason here msg)))) >>= \case
-    Left (reason :: CB.AbortExecReason) -> do
-      liftIO $ putStrLn $ "Invalid SMT model:" ++ show reason
-      throwHere $ InvalidSMTModel
-    Right _ -> return ()
+  (asm, result) <- f (simVarState varsO) (simVarState varsP)
+  return $ SimSpec varsO varsP asm result
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 -- The resulting predicate is the conjunction of the initial assumptions and
@@ -417,18 +365,10 @@ withAssumption' ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption' asmf f = withSym $ \sym -> do
   asm <- asmf
-  envAsms <- asks envCurrentAsm
-  allAsms <- liftIO $ W4.andPred sym asm envAsms
-  fr <- liftIO $ CB.pushAssumptionFrame sym
-  result <- local (\env -> env { envCurrentAsm = allAsms }) $ manifestError $ do
-    addAssumption asm "withAssumption"
-    f
-  _ <- liftIO $ CB.popAssumptionFrame sym fr
-  case result of
-    Left err -> throwError err
-    Right (asm', a) -> do
-      asm'' <- liftIO $ W4.andPred sym asm asm'
-      return (asm'', a)
+  frame <- asks envCurrentFrame
+  (asm', a) <- local (\env -> env { envCurrentFrame = frameAssume asm <> frame }) $ f
+  asm'' <- liftIO $ W4.andPred sym asm asm'
+  return (asm'', a)
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it. Return the given assumption along with the function result.
 withAssumption ::
@@ -449,17 +389,19 @@ withAssumptionFrame' ::
   EquivM sym arch (AssumptionFrame sym, f) ->
   EquivM sym arch (W4.Pred sym, f)
 withAssumptionFrame' asmf f = withValid $ withSym $ \sym -> do
-  asm <- asmf
-  asm_pred <- liftIO $ getAssumedPred sym asm
-  withAssumption' (return asm_pred) $ do
-    (asm', a) <- f
+  asmFrame <- asmf
+  envFrame <- asks envCurrentFrame
+  local (\env -> env { envCurrentFrame = asmFrame <> envFrame }) $ do
+    (frame', a) <- f
     cache <- W4B.newIdxCache
     let
+      localFrame = asmFrame <> frame'
+      
       doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-      doRebind = rebindWithFrame' sym cache (asm <> asm')
+      doRebind = rebindWithFrame' sym cache localFrame
     a' <- liftIO $ PEM.mapExpr sym doRebind a
-    asm_pred' <- liftIO $ getAssumedPred sym asm'
-    return (asm_pred', a')
+    frame_pred <- liftIO $ (doRebind =<< getAssumedPred sym localFrame)
+    return (frame_pred, a')
 
 -- | Run the given function under the given assumption frame, and rebind the resulting
 -- value according to any explicit bindings. The returned predicate is the conjunction
@@ -506,51 +448,15 @@ checkSatisfiableWithModel ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
 checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
-  -- Bind all of our introduced variables in this scope to defaults (i.e., fresh
-  -- variables that are unconstrained)
-  unboundVars <- asks envCurrentVars
-  bindings <- F.foldrM (addSingletonBinding sym) MapF.empty unboundVars
-  let frame = AssumptionFrame { asmPreds = []
-                              , asmBinds = bindings
-                              }
-
-  -- Bring the path condition into scope so that we respect any assumptions in
-  -- the current frame
-  assumptions <- liftIO $ CB.getPathCondition sym
+  envFrame <- asks envCurrentFrame
+  assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
-  goal' <- liftIO $ rebindWithFrame sym frame goal
 
   -- Set up a wrapper around the ground evaluation function that removes some
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
-  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkGroundEvalWrapper sym (rebindWithFrame sym frame) r')) pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter goal'
-  where
-    addSingletonBinding sym (Some boundVar) m = do
-      fresh <- liftIO $ W4.freshConstant sym (WS.safeSymbol "freeVar") (W4.exprType (W4.varExpr sym boundVar))
-      return (MapF.insert (W4.varExpr sym boundVar) (singletonExpr fresh) m)
-
--- | Given a 'W4G.GroundEvalFn' from the solver library, wrap it with extra layers to:
---
--- 1. Strip out assertion uninterpreted functions
---
--- 2. Substitute 'WI.BoundVar's with the appropriate fresh variables
---    (corresponding to those used in the creation of the formula sent
---    to the solver)
-mkGroundEvalWrapper
-  :: forall sym t st fs
-   . (sym ~ W4B.ExprBuilder t st fs)
-  => sym
-  -> (forall tp . W4B.Expr t tp -> IO (W4B.Expr t tp))
-  -> W4G.GroundEvalFn t
-  -> IO (W4G.GroundEvalFn t)
-mkGroundEvalWrapper sym rebind groundEval0 = do
-  W4G.GroundEvalFn groundEval1 <- mkSafeAsserts sym groundEval0
-  let groundEval2 :: forall tp . W4B.Expr t tp -> IO (W4G.GroundValue tp)
-      groundEval2 e0 = do
-        e1 <- rebind e0
-        groundEval1 e1
-  return (W4G.GroundEvalFn groundEval2)
+  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkSafeAsserts sym r')) pure r
+  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter goal
 
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
