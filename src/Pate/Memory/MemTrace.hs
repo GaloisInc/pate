@@ -470,11 +470,10 @@ initMemTrace ::
   sym ->
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
-initMemTrace sym Addr32 = do
-  arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ MemTraceImpl mempty arr
-initMemTrace sym Addr64 = do
-  arr <- ioFreshConstant sym "InitMem" knownRepr
+initMemTrace sym addrRepr = do
+  arr <- ioFreshConstant sym "InitMem" $ case addrRepr of
+    Addr32 -> knownRepr
+    Addr64 -> knownRepr
   return $ MemTraceImpl mempty arr
 
 initMemTraceVar ::
@@ -786,19 +785,6 @@ isZero sym reg = do
   zero <- natLit sym 0
   natEq sym reg zero
 
-andIOPred :: IsExprBuilder sym => sym -> IO (Pred sym) -> IO (Pred sym) -> IO (Pred sym)
-andIOPred sym p1_ p2_ = do
-  p1 <- p1_
-  p2 <- p2_
-  andPred sym p1 p2
-
-orIOPred :: IsExprBuilder sym => sym -> IO (Pred sym) -> IO (Pred sym) -> IO (Pred sym)
-orIOPred sym p1_ p2_ = do
-  p1 <- p1_
-  p2 <- p2_
-  orPred sym p1 p2
-
-
 doReadMem ::
   IsSymInterface sym =>
   sym ->
@@ -876,30 +862,6 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   bvIdx <- bvAdd sym off offBV
   return $ Empty :> reg :> bvIdx
 
-eqIdx ::
-  1 <= ptrW =>
-  IsSymInterface sym =>
-  sym ->
-  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
-  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
-  IO (Pred sym)
-eqIdx sym (_ :> reg1 :> off1) (_ :> reg2 :> off2) = do
-  eqReg <- isEq sym reg1 reg2
-  eqOff <- isEq sym off1 off2
-  andPred sym eqReg eqOff
-
-leIdx ::
-  1 <= ptrW =>
-  IsSymInterface sym =>
-  sym ->
-  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
-  Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
-  IO (Pred sym)
-leIdx sym (_ :> reg1 :> off1) (_ :> reg2 :> off2) = do
-  eqReg <- isEq sym reg1 reg2
-  eqOff <- bvUle sym off1 off2
-  andPred sym eqReg eqOff
-
 concatPtrs ::
   1 <= w1 =>
   1 <= w2 =>
@@ -962,40 +924,6 @@ chunkBV sym endianness w bv
         hd <- bvSelect sym sz' (knownNat @8) bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
-
-data ReadStatus sym =
-  ReadStatus
-    { readDirty :: Pred sym
-    -- ^ all bytes reads are dirty
-    , readFresh :: Pred sym
-    -- ^ all bytes reads are fresh
-    }
-
--- | True when the 'ReadStatus' indicates that at least one
--- byte of the read may be fresh
-readAnyFresh ::
-  IsSymInterface sym =>
-  sym ->    
-  ReadStatus sym ->
-  IO (Pred sym)
-readAnyFresh sym st = notPred sym (readDirty st)
-
-initReadStatus ::
-  IsSymInterface sym =>
-  sym ->  
-  ReadStatus sym
-initReadStatus sym = ReadStatus (truePred sym) (truePred sym)
-
-mergeReadStatus ::
-  IsSymInterface sym =>
-  sym ->
-  ReadStatus sym ->
-  ReadStatus sym ->
-  IO (ReadStatus sym)
-mergeReadStatus sym st1 st2 = do
-  dirty <- andPred sym (readDirty st1) (readDirty st2)
-  fresh <- andPred sym (readFresh st1) (readFresh st2)
-  return $ ReadStatus dirty fresh
 
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
