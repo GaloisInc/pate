@@ -701,11 +701,11 @@ compatSub ::
   IsSymInterface sym =>
   RegionConstraint sym
 compatSub = RegionConstraint msg $ \sym reg1 reg2 -> do
-  regZero1 <- isZero sym reg1
+  regZero2 <- isZero sym reg2
   regEq <- natEq sym reg1 reg2
-  orPred sym regZero1 regEq
+  orPred sym regZero2 regEq
   where
-    msg = "first pointer region must be zero, or both regions must be equal"
+    msg = "both regions must be equal, or the offset must be region 0"
 
 ptrOp ::
   IsSymInterface sym =>
