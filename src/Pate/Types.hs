@@ -301,7 +301,7 @@ ppGroundBV gbv = case gbv of
 
 ppLLVMPointer :: GroundLLVMPointer w -> String
 ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = concat
-  [ pad 3 (show reg)
+  [ pad 4 (show reg)
   , "+0x"
   , padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
   ]
