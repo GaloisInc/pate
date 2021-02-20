@@ -9,7 +9,8 @@
 {-# LANGUAGE UndecidableInstances #-}
 module Pate.MemCell (
     MemCell(..)
-  , MemCells(..)
+  , MemCells
+  , MemCells'(..)
   , mapCellPreds
   , mergeMemCells
   , mergeMemCellsMap
@@ -71,7 +72,8 @@ instance PC.TestEquality (WI.SymExpr sym) => Eq (MemCell sym arch w) where
 instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
   compare stamp1 stamp2  = PC.toOrdering $ PC.compareF stamp1 stamp2
 
-newtype MemCells sym arch w = MemCells (Map.Map (MemCell sym arch w) (WI.Pred sym))
+type MemCells sym arch = MemCells' sym arch (WI.Pred sym)
+newtype MemCells' sym arch a w = MemCells (Map.Map (MemCell sym arch w) a)
 
 mapCellPreds ::
   (WI.Pred sym -> IO (WI.Pred sym)) ->
@@ -216,7 +218,7 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
-instance PC.OrdF (WI.SymExpr sym) => PEM.ExprMappable sym (MemCells sym arch w) where
+instance (PC.OrdF (WI.SymExpr sym), WI.Pred sym ~ a) => PEM.ExprMappable sym (MemCells' sym arch a w) where
   mapExpr sym f (MemCells cells) = do
     maps <- forM (Map.toList cells) $ \(cell, p) -> do
       cell' <- PEM.mapExpr sym f cell

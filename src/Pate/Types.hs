@@ -73,6 +73,7 @@ module Pate.Types
   , RegisterCase(..)
   , registerCase
   , zipRegStates
+  , zipRegStatesPar
   --- reporting
   , EquivalenceStatistics(..)
   , equivSuccess
@@ -126,6 +127,7 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Solver as WS
 
+import qualified Pate.Parallel as PP
 import qualified Pate.Memory.MemTrace as MT
 import           What4.ExprHelpers
 
@@ -558,16 +560,24 @@ registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
         False -> RegGPtr
       _ -> RegElse
 
+zipRegStatesPar :: PP.ParMonad m
+                => MM.RegisterInfo r
+                => MM.RegState r f
+                -> MM.RegState r g
+                -> (forall u. r u -> f u -> g u -> m (PP.Future m h))
+                -> m (PP.Future m [h])
+zipRegStatesPar regs1 regs2 f = do
+  regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
+  PP.promise $ mapM (\(MapF.Pair _ (Const v)) -> PP.joinFuture v) $ MapF.toList $ MM.regStateMap regs'
+
 zipRegStates :: Monad m
              => MM.RegisterInfo r
              => MM.RegState r f
              -> MM.RegState r g
              -> (forall u. r u -> f u -> g u -> m h)
              -> m [h]
-zipRegStates regs1 regs2 f = do
-  regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
-  return $ map (\(MapF.Pair _ (Const v)) -> v) $ MapF.toList $ MM.regStateMap regs'
-
+zipRegStates regs1 regs2 f = PP.runNpm $ PP.joinFuture =<<
+    zipRegStatesPar regs1 regs2 (\r e1 e2 -> (PP.promise $ (lift $ f r e1 e2)))
 ----------------------------------
 
 class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where

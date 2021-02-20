@@ -39,6 +39,7 @@ common shared
                        macaw-loader,
                        -- for TOC module
                        macaw-loader-ppc,
+                       unliftio,
                        unliftio-core,
                        text,
                        time >= 1 && < 2,
@@ -61,6 +62,7 @@ library
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
                        Pate.SimulatorRegisters,
+                       Pate.Parallel,
                        Pate.Proof,
                        Pate.Types,
                        Pate.Utils,
@@ -101,6 +103,7 @@ test-suite pate-test-ppc
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic,
                  dismantle-ppc
+  ghc-options:   -Wcompat -Wall -O2 -threaded -rtsopts "-with-rtsopts=-N"
 
 test-suite pate-test-aarch32
   import: shared-test
