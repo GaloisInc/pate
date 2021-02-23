@@ -430,7 +430,7 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ the logical contents of memory
   }
 
-data MemTraceVar sym ptrW = MemTraceVar (BoundVar sym (MemArrBaseType ptrW))
+data MemTraceVar sym ptrW = MemTraceVar (SymExpr sym (MemArrBaseType ptrW))
 
 type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
@@ -484,11 +484,11 @@ initMemTraceVar ::
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW, MemTraceVar sym ptrW)
 initMemTraceVar sym Addr32 = do
-  arr <- ioFreshVar sym "InitMem" knownRepr
-  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+  arr <- ioFreshConstant sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty arr, MemTraceVar arr)
 initMemTraceVar sym Addr64 = do
-  arr <- ioFreshVar sym "InitMem" knownRepr
-  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+  arr <- ioFreshConstant sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty arr, MemTraceVar arr)
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
 equalPrefixOf s1 s2 = go s1 s2 Seq.empty

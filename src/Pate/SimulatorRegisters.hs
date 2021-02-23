@@ -52,7 +52,7 @@ data MacawRegEntry sym (tp :: MT.Type) where
 data MacawRegVar sym (tp :: MT.Type) where
   MacawRegVar ::
     { macawVarEntry :: MacawRegEntry sym tp
-    , macawVarBVs :: Ctx.Assignment (WI.BoundVar sym) (CrucBaseTypes (MS.ToCrucibleType tp))
+    , macawVarBVs :: Ctx.Assignment (WI.SymExpr sym) (CrucBaseTypes (MS.ToCrucibleType tp))
     } ->
     MacawRegVar sym tp
 
