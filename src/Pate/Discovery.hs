@@ -84,7 +84,7 @@ discoverPairs bundle = do
     DT.forM allCalls $ \(blktO, blktP) -> do
       matches <- matchesBlockTarget bundle blktO blktP
       check <- withSymIO $ \sym -> WI.andPred sym precond matches
-      startTimer $ checkSatisfiableWithModel "check" check $ \satRes -> do
+      startTimer $ checkSatisfiableWithModel (Minutes 1) "check" check $ \satRes -> do
         let
           emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
         case satRes of

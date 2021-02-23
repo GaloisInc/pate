@@ -46,6 +46,7 @@ module Pate.Monad
   , getFootprints
   , memOpCondition
   -- sat helpers
+  , Timeout(..)
   , checkSatisfiableWithModel
   , isPredTrue
   , isPredSat
@@ -81,6 +82,7 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Time as TM
 import           Data.Typeable
+import qualified System.Timeout as ST
 
 import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
@@ -426,28 +428,46 @@ withAssumption_ asmf f =
 -- satisfiable, return the given default value under the "false" assumption.
 withSatAssumption ::
   HasCallStack =>
+  Timeout ->
   f ->
   EquivM sym arch (W4.Pred sym) ->
   EquivM sym arch f ->
   EquivM sym arch (W4.Pred sym, f)
-withSatAssumption default_ asmf f = withSym $ \sym -> do
+withSatAssumption timeout default_ asmf f = withSym $ \sym -> do
   asm <- asmf
-  isPredSat asm >>= \case
+  isPredSat timeout asm >>= \case
     True ->  withAssumption (return asm) $ f
     False -> return (W4.falsePred sym, default_)
 
 --------------------------------------
 -- Sat helpers
 
+data Timeout where
+  -- | No timeout is specified
+  None :: Timeout
+  -- | Specify a timeout in the given number of seconds
+  Seconds :: Int -> Timeout
+  -- | Specify a timeout in the given number of minutes
+  Minutes :: Int -> Timeout
+
+-- | Convert a timeout to a number of microseconds (unless it was 'None')
+timeoutAsMicros :: Timeout -> Maybe Int
+timeoutAsMicros to =
+  case to of
+    None -> Nothing
+    Seconds s -> Just (s * 1000000)
+    Minutes m -> Just (m * 60 * 1000000)
+
 -- | Check a predicate for satisfiability (in our monad)
 --
 -- FIXME: Add a facility for saving the SMT problem under the given name
 checkSatisfiableWithModel ::
+  Timeout ->
   String ->
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
+checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   envFrame <- asks envCurrentFrame
   assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
@@ -456,36 +476,55 @@ checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
   let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkSafeAsserts sym r')) pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter goal
+  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings timeout sym adapter goal
 
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
-  => sym
+  => Timeout
+  -> sym
   -> WSA.SolverAdapter st
   -> W4B.BoolExpr t
   -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
   -> IO a
-checkSatisfiableWithoutBindings sym adapter p k = do
-  WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
-    case sr of
-      W4R.Unsat core -> k (W4R.Unsat core)
-      W4R.Unknown -> k W4R.Unknown
-      W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
+checkSatisfiableWithoutBindings timeout sym adapter p k =
+  case timeoutAsMicros timeout of
+    Nothing -> doCheckSat
+    Just micros -> do
+      mres <- ST.timeout micros doCheckSat
+      case mres of
+        Nothing -> k W4R.Unknown
+        Just r -> return r
+  -- mres <- ST.timeout (timeoutAsMS timeout) $ WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
+  --   case sr of
+  --     W4R.Unsat core -> k (W4R.Unsat core)
+  --     W4R.Unknown -> k W4R.Unknown
+  --     W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
+  -- case mres of
+  --   Just r -> return r
+  --   Nothing -> k W4R.Unknown
+  where
+    doCheckSat = WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
+      case sr of
+        W4R.Unsat core -> k (W4R.Unsat core)
+        W4R.Unknown -> k W4R.Unknown
+        W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
 isPredSat ::
+  Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredSat p = case W4.asConstantPred p of
+isPredSat timeout p = case W4.asConstantPred p of
   Just b -> return b
-  Nothing -> checkSatisfiableWithModel "isPredSat" p $ \case
+  Nothing -> checkSatisfiableWithModel timeout "isPredSat" p $ \case
     W4R.Sat _ -> return True
     W4R.Unsat _ -> return False
     W4R.Unknown -> throwHere InconclusiveSAT
 
 isPredTrue ::
+  Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue p = case W4.asConstantPred p of
+isPredTrue timeout p = case W4.asConstantPred p of
   Just True -> return True
   _ -> do
     frame <- asks envCurrentFrame
@@ -493,13 +532,14 @@ isPredTrue p = case W4.asConstantPred p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        not <$> isPredSat notp
+        not <$> isPredSat timeout notp
 
 -- | Same as 'isPredTrue' but does not throw an error if the result is inconclusive
 isPredTrue' ::
+  Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue' p = case W4.asConstantPred p of
+isPredTrue' timeout p = case W4.asConstantPred p of
   Just b -> return b
   _ -> do
     frame <- asks envCurrentFrame
@@ -507,7 +547,7 @@ isPredTrue' p = case W4.asConstantPred p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        checkSatisfiableWithModel "isPredTrue'" notp $ \case
+        checkSatisfiableWithModel timeout "isPredTrue'" notp $ \case
             W4R.Sat _ -> return False
             W4R.Unsat _ -> return True
             W4R.Unknown -> return False

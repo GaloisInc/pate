@@ -106,6 +106,11 @@ import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Types
 import           What4.ExprHelpers
 
+-- | The timeout used for SAT checks that we can't really allow to fail
+--
+-- FIXME: Make this configurable
+standardTimeout :: Timeout
+standardTimeout = Minutes 5
 
 -- | Verify equality of the given binaries.
 verifyPairs ::
@@ -328,7 +333,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     (_, proofBody) <- liftIO $ bindSpec sym stO stP proof
     preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond (PP.prfBodyPre proofBody)
     -- prove that the generated precondition is implied by the given precondition
-    isPredTrue preImpliesGen >>= \case
+    isPredTrue standardTimeout preImpliesGen >>= \case
       True -> return ()
       False -> throwHere ImpossibleEquivalence
 
@@ -700,7 +705,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     noResult = BranchCase (W4.truePred sym) falseTriple
 
   -- if we have a "return" exit, prove that it satisfies the postcondition
-  precondReturn <- withSatAssumption noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
+  precondReturn <- withSatAssumption standardTimeout noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
     proveLocalPostcondition bundle postcondSpec
   let
     -- for simplicitly, we drop the condition on the return case, and assume
@@ -715,7 +720,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     isFail <- matchingExits bundle MS.MacawBlockEndFail
     isBranch <- matchingExits bundle MS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
-  precondUnknown <- withSatAssumption noResult (return isUnknown) $ do
+  precondUnknown <- withSatAssumption standardTimeout noResult (return isUnknown) $ do
     blocks <- PD.getBlocks (simPair bundle)
     emitWarning blocks BlockEndClassificationFailure
     univDom <- universalDomainSpec
@@ -795,7 +800,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   blocks <- PD.getBlocks $ simPair bundle
 
   result <- startTimer $ withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ do
-    checkSatisfiableWithModel "check" notChecks $ \satRes -> do        
+    checkSatisfiableWithModel standardTimeout "check" notChecks $ \satRes -> do
       case satRes of
         W4R.Unsat _ -> do
           emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
@@ -885,7 +890,7 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
       -- see if we can prove that the goal is independent of this clobbering
       asm <- liftIO $ allPreds sym [p, p', eqMemP, goal]
       check <- liftIO $ W4.impliesPred sym asm goal'
-      isPredTrue' check >>= \case
+      isPredTrue' (Seconds 5) check >>= \case
         True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
         False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
     False -> liftIO $ W4.notPred sym polarity
@@ -906,7 +911,7 @@ maybeEqualAt bundle cell@(PMC.MemCell{}) cond = withSym $ \sym -> do
   valP <- liftIO $ PMC.readMemCell sym memP cell
   ptrsEq <- liftIO $ MT.llvmPtrEq sym valO valP
   withAssumption_ (return cond) $
-    isPredSat ptrsEq
+    isPredSat standardTimeout ptrsEq
   where
     memO = simInMem $ simInO bundle
     memP = simInMem $ simInP bundle
@@ -918,11 +923,12 @@ simplifyPred ::
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
 simplifyPred p = withSym $ \sym -> do
-  isPredSat p >>= \case
-    True -> isPredTrue' p >>= \case
+  isPredSat (Seconds 5) p >>= \case
+    True -> isPredTrue' (Seconds 5) p >>= \case
       True -> return $ W4.truePred sym
       False -> return p
     False -> return $ W4.falsePred sym
+
 
 bindMemory ::
   -- | value to rebind
@@ -995,7 +1001,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
             goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
 
             withAssumption_ (return isFreshValid) $
-              isPredTrue' goalIgnoresReg >>= \case
+              isPredTrue' (Seconds 5) goalIgnoresReg >>= \case
                 True -> exclude
                 False -> include
         _ -> return Nothing
@@ -1362,7 +1368,7 @@ checkCasesTotal bundle cases = withSym $ \sym -> do
     liftIO $ anyPred sym casePreds
 
   notCheck <- liftIO $ W4.notPred sym someCase
-  result <- startTimer $ checkSatisfiableWithModel "checkCasesTotal" notCheck $ \satRes -> do
+  result <- startTimer $ checkSatisfiableWithModel (Minutes 10) "checkCasesTotal" notCheck $ \satRes -> do
     let
       emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)
     case satRes of
