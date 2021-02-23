@@ -161,6 +161,7 @@ groundBlockEndCase fn blkend = withSym $ \sym -> do
   groundMuxTree fn blkend_tree
 
 groundTraceDiff :: forall sym arch.
+  HasCallStack =>
   SymGroundEvalFn sym ->
   EquivRelation sym arch ->
   SimBundle sym arch ->
