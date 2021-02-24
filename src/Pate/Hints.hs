@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE QuantifiedConstraints #-}
@@ -22,6 +23,7 @@ module Pate.Hints (
   ValidVerificationHints(..)
   ) where
 
+import qualified Control.DeepSeq as CD
 import           Control.Lens ( (^.), (%=) )
 import qualified Control.Lens as L
 import qualified Control.Monad.State.Strict as CMS
@@ -31,6 +33,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 import           Data.Word ( Word32, Word64 )
+import           GHC.Generics ( Generic )
 import           Numeric ( showHex )
 import qualified Prettyprinter as PP
 
@@ -39,7 +42,9 @@ data SymbolExtent =
   SymbolExtent { symbolLocation :: Word64
                , symbolSize :: Word32
                }
-  deriving (Show)
+  deriving (Show, Generic)
+
+instance CD.NFData SymbolExtent
 
 instance PP.Pretty SymbolExtent where
   pretty symExt = PP.brackets (ppHex (symbolLocation symExt) <> PP.pretty ":" <> PP.pretty (symbolSize symExt))
@@ -60,7 +65,9 @@ data VerificationHints =
                     , dataSymbols :: [(T.Text, SymbolExtent)]
                     -- ^ Boundaries of data values
                     }
-  deriving (Show)
+  deriving (Show, Generic)
+
+instance CD.NFData VerificationHints
 
 emptyVerificationHints :: VerificationHints
 emptyVerificationHints =
