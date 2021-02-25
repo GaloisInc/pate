@@ -194,6 +194,11 @@ indexSymbolAddresses m v =
       HMS.insert addr name m
     _ -> m
 
+-- | Parse Anvill JSON files, which encode specifications of machine code functions
+--
+-- These come from the Trail of Bits Anvill tool.  The format is specified here:
+--
+-- https://github.com/lifting-bits/anvill/blob/master/docs/SpecificationFormat.md
 parseAnvillSpecHints :: BSL.ByteString -> (PH.VerificationHints, [JSONError])
 parseAnvillSpecHints bs =
   case JSON.eitherDecode' bs of
