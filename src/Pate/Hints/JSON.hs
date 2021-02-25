@@ -168,24 +168,6 @@ anvillExtent varName tyStr addr = do
                             }
   return (varName, ext)
 
--- | Note that Anvill variable specifications do not have names.  We invent a
--- name based on the address and type
--- collectAnvillGlobalVarSpec :: ([(T.Text, PH.SymbolExtent)], [JSONError])
---                            -> JSON.Value
---                            -> ([(T.Text, PH.SymbolExtent)], [JSONError])
--- collectAnvillGlobalVarSpec (extents, errs) v =
---   case v of
---     JSON.Object o
---       | Just (JSON.String tyStr) <- HMS.lookup (T.pack "type") o
---       , Just (JSON.Number addr) <- HMS.lookup (T.pack "address") o ->
---         case DS.toBoundedInteger addr of
---           Nothing -> (extents, MalformedAnvillVariableAddress [JSON.Number addr] : errs)
---           Just addrw
---             | Just ext <- anvillExtent tyStr addrw -> (ext : extents, errs)
---             | otherwise -> (extents, UnknownTypeSize tyStr addrw : errs)
---     _ -> (extents, MalformedAnvillVariableSpec v : errs)
-
-
 collectAnvillVars :: HMS.HashMap Word64 T.Text
                   -> ([(T.Text, PH.SymbolExtent)], [JSONError])
                   -> JSON.Value
