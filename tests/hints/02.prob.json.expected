@@ -1,0 +1,6 @@
+VerificationHints { blockMappings = []
+                  , functionEntries = [ ("UART_RxISR_16BIT", 0x080000c0)
+                                      , ("frame_dummy", 0x080000e8)
+                                      ]
+                  , dataSymbols = []
+                  }

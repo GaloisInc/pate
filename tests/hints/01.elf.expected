@@ -1,0 +1,8 @@
+VerificationHints { blockMappings = []
+                  , functionEntries = [ ("f1", 0x1000)
+                                      , ("main", 0x1017)
+                                      ]
+                  , dataSymbols = [ ("g1", SymbolExtent { symbolLocation = 0x4000, symbolSize = 4} )
+                                  , ("g2", SymbolExtent { symbolLocation = 0x4008, symbolSize = 8} )
+                                  ]
+                  }
