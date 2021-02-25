@@ -1,0 +1,51 @@
+{
+  "0x080000c0": {
+    "matches": [
+      {
+        "confidence": 0.9,
+        "file": "stm32f0xx_hal_uart.c",
+        "function": "UART_RxISR_16BIT"
+      },
+      {
+        "confidence": 0.2596,
+        "file": "UNASSIGNED",
+        "function": "UNASSIGNED"
+      },
+      {
+        "confidence": 0.2468,
+        "file": "stm32f0xx_hal_uart.c",
+        "function": "UART_RxISR_8BIT"
+      },
+      {
+        "confidence": 0.2468,
+        "file": "stm32f0xx_hal_i2c.c",
+        "function": "I2C_DMAAbort"
+      }
+    ]
+  },
+  "0x080000e8": {
+    "matches": [
+      {
+        "confidence": 0.2408,
+        "file": "UNASSIGNED",
+        "function": "UNASSIGNED"
+      },
+      {
+        "confidence": 0.2531,
+        "file": "stm32f0xx_hal_rcc.c",
+        "function": "HAL_RCC_NMI_IRQHandler"
+      },
+      {
+        "confidence": 0.2531,
+        "file": "stm32f0xx_hal_pwr_ex.c",
+        "function": "HAL_PWR_PVD_IRQHandler"
+      },
+      {
+        "confidence": 0.2531,
+        "file": "stm32f0xx_hal_pwr_ex.c",
+        "function": "HAL_PWREx_Vddio2Monitor_IRQHandler"
+      }
+    ],
+    "symbol_name": "frame_dummy"
+  }
+}

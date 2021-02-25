@@ -16,7 +16,7 @@ import qualified Pate.Hints as PH
 data CSVParseError = CSVParseError String
                    | UnexpectedRowShape [T.Text]
                    | AddressParseError T.Text
-  deriving (Show)
+  deriving (Show, Eq)
 
 -- | Parse an address of the form @code:<hexaddr>@ into a 'Word64'
 parseAddress :: T.Text -> Maybe Word64
@@ -24,6 +24,7 @@ parseAddress = MP.parseMaybe parseCodeHex
   where
     parseCodeHex :: MP.Parsec () T.Text Word64
     parseCodeHex = do
+      _ <- MPC.space
       _ <- MPC.string (T.pack "code:")
       MPCL.hexadecimal
 

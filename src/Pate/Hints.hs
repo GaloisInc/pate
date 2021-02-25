@@ -42,7 +42,7 @@ data SymbolExtent =
   SymbolExtent { symbolLocation :: Word64
                , symbolSize :: Word32
                }
-  deriving (Show, Generic)
+  deriving (Read, Show, Eq, Ord, Generic)
 
 instance CD.NFData SymbolExtent
 
@@ -65,7 +65,7 @@ data VerificationHints =
                     , dataSymbols :: [(T.Text, SymbolExtent)]
                     -- ^ Boundaries of data values
                     }
-  deriving (Show, Generic)
+  deriving (Read, Show, Generic)
 
 instance CD.NFData VerificationHints
 

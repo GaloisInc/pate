@@ -1,0 +1,8 @@
+VerificationHints { blockMappings = []
+                  , functionEntries = [ ("thunk_FUN_code_00005d", 0x0)
+                                      , ("FUN_code_00005d", 0x5d)
+                                      , ("FUN_code_0000d6", 0xd6)
+                                      , ("__do_clear_bss", 0xdc)
+                                      ]
+                  , dataSymbols = []
+                  }

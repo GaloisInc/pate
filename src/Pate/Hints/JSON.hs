@@ -20,12 +20,11 @@ import           Data.Word ( Word32, Word64 )
 import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MPC
 import qualified Text.Megaparsec.Char.Lexer as MPCL
-import           Text.Printf ( printf )
 
 import qualified Pate.Hints as PH
 
 data JSONError = JSONParseError String
-               | UnexpectedTopLevel String
+               | UnexpectedTopLevel String JSON.Value
                | UnexpectedMatchEntryType Word64 String
                | MatchEntryMissingMatches Word64
                | InvalidAddressFormat DS.Scientific T.Text
@@ -34,17 +33,14 @@ data JSONError = JSONParseError String
                | MalformedAnvillVariableSpec JSON.Value
                | UnknownTypeSize T.Text Word64
                | InvalidAddress T.Text
-  deriving (Show)
+  deriving (Show, Eq)
 
 readProbabilisticNameMap :: JSON.Value -> ([(T.Text, Word64)], [JSONError])
 readProbabilisticNameMap val =
   case val of
     JSON.Object o -> F.foldl' collectProbabilisticMappings ([], []) (HMS.toList o)
     JSON.Null -> ([], [])
-    JSON.Array _ -> ([], [UnexpectedTopLevel "Array"])
-    JSON.String _ -> ([], [UnexpectedTopLevel "String"])
-    JSON.Number _ -> ([], [UnexpectedTopLevel "Number"])
-    JSON.Bool _ -> ([], [UnexpectedTopLevel "Bool"])
+    _ -> ([], [UnexpectedTopLevel "ProbNameMap" val])
 
 -- | Parse an address of the form @code:<hexaddr>@ into a 'Word64'
 parseAddress :: T.Text -> Maybe Word64
@@ -122,29 +118,17 @@ parseProbabilisticHints bs =
       let (mappings, errs) = readProbabilisticNameMap val
       in (mempty { PH.functionEntries = mappings }, errs)
 
-collectAnvillFunctionPair :: ([(T.Text, Word64)], [JSONError])
-                          -> JSON.Value
-                          -> ([(T.Text, Word64)], [JSONError])
-collectAnvillFunctionPair (fnSpecs, errs) v =
-  case v of
-    JSON.Array (F.toList -> JSON.Number addr : JSON.String sym : _) ->
-      case DS.toBoundedInteger addr of
-        Nothing -> (fnSpecs, InvalidAddressFormat addr sym : errs)
-        Just addrw -> ((sym, addrw) : fnSpecs, errs)
-    JSON.Array vals -> (fnSpecs, MalformedAnvillFunctionAddress (F.toList vals) : errs)
-    _ -> (fnSpecs, MalformedAnvillFunctionAddress [v] : errs)
-
-collectAnvillFunctions :: ([(T.Text, Word64)], [JSONError])
+collectAnvillFunctions :: HMS.HashMap Word64 T.Text
+                       -> ([(T.Text, Word64)], [JSONError])
                        -> JSON.Value
                        -> ([(T.Text, Word64)], [JSONError])
-collectAnvillFunctions acc@(fnSpecs, errs) v =
+collectAnvillFunctions addrSymMap (fnSpecs, errs) v =
   case v of
-    JSON.Array pairs -> F.foldl' collectAnvillFunctionPair acc pairs
-    JSON.Null -> acc
-    JSON.Object {} -> (fnSpecs, UnexpectedTopLevel "Object" : errs)
-    JSON.String {} -> (fnSpecs, UnexpectedTopLevel "String" : errs)
-    JSON.Number {} -> (fnSpecs, UnexpectedTopLevel "Number" : errs)
-    JSON.Bool {} -> (fnSpecs, UnexpectedTopLevel "Bool" : errs)
+    JSON.Object o
+      | Just (JSON.Number fnAddrS) <- HMS.lookup (T.pack "address") o
+      , Just fnAddr <- DS.toBoundedInteger fnAddrS
+      , Just fnName <- HMS.lookup fnAddr addrSymMap -> ((fnName, fnAddr) : fnSpecs, errs)
+    _ -> (fnSpecs, UnexpectedTopLevel "Function" v : errs)
 
 -- | Return the size corresponding to an Anvill type spec
 --
@@ -176,20 +160,37 @@ anvillTypeSize t =
 --
 -- Note that the type descriptors are currently treated unsafely and actually
 -- need to be considered with both the architecture and OS to be really correct
-anvillExtent :: T.Text -> Word64 -> Maybe (T.Text, PH.SymbolExtent)
-anvillExtent tyStr addr = do
+anvillExtent :: T.Text -> T.Text -> Word64 -> Maybe (T.Text, PH.SymbolExtent)
+anvillExtent varName tyStr addr = do
   sz <- anvillTypeSize tyStr
   let ext = PH.SymbolExtent { PH.symbolLocation = addr
                             , PH.symbolSize = sz
                             }
-  return (T.pack (printf "VAR_%s_%x" tyStr addr), ext)
+  return (varName, ext)
 
 -- | Note that Anvill variable specifications do not have names.  We invent a
 -- name based on the address and type
-collectAnvillGlobalVarSpec :: ([(T.Text, PH.SymbolExtent)], [JSONError])
-                           -> JSON.Value
-                           -> ([(T.Text, PH.SymbolExtent)], [JSONError])
-collectAnvillGlobalVarSpec (extents, errs) v =
+-- collectAnvillGlobalVarSpec :: ([(T.Text, PH.SymbolExtent)], [JSONError])
+--                            -> JSON.Value
+--                            -> ([(T.Text, PH.SymbolExtent)], [JSONError])
+-- collectAnvillGlobalVarSpec (extents, errs) v =
+--   case v of
+--     JSON.Object o
+--       | Just (JSON.String tyStr) <- HMS.lookup (T.pack "type") o
+--       , Just (JSON.Number addr) <- HMS.lookup (T.pack "address") o ->
+--         case DS.toBoundedInteger addr of
+--           Nothing -> (extents, MalformedAnvillVariableAddress [JSON.Number addr] : errs)
+--           Just addrw
+--             | Just ext <- anvillExtent tyStr addrw -> (ext : extents, errs)
+--             | otherwise -> (extents, UnknownTypeSize tyStr addrw : errs)
+--     _ -> (extents, MalformedAnvillVariableSpec v : errs)
+
+
+collectAnvillVars :: HMS.HashMap Word64 T.Text
+                  -> ([(T.Text, PH.SymbolExtent)], [JSONError])
+                  -> JSON.Value
+                  -> ([(T.Text, PH.SymbolExtent)], [JSONError])
+collectAnvillVars addrSymMap (extents, errs) v =
   case v of
     JSON.Object o
       | Just (JSON.String tyStr) <- HMS.lookup (T.pack "type") o
@@ -197,22 +198,19 @@ collectAnvillGlobalVarSpec (extents, errs) v =
         case DS.toBoundedInteger addr of
           Nothing -> (extents, MalformedAnvillVariableAddress [JSON.Number addr] : errs)
           Just addrw
-            | Just ext <- anvillExtent tyStr addrw -> (ext : extents, errs)
+            | Just name <- HMS.lookup addrw addrSymMap
+            , Just ext <- anvillExtent name tyStr addrw -> (ext : extents, errs)
             | otherwise -> (extents, UnknownTypeSize tyStr addrw : errs)
-    _ -> (extents, MalformedAnvillVariableSpec v : errs)
+    _ -> (extents, UnexpectedTopLevel "Variable" v : errs)
 
-
-collectAnvillVars :: ([(T.Text, PH.SymbolExtent)], [JSONError])
-                  -> JSON.Value
-                  -> ([(T.Text, PH.SymbolExtent)], [JSONError])
-collectAnvillVars acc@(extents, errs) v =
+indexSymbolAddresses :: HMS.HashMap Word64 T.Text
+                     -> JSON.Value
+                     -> HMS.HashMap Word64 T.Text
+indexSymbolAddresses m v =
   case v of
-    JSON.Array vals -> F.foldl' collectAnvillGlobalVarSpec acc vals
-    JSON.Null -> (extents, UnexpectedTopLevel "Null" : errs)
-    JSON.Object _ -> (extents, UnexpectedTopLevel "Object" : errs)
-    JSON.String _ -> (extents, UnexpectedTopLevel "String" : errs)
-    JSON.Number _ -> (extents, UnexpectedTopLevel "Number" : errs)
-    JSON.Bool _ -> (extents, UnexpectedTopLevel "Bool" : errs)
+    JSON.Array (F.toList -> [JSON.Number (DS.toBoundedInteger -> Just addr), JSON.String name]) ->
+      HMS.insert addr name m
+    _ -> m
 
 parseAnvillSpecHints :: BSL.ByteString -> (PH.VerificationHints, [JSONError])
 parseAnvillSpecHints bs =
@@ -220,16 +218,14 @@ parseAnvillSpecHints bs =
     Left err -> (mempty, [JSONParseError err])
     Right val ->
       case val of
-        JSON.Object o -> fromMaybe (mempty, [UnexpectedTopLevel "Missing 'symbols' or 'variables' array"]) $ do
-          JSON.Array fnSyms <- HMS.lookup (T.pack "symbols") o
+        JSON.Object o -> fromMaybe (mempty, [UnexpectedTopLevel "Missing 'symbols', 'variables', or 'functions' array" val]) $ do
+          JSON.Array syms <- HMS.lookup (T.pack "symbols") o
           JSON.Array vars <- HMS.lookup (T.pack "variables") o
-          let (funAddrs, funErrs) = F.foldl' collectAnvillFunctions ([], []) fnSyms
-          let (varExtents, varErrs) = F.foldl' collectAnvillVars ([], []) vars
+          JSON.Array fns <- HMS.lookup (T.pack "functions") o
+          let symAddrMap = F.foldl' indexSymbolAddresses HMS.empty syms
+          let (funAddrs, funErrs) = F.foldl' (collectAnvillFunctions symAddrMap) ([], []) fns
+          let (varExtents, varErrs) = F.foldl' (collectAnvillVars symAddrMap) ([], []) vars
           return (mempty { PH.functionEntries = funAddrs
                          , PH.dataSymbols = varExtents
                          }, funErrs ++ varErrs)
-        JSON.Null -> (mempty, [UnexpectedTopLevel "Null"])
-        JSON.Array _ -> (mempty, [UnexpectedTopLevel "Array"])
-        JSON.String _ -> (mempty, [UnexpectedTopLevel "String"])
-        JSON.Number _ -> (mempty, [UnexpectedTopLevel "Number"])
-        JSON.Bool _ -> (mempty, [UnexpectedTopLevel "Bool"])
+        _ -> (mempty, [UnexpectedTopLevel "Spec" val])
