@@ -76,7 +76,6 @@ import           Control.Monad.State
 
 
 import qualified Data.ElfEdit as E
-import qualified Data.Foldable as F
 import           Data.Map (Map)
 import           Data.Set (Set)
 import qualified Data.Set as S
@@ -89,13 +88,11 @@ import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
-import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -110,7 +107,6 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
-import qualified What4.SemiRing as SR
 import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
 

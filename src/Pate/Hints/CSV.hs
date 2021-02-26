@@ -1,5 +1,6 @@
 module Pate.Hints.CSV (
-  parseFunctionHints
+  parseFunctionHints,
+  CSVParseError(..)
   ) where
 
 import qualified Data.ByteString.Lazy as BSL

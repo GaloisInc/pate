@@ -40,6 +40,7 @@ module Pate.Types
   , concreteFromAbsolute
   , ParsedBlockMap(..)
   , ParsedFunctionMap
+  , parsedFunctionEntries
   , markEntryPoint
   , type WhichBinary
   , KnownBinary
@@ -162,6 +163,9 @@ newtype ParsedBlockMap arch ids = ParsedBlockMap
 -- You should expect (and check) that exactly one key exists at the function entry point level.
 type ParsedFunctionMap arch = IntervalMap (ConcreteAddress arch) (Map (MM.ArchSegmentOff arch) (Some (ParsedBlockMap arch)))
 
+-- | Return the list of entry points in the parsed function map
+parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
+parsedFunctionEntries = concatMap M.keys . IM.elems
 
 markEntryPoint ::
   MM.ArchSegmentOff arch ->
