@@ -19,7 +19,7 @@ extra-source-files:  CHANGELOG.md
 common shared
   build-depends:       base >= 4.10 && < 5,
                        bv-sized >= 1 && < 1.1,
-                       bytestring,
+                       bytestring >= 0.9 && < 0.12,
                        containers >= 0.5 && < 0.7,
                        deepseq >= 1.3 && < 2,
                        cassava >= 0.5 && < 0.6,
@@ -30,13 +30,13 @@ common shared
                        galois-dwarf,
                        parallel >= 3.2 && < 4,
                        dismantle-tablegen,
-                       exceptions,
+                       exceptions >= 0.10 && < 0.11,
                        elf-edit >= 0.39,
                        IntervalMap >= 0.6 && < 0.7,
-                       lens,
-                       hashtables,
-                       mtl,
-                       lumberjack >= 0.1 && < 0.2,
+                       lens >= 4 && < 6,
+                       hashtables >= 1.2 && < 1.3,
+                       mtl >= 2 && < 2.3,
+                       lumberjack >= 0.1 && < 1.1,
                        prettyprinter >= 1.7 && < 1.8,
                        parameterized-utils,
                        what4 >= 1 && < 2,
@@ -47,11 +47,10 @@ common shared
                        macaw-loader,
                        -- for TOC module
                        macaw-loader-ppc,
-                       unliftio-core,
-                       text,
+                       unliftio-core >= 0.2 && < 0.3,
+                       text >= 1 && < 1.3,
                        time >= 1 && < 2,
-                       transformers,
-                       vector
+                       vector >= 0.10 && < 0.13
                        
   default-language:    Haskell2010
   ghc-options:         -Wall -Wcompat
