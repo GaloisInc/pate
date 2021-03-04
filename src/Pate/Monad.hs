@@ -23,7 +23,6 @@ module Pate.Monad
   , EquivState(..)
   , EquivM
   , EquivM_
-  , EquivMFuture
   , runEquivM
   , ValidSym
   , ValidArch(..)
@@ -71,8 +70,7 @@ import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
-import qualified UnliftIO.Concurrent as IO
-import qualified Control.Concurrent.MVar
+import           Control.Monad ( join )
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, Handler )
 import           Control.Monad.Reader
@@ -181,8 +179,6 @@ data EquivEnv sym arch where
     -- ^ start of the function currently under analysis
     , envCurrentFrame :: AssumptionFrame sym
     -- ^ the current assumption frame, accumulated as assumptions are added
-    , envUseThreads :: Bool
-    -- ^ flag to control when promises should be forked
     } -> EquivEnv sym arch
 
 data VerificationFailureMode =
@@ -511,11 +507,12 @@ isPredTrue p = case W4.asConstantPred p of
 isPredTrue' ::
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue' p = noThreads $ isPredTruePar' p
+isPredTrue' p = join $ isPredTruePar' p
 
 isPredTruePar' ::
+  Par.IsFuture (EquivM_ sym arch) future =>
   W4.Pred sym ->
-  EquivM sym arch (EquivMFuture sym arch Bool)
+  EquivM sym arch (future Bool)
 isPredTruePar' p = case W4.asConstantPred p of
   Just b -> Par.present $ return b
   _ -> do
@@ -529,39 +526,15 @@ isPredTruePar' p = case W4.asConstantPred p of
             W4R.Unsat _ -> return True
             W4R.Unknown -> return False
 
-instance Par.ParMonad (EquivM_ sym arch) where
-  type Future (EquivM_ sym arch) = EquivMFuture sym arch
-  
-  joinFuture (Future _ a) = liftIO $ IO.readMVar a
-  joinFuture (Present v) = v
 
-  present m = return $ Present m
+instance Par.IsFuture (EquivM_ sym arch) Par.Future where
+  present m = Par.runInFutureIO $ Par.present (lift m)
+  -- here we can implement scheduling of IOFutures, which can be tracked
+  -- in the equivM state
+  promise m = Par.runInFutureIO $ Par.promise (lift m)
+  joinFuture future = Par.runInFutureIO $ Par.joinFuture future
+  forFuture future f = Par.runInFutureIO $  Par.forFuture future (lift . f)
 
-  promise m = do
-    asks envUseThreads >>= \case
-      True -> do
-        var <- liftIO $ IO.newEmptyMVar
-        let
-          runM :: EquivM_ sym arch ()
-          runM = do
-            a <- m
-            liftIO (IO.putMVar var $! a)
-        tid <- IO.forkIO runM
-        return $ Future tid var
-      False -> do
-        runInIO <- IO.askRunInIO
-        Par.present (liftIO $ runInIO m)
-
-withThreads :: EquivM sym arch a -> EquivM sym arch a
-withThreads m = local (\env -> env { envUseThreads = True }) $ m
-
-noThreads :: EquivM sym arch (EquivMFuture sym arch a) -> EquivM sym arch a
-noThreads m = local (\env -> env { envUseThreads = False }) $
-  m >>= Par.joinFuture
-
-data EquivMFuture sym arch a =
-    Future IO.ThreadId (IO.MVar a) 
-  | Present (EquivM_ sym arch a)
 
 execGroundFn ::
   forall sym arch tp.

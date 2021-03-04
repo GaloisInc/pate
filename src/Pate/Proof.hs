@@ -58,6 +58,7 @@ import qualified Pate.Equivalence as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Parallel as Par
 
 import qualified What4.Interface as W4
 
@@ -83,7 +84,7 @@ data EquivTripleBody sym arch where
     , eqPostDomain :: PE.StatePredSpec sym arch
       -- ^ the post-domain: the state that was proven equivalent after execution
       -- abstracted over the bound variables representing the final state
-    , eqStatus :: IO (VerificationStatus arch)
+    , eqStatus :: Par.Future (VerificationStatus arch)
       -- ^ flag indicating whether or not this triple has passed verification
     , eqValidSym :: PT.Sym sym
     } -> EquivTripleBody sym arch

@@ -92,6 +92,7 @@ import           GHC.Stack
 import           Control.Exception
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.Except
+import           Control.Monad ( join )
 
 import qualified Data.BitVector.Sized as BVS
 import           Data.Map ( Map )
@@ -560,12 +561,12 @@ registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
         False -> RegGPtr
       _ -> RegElse
 
-zipRegStatesPar :: PP.ParMonad m
+zipRegStatesPar :: PP.IsFuture m future
                 => MM.RegisterInfo r
                 => MM.RegState r f
                 -> MM.RegState r g
-                -> (forall u. r u -> f u -> g u -> m (PP.Future m h))
-                -> m (PP.Future m [h])
+                -> (forall u. r u -> f u -> g u -> m (future h))
+                -> m (future [h])
 zipRegStatesPar regs1 regs2 f = do
   regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
   PP.promise $ mapM (\(MapF.Pair _ (Const v)) -> PP.joinFuture v) $ MapF.toList $ MM.regStateMap regs'
@@ -576,8 +577,7 @@ zipRegStates :: Monad m
              -> MM.RegState r g
              -> (forall u. r u -> f u -> g u -> m h)
              -> m [h]
-zipRegStates regs1 regs2 f = PP.runNpm $ PP.joinFuture =<<
-    zipRegStatesPar regs1 regs2 (\r e1 e2 -> (PP.promise $ (lift $ f r e1 e2)))
+zipRegStates regs1 regs2 f = join $ zipRegStatesPar regs1 regs2 (\r e1 e2 -> return $ f r e1 e2)
 ----------------------------------
 
 class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where

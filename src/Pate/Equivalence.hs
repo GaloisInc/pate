@@ -63,7 +63,7 @@ import           GHC.Stack ( HasCallStack )
 import           GHC.TypeNats
 
 import           Control.Monad.Trans ( lift )
-import           Control.Monad ( forM, foldM )
+import           Control.Monad ( forM, foldM, join )
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.IO.Class ( liftIO )
 
@@ -113,12 +113,12 @@ data MemPred sym arch =
 -- | Map the internal 'PMC.MemCells' representing the locations of a 'MemPred', preserving
 -- its polarity.
 mapMemPredPar ::
-  forall sym arch m.
-  PP.ParMonad m =>
+  forall sym arch m future.
+  PP.IsFuture m future =>
   W4.IsExprBuilder sym =>
   MemPred sym arch ->
-  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (PP.Future m (W4.Pred sym))) ->
-  m (PP.Future m (MemPred sym arch))
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))) ->
+  m (future (MemPred sym arch))
 mapMemPredPar memPred f = do
   let
     dropFalse :: PMC.MemCell sym arch w -> W4.Pred sym -> Maybe (W4.Pred sym)
@@ -126,10 +126,10 @@ mapMemPredPar memPred f = do
       Just False -> Nothing
       _ -> Just p
       
-    f' :: PMC.MemCell sym arch w -> W4.Pred sym -> m (PP.Future m (W4.Pred sym))
+    f' :: PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))
     f' (cell@PMC.MemCell{}) p = f cell p
 
-    cellsF :: PMC.MemCells sym arch w -> m (PP.Future m (PMC.MemCells sym arch w))
+    cellsF :: PMC.MemCells sym arch w -> m (future (PMC.MemCells sym arch w))
     cellsF (PMC.MemCells cells) = do
       future_cells <- M.traverseWithKey f' cells
       PP.present $ PMC.MemCells <$> mapM PP.joinFuture future_cells
@@ -145,8 +145,7 @@ mapMemPred ::
   W4.IsExprBuilder sym =>
   MemPred sym arch ->
   (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) -> m (MemPred sym arch)
-mapMemPred memPred f = PP.runNpm $ PP.joinFuture =<<
-  mapMemPredPar memPred (\cell p -> PP.promise $ (lift $ f cell p))
+mapMemPred memPred f = join $ mapMemPredPar memPred (\cell p -> return $ f cell p)
 
 
 memPredToList ::
