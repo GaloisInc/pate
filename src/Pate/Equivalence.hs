@@ -192,7 +192,6 @@ memPredFalse sym = MemPred MapF.empty (W4.truePred sym)
 footPrintsToPred ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
   sym ->
   Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)) ->
   W4.Pred sym ->
@@ -212,7 +211,6 @@ footPrintsToPred sym foots polarity = do
 addFootPrintsToPred ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
   sym ->
   Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)) ->
   MemPred sym arch ->
@@ -348,8 +346,6 @@ stateEquivalence sym stackRegion =
 getPrecondition ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
@@ -366,8 +362,6 @@ getPrecondition sym stackRegion bundle eqRel stPred = do
 impliesPrecondition ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
@@ -387,8 +381,6 @@ impliesPrecondition sym stackRegion inO inP eqRel stPredAsm stPredConcl = do
 -- structured equivalence relation (for reporting counterexamples)
 getPostcondition ::
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   SimBundle sym arch ->
@@ -430,8 +422,6 @@ weakenEquivRelation sym stPred eqRel =
 memPredPost ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   SimOutput sym arch PT.Original ->
@@ -508,8 +498,6 @@ resolveCellEquiv sym stO stP eqRel cell cond = do
 memPredPre ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   MemRegionEquality sym arch ->
@@ -593,8 +581,6 @@ memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
 regPredRel ::
   forall sym arch.
   W4.IsExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   SimState sym arch PT.Original ->
@@ -612,8 +598,6 @@ regPredRel sym stO stP regEquiv regPred  = do
 
 statePredPre ::
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
@@ -637,8 +621,6 @@ statePredPre sym stackRegion inO inP eqRel stPred  = do
 
 statePredPost ::
   W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   SimOutput sym arch PT.Original ->

@@ -480,7 +480,6 @@ externalTransitions internalAddrs pb =
 -- simulation. Execute the given function in a context where the given 'SimBundle'
 -- is valid (i.e. its bound variables are marked free and its preconditions are assumed).
 withSimBundle ::
-  PEM.ExprMappable sym f =>
   PatchPair arch ->
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)

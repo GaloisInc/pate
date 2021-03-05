@@ -274,8 +274,7 @@ addressAddOffset :: (MM.MemWidth (MM.ArchAddrWidth arch))
 addressAddOffset (ConcreteAddress memAddr) memWord =
   ConcreteAddress (MM.incAddr (fromIntegral memWord) memAddr)
 
-concreteFromAbsolute :: (MM.MemWidth (MM.ArchAddrWidth arch))
-                     => MM.MemWord (MM.ArchAddrWidth arch)
+concreteFromAbsolute :: MM.MemWord (MM.ArchAddrWidth arch)
                      -> ConcreteAddress arch
 concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
 
