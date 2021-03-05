@@ -165,7 +165,6 @@ data VarBinding sym tp =
 
 mapExprPtr ::
   forall sym w.
-  W4.IsSymExprBuilder sym =>
   sym ->
   (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
   CLM.LLVMPtr sym w ->

@@ -312,7 +312,6 @@ ppEquivalenceError err = "-\n\t" ++ show err ++ "\n" -- TODO: pretty-print the e
 
 ppInequivalenceResult ::
   MS.SymArchConstraints arch =>
-  ShowF (MM.ArchReg arch) =>
   InequivalenceResult arch -> String
 ppInequivalenceResult (InequivalentResults traceDiff exitDiffs regDiffs _retDiffs reason) =
   ppReason reason ++ "\n" ++ ppExitCaseDiff exitDiffs ++ "\n" ++ ppPreRegs regDiffs ++ ppMemTraceDiff traceDiff ++ ppDiffs regDiffs
