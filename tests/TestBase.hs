@@ -103,8 +103,8 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
       , PC.infoPath = infoPath
       , PC.origPath = fp <.> "original" <.> "exe"
       , PC.patchedPath = fp <.> "patched" <.> "exe"
+      , PC.hints = Nothing
       , PC.verificationCfg =
-
           PC.defaultVerificationCfg { PC.cfgComputeEquivalenceFrames = computeFrames }
       , PC.logger =
           LJ.LogAction $ \e -> case e of

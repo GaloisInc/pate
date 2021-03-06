@@ -28,6 +28,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Config as PC
 import qualified Pate.Event as PE
+import qualified Pate.Hints as PH
 import qualified Pate.Types as PT
 import qualified Pate.Verification as PV
 
@@ -55,18 +56,18 @@ unpackPatchData proxy (PC.PatchData pairs bmap) =
 runEquivVerification ::
   PA.ValidArchProxy arch ->
   LJ.LogAction IO (PE.Event arch) ->
+  Maybe PH.VerificationHints ->
   PC.PatchData ->
   PC.VerificationConfig ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   IO (Either String Bool)
-runEquivVerification proxy@PA.ValidArchProxy logAction pd dcfg original patched = do
+runEquivVerification proxy@PA.ValidArchProxy logAction mhints pd dcfg original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
-  v <- CME.runExceptT (PV.verifyPairs logAction original patched bmap dcfg ppairs)
+  v <- CME.runExceptT (PV.verifyPairs logAction mhints original patched bmap dcfg ppairs)
   case v of
     Left err -> return $ Left $ show err
     Right b -> return $ Right b
-
 
 -- | Given a patch configuration, check that
 -- either the original or patched binary can be
@@ -96,8 +97,7 @@ runSelfEquivConfig cfg wb = CME.runExceptT $ do
       }
   PA.ValidArchProxy <- return $ PC.archProxy cfg
   bin <- CME.lift $ PB.loadELF @arch Proxy $ path
-  CME.ExceptT $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData' (PC.verificationCfg cfg) bin bin
-
+  CME.ExceptT $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData' (PC.verificationCfg cfg) bin bin
 
 
 runEquivConfig :: forall arch.
@@ -112,4 +112,4 @@ runEquivConfig cfg = CME.runExceptT $ do
   PA.ValidArchProxy <- return $ PC.archProxy cfg
   original <- CME.lift $ PB.loadELF @arch Proxy $ (PC.origPath cfg)
   patched <- CME.lift $ PB.loadELF @arch Proxy $ (PC.patchedPath cfg)
-  CME.ExceptT $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData (PC.verificationCfg cfg) original patched
+  CME.ExceptT $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData (PC.verificationCfg cfg) original patched

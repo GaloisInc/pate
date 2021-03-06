@@ -16,6 +16,7 @@ import           Text.Printf ( PrintfArg, printf )
 
 import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
+import qualified Pate.Hints as PH
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
 
@@ -83,5 +84,6 @@ data RunConfig arch =
     , patchedPath :: FilePath
     , logger :: LJ.LogAction IO (PE.Event arch)
     , verificationCfg :: VerificationConfig
+    , hints :: Maybe PH.VerificationHints
     }
 

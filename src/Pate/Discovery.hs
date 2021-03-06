@@ -33,6 +33,7 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Traversable as DT
+import           Data.Word ( Word64 )
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -53,6 +54,7 @@ import qualified Pate.Binary as PB
 import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
+import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.SimState as PSS
@@ -314,18 +316,34 @@ concreteJumpTargets pb = case MD.pblockTermStmt pb of
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map
 
+addFunctionEntryHints
+  :: (MM.MemWidth (MC.ArchAddrWidth arch))
+  => proxy arch
+  -> MM.Memory (MC.ArchAddrWidth arch)
+  -> (name, Word64)
+  -> ([Word64], [MC.ArchSegmentOff arch])
+  -> ([Word64], [MC.ArchSegmentOff arch])
+addFunctionEntryHints _ mem (_name, addrWord) (invalid, entries) =
+  case MM.resolveAbsoluteAddr mem (fromIntegral addrWord) of
+    Nothing -> (addrWord : invalid, entries)
+    Just segOff -> (invalid, segOff : entries)
+
 runDiscovery ::
+  forall arch .
   PA.ValidArch arch =>
   PB.LoadedELF arch ->
-  CME.ExceptT (EquivalenceError arch) IO (MM.MemSegmentOff (MC.ArchAddrWidth arch), ParsedFunctionMap arch)
-runDiscovery elf = do
+  PH.VerificationHints ->
+  CME.ExceptT (EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), ParsedFunctionMap arch)
+runDiscovery elf hints = do
   let
     bin = PB.loadedBinary elf
     archInfo = PB.archInfo elf
   entries <- F.toList <$> MBL.entryPoints bin
+  let mem = MBL.memoryImage bin
+  let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
   pfm <- goDiscoveryState $
-    MD.cfgFromAddrs archInfo (MBL.memoryImage bin) Map.empty entries []
-  return (head entries, pfm)
+    MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
+  return (invalidHints, head entries, pfm)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)

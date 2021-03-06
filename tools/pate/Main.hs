@@ -23,10 +23,14 @@ import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( join )
 import qualified Data.Binary.Get as DB
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
+import qualified Data.List.NonEmpty as DLN
+import           Data.Maybe ( isNothing, maybeToList )
 import qualified Data.Traversable as T
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
+import           Numeric ( showHex )
 import qualified Options.Applicative as OA
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Terminal as PPRT
@@ -34,6 +38,7 @@ import qualified System.Exit as SE
 import qualified System.IO as IO
 
 import qualified Data.ElfEdit as DEE
+import qualified Data.Macaw.CFG as MC
 import           Data.Parameterized.Some ( Some(..) )
 
 import qualified Pate.AArch32 as AArch32
@@ -41,14 +46,66 @@ import qualified Pate.Arch as PA
 import qualified Pate.Config as PC
 import qualified Pate.CounterExample as PCE
 import qualified Pate.Event as PE
-import qualified Pate.Loader as PL
 import qualified Pate.PPC as PPC
+import qualified Pate.Hints as PH
+import qualified Pate.Hints.CSV as PHC
+import qualified Pate.Hints.DWARF as PHD
+import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Loader as PL
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Types as PT
 
 import qualified Interactive as I
 import qualified Interactive.State as IS
+
+parseHints
+  :: LJ.LogAction IO (PE.Event arch)
+  -> CLIOptions
+  -> IO (Maybe PH.VerificationHints)
+parseHints logAction opts
+  | noHints = return Nothing
+  | otherwise = do
+      anvills <- T.forM (anvillHints opts) $ \anvillFile -> do
+        bytes <- BSL.readFile anvillFile
+        let (hints, errs) = PHJ.parseAnvillSpecHints bytes
+        case errs of
+          e1 : es -> LJ.writeLog logAction (PE.HintErrorsJSON (e1 DLN.:| es))
+          _ -> return ()
+        return hints
+
+      probs <- T.forM (maybeToList (probabilisticHints opts)) $ \probFile -> do
+        bytes <- BSL.readFile probFile
+        let (hints, errs) = PHJ.parseProbabilisticHints bytes
+        case errs of
+          e1 : es -> LJ.writeLog logAction (PE.HintErrorsJSON (e1 DLN.:| es))
+          _ -> return ()
+        return hints
+
+      csvs <- T.forM (maybeToList (csvFunctionHints opts)) $ \csvFile -> do
+        bytes <- BSL.readFile csvFile
+        let (hints, errs) = PHC.parseFunctionHints bytes
+        case errs of
+          e1 : es -> LJ.writeLog logAction (PE.HintErrorsCSV (e1 DLN.:| es))
+          _ -> return ()
+        return hints
+
+      let dwarfSource = if dwarfHints opts then [originalBinary opts] else []
+      dwarves <- T.forM dwarfSource $ \elfFile -> do
+        bytes <- BSL.readFile elfFile
+        let (hints, errs) = PHD.parseDWARFHints bytes
+        case errs of
+          e1 : es -> LJ.writeLog logAction (PE.HintErrorsDWARF (e1 DLN.:| es))
+          _ -> return ()
+        return hints
+
+      return (Just (mconcat (concat [anvills, probs, csvs, dwarves])))
+  where
+    noHints = and [ null (anvillHints opts)
+                  , isNothing (probabilisticHints opts)
+                  , isNothing (csvFunctionHints opts)
+                  , not (dwarfHints opts)
+                  ]
 
 main :: IO ()
 main = do
@@ -59,6 +116,7 @@ main = do
     Right (elfErrs, Some proxy) -> do
       chan <- CC.newChan
       (logger, mConsumer) <- startLogger proxy (logTarget opts) chan
+      mVerificationHints <- parseHints logger opts
       LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
       let
         infoPath = case blockInfo opts of
@@ -81,6 +139,7 @@ main = do
             , PC.patchedPath = patchedBinary opts
             , PC.logger = logger
             , PC.verificationCfg = verificationCfg
+            , PC.hints = mVerificationHints
             }
       PL.runEquivConfig cfg >>= \case
         Left err -> SE.die (show err)
@@ -103,6 +162,10 @@ data CLIOptions = CLIOptions
   , solver :: PS.Solver
   , goalTimeout :: PTi.Timeout
   , heuristicTimeout :: PTi.Timeout
+  , anvillHints :: [FilePath]
+  , probabilisticHints :: Maybe FilePath
+  , csvFunctionHints :: Maybe FilePath
+  , dwarfHints :: Bool
   } deriving (Eq, Ord, Read, Show)
 
 data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
@@ -189,7 +252,10 @@ layout = PP.layoutPretty PP.defaultLayoutOptions
 layoutLn :: PP.Doc ann -> PP.SimpleDocStream ann
 layoutLn doc = layout (doc <> PP.line)
 
-terminalFormatEvent :: PE.Event arch -> PP.SimpleDocStream PPRT.AnsiStyle
+ppHex :: (Integral a, Show a) => a -> PP.Doc ann
+ppHex i = PP.pretty (showHex i "")
+
+terminalFormatEvent :: (MC.MemWidth (MC.ArchAddrWidth arch)) => PE.Event arch -> PP.SimpleDocStream PPRT.AnsiStyle
 terminalFormatEvent evt =
   case evt of
     PE.LoadedBinaries {} -> layoutLn "Loaded original and patched binaries"
@@ -219,6 +285,17 @@ terminalFormatEvent evt =
           in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
     PE.ErrorRaised err -> layout (PP.pretty $ PCE.ppEquivalenceError err)
     PE.ProvenGoal _ prf _ -> layout (PP.viaShow prf)
+    PE.HintErrorsCSV errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.HintErrorsJSON errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.HintErrorsDWARF errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.FunctionEntryInvalidHints errs ->
+      layout ("Invalid function entry hints:" <> PP.line
+               <> PP.vsep [ PP.pretty fn <> "@" <> ppHex addr
+                          | (fn, addr) <- errs
+                          ])
+    PE.FunctionsDiscoveredFromHints extraAddrs ->
+      layout ("Additional functions discovered based on hits: " <> PP.line
+             <> PP.vcat (map PP.viaShow extraAddrs))
     -- FIXME: handle other events
     _ -> layout ""
 
@@ -346,3 +423,18 @@ cliOptions = OA.info (OA.helper <*> parser)
                                     <> OA.showDefault
                                     <> OA.help "The timeout for verifying heuristic goals in seconds"
                                     )))
+    <*> OA.many (OA.strOption
+        ( OA.long "anvill-hints"
+        <> OA.help "Parse an Anvill specification for code discovery hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "probabilistic-hints"
+        <> OA.help "Parse a JSON file containing probabilistic function name/address hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "csv-function-hints"
+         <> OA.help "Parse a CSV file containing function name/address hints"
+        ))
+    <*> OA.switch ( OA.long "dwarf-hints"
+                  <> OA.help "Extract hints from the unpatched DWARF binary"
+                  )

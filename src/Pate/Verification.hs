@@ -28,7 +28,8 @@ module Pate.Verification
 import           Prelude hiding ( fail )
 
 import           GHC.Stack ( HasCallStack )
-import           Control.Monad ( void )
+import qualified Control.Concurrent.Async as CCA
+import           Control.Monad ( void, unless )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
@@ -43,7 +44,7 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import qualified Data.Functor.Compose as DFC
 import qualified Data.List as DL
-import           Data.Maybe (catMaybes)
+import           Data.Maybe ( catMaybes, maybeToList )
 import qualified Data.Map as M
 import           Data.Proxy ( Proxy(..) )
 import           Data.Set (Set)
@@ -96,6 +97,7 @@ import qualified Pate.Discovery as PD
 import           Pate.Equivalence
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Hints as PH
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
@@ -106,26 +108,77 @@ import qualified Pate.Solver as PS
 import           Pate.Types
 import           What4.ExprHelpers
 
+-- | We run discovery in parallel, since we need to run it two or three times
+--
+-- Currently, we run discovery twice on the original binary: once without
+-- hints and again if hints are available.
+--
+-- We report any errors in the hints:
+--
+-- * Hints that point to non-code data (bad)
+--
+-- * Hints not appearing in our discovery (good)
+--
+-- We use the hinted results (if any)
+runDiscovery
+  :: (PA.ValidArch arch)
+  => LJ.LogAction IO (PE.Event arch)
+  -> Maybe PH.VerificationHints
+  -> PB.LoadedELF arch
+  -> PB.LoadedELF arch
+  -> CME.ExceptT (EquivalenceError arch) IO (MM.ArchSegmentOff arch, ParsedFunctionMap arch, MM.ArchSegmentOff arch, ParsedFunctionMap arch)
+runDiscovery logAction mhints elf elf' = do
+  let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
+  origDiscovery <- discoverAsync elf mempty
+  mHintedDiscovery <- DT.traverse (discoverAsync elf) mhints
+  patchedDiscovery <- discoverAsync elf' mempty
+  (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
+  (_, pMain, pPfm) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
+  (oMain, oPfm) <- case mHintedDiscovery of
+    Nothing -> return (oMainUnhinted, oPfmUnhinted)
+    Just hintedDiscovery -> do
+      (hintErrors, oMain, oPfm) <- CME.liftEither =<< liftIO (CCA.wait hintedDiscovery)
+      unless (null hintErrors) $ do
+        let invalidSet = S.fromList hintErrors
+        let invalidEntries = [ (name, addr)
+                             | hints <- maybeToList mhints
+                             , (name, addr) <- PH.functionEntries hints
+                             , S.member addr invalidSet
+                             ]
+        liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints invalidEntries)
+
+      let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfmUnhinted)
+      let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfm)
+      let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
+      unless (S.null newAddrs) $ do
+        liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints (F.toList newAddrs))
+
+      return (oMain, oPfm)
+
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
+  return (oMain, oPfm, pMain, pPfm)
+
+
 -- | Verify equality of the given binaries.
 verifyPairs ::
   forall arch.
   PA.ValidArch arch =>
   LJ.LogAction IO (PE.Event arch) ->
+  Maybe PH.VerificationHints ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   BlockMapping arch ->
   PC.VerificationConfig ->
   [PatchPair arch] ->
   CME.ExceptT (EquivalenceError arch) IO Bool
-verifyPairs logAction elf elf' blockMap vcfg pPairs = do
+verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> CME.throwError $ equivalenceError UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  (oMain, oPfm)  <- PD.runDiscovery elf
-  (pMain, pPfm) <- PD.runDiscovery elf'
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
+
+  (oMain, oPfm, pMain, pPfm) <- runDiscovery logAction mhints elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
