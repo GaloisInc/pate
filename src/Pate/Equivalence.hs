@@ -84,6 +84,7 @@ import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Interface as W4
 
+import qualified Pate.Arch as PA
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
@@ -302,7 +303,7 @@ equalValuesIO sym entry1 entry2 = case (PSR.macawRegRepr entry1, PSR.macawRegRep
 -- Explicitly ignores the region of the stack pointer register, as this is checked elsewhere.
 registerEquivalence ::
   forall sym arch.
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
   sym ->
   RegEquivRelation sym arch
@@ -322,7 +323,7 @@ registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
 stateEquivalence ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   sym ->
   -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->

@@ -82,16 +82,15 @@ import qualified Lang.Crucible.Simulator.GlobalState as CGS
 import qualified Lang.Crucible.Types as CT
 
 import qualified What4.BaseTypes as WT
-import qualified What4.Config as W4C
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.ProgramLoc as W4L
-import qualified What4.Solver as WS
-import qualified What4.Solver.Yices as W4Y
 import qualified What4.Symbol as WS
 import qualified What4.SatResult as W4R
 
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
+import qualified Pate.Config as PC
 import           Pate.CounterExample
 import qualified Pate.Discovery as PD
 import           Pate.Equivalence
@@ -103,24 +102,19 @@ import           Pate.Monad
 import qualified Pate.Proof as PP
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PS
 import           Pate.Types
 import           What4.ExprHelpers
-
--- | The timeout used for SAT checks that we can't really allow to fail
---
--- FIXME: Make this configurable
-standardTimeout :: Timeout
-standardTimeout = Minutes 5
 
 -- | Verify equality of the given binaries.
 verifyPairs ::
   forall arch.
-  ValidArch arch =>
+  PA.ValidArch arch =>
   LJ.LogAction IO (PE.Event arch) ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
   BlockMapping arch ->
-  VerificationConfig ->
+  PC.VerificationConfig ->
   [PatchPair arch] ->
   CME.ExceptT (EquivalenceError arch) IO Bool
 verifyPairs logAction elf elf' blockMap vcfg pPairs = do
@@ -134,12 +128,7 @@ verifyPairs logAction elf elf' blockMap vcfg pPairs = do
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
-  let cfg = W4.getConfiguration sym
-  liftIO $ W4C.extendConfig W4Y.yicesOptions cfg
-
-  -- FIXME: We can set more granular timeouts for different types of goals now
-  -- timeout <- liftIO $ W4C.getOptionSetting W4Y.yicesGoalTimeout cfg
-  -- void $ liftIO $ W4C.setOpt timeout 5
+  adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
 
   eval <- CMT.lift (MS.withArchEval vals sym pure)
   model <- CMT.lift (MT.mkMemTraceVar @arch ha)
@@ -191,11 +180,7 @@ verifyPairs logAction elf elf' blockMap vcfg pPairs = do
       , envBaseEquiv = stateEquivalence sym stackRegion
       , envFailureMode = ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
-
-        -- FIXME: Make the adapter a parameter (it might need to be an
-      -- un-typed ADT that makes the choice here, as the st parameter won't be
-      -- in scope in the function arguments
-      , envValidSym = Sym sym WS.yicesAdapter
+      , envValidSym = Sym sym adapter
       , envStartTime = startedAt
       , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
       -- TODO: restructure EquivEnv to avoid this
@@ -257,7 +242,7 @@ runVerificationLoop env pPairs = do
   where
     doVerify :: EquivM sym arch EquivalenceStatistics
     doVerify = do
-      pPairs' <- ifConfig (not . cfgPairMain) (return pPairs) $ do
+      pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
         mainO <- CMR.asks $ binEntry . originalCtx . envCtx
         mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
         blkO <- PD.mkConcreteBlock BlockEntryInitFunction mainO
@@ -281,7 +266,7 @@ runVerificationLoop env pPairs = do
       CMS.modify' $ \st -> st { stEqStats = normResult <> (stEqStats st) }
 
 ifConfig ::
-  (VerificationConfig -> Bool) ->
+  (PC.VerificationConfig -> Bool) ->
   EquivM sym arch a ->
   EquivM sym arch a ->
   EquivM sym arch a
@@ -315,13 +300,13 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   -- TODO: it's unclear how fine-grained to make this, or if it's even
   -- a good idea, but it makes the tests finish in about 1/3 the time
   let doProof = provePostcondition pPair postcondSpec
-  proof <- ifConfig cfgComputeEquivalenceFrames doProof $ do
+  proof <- ifConfig PC.cfgComputeEquivalenceFrames doProof $ do
     result <- manifestError $ doProof
     -- if the previous attempt fails, fall back to intelligent precondition
     -- propagation
     case result of
       Left _ ->
-        CMR.local (\env -> env { envConfig = (envConfig env){cfgComputeEquivalenceFrames = True} }) $
+        CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
       Right spec -> return spec
 
@@ -333,7 +318,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     (_, proofBody) <- liftIO $ bindSpec sym stO stP proof
     preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond (PP.prfBodyPre proofBody)
     -- prove that the generated precondition is implied by the given precondition
-    isPredTrue standardTimeout preImpliesGen >>= \case
+    goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+    isPredTrue goalTimeout preImpliesGen >>= \case
       True -> return ()
       False -> throwHere ImpossibleEquivalence
 
@@ -346,7 +332,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   vsym <- CMR.asks envValidSym
   blocks <- PD.getBlocks pPair
 
-  ifConfig (not . cfgEmitProofs) (return ()) $ do
+  ifConfig (not . PC.cfgEmitProofs) (return ()) $ do
     emitEvent (PE.ProvenGoal blocks (PP.SomeProofGoal vsym triple proof))
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
@@ -704,7 +690,8 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     noResult = BranchCase (W4.truePred sym) falseTriple
 
   -- if we have a "return" exit, prove that it satisfies the postcondition
-  precondReturn <- withSatAssumption standardTimeout noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  precondReturn <- withSatAssumption goalTimeout noResult (matchingExits bundle MS.MacawBlockEndReturn) $ do
     proveLocalPostcondition bundle postcondSpec
   let
     -- for simplicitly, we drop the condition on the return case, and assume
@@ -719,7 +706,8 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
     isFail <- matchingExits bundle MS.MacawBlockEndFail
     isBranch <- matchingExits bundle MS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
-  precondUnknown <- withSatAssumption standardTimeout noResult (return isUnknown) $ do
+
+  precondUnknown <- withSatAssumption goalTimeout noResult (return isUnknown) $ do
     blocks <- PD.getBlocks (simPair bundle)
     emitWarning blocks BlockEndClassificationFailure
     univDom <- universalDomainSpec
@@ -744,7 +732,7 @@ provePostcondition' bundle postcondSpec = withSym $ \sym -> do
 withNoFrameGuessing ::
   Bool -> EquivM_ sym arch f -> EquivM_ sym arch f
 withNoFrameGuessing True f =
-  CMR.local (\env -> env { envConfig = (envConfig env){cfgComputeEquivalenceFrames = False} }) f
+  CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = False} }) f
 withNoFrameGuessing False f = f
 
 simplifySubPreds ::
@@ -798,8 +786,9 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- PD.getBlocks $ simPair bundle
 
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   result <- startTimer $ withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ do
-    checkSatisfiableWithModel standardTimeout "check" notChecks $ \satRes -> do
+    checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
       case satRes of
         W4R.Unsat _ -> do
           emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
@@ -876,7 +865,7 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
   mapMemPred cells $ \cell p -> maybeEqualAt bundle cell p >>= \case
-    True -> ifConfig (not . cfgComputeEquivalenceFrames) (return polarity) $ do
+    True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (return polarity) $ do
       let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       p' <- bindMemory memP memP' p
       -- clobber the "patched" memory at exactly this cell
@@ -889,7 +878,8 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
       -- see if we can prove that the goal is independent of this clobbering
       asm <- liftIO $ allPreds sym [p, p', eqMemP, goal]
       check <- liftIO $ W4.impliesPred sym asm goal'
-      isPredTrue' (Seconds 5) check >>= \case
+      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+      isPredTrue' heuristicTimeout check >>= \case
         True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
         False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
     False -> liftIO $ W4.notPred sym polarity
@@ -909,8 +899,10 @@ maybeEqualAt bundle cell@(PMC.MemCell{}) cond = withSym $ \sym -> do
   valO <- liftIO $ PMC.readMemCell sym memO cell
   valP <- liftIO $ PMC.readMemCell sym memP cell
   ptrsEq <- liftIO $ MT.llvmPtrEq sym valO valP
+
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   withAssumption_ (return cond) $
-    isPredSat standardTimeout ptrsEq
+    isPredSat goalTimeout ptrsEq
   where
     memO = simInMem $ simInO bundle
     memP = simInMem $ simInP bundle
@@ -922,8 +914,9 @@ simplifyPred ::
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
 simplifyPred p = withSym $ \sym -> do
-  isPredSat (Seconds 5) p >>= \case
-    True -> isPredTrue' (Seconds 5) p >>= \case
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  isPredSat heuristicTimeout p >>= \case
+    True -> isPredTrue' heuristicTimeout p >>= \case
       True -> return $ W4.truePred sym
       False -> return p
     False -> return $ W4.falsePred sym
@@ -991,16 +984,17 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
         -- However our equivalence relation is not strong enough to handle mismatches in
         -- values written to memory that happen to be stack addresses, if those
         -- addresses were computed with different stack bases.
-        RegSP -> ifConfig cfgComputeEquivalenceFrames exclude include
+        RegSP -> ifConfig PC.cfgComputeEquivalenceFrames exclude include
         _ | isInO || isInP ->
-          ifConfig (not . cfgComputeEquivalenceFrames) include $ do
+          ifConfig (not . PC.cfgComputeEquivalenceFrames) include $ do
             (isFreshValid, freshO) <- freshRegEntry (pPatched $ simPair bundle) r vO
 
             goal' <- bindMacawReg vO freshO goal
             goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
 
+            heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
             withAssumption_ (return isFreshValid) $
-              isPredTrue' (Seconds 5) goalIgnoresReg >>= \case
+              isPredTrue' heuristicTimeout goalIgnoresReg >>= \case
                 True -> exclude
                 False -> include
         _ -> return Nothing
@@ -1123,7 +1117,7 @@ functionSegOffs pPair = do
   PE.BlocksPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- PD.getBlocks pPair
   return $ (MD.pblockAddr pblkO, MD.pblockAddr pblkP)
 
-getCurrentTOCs :: HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
+getCurrentTOCs :: PA.HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
 getCurrentTOCs = do
   (tocO, tocP) <- CMR.asks envTocs
   curFuncs <- CMR.asks envCurrentFunc
@@ -1367,7 +1361,9 @@ checkCasesTotal bundle cases = withSym $ \sym -> do
     liftIO $ anyPred sym casePreds
 
   notCheck <- liftIO $ W4.notPred sym someCase
-  result <- startTimer $ checkSatisfiableWithModel (Minutes 10) "checkCasesTotal" notCheck $ \satRes -> do
+
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  result <- startTimer $ checkSatisfiableWithModel goalTimeout "checkCasesTotal" notCheck $ \satRes -> do
     let
       emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)
     case satRes of

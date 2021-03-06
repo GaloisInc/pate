@@ -53,11 +53,12 @@ import qualified Data.Macaw.CFG as MM
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Pate.Types as PT
+import qualified Pate.Arch as PA
 import qualified Pate.Equivalence as PE
+import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
-import qualified Pate.ExprMappable as PEM
+import qualified Pate.Types as PT
 
 import qualified What4.Interface as W4
 
@@ -166,13 +167,13 @@ prfPre = PS.specMap prfBodyPre
 data SomeProofBlockSlice arch where
   SomeProofBlockSlice ::
     PT.Sym sym -> ProofBlockSlice sym arch -> SomeProofBlockSlice arch
-instance PT.ValidArch arch => Show (SomeProofBlockSlice arch) where
+instance PA.ValidArch arch => Show (SomeProofBlockSlice arch) where
   show (SomeProofBlockSlice vsym prf) = show (ppProofBlockSlice vsym prf)
 
 
 data SomeProofGoal arch where
   SomeProofGoal ::
-    PT.ValidArch arch =>
+    PA.ValidArch arch =>
     PT.Sym sym ->
     EquivTriple sym arch ->
     ProofBlockSlice sym arch ->
@@ -193,7 +194,7 @@ ppMaybe Nothing _ = PP.emptyDoc
 
 
 ppProofGoal ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.Sym sym ->
   EquivTriple sym arch ->
   ProofBlockSlice sym arch ->
@@ -208,7 +209,7 @@ ppProofGoal vsym triple prf =
     ]
 
 ppProofBlockSlice ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.Sym sym ->
   ProofBlockSlice sym arch ->
   ProofDoc
@@ -243,7 +244,7 @@ ppProofBlockSlice vsym prf =
 -- are used when describing the triple that proves this function call
 -- is valid
 ppProofFunctionCallSpec ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.Sym sym ->
   PS.SimSpec sym arch (ProofFunctionCall sym arch) ->
   ProofDoc
@@ -272,7 +273,7 @@ ppProofFunctionCallSpec vsym prfCallSpec =
 
 
 
-ppEquivTriple :: PT.ValidArch arch => PT.Sym sym -> EquivTriple sym arch -> ProofDoc
+ppEquivTriple :: PA.ValidArch arch => PT.Sym sym -> EquivTriple sym arch -> ProofDoc
 ppEquivTriple vsym triple =
   PP.vsep
     [ "Pre-domain:"
@@ -285,7 +286,7 @@ ppEquivTriple vsym triple =
 
 ppStatePredSpec ::
   forall sym arch.
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.Sym sym ->
   PE.StatePredSpec sym arch ->
   ProofDoc
@@ -350,7 +351,7 @@ ppStatePredSpec vsym@(PT.Sym _ _) stpred =
 ppExpr :: PT.Sym sym -> W4.SymExpr sym tp -> ProofDoc
 ppExpr (PT.Sym _ _) e = PP.pretty $ showF e
 
-ppPatchPairReturn :: PT.ValidArch arch => PT.PatchPair arch -> ProofDoc
+ppPatchPairReturn :: PA.ValidArch arch => PT.PatchPair arch -> ProofDoc
 ppPatchPairReturn pPair =
   PP.hsep
     [ PP.parens (PP.pretty (PT.ppBlock (PT.pOrig pPair)) <+> "-> return")
@@ -358,7 +359,7 @@ ppPatchPairReturn pPair =
     , PP.parens (PP.pretty (PT.ppBlock (PT.pPatched pPair)) <+> "-> return")
     ]
 
-ppPatchPairTarget :: PT.ValidArch arch => PT.PatchPair arch -> PT.PatchPair arch -> ProofDoc
+ppPatchPairTarget :: PA.ValidArch arch => PT.PatchPair arch -> PT.PatchPair arch -> ProofDoc
 ppPatchPairTarget srcPair tgtPir =
   PP.hsep
     [ PP.parens (PP.pretty (PT.ppBlock (PT.pOrig srcPair)) <+> "->" <+> PP.pretty (PT.ppBlock (PT.pOrig tgtPir)))

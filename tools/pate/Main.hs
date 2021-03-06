@@ -37,11 +37,15 @@ import qualified Data.ElfEdit as DEE
 import           Data.Parameterized.Some ( Some(..) )
 
 import qualified Pate.AArch32 as AArch32
-import qualified Pate.Event as PE
-import qualified Pate.PPC as PPC
-import qualified Pate.Loader as PL
-import qualified Pate.Types as PT
+import qualified Pate.Arch as PA
+import qualified Pate.Config as PC
 import qualified Pate.CounterExample as PCE
+import qualified Pate.Event as PE
+import qualified Pate.Loader as PL
+import qualified Pate.PPC as PPC
+import qualified Pate.Solver as PS
+import qualified Pate.Timeout as PTi
+import qualified Pate.Types as PT
 
 import qualified Interactive as I
 import qualified Interactive.State as IS
@@ -59,21 +63,24 @@ main = do
       let
         infoPath = case blockInfo opts of
           Just path -> Left path
-          Nothing -> Right PL.noPatchData
+          Nothing -> Right PC.noPatchData
         verificationCfg =
-          PT.defaultVerificationCfg
-            { PT.cfgPairMain = not $ noPairMain opts
-            , PT.cfgDiscoverFuns = not $ noDiscoverFuns opts
-            , PT.cfgComputeEquivalenceFrames = not $ trySimpleFrames opts
-            , PT.cfgEmitProofs = not $ noProofs opts
+          PC.defaultVerificationCfg
+            { PC.cfgPairMain = not $ noPairMain opts
+            , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
+            , PC.cfgComputeEquivalenceFrames = not $ trySimpleFrames opts
+            , PC.cfgEmitProofs = not $ noProofs opts
+            , PC.cfgSolver = solver opts
+            , PC.cfgHeuristicTimeout = heuristicTimeout opts
+            , PC.cfgGoalTimeout = goalTimeout opts
             }
-        cfg = PL.RunConfig
-            { PL.archProxy = proxy
-            , PL.infoPath = infoPath
-            , PL.origPath = originalBinary opts
-            , PL.patchedPath = patchedBinary opts
-            , PL.logger = logger
-            , PL.verificationCfg = verificationCfg
+        cfg = PC.RunConfig
+            { PC.archProxy = proxy
+            , PC.infoPath = infoPath
+            , PC.origPath = originalBinary opts
+            , PC.patchedPath = patchedBinary opts
+            , PC.logger = logger
+            , PC.verificationCfg = verificationCfg
             }
       PL.runEquivConfig cfg >>= \case
         Left err -> SE.die (show err)
@@ -93,6 +100,9 @@ data CLIOptions = CLIOptions
   , noDiscoverFuns :: Bool
   , noProofs :: Bool
   , trySimpleFrames :: Bool
+  , solver :: PS.Solver
+  , goalTimeout :: PTi.Timeout
+  , heuristicTimeout :: PTi.Timeout
   } deriving (Eq, Ord, Read, Show)
 
 data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
@@ -117,11 +127,11 @@ data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
 --
 -- Otherwise, just make a basic logger that will write logs to a user-specified
 -- location
-startLogger :: PL.ValidArchProxy arch
+startLogger :: PA.ValidArchProxy arch
             -> LogTarget
             -> CC.Chan (Maybe (PE.Event arch))
             -> IO (LJ.LogAction IO (PE.Event arch), Maybe (CCA.Async ()))
-startLogger PL.ValidArchProxy lt chan =
+startLogger PA.ValidArchProxy lt chan =
   case lt of
     NullLogger -> return (LJ.LogAction $ \_ -> return (), Nothing)
     StdoutLogger -> logToHandle IO.stdout
@@ -220,7 +230,7 @@ data LoadError where
 deriving instance Show LoadError
 
 -- | Examine the input files to determine the architecture
-archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PL.ValidArchProxy))
+archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PA.ValidArchProxy))
 archToProxy origBinaryPath patchedBinaryPath = do
   origBin <- BS.readFile origBinaryPath
   patchedBin <- BS.readFile patchedBinaryPath
@@ -242,12 +252,12 @@ archToProxy origBinaryPath patchedBinaryPath = do
       | otherwise ->
         return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
 
-machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PL.ValidArchProxy)
+machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.ValidArchProxy)
 machineToProxy em =
   case em of
-    DEE.EM_PPC -> Right (Some (PL.ValidArchProxy @PPC.PPC32))
-    DEE.EM_PPC64 -> Right (Some (PL.ValidArchProxy @PPC.PPC64))
-    DEE.EM_ARM -> Right (Some (PL.ValidArchProxy @AArch32.AArch32))
+    DEE.EM_PPC -> Right (Some (PA.ValidArchProxy @PPC.PPC32))
+    DEE.EM_PPC64 -> Right (Some (PA.ValidArchProxy @PPC.PPC64))
+    DEE.EM_ARM -> Right (Some (PA.ValidArchProxy @AArch32.AArch32))
     _ -> Left (UnsupportedArchitecture em)
 
 
@@ -321,3 +331,18 @@ cliOptions = OA.info (OA.helper <*> parser)
       (  OA.long "try-simple-frames"
       <> OA.help "Attempt simple frame propagation first, falling back to heuristic analysis upon failure."
       ))
+    <*> OA.option OA.auto (OA.long "solver"
+                    <> OA.help "The SMT solver to use to solve verification conditions. One of CVC4, Yices, or Z3"
+                    <> OA.value PS.Yices
+                    <> OA.showDefault
+                  )
+    <*> (PTi.Seconds <$> (OA.option OA.auto (OA.long "goal-timeout"
+                                    <> OA.value 300
+                                    <> OA.showDefault
+                                    <> OA.help "The timeout for verifying individual goals in seconds"
+                                    )))
+    <*> (PTi.Seconds <$> (OA.option OA.auto (OA.long "heuristic-timeout"
+                                    <> OA.value 10
+                                    <> OA.showDefault
+                                    <> OA.help "The timeout for verifying heuristic goals in seconds"
+                                    )))

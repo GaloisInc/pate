@@ -48,9 +48,11 @@ import qualified What4.Interface as WI
 import qualified What4.Partial as WP
 import qualified What4.SatResult as WR
 
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
-import qualified Pate.Event as PE
+import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
+import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.SimState as PSS
@@ -84,7 +86,8 @@ discoverPairs bundle = do
     DT.forM allCalls $ \(blktO, blktP) -> do
       matches <- matchesBlockTarget bundle blktO blktP
       check <- withSymIO $ \sym -> WI.andPred sym precond matches
-      startTimer $ checkSatisfiableWithModel (Minutes 1) "check" check $ \satRes -> do
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      startTimer $ checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
         let
           emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
         case satRes of
@@ -207,7 +210,7 @@ getSubBlocks b = withBinary @bin $ do
 concreteValidJumpTargets ::
   forall bin sym arch ids.
   KnownBinary bin =>
-  ValidArch arch =>
+  PA.ValidArch arch =>
   [MD.ParsedBlock arch ids] ->
   MD.ParsedBlock arch ids ->
   EquivM sym arch [BlockTarget arch bin]
@@ -255,14 +258,14 @@ mkConcreteBlock' ::
 mkConcreteBlock' k a = ConcreteBlock a k WI.knownRepr
 
 concreteNextIPs ::
-  ValidArch arch =>
+  PA.ValidArch arch =>
   MC.RegState (MC.ArchReg arch) (MC.Value arch ids) ->
   [ConcreteAddress arch]
 concreteNextIPs st = concreteValueAddress $ st ^. MC.curIP
 
 concreteValueAddress ::
   forall arch ids.
-  ValidArch arch =>
+  PA.ValidArch arch =>
   MC.Value arch ids (MT.BVType (MC.ArchAddrWidth arch)) ->
   [ConcreteAddress arch]
 concreteValueAddress = \case
@@ -278,7 +281,7 @@ concreteValueAddress = \case
 concreteJumpTargets ::
   forall bin sym arch ids.
   KnownBinary bin =>
-  ValidArch arch =>
+  PA.ValidArch arch =>
   MD.ParsedBlock arch ids ->
   EquivM sym arch [BlockTarget arch bin]
 concreteJumpTargets pb = case MD.pblockTermStmt pb of
@@ -312,7 +315,7 @@ concreteJumpTargets pb = case MD.pblockTermStmt pb of
 -- Driving macaw to generate the initial block map
 
 runDiscovery ::
-  ValidArch arch =>
+  PA.ValidArch arch =>
   PB.LoadedELF arch ->
   CME.ExceptT (EquivalenceError arch) IO (MM.MemSegmentOff (MC.ArchAddrWidth arch), ParsedFunctionMap arch)
 runDiscovery elf = do
@@ -336,7 +339,7 @@ runDiscovery elf = do
     ]
 
 archSegmentOffToInterval ::
-  (ValidArch arch, CME.MonadError (EquivalenceError arch) m) =>
+  (PA.ValidArch arch, CME.MonadError (EquivalenceError arch) m) =>
   MC.ArchSegmentOff arch ->
   Int ->
   m (IM.Interval (ConcreteAddress arch))
