@@ -523,10 +523,7 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
       W4.Pred sym ->
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
       IO (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
-    freshWrite cell@(PMC.MemCell{}) cond mem = do
-      let
-        ptr = PMC.cellPtr cell
-        repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
+    freshWrite cell@(PMC.MemCell{}) cond mem =
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do

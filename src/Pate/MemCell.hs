@@ -33,7 +33,6 @@ import           GHC.TypeLits ( type (<=) )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified What4.Interface as WI
 
-import qualified Pate.SimState as PS
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
 import qualified What4.ExprHelpers as WEH

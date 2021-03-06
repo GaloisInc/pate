@@ -350,16 +350,6 @@ ppStatePredSpec vsym@(PT.Sym _ _) stpred =
 ppExpr :: PT.Sym sym -> W4.SymExpr sym tp -> ProofDoc
 ppExpr (PT.Sym _ _) e = PP.pretty $ showF e
 
-ppPatchPair :: PT.ValidArch arch => PT.PatchPair arch -> ProofDoc
-ppPatchPair pPair =
-  PP.hsep
-    [ "Original:" 
-    , PP.pretty $ PT.ppBlock (PT.pOrig pPair)
-    , "vs."
-    , "Patched:"
-    , PP.pretty $ PT.ppBlock (PT.pPatched pPair)
-    ]
-
 ppPatchPairReturn :: PT.ValidArch arch => PT.PatchPair arch -> ProofDoc
 ppPatchPairReturn pPair =
   PP.hsep
