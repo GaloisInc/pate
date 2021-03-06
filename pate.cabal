@@ -58,8 +58,7 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Pate,
-                       Pate.Binary,
+  exposed-modules:     Pate.Binary,
                        Pate.Discovery,
                        Pate.Verification,
                        Pate.Loader,
