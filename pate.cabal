@@ -18,6 +18,7 @@ extra-source-files:  CHANGELOG.md
 
 common shared
   build-depends:       base >= 4.10 && < 5,
+                       async >= 2.2 && < 2.3,
                        bv-sized >= 1 && < 1.1,
                        bytestring >= 0.9 && < 0.12,
                        containers >= 0.5 && < 0.7,
@@ -161,7 +162,7 @@ executable pate-exec
                        Interactive,
                        Interactive.State
   hs-source-dirs:      tools/pate tools arch
-  build-depends:       async >= 2.2 && < 2.3,
+  build-depends:       async,
                        prettyprinter,
                        prettyprinter-ansi-terminal >= 1.1 && < 1.2,
                        utf8-string >= 1 && < 2,

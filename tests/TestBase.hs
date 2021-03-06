@@ -101,6 +101,7 @@ doTest mwb sv proxy@PL.ValidArchProxy fp = do
       , PL.infoPath = infoPath
       , PL.origPath = fp <.> "original" <.> "exe"
       , PL.patchedPath = fp <.> "patched" <.> "exe"
+      , PL.hints = Nothing
       , PL.verificationCfg =
 
           PT.defaultVerificationCfg { PT.cfgComputeEquivalenceFrames = computeFrames }
