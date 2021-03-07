@@ -20,6 +20,8 @@ import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import qualified Test.Tasty.ExpectedFailure as T
 
+import qualified Pate.Arch as PA
+import qualified Pate.Config as PC
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
 import qualified Pate.Event as PE
@@ -28,7 +30,7 @@ import qualified Pate.CounterExample as PCE
 data TestConfig where
   TestConfig ::
     { testArchName :: String
-    , testArchProxy :: PL.ValidArchProxy arch
+    , testArchProxy :: PA.ValidArchProxy arch
     , testExpectEquivalenceFailure :: [String]
     -- ^ tests which are failing now but eventually should succeed
     , testExpectSelfEquivalenceFailure :: [String]
@@ -85,27 +87,26 @@ doTest ::
   forall arch bin.
   Maybe (PT.WhichBinaryRepr bin) ->
   ShouldVerify ->
-  PL.ValidArchProxy arch ->
+  PA.ValidArchProxy arch ->
   FilePath ->
   IO ()
-doTest mwb sv proxy@PL.ValidArchProxy fp = do
+doTest mwb sv proxy@PA.ValidArchProxy fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
   let
-    infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PL.noPatchData
+    infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PC.noPatchData
     -- avoid frame computations for self-tests
     computeFrames = case mwb of
       Just _ -> False
       Nothing -> True
-    rcfg = PL.RunConfig
-      { PL.archProxy = proxy
-      , PL.infoPath = infoPath
-      , PL.origPath = fp <.> "original" <.> "exe"
-      , PL.patchedPath = fp <.> "patched" <.> "exe"
-      , PL.hints = Nothing
-      , PL.verificationCfg =
-
-          PT.defaultVerificationCfg { PT.cfgComputeEquivalenceFrames = computeFrames }
-      , PL.logger =
+    rcfg = PC.RunConfig
+      { PC.archProxy = proxy
+      , PC.infoPath = infoPath
+      , PC.origPath = fp <.> "original" <.> "exe"
+      , PC.patchedPath = fp <.> "patched" <.> "exe"
+      , PC.hints = Nothing
+      , PC.verificationCfg =
+          PC.defaultVerificationCfg { PC.cfgComputeEquivalenceFrames = computeFrames }
+      , PC.logger =
           LJ.LogAction $ \e -> case e of
             PE.AnalysisStart pPair -> do
               putStrLn $ concat $

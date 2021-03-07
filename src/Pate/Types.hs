@@ -24,9 +24,7 @@
 {-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Types
-  ( VerificationConfig(..)
-  , defaultVerificationCfg
-  , PatchPair(..)
+  ( PatchPair(..)
   , ConcreteBlock(..)
   , getConcreteBlock
   , blockMemAddr
@@ -47,10 +45,6 @@ module Pate.Types
   , Original
   , Patched
   , WhichBinaryRepr(..)
-  , ValidArch(..)
-  , HasTOCReg(..)
-  , HasTOCDict(..)
-  , withTOCCases
   , ValidSym
   , Sym(..)
   , RegisterDiff(..)
@@ -104,7 +98,6 @@ import qualified Data.Set as S
 import           Data.Typeable
 import           Numeric.Natural
 import           Numeric
-import qualified Data.ElfEdit as E
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -115,10 +108,7 @@ import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..)) 
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 
@@ -127,29 +117,8 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Solver as WS
 
-import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Arch as PA
 import           What4.ExprHelpers
-
-----------------------------------
--- Verification configuration
-data VerificationConfig =
-  VerificationConfig
-    { cfgPairMain :: Bool
-    -- ^ start by pairing the entry points of the binaries
-    , cfgDiscoverFuns :: Bool
-    -- ^ discover additional functions pairs during analysis
-    , cfgComputeEquivalenceFrames :: Bool
-    -- ^ compute fine-grained equivalence frames using heuristics
-    -- if false, pre-domains will simply be computed as any possible
-    -- relevant state. A failed result in this mode will fallback
-    -- to attempting to use fine-grained domains.
-    , cfgEmitProofs :: Bool
-    -- ^ emit a structured spine of the equivalence proofs
-    }
-
-defaultVerificationCfg :: VerificationConfig
-defaultVerificationCfg = VerificationConfig True True True True
-
 
 ----------------------------------
 
@@ -531,7 +500,7 @@ data RegisterCase arch tp where
   -- | stack pointer
   RegSP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | table of contents register (if defined)
-  RegTOC :: HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
+  RegTOC :: PA.HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | non-specific bitvector (zero-region pointer) register
   RegBV :: RegisterCase arch (CLM.LLVMPointerType w)
   -- | non-specific pointer register
@@ -541,7 +510,7 @@ data RegisterCase arch tp where
   
 registerCase ::
   forall arch tp.
-  ValidArch arch =>
+  PA.ValidArch arch =>
   CC.TypeRepr (MS.ToCrucibleType tp) ->
   MM.ArchReg arch tp ->
   RegisterCase arch (MS.ToCrucibleType tp)
@@ -549,14 +518,14 @@ registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
   Just Refl -> RegIP
   _ -> case testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
     Just Refl -> RegSP
-    _ -> withTOCCases @arch nontoc $
-      case testEquality r (toc_reg @arch) of
+    _ -> PA.withTOCCases (Proxy @arch) nontoc $
+      case testEquality r (PA.toc_reg @arch) of
         Just Refl -> RegTOC
         _ -> nontoc
   where
     nontoc :: RegisterCase arch (MS.ToCrucibleType tp)
     nontoc = case repr of
-      CLM.LLVMPointerRepr{} -> case rawBVReg r of
+      CLM.LLVMPointerRepr{} -> case PA.rawBVReg r of
         True -> RegBV
         False -> RegGPtr
       _ -> RegElse
@@ -572,35 +541,6 @@ zipRegStates regs1 regs2 f = do
   return $ map (\(MapF.Pair _ (Const v)) -> v) $ MapF.toList $ MM.regStateMap regs'
 
 ----------------------------------
-
-class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where
-  toc_reg :: MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch)))
-
-data HasTOCDict arch where
-  HasTOCDict :: HasTOCReg arch => HasTOCDict arch
-
-class
-  ( Typeable arch
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , MS.SymArchConstraints arch
-  , MS.GenArchInfo MT.MemTraceK arch
-  , MM.ArchConstraints arch
-  ) => ValidArch arch where
-  -- | an optional witness that the architecture has a table of contents
-  tocProof :: Maybe (HasTOCDict arch)
-  -- | Registers which are used for "raw" bitvectors (i.e. they are not
-  -- used for pointers). These are assumed to always have region 0.
-  rawBVReg :: forall tp. MM.ArchReg arch tp -> Bool
-
-withTOCCases ::
-  forall arch a.
-  ValidArch arch =>
-  a ->
-  ((HasTOCReg arch, TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))) => a) ->
-  a
-withTOCCases noToc hasToc = case tocProof @arch of
-  Just HasTOCDict -> hasToc
-  Nothing -> noToc
 
 type ValidSym sym =
   ( W4.IsExprBuilder sym
@@ -654,7 +594,7 @@ deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch
 
 data EquivalenceError arch where
   EquivalenceError ::
-    ValidArch arch =>
+    PA.ValidArch arch =>
       { errWhichBinary :: Maybe (Some WhichBinaryRepr)
       , errStackTrace :: Maybe CallStack
       , errEquivError :: InnerEquivalenceError arch
@@ -668,7 +608,7 @@ instance Show (EquivalenceError arch) where
 
 instance (Typeable arch, MS.SymArchConstraints arch) => Exception (EquivalenceError arch)
 
-equivalenceError :: ValidArch arch => InnerEquivalenceError arch -> EquivalenceError arch
+equivalenceError :: PA.ValidArch arch => InnerEquivalenceError arch -> EquivalenceError arch
 equivalenceError err = EquivalenceError
   { errWhichBinary = Nothing
   , errStackTrace = Nothing
