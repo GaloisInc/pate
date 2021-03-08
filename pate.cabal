@@ -15,6 +15,8 @@ maintainer:          tristan@galois.com, dmatichuk@galois.com
 category:            Verification
 build-type:          Simple
 extra-source-files:  CHANGELOG.md
+                     tools/pate/static/*.css
+                     tools/pate/static/*.js
 
 common shared
   build-depends:       base >= 4.10 && < 5,
@@ -166,6 +168,7 @@ executable pate-exec
                        Interactive.State
   hs-source-dirs:      tools/pate tools arch
   build-depends:       async,
+                       temporary >= 1 && < 2,
                        prettyprinter,
                        prettyprinter-ansi-terminal >= 1.1 && < 1.2,
                        utf8-string >= 1 && < 2,

@@ -10,6 +10,7 @@ module Interactive (
   newState
   ) where
 
+import qualified Data.ByteString as BS
 import qualified Control.Concurrent as CC
 import           Control.Lens ( (^.), (%~), (&), (.~) )
 import qualified Control.Lens as L
@@ -25,6 +26,8 @@ import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
 import qualified Prettyprinter as PP
+import           System.FilePath ( (</>) )
+import qualified System.IO.Temp as SIT
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -38,8 +41,11 @@ import qualified Pate.CounterExample as PC
 import           Interactive.State
 
 -- | Embed the CSS we need into the Haskell to ensure that binaries can be relocatable
-cssContent :: String
-cssContent = UTF8.toString (UTF8.fromRep $(DFE.embedFile "tools/pate/pate.css"))
+cssContent :: BS.ByteString
+cssContent = $(DFE.embedFile "tools/pate/static/pate.css")
+
+cytoscape :: BS.ByteString
+cytoscape = $(DFE.embedFile "tools/pate/static/cytoscape.umd.js")
 
 data StateRef arch =
   StateRef { stateRef :: IOR.IORef (State arch)
@@ -97,19 +103,32 @@ addRecent n elt elts = elt : take (n - 1) elts
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier
 startInterface :: (PA.ArchConstraints arch) => StateRef arch -> IO ()
-startInterface r = do
-  let uiConf = TP.defaultConfig
+startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
+  -- Place the content of all of our static dependencies into the temporary
+  -- directory so that it can be served by threepenny
+  --
+  -- This approach is a bit more manual than the Cabal data files
+  -- infrastructure, but allows the verifier to be relocatable easily
+  BS.writeFile (tmpDir </> "cytoscape.umd.js") cytoscape
+  BS.writeFile (tmpDir </> "pate.css") cssContent
+
+  -- Set the port to 5000 to match the Dockerfile
+  let uiConf = TP.defaultConfig { TP.jsPort = Just 5000
+                                , TP.jsStatic = Just tmpDir
+                                }
   TP.startGUI uiConf (uiSetup r)
 
 uiSetup :: (PA.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
 uiSetup r wd = do
   st0 <- liftIO $ IOR.readIORef (stateRef r)
   void $ return wd # TP.set TP.title "PATE Verifier"
-  void $ TP.getHead wd #+ [ TP.mkElement "style" # TP.set TP.text cssContent ]
+  void $ TP.getHead wd #+ [ TP.link # TP.set (TP.attr "rel") "stylesheet" # TP.set (TP.attr "href") "/static/pate.css"
+                          ]
   consoleDiv <- TP.div #. "console-output-pane"
   summaryDiv <- TP.div #. "summary-pane"
   detailDiv <- TP.div #. "detail-pane"
-  void $ TP.getBody wd #+ [ TP.h1 #+ [TP.string "Console Output"]
+  void $ TP.getBody wd #+ [ TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape.umd.js" # TP.set (TP.attr "type") "text/javascript"
+                          , TP.h1 #+ [TP.string "Console Output"]
                           , return consoleDiv #+ [renderConsole r detailDiv]
                           , TP.h1 #+ [TP.string "Summary"]
                           , return summaryDiv #+ [renderSummaryTable st0]
