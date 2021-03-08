@@ -260,7 +260,6 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
     , prfTriplePreDomain :: node ProofDomainType
     , prfTriplePostDomain :: node ProofDomainType
     , prfTripleStatus :: node ProofStatusType
-    
     } -> ProofApp prf node ProofTripleType
 
   -- | The status of some verification problem: either producing a successful result
@@ -295,7 +294,7 @@ data ProofMemoryDomain prf where
       -- | A predicate indicating if this domain is inclusive or exclusive.
       -- * For positive polarity:
       --   a location is in this domain if it is in the map, and its associated predicate
-      --   is tuple.
+      --   is true.
       -- * For negative polarity:
       --   a location is in this domain if it is not in the map,
       --   or it is in the map and its associated predicate is false.
@@ -587,6 +586,15 @@ data ProofNonce prf (tp :: ProofNodeType) where
   ProofNonce :: N.Nonce (ProofScope prf) tp -> ProofNonce prf tp
 
 deriving instance Show (ProofNonce prf tp)
+
+instance ShowF (ProofNonce prf) where
+  showF (ProofNonce n) = showF n
+
+instance TestEquality (ProofNonce prf) where
+  testEquality (ProofNonce n1) (ProofNonce n2) = testEquality n1 n2
+
+instance OrdF (ProofNonce prf) where
+  compareF (ProofNonce n1) (ProofNonce n2) = compareF n1 n2
 
 proofNonceValue :: ProofNonce prf tp -> Natural
 proofNonceValue (ProofNonce n) = fromIntegral (N.indexValue n)
