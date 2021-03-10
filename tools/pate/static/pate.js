@@ -1,12 +1,19 @@
 /**
+  * Construct an ID for the HTML element containing the text of a basic block node
+  */
+function labelContainerID(data, variant) {
+    return 'pre-' + variant + '-' + data.id;
+}
+
+/**
   * Scroll the selected node body (the pre tag containing the text) if there is only one selected
   *
   * If this function scrolls the single selected node, it prevents the page from scrolling at the same time.
   */
-function scrollSelectedGraphNodeLabel(cy, e, amount) {
+function scrollSelectedGraphNodeLabel(cy, e, variant, amount) {
     var sel = cy.$(':selected');
     if(sel.length == 1) {
-        var pre = document.getElementById('pre-' + sel[0].data().id);
+        var pre = document.getElementById(labelContainerID(sel[0].data(), variant));
         pre.scrollBy(0, amount);
         e.stopPropagation();
         e.preventDefault();
@@ -49,7 +56,7 @@ function initializeGraphIn(divId, graphData) {
     cy.nodeHtmlLabel([{
         query: 'node',
         tpl: function(data) {
-            return '<pre id="pre-' + data.id + '" class="graph-node-label">' + data.text + '</pre>';
+            return '<pre id="' + labelContainerID(data, divId) + '" class="graph-node-label">' + data.text + '</pre>';
         }
     }], {enablePointerEvents: true});
 
@@ -58,9 +65,9 @@ function initializeGraphIn(divId, graphData) {
 
     document.addEventListener('keydown', function(e) {
         if(e.key == 'ArrowDown') {
-            scrollSelectedGraphNodeLabel(cy, e, 20);
+            scrollSelectedGraphNodeLabel(cy, e, divId, 20);
         } else if(e.key == 'ArrowUp') {
-            scrollSelectedGraphNodeLabel(cy, e, -20);
+            scrollSelectedGraphNodeLabel(cy, e, divId, -20);
         }
     });
 }
