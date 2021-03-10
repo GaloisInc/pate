@@ -3,6 +3,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
 module Interactive (
   consumeEvents,
   startInterface,
@@ -10,18 +11,23 @@ module Interactive (
   newState
   ) where
 
-import qualified Data.ByteString as BS
 import qualified Control.Concurrent as CC
 import           Control.Lens ( (^.), (%~), (&), (.~) )
 import qualified Control.Lens as L
 import           Control.Monad ( void )
 import           Control.Monad.IO.Class ( liftIO )
+import qualified Data.Aeson as JSON
+import qualified Data.ByteString as BS
 import qualified Data.FileEmbed as DFE
 import qualified Data.Foldable as F
+import qualified Data.HashMap.Strict as HMS
 import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( fromMaybe )
+import           Data.Proxy ( Proxy(..) )
 import qualified Data.String.UTF8 as UTF8
+import qualified Data.Text as T
+import qualified Data.Vector as DV
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
@@ -30,6 +36,8 @@ import           System.FilePath ( (</>) )
 import qualified System.IO.Temp as SIT
 
 import qualified Data.Macaw.BinaryLoader as MBL
+import qualified Data.Macaw.Discovery as MD
+import qualified Data.Macaw.Discovery.State as MDS
 import qualified Data.Macaw.CFG as MC
 
 import qualified Pate.Arch as PA
@@ -44,8 +52,18 @@ import           Interactive.State
 cssContent :: BS.ByteString
 cssContent = $(DFE.embedFile "tools/pate/static/pate.css")
 
+-- | This is our custom JS with extra functions called via JS FFI
+jsContent :: BS.ByteString
+jsContent = $(DFE.embedFile "tools/pate/static/pate.js")
+
+-- | This is the full cytoscape library
 cytoscape :: BS.ByteString
 cytoscape = $(DFE.embedFile "tools/pate/static/cytoscape.umd.js")
+
+-- | This is an extension to cytoscape that enables labels to contain arbitrary
+-- HTML (which we need for multi-line labels)
+cytoscapeHtml :: BS.ByteString
+cytoscapeHtml = $(DFE.embedFile "tools/pate/static/cytoscape-node-html-label.js")
 
 data StateRef arch =
   StateRef { stateRef :: IOR.IORef (State arch)
@@ -110,7 +128,9 @@ startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
   -- This approach is a bit more manual than the Cabal data files
   -- infrastructure, but allows the verifier to be relocatable easily
   BS.writeFile (tmpDir </> "cytoscape.umd.js") cytoscape
+  BS.writeFile (tmpDir </> "cytoscape-node-html-label.js") cytoscapeHtml
   BS.writeFile (tmpDir </> "pate.css") cssContent
+  BS.writeFile (tmpDir </> "pate.js") jsContent
 
   -- Set the port to 5000 to match the Dockerfile
   let uiConf = TP.defaultConfig { TP.jsPort = Just 5000
@@ -128,6 +148,8 @@ uiSetup r wd = do
   summaryDiv <- TP.div #. "summary-pane"
   detailDiv <- TP.div #. "detail-pane"
   void $ TP.getBody wd #+ [ TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape.umd.js" # TP.set (TP.attr "type") "text/javascript"
+                          , TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape-node-html-label.js" # TP.set (TP.attr "type") "text/javascript"
+                          , TP.mkElement "script" # TP.set (TP.attr "src") "/static/pate.js" # TP.set (TP.attr "type") "text/javascript"
                           , TP.h1 #+ [TP.string "Console Output"]
                           , return consoleDiv #+ [renderConsole r detailDiv]
                           , TP.h1 #+ [TP.string "Summary"]
@@ -191,6 +213,9 @@ renderEvent st detailDiv evt =
     _ -> TP.string ""
 
 -- | Show the original block at the given address (as well as its corresponding patched block)
+--
+-- Note that the totally unconstrained argument is the data payload passed in by
+-- the event handler (e.g., click event), which is not used.
 showBlockPairDetail :: (PA.ArchConstraints arch)
                     => State arch
                     -> TP.Element
@@ -199,24 +224,111 @@ showBlockPairDetail :: (PA.ArchConstraints arch)
                     -> PE.EquivalenceResult arch
                     -> a
                     -> TP.UI ()
-showBlockPairDetail st detailDiv (PE.Blocks blkO opbs) (PE.Blocks blkP ppbs) res _ = do
+showBlockPairDetail st detailDiv o@(PE.Blocks blkO opbs) p@(PE.Blocks blkP ppbs) res _ = do
   let
     origAddr = PT.blockMemAddr blkO
     patchedAddr = PT.blockMemAddr blkP
+    (origGraphDiv, origGraphSetup) = renderSliceGraph "original-slice-graph" o
+    (patchedGraphDiv, patchedGraphSetup) = renderSliceGraph "patched-slice-graph" p
   g <- TP.grid [ renderCounterexample res
                , concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
                , concat [ [renderCode opbs, renderCode ppbs]
                         , renderSource st originalSource originalBinary origAddr
                         , renderSource st patchedSource patchedBinary patchedAddr
                         ]
+               , [origGraphDiv, patchedGraphDiv]
                ]
   void $ return detailDiv # TP.set TP.children [g]
-  return ()
+
+  -- Call the remote functions to set up the graph in the relevant divs
+  origGraphSetup
+  patchedGraphSetup
+  -- Make sure the call to set up the graph is flushed to the client
+  TP.flushCallBuffer
   where
     renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
     renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PP.pretty pb)) #. "basic-block"
                                 | pb <- pbs
                                 ]
+
+
+-- | Convert a 'MD.ParsedBlock' to the format described in the documentation of
+-- 'renderSliceGraph' (adding it to the accumulated map)
+blockNode
+  :: forall arch ids
+   . (PA.ArchConstraints arch)
+  => Map.Map (MC.ArchSegmentOff arch) JSON.Value
+  -> MD.ParsedBlock arch ids
+  -> Map.Map (MC.ArchSegmentOff arch) JSON.Value
+blockNode m pb =
+  Map.insert (MD.pblockAddr pb) (JSON.Object node) m
+  where
+    node = HMS.fromList [ (T.pack "data", JSON.Object content)
+                        ]
+    content = HMS.fromList [ (T.pack "id", JSON.String (addrIdent (Proxy @arch) (MD.pblockAddr pb)))
+                           , (T.pack "text", JSON.String (T.pack (show (PP.pretty pb))))
+                           ]
+
+blockEdges
+  :: forall arch ids v
+   . (PA.ArchConstraints arch)
+  => Map.Map (MC.ArchSegmentOff arch) v
+  -> [[JSON.Value]]
+  -> MD.ParsedBlock arch ids
+  -> [[JSON.Value]]
+blockEdges nodes edges pb =
+  [ toEdge (MD.pblockAddr pb) controlFlowSuccessor
+  | controlFlowSuccessor <- MDS.parsedTermSucc (MD.pblockTermStmt pb)
+  , Map.member controlFlowSuccessor nodes
+  ] : edges
+  where
+    toEdge src dst =
+      let srcLabel = addrIdent (Proxy @arch) src
+          tgtLabel = addrIdent (Proxy @arch) dst
+          edgeLabel = srcLabel <> tgtLabel
+          content = HMS.fromList [ (T.pack "id", JSON.String edgeLabel)
+                                 , (T.pack "source", JSON.String srcLabel)
+                                 , (T.pack "target", JSON.String tgtLabel)
+                                 ]
+      in JSON.Object (HMS.fromList [(T.pack "data", JSON.Object content)])
+
+
+addrIdent :: (PA.ArchConstraints arch) => proxy arch -> MC.ArchSegmentOff arch -> T.Text
+addrIdent _ = T.pack . show
+
+-- | Render a set of blocks (a slice) as a graph in the UI (using cytoscape)
+--
+-- This sets up the necessary DOM elements (easy) and translates the block
+-- structure into a graph suitable for display in cytoscaope. It uses the FFI
+-- mechanism of threepenny-gui to sent the graph data to JS.
+--
+-- The cytoscape API expects a list of JS objects; it turns out that threepenny
+-- can just use the Aeson Value type for that.
+--
+-- The format of the data should be a JS object with two top-level fields:
+--
+-- 1. nodes: A list of {data: {id : <ident>, text: <desc>}}
+--
+-- 2. edges: A list of {data: {id: <edgeLabel>, source: <src>, target: <tgt>}}
+--
+-- Note that this code uses block addresses (stringified) as identifiers.
+renderSliceGraph
+  :: (PA.ArchConstraints arch)
+  => String
+  -> PE.Blocks arch bkind
+  -> (TP.UI TP.Element, TP.UI ())
+renderSliceGraph divId (PE.Blocks _ parsedBlocks) =
+  (TP.div # TP.set TP.id_ divId, TP.runFunction (initializeGraph divId (JSON.Object graph)))
+  where
+    nodes = F.foldl' blockNode Map.empty parsedBlocks
+    edges = F.foldl' (blockEdges nodes) [] parsedBlocks
+    graph = HMS.fromList [ (T.pack "nodes", JSON.Array (DV.fromList (Map.elems nodes)))
+                         , (T.pack "edges", JSON.Array (DV.fromList (concat edges)))
+                         ]
+
+
+initializeGraph :: String -> JSON.Value -> TP.JSFunction ()
+initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, %2)" divId graphData
 
 renderCounterexample :: PE.EquivalenceResult arch -> [TP.UI TP.Element]
 renderCounterexample er =

@@ -18,3 +18,17 @@
 .source-listing {
     padding: 10px;
 }
+
+.graph-node-label {
+    font: '14px monospace';
+    width: 400px;
+    height: 500px;
+    overflow: auto;
+}
+
+#original-slice-graph, #patched-slice-graph {
+    width: 1000px;
+    height: 1000px;
+    display: block;
+    overflow: auto;
+}
