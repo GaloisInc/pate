@@ -31,4 +31,5 @@
     height: 1000px;
     display: block;
     overflow: auto;
+    border: 2px dotted black;
 }
