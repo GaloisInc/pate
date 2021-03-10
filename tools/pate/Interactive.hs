@@ -65,6 +65,14 @@ cytoscape = $(DFE.embedFile "tools/pate/static/cytoscape.umd.js")
 cytoscapeHtml :: BS.ByteString
 cytoscapeHtml = $(DFE.embedFile "tools/pate/static/cytoscape-node-html-label.js")
 
+-- | The dagre graph layout library
+dagre :: BS.ByteString
+dagre = $(DFE.embedFile "tools/pate/static/dagre.js")
+
+-- | An adapter to use dagre as a layout engine in cytoscape
+cytoscapeDagre :: BS.ByteString
+cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape-dagre.js")
+
 data StateRef arch =
   StateRef { stateRef :: IOR.IORef (State arch)
            , stateChangeEvent :: TP.Event ()
@@ -131,6 +139,8 @@ startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
   BS.writeFile (tmpDir </> "cytoscape-node-html-label.js") cytoscapeHtml
   BS.writeFile (tmpDir </> "pate.css") cssContent
   BS.writeFile (tmpDir </> "pate.js") jsContent
+  BS.writeFile (tmpDir </> "dagre.js") dagre
+  BS.writeFile (tmpDir </> "cytoscape-dagre.js") cytoscapeDagre
 
   -- Set the port to 5000 to match the Dockerfile
   let uiConf = TP.defaultConfig { TP.jsPort = Just 5000
@@ -149,6 +159,8 @@ uiSetup r wd = do
   detailDiv <- TP.div #. "detail-pane"
   void $ TP.getBody wd #+ [ TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape.umd.js" # TP.set (TP.attr "type") "text/javascript"
                           , TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape-node-html-label.js" # TP.set (TP.attr "type") "text/javascript"
+                          , TP.mkElement "script" # TP.set (TP.attr "src") "/static/dagre.js" # TP.set (TP.attr "type") "text/javascript"
+                          , TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape-dagre.js" # TP.set (TP.attr "type") "text/javascript"
                           , TP.mkElement "script" # TP.set (TP.attr "src") "/static/pate.js" # TP.set (TP.attr "type") "text/javascript"
                           , TP.h1 #+ [TP.string "Console Output"]
                           , return consoleDiv #+ [renderConsole r detailDiv]
@@ -224,7 +236,7 @@ showBlockPairDetail :: (PA.ArchConstraints arch)
                     -> PE.EquivalenceResult arch
                     -> a
                     -> TP.UI ()
-showBlockPairDetail st detailDiv o@(PE.Blocks blkO opbs) p@(PE.Blocks blkP ppbs) res _ = do
+showBlockPairDetail st detailDiv o@(PE.Blocks blkO _opbs) p@(PE.Blocks blkP _ppbs) res _ = do
   let
     origAddr = PT.blockMemAddr blkO
     patchedAddr = PT.blockMemAddr blkP
@@ -232,8 +244,7 @@ showBlockPairDetail st detailDiv o@(PE.Blocks blkO opbs) p@(PE.Blocks blkP ppbs)
     (patchedGraphDiv, patchedGraphSetup) = renderSliceGraph "patched-slice-graph" p
   g <- TP.grid [ renderCounterexample res
                , concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
-               , concat [ [renderCode opbs, renderCode ppbs]
-                        , renderSource st originalSource originalBinary origAddr
+               , concat [ renderSource st originalSource originalBinary origAddr
                         , renderSource st patchedSource patchedBinary patchedAddr
                         ]
                , [origGraphDiv, patchedGraphDiv]
@@ -247,9 +258,6 @@ showBlockPairDetail st detailDiv o@(PE.Blocks blkO opbs) p@(PE.Blocks blkP ppbs)
   TP.flushCallBuffer
   where
     renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
-    renderCode pbs = TP.code #+ [ TP.pre # TP.set TP.text (show (PP.pretty pb)) #. "basic-block"
-                                | pb <- pbs
-                                ]
 
 
 -- | Convert a 'MD.ParsedBlock' to the format described in the documentation of

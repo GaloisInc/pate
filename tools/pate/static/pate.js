@@ -42,13 +42,9 @@ function initializeGraphIn(divId, graphData) {
                   'target-arrow-shape': 'triangle'
               }
             }
-        ],
-        layout: { name: 'breadthfirst',
-                  fit: true,
-                  circle: false,
-                  grid: true
-                }
+        ]
     });
+
 
     cy.nodeHtmlLabel([{
         query: 'node',
@@ -56,6 +52,9 @@ function initializeGraphIn(divId, graphData) {
             return '<pre id="pre-' + data.id + '" class="graph-node-label">' + data.text + '</pre>';
         }
     }], {enablePointerEvents: true});
+
+    cy.layout({ name: 'dagre'
+              }).run();
 
     document.addEventListener('keydown', function(e) {
         if(e.key == 'ArrowDown') {
