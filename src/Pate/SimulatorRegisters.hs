@@ -8,12 +8,15 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ConstraintKinds #-}
+
 module Pate.SimulatorRegisters (
   CrucBaseTypes,
   MacawRegVar(..),
   MacawRegEntry(..),
   macawRegEntry,
-  ptrToEntry
+  ptrToEntry,
+  ValidMacawType
   ) where
 
 import qualified Data.Macaw.Symbolic as MS
@@ -26,6 +29,7 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 
+import qualified Pate.Types as PT
 import qualified Pate.ExprMappable as PEM
 import qualified What4.ExprHelpers as WEH
 
@@ -40,10 +44,12 @@ type family CrucBaseTypes (tp :: CT.CrucibleType) :: Ctx.Ctx WI.BaseType where
   CrucBaseTypes CT.BoolType = (Ctx.EmptyCtx Ctx.::> WT.BaseBoolType)
   CrucBaseTypes (CT.StructType Ctx.EmptyCtx) = Ctx.EmptyCtx
 
+type ValidMacawType tp = Eq (PT.ConcreteValue (MS.ToCrucibleType tp))
+
 -- | This is an analog of the Crucible 'CS.RegEntry' type in terms of the macaw
 -- type system
 data MacawRegEntry sym (tp :: MT.Type) where
-  MacawRegEntry ::
+  MacawRegEntry :: ValidMacawType tp =>
     { macawRegRepr :: CT.TypeRepr (MS.ToCrucibleType tp)
     , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
     } ->
@@ -61,7 +67,7 @@ instance PC.ShowF (WI.SymExpr sym) => Show (MacawRegEntry sym tp) where
     CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> PC.showF rg ++ ":" ++ PC.showF bv
     _ -> "macawRegEntry: unsupported"
 
-macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
+macawRegEntry :: ValidMacawType tp => CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
 macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
 
 ptrToEntry ::

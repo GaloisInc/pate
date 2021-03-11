@@ -22,7 +22,10 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as WI
 import qualified What4.Partial as WP
 
+import qualified Data.Parameterized.TraversableF as TF
+
 import qualified What4.ExprHelpers as WEH
+import qualified Pate.Parallel as Par
 
 -- Expression binding
 
@@ -50,6 +53,13 @@ instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue
       return $ WP.PE p' e'
     WP.Unassigned -> return WP.Unassigned
 
+
+instance ExprMappable sym f => ExprMappable sym (Par.Future f) where
+  mapExpr sym f future = Par.forFuture future (mapExpr sym f)
+
+instance ExprMappable sym (f (a tp)) => ExprMappable sym (Par.ConstF f a tp) where
+  mapExpr sym f (Par.ConstF a) = Par.ConstF <$> mapExpr sym f a
+
 instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
   mapExpr _ _ = return
 
@@ -60,5 +70,3 @@ instance
     asn' <- mapExpr sym f asn
     x' <- mapExpr sym f x
     return $ asn' Ctx.:> x'
-
-

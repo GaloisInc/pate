@@ -19,6 +19,8 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DeriveTraversable #-}
+
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -27,6 +29,11 @@ module Pate.Types
   ( VerificationConfig(..)
   , defaultVerificationCfg
   , PatchPair(..)
+  , ppPatchPair
+  , PatchPairC(..)
+  , mergePatchPairCs
+  , ppPatchPairCEq
+  , BlockPair
   , ConcreteBlock(..)
   , getConcreteBlock
   , blockMemAddr
@@ -106,11 +113,13 @@ import           Data.Typeable
 import           Numeric.Natural
 import           Numeric
 import qualified Data.ElfEdit as E
+import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
@@ -131,6 +140,7 @@ import qualified What4.Solver as WS
 import qualified Pate.Parallel as PP
 import qualified Pate.Memory.MemTrace as MT
 import           What4.ExprHelpers
+import qualified Pate.ExprMappable as PEM
 
 ----------------------------------
 -- Verification configuration
@@ -178,15 +188,66 @@ newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arc
   deriving (Eq, Ord)
 deriving instance Show (ConcreteAddress arch)
 
-data PatchPair arch = PatchPair
-  { pOrig :: ConcreteBlock arch 'Original
-  , pPatched :: ConcreteBlock arch 'Patched
+data PatchPair (tp :: WhichBinary -> *) = PatchPair
+  { pOriginal :: tp 'Original
+  , pPatched :: tp 'Patched
   }
-  deriving (Eq, Ord)
 
-instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (PatchPair arch) where
-  show (PatchPair blk1 blk2) = ppBlock blk1 ++ " vs. " ++ ppBlock blk2
+data PatchPairC tp = PatchPairC
+  { pcOriginal :: tp
+  , pcPatched :: tp
+  }
+  deriving (Eq, Ord, Functor, Foldable, Traversable)
 
+mergePatchPairCs ::
+  PatchPairC a ->
+  PatchPairC b ->
+  PatchPairC (a, b)
+mergePatchPairCs (PatchPairC o1 p1) (PatchPairC o2 p2) = PatchPairC (o1, o2) (p1, p2)
+
+
+instance TestEquality tp => Eq (PatchPair tp) where
+  PatchPair o1 p1 == PatchPair o2 p2
+    | Just Refl <- testEquality o1 o2
+    , Just Refl <- testEquality p1 p2
+    = True
+  _ == _ = False
+
+instance (TestEquality tp, OrdF tp) => Ord (PatchPair tp) where
+  compare (PatchPair o1 p1) (PatchPair o2 p2) = toOrdering $ (lexCompareF o1 o2 (compareF p1 p2))
+
+instance TF.FunctorF PatchPair where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF PatchPair where
+  foldMapF = TF.foldMapFDefault
+
+instance (forall bin. PEM.ExprMappable sym (f bin)) => PEM.ExprMappable sym (PatchPair f) where
+  mapExpr sym f (PatchPair o p) = PatchPair <$> PEM.mapExpr sym f o <*> PEM.mapExpr sym f p
+
+instance TF.TraversableF PatchPair where
+  traverseF f (PatchPair o p) = PatchPair <$> f o <*> f p
+
+type BlockPair arch = PatchPair (ConcreteBlock arch)
+
+instance ShowF tp => Show (PatchPair tp) where
+  show (PatchPair a1 a2) = showF a1 ++ " vs. " ++ showF a2
+
+instance (forall bin. PP.Pretty (f bin)) => PP.Pretty (PatchPair f) where
+  pretty = ppPatchPair PP.pretty 
+
+
+ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
+ppPatchPair f (PatchPair a1 a2) = f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
+
+ppPatchPairCEq ::
+  Eq tp =>
+  (tp -> PP.Doc a) ->
+  PatchPairC tp ->
+  PP.Doc a
+ppPatchPairCEq f (PatchPairC o p) = case o == p of
+  True -> f o
+  False -> ppPatchPair (\(Const v) -> f v) (PatchPair (Const o) (Const p))
 
 data BlockTarget arch bin =
   BlockTarget
@@ -261,6 +322,9 @@ instance Ord (ConcreteBlock arch bin) where
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (ConcreteBlock arch bin) where
   show blk = ppBlock blk
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => ShowF (ConcreteBlock arch) where
+  showF blk = show blk
 
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> String
 ppBlock b = show (absoluteAddress (concreteAddress b))
@@ -642,7 +706,7 @@ data InnerEquivalenceError arch
   | UnexpectedBlockKind String
   | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
-  | MissingPatchPairResult (PatchPair arch)
+  | MissingPatchPairResult (BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
   | AssumedFalse

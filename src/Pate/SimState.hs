@@ -45,6 +45,10 @@ module Pate.SimState
   , simOutMem
   , simOutRegs
   , simPair
+  , simInO
+  , simInP
+  , simOutO
+  , simOutP
   -- variable binding
   , SimVars(..)
   , bindSpec
@@ -73,6 +77,7 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
@@ -108,11 +113,11 @@ data SimInput sym arch bin = SimInput
 
 simInMem ::
   SimInput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-simInMem simIn = simMem $ simInState simIn
+simInMem = simMem . simInState
 
 simInRegs ::
   SimInput sym arch bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
-simInRegs simIn = simRegs $ simInState simIn
+simInRegs = simRegs . simInState
 
 
 data SimOutput sym arch bin = SimOutput
@@ -123,11 +128,11 @@ data SimOutput sym arch bin = SimOutput
 
 simOutMem ::
   SimOutput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-simOutMem simIn = simMem $ simOutState simIn
+simOutMem = simMem . simOutState
 
 simOutRegs ::
   SimOutput sym arch bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
-simOutRegs simIn = simRegs $ simOutState simIn
+simOutRegs = simRegs . simOutState
 
 
 newtype ExprSet sym tp where
@@ -318,11 +323,16 @@ rebindWithFrame' sym cache asm e_outer = do
 
 data SimSpec sym arch f = SimSpec
   {
-    specVarsO :: SimVars sym arch PT.Original
-  , specVarsP :: SimVars sym arch PT.Patched
+    specVars :: PT.PatchPair (SimVars sym arch)
   , specAsm :: W4.Pred sym
   , specBody :: f
   }
+
+specVarsO :: SimSpec sym arch f -> SimVars sym arch PT.Original
+specVarsO spec = PT.pOriginal $ specVars spec
+
+specVarsP :: SimSpec sym arch f -> SimVars sym arch PT.Patched
+specVarsP spec = PT.pPatched $ specVars spec
 
 instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) where
   mapExpr sym f spec = do
@@ -332,7 +342,7 @@ instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) whe
     --specVarsP' <- PEM.mapExpr sym f (specVarsP spec)
     specAsm' <- f (specAsm spec)
     specBody' <- PEM.mapExpr sym f (specBody spec)
-    return $ SimSpec (specVarsO spec) (specVarsP spec) specAsm' specBody'
+    return $ SimSpec (specVars spec) specAsm' specBody'
 
 specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
 specMap f spec = spec { specBody = f (specBody spec) }
@@ -345,14 +355,25 @@ specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBod
 
 data SimBundle sym arch = SimBundle
   {
-    simInO :: SimInput sym arch PT.Original
-  , simInP :: SimInput sym arch PT.Patched
-  , simOutO :: SimOutput sym arch PT.Original
-  , simOutP :: SimOutput sym arch PT.Patched
+    simIn :: PT.PatchPair (SimInput sym arch)
+  , simOut :: PT.PatchPair (SimOutput sym arch)
   }
 
-simPair :: SimBundle sym arch -> PT.PatchPair arch
-simPair bundle = PT.PatchPair (simInBlock $ simInO bundle) (simInBlock $ simInP bundle)
+simInO :: SimBundle sym arch -> SimInput sym arch PT.Original
+simInO = PT.pOriginal . simIn
+
+simInP :: SimBundle sym arch -> SimInput sym arch PT.Patched
+simInP = PT.pPatched . simIn
+
+simOutO :: SimBundle sym arch -> SimOutput sym arch PT.Original
+simOutO = PT.pOriginal . simOut
+
+simOutP :: SimBundle sym arch -> SimOutput sym arch PT.Patched
+simOutP = PT.pPatched . simOut
+
+
+simPair :: SimBundle sym arch -> PT.BlockPair arch
+simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 ---------------------------------------
 -- Variable binding
@@ -430,27 +451,21 @@ bindSpec sym stO stP spec = do
 -- ExprMappable instances
 
 instance PEM.ExprMappable sym (SimState sym arch bin) where
-  mapExpr sym f st = do
-    simMem' <- PEM.mapExpr sym f $ simMem st
-    simRegs' <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) $ simRegs st
-    return $ SimState simMem' simRegs'
+  mapExpr sym f (SimState mem regs) = SimState
+    <$> PEM.mapExpr sym f mem
+    <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
 
 instance PEM.ExprMappable sym (SimInput sym arch bin) where
-  mapExpr sym f simIn = do
-    st <- PEM.mapExpr sym f (simInState simIn)
-    return $ SimInput { simInState = st, simInBlock = (simInBlock simIn) }
+  mapExpr sym f (SimInput st blk) = SimInput
+    <$> PEM.mapExpr sym f st
+    <*> return blk
 
 instance PEM.ExprMappable sym (SimOutput sym arch bin) where
-  mapExpr sym f simOut = do
-    st <- PEM.mapExpr sym f (simOutState simOut)
-    blend <- PEM.mapExpr sym f (simOutBlockEnd simOut)
-    return $ SimOutput { simOutState = st, simOutBlockEnd = blend }
+  mapExpr sym f (SimOutput out blkend) = SimOutput
+    <$> PEM.mapExpr sym f out
+    <*> PEM.mapExpr sym f blkend
 
 instance PEM.ExprMappable sym (SimBundle sym arch) where
-  mapExpr sym f bundle = do
-    simInO' <- PEM.mapExpr sym f $ simInO bundle
-    simInP' <- PEM.mapExpr sym f $ simInP bundle
-    simOutO' <- PEM.mapExpr sym f $ simOutO bundle
-    simOutP' <- PEM.mapExpr sym f $ simOutP bundle
-    return $ SimBundle simInO' simInP' simOutO' simOutP'
-
+  mapExpr sym f (SimBundle in_ out) = SimBundle
+    <$> PEM.mapExpr sym f in_
+    <*> PEM.mapExpr sym f out

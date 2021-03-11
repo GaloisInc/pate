@@ -36,7 +36,7 @@ module Pate.Equivalence
   , EquivRelation(..)
   , MemEquivRelation(..)
   , RegEquivRelation(..)
-
+  , regPredAt
   , muxStatePred
   , mapMemPred
   , mapMemPredPar
@@ -281,6 +281,17 @@ muxStatePred sym p predT predF = case W4.asConstantPred p of
 
 statePredFalse :: W4.IsExprBuilder sym => sym -> StatePred sym arch
 statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
+
+
+regPredAt ::
+  W4.IsExprBuilder sym =>
+  PT.ValidArch arch =>
+  sym ->
+  MM.ArchReg arch tp ->
+  StatePred sym arch -> W4.Pred sym
+regPredAt sym reg stPred  = case M.lookup (Some reg) (predRegs stPred)  of
+  Just p -> p
+  Nothing -> W4.falsePred sym
 
 ---------------------------------------
 -- Equivalence relations

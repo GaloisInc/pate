@@ -175,7 +175,7 @@ data EquivEnv sym arch where
     , envTocs :: HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
     -- ^ table of contents for the original and patched binaries, if defined by the
     -- architecture
-    , envCurrentFunc :: PatchPair arch
+    , envCurrentFunc :: BlockPair arch
     -- ^ start of the function currently under analysis
     , envCurrentFrame :: AssumptionFrame sym
     -- ^ the current assumption frame, accumulated as assumptions are added
@@ -222,9 +222,9 @@ emitEvent evt = do
 
 data EquivState sym arch where
   EquivState ::
-    { stProofs :: [PP.ProofBlockSlice sym arch]
+    { stProofs :: [PP.ProofExpr sym arch]
     -- ^ all intermediate triples that were proven for each block slice
-    , stSimResults ::  Map (PatchPair arch) (SimSpec sym arch (SimBundle sym arch))
+    , stSimResults ::  Map (BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
     -- ^ cached results of symbolic execution for a given block pair
     , stEqStats :: EquivalenceStatistics
     } -> EquivState sym arch
@@ -361,7 +361,7 @@ withFreshVars f = do
   varsO <- freshSimVars @Original
   varsP <- freshSimVars @Patched
   (asm, result) <- f (simVarState varsO) (simVarState varsP)
-  return $ SimSpec varsO varsP asm result
+  return $ SimSpec (PatchPair varsO varsP) asm result
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 -- The resulting predicate is the conjunction of the initial assumptions and

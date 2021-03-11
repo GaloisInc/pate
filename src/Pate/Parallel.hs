@@ -24,6 +24,8 @@ module Pate.Parallel
     ( IsFuture(..)
     , Future(..)
     , InFutureIO(..)
+    , FutureF
+    , ConstF(..)
     )
     where
 
@@ -74,6 +76,8 @@ instance Monad m => IsFuture m m where
 data Future a where
   Future :: IO.ThreadId -> IO.MVar a -> (a -> IO b) -> Future b
   Present :: IO a -> Future a
+
+type FutureF = ConstF Future
 
 -- | A trivial wrapper to differentiate which Future operations to use
 newtype InFutureIO m a = InFutureIO { runInFutureIO :: m a }
