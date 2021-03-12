@@ -96,13 +96,24 @@ import           What4.ExprHelpers
 ---------------------------------------------
 -- Memory predicate
 
+-- | This is a collection of 'PMC.MemCells', which describe ranges of memory
+-- covered by this predicate.  Each 'PMC.MemCells' (which covers a set of
+-- 'PMC.MemCell') contains the predicate determining whether or not it is "in".
+--
+-- The interpretation of those predicates is subject to the 'memPredPolarity'.
 data MemPred sym arch =
     MemPred
       { memPredLocs :: MapF.MapF W4.NatRepr (PMC.MemCells sym arch)
-      -- ^ predicate status at these locations according to polarity
+      -- ^ The locations covered by this 'MemPred' (whether they are "in" or not
+      -- is subject to the polarity)
+      --
+      -- The 'W4.NatRepr' index describes the number of bytes covered by each
+      -- 'PMC.MemCell'
       , memPredPolarity :: W4.Pred sym
-      -- ^ if true, then predicate is true at exactly the locations
-      -- if false, then predicate is true everywhere but these locations.
+      -- ^ If true, then the predicate is true at exactly the locations
+      -- specified by 'memPredLocs'.  If false, then the predicate is true
+      -- everywhere but these locations.
+      --
       -- Currently this is always concrete, but alternate strategies
       -- for computing pre-domains may decide to use symbolic polarities,
       -- and there is no fundamental reason to exclude this case.
@@ -224,12 +235,23 @@ addFootPrintsToPred sym foots memPred = do
 ---------------------------------------------
 -- State predicate
 
+-- | This is a predicate over machine state that says whether or not a given
+-- piece of machine state should be included in an operation.  Notionally, this
+-- could be thought of as a function:
+--
+-- > statePred :: MachineLocation -> 'W4.Pred'
+--
+-- Note that the predicate is 'W4.Pred' rather than 'Bool', potentially allowing
+-- for additional expressivity.
 data StatePred sym arch =
   StatePred
     { predRegs :: Map (Some (MM.ArchReg arch)) (W4.Pred sym)
-    -- ^ predicate is considered false on missing entries
+    -- ^ Predicates covering machine registers; if a machine register is missing from the map, the
+    -- predicate is considered to be false
     , predStack :: MemPred sym arch
+    -- ^ The predicate over stack memory locations
     , predMem :: MemPred sym arch
+    -- ^ The predicate over other memory locations
     }
 
 type StatePredSpec sym arch = SimSpec sym arch (StatePred sym arch)
@@ -267,15 +289,26 @@ statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
 -- The state predicates define equality, meant to be guarded by a 'StatePred' which
 -- defines the domain that the equality holds over
 
-
+-- | Check if two memory cells are equivalent in the original and patched
+-- program states.  The comparisons are done as bitvectors.  The 'CLM.LLVMPtr'
+-- is a single bitvector of the necessary width (i.e., it can be larger than
+-- pointer sized).
+--
+-- Note that this works at the level of bytes.
 newtype MemEquivRelation sym arch =
   MemEquivRelation { applyMemEquivRelation :: (forall w. PMC.MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
 
-
+-- | Check if two register values are the equivalent in the original and patched
+-- program states.
 newtype RegEquivRelation sym arch =
   RegEquivRelation { applyRegEquivRelation :: (forall tp. MM.ArchReg arch tp -> PSR.MacawRegEntry sym tp -> PSR.MacawRegEntry sym tp -> IO (W4.Pred sym)) }
 
-
+-- | The equivalence relation specifies how (symbolic) values in the original
+-- program must relate to (symbolic) values in the patched program.
+--
+-- The 'EquivalenceRelation' must be paired with a 'StatePred' to be useful; the
+-- 'StatePred' tells the verifier which pieces of program state (registers and
+-- memory locations) must be equivalent under the 'EquivRelation'.
 data EquivRelation sym arch =
   EquivRelation
     { eqRelRegs :: RegEquivRelation sym arch
