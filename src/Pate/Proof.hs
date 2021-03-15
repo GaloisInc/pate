@@ -32,26 +32,40 @@ Representation and presentation of the equivalence proofs
 module Pate.Proof
   ( EquivTripleBody(..)
   , EquivTriple
-  --, SomeProof(..)
-  --, VerificationStatus(..)
-  --, ProofBlockSliceBody(..)
-  , ProofBlockSlice
-  , ProofFunctionCall(..)
-  --, SomeProofTriple(..)
-  --, trivialSliceBody
-  --, prfPre
-  --, prfBodyPre
   , IsBoolLike(..)
+  , ProofApp(..)
+  , ValidLeaf
+  , traverseProofApp
+  , ProofExpr(..)
+  , ProofNonce(..)
+  , ProofExprNonces
+  , resolveProofNonceExpr
+  , BlockSliceTransition(..)
+  , BlockSliceState(..)
+  , BlockSliceRegOp(..)
+  , BlockSliceMemOp(..)
+  -- leafs
   , type ProofBlockType
   , type ProofRegisterType
+  , type ProofMemCellType
   , type ProofPredicateType
-  , type ProofMemoryCellType
-  , type ProofMemoryPolarityType
-  , type ProofStatusType
+  , type ProofPolarityType
+  , type ProofCounterExampleType
   , type ProofContextType
+  , type ProofBlockExitType
+  , type ProofBVType
+  , type ProofMacawValueType
+  -- nodes
+  , type ProofBlockSliceType
+  , type ProofDomainType
+  , type ProofTripleType
+  , type ProofFunctionCallType
+  , type ProofStatusType
+  , PrettyProofLeafs
   ) where
 
 import           GHC.Natural
+import           GHC.TypeNats
 --import           GHC.Type
 --import qualified Data.Aeson as AS
 import           Control.Applicative
@@ -66,6 +80,7 @@ import           Data.Parameterized.TH.GADT
 import           Data.Proxy
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.Nonce as N
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -463,230 +478,313 @@ ppMaybe Nothing _ = PP.emptyDoc
 ----------------------------------------------
 -- Serialization
 
-data ProofElemType =
+data ProofLeafType =
     ProofBlockType
   | ProofRegisterType
   | ProofPredicateType
-  | ProofMemoryCellType
-  | ProofMemoryPolarityType
-  | ProofStatusType
+  | ProofMemCellType
+  | ProofPolarityType
+  | ProofCounterExampleType
   | ProofContextType
+  | ProofBVType Nat
+  | ProofBlockExitType
+  | ProofMacawValueType MT.Type
 
+data ProofNodeType =
+    ProofTripleType
+  | ProofFunctionCallType
+  | ProofDomainType
+  | ProofBlockSliceType
+  | ProofStatusType
 
-type ProofBlockType = 'ProofBlockType
-type ProofRegisterType = 'ProofRegisterType
+type ProofBVType n = 'ProofBVType n
+type ProofMacawValueType tp = 'ProofMacawValueType tp
 type ProofPredicateType = 'ProofPredicateType
-type ProofMemoryCellType = 'ProofMemoryCellType
-type ProofMemoryPolarityType = 'ProofMemoryPolarityType
-type ProofStatusType = 'ProofStatusType
+type ProofPolarityType = 'ProofPolarityType
+type ProofBlockExitType = 'ProofBlockExitType
+type ProofBlockType = 'ProofBlockType
+type ProofMemCellType = 'ProofMemCellType
+type ProofRegisterType = 'ProofRegisterType
+type ProofCounterExampleType = 'ProofCounterExampleType
 type ProofContextType = 'ProofContextType
 
--- | Proof that the top-level triple is satisfied, according to all possible
--- exits from the given block slice
-data ProofBlockSlice (e :: ProofElemType -> *) =
-  ProofBlockSlice
-    { prfBlockSliceTriple :: ProofTriple e
-    , prfBlockSliceCalls :: [ProofFunctionCall e]
-    , prfBlockSliceReturn :: Maybe (ProofTriple e)
-    , prfBlockSliceUnknownExit :: Maybe (ProofTriple e)
-    }
+type ProofDomainType = 'ProofDomainType
+type ProofTripleType = 'ProofTripleType
+type ProofFunctionCallType = 'ProofFunctionCallType
+type ProofBlockSliceType = 'ProofBlockSliceType
+type ProofStatusType = 'ProofStatusType
 
-instance TF.FunctorF ProofBlockSlice where
+--type family ProofLeaf prf (e :: ProofLeafType) :: *
+
+
+-- data ProofLeafCurry :: (app :: l -> *) (f :: ProofLeafType -> l) (ltp :: tp -> ProofLeafType) repr tp where
+--   ProofLeafCurry :: repr tp -> app (f (ltp tp)) -> ProofLeafCurry app f ltp repr tp
+
+-- type ProofBlockC app f = ProofLeafCurry app f 'ProofLeafBlockType PT.WhichBinaryRepr
+-- type ProofRegisterC app f = ProofLeafCurry app f 'ProofLeafRegisterType MT.TypeRepr
+-- type ProofBVC app f = ProofLeafCurry app f 'ProofLeafBVType W4.NatRepr
+-- type ProofMacawValueC app f = ProofLeafCurry app f 'ProofLeafMacawValueType MT.TypeRepr
+
+
+-- instance
+--    (TestEquality repr
+--    , (forall tp. Eq (app (f (ltp tp)))))
+--    => TestEquality (ProofLeafCurry app f ltp repr) where
+--   testEquality (ProofLeafCurry repr1 v1) (ProofLeafCurry repr2 v2) | Just Refl <- testEquality repr1 repr2 = v1 == v2
+--   testEquality _ _ = Nothing
+
+-- instance
+--    (OrdF repr
+--    , (forall tp. Ord (app (f (ltp tp)))))
+--    => OrdF (ProofLeafCurry app f ltp repr) where
+--   compareF (ProofLeafCurry repr1 v1) (ProofLeafCurry repr2 v2) = lexCompareF repr1 repr2 (toOrdering $ compare v1 v2)
+
+
+
+-- data ProofLeafRepr tp where
+--   ProofLeafBlockRepr :: ProofLeafRepr ProofLeafBlockType
+--   ProofLeafRegisterRepr :: MT.TypeRepr tp -> ProofLeafRepr (ProofLeafRegisterType tp)
+--   ProofLeafPredicateRepr :: ProofLeafRepr ProofLeafPredicateType
+--   ProofLeafMemCellRepr :: W4.NatRepr n -> ProofLeafRepr (ProofLeafMemCellType n)
+--   ProofLeafPolarityRepr :: ProofLeafRepr ProofLeafPolarityType
+--   ProofLeafCounterExampleRepr :: ProofLeafRepr ProofLeafCounterExampleType
+--   ProofLeafContextRepr :: ProofLeafRepr ProofLeafContextType
+--   ProofLeafBVRepr :: W4.NatRepr n -> ProofLeafRepr (ProofLeafBVType n)
+--   ProofLeafBlockExitRepr :: ProofLeafRepr ProofLeafBlockExitType
+--   ProofLeafMacawValueRepr :: MT.TypeRepr tp -> ProofLeafRepr (ProofLeafMacawValueType tp)
+
+
+-- class (OrdF (CurriedProofLeaf prf ProofLeafRegisterType),
+--        OrdF (CurriedProofLeaf prf ProofMemCellType)) => IsProof prf where
+--   type ProofBlock prf 
+--   type ProofRegister prf
+--   type ProofMemCell prf
+--   type ProofStatus prf
+--   type ProofPredicate prf
+--   type ProofPolarity prf
+--   type ProofContext prf
+
+data VerificationStatus (leaf :: ProofLeafType -> *) =
+    Unverified
+  | VerificationSkipped
+  | VerificationSuccess
+  | VerificationFail (leaf ProofCounterExampleType)
+
+instance TF.FunctorF VerificationStatus where
   fmapF = TF.fmapFDefault
 
-instance TF.FoldableF ProofBlockSlice where
+instance TF.FoldableF VerificationStatus where
   foldMapF = TF.foldMapFDefault
 
-instance TF.TraversableF ProofBlockSlice where
-  traverseF f (ProofBlockSlice a1 a2 a3 a4) =
-    ProofBlockSlice
-      <$> TF.traverseF f a1
-      <*> traverse (TF.traverseF f) a2
-      <*> traverse (TF.traverseF f) a3
-      <*> traverse (TF.traverseF f) a4
+instance TF.TraversableF VerificationStatus where
+  traverseF f = \case
+    VerificationFail a1 -> VerificationFail <$> f a1
+    Unverified -> pure Unverified
+    VerificationSkipped -> pure VerificationSkipped
+    VerificationSuccess -> pure VerificationSuccess
+  
+data ProofApp (leaf :: ProofLeafType -> *) (node :: ProofNodeType -> *) (tp :: ProofNodeType) where
+  -- | Proof that the top-level triple is satisfied, according to all possible
+  -- exits from the given block slice
+  ProofBlockSlice ::
+    { prfBlockSliceTriple :: node ProofTripleType
+    , prfBlockSliceCalls :: [node ProofFunctionCallType]
+    , prfBlockSliceReturn :: Maybe (node ProofTripleType)
+    , prfBlockSliceUnknownExit :: Maybe (node ProofTripleType)
+    } -> ProofApp leaf node ProofBlockSliceType
+    
+  ProofFunctionCall ::
+    { prfFunctionCallPre :: node ProofTripleType
+    , prfFunctionCallBody :: node ProofBlockSliceType
+    , prfFunctionCallContinue :: Maybe (node ProofBlockSliceType)
+    } -> ProofApp leaf node ProofFunctionCallType
 
-instance PrettyProofElem e => PP.Pretty (ProofBlockSlice e) where
-  pretty prf = 
-   PP.vsep
-     [ PP.pretty (prfBlockSliceTriple prf)
-     , "Proof:"
-     , PP.indent 4 $ 
-         (case prfBlockSliceCalls prf of
-           [] -> PP.emptyDoc
-           funCalls -> "Function Calls: "
-                <> PP.line
-                <> PP.indent 4 (PP.vsep (map PP.pretty funCalls))
-                <> PP.line
-         )
-         <> (ppMaybe (prfBlockSliceReturn prf) $ \trip ->
-           PP.vsep
-             [ "Function Return: "
-             , PP.indent 4 $ PP.pretty trip
-             ])
-         <> (ppMaybe (prfBlockSliceUnknownExit prf) $ \trip ->
-           PP.vsep
-             [ "Unknown function exit: "
-             , PP.indent 4 $ PP.pretty trip
-             ])
-     ]
+  ProofTriple ::
+    { prfTripleBlocks :: PT.PatchPairC (leaf ProofBlockType)
+    , prfTriplePreDomain :: node ProofDomainType
+    , prfTriplePostDomain :: node ProofDomainType
+    , prfTripleStatus :: node ProofStatusType
+    , prfTripleSlice :: BlockSliceTransition leaf
+    } -> ProofApp leaf node ProofTripleType
 
--- | Proof that a function call is valid
-data ProofFunctionCall (e :: ProofElemType -> *) =
-  ProofFunctionCall
-    { prfFunctionCallPre :: ProofTriple e
-    , prfFunctionCallBody :: ProofBlockSlice e
-    , prfFunctionCallContinue :: Maybe (ProofBlockSlice e)
-    }
+  ProofStatus ::
+    { prfStatus :: VerificationStatus leaf }
+    -> ProofApp leaf node ProofStatusType
 
-instance TF.FunctorF ProofFunctionCall where
-  fmapF = TF.fmapFDefault
+  ProofDomain ::
+    { prfDomainRegisters :: Map.Map (leaf ProofRegisterType) (leaf ProofPredicateType)
+    , prfDomainStackMemory :: ProofMemoryDomain leaf
+    , prfDomainGlobalMemory :: ProofMemoryDomain leaf
+    , prfDomainContext :: leaf ProofContextType
+    }  -> ProofApp leaf node ProofDomainType
 
-instance TF.FoldableF ProofFunctionCall where
-  foldMapF = TF.foldMapFDefault
 
-instance TF.TraversableF ProofFunctionCall where
-  traverseF f (ProofFunctionCall a1 a2 a3) =
-    ProofFunctionCall
-      <$> TF.traverseF f a1
-      <*> TF.traverseF f a2
-      <*> traverse (TF.traverseF f) a3
+type ValidLeaf leaf = (Ord (leaf ProofRegisterType), Ord (leaf ProofMemCellType))
 
-instance PrettyProofElem e => PP.Pretty (ProofFunctionCall e) where
- pretty prf =
+class (IsBoolLike (leaf ProofPredicateType),
+       Eq (leaf ProofBlockType),
+       Eq (leaf ProofBlockExitType),
+       (forall tp. Eq (leaf (ProofMacawValueType tp))),
+       (forall n. Eq (leaf (ProofBVType n))),
+       (forall ltp. PP.Pretty (leaf ltp))) => PrettyProofLeafs leaf
+
+data ProofMemoryDomain leaf where
+  ProofMemoryDomain ::
+    { prfMemoryDomain :: Map.Map (leaf ProofMemCellType) (leaf ProofPredicateType)
+    , prfMemoryDomainPolarity :: leaf ProofPolarityType
+    }  -> ProofMemoryDomain leaf
+
+traverseMemDomain ::
+  Applicative m =>
+  ValidLeaf leaf' =>
+  (forall tp. leaf tp -> m (leaf' tp)) ->
+  ProofMemoryDomain leaf ->
+  m (ProofMemoryDomain leaf')
+traverseMemDomain f (ProofMemoryDomain a1 a2) = ProofMemoryDomain
+  <$> traverseMap f f a1
+  <*> f a2
+
+traverseMap ::
+  forall m k k' a a'.
+  Ord k' =>
+  Applicative m =>
+  (k -> m k') ->
+  (a -> m a') ->
+  Map.Map k a ->
+  m (Map.Map k' a')
+traverseMap f g m = Map.fromList <$> (traverse go $ Map.toList m)
+  where
+    go :: (k, a) -> m (k', a')
+    go (k, a) = (,) <$> f k <*> g a
+
+traverseProofApp ::
+  Applicative m =>
+  ValidLeaf leaf' =>
+  (forall tp. leaf tp -> m (leaf' tp)) ->
+  (forall tp. node tp -> m (node' tp)) ->
+  ProofApp leaf node utp ->
+  m ((ProofApp leaf' node') utp)
+traverseProofApp f g = \case
+  ProofBlockSlice a1 a2 a3 a4 -> ProofBlockSlice
+    <$> g a1
+    <*> traverse g a2
+    <*> traverse g a3
+    <*> traverse g a4
+  ProofFunctionCall a1 a2 a3 -> ProofFunctionCall
+    <$> g a1
+    <*> g a2
+    <*> traverse g a3
+  ProofTriple a1 a2 a3 a4 a5 -> ProofTriple
+    <$> traverse f a1
+    <*> g a2
+    <*> g a3
+    <*> g a4
+    <*> TF.traverseF f a5
+  ProofStatus a1 -> ProofStatus
+    <$> TF.traverseF f a1
+  ProofDomain a1 a2 a3 a4 -> ProofDomain
+    <$> traverseMap f f a1
+    <*> traverseMemDomain f a2
+    <*> traverseMemDomain f a3
+    <*> f a4
+
+
+data ProofNonce t tp where
+  ProofNonce ::
+    { prfNonceParent :: Some (N.Nonce t)
+    , prfNonceThis :: N.Nonce t tp
+    } -> ProofNonce t tp
+
+instance PEM.ExprMappable sym (ProofNonce t tp)
+
+-- | A 'ProofExprNonces' is a shallow representation of a given
+-- prove node, with nonce references instead of directly including its sub-proof
+-- elements.
+type ProofExprNonces t leaf tp = ProofApp leaf (ProofNonce t) tp
+
+-- | A 'ProofExpr' is an direct proof representation, where
+-- nodes hold completed sub-proofs.
+data ProofExpr leaf tp where
+  ProofExpr :: { unApp :: ProofApp leaf (ProofExpr leaf) tp } -> ProofExpr leaf tp
+
+instance ((forall tp1. PEM.ExprMappable sym (leaf tp1))
+         ,(forall tp2. PEM.ExprMappable sym (node tp2))
+         , ValidLeaf leaf) =>
+         PEM.ExprMappable sym (ProofApp leaf node tp) where
+  mapExpr sym f = traverseProofApp (PEM.mapExpr sym f) (PEM.mapExpr sym f)
+
+
+resolveProofNonceExpr ::
+  forall m t leaf tp.
+  Monad m =>
+  ValidLeaf leaf =>
+  (forall tp'.
+    N.Nonce t tp' ->
+    m (ProofApp leaf (ProofNonce t) tp')) ->
+  ProofExprNonces t leaf tp ->
+  m (ProofExpr leaf tp)  
+resolveProofNonceExpr f app =
+  ProofExpr <$> traverseProofApp return go app
+  where
+     go :: forall tp2. ProofNonce t tp2 -> m (ProofExpr leaf tp2)
+     go nonce = resolveProofNonceExpr f =<< f (prfNonceThis nonce)
+
+instance
+  (forall ntp. PP.Pretty (ProofApp leaf (ProofExpr leaf) ntp)) =>
+  PP.Pretty (ProofExpr leaf tp) where
+  pretty p = PP.pretty (unApp p)
+
+instance PrettyProofLeafs leaf => PP.Pretty (ProofApp leaf (ProofExpr leaf) tp) where
+ pretty prf@ProofFunctionCall{} =
    PP.vsep $ 
      [ "Function pre-domain is satisfied before call:"
-     , PP.indent 4 $ ppBlockPairTarget (prfTripleBlocks $ prfFunctionCallPre prf) (prfTripleBlocks $ prfBlockSliceTriple $ prfFunctionCallBody prf)
+     , PP.indent 4 $ ppBlockPairTarget (prfTripleBlocks $ unApp $ prfFunctionCallPre prf) (prfTripleBlocks $ unApp $ prfBlockSliceTriple $ unApp $ prfFunctionCallBody prf)
      , PP.indent 4 $ PP.pretty $ prfFunctionCallPre prf
      , "Function satisfies post-domain upon return:"
      , PP.indent 4 $ PP.pretty $ prfFunctionCallBody prf
      ] ++ case prfFunctionCallContinue prf of
        Just cont ->
          [ "Continuing after function return satisfies post-domain for caller."
-         , PP.indent 4 $ ppBlockPairReturn (prfTripleBlocks $ prfBlockSliceTriple cont)
+         , PP.indent 4 $ ppBlockPairReturn (prfTripleBlocks $ unApp $ prfBlockSliceTriple $ unApp cont)
          ]
        Nothing -> []
    where
-     ppBlockPairReturn :: PT.PatchPairC (e 'ProofBlockType) -> PP.Doc a
+     ppBlockPairReturn :: PT.PatchPairC (leaf ProofBlockType) -> PP.Doc a
      ppBlockPairReturn pPair = PT.ppPatchPairCEq go pPair
        where
-         go :: e 'ProofBlockType -> PP.Doc a
+         go :: leaf ProofBlockType -> PP.Doc a
          go blk = PP.parens (PP.pretty blk <+> "-> return")
 
-     ppBlockPairTarget :: PT.PatchPairC (e 'ProofBlockType) -> PT.PatchPairC (e 'ProofBlockType) -> PP.Doc a
+     ppBlockPairTarget :: PT.PatchPairC (leaf ProofBlockType) -> PT.PatchPairC (leaf ProofBlockType) -> PP.Doc a
      ppBlockPairTarget srcPair tgtPair =
        PT.ppPatchPairCEq go (PT.mergePatchPairCs srcPair tgtPair)
        where
-         go :: (e 'ProofBlockType, e 'ProofBlockType) -> PP.Doc a
+         go :: (leaf ProofBlockType, leaf ProofBlockType) -> PP.Doc a
          go (src, tgt) = PP.parens (PP.pretty src) <+> "->" <+> PP.pretty tgt
-
-data ProofRegisterDomain (e :: ProofElemType -> *) =
-  ProofRegisterDomain
-    { prfRegisterDomain :: [(e 'ProofRegisterType, e 'ProofPredicateType)] }
-
-instance TF.FunctorF ProofRegisterDomain where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF ProofRegisterDomain where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF ProofRegisterDomain where
-  traverseF f (ProofRegisterDomain a1) =
-    ProofRegisterDomain <$> traverse (\(a, b) -> (,) <$> f a <*> f b) a1
-
-instance PrettyProofElem e => PP.Pretty (ProofRegisterDomain e) where
-  pretty prf = PP.vsep (map ppReg (prfRegisterDomain prf))
-    where
-      ppReg :: (e 'ProofRegisterType, e 'ProofPredicateType) -> PP.Doc a
-      ppReg (reg, p) = case asBool p of
-        Just False -> PP.emptyDoc
-        Just True -> PP.pretty reg
-        _ -> PP.pretty reg <> PP.line <> PP.indent 1 (PP.pretty p)
-
-
-data ProofMemoryDomain (e :: ProofElemType -> *) =
-  ProofMemoryDomain
-    { prfMemoryDomain :: [(e 'ProofMemoryCellType, e 'ProofPredicateType)]
-    , prfMemoryDomainPolarity :: e 'ProofMemoryPolarityType
-    }
-
-instance TF.FunctorF ProofMemoryDomain where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF ProofMemoryDomain where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF ProofMemoryDomain where
-  traverseF f (ProofMemoryDomain a1 a2) =
-    ProofMemoryDomain <$> traverse (\(a, b) -> (,) <$> f a <*> f b) a1 <*> f a2
-
-instance PrettyProofElem e => PP.Pretty (ProofMemoryDomain e) where
-  pretty prf =
-    PP.pretty (prfMemoryDomainPolarity prf) <> PP.line <> PP.vsep (map ppMem (prfMemoryDomain prf))
-    where
-      ppMem :: (e 'ProofMemoryCellType, e 'ProofPredicateType) -> PP.Doc a
-      ppMem (cell, p) = case asBool p of
-        Just False -> PP.emptyDoc
-        Just True -> PP.pretty cell
-        _ -> PP.pretty cell <> PP.line <> PP.indent 1 (PP.pretty p)
-
-data ProofDomain (e :: ProofElemType -> *) =
-  ProofDomain
-    { prfDomainRegisters :: ProofRegisterDomain e
-    , prfDomainStackMemory :: ProofMemoryDomain e
-    , prfDomainGlobalMemory :: ProofMemoryDomain e
-    , prfDomainContext :: e 'ProofContextType
-    }
-
-instance TF.FunctorF ProofDomain where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF ProofDomain where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF ProofDomain where
-  traverseF f (ProofDomain a1 a2 a3 a4) =
-    ProofDomain
-    <$> TF.traverseF f a1
-    <*> TF.traverseF f a2
-    <*> TF.traverseF f a3
-    <*> f a4
-
-instance PrettyProofElem e => PP.Pretty (ProofDomain e) where
-  pretty prf = PP.vsep
-    [ "Registers:"
-    , PP.pretty (prfDomainRegisters prf)
-    , "Stack Memory:"
-    , PP.pretty (prfDomainStackMemory prf)
-    , "Global Memory:"
-    , PP.pretty (prfDomainGlobalMemory prf)
-    ]
-    
-
-data ProofTriple (e :: ProofElemType -> *) =
-  ProofTriple
-    { prfTripleBlocks :: PT.PatchPairC (e 'ProofBlockType) 
-    , prfTriplePreDomain :: ProofDomain e
-    , prfTriplePostDomain :: ProofDomain e
-    , prfTripleStatus :: e 'ProofStatusType
-    }
-
-
-instance TF.FunctorF ProofTriple where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF ProofTriple where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF ProofTriple where
-  traverseF f (ProofTriple a1 a2 a3 a4) =
-    ProofTriple
-    <$> traverse f a1
-    <*> TF.traverseF f a2
-    <*> TF.traverseF f a3
-    <*> f a4
-
-instance PrettyProofElem e => PP.Pretty (ProofTriple e) where
- pretty prf =
+ pretty prf@ProofBlockSlice{} =
+    PP.vsep
+      [ PP.pretty (prfBlockSliceTriple prf)
+      , "Proof:"
+      , PP.indent 4 $ 
+          (case prfBlockSliceCalls prf of
+            [] -> PP.emptyDoc
+            funCalls -> "Function Calls: "
+                 <> PP.line
+                 <> PP.indent 4 (PP.vsep (map PP.pretty funCalls))
+                 <> PP.line
+          )
+          <> (ppMaybe (prfBlockSliceReturn prf) $ \trip ->
+            PP.vsep
+              [ "Function Return: "
+              , PP.indent 4 $ PP.pretty trip
+              ])
+          <> (ppMaybe (prfBlockSliceUnknownExit prf) $ \trip ->
+            PP.vsep
+              [ "Unknown function exit: "
+              , PP.indent 4 $ PP.pretty trip
+              ])
+      ]
+ pretty prf@ProofTriple{} =
    PP.vsep
      [ PT.ppPatchPairCEq PP.pretty (prfTripleBlocks prf)
      , "Pre-domain:"
@@ -696,10 +794,336 @@ instance PrettyProofElem e => PP.Pretty (ProofTriple e) where
      , "Verification Status:"
      , PP.indent 4 $ PP.pretty (prfTripleStatus prf)
      ]
+ pretty prf@ProofDomain{} = PP.vsep
+   [ "Registers:"
+   , prettyMap (prfDomainRegisters prf)
+   , "Stack Memory:"
+   , PP.pretty (prfDomainStackMemory prf)
+   , "Global Memory:"
+   , PP.pretty (prfDomainGlobalMemory prf)
+   ]
+ pretty prf@ProofStatus{} = case prfStatus prf of
+   Unverified -> "Not verified"
+   VerificationSkipped -> "Skipped (assumed)"
+   VerificationSuccess -> "Succeeded"
+   VerificationFail result -> PP.vsep [ "Failed:", PP.pretty result ]
 
-class (IsBoolLike (e 'ProofPredicateType),
-       Eq (e 'ProofBlockType),
-       (forall tp. PP.Pretty (e tp))) => PrettyProofElem e
+instance PrettyProofLeafs leaf => PP.Pretty (ProofMemoryDomain leaf) where
+  pretty domain = PP.pretty (prfMemoryDomainPolarity domain) <> prettyMap (prfMemoryDomain domain)
+
+prettyMap ::
+  forall k v a.
+  IsBoolLike v =>
+  PP.Pretty k =>
+  PP.Pretty v =>
+  Map.Map k v ->
+  PP.Doc a
+prettyMap m = PP.vsep (map go (Map.toList m))
+  where
+    go :: (k, v) -> PP.Doc a
+    go (k, v) = case asBool v of
+      Just False -> PP.emptyDoc
+      Just True -> PP.pretty k
+      _ -> PP.pretty k <> PP.line <> PP.indent 1 (PP.pretty v)
+
+
+data BlockSliceTransition (leaf :: ProofLeafType -> *) where
+  BlockSliceTransition ::
+    { slBlockPreState :: BlockSliceState leaf
+    , slBlockPostState :: BlockSliceState leaf
+    , slBlockExitCase :: PT.PatchPairC (leaf ProofBlockExitType)
+    } -> BlockSliceTransition leaf
+
+instance TF.FunctorF BlockSliceTransition where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF BlockSliceTransition where
+  foldMapF = TF.foldMapFDefault
+
+instance TF.TraversableF BlockSliceTransition where
+  traverseF f (BlockSliceTransition a1 a2 a3) =
+    BlockSliceTransition
+      <$> TF.traverseF f a1
+      <*> TF.traverseF f a2
+      <*> traverse f a3
+
+data BlockSliceState leaf where
+  BlockSliceState ::
+    { slMemState :: [BlockSliceMemOp leaf]
+    , slRegState :: [BlockSliceRegOp leaf]
+    } -> BlockSliceState leaf
+
+instance TF.FunctorF BlockSliceState where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF BlockSliceState where
+  foldMapF = TF.foldMapFDefault
+
+instance TF.TraversableF BlockSliceState where
+  traverseF f (BlockSliceState a1 a2) =
+    BlockSliceState
+      <$> traverse (TF.traverseF f) a1
+      <*> traverse (TF.traverseF f) a2
+
+
+data BlockSliceRegOp leaf where
+  BlockSliceRegOp ::
+    { slRegister :: leaf ProofRegisterType
+    , slRegisterValues :: PT.PatchPairC (leaf (ProofMacawValueType tp))
+    -- | true if the values in this register are considered equivalent
+    , slRegisterEquiv :: leaf ProofPredicateType
+    -- | true if the cell of the register is within the domain that this
+    -- block slice is checked in
+    , slRegisterInDomain :: leaf ProofPredicateType
+    } -> BlockSliceRegOp leaf
+
+instance TF.FunctorF BlockSliceRegOp where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF BlockSliceRegOp where
+  foldMapF = TF.foldMapFDefault
+
+instance TF.TraversableF BlockSliceRegOp where
+  traverseF f (BlockSliceRegOp a1 a2 a3 a4) =
+    BlockSliceRegOp
+      <$> f a1
+      <*> traverse f a2
+      <*> f a3
+      <*> f a4
+
+data BlockSliceMemOp leaf where
+  BlockSliceMemOp ::
+    { slMemOpCell :: leaf ProofMemCellType
+    , slMemOpValues :: PT.PatchPairC (leaf (ProofBVType n))
+    -- | true if the values of the memory operation are considered equivalent
+    , slMemOpEquiv :: leaf ProofPredicateType
+    -- | true if the cell of the memory operation is within the domain that this
+    -- block slice is checked in
+    , slMemOpInDomain :: leaf ProofPredicateType
+    } -> BlockSliceMemOp leaf
+
+
+instance TF.FunctorF BlockSliceMemOp where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF BlockSliceMemOp where
+  foldMapF = TF.foldMapFDefault
+
+instance TF.TraversableF BlockSliceMemOp where
+  traverseF f (BlockSliceMemOp a1 a2 a3 a4) =
+    BlockSliceMemOp
+      <$> f a1
+      <*> traverse f a2
+      <*> f a3
+      <*> f a4
+
+instance PrettyProofLeafs leaf => PP.Pretty (BlockSliceTransition leaf) where
+  pretty bs = PP.vsep $
+    [ "Block Exit Condition:" <+> PT.ppPatchPairCEq PP.pretty (slBlockExitCase bs)
+    ,  "Initial register state:"
+    , PP.vsep $ map PP.pretty (slRegState $ slBlockPreState bs)
+    , "Initial memory state:"
+    , PP.vsep $ map PP.pretty (slMemState $ slBlockPreState bs)
+    , "Final memory state:"
+    , PP.vsep $ map PP.pretty (slRegState $ slBlockPostState bs) 
+    , "Final register state:"
+    , PP.vsep $ map PP.pretty (slRegState $ slBlockPostState bs)
+    ]
+
+
+instance PrettyProofLeafs leaf => PP.Pretty (BlockSliceMemOp leaf) where
+  pretty mop@(BlockSliceMemOp _ vals _ _) = PP.pretty (slMemOpCell mop) <> ":" <+> PT.ppPatchPairCEq PP.pretty vals
+    <+> prettyEquiv (slMemOpEquiv mop) (slMemOpInDomain mop)
+
+instance PrettyProofLeafs leaf => PP.Pretty (BlockSliceRegOp leaf) where
+  pretty bsr@(BlockSliceRegOp reg vals _ _) = PP.pretty reg <> ":" <+> PT.ppPatchPairCEq PP.pretty vals
+    <+> prettyEquiv (slRegisterEquiv bsr) (slRegisterInDomain bsr)
+
+
+prettyEquiv :: PrettyProofLeafs leaf => leaf ProofPredicateType -> leaf ProofPredicateType -> PP.Doc a
+prettyEquiv isEq isInDomain = case (asBool isEq, asBool isInDomain) of
+  (Just True, _) -> PP.emptyDoc
+  (Just False, Just False) -> "Excluded"
+  _ -> "Unequal"
+
+--data SliceExpr prf tp where
+--  SliceExprApp :: SliceApp (SliceExpr prf) tp -> SliceExpr prf tp
+--  SliceExprLeaf :: ProofLeaf prf tp -> SliceExpr prf ('SliceElemLeafType tp)
+
+
+-- ProofApp app tp
+-- ProofApp (ProofExpr leaf) tp
+
+-- instance TF.FunctorF ProofBlockSlice where
+--   fmapF = TF.fmapFDefault
+
+-- instance TF.FoldableF ProofBlockSlice where
+--   foldMapF = TF.foldMapFDefault
+
+-- instance TF.TraversableF ProofBlockSlice where
+--   traverseF f (ProofBlockSlice a1 a2 a3 a4) =
+--     ProofBlockSlice
+--       <$> TF.traverseF f a1
+--       <*> traverse (TF.traverseF f) a2
+--       <*> traverse (TF.traverseF f) a3
+--       <*> traverse (TF.traverseF f) a4
+
+-- instance PrettyProofElem e => PP.Pretty (ProofBlockSlice e) where
+--   pretty prf = 
+--    PP.vsep
+--      [ PP.pretty (prfBlockSliceTriple prf)
+--      , "Proof:"
+--      , PP.indent 4 $ 
+--          (case prfBlockSliceCalls prf of
+--            [] -> PP.emptyDoc
+--            funCalls -> "Function Calls: "
+--                 <> PP.line
+--                 <> PP.indent 4 (PP.vsep (map PP.pretty funCalls))
+--                 <> PP.line
+--          )
+--          <> (ppMaybe (prfBlockSliceReturn prf) $ \trip ->
+--            PP.vsep
+--              [ "Function Return: "
+--              , PP.indent 4 $ PP.pretty trip
+--              ])
+--          <> (ppMaybe (prfBlockSliceUnknownExit prf) $ \trip ->
+--            PP.vsep
+--              [ "Unknown function exit: "
+--              , PP.indent 4 $ PP.pretty trip
+--              ])
+--      ]
+
+-- | Proof that a function call is valid
+
+
+-- instance TF.FunctorF ProofFunctionCall where
+--   fmapF = TF.fmapFDefault
+
+-- instance TF.FoldableF ProofFunctionCall where
+--   foldMapF = TF.foldMapFDefault
+
+-- instance TF.TraversableF ProofFunctionCall where
+--   traverseF f (ProofFunctionCall a1 a2 a3) =
+--     ProofFunctionCall
+--       <$> TF.traverseF f a1
+--       <*> TF.traverseF f a2
+--       <*> traverse (TF.traverseF f) a3
+
+
+
+-- data ProofRegisterDomain (e :: ProofElemType -> *) =
+--   ProofRegisterDomain
+--     { prfRegisterDomain :: [(e 'ProofRegisterType, e 'ProofPredicateType)] }
+
+-- instance TF.FunctorF ProofRegisterDomain where
+--   fmapF = TF.fmapFDefault
+
+-- instance TF.FoldableF ProofRegisterDomain where
+--   foldMapF = TF.foldMapFDefault
+
+-- instance TF.TraversableF ProofRegisterDomain where
+--   traverseF f (ProofRegisterDomain a1) =
+--     ProofRegisterDomain <$> traverse (\(a, b) -> (,) <$> f a <*> f b) a1
+
+-- instance PrettyProofElem e => PP.Pretty (ProofRegisterDomain e) where
+--   pretty prf = PP.vsep (map ppReg (prfRegisterDomain prf))
+--     where
+--       ppReg :: (e 'ProofRegisterType, e 'ProofPredicateType) -> PP.Doc a
+--       ppReg (reg, p) = case asBool p of
+--         Just False -> PP.emptyDoc
+--         Just True -> PP.pretty reg
+--         _ -> PP.pretty reg <> PP.line <> PP.indent 1 (PP.pretty p)
+
+
+-- data ProofMemoryDomain (e :: ProofElemType -> *) =
+
+
+-- instance TF.FunctorF ProofMemoryDomain where
+--   fmapF = TF.fmapFDefault
+
+-- instance TF.FoldableF ProofMemoryDomain where
+--   foldMapF = TF.foldMapFDefault
+
+-- instance TF.TraversableF ProofMemoryDomain where
+--   traverseF f (ProofMemoryDomain a1 a2) =
+--     ProofMemoryDomain <$> traverse (\(a, b) -> (,) <$> f a <*> f b) a1 <*> f a2
+
+-- instance PrettyProofElem e => PP.Pretty (ProofMemoryDomain e) where
+--   pretty prf =
+--     PP.pretty (prfMemoryDomainPolarity prf) <> PP.line <> PP.vsep (map ppMem (prfMemoryDomain prf))
+--     where
+--       ppMem :: (e 'ProofMemoryCellType, e 'ProofPredicateType) -> PP.Doc a
+--       ppMem (cell, p) = case asBool p of
+--         Just False -> PP.emptyDoc
+--         Just True -> PP.pretty cell
+--         _ -> PP.pretty cell <> PP.line <> PP.indent 1 (PP.pretty p)
+
+-- data ProofDomain (e :: ProofElemType -> *) =
+
+
+-- instance TF.FunctorF ProofDomain where
+--   fmapF = TF.fmapFDefault
+
+-- instance TF.FoldableF ProofDomain where
+--   foldMapF = TF.foldMapFDefault
+
+-- instance TF.TraversableF ProofDomain where
+--   traverseF f (ProofDomain a1 a2 a3 a4) =
+--     ProofDomain
+--     <$> TF.traverseF f a1
+--     <*> TF.traverseF f a2
+--     <*> TF.traverseF f a3
+--     <*> f a4
+
+-- instance PrettyProofElem e => PP.Pretty (ProofDomain e) where
+--   pretty prf = PP.vsep
+--     [ "Registers:"
+--     , PP.pretty (prfDomainRegisters prf)
+--     , "Stack Memory:"
+--     , PP.pretty (prfDomainStackMemory prf)
+--     , "Global Memory:"
+--     , PP.pretty (prfDomainGlobalMemory prf)
+--     ]
+    
+
+-- data ProofTriple (e :: ProofElemType -> *) =
+--   ProofTriple
+--     { prfTripleBlocks :: PT.PatchPairC (e 'ProofBlockType) 
+--     , prfTriplePreDomain :: ProofDomain e
+--     , prfTriplePostDomain :: ProofDomain e
+--     , prfTripleStatus :: e 'ProofStatusType
+--     }
+
+
+-- instance TF.FunctorF ProofTriple where
+--   fmapF = TF.fmapFDefault
+
+-- instance TF.FoldableF ProofTriple where
+--   foldMapF = TF.foldMapFDefault
+
+-- instance TF.TraversableF ProofTriple where
+--   traverseF f (ProofTriple a1 a2 a3 a4) =
+--     ProofTriple
+--     <$> traverse f a1
+--     <*> TF.traverseF f a2
+--     <*> TF.traverseF f a3
+--     <*> f a4
+
+-- instance PrettyProofElem e => PP.Pretty (ProofTriple e) where
+--  pretty prf =
+--    PP.vsep
+--      [ PT.ppPatchPairCEq PP.pretty (prfTripleBlocks prf)
+--      , "Pre-domain:"
+--      , PP.indent 4 $ PP.pretty (prfTriplePreDomain prf)
+--      , "Post-domain:"
+--      , PP.indent 4 $ PP.pretty (prfTriplePostDomain prf)
+--      , "Verification Status:"
+--      , PP.indent 4 $ PP.pretty (prfTripleStatus prf)
+--      ]
+
+--class (IsBoolLike (e 'ProofPredicateType),
+--       Eq (e 'ProofBlockType),
+--       (forall tp. PP.Pretty (e tp))) => PrettyProofElem e
 
 class IsBoolLike tp where
   asBool :: tp -> Maybe Bool
@@ -727,14 +1151,7 @@ class IsBoolLike tp where
 --   ++ ppExitCase eO ++ " (original) vs. "
 --   ++ ppExitCase eP ++ " (rewritten)"
 
-ppExitCase :: MS.MacawBlockEndCase -> String
-ppExitCase ec = case ec of
-  MS.MacawBlockEndJump -> "arbitrary jump"
-  MS.MacawBlockEndCall -> "function call"
-  MS.MacawBlockEndReturn -> "function return"
-  MS.MacawBlockEndBranch -> "branch"
-  MS.MacawBlockEndArch -> "syscall"
-  MS.MacawBlockEndFail -> "analysis failure"
+
 
 -- ppMemTraceDiff :: MemTraceDiff arch -> String
 -- ppMemTraceDiff diffs = "\tTrace of memory operations:\n" ++ concatMap ppMemOpDiff diffs

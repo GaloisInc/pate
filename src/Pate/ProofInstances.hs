@@ -8,27 +8,40 @@ Instantiations for the leaves of the proof types
 
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE TypeOperators   #-}
 
 module Pate.ProofInstances
-  ( BSExprLeaf(..)
-  , BSGroundExprLeaf(..)
-  , BlockSliceRegister(..)
-  , BlockSliceMemOp(..)
-  , PatchPairC(..)
-  , ExprBlockSlice
-  , GroundBlockSlice
+  ( ProofSymLeafs(..)
+  , ProofGroundLeafs(..)
   , InequivalenceResult(..)
-  , ProofExpr
-  , BlockSliceState(..)
+  , ProofSymExpr
+  , CounterExample
+  , SomeProof(..)
+  , SomeProofTriple(..)
   )
   
   where
 
-import qualified Data.Parameterized.TraversableF as TF
-import           Data.Functor.Identity
+import           GHC.Natural
+
+import           Data.Parameterized.Classes
+
+import qualified Lang.Crucible.Types as CT
+import qualified Lang.Crucible.Simulator.RegValue as CS
+import qualified Lang.Crucible.LLVM.MemModel as CLM
+
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.Symbolic as MS
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -38,273 +51,194 @@ import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
-import qualified Pate.Parallel as Par
+import qualified Pate.SimulatorRegisters as PSR
 
 import qualified What4.Interface as W4
+import qualified What4.ExprHelpers as WEH
 
-data VerificationStatus arch =
-    Unverified
-  | VerificationSkipped
-  | VerificationSuccess
-  | VerificationFail (InequivalenceResult arch)
 
 data InequivalenceResult arch =
   InequivalenceResult
-    { ineqSlice :: GroundBlockSlice arch
+    { ineqSlice :: CounterExample arch
     , ineqReason :: PT.InequivalenceReason
     }
 
 
-data ProofExprLeafs sym arch future tp where
-  ProofExprBlock :: PT.ConcreteBlock arch bin -> ProofExprLeafs sym arch future PF.ProofBlockType
-  ProofExprRegister :: MM.ArchReg arch tp -> ProofExprLeafs sym arch future PF.ProofRegisterType
-  ProofExprMemCell :: PMC.MemCell sym arch w -> ProofExprLeafs sym arch future PF.ProofMemoryCellType
-  ProofExprStatus :: future (VerificationStatus arch) -> ProofExprLeafs sym arch future PF.ProofStatusType
-  ProofExprPred :: W4.Pred sym -> ProofExprLeafs sym arch future PF.ProofPredicateType
-  ProofExprPolarity :: W4.Pred sym -> ProofExprLeafs sym arch future PF.ProofMemoryPolarityType
-  ProofExprContext :: PT.PatchPair (PS.SimState sym arch) -> ProofExprLeafs sym arch future PF.ProofContextType
+instance PT.ValidArch arch => PP.Pretty (InequivalenceResult arch) where
+  pretty ineq = PP.vsep [ "Reason:" <+> PP.pretty (show (ineqReason ineq)), PP.pretty (ineqSlice ineq) ]
 
-joinProofExpr ::
-  ProofExprLeafs sym arch Par.Future tp ->
-  IO (ProofExprLeafs sym arch Identity tp)
-joinProofExpr = \case
-  ProofExprStatus status -> ProofExprStatus <$> (Identity <$> Par.joinFuture status)
-  ProofExprBlock blk -> return $ ProofExprBlock blk
-  ProofExprRegister reg -> return $ ProofExprRegister reg
-  ProofExprMemCell cell -> return $ ProofExprMemCell cell
-  ProofExprPred p -> return $ ProofExprPred p
-  ProofExprPolarity p -> return $ ProofExprPolarity p
-  ProofExprContext st -> return $ ProofExprContext st
+data ProofSymLeafs sym arch tp where
+  ProofSymBlock :: PT.ConcreteBlock arch bin -> ProofSymLeafs sym arch PF.ProofBlockType
+  ProofSymRegister :: MM.ArchReg arch tp -> ProofSymLeafs sym arch  PF.ProofRegisterType
+  ProofSymMemCell :: PMC.MemCell sym arch w -> ProofSymLeafs sym arch PF.ProofMemCellType
+  ProofSymCounterExample :: InequivalenceResult arch -> ProofSymLeafs sym arch PF.ProofCounterExampleType
+  ProofSymPredicate :: W4.Pred sym -> ProofSymLeafs sym arch PF.ProofPredicateType
+  ProofSymPolarity :: W4.Pred sym -> ProofSymLeafs sym arch PF.ProofPolarityType
+  ProofSymContext :: PT.PatchPair (PS.SimState sym arch) -> ProofSymLeafs sym arch PF.ProofContextType
+  ProofSymBlockExit :: CS.RegValue sym (MS.MacawBlockEndType arch) -> ProofSymLeafs sym arch PF.ProofBlockExitType
+  ProofSymBV :: CLM.LLVMPtr sym w -> ProofSymLeafs sym arch (PF.ProofBVType w)
+  ProofSymMacawValue :: PSR.MacawRegEntry sym tp -> ProofSymLeafs sym arch (PF.ProofMacawValueType tp)
 
-instance (PT.ValidArch arch, PT.ValidSym sym) => PP.Pretty (ProofExprLeafs sym arch Identity tp) where
+instance (PT.ValidArch arch, PT.ValidSym sym) => PP.Pretty (ProofSymLeafs sym arch tp) where
   pretty = \case
-    ProofExprBlock blk -> PP.pretty $ PT.ppBlock blk
-    ProofExprRegister reg -> PP.pretty $ showF reg
-    ProofExprMemCell cell ->
+    ProofSymBlock blk -> PP.pretty $ PT.ppBlock blk
+    ProofSymRegister reg -> PP.pretty $ showF reg
+    ProofSymMemCell cell ->
       let CLM.LLVMPointer reg off = PMC.cellPtr cell
       in PP.pretty (showF reg) <> "+" <> PP.pretty (showF off)
-    ProofExprStatus st -> case runIdentity st of
-      Unverified -> "Not verified"
-      VerificationSkipped -> "Skipped (assumed)"
-      VerificationSuccess -> "Succeeded"
-      VerificationFail result -> PP.vsep [ "Failed:", PP.pretty result ]
-    ProofExprPred p | Just True <- W4.asConstantPred p -> PP.emptyDoc
-    ProofExprPred _ -> "Conditional"
-    ProofExprContext _ -> "Proof Context"
-    ProofExprPolarity p | Just True <- W4.asConstantPred p -> "Inclusive"
-    ProofExprPolarity p | Just True <- W4.asConstantPred p -> "Exclusive"
-    ProofExprPolarity _ -> "Symbolic Polarity"
-
-instance PEM.ExprMappable sym (ProofExprLeafs sym arch future tp) where
-  mapExpr sym f leaf = case leaf of
-    ProofExprMemCell cell -> ProofExprMemCell <$> PEM.mapExpr sym f cell
-    ProofExprPred p -> ProofExprPred <$> f p
-    ProofExprContext st -> ProofExprContext <$> PEM.mapExpr sym f st 
-    _ -> return leaf
+    ProofSymCounterExample ce -> PP.pretty ce
+    ProofSymPredicate p | Just True <- W4.asConstantPred p -> PP.emptyDoc
+    ProofSymPredicate _ -> "Conditional"
+    ProofSymContext _ -> "Proof Context"
+    ProofSymPolarity p | Just True <- W4.asConstantPred p -> "Inclusive"
+    ProofSymPolarity p | Just True <- W4.asConstantPred p -> "Exclusive"
+    ProofSymPolarity _ -> "Symbolic Polarity"
+    ProofSymBlockExit _ -> "Symbolic Block Exit"
+    ProofSymBV e -> ppPtr e
+    ProofSymMacawValue me -> PP.pretty $ show me
 
 
 
-type ProofExprFuture sym arch = ProofBlockSlice (ProofExprLeafs sym arch Par.Future)
-type ProofExpr sym arch = ProofBlockSlice (ProofExprLeafs sym arch Identity)
+ppPtr :: PT.ValidSym sym => CLM.LLVMPtr sym w -> PP.Doc a
+ppPtr ( CLM.LLVMPointer reg off) = PP.pretty (showF reg) <> "+" <> PP.pretty (showF off)
 
-data SomeProof (arch :: *) where
-  SomeProof :: PT.Sym sym -> ProofExpr sym arch -> SomeProof arch
+instance W4.IsSymExprBuilder sym => PF.IsBoolLike (ProofSymLeafs sym arch PF.ProofPredicateType) where
+  asBool (ProofSymPredicate p) = W4.asConstantPred p
 
-data SomeProofTriple (arch :: *) where
-  SomeProofTriple :: PT.Sym sym -> ProofTriple (ProofExprLeafs sym arch Identity) -> SomeProofTriple arch
+instance Eq (ProofSymLeafs sym arch PF.ProofBlockType) where
+  (ProofSymBlock blk) == (ProofSymBlock blk') =
+       PT.concreteAddress blk == PT.concreteAddress blk'
+    && PT.concreteBlockEntry blk == PT.concreteBlockEntry blk'
 
+instance PT.ValidSym sym => Eq (ProofSymLeafs sym arch PF.ProofBlockExitType) where
+  -- unused for symbolic values at the moment, and it's annoying to define 
+  _ == _ = False
 
-finalizeProof :: ProofExprFuture sym arch -> IO (ProofExpr sym arch)
-finalizeProof = TF.traverseF joinProofExpr
+instance W4.IsSymExprBuilder sym => Eq (ProofSymLeafs sym arch (PF.ProofMacawValueType tp)) where
+  (ProofSymMacawValue mv) == (ProofSymMacawValue mv') = mv == mv'
+    
+instance W4.IsSymExprBuilder sym => Eq (ProofSymLeafs sym arch (PF.ProofBVType n)) where
+  (ProofSymBV bv) == (ProofSymBV bv') | Just Refl <- PT.ptrEquality bv bv' = True
+  _ == _ = False
 
+instance PT.ValidArch arch => Eq (ProofSymLeafs sym arch PF.ProofRegisterType) where
+  (ProofSymRegister r1) == (ProofSymRegister r2) | Just Refl <- testEquality r1 r2 = True
+  _ == _ = False
 
+instance PT.ValidArch arch => Ord (ProofSymLeafs sym arch PF.ProofRegisterType) where
+  compare (ProofSymRegister r1) (ProofSymRegister r2) = toOrdering $ compareF r1 r2
 
+instance W4.IsSymExprBuilder sym => Eq (ProofSymLeafs sym arch PF.ProofMemCellType) where
+  (ProofSymMemCell m1) == (ProofSymMemCell m2) | Just Refl <- testEquality m1 m2 = True
+  _ == _ = False
 
-data BlockSliceElemType =
-    BSMemCellType
-  | BSBVType
-  | BSMacawValueType MT.Type
-  | BSBoolType
-  | BSBlockExitType
-  | BSRegisterType MT.Type
+instance W4.IsSymExprBuilder sym => Ord (ProofSymLeafs sym arch PF.ProofMemCellType) where
+  compare (ProofSymMemCell m1) (ProofSymMemCell m2) = toOrdering $ compareF m1 m2
 
-class (IsBoolLike (e 'BSBoolType),
-       (forall tp. Eq (e tp)),
-       (forall tp. PP.Pretty (e tp))) => PrettySliceElem e
-
-
-data BlockSliceState (e :: BlockSliceElemType -> *) =
-  BlockSliceState
-    {
-      bsMemState :: [BlockSliceMemOp e]
-    , bsRegState :: [BlockSliceRegister e]
-    }
-
-instance TF.FunctorF BlockSliceState where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF BlockSliceState where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF BlockSliceState where
-  traverseF f (BlockSliceState a1 a2) =
-    BlockSliceState
-      <$> traverse (TF.traverseF f) a1
-      <*> traverse (TF.traverseF f) a2
-
--- | A block slice represents the semantics of executing a sequence of blocks,
--- from some initial memory and register state to a final memory and register state
-data BlockSlice (e :: BlockSliceElemType -> *) =
-  BlockSlice
-    { 
-      bsPreState :: BlockSliceState e
-    , bsPostState :: BlockSliceState e
-    , bsExitCase :: PatchPairC (e 'BSBlockExitType)
-    }
+instance (PT.ValidArch arch, PT.ValidSym sym) => PF.PrettyProofLeafs (ProofSymLeafs sym arch)
 
 
-instance TF.FunctorF BlockSlice where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF BlockSlice where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF BlockSlice where
-  traverseF f (BlockSlice a1 a2 a3) =
-    BlockSlice
-      <$> TF.traverseF f a1
-      <*> TF.traverseF f a2
-      <*> traverse f a3
-
-
-data BlockSliceMemOp (e :: BlockSliceElemType -> *) =
-  BlockSliceMemOp
-    {
-      bsMemOpCell :: e 'BSMemCellType
-    , bsMemOpValues :: PatchPairC (e 'BSBVType)
-    -- | true if the values of the memory operation are considered equivalent
-    , bsMemOpEquiv :: e 'BSBoolType
-    -- | true if the cell of the memory operation is within the domain that this
-    -- block slice is checked in
-    , bsMemOpInDomain :: e 'BSBoolType
-    }
-
-instance TF.FunctorF BlockSliceMemOp where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF BlockSliceMemOp where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF BlockSliceMemOp where
-  traverseF f (BlockSliceMemOp a1 a2 a3 a4) =
-    BlockSliceMemOp
-      <$> f a1
-      <*> traverse f a2
-      <*> f a3
-      <*> f a4
+data ProofGroundLeafs arch tp where
+  -- unchanged from symbolic
+  ProofGroundBlock :: PT.ConcreteBlock arch bin -> ProofGroundLeafs arch PF.ProofBlockType
+  -- unchanged from symbolic
+  ProofGroundRegister :: MM.ArchReg arch tp -> ProofGroundLeafs arch PF.ProofRegisterType
+  ProofGroundPredicate :: Bool -> ProofGroundLeafs arch PF.ProofPredicateType
+  ProofGroundMemCell :: PT.GroundLLVMPointer (MM.ArchAddrWidth arch) -> Natural -> ProofGroundLeafs arch PF.ProofMemCellType
+  ProofGroundPolarity :: Bool -> ProofGroundLeafs arch PF.ProofPolarityType
+  -- unchanged from symbolic
+  ProofGroundCounterExample :: InequivalenceResult arch -> ProofGroundLeafs arch PF.ProofCounterExampleType
+  -- unsupported
+  ProofGroundContext :: ProofGroundLeafs arch PF.ProofContextType
+  ProofGroundBV :: PT.GroundBV w -> ProofGroundLeafs arch (PF.ProofBVType w)
+  ProofGroundBlockExit :: MS.MacawBlockEndCase -> Maybe (PT.GroundLLVMPointer (MM.ArchAddrWidth arch)) -> ProofGroundLeafs arch PF.ProofBlockExitType
+  ProofGroundMacawValue :: PSR.ValidMacawType tp =>
+    CT.TypeRepr (MS.ToCrucibleType tp) -> PT.ConcreteValue (MS.ToCrucibleType tp) -> ProofGroundLeafs arch (PF.ProofMacawValueType tp)
 
 
-instance PrettySliceElem e => PP.Pretty (BlockSliceMemOp e) where
-  pretty mop = PP.pretty (bsMemOpCell mop) <> ":" <+> ppPatchPairEq PP.pretty (bsMemOpValues mop)
-    <+> prettyEquiv (bsMemOpEquiv mop) (bsMemOpInDomain mop)
-
-prettyEquiv :: PrettySliceElem e => e 'BSBoolType -> e 'BSBoolType -> PP.Doc a
-prettyEquiv isEq isInDomain = case (asBool isEq, asBool isInDomain) of
-  (Just True, _) -> PP.emptyDoc
-  (Just False, Just False) -> "Excluded"
-  _ -> "Unequal"
-
-data BlockSliceRegister (e :: BlockSliceElemType -> *) where
-  BlockSliceRegister ::
-    {
-      bsRegister :: e ('BSRegisterType tp)
-    , bsRegisterValues :: PatchPairC (e ('BSMacawValueType tp))
-    , bsRegisterEquiv :: e 'BSBoolType
-    , bsRegisterInDomain :: e 'BSBoolType
-    } -> BlockSliceRegister e
-
-instance TF.FunctorF BlockSliceRegister where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF BlockSliceRegister where
-  foldMapF = TF.foldMapFDefault
-
-instance TF.TraversableF BlockSliceRegister where
-  traverseF f (BlockSliceRegister a1 a2 a3 a4) =
-    BlockSliceRegister
-      <$> f a1
-      <*> traverse f a2
-      <*> f a3
-      <*> f a4
-
-instance PrettySliceElem e => PP.Pretty (BlockSliceRegister e) where
-  pretty bsr@(BlockSliceRegister reg vals _ _) = PP.pretty reg <> ":" <+> ppPatchPairEq PP.pretty vals
-    <+> prettyEquiv (bsRegisterEquiv bsr) (bsRegisterInDomain bsr)
-
-instance PrettySliceElem e => PP.Pretty (BlockSlice e) where
-  pretty bs = PP.vsep $
-    [ "Block Exit Condition:" <+> ppPatchPairEq PP.pretty (bsExitCase bs)
-    ,  "Initial register state:"
-    , PP.vsep $ map PP.pretty (bsRegState $ bsPreState bs)
-    , "Initial memory state:"
-    , PP.vsep $ map PP.pretty (bsMemState $ bsPreState bs)
-    , "Final memory state:"
-    , PP.vsep $ map PP.pretty (bsRegState $ bsPostState bs) 
-    , "Final register state:"
-    , PP.vsep $ map PP.pretty (bsRegState $ bsPostState bs)
-    ]
-
-data BSGroundExprLeaf arch tp where
-  BSGroundMemCell :: PT.GroundLLVMPointer (MM.ArchAddrWidth arch) -> Natural -> BSGroundExprLeaf arch 'BSMemCellType
-  BSGroundBV :: PT.GroundBV w -> BSGroundExprLeaf arch 'BSBVType
-  BSGroundMacawValue :: PSR.ValidMacawType tp => CT.TypeRepr (MS.ToCrucibleType tp) -> PT.ConcreteValue (MS.ToCrucibleType tp) -> BSGroundExprLeaf arch ('BSMacawValueType tp)
-  BSGroundBool :: Bool -> BSGroundExprLeaf arch 'BSBoolType
-  BSGroundBlockExit :: MS.MacawBlockEndCase -> Maybe (PT.GroundLLVMPointer (MM.ArchAddrWidth arch)) -> BSGroundExprLeaf arch 'BSBlockExitType
-  BSGroundRegister :: MM.ArchReg arch tp -> BSGroundExprLeaf arch ('BSRegisterType tp)
-
-instance PT.ValidArch arch => Eq (BSGroundExprLeaf arch tp) where
-  a == b = case (a, b) of
-    (BSGroundMemCell a1 a2, BSGroundMemCell b1 b2) | a1 == b1, a2 == b2 -> True
-    (BSGroundBV a1, BSGroundBV b1) | Just Refl <- testEquality a1 b1 -> True
-    (BSGroundMacawValue a1 a2, BSGroundMacawValue b1 b2)
-      | Just Refl <- testEquality a1 b1
-      , a2 == b2
-      -> True
-    (BSGroundBool a1, BSGroundBool b1) | a1 == b1 -> True
-    (BSGroundBlockExit a1 a2, BSGroundBlockExit b1 b2) | a1 == b1, a2 == b2 -> True
-    (BSGroundRegister a1, BSGroundRegister b1) | Just Refl <- testEquality a1 b1 -> True
-    _ -> False
-
-
-instance PT.ValidArch arch => PP.Pretty (BSGroundExprLeaf arch tp) where
+instance PT.ValidArch arch => PP.Pretty (ProofGroundLeafs arch tp) where
   pretty = \case
-    BSGroundMemCell ptr _ -> PP.pretty $ PT.ppLLVMPointer ptr
-    BSGroundBV bv -> PP.pretty $ show bv
-    BSGroundMacawValue repr cv -> case repr of
+    ProofGroundBlock blk -> PP.pretty $ PT.ppBlock blk
+    ProofGroundRegister reg -> PP.pretty $ showF reg
+    ProofGroundPredicate p -> PP.pretty $ show p
+    ProofGroundMemCell ptr _ -> PP.pretty $ PT.ppLLVMPointer ptr
+    ProofGroundPolarity p -> PP.pretty $ show p
+    ProofGroundCounterExample ce -> PP.pretty ce
+    ProofGroundContext -> PP.emptyDoc
+    ProofGroundBV bv -> PP.pretty $ show bv
+    ProofGroundBlockExit ec Nothing -> PP.pretty $ ppExitCase ec
+    ProofGroundBlockExit ec (Just ptr) ->
+      PP.pretty (ppExitCase ec) <+> "returning to" <+> PP.pretty (PT.ppLLVMPointer ptr)    
+    ProofGroundMacawValue repr cv -> case repr of
       CLM.LLVMPointerRepr _ -> PP.pretty $ show cv
       _ -> "Unsupported Value"
-    BSGroundBool b -> PP.pretty $ show b
-    BSGroundBlockExit ec Nothing -> PP.pretty $ ppExitCase ec
-    BSGroundBlockExit ec (Just ptr) ->
-      PP.pretty (ppExitCase ec) <+> "returning to" <+> PP.pretty (PT.ppLLVMPointer ptr)
-    BSGroundRegister r -> PP.pretty $ showF r
 
-instance PF.IsBoolLike (BSGroundExprLeaf arch 'BSBoolType) where
-  asBool (BSGroundBool b) = Just b
+instance PF.IsBoolLike (ProofGroundLeafs arch PF.ProofPredicateType) where
+  asBool (ProofGroundPredicate p) = Just p
 
-instance PT.ValidArch arch => PrettySliceElem (BSGroundExprLeaf arch)
+instance Eq (ProofGroundLeafs arch PF.ProofBlockType) where
+  (ProofGroundBlock blk) == (ProofGroundBlock blk') =
+    PT.concreteAddress blk == PT.concreteAddress blk'
+    && PT.concreteBlockEntry blk == PT.concreteBlockEntry blk'
 
-data BSExprLeaf sym arch tp where
-  BSExprMemCell :: PMC.MemCell sym arch w -> BSExprLeaf sym arch 'BSMemCellType
-  BSExprBV :: CLM.LLVMPtr sym w -> BSExprLeaf sym arch 'BSBVType
-  BSExprMacawValue :: PSR.MacawRegEntry sym tp -> BSExprLeaf sym arch ('BSMacawValueType tp)
-  BSExprBool :: W4.Pred sym -> BSExprLeaf sym arch 'BSBoolType
-  BSExprBlockExit :: CS.RegValue sym (MS.MacawBlockEndType arch) -> BSExprLeaf sym arch 'BSBlockExitType
-  BSExprRegister :: MM.ArchReg arch tp -> BSExprLeaf sym arch ('BSRegisterType tp)
- 
+instance Eq (ProofGroundLeafs arch PF.ProofBlockExitType) where
+  (ProofGroundBlockExit ecase1 eret1) == (ProofGroundBlockExit ecase2 eret2) = ecase1 == ecase2 && eret1 == eret2
 
-type GroundBlockSlice arch = BlockSlice (BSGroundExprLeaf arch)
-type ExprBlockSlice sym arch = BlockSlice (BSExprLeaf sym arch)
+instance Eq (ProofGroundLeafs arch (PF.ProofMacawValueType tp)) where
+  (ProofGroundMacawValue _ v1) == (ProofGroundMacawValue _ v2) = v1 == v2
+
+instance Eq (ProofGroundLeafs arch (PF.ProofBVType n)) where
+  (ProofGroundBV bv) == (ProofGroundBV bv') = bv == bv'
+
+instance PT.ValidArch arch => Eq (ProofGroundLeafs arch PF.ProofRegisterType) where
+  (ProofGroundRegister r1) == (ProofGroundRegister r2) | Just Refl <- testEquality r1 r2 = True
+  _ == _ = False
+
+instance PT.ValidArch arch => Ord (ProofGroundLeafs arch PF.ProofRegisterType) where
+  compare (ProofGroundRegister r1) (ProofGroundRegister r2) = toOrdering $ compareF r1 r2
+
+instance Eq (ProofGroundLeafs arch PF.ProofMemCellType) where
+  (ProofGroundMemCell m1 n1) == (ProofGroundMemCell m2 n2) = m1 == m2 && n1 == n2
+
+instance Ord (ProofGroundLeafs arch PF.ProofMemCellType) where
+  compare (ProofGroundMemCell m1 n1) (ProofGroundMemCell m2 n2) = compare n1 n2 <> (toOrdering $ compareF m1 m2)
+
+instance PT.ValidArch arch => PF.PrettyProofLeafs (ProofGroundLeafs arch)
+
+instance PEM.ExprMappable sym (ProofSymLeafs sym arch tp) where
+  mapExpr sym f leaf = case leaf of
+    ProofSymMemCell cell -> ProofSymMemCell <$> PEM.mapExpr sym f cell
+    ProofSymPredicate p -> ProofSymPredicate <$> f p
+    ProofSymPolarity p -> ProofSymPolarity <$> f p
+    ProofSymBV bv -> ProofSymBV <$> WEH.mapExprPtr sym f bv
+    ProofSymMacawValue mv -> ProofSymMacawValue <$> PEM.mapExpr sym f mv
+    ProofSymContext st -> ProofSymContext <$> PEM.mapExpr sym f st
+    _ -> return leaf
+
+instance (forall tp. PEM.ExprMappable sym (leaf tp)
+         ,forall tp. PEM.ExprMappable sym (node tp)
+         , PF.ValidLeaf leaf) =>
+         PEM.ExprMappable sym (PF.ProofApp leaf node tp) where
+  mapExpr sym f = PF.traverseProofApp (PEM.mapExpr sym f) (PEM.mapExpr sym f)
+
+
+type ProofSymExpr sym arch = PF.ProofExpr (ProofSymLeafs sym arch) PF.ProofBlockSliceType
+type CounterExample arch = PF.BlockSliceTransition (ProofGroundLeafs arch)
+
+data SomeProof (arch :: *) where
+  SomeProof :: PT.Sym sym -> ProofSymExpr sym arch -> SomeProof arch
+
+data SomeProofTriple (arch :: *) where
+  SomeProofTriple :: PT.Sym sym -> PF.ProofExpr (ProofSymLeafs sym arch) PF.ProofTripleType -> SomeProofTriple arch
 
 
 
+
+ppExitCase :: MS.MacawBlockEndCase -> String
+ppExitCase ec = case ec of
+  MS.MacawBlockEndJump -> "arbitrary jump"
+  MS.MacawBlockEndCall -> "function call"
+  MS.MacawBlockEndReturn -> "function return"
+  MS.MacawBlockEndBranch -> "branch"
+  MS.MacawBlockEndArch -> "syscall"
+  MS.MacawBlockEndFail -> "analysis failure"

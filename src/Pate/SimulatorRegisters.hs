@@ -55,6 +55,13 @@ data MacawRegEntry sym (tp :: MT.Type) where
     } ->
     MacawRegEntry sym tp
 
+instance WI.IsSymExprBuilder sym => Eq (MacawRegEntry sym tp) where
+  (MacawRegEntry repr v1) == (MacawRegEntry _ v2) = case repr of
+    CLM.LLVMPointerRepr{} | Just PC.Refl <- PT.ptrEquality v1 v2 -> True
+    CT.BoolRepr | Just PC.Refl <- WI.testEquality v1 v2 -> True
+    CT.StructRepr Ctx.Empty -> True
+    _ -> error "MacawRegEntry: unexpected type for equality comparison"
+
 data MacawRegVar sym (tp :: MT.Type) where
   MacawRegVar ::
     { macawVarEntry :: MacawRegEntry sym tp
@@ -67,7 +74,7 @@ instance PC.ShowF (WI.SymExpr sym) => Show (MacawRegEntry sym tp) where
     CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> PC.showF rg ++ ":" ++ PC.showF bv
     _ -> "macawRegEntry: unsupported"
 
-macawRegEntry :: ValidMacawType tp => CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
+macawRegEntry :: ValidMacawType tp =>  Eq (CS.RegValue sym (MS.ToCrucibleType tp)) => CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
 macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
 
 ptrToEntry ::

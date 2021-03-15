@@ -91,6 +91,7 @@ module Pate.Types
   , showModelForExpr
   , mapExprPtr
   , freshPtr
+  , ptrEquality
   )
 where
 
@@ -745,6 +746,18 @@ equivalenceError err = EquivalenceError
   , errStackTrace = Nothing
   , errEquivError = err
   }
+----------------------------------
+
+
+ptrEquality ::
+  TestEquality (W4B.SymExpr sym) =>
+  CLM.LLVMPtr sym w1 ->
+  CLM.LLVMPtr sym w2 ->
+  Maybe (w1 :~: w2)
+ptrEquality (CLM.LLVMPointer reg1 off1) (CLM.LLVMPointer reg2 off2)
+  | Just Refl <- testEquality reg1 reg2, Just Refl <- testEquality off1 off2 = Just Refl
+ptrEquality _ _ = Nothing
+
 ----------------------------------
 
 ppEquivalenceStatistics :: EquivalenceStatistics -> String

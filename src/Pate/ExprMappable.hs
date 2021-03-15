@@ -38,6 +38,7 @@ class ExprMappable sym f where
     (forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)) ->
     f ->
     IO f
+  mapExpr _ _ = pure
 
 instance ExprMappable sym (CS.RegValue' sym (CT.BaseToType bt)) where
   mapExpr _ f (CS.RV x) = CS.RV <$> f x
