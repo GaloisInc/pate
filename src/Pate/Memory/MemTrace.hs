@@ -1008,6 +1008,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
     -- bad case: mismatched regions. use an uninterpreted function
     undefBytes <- forM memBytes $ \(badReg, badOff, badSubOff) ->
       undefMismatchedRegionRead undef sym (LLVMPointer badReg badOff) badSubOff
+    appendByte <- mkAppendByte
     undefOff <- foldM appendByte bv0 (appendOrder endianness undefBytes)
 
     -- put it all together
@@ -1051,7 +1052,12 @@ readMemArr sym undef mem ptr repr = go 0 repr
       off' <- bvLshr sym off subOff'
       bvOrBits sym bytes' =<< bvAndBits sym off' mask
 
-  appendByte = undefined
+  mkAppendByte | LeqProof <- memWidthIsBig @ptrW @9 = do
+    bv8 <- bvFromInteger sym ptrWRepr 8
+    pure $ \bytes byte -> do
+      bytes' <- bvShl sym bytes bv8
+      byte' <- bvZext sym ptrWRepr byte
+      bvOrBits sym bytes' byte'
 
   goBV :: forall w. 1 <= w => Integer -> NatRepr w -> Endianness -> IO (LLVMPtr sym (8*w))
   goBV n byteWidth endianness =
