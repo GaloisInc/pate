@@ -30,10 +30,10 @@ import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PNR
 import qualified Data.Parameterized.TraversableF as TF
 import           GHC.TypeLits ( type (<=) )
+import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified What4.Interface as WI
 
-import qualified Pate.SimState as PS
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
 import qualified What4.ExprHelpers as WEH
@@ -189,27 +189,28 @@ readMemCell ::
   WI.IsSymExprBuilder sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
+  PMT.UndefinedPtrOps sym ->
   PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   IO (CLM.LLVMPtr sym (8 WI.* w))
-readMemCell sym mem cell@(MemCell{}) = do
+readMemCell sym undef mem cell@(MemCell{}) = do
   let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-  PMT.readMemArr sym mem (cellPtr cell) repr
+  PMT.readMemArr sym undef mem (cellPtr cell) repr
 
 -- FIXME: this currently drops the region due to weaknesses in the memory model
 writeMemCell ::
-  WI.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
+  PMT.UndefinedPtrOps sym ->
   PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   CLM.LLVMPtr sym (8 WI.* w) ->
   IO (PMT.MemTraceImpl sym (MC.ArchAddrWidth arch))
-writeMemCell sym mem cell@(MemCell{}) valPtr = do
+writeMemCell sym undef mem cell@(MemCell{}) valPtr = do
   let
     repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-    CLM.LLVMPointer _ val = valPtr
-  PMT.writeMemArr sym mem (cellPtr cell) repr val
+  PMT.writeMemArr sym undef mem (cellPtr cell) repr valPtr
 
 instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do

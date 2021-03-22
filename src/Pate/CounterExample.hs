@@ -179,14 +179,15 @@ groundTraceDiff fn eqRel bundle = do
       EquivM sym arch (Maybe (MemOpDiff arch))
     checkFootprint (MT.MemFootprint ptr w dir cond end) = do
       let repr = MM.BVMemRepr w end
+      undef <- CMR.asks envUndefinedPtrOps
       stackRegion <- CMR.asks envStackRegion
       gstackRegion <- execGroundFn fn stackRegion
       -- "reads" here are simply the memory pre-state
       (oMem, pMem) <- case dir of
             MT.Read -> return $ (preMemO, preMemP)
             MT.Write -> return $ (memO, memP)
-      val1 <- withSymIO $ \sym -> MT.readMemArr sym oMem ptr repr
-      val2 <- withSymIO $ \sym -> MT.readMemArr sym pMem ptr repr
+      val1 <- withSymIO $ \sym -> MT.readMemArr sym undef oMem ptr repr
+      val2 <- withSymIO $ \sym -> MT.readMemArr sym undef pMem ptr repr
       cond' <- memOpCondition cond
       execGroundFn fn cond' >>= \case
         True -> do

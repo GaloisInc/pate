@@ -158,6 +158,7 @@ data EquivEnv sym arch where
     , envProc :: W4O.SolverProcess scope solver
     , envCtx :: EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
+    , envUndefinedPtrOps :: MT.UndefinedPtrOps sym
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envStackRegion :: W4.SymNat sym
     , envGlobalRegion :: W4.SymNat sym
