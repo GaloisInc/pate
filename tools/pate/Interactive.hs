@@ -32,7 +32,6 @@ import qualified Data.Macaw.CFG as MC
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
-import qualified Pate.Proof.Ground as PFG
 import qualified Pate.Proof.Instances as PFI
 
 import           Interactive.State

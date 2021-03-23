@@ -74,51 +74,28 @@ module Pate.Proof
   , ProofBlockExit
   ) where
 
-import           GHC.Natural
 import           GHC.TypeNats
---import           GHC.Type
---import qualified Data.Aeson as AS
 import           Control.Applicative
 import           Control.Monad.Identity
 import           Control.Monad.Writer.Strict as CMW
-import           Control.Lens hiding ( op, pre )
-
-import qualified Data.Map as Map
-import           Data.List
-import           Data.Functor.Identity
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
-import           Data.Parameterized.TH.GADT
-import           Data.Proxy
-import qualified Data.Parameterized.Nonce as N
-import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Map as MapF
-
-import qualified Prettyprinter as PP
-import           Prettyprinter ( (<+>) )
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MT
 
-import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Types as CT
-import qualified Lang.Crucible.Simulator.RegValue as CS
 
 import qualified Pate.Types as PT
 import qualified Pate.Equivalence as PE
-import qualified Pate.MemCell as PMC
-import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.SimState as PS
-import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.ExprMappable as PEM
 
-import qualified Pate.Parallel as Par
 import qualified What4.Interface as W4
-import qualified What4.Expr.Builder as W4B
 
 ---------------------------------------------
 -- proof objects

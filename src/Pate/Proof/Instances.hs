@@ -23,6 +23,7 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 module Pate.Proof.Instances
   ( ProofSym
@@ -34,6 +35,11 @@ module Pate.Proof.Instances
   , ProofSymNonceApp
   , ProofSymApp
   , SomeProofSym(..)
+  , GroundBV(..)
+  , mkGroundBV
+  , groundBVAsPointer
+  , ConcreteValue
+  , GroundLLVMPointer(..)
   , GroundBlockExit(..)
   , GroundDomain
   , GroundMemCell(..)
@@ -45,6 +51,7 @@ module Pate.Proof.Instances
   
   where
 
+import           Numeric
 import           GHC.Natural
 import           Data.Functor.Const
 import           Control.Lens hiding ( op, pre )
@@ -309,7 +316,7 @@ data ProofGround arch
 type instance PF.ProofBlock (ProofGround arch) = PT.ConcreteBlock arch
 type instance PF.ProofRegister (ProofGround arch) = MM.ArchReg arch
 type instance PF.ProofMemCell (ProofGround arch) = GroundMemCell arch
-type instance PF.ProofBV (ProofGround arch) = PT.GroundBV
+type instance PF.ProofBV (ProofGround arch) = GroundBV
 type instance PF.ProofCounterExample (ProofGround arch) = InequivalenceResult arch
 type instance PF.ProofPredicate (ProofGround arch) = Bool
 type instance PF.ProofMacawValue (ProofGround arch) = GroundMacawValue
@@ -319,9 +326,109 @@ type instance PF.ProofContext (ProofGround arch) = ()
 
 instance PT.ValidArch arch => PF.IsProof (ProofGround arch)
 
+
+
+data GroundBV n where
+  GroundBV :: W4.NatRepr n -> BVS.BV n -> GroundBV n
+  GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
+  deriving Eq
+
+instance Show (GroundBV n) where
+  show = ppGroundBV
+
+ppGroundBV :: GroundBV w -> String
+ppGroundBV gbv = case gbv of
+  GroundBV w bv -> BVS.ppHex w bv
+  GroundLLVMPointer ptr -> ppLLVMPointer ptr
+
+groundBVWidth :: GroundBV n -> W4.NatRepr n
+groundBVWidth gbv = case gbv of
+  GroundBV nr _ -> nr
+  GroundLLVMPointer ptr -> ptrWidth ptr
+
+instance TestEquality GroundBV where
+  testEquality bv bv' = case testEquality (groundBVWidth bv) (groundBVWidth bv') of
+    Just Refl | bv == bv' -> Just Refl
+    _ -> Nothing
+
+instance OrdF GroundBV where
+  compareF (GroundBV w bv) (GroundBV w' bv') =
+    lexCompareF w w' $ fromOrdering $ compare bv bv'
+  compareF (GroundLLVMPointer ptr) (GroundLLVMPointer ptr') = compareF ptr ptr'
+  compareF (GroundBV _ _) _ = LTF
+  compareF (GroundLLVMPointer _) _ = GTF
+
+instance Ord (GroundBV n) where
+  compare bv bv' = toOrdering (compareF bv bv')
+
+data GroundLLVMPointer n where
+  GroundLLVMPointerC ::
+      { ptrWidth :: W4.NatRepr n
+      , _ptrRegion :: Natural
+      , _ptrOffset :: BVS.BV n
+      } -> GroundLLVMPointer n
+  deriving Eq
+
+pad :: Int -> String -> String
+pad = padWith ' '
+
+padWith :: Char -> Int -> String -> String
+padWith c n s = replicate (n-length s) c ++ s
+
+ppLLVMPointer :: GroundLLVMPointer w -> String
+ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = concat
+  [ pad 3 (show reg)
+  , "+0x"
+  , padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
+  ]
+  where
+    off = BVS.asUnsigned offBV
+    bitWidth = W4.natValue bitWidthRepr
+
+instance TestEquality GroundLLVMPointer where
+  testEquality ptr ptr'
+    | Just Refl <- testEquality (ptrWidth ptr) (ptrWidth ptr')
+    , ptr == ptr'
+    = Just Refl
+  testEquality _ _ = Nothing
+
+instance Ord (GroundLLVMPointer n) where
+  compare (GroundLLVMPointerC _ reg off) (GroundLLVMPointerC _ reg' off') =
+    compare reg reg' <> compare off off'
+
+instance OrdF GroundLLVMPointer where
+  compareF ptr ptr' =
+    lexCompareF (ptrWidth ptr) (ptrWidth ptr') $ fromOrdering $ compare ptr ptr'
+
+instance Show (GroundLLVMPointer n) where
+  show ptr = ppLLVMPointer ptr
+
+mkGroundBV :: forall n.
+  W4.NatRepr n ->
+  Natural ->
+  BVS.BV n ->
+  GroundBV n
+mkGroundBV nr reg bv = case reg > 0 of
+ True -> GroundLLVMPointer $ GroundLLVMPointerC nr reg bv
+ False -> GroundBV nr bv
+
+groundBVAsPointer :: GroundBV n -> GroundLLVMPointer n
+groundBVAsPointer gbv = case gbv of
+  GroundLLVMPointer ptr -> ptr
+  GroundBV w bv -> GroundLLVMPointerC w 0 bv
+
+type family ConcreteValue (tp :: CT.CrucibleType)
+type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
+type instance ConcreteValue (CT.MaybeType (CLM.LLVMPointerType w)) = Maybe (GroundBV w)
+type instance ConcreteValue CT.BoolType = Bool
+type instance ConcreteValue (CT.StructType CT.EmptyCtx) = ()
+
+type ValidMacawType tp = (Eq (ConcreteValue (MS.ToCrucibleType tp)), Show (ConcreteValue (MS.ToCrucibleType tp)))
+
+
 data GroundMemCell arch w where
   GroundMemCell ::
-    { grndCellPtr :: PT.GroundLLVMPointer (MM.ArchAddrWidth arch)
+    { grndCellPtr :: GroundLLVMPointer (MM.ArchAddrWidth arch)
     -- | width of this cell in bytes
     , grndCellWidth :: W4.NatRepr w
     -- | true if this cell is a stack pointer
@@ -341,11 +448,11 @@ instance OrdF (GroundMemCell arch) where
     lexCompareF w1 w2 $ fromOrdering $ compare ptr1 ptr2 <> compare s1 s2
 
 instance PP.Pretty (GroundMemCell arch w) where
-  pretty (GroundMemCell ptr _ _) = PP.pretty $ PT.ppLLVMPointer ptr
+  pretty (GroundMemCell ptr _ _) = PP.pretty $ ppLLVMPointer ptr
 
 data GroundMacawValue tp where
-  GroundMacawValue :: PSR.ValidMacawType tp =>
-    { grndMacawValue :: PT.ConcreteValue (MS.ToCrucibleType tp)
+  GroundMacawValue :: ValidMacawType tp =>
+    { grndMacawValue :: ConcreteValue (MS.ToCrucibleType tp)
     } -> GroundMacawValue tp
 
 instance PP.Pretty (GroundMacawValue tp) where
@@ -355,7 +462,7 @@ instance PP.Pretty (GroundMacawValue tp) where
 data GroundBlockExit arch where
   GroundBlockExit ::
     { grndBlockCase :: MS.MacawBlockEndCase
-    , grndBlockReturn :: Maybe (PT.GroundLLVMPointer (MM.ArchAddrWidth arch))
+    , grndBlockReturn :: Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))
     } -> GroundBlockExit arch
   deriving Eq
 
@@ -385,7 +492,7 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , ppRegs post (PF.slRegState $ PF.slBlockPostState bs)
   , "Final memory state:"
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
-  , "Block Return Address:" <+> PT.ppPatchPairCEq (\v -> ppMaybe v (PP.pretty . PT.ppLLVMPointer)) (fmap grndBlockReturn $ PF.slBlockExitCase bs)
+  , "Block Return Address:" <+> PT.ppPatchPairCEq (\v -> ppMaybe v (PP.pretty . ppLLVMPointer)) (fmap grndBlockReturn $ PF.slBlockExitCase bs)
   ]
 
 ppMemCellMap ::
@@ -411,8 +518,8 @@ ppRegs dom regs = let
   in (PP.vsep docs) <> PP.line <> (".. and" <+> PP.pretty diff <+> "zero-valued registers")
   
 
-isGroundBVZero :: PT.GroundBV w -> Bool
-isGroundBVZero (PT.GroundBV _ ptr) = BVS.asUnsigned ptr == 0
+isGroundBVZero :: GroundBV w -> Bool
+isGroundBVZero (GroundBV _ ptr) = BVS.asUnsigned ptr == 0
 isGroundBVZero _ = False
 
 

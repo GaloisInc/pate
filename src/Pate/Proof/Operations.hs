@@ -47,7 +47,6 @@ import qualified Data.Map as Map
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.CFG as MM
@@ -56,7 +55,6 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
-import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC

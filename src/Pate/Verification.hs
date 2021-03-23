@@ -795,9 +795,6 @@ simplifySubPreds a = withValid $ withSym $ \sym -> do
       _ -> return e
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (simplifyPred' e)) a
 
-statePredSpecFalse :: EquivM sym arch (StatePredSpec sym arch)
-statePredSpecFalse = withSym $ \sym -> withFreshVars $ \_ _ -> return $ (W4.truePred sym, statePredFalse sym)
-
 matchingExits ::
   forall sym arch.
   SimBundle sym arch ->
@@ -1283,14 +1280,6 @@ doStaticRead mem addr w end = case MM.asSegmentOff mem addr of
 
 --------------------------------------------------------
 -- Toplevel preconditions and postconditions
-
-
-trivialEquivRelation :: EquivM sym arch (EquivRelation sym arch)
-trivialEquivRelation = withSym $ \sym -> do
-  return $ EquivRelation
-    (RegEquivRelation (\_ _ _-> return $ W4.truePred sym))
-    (MemEquivRelation (\_ _ _-> return $ W4.truePred sym))
-    (MemEquivRelation (\_ _ _-> return $ W4.truePred sym))
 
 -- | Default toplevel register post-domain: no registers are required to be
 -- equivalent

@@ -22,8 +22,6 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as WI
 import qualified What4.Partial as WP
 
-import qualified Data.Parameterized.TraversableF as TF
-
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Parallel as Par
 

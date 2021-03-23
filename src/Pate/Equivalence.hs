@@ -62,7 +62,6 @@ module Pate.Equivalence
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeNats
 
-import           Control.Monad.Trans ( lift )
 import           Control.Monad ( forM, foldM, join )
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.IO.Class ( liftIO )
@@ -567,9 +566,6 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
       MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
       IO (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
     freshWrite cell@(PMC.MemCell{}) cond mem = do
-      let
-        ptr = PMC.cellPtr cell
-        repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do

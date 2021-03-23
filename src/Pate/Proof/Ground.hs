@@ -29,6 +29,7 @@ Presenting counter-examples to failed equivalence checks
 
 module Pate.Proof.Ground 
   ( getInequivalenceResult
+  , groundMacawValue
   ) where
 
 import           GHC.Stack ( HasCallStack )
@@ -40,8 +41,8 @@ import qualified Control.Monad.Reader as CMR
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
 
-import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -61,6 +62,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
+
 
 getInequivalenceResult ::
   PT.InequivalenceReason ->
@@ -159,20 +161,20 @@ groundBV ::
   HasCallStack =>
   PT.SymGroundEvalFn sym ->
   CLM.LLVMPtr sym w ->
-  EquivM sym arch (PT.GroundBV w)
+  EquivM sym arch (PFI.GroundBV w)
 groundBV fn (CLM.LLVMPointer reg off) = do
   W4.BaseBVRepr w <- return $ W4.exprType off
   greg <- execGroundFn fn reg
   goff <- execGroundFn fn off
-  let gbv = PT.mkGroundBV w greg goff
+  let gbv = PFI.mkGroundBV w greg goff
   return gbv
 
 groundLLVMPointer :: forall sym arch.
   HasCallStack =>
   PT.SymGroundEvalFn sym ->
   CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-  EquivM sym arch (PT.GroundLLVMPointer (MM.ArchAddrWidth arch))
-groundLLVMPointer fn ptr = PT.groundBVAsPointer <$> groundBV fn ptr
+  EquivM sym arch (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch))
+groundLLVMPointer fn ptr = PFI.groundBVAsPointer <$> groundBV fn ptr
 
 
 isStackCell ::
@@ -193,32 +195,25 @@ groundMemCell fn cell = do
   gIsStack <- execGroundFn fn isStack
   return $ PFI.GroundMemCell gptr (PMC.cellWidth cell) gIsStack
 
-concreteValue ::
-  HasCallStack =>
-  PT.SymGroundEvalFn sym ->
-  PSR.MacawRegEntry sym tp ->
-  EquivM sym arch (PT.ConcreteValue (MS.ToCrucibleType tp))
-concreteValue fn e
-  | CLM.LLVMPointerRepr _ <- PSR.macawRegRepr e
-  , ptr <- PSR.macawRegValue e = do
-    groundBV fn ptr
-  | CT.BoolRepr <- PSR.macawRegRepr e
-  , val <- PSR.macawRegValue e = execGroundFn fn val
-  | CT.StructRepr Ctx.Empty <- PSR.macawRegRepr e = return ()
-concreteValue _ e = throwHere (PT.UnsupportedRegisterType (Some (PSR.macawRegRepr e)))
-
 groundMacawValue ::
   PT.SymGroundEvalFn sym ->
   PSR.MacawRegEntry sym tp ->
   EquivM sym arch (PFI.GroundMacawValue tp)
-groundMacawValue fn e@PSR.MacawRegEntry{} = PFI.GroundMacawValue <$> concreteValue fn e
+groundMacawValue fn e
+  | CLM.LLVMPointerRepr _ <- PSR.macawRegRepr e
+  , ptr <- PSR.macawRegValue e = do
+    PFI.GroundMacawValue <$> groundBV fn ptr
+  | CT.BoolRepr <- PSR.macawRegRepr e
+  , val <- PSR.macawRegValue e = PFI.GroundMacawValue <$>  execGroundFn fn val
+  | CT.StructRepr Ctx.Empty <- PSR.macawRegRepr e = PFI.GroundMacawValue <$> return ()
+  | otherwise = throwHere $ PT.UnsupportedRegisterType (Some $ PSR.macawRegRepr e)
 
 groundReturnPtr ::
   forall sym arch.
   HasCallStack =>
   PT.SymGroundEvalFn sym ->
   CS.RegValue sym (MS.MacawBlockEndType arch) ->
-  EquivM sym arch (Maybe (PT.GroundLLVMPointer (MM.ArchAddrWidth arch)))
+  EquivM sym arch (Maybe (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch)))
 groundReturnPtr fn blkend = case MS.blockEndReturn (Proxy @arch) blkend of
   W4P.PE p e -> execGroundFn fn p >>= \case
     True -> Just <$> groundLLVMPointer fn e

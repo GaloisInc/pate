@@ -23,7 +23,6 @@ import qualified Test.Tasty.ExpectedFailure as T
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
 import qualified Pate.Event as PE
-import qualified Pate.Proof.Ground as PFG
 
 data TestConfig where
   TestConfig ::

@@ -63,23 +63,12 @@ module Pate.Types
   , withTOCCases
   , ValidSym
   , Sym(..)
-  , RegisterDiff(..)
-  , ConcreteValue
-  , GroundBV(..)
-  , mkGroundBV
-  , groundBVAsPointer
-  , GroundLLVMPointer(..)
-  , GroundMemOp(..)
-  , gValue
   , SymGroundEvalFn(..)
   , execGroundFnIO
-  , MemTraceDiff
-  , MemOpDiff(..)
   , InnerEquivalenceError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
   , equivalenceError
-  , ExitCaseDiff
   --- register helpers
   , RegisterCase(..)
   , registerCase
@@ -91,7 +80,6 @@ module Pate.Types
   , equivSuccess
   , ppEquivalenceStatistics
   , ppBlock
-  , ppLLVMPointer
   , showModelForExpr
   , mapExprPtr
   , freshPtr
@@ -115,8 +103,7 @@ import qualified Data.IntervalMap as IM
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Typeable
-import           Numeric.Natural
-import           Numeric
+
 import qualified Data.ElfEdit as E
 import qualified Prettyprinter as PP
 
@@ -383,113 +370,6 @@ concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
 
 ----------------------------------
 
-data GroundBV n where
-  GroundBV :: W4.NatRepr n -> BVS.BV n -> GroundBV n
-  GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
-  deriving Eq
-
-instance Show (GroundBV n) where
-  show = ppGroundBV
-
-pad :: Int -> String -> String
-pad = padWith ' '
-
-padWith :: Char -> Int -> String -> String
-padWith c n s = replicate (n-length s) c ++ s
-
-ppGroundBV :: GroundBV w -> String
-ppGroundBV gbv = case gbv of
-  GroundBV w bv -> BVS.ppHex w bv
-  GroundLLVMPointer ptr -> ppLLVMPointer ptr
-
-ppLLVMPointer :: GroundLLVMPointer w -> String
-ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = concat
-  [ pad 3 (show reg)
-  , "+0x"
-  , padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
-  ]
-  where
-    off = BVS.asUnsigned offBV
-    bitWidth = W4.natValue bitWidthRepr
-
-groundBVWidth :: GroundBV n -> W4.NatRepr n
-groundBVWidth gbv = case gbv of
-  GroundBV nr _ -> nr
-  GroundLLVMPointer ptr -> ptrWidth ptr
-
-instance TestEquality GroundBV where
-  testEquality bv bv' = case testEquality (groundBVWidth bv) (groundBVWidth bv') of
-    Just Refl | bv == bv' -> Just Refl
-    _ -> Nothing
-
-instance OrdF GroundBV where
-  compareF (GroundBV w bv) (GroundBV w' bv') =
-    lexCompareF w w' $ fromOrdering $ compare bv bv'
-  compareF (GroundLLVMPointer ptr) (GroundLLVMPointer ptr') = compareF ptr ptr'
-  compareF (GroundBV _ _) _ = LTF
-  compareF (GroundLLVMPointer _) _ = GTF
-
-instance Ord (GroundBV n) where
-  compare bv bv' = toOrdering (compareF bv bv')
-
-data GroundLLVMPointer n where
-  GroundLLVMPointerC ::
-      { ptrWidth :: W4.NatRepr n
-      , ptrRegion :: Natural
-      , ptrOffset :: BVS.BV n
-      } -> GroundLLVMPointer n
-  deriving Eq
-
-instance TestEquality GroundLLVMPointer where
-  testEquality ptr ptr'
-    | Just Refl <- testEquality (ptrWidth ptr) (ptrWidth ptr')
-    , ptr == ptr'
-    = Just Refl
-  testEquality _ _ = Nothing
-
-instance Ord (GroundLLVMPointer n) where
-  compare (GroundLLVMPointerC _ reg off) (GroundLLVMPointerC _ reg' off') =
-    compare reg reg' <> compare off off'
-
-instance OrdF GroundLLVMPointer where
-  compareF ptr ptr' =
-    lexCompareF (ptrWidth ptr) (ptrWidth ptr') $ fromOrdering $ compare ptr ptr'
-
-instance Show (GroundLLVMPointer n) where
-  show ptr = ppLLVMPointer ptr
-
-mkGroundBV :: forall n.
-  W4.NatRepr n ->
-  Natural ->
-  BVS.BV n ->
-  GroundBV n
-mkGroundBV nr reg bv = case reg > 0 of
- True -> GroundLLVMPointer $ GroundLLVMPointerC nr reg bv
- False -> GroundBV nr bv
-
-groundBVAsPointer :: GroundBV n -> GroundLLVMPointer n
-groundBVAsPointer gbv = case gbv of
-  GroundLLVMPointer ptr -> ptr
-  GroundBV w bv -> GroundLLVMPointerC w 0 bv
-
-type family ConcreteValue (tp :: CC.CrucibleType)
-type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
-type instance ConcreteValue (CC.MaybeType (CLM.LLVMPointerType w)) = Maybe (GroundBV w)
-type instance ConcreteValue CC.BoolType = Bool
-type instance ConcreteValue (CC.StructType CC.EmptyCtx) = ()
-
-data RegisterDiff arch tp where
-  RegisterDiff :: ShowF (MM.ArchReg arch) =>
-    { rReg :: MM.ArchReg arch tp
-    , rTypeRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
-    , rPreOriginal :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPrePatched :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostOriginal :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostPatched :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostEquivalent :: Bool
-    , rDiffDescription :: String
-    } -> RegisterDiff arch tp
-
 data SymGroundEvalFn sym where
   SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
 
@@ -501,46 +381,7 @@ execGroundFnIO ::
 execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
 
 ----------------------------------
-data GroundMemOp arch where
-  GroundMemOp :: forall arch w.
-    { gAddress :: GroundLLVMPointer (MM.ArchAddrWidth arch)
-    , gCondition :: Bool
-    , gValue_ :: GroundBV w
-    } -> GroundMemOp arch
 
-gValue :: GroundMemOp arch -> Some GroundBV
-gValue (GroundMemOp { gValue_ = v}) = Some v
-
-instance Eq (GroundMemOp arch) where
-  (GroundMemOp addr cond v) == (GroundMemOp addr' cond' v')
-    | Just Refl <- testEquality addr addr'
-    , Just Refl <- testEquality v v'
-    = cond == cond'
-  _ == _ = False
-      
-instance Ord (GroundMemOp arch) where
-  compare (GroundMemOp addr cond v) (GroundMemOp addr' cond' v') =
-    case compare cond cond' of
-      LT -> LT
-      GT -> GT
-      EQ -> toOrdering $ lexCompareF addr addr' $ compareF v v'
-
-deriving instance Show (GroundMemOp arch)
-
-data MemOpDiff arch = MemOpDiff
-  { mIsRead :: Bool
-  , mOpOriginal :: GroundMemOp arch
-  , mOpRewritten :: GroundMemOp arch
-  , mIsValid :: Bool
-  , mDesc :: String
-  } deriving (Eq, Ord, Show)
-
-type MemTraceDiff arch = [MemOpDiff arch]
-
-----------------------------------
-
-
---------------------
 
 data EquivalenceStatistics = EquivalenceStatistics
   { numPairsChecked :: Int
@@ -568,9 +409,6 @@ data InequivalenceReason =
   | InvalidPostState
   | PostRelationUnsat
   deriving (Eq, Ord, Show)
-
-type ExitCaseDiff = (MS.MacawBlockEndCase, MS.MacawBlockEndCase)
-type ReturnAddrDiff arch = (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)), (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))))
 
 ----------------------------------
 
