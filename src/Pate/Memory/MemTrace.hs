@@ -100,7 +100,7 @@ import qualified What4.ExprHelpers as WEH
 -- functions when necessary, which is complicated by the fact that unintepreted functions must be monomorphic. We therefore lazily generate and cache each monomorphic variant of the uninterpreted function as they are needed.
 
 -- | A collection of functions used to produce undefined values for each pointer operation.
-data UndefinedPtrOps sym =
+data UndefinedPtrOps sym ptrW =
   UndefinedPtrOps
     { undefPtrOff :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w))
     , undefPtrLt :: UndefinedPtrPredOp sym
@@ -108,9 +108,9 @@ data UndefinedPtrOps sym =
     , undefPtrAdd :: UndefinedPtrBinOp sym
     , undefPtrSub :: UndefinedPtrBinOp sym
     , undefPtrAnd :: UndefinedPtrBinOp sym
-    , undefWriteSize :: forall ptrW valW. sym -> LLVMPtr sym valW -> SymBV sym ptrW -> IO (SymBV sym ptrW)
+    , undefWriteSize :: forall valW. sym -> LLVMPtr sym valW -> SymBV sym ptrW -> IO (SymBV sym ptrW)
     -- ^ arguments are the value being written and the index of the byte within that value being written
-    , undefMismatchedRegionRead :: forall ptrW. sym -> LLVMPtr sym ptrW -> SymBV sym ptrW -> IO (SymBV sym 8)
+    , undefMismatchedRegionRead :: sym -> LLVMPtr sym ptrW -> SymBV sym ptrW -> IO (SymBV sym 8)
     }
 
 -- | Wraps a function which is used to produce an "undefined" pointer that
@@ -171,34 +171,28 @@ polySymbol ::
   SolverSymbol
 polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
 
+
+type AnyNat = 0
 -- | Defines how a given type can be concretized to a specific type-level nat.
 -- This allows us to easily describe a type that is polymorphic in one natural,
 -- using existing type constructors.
-class HasNatAbs (tp :: k) where
-  -- | 'Apply' a specific type-level nat to the type
-  type NatAbs tp (w :: Nat) :: k
+type family NatAbs tp (w :: Nat) :: BaseType where
+  NatAbs (BasePtrType AnyNat) w' = BasePtrType w'
+  NatAbs (BasePtrType w) _ = BasePtrType w
+  NatAbs (BaseBVType AnyNat) w' = BaseBVType w'
+  NatAbs (BaseBVType w) _ = BaseBVType w
+  NatAbs BaseBoolType _ = BaseBoolType
 
-type AnyNat = 0
+type family NatAbsCtx tp (w :: Nat) :: Ctx.Ctx BaseType where
+  NatAbsCtx EmptyCtx w = EmptyCtx
+  NatAbsCtx (ctx Ctx.::> tp) w' = NatAbsCtx ctx w' Ctx.::> NatAbs tp w'
 
-instance HasNatAbs (BasePtrType AnyNat) where
-  type NatAbs (BasePtrType AnyNat) w' = BasePtrType w'
-
-instance HasNatAbs (BaseBVType AnyNat) where
-  type NatAbs (BaseBVType AnyNat) w' = BaseBVType w'
-
-instance HasNatAbs BaseBoolType where
-  type NatAbs BaseBoolType _ = BaseBoolType
-
-instance HasNatAbs EmptyCtx where
-  type NatAbs EmptyCtx w = EmptyCtx
-
-instance (HasNatAbs ctx, HasNatAbs tp) => HasNatAbs (ctx Ctx.::> tp) where
-  type NatAbs (ctx Ctx.::> tp) w' = NatAbs ctx w' Ctx.::> NatAbs tp w'
+natAbsBVFixed :: 1 <= w => NatRepr w -> NatRepr w' -> (NatAbs (BaseBVType w) w' :~: BaseBVType w)
+natAbsBVFixed _ _ = unsafeCoerce Refl
 
 data PolyFun sym args ret (w :: Nat) where
   PolyFun ::
-    (HasNatAbs args, HasNatAbs ret) =>
-    (SymFn sym (NatAbs args w) (NatAbs ret w)) ->
+    (SymFn sym (NatAbsCtx args w) (NatAbs ret w)) ->
     PolyFun sym args ret w
 
 newtype PolyFunMaker sym args ret =
@@ -213,6 +207,21 @@ mkBinUF nm  = PolyFunMaker $ \sym w -> do
     ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
+
+mkPtrBVUF ::
+  forall ptrW sym.
+  IsSymInterface sym =>
+  KnownNat ptrW =>
+  1 <= ptrW =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BaseBVType ptrW) (BaseBVType ptrW)
+mkPtrBVUF nm = PolyFunMaker $ \sym w ->
+  case natAbsBVFixed (knownNat @ptrW) w of
+    Refl -> do
+      let
+        ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+        repr = Empty :> ptrRepr :> BaseBVRepr (knownNat @ptrW)
+      PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr knownNat)
 
 mkPtrAssert ::
   IsSymInterface sym =>
@@ -319,10 +328,12 @@ mkPredOp sym nm (PolyFunMaker mkAssert) = do
     applySymFn sym' doAssert (Empty :> result :> cond)
 
 mkUndefinedPtrOps ::
-  forall sym.
+  forall sym ptrW.
   IsSymInterface sym =>
+  KnownNat ptrW =>
+  1 <= ptrW =>
   sym ->
-  IO (UndefinedPtrOps sym)
+  IO (UndefinedPtrOps sym ptrW)
 mkUndefinedPtrOps sym = do
   ptrAssert <- cachedPolyFun sym $ mkPtrAssert assertPrefix
   predAssert <- cachedPolyFun sym $ mkPredAssert assertPrefix
@@ -335,6 +346,33 @@ mkUndefinedPtrOps sym = do
       PolyFun resultfn <- offFn sym' w
       result <- applySymFn sym' resultfn (Empty :> sptr)
       PolyFun doAssert <- bvAssert sym' w
+      applySymFn sym' doAssert (Empty :> result :> cond)
+  PolyFunMaker undefWriteFn <- cachedPolyFun sym $ mkPtrBVUF @ptrW "undefWriteSize"
+  let
+    ptrW :: NatRepr ptrW
+    ptrW = knownNat @ptrW
+
+    undefWriteFn' :: forall valW. sym -> LLVMPtr sym valW -> SymBV sym ptrW -> IO (SymBV sym ptrW)
+    undefWriteFn' sym' ptr bv = withPtrWidth ptr $ \w -> do
+      sptr <- asSymPtr sym' ptr
+      PolyFun resultfn <- undefWriteFn sym' w
+      Refl <- return $ natAbsBVFixed ptrW w
+      result <- applySymFn sym' resultfn (Empty :> sptr :> bv)
+      -- FIXME: What is the asserted predicate here?
+      let cond = truePred sym'
+      PolyFun doAssert <- bvAssert sym' knownNat
+      applySymFn sym' doAssert (Empty :> result :> cond)
+
+  undefReadFn <- freshTotalUninterpFn sym (polySymbol "undefMismatchedRegionRead" ptrW) knownRepr knownRepr
+
+  let
+    undefReadFn' :: sym -> LLVMPtr sym ptrW -> SymBV sym ptrW -> IO (SymBV sym 8)
+    undefReadFn' sym' ptr bv = do
+      sptr <- asSymPtr sym' ptr
+      result <- applySymFn sym' undefReadFn (Empty :> sptr :> bv)
+      -- FIXME: What is the asserted predicate here?
+      let cond = truePred sym'
+      PolyFun doAssert <- bvAssert sym' (knownNat @8)
       applySymFn sym' doAssert (Empty :> result :> cond)
 
   undefPtrLt' <- mkPredOp sym "undefPtrLt" predAssert
@@ -350,6 +388,8 @@ mkUndefinedPtrOps sym = do
       , undefPtrAdd = undefPtrAdd'
       , undefPtrSub = undefPtrSub'
       , undefPtrAnd = undefPtrAnd'
+      , undefWriteSize = undefWriteFn'
+      , undefMismatchedRegionRead = undefReadFn'
       }
 
 -- * Memory trace model
@@ -362,7 +402,7 @@ macawTraceExtensions ::
   MacawArchEvalFn sym (MemTrace arch) arch ->
   GlobalVar (MemTrace arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym (ArchAddrWidth arch) ->
   ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
 macawTraceExtensions archStmtFn mvar globs undefptr =
   ExtensionImpl
@@ -558,7 +598,7 @@ type MacawTraceEvalStmtFunc sym arch = EvalStmtFunc (MacawStmtExtension arch) (M
 execMacawStmtExtension ::
   forall sym arch t st fs. (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn sym (MemTrace arch) arch ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym (ArchAddrWidth arch) ->
   GlobalVar (MemTrace arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   MacawTraceEvalStmtFunc sym arch
@@ -626,9 +666,9 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
 
-evalMacawExprExtensionTrace :: forall sym arch f tp
+evalMacawExprExtensionTrace :: forall sym arch ptrW f tp
                        .  IsSymInterface sym
-                       => UndefinedPtrOps sym
+                       => UndefinedPtrOps sym ptrW
                        -> sym
                        -> IntrinsicTypes sym
                        -> (Int -> String -> IO ())
@@ -643,7 +683,7 @@ evalMacawExprExtensionTrace undefptr sym iTypes logFn f e0 =
 doPtrToBits ::
   (IsSymInterface sym, 1 <= w) =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   LLVMPtr sym w ->
   IO (SymBV sym w)
 doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
@@ -814,7 +854,7 @@ isZero sym reg = do
 doReadMem ::
   IsSymInterface sym =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
@@ -828,7 +868,7 @@ doReadMem sym undef ptrW ptr memRepr = addrWidthClass ptrW $ do
 doCondReadMem ::
   IsSymInterface sym =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   RegValue sym BoolType ->
   RegValue sym (MS.ToCrucibleType ty) ->
   AddrWidthRepr ptrW ->
@@ -845,7 +885,7 @@ doWriteMem ::
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
   RegValue sym (MS.ToCrucibleType ty) ->
@@ -857,7 +897,7 @@ doCondWriteMem ::
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   RegValue sym BoolType ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
@@ -965,7 +1005,7 @@ readMemArr :: forall sym ptrW ty.
   MemWidth ptrW =>
   IsExprBuilder sym =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
@@ -1089,7 +1129,7 @@ writeMemArr :: forall sym ptrW w.
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr (MT.BVType w) ->
@@ -1153,7 +1193,7 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
 getMemByteOff :: forall sym ptrW.
   (MemWidth ptrW, IsExprBuilder sym) =>
   sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   NatRepr ptrW ->
   SymExpr sym (MemByteBaseType ptrW) ->
   IO (SymBV sym 8)
@@ -1206,7 +1246,7 @@ doMemOpInternal :: forall sym ptrW ty.
   sym ->
   MemOpDirection ->
   MemOpCondition sym ->
-  UndefinedPtrOps sym ->
+  UndefinedPtrOps sym ptrW ->
   AddrWidthRepr ptrW ->
   LLVMPtr sym ptrW ->
   RegValue sym (MS.ToCrucibleType ty) ->
