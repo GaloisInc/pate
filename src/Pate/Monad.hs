@@ -17,6 +17,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE ExistentialQuantification #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -63,6 +64,9 @@ module Pate.Monad
   , withSatAssumption
   , withAssumptionFrame
   , withAssumptionFrame'
+  -- nonces
+  , freshNonce
+  , withProofNonce
   )
   where
 
@@ -77,7 +81,8 @@ import           Control.Monad.Reader
 import           Control.Monad.Trans.Except
 import           Control.Monad.Except
 import           Control.Monad.State
-
+import           Control.Monad.Identity
+import qualified UnliftIO.Concurrent as IO
 
 import           Data.Functor.Const
 import qualified Data.ElfEdit as E
@@ -128,7 +133,8 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Types
-import qualified Pate.Proof as PP
+import qualified Pate.Proof as PF
+import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Parallel as Par
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
@@ -150,7 +156,7 @@ data EquivalenceContext sym arch where
 
 data EquivEnv sym arch where
   EquivEnv ::
-    forall sym arch .
+    forall sym arch.
     (ValidArch arch, ValidSym sym) =>
     { envWhichBinary :: Maybe (Some WhichBinaryRepr)
     , envCtx :: EquivalenceContext sym arch
@@ -166,7 +172,7 @@ data EquivEnv sym arch where
     , envConfig :: VerificationConfig
     , envFailureMode :: VerificationFailureMode
     , envBaseEquiv :: EquivRelation sym arch
-    , envGoalTriples :: [PP.EquivTriple sym arch]
+    , envGoalTriples :: [PF.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
     , envValidSym :: Sym sym
     -- ^ expression builder, wrapped with a validity proof
@@ -179,7 +185,25 @@ data EquivEnv sym arch where
     -- ^ start of the function currently under analysis
     , envCurrentFrame :: AssumptionFrame sym
     -- ^ the current assumption frame, accumulated as assumptions are added
+    , envNonceGenerator :: N.NonceGenerator IO (PF.ProofScope (PFI.ProofSym sym arch))
+    , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
+    -- ^ nonce of the parent proof node currently in scope
     } -> EquivEnv sym arch
+
+
+freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
+freshNonce = do
+  gen <- asks envNonceGenerator
+  liftIO $ N.freshNonce gen
+
+withProofNonce ::
+  forall tp sym arch a.
+  (PF.ProofNonce (PFI.ProofSym sym arch) tp -> EquivM sym arch a) ->
+  EquivM sym arch a
+withProofNonce f = withValid $do
+  nonce <- freshNonce
+  let proofNonce = PF.ProofNonce nonce
+  local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
 
 data VerificationFailureMode =
     ThrowOnAnyFailure
@@ -222,7 +246,7 @@ emitEvent evt = do
 
 data EquivState sym arch where
   EquivState ::
-    { stProofs :: [PP.ProofExpr sym arch]
+    { stProofs :: [PFI.ProofSymExpr sym arch PF.ProofBlockSliceType]
     -- ^ all intermediate triples that were proven for each block slice
     , stSimResults ::  Map (BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
     -- ^ cached results of symbolic execution for a given block pair
@@ -431,18 +455,17 @@ withAssumption_ asmf f =
   withSym $ \sym -> fmap snd $ withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
--- satisfiable, return the given default value under the "false" assumption.
+-- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
-  f ->
   EquivM sym arch (W4.Pred sym) ->
   EquivM sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-withSatAssumption default_ asmf f = withSym $ \sym -> do
+  EquivM sym arch (Maybe (W4.Pred sym, f))
+withSatAssumption asmf f = do
   asm <- asmf
   isPredSat asm >>= \case
-    True ->  withAssumption (return asm) $ f
-    False -> return (W4.falsePred sym, default_)
+    True ->  Just <$> (withAssumption (return asm) $ f)
+    False -> return Nothing
 
 --------------------------------------
 -- Sat helpers
@@ -635,3 +658,10 @@ manifestError act = catchError (Right <$> act) (pure . Left)
 implicitError :: MonadError e m => Either e a -> m a
 implicitError (Left e) = throwError e
 implicitError (Right a) = pure a
+
+----------------------------------------
+-- Proof
+
+
+
+

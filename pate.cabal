@@ -64,11 +64,13 @@ library
                        Pate.SimulatorRegisters,
                        Pate.Parallel,
                        Pate.Proof,
+                       Pate.Proof.Instances,
+                       Pate.Proof.Operations,
+                       Pate.Proof.Ground,
                        Pate.Types,
                        Pate.Utils,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
-                       Pate.CounterExample,
                        Pate.SimState,
                        Pate.Equivalence
 

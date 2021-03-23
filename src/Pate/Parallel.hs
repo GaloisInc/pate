@@ -19,6 +19,7 @@ Primitives for parallelism
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.Parallel
     ( IsFuture(..)
@@ -74,8 +75,15 @@ instance Monad m => IsFuture m m where
   promise = present
 
 data Future a where
+  -- | A "future" value is a handle on a forked thread, with a
+  -- finalization action
   Future :: IO.ThreadId -> IO.MVar a -> (a -> IO b) -> Future b
+  -- | A "present" value is evaluated lazily when the future is joined, but on the
+  -- joining thread
   Present :: IO a -> Future a
+  -- | An "immediate" value has already been evaluated.
+  Immediate :: a -> Future a
+  
 
 type FutureF = ConstF Future
 
@@ -86,20 +94,36 @@ newtype InFutureIO m a = InFutureIO { runInFutureIO :: m a }
 instance MonadTrans InFutureIO where
   lift f = InFutureIO f
 
-instance IO.MonadUnliftIO m => IsFuture (InFutureIO m) Future where
-  joinFuture (Future _ a f) = IO.liftIO $ IO.readMVar a >>= f
-  joinFuture (Present v) = IO.liftIO $ v
+-- | Cached evaluation that assumes the same value for 'b' will always be given.
+cachedEval :: (b -> IO a) -> IO (b -> IO a)
+cachedEval f = do
+  var <- IO.newMVar Nothing
+  let f' b = IO.modifyMVar var $ \case
+        Just a -> return (Just a, a)
+        Nothing -> do
+          a <- f b
+          return (Just a, a)
+  return f'
 
-  forFuture (Present a) f = do
+instance IO.MonadUnliftIO m => IsFuture (InFutureIO m) Future where
+  joinFuture (Future _ a_var fin) = IO.liftIO $ IO.readMVar a_var >>= fin
+  joinFuture (Present f) = IO.liftIO $ f
+  joinFuture (Immediate a) = return a
+
+  forFuture (Future tid a_var g) f = do
     runInIO <- IO.askRunInIO
-    return $ Present $ (a >>= runInIO . f)
-  forFuture (Future tid a g) f = do
+    f' <- liftIO $ cachedEval (\b -> runInIO (f b))
+    return $ Future tid a_var (\a -> g a >>= f')
+  forFuture (Present g) f = do
     runInIO <- IO.askRunInIO
-    return $ Future tid a (\v -> g v >>= runInIO . f)
+    f' <- liftIO $ cachedEval (\b -> runInIO (f b))
+    return $ Present (g >>= f')
+  forFuture (Immediate a) f = present (f a)
 
   present m = do
     runInIO <- IO.askRunInIO
-    return $ Present $ runInIO m    
+    f' <- liftIO $ cachedEval (\() -> runInIO m)
+    return $ Present (f' ())
 
   promise m = do
     var <- IO.newEmptyMVar

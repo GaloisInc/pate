@@ -15,7 +15,8 @@ import qualified Data.Time as TM
 
 import qualified Pate.Binary as PB
 import qualified Pate.Types as PT
-import qualified Pate.Proof as PP
+import qualified Pate.Proof as PF
+import qualified Pate.Proof.Instances as PFI
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
@@ -25,7 +26,7 @@ type BlocksPair arch = PT.PatchPair (Blocks arch)
 
 data EquivalenceResult arch = Equivalent
                             | Inconclusive
-                            | Inequivalent (PT.InequivalenceResult arch)
+                            | Inequivalent (PFI.InequivalenceResult arch)
 
 data BlockTargetResult = Reachable
                        | InconclusiveTarget
@@ -33,7 +34,7 @@ data BlockTargetResult = Reachable
 
 data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches
-                                   | BranchesIncomplete (PT.InequivalenceResult arch)
+                                   | BranchesIncomplete (PFI.InequivalenceResult arch)
 
 -- | Events that can be reported from the verifier
 --
@@ -44,10 +45,10 @@ data Event arch where
   AnalysisStart :: PT.BlockPair arch -> Event arch
   ErrorRaised :: PT.EquivalenceError arch -> Event arch
   Warning :: BlocksPair arch -> PT.EquivalenceError arch -> Event arch
-  -- | top-level result
-  ProvenGoal :: BlocksPair arch -> PP.SomeProof arch -> TM.NominalDiffTime -> Event arch
-  -- | intermediate result
-  ProvenTriple :: BlocksPair arch -> PP.SomeProofTriple arch -> TM.NominalDiffTime -> Event arch
+  -- | final top-level result
+  ProvenGoal :: BlocksPair arch ->  PFI.SomeProofSym arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arc
+  -- | intermediate results
+  ProofIntermediate :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
   DiscoverBlockPair :: BlocksPair arch -> PT.BlockTarget arch PT.Original -> PT.BlockTarget arch PT.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch

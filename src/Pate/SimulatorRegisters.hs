@@ -44,7 +44,7 @@ type family CrucBaseTypes (tp :: CT.CrucibleType) :: Ctx.Ctx WI.BaseType where
   CrucBaseTypes CT.BoolType = (Ctx.EmptyCtx Ctx.::> WT.BaseBoolType)
   CrucBaseTypes (CT.StructType Ctx.EmptyCtx) = Ctx.EmptyCtx
 
-type ValidMacawType tp = Eq (PT.ConcreteValue (MS.ToCrucibleType tp))
+type ValidMacawType tp = (Eq (PT.ConcreteValue (MS.ToCrucibleType tp)), Show (PT.ConcreteValue (MS.ToCrucibleType tp)))
 
 -- | This is an analog of the Crucible 'CS.RegEntry' type in terms of the macaw
 -- type system
@@ -74,8 +74,12 @@ instance PC.ShowF (WI.SymExpr sym) => Show (MacawRegEntry sym tp) where
     CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> PC.showF rg ++ ":" ++ PC.showF bv
     _ -> "macawRegEntry: unsupported"
 
-macawRegEntry :: ValidMacawType tp =>  Eq (CS.RegValue sym (MS.ToCrucibleType tp)) => CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
-macawRegEntry (CS.RegEntry repr v) = MacawRegEntry repr v
+macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
+macawRegEntry (CS.RegEntry repr v) = case repr of
+  CLM.LLVMPointerRepr{} -> MacawRegEntry repr v
+  CT.BoolRepr -> MacawRegEntry repr v
+  CT.StructRepr Ctx.Empty -> MacawRegEntry repr v
+  _ -> error ("macawRegEntry: unsupported macaw type " ++ show repr)
 
 ptrToEntry ::
   WI.IsExprBuilder sym =>

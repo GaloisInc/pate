@@ -36,7 +36,6 @@ module Pate.SimState
   , SimInput(..)
   , SimOutput(..)
   , SimSpec(..)
-  , specMap
   , specMapList
   , attachSpec
   , SimBundle(..)
@@ -328,6 +327,7 @@ data SimSpec sym arch f = SimSpec
   , specBody :: f
   }
 
+
 specVarsO :: SimSpec sym arch f -> SimVars sym arch PT.Original
 specVarsO spec = PT.pOriginal $ specVars spec
 
@@ -344,8 +344,8 @@ instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) whe
     specBody' <- PEM.mapExpr sym f (specBody spec)
     return $ SimSpec (specVars spec) specAsm' specBody'
 
-specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
-specMap f spec = spec { specBody = f (specBody spec) }
+instance Functor (SimSpec sym arch) where
+  fmap f spec = spec { specBody = f (specBody spec) }
 
 attachSpec :: SimSpec sym arch f -> g -> SimSpec sym arch g
 attachSpec spec g = spec { specBody = g }

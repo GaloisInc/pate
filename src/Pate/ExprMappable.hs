@@ -40,6 +40,9 @@ class ExprMappable sym f where
     IO f
   mapExpr _ _ = pure
 
+instance (ExprMappable sym a, ExprMappable sym b) => ExprMappable sym (a, b) where
+  mapExpr sym f (a, b) = (,) <$> mapExpr sym f a <*> mapExpr sym f b
+
 instance ExprMappable sym (CS.RegValue' sym (CT.BaseToType bt)) where
   mapExpr _ f (CS.RV x) = CS.RV <$> f x
 

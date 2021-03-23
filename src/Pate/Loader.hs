@@ -71,7 +71,7 @@ unpackBlockData proxy start =
     , PT.blockBinRepr = knownRepr
     }
 
-unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])
+unpackPatchData :: ValidArchProxy arch -> PatchData -> (PT.BlockMapping arch, [PT.BlockPair arch])
 unpackPatchData proxy (PatchData pairs bmap) =
   let
     bmap' = PT.BlockMapping $ 

@@ -7,6 +7,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE OverloadedStrings   #-}
+
 module Pate.MemCell (
     MemCell(..)
   , MemCells
@@ -22,6 +24,7 @@ module Pate.MemCell (
   ) where
 
 import           Control.Monad ( foldM, forM )
+
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map

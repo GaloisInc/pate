@@ -29,12 +29,16 @@ module Pate.Types
   ( VerificationConfig(..)
   , defaultVerificationCfg
   , PatchPair(..)
+  , PatchPairEq(..)
   , ppPatchPair
   , PatchPairC(..)
   , mergePatchPairCs
   , ppPatchPairCEq
+  , ppPatchPairEq
+  , ppPatchPairC
   , BlockPair
   , ConcreteBlock(..)
+  , equivBlocks
   , getConcreteBlock
   , blockMemAddr
   , BlockMapping(..)
@@ -81,10 +85,10 @@ module Pate.Types
   , registerCase
   , zipRegStates
   , zipRegStatesPar
+  , zipWithRegStatesM
   --- reporting
   , EquivalenceStatistics(..)
   , equivSuccess
-  , InequivalenceResult(..)
   , ppEquivalenceStatistics
   , ppBlock
   , ppLLVMPointer
@@ -194,6 +198,9 @@ data PatchPair (tp :: WhichBinary -> *) = PatchPair
   , pPatched :: tp 'Patched
   }
 
+class PatchPairEq tp where
+  ppEq :: tp Original -> tp Patched -> Bool
+
 data PatchPairC tp = PatchPairC
   { pcOriginal :: tp
   , pcPatched :: tp
@@ -231,24 +238,43 @@ instance TF.TraversableF PatchPair where
 
 type BlockPair arch = PatchPair (ConcreteBlock arch)
 
+
+  
+
 instance ShowF tp => Show (PatchPair tp) where
   show (PatchPair a1 a2) = showF a1 ++ " vs. " ++ showF a2
 
-instance (forall bin. PP.Pretty (f bin)) => PP.Pretty (PatchPair f) where
-  pretty = ppPatchPair PP.pretty 
+instance (PatchPairEq f, (forall bin. PP.Pretty (f bin))) => PP.Pretty (PatchPair f) where
+  pretty = ppPatchPairEq ppEq PP.pretty 
 
 
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
 ppPatchPair f (PatchPair a1 a2) = f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
+
+
+ppPatchPairEq ::
+  (tp Original -> tp Patched -> Bool) ->
+  (forall bin. tp bin -> PP.Doc a) ->
+  PatchPair tp ->
+  PP.Doc a
+ppPatchPairEq test f (PatchPair a1 a2) = case test a1 a2 of
+  True -> f a1
+  False -> f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
+
+ppPatchPairC ::
+  (tp -> PP.Doc a) ->
+  PatchPairC tp ->
+  PP.Doc a
+ppPatchPairC f (PatchPairC o p) = ppPatchPair (\(Const v) -> f v) (PatchPair (Const o) (Const p))
 
 ppPatchPairCEq ::
   Eq tp =>
   (tp -> PP.Doc a) ->
   PatchPairC tp ->
   PP.Doc a
-ppPatchPairCEq f (PatchPairC o p) = case o == p of
+ppPatchPairCEq f ppair@(PatchPairC o p) = case o == p of
   True -> f o
-  False -> ppPatchPair (\(Const v) -> f v) (PatchPair (Const o) (Const p))
+  False -> ppPatchPairC f ppair
 
 data BlockTarget arch bin =
   BlockTarget
@@ -288,6 +314,14 @@ data ConcreteBlock arch (bin :: WhichBinary) =
                 , concreteBlockEntry :: BlockEntryKind arch
                 , blockBinRepr :: WhichBinaryRepr bin
                 }
+
+equivBlocks :: ConcreteBlock arch Original -> ConcreteBlock arch Patched -> Bool
+equivBlocks blkO blkP =
+  concreteAddress blkO == concreteAddress blkP &&
+  concreteBlockEntry blkO == concreteBlockEntry blkP
+
+instance PatchPairEq (ConcreteBlock arch) where
+  ppEq = equivBlocks
 
 getConcreteBlock ::
   MM.MemWidth (MM.ArchAddrWidth arch) =>
@@ -413,10 +447,13 @@ instance TestEquality GroundLLVMPointer where
     = Just Refl
   testEquality _ _ = Nothing
 
+instance Ord (GroundLLVMPointer n) where
+  compare (GroundLLVMPointerC _ reg off) (GroundLLVMPointerC _ reg' off') =
+    compare reg reg' <> compare off off'
 
 instance OrdF GroundLLVMPointer where
-  compareF (GroundLLVMPointerC w reg off) (GroundLLVMPointerC w' reg' off') =
-    lexCompareF w w' $ joinOrderingF (fromOrdering $ compare reg reg') (fromOrdering $ compare off off')
+  compareF ptr ptr' =
+    lexCompareF (ptrWidth ptr) (ptrWidth ptr') $ fromOrdering $ compare ptr ptr'
 
 instance Show (GroundLLVMPointer n) where
   show ptr = ppLLVMPointer ptr
@@ -535,20 +572,6 @@ data InequivalenceReason =
 type ExitCaseDiff = (MS.MacawBlockEndCase, MS.MacawBlockEndCase)
 type ReturnAddrDiff arch = (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)), (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))))
 
-data InequivalenceResult arch =
-  InequivalentResults
-    { diffMem :: MemTraceDiff arch
-    , diffExit :: ExitCaseDiff
-    , diffRegs :: MM.RegState (MM.ArchReg arch) (RegisterDiff arch)
-    , diffRetAddr :: ReturnAddrDiff arch
-    , diffReason :: InequivalenceReason
-    }
-
-
-
-instance Show (InequivalenceResult arch) where
-  show _ = "InequivalenceResult"
-
 ----------------------------------
 
 data WhichBinary = Original | Patched deriving (Bounded, Enum, Eq, Ord, Read, Show)
@@ -643,6 +666,15 @@ zipRegStates :: Monad m
              -> (forall u. r u -> f u -> g u -> m h)
              -> m [h]
 zipRegStates regs1 regs2 f = join $ zipRegStatesPar regs1 regs2 (\r e1 e2 -> return $ f r e1 e2)
+
+zipWithRegStatesM :: Monad m
+                  => MM.RegisterInfo r
+                  => MM.RegState r f
+                  -> MM.RegState r g
+                  -> (forall u. r u -> f u -> g u -> m (h u))
+                  -> m (MM.RegState r h)
+zipWithRegStatesM regs1 regs2 f = MM.mkRegStateM (\r -> f r (regs1 ^. MM.boundValue r) (regs2 ^. MM.boundValue r))
+
 ----------------------------------
 
 class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where
@@ -716,7 +748,6 @@ data InnerEquivalenceError arch
   | MismatchedAssumptionsPanic
   | UnexpectedNonBoundVar
   | UnsatisfiableAssumptions
-  | InequivalentError (InequivalenceResult arch)
   | MissingCrucibleGlobals
   | UnexpectedUnverifiedTriple
   | MissingTOCEntry (MM.ArchSegmentOff arch)

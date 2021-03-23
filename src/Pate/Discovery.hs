@@ -67,10 +67,10 @@ discoverPairs ::
   SimBundle sym arch ->
   EquivM sym arch [(BlockTarget arch Original, BlockTarget arch Patched)]
 discoverPairs bundle = do
-  precond <- exactEquivalence (simInO bundle) (simInP bundle)
+  precond <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
 
-  blksO <- getSubBlocks (PSS.simInBlock $ simInO $ bundle)
-  blksP <- getSubBlocks (PSS.simInBlock $ simInP $ bundle)
+  blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
+  blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
 
   let
     allCalls = [ (blkO, blkP)
@@ -348,16 +348,16 @@ archSegmentOffToInterval segOff size = case MM.segoffAsAbsoluteAddr segOff of
 
 
 getBlocks ::
-  PatchPair arch ->
+  BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
   Some (DFC.Compose opbs) <- lookupBlocks blkO
   let oBlocks = PE.Blocks blkO opbs
   Some (DFC.Compose ppbs) <- lookupBlocks blkP
   let pBlocks = PE.Blocks blkP ppbs
-  return $ PE.BlocksPair oBlocks pBlocks
+  return $ PatchPair oBlocks pBlocks
   where
-    blkO = pOrig pPair
+    blkO = pOriginal pPair
     blkP = pPatched pPair
 
 lookupBlocks ::

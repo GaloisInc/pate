@@ -41,7 +41,6 @@ import qualified Pate.Event as PE
 import qualified Pate.PPC as PPC
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
-import qualified Pate.CounterExample as PCE
 
 import qualified Interactive as I
 import qualified Interactive.State as IS
@@ -186,7 +185,7 @@ terminalFormatEvent evt =
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
-    PE.CheckedEquivalence (PE.BlocksPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
+    PE.CheckedEquivalence (PT.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
       let
         origAddr = PT.concreteAddress blkO
         patchedAddr = PT.concreteAddress blkP
@@ -207,7 +206,7 @@ terminalFormatEvent evt =
         PE.Inequivalent _mdl ->
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
           in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
-    PE.ErrorRaised err -> layout (PP.pretty $ PCE.ppEquivalenceError err)
+    PE.ErrorRaised err -> layout (PP.pretty $ show err)
     PE.ProvenGoal _ prf _ -> layout (PP.viaShow prf)
     -- FIXME: handle other events
     _ -> layout ""
