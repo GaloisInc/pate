@@ -551,12 +551,12 @@ isPredTruePar' p = case W4.asConstantPred p of
 
 
 instance Par.IsFuture (EquivM_ sym arch) Par.Future where
-  present m = Par.runInFutureIO $ Par.present (lift m)
+  present m = IO.withRunInIO $ \runInIO -> Par.present (runInIO m)
   -- here we can implement scheduling of IOFutures, which can be tracked
   -- in the equivM state
-  promise m = Par.runInFutureIO $ Par.promise (lift m)
-  joinFuture future = Par.runInFutureIO $ Par.joinFuture future
-  forFuture future f = Par.runInFutureIO $  Par.forFuture future (lift . f)
+  promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
+  joinFuture future = withValid $ catchInIO $ Par.joinFuture future
+  forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
 
 
 execGroundFn ::

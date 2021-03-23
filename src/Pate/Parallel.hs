@@ -24,16 +24,17 @@ Primitives for parallelism
 module Pate.Parallel
     ( IsFuture(..)
     , Future(..)
-    , InFutureIO(..)
     , FutureF
     , ConstF(..)
     )
     where
 
+import           Control.Exception (SomeException)
+
 import           Data.Parameterized.TraversableF as TF
-import qualified Control.Monad.IO.Unlift as IO
+import           Control.Exception (throwIO)
 import           Control.Monad.Trans
-import qualified UnliftIO.Concurrent as IO
+import qualified Control.Concurrent as IO
 
 data ConstF f a tp where
   ConstF :: { getConstF :: f (a tp) } -> ConstF f a tp
@@ -77,7 +78,7 @@ instance Monad m => IsFuture m m where
 data Future a where
   -- | A "future" value is a handle on a forked thread, with a
   -- finalization action
-  Future :: IO.ThreadId -> IO.MVar a -> (a -> IO b) -> Future b
+  Future :: IO.ThreadId -> IO.MVar (Either SomeException a) -> (a -> IO b) -> Future b
   -- | A "present" value is evaluated lazily when the future is joined, but on the
   -- joining thread
   Present :: IO a -> Future a
@@ -86,13 +87,6 @@ data Future a where
   
 
 type FutureF = ConstF Future
-
--- | A trivial wrapper to differentiate which Future operations to use
-newtype InFutureIO m a = InFutureIO { runInFutureIO :: m a }
-  deriving (Functor, Applicative, Monad, IO.MonadIO, IO.MonadUnliftIO)
-
-instance MonadTrans InFutureIO where
-  lift f = InFutureIO f
 
 -- | Cached evaluation that assumes the same value for 'b' will always be given.
 cachedEval :: (b -> IO a) -> IO (b -> IO a)
@@ -105,36 +99,28 @@ cachedEval f = do
           return (Just a, a)
   return f'
 
-instance IO.MonadUnliftIO m => IsFuture (InFutureIO m) Future where
-  joinFuture (Future _ a_var fin) = IO.liftIO $ IO.readMVar a_var >>= fin
-  joinFuture (Present f) = IO.liftIO $ f
+instance IsFuture IO Future where
+  joinFuture (Future _ a_var fin) = do
+    v <- IO.readMVar a_var
+    case v of
+      Left e -> throwIO e
+      Right a -> fin a
+  joinFuture (Present f) = f
   joinFuture (Immediate a) = return a
 
   forFuture (Future tid a_var g) f = do
-    runInIO <- IO.askRunInIO
-    f' <- liftIO $ cachedEval (\b -> runInIO (f b))
+    f' <- liftIO $ cachedEval f
     return $ Future tid a_var (\a -> g a >>= f')
   forFuture (Present g) f = do
-    runInIO <- IO.askRunInIO
-    f' <- liftIO $ cachedEval (\b -> runInIO (f b))
+    f' <- liftIO $ cachedEval f
     return $ Present (g >>= f')
   forFuture (Immediate a) f = present (f a)
 
   present m = do
-    runInIO <- IO.askRunInIO
-    f' <- liftIO $ cachedEval (\() -> runInIO m)
+    f' <- liftIO $ cachedEval (\() -> m)
     return $ Present (f' ())
 
   promise m = do
     var <- IO.newEmptyMVar
-    let runM = do
-          a <- m
-          IO.putMVar var $! a
-    tid <- IO.forkIO runM
+    tid <- IO.forkFinally m (IO.putMVar var)
     return $ Future tid var return
-
-instance IsFuture IO Future where
-  present m = runInFutureIO $ present (lift m)
-  promise m = runInFutureIO $ promise (lift m)
-  joinFuture future = runInFutureIO $ joinFuture future
-  forFuture future f = runInFutureIO $ forFuture future (lift . f)
