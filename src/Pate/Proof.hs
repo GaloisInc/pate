@@ -78,6 +78,7 @@ import           GHC.TypeNats
 import           Control.Applicative
 import           Control.Monad.Identity
 import           Control.Monad.Writer.Strict as CMW
+import qualified Data.Kind as DK
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -129,15 +130,15 @@ instance PEM.ExprMappable sym (EquivTripleBody sym arch) where
 type EquivTriple sym arch = PS.SimSpec sym arch (EquivTripleBody sym arch)
 
 
-type family ProofBlock prf :: PT.WhichBinary -> *
-type family ProofRegister prf :: MT.Type -> *
-type family ProofPredicate prf :: *
-type family ProofMemCell prf :: Nat -> *
-type family ProofCounterExample prf :: *
-type family ProofContext prf :: *
-type family ProofBV prf :: Nat -> *
-type family ProofBlockExit prf :: *
-type family ProofMacawValue prf :: MT.Type -> *
+type family ProofBlock prf :: PT.WhichBinary -> DK.Type
+type family ProofRegister prf :: MT.Type -> DK.Type
+type family ProofPredicate prf :: DK.Type
+type family ProofMemCell prf :: Nat -> DK.Type
+type family ProofCounterExample prf :: DK.Type
+type family ProofContext prf :: DK.Type
+type family ProofBV prf :: Nat -> DK.Type
+type family ProofBlockExit prf :: DK.Type
+type family ProofMacawValue prf :: MT.Type -> DK.Type
 
 class (OrdF (ProofRegister prf),
        OrdF (ProofMemCell prf)) => IsProof prf
@@ -165,7 +166,7 @@ data VerificationStatus ce =
 
 
 -- | An abstract proof object, representing the overall structure of an equivalence proof.
-data ProofApp prf (node :: ProofNodeType -> *) (tp :: ProofNodeType) where
+data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
   -- | Proof that the top-level triple is satisfied, according to all possible
   -- exits from the given block slice
   ProofBlockSlice ::
@@ -355,7 +356,7 @@ collectProofExpr f e_outer = runIdentity $ CMW.execWriterT (traverseProofExpr go
       CMW.tell (f e)
       return e
 
-type family ProofScope prf :: *
+type family ProofScope prf :: DK.Type
 
 -- | A nonce representing an indirect reference to a proof node.
 data ProofNonce prf (tp :: ProofNodeType) where

@@ -31,15 +31,16 @@ module Pate.Parallel
 
 import           Control.Exception (SomeException)
 
-import           Data.Parameterized.TraversableF as TF
+import qualified Control.Concurrent as IO
 import           Control.Exception (throwIO)
 import           Control.Monad.Trans
-import qualified Control.Concurrent as IO
+import qualified Data.Kind as DK
+import           Data.Parameterized.TraversableF as TF
 
 data ConstF f a tp where
   ConstF :: { getConstF :: f (a tp) } -> ConstF f a tp
 
-class Monad m => IsFuture m (future :: * -> *) where
+class Monad m => IsFuture m (future :: DK.Type -> DK.Type) where
   
   traverseFPar :: forall t f e.
     TF.TraversableF t => (forall s. e s -> m (future (f s))) -> t e -> m (future (t f))

@@ -54,6 +54,7 @@ module Pate.Proof.Instances
 import           Numeric
 import           GHC.Natural
 import           Data.Functor.Const
+import qualified Data.Kind as DK
 import           Control.Lens hiding ( op, pre )
 import           Data.Maybe
 import           Data.Proxy
@@ -87,7 +88,7 @@ import qualified What4.ExprHelpers as WEH
 import qualified What4.Expr.Builder as W4B
 
 
-data SomeProofSym (arch :: *) tp where
+data SomeProofSym (arch :: DK.Type) tp where
   SomeProofSym :: PA.ValidArch arch =>
     PT.Sym sym -> ProofSymNonceExpr sym arch tp -> SomeProofSym arch tp
 

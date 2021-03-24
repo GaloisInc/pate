@@ -87,19 +87,17 @@ import           GHC.Stack
 import           Control.Exception
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.Except
-import           Control.Monad ( join )
 
 import qualified Data.BitVector.Sized as BVS
+import           Data.IntervalMap (IntervalMap)
+import qualified Data.IntervalMap as IM
+import qualified Data.Kind as DK
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
-import           Data.IntervalMap (IntervalMap)
-import qualified Data.IntervalMap as IM
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Typeable
-
-import qualified Data.ElfEdit as E
 import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Some
@@ -122,7 +120,6 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Solver as WS
 
 import qualified Pate.Parallel as PP
-import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Arch as PA
 import           What4.ExprHelpers
 import qualified Pate.ExprMappable as PEM
@@ -155,7 +152,7 @@ newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arc
   deriving (Eq, Ord)
 deriving instance Show (ConcreteAddress arch)
 
-data PatchPair (tp :: WhichBinary -> *) = PatchPair
+data PatchPair (tp :: WhichBinary -> DK.Type) = PatchPair
   { pOriginal :: tp 'Original
   , pPatched :: tp 'Patched
   }

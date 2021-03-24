@@ -73,7 +73,6 @@ import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
-import           Control.Monad ( join )
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, Handler )
 import           Control.Monad.Reader
@@ -122,7 +121,6 @@ import           Pate.Equivalence
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Proof as PP
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Timeout as PT
