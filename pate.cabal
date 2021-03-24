@@ -18,18 +18,27 @@ extra-source-files:  CHANGELOG.md
 
 common shared
   build-depends:       base >= 4.10 && < 5,
+                       async >= 2.2 && < 2.3,
                        bv-sized >= 1 && < 1.1,
-                       bytestring,
+                       bytestring >= 0.9 && < 0.12,
                        containers >= 0.5 && < 0.7,
+                       deepseq >= 1.3 && < 2,
+                       cassava >= 0.5 && < 0.6,
+                       megaparsec >= 8 && < 10,
+                       unordered-containers >= 0.2.10 && < 0.3,
+                       aeson >= 1.5 && < 1.6,
+                       scientific >= 0.3 && < 0.4,
+                       galois-dwarf,
+                       parallel >= 3.2 && < 4,
                        dismantle-tablegen,
-                       exceptions,
+                       exceptions >= 0.10 && < 0.11,
                        elf-edit >= 0.39,
                        IntervalMap >= 0.6 && < 0.7,
-                       lens,
-                       hashtables,
-                       mtl,
-                       lumberjack >= 0.1 && < 0.2,
-                       prettyprinter >= 1 && < 1.8,
+                       lens >= 4 && < 6,
+                       hashtables >= 1.2 && < 1.3,
+                       mtl >= 2 && < 2.3,
+                       lumberjack >= 0.1 && < 1.1,
+                       prettyprinter >= 1.7 && < 1.8,
                        parameterized-utils,
                        what4 >= 1 && < 2,
                        crucible,
@@ -39,12 +48,10 @@ common shared
                        macaw-loader,
                        -- for TOC module
                        macaw-loader-ppc,
-                       unliftio,
-                       unliftio-core,
-                       text,
+                       unliftio-core >= 0.2 && < 0.3,
+                       text >= 1 && < 1.3,
                        time >= 1 && < 2,
-                       transformers,
-                       vector
+                       vector >= 0.10 && < 0.13
                        
   default-language:    Haskell2010
   ghc-options:         -Wall -Wcompat
@@ -52,12 +59,17 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Pate,
+  exposed-modules:     Pate.Arch,
                        Pate.Binary,
+                       Pate.Config,
                        Pate.Discovery,
                        Pate.Verification,
                        Pate.Loader,
                        Pate.Event,
+                       Pate.Hints,
+                       Pate.Hints.CSV,
+                       Pate.Hints.JSON,
+                       Pate.Hints.DWARF,
                        Pate.Monad,
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
@@ -67,6 +79,8 @@ library
                        Pate.Proof.Instances,
                        Pate.Proof.Operations,
                        Pate.Proof.Ground,
+                       Pate.Solver,
+                       Pate.Timeout,
                        Pate.Types,
                        Pate.Utils,
                        Pate.ExprMappable,
@@ -95,6 +109,14 @@ common shared-test
                  tasty-expected-failure >= 0.12,
                  text,
                  pate 
+
+test-suite pate-test-loaders
+  import: shared-test
+  type: exitcode-stdio-1.0
+  main-is: LoaderTestMain.hs
+  hs-source-dirs: tests
+  build-depends: galois-dwarf
+
 
 test-suite pate-test-ppc
   import: shared-test
@@ -147,14 +169,14 @@ executable pate-exec
                        Interactive,
                        Interactive.State
   hs-source-dirs:      tools/pate tools arch
-  build-depends:       async >= 2.2 && < 2.3,
-                       prettyprinter >= 1 && < 1.8,
+  build-depends:       async,
+                       prettyprinter,
                        prettyprinter-ansi-terminal >= 1.1 && < 1.2,
                        utf8-string >= 1 && < 2,
                        file-embed >= 0.0.12 && < 0.0.14,
                        time,
                        ansi-wl-pprint,
-                       lumberjack,
+                       lumberjack >= 0.1 && < 1.1,
                        threepenny-gui >= 0.9 && < 0.10,
                        language-c >= 0.9 && < 0.10,
                        parameterized-utils,

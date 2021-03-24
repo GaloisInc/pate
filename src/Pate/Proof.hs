@@ -90,10 +90,10 @@ import qualified Data.Macaw.Types as MT
 
 import qualified Lang.Crucible.Types as CT
 
-import qualified Pate.Types as PT
 import qualified Pate.Equivalence as PE
-import qualified Pate.SimState as PS
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.SimState as PS
+import qualified Pate.Types as PT
 
 import qualified What4.Interface as W4
 
@@ -148,7 +148,6 @@ data ProofNodeType =
   | ProofDomainType
   | ProofBlockSliceType
   | ProofStatusType
-
 
 type ProofDomainType = 'ProofDomainType
 type ProofTripleType = 'ProofTripleType
@@ -276,7 +275,6 @@ transformMemDomain f (ProofMemoryDomain dom pol) = prfConstraint f $ ProofMemory
       transMemCell (MapF.Pair cell (Const p)) = MapF.Pair
         <$> prfMemCellTrans f cell
         <*> (Const <$> (prfPredTrans f p))
-      
 
 transformProofApp ::
   Applicative m =>

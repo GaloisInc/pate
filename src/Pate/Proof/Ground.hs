@@ -62,7 +62,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
-
+import qualified Pate.Arch as PA
 
 getInequivalenceResult ::
   PT.InequivalenceReason ->
@@ -84,7 +84,7 @@ getInequivalenceResult defaultReason pre post slice fn = do
   return $ PFI.InequivalenceResult gslice groundPre groundPost reason
 
 groundProofTransformer ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.ValidSym sym =>
   PT.SymGroundEvalFn sym ->
   PF.ProofTransformer (EquivM_ sym arch) (PFI.ProofSym sym arch) (PFI.ProofGround arch)
@@ -114,21 +114,21 @@ groundProofExpr fn = PF.transformProofExpr (groundProofTransformer fn)
 
 
 isMemOpValid ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PFI.GroundDomain arch ->
   MapF.Pair (PFI.GroundMemCell arch) (PF.BlockSliceMemOp (PFI.ProofGround arch)) -> Bool
 isMemOpValid dom (MapF.Pair cell mop) =
   (not (PFI.cellInDomain dom cell)) || (not (PF.slMemOpCond mop)) || PF.slMemOpEquiv mop
 
 isRegValid ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PFI.GroundDomain arch ->
   MapF.Pair (MM.ArchReg arch) (PF.BlockSliceRegOp (PFI.ProofGround arch)) -> Bool
 isRegValid dom (MapF.Pair r rop) =
   (not (PFI.regInDomain dom r)) || PF.slRegOpEquiv rop
 
 getInequivalenceReason ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PFI.GroundDomain arch ->
   PF.BlockSliceState (PFI.ProofGround arch) ->
   Maybe PT.InequivalenceReason

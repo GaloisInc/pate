@@ -400,7 +400,6 @@ flatVars simVars =
 flatVarBinds ::
   forall sym arch bin.
   HasCallStack =>
-  W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   SimVars sym arch bin ->

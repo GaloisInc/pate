@@ -3,15 +3,15 @@
 
 module Main ( main ) where
 
+import qualified Pate.Arch as PA
 import qualified Pate.AArch32 as AArch32
-import qualified Pate.Loader as PL
 import           TestBase
 
 main :: IO ()
 main = do
   let cfg = TestConfig
         { testArchName = "aarch32"
-        , testArchProxy = PL.ValidArchProxy @AArch32.AArch32
+        , testArchProxy = PA.ValidArchProxy @AArch32.AArch32
         , testExpectEquivalenceFailure =
             [
             -- see: https://github.com/GaloisInc/pate/issues/10

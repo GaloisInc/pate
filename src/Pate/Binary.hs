@@ -19,26 +19,24 @@
 
 
 module Pate.Binary
-  ( ArchConstraints(..)
-  , LoadedELF(..)
+  ( LoadedELF(..)
   , loadELF
   )
 where
 
-import           GHC.TypeLits
-
 import qualified Data.ByteString as BS
-import           Data.Proxy
+import           Data.Proxy ( Proxy(..) )
 
 import           Data.Parameterized.Classes
 
 import qualified Data.ElfEdit as E
 
-import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Memory.ElfLoader as MME
 import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.BinaryLoader as MBL
+
+import qualified Pate.Arch as PA
 
 data LoadedELF arch =
   LoadedELF
@@ -46,18 +44,9 @@ data LoadedELF arch =
     , loadedBinary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
     }
 
-class
-  ( MC.MemWidth (MC.ArchAddrWidth arch)
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
-  , E.ElfWidthConstraints (MC.ArchAddrWidth arch)
-  , MS.SymArchConstraints arch
-  , 16 <= MC.RegAddrWidth (MC.ArchReg arch)
-  ) => ArchConstraints arch where
-  binArchInfo :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
-
 loadELF ::
   forall arch.
-  ArchConstraints arch =>
+  PA.ArchConstraints arch =>
   Proxy arch ->
   FilePath ->
   IO (LoadedELF arch)
@@ -66,7 +55,7 @@ loadELF _ path = do
   elf <- doParse bs
   mem <- MBL.loadBinary MME.defaultLoadOptions elf
   return $ LoadedELF
-    { archInfo = binArchInfo mem
+    { archInfo = PA.binArchInfo mem
     , loadedBinary = mem
     }
   where

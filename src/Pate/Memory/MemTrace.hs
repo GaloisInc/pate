@@ -709,7 +709,6 @@ compatSub = RegionConstraint msg $ \sym reg1 reg2 -> do
     msg = "first pointer region must be zero, or both regions must be equal"
 
 ptrOp ::
-  IsSymInterface sym =>
   AddrWidthRepr w ->
   RegEntry sym (LLVMPointerType w) ->
   RegEntry sym (LLVMPointerType w) ->
@@ -721,7 +720,6 @@ ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region
     f sym region offset region' offset'
         
 ptrPredOp ::
-  1 <= w =>
   IsSymInterface sym =>
   UndefinedPtrPredOp sym ->
   RegionConstraint sym ->
@@ -751,7 +749,6 @@ muxPtr sym p (LLVMPointer region offset) (LLVMPointer region' offset') = do
   return $ LLVMPointer reg'' off''
 
 ptrBinOp ::
-  1 <= w => 
   IsSymInterface sym =>
   UndefinedPtrBinOp sym ->
   RegionConstraint sym ->
@@ -877,7 +874,6 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   return $ Empty :> reg :> bvIdx
 
 eqIdx ::
-  1 <= ptrW =>
   IsSymInterface sym =>
   sym ->
   Assignment (SymExpr sym) (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW) ->
@@ -1040,7 +1036,6 @@ readMemArr sym mem ptr repr = go 0 repr
 writeMemArr :: forall sym ptrW w.
   1 <= ptrW =>
   IsExprBuilder sym =>
-  MemWidth ptrW =>
   sym ->
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->

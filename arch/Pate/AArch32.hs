@@ -8,13 +8,13 @@ import qualified SemMC.Architecture.AArch32 as SA
 import           Data.Macaw.BinaryLoader.AArch32 ()
 import qualified Data.Macaw.ARM as ARM
 import           Data.Macaw.AArch32.Symbolic ()
-import qualified Pate.Binary as PB
-import qualified Pate.Monad as PM
 
-instance PB.ArchConstraints SA.AArch32 where
+import qualified Pate.Arch as PA
+
+instance PA.ArchConstraints SA.AArch32 where
   binArchInfo = const ARM.arm_linux_info
 
-instance PM.ValidArch SA.AArch32 where
+instance PA.ValidArch SA.AArch32 where
   -- FIXME: generalize this properly for ARM
   tocProof = Nothing
   -- FIXME: define these

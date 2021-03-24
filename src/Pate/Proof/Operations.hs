@@ -68,6 +68,7 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 import qualified Pate.Parallel as Par
+import qualified Pate.Arch as PA
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -167,7 +168,7 @@ noTransition stIn blockEnd = do
 -- the corresponding types
 
 statePredToDomain ::
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.ValidSym sym =>
   sym ->
   PT.PatchPair (PS.SimState sym arch) ->
@@ -183,7 +184,7 @@ statePredToDomain sym states stPred =
 
 predRegsToDomain ::
   forall arch sym.
-  PT.ValidArch arch =>
+  PA.ValidArch arch =>
   PT.ValidSym sym =>
   sym ->
   Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
@@ -263,11 +264,11 @@ data LazyProofBody sym arch tp where
 
 type LazyProofApp sym arch = PF.ProofApp (PFI.ProofSym sym arch) (LazyProof sym arch)
 
-instance (ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProofBody sym arch tp) where
+instance (PA.ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProofBody sym arch tp) where
   mapExpr sym f (LazyProofBodyApp app) = LazyProofBodyApp <$> PEM.mapExpr sym f app
   mapExpr sym f (LazyProofBodyFuture future) = LazyProofBodyFuture <$> PEM.mapExpr sym f future
 
-instance (ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProof sym arch tp) where
+instance (PA.ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProof sym arch tp) where
   mapExpr sym f (LazyProof a1 a2 v fin) = do
     v' <- PEM.mapExpr sym f v
     return $ LazyProof a1 a2 v' fin

@@ -26,7 +26,6 @@ module Pate.Monad
   , EquivM_
   , runEquivM
   , ValidSym
-  , ValidArch(..)
   , EquivalenceContext(..)
   , BinaryContext(..)
   , VerificationFailureMode(..)
@@ -78,7 +77,6 @@ import           Control.Monad ( join )
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, Handler )
 import           Control.Monad.Reader
-import           Control.Monad.Trans.Except
 import           Control.Monad.Except
 import           Control.Monad.State
 
@@ -118,12 +116,16 @@ import qualified What4.Symbol as WS
 
 import           What4.ExprHelpers
 
+import qualified Pate.Arch as PA
+import qualified Pate.Config as PC
 import           Pate.Equivalence
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Proof as PP
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Timeout as PT
 import           Pate.Types
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
@@ -138,7 +140,7 @@ data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
 data EquivalenceContext sym arch where
   EquivalenceContext ::
     forall sym ids arch.
-    (ValidArch arch, ValidSym sym) =>
+    (PA.ValidArch arch, ValidSym sym) =>
     { nonces :: N.NonceGenerator IO ids
     , handles :: CFH.HandleAllocator
     , exprBuilder :: sym
@@ -148,8 +150,8 @@ data EquivalenceContext sym arch where
 
 data EquivEnv sym arch where
   EquivEnv ::
-    forall sym arch.
-    (ValidArch arch, ValidSym sym) =>
+    forall sym arch .
+    (PA.ValidArch arch, ValidSym sym) =>
     { envWhichBinary :: Maybe (Some WhichBinaryRepr)
     , envCtx :: EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
@@ -161,7 +163,7 @@ data EquivEnv sym arch where
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
     , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
-    , envConfig :: VerificationConfig
+    , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode
     , envBaseEquiv :: EquivRelation sym arch
     , envGoalTriples :: [PF.EquivTriple sym arch]
@@ -170,7 +172,7 @@ data EquivEnv sym arch where
     -- ^ expression builder, wrapped with a validity proof
     , envStartTime :: TM.UTCTime
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
-    , envTocs :: HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
+    , envTocs :: PA.HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
     -- ^ table of contents for the original and patched binaries, if defined by the
     -- architecture
     , envCurrentFunc :: BlockPair arch
@@ -181,7 +183,6 @@ data EquivEnv sym arch where
     , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
     -- ^ nonce of the parent proof node currently in scope
     } -> EquivEnv sym arch
-
 
 freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
 freshNonce = do
@@ -265,7 +266,7 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (State
 --     asmSt <- liftIO $ CB.saveAssumptionState sym
 --     EquivM $ catchError f (\e -> (liftIO $ CB.restoreAssumptionState sym asmSt) >> unEQ (h e))
   
-type EquivM sym arch a = (ValidArch arch, ValidSym sym) => EquivM_ sym arch a
+type EquivM sym arch a = (PA.ValidArch arch, ValidSym sym) => EquivM_ sym arch a
 
 withBinary ::
   forall bin sym arch a.
@@ -291,17 +292,15 @@ getBinCtx' repr = case repr of
   PatchedRepr -> asks (rewrittenCtx . envCtx)
 
 withValid :: forall a sym arch.
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, ValidArch arch, ValidSym sym) => EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
   env <- ask
   withValidEnv env $ f
 
-
-
 withValidEnv ::
   EquivEnv sym arch ->
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, ValidArch arch, ValidSym sym) => a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => a) ->
   a
 withValidEnv (EquivEnv { envValidSym = Sym {}}) f = f
 
@@ -450,12 +449,13 @@ withAssumption_ asmf f =
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
+  PT.Timeout ->
   EquivM sym arch (W4.Pred sym) ->
   EquivM sym arch f ->
   EquivM sym arch (Maybe (W4.Pred sym, f))
-withSatAssumption asmf f = do
+withSatAssumption timeout asmf f = do
   asm <- asmf
-  isPredSat asm >>= \case
+  isPredSat timeout asm >>= \case
     True ->  Just <$> (withAssumption (return asm) $ f)
     False -> return Nothing
 
@@ -466,11 +466,12 @@ withSatAssumption asmf f = do
 --
 -- FIXME: Add a facility for saving the SMT problem under the given name
 checkSatisfiableWithModel ::
+  PT.Timeout ->
   String ->
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch a
-checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
+checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   envFrame <- asks envCurrentFrame
   assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
@@ -479,36 +480,47 @@ checkSatisfiableWithModel _desc p k = withSymSolver $ \sym adapter -> do
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
   let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkSafeAsserts sym r')) pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings sym adapter goal
+  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings timeout sym adapter goal
 
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
-  => sym
+  => PT.Timeout
+  -> sym
   -> WSA.SolverAdapter st
   -> W4B.BoolExpr t
   -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
   -> IO a
-checkSatisfiableWithoutBindings sym adapter p k = do
-  WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
-    case sr of
-      W4R.Unsat core -> k (W4R.Unsat core)
-      W4R.Unknown -> k W4R.Unknown
-      W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
+checkSatisfiableWithoutBindings timeout sym adapter p k =
+  case PT.timeoutAsMicros timeout of
+    Nothing -> doCheckSat
+    Just micros -> do
+      mres <- PT.timeout micros doCheckSat
+      case mres of
+        Nothing -> k W4R.Unknown
+        Just r -> return r
+  where
+    doCheckSat = WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
+      case sr of
+        W4R.Unsat core -> k (W4R.Unsat core)
+        W4R.Unknown -> k W4R.Unknown
+        W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
 isPredSat ::
+  PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredSat p = case W4.asConstantPred p of
+isPredSat timeout p = case W4.asConstantPred p of
   Just b -> return b
-  Nothing -> checkSatisfiableWithModel "isPredSat" p $ \case
+  Nothing -> checkSatisfiableWithModel timeout "isPredSat" p $ \case
     W4R.Sat _ -> return True
     W4R.Unsat _ -> return False
     W4R.Unknown -> throwHere InconclusiveSAT
 
 isPredTrue ::
+  PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue p = case W4.asConstantPred p of
+isPredTrue timeout p = case W4.asConstantPred p of
   Just True -> return True
   _ -> do
     frame <- asks envCurrentFrame
@@ -516,19 +528,21 @@ isPredTrue p = case W4.asConstantPred p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        not <$> isPredSat notp
+        not <$> isPredSat timeout notp
 
 -- | Same as 'isPredTrue' but does not throw an error if the result is inconclusive
 isPredTrue' ::
+  PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue' p = join $ isPredTruePar' p
+isPredTrue' timeout p = join $ isPredTruePar' timeout p
 
 isPredTruePar' ::
   Par.IsFuture (EquivM_ sym arch) future =>
+  PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch (future Bool)
-isPredTruePar' p = case W4.asConstantPred p of
+isPredTruePar' timeout p = case W4.asConstantPred p of
   Just b -> Par.present $ return b
   _ -> do
     frame <- asks envCurrentFrame
@@ -536,7 +550,7 @@ isPredTruePar' p = case W4.asConstantPred p of
       True -> Par.present $ return True
       False -> Par.promise $ do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        checkSatisfiableWithModel "isPredTrue'" notp $ \case
+        checkSatisfiableWithModel timeout "isPredTrue'" notp $ \case
             W4R.Sat _ -> return False
             W4R.Unsat _ -> return True
             W4R.Unknown -> return False
@@ -549,7 +563,6 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
   joinFuture future = withValid $ catchInIO $ Par.joinFuture future
   forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
-
 
 execGroundFn ::
   forall sym arch tp.

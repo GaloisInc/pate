@@ -43,6 +43,10 @@ import qualified What4.ExprHelpers as WEH
 
 -- | A pointer with an attached width, representing the size of the "cell" in bytes.
 -- It represents a discrete read or write, used as the key when forming a 'Pate.Equivalence.MemPred'
+--
+-- Note these are indirectly contained in the 'Pate.Equivalence.MemPred', which
+-- has its own 'PNR.NatRepr'; this is the same 'PNR.NatRepr' as is contained
+-- here.  The duplication allows the width of the cell to be determined in isolation.
 data MemCell sym arch w where
   MemCell ::
     1 <= w =>
@@ -74,6 +78,10 @@ instance PC.TestEquality (WI.SymExpr sym) => Eq (MemCell sym arch w) where
 instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
   compare stamp1 stamp2  = PC.toOrdering $ PC.compareF stamp1 stamp2
 
+-- | This is a collection of 'MemCell' that all represent memory regions of the same size.
+--
+-- Each 'MemCell' is associated with the predicate that says whether or not the
+-- described memory is contained in the 'Pate.Equivalence.MemPred'.
 type MemCells sym arch = MemCells' sym arch (WI.Pred sym)
 newtype MemCells' sym arch a w = MemCells (Map.Map (MemCell sym arch w) a)
 

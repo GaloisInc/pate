@@ -3,15 +3,15 @@
 
 module Main ( main ) where
 
+import qualified Pate.Arch as PA
 import qualified Pate.PPC as PPC
-import qualified Pate.Loader as PL
 import           TestBase
 
 main :: IO ()
 main = do
   let cfg = TestConfig
         { testArchName = "ppc"
-        , testArchProxy = PL.ValidArchProxy @PPC.PPC64
+        , testArchProxy = PA.ValidArchProxy @PPC.PPC64
         , testExpectEquivalenceFailure =
             [
             -- see: https://github.com/GaloisInc/pate/issues/10

@@ -10,10 +10,17 @@ module Pate.Event (
   ) where
 
 import qualified Data.ElfEdit as DEE
+import qualified Data.List.NonEmpty as DLN
+import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Discovery as MD
+import qualified Data.Text as T
 import qualified Data.Time as TM
+import           Data.Word ( Word64 )
 
 import qualified Pate.Binary as PB
+import qualified Pate.Hints.CSV as PHC
+import qualified Pate.Hints.DWARF as PHD
+import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
@@ -55,3 +62,8 @@ data Event arch where
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch
+  FunctionEntryInvalidHints :: [(T.Text, Word64)] -> Event arch
+  FunctionsDiscoveredFromHints :: [MC.ArchSegmentOff arch] -> Event arch
+  HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
+  HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
+  HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch
