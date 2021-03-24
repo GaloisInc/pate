@@ -189,4 +189,4 @@ executable pate-exec
                        macaw-aarch32-symbolic,
                        asl-translator
   default-language: Haskell2010
-  ghc-options: -Wall -Wcompat
+  ghc-options: -Wall -Wcompat -O2 -threaded -rtsopts "-with-rtsopts=-N"
