@@ -64,6 +64,13 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Arch as PA
 
+-- | Generate a structured counterexample for an equivalence
+-- check from an SMT model.
+-- Takes a symbolic 'PF.BlockSliceTransition' and grounds it according
+-- to the model. Additionally, the given pre-domain and post-domains are
+-- similarly grounded, so the counter-example contains which concrete locations
+-- were assumed equivalent, and any concrete locations that are not equivalent
+-- after the block slice transition.
 getInequivalenceResult ::
   PT.InequivalenceReason ->
   -- | pre-domain

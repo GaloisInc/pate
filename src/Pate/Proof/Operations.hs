@@ -130,7 +130,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
 blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PT.BlockPair arch
 blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF.unApp prf))
 
--- | Find an inequivalence result in the proof if it exists
+-- | Find an inequivalence result in the proof if it exists. A 'Nothing' result indicates
+-- that the proof was successful.
 proofResult ::
   forall sym arch tp.
   PFI.ProofSymExpr sym arch tp ->

@@ -353,6 +353,7 @@ attachSpec spec g = spec { specBody = g }
 specMapList :: (f -> [g]) -> SimSpec sym arch f -> [SimSpec sym arch g]
 specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBody spec))
 
+-- | The symbolic inputs and outputs of an original vs. patched block slice.
 data SimBundle sym arch = SimBundle
   {
     simIn :: PT.PatchPair (SimInput sym arch)
