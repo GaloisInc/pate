@@ -130,14 +130,27 @@ instance PEM.ExprMappable sym (EquivTripleBody sym arch) where
 type EquivTriple sym arch = PS.SimSpec sym arch (EquivTripleBody sym arch)
 
 
+-- | A concrete block (instantiated to 'Pate.Type.ConcreteBlock')
 type family ProofBlock prf :: PT.WhichBinary -> DK.Type
+-- | A machine register (instantiated to 'Data.Macaw.CFG.AssignRhs.ArchReg')
 type family ProofRegister prf :: MT.Type -> DK.Type
+-- | A predicate (instantiated to either 'What4.Interface.Pred' or 'Bool')
 type family ProofPredicate prf :: DK.Type
+-- | A memory location (instantiated to either 'Pate.MemCell.MemCell' or 'Pate.Instances.GroundMemCell')
 type family ProofMemCell prf :: Nat -> DK.Type
+-- | A proof counterexample (instantiated to 'Pate.Proof.Instances.InequivalenceResult')
 type family ProofCounterExample prf :: DK.Type
+-- | Additional ontext for a domain (instantiated to a 'Pate.SimState' pair)
 type family ProofContext prf :: DK.Type
+-- | A bitvector value
+-- (instantiated to 'Pate.Proof.Instances.SymBV' which wraps 'Lang.Crucible.LLVM.Types.LLVMPtr',
+-- or 'Pate.Proof.Instances.GroundBV')
 type family ProofBV prf :: Nat -> DK.Type
+-- | A classification for the exit condition of a block.
+-- (instantiated to either a 'Data.Macaw.Symbolic.MacawBlockEndType' term or 'Pate.Proof.Instances.GroundBlockExit')
 type family ProofBlockExit prf :: DK.Type
+-- | A register value, parameterized over a macaw type.
+-- (instantiated to either 'Pate.SimulatorRegisters.MacawRegEntry' or 'Pate.Proof.Instances.GroundMacawValue')
 type family ProofMacawValue prf :: MT.Type -> DK.Type
 
 class (OrdF (ProofRegister prf),
@@ -305,7 +318,8 @@ mapProofApp f app = runIdentity $ traverseProofApp (\app' -> Identity $ f app') 
 -- | A bundle of functions for converting the leafs of a proof graph
 data ProofTransformer m prf prf' where
   ProofTransformer ::
-    { prfPredTrans :: ProofPredicate prf -> m (ProofPredicate prf')
+    {
+      prfPredTrans :: ProofPredicate prf -> m (ProofPredicate prf')
     , prfMemCellTrans :: forall n. ProofMemCell prf n -> m (ProofMemCell prf' n)
     , prfBVTrans :: forall n. ProofBV prf n -> m (ProofBV prf' n)
     , prfExitTrans :: ProofBlockExit prf -> m (ProofBlockExit prf')
