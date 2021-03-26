@@ -166,23 +166,58 @@ data VerificationStatus ce =
 
 
 -- | An abstract proof object, representing the overall structure of an equivalence proof.
-data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
-  -- | Proof that the top-level triple is satisfied, according to all possible
-  -- exits from the given block slice
+-- The type parameter 'prf' abstracts this structure over the specific types used in the proof,
+-- which may be symbolic or concrete (i.e. ground terms from a counterexample).
+-- The two instantiations for this parameter are given in
+-- 'Pate.Proof.Instances'.
+data ProofApp prf (node :: ProofNodeType -> *) (tp :: ProofNodeType) where
+  -- | Proof that the post-domain of a given triple is satisfied when the function
+  -- corresponding to this 'slice' returns, assuming the pre-domain of the triple
+  -- is initially satisifed. The start of this slice (i.e. 'prfTripleBlocks') may either
+  -- be the start of a function, or some intermediate point within a function.
+  -- The end of this slice is the next function return (or unclassifed jump).
+
   ProofBlockSlice ::
-    { prfBlockSliceTriple :: node ProofTripleType
+    { -- | The pre-domain and post-domain that this slice is proven to satisfy upon return.
+      -- This triple is not directly proven, but is a consequence of the intermediate proofs
+      -- for all function calls (i.e. 'prfBlockSliceCalls').
+      prfBlockSliceTriple :: node ProofTripleType
+      -- | Proofs for all intermediate function calls between the start of this slice and the final
+      -- exit of this slice, showing that the post-domain is satisfied by continuing after each
+      -- function call returns.
     , prfBlockSliceCalls :: [(PT.PatchPair (ProofBlock prf), node ProofFunctionCallType)]
+      -- | Proof that the post-domain is satisfied if this block slice exits with a return.
     , prfBlockSliceReturn :: Maybe (node ProofTripleType)
+      -- | Proof that the post-domain is satisfied if this block slice exits with an unknown branch class.
     , prfBlockSliceUnknownExit :: Maybe (node ProofTripleType)
+      -- | The symbolic semantics of the head of this block slice (i.e. from the start of the triple
+      -- to some exit condition, either a return or some function call).
     , prfBlockSliceTrans :: BlockSliceTransition prf
     } -> ProofApp prf node ProofBlockSliceType
 
+  -- | Proof that a function call is valid. Specifically, if a function 'g' is called from
+  -- 'f', we represent this as follows:
+  -- > f(x) =
+  -- >   pre(x);
+  -- >   g(x);
+  -- >   post(x);
+  -- >   return;
   ProofFunctionCall ::
-    { prfFunctionCallPre :: node ProofTripleType
+    {
+      -- | Proof that the pre-domain of the called function is satisifed, assuming
+      -- the pre-domain of the caller (i.e. the proof of @pre(x)@).
+      prfFunctionCallPre :: node ProofTripleType
+      -- | Proof that the function, when called, satisifes the pre-domain of
+      -- @post(x)@, assuming the post-domain of @pre(x)@ (i.e. the proof of @g(x)@).
     , prfFunctionCallBody :: node ProofBlockSliceType
+      -- | Proof that the post-domain of the caller is satisifed, assuming the
+      -- domain of @post(x)@ (i.e. the proof of @post(x)@).
     , prfFunctionCallContinue :: Maybe (node ProofBlockSliceType)
     } -> ProofApp prf node ProofFunctionCallType
 
+  -- | Proof that two block slices are equal according to a given post-domain, assuming
+  -- a given pre-domain. The scope of the slice is dependent on which parent node
+  -- this is attached to.
   ProofTriple ::
     { prfTripleBlocks :: PT.PatchPair (ProofBlock prf)
     , prfTriplePreDomain :: node ProofDomainType
@@ -191,24 +226,44 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
     
     } -> ProofApp prf node ProofTripleType
 
+  -- | The status of some verification problem: either producing a successful result
+  -- or yielding a counterexample.
   ProofStatus ::
     { prfStatus :: VerificationStatus (ProofCounterExample prf) }
     -> ProofApp prf node ProofStatusType
 
+  -- | The domain of an equivalence problem: representing the state that is either
+  -- assumed (in a pre-domain) or proven (in a post-domain) to be equivalent.
   ProofDomain ::
-    { prfDomainRegisters :: MM.RegState (ProofRegister prf) (Const (ProofPredicate prf))
+    { -- | Each register is considered to be in this domain if the given predicate is true.
+      prfDomainRegisters :: MM.RegState (ProofRegister prf) (Const (ProofPredicate prf))
+      -- | The memory domain that is specific to stack variables.
     , prfDomainStackMemory :: ProofMemoryDomain prf
+      -- | The memory domain that is specific to non-stack (i.e. global) variables.
     , prfDomainGlobalMemory :: ProofMemoryDomain prf
+      -- | Additional context for the domain. In the case of symbolic leafs, this
+      -- corresponds to the bound variables appearing in the symbolic terms in this domain.
     , prfDomainContext :: ProofContext prf
     }  -> ProofApp prf node ProofDomainType
 
-
+-- | A memory domain for an equivalence problem.
 data ProofMemoryDomain prf where
   ProofMemoryDomain ::
-    { prfMemoryDomain :: MapF.MapF (ProofMemCell prf) (Const (ProofPredicate prf))
+    { -- | Associating each memory location (i.e. an address and a number of bytes) with
+      -- a predicate.
+      prfMemoryDomain :: MapF.MapF (ProofMemCell prf) (Const (ProofPredicate prf))
+      -- | A predicate indicating if this domain is inclusive or exclusive.
+      -- * For positive polarity:
+      --   a location is in this domain if it is in the map, and its associated predicate
+      --   is tuple.
+      -- * For negative polarity:
+      --   a location is in this domain if it is not in the map,
+      --   or it is in the map and its associated predicate is false.
     , prfMemoryDomainPolarity :: ProofPredicate prf
     }  -> ProofMemoryDomain prf
 
+-- | Traverse the nodes of a 'ProofApp', changing the
+-- recursive 'node' type while leaving the leafs (i.e. the 'prf' type) unchanged.
 traverseProofApp ::
   Applicative m =>
   (forall tp. node tp -> m (node' tp)) ->
@@ -239,6 +294,8 @@ traverseProofApp f = \case
     <*> pure a3
     <*> pure a4
 
+-- | Map over the nodes of a 'ProofApp', changing the
+-- 'node' type while leaving the leafs (i.e. the 'prf' type) unchanged.
 mapProofApp ::
   (forall tp. node tp -> node' tp) ->
   ProofApp prf node utp ->
@@ -277,6 +334,8 @@ transformMemDomain f (ProofMemoryDomain dom pol) = prfConstraint f $ ProofMemory
         <$> prfMemCellTrans f cell
         <*> (Const <$> (prfPredTrans f p))
 
+-- | Traverse the leafs of 'ProofApp' with the given 'ProofTransformer', leaving the
+-- 'node' type unchanged, but changing the 'prf' type.
 transformProofApp ::
   Applicative m =>
   ProofTransformer m prf prf' ->
@@ -372,16 +431,25 @@ data ProofNonceExpr prf tp where
 
 type ProofNonceApp prf tp = ProofApp prf (ProofNonceExpr prf) tp
 
+-- | Strip the nonces from a 'ProofNonceExpr', yielding an equivalent 'ProofExpr'.
 unNonceProof :: ProofNonceExpr prf tp -> ProofExpr prf tp
-unNonceProof prf = ProofExpr $ runIdentity $ (traverseProofApp (\e -> Identity $ unNonceProof e)) (prfNonceBody prf)
+unNonceProof prf = ProofExpr $ mapProofApp unNonceProof (prfNonceBody prf)
 
+-- | The semantics of executing two block slices: an original and a patched variant.
+-- The type parameter 'prf' abstracts this over the specific types,
+-- which may be symbolic or concrete (i.e. ground terms from a counterexample).
 data BlockSliceTransition prf where
   BlockSliceTransition ::
-    { slBlockPreState :: BlockSliceState prf
+    { -- | The pre-states of the blocks prior to execution.
+      slBlockPreState :: BlockSliceState prf
+      -- | The post-states of the blocks after execution.
     , slBlockPostState :: BlockSliceState prf
+      -- | The exit condition of the blocks (i.e. return, function call, etc)
     , slBlockExitCase :: PT.PatchPairC (ProofBlockExit prf)
     } -> BlockSliceTransition prf
 
+-- | Traverse the leafs of a 'BlockSliceTransition' with the given 'ProofTransformer',
+-- changing the 'prf' type. In particular, this is used to ground a counterexample.
 transformBlockSlice ::
   Applicative m =>
   ProofTransformer m prf prf' ->
@@ -393,9 +461,13 @@ transformBlockSlice f (BlockSliceTransition a1 a2 a3) =
       <*> transformBlockSliceState f a2
       <*> traverse (prfExitTrans f) a3
 
+-- | The machine state of two block slices: original and patched.
 data BlockSliceState prf where
   BlockSliceState ::
-    { slMemState :: MapF.MapF (ProofMemCell prf) (BlockSliceMemOp prf)
+    { -- | The state of memory for all memory locations that are associated with this
+      -- slice: i.e. the pre-state contains all reads and the post-state contains all writes.
+      slMemState :: MapF.MapF (ProofMemCell prf) (BlockSliceMemOp prf)
+      -- | The state of all registers.
     , slRegState :: MM.RegState (ProofRegister prf) (BlockSliceRegOp prf)
     } -> BlockSliceState prf
 
@@ -416,11 +488,13 @@ transformBlockSliceState f (BlockSliceState a1 a2) = prfConstraint f $
       <$> prfMemCellTrans f cell
       <*> transformBlockSliceMemOp f mop
 
+-- | The original and patched values for a register.
 data BlockSliceRegOp prf tp where
   BlockSliceRegOp ::
     { slRegOpValues :: PT.PatchPairC (ProofMacawValue prf tp)
     , slRegOpRepr :: CT.TypeRepr (MS.ToCrucibleType tp)
-    -- | true if the values in this register are considered equivalent
+    -- | True if these values are considered equivalent (without
+    -- considering a particular equivalence domain).
     , slRegOpEquiv :: ProofPredicate prf
     } -> BlockSliceRegOp prf tp
 
@@ -435,12 +509,15 @@ transformBlockSliceRegOp f (BlockSliceRegOp a1 a2 a3) =
       <*> pure a2
       <*> prfPredTrans f a3
 
+-- | The original and patched values for a memory location, where
+-- 'w' represents the number of bytes read or written.
 data BlockSliceMemOp prf w where
   BlockSliceMemOp ::
     { slMemOpValues :: PT.PatchPairC (ProofBV prf (8 W4.* w))
-    -- | true if the values of the memory operation are considered equivalent
+    -- | True if these values are considered equivalent (without
+    -- considering a particular equivalence domain).
     , slMemOpEquiv :: ProofPredicate prf
-    -- | conditional on memory operation
+    -- | True if this memory operation is "live".
     , slMemOpCond :: ProofPredicate prf
     } -> BlockSliceMemOp prf w
 

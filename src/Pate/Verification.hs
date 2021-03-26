@@ -342,8 +342,8 @@ emitResult (Right _) = return ()
 
 -- | Verify that the given triple: that a pair of blocks yield equivalent
 -- states on the post-domain, assuming equality on the pre-domain.
--- Throws an exception if there is an inequality result, otherwise
--- it returns normally.
+-- Returns 'True' if the pairs are proven equivalent, and 'False' if
+-- the generated proof contains an inequivalence counterexample.
 checkEquivalence ::
   HasCallStack =>
   PF.EquivTriple sym arch ->
@@ -688,6 +688,10 @@ unzipProof ::
   (SimSpec sym arch f, PFO.LazyProof sym arch tp)
 unzipProof spec = (fmap fst spec, snd $ specBody spec)
 
+-- | Emits a skipped equivalence proof for a block slice that assumes
+-- the post-domain is equivalent if the pre-domain is exactly equivalent.
+-- Currently this is used to model syscalls, since we don't have a more precise
+-- semantics to decide the conditions under which they are equivalent.
 trivialBlockSlice ::
   SimBundle sym arch ->
   StatePredSpec sym arch ->
@@ -704,8 +708,9 @@ trivialBlockSlice bundle postcondSpec = do
     return (preUniv, prf)
 
 -- | Prove that a postcondition holds for a function pair starting at
--- this address. Returns the computed pre-domain as well as any intermediate
--- triples that were proven.
+-- this address. The return result is the computed pre-domain, tupled with a lazy
+-- proof result that, once evaluated, represents the proof tree that verifies
+-- the given block slices are equivalent.
 provePostcondition' ::
   forall sym arch.
   HasCallStack =>
@@ -1445,7 +1450,9 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
         blockSlice <- PFO.simBundleToSlice bundle
         preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
         -- TODO: a different counter-example type would be appropriate here, which explicitly
-        -- doesn't consider the post-state
+        -- doesn't consider the post-state. At this point we aren't interested in the target
+        -- post-domain because we're just making sure that the given cases cover all possible exits,
+        -- without considering the equivalence of the state at those exit points.
         noDomain <- PF.unNonceProof <$> PFO.emptyDomain
        
         ir <- PFG.getInequivalenceResult InvalidCallPair preDomain' noDomain blockSlice fn

@@ -124,7 +124,7 @@ type instance PF.ProofContext (ProofSym sym arch) = PT.PatchPair (PS.SimState sy
 type instance PF.ProofScope (ProofSym (W4B.ExprBuilder t st fs) arch) = t
 
 -- Needed because LLVMPtr is defined as an alias
-data SymBV sym w = SymBV (CLM.LLVMPtr sym w)
+newtype SymBV sym w = SymBV (CLM.LLVMPtr sym w)
 
 instance PEM.ExprMappable sym (SymBV sym w) where
   mapExpr sym f (SymBV bv) = SymBV <$> WEH.mapExprPtr sym f bv
