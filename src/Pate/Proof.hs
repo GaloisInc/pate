@@ -183,7 +183,7 @@ data VerificationStatus ce =
 -- which may be symbolic or concrete (i.e. ground terms from a counterexample).
 -- The two instantiations for this parameter are given in
 -- 'Pate.Proof.Instances'.
-data ProofApp prf (node :: ProofNodeType -> *) (tp :: ProofNodeType) where
+data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
   -- | Proof that the post-domain of a given triple is satisfied when the function
   -- corresponding to this 'slice' returns, assuming the pre-domain of the triple
   -- is initially satisifed. The start of this slice (i.e. 'prfTripleBlocks') may either
