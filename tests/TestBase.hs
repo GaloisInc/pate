@@ -25,7 +25,6 @@ import qualified Pate.Config as PC
 import qualified Pate.Loader as PL
 import qualified Pate.Types as PT
 import qualified Pate.Event as PE
-import qualified Pate.CounterExample as PCE
 
 data TestConfig where
   TestConfig ::
@@ -111,10 +110,10 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
             PE.AnalysisStart pPair -> do
               putStrLn $ concat $
                 [ "Checking equivalence of "
-                , PT.ppBlock (PT.pOrig pPair)
+                , PT.ppBlock (PT.pOriginal pPair)
                 , " and "
                 , PT.ppBlock (PT.pPatched pPair)
-                , " (" ++ PT.ppBlockEntry (PT.concreteBlockEntry (PT.pOrig pPair)) ++ ") "
+                , " (" ++ PT.ppBlockEntry (PT.concreteBlockEntry (PT.pOriginal pPair)) ++ ") "
                 , ": "
                 ]
             PE.CheckedEquivalence _ PE.Equivalent time -> do
@@ -125,13 +124,13 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
               putStrLn $ "Branch completeness check: " ++ show time
             PE.ComputedPrecondition _ time -> do
               putStrLn $ "Precondition propagation: " ++ show time
-            PE.ProvenTriple _ _ time -> do
+            PE.ProofIntermediate _ _ time -> do
               putStrLn $ "Intermediate Proof result: " ++ show time
             PE.ProvenGoal _ goal time -> do
               putStrLn $ "Toplevel Proof result: " ++ show time ++ "\n" ++ show goal
             PE.Warning _ err -> do
               putStrLn $ "WARNING: " ++ show err
-            PE.ErrorRaised err -> putStrLn $ "Error: " ++ PCE.ppEquivalenceError err
+            PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
             _ -> return ()
       }
   result <- case mwb of

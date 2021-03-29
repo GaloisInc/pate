@@ -74,14 +74,17 @@ library
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
                        Pate.SimulatorRegisters,
+                       Pate.Parallel,
                        Pate.Proof,
+                       Pate.Proof.Instances,
+                       Pate.Proof.Operations,
+                       Pate.Proof.Ground,
                        Pate.Solver,
                        Pate.Timeout,
                        Pate.Types,
                        Pate.Utils,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
-                       Pate.CounterExample,
                        Pate.SimState,
                        Pate.Equivalence
 
@@ -124,6 +127,7 @@ test-suite pate-test-ppc
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic,
                  dismantle-ppc
+  ghc-options:   -Wcompat -Wall -O2 -threaded -rtsopts "-with-rtsopts=-N"
 
 test-suite pate-test-aarch32
   import: shared-test
@@ -185,4 +189,4 @@ executable pate-exec
                        macaw-aarch32-symbolic,
                        asl-translator
   default-language: Haskell2010
-  ghc-options: -Wall -Wcompat
+  ghc-options: -Wall -Wcompat -O2 -threaded -rtsopts "-with-rtsopts=-N"

@@ -33,7 +33,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
-import qualified Pate.CounterExample as PC
+import qualified Pate.Proof.Instances as PFI
 
 import           Interactive.State
 
@@ -68,7 +68,7 @@ consumeEvents chan r0 = do
                                                           & patchedBinary .~ Just (pelf, pmap), ())
         PE.ElfLoaderWarnings {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.CheckedEquivalence bpair@(PE.BlocksPair (PE.Blocks blk _) _) res duration -> do
+        PE.CheckedEquivalence bpair@(PT.PatchPair (PE.Blocks blk _) _) res duration -> do
           let
             addr = PT.concreteAddress blk
             et = EquivalenceTest bpair duration
@@ -154,7 +154,7 @@ renderEvent st detailDiv evt =
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       TP.ul #+ (map (\w -> TP.li #+ [TP.string (show w)]) pes)
-    PE.CheckedEquivalence (PE.BlocksPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
+    PE.CheckedEquivalence (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
       let
         origAddr = PT.blockMemAddr blkO
         patchedAddr = PT.blockMemAddr blkP
@@ -205,10 +205,8 @@ renderCounterexample er =
     PE.Equivalent -> []
     PE.Inconclusive -> []
     PE.Inequivalent ir ->
-      case ir of
-        PT.InequivalentResults _traceDiff _exitDiff regs _retAddrs rsn ->
-          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show rsn)
-                               , TP.pre #+ [TP.string (PC.ppPreRegs regs)]
+          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show (PFI.ineqReason ir))
+                               , TP.pre #+ [TP.string (PFI.ppInequivalencePreRegs ir)]
                                ]
                    ]
           ]

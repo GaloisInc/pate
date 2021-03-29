@@ -8,6 +8,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+
 module Pate.SimulatorRegisters (
   CrucBaseTypes,
   MacawRegVar(..),
@@ -26,6 +27,7 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 
+import qualified Pate.Types as PT
 import qualified Pate.ExprMappable as PEM
 import qualified What4.ExprHelpers as WEH
 
@@ -48,6 +50,13 @@ data MacawRegEntry sym (tp :: MT.Type) where
     , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
     } ->
     MacawRegEntry sym tp
+
+instance WI.IsSymExprBuilder sym => Eq (MacawRegEntry sym tp) where
+  (MacawRegEntry repr v1) == (MacawRegEntry _ v2) = case repr of
+    CLM.LLVMPointerRepr{} | Just PC.Refl <- PT.ptrEquality v1 v2 -> True
+    CT.BoolRepr | Just PC.Refl <- WI.testEquality v1 v2 -> True
+    CT.StructRepr Ctx.Empty -> True
+    _ -> error "MacawRegEntry: unexpected type for equality comparison"
 
 data MacawRegVar sym (tp :: MT.Type) where
   MacawRegVar ::

@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+
 module Pate.MemCell (
     MemCell(..)
   , MemCells(..)
@@ -21,6 +22,7 @@ module Pate.MemCell (
   ) where
 
 import           Control.Monad ( foldM, forM )
+
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
@@ -223,7 +225,7 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
-instance PC.OrdF (WI.SymExpr sym) => PEM.ExprMappable sym (MemCells sym arch w) where
+instance (PC.OrdF (WI.SymExpr sym)) => PEM.ExprMappable sym (MemCells sym arch w) where
   mapExpr sym f (MemCells cells) = do
     maps <- forM (Map.toList cells) $ \(cell, p) -> do
       cell' <- PEM.mapExpr sym f cell

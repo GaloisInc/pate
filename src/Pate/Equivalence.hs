@@ -36,9 +36,10 @@ module Pate.Equivalence
   , EquivRelation(..)
   , MemEquivRelation(..)
   , RegEquivRelation(..)
-
+  , regPredAt
   , muxStatePred
   , mapMemPred
+  , mapMemPredPar
   , memPredTrue
   , memPredFalse
   , weakenEquivRelation
@@ -61,7 +62,7 @@ module Pate.Equivalence
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeNats
 
-import           Control.Monad ( forM, foldM )
+import           Control.Monad ( forM, foldM, join )
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.IO.Class ( liftIO )
 
@@ -91,6 +92,7 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
+import qualified Pate.Parallel as PP
 import           What4.ExprHelpers
 
 ---------------------------------------------
@@ -121,23 +123,40 @@ data MemPred sym arch =
 
 -- | Map the internal 'PMC.MemCells' representing the locations of a 'MemPred', preserving
 -- its polarity.
+mapMemPredPar ::
+  forall sym arch m future.
+  PP.IsFuture m future =>
+  W4.IsExprBuilder sym =>
+  MemPred sym arch ->
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))) ->
+  m (future (MemPred sym arch))
+mapMemPredPar memPred f = do
+  let
+    dropFalse :: PMC.MemCell sym arch w -> W4.Pred sym -> Maybe (W4.Pred sym)
+    dropFalse _ p = case W4.asConstantPred p of
+      Just False -> Nothing
+      _ -> Just p
+      
+    f' :: PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))
+    f' (cell@PMC.MemCell{}) p = f cell p
+
+    cellsF :: PMC.MemCells sym arch w -> m (future (PMC.MemCells sym arch w))
+    cellsF (PMC.MemCells cells) = do
+      future_cells <- M.traverseWithKey f' cells
+      PP.present $ PMC.MemCells <$> mapM PP.joinFuture future_cells
+
+  future_locs <- PP.traverseFPar cellsF (memPredLocs memPred)
+  PP.forFuture future_locs $ \locs -> do
+    let locs' = TF.fmapF (\(PMC.MemCells cells) -> PMC.MemCells $ M.mapMaybeWithKey dropFalse cells) locs
+    return $ memPred { memPredLocs = locs' }
+
 mapMemPred ::
   forall sym arch m.
   Monad m =>
   W4.IsExprBuilder sym =>
   MemPred sym arch ->
-  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
-  m (MemPred sym arch)
-mapMemPred memPred f = do
-  let
-    f' :: (forall w. PMC.MemCell sym arch w -> W4.Pred sym -> m (Maybe (W4.Pred sym)))
-    f' cell@(PMC.MemCell{}) p = do
-      p' <- f cell p
-      case W4.asConstantPred p' of
-        Just False -> return Nothing
-        _ -> return $ Just p'
-  locs <- TF.traverseF (\(PMC.MemCells cells) -> PMC.MemCells <$> M.traverseMaybeWithKey f' cells) (memPredLocs memPred)
-  return $ memPred { memPredLocs = locs }
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) -> m (MemPred sym arch)
+mapMemPred memPred f = join $ mapMemPredPar memPred (\cell p -> return $ f cell p)
 
 
 memPredToList ::
@@ -282,6 +301,17 @@ muxStatePred sym p predT predF = case W4.asConstantPred p of
 
 statePredFalse :: W4.IsExprBuilder sym => sym -> StatePred sym arch
 statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
+
+
+regPredAt ::
+  W4.IsExprBuilder sym =>
+  PA.ValidArch arch =>
+  sym ->
+  MM.ArchReg arch tp ->
+  StatePred sym arch -> W4.Pred sym
+regPredAt sym reg stPred  = case M.lookup (Some reg) (predRegs stPred)  of
+  Just p -> p
+  Nothing -> W4.falsePred sym
 
 ---------------------------------------
 -- Equivalence relations
