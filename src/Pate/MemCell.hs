@@ -55,7 +55,7 @@ data MemCell sym arch w where
 
 instance PC.TestEquality (WI.SymExpr sym) => PC.TestEquality (MemCell sym arch) where
   testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2)
-   | Just PC.Refl <- PC.testEquality reg1 reg2
+   | reg1 == reg2
    , Just PC.Refl <- PC.testEquality off1 off2
    , Just PC.Refl <- PC.testEquality sz1 sz2
    , end1 == end2
@@ -64,10 +64,9 @@ instance PC.TestEquality (WI.SymExpr sym) => PC.TestEquality (MemCell sym arch) 
 
 instance PC.OrdF (WI.SymExpr sym) => PC.OrdF (MemCell sym arch) where
   compareF (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2) =
-    PC.lexCompareF reg1 reg2 $
     PC.lexCompareF off1 off2 $
     PC.lexCompareF sz1 sz2 $
-    PC.fromOrdering $ compare end1 end2
+    PC.fromOrdering (compare reg1 reg2 <> compare end1 end2)
 
 instance PC.TestEquality (WI.SymExpr sym) => Eq (MemCell sym arch w) where
   stamp1 == stamp2 | Just PC.Refl <- PC.testEquality stamp1 stamp2 = True

@@ -38,7 +38,7 @@ import qualified What4.ExprHelpers as WEH
 -- sentinel values.  This mapping is complicated because the Crucible struct
 -- type and the what4 struct type are not actually related.
 type family CrucBaseTypes (tp :: CT.CrucibleType) :: Ctx.Ctx WI.BaseType where
-  CrucBaseTypes (CLM.LLVMPointerType w) = (Ctx.EmptyCtx Ctx.::> WT.BaseNatType Ctx.::> WT.BaseBVType w)
+  CrucBaseTypes (CLM.LLVMPointerType w) = (Ctx.EmptyCtx Ctx.::> WT.BaseIntegerType Ctx.::> WT.BaseBVType w)
   CrucBaseTypes CT.BoolType = (Ctx.EmptyCtx Ctx.::> WT.BaseBoolType)
   CrucBaseTypes (CT.StructType Ctx.EmptyCtx) = Ctx.EmptyCtx
 
@@ -65,9 +65,9 @@ data MacawRegVar sym (tp :: MT.Type) where
     } ->
     MacawRegVar sym tp
 
-instance PC.ShowF (WI.SymExpr sym) => Show (MacawRegEntry sym tp) where
+instance (WI.IsExpr (WI.SymExpr sym), PC.ShowF (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of
-    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> PC.showF rg ++ ":" ++ PC.showF bv
+    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ ":" ++ PC.showF bv
     _ -> "macawRegEntry: unsupported"
 
 macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp

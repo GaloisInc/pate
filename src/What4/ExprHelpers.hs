@@ -165,12 +165,14 @@ data VarBinding sym tp =
 
 mapExprPtr ::
   forall sym w.
+  (W4.IsExprBuilder sym) =>
   sym ->
   (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
   CLM.LLVMPtr sym w ->
   IO (CLM.LLVMPtr sym w)  
-mapExprPtr _sym f (CLM.LLVMPointer reg off) = do
-  reg' <- f reg
+mapExprPtr sym f (CLM.LLVMPointer reg off) = do
+  regInt <- W4.natToInteger sym reg
+  reg' <- W4.integerToNat sym =<< f regInt
   off' <- f off
   return $ CLM.LLVMPointer reg' off'  
 
@@ -193,7 +195,7 @@ freshPtr ::
   IO (CLM.LLVMPtr sym w)
 freshPtr sym w = do
   off <- W4.freshConstant sym W4.emptySymbol (W4.BaseBVRepr w)
-  reg <- W4.freshConstant sym W4.emptySymbol W4.BaseNatRepr
+  reg <- W4.freshNat sym W4.emptySymbol
   return $ CLM.LLVMPointer reg off
 
 
@@ -240,6 +242,7 @@ boundVars' visited (W4B.BoundVarExpr v) = do
 boundVars' _ (W4B.SemiRingLiteral{}) = return S.empty
 boundVars' _ (W4B.BoolExpr{}) = return S.empty
 boundVars' _ (W4B.StringExpr{}) = return S.empty
+boundVars' _ (W4B.FloatExpr {}) = return S.empty
 -- End Clag
 
 newtype ExprFilter sym = ExprFilter (forall tp'. W4.SymExpr sym tp' -> IO Bool)
@@ -312,7 +315,6 @@ groundToConcrete ::
 groundToConcrete repr gv = case repr of
   W4.BaseBoolRepr -> return $ W4C.ConcreteBool gv
   W4.BaseBVRepr w -> return $ W4C.ConcreteBV w gv
-  W4.BaseNatRepr -> return $ W4C.ConcreteNat gv
   W4.BaseIntegerRepr -> return $ W4C.ConcreteInteger gv
   W4.BaseStructRepr srepr -> do
     let

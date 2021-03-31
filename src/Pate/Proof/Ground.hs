@@ -40,6 +40,7 @@ import qualified Control.Monad.Reader as CMR
 
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
+import           Numeric.Natural ( Natural )
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Context as Ctx
@@ -169,11 +170,16 @@ groundBV ::
   PT.SymGroundEvalFn sym ->
   CLM.LLVMPtr sym w ->
   EquivM sym arch (PFI.GroundBV w)
-groundBV fn (CLM.LLVMPointer reg off) = do
+groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
   W4.BaseBVRepr w <- return $ W4.exprType off
-  greg <- execGroundFn fn reg
+  iReg <- liftIO $ W4.natToInteger sym reg
+  greg <- execGroundFn fn iReg
   goff <- execGroundFn fn off
-  let gbv = PFI.mkGroundBV w greg goff
+  let integerToNat :: Integer -> Natural
+      integerToNat i
+        | i >= 0 = fromIntegral i
+        | otherwise = fromIntegral (negate i)
+  let gbv = PFI.mkGroundBV w (integerToNat greg) goff
   return gbv
 
 groundLLVMPointer :: forall sym arch.
@@ -190,7 +196,7 @@ isStackCell ::
 isStackCell cell = withSym $ \sym -> do
   stackRegion <- CMR.asks envStackRegion
   let CLM.LLVMPointer region _ = PMC.cellPtr cell
-  liftIO $ W4.isEq sym region stackRegion
+  liftIO $ W4.natEq sym region stackRegion
 
 groundMemCell :: forall sym arch w.
   PT.SymGroundEvalFn sym ->

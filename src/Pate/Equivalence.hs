@@ -389,13 +389,13 @@ stateEquivalence ::
   PA.ValidArch arch =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   EquivRelation sym arch
 stateEquivalence sym stackRegion =
   let
     isStackCell cell = do
       let CLM.LLVMPointer region _ = PMC.cellPtr cell
-      W4.isEq sym region stackRegion
+      W4.natEq sym region stackRegion
 
     memEq = MemEquivRelation $ \cell vO vP -> do
       impM sym (isStackCell cell >>= W4.notPred sym) $
@@ -413,7 +413,7 @@ getPrecondition ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
   StatePred sym arch ->
@@ -429,7 +429,7 @@ impliesPrecondition ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->
@@ -618,11 +618,12 @@ memEqOutsideRegion ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   sym ->
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   MemRegionEquality sym arch
 memEqOutsideRegion sym region = MemRegionEquality $ \mem1 mem2 -> do
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton region)
-  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton region) mem1Stack
+  iRegion <- W4.natToInteger sym region
+  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iRegion)
+  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton iRegion) mem1Stack
   W4.isEq sym (MT.memArr mem1) mem2'
 
 
@@ -632,11 +633,12 @@ memEqAtRegion ::
   W4.IsSymExprBuilder sym =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   MemRegionEquality sym arch
 memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton stackRegion)
-  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton stackRegion)
+  iStackRegion <- W4.natToInteger sym stackRegion
+  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iStackRegion)
+  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton iStackRegion)
   W4.isEq sym mem1Stack mem2Stack
 
 regPredRel ::
@@ -662,7 +664,7 @@ statePredPre ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->
