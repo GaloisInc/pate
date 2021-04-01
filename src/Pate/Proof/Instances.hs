@@ -172,7 +172,7 @@ type ProofSymApp sym arch = PF.ProofApp (ProofSym sym arch) (ProofSymExpr sym ar
 ppCell :: (PA.ValidArch arch, PT.ValidSym sym) => PMC.MemCell sym arch w -> PP.Doc a
 ppCell cell =
   let CLM.LLVMPointer reg off = PMC.cellPtr cell
-  in PP.pretty (showF reg) <> "+" <> PP.pretty (showF off)
+  in W4.printSymNat reg <> "+" <> PP.pretty (showF off)
 
 ppMaybe :: Maybe f -> (f ->  PP.Doc a) -> PP.Doc a
 ppMaybe (Just f) pp = pp f

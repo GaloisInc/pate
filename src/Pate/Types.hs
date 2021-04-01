@@ -566,7 +566,7 @@ ptrEquality ::
   CLM.LLVMPtr sym w2 ->
   Maybe (w1 :~: w2)
 ptrEquality (CLM.LLVMPointer reg1 off1) (CLM.LLVMPointer reg2 off2)
-  | Just Refl <- testEquality reg1 reg2, Just Refl <- testEquality off1 off2 = Just Refl
+  | reg1 == reg2, Just Refl <- testEquality off1 off2 = Just Refl
 ptrEquality _ _ = Nothing
 
 ----------------------------------
@@ -637,6 +637,6 @@ showGroundValue ::
 showGroundValue repr gv = case repr of
   W4.BaseBoolRepr -> show gv
   W4.BaseBVRepr w -> BVS.ppHex w gv
-  W4.BaseNatRepr -> show gv
+  W4.BaseIntegerRepr -> show gv
   _ -> "Unsupported ground value"
 

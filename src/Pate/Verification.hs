@@ -646,7 +646,7 @@ initSimContext = withValid $ withSym $ \sym -> do
     MT.memTraceIntrinsicTypes
     ha
     IO.stderr
-    CFH.emptyHandleMap
+    (CS.FnBindings CFH.emptyHandleMap)
     exts
     MS.MacawSimulatorState
 
@@ -1088,7 +1088,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   let
     isStackCell cell = do
       let CLM.LLVMPointer region _ = PMC.cellPtr cell
-      liftIO $ W4.isEq sym region stackRegion
+      liftIO $ W4.natEq sym region stackRegion
     isNotStackCell cell = do
       p <- isStackCell cell
       liftIO $ W4.notPred sym p
@@ -1151,11 +1151,12 @@ getIsBoundFilter' e = withValid $ liftIO $ getIsBoundFilter e
 liftFilterMacaw ::
   (forall tp'. W4.SymExpr sym tp' -> IO Bool) ->
   PSR.MacawRegEntry sym tp -> EquivM sym arch Bool
-liftFilterMacaw f entry = do
+liftFilterMacaw f entry = withSym $ \sym -> do
   case PSR.macawRegRepr entry of
     CLM.LLVMPointerRepr{} -> liftIO $ do
       let CLM.LLVMPointer reg off = PSR.macawRegValue entry
-      reg' <- f reg
+      iReg <- W4.natToInteger sym reg
+      reg' <- f iReg
       off' <- f off
       return $ reg' || off'
     CT.BoolRepr -> liftIO $ f (PSR.macawRegValue entry)
@@ -1172,7 +1173,7 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
   binds <- fmap (mconcat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case registerCase (PSR.macawRegRepr vO) r of
     RegIP -> return mempty
     _ -> case M.lookup (Some r) regRel of
-      Just cond | Just True <- W4.asConstantPred cond -> return $ macawRegBinding vO vP
+      Just cond | Just True <- W4.asConstantPred cond -> liftIO $ macawRegBinding sym vO vP
       _ -> return mempty
   cache <- W4B.newIdxCache
   return $ ExprMapper $ rebindWithFrame' sym cache binds
@@ -1189,7 +1190,7 @@ bindMacawReg ::
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')
 bindMacawReg var val expr = withValid $ withSym $ \sym -> do
-  let bind = macawRegBinding var val
+  bind <- liftIO $ macawRegBinding sym var val
   liftIO $ rebindWithFrame sym bind expr
 
 
@@ -1233,18 +1234,21 @@ validRegister mblockStart entry r = withSym $ \sym ->
     RegIP -> case mblockStart of
       Just blockStart -> do
         ptrO <- PD.concreteToLLVM blockStart
-        return $ macawRegBinding entry (PSR.ptrToEntry ptrO)
+        liftIO $ macawRegBinding sym entry (PSR.ptrToEntry ptrO)
       Nothing -> return $ mempty
     RegSP -> do
       stackRegion <- CMR.asks envStackRegion
       let
         CLM.LLVMPointer region _ = PSR.macawRegValue entry
-      return $ exprBinding region stackRegion
+      iRegion <- liftIO $ W4.natToInteger sym region
+      iStackRegion <- liftIO $ W4.natToInteger sym stackRegion
+      return $ exprBinding iRegion iStackRegion
     RegBV -> liftIO $ do
       let
         CLM.LLVMPointer region _ = PSR.macawRegValue entry
-      zero <- W4.natLit sym 0
-      return $ exprBinding region zero
+      zero <- W4.intLit sym 0
+      iRegion <- W4.natToInteger sym region
+      return $ exprBinding iRegion zero
     RegTOC -> do
       globalRegion <- CMR.asks envGlobalRegion
       (tocO, tocP) <- getCurrentTOCs
@@ -1252,7 +1256,7 @@ validRegister mblockStart entry r = withSym $ \sym ->
         OriginalRepr -> wLit tocO
         PatchedRepr -> wLit tocP
       let targetToc = CLM.LLVMPointer globalRegion tocBV
-      return $ macawRegBinding entry (PSR.ptrToEntry targetToc)
+      liftIO $ macawRegBinding sym entry (PSR.ptrToEntry targetToc)
     _ -> return $ mempty
 
 

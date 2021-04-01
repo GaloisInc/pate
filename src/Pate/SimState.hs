@@ -198,22 +198,24 @@ exprBinding eSrc eTgt = case testEquality eSrc eTgt of
 macawRegBinding ::
   W4.IsSymExprBuilder sym =>
   MS.ToCrucibleType tp ~ MS.ToCrucibleType tp' =>
+  sym ->
   -- | value to rebind
   PSR.MacawRegEntry sym tp ->
   -- | new value
   PSR.MacawRegEntry sym tp' ->
-  AssumptionFrame sym
-macawRegBinding var val = do
+  IO (AssumptionFrame sym)
+macawRegBinding sym var val = do
   case PSR.macawRegRepr var of
-    CLM.LLVMPointerRepr _ ->
-      let
-        CLM.LLVMPointer regVar offVar = PSR.macawRegValue var
-        CLM.LLVMPointer regVal offVal = PSR.macawRegValue val
-        regBind = exprBinding regVar regVal
-        offBind = exprBinding offVar offVal
-      in regBind <> offBind
-    CT.BoolRepr -> exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
-    _ -> mempty
+    CLM.LLVMPointerRepr _ -> do
+      let CLM.LLVMPointer regVar offVar = PSR.macawRegValue var
+      let CLM.LLVMPointer regVal offVal = PSR.macawRegValue val
+      iRegVar <- W4.natToInteger sym regVar
+      iRegVal <- W4.natToInteger sym regVal
+      let regBind = exprBinding iRegVar iRegVal
+      let offBind = exprBinding offVar offVal
+      return (regBind <> offBind)
+    CT.BoolRepr -> return $ exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
+    _ -> return mempty
 
 frameAssume ::
   W4.IsSymExprBuilder sym =>
@@ -402,12 +404,13 @@ flatVarBinds ::
   forall sym arch bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
+  W4.IsExprBuilder sym =>
   sym ->
   SimVars sym arch bin ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   IO [Some (VarBinding sym)]
-flatVarBinds _sym simVars mem regs = do
+flatVarBinds sym simVars mem regs = do
   let
     regBinds =
       MapF.toList $
@@ -418,7 +421,8 @@ flatVarBinds _sym simVars mem regs = do
       CLM.LLVMPointerRepr{} -> do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
-        return $ [Some (VarBinding regVar region), Some (VarBinding offVar off)]
+        iRegion <- W4.natToInteger sym region
+        return $ [Some (VarBinding regVar iRegion), Some (VarBinding offVar off)]
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars
         return [Some (VarBinding var (PSR.macawRegValue val))]
