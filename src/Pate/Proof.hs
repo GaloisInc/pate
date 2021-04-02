@@ -435,6 +435,8 @@ type family ProofScope prf :: DK.Type
 data ProofNonce prf (tp :: ProofNodeType) where
   ProofNonce :: N.Nonce (ProofScope prf) tp -> ProofNonce prf tp
 
+deriving instance Show (ProofNonce prf tp)
+
 -- | A proof expression, annotated with nonces.
 data ProofNonceExpr prf tp where
   ProofNonceExpr ::
