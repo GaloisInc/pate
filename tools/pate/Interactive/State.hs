@@ -12,12 +12,16 @@ module Interactive.State (
   recentEvents,
   originalBinary,
   patchedBinary,
-  sources
+  sources,
+  StateRef(..),
+  newState
   ) where
 
 import qualified Control.Lens as L
+import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
 import qualified Data.Time as TM
+import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
 
 import qualified Pate.Binary as PB
@@ -62,3 +66,18 @@ emptyState ms = State { _successful = Map.empty
                       , _patchedBinary = Nothing
                       , _sources = ms
                       }
+
+data StateRef arch =
+  StateRef { stateRef :: IOR.IORef (State arch)
+           , stateChangeEvent :: TP.Event ()
+           , stateChangeEmitter :: () -> IO ()
+           }
+
+newState :: Maybe (SourcePair LC.CTranslUnit) -> IO (StateRef arch)
+newState ms = do
+  r <- IOR.newIORef (emptyState ms)
+  (evt, emitter) <- TP.newEvent
+  return StateRef { stateRef = r
+                  , stateChangeEvent = evt
+                  , stateChangeEmitter = emitter
+                  }

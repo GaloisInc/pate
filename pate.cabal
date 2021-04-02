@@ -169,6 +169,9 @@ executable pate-exec
   other-modules:       Pate.PPC,
                        Pate.AArch32,
                        Interactive,
+                       Interactive.Render.BlockPairDetail,
+                       Interactive.Render.Console,
+                       Interactive.Render.SliceGraph,
                        Interactive.State
   hs-source-dirs:      tools/pate tools arch
   build-depends:       async,
