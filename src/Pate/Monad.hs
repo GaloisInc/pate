@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE LambdaCase #-}
@@ -14,6 +15,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE ExistentialQuantification #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -49,6 +53,7 @@ module Pate.Monad
   , isPredTrue
   , isPredSat
   , isPredTrue'
+  , isPredTruePar'
   -- working under a 'SimSpec' context
   , withSimSpec
   , withFreshVars
@@ -58,6 +63,9 @@ module Pate.Monad
   , withSatAssumption
   , withAssumptionFrame
   , withAssumptionFrame'
+  -- nonces
+  , freshNonce
+  , withProofNonce
   )
   where
 
@@ -113,11 +121,13 @@ import           Pate.Equivalence
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Proof as PP
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Timeout as PT
 import           Pate.Types
+import qualified Pate.Proof as PF
+import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Parallel as Par
 
 data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
@@ -154,7 +164,7 @@ data EquivEnv sym arch where
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode
     , envBaseEquiv :: EquivRelation sym arch
-    , envGoalTriples :: [PP.EquivTriple sym arch]
+    , envGoalTriples :: [PF.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
     , envValidSym :: Sym sym
     -- ^ expression builder, wrapped with a validity proof
@@ -163,11 +173,28 @@ data EquivEnv sym arch where
     , envTocs :: PA.HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
     -- ^ table of contents for the original and patched binaries, if defined by the
     -- architecture
-    , envCurrentFunc :: PatchPair arch
+    , envCurrentFunc :: BlockPair arch
     -- ^ start of the function currently under analysis
     , envCurrentFrame :: AssumptionFrame sym
     -- ^ the current assumption frame, accumulated as assumptions are added
+    , envNonceGenerator :: N.NonceGenerator IO (PF.ProofScope (PFI.ProofSym sym arch))
+    , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
+    -- ^ nonce of the parent proof node currently in scope
     } -> EquivEnv sym arch
+
+freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
+freshNonce = do
+  gen <- asks envNonceGenerator
+  liftIO $ N.freshNonce gen
+
+withProofNonce ::
+  forall tp sym arch a.
+  (PF.ProofNonce (PFI.ProofSym sym arch) tp -> EquivM sym arch a) ->
+  EquivM sym arch a
+withProofNonce f = withValid $do
+  nonce <- freshNonce
+  let proofNonce = PF.ProofNonce nonce
+  local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
 
 data VerificationFailureMode =
     ThrowOnAnyFailure
@@ -210,9 +237,9 @@ emitEvent evt = do
 
 data EquivState sym arch where
   EquivState ::
-    { stProofs :: [PP.ProofBlockSlice sym arch]
+    { stProofs :: [PFI.ProofSymExpr sym arch PF.ProofBlockSliceType]
     -- ^ all intermediate triples that were proven for each block slice
-    , stSimResults ::  Map (PatchPair arch) (SimSpec sym arch (SimBundle sym arch))
+    , stSimResults ::  Map (BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
     -- ^ cached results of symbolic execution for a given block pair
     , stEqStats :: EquivalenceStatistics
     } -> EquivState sym arch
@@ -269,8 +296,6 @@ withValid f = do
   env <- ask
   withValidEnv env $ f
 
-
-
 withValidEnv ::
   EquivEnv sym arch ->
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => a) ->
@@ -315,7 +340,8 @@ unconstrainedRegister reg = do
   case repr of
     MM.BVTypeRepr n -> withSymIO $ \sym -> do
       ptr@(CLM.LLVMPointer region off) <- freshPtr sym n
-      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> region Ctx.:> off)
+      iRegion <- W4.natToInteger sym region
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
       var <- W4.freshConstant sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) var) (Ctx.empty Ctx.:> var)
@@ -349,7 +375,7 @@ withFreshVars f = do
   varsO <- freshSimVars @Original
   varsP <- freshSimVars @Patched
   (asm, result) <- f (simVarState varsO) (simVarState varsP)
-  return $ SimSpec varsO varsP asm result
+  return $ SimSpec (PatchPair varsO varsP) asm result
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 -- The resulting predicate is the conjunction of the initial assumptions and
@@ -419,23 +445,21 @@ withAssumption_ asmf f =
   withSym $ \sym -> fmap snd $ withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
--- satisfiable, return the given default value under the "false" assumption.
+-- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
   PT.Timeout ->
-  f ->
   EquivM sym arch (W4.Pred sym) ->
   EquivM sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-withSatAssumption timeout default_ asmf f = withSym $ \sym -> do
+  EquivM sym arch (Maybe (W4.Pred sym, f))
+withSatAssumption timeout asmf f = do
   asm <- asmf
   isPredSat timeout asm >>= \case
-    True ->  withAssumption (return asm) $ f
-    False -> return (W4.falsePred sym, default_)
+    True ->  Just <$> (withAssumption (return asm) $ f)
+    False -> return Nothing
 
 --------------------------------------
 -- Sat helpers
-
 
 -- | Check a predicate for satisfiability (in our monad)
 --
@@ -510,18 +534,34 @@ isPredTrue' ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue' timeout p = case W4.asConstantPred p of
-  Just b -> return b
+isPredTrue' timeout p = join $ isPredTruePar' timeout p
+
+isPredTruePar' ::
+  Par.IsFuture (EquivM_ sym arch) future =>
+  PT.Timeout ->
+  W4.Pred sym ->
+  EquivM sym arch (future Bool)
+isPredTruePar' timeout p = case W4.asConstantPred p of
+  Just b -> Par.present $ return b
   _ -> do
     frame <- asks envCurrentFrame
     case isAssumedPred frame p of
-      True -> return True
-      False -> do
+      True -> Par.present $ return True
+      False -> Par.promise $ do
         notp <- withSymIO $ \sym -> W4.notPred sym p
         checkSatisfiableWithModel timeout "isPredTrue'" notp $ \case
             W4R.Sat _ -> return False
             W4R.Unsat _ -> return True
             W4R.Unknown -> return False
+
+
+instance Par.IsFuture (EquivM_ sym arch) Par.Future where
+  present m = IO.withRunInIO $ \runInIO -> Par.present (runInIO m)
+  -- here we can implement scheduling of IOFutures, which can be tracked
+  -- in the equivM state
+  promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
+  joinFuture future = withValid $ catchInIO $ Par.joinFuture future
+  forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
 
 execGroundFn ::
   forall sym arch tp.
@@ -622,3 +662,10 @@ manifestError act = catchError (Right <$> act) (pure . Left)
 implicitError :: MonadError e m => Either e a -> m a
 implicitError (Left e) = throwError e
 implicitError (Right a) = pure a
+
+----------------------------------------
+-- Proof
+
+
+
+

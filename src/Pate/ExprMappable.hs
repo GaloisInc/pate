@@ -23,6 +23,7 @@ import qualified What4.Interface as WI
 import qualified What4.Partial as WP
 
 import qualified What4.ExprHelpers as WEH
+import qualified Pate.Parallel as Par
 
 -- Expression binding
 
@@ -35,6 +36,10 @@ class ExprMappable sym f where
     (forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)) ->
     f ->
     IO f
+  mapExpr _ _ = pure
+
+instance (ExprMappable sym a, ExprMappable sym b) => ExprMappable sym (a, b) where
+  mapExpr sym f (a, b) = (,) <$> mapExpr sym f a <*> mapExpr sym f b
 
 instance ExprMappable sym (CS.RegValue' sym (CT.BaseToType bt)) where
   mapExpr _ f (CS.RV x) = CS.RV <$> f x
@@ -50,6 +55,13 @@ instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue
       return $ WP.PE p' e'
     WP.Unassigned -> return WP.Unassigned
 
+
+instance ExprMappable sym f => ExprMappable sym (Par.Future f) where
+  mapExpr sym f future = Par.forFuture future (mapExpr sym f)
+
+instance ExprMappable sym (f (a tp)) => ExprMappable sym (Par.ConstF f a tp) where
+  mapExpr sym f (Par.ConstF a) = Par.ConstF <$> mapExpr sym f a
+
 instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
   mapExpr _ _ = return
 
@@ -60,5 +72,3 @@ instance
     asn' <- mapExpr sym f asn
     x' <- mapExpr sym f x
     return $ asn' Ctx.:> x'
-
-

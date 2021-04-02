@@ -44,7 +44,6 @@ import           Data.Parameterized.Some ( Some(..) )
 import qualified Pate.AArch32 as AArch32
 import qualified Pate.Arch as PA
 import qualified Pate.Config as PC
-import qualified Pate.CounterExample as PCE
 import qualified Pate.Event as PE
 import qualified Pate.PPC as PPC
 import qualified Pate.Hints as PH
@@ -262,7 +261,7 @@ terminalFormatEvent evt =
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
-    PE.CheckedEquivalence (PE.BlocksPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
+    PE.CheckedEquivalence (PT.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
       let
         origAddr = PT.concreteAddress blkO
         patchedAddr = PT.concreteAddress blkP
@@ -283,7 +282,7 @@ terminalFormatEvent evt =
         PE.Inequivalent _mdl ->
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
           in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
-    PE.ErrorRaised err -> layout (PP.pretty $ PCE.ppEquivalenceError err)
+    PE.ErrorRaised err -> layout (PP.pretty $ show err)
     PE.ProvenGoal _ prf _ -> layout (PP.viaShow prf)
     PE.HintErrorsCSV errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))

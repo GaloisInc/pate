@@ -36,9 +36,10 @@ module Pate.Equivalence
   , EquivRelation(..)
   , MemEquivRelation(..)
   , RegEquivRelation(..)
-
+  , regPredAt
   , muxStatePred
   , mapMemPred
+  , mapMemPredPar
   , memPredTrue
   , memPredFalse
   , weakenEquivRelation
@@ -61,7 +62,7 @@ module Pate.Equivalence
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeNats
 
-import           Control.Monad ( forM, foldM )
+import           Control.Monad ( forM, foldM, join )
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad.IO.Class ( liftIO )
 
@@ -91,18 +92,30 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
+import qualified Pate.Parallel as PP
 import           What4.ExprHelpers
 
 ---------------------------------------------
 -- Memory predicate
 
+-- | This is a collection of 'PMC.MemCells', which describe ranges of memory
+-- covered by this predicate.  Each 'PMC.MemCells' (which covers a set of
+-- 'PMC.MemCell') contains the predicate determining whether or not it is "in".
+--
+-- The interpretation of those predicates is subject to the 'memPredPolarity'.
 data MemPred sym arch =
     MemPred
       { memPredLocs :: MapF.MapF W4.NatRepr (PMC.MemCells sym arch)
-      -- ^ predicate status at these locations according to polarity
+      -- ^ The locations covered by this 'MemPred' (whether they are "in" or not
+      -- is subject to the polarity)
+      --
+      -- The 'W4.NatRepr' index describes the number of bytes covered by each
+      -- 'PMC.MemCell'
       , memPredPolarity :: W4.Pred sym
-      -- ^ if true, then predicate is true at exactly the locations
-      -- if false, then predicate is true everywhere but these locations.
+      -- ^ If true, then the predicate is true at exactly the locations
+      -- specified by 'memPredLocs'.  If false, then the predicate is true
+      -- everywhere but these locations.
+      --
       -- Currently this is always concrete, but alternate strategies
       -- for computing pre-domains may decide to use symbolic polarities,
       -- and there is no fundamental reason to exclude this case.
@@ -110,23 +123,40 @@ data MemPred sym arch =
 
 -- | Map the internal 'PMC.MemCells' representing the locations of a 'MemPred', preserving
 -- its polarity.
+mapMemPredPar ::
+  forall sym arch m future.
+  PP.IsFuture m future =>
+  W4.IsExprBuilder sym =>
+  MemPred sym arch ->
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))) ->
+  m (future (MemPred sym arch))
+mapMemPredPar memPred f = do
+  let
+    dropFalse :: PMC.MemCell sym arch w -> W4.Pred sym -> Maybe (W4.Pred sym)
+    dropFalse _ p = case W4.asConstantPred p of
+      Just False -> Nothing
+      _ -> Just p
+      
+    f' :: PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))
+    f' (cell@PMC.MemCell{}) p = f cell p
+
+    cellsF :: PMC.MemCells sym arch w -> m (future (PMC.MemCells sym arch w))
+    cellsF (PMC.MemCells cells) = do
+      future_cells <- M.traverseWithKey f' cells
+      PP.present $ PMC.MemCells <$> mapM PP.joinFuture future_cells
+
+  future_locs <- PP.traverseFPar cellsF (memPredLocs memPred)
+  PP.forFuture future_locs $ \locs -> do
+    let locs' = TF.fmapF (\(PMC.MemCells cells) -> PMC.MemCells $ M.mapMaybeWithKey dropFalse cells) locs
+    return $ memPred { memPredLocs = locs' }
+
 mapMemPred ::
   forall sym arch m.
   Monad m =>
   W4.IsExprBuilder sym =>
   MemPred sym arch ->
-  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
-  m (MemPred sym arch)
-mapMemPred memPred f = do
-  let
-    f' :: (forall w. PMC.MemCell sym arch w -> W4.Pred sym -> m (Maybe (W4.Pred sym)))
-    f' cell@(PMC.MemCell{}) p = do
-      p' <- f cell p
-      case W4.asConstantPred p' of
-        Just False -> return Nothing
-        _ -> return $ Just p'
-  locs <- TF.traverseF (\(PMC.MemCells cells) -> PMC.MemCells <$> M.traverseMaybeWithKey f' cells) (memPredLocs memPred)
-  return $ memPred { memPredLocs = locs }
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) -> m (MemPred sym arch)
+mapMemPred memPred f = join $ mapMemPredPar memPred (\cell p -> return $ f cell p)
 
 
 memPredToList ::
@@ -224,12 +254,23 @@ addFootPrintsToPred sym foots memPred = do
 ---------------------------------------------
 -- State predicate
 
+-- | This is a predicate over machine state that says whether or not a given
+-- piece of machine state should be included in an operation.  Notionally, this
+-- could be thought of as a function:
+--
+-- > statePred :: MachineLocation -> 'W4.Pred'
+--
+-- Note that the predicate is 'W4.Pred' rather than 'Bool', potentially allowing
+-- for additional expressivity.
 data StatePred sym arch =
   StatePred
     { predRegs :: Map (Some (MM.ArchReg arch)) (W4.Pred sym)
-    -- ^ predicate is considered false on missing entries
+    -- ^ Predicates covering machine registers; if a machine register is missing from the map, the
+    -- predicate is considered to be false
     , predStack :: MemPred sym arch
+    -- ^ The predicate over stack memory locations
     , predMem :: MemPred sym arch
+    -- ^ The predicate over other memory locations
     }
 
 type StatePredSpec sym arch = SimSpec sym arch (StatePred sym arch)
@@ -261,21 +302,43 @@ muxStatePred sym p predT predF = case W4.asConstantPred p of
 statePredFalse :: W4.IsExprBuilder sym => sym -> StatePred sym arch
 statePredFalse sym = StatePred M.empty (memPredFalse sym) (memPredFalse sym)
 
+
+regPredAt ::
+  W4.IsExprBuilder sym =>
+  PA.ValidArch arch =>
+  sym ->
+  MM.ArchReg arch tp ->
+  StatePred sym arch -> W4.Pred sym
+regPredAt sym reg stPred  = case M.lookup (Some reg) (predRegs stPred)  of
+  Just p -> p
+  Nothing -> W4.falsePred sym
+
 ---------------------------------------
 -- Equivalence relations
 
 -- The state predicates define equality, meant to be guarded by a 'StatePred' which
 -- defines the domain that the equality holds over
 
-
+-- | Check if two memory cells are equivalent in the original and patched
+-- program states.  The comparisons are done as bitvectors.  The 'CLM.LLVMPtr'
+-- is a single bitvector of the necessary width (i.e., it can be larger than
+-- pointer sized).
+--
+-- Note that this works at the level of bytes.
 newtype MemEquivRelation sym arch =
   MemEquivRelation { applyMemEquivRelation :: (forall w. PMC.MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
 
-
+-- | Check if two register values are the equivalent in the original and patched
+-- program states.
 newtype RegEquivRelation sym arch =
   RegEquivRelation { applyRegEquivRelation :: (forall tp. MM.ArchReg arch tp -> PSR.MacawRegEntry sym tp -> PSR.MacawRegEntry sym tp -> IO (W4.Pred sym)) }
 
-
+-- | The equivalence relation specifies how (symbolic) values in the original
+-- program must relate to (symbolic) values in the patched program.
+--
+-- The 'EquivalenceRelation' must be paired with a 'StatePred' to be useful; the
+-- 'StatePred' tells the verifier which pieces of program state (registers and
+-- memory locations) must be equivalent under the 'EquivRelation'.
 data EquivRelation sym arch =
   EquivRelation
     { eqRelRegs :: RegEquivRelation sym arch
@@ -326,13 +389,13 @@ stateEquivalence ::
   PA.ValidArch arch =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   EquivRelation sym arch
 stateEquivalence sym stackRegion =
   let
     isStackCell cell = do
       let CLM.LLVMPointer region _ = PMC.cellPtr cell
-      W4.isEq sym region stackRegion
+      W4.natEq sym region stackRegion
 
     memEq = MemEquivRelation $ \cell vO vP -> do
       impM sym (isStackCell cell >>= W4.notPred sym) $
@@ -350,7 +413,7 @@ getPrecondition ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
   StatePred sym arch ->
@@ -366,7 +429,7 @@ impliesPrecondition ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->
@@ -555,11 +618,12 @@ memEqOutsideRegion ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   sym ->
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   MemRegionEquality sym arch
 memEqOutsideRegion sym region = MemRegionEquality $ \mem1 mem2 -> do
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton region)
-  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton region) mem1Stack
+  iRegion <- W4.natToInteger sym region
+  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iRegion)
+  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton iRegion) mem1Stack
   W4.isEq sym (MT.memArr mem1) mem2'
 
 
@@ -569,11 +633,12 @@ memEqAtRegion ::
   W4.IsSymExprBuilder sym =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   MemRegionEquality sym arch
 memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton stackRegion)
-  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton stackRegion)
+  iStackRegion <- W4.natToInteger sym stackRegion
+  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iStackRegion)
+  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton iStackRegion)
   W4.isEq sym mem1Stack mem2Stack
 
 regPredRel ::
@@ -599,7 +664,7 @@ statePredPre ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
-  W4.SymExpr sym W4.BaseNatType ->
+  W4.SymNat sym ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   EquivRelation sym arch ->

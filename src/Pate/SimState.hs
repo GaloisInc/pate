@@ -36,7 +36,6 @@ module Pate.SimState
   , SimInput(..)
   , SimOutput(..)
   , SimSpec(..)
-  , specMap
   , specMapList
   , attachSpec
   , SimBundle(..)
@@ -45,6 +44,10 @@ module Pate.SimState
   , simOutMem
   , simOutRegs
   , simPair
+  , simInO
+  , simInP
+  , simOutO
+  , simOutP
   -- variable binding
   , SimVars(..)
   , bindSpec
@@ -73,6 +76,7 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
@@ -108,11 +112,11 @@ data SimInput sym arch bin = SimInput
 
 simInMem ::
   SimInput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-simInMem simIn = simMem $ simInState simIn
+simInMem = simMem . simInState
 
 simInRegs ::
   SimInput sym arch bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
-simInRegs simIn = simRegs $ simInState simIn
+simInRegs = simRegs . simInState
 
 
 data SimOutput sym arch bin = SimOutput
@@ -123,11 +127,11 @@ data SimOutput sym arch bin = SimOutput
 
 simOutMem ::
   SimOutput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-simOutMem simIn = simMem $ simOutState simIn
+simOutMem = simMem . simOutState
 
 simOutRegs ::
   SimOutput sym arch bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
-simOutRegs simIn = simRegs $ simOutState simIn
+simOutRegs = simRegs . simOutState
 
 
 newtype ExprSet sym tp where
@@ -194,22 +198,24 @@ exprBinding eSrc eTgt = case testEquality eSrc eTgt of
 macawRegBinding ::
   W4.IsSymExprBuilder sym =>
   MS.ToCrucibleType tp ~ MS.ToCrucibleType tp' =>
+  sym ->
   -- | value to rebind
   PSR.MacawRegEntry sym tp ->
   -- | new value
   PSR.MacawRegEntry sym tp' ->
-  AssumptionFrame sym
-macawRegBinding var val = do
+  IO (AssumptionFrame sym)
+macawRegBinding sym var val = do
   case PSR.macawRegRepr var of
-    CLM.LLVMPointerRepr _ ->
-      let
-        CLM.LLVMPointer regVar offVar = PSR.macawRegValue var
-        CLM.LLVMPointer regVal offVal = PSR.macawRegValue val
-        regBind = exprBinding regVar regVal
-        offBind = exprBinding offVar offVal
-      in regBind <> offBind
-    CT.BoolRepr -> exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
-    _ -> mempty
+    CLM.LLVMPointerRepr _ -> do
+      let CLM.LLVMPointer regVar offVar = PSR.macawRegValue var
+      let CLM.LLVMPointer regVal offVal = PSR.macawRegValue val
+      iRegVar <- W4.natToInteger sym regVar
+      iRegVal <- W4.natToInteger sym regVal
+      let regBind = exprBinding iRegVar iRegVal
+      let offBind = exprBinding offVar offVal
+      return (regBind <> offBind)
+    CT.BoolRepr -> return $ exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
+    _ -> return mempty
 
 frameAssume ::
   W4.IsSymExprBuilder sym =>
@@ -318,11 +324,17 @@ rebindWithFrame' sym cache asm e_outer = do
 
 data SimSpec sym arch f = SimSpec
   {
-    specVarsO :: SimVars sym arch PT.Original
-  , specVarsP :: SimVars sym arch PT.Patched
+    specVars :: PT.PatchPair (SimVars sym arch)
   , specAsm :: W4.Pred sym
   , specBody :: f
   }
+
+
+specVarsO :: SimSpec sym arch f -> SimVars sym arch PT.Original
+specVarsO spec = PT.pOriginal $ specVars spec
+
+specVarsP :: SimSpec sym arch f -> SimVars sym arch PT.Patched
+specVarsP spec = PT.pPatched $ specVars spec
 
 instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) where
   mapExpr sym f spec = do
@@ -332,10 +344,10 @@ instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) whe
     --specVarsP' <- PEM.mapExpr sym f (specVarsP spec)
     specAsm' <- f (specAsm spec)
     specBody' <- PEM.mapExpr sym f (specBody spec)
-    return $ SimSpec (specVarsO spec) (specVarsP spec) specAsm' specBody'
+    return $ SimSpec (specVars spec) specAsm' specBody'
 
-specMap :: (f -> g) -> SimSpec sym arch f -> SimSpec sym arch g
-specMap f spec = spec { specBody = f (specBody spec) }
+instance Functor (SimSpec sym arch) where
+  fmap f spec = spec { specBody = f (specBody spec) }
 
 attachSpec :: SimSpec sym arch f -> g -> SimSpec sym arch g
 attachSpec spec g = spec { specBody = g }
@@ -343,16 +355,28 @@ attachSpec spec g = spec { specBody = g }
 specMapList :: (f -> [g]) -> SimSpec sym arch f -> [SimSpec sym arch g]
 specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBody spec))
 
+-- | The symbolic inputs and outputs of an original vs. patched block slice.
 data SimBundle sym arch = SimBundle
   {
-    simInO :: SimInput sym arch PT.Original
-  , simInP :: SimInput sym arch PT.Patched
-  , simOutO :: SimOutput sym arch PT.Original
-  , simOutP :: SimOutput sym arch PT.Patched
+    simIn :: PT.PatchPair (SimInput sym arch)
+  , simOut :: PT.PatchPair (SimOutput sym arch)
   }
 
-simPair :: SimBundle sym arch -> PT.PatchPair arch
-simPair bundle = PT.PatchPair (simInBlock $ simInO bundle) (simInBlock $ simInP bundle)
+simInO :: SimBundle sym arch -> SimInput sym arch PT.Original
+simInO = PT.pOriginal . simIn
+
+simInP :: SimBundle sym arch -> SimInput sym arch PT.Patched
+simInP = PT.pPatched . simIn
+
+simOutO :: SimBundle sym arch -> SimOutput sym arch PT.Original
+simOutO = PT.pOriginal . simOut
+
+simOutP :: SimBundle sym arch -> SimOutput sym arch PT.Patched
+simOutP = PT.pPatched . simOut
+
+
+simPair :: SimBundle sym arch -> PT.BlockPair arch
+simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 ---------------------------------------
 -- Variable binding
@@ -380,12 +404,13 @@ flatVarBinds ::
   forall sym arch bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
+  W4.IsExprBuilder sym =>
   sym ->
   SimVars sym arch bin ->
   MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   IO [Some (VarBinding sym)]
-flatVarBinds _sym simVars mem regs = do
+flatVarBinds sym simVars mem regs = do
   let
     regBinds =
       MapF.toList $
@@ -396,7 +421,8 @@ flatVarBinds _sym simVars mem regs = do
       CLM.LLVMPointerRepr{} -> do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
-        return $ [Some (VarBinding regVar region), Some (VarBinding offVar off)]
+        iRegion <- W4.natToInteger sym region
+        return $ [Some (VarBinding regVar iRegion), Some (VarBinding offVar off)]
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars
         return [Some (VarBinding var (PSR.macawRegValue val))]
@@ -429,27 +455,21 @@ bindSpec sym stO stP spec = do
 -- ExprMappable instances
 
 instance PEM.ExprMappable sym (SimState sym arch bin) where
-  mapExpr sym f st = do
-    simMem' <- PEM.mapExpr sym f $ simMem st
-    simRegs' <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) $ simRegs st
-    return $ SimState simMem' simRegs'
+  mapExpr sym f (SimState mem regs) = SimState
+    <$> PEM.mapExpr sym f mem
+    <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
 
 instance PEM.ExprMappable sym (SimInput sym arch bin) where
-  mapExpr sym f simIn = do
-    st <- PEM.mapExpr sym f (simInState simIn)
-    return $ SimInput { simInState = st, simInBlock = (simInBlock simIn) }
+  mapExpr sym f (SimInput st blk) = SimInput
+    <$> PEM.mapExpr sym f st
+    <*> return blk
 
 instance PEM.ExprMappable sym (SimOutput sym arch bin) where
-  mapExpr sym f simOut = do
-    st <- PEM.mapExpr sym f (simOutState simOut)
-    blend <- PEM.mapExpr sym f (simOutBlockEnd simOut)
-    return $ SimOutput { simOutState = st, simOutBlockEnd = blend }
+  mapExpr sym f (SimOutput out blkend) = SimOutput
+    <$> PEM.mapExpr sym f out
+    <*> PEM.mapExpr sym f blkend
 
 instance PEM.ExprMappable sym (SimBundle sym arch) where
-  mapExpr sym f bundle = do
-    simInO' <- PEM.mapExpr sym f $ simInO bundle
-    simInP' <- PEM.mapExpr sym f $ simInP bundle
-    simOutO' <- PEM.mapExpr sym f $ simOutO bundle
-    simOutP' <- PEM.mapExpr sym f $ simOutP bundle
-    return $ SimBundle simInO' simInP' simOutO' simOutP'
-
+  mapExpr sym f (SimBundle in_ out) = SimBundle
+    <$> PEM.mapExpr sym f in_
+    <*> PEM.mapExpr sym f out

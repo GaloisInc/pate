@@ -45,7 +45,7 @@ unpackBlockData proxy start =
     , PT.blockBinRepr = DPC.knownRepr
     }
 
-unpackPatchData :: PA.ValidArchProxy arch -> PC.PatchData -> (PT.BlockMapping arch, [PT.PatchPair arch])
+unpackPatchData :: PA.ValidArchProxy arch -> PC.PatchData -> (PT.BlockMapping arch, [PT.BlockPair arch])
 unpackPatchData proxy (PC.PatchData pairs bmap) =
   let
     bmap' = PT.BlockMapping $ 
