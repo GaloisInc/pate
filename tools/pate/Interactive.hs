@@ -58,20 +58,20 @@ jsContent = $(DFE.embedFile "tools/pate/static/pate.js")
 
 -- | This is the full cytoscape library
 cytoscape :: BS.ByteString
-cytoscape = $(DFE.embedFile "tools/pate/static/cytoscape.umd.js")
+cytoscape = $(DFE.embedFile "tools/pate/static/cytoscape.js/dist/cytoscape.umd.js")
 
 -- | This is an extension to cytoscape that enables labels to contain arbitrary
 -- HTML (which we need for multi-line labels)
 cytoscapeHtml :: BS.ByteString
-cytoscapeHtml = $(DFE.embedFile "tools/pate/static/cytoscape-node-html-label.js")
+cytoscapeHtml = $(DFE.embedFile "tools/pate/static/cytoscape-node-html-label/dist/cytoscape-node-html-label.js")
 
 -- | The dagre graph layout library
 dagre :: BS.ByteString
-dagre = $(DFE.embedFile "tools/pate/static/dagre.js")
+dagre = $(DFE.embedFile "tools/pate/static/dagre/dist/dagre.js")
 
 -- | An adapter to use dagre as a layout engine in cytoscape
 cytoscapeDagre :: BS.ByteString
-cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape-dagre.js")
+cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js")
 
 data StateRef arch =
   StateRef { stateRef :: IOR.IORef (State arch)
