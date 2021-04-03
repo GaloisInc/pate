@@ -39,6 +39,7 @@ module Pate.Proof
   , traverseProofApp
   , mapProofApp
   , ProofNonce(..)
+  , proofNonceValue
   , ProofNonceExpr(..)
   , ProofNonceApp
   , ProofScope
@@ -74,11 +75,12 @@ module Pate.Proof
   , ProofBlockExit
   ) where
 
-import           GHC.TypeNats
 import           Control.Applicative
 import           Control.Monad.Identity
 import           Control.Monad.Writer.Strict as CMW
 import qualified Data.Kind as DK
+import           GHC.TypeNats
+import           Numeric.Natural ( Natural )
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -436,6 +438,9 @@ data ProofNonce prf (tp :: ProofNodeType) where
   ProofNonce :: N.Nonce (ProofScope prf) tp -> ProofNonce prf tp
 
 deriving instance Show (ProofNonce prf tp)
+
+proofNonceValue :: ProofNonce prf tp -> Natural
+proofNonceValue (ProofNonce n) = fromIntegral (N.indexValue n)
 
 -- | A proof expression, annotated with nonces.
 data ProofNonceExpr prf tp where
