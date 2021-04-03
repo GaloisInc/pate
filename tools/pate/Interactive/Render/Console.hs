@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs #-}
 module Interactive.Render.Console (
   renderConsole
   ) where
@@ -57,6 +58,25 @@ renderEquivalenceResult res =
                                        , TP.string "]"
                                        ]
 
+verificationStatusTag :: PPr.VerificationStatus ce -> String
+verificationStatusTag vs =
+  case vs of
+    PPr.Unverified -> "Unverified"
+    PPr.VerificationSkipped -> "Skipped"
+    PPr.VerificationSuccess -> "Verified"
+    PPr.VerificationFail _ -> "Failed"
+
+renderProofApp
+  :: PPr.ProofApp prf node tp
+  -> TP.UI TP.Element
+renderProofApp app =
+  case app of
+    PPr.ProofBlockSlice {} -> TP.string "ProofBlockSlice"
+    PPr.ProofFunctionCall {} -> TP.string "ProofFunctionCall"
+    PPr.ProofTriple {} -> TP.string "ProofTriple"
+    PPr.ProofStatus vs -> TP.string ("ProofStatus=" ++ verificationStatusTag vs)
+    PPr.ProofDomain {} -> TP.string "ProofDomain"
+
 renderEvent :: (PA.ArchConstraints arch) => IS.State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
 renderEvent st detailDiv evt =
   case evt of
@@ -77,18 +97,24 @@ renderEvent st detailDiv evt =
                  , TP.string (" (in " ++ show duration ++ ")")
                  , renderEquivalenceResult res
                  ]
-    PE.ProofIntermediate _bp (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) _body)) _ -> do
-      TP.span #+ [ TP.string "Created an intermediate proof node with id "
-                 , TP.string (show nonce)
-                 , TP.string " and parent "
-                 , TP.string (show parentNonce)
+    PE.ProofIntermediate (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _))
+                         (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
+      let origAddr = PT.blockMemAddr blkO
+      blockLink <- TP.a # TP.set TP.text (show origAddr)
+                        # TP.set TP.href ("#" ++ show origAddr)
+      -- This is fake - we should refactor this to avoid needing it or translate failures into this type
+      let res = PE.Equivalent
+      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb res)
+      TP.span #+ [ TP.string "Verified an intermediate proof node ("
+                 , TP.string (show (PPr.proofNonceValue nonce) ++ "->" ++ show (PPr.proofNonceValue parentNonce))
+                 , TP.string ") for "
+                 , return blockLink
+                 , TP.string ": "
+                 , renderProofApp app
+                 , TP.string (" (in " ++ show duration ++ ")")
                  ]
-    PE.ProvenGoal _bp (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) _body)) _ -> do
-      TP.span #+ [ TP.string "Verified a proof node with id "
-                 , TP.string (show nonce)
-                 , TP.string " and parent "
-                 , TP.string (show parentNonce)
-                 ]
+    PE.ProvenGoal _bp _ _ -> do
+      TP.span #+ [ TP.string "Verified all goals" ]
     _ -> TP.string ""
 
 -- | Render the most recent events
