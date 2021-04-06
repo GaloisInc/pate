@@ -134,31 +134,7 @@ simOutRegs ::
 simOutRegs = simRegs . simOutState
 
 
-newtype ExprSet sym tp where
-  ExprSet :: Set (AsOrd (W4.SymExpr sym) tp) -> ExprSet sym tp
 
-data AsOrd f tp where
-  AsOrd :: OrdF f => { unAsOrd :: f tp } -> AsOrd f tp
-
-instance Eq (AsOrd f tp) where
-  (AsOrd a) == (AsOrd b) = case compareF a b of
-    EQF -> True
-    _ -> False
-
-instance Ord (AsOrd f tp) where
-  compare (AsOrd a) (AsOrd b) = toOrdering $ compareF a b
-
-deriving instance Semigroup (ExprSet sym tp)
-deriving instance Monoid (ExprSet sym tp)
-
-singletonExpr :: OrdF (W4.SymExpr sym) => W4.SymExpr sym tp -> ExprSet sym tp
-singletonExpr e = ExprSet (Set.singleton (AsOrd e))
-
-listToExprSet :: W4.IsSymExprBuilder sym => [W4.SymExpr sym tp] -> ExprSet sym tp
-listToExprSet l = ExprSet $ Set.fromList $ map AsOrd l
-
-exprSetToList :: ExprSet sym tp -> [W4.SymExpr sym tp]
-exprSetToList (ExprSet es) = map unAsOrd $ Set.toList es
 
 data AssumptionFrame sym where
   AssumptionFrame ::
@@ -185,6 +161,7 @@ instance OrdF (W4.SymExpr sym) => Monoid (AssumptionFrame sym) where
   mempty = AssumptionFrame mempty MapF.empty
 
 exprBinding ::
+  forall sym tp.
   W4.IsSymExprBuilder sym =>
   -- | source expression
   W4.SymExpr sym tp ->
@@ -193,7 +170,7 @@ exprBinding ::
   AssumptionFrame sym
 exprBinding eSrc eTgt = case testEquality eSrc eTgt of
   Just Refl -> mempty
-  _ -> mempty { asmBinds = (MapF.singleton eSrc (singletonExpr eTgt)) }
+  _ -> mempty { asmBinds = (MapF.singleton eSrc (singletonExpr @sym eTgt)) }
 
 macawRegBinding ::
   W4.IsSymExprBuilder sym =>
@@ -218,21 +195,23 @@ macawRegBinding sym var val = do
     _ -> return mempty
 
 frameAssume ::
+  forall sym.
   W4.IsSymExprBuilder sym =>
   W4.Pred sym ->
   AssumptionFrame sym
-frameAssume p = AssumptionFrame (singletonExpr p) MapF.empty
+frameAssume p = AssumptionFrame (singletonExpr @sym p) MapF.empty
 
 getUniqueBinding ::
+  forall sym tp.
   W4.IsSymExprBuilder sym =>
   sym ->
   AssumptionFrame sym ->
   W4.SymExpr sym tp ->
   Maybe (W4.SymExpr sym tp)
 getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
-  Just (ExprSet es)
-    | Set.size es == 1
-    , [AsOrd e'] <- Set.toList es -> Just e'
+  Just es
+    | exprSetSize @sym es == 1
+    , [e'] <- exprSetToList @sym es -> Just e'
   _ -> case W4.exprType e of
     W4.BaseBoolRepr | isAssumedPred asm e -> Just $ W4.truePred sym
     _ -> Nothing
@@ -247,24 +226,24 @@ getAssumedPred ::
   IO (W4.Pred sym)
 getAssumedPred sym asm = do
   bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
-  let predList = exprSetToList $ (asmPreds asm) <> (listToExprSet bindsAsm)
+  let predList = exprSetToList @sym $ (asmPreds asm) <> (listToExprSet @sym bindsAsm)
   allPreds sym predList
   where
     assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> IO [W4.Pred sym]
-    assumeBinds (MapF.Pair eSrc eTgts) = forM (exprSetToList eTgts) $ \eTgt ->
+    assumeBinds (MapF.Pair eSrc eTgts) = forM (exprSetToList @sym eTgts) $ \eTgt ->
       W4.isEq sym eSrc eTgt
 
 isAssumedPred ::
+  forall sym.
   W4.IsSymExprBuilder sym =>
   AssumptionFrame sym ->
   W4.Pred sym ->
   Bool
-isAssumedPred frame asm =
-  let ExprSet asms = asmPreds frame
-  in Set.member (AsOrd asm) asms
+isAssumedPred frame asm = inExprSet @sym asm (asmPreds frame)
 
-rebindExpr
-  :: ( sym ~ W4B.ExprBuilder t st fs )
+rebindExpr ::
+  forall sym t st fs ctx tp.
+  ( sym ~ W4B.ExprBuilder t st fs )
   => sym
   -> Ctx.Assignment (VarBinding sym) ctx
   -> W4.SymExpr sym tp
@@ -276,7 +255,7 @@ rebindExpr sym bindings expr =
                             , asmBinds = TFC.foldrFC addSingletonBinding MapF.empty bindings
                             }
     addSingletonBinding varBinding =
-      MapF.insert (bindVar varBinding) (singletonExpr (bindVal varBinding))
+      MapF.insert (bindVar varBinding) (singletonExpr @sym (bindVal varBinding))
 
 -- | Explicitly rebind any known sub-expressions that are in the frame.
 rebindWithFrame ::

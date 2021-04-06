@@ -664,8 +664,11 @@ implicitError (Left e) = throwError e
 implicitError (Right a) = pure a
 
 ----------------------------------------
--- Proof
+-- Proof instances
 
-
-
-
+instance PF.IsBoolLike (PFI.ProofSym sym arch) (EquivM_ sym arch) where
+  proofPredAnd p1 p2 = withValid $ withSymIO $ \sym -> W4.andPred sym p1 p2
+  proofPredOr p1 p2 = withValid $ withSymIO $ \sym -> W4.orPred sym p1 p2
+  proofPredEq p1 p2 = withValid $ withSymIO $ \sym -> W4.isEq sym p1 p2
+  proofPredTrue = withValid $ withSym $ \sym -> return $ W4.truePred sym
+  proofPredFalse = withValid $ withSym $ \sym -> return $ W4.falsePred sym

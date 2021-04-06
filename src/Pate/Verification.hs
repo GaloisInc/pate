@@ -40,6 +40,8 @@ import           Control.Lens hiding ( op, pre )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 
+import qualified Prettyprinter as PP
+
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import qualified Data.Functor.Compose as DFC
@@ -369,8 +371,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     -- propagation
     -- FIXME: this should fail early, rather than waiting for the entire proof result
     case PFO.proofResult (PF.unNonceProof proof) of
-      Nothing -> return (spec, proof)
-      Just _ -> 
+      PF.VerificationSuccess -> return (spec, proof)
+      _ -> 
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
@@ -398,8 +400,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   ifConfig (not . PC.cfgEmitProofs) (return ()) $ do
     emitEvent (PE.ProvenGoal blocks (PFI.SomeProofSym vsym proof))
   case PFO.proofResult (PF.unNonceProof proof) of
-    Nothing -> return True
-    Just _ -> return False
+    PF.VerificationSuccess -> return True
+    _ -> return False
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
     -- the bound terms
@@ -696,13 +698,13 @@ trivialBlockSlice ::
   SimBundle sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-trivialBlockSlice bundle postcondSpec = do
+trivialBlockSlice bundle postcondSpec = withSym $ \sym -> do
   transition <- PFO.noTransition (simIn bundle) (simOutBlockEnd $ simOutO bundle)
   PFO.lazyProofEvent (simPair bundle) $ do
     preUniv <- universalDomain
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle preUniv
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    status <- PFO.lazyProofApp $ PF.ProofStatus PF.VerificationSkipped
+    status <- PFO.lazyProofApp $ PF.ProofStatus PF.VerificationSkipped (W4.truePred sym)
     triple <- PFO.lazyProofApp $ PF.ProofTriple (simPair bundle) preDomain postDomain status
     let prf = PF.ProofBlockSlice triple [] Nothing Nothing transition
     return (preUniv, prf)
@@ -871,7 +873,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
-
+  let sliceState = PF.slBlockPostState blockSlice
+       
   stackRegion <- CMR.asks envStackRegion
   eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
@@ -880,9 +883,11 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
   postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  result <- PFO.forkProofEvent (simPair bundle) $ fmap PF.ProofStatus $ 
+
+  liftIO $ putStrLn "Starting inequivalence proof"
+  result <- PFO.lazyProofEvent_ (simPair bundle) $
      withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
-       checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do        
+       status <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do        
          case satRes of
            W4R.Unsat _ -> do
              emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
@@ -893,12 +898,118 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
            W4R.Sat fn -> do
              preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
              postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+             liftIO $ putStrLn "Getting inequivalence result"
+             
              ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
              emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
              return $ PF.VerificationFail ir
+       cond <- case status of
+         PF.VerificationFail _ -> do
+           postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+           -- no paths are known to be equivalent at this point
+           noPathCond <- falsePathCond
+           cond <- conditionalEquivalenceCheck bundle noPathCond
+                      sliceState postDomain' notChecks
+           minimalPathCondition cond postcondPred
+         _ -> return $ W4.truePred sym
+       return $ PF.ProofStatus status cond
+           
   triple <- PFO.lazyProofEvent_ (simPair bundle) $
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
+
+-- | Compute an equivalence condition without strengthening the pre-domain.
+-- The condition is negated, then assumed, and the equivalence check is re-attempted.
+-- This process eventually terminates by either resulting in a "false" equivalence condition
+-- representing the fact that no such condition could be found, or by finding a structured
+-- equivalence condition which induces equality on the given slice under the given additional
+-- assumption.
+conditionalEquivalenceCheck ::
+  SimBundle sym arch ->
+  -- | path conditions that (should) induce equivalence
+  PatchPairC (W4.Pred sym) ->
+  -- | block slice post-state
+  PF.BlockSliceState (PFI.ProofSym sym arch) ->
+  -- | equivalence post-domain
+  PFI.SymDomain sym arch ->
+  -- | goal equivalence predicate
+  W4.Pred sym ->
+  EquivM sym arch (PatchPairC (W4.Pred sym))
+conditionalEquivalenceCheck bundle pathCond sliceState postDomain notChecks = withSym $ \sym -> do
+  liftIO $ putStrLn "Checking for conditional equivalence.."
+
+  -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+
+  result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
+      W4R.Unsat _ -> return Nothing
+      W4R.Unknown -> return Nothing
+      -- counter-example, compute another path condition and continue
+      W4R.Sat fn -> Just <$> PFG.getUnequalPathCondition bundle sliceState postDomain fn
+  case result of
+    Nothing -> do
+      liftIO $ putStrLn "Got result, giving up."
+      return pathCond
+  -- indeterminate result, failure
+    Just unequalPathCond -> do
+      liftIO $ putStrLn "No result, recursing."
+      pathCond' <- liftIO $ zipMPatchPairC unequalPathCond pathCond (W4.orPred sym)
+      liftIO $ putStrLn (show $ ppPatchPairC (PP.pretty . CC.showF) unequalPathCond)
+      -- assume this path is not taken and continue
+      unequalPathCond_flat <- flattenCondPair unequalPathCond
+      withAssumption_ (liftIO $ W4.notPred sym unequalPathCond_flat) $
+        conditionalEquivalenceCheck bundle pathCond' sliceState postDomain notChecks
+
+falsePathCond :: EquivM sym arch (PatchPairC (W4.Pred sym))
+falsePathCond = withSym $ \sym -> return (PatchPairC (W4.falsePred sym) (W4.falsePred sym))
+
+flattenCondPair :: PatchPairC (W4.Pred sym) -> EquivM sym arch (W4.Pred sym)
+flattenCondPair (PatchPairC p1 p2) = withSym $ \sym -> liftIO $ W4.andPred sym p1 p2
+
+-- | Given a path condition representing the set of paths that are inequivalent,
+-- compute a minimal positive condition for equivalence.
+minimalPathCondition ::
+  forall sym arch.
+  -- | path condition that is assumed to imply equivalence
+  PatchPairC (W4.Pred sym) ->
+  -- | goal equivalence predicate
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+minimalPathCondition pathCond goal = withValid $ withSym $ \sym -> do
+  liftIO $ putStrLn "Conditional equivalence found!"
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  let
+    checkCond :: W4.Pred sym -> EquivM sym arch (Maybe (W4.Pred sym, Bool))
+    checkCond cond = withSatAssumption goalTimeout (liftIO $ W4.notPred sym cond) $ do
+        isPredTrue' goalTimeout goal
+
+  liftIO $ putStrLn (show $ ppPatchPairC (PP.pretty . CC.showF) pathCond)
+  -- check if either path condition alone is sufficient to imply equivalence
+  p <- mapM checkCond pathCond >>= \case
+    PatchPairC _ (Just (condP, True)) -> return condP
+    PatchPairC (Just (condO, True)) _ -> return condO
+    PatchPairC (Just (condO, False)) (Just (condP, False)) -> do
+      result <- withSatAssumption goalTimeout (liftIO $ W4.andPred sym condO condP) $ do
+        isPredTrue' goalTimeout goal
+      case result of
+        Just (p, True) -> return p
+        _ -> return $ W4.falsePred sym
+    _ -> return $ W4.falsePred sym
+  atoms <- exprSetToList @sym <$> (liftIO $ getPredAtoms sym p)
+  let
+    applyAtom :: W4.Pred sym -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
+    applyAtom p' atom = do
+      isIndep <- liftIO $ independentOf sym atom p'
+      isPredTrue' heuristicTimeout isIndep >>= \case
+        True -> liftIO $ rebindWithFrame sym (frameAssume atom) p' 
+        False -> return p'
+    
+  p' <- CME.foldM applyAtom p atoms
+  liftIO $ putStrLn "Minimal path condition:"
+  liftIO $ putStrLn (CC.showF p')
+  return p
+
 
 --------------------------------------------------------
 -- Propagating preconditions
@@ -1444,11 +1555,11 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
 
   notCheck <- liftIO $ W4.notPred sym someCase
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  PFO.forkProofEvent (simPair bundle) $ fmap PF.ProofStatus $
+  PFO.forkProofEvent (simPair bundle) $ 
     checkSatisfiableWithModel goalTimeout "checkCasesTotal" notCheck $ \satRes -> do
     let
       emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)
-    case satRes of
+    status <- case satRes of
       W4R.Sat fn -> do
         -- TODO: avoid re-computing this
         blockSlice <- PFO.simBundleToSlice bundle
@@ -1468,6 +1579,7 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
       W4R.Unknown -> do
         emit PE.InconclusiveBranches
         return PF.Unverified
+    return $ PF.ProofStatus status (W4.truePred sym)
   where
     -- | a branch case is assuming the pre-domain predicate, that the branch condition holds
     getCase :: (W4.Pred sym, BranchCase sym arch) -> EquivM sym arch (W4.Pred sym)

@@ -27,9 +27,15 @@ Presenting counter-examples to failed equivalence checks
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiWayIf #-}
 
+-- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
+{-# LANGUAGE NoMonoLocalBinds #-}
+
 module Pate.Proof.Ground 
   ( getInequivalenceResult
+  , getUnequalPathCondition
   , groundMacawValue
+  , groundProofTransformer
+  , groundProofExpr
   ) where
 
 import           GHC.Stack ( HasCallStack )
@@ -41,10 +47,13 @@ import qualified Control.Monad.Reader as CMR
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
 import           Numeric.Natural ( Natural )
+import           Data.Functor.Const
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.TraversableF as TF
+
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
@@ -56,6 +65,7 @@ import qualified Data.Macaw.CFG as MM
 
 import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.MemCell as PMC
 import           Pate.Monad
@@ -63,7 +73,11 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.SimState as PS
 import qualified Pate.Arch as PA
+import qualified Pate.ExprMappable as PEM
+import           What4.ExprHelpers
 
 -- | Generate a structured counterexample for an equivalence
 -- check from an SMT model.
@@ -90,6 +104,59 @@ getInequivalenceResult defaultReason pre post slice fn = do
   gslice <- groundSlice fn slice
   let reason = fromMaybe defaultReason (getInequivalenceReason groundPost (PF.slBlockPostState gslice))
   return $ PFI.InequivalenceResult gslice groundPre groundPost reason
+
+
+getGenPathCondition ::
+  forall sym f.
+  W4.IsExprBuilder sym =>
+  PEM.ExprMappable sym f =>
+  sym ->
+  PT.SymGroundEvalFn sym ->
+  f ->
+  IO (W4.Pred sym)
+getGenPathCondition sym (PT.SymGroundEvalFn fn) e = do
+  cache <- W4B.newIdxCache
+  
+  
+  let
+    f :: forall tp'. W4.SymExpr sym tp' -> W4.Pred sym -> IO (W4.Pred sym)
+    f e' cond = do
+      stripped <- stripAsserts sym cache e'
+      cond' <- getPathCondition sym fn stripped
+      W4.andPred sym cond cond'
+  
+  PEM.foldExpr sym f e (W4.truePred sym)
+
+-- | Compute a domain that represents the path condition for
+-- values which disagree in the given counter-example
+getUnequalPathCondition ::
+  forall sym arch.
+  PS.SimBundle sym arch ->
+  PF.BlockSliceState (PFI.ProofSym sym arch) ->
+  PFI.SymDomain sym arch ->
+  PT.SymGroundEvalFn sym ->
+  EquivM sym arch (PT.PatchPairC (W4.Pred sym))
+getUnequalPathCondition bundle slice dom fn = withSym $ \sym -> do
+  groundDom <- groundProofExpr fn dom
+  let
+    getRegPath reg regOp paths = do
+      case PFI.regInDomain groundDom reg of
+        True -> do
+          paths' <- liftIO $ mapM (getGenPathCondition sym fn) (PF.slRegOpValues regOp)
+          liftIO $ PT.zipMPatchPairC paths paths' (W4.andPred sym)
+        _ -> return paths    
+
+    getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
+    getMemPath st = do
+      let mem = MT.memArr $ PS.simOutMem st
+      Const <$> (liftIO $ getGenPathCondition sym fn mem)
+
+  let truePair = PT.PatchPairC (W4.truePred sym) (W4.truePred sym)
+  regPath <- PF.foldrMBlockStateLocs getRegPath (\_ _ -> return) truePair slice
+  
+  memPath <- PT.toPatchPairC <$> TF.traverseF getMemPath (PS.simOut bundle)
+  liftIO $ PT.zipMPatchPairC regPath memPath (W4.andPred sym)
+
 
 groundProofTransformer ::
   PA.ValidArch arch =>
