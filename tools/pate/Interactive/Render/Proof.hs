@@ -101,7 +101,7 @@ generateRoot proofTree newRoots (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr _ 
                            ]
 
 initializeGraph :: String -> JSON.Value -> TP.JSFunction ()
-initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, %2)" divId graphData
+initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, proofGraphConfig, %2)" divId graphData
 
 renderProof
   :: String

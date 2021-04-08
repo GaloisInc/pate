@@ -20,25 +20,37 @@ function scrollSelectedGraphNodeLabel(cy, e, variant, amount) {
     }
 }
 
+var sliceGraphNodeStyle = { shape: 'round-rectangle',
+                            width: '400px',
+                            height: '500px',
+                            events: 'yes',
+                            'text-events': 'yes'
+                          };
+var sliceGraphConfig = { style: sliceGraphNodeStyle,
+                         nodeClass: 'slice-graph-node-label'
+                       };
+
+var proofGraphNodeStyle = { shape: 'round-rectangle',
+                            width: '200px',
+                            height: '50px',
+                          };
+var proofGraphConfig = { style: proofGraphNodeStyle,
+                         nodeClass: 'proof-graph-node-label'
+                       };
+
 /**
  * Initialize a graph in the given div with the given data (which corresponds to a cytoscape elements map)
  *
  * @param{string} divId
  * @param{Object} graphData
  */
-function initializeGraphIn(divId, graphData) {
+function initializeGraphIn(divId, nodeConfig, graphData) {
     var cy = cytoscape({
         container: document.getElementById(divId),
         elements: graphData,
         style: [
             { selector: 'node',
-              style: {
-                  shape: 'round-rectangle',
-                  width: '400px',
-                  height: '500px',
-                  events: 'yes',
-                  'text-events': 'yes'
-              }
+              style: nodeConfig.style
             },
             { selector: 'edge',
               style: {
@@ -56,7 +68,7 @@ function initializeGraphIn(divId, graphData) {
     cy.nodeHtmlLabel([{
         query: 'node',
         tpl: function(data) {
-            return '<pre id="' + labelContainerID(data, divId) + '" class="graph-node-label">' + data.text + '</pre>';
+            return '<pre id="' + labelContainerID(data, divId) + '" class="' + nodeConfig.nodeClass + '">' + data.text + '</pre>';
         }
     }], {enablePointerEvents: true});
 

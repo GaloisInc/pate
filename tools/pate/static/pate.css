@@ -19,7 +19,14 @@
     padding: 10px;
 }
 
-.graph-node-label {
+.proof-graph-node-label {
+    font: '14px monospace';
+    width: 200px;
+    height: 50px;
+    overflow: auto;
+}
+
+.slice-graph-node-label {
     font: '14px monospace';
     width: 400px;
     height: 500px;
@@ -27,7 +34,7 @@
 }
 
 #proof-canvas {
-    width: 600px;
+    width: 1600px;
     height: 1000px;
     display: block;
     overflow: auto;

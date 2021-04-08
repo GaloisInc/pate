@@ -67,7 +67,7 @@ blockEdges nodes edges pb =
       in JSON.Object (HMS.fromList [(T.pack "data", JSON.Object content)])
 
 initializeGraph :: String -> JSON.Value -> TP.JSFunction ()
-initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, %2)" divId graphData
+initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, sliceGraphConfig, %2)" divId graphData
 
 -- | Render a set of blocks (a slice) as a graph in the UI (using cytoscape)
 --
