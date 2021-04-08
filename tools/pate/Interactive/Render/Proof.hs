@@ -28,11 +28,11 @@ pp = PPT.renderStrict . PP.layoutCompact
 ppApp :: PPr.ProofApp prf node tp -> PP.Doc ann
 ppApp app =
   case app of
-    PPr.ProofBlockSlice {} -> PP.pretty "ProofBlockSlice"
-    PPr.ProofFunctionCall {} -> PP.pretty "ProofFunctionCall"
-    PPr.ProofTriple {} -> PP.pretty "ProofTriple"
-    PPr.ProofStatus {} -> PP.pretty "ProofStatus"
-    PPr.ProofDomain {} -> PP.pretty "ProofDomain"
+    PPr.ProofBlockSlice {} -> PP.pretty "Slice"
+    PPr.ProofFunctionCall {} -> PP.pretty "Call"
+    PPr.ProofTriple {} -> PP.pretty "Triple"
+    PPr.ProofStatus {} -> PP.pretty "Status"
+    PPr.ProofDomain {} -> PP.pretty "Domain"
 
 nodeLabel
   :: PE.BlocksPair arch
@@ -40,14 +40,14 @@ nodeLabel
   -> T.Text
 nodeLabel (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) app =
   pp (mconcat [ ppApp app
-              , PP.parens (mconcat [ PP.viaShow (PT.concreteAddress ob)
+              , PP.parens (mconcat [ PP.pretty (PT.concreteAddress ob)
                                    , PP.pretty "/"
-                                   , PP.viaShow (PT.concreteAddress pb)
+                                   , PP.pretty (PT.concreteAddress pb)
                                    ])
               ])
 
 nodeId :: PPr.ProofNonce prf tp -> T.Text
-nodeId = T.pack . show . PPr.proofNonceValue
+nodeId = pp . PP.viaShow . PPr.proofNonceValue
 
 -- | Render a proof node as a JSON object that can be used to construct the graph
 --

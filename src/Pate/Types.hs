@@ -153,6 +153,9 @@ newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arc
   deriving (Eq, Ord)
 deriving instance Show (ConcreteAddress arch)
 
+instance PP.Pretty (ConcreteAddress arch) where
+  pretty (ConcreteAddress addr) = PP.pretty addr
+
 data PatchPair (tp :: WhichBinary -> DK.Type) = PatchPair
   { pOriginal :: tp 'Original
   , pPatched :: tp 'Patched
