@@ -25,13 +25,21 @@ import qualified Interactive.State as IS
 pp :: PP.Doc ann -> T.Text
 pp = PPT.renderStrict . PP.layoutCompact
 
-ppApp :: PPr.ProofApp prf node tp -> PP.Doc ann
-ppApp app =
+ppStatus :: PPr.VerificationStatus a -> PP.Doc ann
+ppStatus st =
+  case st of
+    PPr.Unverified -> PP.pretty "Unverified"
+    PPr.VerificationSkipped -> PP.pretty "Skipped"
+    PPr.VerificationSuccess -> PP.pretty "Success"
+    PPr.VerificationFail {} -> PP.pretty "Fail"
+
+ppAppTag :: PPr.ProofApp prf node tp -> PP.Doc ann
+ppAppTag app =
   case app of
     PPr.ProofBlockSlice {} -> PP.pretty "Slice"
     PPr.ProofFunctionCall {} -> PP.pretty "Call"
     PPr.ProofTriple {} -> PP.pretty "Triple"
-    PPr.ProofStatus {} -> PP.pretty "Status"
+    PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus st)
     PPr.ProofDomain {} -> PP.pretty "Domain"
 
 nodeLabel
@@ -39,11 +47,12 @@ nodeLabel
   -> PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
   -> T.Text
 nodeLabel (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) app =
-  pp (mconcat [ ppApp app
-              , PP.parens (mconcat [ PP.pretty (PT.concreteAddress ob)
-                                   , PP.pretty "/"
-                                   , PP.pretty (PT.concreteAddress pb)
-                                   ])
+  pp (mconcat [ ppAppTag app
+              , PP.line
+              , mconcat [ PP.pretty (PT.concreteAddress ob)
+                        , PP.pretty "/"
+                        , PP.pretty (PT.concreteAddress pb)
+                        ]
               ])
 
 nodeId :: PPr.ProofNonce prf tp -> T.Text
@@ -63,6 +72,7 @@ blockNode m (Some (IS.ProofTreeNode blockPair (PPr.ProofNonceExpr thisNonce _par
     node = HMS.fromList [ (T.pack "data", JSON.Object content) ]
     content = HMS.fromList [ (T.pack "id", JSON.String (nodeId thisNonce))
                            , (T.pack "text", JSON.String (nodeLabel blockPair app))
+                           , (T.pack "nodeType", JSON.String (pp (ppAppTag app)))
                            ]
 
 blockEdges
@@ -101,7 +111,7 @@ generateRoot proofTree newRoots (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr _ 
                            ]
 
 initializeGraph :: String -> JSON.Value -> TP.JSFunction ()
-initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, proofGraphConfig, %2)" divId graphData
+initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, proofGraphConfig(), %2)" divId graphData
 
 renderProof
   :: String

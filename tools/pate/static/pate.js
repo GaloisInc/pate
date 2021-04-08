@@ -27,16 +27,44 @@ var sliceGraphNodeStyle = { shape: 'round-rectangle',
                             'text-events': 'yes'
                           };
 var sliceGraphConfig = { style: sliceGraphNodeStyle,
-                         nodeClass: 'slice-graph-node-label'
+                         nodeClass: 'slice-graph-node-label',
+                         nodeBackgroundColor: function(ele) { return 'gray'; }
                        };
 
+function proofNodeColor(nodeType) {
+    switch(nodeType) {
+    case 'Slice':
+        return 'blue';
+    case 'Call':
+        return 'orange';
+    case 'Triple':
+        return 'gray';
+    case 'Status(Success)':
+        return 'green';
+    case 'Status(Fail)':
+        return 'red';
+    case 'Status(Skipped)':
+        return 'white';
+    case 'Status(Unverified)':
+        return 'white';
+    case 'Domain':
+        return 'brown';
+    }
+
+    // Root color
+    return 'pink';
+}
 var proofGraphNodeStyle = { shape: 'round-rectangle',
                             width: '200px',
                             height: '50px',
+                            'background-color': function(ele) { return proofNodeColor(ele.data('nodeType')); },
+                            border: '2px dotted black'
                           };
-var proofGraphConfig = { style: proofGraphNodeStyle,
-                         nodeClass: 'proof-graph-node-label'
-                       };
+function proofGraphConfig() {
+    return { style: proofGraphNodeStyle,
+             nodeClass: 'proof-graph-node-label'
+           };
+}
 
 /**
  * Initialize a graph in the given div with the given data (which corresponds to a cytoscape elements map)
