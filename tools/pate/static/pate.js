@@ -28,7 +28,8 @@ var sliceGraphNodeStyle = { shape: 'round-rectangle',
                           };
 var sliceGraphConfig = { style: sliceGraphNodeStyle,
                          nodeClass: 'slice-graph-node-label',
-                         nodeBackgroundColor: function(ele) { return 'gray'; }
+                         nodeBackgroundColor: function(ele) { return 'gray'; },
+                         nodeTapHandler: false
                        };
 
 function proofNodeColor(nodeType) {
@@ -54,15 +55,28 @@ function proofNodeColor(nodeType) {
     // Root color
     return 'pink';
 }
+
+function proofNodeTapHandler(cy, nodeClickCallback) {
+    return function (evt) {
+        if(!nodeClickCallback) return;
+        if(evt.target === cy) return;
+
+        nodeClickCallback(parseInt(evt.target.data("id"), 10));
+    };
+}
+
 var proofGraphNodeStyle = { shape: 'round-rectangle',
                             width: '200px',
                             height: '50px',
                             'background-color': function(ele) { return proofNodeColor(ele.data('nodeType')); },
-                            border: '2px dotted black'
+                            border: '2px dotted black',
+                            events: 'yes',
+                            'text-events': 'yes'
                           };
 function proofGraphConfig() {
     return { style: proofGraphNodeStyle,
-             nodeClass: 'proof-graph-node-label'
+             nodeClass: 'proof-graph-node-label',
+             nodeTapHandler: proofNodeTapHandler
            };
 }
 
@@ -72,7 +86,7 @@ function proofGraphConfig() {
  * @param{string} divId
  * @param{Object} graphData
  */
-function initializeGraphIn(divId, nodeConfig, graphData) {
+function initializeGraphIn(nodeClickCallback, divId, nodeConfig, graphData) {
     var cy = cytoscape({
         container: document.getElementById(divId),
         elements: graphData,
@@ -92,6 +106,9 @@ function initializeGraphIn(divId, nodeConfig, graphData) {
         ]
     });
 
+    if(nodeConfig.nodeTapHandler) {
+        cy.on('tap', nodeConfig.nodeTapHandler(cy, nodeClickCallback));
+    }
 
     cy.nodeHtmlLabel([{
         query: 'node',

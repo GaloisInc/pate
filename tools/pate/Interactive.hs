@@ -20,18 +20,23 @@ import qualified Data.ByteString as BS
 import qualified Data.FileEmbed as DFE
 import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
+import           Data.Parameterized.Some ( Some(..) )
+import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
 import           System.FilePath ( (</>) )
+import qualified System.IO as IO
 import qualified System.IO.Temp as SIT
 
 import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
+import qualified Pate.Proof as PPr
 import qualified Pate.Types as PT
 
-import           Interactive.State
+import qualified Interactive.Render.BlockPairDetail as IRB
 import qualified Interactive.Render.Console as IRC
 import qualified Interactive.Render.Proof as IRP
+import           Interactive.State
 
 -- | Embed the CSS we need into the Haskell to ensure that binaries can be relocatable
 cssContent :: BS.ByteString
@@ -132,6 +137,31 @@ snapshotProofState r _ = do
   liftIO $ IOR.modifyIORef' (stateRef r) snapshotProofTree
   liftIO $ proofChangeEmitter r ()
 
+onProofNodeClicked
+  :: (PA.ArchConstraints arch)
+  => StateRef arch
+  -> TP.Window
+  -> TP.Element
+  -> Int
+  -> IO ()
+onProofNodeClicked r wd detailDiv ident = do
+  st <- IOR.readIORef (stateRef r)
+  case st ^. activeProofTree of
+    Just (ProofTree _sym _nodes idx)
+      | Just (Some (ProofTreeNode (PT.PatchPair ob pb) (PPr.ProofNonceExpr _ _ papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
+          let res = PE.Equivalent -- FIXME: refactor to avoid this synthetic result
+          (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb res
+          appDetail <- IRP.renderProofApp papp
+          content <- TP.column [ return appDetail
+                               , TP.string ("Duration: " ++ show tm)
+                               , return g
+                               ]
+          void $ TP.set TP.children [content] (return detailDiv)
+          origGraphSetup
+          patchedGraphSetup
+          TP.flushCallBuffer
+    _ -> IO.hPutStrLn IO.stderr ("Error, missing proof node for id=" ++ show ident)
+
 uiSetup :: (PA.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
 uiSetup r wd = do
   st0 <- liftIO $ IOR.readIORef (stateRef r)
@@ -161,23 +191,27 @@ uiSetup r wd = do
                           , TP.h1 #+ [TP.string "Details"]
                           , return detailDiv
                           ]
+
+  jsOnProofNodeClicked <- TP.ffiExport (onProofNodeClicked r wd detailDiv)
+
   void $ liftIO $ TP.register (stateChangeEvent r) (updateConsole r wd consoleDiv summaryDiv detailDiv)
-  void $ liftIO $ TP.register (proofChangeEvent r) (updateProofDisplay r wd proofDiv)
+  void $ liftIO $ TP.register (proofChangeEvent r) (updateProofDisplay r wd proofDiv jsOnProofNodeClicked)
   return ()
 
 updateProofDisplay
   :: StateRef arch
   -> TP.Window
   -> TP.Element
+  -> FJ.JSObject
   -> ()
   -> IO ()
-updateProofDisplay r wd proofDiv () = do
+updateProofDisplay r wd proofDiv clickCallback () = do
   state <- IOR.readIORef (stateRef r)
-  TP.runUI wd $ do
-    case state ^. activeProofTree of
-      Nothing -> return ()
-      Just proof -> do
-        let (genProofGraphContent, initAction) = IRP.renderProof "proof-canvas" proof
+  case state ^. activeProofTree of
+    Nothing -> return ()
+    Just proof -> do
+      TP.runUI wd $ do
+        let (genProofGraphContent, initAction) = IRP.renderProof clickCallback "proof-canvas" proof
         proofGraphContent <- genProofGraphContent
         void $ TP.set TP.children [proofGraphContent] (return proofDiv)
         initAction

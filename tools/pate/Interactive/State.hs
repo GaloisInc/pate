@@ -28,6 +28,7 @@ import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Time as TM
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
@@ -59,6 +60,7 @@ data ProofTree arch where
   ProofTree :: (prf ~ PFI.ProofSym sym arch)
             => PT.Sym sym
             -> MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf)
+            -> Map.Map Int (Some (ProofTreeNode arch prf))
             -> ProofTree arch
 
 -- | The state tracks verification successes and failures
@@ -94,13 +96,21 @@ addProofTreeNode
 addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PT.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
   case mpt of
     Nothing ->
-      Just (ProofTree oldSym (MapF.singleton enonce (ProofTreeNode blockPair expr tm)))
-    Just (ProofTree sym@(PT.Sym symNonce1 _ _) m)
+      let proofNode = ProofTreeNode blockPair expr tm
+      in Just (ProofTree oldSym
+                         (MapF.singleton enonce proofNode)
+                         (Map.singleton (asInt enonce) (Some proofNode)))
+    Just (ProofTree sym@(PT.Sym symNonce1 _ _) m idx)
       | Just PC.Refl <- PC.testEquality symNonce0 symNonce1 ->
-        Just (ProofTree sym (MapF.insert enonce (ProofTreeNode blockPair expr tm) m))
+        let proofNode = ProofTreeNode blockPair expr tm
+        in Just (ProofTree sym
+                           (MapF.insert enonce proofNode m)
+                           (Map.insert (asInt enonce) (Some proofNode) idx))
       | otherwise ->
         -- This shouldn't be possible, as we only ever allocate one 'PT.Sym'
         error "Impossible: there should be only one symbolic backend"
+  where
+    asInt = fromIntegral . PPr.proofNonceValue
 
 snapshotProofTree :: State arch -> State arch
 snapshotProofTree s = s { _activeProofTree = _proofTree s }

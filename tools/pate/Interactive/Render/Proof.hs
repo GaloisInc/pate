@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs #-}
 module Interactive.Render.Proof (
-  renderProof
+    renderProof
+  , renderProofApp
   ) where
 
 import qualified Data.Aeson as JSON
@@ -11,13 +12,16 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Text as T
 import qualified Data.Vector as DV
-import           Graphics.UI.Threepenny ( (#) )
+import qualified Foreign.JavaScript as FJ
+import           Graphics.UI.Threepenny ( (#), (#+) )
 import qualified Graphics.UI.Threepenny as TP
+import           Numeric.Natural ( Natural )
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 
 import qualified Pate.Event as PE
 import qualified Pate.Proof as PPr
+import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 
 import qualified Interactive.State as IS
@@ -55,8 +59,8 @@ nodeLabel (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) app =
                         ]
               ])
 
-nodeId :: PPr.ProofNonce prf tp -> T.Text
-nodeId = pp . PP.viaShow . PPr.proofNonceValue
+nodeId :: PPr.ProofNonce prf tp -> Natural
+nodeId = PPr.proofNonceValue
 
 -- | Render a proof node as a JSON object that can be used to construct the graph
 --
@@ -70,8 +74,8 @@ blockNode m (Some (IS.ProofTreeNode blockPair (PPr.ProofNonceExpr thisNonce _par
   Map.insert (Some thisNonce) (JSON.Object node) m
   where
     node = HMS.fromList [ (T.pack "data", JSON.Object content) ]
-    content = HMS.fromList [ (T.pack "id", JSON.String (nodeId thisNonce))
-                           , (T.pack "text", JSON.String (nodeLabel blockPair app))
+    content = HMS.fromList [ (T.pack "id", JSON.Number (fromIntegral (nodeId thisNonce)))
+                           , (T.pack "text", JSON.String (pp (PP.pretty (nodeLabel blockPair app))))
                            , (T.pack "nodeType", JSON.String (pp (ppAppTag app)))
                            ]
 
@@ -86,8 +90,8 @@ blockEdges edges (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr thisNonce (Some p
     tgtLabel = nodeId thisNonce
     edgeLabel = pp (PP.pretty srcLabel <> PP.pretty "/" <> PP.pretty tgtLabel)
     content = HMS.fromList [ (T.pack "id", JSON.String edgeLabel)
-                           , (T.pack "source", JSON.String srcLabel)
-                           , (T.pack "target", JSON.String tgtLabel)
+                           , (T.pack "source", JSON.String (pp (PP.pretty srcLabel)))
+                           , (T.pack "target", JSON.String (pp (PP.pretty tgtLabel)))
                            ]
 
 -- | If there is an edge with a source that is not in the list of nodes,
@@ -106,19 +110,21 @@ generateRoot proofTree newRoots (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr _ 
   | otherwise = Map.insert (Some src) (JSON.Object node) newRoots
   where
     node = HMS.fromList [ (T.pack "data", JSON.Object content) ]
-    content = HMS.fromList [ (T.pack "id", JSON.String (nodeId src))
+    content = HMS.fromList [ (T.pack "id", JSON.Number (fromIntegral (nodeId src)))
                            , (T.pack "text", JSON.String (T.pack "Proof Root"))
                            ]
 
-initializeGraph :: String -> JSON.Value -> TP.JSFunction ()
-initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, proofGraphConfig(), %2)" divId graphData
+initializeGraph :: FJ.JSObject -> String -> JSON.Value -> TP.JSFunction ()
+initializeGraph clickCallback divId graphData =
+  TP.ffi "initializeGraphIn(%1, %2, proofGraphConfig(), %3)" clickCallback divId graphData
 
 renderProof
-  :: String
+  :: FJ.JSObject
+  -> String
   -> IS.ProofTree arch
   -> (TP.UI TP.Element, TP.UI ())
-renderProof divId (IS.ProofTree _sym proofTreeNodes) =
-  (TP.div # TP.set TP.id_ divId, TP.runFunction (initializeGraph divId (JSON.Object graph)))
+renderProof clickCallback divId (IS.ProofTree _sym proofTreeNodes _) =
+  (TP.div # TP.set TP.id_ divId, TP.runFunction (initializeGraph clickCallback divId (JSON.Object graph)))
   where
     nodes = F.foldl' blockNode Map.empty (MapF.elems proofTreeNodes)
     edges = F.foldl' blockEdges [] (MapF.elems proofTreeNodes)
@@ -126,3 +132,42 @@ renderProof divId (IS.ProofTree _sym proofTreeNodes) =
     graph = HMS.fromList [ (T.pack "nodes", JSON.Array (DV.fromList (Map.elems (nodes <> roots))))
                          , (T.pack "edges", JSON.Array (DV.fromList edges))
                          ]
+
+renderProofApp
+  :: (prf ~ PFI.ProofSym sym arch)
+  => PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
+  -> TP.UI TP.Element
+renderProofApp app =
+  case app of
+    PPr.ProofBlockSlice domain callees mret munknown transition ->
+      TP.div #+ [ TP.string "Proof that the post-domain of this slice of the program is satisfied when this slice returns, assuming its precondition"
+                ]
+    PPr.ProofFunctionCall pre body cont ->
+      TP.div #+ [ TP.string "Proof that a function call is valid given its preconditions"
+                ]
+    PPr.ProofTriple blocks pre post status ->
+      TP.div #+ [ TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
+                ]
+    PPr.ProofStatus st ->
+      TP.div #+ [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus st)))
+                ]
+    PPr.ProofDomain regs stack globals context ->
+      TP.div #+ [ TP.string "The domain of an individual equivalence proof"
+                ]
+
+
+{- Note [Proof Graph Interaction]
+
+We want to be able to show more detail when requested for individual nodes, but
+we would like to avoid sending all of that to the client eagerly because it
+would just be way too much and slow everything to a crawl.  Instead, we will:
+
+1. Build an FFI callback (via ~ffiExport~ from threepenny-ui) that accepts a node ID
+2. We can pass that callback (as a ~JSObject~) to the graph initialization function
+3. The raw event handler in JS will invoke that callback when nodes are clicked (passing the node ID)
+4. That will call back into Haskell, which will then render the details of that node
+
+Note that node IDs are ints in the JS side, but nonces on the Haskell
+side. We'll need to maintain a mapping there
+
+-}
