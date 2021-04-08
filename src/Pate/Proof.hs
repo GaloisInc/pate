@@ -238,7 +238,6 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
     , prfTriplePreDomain :: node ProofDomainType
     , prfTriplePostDomain :: node ProofDomainType
     , prfTripleStatus :: node ProofStatusType
-    
     } -> ProofApp prf node ProofTripleType
 
   -- | The status of some verification problem: either producing a successful result
