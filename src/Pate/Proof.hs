@@ -439,6 +439,15 @@ data ProofNonce prf (tp :: ProofNodeType) where
 
 deriving instance Show (ProofNonce prf tp)
 
+instance ShowF (ProofNonce prf) where
+  showF (ProofNonce n) = showF n
+
+instance TestEquality (ProofNonce prf) where
+  testEquality (ProofNonce n1) (ProofNonce n2) = testEquality n1 n2
+
+instance OrdF (ProofNonce prf) where
+  compareF (ProofNonce n1) (ProofNonce n2) = compareF n1 n2
+
 proofNonceValue :: ProofNonce prf tp -> Natural
 proofNonceValue (ProofNonce n) = fromIntegral (N.indexValue n)
 

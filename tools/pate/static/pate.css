@@ -26,6 +26,14 @@
     overflow: auto;
 }
 
+#proof-canvas {
+    width: 600px;
+    height: 1000px;
+    display: block;
+    overflow: auto;
+    border: 2px dotted black;
+}
+
 #original-slice-graph, #patched-slice-graph {
     width: 600px;
     height: 1000px;

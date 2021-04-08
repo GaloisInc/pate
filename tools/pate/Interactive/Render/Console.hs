@@ -97,7 +97,7 @@ renderEvent st detailDiv evt =
                  , TP.string (" (in " ++ show duration ++ ")")
                  , renderEquivalenceResult res
                  ]
-    PE.ProofIntermediate (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _))
+    PE.ProofIntermediate (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks _blkP _))
                          (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
       let origAddr = PT.blockMemAddr blkO
       blockLink <- TP.a # TP.set TP.text (show origAddr)

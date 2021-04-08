@@ -171,6 +171,7 @@ executable pate-exec
                        Interactive,
                        Interactive.Render.BlockPairDetail,
                        Interactive.Render.Console,
+                       Interactive.Render.Proof,
                        Interactive.Render.SliceGraph,
                        Interactive.State
   hs-source-dirs:      tools/pate tools arch

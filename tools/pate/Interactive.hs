@@ -31,6 +31,7 @@ import qualified Pate.Types as PT
 
 import           Interactive.State
 import qualified Interactive.Render.Console as IRC
+import qualified Interactive.Render.Proof as IRP
 
 -- | Embed the CSS we need into the Haskell to ensure that binaries can be relocatable
 cssContent :: BS.ByteString
@@ -56,7 +57,6 @@ dagre = $(DFE.embedFile "tools/pate/static/dagre/dist/dagre.js")
 -- | An adapter to use dagre as a layout engine in cytoscape
 cytoscapeDagre :: BS.ByteString
 cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js")
-
 
 consumeEvents :: CC.Chan (Maybe (PE.Event arch)) -> StateRef arch -> IO ()
 consumeEvents chan r0 = do
@@ -84,8 +84,11 @@ consumeEvents chan r0 = do
             PE.Inequivalent model ->
               IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & failure %~ Map.insert addr (Failure model et)
                                                               & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.ProofIntermediate {} ->
-          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
+        PE.ProofIntermediate blockPair proofNode time ->
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> ( s & recentEvents %~ addRecent recentEventCount evt
+                                                           & proofTree %~ addProofTreeNode blockPair proofNode time
+                                                       , ()
+                                                       )
         PE.ProvenGoal {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
         _ -> return ()
@@ -121,6 +124,14 @@ startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
                                 }
   TP.startGUI uiConf (uiSetup r)
 
+snapshotProofState
+  :: StateRef arch
+  -> a
+  -> TP.UI ()
+snapshotProofState r _ = do
+  liftIO $ IOR.modifyIORef' (stateRef r) snapshotProofTree
+  liftIO $ proofChangeEmitter r ()
+
 uiSetup :: (PA.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
 uiSetup r wd = do
   st0 <- liftIO $ IOR.readIORef (stateRef r)
@@ -130,6 +141,12 @@ uiSetup r wd = do
   consoleDiv <- TP.div #. "console-output-pane"
   summaryDiv <- TP.div #. "summary-pane"
   detailDiv <- TP.div #. "detail-pane"
+
+  proofDiv <- TP.div #. "proof-pane"
+  proofSnapshotButton <- TP.a # TP.set TP.text "[Snapshot]"
+                              # TP.set TP.href "#snapshot"
+  TP.on TP.click proofSnapshotButton (snapshotProofState r)
+
   void $ TP.getBody wd #+ [ TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape.umd.js" # TP.set (TP.attr "type") "text/javascript"
                           , TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape-node-html-label.js" # TP.set (TP.attr "type") "text/javascript"
                           , TP.mkElement "script" # TP.set (TP.attr "src") "/static/dagre.js" # TP.set (TP.attr "type") "text/javascript"
@@ -139,11 +156,33 @@ uiSetup r wd = do
                           , return consoleDiv #+ [IRC.renderConsole r detailDiv]
                           , TP.h1 #+ [TP.string "Summary"]
                           , return summaryDiv #+ [renderSummaryTable st0]
+                          , TP.h1 #+ [TP.string "Proof", return proofSnapshotButton]
+                          , return proofDiv
                           , TP.h1 #+ [TP.string "Details"]
                           , return detailDiv
                           ]
   void $ liftIO $ TP.register (stateChangeEvent r) (updateConsole r wd consoleDiv summaryDiv detailDiv)
+  void $ liftIO $ TP.register (proofChangeEvent r) (updateProofDisplay r wd proofDiv)
   return ()
+
+updateProofDisplay
+  :: StateRef arch
+  -> TP.Window
+  -> TP.Element
+  -> ()
+  -> IO ()
+updateProofDisplay r wd proofDiv () = do
+  state <- IOR.readIORef (stateRef r)
+  TP.runUI wd $ do
+    case state ^. activeProofTree of
+      Nothing -> return ()
+      Just proof -> do
+        let (genProofGraphContent, initAction) = IRP.renderProof "proof-canvas" proof
+        proofGraphContent <- genProofGraphContent
+        void $ TP.set TP.children [proofGraphContent] (return proofDiv)
+        initAction
+        TP.flushCallBuffer
+        return ()
 
 updateConsole :: (PA.ArchConstraints arch)
               => StateRef arch
@@ -180,33 +219,41 @@ We want to be able to monitor the construction of the proof object in the
 verifier and watch as it is verified.  The verifier currently emits two events
 of interest:
 
-> ProofIntermediate :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
-> ProvenGoal :: BlocksPair arch ->  PFI.SomeProofSym arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
+#+BEGIN_SRC haskell
+  ProofIntermediate :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
+  ProvenGoal :: BlocksPair arch ->  PFI.SomeProofSym arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
+#+END_SRC
 
 The first is emitted when an internal proof node is verified.  The second is emitted after the entire proof has completed.
 
 Those events contain two main things:
-- A 'BlocksPair' is a 'PatchPair' containing the original and patched 'ConcreteBlock's.
-- A handle to the proof frame: 'SomeProofSym'
+- A ~BlocksPair~ is a ~PatchPair~ containing the original and patched ~ConcreteBlock~s.
+- A handle to the proof frame: ~SomeProofSym~
 
-> data SomeProofSym (arch :: DK.Type) tp where
->   SomeProofSym :: PA.ValidArch arch
->                => PT.Sym sym
->                -> ProofSymNonceExpr sym arch tp
->                -> SomeProofSym arch tp
+#+BEGIN_SRC haskell
+data SomeProofSym (arch :: DK.Type) tp where
+  SomeProofSym :: PA.ValidArch arch
+               => PT.Sym sym
+               -> ProofSymNonceExpr sym arch tp
+               -> SomeProofSym arch tp
+#+END_SRC
 
-Chasing this structure, the important part is the 'ProofSymNonceExpr':
+Chasing this structure, the important part is the ~ProofSymNonceExpr~:
 
-> type ProofSymNonceExpr sym arch = PF.ProofNonceExpr (ProofSym sym arch)
+#+BEGIN_SRC haskell
+type ProofSymNonceExpr sym arch = PF.ProofNonceExpr (ProofSym sym arch)
+#+END_SRC
 
 which is a:
 
-> data ProofNonceExpr prf tp where
->   ProofNonceExpr ::
->     { prfNonce :: ProofNonce prf tp
->     , prfParent :: Some (ProofNonce prf)
->     , prfNonceBody :: ProofApp prf (ProofNonceExpr prf) tp
->     } -> ProofNonceExpr prf tp
+#+BEGIN_SRC haskell
+data ProofNonceExpr prf tp where
+  ProofNonceExpr ::
+    { prfNonce :: ProofNonce prf tp
+    , prfParent :: Some (ProofNonce prf)
+    , prfNonceBody :: ProofApp prf (ProofNonceExpr prf) tp
+    } -> ProofNonceExpr prf tp
+#+END_SRC haskell
 
 This exposes the necessary structure for visualizing the structure of the proof:
 - We have block addresses from the block pairs

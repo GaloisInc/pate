@@ -100,11 +100,12 @@ import qualified Data.Set as S
 import           Data.Typeable
 import qualified Prettyprinter as PP
 
-import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.Nonce as PN
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.TraversableFC as TFC
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
@@ -493,7 +494,7 @@ type ValidSym sym =
   )
 
 data Sym sym where
-  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> WS.SolverAdapter st -> Sym sym
+  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => PN.Nonce PN.GlobalNonceGenerator sym -> sym -> WS.SolverAdapter st -> Sym sym
 
 ----------------------------------
 

@@ -72,7 +72,7 @@ initializeGraph divId graphData = TP.ffi "initializeGraphIn(%1, %2)" divId graph
 -- | Render a set of blocks (a slice) as a graph in the UI (using cytoscape)
 --
 -- This sets up the necessary DOM elements (easy) and translates the block
--- structure into a graph suitable for display in cytoscaope. It uses the FFI
+-- structure into a graph suitable for display in cytoscape. It uses the FFI
 -- mechanism of threepenny-gui to sent the graph data to JS.
 --
 -- The cytoscape API expects a list of JS objects; it turns out that threepenny

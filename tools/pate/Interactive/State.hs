@@ -13,6 +13,12 @@ module Interactive.State (
   originalBinary,
   patchedBinary,
   sources,
+  ProofTreeNode(..),
+  ProofTree(..),
+  proofTree,
+  activeProofTree,
+  addProofTreeNode,
+  snapshotProofTree,
   StateRef(..),
   newState
   ) where
@@ -20,14 +26,17 @@ module Interactive.State (
 import qualified Control.Lens as L
 import qualified Data.IORef as IOR
 import qualified Data.Map.Strict as Map
+import qualified Data.Parameterized.Classes as PC
+import qualified Data.Parameterized.Map as MapF
 import qualified Data.Time as TM
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
 
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
-import qualified Pate.Types as PT
+import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Types as PT
 
 data SourcePair f = SourcePair { originalSource :: f
                                , patchedSource :: f
@@ -39,6 +48,18 @@ data EquivalenceTest arch where
 
 data Failure arch where
   Failure :: PFI.InequivalenceResult arch -> EquivalenceTest arch -> Failure arch
+
+data ProofTreeNode arch prf tp where
+  ProofTreeNode :: PE.BlocksPair arch
+                -> PPr.ProofNonceExpr prf tp
+                -> TM.NominalDiffTime
+                -> ProofTreeNode arch prf tp
+
+data ProofTree arch where
+  ProofTree :: (prf ~ PFI.ProofSym sym arch)
+            => PT.Sym sym
+            -> MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf)
+            -> ProofTree arch
 
 -- | The state tracks verification successes and failures
 --
@@ -53,9 +74,36 @@ data State arch =
         , _originalBinary :: Maybe (PB.LoadedELF arch, PT.ParsedFunctionMap arch)
         , _patchedBinary :: Maybe (PB.LoadedELF arch, PT.ParsedFunctionMap arch)
         , _sources :: Maybe (SourcePair LC.CTranslUnit)
+        , _proofTree :: Maybe (ProofTree arch)
+        -- ^ All of the collected proof nodes received from the verifier
+        , _activeProofTree :: Maybe (ProofTree arch)
+        -- ^ The snapshot of the proof tree displayed to the user
+        --
+        -- This is only updated at the user's direction so that they don't lose
+        -- their place as new data streams in
         }
 
 $(L.makeLenses 'State)
+
+addProofTreeNode
+  :: PE.BlocksPair arch
+  -> PFI.SomeProofSym arch tp
+  -> TM.NominalDiffTime
+  -> Maybe (ProofTree arch)
+  -> Maybe (ProofTree arch)
+addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PT.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
+  case mpt of
+    Nothing ->
+      Just (ProofTree oldSym (MapF.singleton enonce (ProofTreeNode blockPair expr tm)))
+    Just (ProofTree sym@(PT.Sym symNonce1 _ _) m)
+      | Just PC.Refl <- PC.testEquality symNonce0 symNonce1 ->
+        Just (ProofTree sym (MapF.insert enonce (ProofTreeNode blockPair expr tm) m))
+      | otherwise ->
+        -- This shouldn't be possible, as we only ever allocate one 'PT.Sym'
+        error "Impossible: there should be only one symbolic backend"
+
+snapshotProofTree :: State arch -> State arch
+snapshotProofTree s = s { _activeProofTree = _proofTree s }
 
 emptyState :: Maybe (SourcePair LC.CTranslUnit) -> State arch
 emptyState ms = State { _successful = Map.empty
@@ -65,19 +113,35 @@ emptyState ms = State { _successful = Map.empty
                       , _originalBinary = Nothing
                       , _patchedBinary = Nothing
                       , _sources = ms
+                      , _proofTree = Nothing
+                      , _activeProofTree = Nothing
                       }
 
 data StateRef arch =
   StateRef { stateRef :: IOR.IORef (State arch)
+           -- ^ An IORef with the current state of the visualization
            , stateChangeEvent :: TP.Event ()
+           -- ^ The event indicating that the visualization state has changed
+           -- and the UI needs to be redrawn appropriately
            , stateChangeEmitter :: () -> IO ()
+           -- ^ The IO action to emit the state change event
+           , proofChangeEvent :: TP.Event ()
+           -- ^ The event indicating that a proof snapshot has been taken and
+           -- that the UI should update to reflect it; this is split into a
+           -- separate event because we want to give the user more control as to
+           -- when the proof is redrawn (so that they don't lose state)
+           , proofChangeEmitter :: () -> IO ()
+           -- ^ The IO action to emit the proof change event
            }
 
 newState :: Maybe (SourcePair LC.CTranslUnit) -> IO (StateRef arch)
 newState ms = do
   r <- IOR.newIORef (emptyState ms)
-  (evt, emitter) <- TP.newEvent
+  (stateChangeEvt, stateChangeEmit) <- TP.newEvent
+  (proofSnapshotEvt, proofSnapshotEmit) <- TP.newEvent
   return StateRef { stateRef = r
-                  , stateChangeEvent = evt
-                  , stateChangeEmitter = emitter
+                  , stateChangeEvent = stateChangeEvt
+                  , stateChangeEmitter = stateChangeEmit
+                  , proofChangeEvent = proofSnapshotEvt
+                  , proofChangeEmitter = proofSnapshotEmit
                   }
