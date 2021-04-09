@@ -904,7 +904,6 @@ getPredAtoms sym e_outer = do
            W4B.BVUlt e1 e2 -> Const <$> binOp (liftPred W4.bvUlt) e1 e2 
            W4B.BVSlt e1 e2 -> Const <$> binOp (liftPred W4.bvSlt) e1 e2
            W4B.SemiRingLe SR.OrderedSemiRingIntegerRepr e1 e2 -> Const <$> binOp (liftPred W4.intLe) e1 e2
-           W4B.SemiRingLe SR.OrderedSemiRingNatRepr e1 e2 -> Const <$> binOp (liftPred W4.natLe) e1 e2
            W4B.SemiRingLe SR.OrderedSemiRingRealRepr e1 e2 -> Const <$> binOp (liftPred W4.realLe) e1 e2
            W4B.BVTestBit n e -> Const <$> unOp (\e' -> singletonExpr @sym <$> W4.testBitBV sym n e') e
            _ -> TFC.foldrMFC acc mempty (W4B.appExprApp a0)
