@@ -76,8 +76,9 @@ nodeId = PPr.proofNonceValue
 
 -- | Render a proof node as a JSON object that can be used to construct the graph
 --
--- The label should be minimal, but FIXME we need to include some extra data
--- that can be used for a detailed view of the node
+-- The label should be minimal so that we don't overwhelm the display. In the
+-- 'Interactive' module, we set up some callbacks to allow users to ask for more
+-- information on individual nodes.
 blockNode
   :: Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
   -> Some (IS.ProofTreeNode arch prf)
