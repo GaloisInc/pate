@@ -81,10 +81,10 @@ renderBlockPairDetail
   => IS.State arch
   -> PE.Blocks arch PT.Original
   -> PE.Blocks arch PT.Patched
-  -> PE.EquivalenceResult arch
+  -> Maybe (PE.EquivalenceResult arch)
   -> TP.UI (TP.Element, TP.UI (), TP.UI ())
 renderBlockPairDetail st o@(PE.Blocks blkO _opbs) p@(PE.Blocks blkP _ppbs) res = do
-  g <- TP.grid [ renderCounterexample res
+  g <- TP.grid [ maybe [] renderCounterexample res
                , concat [[renderAddr "Original Code" origAddr, renderAddr "Patched Code" patchedAddr], renderFunctionName st origAddr]
                , concat [ renderSource st IS.originalSource IS.originalBinary origAddr
                         , renderSource st IS.patchedSource IS.patchedBinary patchedAddr

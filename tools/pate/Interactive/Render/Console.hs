@@ -29,7 +29,7 @@ showBlockPairDetail :: (PA.ArchConstraints arch)
                     -> TP.Element
                     -> PE.Blocks arch PT.Original
                     -> PE.Blocks arch PT.Patched
-                    -> PE.EquivalenceResult arch
+                    -> Maybe (PE.EquivalenceResult arch)
                     -> a
                     -> TP.UI ()
 showBlockPairDetail st detailDiv o p res _ = do
@@ -89,7 +89,7 @@ renderEvent st detailDiv evt =
         patchedAddr = PT.blockMemAddr blkP
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
-      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb res)
+      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb (Just res))
       TP.span #+ [ TP.string "Checking original block at "
                  , return blockLink
                  , TP.string " against patched block at "
@@ -102,9 +102,7 @@ renderEvent st detailDiv evt =
       let origAddr = PT.blockMemAddr blkO
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
-      -- This is fake - we should refactor this to avoid needing it or translate failures into this type
-      let res = PE.Equivalent
-      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb res)
+      TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb Nothing)
       TP.span #+ [ TP.string "Verified an intermediate proof node ("
                  , TP.string (show (PPr.proofNonceValue nonce) ++ "->" ++ show (PPr.proofNonceValue parentNonce))
                  , TP.string ") for "

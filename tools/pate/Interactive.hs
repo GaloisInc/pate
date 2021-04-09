@@ -163,8 +163,7 @@ onProofNodeClicked r wd detailDiv ident = do
   case st ^. activeProofTree of
     Just (ProofTree (PT.Sym {}) _nodes idx)
       | Just (Some (ProofTreeNode (PT.PatchPair ob pb) (PPr.ProofNonceExpr _ _ papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
-          let res = PE.Equivalent -- FIXME: refactor to avoid this synthetic result
-          (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb res
+          (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb Nothing
           appDetail <- IRP.renderProofApp papp
           content <- TP.column [ return appDetail
                                , TP.string ("Duration: " ++ show tm)
