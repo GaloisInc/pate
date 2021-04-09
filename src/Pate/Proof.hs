@@ -269,7 +269,7 @@ data ProofMemoryDomain prf where
       -- | A predicate indicating if this domain is inclusive or exclusive.
       -- * For positive polarity:
       --   a location is in this domain if it is in the map, and its associated predicate
-      --   is tuple.
+      --   is true.
       -- * For negative polarity:
       --   a location is in this domain if it is not in the map,
       --   or it is in the map and its associated predicate is false.

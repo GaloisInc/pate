@@ -137,17 +137,31 @@ snapshotProofState r _ = do
   liftIO $ IOR.modifyIORef' (stateRef r) snapshotProofTree
   liftIO $ proofChangeEmitter r ()
 
+-- | The handler that will be invoked when the user asks for more detail for a
+-- node in the proof tree
+--
+-- This renders all of the details we have into the detail pane (clobbering any
+-- previous contents)
+--
+-- See Note [Proof Graph Interaction] on details of this interaction
 onProofNodeClicked
   :: (PA.ArchConstraints arch)
   => StateRef arch
   -> TP.Window
+  -- ^ The window object (so that we can get back into the 'TP.UI' monad)
   -> TP.Element
+  -- ^ The detail div already in the document to populate
   -> Int
+  -- ^ The identifier of the node the user clicked on
+  --
+  -- This is an 'Int' coming back from JS, but it is actually a nonce.  We can't
+  -- convert it back safely, so we maintain the equivalence in the 'ProofTree'
+  -- structure as a 'Map.Map'
   -> IO ()
 onProofNodeClicked r wd detailDiv ident = do
   st <- IOR.readIORef (stateRef r)
   case st ^. activeProofTree of
-    Just (ProofTree _sym _nodes idx)
+    Just (ProofTree (PT.Sym {}) _nodes idx)
       | Just (Some (ProofTreeNode (PT.PatchPair ob pb) (PPr.ProofNonceExpr _ _ papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
           let res = PE.Equivalent -- FIXME: refactor to avoid this synthetic result
           (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb res
@@ -192,6 +206,9 @@ uiSetup r wd = do
                           , return detailDiv
                           ]
 
+  -- Set up a way for the UI to call back to Haskell for more details
+  --
+  -- See Note [Proof Graph Interaction] for details
   jsOnProofNodeClicked <- TP.ffiExport (onProofNodeClicked r wd detailDiv)
 
   void $ liftIO $ TP.register (stateChangeEvent r) (updateConsole r wd consoleDiv summaryDiv detailDiv)
@@ -293,5 +310,21 @@ This exposes the necessary structure for visualizing the structure of the proof:
 - We have block addresses from the block pairs
 - We have nonces attached to each node pointing to parents
 
+
+-}
+
+{- Note [Proof Graph Interaction]
+
+We want to be able to show more detail when requested for individual nodes, but
+we would like to avoid sending all of that to the client eagerly because it
+would just be way too much and slow everything to a crawl.  Instead, we will:
+
+1. Build an FFI callback (via ~ffiExport~ from threepenny-ui) that accepts a node ID
+2. We can pass that callback (as a ~JSObject~) to the graph initialization function
+3. The raw event handler in JS will invoke that callback when nodes are clicked (passing the node ID)
+4. That will call back into Haskell, which will then render the details of that node
+
+Note that node IDs are ints in the JS side, but nonces on the Haskell
+side. We'll need to maintain a mapping there
 
 -}

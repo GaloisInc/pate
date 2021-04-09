@@ -1,4 +1,7 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 module Interactive.Render.Proof (
     renderProof
   , renderProofApp
@@ -6,20 +9,29 @@ module Interactive.Render.Proof (
 
 import qualified Data.Aeson as JSON
 import qualified Data.Foldable as F
+import qualified Data.Functor.Const as C
 import qualified Data.HashMap.Strict as HMS
+import qualified Data.Macaw.CFG as MC
 import qualified Data.Map.Strict as Map
+import           Data.Maybe ( mapMaybe )
+import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import           Data.Proxy (Proxy(..))
 import qualified Data.Text as T
 import qualified Data.Vector as DV
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+) )
 import qualified Graphics.UI.Threepenny as TP
+import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Numeric.Natural ( Natural )
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
+import qualified What4.Interface as WI
 
 import qualified Pate.Event as PE
+import qualified Pate.MemCell as PMC
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
@@ -133,8 +145,84 @@ renderProof clickCallback divId (IS.ProofTree _sym proofTreeNodes _) =
                          , (T.pack "edges", JSON.Array (DV.fromList edges))
                          ]
 
+-- | Render a row in the register domain table if necessary
+--
+-- If the predicate is syntactically false, the register is not in the domain
+-- and we do not need to render an entry. Otherwise, render the register and an
+-- (expandable) view of the formula.
+--
+-- If the predicate is syntactically true, the register is always in the domain
+-- and no additional information about the formula is displayed for simplicity.
+renderProofRegisterDomain
+  :: ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     , MC.ArchConstraints arch
+     )
+  => proxy prf
+  -> MapF.Pair (PPr.ProofRegister prf) (C.Const (PPr.ProofPredicate prf))
+  -> Maybe (TP.UI TP.Element)
+renderProofRegisterDomain _ (MapF.Pair reg (C.Const predicate))
+  | Just False <- WI.asConstantPred predicate = Nothing
+  | Just True <- WI.asConstantPred predicate = Just (TP.string (PC.showF reg))
+  | otherwise = Just $ TP.row [ TP.string (PC.showF reg)
+                              , TP.string (T.unpack (pp (WI.printSymExpr predicate)))
+                              ]
+
+renderProofMemoryDomain
+  :: ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     )
+  => PPr.ProofPredicate prf
+  -> MapF.Pair (PPr.ProofMemCell prf) (C.Const (PPr.ProofPredicate prf))
+  -> Maybe (TP.UI TP.Element)
+renderProofMemoryDomain polarity (MapF.Pair memCell (C.Const predicate))
+  | WI.asConstantPred polarity /= WI.asConstantPred predicate =
+    Just $ TP.row [ TP.string (show (PN.natValue (PMC.cellWidth memCell)) ++ " bytes at ")
+                  , TP.pre # TP.set TP.text (T.unpack (pp (CLM.ppPtr (PMC.cellPtr memCell))))
+                  ]
+  | otherwise = Nothing
+
+renderDomainExpr
+  :: ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     , MC.ArchConstraints arch
+     )
+  => PPr.ProofNonceExpr prf PPr.ProofDomainType
+  -> TP.UI TP.Element
+renderDomainExpr (PPr.ProofNonceExpr _ _ app) = renderDomainApp app
+
+ppPolarityDescription :: WI.IsExpr e => e WI.BaseBoolType -> PP.Doc ann
+ppPolarityDescription predicate
+  | Just False <- WI.asConstantPred predicate =
+      PP.pretty "These locations are in the domain of this slice"
+  | Just True <- WI.asConstantPred predicate =
+      PP.pretty "All locations other than these are in the domain of this slice"
+  | otherwise = PP.pretty "Symbolic polarity"
+
+renderDomainApp
+  :: forall prf node sym arch
+   . ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     , MC.ArchConstraints arch
+     )
+  => PPr.ProofApp prf node PPr.ProofDomainType
+  -> TP.UI TP.Element
+renderDomainApp (PPr.ProofDomain regs stack mem _context) =
+  TP.column [ TP.h4 #+ [TP.string "Registers"]
+            , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @prf)) (MapF.toList (MC.regStateMap regs)))
+            , TP.h4 #+ [TP.string "Stack Memory"]
+            , TP.string (T.unpack (pp (ppPolarityDescription (PPr.prfMemoryDomainPolarity stack))))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity stack)) (MapF.toList (PPr.prfMemoryDomain stack)))
+            , TP.h4 #+ [TP.string "Other Memory"]
+            , TP.string (T.unpack (pp (ppPolarityDescription (PPr.prfMemoryDomainPolarity mem))))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity mem)) (MapF.toList (PPr.prfMemoryDomain mem)))
+            ]
+
 renderProofApp
-  :: (prf ~ PFI.ProofSym sym arch)
+  :: ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     , MC.ArchConstraints arch
+     )
   => PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
   -> TP.UI TP.Element
 renderProofApp app =
@@ -145,29 +233,21 @@ renderProofApp app =
     PPr.ProofFunctionCall pre body cont ->
       TP.div #+ [ TP.string "Proof that a function call is valid given its preconditions"
                 ]
-    PPr.ProofTriple blocks pre post status ->
-      TP.div #+ [ TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
+    PPr.ProofTriple blocks pre post (PPr.ProofNonceExpr _ _ (PPr.ProofStatus status)) ->
+      TP.column [ TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
+                , TP.h3 #+ [TP.string "Pre-domain"]
+                , TP.string "These values are assumed to be equal in both the original and patched program at the start of this program slice"
+                , renderDomainExpr pre
+                , TP.h3 #+ [TP.string "Post-domain"]
+                , TP.string "These values are asserted to be equal in both the original and patched program at the end of this program slice"
+                , renderDomainExpr post
+                , TP.h3 #+ [TP.string "Status"]
+                , TP.string (T.unpack (pp (ppStatus status)))
                 ]
     PPr.ProofStatus st ->
       TP.div #+ [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus st)))
                 ]
-    PPr.ProofDomain regs stack globals context ->
-      TP.div #+ [ TP.string "The domain of an individual equivalence proof"
+    PPr.ProofDomain {} ->
+      TP.column [ TP.string "The domain of an individual equivalence proof"
+                , renderDomainApp app
                 ]
-
-
-{- Note [Proof Graph Interaction]
-
-We want to be able to show more detail when requested for individual nodes, but
-we would like to avoid sending all of that to the client eagerly because it
-would just be way too much and slow everything to a crawl.  Instead, we will:
-
-1. Build an FFI callback (via ~ffiExport~ from threepenny-ui) that accepts a node ID
-2. We can pass that callback (as a ~JSObject~) to the graph initialization function
-3. The raw event handler in JS will invoke that callback when nodes are clicked (passing the node ID)
-4. That will call back into Haskell, which will then render the details of that node
-
-Note that node IDs are ints in the JS side, but nonces on the Haskell
-side. We'll need to maintain a mapping there
-
--}

@@ -188,6 +188,7 @@ executable pate-exec
                        threepenny-gui >= 0.9 && < 0.10,
                        language-c >= 0.9 && < 0.10,
                        parameterized-utils,
+                       what4,
                        macaw-ppc,
                        macaw-ppc-symbolic,
                        dismantle-ppc,
