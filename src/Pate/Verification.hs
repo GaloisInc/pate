@@ -883,8 +883,6 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
   postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-
-  liftIO $ putStrLn "Starting inequivalence proof"
   result <- PFO.lazyProofEvent_ (simPair bundle) $
      withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
        status <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do        
@@ -898,19 +896,19 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
            W4R.Sat fn -> do
              preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
              postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-             liftIO $ putStrLn "Getting inequivalence result"
-             
              ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
              emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
              return $ PF.VerificationFail ir
        cond <- case status of
          PF.VerificationFail _ -> do
-           postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-           -- no paths are known to be equivalent at this point
-           noPathCond <- falsePathCond
-           cond <- conditionalEquivalenceCheck bundle noPathCond
-                      sliceState postDomain' notChecks
-           minimalPathCondition cond postcondPred
+           goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+           isPredSat goalTimeout postcondPred >>= \case
+             True -> do
+               postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+               cond <- computeEqCondition bundle sliceState postDomain' notChecks
+               cond' <- weakenEqCondition bundle cond sliceState postDomain' postcondPred
+               checkAndMinimizeEqCondition cond' postcondPred
+             False -> return $ W4.falsePred sym
          _ -> return $ W4.truePred sym
        return $ PF.ProofStatus status cond
            
@@ -918,13 +916,60 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
 
--- | Compute an equivalence condition without strengthening the pre-domain.
--- The condition is negated, then assumed, and the equivalence check is re-attempted.
--- This process eventually terminates by either resulting in a "false" equivalence condition
--- representing the fact that no such condition could be found, or by finding a structured
--- equivalence condition which induces equality on the given slice under the given additional
--- assumption.
-conditionalEquivalenceCheck ::
+-- | Incrementally build an equivalence condition by negating path conditions which
+-- induce inequality on the block slices.
+-- For each counter example to equivalence, the negated corresponding path condition is assumed,
+-- and then the equivalence check is re-attempted.
+--
+-- This process terminates when the resulting set of assumptions is sufficient to prove
+-- equivalence. Termination is guaranteed, because eventually all possible paths through
+-- the given slice will be considered.
+-- If no equivalence condition is found, then the resulting path condition from this function will be
+-- the negation of all possible path conditions, and therefore inconsistent (i.e. representing
+-- the degenerate case that @false@ implies equivalence).
+computeEqCondition ::
+  forall sym arch.
+  SimBundle sym arch ->
+  -- | block slice post-state
+  PF.BlockSliceState (PFI.ProofSym sym arch) ->
+  -- | equivalence post-domain
+  PFI.SymDomain sym arch ->
+  -- | goal equivalence predicate
+  W4.Pred sym ->
+  EquivM sym arch (PatchPairC (W4.Pred sym))
+computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
+  go (PatchPairC (W4.truePred sym) (W4.truePred sym))
+  where
+    go :: PatchPairC (W4.Pred sym) -> EquivM sym arch (PatchPairC (W4.Pred sym))
+    go pathCond = withSym $ \sym -> do
+      -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      liftIO $ putStrLn "Disproving equivalence.."
+      result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
+          W4R.Unsat _ -> return Nothing
+          -- this is safe, because the resulting condition is still checked later
+          W4R.Unknown -> return Nothing
+          -- counter-example, compute another path condition and continue
+          W4R.Sat fn -> Just <$> PFG.getUnequalPathCondition bundle sliceState postDomain fn
+      case result of
+        -- no result, returning the accumulated path conditions
+        Nothing -> return pathCond
+      -- indeterminate result, failure
+        Just unequalPathCond -> do
+          notThis <- liftIO $ mapM (W4.notPred sym) unequalPathCond
+          pathCond' <- liftIO $ zipMPatchPairC notThis pathCond (W4.andPred sym)
+          -- assume this path is not taken and continue
+          unequalPathCond_flat <- flattenCondPair unequalPathCond
+          withAssumption_ (liftIO $ W4.notPred sym unequalPathCond_flat) $
+            go pathCond'
+
+-- | Weaken a given equality condition with alternative paths which also
+-- induce equality.
+--
+-- Similar to computing a sufficient condition, this process necessarily terminates, as
+-- eventually the given predicate will cover all possible paths through the slice.
+weakenEqCondition ::
+  forall sym arch.
   SimBundle sym arch ->
   -- | path conditions that (should) induce equivalence
   PatchPairC (W4.Pred sym) ->
@@ -935,81 +980,82 @@ conditionalEquivalenceCheck ::
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (PatchPairC (W4.Pred sym))
-conditionalEquivalenceCheck bundle pathCond sliceState postDomain notChecks = withSym $ \sym -> do
-  liftIO $ putStrLn "Checking for conditional equivalence.."
-
-  -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
-  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-
-  result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
-      W4R.Unsat _ -> return Nothing
-      W4R.Unknown -> return Nothing
-      -- counter-example, compute another path condition and continue
-      W4R.Sat fn -> Just <$> PFG.getUnequalPathCondition bundle sliceState postDomain fn
-  case result of
-    Nothing -> do
-      liftIO $ putStrLn "Got result, giving up."
-      return pathCond
-  -- indeterminate result, failure
-    Just unequalPathCond -> do
-      liftIO $ putStrLn "No result, recursing."
-      pathCond' <- liftIO $ zipMPatchPairC unequalPathCond pathCond (W4.orPred sym)
-      liftIO $ putStrLn (show $ ppPatchPairC (PP.pretty . CC.showF) unequalPathCond)
-      -- assume this path is not taken and continue
-      unequalPathCond_flat <- flattenCondPair unequalPathCond
-      withAssumption_ (liftIO $ W4.notPred sym unequalPathCond_flat) $
-        conditionalEquivalenceCheck bundle pathCond' sliceState postDomain notChecks
-
-falsePathCond :: EquivM sym arch (PatchPairC (W4.Pred sym))
-falsePathCond = withSym $ \sym -> return (PatchPairC (W4.falsePred sym) (W4.falsePred sym))
+weakenEqCondition bundle pathCond_outer sliceState postDomain goal = withSym $ \sym -> do
+  pathCond_flat <- flattenCondPair pathCond_outer
+  withAssumption_ (liftIO $ W4.notPred sym pathCond_flat) $ go pathCond_outer
+  where
+    go :: PatchPairC (W4.Pred sym) -> EquivM sym arch (PatchPairC (W4.Pred sym))
+    go pathCond = withSym $ \sym -> do
+      -- we use the heuristic timeout here because we're refining the equivalence condition
+      -- and failure simply means we fail to refine it further
+      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+      result <- checkSatisfiableWithModel heuristicTimeout "check" goal $ \satRes -> case satRes of
+          W4R.Unsat _ -> return Nothing
+          W4R.Unknown -> return Nothing
+          -- counter-example, compute another path condition and continue
+          W4R.Sat fn -> Just <$> PFG.getUnequalPathCondition bundle sliceState postDomain fn
+      case result of
+        Nothing -> return pathCond
+        Just unequalPathCond -> do
+          unequalPathCond_flat <- flattenCondPair unequalPathCond
+          isSufficient <- withAssumption_ (return unequalPathCond_flat) $
+            isPredTrue' heuristicTimeout goal
+          pathCond' <- case isSufficient of
+            True -> liftIO $ zipMPatchPairC unequalPathCond pathCond (W4.orPred sym)
+            False -> return pathCond
+          withAssumption_ (liftIO $ W4.notPred sym unequalPathCond_flat) $
+            go pathCond'
 
 flattenCondPair :: PatchPairC (W4.Pred sym) -> EquivM sym arch (W4.Pred sym)
 flattenCondPair (PatchPairC p1 p2) = withSym $ \sym -> liftIO $ W4.andPred sym p1 p2
 
--- | Given a path condition representing the set of paths that are inequivalent,
--- compute a minimal positive condition for equivalence.
-minimalPathCondition ::
+-- | Given a pair of path conditions, minimize the predicates and
+-- verify that they imply equivalence of the block slice.
+-- If no equivalence condition exists, then the given pair of path conditions is
+-- inconsistent and the result of this function will simply be @false@.
+--
+-- The resulting predicate is simplified under the current set of assumptions.
+checkAndMinimizeEqCondition ::
   forall sym arch.
   -- | path condition that is assumed to imply equivalence
   PatchPairC (W4.Pred sym) ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
-minimalPathCondition pathCond goal = withValid $ withSym $ \sym -> do
-  liftIO $ putStrLn "Conditional equivalence found!"
-  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  let
-    checkCond :: W4.Pred sym -> EquivM sym arch (Maybe (W4.Pred sym, Bool))
-    checkCond cond = withSatAssumption goalTimeout (liftIO $ W4.notPred sym cond) $ do
-        isPredTrue' goalTimeout goal
-
-  liftIO $ putStrLn (show $ ppPatchPairC (PP.pretty . CC.showF) pathCond)
-  -- check if either path condition alone is sufficient to imply equivalence
-  p <- mapM checkCond pathCond >>= \case
-    PatchPairC _ (Just (condP, True)) -> return condP
-    PatchPairC (Just (condO, True)) _ -> return condO
-    PatchPairC (Just (condO, False)) (Just (condP, False)) -> do
-      result <- withSatAssumption goalTimeout (liftIO $ W4.andPred sym condO condP) $ do
-        isPredTrue' goalTimeout goal
-      case result of
-        Just (p, True) -> return p
-        _ -> return $ W4.falsePred sym
+checkAndMinimizeEqCondition (PatchPairC condO condP) goal = withValid $ withSym $ \sym -> do
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)  
+  condO' <- withAssumption_ (return condP) $ simplifyPred_deep condO
+  condP' <- simplifyPred_deep condP
+  -- this check is not strictly necessary, as the incremental checks should guarantee it
+  -- for the moment it's a sanity check on this process as well as the final simplifications
+  result <- withSatAssumption goalTimeout (liftIO $ W4.andPred sym condO' condP') $ do
+    isPredTrue' goalTimeout goal
+  case result of
+    Just (p, True) -> return p
     _ -> return $ W4.falsePred sym
-  atoms <- exprSetToList @sym <$> (liftIO $ getPredAtoms sym p)
-  let
-    applyAtom :: W4.Pred sym -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
-    applyAtom p' atom = do
-      isIndep <- liftIO $ independentOf sym atom p'
-      isPredTrue' heuristicTimeout isIndep >>= \case
-        True -> liftIO $ rebindWithFrame sym (frameAssume atom) p' 
-        False -> return p'
-    
-  p' <- CME.foldM applyAtom p atoms
-  liftIO $ putStrLn "Minimal path condition:"
-  liftIO $ putStrLn (CC.showF p')
-  return p
 
+-- | Simplify a predicate by considering the
+-- logical necesssity of each atomic sub-predicate under the current set of assumptions.
+-- Additionally, simplify array lookups across unrelated updates.
+simplifyPred_deep ::
+  forall sym arch.
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+simplifyPred_deep p = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  cache <- W4B.newIdxCache
+  let
+    checkPred :: W4.Pred sym -> EquivM sym arch Bool
+    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $
+      Const <$> isPredTrue' heuristicTimeout p'
+    go :: W4.Pred sym -> EquivM sym arch (W4.Pred sym)
+    go p' = do
+      atoms <- liftIO $ getPredAtoms sym p'
+      p'' <- minimalPredAtoms sym atoms checkPred p'
+      if p'' == p' then return p'' else go p''
+  p' <- go p
+  resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) p'
+  
 
 --------------------------------------------------------
 -- Propagating preconditions

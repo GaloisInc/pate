@@ -54,11 +54,14 @@ module What4.ExprHelpers (
   , exprSetSize
   , inExprSet
   , getPredAtoms
-  , independentOf
+  , abstractOver
+  , resolveConcreteLookups
+  , minimalPredAtoms
   ) where
 
 import           GHC.TypeNats
 import           Unsafe.Coerce -- for mulMono axiom
+import           GHC.Stack ( HasCallStack )
 
 import           Control.Applicative
 import           Control.Monad.Except
@@ -73,6 +76,8 @@ import qualified Data.Text as T
 import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
+import           Data.Map (Map)
+import qualified Data.Map as Map
 import           Data.List ( foldl' )
 import           Data.List.NonEmpty (NonEmpty(..))
 
@@ -82,6 +87,7 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.Map as MapF
 
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -92,6 +98,7 @@ import qualified What4.Interface as W4
 import qualified What4.Concrete as W4C
 import qualified What4.Symbol as W4
 import qualified What4.Expr.BoolMap as BM
+import qualified What4.SemiRing as SR
 
 iteM ::
   W4.IsExprBuilder sym =>
@@ -359,6 +366,7 @@ type GroundM t a = ExceptT (W4B.Expr t W4.BaseBoolType) IO a
 -- doesn't encounter uninterpreted functions.
 stripAsserts ::
   forall sym t solver fs tp.
+  HasCallStack =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4B.IdxCache t (W4B.Expr t) ->
@@ -459,115 +467,6 @@ exprSetSize (SetF es) = S.size es
 inExprSet :: OrdF (W4.SymExpr sym) => W4.SymExpr sym tp -> ExprSet sym tp -> Bool
 inExprSet e (SetF es) = S.member (AsOrd e) es
 
-setFUnion :: OrdF f => SetF f tp -> SetF f tp -> SetF f tp
-setFUnion (SetF s1) (SetF s2) = SetF (S.union s1 s2)
-
-setFEmpty :: SetF f tp
-setFEmpty = SetF S.empty
-
--- -- | Compute a list of predicates that, if any one is true,
--- -- under the given assumptions, the predicate is equal to the given polarity.
--- toDisjunction ::
---   forall sym t solver fs tp.
---   sym ~ (W4B.ExprBuilder t solver fs) =>
---   sym ->
---   Bool ->
---   [W4.Pred sym] ->
---   W4.Pred sym ->
---   IO [W4.Pred sym]
--- toDisjunction sym = go
---   where
---     go :: Bool -> [W4.Pred sym] -> W4.Pred sym -> IO [W4.Pred sym]
---     go pol asms (W4B.BaseIte _ _ cond pT pF) = do
---       cond_neg <- go False asms cond
---       cond_pos <- go True asms cond
---       pT_disj <- concat <$> mapM (\cond_pos' -> go pol (cond_pos' : asms) pT) cond_pos
---       pT_disj <- concat <$> mapM (\cond_neg' -> go pol (cond_neg' : asms) pF) cond_neg
---       return $ pT_disj ++ pT_disj
---     go asms (W4B.NotPred p) = go (not pol) asms p
---     go asms (W4B.ConjPred bm) =
---       let pol (x,BM.Positive) = go pol [] x
---           pol (x,BM.Negative) = go (not pol) [] x
---       in
---       case BM.viewBoolMap bm of
---         BM.BoolMapUnit -> go pol (W4.truePred sym)
---         BM.BoolMapDualUnit -> go pol (W4.falsePred sym)
---         BM.BoolMapTerms (t:|ts),-> mulLists (t:ts)
---           foldl' (&&) <$> pol t <*> mapM pol ts
-
--- mulLists :: [[a]] -> [[a]]
--- mulLists [] = [[]]
--- mulLists (xs:xss) = [ x:xs_ | x <- xs, xs_ <- mulLists xss ]
-
--- -- | A list of predicates where, if any one is true, the predicate is true.
--- toDisjunction ::
---   forall sym t solver fs tp.
---   sym ~ (W4B.ExprBuilder t solver fs) =>
---   sym ->
---   [W4.Pred sym] ->
---   W4.Pred sym ->
---   IO [W4.Pred sym]
--- toDisjunction sym asms_outer p_outer = go p_outer
---   where
---     go :: [W4.Pred sym] -> W4.Pred sym -> IO [W4.Pred sym]
---     go assuming (W4B.BaseIte _ _ cond pT pF) = do
---       cond_neg <- go assuming cond
---       pT_neg <- go (cond : assuming) pT
---       pF_neg <- concat <$> mapM (\cond_neg' -> go (cond_neg' : assuming) pF) cond_neg
---       return $ pT_neg ++ pF_neg
---     go assuming (W4B.NotPred p) = do
---       p_neg <- go assuming p    
-
--- data GroundValue' tp where
---   GroundValue' tp :: W4.BaseTypeRepr tp -> W4G.GroundValue tp -> GroundValue' tp
-
--- fromWrapped ::
---   W4.BaseTypeRepr tp ->
---   W4G.GroundValueWrapper tp ->
---   GroundValue' tp
--- fromWrapped repr (W4G.GroundValueWrapper v) = GroundValue' repr v
-
--- instance Eq (GroundValue' tp) where
---   (GroundValue' repr1 v1) == (GroundValue' repr2 v2) = case repr of
---     W4.BaseBoolType -> v1 == v2
---     W4.BaseNatType -> v1 == v2
---     W4.BaseIntegerType -> v1 == v2
---     W4.BaseRealType -> v1 == v2
---     W4.BaseBVType _ -> v1 == v2
---     W4.BaseFloatType _ -> v1 == v2
---     W4.BaseComplexType -> v1 == v2
---     W4.BaseStringType -> v1 == v2
---     W4.BaseArrayType _ -> case (v1, v2) of
---       (W4G.ArrayConcrete default1 map1, W4G.ArrayConcrete default2 map2)
---         -> default1 == default2 &&  map1 == map2
---       (W4G.ArrayMapping _, W4G.ArrayMapping _) -> error "GroundValue': cannot compare non-concrete arrays"
---     W4.BaseStructType repr' -> (Ctx.zipWith fromWrapped repr' v1) == (Ctx.zipWith fromWrapped repr' v2)
-    
--- instance TestEquality GroundValue'where
---   testEquality (GroundValue' repr1 v1) (GroundValue' repr2 v2)
---     | Just Refl <- testEquality repr1 repr2, v1 == v2 = Just Refl
---   testEquality _ _ = Nothing
-
--- evalGround ::
---   forall sym t solver fs tp.
---   sym ~ (W4B.ExprBuilder t solver fs) =>
---   sym ->
---   W4G.GroundEvalFn t ->
---   W4B.Expr t tp ->
---   IO (GroundValue' tp)
--- evalGround _sym fn e = GroundValue' (W4.exprType e) <$> W4G.groundEval fn e
-
--- maybeTDefault ::
---   -- | computation to run
---   MaybeT m a ->
---   -- | default value if it fails
---   MaybeT m a ->
---   MaybeT m a ->
--- maybeTDefault f default_ = lift (runMaybeT f) >>= \case
---   Just a -> return a
---   Nothing -> default_
-
-
 
 -- | Compute a predicate representing the path condition of the
 -- expression according to its internal mux structure.
@@ -607,7 +506,10 @@ data PathMEnv sym where
 
 newtype PathCondition sym = PathCondition (W4.Pred sym)
 
--- Monad for computing a path condition
+-- | Monad for computing a path condition of an expression
+-- with respect to a particular model. The "current" path condition is the conjunction
+-- of the path in the environment and the path in the state. The 'MaybeT' transformer
+-- allows for early termination when a path in the expression is determined to be infeasible.
 newtype PathM sym a = PathM (CMR.ReaderT (PathMEnv sym) (CMS.StateT (PathCondition sym) (MaybeT.MaybeT IO)) a)
   deriving (Functor
            , Applicative
@@ -638,6 +540,7 @@ evalPath_ ::
   PathM sym (W4.Pred sym)
 evalPath_ f = snd <$> evalPath f
 
+-- | Run the sub-computation, and return the resulting path condition.
 watchPath ::
   PathM sym a ->
   PathM sym (a, W4.Pred sym)
@@ -729,12 +632,6 @@ fromPolarity ::
 fromPolarity BM.Positive = True
 fromPolarity BM.Negative = False
 
-toPolarity ::
-  Bool -> BM.Polarity
-toPolarity True = BM.Positive
-toPolarity False = BM.Negative
-
-
 liftBinOp ::
   (sym -> W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO a) ->
   W4.SymExpr sym tp1 ->
@@ -755,15 +652,11 @@ altBinOp f e1 e2 = forMuxes2 e1 e2 $ \e1' e2' -> do
 -- | From a signed operation, consider separately the case where both
 -- operands are signed
 altBVOp ::
-
-  -- | unsigned case
-  (W4.SymBV sym w1  -> W4.SymBV sym w2  -> PathM sym a) ->
-  -- | signed case
   (W4.SymBV sym w1  -> W4.SymBV sym w2  -> PathM sym a) ->
   W4.SymBV sym w1 ->
   W4.SymBV sym w2 ->
   PathM sym a
-altBVOp f_unsigned f_signed e1 e2 = withSym $ \sym -> forMuxes2 e1 e2 $ \e1' e2' -> do
+altBVOp f_signed e1 e2 = withSym $ \sym -> forMuxes2 e1 e2 $ \e1' e2' -> do
   e1'' <- withPathCond e1'
   e2'' <- withPathCond e2'  
   unsigned1 <- liftIO $ isUnsigned sym e1''
@@ -785,16 +678,17 @@ isUnsigned ::
   W4.SymBV sym w ->
   IO (W4.Pred sym)
 isUnsigned sym bv = do
-  W4.BaseBVRepr w <- return $ W4.exprType bv
+  W4.BaseBVRepr _ <- return $ W4.exprType bv
   clz <- W4.bvCountLeadingZeros sym bv
   -- must have at least one leading zero
   W4.bvIsNonzero sym clz  
 
   
--- | compute a set of assumptions that will cause the given predicate to
+-- | Compute a set of assumptions that are sufficient for the given predicate to
 -- have the given polarity in the given model.
 -- If the predicate disagrees with the given polarity, then no results
--- are produced (i.e. this branch was not taken in the model)
+-- are produced (i.e. this branch was not taken in the model).
+-- 
 getPredCase ::
   forall sym. 
   BM.Polarity ->
@@ -818,19 +712,18 @@ getPredCase pol_outer e_outer = do
       forall w1 w2.
       BM.Polarity ->
       (sym -> W4.SymBV sym w1  -> W4.SymBV sym w2  -> IO (W4.Pred sym)) ->
-      (sym -> W4.SymBV sym w1  -> W4.SymBV sym w2  -> IO (W4.Pred sym)) ->
       W4.SymBV sym w1 ->
       W4.SymBV sym w2 ->
       PathM sym (W4.Pred sym)      
-    bvOp pol f_unsigned f_signed e1 e2 =
+    bvOp pol f e1 e2 =
       altBVOp
-        (\e1' e2' -> liftBinOp f_unsigned e1' e2' >>= applyPolarity pol)
-        (\e1' e2' -> liftBinOp f_signed e1' e2' >>= applyPolarity pol)
+        (\e1' e2' -> liftBinOp f e1' e2' >>= applyPolarity pol)
         e1 e2 
     
     go :: BM.Polarity -> W4.Pred sym -> PathM sym (W4.Pred sym)
     go pol e_inner = withValid $ withSym $ \sym -> forMuxes e_inner $ \e -> do
       -- only consider cases where the polarity agrees with the model
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
       predAgrees pol e
       case e of
           -- recurse into substructure
@@ -852,9 +745,11 @@ getPredCase pol_outer e_outer = do
                 -- for each conjuct: yield a disjunction of primitive conditions
                 -- which falsify this predicate in the model
                 BM.Negative -> do
-                  let eval p (x, pol') = do
-                        p' <- go (BM.negatePolarity pol') x
-                        liftIO $ W4.orPred sym p p'
+                  let eval p (x, pol') = (evalPath $ go (BM.negatePolarity pol') x) >>= \case
+                        (Just p', p'') -> do
+                          p''' <- liftIO $ W4.andPred sym p' p''
+                          liftIO $ W4.orPred sym p p'''
+                        (Nothing, _) -> return p
                   case BM.viewBoolMap bm of
                     -- a statically true boolmap cannot be made false
                     BM.BoolMapUnit -> return $ W4.falsePred sym
@@ -867,14 +762,14 @@ getPredCase pol_outer e_outer = do
             W4B.BVUlt e1 e2 -> binOp pol W4.bvUlt e1 e2
              
             -- add explicit signed check to signed comparison
-            W4B.BVSlt e1 e2 -> bvOp pol W4.bvUlt W4.bvSlt e1 e2
+            W4B.BVSlt e1 e2 -> bvOp pol W4.bvSlt e1 e2
 
             -- catch-all: assume the entire predicate
             _ -> applyPolarity pol e
           _ -> applyPolarity pol e
 
 -- | No-op if the predicate agrees with the given polarity in the model.
--- Otherwise, yields no results.
+-- Otherwise, terminates early.
 predAgrees ::
   BM.Polarity ->
   W4.Pred sym ->
@@ -891,7 +786,8 @@ data ExprAsms sym tp where
 
 -- | Compute the set of assumptions used to induce the value of the given
 -- expression in the model, based on its internal mux structure.
--- Resolve to the resulting expression with the given mux structure.
+-- Resolve to an expression that is equal to the given one in the given model, but
+-- which contains no muxes internally (i.e. all muxes have been statically resolved).
 withPathCond ::
   forall sym tp.
   W4.SymExpr sym tp ->
@@ -907,14 +803,12 @@ withPathCond e_outer = withValid $ do
     bvOp ::
       forall w1 w2 tp3.
       (sym -> W4.SymBV sym w1  -> W4.SymBV sym w2  -> IO (W4.SymExpr sym tp3)) ->
-      (sym -> W4.SymBV sym w1  -> W4.SymBV sym w2  -> IO (W4.SymExpr sym tp3)) ->
       W4.SymBV sym w1 ->
       W4.SymBV sym w2 ->
       PathM sym (ExprAsms sym tp3)      
-    bvOp f_unsigned f_signed e1 e2 =
+    bvOp f e1 e2 =
       altBVOp
-        (\e1' e2' -> watch $ liftBinOp f_unsigned e1' e2')
-        (\e1' e2' -> watch $ liftBinOp f_signed e1' e2')
+        (\e1' e2' -> watch $ liftBinOp f e1' e2')
         e1 e2 
     
     go :: forall tp'. W4.SymExpr sym tp' -> PathM sym (W4.SymExpr sym tp')
@@ -930,8 +824,8 @@ withPathCond e_outer = withValid $ do
       forMuxes e_inner $ \e -> do
         case e of
           W4B.AppExpr a0 -> case W4B.appExprApp a0 of
-            W4B.BVAshr _ e1 e2 -> bvOp W4.bvLshr W4.bvAshr e1 e2
-            W4B.BVSdiv _ e1 e2 -> bvOp W4.bvUdiv W4.bvSdiv e1 e2
+            W4B.BVAshr _ e1 e2 -> bvOp W4.bvAshr e1 e2
+            W4B.BVSdiv _ e1 e2 -> bvOp W4.bvSdiv e1 e2
             app -> watch $ do
               a0' <- W4B.traverseApp go app
               if (W4B.appExprApp a0) == a0' then return e
@@ -943,64 +837,95 @@ withPathCond e_outer = withValid $ do
           _ -> return $ ExprAsms e (W4.truePred sym)
   go e_outer
 
+type PredSet sym = ExprSet sym W4.BaseBoolType
 
--- | Get the atoms of a composite predicate.
+-- | Get the atomic predicates which appear anywhere in the given predicate.
+-- TODO: does not consider all possible predicate constructors.
 getPredAtoms ::
   forall sym t solver fs.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4.Pred sym ->
-  IO (ExprSet sym W4.BaseBoolType)
-getPredAtoms _sym e_outer = do
+  IO (PredSet sym)
+getPredAtoms sym e_outer = do
   cache <- W4B.newIdxCache
-  let
-    go :: forall tp'. W4.SymExpr sym tp' -> IO (Const (ExprSet sym W4.BaseBoolType) tp')
-    go p =  W4B.idxCacheEval cache p $ case p of
-      W4B.AppExpr a0 -> case W4B.appExprApp a0 of
-         W4B.BaseEq{} -> return $ Const $ singletonExpr @sym p
-         W4B.BVUlt{} -> return $ Const $ singletonExpr @sym p
-         W4B.BVSlt{} -> return $ Const $ singletonExpr @sym p
-         _ -> TFC.foldrMFC acc (Const setFEmpty) (W4B.appExprApp a0)
-      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc (Const setFEmpty) (W4B.nonceExprApp a0)
-      _ -> return $ Const setFEmpty
+  let    
+    muxes ::
+      forall tp1.
+      W4.SymExpr sym tp1 ->
+      (W4.SymExpr sym tp1 -> IO (PredSet sym)) ->
+      IO (PredSet sym)
+    muxes e f = case W4B.asApp e of
+      Just (W4B.BaseIte _ _ cond eT eF) -> do
+        condAtoms <- go cond
+        eTAtoms <- muxes eT f 
+        eFAtoms <- muxes eF f
+        return $ condAtoms <> eTAtoms <> eFAtoms
+      _ -> f e
 
-    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (ExprSet sym W4.BaseBoolType) tp2 -> IO (Const (ExprSet sym W4.BaseBoolType) tp2)
+    muxes2 ::
+      forall tp1 tp2.
+      W4.SymExpr sym tp1 ->
+      W4.SymExpr sym tp2 ->
+      (W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (PredSet sym)) ->
+      IO (PredSet sym)
+    muxes2 e1 e2 f = muxes e1 (\e1' -> muxes e2 (f e1'))
+
+    liftPred ::
+      forall tp1 tp2.
+      (sym -> W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (W4.Pred sym)) ->
+      (W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (PredSet sym))
+    liftPred f e1 e2 = singletonExpr @sym <$> f sym e1 e2
+      
+    binOp ::
+      forall tp1 tp2.
+      (W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (PredSet sym)) ->
+      W4.SymExpr sym tp1 ->
+      W4.SymExpr sym tp2 ->
+      IO (PredSet sym)
+    binOp f e1 e2 = muxes2 e1 e2 $ \e1' e2' -> do
+      e1Atoms <- go e1'
+      e2Atoms <- go e2'
+      leafAtoms <- f e1' e2'
+      return $ leafAtoms <> e1Atoms <> e2Atoms
+
+    unOp ::
+      forall tp1.
+      (W4.SymExpr sym tp1 -> IO (PredSet sym)) ->
+      W4.SymExpr sym tp1 ->
+      IO (PredSet sym)
+    unOp f e1 = muxes e1 $ \e1' -> do
+      e1Atoms <- go e1'
+      leafAtoms <- f e1'
+      return $ e1Atoms <> leafAtoms
+  
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (PredSet sym)
+    go p_inner = muxes p_inner $ \p -> fmap getConst $ W4B.idxCacheEval cache p $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc p)
+      case p of
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+           W4B.BaseEq _ e1 e2 -> Const <$> binOp (liftPred W4.isEq) e1 e2 
+           W4B.BVUlt e1 e2 -> Const <$> binOp (liftPred W4.bvUlt) e1 e2 
+           W4B.BVSlt e1 e2 -> Const <$> binOp (liftPred W4.bvSlt) e1 e2
+           W4B.SemiRingLe SR.OrderedSemiRingIntegerRepr e1 e2 -> Const <$> binOp (liftPred W4.intLe) e1 e2
+           W4B.SemiRingLe SR.OrderedSemiRingNatRepr e1 e2 -> Const <$> binOp (liftPred W4.natLe) e1 e2
+           W4B.SemiRingLe SR.OrderedSemiRingRealRepr e1 e2 -> Const <$> binOp (liftPred W4.realLe) e1 e2
+           W4B.BVTestBit n e -> Const <$> unOp (\e' -> singletonExpr @sym <$> W4.testBitBV sym n e') e
+           _ -> TFC.foldrMFC acc mempty (W4B.appExprApp a0)
+        W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
+        _ -> return $ mempty
+
+    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (PredSet sym) tp2 -> IO (Const (PredSet sym) tp2)
     acc p (Const exprs) = do
-      Const exprs' <- go p
-      return $ Const $ setFUnion exprs exprs'
+      exprs' <- go p
+      return $ Const $ exprs <> exprs'
 
-  getConst <$> go e_outer
-
-
--- | Freshen the bound variables in the given term
-freshBVs ::
-  forall sym t solver fs tp.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  sym ->
-  W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-freshBVs sym e_outer = do
-  cache <- W4B.newIdxCache
-  let
-    go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
-    go e = W4B.idxCacheEval cache e $ case e of
-      W4B.BoundVarExpr _ -> W4.freshConstant sym W4.emptySymbol (W4.exprType e)
-      W4B.AppExpr a0 -> do
-        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-        if (W4B.appExprApp a0) == a0' then return e
-        else W4B.sbMakeExpr sym a0'
-      W4B.NonceAppExpr a0 -> do
-        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-        if (W4B.nonceExprApp a0) == a0' then return e
-        else W4B.sbNonceExpr sym a0'
-      _ -> return e
   go e_outer
 
 
-
--- | Predicate stating that the value of the outer term is independent of the value
--- of the inner term.
-independentOf ::
+-- | Lambda abstraction: given a term @a@ and a term @e@ which contains @a@,
+-- generate a function @f(x) = e[a/x]@.
+abstractOver ::
   forall sym t solver fs tp1 tp2.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
@@ -1008,70 +933,141 @@ independentOf ::
   W4.SymExpr sym tp1 ->
   -- | outer term
   W4.SymExpr sym tp2 ->
-  IO (W4.Pred sym)
-independentOf sym sub outer = do
-  sub_fresh <- freshBVs sym sub
+  IO (W4.SymFn sym (Ctx.EmptyCtx Ctx.::> tp1) tp2)
+abstractOver sym sub outer = do
+  sub_bv <- W4.freshBoundVar sym W4.emptySymbol (W4.exprType sub)
   cache <- W4B.newIdxCache
   let
     go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
-    go e | Just Refl <- testEquality (W4.exprType e) (W4.exprType sub), e == sub = return $ sub_fresh
-    go e = W4B.idxCacheEval cache e $ case e of
-      W4B.AppExpr a0 -> do
-        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-        if (W4B.appExprApp a0) == a0' then return e
-        else W4B.sbMakeExpr sym a0'
-      W4B.NonceAppExpr a0 -> do
-        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-        if (W4B.nonceExprApp a0) == a0' then return e
-        else W4B.sbNonceExpr sym a0'
-      _ -> return e
-  outer_fresh <- go outer
-  W4.isEq sym outer outer_fresh
+    go e
+      | Just Refl <- testEquality (W4.exprType e) (W4.exprType sub), e == sub
+         = return $ W4.varExpr sym sub_bv
+    go e = W4B.idxCacheEval cache e $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      case e of
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else W4B.sbNonceExpr sym a0'
+        _ -> return e
+  outer_abs <- go outer
+  W4.definedFn sym W4.emptySymbol (Ctx.empty Ctx.:> sub_bv) outer_abs W4.AlwaysUnfold
 
--- getPathCondition ::
---   forall sym t solver fs.
---   sym ~ (W4B.ExprBuilder t solver fs) =>
---   sym ->
---   W4B.Expr t tp ->
---   [W4.Pred sym]
--- getPathCondition sym e = go e
---   let
---     go :: forall tp'. W4B.Expr t tp' -> [W4.Pred sym]
---     go e = case e of
---       W4B.AppExpr a0
---         | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
---         -> let
---             cond_conds = go cond
---             eT_conds = go eT
---             eF_conds = go eF
---            in cond_conds ++ eT_conds ++ eF_conds
-            
---             notcond <- lift $ W4.notPred sym cond
---             eT' <- lift $ runExceptT $ go eT
---             eF' <- lift $ runExceptT $ go eF
---             case (eT', eF') of
---               -- FIXME: It'd be better to key this more precisely
---               (Left condT, Right eF'') ->
---                 (W4.asConstantPred <$> (lift $ W4.isEq sym condT notcond)) >>= \case
---                   Just True -> return eF''
---                   _ -> throwError condT
---               (Right eT'', Left condF) -> do          
---                 (W4.asConstantPred <$> (lift $ W4.isEq sym condF cond)) >>= \case
---                   Just True -> return eT''
---                   _ -> throwError condF
---               (Right eT'', Right eF'') ->
---                 if cond' == cond && eT'' == eT && eF'' == eF then return e
---                 else lift $ W4.baseTypeIte sym cond' eT'' eF''
---               (Left condT, Left _) -> throwError condT
---       W4B.AppExpr a0 -> do
---         a0' <- W4B.traverseApp go (W4B.appExprApp a0)
---         if (W4B.appExprApp a0) == a0' then return e
---         else lift $ W4B.sbMakeExpr sym a0'
---       W4B.NonceAppExpr a0 -> do
---         a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
---         if (W4B.nonceExprApp a0) == a0' then return e
---         else lift $ W4B.sbNonceExpr sym a0'
---       _ -> return e
---   (runExceptT $ go e_outer) >>= \case
---     Left _ -> fail "stripAsserts: assertion not guarded by a corresponding mux"
---     Right x -> return x  
+-- | Resolve array lookups across array updates which are known to not alias.
+-- i.e. @select (update arr A V) B --> select arr B@ given that @f(A, B) = Just False@ (i.e.
+-- they are statically known to be inequivalent according to the given testing function)
+resolveConcreteLookups ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  (forall tp'. W4.SymExpr sym tp' -> W4.SymExpr sym tp' -> m (Maybe Bool)) ->
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+resolveConcreteLookups sym f e_outer = do
+  cache <- W4B.newIdxCache
+  let
+    andPred ::
+      forall (tp' :: W4.BaseType).
+      Const (Maybe Bool) tp' ->
+      Maybe Bool ->
+      Maybe Bool
+    andPred (Const p) (Just b) = case p of
+      Just b' -> Just (b && b')
+      Nothing -> Nothing
+    andPred _ Nothing = Nothing
+    
+    resolveArr ::
+      forall idx idx1 idx2 tp'.
+      idx ~ (idx1 Ctx.::> idx2) =>
+      W4.SymExpr sym (W4.BaseArrayType idx tp') ->
+      Ctx.Assignment (W4.SymExpr sym) idx ->
+      m (W4.SymExpr sym tp')
+    resolveArr arr_base idx_base = do
+      arr <- go arr_base
+      idx <- TFC.traverseFC go idx_base
+      val <- liftIO $ W4.arrayLookup sym arr idx
+      case arr of
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+          W4B.UpdateArray _ _ arr' idx' upd_val -> do
+            eqIdx <- Ctx.zipWithM (\e1 e2 -> Const <$> f e1 e2) idx idx'
+            case TFC.foldrFC andPred (Just True) eqIdx of
+              Just True -> return $ upd_val
+              Just False -> resolveArr arr' idx
+              _ -> return val
+          W4B.SelectArray _ arr' idx' -> do
+            arr'' <- resolveArr arr' idx'
+            case arr'' == arr of
+              True -> return val
+              False -> resolveArr arr'' idx
+          _ -> return val
+        _ -> return val
+    
+    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+    go e = W4B.idxCacheEval cache e $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      case e of
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+          W4B.SelectArray _ arr idx -> resolveArr arr idx
+          app -> do
+            a0' <- W4B.traverseApp go app
+            if (W4B.appExprApp a0) == a0' then return e
+            else liftIO $ W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else liftIO $ W4B.sbNonceExpr sym a0'
+        _ -> return e
+  go e_outer
+
+
+
+-- | Simplify the given predicate by deciding which atoms are logically necessary
+-- according to the given provability function.
+--
+-- Starting with @p@, for each atom @a@ in @p@ and intermediate result @p'@, either:
+--   * if @p'[a/true] == p'[a/false]: return @p'[a/true]@
+--   * if @a@ is provable: return @p'[a/true]@
+--   * if @a@ is disprovable: return @p'[a/false]@
+--   * if @p' --> a@ is provable: return @a && p'[a/true]@
+--   * if @p' --> not(a)@ is provable: return @not(a) && p'[a/false]@
+--   * otherwise, return @p'@
+minimalPredAtoms ::
+  forall m sym t solver fs.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  -- | individual "atoms" of a predicate
+  PredSet sym ->
+  -- | decision for the provability of a predicate
+  (W4.Pred sym -> m Bool) ->
+  W4.Pred sym ->
+  m (W4.Pred sym)
+minimalPredAtoms sym atoms provable p = do
+  let
+    applyAtom :: W4.Pred sym -> W4.Pred sym -> m (W4.Pred sym)
+    applyAtom p' atom = do
+      notAtom <- liftIO $ W4.notPred sym atom
+      p_fn <- liftIO $ abstractOver sym atom p'
+      p_fn_true <- liftIO $ W4.applySymFn sym p_fn (Ctx.empty Ctx.:> W4.truePred sym)
+      p_fn_false <- liftIO $ W4.applySymFn sym p_fn (Ctx.empty Ctx.:> W4.falsePred sym)
+      indep <- liftIO $ W4.isEq sym p_fn_true p_fn_false
+
+      trueCase <- liftIO $ W4.orPred sym atom indep
+      implies_atom <- liftIO $ W4.impliesPred sym p' atom
+      implies_notAtom <- liftIO $ W4.impliesPred sym p' notAtom
+      
+      provable trueCase >>= \case
+        True -> return p_fn_true
+        False -> provable notAtom >>= \case
+          True -> return p_fn_false
+          False -> provable implies_atom >>= \case
+            True -> liftIO $ W4.andPred sym atom p_fn_true
+            False -> provable implies_notAtom >>= \case
+              True -> liftIO $ W4.andPred sym notAtom p_fn_false
+              False -> return p'
+  CMS.foldM applyAtom p (exprSetToList @sym atoms)
