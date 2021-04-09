@@ -40,8 +40,6 @@ import           Control.Lens hiding ( op, pre )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 
-import qualified Prettyprinter as PP
-
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import qualified Data.Functor.Compose as DFC
@@ -901,7 +899,6 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
              return $ PF.VerificationFail ir
        cond <- case status of
          PF.VerificationFail _ -> do
-           goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
            isPredSat goalTimeout postcondPred >>= \case
              True -> do
                postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain

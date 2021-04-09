@@ -76,8 +76,6 @@ import qualified Data.Text as T
 import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.Map (Map)
-import qualified Data.Map as Map
 import           Data.List ( foldl' )
 import           Data.List.NonEmpty (NonEmpty(..))
 
@@ -86,8 +84,6 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
-import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.Map as MapF
 
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM

@@ -68,8 +68,6 @@ module Pate.SimState
 import           GHC.Stack ( HasCallStack )
 
 import           Control.Monad ( forM )
-import           Data.Set (Set)
-import qualified Data.Set as Set
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
