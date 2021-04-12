@@ -804,12 +804,12 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     simplifySubPreds precond'
 
   -- TODO: this needs to be reorganized to make the domain results actually lazy
-  preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle precond
-  postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-  status <- checkCasesTotal bundle preDomain allPreconds
   blockSlice <- PFO.simBundleToSlice bundle
-  triple <- PFO.lazyProofEvent_ (simPair bundle) $ return $
-    PF.ProofTriple (simPair bundle) preDomain postDomain status
+  triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
+    preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle precond
+    postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+    status <- checkCasesTotal bundle preDomain allPreconds
+    return $ PF.ProofTriple (simPair bundle) preDomain postDomain status
   let
     prf = PF.ProofBlockSlice
             { PF.prfBlockSliceTriple = triple
@@ -877,26 +877,28 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- PD.getBlocks $ simPair bundle
-  preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
-  postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  result <- PFO.forkProofEvent (simPair bundle) $ fmap PF.ProofStatus $ 
-     withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
-       checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do        
-         case satRes of
-           W4R.Unsat _ -> do
-             emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
-             return PF.VerificationSuccess
-           W4R.Unknown -> do
-             emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
-             return PF.Unverified
-           W4R.Sat fn -> do
-             preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
-             postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-             ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
-             emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
-             return $ PF.VerificationFail ir
-  triple <- PFO.lazyProofEvent_ (simPair bundle) $
+  triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
+    preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
+    postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+    result <- PFO.forkProofEvent (simPair bundle) $ fmap PF.ProofStatus $
+       withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
+         checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
+           case satRes of
+             W4R.Unsat _ -> do
+               emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
+               return PF.VerificationSuccess
+             W4R.Unknown -> do
+               emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
+               return PF.Unverified
+             W4R.Sat fn -> do
+               preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
+               postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+               ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
+               emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
+               return $ PF.VerificationFail ir
+
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
 
