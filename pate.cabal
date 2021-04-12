@@ -86,6 +86,8 @@ library
                        Pate.Utils,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
+                       What4.PathCondition,
+                       Data.Parameterized.SetF,
                        Pate.SimState,
                        Pate.Equivalence
 

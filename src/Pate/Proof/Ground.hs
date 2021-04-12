@@ -78,6 +78,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.Arch as PA
 import qualified Pate.ExprMappable as PEM
 import           What4.ExprHelpers
+import qualified What4.PathCondition as WPC
 
 -- | Generate a structured counterexample for an equivalence
 -- check from an SMT model.
@@ -122,7 +123,7 @@ getGenPathCondition sym (PT.SymGroundEvalFn fn) e = do
     f :: forall tp'. W4.SymExpr sym tp' -> W4.Pred sym -> IO (W4.Pred sym)
     f e' cond = do
       stripped <- stripAsserts sym cache e'
-      cond' <- getPathCondition sym fn stripped
+      cond' <- WPC.getPathCondition sym fn stripped
       W4.andPred sym cond cond'
   
   PEM.foldExpr sym f e (W4.truePred sym)

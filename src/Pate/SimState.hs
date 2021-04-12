@@ -55,7 +55,6 @@ module Pate.SimState
   -- assumption frames
   , AssumptionFrame(..)
   , isAssumedPred
-  , singletonExpr
   , exprBinding
   , macawRegBinding
   , frameAssume
@@ -91,6 +90,7 @@ import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
 import           What4.ExprHelpers
+import qualified Data.Parameterized.SetF as SetF
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -168,7 +168,7 @@ exprBinding ::
   AssumptionFrame sym
 exprBinding eSrc eTgt = case testEquality eSrc eTgt of
   Just Refl -> mempty
-  _ -> mempty { asmBinds = (MapF.singleton eSrc (singletonExpr @sym eTgt)) }
+  _ -> mempty { asmBinds = (MapF.singleton eSrc (SetF.singleton eTgt)) }
 
 macawRegBinding ::
   W4.IsSymExprBuilder sym =>
@@ -197,7 +197,7 @@ frameAssume ::
   W4.IsSymExprBuilder sym =>
   W4.Pred sym ->
   AssumptionFrame sym
-frameAssume p = AssumptionFrame (singletonExpr @sym p) MapF.empty
+frameAssume p = AssumptionFrame (SetF.singleton p) MapF.empty
 
 getUniqueBinding ::
   forall sym tp.
@@ -208,8 +208,8 @@ getUniqueBinding ::
   Maybe (W4.SymExpr sym tp)
 getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
   Just es
-    | exprSetSize @sym es == 1
-    , [e'] <- exprSetToList @sym es -> Just e'
+    | SetF.size es == 1
+    , [e'] <- SetF.toList es -> Just e'
   _ -> case W4.exprType e of
     W4.BaseBoolRepr | isAssumedPred asm e -> Just $ W4.truePred sym
     _ -> Nothing
@@ -224,11 +224,11 @@ getAssumedPred ::
   IO (W4.Pred sym)
 getAssumedPred sym asm = do
   bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
-  let predList = exprSetToList @sym $ (asmPreds asm) <> (listToExprSet @sym bindsAsm)
+  let predList = SetF.toList $ (asmPreds asm) <> (SetF.fromList bindsAsm)
   allPreds sym predList
   where
     assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> IO [W4.Pred sym]
-    assumeBinds (MapF.Pair eSrc eTgts) = forM (exprSetToList @sym eTgts) $ \eTgt ->
+    assumeBinds (MapF.Pair eSrc eTgts) = forM (SetF.toList eTgts) $ \eTgt ->
       W4.isEq sym eSrc eTgt
 
 isAssumedPred ::
@@ -237,7 +237,7 @@ isAssumedPred ::
   AssumptionFrame sym ->
   W4.Pred sym ->
   Bool
-isAssumedPred frame asm = inExprSet @sym asm (asmPreds frame)
+isAssumedPred frame asm = SetF.member asm (asmPreds frame)
 
 rebindExpr ::
   forall sym t st fs ctx tp.
@@ -253,7 +253,7 @@ rebindExpr sym bindings expr =
                             , asmBinds = TFC.foldrFC addSingletonBinding MapF.empty bindings
                             }
     addSingletonBinding varBinding =
-      MapF.insert (bindVar varBinding) (singletonExpr @sym (bindVal varBinding))
+      MapF.insert (bindVar varBinding) (SetF.singleton (bindVal varBinding))
 
 -- | Explicitly rebind any known sub-expressions that are in the frame.
 rebindWithFrame ::

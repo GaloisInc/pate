@@ -39,7 +39,6 @@ module Pate.Proof.Operations
   ) where
 
 import qualified Control.Monad.Reader as CMR
-import qualified Control.Monad.State as CMS
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 
