@@ -103,7 +103,6 @@ instance
     return $ asn' Ctx.:> x'
 
 
-
 instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
   mapExpr _sym f e = f e
   foldExpr _sym f e b = f e b

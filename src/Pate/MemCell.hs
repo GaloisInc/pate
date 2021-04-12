@@ -10,6 +10,7 @@
 
 module Pate.MemCell (
     MemCell(..)
+  , setMemCellRegion
   , MemCells(..)
   , mapCellPreds
   , mergeMemCells
@@ -195,6 +196,13 @@ inMemCells sym cell (MemCells cells) =
           go p' cells'
     go p [] = return p
 
+setMemCellRegion ::
+  WI.SymNat sym ->
+  MemCell sym arch w ->
+  MemCell sym arch w
+setMemCellRegion n cell@(MemCell{}) =
+  let CLM.LLVMPointer _ off = cellPtr cell
+  in cell { cellPtr = CLM.LLVMPointer n off }
 
 readMemCell ::
   WI.IsSymExprBuilder sym =>

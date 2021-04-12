@@ -97,7 +97,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
 import           What4.ExprHelpers
 import qualified Data.Parameterized.SetF as SetF
-
+import           Data.Parameterized.SetF (SetF)
 ------------------------------------
 -- Crucible inputs and outputs
 
@@ -275,11 +275,11 @@ rebindWithFrame sym asm e = do
 
 newtype VarBinds sym = VarBinds (MapF.MapF (W4.SymExpr sym) (SetF (W4.BoundVar sym)))
 
-instance OrdF (W4.SymExpr sym) => Semigroup (VarBinds sym) where
+instance (OrdF (W4.BoundVar sym), OrdF (W4.SymExpr sym)) => Semigroup (VarBinds sym) where
   (VarBinds v1) <> (VarBinds v2) = VarBinds $
     MapF.mergeWithKey (\_ bvs1 bvs2 -> Just (bvs1 <> bvs2)) id id v1 v2
 
-instance OrdF (W4.SymExpr sym) => Monoid (VarBinds sym) where
+instance (OrdF (W4.BoundVar sym), OrdF (W4.SymExpr sym)) => Monoid (VarBinds sym) where
   mempty = VarBinds MapF.empty
 
 toAssignmentPair ::
@@ -297,7 +297,7 @@ flattenVarBinds ::
 flattenVarBinds (VarBinds binds) = concat $ map go (MapF.toList binds)
   where
     go :: Pair (W4.SymExpr sym) (SetF (W4.BoundVar sym)) -> [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
-    go (Pair e bvs) = map (\bv -> Pair bv e) $ setFToList bvs
+    go (Pair e bvs) = map (\bv -> Pair bv e) $ SetF.toList bvs
 
 toBindings ::
   forall sym t solver fs.
@@ -320,7 +320,7 @@ rebindWithFrame' sym cache asm e_outer = do
     go e = idxCacheEvalWriter cache e $ case getUniqueBinding sym asm e of
       Just e' -> do
         bv <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType e')
-        CMW.tell $ VarBinds $ MapF.singleton e' (setFSingleton bv)
+        CMW.tell $ VarBinds $ MapF.singleton e' (SetF.singleton bv)
         return $ W4.varExpr sym bv
       Nothing -> case e of
         W4B.AppExpr a0 -> do
