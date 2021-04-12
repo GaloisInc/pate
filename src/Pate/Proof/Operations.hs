@@ -70,6 +70,10 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 import qualified Pate.Parallel as Par
 import qualified Pate.Arch as PA
+import qualified What4.ExprHelpers as WEH
+import qualified What4.Expr.Builder as W4B
+
+import qualified Prettyprinter as PP
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
