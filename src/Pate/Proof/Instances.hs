@@ -293,8 +293,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PT.ValidSym sym) => PP.Pretty (
    PF.Unverified -> "Not verified"
    PF.VerificationSkipped -> "Skipped (assumed)"
    PF.VerificationSuccess -> "Succeeded"
-   PF.VerificationFail result -> PP.vsep [ "Failed:", PP.pretty result, "Equivalence Condition:", PP.pretty (showF (PF.prfCondition prf)) ]
-
+   PF.VerificationFail (result, cond) -> PP.vsep [ "Failed:", PP.pretty result, "Equivalence Condition:", PP.pretty (showF cond) ]
 
 
 collapseRegState ::

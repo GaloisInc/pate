@@ -176,6 +176,7 @@ class IsBoolLike prf m where
   proofPredEq :: ProofPredicate prf -> ProofPredicate prf -> m (ProofPredicate prf)
   proofPredTrue :: m (ProofPredicate prf)
   proofPredFalse :: m (ProofPredicate prf)
+  proofPredAssertEqual :: ProofPredicate prf -> ProofPredicate prf  -> m ()
 
 data ProofNodeType =
     ProofTripleType
@@ -266,8 +267,7 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
   -- (i.e. conditional equivalence).
   -- In the case of inequality, the predicate simply false
   ProofStatus ::
-    { prfStatus :: VerificationStatus (ProofCounterExample prf)
-    , prfCondition :: ProofPredicate prf
+    { prfStatus :: VerificationStatus (ProofCounterExample prf, ProofPredicate prf)
     } -> ProofApp prf node ProofStatusType
 
   -- | Equivalence condition in the case that exact equivalence can't be proven.
@@ -326,9 +326,8 @@ traverseProofApp f = \case
     <*> f a3
     <*> f a4
     
-  ProofStatus a1 a2 -> ProofStatus
+  ProofStatus a1 -> ProofStatus
     <$> pure a1
-    <*> pure a2
   ProofDomain a1 a2 a3 a4 -> ProofDomain
     <$> pure a1
     <*> pure a2
@@ -400,9 +399,8 @@ transformProofApp f app = prfConstraint f $ case app of
     <*> pure a3
     <*> pure a4
     
-  ProofStatus a1 a2 -> ProofStatus
-    <$> pure a1
-    <*> prfPredTrans f a2
+  ProofStatus a1 -> ProofStatus
+    <$> traverse (\(x, cond) -> (,) <$> pure x <*> prfPredTrans f cond) a1
   ProofDomain a1 a2 a3 a4 -> ProofDomain
     <$> MM.traverseRegsWith (\_ (Const v) -> Const <$> prfPredTrans f v) a1
     <*> transformMemDomain f a2
@@ -579,11 +577,9 @@ mergeMemDomains mem1 mem2 = do
     return
     (prfMemoryDomain mem1)
     (prfMemoryDomain mem2)
-  -- it is not meaningful to combine polarities, but it's unclear what to do here if
-  -- they disagree
-  pol <- proofPredAnd @prf (prfMemoryDomainPolarity mem1) (prfMemoryDomainPolarity mem2)
-  return $ ProofMemoryDomain dom pol
-      
+  proofPredAssertEqual @prf (prfMemoryDomainPolarity mem1) (prfMemoryDomainPolarity mem2)
+  return $ ProofMemoryDomain dom (prfMemoryDomainPolarity mem1)
+
 type family ProofScope prf :: DK.Type
 
 -- | A nonce representing an indirect reference to a proof node.

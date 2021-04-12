@@ -702,7 +702,7 @@ trivialBlockSlice bundle postcondSpec = withSym $ \sym -> do
     preUniv <- universalDomain
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle preUniv
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    status <- PFO.lazyProofApp $ PF.ProofStatus PF.VerificationSkipped (W4.truePred sym)
+    status <- PFO.lazyProofApp $ PF.ProofStatus PF.VerificationSkipped
     triple <- PFO.lazyProofApp $ PF.ProofTriple (simPair bundle) preDomain postDomain status
     let prf = PF.ProofBlockSlice triple [] Nothing Nothing transition
     return (preUniv, prf)
@@ -907,8 +907,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                checkAndMinimizeEqCondition cond' postcondPred
              False -> return $ W4.falsePred sym
          _ -> return $ W4.truePred sym
-       return $ PF.ProofStatus status cond
-           
+       return $ PF.ProofStatus (fmap (\ir -> (ir, cond)) status)
+
   triple <- PFO.lazyProofEvent_ (simPair bundle) $
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
@@ -1615,14 +1615,15 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
        
         ir <- PFG.getInequivalenceResult InvalidCallPair preDomain' noDomain blockSlice fn
         emit $ PE.BranchesIncomplete ir
-        return $ PF.VerificationFail ir
+        -- no conditional equivalence case
+        return $ PF.VerificationFail (ir, W4.falsePred sym)
       W4R.Unsat _ -> do
         emit PE.BranchesComplete
         return PF.VerificationSuccess
       W4R.Unknown -> do
         emit PE.InconclusiveBranches
         return PF.Unverified
-    return $ PF.ProofStatus status (W4.truePred sym)
+    return $ PF.ProofStatus status
   where
     -- | a branch case is assuming the pre-domain predicate, that the branch condition holds
     getCase :: (W4.Pred sym, BranchCase sym arch) -> EquivM sym arch (W4.Pred sym)

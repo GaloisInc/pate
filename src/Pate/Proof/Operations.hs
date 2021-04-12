@@ -161,7 +161,7 @@ blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PT.Block
 blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF.unApp prf))
 
 -- | Compute an aggregate verification condition: preferring an inequivalence result
--- if it exists, but potentiaally yielding an 'PF.Unverified' result.
+-- if it exists, but potentially yielding an 'PF.Unverified' result.
 proofResult ::
   forall sym arch tp.
   PFI.ProofSymExpr sym arch tp ->
@@ -184,7 +184,7 @@ proofResult e = foldr merge PF.VerificationSuccess statuses
     statuses = PF.collectProofExpr go e
 
     go :: PFI.ProofSymExpr sym arch tp' -> [PF.VerificationStatus (PFI.InequivalenceResult arch)]
-    go (PF.ProofExpr (PF.ProofStatus st _)) = [st]
+    go (PF.ProofExpr (PF.ProofStatus st)) = [fmap fst st]
     go _ = []
     
 

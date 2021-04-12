@@ -550,6 +550,7 @@ data InnerEquivalenceError arch
   | MissingTOCEntry (MM.ArchSegmentOff arch)
   | BlockEndClassificationFailure
   | InvalidCallTarget (ConcreteAddress arch)
+  | IncompatibleDomainPolarities
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch where

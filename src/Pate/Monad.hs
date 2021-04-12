@@ -672,3 +672,6 @@ instance PF.IsBoolLike (PFI.ProofSym sym arch) (EquivM_ sym arch) where
   proofPredEq p1 p2 = withValid $ withSymIO $ \sym -> W4.isEq sym p1 p2
   proofPredTrue = withValid $ withSym $ \sym -> return $ W4.truePred sym
   proofPredFalse = withValid $ withSym $ \sym -> return $ W4.falsePred sym
+  proofPredAssertEqual p1 p2 = withValid $ case p1 == p2 of
+    True -> return ()
+    False -> throwHere $ IncompatibleDomainPolarities
