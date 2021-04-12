@@ -52,7 +52,7 @@ jobs:
         restore-keys: |
           cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles(format('cabal.GHC-{0}.config', matrix.ghc)) }}-
 
-    - name: Deps
+    - name: System Dependencies
       run: |
         sudo apt update
         sudo apt install -y software-properties-common apt-transport-https ca-certificates wget
@@ -62,11 +62,18 @@ jobs:
         sudo locale-gen en_US.UTF-8
         sudo pip3 install toml
 
-    - name: Build
+    - name: Setup Cabal Configuration
       run: |
         cp cabal.project.dist cabal.project
-        cabal v2-configure pkg:pate --write-ghc-environment-files=always --enable-tests -j1
-        cabal v2-build pkg:pate
+        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j4
+
+    - name: Build dependencies
+      run: |
+        cabal build --only-dependencies
+
+    - name: Build
+      run: |
+        cabal build pkg:pate
 
     - name: Install Solvers
       run: .github/ci.sh install_system_deps
@@ -79,7 +86,7 @@ jobs:
     - name: Test
       if: runner.os == 'Linux'
       run: |
-        cabal v2-test pkg:pate
+        cabal test pkg:pate
 
     - name: Docs
       run: cabal haddock pkg:pate
