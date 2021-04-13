@@ -510,8 +510,23 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , ppRegs post (PF.slRegState $ PF.slBlockPostState bs)
   , "Final memory state:"
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
-  , "Block Return Address:" <+> PT.ppPatchPairCEq (\v -> ppMaybe v (PP.pretty . ppLLVMPointer)) (fmap grndBlockReturn $ PF.slBlockExitCase bs)
+  , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
+  , case fmap grndBlockReturn $ PF.slBlockExitCase bs of
+      PT.PatchPairC (Just cont1) (Just cont2) ->
+        "Function Continue Address:" <+> PT.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PT.PatchPairC cont1 cont2)
+      _ -> PP.emptyDoc
   ]
+
+ppIPs ::
+  PA.ValidArch arch =>
+  PF.BlockSliceState (ProofGround arch) ->
+  PP.Doc a
+ppIPs st  =
+  let
+    pcRegs = (PF.slRegState st) ^. MM.curIP
+  in case PF.slRegOpEquiv pcRegs of
+    True -> PP.pretty $ PT.pcOriginal (PF.slRegOpValues pcRegs)
+    False -> PT.ppPatchPairC PP.pretty (PF.slRegOpValues pcRegs)
 
 ppMemCellMap ::
   PA.ValidArch arch =>
