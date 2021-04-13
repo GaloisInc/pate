@@ -15,12 +15,16 @@ module Pate.ExprMappable (
   ExprMappable(..)
   ) where
 
+import qualified Data.IORef as IO
+
+import           Data.Functor.Const
 import qualified Data.Parameterized.Context as Ctx
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as WI
 import qualified What4.Partial as WP
+import qualified What4.Expr.Builder as W4B
 
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Parallel as Par
@@ -37,7 +41,24 @@ class ExprMappable sym f where
     f ->
     IO f
   mapExpr _ _ = pure
-
+  foldExpr ::
+    WI.IsSymExprBuilder sym =>
+    sym ->
+    (forall tp. WI.SymExpr sym tp -> b -> IO b) ->
+    f ->
+    b ->
+    IO b    
+  foldExpr sym f e b = do
+    ref <- IO.newIORef b
+    let
+      f' :: forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)
+      f' e' = do
+          b' <- IO.readIORef ref
+          b'' <- f e' b'
+          IO.writeIORef ref b''
+          return e'
+    _ <- mapExpr sym f' e
+    IO.readIORef ref
 instance (ExprMappable sym a, ExprMappable sym b) => ExprMappable sym (a, b) where
   mapExpr sym f (a, b) = (,) <$> mapExpr sym f a <*> mapExpr sym f b
 
@@ -58,9 +79,17 @@ instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue
 
 instance ExprMappable sym f => ExprMappable sym (Par.Future f) where
   mapExpr sym f future = Par.forFuture future (mapExpr sym f)
+  -- | Folding on a "future" requires joining it first
+  foldExpr sym f future b = do
+    result <- Par.joinFuture future
+    foldExpr sym f result b
 
 instance ExprMappable sym (f (a tp)) => ExprMappable sym (Par.ConstF f a tp) where
   mapExpr sym f (Par.ConstF a) = Par.ConstF <$> mapExpr sym f a
+
+instance ExprMappable sym f => ExprMappable sym ((Const f) tp)  where
+  mapExpr sym f (Const e) = Const <$> mapExpr sym f e
+  foldExpr sym f (Const e) b = foldExpr sym f e b
 
 instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
   mapExpr _ _ = return
@@ -72,3 +101,9 @@ instance
     asn' <- mapExpr sym f asn
     x' <- mapExpr sym f x
     return $ asn' Ctx.:> x'
+
+
+
+instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
+  mapExpr _sym f e = f e
+  foldExpr _sym f e b = f e b

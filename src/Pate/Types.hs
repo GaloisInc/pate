@@ -30,10 +30,12 @@ module Pate.Types
   , PatchPairEq(..)
   , ppPatchPair
   , PatchPairC(..)
+  , toPatchPairC
   , mergePatchPairCs
   , ppPatchPairCEq
   , ppPatchPairEq
   , ppPatchPairC
+  , zipMPatchPairC
   , BlockPair
   , ConcreteBlock(..)
   , equivBlocks
@@ -160,11 +162,17 @@ data PatchPair (tp :: WhichBinary -> DK.Type) = PatchPair
 class PatchPairEq tp where
   ppEq :: tp Original -> tp Patched -> Bool
 
+
 data PatchPairC tp = PatchPairC
   { pcOriginal :: tp
   , pcPatched :: tp
   }
   deriving (Eq, Ord, Functor, Foldable, Traversable)
+
+toPatchPairC ::
+  PatchPair (Const f) ->
+  PatchPairC f
+toPatchPairC (PatchPair (Const v1) (Const v2)) = PatchPairC v1 v2
 
 mergePatchPairCs ::
   PatchPairC a ->
@@ -172,6 +180,15 @@ mergePatchPairCs ::
   PatchPairC (a, b)
 mergePatchPairCs (PatchPairC o1 p1) (PatchPairC o2 p2) = PatchPairC (o1, o2) (p1, p2)
 
+zipMPatchPairC ::
+  Applicative m =>
+  PatchPairC a ->
+  PatchPairC b ->
+  (a -> b -> m c) ->
+  m (PatchPairC c)
+zipMPatchPairC (PatchPairC a1 a2) (PatchPairC b1 b2) f = PatchPairC
+  <$> f a1 b1
+  <*> f a2 b2
 
 instance TestEquality tp => Eq (PatchPair tp) where
   PatchPair o1 p1 == PatchPair o2 p2
@@ -533,6 +550,7 @@ data InnerEquivalenceError arch
   | MissingTOCEntry (MM.ArchSegmentOff arch)
   | BlockEndClassificationFailure
   | InvalidCallTarget (ConcreteAddress arch)
+  | IncompatibleDomainPolarities
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch where

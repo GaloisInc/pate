@@ -25,6 +25,7 @@ Helper functions for manipulating What4 expressions
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module What4.ExprHelpers (
     iteM
@@ -37,6 +38,7 @@ module What4.ExprHelpers (
   , mapExprPtr
   , freshPtr
   , freshPtrBytes
+  , stripAsserts
   , mkSafeAsserts
   , ExprFilter(..)
   , getIsBoundFilter
@@ -44,14 +46,22 @@ module What4.ExprHelpers (
   , BoundVarBinding(..)
   , groundToConcrete
   , fixMux
+  , ExprSet
+  , getPredAtoms
+  , abstractOver
+  , resolveConcreteLookups
+  , minimalPredAtoms
   ) where
 
 import           GHC.TypeNats
 import           Unsafe.Coerce -- for mulMono axiom
+import           GHC.Stack ( HasCallStack )
 
+import           Control.Applicative
 import           Control.Monad.Except
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
+import qualified Control.Monad.State as CMS
 
 import qualified Data.HashTable.ST.Basic as H
 import qualified Data.Text as T
@@ -62,6 +72,7 @@ import           Data.List ( foldl' )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
+import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
 
@@ -73,6 +84,10 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Concrete as W4C
 import qualified What4.Symbol as W4
+import qualified What4.SemiRing as SR
+
+import           Data.Parameterized.SetF (SetF)
+import qualified Data.Parameterized.SetF as SetF 
 
 iteM ::
   W4.IsExprBuilder sym =>
@@ -340,6 +355,7 @@ type GroundM t a = ExceptT (W4B.Expr t W4.BaseBoolType) IO a
 -- doesn't encounter uninterpreted functions.
 stripAsserts ::
   forall sym t solver fs tp.
+  HasCallStack =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4B.IdxCache t (W4B.Expr t) ->
@@ -348,48 +364,51 @@ stripAsserts ::
 stripAsserts sym cache e_outer = do
   let
     go :: forall tp'. W4B.Expr t tp' -> GroundM t (W4B.Expr t tp')
-    go e = W4B.idxCacheEval cache e $ case e of
-      _
-        | Just (W4B.FnApp efn args) <- W4B.asNonceApp e
-        , isAssert (W4B.symFnName efn)
-        , W4B.UninterpFnInfo argtps _ <- W4B.symFnInfo efn
-        , Ctx.Empty Ctx.:> _ Ctx.:> cond <- args
-        , Ctx.Empty Ctx.:> _ Ctx.:> W4.BaseBoolRepr <- argtps
-        -> throwError cond
-      W4B.AppExpr a0
-        | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
-        -> do
-            cond' <- go cond
-            notcond <- lift $ W4.notPred sym cond
-            eT' <- lift $ runExceptT $ go eT
-            eF' <- lift $ runExceptT $ go eF
-            case (eT', eF') of
-              -- FIXME: It'd be better to key this more precisely
-              (Left condT, Right eF'') ->
-                (W4.asConstantPred <$> (lift $ W4.isEq sym condT notcond)) >>= \case
-                  Just True -> return eF''
-                  _ -> throwError condT
-              (Right eT'', Left condF) -> do          
-                (W4.asConstantPred <$> (lift $ W4.isEq sym condF cond)) >>= \case
-                  Just True -> return eT''
-                  _ -> throwError condF
-              (Right eT'', Right eF'') ->
-                if cond' == cond && eT'' == eT && eF'' == eF then return e
-                else lift $ W4.baseTypeIte sym cond' eT'' eF''
-              (Left condT, Left _) -> throwError condT
-      W4B.AppExpr a0 -> do
-        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-        if (W4B.appExprApp a0) == a0' then return e
-        else lift $ W4B.sbMakeExpr sym a0'
-      W4B.NonceAppExpr a0 -> do
-        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-        if (W4B.nonceExprApp a0) == a0' then return e
-        else lift $ W4B.sbNonceExpr sym a0'
-      _ -> return e
+    go e = W4B.idxCacheEval cache e $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      case e of
+        _
+          | Just (W4B.FnApp efn args) <- W4B.asNonceApp e
+          , isAssert (W4B.symFnName efn)
+          , W4B.UninterpFnInfo argtps _ <- W4B.symFnInfo efn
+          , Ctx.Empty Ctx.:> _ Ctx.:> cond <- args
+          , Ctx.Empty Ctx.:> _ Ctx.:> W4.BaseBoolRepr <- argtps
+          -> throwError cond
+        W4B.AppExpr a0
+          | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+          -> do
+              cond' <- go cond
+              notcond <- lift $ W4.notPred sym cond
+              eT' <- lift $ runExceptT $ go eT
+              eF' <- lift $ runExceptT $ go eF
+              case (eT', eF') of
+                -- FIXME: It'd be better to key this more precisely
+                (Left condT, Right eF'') ->
+                  (W4.asConstantPred <$> (lift $ W4.isEq sym condT notcond)) >>= \case
+                    Just True -> return eF''
+                    _ -> throwError condT
+                (Right eT'', Left condF) -> do          
+                  (W4.asConstantPred <$> (lift $ W4.isEq sym condF cond)) >>= \case
+                    Just True -> return eT''
+                    _ -> throwError condF
+                (Right eT'', Right eF'') ->
+                  if cond' == cond && eT'' == eT && eF'' == eF then return e
+                  else lift $ W4.baseTypeIte sym cond' eT'' eF''
+                (Left condT, Left _) -> throwError condT
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else lift $ W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else lift $ W4B.sbNonceExpr sym a0'
+        _ -> return e
   (runExceptT $ go e_outer) >>= \case
     Left _ -> fail "stripAsserts: assertion not guarded by a corresponding mux"
     Right x -> return x
 
+  
 
 -- | Peel off any "assert" uninterpreted functions while evaluating to a ground
 -- value
@@ -402,3 +421,239 @@ mkSafeAsserts ::
 mkSafeAsserts sym (W4G.GroundEvalFn fn) = do
   cache <- W4B.newIdxCache
   return $ W4G.GroundEvalFn (\e -> stripAsserts sym cache e >>= fn)
+
+type ExprSet sym = SetF (W4.SymExpr sym)
+
+type PredSet sym = ExprSet sym W4.BaseBoolType
+
+-- | Get the atomic predicates which appear anywhere in the given predicate.
+-- TODO: does not consider all possible predicate constructors.
+getPredAtoms ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.Pred sym ->
+  IO (PredSet sym)
+getPredAtoms sym e_outer = do
+  cache <- W4B.newIdxCache
+  let    
+    muxes ::
+      forall tp1.
+      W4.SymExpr sym tp1 ->
+      (W4.SymExpr sym tp1 -> IO (PredSet sym)) ->
+      IO (PredSet sym)
+    muxes e f = case W4B.asApp e of
+      Just (W4B.BaseIte _ _ cond eT eF) -> do
+        condAtoms <- go cond
+        eTAtoms <- muxes eT f 
+        eFAtoms <- muxes eF f
+        return $ condAtoms <> eTAtoms <> eFAtoms
+      _ -> f e
+
+    muxes2 ::
+      forall tp1 tp2.
+      W4.SymExpr sym tp1 ->
+      W4.SymExpr sym tp2 ->
+      (W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (PredSet sym)) ->
+      IO (PredSet sym)
+    muxes2 e1 e2 f = muxes e1 (\e1' -> muxes e2 (f e1'))
+
+    liftPred ::
+      forall tp1 tp2.
+      (sym -> W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (W4.Pred sym)) ->
+      (W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (PredSet sym))
+    liftPred f e1 e2 = SetF.singleton <$> f sym e1 e2
+      
+    binOp ::
+      forall tp1 tp2.
+      (W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> IO (PredSet sym)) ->
+      W4.SymExpr sym tp1 ->
+      W4.SymExpr sym tp2 ->
+      IO (PredSet sym)
+    binOp f e1 e2 = muxes2 e1 e2 $ \e1' e2' -> do
+      e1Atoms <- go e1'
+      e2Atoms <- go e2'
+      leafAtoms <- f e1' e2'
+      return $ leafAtoms <> e1Atoms <> e2Atoms
+
+    unOp ::
+      forall tp1.
+      (W4.SymExpr sym tp1 -> IO (PredSet sym)) ->
+      W4.SymExpr sym tp1 ->
+      IO (PredSet sym)
+    unOp f e1 = muxes e1 $ \e1' -> do
+      e1Atoms <- go e1'
+      leafAtoms <- f e1'
+      return $ e1Atoms <> leafAtoms
+  
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (PredSet sym)
+    go p_inner = muxes p_inner $ \p -> fmap getConst $ W4B.idxCacheEval cache p $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc p)
+      case p of
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+           W4B.BaseEq _ e1 e2 -> Const <$> binOp (liftPred W4.isEq) e1 e2 
+           W4B.BVUlt e1 e2 -> Const <$> binOp (liftPred W4.bvUlt) e1 e2 
+           W4B.BVSlt e1 e2 -> Const <$> binOp (liftPred W4.bvSlt) e1 e2
+           W4B.SemiRingLe SR.OrderedSemiRingIntegerRepr e1 e2 -> Const <$> binOp (liftPred W4.intLe) e1 e2
+           W4B.SemiRingLe SR.OrderedSemiRingRealRepr e1 e2 -> Const <$> binOp (liftPred W4.realLe) e1 e2
+           W4B.BVTestBit n e -> Const <$> unOp (\e' -> SetF.singleton <$> W4.testBitBV sym n e') e
+           _ -> TFC.foldrMFC acc mempty (W4B.appExprApp a0)
+        W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
+        _ -> return $ mempty
+
+    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (PredSet sym) tp2 -> IO (Const (PredSet sym) tp2)
+    acc p (Const exprs) = do
+      exprs' <- go p
+      return $ Const $ exprs <> exprs'
+
+  go e_outer
+
+
+-- | Lambda abstraction: given a term @a@ and a term @e@ which contains @a@,
+-- generate a function @f(x) = e[a/x]@.
+abstractOver ::
+  forall sym t solver fs tp1 tp2.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  -- | subterm
+  W4.SymExpr sym tp1 ->
+  -- | outer term
+  W4.SymExpr sym tp2 ->
+  IO (W4.SymFn sym (Ctx.EmptyCtx Ctx.::> tp1) tp2)
+abstractOver sym sub outer = do
+  sub_bv <- W4.freshBoundVar sym W4.emptySymbol (W4.exprType sub)
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
+    go e
+      | Just Refl <- testEquality (W4.exprType e) (W4.exprType sub), e == sub
+         = return $ W4.varExpr sym sub_bv
+    go e = W4B.idxCacheEval cache e $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      case e of
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else W4B.sbNonceExpr sym a0'
+        _ -> return e
+  outer_abs <- go outer
+  W4.definedFn sym W4.emptySymbol (Ctx.empty Ctx.:> sub_bv) outer_abs W4.AlwaysUnfold
+
+-- | Resolve array lookups across array updates which are known to not alias.
+-- i.e. @select (update arr A V) B --> select arr B@ given that @f(A, B) = Just False@ (i.e.
+-- they are statically known to be inequivalent according to the given testing function)
+resolveConcreteLookups ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  (forall tp'. W4.SymExpr sym tp' -> W4.SymExpr sym tp' -> m (Maybe Bool)) ->
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+resolveConcreteLookups sym f e_outer = do
+  cache <- W4B.newIdxCache
+  let
+    andPred ::
+      forall (tp' :: W4.BaseType).
+      Const (Maybe Bool) tp' ->
+      Maybe Bool ->
+      Maybe Bool
+    andPred (Const p) (Just b) = case p of
+      Just b' -> Just (b && b')
+      Nothing -> Nothing
+    andPred _ Nothing = Nothing
+    
+    resolveArr ::
+      forall idx idx1 idx2 tp'.
+      idx ~ (idx1 Ctx.::> idx2) =>
+      W4.SymExpr sym (W4.BaseArrayType idx tp') ->
+      Ctx.Assignment (W4.SymExpr sym) idx ->
+      m (W4.SymExpr sym tp')
+    resolveArr arr_base idx_base = do
+      arr <- go arr_base
+      idx <- TFC.traverseFC go idx_base
+      val <- liftIO $ W4.arrayLookup sym arr idx
+      case arr of
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+          W4B.UpdateArray _ _ arr' idx' upd_val -> do
+            eqIdx <- Ctx.zipWithM (\e1 e2 -> Const <$> f e1 e2) idx idx'
+            case TFC.foldrFC andPred (Just True) eqIdx of
+              Just True -> return $ upd_val
+              Just False -> resolveArr arr' idx
+              _ -> return val
+          W4B.SelectArray _ arr' idx' -> do
+            arr'' <- resolveArr arr' idx'
+            case arr'' == arr of
+              True -> return val
+              False -> resolveArr arr'' idx
+          _ -> return val
+        _ -> return val
+    
+    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+    go e = W4B.idxCacheEval cache e $ do
+      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      case e of
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+          W4B.SelectArray _ arr idx -> resolveArr arr idx
+          app -> do
+            a0' <- W4B.traverseApp go app
+            if (W4B.appExprApp a0) == a0' then return e
+            else liftIO $ W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else liftIO $ W4B.sbNonceExpr sym a0'
+        _ -> return e
+  go e_outer
+
+
+
+-- | Simplify the given predicate by deciding which atoms are logically necessary
+-- according to the given provability function.
+--
+-- Starting with @p@, for each atom @a@ in @p@ and intermediate result @p'@, either:
+--   * if @p'[a/true] == p'[a/false]: return @p'[a/true]@
+--   * if @a@ is provable: return @p'[a/true]@
+--   * if @a@ is disprovable: return @p'[a/false]@
+--   * if @p' --> a@ is provable: return @a && p'[a/true]@
+--   * if @p' --> not(a)@ is provable: return @not(a) && p'[a/false]@
+--   * otherwise, return @p'@
+minimalPredAtoms ::
+  forall m sym t solver fs.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  -- | individual "atoms" of a predicate
+  PredSet sym ->
+  -- | decision for the provability of a predicate
+  (W4.Pred sym -> m Bool) ->
+  W4.Pred sym ->
+  m (W4.Pred sym)
+minimalPredAtoms sym atoms provable p = do
+  let
+    applyAtom :: W4.Pred sym -> W4.Pred sym -> m (W4.Pred sym)
+    applyAtom p' atom = do
+      notAtom <- liftIO $ W4.notPred sym atom
+      p_fn <- liftIO $ abstractOver sym atom p'
+      p_fn_true <- liftIO $ W4.applySymFn sym p_fn (Ctx.empty Ctx.:> W4.truePred sym)
+      p_fn_false <- liftIO $ W4.applySymFn sym p_fn (Ctx.empty Ctx.:> W4.falsePred sym)
+      indep <- liftIO $ W4.isEq sym p_fn_true p_fn_false
+
+      trueCase <- liftIO $ W4.orPred sym atom indep
+      implies_atom <- liftIO $ W4.impliesPred sym p' atom
+      implies_notAtom <- liftIO $ W4.impliesPred sym p' notAtom
+      
+      provable trueCase >>= \case
+        True -> return p_fn_true
+        False -> provable notAtom >>= \case
+          True -> return p_fn_false
+          False -> provable implies_atom >>= \case
+            True -> liftIO $ W4.andPred sym atom p_fn_true
+            False -> provable implies_notAtom >>= \case
+              True -> liftIO $ W4.andPred sym notAtom p_fn_false
+              False -> return p'
+  CMS.foldM applyAtom p (SetF.toList atoms)

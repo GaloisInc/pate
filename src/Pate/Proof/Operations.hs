@@ -35,6 +35,7 @@ module Pate.Proof.Operations
   , lazyProofEvent_
   , forkProofFinal
   , forkProofEvent
+  , flattenDomainConditions
   ) where
 
 import qualified Control.Monad.Reader as CMR
@@ -127,30 +128,62 @@ simBundleToSlice bundle = withSym $ \sym -> do
         , PF.slMemOpCond = cond
         }
 
+-- | Compute a single predicate representing the conjunction of all conditions
+-- in the domain. Conditions in negative polarity domains are negated.
+flattenDomainConditions ::
+  forall sym arch.
+  PF.ProofExpr (PFI.ProofSym sym arch) PF.ProofDomainType ->
+  EquivM sym arch (W4.Pred sym)
+flattenDomainConditions domApp = withSym $ \sym -> do
+  reg_cond <- MapF.foldrMWithKey (\_ (Const p) p' -> liftIO $ W4.andPred sym p p') (W4.truePred sym) (MM.regStateMap $ PF.prfDomainRegisters dom)
+  stack_cond <- MapF.foldrMWithKey (go stack_pol) reg_cond (PF.prfMemoryDomain $ PF.prfDomainStackMemory dom)
+  MapF.foldrMWithKey (go glob_pol) stack_cond (PF.prfMemoryDomain $ PF.prfDomainGlobalMemory dom)
+  where
+    dom = PF.unApp domApp
+    stack_pol = PF.prfMemoryDomainPolarity $ PF.prfDomainStackMemory dom
+    glob_pol = PF.prfMemoryDomainPolarity $ PF.prfDomainGlobalMemory dom
+    go ::
+      -- | polarity
+      W4.Pred sym ->
+      PMC.MemCell sym arch w ->
+      -- | condition
+      Const (W4.Pred sym) w ->
+      -- | accumulator
+      W4.Pred sym ->
+      EquivM sym arch (W4.Pred sym)
+    go pol _cell (Const p) acc = withSym $ \sym -> do
+      p' <- liftIO $ W4.isEq sym pol p
+      liftIO $ W4.andPred sym p' acc
+      
+
 blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PT.BlockPair arch
 blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF.unApp prf))
 
--- | Find an inequivalence result in the proof if it exists. A 'Nothing' result indicates
--- that the proof was successful.
+-- | Compute an aggregate verification condition: preferring an inequivalence result
+-- if it exists, but potentially yielding an 'PF.Unverified' result.
 proofResult ::
   forall sym arch tp.
   PFI.ProofSymExpr sym arch tp ->
-  Maybe (PFI.InequivalenceResult arch)
-proofResult e = foldr merge Nothing statuses
+  PF.VerificationStatus (PFI.InequivalenceResult arch)
+proofResult e = foldr merge PF.VerificationSuccess statuses
   where
     merge ::
       PF.VerificationStatus (PFI.InequivalenceResult arch) ->
-      Maybe (PFI.InequivalenceResult arch) ->
-      Maybe (PFI.InequivalenceResult arch)
-    merge (PF.VerificationFail ce) _ = Just ce
-    merge _ (Just ce) = Just ce
-    merge _ a = a
+      PF.VerificationStatus (PFI.InequivalenceResult arch) ->
+      PF.VerificationStatus (PFI.InequivalenceResult arch)
+    merge (PF.VerificationFail ce) _ = PF.VerificationFail ce
+    merge _ (PF.VerificationFail ce) = PF.VerificationFail ce
+    merge PF.Unverified _ = PF.Unverified
+    merge _ PF.Unverified = PF.Unverified
+    merge PF.VerificationSkipped a = a
+    merge a PF.VerificationSkipped = a
+    merge PF.VerificationSuccess PF.VerificationSuccess = PF.VerificationSuccess
     
     statuses :: [PF.VerificationStatus (PFI.InequivalenceResult arch)]
     statuses = PF.collectProofExpr go e
 
     go :: PFI.ProofSymExpr sym arch tp' -> [PF.VerificationStatus (PFI.InequivalenceResult arch)]
-    go (PF.ProofExpr (PF.ProofStatus st)) = [st]
+    go (PF.ProofExpr (PF.ProofStatus st)) = [fmap fst st]
     go _ = []
     
 
