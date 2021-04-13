@@ -941,7 +941,6 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
     go pathCond = withSym $ \sym -> do
       -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-      liftIO $ putStrLn "Disproving equivalence.."
       result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
           W4R.Unsat _ -> return Nothing
           -- this is safe, because the resulting condition is still checked later
