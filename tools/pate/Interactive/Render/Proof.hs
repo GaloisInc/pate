@@ -32,6 +32,7 @@ import qualified What4.Interface as WI
 
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
+import qualified Pate.Panic as Panic
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
@@ -49,21 +50,41 @@ ppStatus st =
     PPr.VerificationSuccess -> PP.pretty "Success"
     PPr.VerificationFail {} -> PP.pretty "Fail"
 
-ppAppTag :: PPr.ProofApp prf node tp -> PP.Doc ann
-ppAppTag app =
+ppAppTag
+  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  -> PPr.ProofNonceExpr prf tp
+  -> PP.Doc ann
+ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
   case app of
     PPr.ProofBlockSlice {} -> PP.pretty "Slice"
     PPr.ProofFunctionCall {} -> PP.pretty "Call"
-    PPr.ProofTriple {} -> PP.pretty "Triple"
+    PPr.ProofTriple {}
+      | Just (IS.ProofTreeNode _blocks parentExpr _) <- MapF.lookup parentNonce proofTreeNodes ->
+        case PPr.prfNonceBody parentExpr of
+          PPr.ProofBlockSlice summaryTriple callNodes mRetTriple mUnknownTriple transition
+            | Just PC.Refl <- PC.testEquality (PPr.prfNonce summaryTriple) thisNonce -> PP.pretty "Triple(SliceSummary)"
+            | Just sliceReturnTriple <- mRetTriple
+            , Just PC.Refl <- PC.testEquality (PPr.prfNonce sliceReturnTriple) thisNonce -> PP.pretty "Triple"
+            | Just unknownTriple <- mUnknownTriple
+            , Just PC.Refl <- PC.testEquality (PPr.prfNonce unknownTriple) thisNonce -> PP.pretty "Triple(Unknown)"
+            | otherwise -> Panic.panic Panic.Visualizer "ppAppTag" ["Invalid parent connection to a ProofBlockSlice for a ProofTriple: " ++ show thisNonce]
+          PPr.ProofFunctionCall funcPre _callBody _continuation
+            | Just PC.Refl <- PC.testEquality (PPr.prfNonce funcPre) thisNonce -> PP.pretty "Triple(FunctionPredomain)"
+            | otherwise -> Panic.panic Panic.Visualizer "ppAppTag" ["Unexpected parent for a ProofTriple: " ++ show (thisNonce, parentNonce)]
+          PPr.ProofTriple {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofTriple is not a possible parent component for a ProofTriple"]
+          PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
+          PPr.ProofDomain {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofDomain is not a possible parent component for a ProofTriple"]
+      | otherwise -> error ("Missing parent for node " ++ show thisNonce ++ "(" ++ show parentNonce ++ ")")
     PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus st)
     PPr.ProofDomain {} -> PP.pretty "Domain"
 
 nodeLabel
-  :: PE.BlocksPair arch
-  -> PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
+  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  -> PE.BlocksPair arch
+  -> PPr.ProofNonceExpr prf tp
   -> T.Text
-nodeLabel (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) app =
-  pp (mconcat [ ppAppTag app
+nodeLabel proofTreeNodes (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) expr =
+  pp (mconcat [ ppAppTag proofTreeNodes expr
               , PP.line
               , mconcat [ PP.pretty (PT.concreteAddress ob)
                         , PP.pretty "/"
@@ -80,16 +101,17 @@ nodeId = PPr.proofNonceValue
 -- 'Interactive' module, we set up some callbacks to allow users to ask for more
 -- information on individual nodes.
 blockNode
-  :: Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
+  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
   -> Some (IS.ProofTreeNode arch prf)
   -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
-blockNode m (Some (IS.ProofTreeNode blockPair (PPr.ProofNonceExpr thisNonce _parentNonce app) _tm)) =
+blockNode proofTreeNodes m (Some (IS.ProofTreeNode blockPair expr@(PPr.ProofNonceExpr thisNonce _parentNonce app) _tm)) =
   Map.insert (Some thisNonce) (JSON.Object node) m
   where
     node = HMS.fromList [ (T.pack "data", JSON.Object content) ]
     content = HMS.fromList [ (T.pack "id", JSON.Number (fromIntegral (nodeId thisNonce)))
-                           , (T.pack "text", JSON.String (pp (PP.pretty (nodeLabel blockPair app))))
-                           , (T.pack "nodeType", JSON.String (pp (ppAppTag app)))
+                           , (T.pack "text", JSON.String (pp (PP.pretty (nodeLabel proofTreeNodes blockPair expr))))
+                           , (T.pack "nodeType", JSON.String (pp (ppAppTag proofTreeNodes expr)))
                            ]
 
 blockEdges
@@ -127,10 +149,14 @@ generateRoot proofTree newRoots (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr _ 
                            , (T.pack "text", JSON.String (T.pack "Proof Root"))
                            ]
 
+-- | This is a foreign function call to the Javascript that initializes the graph rendering in the provided div
 initializeGraph :: FJ.JSObject -> String -> JSON.Value -> TP.JSFunction ()
 initializeGraph clickCallback divId graphData =
   TP.ffi "initializeGraphIn(%1, %2, proofGraphConfig(), %3)" clickCallback divId graphData
 
+-- | This returns two things: the UI element into which the proof display will
+-- be rendered and a JS function call that needs to be invoked to start
+-- rendering on the client side
 renderProof
   :: FJ.JSObject
   -> String
@@ -139,7 +165,7 @@ renderProof
 renderProof clickCallback divId (IS.ProofTree _sym proofTreeNodes _) =
   (TP.div # TP.set TP.id_ divId, TP.runFunction (initializeGraph clickCallback divId (JSON.Object graph)))
   where
-    nodes = F.foldl' blockNode Map.empty (MapF.elems proofTreeNodes)
+    nodes = F.foldl' (blockNode proofTreeNodes) Map.empty (MapF.elems proofTreeNodes)
     edges = F.foldl' blockEdges [] (MapF.elems proofTreeNodes)
     roots = F.foldl' (generateRoot proofTreeNodes) Map.empty (MapF.elems proofTreeNodes)
     graph = HMS.fromList [ (T.pack "nodes", JSON.Array (DV.fromList (Map.elems (nodes <> roots))))

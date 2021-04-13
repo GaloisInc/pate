@@ -35,13 +35,19 @@ var sliceGraphConfig = { style: sliceGraphNodeStyle,
 function proofNodeColor(nodeType) {
     switch(nodeType) {
     case 'Slice':
-        return 'blue';
+        return '#65c5eb';
     case 'Call':
         return 'orange';
     case 'Triple':
-        return 'gray';
+        return '#d4d9d5';
+    case 'Triple(FunctionPredomain)':
+        return '#d4d9d5';
+    case 'Triple(SliceSummary)':
+        return '#d4d9d5';
+    case 'Triple(Unknown)':
+        return 'red';
     case 'Status(Success)':
-        return 'green';
+        return '#94d498';
     case 'Status(Fail)':
         return 'red';
     case 'Status(Skipped)':
