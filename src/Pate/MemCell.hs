@@ -186,10 +186,10 @@ inMemCells sym cell (MemCells cells) =
 
 
 readMemCell ::
-  WI.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PMT.UndefinedPtrOps sym ->
+  PMT.UndefinedPtrOps sym (MC.ArchAddrWidth arch) ->
   PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   IO (CLM.LLVMPtr sym (8 WI.* w))
@@ -202,7 +202,7 @@ writeMemCell ::
   CB.IsSymInterface sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PMT.UndefinedPtrOps sym ->
+  PMT.UndefinedPtrOps sym (MC.ArchAddrWidth arch) ->
   PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   CLM.LLVMPtr sym (8 WI.* w) ->

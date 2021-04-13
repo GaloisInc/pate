@@ -1003,7 +1003,7 @@ testByteSizeEquality w' = case addrWidthRepr @w Proxy of
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
   MemWidth ptrW =>
-  IsExprBuilder sym =>
+  IsSymInterface sym =>
   sym ->
   UndefinedPtrOps sym ptrW ->
   MemTraceImpl sym ptrW ->
@@ -1048,6 +1048,8 @@ readMemArr sym undef mem ptr repr = go 0 repr
     -- bad case: mismatched regions. use an uninterpreted function
     undefBytes <- forM memBytes $ \(badReg, badOff, badSubOff) ->
       undefMismatchedRegionRead undef sym (LLVMPointer badReg badOff) badSubOff
+    predAvoidUndef <- andPred sym isPtr isReg0
+    assert sym predAvoidUndef $ AssertFailureSimError "readMemArr" $ "readMemArr: reading bytes from mismatched regions"
     appendByte <- mkAppendByte
     undefOff <- foldM appendByte bv0 (appendOrder endianness undefBytes)
 
@@ -1143,8 +1145,11 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     Right (mulMono @_ @_ @8 Proxy -> LeqProof) -> do
       bvZero <- bvFromInteger sym ptrWRepr 0
       natZero <- natLit sym 0
+      bvPtrW <- bvFromInteger sym ptrWRepr ptrWInteger
+      bvValW <- bvFromInteger sym ptrWRepr (8*valWByteInteger)
+      eqCond <- bvEq sym bvPtrW bvValW
       -- treat any non-pointer-width writes as writing undefined values
-      goBV bvZero natZero 0 mem_init
+      goBV eqCond bvZero natZero 0 mem_init
   where
   goBV ::
     SymBV sym ptrW ->
@@ -1152,11 +1157,12 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     Integer ->
     MemTraceImpl sym ptrW ->
     IO (MemTraceImpl sym ptrW)
-  goBV _bvZero _natZero n mem | n == valWByteInteger = pure mem
-  goBV bvZero natZero n mem = do
+  goBV _eqCond _bvZero _natZero n mem | n == valWByteInteger = pure mem
+  goBV eqCond bvZero natZero n mem = do
     nBV <- bvFromInteger sym ptrWRepr (useEnd n)
+    assert sym eqCond $ AssertFailureSimError "writeMemArr" $ "writeMemArr: expected write of size " ++ show ptrWInteger ++ ", saw " ++ show (8*valWByteInteger)
     undefBV <- undefWriteSize undef sym val nBV
-    writeByte (LLVMPointer natZero undefBV) n bvZero mem >>= goBV bvZero natZero (n+1)
+    writeByte (LLVMPointer natZero undefBV) n bvZero mem >>= goBV eqCond bvZero natZero (n+1)
 
   goPtr ::
     w ~ ptrW =>

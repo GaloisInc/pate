@@ -353,7 +353,7 @@ getPrecondition ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
   SimBundle sym arch ->
@@ -372,7 +372,7 @@ impliesPrecondition ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
   SimInput sym arch PT.Original ->
@@ -389,12 +389,12 @@ impliesPrecondition sym undef stackRegion inO inP eqRel stPredAsm stPredConcl = 
 -- | Resolve a domain predicate and equivalence relation into a postcondition and associated
 -- structured equivalence relation (for reporting counterexamples)
 getPostcondition ::
-  W4.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   OrdF (W4.SymExpr sym) =>
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
   StatePred sym arch ->  
@@ -433,12 +433,12 @@ weakenEquivRelation sym stPred eqRel =
 -- the given 'MemEquivRelation' at the locations defined by the given 'MemPred'
 memPredPost ::
   forall sym arch.
-  W4.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   OrdF (W4.SymExpr sym) =>
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimOutput sym arch PT.Original ->
   SimOutput sym arch PT.Patched ->
   MemEquivRelation sym arch ->
@@ -476,10 +476,10 @@ memPredPost sym undef outO outP memEq memPred = do
 
 positiveMemPred :: 
   forall sym arch.
-  W4.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimState sym arch PT.Original ->
   SimState sym arch PT.Patched ->  
   MemEquivRelation sym arch ->
@@ -493,10 +493,10 @@ positiveMemPred sym undef stO stP memEq memPred = do
 
 resolveCellEquiv ::
   forall sym arch w.
-  W4.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimState sym arch PT.Original ->
   SimState sym arch PT.Patched ->  
   MemEquivRelation sym arch ->
@@ -519,7 +519,7 @@ memPredPre ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   MemRegionEquality sym arch ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
@@ -624,7 +624,7 @@ statePredPre ::
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   -- | stack memory region
   W4.SymExpr sym W4.BaseNatType ->
   SimInput sym arch PT.Original ->
@@ -645,12 +645,12 @@ statePredPre sym undef stackRegion inO inP eqRel stPred  = do
   andM sym regsEq (andM sym stacksEq memEq)
 
 statePredPost ::
-  W4.IsSymExprBuilder sym =>
+  CB.IsSymInterface sym =>
   OrdF (W4.SymExpr sym) =>
   OrdF (MM.ArchReg arch) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym ->
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimOutput sym arch PT.Original ->
   SimOutput sym arch PT.Patched ->
   EquivRelation sym arch ->
