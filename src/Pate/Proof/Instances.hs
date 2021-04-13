@@ -28,6 +28,7 @@ Instantiations for the leaves of the proof types
 module Pate.Proof.Instances
   ( ProofSym
   , ProofGround
+  , SymDomain
   , InequivalenceResult(..)
   , SymBV(..)
   , ProofSymExpr
@@ -44,6 +45,8 @@ module Pate.Proof.Instances
   , GroundDomain
   , GroundMemCell(..)
   , GroundMacawValue(..)
+  , GroundRegOp
+  , GroundMemOp
   , cellInDomain
   , regInDomain
   , ppInequivalencePreRegs
@@ -123,6 +126,8 @@ type instance PF.ProofBlockExit (ProofSym sym arch) = CS.RegValue sym (MS.MacawB
 type instance PF.ProofContext (ProofSym sym arch) = PT.PatchPair (PS.SimState sym arch)
 type instance PF.ProofScope (ProofSym (W4B.ExprBuilder t st fs) arch) = t
 
+type SymDomain sym arch = PF.ProofExpr (ProofSym sym arch) PF.ProofDomainType
+
 -- Needed because LLVMPtr is defined as an alias
 newtype SymBV sym w = SymBV (CLM.LLVMPtr sym w)
 
@@ -139,12 +144,24 @@ instance (PA.ValidArch arch, PT.ValidSym sym) => PEM.ExprMappable sym (PF.ProofN
 
 instance
   ( PA.ValidArch arch
+  , PT.ValidSym sym
+  ) =>
+  PEM.ExprMappable sym (PF.BlockSliceMemOp (ProofSym sym arch) w) where
+  mapExpr sym f memOp = PF.transformBlockSliceMemOp (mapExprTrans sym f) memOp
+
+instance
+  ( PA.ValidArch arch
+  , PT.ValidSym sym
+  ) =>
+  PEM.ExprMappable sym (PF.BlockSliceRegOp (ProofSym sym arch) w) where
+  mapExpr sym f regOp = PF.transformBlockSliceRegOp (mapExprTrans sym f) regOp
+
+instance
+  ( PA.ValidArch arch
   , PT.ValidSym sym,
     forall ntp. PEM.ExprMappable sym (app ntp)) =>
   PEM.ExprMappable sym (PF.ProofApp (ProofSym sym arch) app tp) where
-  mapExpr sym f app =
-    PF.traverseProofApp (PEM.mapExpr sym f) =<< PF.transformProofApp (mapExprTrans sym f) app
-    
+
 mapExprTrans ::
   PA.ValidArch arch =>
   PT.ValidSym sym =>
@@ -276,8 +293,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PT.ValidSym sym) => PP.Pretty (
    PF.Unverified -> "Not verified"
    PF.VerificationSkipped -> "Skipped (assumed)"
    PF.VerificationSuccess -> "Succeeded"
-   PF.VerificationFail result -> PP.vsep [ "Failed:", PP.pretty result ]
-
+   PF.VerificationFail (result, cond) -> PP.vsep [ "Failed:", PP.pretty result, "Equivalence Condition:", PP.pretty (showF cond) ]
 
 
 collapseRegState ::
