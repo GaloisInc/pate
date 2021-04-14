@@ -74,6 +74,7 @@ module Pate.Types
   , zipWithRegStatesM
   --- reporting
   , EquivalenceStatistics(..)
+  , EquivalenceStatus(..)
   , equivSuccess
   , ppEquivalenceStatistics
   , ppBlock
@@ -386,6 +387,24 @@ instance Semigroup EquivalenceStatistics where
 instance Monoid EquivalenceStatistics where
   mempty = EquivalenceStatistics 0 0 0
 
+
+data EquivalenceStatus =
+    Equivalent
+  | Inequivalent
+  | ConditionallyEquivalent
+  | Errored String
+
+instance Semigroup EquivalenceStatus where
+  Errored err <> _ = Errored err
+  _ <> Errored err = Errored err
+  Inequivalent <> _ = Inequivalent
+  _ <> Inequivalent = Inequivalent
+  ConditionallyEquivalent <> _ = ConditionallyEquivalent
+  _ <> ConditionallyEquivalent = ConditionallyEquivalent
+  Equivalent <> Equivalent = Equivalent
+
+instance Monoid EquivalenceStatus where
+  mempty = Equivalent
 
 equivSuccess :: EquivalenceStatistics -> Bool
 equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total

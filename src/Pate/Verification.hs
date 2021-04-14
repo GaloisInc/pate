@@ -109,6 +109,7 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PS
 import           Pate.Types
+import qualified Pate.Types as PT
 import           What4.ExprHelpers
 
 -- | We run discovery in parallel, since we need to run it two or three times
@@ -173,7 +174,7 @@ verifyPairs ::
   BlockMapping arch ->
   PC.VerificationConfig ->
   [BlockPair arch] ->
-  CME.ExceptT (EquivalenceError arch) IO Bool
+  CME.ExceptT (EquivalenceError arch) IO PT.EquivalenceStatus
 verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
@@ -248,9 +249,9 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
       }
 
   liftIO $ do
-    stats <- runVerificationLoop env pPairs
+    (result, stats) <- runVerificationLoop env pPairs
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats)
-    return $ equivSuccess stats
+    return $ result
 
 ---------------------------------------------
 -- Top-level loop
@@ -285,7 +286,7 @@ runVerificationLoop ::
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the start of a function.
   [BlockPair arch] ->
-  IO EquivalenceStatistics
+  IO (PT.EquivalenceStatus, EquivalenceStatistics)
 runVerificationLoop env pPairs = do
   let
     st = EquivState
@@ -299,7 +300,7 @@ runVerificationLoop env pPairs = do
     Right r -> return r
 
   where
-    doVerify :: EquivM sym arch EquivalenceStatistics
+    doVerify :: EquivM sym arch (PT.EquivalenceStatus, EquivalenceStatistics)
     doVerify = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
         mainO <- CMR.asks $ binEntry . originalCtx . envCtx
@@ -309,20 +310,24 @@ runVerificationLoop env pPairs = do
         let pPair = PatchPair blkO blkP
         return $ pPair : pPairs
       triples <- DT.forM pPairs' $ topLevelTriple
-      CMR.local (\env' -> env' { envGoalTriples = triples } ) $
-        F.forM_ triples go
-      CMS.gets stEqStats
+      result <- CMR.local (\env' -> env' { envGoalTriples = triples } ) $
+        CME.foldM (\a b -> (<>) a <$> go b) mempty triples
+      stats <- CMS.gets stEqStats
+      return (result, stats)
 
     go ::
-      PF.EquivTriple sym arch -> EquivM sym arch ()
+      PF.EquivTriple sym arch -> EquivM sym arch PT.EquivalenceStatus
     go triple = do
       result <- manifestError $ checkEquivalence triple
       emitResult result
-      normResult <- return $ case result of 
+      normResult <- return $ case result of
+        Right PT.Equivalent -> EquivalenceStatistics 1 1 0
         Left _ -> EquivalenceStatistics 1 0 1
-        Right False -> EquivalenceStatistics 1 0 0
-        Right True -> EquivalenceStatistics 1 1 0
+        Right _ -> EquivalenceStatistics 1 0 0
       CMS.modify' $ \st -> st { stEqStats = normResult <> (stEqStats st) }
+      case result of
+        Right r -> return r
+        Left err -> return (Errored (show err))
 
 ifConfig ::
   (PC.VerificationConfig -> Bool) ->
@@ -347,7 +352,7 @@ emitResult (Right _) = return ()
 checkEquivalence ::
   HasCallStack =>
   PF.EquivTriple sym arch ->
-  EquivM sym arch Bool
+  EquivM sym arch PT.EquivalenceStatus
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   eqRel <- CMR.asks envBaseEquiv
@@ -398,8 +403,11 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   ifConfig (not . PC.cfgEmitProofs) (return ()) $ do
     emitEvent (PE.ProvenGoal blocks (PFI.SomeProofSym vsym proof))
   case PFO.proofResult (PF.unNonceProof proof) of
-    PF.VerificationSuccess -> return True
-    _ -> return False
+    PF.VerificationSuccess -> return PT.Equivalent
+    PF.VerificationFail (_, cond) -> case W4.asConstantPred cond of
+      Just False -> return Inequivalent
+      _ -> return PT.ConditionallyEquivalent
+    _ -> return PT.Inequivalent
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
     -- the bound terms

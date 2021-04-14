@@ -53,6 +53,7 @@ unpackPatchData proxy (PC.PatchData pairs bmap) =
     ppairs = map (\(bd, bd') -> PT.PatchPair (unpackBlockData proxy bd) (unpackBlockData proxy bd')) pairs
   in (bmap', ppairs)
 
+
 runEquivVerification ::
   PA.ValidArchProxy arch ->
   LJ.LogAction IO (PE.Event arch) ->
@@ -61,13 +62,21 @@ runEquivVerification ::
   PC.VerificationConfig ->
   PB.LoadedELF arch ->
   PB.LoadedELF arch ->
-  IO (Either String Bool)
+  IO PT.EquivalenceStatus
 runEquivVerification proxy@PA.ValidArchProxy logAction mhints pd dcfg original patched = do
   let (bmap, ppairs) = unpackPatchData proxy pd
-  v <- CME.runExceptT (PV.verifyPairs logAction mhints original patched bmap dcfg ppairs)
+  liftToEquivStatus $ PV.verifyPairs logAction mhints original patched bmap dcfg ppairs
+
+liftToEquivStatus ::
+  Show e =>
+  Monad m =>
+  CME.ExceptT e m PT.EquivalenceStatus ->
+  m PT.EquivalenceStatus
+liftToEquivStatus f = do
+  v <- CME.runExceptT f
   case v of
-    Left err -> return $ Left $ show err
-    Right b -> return $ Right b
+    Left err -> return $ PT.Errored $ show err
+    Right b -> return b  
 
 -- | Given a patch configuration, check that
 -- either the original or patched binary can be
@@ -75,8 +84,8 @@ runEquivVerification proxy@PA.ValidArchProxy logAction mhints pd dcfg original p
 runSelfEquivConfig :: forall arch bin.
   PC.RunConfig arch ->
   PT.WhichBinaryRepr bin ->
-  IO (Either String Bool)
-runSelfEquivConfig cfg wb = CME.runExceptT $ do
+  IO PT.EquivalenceStatus
+runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
     Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
       Nothing -> CME.throwError "Bad patch info file"
@@ -97,13 +106,12 @@ runSelfEquivConfig cfg wb = CME.runExceptT $ do
       }
   PA.ValidArchProxy <- return $ PC.archProxy cfg
   bin <- CME.lift $ PB.loadELF @arch Proxy $ path
-  CME.ExceptT $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData' (PC.verificationCfg cfg) bin bin
-
+  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData' (PC.verificationCfg cfg) bin bin
 
 runEquivConfig :: forall arch.
   PC.RunConfig arch ->
-  IO (Either String Bool)
-runEquivConfig cfg = CME.runExceptT $ do
+  IO PT.EquivalenceStatus
+runEquivConfig cfg = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
     Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
       Nothing -> CME.throwError "Bad patch info file"
@@ -112,4 +120,4 @@ runEquivConfig cfg = CME.runExceptT $ do
   PA.ValidArchProxy <- return $ PC.archProxy cfg
   original <- CME.lift $ PB.loadELF @arch Proxy $ (PC.origPath cfg)
   patched <- CME.lift $ PB.loadELF @arch Proxy $ (PC.patchedPath cfg)
-  CME.ExceptT $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData (PC.verificationCfg cfg) original patched
+  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData (PC.verificationCfg cfg) original patched

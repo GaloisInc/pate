@@ -162,15 +162,16 @@ blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF
 -- | Compute an aggregate verification condition: preferring an inequivalence result
 -- if it exists, but potentially yielding an 'PF.Unverified' result.
 proofResult ::
-  forall sym arch tp.
-  PFI.ProofSymExpr sym arch tp ->
-  PF.VerificationStatus (PFI.InequivalenceResult arch)
+  forall prf tp a.
+  a ~ (PF.ProofCounterExample prf, PF.ProofPredicate prf) =>
+  PF.ProofExpr prf tp ->
+  PF.VerificationStatus a
 proofResult e = foldr merge PF.VerificationSuccess statuses
   where
     merge ::
-      PF.VerificationStatus (PFI.InequivalenceResult arch) ->
-      PF.VerificationStatus (PFI.InequivalenceResult arch) ->
-      PF.VerificationStatus (PFI.InequivalenceResult arch)
+      PF.VerificationStatus a ->
+      PF.VerificationStatus a ->
+      PF.VerificationStatus a
     merge (PF.VerificationFail ce) _ = PF.VerificationFail ce
     merge _ (PF.VerificationFail ce) = PF.VerificationFail ce
     merge PF.Unverified _ = PF.Unverified
@@ -179,13 +180,12 @@ proofResult e = foldr merge PF.VerificationSuccess statuses
     merge a PF.VerificationSkipped = a
     merge PF.VerificationSuccess PF.VerificationSuccess = PF.VerificationSuccess
     
-    statuses :: [PF.VerificationStatus (PFI.InequivalenceResult arch)]
+    statuses :: [PF.VerificationStatus a]
     statuses = PF.collectProofExpr go e
 
-    go :: PFI.ProofSymExpr sym arch tp' -> [PF.VerificationStatus (PFI.InequivalenceResult arch)]
-    go (PF.ProofExpr (PF.ProofStatus st)) = [fmap fst st]
+    go :: PF.ProofExpr prf tp' -> [PF.VerificationStatus a]
+    go (PF.ProofExpr (PF.ProofStatus st)) = [st]
     go _ = []
-    
 
 noTransition ::
   PT.PatchPair (PS.SimInput sym arch) ->

@@ -141,8 +141,8 @@ main = do
             , PC.hints = mVerificationHints
             }
       PL.runEquivConfig cfg >>= \case
-        Left err -> SE.die (show err)
-        Right _ -> pure ()
+        PT.Errored err -> SE.die (show err)
+        _ -> pure ()
 
       -- Shut down the logger cleanly (if we can - the interactive logger will be
       -- persistent until the user kills it)

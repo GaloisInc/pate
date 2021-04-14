@@ -42,13 +42,16 @@ runTests cfg = do
     name = testArchName cfg
     glob = "tests" </> name </> "*.original.exe"
     globUnequal = "tests" </> name </> "unequal" </> "*.original.exe"
+    globCondequal = "tests" </> name </> "conditional" </> "*.original.exe"
 
   equivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching glob
   inequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globUnequal
+  condequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globCondequal
 
   T.defaultMain $ T.testGroup name $
     [ T.testGroup "equivalence" $ map (mkTest cfg) equivTestFiles
     , T.testGroup "inequivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldNotVerify fp]) inequivTestFiles
+    , T.testGroup "conditional equivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) condequivTestFiles
     ]
 
 expectSelfEquivalenceFailure :: TestConfig -> FilePath -> Bool
@@ -73,7 +76,7 @@ mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
     wrap :: T.TestTree -> T.TestTree
     wrap t = if (expectSelfEquivalenceFailure cfg fp) then T.expectFail t else t    
 
-data ShouldVerify = ShouldVerify | ShouldNotVerify
+data ShouldVerify = ShouldVerify | ShouldNotVerify | ShouldConditionallyVerify
 
 mkEquivTest :: TestConfig -> ShouldVerify -> FilePath -> T.TestTree
 mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
@@ -137,8 +140,15 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg
   case result of
-    Left err -> T.assertFailure (show err)
-    Right True | ShouldVerify <- sv -> return ()
-    Right False | ShouldNotVerify <- sv -> return ()
-    Right False | ShouldVerify <- sv -> T.assertFailure "Failed to prove equivalence."
-    Right True | ShouldNotVerify <- sv -> T.assertFailure "Unexpectedly proved equivalence."
+    PT.Errored err -> T.assertFailure (show err)
+    PT.Equivalent -> case sv of
+      ShouldVerify -> return ()
+      _ -> T.assertFailure "Unexpectedly proved equivalence."
+    PT.Inequivalent -> case sv of
+      ShouldVerify -> T.assertFailure "Failed to prove equivalence."
+      ShouldNotVerify -> return ()
+      ShouldConditionallyVerify -> T.assertFailure "Failed to prove conditional equivalence."    
+    PT.ConditionallyEquivalent -> case sv of
+      ShouldVerify -> T.assertFailure "Failed to prove equivalence."
+      ShouldNotVerify -> T.assertFailure "Unexpectedly proved conditional equivalence."
+      ShouldConditionallyVerify -> return ()
