@@ -891,33 +891,33 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    result <- PFO.forkProofEvent (simPair bundle) $ do
-       status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
-         checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
-           case satRes of
-             W4R.Unsat _ -> do
-               emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
-               return PF.VerificationSuccess
-             W4R.Unknown -> do
-               emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
-               return PF.Unverified
-             W4R.Sat fn -> do
-               preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
-               postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-               ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
-               emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
-               return $ PF.VerificationFail ir
-       cond <- case status of
-         PF.VerificationFail _ -> do
-           isPredSat goalTimeout postcondPred >>= \case
-             True -> do
-               postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-               cond <- computeEqCondition bundle sliceState postDomain' notChecks
-               cond' <- weakenEqCondition bundle cond sliceState postDomain' postcondPred
-               checkAndMinimizeEqCondition cond' postcondPred
-             False -> return $ W4.falsePred sym
-         _ -> return $ W4.truePred sym
-       return $ PF.ProofStatus (fmap (\ir -> (ir, cond)) status)
+    result <- PFO.forkProofEvent (simPair bundle) $
+      withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
+        status <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
+            case satRes of
+              W4R.Unsat _ -> do
+                emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
+                return PF.VerificationSuccess
+              W4R.Unknown -> do
+                emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
+                return PF.Unverified
+              W4R.Sat fn -> do
+                preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
+                postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+                ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
+                emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
+                return $ PF.VerificationFail ir
+        cond <- case status of
+          PF.VerificationFail _ -> do
+            isPredSat goalTimeout postcondPred >>= \case
+              True -> do
+                postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+                cond <- computeEqCondition bundle sliceState postDomain' notChecks
+                cond' <- weakenEqCondition bundle cond sliceState postDomain' postcondPred
+                checkAndMinimizeEqCondition cond' postcondPred
+              False -> return $ W4.falsePred sym
+          _ -> return $ W4.truePred sym
+        return $ PF.ProofStatus (fmap (\ir -> (ir, cond)) status)
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
 
