@@ -312,7 +312,7 @@ renderProofApp app =
           | otherwise ->
             TP.column [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
                       , TP.string "The patched program exhibits identical behavior to the original under the following conditions:"
-                      , TP.string (T.unpack (pp (WI.printSymExpr diffSummary)))
+                      , TP.pre # TP.set TP.text (T.unpack (pp (WI.printSymExpr diffSummary)))
                       , TP.string "Counterexample:"
                       , renderCounterexample cex
                       ]
