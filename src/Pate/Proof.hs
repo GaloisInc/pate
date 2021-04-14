@@ -271,8 +271,6 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
     { prfStatus :: VerificationStatus (ProofCounterExample prf, ProofPredicate prf)
     } -> ProofApp prf node ProofStatusType
 
-  -- | Equivalence condition in the case that exact equivalence can't be proven.
-
   -- | The domain of an equivalence problem: representing the state that is either
   -- assumed (in a pre-domain) or proven (in a post-domain) to be equivalent.
   ProofDomain ::
