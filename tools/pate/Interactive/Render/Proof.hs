@@ -30,6 +30,7 @@ import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 import qualified What4.Interface as WI
 
+import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Panic as Panic
@@ -42,16 +43,27 @@ import qualified Interactive.State as IS
 pp :: PP.Doc ann -> T.Text
 pp = PPT.renderStrict . PP.layoutCompact
 
-ppStatus :: PPr.VerificationStatus a -> PP.Doc ann
-ppStatus st =
+ppStatus :: ( prf ~ PFI.ProofSym sym arch
+            , WI.IsSymExprBuilder sym
+            )
+         => proxy prf
+         -> PPr.VerificationStatus (PPr.ProofCounterExample prf, PPr.ProofPredicate prf)
+         -> PP.Doc ann
+ppStatus _ st =
   case st of
     PPr.Unverified -> PP.pretty "Unverified"
     PPr.VerificationSkipped -> PP.pretty "Skipped"
     PPr.VerificationSuccess -> PP.pretty "Success"
-    PPr.VerificationFail {} -> PP.pretty "Fail"
+    PPr.VerificationFail (_cex, diffSummary)
+      | Just False <- WI.asConstantPred diffSummary -> PP.pretty "Inequivalent"
+      | otherwise -> PP.pretty "Conditional"
 
 ppAppTag
-  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  :: forall prf tp arch ann sym
+   . ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     )
+  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
   -> PPr.ProofNonceExpr prf tp
   -> PP.Doc ann
 ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
@@ -75,11 +87,14 @@ ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
           PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
           PPr.ProofDomain {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofDomain is not a possible parent component for a ProofTriple"]
       | otherwise -> error ("Missing parent for node " ++ show thisNonce ++ "(" ++ show parentNonce ++ ")")
-    PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus st)
+    PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus (Proxy @prf) st)
     PPr.ProofDomain {} -> PP.pretty "Domain"
 
 nodeLabel
-  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  :: ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     )
+  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
   -> PE.BlocksPair arch
   -> PPr.ProofNonceExpr prf tp
   -> T.Text
@@ -101,7 +116,10 @@ nodeId = PPr.proofNonceValue
 -- 'Interactive' module, we set up some callbacks to allow users to ask for more
 -- information on individual nodes.
 blockNode
-  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  :: ( prf ~ PFI.ProofSym sym arch
+     , WI.IsSymExprBuilder sym
+     )
+  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
   -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
   -> Some (IS.ProofTreeNode arch prf)
   -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
@@ -245,10 +263,21 @@ renderDomainApp (PPr.ProofDomain regs stack mem _context) =
             , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity mem)) (MapF.toList (PPr.prfMemoryDomain mem)))
             ]
 
-renderProofApp
+renderCounterexample
   :: ( prf ~ PFI.ProofSym sym arch
+     , PA.ValidArch arch
+     )
+  => PPr.ProofCounterExample prf
+  -> TP.UI TP.Element
+renderCounterexample ineqRes =
+  TP.pre # TP.set TP.text (T.unpack (pp (PP.pretty ineqRes)))
+
+renderProofApp
+  :: forall prf sym arch tp
+   . ( prf ~ PFI.ProofSym sym arch
      , WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
+     , PA.ValidArch arch
      )
   => PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
   -> TP.UI TP.Element
@@ -269,11 +298,26 @@ renderProofApp app =
                 , TP.string "These values are asserted to be equal in both the original and patched program at the end of this program slice"
                 , renderDomainExpr post
                 , TP.h3 #+ [TP.string "Status"]
-                , TP.string (T.unpack (pp (ppStatus status)))
+                , TP.string (T.unpack (pp (ppStatus (Proxy @prf) status)))
                 ]
     PPr.ProofStatus st ->
-      TP.div #+ [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus st)))
-                ]
+      case st of
+        PPr.VerificationFail (cex, diffSummary)
+          | Just False <- WI.asConstantPred diffSummary ->
+            TP.column [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
+                      , TP.string "The patched program always exhibits different behavior if this program location is reached"
+                      , TP.string "Counterexample:"
+                      , renderCounterexample cex
+                      ]
+          | otherwise ->
+            TP.column [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
+                      , TP.string "The patched program exhibits identical behavior to the original under the following conditions:"
+                      , TP.string (T.unpack (pp (WI.printSymExpr diffSummary)))
+                      , TP.string "Counterexample:"
+                      , renderCounterexample cex
+                      ]
+        _ -> TP.div #+ [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
+                       ]
     PPr.ProofDomain {} ->
       TP.column [ TP.string "The domain of an individual equivalence proof"
                 , renderDomainApp app

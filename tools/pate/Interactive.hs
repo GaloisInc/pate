@@ -109,7 +109,7 @@ addRecent n elt elts = elt : take (n - 1) elts
 
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier
-startInterface :: (PA.ArchConstraints arch) => StateRef arch -> IO ()
+startInterface :: (PA.ArchConstraints arch, PA.ValidArch arch) => StateRef arch -> IO ()
 startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
   -- Place the content of all of our static dependencies into the temporary
   -- directory so that it can be served by threepenny
@@ -145,7 +145,9 @@ snapshotProofState r _ = do
 --
 -- See Note [Proof Graph Interaction] on details of this interaction
 onProofNodeClicked
-  :: (PA.ArchConstraints arch)
+  :: ( PA.ArchConstraints arch
+     , PA.ValidArch arch
+     )
   => StateRef arch
   -> TP.Window
   -- ^ The window object (so that we can get back into the 'TP.UI' monad)
@@ -175,7 +177,7 @@ onProofNodeClicked r wd detailDiv ident = do
           TP.flushCallBuffer
     _ -> IO.hPutStrLn IO.stderr ("Error, missing proof node for id=" ++ show ident)
 
-uiSetup :: (PA.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
+uiSetup :: (PA.ArchConstraints arch, PA.ValidArch arch) => StateRef arch -> TP.Window -> TP.UI ()
 uiSetup r wd = do
   st0 <- liftIO $ IOR.readIORef (stateRef r)
   void $ return wd # TP.set TP.title "PATE Verifier"

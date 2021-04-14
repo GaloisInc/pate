@@ -32,6 +32,7 @@ import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Time as TM
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
+import qualified What4.Interface as WI
 
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
@@ -57,7 +58,9 @@ data ProofTreeNode arch prf tp where
                 -> ProofTreeNode arch prf tp
 
 data ProofTree arch where
-  ProofTree :: (prf ~ PFI.ProofSym sym arch)
+  ProofTree :: ( prf ~ PFI.ProofSym sym arch
+               , WI.IsSymExprBuilder sym
+               )
             => PT.Sym sym
             -> MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf)
             -> Map.Map Int (Some (ProofTreeNode arch prf))
