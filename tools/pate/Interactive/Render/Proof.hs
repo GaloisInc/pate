@@ -73,7 +73,7 @@ ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
     PPr.ProofTriple {}
       | Just (IS.ProofTreeNode _blocks parentExpr _) <- MapF.lookup parentNonce proofTreeNodes ->
         case PPr.prfNonceBody parentExpr of
-          PPr.ProofBlockSlice summaryTriple callNodes mRetTriple mUnknownTriple transition
+          PPr.ProofBlockSlice summaryTriple _callNodes mRetTriple mUnknownTriple _transition
             | Just PC.Refl <- PC.testEquality (PPr.prfNonce summaryTriple) thisNonce -> PP.pretty "Triple(SliceSummary)"
             | Just sliceReturnTriple <- mRetTriple
             , Just PC.Refl <- PC.testEquality (PPr.prfNonce sliceReturnTriple) thisNonce -> PP.pretty "Triple"
@@ -123,7 +123,7 @@ blockNode
   -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
   -> Some (IS.ProofTreeNode arch prf)
   -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
-blockNode proofTreeNodes m (Some (IS.ProofTreeNode blockPair expr@(PPr.ProofNonceExpr thisNonce _parentNonce app) _tm)) =
+blockNode proofTreeNodes m (Some (IS.ProofTreeNode blockPair expr@(PPr.ProofNonceExpr thisNonce _parentNonce _app) _tm)) =
   Map.insert (Some thisNonce) (JSON.Object node) m
   where
     node = HMS.fromList [ (T.pack "data", JSON.Object content) ]
@@ -283,13 +283,13 @@ renderProofApp
   -> TP.UI TP.Element
 renderProofApp app =
   case app of
-    PPr.ProofBlockSlice domain callees mret munknown transition ->
+    PPr.ProofBlockSlice _domain _callees _mret _munknown _transition ->
       TP.div #+ [ TP.string "Proof that the post-domain of this slice of the program is satisfied when this slice returns, assuming its precondition"
                 ]
-    PPr.ProofFunctionCall pre body cont ->
+    PPr.ProofFunctionCall _pre _body _cont ->
       TP.div #+ [ TP.string "Proof that a function call is valid given its preconditions"
                 ]
-    PPr.ProofTriple blocks pre post (PPr.ProofNonceExpr _ _ (PPr.ProofStatus status)) ->
+    PPr.ProofTriple _blocks pre post (PPr.ProofNonceExpr _ _ (PPr.ProofStatus status)) ->
       TP.column [ TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
                 , TP.h3 #+ [TP.string "Pre-domain"]
                 , TP.string "These values are assumed to be equal in both the original and patched program at the start of this program slice"
