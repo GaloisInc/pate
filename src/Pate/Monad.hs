@@ -306,14 +306,14 @@ withSymSolver ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
   EquivM sym arch a
 withSymSolver f = withValid $ do
-  Sym sym adapter <- asks envValidSym
+  Sym _ sym adapter <- asks envValidSym
   f sym adapter
 
 withSym ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
-  Sym sym _ <- asks envValidSym
+  Sym _ sym _ <- asks envValidSym
   f sym
 
 withSymIO :: forall sym arch a.

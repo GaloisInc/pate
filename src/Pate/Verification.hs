@@ -201,6 +201,13 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
 
   startedAt <- liftIO TM.getCurrentTime
   topNonce <- liftIO $ (PF.ProofNonce <$> N.freshNonce gen)
+
+  -- NOTE: This is using the global nonce generator because it gets sunk down
+  -- into contexts where the scope type parameter is quantified out in ways that
+  -- are not practical to recover without major refactoring.  This is just as
+  -- safe but makes things significantly easier.
+  symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
+
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -238,7 +245,7 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
       , envBaseEquiv = stateEquivalence sym stackRegion
       , envFailureMode = ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
-      , envValidSym = Sym sym adapter
+      , envValidSym = Sym symNonce sym adapter
       , envStartTime = startedAt
       , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
       -- TODO: restructure EquivEnv to avoid this
@@ -949,7 +956,6 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
     go pathCond = withSym $ \sym -> do
       -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-      liftIO $ putStrLn "Disproving equivalence.."
       result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
           W4R.Unsat _ -> return Nothing
           -- this is safe, because the resulting condition is still checked later
