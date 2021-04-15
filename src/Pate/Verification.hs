@@ -711,7 +711,7 @@ trivialBlockSlice ::
   SimBundle sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-trivialBlockSlice bundle postcondSpec = withSym $ \sym -> do
+trivialBlockSlice bundle postcondSpec = do
   transition <- PFO.noTransition (simIn bundle) (simOutBlockEnd $ simOutO bundle)
   PFO.lazyProofEvent (simPair bundle) $ do
     preUniv <- universalDomain
