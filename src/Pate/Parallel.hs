@@ -23,7 +23,7 @@ Primitives for parallelism
 
 module Pate.Parallel
     ( IsFuture(..)
-    , Future(..)
+    , Future
     , FutureF
     , ConstF(..)
     )
