@@ -188,8 +188,7 @@ uiSetup r wd = do
   detailDiv <- TP.div #. "detail-pane"
 
   proofDiv <- TP.div #. "proof-pane"
-  proofSnapshotButton <- TP.a # TP.set TP.text "[Snapshot]"
-                              # TP.set TP.href "#snapshot"
+  proofSnapshotButton <- TP.button # TP.set TP.text "Snapshot"
   TP.on TP.click proofSnapshotButton (snapshotProofState r)
 
   void $ TP.getBody wd #+ [ TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape.umd.js" # TP.set (TP.attr "type") "text/javascript"
