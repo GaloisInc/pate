@@ -595,8 +595,9 @@ execGroundFn ::
   SymGroundEvalFn sym  -> 
   W4.SymExpr sym tp -> 
   EquivM sym arch (W4G.GroundValue tp)  
-execGroundFn gfn e = do  
-  result <- liftIO $ (Just <$> execGroundFnIO gfn e) `catches`
+execGroundFn gfn e = do
+  groundTimeout <- asks (PC.cfgGroundTimeout . envConfig)
+  result <- liftIO $ (PT.timeout' groundTimeout $ execGroundFnIO gfn e) `catches`
     [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
     , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
     ]

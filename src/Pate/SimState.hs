@@ -279,7 +279,7 @@ rebindWithFrame' sym cache asm e_outer = do
   let
     go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
     go e = W4B.idxCacheEval cache e $ do
-      W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      setProgramLoc sym e
       case getUniqueBinding sym asm e of
         Just e' -> return e'
         _ -> case e of
