@@ -55,6 +55,7 @@ module What4.ExprHelpers (
   , simplifyBVOps
   , simplifyConjuncts
   , boundVars
+  , setProgramLoc
   ) where
 
 import           GHC.TypeNats
@@ -87,6 +88,7 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified What4.Expr.Builder as W4B
+import qualified What4.ProgramLoc as W4PL
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Expr.WeightedSum as WSum
 import qualified What4.Interface as W4
@@ -503,7 +505,7 @@ getPredAtoms sym e_outer = do
   
     go :: forall tp'. W4.SymExpr sym tp' -> IO (PredSet sym)
     go p_inner = muxes p_inner $ \p -> fmap getConst $ W4B.idxCacheEval cache p $ do
-      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc p)
+      setProgramLoc sym p
       case p of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
            W4B.BaseEq _ e1 e2 -> Const <$> binOp (liftPred W4.isEq) e1 e2 
@@ -544,7 +546,7 @@ abstractOver sym sub outer = do
       | Just Refl <- testEquality (W4.exprType e) (W4.exprType sub), e == sub
          = return $ W4.varExpr sym sub_bv
     go e = W4B.idxCacheEval cache e $ do
-      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> do
           a0' <- W4B.traverseApp go (W4B.appExprApp a0)
@@ -610,7 +612,7 @@ resolveConcreteLookups sym f e_outer = do
     
     go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
     go e = W4B.idxCacheEval cache e $ do
-      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
           W4B.SelectArray _ arr idx -> resolveArr arr idx
@@ -708,7 +710,7 @@ expandMuxEquality sym outer = do
 
     go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
     go e = W4B.idxCacheEval cache e $ do
-      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
           W4B.BaseEq _ lhs rhs
@@ -743,7 +745,7 @@ simplifyBVOps sym outer = do
   let
     go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
     go e = W4B.idxCacheEval cache e $ do
-      liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+      setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
           W4B.BVConcat _ u v
@@ -963,7 +965,9 @@ simplifyConjuncts sym provable p_outer = do
   cache <- W4B.newIdxCache
   let
     go :: ConjunctFoldDir -> W4.Pred sym -> W4.Pred sym -> m (W4.Pred sym)
-    go foldDir asms p = W4B.idxCacheEval cache p $ case W4B.asApp p of
+    go foldDir asms p = W4B.idxCacheEval cache p $ do
+      setProgramLoc sym p
+      case W4B.asApp p of
         Just (W4B.ConjPred bm) -> do
           let
             eval' :: (W4.Pred sym, BM.Polarity) -> m (W4.Pred sym)
@@ -995,3 +999,15 @@ simplifyConjuncts sym provable p_outer = do
         _ -> return p
   p <- go ConjunctFoldRight (W4.truePred sym) p_outer
   go ConjunctFoldLeft (W4.truePred sym) p
+
+
+setProgramLoc ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.SymExpr sym tp ->
+  m ()
+setProgramLoc sym e = case W4PL.plSourceLoc (W4B.exprLoc e) of
+  W4PL.InternalPos -> return ()
+  _ -> liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
