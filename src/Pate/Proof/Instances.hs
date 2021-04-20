@@ -181,6 +181,7 @@ instance
   , PT.ValidSym sym,
     forall ntp. PEM.ExprMappable sym (app ntp)) =>
   PEM.ExprMappable sym (PF.ProofApp (ProofSym sym arch) app tp) where
+  mapExpr sym f = PF.transformProofApp (mapExprTrans sym f)
 
 mapExprTrans ::
   PA.ValidArch arch =>

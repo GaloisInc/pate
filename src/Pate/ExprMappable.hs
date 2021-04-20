@@ -40,7 +40,6 @@ class ExprMappable sym f where
     (forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)) ->
     f ->
     IO f
-  mapExpr _ _ = pure
   foldExpr ::
     WI.IsSymExprBuilder sym =>
     sym ->
