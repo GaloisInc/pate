@@ -19,7 +19,10 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.ByteString as BS
 import qualified Data.FileEmbed as DFE
 import qualified Data.IORef as IOR
+import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
+import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
@@ -30,6 +33,7 @@ import qualified System.IO.Temp as SIT
 
 import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
+import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Types as PT
 
@@ -63,7 +67,7 @@ dagre = $(DFE.embedFile "tools/pate/static/dagre/dist/dagre.js")
 cytoscapeDagre :: BS.ByteString
 cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js")
 
-consumeEvents :: CC.Chan (Maybe (PE.Event arch)) -> StateRef arch -> IO ()
+consumeEvents :: (MM.MemWidth (MC.ArchAddrWidth arch)) => CC.Chan (Maybe (PE.Event arch)) -> StateRef arch -> IO ()
 consumeEvents chan r0 = do
   mEvt <- CC.readChan chan
   case mEvt of
@@ -97,6 +101,10 @@ consumeEvents chan r0 = do
         PE.ProvenGoal {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
         _ -> return ()
+
+      -- Collect any metrics that we can from the event stream
+      IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & metrics %~ PM.summarize evt, ())
+
       -- Notify the UI that we got a new result
       stateChangeEmitter r0 ()
       consumeEvents chan r0
@@ -188,8 +196,7 @@ uiSetup r wd = do
   detailDiv <- TP.div #. "detail-pane"
 
   proofDiv <- TP.div #. "proof-pane"
-  proofSnapshotButton <- TP.a # TP.set TP.text "[Snapshot]"
-                              # TP.set TP.href "#snapshot"
+  proofSnapshotButton <- TP.button # TP.set TP.text "Snapshot"
   TP.on TP.click proofSnapshotButton (snapshotProofState r)
 
   void $ TP.getBody wd #+ [ TP.mkElement "script" # TP.set (TP.attr "src") "/static/cytoscape.umd.js" # TP.set (TP.attr "type") "text/javascript"
@@ -257,13 +264,39 @@ renderSummaryTable :: forall arch
                     . State arch
                    -> TP.UI TP.Element
 renderSummaryTable st =
-  TP.grid [ [ TP.bold #+ [TP.string "# Equivalent"], mapSizeElement successful]
-          , [ TP.bold #+ [TP.string "# Inconclusive"], mapSizeElement indeterminate]
-          , [ TP.bold #+ [TP.string "# Inequivalent"], mapSizeElement failure]
-          ]
+  TP.row [ proofStats, metricsSummary ]
   where
     mapSizeElement :: forall k v . L.Getter (State arch) (Map.Map k v) -> TP.UI TP.Element
     mapSizeElement l = TP.string (show (Map.size (st ^. l)))
+
+    proofStats = TP.grid [ [ TP.bold #+ [TP.string "# Equivalent"], mapSizeElement successful]
+                         , [ TP.bold #+ [TP.string "# Inconclusive"], mapSizeElement indeterminate]
+                         , [ TP.bold #+ [TP.string "# Inequivalent"], mapSizeElement failure]
+                         ]
+
+    metricsSummary = TP.grid (catMaybes possibleMetrics)
+    possibleMetrics = [ totalDuration st
+                      , Just [ TP.bold #+ [TP.string "# Goals"], TP.string (show (st ^. metrics . L.to PM.verifiedGoals)) ]
+                      , binaryStats st PM.originalBinaryMetrics "Original"
+                      , binaryStats st PM.patchedBinaryMetrics "Patched"
+                      ]
+
+totalDuration :: State arch -> Maybe [TP.UI TP.Element]
+totalDuration st = do
+  dur <- st ^. metrics . L.to PM.duration
+  return [ TP.bold #+ [TP.string "Total Duration"] , TP.string (show dur) ]
+
+binaryStats
+  :: (Monad m)
+  => State arch
+  -> (PM.Metrics -> m PM.BinaryMetrics)
+  -> [Char]
+  -> m [TP.UI TP.Element]
+binaryStats st accessor label = do
+  bm <- st ^. metrics . L.to accessor
+  return [ TP.bold #+ [TP.string (label ++ " Binary Stats")]
+         , TP.string ("Size (bytes): " ++ show (PM.executableBytes bm) ++ " / # Functions: " ++ show (PM.numFunctions bm) ++ " / # Blocks: " ++ show (PM.numBlocks bm))
+         ]
 
 {- Note [Monitoring Proof Construction and Evaluation]
 
