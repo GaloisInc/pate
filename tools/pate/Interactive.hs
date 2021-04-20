@@ -175,7 +175,7 @@ onProofNodeClicked r wd detailDiv ident = do
       | Just (Some (ProofTreeNode (PT.PatchPair ob pb) (PPr.ProofNonceExpr _ _ papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
           (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb Nothing
           appDetail <- IRP.renderProofApp papp
-          content <- TP.column [ return appDetail
+          content <- TP.column [ return appDetail # TP.set TP.class_ "proof-app"
                                , TP.string ("Duration: " ++ show tm)
                                , return g
                                ]
