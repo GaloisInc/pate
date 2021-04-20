@@ -546,7 +546,7 @@ data InnerEquivalenceError arch
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
   | NoUniqueFunctionOwner (IM.Interval (ConcreteAddress arch)) [MM.ArchSegmentOff arch]
-  | LookupNotAtFunctionStart (ConcreteAddress arch)
+  | LookupNotAtFunctionStart (ConcreteAddress arch) (ConcreteAddress arch)
   | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (ConcreteAddress arch) (ConcreteAddress arch) (ConcreteAddress arch)
@@ -574,6 +574,9 @@ data InnerEquivalenceError arch
   | BlockEndClassificationFailure
   | InvalidCallTarget (ConcreteAddress arch)
   | IncompatibleDomainPolarities
+  | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
+  | InconsistentSimplificationResult String String
+
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch where

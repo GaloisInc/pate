@@ -84,6 +84,7 @@ module Pate.Proof
   , ProofMacawValue
   , ProofPredicate
   , ProofCounterExample
+  , ProofCondition
   , ProofContext
   , ProofBlockExit
   ) where
@@ -156,6 +157,8 @@ type family ProofPredicate prf :: DK.Type
 type family ProofMemCell prf :: Nat -> DK.Type
 -- | A proof counterexample (instantiated to 'Pate.Proof.Instances.InequivalenceResult')
 type family ProofCounterExample prf :: DK.Type
+-- | Side conditions for a proof (instantiated to 'Pate.Proof.Instances.CondEquivalenceResult')
+type family ProofCondition prf :: DK.Type
 -- | Additional ontext for a domain (instantiated to a 'Pate.SimState' pair)
 type family ProofContext prf :: DK.Type
 -- | A bitvector value
@@ -201,6 +204,8 @@ data VerificationStatus ce =
   | VerificationFail ce
   deriving (Functor, Foldable, Traversable)
 
+instance PEM.ExprMappable sym a => PEM.ExprMappable sym (VerificationStatus a) where
+  mapExpr sym f = traverse (PEM.mapExpr sym f)
 
 -- | An abstract proof object, representing the overall structure of an equivalence proof.
 -- The type parameter 'prf' abstracts this structure over the specific types used in the proof,
@@ -268,7 +273,7 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
   -- (i.e. conditional equivalence).
   -- In the case of inequality, the predicate simply false
   ProofStatus ::
-    { prfStatus :: VerificationStatus (ProofCounterExample prf, ProofPredicate prf)
+    { prfStatus :: VerificationStatus (ProofCounterExample prf, ProofCondition prf)
     } -> ProofApp prf node ProofStatusType
 
   -- | The domain of an equivalence problem: representing the state that is either
@@ -351,11 +356,12 @@ data ProofTransformer m prf prf' where
     , prfExitTrans :: ProofBlockExit prf -> m (ProofBlockExit prf')
     , prfValueTrans :: forall tp. ProofMacawValue prf tp -> m (ProofMacawValue prf' tp)
     , prfContextTrans :: ProofContext prf -> m (ProofContext prf')
+    , prfCounterExampleTrans :: ProofCounterExample prf -> m (ProofCounterExample prf')
+    , prfConditionTrans :: ProofCondition prf -> m (ProofCondition prf')
     , prfConstraint ::
         forall a. ((IsProof prf'
                    , ProofRegister prf ~ ProofRegister prf'
-                   , ProofBlock prf ~ ProofBlock prf'
-                   , ProofCounterExample prf ~ ProofCounterExample prf') => a) -> a
+                   , ProofBlock prf ~ ProofBlock prf') => a) -> a
     } -> ProofTransformer m prf prf'
 
 transformMemDomain ::
@@ -399,7 +405,7 @@ transformProofApp f app = prfConstraint f $ case app of
     <*> pure a4
     
   ProofStatus a1 -> ProofStatus
-    <$> traverse (\(x, cond) -> (,) <$> pure x <*> prfPredTrans f cond) a1
+    <$> traverse (\(cex, cond) -> (,) <$> prfCounterExampleTrans f cex <*> prfConditionTrans f cond) a1
   ProofDomain a1 a2 a3 a4 -> ProofDomain
     <$> MM.traverseRegsWith (\_ (Const v) -> Const <$> prfPredTrans f v) a1
     <*> transformMemDomain f a2

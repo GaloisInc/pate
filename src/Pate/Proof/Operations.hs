@@ -163,7 +163,7 @@ blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF
 -- if it exists, but potentially yielding an 'PF.Unverified' result.
 proofResult ::
   forall prf tp a.
-  a ~ (PF.ProofCounterExample prf, PF.ProofPredicate prf) =>
+  a ~ (PF.ProofCounterExample prf, PF.ProofCondition prf) =>
   PF.ProofExpr prf tp ->
   PF.VerificationStatus a
 proofResult e = foldr merge PF.VerificationSuccess statuses
