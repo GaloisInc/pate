@@ -67,11 +67,17 @@ module Pate.SimState
 import           GHC.Stack ( HasCallStack )
 
 import           Control.Monad ( forM )
+import qualified Control.Monad.Writer as CMW
+import qualified Control.Monad.IO.Class as IO
+
+import qualified Data.Set as Set
+
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Map ( Pair(..) )
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.TraversableF as TF
 
@@ -267,39 +273,69 @@ rebindWithFrame sym asm e = do
   cache <- W4B.newIdxCache
   rebindWithFrame' sym cache asm e
 
+newtype VarBinds sym = VarBinds (MapF.MapF (W4.SymExpr sym) (SetF (W4.BoundVar sym)))
+
+instance OrdF (W4.SymExpr sym) => Semigroup (VarBinds sym) where
+  (VarBinds v1) <> (VarBinds v2) = VarBinds $
+    MapF.mergeWithKey (\_ bvs1 bvs2 -> Just (bvs1 <> bvs2)) id id v1 v2
+
+instance OrdF (W4.SymExpr sym) => Monoid (VarBinds sym) where
+  mempty = VarBinds MapF.empty
+
+toAssignmentPair ::
+  [Pair f g] ->
+  Pair (Ctx.Assignment f) (Ctx.Assignment g)
+toAssignmentPair [] = Pair Ctx.empty Ctx.empty
+toAssignmentPair ((Pair a1 a2):xs) | Pair a1' a2' <- toAssignmentPair xs =
+  Pair (a1' Ctx.:> a1) (a2' Ctx.:> a2)
+
+flattenVarBinds ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  VarBinds sym ->
+  [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
+flattenVarBinds (VarBinds binds) = concat $ map go (MapF.toList binds)
+  where
+    go :: Pair (W4.SymExpr sym) (SetF (W4.BoundVar sym)) -> [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
+    go (Pair e bvs) = map (\bv -> Pair bv e) $ setFToList bvs
+
+toBindings ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  VarBinds sym ->
+  Pair (Ctx.Assignment (W4.BoundVar sym)) (Ctx.Assignment (W4.SymExpr sym))
+toBindings varBinds = toAssignmentPair (flattenVarBinds varBinds)
+
 rebindWithFrame' ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  W4B.IdxCache t (W4B.Expr t) ->
+  W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t)) ->
   AssumptionFrame sym ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
 rebindWithFrame' sym cache asm e_outer = do
   let
-    go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
-    go e = W4B.idxCacheEval cache e $ do
-      setProgramLoc sym e
-      case getUniqueBinding sym asm e of
-        Just e' -> return e'
-        _ -> case e of
-          -- fixing a common trivial mux case
-          W4B.AppExpr a0
-            | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
-            , Just (W4B.BaseEq _ eT' eF') <- W4B.asApp cond
-            , Just W4.Refl <- W4.testEquality eT eT'
-            , Just W4.Refl <- W4.testEquality eF eF'
-            -> go eF
-          W4B.AppExpr a0 -> do
-            a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-            if (W4B.appExprApp a0) == a0' then return e
-            else W4B.sbMakeExpr sym a0'
-          W4B.NonceAppExpr a0 -> do
-            a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-            if (W4B.nonceExprApp a0) == a0' then return e
-            else W4B.sbNonceExpr sym a0'
-          _ -> return e
-  go e_outer
+    go :: forall tp'. W4B.Expr t tp' -> CMW.WriterT (VarBinds sym) IO (W4B.Expr t tp')
+    go e = idxCacheEvalWriter cache e $ case getUniqueBinding sym asm e of
+      Just e' -> do
+        bv <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType e')
+        CMW.tell $ VarBinds $ MapF.singleton e' (setFSingleton bv)
+        return $ W4.varExpr sym bv
+      Nothing -> case e of
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else IO.liftIO $ W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else IO.liftIO $ W4B.sbNonceExpr sym a0'
+        _ -> return e
+  (e', binds) <- CMW.runWriterT (go e_outer)
+  Pair vars vals <- return $ toBindings binds
+  fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
+  W4.applySymFn sym fn vals >>= fixMux sym
 
 data SimSpec sym arch f = SimSpec
   {
