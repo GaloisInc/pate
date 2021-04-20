@@ -56,5 +56,14 @@ challenge02-self: challenge02/challenge-02.original.exe challenge02/challenge-02
                                 --original challenge02/challenge-02.original.exe \
                                 --patched challenge02/challenge-02.original.exe
 
+.PHONY: challenge03
+challenge03: challenge03/challenge03.original.exe challenge03/challenge03.patched.exe
+	cabal v2-run exe:pate-exec -- \
+		                       --original challenge03/challenge03.original.exe \
+							   --patched challenge03/challenge03.patched.exe \
+							   --blockinfo challenge03/challenge03.info \
+							   --ignoremain
+
+
 %.i: %.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
