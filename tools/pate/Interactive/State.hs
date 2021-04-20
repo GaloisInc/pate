@@ -13,6 +13,7 @@ module Interactive.State (
   originalBinary,
   patchedBinary,
   sources,
+  metrics,
   ProofTreeNode(..),
   ProofTree(..),
   proofTree,
@@ -36,6 +37,7 @@ import qualified What4.Interface as WI
 
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
+import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
@@ -86,6 +88,7 @@ data State arch =
         --
         -- This is only updated at the user's direction so that they don't lose
         -- their place as new data streams in
+        , _metrics :: PM.Metrics
         }
 
 $(L.makeLenses 'State)
@@ -128,6 +131,7 @@ emptyState ms = State { _successful = Map.empty
                       , _sources = ms
                       , _proofTree = Nothing
                       , _activeProofTree = Nothing
+                      , _metrics = PM.emptyMetrics
                       }
 
 data StateRef arch =

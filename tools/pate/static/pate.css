@@ -33,6 +33,15 @@
     overflow: auto;
 }
 
+.domain {
+    margin: 10px;
+}
+
+.proof-app {
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
 #proof-canvas {
     width: 1600px;
     height: 1000px;

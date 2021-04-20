@@ -210,7 +210,7 @@ renderProofRegisterDomain _ (MapF.Pair reg (C.Const predicate))
   | Just False <- WI.asConstantPred predicate = Nothing
   | Just True <- WI.asConstantPred predicate = Just (TP.string (PC.showF reg))
   | otherwise = Just $ TP.row [ TP.string (PC.showF reg)
-                              , TP.string (T.unpack (pp (WI.printSymExpr predicate)))
+                              , text (WI.printSymExpr predicate)
                               ]
 
 renderProofMemoryDomain
@@ -238,11 +238,14 @@ renderDomainExpr (PPr.ProofNonceExpr _ _ app) = renderDomainApp app
 
 ppPolarityDescription :: WI.IsExpr e => e WI.BaseBoolType -> PP.Doc ann
 ppPolarityDescription predicate
-  | Just False <- WI.asConstantPred predicate =
-      PP.pretty "These locations are in the domain of this slice"
   | Just True <- WI.asConstantPred predicate =
+      PP.pretty "These locations are in the domain of this slice"
+  | Just False <- WI.asConstantPred predicate =
       PP.pretty "All locations other than these are in the domain of this slice"
   | otherwise = PP.pretty "Symbolic polarity"
+
+text :: PP.Doc ann -> TP.UI TP.Element
+text = TP.string . T.unpack . pp
 
 renderDomainApp
   :: forall prf node sym arch
@@ -256,10 +259,10 @@ renderDomainApp (PPr.ProofDomain regs stack mem _context) =
   TP.column [ TP.h4 #+ [TP.string "Registers"]
             , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @prf)) (MapF.toList (MC.regStateMap regs)))
             , TP.h4 #+ [TP.string "Stack Memory"]
-            , TP.string (T.unpack (pp (ppPolarityDescription (PPr.prfMemoryDomainPolarity stack))))
+            , text (ppPolarityDescription (PPr.prfMemoryDomainPolarity stack))
             , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity stack)) (MapF.toList (PPr.prfMemoryDomain stack)))
             , TP.h4 #+ [TP.string "Other Memory"]
-            , TP.string (T.unpack (pp (ppPolarityDescription (PPr.prfMemoryDomainPolarity mem))))
+            , text (ppPolarityDescription (PPr.prfMemoryDomainPolarity mem))
             , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity mem)) (MapF.toList (PPr.prfMemoryDomain mem)))
             ]
 
@@ -290,33 +293,38 @@ renderProofApp app =
       TP.div #+ [ TP.string "Proof that a function call is valid given its preconditions"
                 ]
     PPr.ProofTriple _blocks pre post (PPr.ProofNonceExpr _ _ (PPr.ProofStatus status)) ->
-      TP.column [ TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
-                , TP.h3 #+ [TP.string "Pre-domain"]
-                , TP.string "These values are assumed to be equal in both the original and patched program at the start of this program slice"
-                , renderDomainExpr pre
-                , TP.h3 #+ [TP.string "Post-domain"]
-                , TP.string "These values are asserted to be equal in both the original and patched program at the end of this program slice"
-                , renderDomainExpr post
-                , TP.h3 #+ [TP.string "Status"]
-                , TP.string (T.unpack (pp (ppStatus (Proxy @prf) status)))
-                ]
+      let preElts = TP.column [ TP.h3 #+ [TP.string "Pre-domain"]
+                              , TP.string "These values are assumed to be equal in both the original and patched program at the start of this program slice"
+                              , renderDomainExpr pre
+                              ]
+          postElts = TP.column [ TP.h3 #+ [TP.string "Post-domain"]
+                               , TP.string "These values are asserted to be equal in both the original and patched program at the end of this program slice"
+                               , renderDomainExpr post
+                               ]
+          statusElts = TP.column [ TP.h3 #+ [TP.string "Status"]
+                                 , text (ppStatus (Proxy @prf) status)
+                                 ]
+      in TP.grid [ [TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"]
+                 , [preElts # TP.set TP.class_ "domain", postElts # TP.set TP.class_ "domain"]
+                 , [statusElts]
+                 ]
     PPr.ProofStatus st ->
       case st of
         PPr.VerificationFail (cex, diffSummary)
           | Just False <- WI.asConstantPred (PFI.condEqPred diffSummary) ->
-            TP.column [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
+            TP.column [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
                       , TP.string "The patched program always exhibits different behavior if this program location is reached"
                       , TP.string "Counterexample:"
                       , renderCounterexample cex
                       ]
           | otherwise ->
-            TP.column [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
+            TP.column [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
                       , TP.string "The patched program exhibits identical behavior to the original under the following conditions:"
                       , TP.pre # TP.set TP.text (T.unpack (pp (WI.printSymExpr (PFI.condEqPred diffSummary))))
                       , TP.string "Counterexample:"
                       , renderCounterexample cex
                       ]
-        _ -> TP.div #+ [ TP.string (T.unpack (pp (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)))
+        _ -> TP.div #+ [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
                        ]
     PPr.ProofDomain {} ->
       TP.column [ TP.string "The domain of an individual equivalence proof"
