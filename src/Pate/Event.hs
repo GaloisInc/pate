@@ -48,7 +48,7 @@ data BranchCompletenessResult arch = BranchesComplete
 -- This can include traditional logging information, but also statistics about
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
-  AnalysisEnd :: PT.EquivalenceStatistics -> Event arch
+  AnalysisEnd :: PT.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
   AnalysisStart :: PT.BlockPair arch -> Event arch
   ErrorRaised :: PT.EquivalenceError arch -> Event arch
   Warning :: BlocksPair arch -> PT.EquivalenceError arch -> Event arch
@@ -64,7 +64,10 @@ data Event arch where
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch
+  -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: [(T.Text, Word64)] -> Event arch
+  -- | A list of functions discovered from provided hints that macaw code
+  -- discovery was not able to identify by itself
   FunctionsDiscoveredFromHints :: [MC.ArchSegmentOff arch] -> Event arch
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch

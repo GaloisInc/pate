@@ -77,6 +77,7 @@ library
                        Pate.Monad,
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
+                       Pate.Metrics,
                        Pate.SimulatorRegisters,
                        Pate.Panic,
                        Pate.Parallel,

@@ -176,6 +176,7 @@ verifyPairs ::
   [BlockPair arch] ->
   CME.ExceptT (EquivalenceError arch) IO PT.EquivalenceStatus
 verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
+  startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> CME.throwError $ equivalenceError UnsupportedArchitecture
@@ -257,7 +258,9 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
 
   liftIO $ do
     (result, stats) <- runVerificationLoop env pPairs
-    IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats)
+    endTime <- TM.getCurrentTime
+    let duration = TM.diffUTCTime endTime startTime
+    IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
     return $ result
 
 ---------------------------------------------
