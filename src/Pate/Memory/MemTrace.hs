@@ -145,7 +145,7 @@ newtype UndefinedPtrPredOp sym =
 
 -- | Wrapping a pointer as a struct, so that it may be represented as the
 -- result of an uninterpreted function.
-type BasePtrType w = BaseStructType (EmptyCtx ::> BaseNatType ::> BaseBVType w)
+type BasePtrType w = BaseStructType (EmptyCtx ::> BaseIntegerType ::> BaseBVType w)
 type SymPtr sym w = SymExpr sym (BasePtrType w)
 
 asSymPtr ::
@@ -153,7 +153,9 @@ asSymPtr ::
   sym ->
   LLVMPtr sym w ->
   IO (SymPtr sym w)
-asSymPtr sym (LLVMPointer reg off) = mkStruct sym (Empty :> reg :> off)
+asSymPtr sym (LLVMPointer reg off) = do
+  ireg <- natToInteger sym reg
+  mkStruct sym (Empty :> ireg :> off)
 
 fromSymPtr ::
   IsSymExprBuilder sym =>
@@ -163,7 +165,8 @@ fromSymPtr ::
 fromSymPtr sym sptr = do
   reg <- structField sym sptr Ctx.i1of2
   off <- structField sym sptr Ctx.i2of2
-  return $ LLVMPointer reg off
+  nreg <- integerToNat sym reg
+  return $ LLVMPointer nreg off
 
 polySymbol ::
   String ->
@@ -204,7 +207,7 @@ mkBinUF ::
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) (BasePtrType AnyNat)
 mkBinUF nm  = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
 
@@ -219,7 +222,7 @@ mkPtrBVUF nm = PolyFunMaker $ \sym w ->
   case natAbsBVFixed (knownNat @ptrW) w of
     Refl -> do
       let
-        ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+        ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
         repr = Empty :> ptrRepr :> BaseBVRepr (knownNat @ptrW)
       PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr knownNat)
 
@@ -229,7 +232,7 @@ mkPtrAssert ::
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat)
 mkPtrAssert nm = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> BaseBoolRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
 
@@ -257,7 +260,7 @@ mkPredUF ::
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) BaseBoolType
 mkPredUF nm = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
 
@@ -267,7 +270,7 @@ mkOffUF ::
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat) (BaseBVType AnyNat)
 mkOffUF nm = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseNatRepr :> BaseBVRepr w)
+    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr
   PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
 
@@ -458,9 +461,9 @@ instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
   MemOp (LLVMPointer addrR addrO) dir cond repr (LLVMPointer valR valO) end
     == MemOp (LLVMPointer addrR' addrO') dir' cond' repr' (LLVMPointer valR' valO') end'
      | Just Refl <- testEquality repr repr'
-     , Just Refl <- testEquality addrR addrR'
+     , addrR == addrR'
      , Just Refl <- testEquality addrO addrO'
-     , Just Refl <- testEquality valR valR'
+     , valR == valR'
      , Just Refl <- testEquality valO valO'
     = cond == cond' && dir == dir' && end == end'
   MergeOps p opsT opsF == MergeOps p' opsT' opsF'
@@ -475,12 +478,12 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ the logical contents of memory
   }
 
-data MemTraceVar sym ptrW = MemTraceVar (BoundVar sym (MemArrBaseType ptrW))
+data MemTraceVar sym ptrW = MemTraceVar (SymExpr sym (MemArrBaseType ptrW))
 
 type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (MemByteBaseType ptrW)
 
-type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseNatType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
+type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
 
 -- | 'MemByteBaseType' is the struct that we store to describe a single byte of
 -- memory. We want to be able to reconstruct pointers when we read back out of
@@ -490,7 +493,7 @@ type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> Base
 -- Two of the fields in the struct come from an LLVMPointer, and one is
 -- metadata:
 --
--- * BaseNatType: the region from an LLVMPointer
+-- * BaseIntegerType: the region from an LLVMPointer
 -- * BaseBVType ptrW: the offset from an LLVMPointer
 -- * BaseBVType ptrW: an index into the bytes of the pointer that the given
 --       region+offset decodes to (0 means the LSB, ptrW/8-1 is the MSB)
@@ -501,9 +504,9 @@ type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> Base
 -- that the indices go 0, 1, 2, .... If they don't, we either use a descriptive
 -- uninterpreted function or drop the result into region 0, depending on
 -- exactly how they're mismatched.
-type MemByteBaseType ptrW = BaseStructType (EmptyCtx ::> BaseNatType ::> BaseBVType ptrW ::> BaseBVType ptrW)
+type MemByteBaseType ptrW = BaseStructType (EmptyCtx ::> BaseIntegerType ::> BaseBVType ptrW ::> BaseBVType ptrW)
 type MemByteType ptrW = BaseToType (MemByteBaseType ptrW)
-type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseNatType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) (MemByteBaseType ptrW))
+type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) (MemByteBaseType ptrW))
 
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
@@ -549,11 +552,11 @@ initMemTraceVar ::
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW, MemTraceVar sym ptrW)
 initMemTraceVar sym Addr32 = do
-  arr <- ioFreshVar sym "InitMem" knownRepr
-  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+  arr <- ioFreshConstant sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty arr, MemTraceVar arr)
 initMemTraceVar sym Addr64 = do
-  arr <- ioFreshVar sym "InitMem" knownRepr
-  return $ (MemTraceImpl mempty (varExpr sym arr), MemTraceVar arr)
+  arr <- ioFreshConstant sym "InitMem" knownRepr
+  return $ (MemTraceImpl mempty arr, MemTraceVar arr)
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
 equalPrefixOf s1 s2 = go s1 s2 Seq.empty
@@ -774,7 +777,6 @@ compatSub = RegionConstraint msg $ \sym reg1 reg2 -> do
     msg = "both regions must be equal, or the offset must be region 0"
 
 ptrOp ::
-  IsSymInterface sym =>
   AddrWidthRepr w ->
   RegEntry sym (LLVMPointerType w) ->
   RegEntry sym (LLVMPointerType w) ->
@@ -786,7 +788,6 @@ ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region
     f sym region offset region' offset'
         
 ptrPredOp ::
-  1 <= w =>
   IsSymInterface sym =>
   UndefinedPtrPredOp sym ->
   RegionConstraint sym ->
@@ -816,7 +817,6 @@ muxPtr sym p (LLVMPointer region offset) (LLVMPointer region' offset') = do
   return $ LLVMPointer reg'' off''
 
 ptrBinOp ::
-  1 <= w => 
   IsSymInterface sym =>
   UndefinedPtrBinOp sym ->
   RegionConstraint sym ->
@@ -1026,7 +1026,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
   goPtr n endianness = do
     -- read memory
     LLVMPointer reg off <- arrayIdx sym ptr n
-    regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+    regArray <- arrayLookup sym (memArr mem) . Ctx.singleton =<< natToInteger sym reg
     memBytes@((valReg, valOff, _):_) <- forM [0 .. natValue ptrWRepr - 1] $ \byteOff -> do
       off' <- bvAdd sym off =<< bvFromInteger sym ptrWRepr (toInteger byteOff)
       memByteFields sym =<< arrayLookup sym regArray (Ctx.singleton off')
@@ -1107,7 +1107,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
       Left Refl
         | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
           LLVMPointer reg off <- arrayIdx sym ptr n
-          regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+          regArray <- arrayLookup sym (memArr mem) . Ctx.singleton =<< natToInteger sym reg
           memByte <- arrayLookup sym regArray (Ctx.singleton off)
           content <- getMemByteOff sym undef ptrWRepr memByte
           blk0 <- natLit sym 0
@@ -1152,6 +1152,7 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
       goBV eqCond bvZero natZero 0 mem_init
   where
   goBV ::
+    Pred sym ->
     SymBV sym ptrW ->
     SymNat sym ->
     Integer ->
@@ -1182,10 +1183,13 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     IO (MemTraceImpl sym ptrW)
   writeByte (LLVMPointer byteReg byteOff) nInteger nBV mem = do
     LLVMPointer ptrReg ptrOff <- arrayIdx sym ptr nInteger
-    memByte <- mkStruct sym (Ctx.extend (Ctx.extend (Ctx.extend Ctx.empty byteReg) byteOff) nBV)
-    regArray <- arrayLookup sym (memArr mem) (Ctx.singleton ptrReg)
+    byteRegSI <- natToInteger sym byteReg
+    ptrRegSI <- natToInteger sym ptrReg
+
+    memByte <- mkStruct sym (Ctx.extend (Ctx.extend (Ctx.extend Ctx.empty byteRegSI) byteOff) nBV)
+    regArray <- arrayLookup sym (memArr mem) (Ctx.singleton ptrRegSI)
     regArray' <- arrayUpdate sym regArray (Ctx.singleton ptrOff) memByte
-    regArray'' <- arrayUpdate sym (memArr mem) (Ctx.singleton ptrReg) regArray'
+    regArray'' <- arrayUpdate sym (memArr mem) (Ctx.singleton ptrRegSI) regArray'
     pure mem { memArr = regArray'' }
 
   ptrWRepr = let LLVMPointer _ off = ptr in bvWidth off
@@ -1226,9 +1230,10 @@ memByteFields ::
   SymExpr sym (MemByteBaseType w) ->
   IO (SymNat sym, SymBV sym w, SymBV sym w)
 memByteFields sym memByte = do
-    reg <- structField sym memByte (Ctx.skipIndex (Ctx.skipIndex Ctx.baseIndex))
+    regSI <- structField sym memByte (Ctx.skipIndex (Ctx.skipIndex Ctx.baseIndex))
     off <- structField sym memByte (Ctx.extendIndex' (Ctx.extendRight Ctx.noDiff) (Ctx.lastIndex (Ctx.incSize (Ctx.incSize Ctx.zeroSize))))
     subOff <- structField sym memByte (Ctx.nextIndex (Ctx.incSize (Ctx.incSize Ctx.zeroSize)))
+    reg <- integerToNat sym regSI
     return (reg, off, subOff)
 
 memWidthIsBig :: (MemWidth ptrW, n <= 32) => LeqProof n ptrW
@@ -1407,7 +1412,7 @@ memFootDir (MemFootprint _ _ dir _ _) = dir
 
 instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
   (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
-   | Just Refl <- testEquality reg1 reg2
+   | reg1 == reg2
    , Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
    = cond1 == cond2 && dir1 == dir2 && end1 == end2
@@ -1416,7 +1421,7 @@ instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
 instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
   compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2) =
     compare dir1 dir2 <>
-    (toOrdering $ compareF reg1 reg2) <>
+    (compare reg1 reg2) <>
     (toOrdering $ compareF off1 off2) <>
     (toOrdering $ compareF sz1 sz2) <>
     compare cond1 cond2 <>
@@ -1446,7 +1451,7 @@ llvmPtrEq ::
   LLVMPtr sym w ->
   IO (Pred sym)
 llvmPtrEq sym (LLVMPointer region offset) (LLVMPointer region' offset') = do
-  regionsEq <- isEq sym region region'
+  regionsEq <- natEq sym region region'
   offsetsEq <- isEq sym offset offset'
   andPred sym regionsEq offsetsEq
 

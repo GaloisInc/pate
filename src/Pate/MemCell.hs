@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+
 module Pate.MemCell (
     MemCell(..)
   , MemCells(..)
@@ -21,6 +22,7 @@ module Pate.MemCell (
   ) where
 
 import           Control.Monad ( foldM, forM )
+
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
@@ -40,6 +42,10 @@ import qualified What4.ExprHelpers as WEH
 
 -- | A pointer with an attached width, representing the size of the "cell" in bytes.
 -- It represents a discrete read or write, used as the key when forming a 'Pate.Equivalence.MemPred'
+--
+-- Note these are indirectly contained in the 'Pate.Equivalence.MemPred', which
+-- has its own 'PNR.NatRepr'; this is the same 'PNR.NatRepr' as is contained
+-- here.  The duplication allows the width of the cell to be determined in isolation.
 data MemCell sym arch w where
   MemCell ::
     1 <= w =>
@@ -50,7 +56,7 @@ data MemCell sym arch w where
 
 instance PC.TestEquality (WI.SymExpr sym) => PC.TestEquality (MemCell sym arch) where
   testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2)
-   | Just PC.Refl <- PC.testEquality reg1 reg2
+   | reg1 == reg2
    , Just PC.Refl <- PC.testEquality off1 off2
    , Just PC.Refl <- PC.testEquality sz1 sz2
    , end1 == end2
@@ -59,10 +65,9 @@ instance PC.TestEquality (WI.SymExpr sym) => PC.TestEquality (MemCell sym arch) 
 
 instance PC.OrdF (WI.SymExpr sym) => PC.OrdF (MemCell sym arch) where
   compareF (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2) =
-    PC.lexCompareF reg1 reg2 $
     PC.lexCompareF off1 off2 $
     PC.lexCompareF sz1 sz2 $
-    PC.fromOrdering $ compare end1 end2
+    PC.fromOrdering (compare reg1 reg2 <> compare end1 end2)
 
 instance PC.TestEquality (WI.SymExpr sym) => Eq (MemCell sym arch w) where
   stamp1 == stamp2 | Just PC.Refl <- PC.testEquality stamp1 stamp2 = True
@@ -71,6 +76,10 @@ instance PC.TestEquality (WI.SymExpr sym) => Eq (MemCell sym arch w) where
 instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
   compare stamp1 stamp2  = PC.toOrdering $ PC.compareF stamp1 stamp2
 
+-- | This is a collection of 'MemCell' that all represent memory regions of the same size.
+--
+-- Each 'MemCell' is associated with the predicate that says whether or not the
+-- described memory is contained in the 'Pate.Equivalence.MemPred'.
 newtype MemCells sym arch w = MemCells (Map.Map (MemCell sym arch w) (WI.Pred sym))
 
 mapCellPreds ::
@@ -217,7 +226,7 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
-instance PC.OrdF (WI.SymExpr sym) => PEM.ExprMappable sym (MemCells sym arch w) where
+instance (PC.OrdF (WI.SymExpr sym)) => PEM.ExprMappable sym (MemCells sym arch w) where
   mapExpr sym f (MemCells cells) = do
     maps <- forM (Map.toList cells) $ \(cell, p) -> do
       cell' <- PEM.mapExpr sym f cell

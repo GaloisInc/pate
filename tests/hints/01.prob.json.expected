@@ -1,0 +1,6 @@
+VerificationHints { blockMappings = []
+                  , functionEntries = [ ("__do_global_dtors_aux", 0x080000c0)
+                                      , ("frame_dummy", 0x080000e8)
+                                      ]
+                  , dataSymbols = []
+                  }

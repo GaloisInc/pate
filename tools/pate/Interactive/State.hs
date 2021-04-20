@@ -23,6 +23,7 @@ import qualified Language.C as LC
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
+import qualified Pate.Proof.Instances as PFI
 
 data SourcePair f = SourcePair { originalSource :: f
                                , patchedSource :: f
@@ -33,7 +34,7 @@ data EquivalenceTest arch where
   EquivalenceTest :: PE.BlocksPair arch -> TM.NominalDiffTime -> EquivalenceTest arch
 
 data Failure arch where
-  Failure :: PT.InequivalenceResult arch -> EquivalenceTest arch -> Failure arch
+  Failure :: PFI.InequivalenceResult arch -> EquivalenceTest arch -> Failure arch
 
 -- | The state tracks verification successes and failures
 --

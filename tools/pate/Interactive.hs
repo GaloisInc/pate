@@ -29,10 +29,11 @@ import qualified Prettyprinter as PP
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
 
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Types as PT
-import qualified Pate.CounterExample as PC
+import qualified Pate.Proof.Instances as PFI
 
 import           Interactive.State
 
@@ -67,7 +68,7 @@ consumeEvents chan r0 = do
                                                           & patchedBinary .~ Just (pelf, pmap), ())
         PE.ElfLoaderWarnings {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.CheckedEquivalence bpair@(PE.BlocksPair (PE.Blocks blk _) _) res duration -> do
+        PE.CheckedEquivalence bpair@(PT.PatchPair (PE.Blocks blk _) _) res duration -> do
           let
             addr = PT.concreteAddress blk
             et = EquivalenceTest bpair duration
@@ -95,12 +96,12 @@ addRecent n elt elts = elt : take (n - 1) elts
 
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier
-startInterface :: (PB.ArchConstraints arch) => StateRef arch -> IO ()
+startInterface :: (PA.ArchConstraints arch) => StateRef arch -> IO ()
 startInterface r = do
   let uiConf = TP.defaultConfig
   TP.startGUI uiConf (uiSetup r)
 
-uiSetup :: (PB.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
+uiSetup :: (PA.ArchConstraints arch) => StateRef arch -> TP.Window -> TP.UI ()
 uiSetup r wd = do
   st0 <- liftIO $ IOR.readIORef (stateRef r)
   void $ return wd # TP.set TP.title "PATE Verifier"
@@ -118,7 +119,7 @@ uiSetup r wd = do
   void $ liftIO $ TP.register (stateChangeEvent r) (updateConsole r wd consoleDiv summaryDiv detailDiv)
   return ()
 
-updateConsole :: (PB.ArchConstraints arch)
+updateConsole :: (PA.ArchConstraints arch)
               => StateRef arch
               -> TP.Window
               -> TP.Element
@@ -139,7 +140,7 @@ updateConsole r wd consoleDiv summaryDiv detailDiv () = do
 --
 -- The most recent event will be on the bottom (as in a normal scrolling
 -- terminal), which requires us to reverse the events list
-renderConsole :: (PB.ArchConstraints arch)
+renderConsole :: (PA.ArchConstraints arch)
               => StateRef arch
               -> TP.Element
               -> TP.UI TP.Element
@@ -147,13 +148,13 @@ renderConsole r detailDiv = do
   state <- liftIO $ IOR.readIORef (stateRef r)
   TP.ul #+ (map (\evt -> TP.li #+ [renderEvent state detailDiv evt]) (reverse (state ^. recentEvents)))
 
-renderEvent :: (PB.ArchConstraints arch) => State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
+renderEvent :: (PA.ArchConstraints arch) => State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
 renderEvent st detailDiv evt =
   case evt of
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       TP.ul #+ (map (\w -> TP.li #+ [TP.string (show w)]) pes)
-    PE.CheckedEquivalence (PE.BlocksPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
+    PE.CheckedEquivalence (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
       let
         origAddr = PT.blockMemAddr blkO
         patchedAddr = PT.blockMemAddr blkP
@@ -171,7 +172,7 @@ renderEvent st detailDiv evt =
     _ -> TP.string ""
 
 -- | Show the original block at the given address (as well as its corresponding patched block)
-showBlockPairDetail :: (PB.ArchConstraints arch)
+showBlockPairDetail :: (PA.ArchConstraints arch)
                     => State arch
                     -> TP.Element
                     -> PE.Blocks arch PT.Original
@@ -204,17 +205,15 @@ renderCounterexample er =
     PE.Equivalent -> []
     PE.Inconclusive -> []
     PE.Inequivalent ir ->
-      case ir of
-        PT.InequivalentResults _traceDiff _exitDiff regs _retAddrs rsn ->
-          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show rsn)
-                               , TP.pre #+ [TP.string (PC.ppPreRegs regs)]
+          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show (PFI.ineqReason ir))
+                               , TP.pre #+ [TP.string (PFI.ppInequivalencePreRegs ir)]
                                ]
                    ]
           ]
 
 -- | Note that we always look up the original address because we key the
 -- function name off of that... we could do better
-renderSource :: (PB.ArchConstraints arch)
+renderSource :: (PA.ArchConstraints arch)
              => State arch
              -> (SourcePair LC.CTranslUnit -> LC.CTranslUnit)
              -> L.Getter (State arch) (Maybe (PB.LoadedELF arch, b))
@@ -239,7 +238,7 @@ matchingFunctionName sname def =
         LC.CDeclr (Just ident) _ _ _ _ -> LC.identToString ident == sname
         LC.CDeclr Nothing _ _ _ _ -> False
 
-renderFunctionName :: (PB.ArchConstraints arch)
+renderFunctionName :: (PA.ArchConstraints arch)
                    => State arch
                    -> MC.MemAddr (MC.ArchAddrWidth arch)
                    -> [TP.UI TP.Element]

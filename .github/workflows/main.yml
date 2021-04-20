@@ -64,3 +64,6 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         cabal v2-test pkg:pate
+
+    - name: Docs
+      run: cabal haddock pkg:pate

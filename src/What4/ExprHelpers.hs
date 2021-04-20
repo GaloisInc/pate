@@ -34,16 +34,13 @@ module What4.ExprHelpers (
   , allPreds
   , anyPred
   , VarBinding(..)
-  , rebindExpr
   , mapExprPtr
   , freshPtr
-  , freshPtrVar
   , freshPtrBytes
   , mkSafeAsserts
   , ExprFilter(..)
   , getIsBoundFilter
   , assertPrefix
-  , expandVars
   , BoundVarBinding(..)
   , groundToConcrete
   , fixMux
@@ -62,7 +59,6 @@ import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.List ( foldl' )
-import           Data.Maybe ( catMaybes )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -163,32 +159,20 @@ anyPred sym preds = foldr (\p -> orM sym (return p)) (return $ W4.falsePred sym)
 data VarBinding sym tp =
   VarBinding
    {
-     bindVar :: W4.BoundVar sym tp
+     bindVar :: W4.SymExpr sym tp
    , bindVal :: W4.SymExpr sym tp
    }
 
-rebindExpr ::
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  Ctx.Assignment (VarBinding sym) ctx ->
-  W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-rebindExpr sym binds expr = do
-  let vars = TFC.fmapFC bindVar binds
-  let vals = TFC.fmapFC bindVal binds
-  fn <- W4.definedFn sym W4.emptySymbol vars expr W4.AlwaysUnfold
-  W4.applySymFn sym fn vals
-
-
 mapExprPtr ::
   forall sym w.
-  W4.IsSymExprBuilder sym =>
+  (W4.IsExprBuilder sym) =>
   sym ->
   (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
   CLM.LLVMPtr sym w ->
   IO (CLM.LLVMPtr sym w)  
-mapExprPtr _sym f (CLM.LLVMPointer reg off) = do
-  reg' <- f reg
+mapExprPtr sym f (CLM.LLVMPointer reg off) = do
+  regInt <- W4.natToInteger sym reg
+  reg' <- W4.integerToNat sym =<< f regInt
   off' <- f off
   return $ CLM.LLVMPointer reg' off'  
 
@@ -211,21 +195,9 @@ freshPtr ::
   IO (CLM.LLVMPtr sym w)
 freshPtr sym w = do
   off <- W4.freshConstant sym W4.emptySymbol (W4.BaseBVRepr w)
-  reg <- W4.freshConstant sym W4.emptySymbol W4.BaseNatRepr
+  reg <- W4.freshNat sym W4.emptySymbol
   return $ CLM.LLVMPointer reg off
 
-freshPtrVar ::
-  W4.IsSymExprBuilder sym =>
-  1 <= w =>
-  sym ->
-  W4.NatRepr w ->
-  W4.SolverSymbol ->
-  IO (CLM.LLVMPtr sym w, W4.BoundVar sym W4.BaseNatType, W4.BoundVar sym (W4.BaseBVType w))
-freshPtrVar sym w nm = do
-  offVar <- W4.freshBoundVar sym nm (W4.BaseBVRepr w)
-  regVar <- W4.freshBoundVar sym nm W4.BaseNatRepr
-  let ptr = CLM.LLVMPointer (W4.varExpr sym regVar) (W4.varExpr sym offVar)
-  return $ (ptr, regVar, offVar)
 
 mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> W4.LeqProof 1 (x W4.* w)
 mulMono _x w = unsafeCoerce (W4.leqRefl w)
@@ -239,11 +211,6 @@ boundVarsMap e0 = do
   visited <- stToIO $ H.new
   _ <- boundVars' visited e0
   return visited
-
-boundVars :: W4B.Expr t tp -> IO (Set (Some (W4B.ExprBoundVar t)))
-boundVars e0 = do
-  visited <- stToIO $ H.new
-  boundVars' visited e0
 
 cacheExec :: (Eq k, CC.Hashable k) => H.HashTable RealWorld k r -> k -> IO r -> IO r
 cacheExec h k m = do
@@ -268,15 +235,14 @@ boundVars' visited (W4B.NonceAppExpr e) = do
   cacheExec visited idx $ do
     sums <- sequence (TFC.toListFC (boundVars' visited) (W4B.nonceExprApp e))
     return $ foldl' S.union S.empty sums
-boundVars' visited (W4B.BoundVarExpr v)
-  | W4B.QuantifierVarKind <- W4B.bvarKind v = do
+boundVars' visited (W4B.BoundVarExpr v) = do
       let idx = N.indexValue (W4B.bvarId v)
       cacheExec visited idx $
         return (S.singleton (Some v))
-boundVars' _ (W4B.BoundVarExpr{}) = return S.empty
 boundVars' _ (W4B.SemiRingLiteral{}) = return S.empty
 boundVars' _ (W4B.BoolExpr{}) = return S.empty
 boundVars' _ (W4B.StringExpr{}) = return S.empty
+boundVars' _ (W4B.FloatExpr {}) = return S.empty
 -- End Clag
 
 newtype ExprFilter sym = ExprFilter (forall tp'. W4.SymExpr sym tp' -> IO Bool)
@@ -301,24 +267,6 @@ getIsBoundFilter expr = do
 
 
 newtype BoundVarBinding sym = BoundVarBinding (forall tp'. W4.BoundVar sym tp' -> IO (Maybe (W4.SymExpr sym tp')))
-
--- | expand any bound variables contained in the expression
--- according to the given expansion function
-expandVars ::
-  forall sym tp t solver fs.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  sym ->
-  BoundVarBinding sym ->
-  W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-expandVars sym (BoundVarBinding f) e = do
-  bvs <- boundVars e
-  let
-    getBinding (Some bv) = f bv >>= \case
-      Just e' -> return $ Just $ (Some (VarBinding @sym bv e'))
-      Nothing -> return Nothing
-  Some binds <- (Ctx.fromList . catMaybes) <$> mapM getBinding (S.toList bvs)
-  rebindExpr sym binds e
 
 -- | Simplify 'ite (eq y x) y x' into 'x'
 fixMux ::
@@ -367,7 +315,6 @@ groundToConcrete ::
 groundToConcrete repr gv = case repr of
   W4.BaseBoolRepr -> return $ W4C.ConcreteBool gv
   W4.BaseBVRepr w -> return $ W4C.ConcreteBV w gv
-  W4.BaseNatRepr -> return $ W4C.ConcreteNat gv
   W4.BaseIntegerRepr -> return $ W4C.ConcreteInteger gv
   W4.BaseStructRepr srepr -> do
     let

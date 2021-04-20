@@ -19,15 +19,24 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DeriveTraversable #-}
+
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Types
-  ( VerificationConfig(..)
-  , defaultVerificationCfg
-  , PatchPair(..)
+  ( PatchPair(..)
+  , PatchPairEq(..)
+  , ppPatchPair
+  , PatchPairC(..)
+  , mergePatchPairCs
+  , ppPatchPairCEq
+  , ppPatchPairEq
+  , ppPatchPairC
+  , BlockPair
   , ConcreteBlock(..)
+  , equivBlocks
   , getConcreteBlock
   , blockMemAddr
   , BlockMapping(..)
@@ -40,49 +49,36 @@ module Pate.Types
   , concreteFromAbsolute
   , ParsedBlockMap(..)
   , ParsedFunctionMap
+  , parsedFunctionEntries
   , markEntryPoint
   , type WhichBinary
   , KnownBinary
   , Original
   , Patched
   , WhichBinaryRepr(..)
-  , ValidArch(..)
-  , HasTOCReg(..)
-  , HasTOCDict(..)
-  , withTOCCases
   , ValidSym
   , Sym(..)
-  , RegisterDiff(..)
-  , ConcreteValue
-  , GroundBV(..)
-  , mkGroundBV
-  , groundBVAsPointer
-  , GroundLLVMPointer(..)
-  , GroundMemOp(..)
-  , gValue
   , SymGroundEvalFn(..)
   , execGroundFnIO
-  , MemTraceDiff
-  , MemOpDiff(..)
   , InnerEquivalenceError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
   , equivalenceError
-  , ExitCaseDiff
   --- register helpers
   , RegisterCase(..)
   , registerCase
   , zipRegStates
+  , zipRegStatesPar
+  , zipWithRegStatesM
   --- reporting
   , EquivalenceStatistics(..)
   , equivSuccess
-  , InequivalenceResult(..)
   , ppEquivalenceStatistics
   , ppBlock
-  , ppLLVMPointer
   , showModelForExpr
   , mapExprPtr
   , freshPtr
+  , ptrEquality
   )
 where
 
@@ -93,61 +89,40 @@ import           Control.Lens hiding ( op, pre )
 import           Control.Monad.Except
 
 import qualified Data.BitVector.Sized as BVS
+import           Data.IntervalMap (IntervalMap)
+import qualified Data.IntervalMap as IM
+import qualified Data.Kind as DK
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
-import           Data.IntervalMap (IntervalMap)
-import qualified Data.IntervalMap as IM
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Typeable
-import           Numeric.Natural
-import           Numeric
-import qualified Data.ElfEdit as E
+import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..)) 
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
+import qualified What4.Solver as WS
 
-import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Parallel as PP
+import qualified Pate.Arch as PA
 import           What4.ExprHelpers
-
-----------------------------------
--- Verification configuration
-data VerificationConfig =
-  VerificationConfig
-    { cfgPairMain :: Bool
-    -- ^ start by pairing the entry points of the binaries
-    , cfgDiscoverFuns :: Bool
-    -- ^ discover additional functions pairs during analysis
-    , cfgComputeEquivalenceFrames :: Bool
-    -- ^ compute fine-grained equivalence frames using heuristics
-    -- if false, pre-domains will simply be computed as any possible
-    -- relevant state. A failed result in this mode will fallback
-    -- to attempting to use fine-grained domains.
-    , cfgEmitProofs :: Bool
-    -- ^ emit a structured spine of the equivalence proofs
-    }
-
-defaultVerificationCfg :: VerificationConfig
-defaultVerificationCfg = VerificationConfig True True True True
-
+import qualified Pate.ExprMappable as PEM
 
 ----------------------------------
 
@@ -161,6 +136,9 @@ newtype ParsedBlockMap arch ids = ParsedBlockMap
 -- You should expect (and check) that exactly one key exists at the function entry point level.
 type ParsedFunctionMap arch = IntervalMap (ConcreteAddress arch) (Map (MM.ArchSegmentOff arch) (Some (ParsedBlockMap arch)))
 
+-- | Return the list of entry points in the parsed function map
+parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
+parsedFunctionEntries = concatMap M.keys . IM.elems
 
 markEntryPoint ::
   MM.ArchSegmentOff arch ->
@@ -174,15 +152,88 @@ newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arc
   deriving (Eq, Ord)
 deriving instance Show (ConcreteAddress arch)
 
-data PatchPair arch = PatchPair
-  { pOrig :: ConcreteBlock arch 'Original
-  , pPatched :: ConcreteBlock arch 'Patched
+data PatchPair (tp :: WhichBinary -> DK.Type) = PatchPair
+  { pOriginal :: tp 'Original
+  , pPatched :: tp 'Patched
   }
-  deriving (Eq, Ord)
 
-instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (PatchPair arch) where
-  show (PatchPair blk1 blk2) = ppBlock blk1 ++ " vs. " ++ ppBlock blk2
+class PatchPairEq tp where
+  ppEq :: tp Original -> tp Patched -> Bool
 
+data PatchPairC tp = PatchPairC
+  { pcOriginal :: tp
+  , pcPatched :: tp
+  }
+  deriving (Eq, Ord, Functor, Foldable, Traversable)
+
+mergePatchPairCs ::
+  PatchPairC a ->
+  PatchPairC b ->
+  PatchPairC (a, b)
+mergePatchPairCs (PatchPairC o1 p1) (PatchPairC o2 p2) = PatchPairC (o1, o2) (p1, p2)
+
+
+instance TestEquality tp => Eq (PatchPair tp) where
+  PatchPair o1 p1 == PatchPair o2 p2
+    | Just Refl <- testEquality o1 o2
+    , Just Refl <- testEquality p1 p2
+    = True
+  _ == _ = False
+
+instance (TestEquality tp, OrdF tp) => Ord (PatchPair tp) where
+  compare (PatchPair o1 p1) (PatchPair o2 p2) = toOrdering $ (lexCompareF o1 o2 (compareF p1 p2))
+
+instance TF.FunctorF PatchPair where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF PatchPair where
+  foldMapF = TF.foldMapFDefault
+
+instance (forall bin. PEM.ExprMappable sym (f bin)) => PEM.ExprMappable sym (PatchPair f) where
+  mapExpr sym f (PatchPair o p) = PatchPair <$> PEM.mapExpr sym f o <*> PEM.mapExpr sym f p
+
+instance TF.TraversableF PatchPair where
+  traverseF f (PatchPair o p) = PatchPair <$> f o <*> f p
+
+type BlockPair arch = PatchPair (ConcreteBlock arch)
+
+
+  
+
+instance ShowF tp => Show (PatchPair tp) where
+  show (PatchPair a1 a2) = showF a1 ++ " vs. " ++ showF a2
+
+instance (PatchPairEq f, (forall bin. PP.Pretty (f bin))) => PP.Pretty (PatchPair f) where
+  pretty = ppPatchPairEq ppEq PP.pretty 
+
+
+ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
+ppPatchPair f (PatchPair a1 a2) = f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
+
+
+ppPatchPairEq ::
+  (tp Original -> tp Patched -> Bool) ->
+  (forall bin. tp bin -> PP.Doc a) ->
+  PatchPair tp ->
+  PP.Doc a
+ppPatchPairEq test f (PatchPair a1 a2) = case test a1 a2 of
+  True -> f a1
+  False -> f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
+
+ppPatchPairC ::
+  (tp -> PP.Doc a) ->
+  PatchPairC tp ->
+  PP.Doc a
+ppPatchPairC f (PatchPairC o p) = ppPatchPair (\(Const v) -> f v) (PatchPair (Const o) (Const p))
+
+ppPatchPairCEq ::
+  Eq tp =>
+  (tp -> PP.Doc a) ->
+  PatchPairC tp ->
+  PP.Doc a
+ppPatchPairCEq f ppair@(PatchPairC o p) = case o == p of
+  True -> f o
+  False -> ppPatchPairC f ppair
 
 data BlockTarget arch bin =
   BlockTarget
@@ -223,6 +274,14 @@ data ConcreteBlock arch (bin :: WhichBinary) =
                 , blockBinRepr :: WhichBinaryRepr bin
                 }
 
+equivBlocks :: ConcreteBlock arch Original -> ConcreteBlock arch Patched -> Bool
+equivBlocks blkO blkP =
+  concreteAddress blkO == concreteAddress blkP &&
+  concreteBlockEntry blkO == concreteBlockEntry blkP
+
+instance PatchPairEq (ConcreteBlock arch) where
+  ppEq = equivBlocks
+
 getConcreteBlock ::
   MM.MemWidth (MM.ArchAddrWidth arch) =>
   MM.ArchSegmentOff arch ->
@@ -258,6 +317,9 @@ instance Ord (ConcreteBlock arch bin) where
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (ConcreteBlock arch bin) where
   show blk = ppBlock blk
 
+instance MM.MemWidth (MM.ArchAddrWidth arch) => ShowF (ConcreteBlock arch) where
+  showF blk = show blk
+
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> String
 ppBlock b = show (absoluteAddress (concreteAddress b))
 
@@ -273,116 +335,11 @@ addressAddOffset :: (MM.MemWidth (MM.ArchAddrWidth arch))
 addressAddOffset (ConcreteAddress memAddr) memWord =
   ConcreteAddress (MM.incAddr (fromIntegral memWord) memAddr)
 
-concreteFromAbsolute :: (MM.MemWidth (MM.ArchAddrWidth arch))
-                     => MM.MemWord (MM.ArchAddrWidth arch)
+concreteFromAbsolute :: MM.MemWord (MM.ArchAddrWidth arch)
                      -> ConcreteAddress arch
 concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
 
 ----------------------------------
-
-data GroundBV n where
-  GroundBV :: W4.NatRepr n -> BVS.BV n -> GroundBV n
-  GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
-  deriving Eq
-
-instance Show (GroundBV n) where
-  show = ppGroundBV
-
-pad :: Int -> String -> String
-pad = padWith ' '
-
-padWith :: Char -> Int -> String -> String
-padWith c n s = replicate (n-length s) c ++ s
-
-ppGroundBV :: GroundBV w -> String
-ppGroundBV gbv = case gbv of
-  GroundBV w bv -> BVS.ppHex w bv
-  GroundLLVMPointer ptr -> ppLLVMPointer ptr
-
-ppLLVMPointer :: GroundLLVMPointer w -> String
-ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = concat
-  [ pad 4 (show reg)
-  , "+0x"
-  , padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
-  ]
-  where
-    off = BVS.asUnsigned offBV
-    bitWidth = W4.natValue bitWidthRepr
-
-groundBVWidth :: GroundBV n -> W4.NatRepr n
-groundBVWidth gbv = case gbv of
-  GroundBV nr _ -> nr
-  GroundLLVMPointer ptr -> ptrWidth ptr
-
-instance TestEquality GroundBV where
-  testEquality bv bv' = case testEquality (groundBVWidth bv) (groundBVWidth bv') of
-    Just Refl | bv == bv' -> Just Refl
-    _ -> Nothing
-
-instance OrdF GroundBV where
-  compareF (GroundBV w bv) (GroundBV w' bv') =
-    lexCompareF w w' $ fromOrdering $ compare bv bv'
-  compareF (GroundLLVMPointer ptr) (GroundLLVMPointer ptr') = compareF ptr ptr'
-  compareF (GroundBV _ _) _ = LTF
-  compareF (GroundLLVMPointer _) _ = GTF
-
-instance Ord (GroundBV n) where
-  compare bv bv' = toOrdering (compareF bv bv')
-
-data GroundLLVMPointer n where
-  GroundLLVMPointerC ::
-      { ptrWidth :: W4.NatRepr n
-      , ptrRegion :: Natural
-      , ptrOffset :: BVS.BV n
-      } -> GroundLLVMPointer n
-  deriving Eq
-
-instance TestEquality GroundLLVMPointer where
-  testEquality ptr ptr'
-    | Just Refl <- testEquality (ptrWidth ptr) (ptrWidth ptr')
-    , ptr == ptr'
-    = Just Refl
-  testEquality _ _ = Nothing
-
-
-instance OrdF GroundLLVMPointer where
-  compareF (GroundLLVMPointerC w reg off) (GroundLLVMPointerC w' reg' off') =
-    lexCompareF w w' $ joinOrderingF (fromOrdering $ compare reg reg') (fromOrdering $ compare off off')
-
-instance Show (GroundLLVMPointer n) where
-  show ptr = ppLLVMPointer ptr
-
-mkGroundBV :: forall n.
-  W4.NatRepr n ->
-  Natural ->
-  BVS.BV n ->
-  GroundBV n
-mkGroundBV nr reg bv = case reg > 0 of
- True -> GroundLLVMPointer $ GroundLLVMPointerC nr reg bv
- False -> GroundBV nr bv
-
-groundBVAsPointer :: GroundBV n -> GroundLLVMPointer n
-groundBVAsPointer gbv = case gbv of
-  GroundLLVMPointer ptr -> ptr
-  GroundBV w bv -> GroundLLVMPointerC w 0 bv
-
-type family ConcreteValue (tp :: CC.CrucibleType)
-type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
-type instance ConcreteValue (CC.MaybeType (CLM.LLVMPointerType w)) = Maybe (GroundBV w)
-type instance ConcreteValue CC.BoolType = Bool
-type instance ConcreteValue (CC.StructType CC.EmptyCtx) = ()
-
-data RegisterDiff arch tp where
-  RegisterDiff :: ShowF (MM.ArchReg arch) =>
-    { rReg :: MM.ArchReg arch tp
-    , rTypeRepr :: CC.TypeRepr (MS.ToCrucibleType tp)
-    , rPreOriginal :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPrePatched :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostOriginal :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostPatched :: ConcreteValue (MS.ToCrucibleType tp)
-    , rPostEquivalent :: Bool
-    , rDiffDescription :: String
-    } -> RegisterDiff arch tp
 
 data SymGroundEvalFn sym where
   SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
@@ -395,46 +352,7 @@ execGroundFnIO ::
 execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
 
 ----------------------------------
-data GroundMemOp arch where
-  GroundMemOp :: forall arch w.
-    { gAddress :: GroundLLVMPointer (MM.ArchAddrWidth arch)
-    , gCondition :: Bool
-    , gValue_ :: GroundBV w
-    } -> GroundMemOp arch
 
-gValue :: GroundMemOp arch -> Some GroundBV
-gValue (GroundMemOp { gValue_ = v}) = Some v
-
-instance Eq (GroundMemOp arch) where
-  (GroundMemOp addr cond v) == (GroundMemOp addr' cond' v')
-    | Just Refl <- testEquality addr addr'
-    , Just Refl <- testEquality v v'
-    = cond == cond'
-  _ == _ = False
-      
-instance Ord (GroundMemOp arch) where
-  compare (GroundMemOp addr cond v) (GroundMemOp addr' cond' v') =
-    case compare cond cond' of
-      LT -> LT
-      GT -> GT
-      EQ -> toOrdering $ lexCompareF addr addr' $ compareF v v'
-
-deriving instance Show (GroundMemOp arch)
-
-data MemOpDiff arch = MemOpDiff
-  { mIsRead :: Bool
-  , mOpOriginal :: GroundMemOp arch
-  , mOpRewritten :: GroundMemOp arch
-  , mIsValid :: Bool
-  , mDesc :: String
-  } deriving (Eq, Ord, Show)
-
-type MemTraceDiff arch = [MemOpDiff arch]
-
-----------------------------------
-
-
---------------------
 
 data EquivalenceStatistics = EquivalenceStatistics
   { numPairsChecked :: Int
@@ -462,23 +380,6 @@ data InequivalenceReason =
   | InvalidPostState
   | PostRelationUnsat
   deriving (Eq, Ord, Show)
-
-type ExitCaseDiff = (MS.MacawBlockEndCase, MS.MacawBlockEndCase)
-type ReturnAddrDiff arch = (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch)), (Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))))
-
-data InequivalenceResult arch =
-  InequivalentResults
-    { diffMem :: MemTraceDiff arch
-    , diffExit :: ExitCaseDiff
-    , diffRegs :: MM.RegState (MM.ArchReg arch) (RegisterDiff arch)
-    , diffRetAddr :: ReturnAddrDiff arch
-    , diffReason :: InequivalenceReason
-    }
-
-
-
-instance Show (InequivalenceResult arch) where
-  show _ = "InequivalenceResult"
 
 ----------------------------------
 
@@ -527,7 +428,7 @@ data RegisterCase arch tp where
   -- | stack pointer
   RegSP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | table of contents register (if defined)
-  RegTOC :: HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
+  RegTOC :: PA.HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | non-specific bitvector (zero-region pointer) register
   RegBV :: RegisterCase arch (CLM.LLVMPointerType w)
   -- | non-specific pointer register
@@ -537,7 +438,7 @@ data RegisterCase arch tp where
   
 registerCase ::
   forall arch tp.
-  ValidArch arch =>
+  PA.ValidArch arch =>
   CC.TypeRepr (MS.ToCrucibleType tp) ->
   MM.ArchReg arch tp ->
   RegisterCase arch (MS.ToCrucibleType tp)
@@ -545,17 +446,27 @@ registerCase repr r = case testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
   Just Refl -> RegIP
   _ -> case testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
     Just Refl -> RegSP
-    _ -> withTOCCases @arch nontoc $
-      case testEquality r (toc_reg @arch) of
+    _ -> PA.withTOCCases (Proxy @arch) nontoc $
+      case testEquality r (PA.toc_reg @arch) of
         Just Refl -> RegTOC
         _ -> nontoc
   where
     nontoc :: RegisterCase arch (MS.ToCrucibleType tp)
     nontoc = case repr of
-      CLM.LLVMPointerRepr{} -> case rawBVReg r of
+      CLM.LLVMPointerRepr{} -> case PA.rawBVReg r of
         True -> RegBV
         False -> RegGPtr
       _ -> RegElse
+
+zipRegStatesPar :: PP.IsFuture m future
+                => MM.RegisterInfo r
+                => MM.RegState r f
+                -> MM.RegState r g
+                -> (forall u. r u -> f u -> g u -> m (future h))
+                -> m (future [h])
+zipRegStatesPar regs1 regs2 f = do
+  regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
+  PP.promise $ mapM (\(MapF.Pair _ (Const v)) -> PP.joinFuture v) $ MapF.toList $ MM.regStateMap regs'
 
 zipRegStates :: Monad m
              => MM.RegisterInfo r
@@ -563,40 +474,17 @@ zipRegStates :: Monad m
              -> MM.RegState r g
              -> (forall u. r u -> f u -> g u -> m h)
              -> m [h]
-zipRegStates regs1 regs2 f = do
-  regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
-  return $ map (\(MapF.Pair _ (Const v)) -> v) $ MapF.toList $ MM.regStateMap regs'
+zipRegStates regs1 regs2 f = join $ zipRegStatesPar regs1 regs2 (\r e1 e2 -> return $ f r e1 e2)
+
+zipWithRegStatesM :: Monad m
+                  => MM.RegisterInfo r
+                  => MM.RegState r f
+                  -> MM.RegState r g
+                  -> (forall u. r u -> f u -> g u -> m (h u))
+                  -> m (MM.RegState r h)
+zipWithRegStatesM regs1 regs2 f = MM.mkRegStateM (\r -> f r (regs1 ^. MM.boundValue r) (regs2 ^. MM.boundValue r))
 
 ----------------------------------
-
-class TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch)) => HasTOCReg arch where
-  toc_reg :: MM.ArchReg arch (MM.BVType (MM.RegAddrWidth (MM.ArchReg arch)))
-
-data HasTOCDict arch where
-  HasTOCDict :: HasTOCReg arch => HasTOCDict arch
-
-class
-  ( Typeable arch
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , MS.SymArchConstraints arch
-  , MS.GenArchInfo MT.MemTraceK arch
-  , MM.ArchConstraints arch
-  ) => ValidArch arch where
-  -- | an optional witness that the architecture has a table of contents
-  tocProof :: Maybe (HasTOCDict arch)
-  -- | Registers which are used for "raw" bitvectors (i.e. they are not
-  -- used for pointers). These are assumed to always have region 0.
-  rawBVReg :: forall tp. MM.ArchReg arch tp -> Bool
-
-withTOCCases ::
-  forall arch a.
-  ValidArch arch =>
-  a ->
-  ((HasTOCReg arch, TOC.HasTOC arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))) => a) ->
-  a
-withTOCCases noToc hasToc = case tocProof @arch of
-  Just HasTOCDict -> hasToc
-  Nothing -> noToc
 
 type ValidSym sym =
   ( W4.IsExprBuilder sym
@@ -605,7 +493,7 @@ type ValidSym sym =
   )
 
 data Sym sym where
-  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> Sym sym
+  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> WS.SolverAdapter st -> Sym sym
 
 ----------------------------------
 
@@ -631,7 +519,7 @@ data InnerEquivalenceError arch
   | UnexpectedBlockKind String
   | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
-  | MissingPatchPairResult (PatchPair arch)
+  | MissingPatchPairResult (BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
   | AssumedFalse
@@ -640,7 +528,6 @@ data InnerEquivalenceError arch
   | MismatchedAssumptionsPanic
   | UnexpectedNonBoundVar
   | UnsatisfiableAssumptions
-  | InequivalentError (InequivalenceResult arch)
   | MissingCrucibleGlobals
   | UnexpectedUnverifiedTriple
   | MissingTOCEntry (MM.ArchSegmentOff arch)
@@ -650,7 +537,7 @@ deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch
 
 data EquivalenceError arch where
   EquivalenceError ::
-    ValidArch arch =>
+    PA.ValidArch arch =>
       { errWhichBinary :: Maybe (Some WhichBinaryRepr)
       , errStackTrace :: Maybe CallStack
       , errEquivError :: InnerEquivalenceError arch
@@ -664,12 +551,24 @@ instance Show (EquivalenceError arch) where
 
 instance (Typeable arch, MS.SymArchConstraints arch) => Exception (EquivalenceError arch)
 
-equivalenceError :: ValidArch arch => InnerEquivalenceError arch -> EquivalenceError arch
+equivalenceError :: PA.ValidArch arch => InnerEquivalenceError arch -> EquivalenceError arch
 equivalenceError err = EquivalenceError
   { errWhichBinary = Nothing
   , errStackTrace = Nothing
   , errEquivError = err
   }
+----------------------------------
+
+
+ptrEquality ::
+  TestEquality (W4B.SymExpr sym) =>
+  CLM.LLVMPtr sym w1 ->
+  CLM.LLVMPtr sym w2 ->
+  Maybe (w1 :~: w2)
+ptrEquality (CLM.LLVMPointer reg1 off1) (CLM.LLVMPointer reg2 off2)
+  | reg1 == reg2, Just Refl <- testEquality off1 off2 = Just Refl
+ptrEquality _ _ = Nothing
+
 ----------------------------------
 
 ppEquivalenceStatistics :: EquivalenceStatistics -> String
@@ -738,6 +637,6 @@ showGroundValue ::
 showGroundValue repr gv = case repr of
   W4.BaseBoolRepr -> show gv
   W4.BaseBVRepr w -> BVS.ppHex w gv
-  W4.BaseNatRepr -> show gv
+  W4.BaseIntegerRepr -> show gv
   _ -> "Unsupported ground value"
 

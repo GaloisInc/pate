@@ -1,0 +1,8 @@
+VerificationHints { blockMappings = []
+                  , functionEntries = [ ("printf", 4195440)
+                                      , ("main", 4195712)
+                                      , ("puts", 4195424)
+                                      ]
+                  , dataSymbols = [ ("errno", SymbolExtent { symbolLocation = 400, symbolSize = 4} )
+                                  ]
+                  }

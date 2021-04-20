@@ -2,7 +2,7 @@
 -- | Events that can be reported from the verifier
 module Pate.Event (
   Blocks(..),
-  BlocksPair(..),
+  BlocksPair,
   EquivalenceResult(..),
   BlockTargetResult(..),
   BranchCompletenessResult(..),
@@ -10,26 +10,30 @@ module Pate.Event (
   ) where
 
 import qualified Data.ElfEdit as DEE
+import qualified Data.List.NonEmpty as DLN
+import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Discovery as MD
+import qualified Data.Text as T
 import qualified Data.Time as TM
+import           Data.Word ( Word64 )
 
 import qualified Pate.Binary as PB
+import qualified Pate.Hints.CSV as PHC
+import qualified Pate.Hints.DWARF as PHD
+import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Types as PT
-import qualified Pate.Proof as PP
+import qualified Pate.Proof as PF
+import qualified Pate.Proof.Instances as PFI
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
   Blocks :: PT.ConcreteBlock arch bin -> [MD.ParsedBlock arch ids] -> Blocks arch bin
 
-data BlocksPair arch =
-  BlocksPair
-    { blocksO :: Blocks arch PT.Original
-    , blocksP :: Blocks arch PT.Patched
-    }
+type BlocksPair arch = PT.PatchPair (Blocks arch)
 
 data EquivalenceResult arch = Equivalent
                             | Inconclusive
-                            | Inequivalent (PT.InequivalenceResult arch)
+                            | Inequivalent (PFI.InequivalenceResult arch)
 
 data BlockTargetResult = Reachable
                        | InconclusiveTarget
@@ -37,7 +41,7 @@ data BlockTargetResult = Reachable
 
 data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches
-                                   | BranchesIncomplete (PT.InequivalenceResult arch)
+                                   | BranchesIncomplete (PFI.InequivalenceResult arch)
 
 -- | Events that can be reported from the verifier
 --
@@ -45,16 +49,23 @@ data BranchCompletenessResult arch = BranchesComplete
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
   AnalysisEnd :: PT.EquivalenceStatistics -> Event arch
-  AnalysisStart :: PT.PatchPair arch -> Event arch
+  AnalysisStart :: PT.BlockPair arch -> Event arch
   ErrorRaised :: PT.EquivalenceError arch -> Event arch
   Warning :: BlocksPair arch -> PT.EquivalenceError arch -> Event arch
-  -- | top-level result
-  ProvenGoal :: BlocksPair arch -> PP.SomeProofGoal arch -> TM.NominalDiffTime -> Event arch
-  -- | intermediate result
-  ProvenTriple :: BlocksPair arch -> PP.SomeProofBlockSlice arch -> TM.NominalDiffTime -> Event arch
+  -- | final top-level result
+  ProvenGoal :: BlocksPair arch ->  PFI.SomeProofSym arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
+  -- | intermediate results
+  ProofIntermediate :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
+  ProofStarted :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
+
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
   DiscoverBlockPair :: BlocksPair arch -> PT.BlockTarget arch PT.Original -> PT.BlockTarget arch PT.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PB.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch
+  FunctionEntryInvalidHints :: [(T.Text, Word64)] -> Event arch
+  FunctionsDiscoveredFromHints :: [MC.ArchSegmentOff arch] -> Event arch
+  HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
+  HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
+  HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch
