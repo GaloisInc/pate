@@ -1218,6 +1218,7 @@ bindMemory ::
 bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
 
+
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
 -- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.

@@ -348,6 +348,11 @@ fixMux' sym cache e_outer = do
                 | eT' == eT, eF' == eF -> return e
                 | otherwise -> W4.baseTypeIte sym cond eT' eF'
       W4B.AppExpr a0
+         | W4B.BaseIte _ _ cond eT eF <- W4B.appExprApp a0
+         , Just (W4B.BaseIte _ _ cond2 eT2 _) <- W4B.asApp eT
+         , cond == cond2
+         -> go =<< W4.baseTypeIte sym cond eT2 eF
+      W4B.AppExpr a0
          | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
          , Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF
          , cond == cond2
