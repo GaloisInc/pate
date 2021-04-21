@@ -53,6 +53,7 @@ Design
 The verifier takes two binaries as input: an original binary and a patched binary. The assumption is that some security-oriented patch has been applied to the original binary that largely preserves its behavior, but may fix some undesirable behaviors. The verifier then attempts to prove that the two binaries exhibit the same observable behavior; if it cannot, it produces a *differential summary* that describes the conditions under which the patched binary exhibits different behavior from the original.  This enables patch developers to understand the impact of their patches on the program semantics and evaluate if the impact is restricted to the execution paths that they intended.
 
 The verifier does not require a manually-provided specification from users; instead, it treats the original program as the desired behavioral specification. This arrangement makes pate a *relational* verifier, as it relates the patched binary to the original. The verifier is based on a number of existing libraries for binary code discovery and symbolic execution of programs (including machine code programs).  Roughly, the verifier works by:
+
 1. Performing code discovery on both binaries
 2. Breaking the binaries into *slices*, which are collections of basic blocks with control flow between them, but without backedges; it also breaks regions at function call boundaries
 3. It aligns slices based on control flow and under the heuristic assumption that machine states will be similar after each pair of corresponding slices in the original and patched binaries
