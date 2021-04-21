@@ -40,7 +40,6 @@ class ExprMappable sym f where
     (forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)) ->
     f ->
     IO f
-  mapExpr _ _ = pure
   foldExpr ::
     WI.IsSymExprBuilder sym =>
     sym ->
@@ -101,7 +100,6 @@ instance
     asn' <- mapExpr sym f asn
     x' <- mapExpr sym f x
     return $ asn' Ctx.:> x'
-
 
 
 instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where

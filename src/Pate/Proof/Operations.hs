@@ -70,6 +70,10 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 import qualified Pate.Parallel as Par
 import qualified Pate.Arch as PA
+import qualified What4.ExprHelpers as WEH
+import qualified What4.Expr.Builder as W4B
+
+import qualified Prettyprinter as PP
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -207,14 +211,24 @@ statePredToDomain ::
   sym ->
   PT.PatchPair (PS.SimState sym arch) ->
   PE.StatePred sym arch ->
-  PF.ProofApp (PFI.ProofSym sym arch) app PF.ProofDomainType
-statePredToDomain sym states stPred =
-  PF.ProofDomain
-    { PF.prfDomainRegisters = predRegsToDomain sym $ PE.predRegs stPred
-    , PF.prfDomainStackMemory = memPredToDomain $ PE.predStack stPred
-    , PF.prfDomainGlobalMemory = memPredToDomain $ PE.predMem stPred
-    , PF.prfDomainContext = states
-    }
+  EquivM sym arch (PFI.SymDomain sym arch)
+statePredToDomain sym states stPred = do
+  dom <- PF.ProofDomain
+    <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
+    <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
+    <*> (return $ memPredToDomain $ PE.predMem stPred)
+    <*> (return states)
+  return $ PF.ProofExpr dom
+
+flattenToStackRegion ::
+  PF.ProofMemoryDomain (PFI.ProofSym sym arch) ->
+  EquivM sym arch (PF.ProofMemoryDomain (PFI.ProofSym sym arch))
+flattenToStackRegion dom = do
+  stackRegion <- CMR.asks envStackRegion
+  let
+    dom' = map (\(MapF.Pair cell p) -> MapF.Pair (PMC.setMemCellRegion stackRegion cell) p) (MapF.toList (PF.prfMemoryDomain dom))
+  return $ dom { PF.prfMemoryDomain = MapF.fromList dom' }
+
 
 predRegsToDomain ::
   forall arch sym.
@@ -244,13 +258,13 @@ memPredToDomain memPred =
     go :: (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       MapF.Pair (PMC.MemCell sym arch) (Const (W4.Pred sym))
     go (Some cell, p) = MapF.Pair cell (Const p)
-      
+
 statePredToPreDomain ::
   PS.SimBundle sym arch ->
   PE.StatePred sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
 statePredToPreDomain bundle stPred = proofNonceExpr $ withSym $ \sym -> do
-  return $ statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain sym states stPred
   where
     states = TF.fmapF PS.simInState $ PS.simIn bundle
 
@@ -261,11 +275,13 @@ statePredToPostDomain stPredSpec = proofNonceExpr $ withSym $ \sym -> do
   let
     states = TF.fmapF PS.simVarState $ PS.specVars stPredSpec
     stPred = PS.specBody stPredSpec
-  return $ statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain sym states stPred
+
 
 emptyDomain :: EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP ->
-  return $ (W4.truePred sym, statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym))
+emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP -> do
+  dom <- PF.appDomain <$> statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym)
+  return $ (W4.truePred sym, dom)
 
 proofNonceExpr ::
   EquivM sym arch (PFI.ProofSymNonceApp sym arch tp) ->
@@ -398,10 +414,10 @@ joinLazyProofApp :: LazyProofApp sym arch tp -> EquivM sym arch (PFI.ProofSymNon
 joinLazyProofApp = PF.traverseProofApp joinLazyProof
 
 joinLazyProof :: LazyProof sym arch tp -> EquivM sym arch (PFI.ProofSymNonceExpr sym arch tp)
-joinLazyProof prf = do
+joinLazyProof prf = withValid $ do
   app <- case lazyProofBody prf of
     LazyProofBodyApp app -> joinLazyProofApp app
     LazyProofBodyFuture future -> Par.joinFuture future
-  let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app 
-  liftIO $ lazyProofFinalize prf nonce_prf 
+  let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app
+  liftIO $ lazyProofFinalize prf nonce_prf
   return nonce_prf

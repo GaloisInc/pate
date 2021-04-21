@@ -1225,7 +1225,7 @@ mapExpr' ::
   f ->
   EquivM sym arch f
 mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a)) e
+  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a) >>= fixMux sym ) e
 
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.

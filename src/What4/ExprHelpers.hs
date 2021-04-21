@@ -26,6 +26,7 @@ Helper functions for manipulating What4 expressions
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module What4.ExprHelpers (
     iteM
@@ -56,6 +57,8 @@ module What4.ExprHelpers (
   , simplifyConjuncts
   , boundVars
   , setProgramLoc
+  , idxCacheEvalWriter
+  , Tagged
   ) where
 
 import           GHC.TypeNats
@@ -66,6 +69,8 @@ import           Control.Applicative
 import           Control.Monad.Except
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
+import qualified Control.Monad.Reader as CMR
+import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.State as CMS
 
 import           Data.Foldable (foldlM, foldrM)
@@ -190,6 +195,17 @@ data VarBinding sym tp =
    , bindVal :: W4.SymExpr sym tp
    }
 
+instance TestEquality (W4.SymExpr sym) => TestEquality (VarBinding sym) where
+  testEquality (VarBinding var1 val1) (VarBinding var2 val2)
+    | Just Refl <- testEquality var1 var2
+    , Just Refl <- testEquality val1 val2
+    = Just Refl
+  testEquality _ _ = Nothing
+
+instance OrdF (W4.SymExpr sym) => OrdF (VarBinding sym) where
+  compareF (VarBinding var1 val1) (VarBinding var2 val2) =
+    lexCompareF var1 var2 (compareF val1 val2)
+
 mapExprPtr ::
   forall sym w.
   (W4.IsExprBuilder sym) =>
@@ -201,7 +217,7 @@ mapExprPtr sym f (CLM.LLVMPointer reg off) = do
   regInt <- W4.natToInteger sym reg
   reg' <- W4.integerToNat sym =<< f regInt
   off' <- f off
-  return $ CLM.LLVMPointer reg' off'  
+  return $ CLM.LLVMPointer reg' off'
 
 freshPtrBytes ::
   W4.IsSymExprBuilder sym =>
@@ -327,7 +343,23 @@ fixMux' sym cache e_outer = do
         , Just (W4B.BaseEq _ eT' eF') <- W4B.asApp cond
         , Just W4.Refl <- W4.testEquality eT eT'
         , Just W4.Refl <- W4.testEquality eF eF'
-        -> return eF
+        -> go eF
+      W4B.AppExpr a0
+         | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+         -> do
+             eT' <- go eT
+             eF' <- go eF
+             if | Just (W4B.BaseIte _ _ cond2 eT2 _) <- W4B.asApp eT'
+                , cond == cond2 -> W4.baseTypeIte sym cond eT2 eF'
+                | Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF'
+                , cond == cond2 ->  W4.baseTypeIte sym cond eT' eF2
+                | eT' == eT, eF' == eF -> return e
+                | otherwise -> W4.baseTypeIte sym cond eT' eF'
+      W4B.AppExpr a0
+         | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+         , Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF
+         , cond == cond2
+         -> go =<< W4.baseTypeIte sym cond eT eF2
       W4B.AppExpr a0 -> do
         a0' <- W4B.traverseApp go (W4B.appExprApp a0)
         if (W4B.appExprApp a0) == a0' then return e
@@ -1011,3 +1043,21 @@ setProgramLoc ::
 setProgramLoc sym e = case W4PL.plSourceLoc (W4B.exprLoc e) of
   W4PL.InternalPos -> return ()
   _ -> liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+
+data Tagged w f tp where
+  Tagged :: w -> f tp -> Tagged w f tp
+
+-- | Cached evaluation that retains auxiliary results
+idxCacheEvalWriter ::
+  MonadIO m =>
+  CMW.MonadWriter w m =>
+  W4B.IdxCache t (Tagged w f) ->
+  W4B.Expr t tp ->
+  m (f tp) ->
+  m (f tp)
+idxCacheEvalWriter cache e f = do
+  Tagged w result <- W4B.idxCacheEval cache e $ do
+    (result, w) <- CMW.listen $ f
+    return $ Tagged w result
+  CMW.tell w
+  return result
