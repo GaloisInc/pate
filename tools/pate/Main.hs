@@ -28,6 +28,7 @@ import qualified Data.Foldable as F
 import qualified Data.List.NonEmpty as DLN
 import           Data.Maybe ( isNothing, maybeToList )
 import qualified Data.Traversable as T
+import           Data.Word ( Word16 )
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
 import           Numeric ( showHex )
@@ -167,7 +168,7 @@ data CLIOptions = CLIOptions
   , dwarfHints :: Bool
   } deriving (Eq, Ord, Read, Show)
 
-data LogTarget = Interactive (Maybe (IS.SourcePair FilePath))
+data LogTarget = Interactive Word16 (Maybe (IS.SourcePair FilePath))
                -- ^ Logs will go to an interactive viewer
                --
                -- If source files (corresponding to the original and patched
@@ -201,7 +202,7 @@ startLogger PA.ValidArchProxy lt chan =
       hdl <- IO.openFile fp IO.WriteMode
       IO.hSetBuffering hdl IO.LineBuffering
       logToHandle hdl
-    Interactive mSourceFiles -> do
+    Interactive portNumber mSourceFiles -> do
       -- This odd structure makes all of the threading explicit at this top
       -- level so that there is no thread creation hidden in the Interactive
       -- module
@@ -212,7 +213,7 @@ startLogger PA.ValidArchProxy lt chan =
         mSourceContent <- join <$> T.traverse parseSources mSourceFiles
         stateRef <- I.newState mSourceContent
         watcher <- CCA.async $ I.consumeEvents chan stateRef
-        ui <- CCA.async $ I.startInterface stateRef
+        ui <- CCA.async $ I.startInterface stateRef portNumber
         CCA.wait watcher
         CCA.wait ui
       return (logAct, Just consumer)
@@ -345,6 +346,12 @@ logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure St
                                      <> OA.short 'i'
                                      <> OA.help "Start a web server providing an interactive view of results"
                                      )
+                                    <*> OA.option OA.auto ( OA.long "port"
+                                                          <> OA.metavar "PORT"
+                                                          <> OA.help "The port to run the interactive UI on"
+                                                          <> OA.value 5000
+                                                          <> OA.showDefault
+                                                          )
                                     <*> OA.optional parseSourceFiles
     parseSourceFiles = IS.SourcePair <$> OA.strOption (  OA.long "original-source"
                                                       <> OA.metavar "FILE"

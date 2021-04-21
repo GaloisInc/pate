@@ -24,6 +24,7 @@ import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
+import           Data.Word ( Word16 )
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
@@ -117,8 +118,8 @@ addRecent n elt elts = elt : take (n - 1) elts
 
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier
-startInterface :: (PA.ArchConstraints arch, PA.ValidArch arch) => StateRef arch -> IO ()
-startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
+startInterface :: (PA.ArchConstraints arch, PA.ValidArch arch) => StateRef arch -> Word16 -> IO ()
+startInterface r portNumber = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
   -- Place the content of all of our static dependencies into the temporary
   -- directory so that it can be served by threepenny
   --
@@ -131,8 +132,8 @@ startInterface r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
   BS.writeFile (tmpDir </> "dagre.js") dagre
   BS.writeFile (tmpDir </> "cytoscape-dagre.js") cytoscapeDagre
 
-  -- Set the port to 5000 to match the Dockerfile
-  let uiConf = TP.defaultConfig { TP.jsPort = Just 5000
+  -- Set the port to 5000 to match the Dockerfile as a default; users can change it if they wish
+  let uiConf = TP.defaultConfig { TP.jsPort = Just (fromIntegral portNumber)
                                 , TP.jsStatic = Just tmpDir
                                 }
   TP.startGUI uiConf (uiSetup r)
