@@ -10,6 +10,7 @@
 -- corresponding blocks in an original and patched binary
 module Pate.Discovery (
   discoverPairs,
+  exactEquivalence,
   runDiscovery,
   mkConcreteBlock,
   lookupBlocks,
@@ -394,8 +395,8 @@ lookupBlocks b = do
       case concreteBlockEntry b of
         BlockEntryInitFunction -> do
           funAddr <- segOffToAddr start'
-          when (funAddr /= start) $
-            throwHere $ LookupNotAtFunctionStart start
+          when (funAddr /= start) $ do
+            throwHere $ LookupNotAtFunctionStart funAddr start
         _ -> return ()
       let result = concat $ IM.elems $ IM.intersecting pbm i
       return $ Some (DFC.Compose result)

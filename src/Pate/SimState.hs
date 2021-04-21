@@ -278,25 +278,27 @@ rebindWithFrame' ::
 rebindWithFrame' sym cache asm e_outer = do
   let
     go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
-    go e = W4B.idxCacheEval cache e $ case getUniqueBinding sym asm e of
-      Just e' -> return e'
-      _ -> case e of
-        -- fixing a common trivial mux case
-        W4B.AppExpr a0
-          | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
-          , Just (W4B.BaseEq _ eT' eF') <- W4B.asApp cond
-          , Just W4.Refl <- W4.testEquality eT eT'
-          , Just W4.Refl <- W4.testEquality eF eF'
-          -> go eF
-        W4B.AppExpr a0 -> do
-          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-          if (W4B.appExprApp a0) == a0' then return e
-          else W4B.sbMakeExpr sym a0'
-        W4B.NonceAppExpr a0 -> do
-          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-          if (W4B.nonceExprApp a0) == a0' then return e
-          else W4B.sbNonceExpr sym a0'
-        _ -> return e
+    go e = W4B.idxCacheEval cache e $ do
+      setProgramLoc sym e
+      case getUniqueBinding sym asm e of
+        Just e' -> return e'
+        _ -> case e of
+          -- fixing a common trivial mux case
+          W4B.AppExpr a0
+            | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
+            , Just (W4B.BaseEq _ eT' eF') <- W4B.asApp cond
+            , Just W4.Refl <- W4.testEquality eT eT'
+            , Just W4.Refl <- W4.testEquality eF eF'
+            -> go eF
+          W4B.AppExpr a0 -> do
+            a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+            if (W4B.appExprApp a0) == a0' then return e
+            else W4B.sbMakeExpr sym a0'
+          W4B.NonceAppExpr a0 -> do
+            a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+            if (W4B.nonceExprApp a0) == a0' then return e
+            else W4B.sbNonceExpr sym a0'
+          _ -> return e
   go e_outer
 
 data SimSpec sym arch f = SimSpec

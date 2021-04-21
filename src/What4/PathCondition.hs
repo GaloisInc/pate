@@ -28,8 +28,8 @@ SAT models
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module What4.PathCondition (
-  getPathCondition
+module What4.PathCondition
+  ( getPathCondition
   )
   where
 
@@ -49,6 +49,8 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Expr.BoolMap as BM
 
+import qualified What4.ExprHelpers as WEH
+
 -- | Compute a predicate representing the path condition of the
 -- expression according to its internal mux structure.
 -- i.e. given the model @[x := 2, y := 5]@ and the expression
@@ -64,16 +66,27 @@ getPathCondition ::
   W4G.GroundEvalFn t ->
   W4B.Expr t tp -> 
   IO (W4.Pred sym)
-getPathCondition sym fn expr = do
+getPathCondition sym fn expr = snd <$> runPathM sym fn (withPathCond expr)
+
+runPathM ::
+  forall sym t solver fs a.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4G.GroundEvalFn t ->
+  PathM sym a ->
+  IO (a, W4.Pred sym)
+runPathM sym fn f = do
   cache <- W4B.newIdxCache
   let
     env = PathMEnv sym fn (W4.truePred sym) cache
-    PathM f = withPathCond expr >> getFullPath
-  mpred <- liftIO $ MaybeT.runMaybeT $ CMS.evalStateT (CMR.runReaderT f env) (PathCondition (W4.truePred sym))
+    PathM f' = do
+      a <- f
+      p <- getFullPath
+      return (a, p)
+  mpred <- liftIO $ MaybeT.runMaybeT $ CMS.evalStateT (CMR.runReaderT f' env) (PathCondition (W4.truePred sym))
   case mpred of
-    Just p -> return p
-    Nothing -> fail "getPathCondition: Unexpected inconsistent path condition"
-
+    Just r -> return r
+    Nothing -> fail "runPathM: Unexpected inconsistent path condition"
 
 data PathMEnv sym where
   PathMEnv ::
@@ -407,6 +420,7 @@ withPathCond e_outer = withValid $ do
           W4B.AppExpr a0 -> case W4B.appExprApp a0 of
             W4B.BVAshr _ e1 e2 -> bvOp W4.bvAshr e1 e2
             W4B.BVSdiv _ e1 e2 -> bvOp W4.bvSdiv e1 e2
+            W4B.BVSext w e1 -> bvOp (\_sym e1' _ -> W4.bvSext sym w e1') e1 e1
             app -> watch $ do
               a0' <- W4B.traverseApp go app
               if (W4B.appExprApp a0) == a0' then return e

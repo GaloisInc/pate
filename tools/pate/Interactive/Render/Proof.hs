@@ -47,7 +47,7 @@ ppStatus :: ( prf ~ PFI.ProofSym sym arch
             , WI.IsSymExprBuilder sym
             )
          => proxy prf
-         -> PPr.VerificationStatus (PPr.ProofCounterExample prf, PPr.ProofPredicate prf)
+         -> PPr.VerificationStatus (PPr.ProofCounterExample prf, PPr.ProofCondition prf)
          -> PP.Doc ann
 ppStatus _ st =
   case st of
@@ -55,7 +55,7 @@ ppStatus _ st =
     PPr.VerificationSkipped -> PP.pretty "Skipped"
     PPr.VerificationSuccess -> PP.pretty "Success"
     PPr.VerificationFail (_cex, diffSummary)
-      | Just False <- WI.asConstantPred diffSummary -> PP.pretty "Inequivalent"
+      | Just False <- WI.asConstantPred (PFI.condEqPred diffSummary) -> PP.pretty "Inequivalent"
       | otherwise -> PP.pretty "Conditional"
 
 ppAppTag
@@ -311,7 +311,7 @@ renderProofApp app =
     PPr.ProofStatus st ->
       case st of
         PPr.VerificationFail (cex, diffSummary)
-          | Just False <- WI.asConstantPred diffSummary ->
+          | Just False <- WI.asConstantPred (PFI.condEqPred diffSummary) ->
             TP.column [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
                       , TP.string "The patched program always exhibits different behavior if this program location is reached"
                       , TP.string "Counterexample:"
@@ -320,7 +320,7 @@ renderProofApp app =
           | otherwise ->
             TP.column [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
                       , TP.string "The patched program exhibits identical behavior to the original under the following conditions:"
-                      , TP.pre # TP.set TP.text (T.unpack (pp (WI.printSymExpr diffSummary)))
+                      , TP.pre # TP.set TP.text (T.unpack (pp (WI.printSymExpr (PFI.condEqPred diffSummary))))
                       , TP.string "Counterexample:"
                       , renderCounterexample cex
                       ]

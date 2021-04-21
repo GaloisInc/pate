@@ -63,6 +63,9 @@ data VerificationConfig =
     -- (where there is a reasonable default)
     , cfgGoalTimeout :: PT.Timeout
     -- ^ The timeout to apply to proof goals
+    , cfgGroundTimeout :: PT.Timeout
+    -- ^ The timeout to use when grounding terms. We expect this to be
+    -- fast and therefore a delay indicates a problem with the solver
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -74,6 +77,7 @@ defaultVerificationCfg =
                      , cfgSolver = PS.Yices
                      , cfgHeuristicTimeout = PT.Seconds 10
                      , cfgGoalTimeout = PT.Minutes 5
+                     , cfgGroundTimeout = PT.Seconds 5
                      }
 
 data RunConfig arch =

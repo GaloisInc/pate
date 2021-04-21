@@ -63,6 +63,9 @@ module Pate.Monad
   , withSatAssumption
   , withAssumptionFrame
   , withAssumptionFrame'
+  , withAssumptionFrame_
+  , applyAssumptionFrame
+  , applyCurrentFrame
   -- nonces
   , freshNonce
   , withProofNonce
@@ -410,20 +413,36 @@ withAssumptionFrame' ::
   EquivM sym arch (AssumptionFrame sym) ->
   EquivM sym arch (AssumptionFrame sym, f) ->
   EquivM sym arch (W4.Pred sym, f)
-withAssumptionFrame' asmf f = withValid $ withSym $ \sym -> do
+withAssumptionFrame' asmf f = withSym $ \sym -> do
   asmFrame <- asmf
   envFrame <- asks envCurrentFrame
   local (\env -> env { envCurrentFrame = asmFrame <> envFrame }) $ do
-    (frame', a) <- f
-    cache <- W4B.newIdxCache
-    let
-      localFrame = asmFrame <> frame'
-      
-      doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-      doRebind = rebindWithFrame' sym cache localFrame
-    a' <- liftIO $ PEM.mapExpr sym doRebind a
-    frame_pred <- liftIO $ (doRebind =<< getAssumedPred sym localFrame)
-    return (frame_pred, a')
+    withAssumption' (liftIO $ getAssumedPred sym (asmFrame <> envFrame)) $ do
+      (frame', a) <- f
+      applyAssumptionFrame (asmFrame <> frame') a
+
+applyCurrentFrame ::
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  f ->
+  EquivM sym arch f
+applyCurrentFrame f = snd <$> withAssumptionFrame (asks envCurrentFrame) (return f)
+
+applyAssumptionFrame ::
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  AssumptionFrame sym ->
+  f ->
+  EquivM sym arch (W4.Pred sym, f)
+applyAssumptionFrame frame f = withSym $ \sym -> do
+  cache <- W4B.newIdxCache
+  let
+    doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
+    doRebind = rebindWithFrame' sym cache frame
+  f' <- liftIO $ PEM.mapExpr sym doRebind f
+  p <- liftIO $ getAssumedPred sym frame
+  p' <- liftIO $ PEM.mapExpr sym doRebind p
+  return (p',f')
 
 -- | Run the given function under the given assumption frame, and rebind the resulting
 -- value according to any explicit bindings. The returned predicate is the conjunction
@@ -434,6 +453,13 @@ withAssumptionFrame ::
   EquivM sym arch f ->
   EquivM sym arch (W4.Pred sym, f)
 withAssumptionFrame asmf f = withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
+
+withAssumptionFrame_ ::
+  PEM.ExprMappable sym f =>
+  EquivM sym arch (AssumptionFrame sym) ->
+  EquivM sym arch f ->
+  EquivM sym arch f
+withAssumptionFrame_ asmf f = fmap snd $ withAssumptionFrame asmf f
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 withAssumption_ ::
@@ -569,8 +595,9 @@ execGroundFn ::
   SymGroundEvalFn sym  -> 
   W4.SymExpr sym tp -> 
   EquivM sym arch (W4G.GroundValue tp)  
-execGroundFn gfn e = do  
-  result <- liftIO $ (Just <$> execGroundFnIO gfn e) `catches`
+execGroundFn gfn e = do
+  groundTimeout <- asks (PC.cfgGroundTimeout . envConfig)
+  result <- liftIO $ (PT.timeout' groundTimeout $ execGroundFnIO gfn e) `catches`
     [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
     , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
     ]
