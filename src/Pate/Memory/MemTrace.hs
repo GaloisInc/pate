@@ -68,7 +68,7 @@ import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator)
-import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, llvmPointer_bv)
+import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer)
 import Lang.Crucible.Simulator.ExecutionTree (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree)
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
 import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..), IntrinsicTypes)
@@ -677,10 +677,12 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) bothZero $ \sym _ off _ off' -> do
-      off'' <- bvXorBits sym off off'
-      llvmPointer_bv sym off''
+    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) someZero $ \sym reg off reg' off' -> do
+      regZero <- isZero sym reg
 
+      reg'' <- natIte sym regZero reg' reg
+      off'' <- bvXorBits sym off off'
+      pure (LLVMPointer reg'' off'')
 
 evalMacawExprExtensionTrace :: forall sym arch f tp
                        .  IsSymInterface sym

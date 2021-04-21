@@ -34,7 +34,6 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Traversable as DT
-
 import           Data.Word ( Word64 )
 
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -241,7 +240,7 @@ validateBlockTarget tgt = do
   case concreteBlockEntry blk of
     BlockEntryInitFunction -> do
       (manifestError $ lookupBlocks blk) >>= \case
-        Left _ -> throwHere $ InvalidCallTarget $ concreteAddress blk
+        Left err -> throwHere $ InvalidCallTarget (concreteAddress blk) err
         Right _ -> return ()
     _ -> return ()
 
@@ -389,18 +388,21 @@ lookupBlocks ::
   EquivM sym arch (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
-  let pfm = parsedFunctionMap binCtx
-  case Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm of
-    [(start', Some (ParsedBlockMap pbm))] -> do
+  let
+    pfm = parsedFunctionMap binCtx
+    fns = Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm
+  fns' <- mapM (\(segOff, pbm) -> (,) <$> segOffToAddr segOff <*> pure pbm) fns
+  case reverse $ filter (\(addr', _) -> addr' <= start) fns' of
+    ((funAddr, Some (ParsedBlockMap pbm)):_) -> do
       case concreteBlockEntry b of
         BlockEntryInitFunction -> do
-          funAddr <- segOffToAddr start'
           when (funAddr /= start) $ do
             throwHere $ LookupNotAtFunctionStart funAddr start
         _ -> return ()
+
       let result = concat $ IM.elems $ IM.intersecting pbm i
       return $ Some (DFC.Compose result)
-    blks -> throwHere $ NoUniqueFunctionOwner i (fst <$> blks)
+    _ -> throwHere $ NoUniqueFunctionOwner i (fst <$> fns)
   where
   start@(ConcreteAddress addr) = concreteAddress b
   end = ConcreteAddress (MM.MemAddr (MM.addrBase addr) maxBound)

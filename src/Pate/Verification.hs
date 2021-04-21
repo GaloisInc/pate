@@ -72,6 +72,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.Map as MapF
 
 import qualified Lang.Crucible.Backend.Simple as CB
@@ -686,9 +687,27 @@ provePostcondition ::
   StatePredSpec sym arch ->
   EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition pPair postcondSpec = startTimer $ withPair pPair $ do
+  liftIO $ putStrLn "provePostcondition"
   emitPreamble pPair
-  fmap unzipProof $ withSimBundle pPair $ \bundle ->
+  catchSimBundle pPair postcondSpec $ \bundle ->
     provePostcondition' bundle postcondSpec
+
+catchSimBundle ::
+  BlockPair arch ->
+  StatePredSpec sym arch ->
+  (SimBundle sym arch -> EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)  ) ->
+  EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)  
+catchSimBundle pPair postcondSpec f =
+  fmap unzipProof $ withSym $ \sym -> do
+    result <- manifestError $ withSimBundle pPair $ f
+    case result of
+      Left _ -> withFreshVars $ \stO stP -> do
+        let
+          simInO_ = SimInput stO (pOriginal pPair)
+          simInP_ = SimInput stP (pPatched pPair)
+        r <- trivialBlockSlice False (PatchPair simInO_ simInP_) postcondSpec
+        return $ (W4.truePred sym, r)
+      Right r -> return r  
 
 data BranchCase sym arch =
   BranchCase
@@ -714,20 +733,29 @@ unzipProof spec = (fmap fst spec, snd $ specBody spec)
 -- Currently this is used to model syscalls, since we don't have a more precise
 -- semantics to decide the conditions under which they are equivalent.
 trivialBlockSlice ::
-  SimBundle sym arch ->
+  forall sym arch.
+  Bool  ->
+  PatchPair (SimInput sym arch) ->
   StatePredSpec sym arch ->
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-trivialBlockSlice bundle postcondSpec = do
-  transition <- PFO.noTransition (simIn bundle) (simOutBlockEnd $ simOutO bundle)
-  PFO.lazyProofEvent (simPair bundle) $ do
-    preUniv <- universalDomain
-    preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle preUniv
-    postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    status <- PFO.lazyProofApp $ PF.ProofStatus PF.VerificationSkipped
-    triple <- PFO.lazyProofApp $ PF.ProofTriple (simPair bundle) preDomain postDomain status
-    let prf = PF.ProofBlockSlice triple [] Nothing Nothing transition
-    return (preUniv, prf)
-
+trivialBlockSlice isSkipped in_ postcondSpec = withSym $ \sym -> do
+  blkEnd <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
+  transition <- PFO.noTransition in_ blkEnd
+  preUniv <- universalDomain
+  prf <- PFO.lazyProofEvent_ pPair $ do
+    triple <- PFO.lazyProofEvent_ pPair $ do
+      preDomain <- fmap PFO.asLazyProof $ PFO.proofNonceExpr $
+         PF.appDomain <$> PFO.statePredToDomain (TF.fmapF simInState in_) preUniv
+      postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+      status <- PFO.lazyProofApp $ case isSkipped of
+        True -> PF.ProofStatus PF.VerificationSkipped
+        False -> PF.ProofStatus PF.Unverified
+      return $ PF.ProofTriple pPair preDomain postDomain status
+    return $ PF.ProofBlockSlice triple [] Nothing Nothing transition
+  return (preUniv, prf)
+  where
+    pPair :: BlockPair arch
+    pPair = TF.fmapF simInBlock in_
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -756,14 +784,14 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             _ -> throwHere $ BlockExitMismatch
           withNoFrameGuessing isSyscall $ do
             (contPre, contPrf) <- provePostcondition (PatchPair blkRetO blkRetP) postcondSpec
-            (funCallPre, funCallSlicePrf) <- fmap unzipProof $ withSimBundle pPair $ \bundleCall -> do
+            (funCallPre, funCallSlicePrf) <- catchSimBundle pPair postcondSpec $ \bundleCall -> do
               -- equivalence condition for when this function returns
               case isSyscall of
                 -- for arch exits (i.e. syscalls) we assume that equivalence will hold on
                 -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
                 -- treated as an uninterpreted function that reads the entire machine state
                 -- this can be relaxed with more information about the specific call
-                True -> trivialBlockSlice bundleCall postcondSpec
+                True -> trivialBlockSlice True (simIn bundle)  postcondSpec
                 False -> do
                   emitPreamble pPair
                   -- equivalence condition for calling this function
@@ -1160,13 +1188,12 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
       eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
 
       -- see if we can prove that the goal is independent of this clobbering
-      asm <- liftIO $ allPreds sym [p, eqMemP, goal]
-      check <- liftIO $ W4.impliesPred sym asm goal'
       heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-      result <- isPredTruePar' heuristicTimeout check
-      Par.forFuture result $ \case
-        True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
-        False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
+      withAssumption_ (liftIO $ allPreds sym [p, eqMemP, goal]) $ do
+        result <- isPredTruePar' heuristicTimeout goal'
+        Par.forFuture result $ \case
+          True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
+          False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
     False -> Par.present $ liftIO $ W4.notPred sym polarity
   Par.joinFuture (result :: Par.Future (MemPred sym arch))
   where
@@ -1217,7 +1244,6 @@ bindMemory ::
   EquivM sym arch (W4.SymExpr sym tp')  
 bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
-
 
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.

@@ -572,7 +572,7 @@ data InnerEquivalenceError arch
   | UnexpectedUnverifiedTriple
   | MissingTOCEntry (MM.ArchSegmentOff arch)
   | BlockEndClassificationFailure
-  | InvalidCallTarget (ConcreteAddress arch)
+  | InvalidCallTarget (ConcreteAddress arch) (EquivalenceError arch)
   | IncompatibleDomainPolarities
   | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
   | InconsistentSimplificationResult String String

@@ -18,6 +18,7 @@ module Pate.Proof.Operations
   ( simBundleToSlice
   , noTransition
   , emptyDomain
+  , statePredToDomain
   , statePredToPreDomain
   , statePredToPostDomain
   , blockSliceBlocks
@@ -30,6 +31,7 @@ module Pate.Proof.Operations
   , joinLazyProof
   , asLazyProof
   , forkProof
+  , proofNonceExpr
   , lazyProofFinal
   , lazyProofEvent
   , lazyProofEvent_
@@ -206,18 +208,16 @@ noTransition stIn blockEnd = do
 -- the corresponding types
 
 statePredToDomain ::
-  PA.ValidArch arch =>
-  PT.ValidSym sym =>
-  sym ->
   PT.PatchPair (PS.SimState sym arch) ->
   PE.StatePred sym arch ->
   EquivM sym arch (PFI.SymDomain sym arch)
-statePredToDomain sym states stPred = do
-  dom <- PF.ProofDomain
-    <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
-    <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
-    <*> (return $ memPredToDomain $ PE.predMem stPred)
-    <*> (return states)
+statePredToDomain states stPred = withSym $ \sym -> do
+  dom <-
+    PF.ProofDomain
+      <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
+      <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
+      <*> (return $ memPredToDomain $ PE.predMem stPred)
+      <*> (return states)
   return $ PF.ProofExpr dom
 
 flattenToStackRegion ::
@@ -263,24 +263,24 @@ statePredToPreDomain ::
   PS.SimBundle sym arch ->
   PE.StatePred sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-statePredToPreDomain bundle stPred = proofNonceExpr $ withSym $ \sym -> do
-  PF.appDomain <$> statePredToDomain sym states stPred
+statePredToPreDomain bundle stPred = proofNonceExpr $ do
+  PF.appDomain <$> statePredToDomain states stPred
   where
     states = TF.fmapF PS.simInState $ PS.simIn bundle
 
 statePredToPostDomain ::
   PE.StatePredSpec sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-statePredToPostDomain stPredSpec = proofNonceExpr $ withSym $ \sym -> do
+statePredToPostDomain stPredSpec = proofNonceExpr $ do
   let
     states = TF.fmapF PS.simVarState $ PS.specVars stPredSpec
     stPred = PS.specBody stPredSpec
-  PF.appDomain <$> statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain states stPred
 
 
 emptyDomain :: EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
 emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP -> do
-  dom <- PF.appDomain <$> statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym)
+  dom <- PF.appDomain <$> statePredToDomain (PT.PatchPair stO stP) (PE.statePredFalse sym)
   return $ (W4.truePred sym, dom)
 
 proofNonceExpr ::
