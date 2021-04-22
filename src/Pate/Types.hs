@@ -60,8 +60,8 @@ module Pate.Types
   , WhichBinaryRepr(..)
   , ValidSym
   , Sym(..)
-  , SymGroundEvalFn(..)
-  , execGroundFnIO
+  --, SymGroundEvalFn(..)
+  --, execGroundFnIO
   , InnerEquivalenceError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
@@ -78,7 +78,7 @@ module Pate.Types
   , equivSuccess
   , ppEquivalenceStatistics
   , ppBlock
-  , showModelForExpr
+  --, showModelForExpr
   , mapExprPtr
   , freshPtr
   , ptrEquality
@@ -363,15 +363,7 @@ concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
 
 ----------------------------------
 
-data SymGroundEvalFn sym where
-  SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
 
-execGroundFnIO ::
-  forall sym tp.
-  SymGroundEvalFn sym -> 
-  W4.SymExpr sym tp ->
-  IO (W4G.GroundValue tp)
-execGroundFnIO (SymGroundEvalFn (W4G.GroundEvalFn fn)) = fn
 
 ----------------------------------
 
@@ -576,6 +568,7 @@ data InnerEquivalenceError arch
   | IncompatibleDomainPolarities
   | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
   | InconsistentSimplificationResult String String
+  | UnhandledLoop
 
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
@@ -655,24 +648,24 @@ freeExprTerms expr = do
   getConst <$> go expr
 
 
-showModelForExpr :: forall sym tp.
-  SymGroundEvalFn sym ->
-  W4.SymExpr sym tp ->
-  IO String
-showModelForExpr fn@(SymGroundEvalFn _) expr = do
-  freeTerms <- freeExprTerms expr
-  v <- execGroundFnIO fn expr
-  let
-    s = "Expression: " ++ show expr ++ "\n" ++
-        "Value: " ++ showGroundValue (W4.exprType expr) v ++ "\n" ++
-        "Environment:"
+-- showModelForExpr :: forall sym tp.
+--   SymGroundEvalFn sym ->
+--   W4.SymExpr sym tp ->
+--   IO String
+-- showModelForExpr fn@(SymGroundEvalFn _) expr = do
+--   freeTerms <- freeExprTerms expr
+--   v <- execGroundFnIO fn expr
+--   let
+--     s = "Expression: " ++ show expr ++ "\n" ++
+--         "Value: " ++ showGroundValue (W4.exprType expr) v ++ "\n" ++
+--         "Environment:"
 
-  foldM go s freeTerms
-  where
-    go :: String -> Some (W4.SymExpr sym)  -> IO String
-    go s (Some e) = do
-      gv <- execGroundFnIO fn e
-      return $ s ++ "\n" ++ show e ++ " :== " ++ showGroundValue (W4.exprType e) gv
+--   foldM go s freeTerms
+--   where
+--     go :: String -> Some (W4.SymExpr sym)  -> IO String
+--     go s (Some e) = do
+--       gv <- execGroundFnIO fn e
+--       return $ s ++ "\n" ++ show e ++ " :== " ++ showGroundValue (W4.exprType e) gv
 
 showGroundValue ::
   W4.BaseTypeRepr tp ->

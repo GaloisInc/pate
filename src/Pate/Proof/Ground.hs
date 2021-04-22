@@ -100,7 +100,7 @@ getInequivalenceResult ::
   -- in the given domains
   PF.BlockSliceTransition (PFI.ProofSym sym arch) ->
   -- | the model representing the counterexample from the solver
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   EquivM sym arch (PFI.InequivalenceResult arch)
 getInequivalenceResult defaultReason pre post slice fn = do
   groundPre <- groundProofExpr fn pre
@@ -121,7 +121,7 @@ instance OrdF (W4.SymExpr sym) => Monoid (Bindings sym tp) where
 
 singleBinding ::
   W4.SymExpr sym tp ->
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   EquivM sym arch (Bindings sym tp)
 singleBinding e fn = do
   grnd <- execGroundFn fn e
@@ -131,7 +131,7 @@ getCondEquivalenceResult ::
   forall sym arch.
   W4.Pred sym ->
   -- | the model representing the counterexample from the solver
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   EquivM sym arch (PFI.CondEquivalenceResult sym arch)
 getCondEquivalenceResult eqCond fn = withValid $ do
   cache <- W4B.newIdxCache
@@ -158,14 +158,14 @@ getCondEquivalenceResult eqCond fn = withValid $ do
   return $ PFI.CondEquivalenceResult { PFI.condEqExample = binds, PFI.condEqPred = eqCond }
 
 getGenPathCondition ::
-  forall sym f.
-  W4.IsExprBuilder sym =>
+  forall sym  t st fs f.
+  sym ~ W4B.ExprBuilder t st fs =>
   PEM.ExprMappable sym f =>
   sym ->
-  PT.SymGroundEvalFn sym ->
+  W4G.GroundEvalFn t ->
   f ->
   IO (W4.Pred sym)
-getGenPathCondition sym (PT.SymGroundEvalFn fn) e = do
+getGenPathCondition sym fn e = do
   let
     f :: forall tp'. W4.SymExpr sym tp' -> W4.Pred sym -> IO (W4.Pred sym)
     f e' cond = do
@@ -181,22 +181,27 @@ getPathCondition ::
   PS.SimBundle sym arch ->
   PF.BlockSliceState (PFI.ProofSym sym arch) ->
   PFI.SymDomain sym arch ->
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   EquivM sym arch (PT.PatchPairC (W4.Pred sym))
 getPathCondition bundle slice dom fn = withSym $ \sym -> do
   groundDom <- groundProofExpr fn dom
   let
+    getRegPath ::
+      MM.ArchReg arch tp ->
+      PF.BlockSliceRegOp (PFI.ProofSym sym arch) tp ->
+      PT.PatchPairC (W4.Pred sym) ->
+      EquivM sym arch (PT.PatchPairC (W4.Pred sym))
     getRegPath reg regOp paths = do
       case PFI.regInDomain groundDom reg of
         True -> do
-          paths' <- liftIO $ mapM (getGenPathCondition sym fn) (PF.slRegOpValues regOp)
+          paths' <- withGroundEvalFn fn $ \fn' -> mapM (getGenPathCondition sym fn') (PF.slRegOpValues regOp)
           liftIO $ PT.zipMPatchPairC paths paths' (W4.andPred sym)
         _ -> return paths    
 
     getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
     getMemPath st = do
       let mem = MT.memArr $ PS.simOutMem st
-      Const <$> (liftIO $ getGenPathCondition sym fn mem)
+      Const <$> (withGroundEvalFn fn $ \fn' -> getGenPathCondition sym fn' mem)
 
   let truePair = PT.PatchPairC (W4.truePred sym) (W4.truePred sym)
   regPath <- PF.foldrMBlockStateLocs getRegPath (\_ _ -> return) truePair slice
@@ -208,7 +213,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
 groundProofTransformer ::
   PA.ValidArch arch =>
   PT.ValidSym sym =>
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   PF.ProofTransformer (EquivM_ sym arch) (PFI.ProofSym sym arch) (PFI.ProofGround arch)
 groundProofTransformer fn = PF.ProofTransformer
   { PF.prfPredTrans = execGroundFn fn
@@ -224,14 +229,14 @@ groundProofTransformer fn = PF.ProofTransformer
   }
 
 groundSlice ::
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   PF.BlockSliceTransition (PFI.ProofSym sym arch) ->
   EquivM sym arch (PF.BlockSliceTransition (PFI.ProofGround arch))
 groundSlice fn = PF.transformBlockSlice (groundProofTransformer fn)
 
 
 groundProofExpr ::
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   PF.ProofExpr (PFI.ProofSym sym arch) tp ->
   EquivM sym arch (PF.ProofExpr (PFI.ProofGround arch) tp)
 groundProofExpr fn = PF.transformProofExpr (groundProofTransformer fn)
@@ -263,7 +268,7 @@ getInequivalenceReason dom st =
 
 
 groundMuxTree ::
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   C.MuxTree sym a ->
   EquivM sym arch a
 groundMuxTree fn mt =
@@ -274,7 +279,7 @@ groundMuxTree fn mt =
                               return $ if p' then a else b) mt
 groundBlockEndCase ::
   forall sym arch.
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   CS.RegValue sym (MS.MacawBlockEndType arch) ->
   EquivM sym arch MS.MacawBlockEndCase
 groundBlockEndCase fn blkend = withSym $ \sym -> do
@@ -283,7 +288,7 @@ groundBlockEndCase fn blkend = withSym $ \sym -> do
 
 groundBV ::
   HasCallStack =>
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   CLM.LLVMPtr sym w ->
   EquivM sym arch (PFI.GroundBV w)
 groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
@@ -304,7 +309,7 @@ groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
 -- on undefined pointers in the given model
 getPointerTags ::
   forall sym arch tp.
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   W4.SymExpr sym tp ->
   EquivM sym arch MT.UndefPtrOpTags
 getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
@@ -341,7 +346,7 @@ getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
 
 groundLLVMPointer :: forall sym arch.
   HasCallStack =>
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
   EquivM sym arch (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch))
 groundLLVMPointer fn ptr = PFI.groundBVAsPointer <$> groundBV fn ptr
@@ -356,7 +361,7 @@ isStackCell cell = withSym $ \sym -> do
   liftIO $ W4.natEq sym region stackRegion
 
 groundMemCell :: forall sym arch w.
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   PMC.MemCell sym arch w ->
   EquivM sym arch (PFI.GroundMemCell arch w)
 groundMemCell fn cell = do
@@ -366,7 +371,7 @@ groundMemCell fn cell = do
   return $ PFI.GroundMemCell gptr (PMC.cellWidth cell) gIsStack
 
 groundMacawValue ::
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   PSR.MacawRegEntry sym tp ->
   EquivM sym arch (PFI.GroundMacawValue tp)
 groundMacawValue fn e
@@ -381,7 +386,7 @@ groundMacawValue fn e
 groundReturnPtr ::
   forall sym arch.
   HasCallStack =>
-  PT.SymGroundEvalFn sym ->
+  SymGroundEvalFn sym ->
   CS.RegValue sym (MS.MacawBlockEndType arch) ->
   EquivM sym arch (Maybe (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch)))
 groundReturnPtr fn blkend = case MS.blockEndReturn (Proxy @arch) blkend of

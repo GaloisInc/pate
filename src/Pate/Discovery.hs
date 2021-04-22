@@ -60,6 +60,7 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Parallel as Par
 import           Pate.Types
 import qualified What4.ExprHelpers as WEH
 
@@ -70,41 +71,51 @@ import qualified What4.ExprHelpers as WEH
 discoverPairs ::
   forall sym arch.
   SimBundle sym arch ->
-  EquivM sym arch [(BlockTarget arch Original, BlockTarget arch Patched)]
+  EquivM sym arch [PatchPair (BlockTarget arch)]
 discoverPairs bundle = do
-  precond <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
+  lookupBlockCache envExitPairsCache pPair >>= \case
+    Just pairs -> return pairs
+    Nothing -> do
+      precond <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
+      blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
+      blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
 
-  blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
-  blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
+      let
+        allCalls = [ (blkO, blkP)
+                   | blkO <- blksO
+                   , blkP <- blksP
+                   , compatibleTargets blkO blkP]  
+      blocks <- getBlocks $ PSS.simPair bundle
 
-  let
-    allCalls = [ (blkO, blkP)
-               | blkO <- blksO
-               , blkP <- blksP
-               , compatibleTargets blkO blkP]
-
-  blocks <- getBlocks $ PSS.simPair bundle
-
-  validTargets <- fmap catMaybes $
-    DT.forM allCalls $ \(blktO, blktP) -> do
-      matches <- matchesBlockTarget bundle blktO blktP
-      check <- withSymIO $ \sym -> WI.andPred sym precond matches
-      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-      startTimer $ checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
-        let
-          emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
-        case satRes of
-          WR.Sat _ -> do
+      result <- Par.forMPar allCalls $ \(blktO, blktP) -> startTimer $ do
+        let emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
+        matches <- matchesBlockTarget bundle blktO blktP
+        check <- withSymIO $ \sym -> WI.andPred sym precond matches
+        case WI.asConstantPred check of
+          Just True -> do
             emit PE.Reachable
-            return $ Just $ (blktO, blktP)
-          WR.Unsat _ -> do
+            return $ Par.Immediate $ Just $ PatchPair blktO blktP
+          Just False -> do
             emit PE.Unreachable
-            return Nothing
-          WR.Unknown -> do
-            emit PE.InconclusiveTarget
-            throwHere InconclusiveSAT
-  return validTargets
-
+            return $ Par.Immediate $ Nothing
+          _ ->  do
+            goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+            Par.promise $ checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
+              case satRes of
+                WR.Sat _ -> do
+                  emit PE.Reachable
+                  return $ Just $ PatchPair blktO blktP
+                WR.Unsat _ -> do
+                  emit PE.Unreachable
+                  return Nothing
+                WR.Unknown -> do
+                  emit PE.InconclusiveTarget
+                  throwHere InconclusiveSAT
+      joined <- fmap catMaybes $ Par.joinFuture result
+      modifyBlockCache envExitPairsCache pPair (++) joined
+      return joined
+  where
+    pPair = PSS.simPair bundle
 -- | True for a pair of original and patched block targets that represent a valid pair of
 -- jumps
 compatibleTargets ::
@@ -125,8 +136,19 @@ exactEquivalence ::
 exactEquivalence inO inP = withSym $ \sym -> do
   eqRel <- CMR.asks envBaseEquiv
   regsEqs <- liftIO $ zipRegStates (PSS.simInRegs inO) (PSS.simInRegs inP) (PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel))
+
   regsEq <- liftIO $ WEH.allPreds sym regsEqs
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  isPredSat heuristicTimeout regsEq >>= \case
+    True -> return ()
+    False -> CME.fail "exactEquivalence: regsEq: assumed false"
+    
   memEq <- liftIO $ WI.isEq sym (MT.memArr (PSS.simInMem inO)) (MT.memArr (PSS.simInMem inP))
+
+  isPredSat heuristicTimeout memEq >>= \case
+    True -> return ()
+    False -> CME.fail "exactEquivalence: memEq: assumed false"
+    
   liftIO $ WI.andPred sym regsEq memEq
 
 matchesBlockTarget ::
