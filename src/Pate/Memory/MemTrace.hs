@@ -51,7 +51,7 @@ import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
-import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthNatRepr, addrWidthRepr)
+import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthNatRepr, addrWidthRepr, memWidthNatRepr)
 import Data.Macaw.Symbolic.Backend (EvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap, MacawSimulatorState(..)
@@ -1000,6 +1000,16 @@ testByteSizeEquality w' = case addrWidthRepr @w Proxy of
   Addr32 -> (\Refl -> Refl) <$> testEquality w' (knownRepr :: NatRepr 4)
   Addr64 -> (\Refl -> Refl) <$> testEquality w' (knownRepr :: NatRepr 8)
 
+leibnizMultiplication :: forall n a b. OrderingF a b -> OrderingF (n*a) (n*b)
+leibnizMultiplication LTF = LTF
+leibnizMultiplication EQF = EQF
+leibnizMultiplication GTF = GTF
+
+compareByteSize :: forall w w'. MemWidth w => NatRepr w' -> OrderingF w (8*w')
+compareByteSize w' = case addrWidthRepr @w Proxy of
+  Addr32 -> leibnizMultiplication @8 (compareF (knownNat @4) w')
+  Addr64 -> leibnizMultiplication @8 (compareF (knownNat @8) w')
+
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
   MemWidth ptrW =>
@@ -1140,6 +1150,10 @@ writeMemArr :: forall sym ptrW w.
 writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPointer valReg valOff)
   | Just Refl <- testByteSizeEquality @ptrW byteWidth
     = goPtr 0 mem_init
+  | Just 0 <- asNat valReg
+  , NatLT _ <- compareNat (knownNat @0) bitWidth
+  , NatLT _ <- compareNat bitWidth (memWidthNatRepr @ptrW)
+    = goNonPtr 0 mem_init
   | otherwise = case isZeroOrGT1 byteWidth of
     Left pf -> case pf of -- impossible, and obvious enough GHC can see it
     Right (mulMono @_ @_ @8 Proxy -> LeqProof) -> do
@@ -1160,7 +1174,7 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     IO (MemTraceImpl sym ptrW)
   goBV _eqCond _bvZero _natZero n mem | n == valWByteInteger = pure mem
   goBV eqCond bvZero natZero n mem = do
-    nBV <- bvFromInteger sym ptrWRepr (useEnd n)
+    nBV <- bvFromInteger sym ptrWRepr (useEnd ptrWByteInteger n)
     assert sym eqCond $ AssertFailureSimError "writeMemArr" $ "writeMemArr: expected write of size " ++ show ptrWInteger ++ ", saw " ++ show (8*valWByteInteger)
     undefBV <- undefWriteSize undef sym val nBV
     writeByte (LLVMPointer natZero undefBV) n bvZero mem >>= goBV eqCond bvZero natZero (n+1)
@@ -1172,8 +1186,19 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     IO (MemTraceImpl sym ptrW)
   goPtr n mem | n == ptrWByteInteger = pure mem
   goPtr n mem = do
-    nBV <- bvFromInteger sym ptrWRepr (useEnd n)
-    writeByte (LLVMPointer valReg valOff) n nBV mem >>= goPtr (n+1)
+    nBV <- bvFromInteger sym ptrWRepr (useEnd ptrWByteInteger n)
+    writeByte val n nBV mem >>= goPtr (n+1)
+
+  goNonPtr ::
+    (1 <= w, w + 1 <= ptrW) =>
+    Integer ->
+    MemTraceImpl sym ptrW ->
+    IO (MemTraceImpl sym ptrW)
+  goNonPtr n mem | n == valWByteInteger = pure mem
+  goNonPtr n mem = do
+    nBV <- bvFromInteger sym ptrWRepr (useEnd valWByteInteger n)
+    valOffExt <- bvZext sym memWidthNatRepr valOff
+    writeByte (LLVMPointer valReg valOffExt) n nBV mem >>= goNonPtr (n+1)
 
   writeByte ::
     LLVMPtr sym ptrW ->
@@ -1192,13 +1217,14 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     regArray'' <- arrayUpdate sym (memArr mem) (Ctx.singleton ptrRegSI) regArray'
     pure mem { memArr = regArray'' }
 
+  bitWidth = natMultiply (knownNat @8) byteWidth
   ptrWRepr = let LLVMPointer _ off = ptr in bvWidth off
   ptrWInteger = toInteger (natValue ptrWRepr)
   ptrWByteInteger = ptrWInteger `div` 8
   valWByteInteger = toInteger (natValue byteWidth)
-  useEnd = case endianness of
+  useEnd writeSize = case endianness of
     BigEndian -> id
-    LittleEndian -> ((ptrWByteInteger-1)-)
+    LittleEndian -> ((writeSize-1)-)
 
 getMemByteOff :: forall sym ptrW.
   (MemWidth ptrW, IsExprBuilder sym) =>
