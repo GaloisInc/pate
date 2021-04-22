@@ -360,11 +360,7 @@ mkUndefinedPtrOps sym = do
       sptr <- asSymPtr sym' ptr
       PolyFun resultfn <- undefWriteFn sym' w
       Refl <- return $ natAbsBVFixed ptrW w
-      result <- applySymFn sym' resultfn (Empty :> sptr :> bv)
-      -- FIXME: What is the asserted predicate here?
-      let cond = truePred sym'
-      PolyFun doAssert <- bvAssert sym' knownNat
-      applySymFn sym' doAssert (Empty :> result :> cond)
+      applySymFn sym' resultfn (Empty :> sptr :> bv)
 
   undefReadFn <- freshTotalUninterpFn sym (polySymbol "undefMismatchedRegionRead" ptrW) knownRepr knownRepr
 
@@ -372,11 +368,7 @@ mkUndefinedPtrOps sym = do
     undefReadFn' :: sym -> LLVMPtr sym ptrW -> SymBV sym ptrW -> IO (SymBV sym 8)
     undefReadFn' sym' ptr bv = do
       sptr <- asSymPtr sym' ptr
-      result <- applySymFn sym' undefReadFn (Empty :> sptr :> bv)
-      -- FIXME: What is the asserted predicate here?
-      let cond = truePred sym'
-      PolyFun doAssert <- bvAssert sym' (knownNat @8)
-      applySymFn sym' doAssert (Empty :> result :> cond)
+      applySymFn sym' undefReadFn (Empty :> sptr :> bv)
 
   undefPtrLt' <- mkPredOp sym "undefPtrLt" predAssert
   undefPtrLeq' <- mkPredOp sym "undefPtrLeq'" predAssert
