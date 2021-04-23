@@ -109,6 +109,7 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PS
 import           Pate.Types
+import qualified Pate.Types as PT
 import           What4.ExprHelpers
 
 -- | We run discovery in parallel, since we need to run it two or three times
@@ -134,7 +135,9 @@ runDiscovery logAction mhints elf elf' = do
   let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
   origDiscovery <- discoverAsync elf mempty
   mHintedDiscovery <- DT.traverse (discoverAsync elf) mhints
-  patchedDiscovery <- discoverAsync elf' mempty
+  patchedDiscovery <- case mhints of
+    Just hints -> discoverAsync elf' hints
+    Nothing -> discoverAsync elf' mempty
   (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
   (_, pMain, pPfm) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
   (oMain, oPfm) <- case mHintedDiscovery of
@@ -173,8 +176,9 @@ verifyPairs ::
   BlockMapping arch ->
   PC.VerificationConfig ->
   [BlockPair arch] ->
-  CME.ExceptT (EquivalenceError arch) IO Bool
+  CME.ExceptT (EquivalenceError arch) IO PT.EquivalenceStatus
 verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
+  startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> CME.throwError $ equivalenceError UnsupportedArchitecture
@@ -200,6 +204,13 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
 
   startedAt <- liftIO TM.getCurrentTime
   topNonce <- liftIO $ (PF.ProofNonce <$> N.freshNonce gen)
+
+  -- NOTE: This is using the global nonce generator because it gets sunk down
+  -- into contexts where the scope type parameter is quantified out in ways that
+  -- are not practical to recover without major refactoring.  This is just as
+  -- safe but makes things significantly easier.
+  symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
+
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -238,7 +249,7 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
       , envBaseEquiv = stateEquivalence sym stackRegion
       , envFailureMode = ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
-      , envValidSym = Sym sym adapter
+      , envValidSym = Sym symNonce sym adapter
       , envStartTime = startedAt
       , envTocs = (TOC.getTOC $ PB.loadedBinary elf, TOC.getTOC $ PB.loadedBinary elf')
       -- TODO: restructure EquivEnv to avoid this
@@ -249,9 +260,11 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
       }
 
   liftIO $ do
-    stats <- runVerificationLoop env pPairs
-    IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats)
-    return $ equivSuccess stats
+    (result, stats) <- runVerificationLoop env pPairs
+    endTime <- TM.getCurrentTime
+    let duration = TM.diffUTCTime endTime startTime
+    IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
+    return $ result
 
 ---------------------------------------------
 -- Top-level loop
@@ -286,7 +299,7 @@ runVerificationLoop ::
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the start of a function.
   [BlockPair arch] ->
-  IO EquivalenceStatistics
+  IO (PT.EquivalenceStatus, EquivalenceStatistics)
 runVerificationLoop env pPairs = do
   let
     st = EquivState
@@ -300,7 +313,7 @@ runVerificationLoop env pPairs = do
     Right r -> return r
 
   where
-    doVerify :: EquivM sym arch EquivalenceStatistics
+    doVerify :: EquivM sym arch (PT.EquivalenceStatus, EquivalenceStatistics)
     doVerify = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
         mainO <- CMR.asks $ binEntry . originalCtx . envCtx
@@ -310,20 +323,24 @@ runVerificationLoop env pPairs = do
         let pPair = PatchPair blkO blkP
         return $ pPair : pPairs
       triples <- DT.forM pPairs' $ topLevelTriple
-      CMR.local (\env' -> env' { envGoalTriples = triples } ) $
-        F.forM_ triples go
-      CMS.gets stEqStats
+      result <- CMR.local (\env' -> env' { envGoalTriples = triples } ) $
+        CME.foldM (\a b -> (<>) a <$> go b) mempty triples
+      stats <- CMS.gets stEqStats
+      return (result, stats)
 
     go ::
-      PF.EquivTriple sym arch -> EquivM sym arch ()
+      PF.EquivTriple sym arch -> EquivM sym arch PT.EquivalenceStatus
     go triple = do
       result <- manifestError $ checkEquivalence triple
       emitResult result
-      normResult <- return $ case result of 
+      normResult <- return $ case result of
+        Right PT.Equivalent -> EquivalenceStatistics 1 1 0
         Left _ -> EquivalenceStatistics 1 0 1
-        Right False -> EquivalenceStatistics 1 0 0
-        Right True -> EquivalenceStatistics 1 1 0
+        Right _ -> EquivalenceStatistics 1 0 0
       CMS.modify' $ \st -> st { stEqStats = normResult <> (stEqStats st) }
+      case result of
+        Right r -> return r
+        Left err -> return (Errored (show err))
 
 ifConfig ::
   (PC.VerificationConfig -> Bool) ->
@@ -348,7 +365,7 @@ emitResult (Right _) = return ()
 checkEquivalence ::
   HasCallStack =>
   PF.EquivTriple sym arch ->
-  EquivM sym arch Bool
+  EquivM sym arch PT.EquivalenceStatus
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   undef <- CMR.asks envUndefinedPtrOps
@@ -371,8 +388,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     -- propagation
     -- FIXME: this should fail early, rather than waiting for the entire proof result
     case PFO.proofResult (PF.unNonceProof proof) of
-      Nothing -> return (spec, proof)
-      Just _ -> 
+      PF.VerificationSuccess -> return (spec, proof)
+      _ -> 
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
@@ -400,8 +417,11 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   ifConfig (not . PC.cfgEmitProofs) (return ()) $ do
     emitEvent (PE.ProvenGoal blocks (PFI.SomeProofSym vsym proof))
   case PFO.proofResult (PF.unNonceProof proof) of
-    Nothing -> return True
-    Just _ -> return False
+    PF.VerificationSuccess -> return PT.Equivalent
+    PF.VerificationFail (_, cond) -> case W4.asConstantPred (PFI.condEqPred cond) of
+      Just False -> return Inequivalent
+      _ -> return PT.ConditionallyEquivalent
+    _ -> return PT.Inequivalent
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
     -- the bound terms
@@ -874,7 +894,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
-
+  let sliceState = PF.slBlockPostState blockSlice
+       
   stackRegion <- CMR.asks envStackRegion
   eqInputsPred <- liftIO $ getPrecondition sym undef stackRegion bundle eqRel eqInputs
 
@@ -885,25 +906,204 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    result <- PFO.forkProofEvent (simPair bundle) $ fmap PF.ProofStatus $
-       withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
-         checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
-           case satRes of
-             W4R.Unsat _ -> do
-               emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
-               return PF.VerificationSuccess
-             W4R.Unknown -> do
-               emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
-               return PF.Unverified
-             W4R.Sat fn -> do
-               preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
-               postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-               ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
-               emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
-               return $ PF.VerificationFail ir
+    result <- PFO.forkProofEvent (simPair bundle) $ do
+        status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
+          checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
+            case satRes of
+              W4R.Unsat _ -> do
+                emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
+                return PF.VerificationSuccess
+              W4R.Unknown -> do
+                emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
+                return PF.Unverified
+              W4R.Sat fn -> do
+                preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
+                postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+                ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
+                emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
+                return $ PF.VerificationFail ir
+        let noCond = fmap (\ir -> (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))) status
+        status' <- case status of
+          PF.VerificationFail _ -> do
+            withAssumptionFrame_ (equateInitialStates bundle) $ do
+              notGoal <- applyCurrentFrame notChecks
+              goal <- applyCurrentFrame postcondPred
 
+              withAssumption_ (return asm ) $ do
+                isPredSat goalTimeout goal >>= \case
+                  True -> do
+                    postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+                    cond <- computeEqCondition bundle sliceState postDomain' notGoal
+                    cond' <- weakenEqCondition bundle cond sliceState postDomain' goal
+                    cond'' <- checkAndMinimizeEqCondition cond' goal
+                    checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
+                      case satRes of
+                        W4R.Sat fn -> do
+                          preUniv <- universalDomain
+                          preUnivDomain <- PF.unNonceProof <$> PFO.statePredToPreDomain bundle preUniv
+                          ir <- PFG.getInequivalenceResult InvalidPostState preUnivDomain postDomain' blockSlice fn
+                          cr <- PFG.getCondEquivalenceResult cond'' fn
+                          return $ PF.VerificationFail (ir, cr)
+                        W4R.Unsat _ -> return $ noCond
+                        W4R.Unknown -> return $ noCond
+
+                  False -> return $ noCond
+          _ -> return $ noCond
+        return $ PF.ProofStatus status'
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
+
+
+-- | Incrementally build an equivalence condition by negating path conditions which
+-- induce inequality on the block slices.
+-- For each counter example to equivalence, the negated corresponding path condition is assumed,
+-- and then the equivalence check is re-attempted.
+--
+-- This process terminates when the resulting set of assumptions is sufficient to prove
+-- equivalence. Termination is guaranteed, because eventually all possible paths through
+-- the given slice will be considered.
+-- If no equivalence condition is found, then the resulting path condition from this function will be
+-- the negation of all possible path conditions, and therefore inconsistent (i.e. representing
+-- the degenerate case that @false@ implies equivalence).
+computeEqCondition ::
+  forall sym arch.
+  SimBundle sym arch ->
+  -- | block slice post-state
+  PF.BlockSliceState (PFI.ProofSym sym arch) ->
+  -- | equivalence post-domain
+  PFI.SymDomain sym arch ->
+  -- | goal equivalence predicate
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
+  cond <- go (W4.truePred sym)
+  simplifyPred cond
+  where
+    go :: (W4.Pred sym) -> EquivM sym arch (W4.Pred sym)
+    go pathCond = withSym $ \sym -> do
+      -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
+          W4R.Unsat _ -> return Nothing
+          -- this is safe, because the resulting condition is still checked later
+          W4R.Unknown -> return Nothing
+          -- counter-example, compute another path condition and continue
+          W4R.Sat fn -> Just <$> do
+            pathCond' <- PFG.getPathCondition bundle sliceState postDomain fn
+            flattenCondPair pathCond'
+      case result of
+        -- no result, returning the accumulated path conditions
+        Nothing -> return pathCond
+      -- indeterminate result, failure
+        Just unequalPathCond -> do
+          notThis <- liftIO $ W4.notPred sym unequalPathCond
+          pathCond' <- liftIO $ W4.andPred sym notThis pathCond
+          -- assume this path is not taken and continue
+          withAssumption_ (return notThis) $
+            go pathCond'
+
+-- | Weaken a given equality condition with alternative paths which also
+-- induce equality.
+--
+-- Similar to computing a sufficient condition, this process necessarily terminates, as
+-- eventually the given predicate will cover all possible paths through the slice.
+weakenEqCondition ::
+  forall sym arch.
+  SimBundle sym arch ->
+  -- | path conditions that (should) induce equivalence
+  W4.Pred sym ->
+  -- | block slice post-state
+  PF.BlockSliceState (PFI.ProofSym sym arch) ->
+  -- | equivalence post-domain
+  PFI.SymDomain sym arch ->
+  -- | goal equivalence predicate
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+weakenEqCondition bundle pathCond_outer sliceState postDomain goal = withSym $ \sym -> do
+  notPathCond_outer <- liftIO $ W4.notPred sym pathCond_outer
+  go notPathCond_outer pathCond_outer
+  where
+    go :: W4.Pred sym -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
+    go notPathCond pathCond = withSym $ \sym -> do
+      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+      -- we use the heuristic timeout here because we're refining the equivalence condition
+      -- and failure simply means we fail to refine it further
+
+      result <- withAssumption_ (return notPathCond) $
+        checkSatisfiableWithModel heuristicTimeout "check" goal $ \satRes -> case satRes of
+          W4R.Unsat _ -> return Nothing
+          W4R.Unknown -> return Nothing
+          -- counter-example, compute another path condition and continue
+          W4R.Sat fn -> Just <$> do
+            pathCond' <- PFG.getPathCondition bundle sliceState postDomain fn
+            flattenCondPair pathCond'
+      case result of
+        Nothing -> return pathCond
+        Just unequalPathCond -> do
+          isSufficient <- withAssumption_ (return unequalPathCond) $
+            isPredTrue' heuristicTimeout goal
+          pathCond' <- case isSufficient of
+            True -> liftIO $ W4.orPred sym unequalPathCond pathCond
+            False -> return pathCond
+          notPathCond' <- liftIO $ W4.andPred sym notPathCond =<< W4.notPred sym unequalPathCond
+          go notPathCond' pathCond'
+
+flattenCondPair :: PatchPairC (W4.Pred sym) -> EquivM sym arch (W4.Pred sym)
+flattenCondPair (PatchPairC p1 p2) = withSym $ \sym -> liftIO $ W4.andPred sym p1 p2
+
+-- | Given a pair of path conditions, minimize the predicates and
+-- verify that they imply equivalence of the block slice.
+-- If no equivalence condition exists, then the given pair of path conditions is
+-- inconsistent and the result of this function will simply be @false@.
+--
+-- The resulting predicate is simplified under the current set of assumptions.
+checkAndMinimizeEqCondition ::
+  forall sym arch.
+  -- | path condition that is assumed to imply equivalence
+  W4.Pred sym ->
+  -- | goal equivalence predicate
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+checkAndMinimizeEqCondition cond goal = withValid $ withSym $ \sym -> do
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  -- this check is not strictly necessary, as the incremental checks should guarantee it
+  -- for the moment it's a sanity check on this process as well as the final simplifications
+  result <- withSatAssumption goalTimeout (simplifyPred_deep cond) $ do
+    isPredTrue' goalTimeout goal
+  case result of
+    Just (p, True) -> return p
+    _ -> return $ W4.falsePred sym
+
+-- | Simplify a predicate by considering the
+-- logical necessity of each atomic sub-predicate under the current set of assumptions.
+-- Additionally, simplify array lookups across unrelated updates.
+simplifyPred_deep ::
+  forall sym arch.
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+simplifyPred_deep p = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  cache <- W4B.newIdxCache
+  let
+    checkPred :: W4.Pred sym -> EquivM sym arch Bool
+    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $
+      Const <$> isPredTrue' heuristicTimeout p'
+  -- remove redundant atoms
+  p1 <- minimalPredAtoms sym checkPred p
+  -- resolve array lookups across unrelated updates
+  p2 <- resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) p1
+  -- additional bitvector simplifications
+  p3 <- liftIO $ simplifyBVOps sym p2
+  -- drop any muxes across equality tests
+  p4 <- liftIO $ expandMuxEquality sym p3
+  -- remove redundant conjuncts
+  p_final <- simplifyConjuncts sym checkPred p4
+  -- TODO: redundant sanity check that simplification hasn't clobbered anything
+  validSimpl <- liftIO $ W4.isEq sym p p_final
+  isPredTrue' heuristicTimeout validSimpl >>= \case
+    True -> return p_final
+    False -> throwHere $ InconsistentSimplificationResult (CC.showF p) (CC.showF p_final)
+  
 
 --------------------------------------------------------
 -- Propagating preconditions
@@ -929,6 +1129,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
 guessMemoryDomain ::
   forall sym arch.
+  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimBundle sym arch ->
   -- | the target postcondition that we are trying to satisfy
   W4.Pred sym ->
@@ -941,7 +1142,7 @@ guessMemoryDomain ::
   -- the given domain
   (forall w. PMC.MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
   EquivM sym arch (MemPred sym arch)
-guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
+guessMemoryDomain undef bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
   foots <- getFootprints bundle
   cells <- do
     localPred <- liftIO $ addFootPrintsToPred sym foots memPred
@@ -955,17 +1156,14 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
   result <- mapMemPredPar cells $ \cell p -> maybeEqualAt bundle cell p >>= \case
     True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (Par.present $ return polarity) $ do
       let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
-      p' <- bindMemory memP memP' p
       -- clobber the "patched" memory at exactly this cell
       freshP <- liftIO $ freshPtrBytes sym (PMC.cellWidth cell)
-      cell' <- mapExpr' (bindMemory memP memP') cell
 
-      undef <- CMR.asks envUndefinedPtrOps
-      memP'' <- liftIO $ MT.writeMemArr sym undef memP (PMC.cellPtr cell') repr freshP
+      memP'' <- liftIO $ MT.writeMemArr sym undef memP (PMC.cellPtr cell) repr freshP
       eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
 
       -- see if we can prove that the goal is independent of this clobbering
-      asm <- liftIO $ allPreds sym [p, p', eqMemP, goal]
+      asm <- liftIO $ allPreds sym [p, eqMemP, goal]
       check <- liftIO $ W4.impliesPred sym asm goal'
       heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
       result <- isPredTruePar' heuristicTimeout check
@@ -1030,7 +1228,7 @@ mapExpr' ::
   f ->
   EquivM sym arch f
 mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a)) e
+  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a) >>= fixMux sym ) e
 
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
@@ -1101,20 +1299,20 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
       p <- isStackCell cell
       liftIO $ W4.notPred sym p
 
-  ExprMapper doEquate <- equateRegisters regsDom bundle
+  eqRegsFrame <- equateRegisters regsDom bundle
    
   -- rewrite the state elements to explicitly equate registers we have assumed equivalent
-  bundle_regsEq <- liftIO $ PEM.mapExpr sym doEquate bundle
-  goal_regsEq <- liftIO $ doEquate goal
-  postcond_regsEq <- liftIO $ PEM.mapExpr sym doEquate postcond
+  (_, bundle_regsEq) <- applyAssumptionFrame eqRegsFrame bundle
+  (_, goal_regsEq) <- applyAssumptionFrame eqRegsFrame goal
+  (_, postcond_regsEq) <- applyAssumptionFrame eqRegsFrame postcond
   
   memP' <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   goal' <- bindMemory memP memP' goal_regsEq
 
-  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predStack postcond_regsEq) isStackCell
+  stackDom <- guessMemoryDomain undef bundle_regsEq goal_regsEq (memP', goal') (predStack postcond_regsEq) isStackCell
   let stackEq = liftIO $ memPredPre sym undef (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) stackDom
   memDom <- withAssumption_ stackEq $ do
-    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
+    guessMemoryDomain undef bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
 
   blocks <- PD.getBlocks $ simPair bundle
   
@@ -1171,24 +1369,31 @@ liftFilterMacaw f entry = withSym $ \sym -> do
     CT.StructRepr Ctx.Empty -> return False
     repr -> throwHere $ UnsupportedRegisterType (Some repr)
 
-newtype ExprMapper sym = ExprMapper (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp'))
 
 equateRegisters ::
   M.Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
   SimBundle sym arch ->
-  EquivM sym arch (ExprMapper sym)
+  EquivM sym arch (AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
-  binds <- fmap (mconcat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case registerCase (PSR.macawRegRepr vO) r of
+  fmap (mconcat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case registerCase (PSR.macawRegRepr vO) r of
     RegIP -> return mempty
     _ -> case M.lookup (Some r) regRel of
       Just cond | Just True <- W4.asConstantPred cond -> liftIO $ macawRegBinding sym vO vP
       _ -> return mempty
-  cache <- W4B.newIdxCache
-  return $ ExprMapper $ rebindWithFrame' sym cache binds
   where
     inStO = simInState $ simInO bundle
     inStP = simInState $ simInP bundle
 
+equateInitialMemory :: SimBundle sym arch -> EquivM sym arch (AssumptionFrame sym)
+equateInitialMemory bundle =
+  return $ exprBinding (MT.memArr (simInMem $ simInO bundle)) (MT.memArr (simInMem $ simInP bundle))
+
+equateInitialStates :: SimBundle sym arch -> EquivM sym arch (AssumptionFrame sym)
+equateInitialStates bundle = do
+  regDomain <- allRegistersDomain
+  eqRegs <- equateRegisters regDomain bundle
+  eqMem <- equateInitialMemory bundle
+  return $ eqRegs <> eqMem
 
 bindMacawReg ::
   -- | value to rebind
@@ -1452,11 +1657,11 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
 
   notCheck <- liftIO $ W4.notPred sym someCase
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  PFO.forkProofEvent (simPair bundle) $ fmap PF.ProofStatus $
+  PFO.forkProofEvent (simPair bundle) $ 
     checkSatisfiableWithModel goalTimeout "checkCasesTotal" notCheck $ \satRes -> do
     let
       emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)
-    case satRes of
+    status <- case satRes of
       W4R.Sat fn -> do
         -- TODO: avoid re-computing this
         blockSlice <- PFO.simBundleToSlice bundle
@@ -1469,13 +1674,15 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
        
         ir <- PFG.getInequivalenceResult InvalidCallPair preDomain' noDomain blockSlice fn
         emit $ PE.BranchesIncomplete ir
-        return $ PF.VerificationFail ir
+        -- no conditional equivalence case
+        return $ PF.VerificationFail (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))
       W4R.Unsat _ -> do
         emit PE.BranchesComplete
         return PF.VerificationSuccess
       W4R.Unknown -> do
         emit PE.InconclusiveBranches
         return PF.Unverified
+    return $ PF.ProofStatus status
   where
     -- | a branch case is assuming the pre-domain predicate, that the branch condition holds
     getCase :: (W4.Pred sym, BranchCase sym arch) -> EquivM sym arch (W4.Pred sym)

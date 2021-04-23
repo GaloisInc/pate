@@ -4,7 +4,8 @@ module Pate.Timeout (
   Timeout(..),
   Microseconds,
   timeoutAsMicros,
-  timeout
+  timeout,
+  timeout'
   ) where
 
 import qualified System.Timeout as ST
@@ -35,3 +36,8 @@ timeoutAsMicros to =
 
 timeout :: Microseconds -> IO a -> IO (Maybe a)
 timeout (Microseconds us) act = ST.timeout us act
+
+timeout' :: Timeout -> IO a -> IO (Maybe a)
+timeout' to act = case timeoutAsMicros to of
+  Just micros -> timeout micros act
+  Nothing -> Just <$> act

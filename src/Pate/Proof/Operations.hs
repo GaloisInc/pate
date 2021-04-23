@@ -35,6 +35,7 @@ module Pate.Proof.Operations
   , lazyProofEvent_
   , forkProofFinal
   , forkProofEvent
+  , flattenDomainConditions
   ) where
 
 import qualified Control.Monad.Reader as CMR
@@ -70,6 +71,10 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 import qualified Pate.Parallel as Par
 import qualified Pate.Arch as PA
+import qualified What4.ExprHelpers as WEH
+import qualified What4.Expr.Builder as W4B
+
+import qualified Prettyprinter as PP
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -129,32 +134,64 @@ simBundleToSlice bundle = withSym $ \sym -> do
         , PF.slMemOpCond = cond
         }
 
+-- | Compute a single predicate representing the conjunction of all conditions
+-- in the domain. Conditions in negative polarity domains are negated.
+flattenDomainConditions ::
+  forall sym arch.
+  PF.ProofExpr (PFI.ProofSym sym arch) PF.ProofDomainType ->
+  EquivM sym arch (W4.Pred sym)
+flattenDomainConditions domApp = withSym $ \sym -> do
+  reg_cond <- MapF.foldrMWithKey (\_ (Const p) p' -> liftIO $ W4.andPred sym p p') (W4.truePred sym) (MM.regStateMap $ PF.prfDomainRegisters dom)
+  stack_cond <- MapF.foldrMWithKey (go stack_pol) reg_cond (PF.prfMemoryDomain $ PF.prfDomainStackMemory dom)
+  MapF.foldrMWithKey (go glob_pol) stack_cond (PF.prfMemoryDomain $ PF.prfDomainGlobalMemory dom)
+  where
+    dom = PF.unApp domApp
+    stack_pol = PF.prfMemoryDomainPolarity $ PF.prfDomainStackMemory dom
+    glob_pol = PF.prfMemoryDomainPolarity $ PF.prfDomainGlobalMemory dom
+    go ::
+      -- | polarity
+      W4.Pred sym ->
+      PMC.MemCell sym arch w ->
+      -- | condition
+      Const (W4.Pred sym) w ->
+      -- | accumulator
+      W4.Pred sym ->
+      EquivM sym arch (W4.Pred sym)
+    go pol _cell (Const p) acc = withSym $ \sym -> do
+      p' <- liftIO $ W4.isEq sym pol p
+      liftIO $ W4.andPred sym p' acc
+      
+
 blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PT.BlockPair arch
 blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF.unApp prf))
 
--- | Find an inequivalence result in the proof if it exists. A 'Nothing' result indicates
--- that the proof was successful.
+-- | Compute an aggregate verification condition: preferring an inequivalence result
+-- if it exists, but potentially yielding an 'PF.Unverified' result.
 proofResult ::
-  forall sym arch tp.
-  PFI.ProofSymExpr sym arch tp ->
-  Maybe (PFI.InequivalenceResult arch)
-proofResult e = foldr merge Nothing statuses
+  forall prf tp a.
+  a ~ (PF.ProofCounterExample prf, PF.ProofCondition prf) =>
+  PF.ProofExpr prf tp ->
+  PF.VerificationStatus a
+proofResult e = foldr merge PF.VerificationSuccess statuses
   where
     merge ::
-      PF.VerificationStatus (PFI.InequivalenceResult arch) ->
-      Maybe (PFI.InequivalenceResult arch) ->
-      Maybe (PFI.InequivalenceResult arch)
-    merge (PF.VerificationFail ce) _ = Just ce
-    merge _ (Just ce) = Just ce
-    merge _ a = a
+      PF.VerificationStatus a ->
+      PF.VerificationStatus a ->
+      PF.VerificationStatus a
+    merge (PF.VerificationFail ce) _ = PF.VerificationFail ce
+    merge _ (PF.VerificationFail ce) = PF.VerificationFail ce
+    merge PF.Unverified _ = PF.Unverified
+    merge _ PF.Unverified = PF.Unverified
+    merge PF.VerificationSkipped a = a
+    merge a PF.VerificationSkipped = a
+    merge PF.VerificationSuccess PF.VerificationSuccess = PF.VerificationSuccess
     
-    statuses :: [PF.VerificationStatus (PFI.InequivalenceResult arch)]
+    statuses :: [PF.VerificationStatus a]
     statuses = PF.collectProofExpr go e
 
-    go :: PFI.ProofSymExpr sym arch tp' -> [PF.VerificationStatus (PFI.InequivalenceResult arch)]
+    go :: PF.ProofExpr prf tp' -> [PF.VerificationStatus a]
     go (PF.ProofExpr (PF.ProofStatus st)) = [st]
     go _ = []
-    
 
 noTransition ::
   PT.PatchPair (PS.SimInput sym arch) ->
@@ -176,14 +213,24 @@ statePredToDomain ::
   sym ->
   PT.PatchPair (PS.SimState sym arch) ->
   PE.StatePred sym arch ->
-  PF.ProofApp (PFI.ProofSym sym arch) app PF.ProofDomainType
-statePredToDomain sym states stPred =
-  PF.ProofDomain
-    { PF.prfDomainRegisters = predRegsToDomain sym $ PE.predRegs stPred
-    , PF.prfDomainStackMemory = memPredToDomain $ PE.predStack stPred
-    , PF.prfDomainGlobalMemory = memPredToDomain $ PE.predMem stPred
-    , PF.prfDomainContext = states
-    }
+  EquivM sym arch (PFI.SymDomain sym arch)
+statePredToDomain sym states stPred = do
+  dom <- PF.ProofDomain
+    <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
+    <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
+    <*> (return $ memPredToDomain $ PE.predMem stPred)
+    <*> (return states)
+  return $ PF.ProofExpr dom
+
+flattenToStackRegion ::
+  PF.ProofMemoryDomain (PFI.ProofSym sym arch) ->
+  EquivM sym arch (PF.ProofMemoryDomain (PFI.ProofSym sym arch))
+flattenToStackRegion dom = do
+  stackRegion <- CMR.asks envStackRegion
+  let
+    dom' = map (\(MapF.Pair cell p) -> MapF.Pair (PMC.setMemCellRegion stackRegion cell) p) (MapF.toList (PF.prfMemoryDomain dom))
+  return $ dom { PF.prfMemoryDomain = MapF.fromList dom' }
+
 
 predRegsToDomain ::
   forall arch sym.
@@ -213,13 +260,13 @@ memPredToDomain memPred =
     go :: (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       MapF.Pair (PMC.MemCell sym arch) (Const (W4.Pred sym))
     go (Some cell, p) = MapF.Pair cell (Const p)
-      
+
 statePredToPreDomain ::
   PS.SimBundle sym arch ->
   PE.StatePred sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
 statePredToPreDomain bundle stPred = proofNonceExpr $ withSym $ \sym -> do
-  return $ statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain sym states stPred
   where
     states = TF.fmapF PS.simInState $ PS.simIn bundle
 
@@ -230,11 +277,13 @@ statePredToPostDomain stPredSpec = proofNonceExpr $ withSym $ \sym -> do
   let
     states = TF.fmapF PS.simVarState $ PS.specVars stPredSpec
     stPred = PS.specBody stPredSpec
-  return $ statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain sym states stPred
+
 
 emptyDomain :: EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP ->
-  return $ (W4.truePred sym, statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym))
+emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP -> do
+  dom <- PF.appDomain <$> statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym)
+  return $ (W4.truePred sym, dom)
 
 proofNonceExpr ::
   EquivM sym arch (PFI.ProofSymNonceApp sym arch tp) ->
@@ -367,10 +416,10 @@ joinLazyProofApp :: LazyProofApp sym arch tp -> EquivM sym arch (PFI.ProofSymNon
 joinLazyProofApp = PF.traverseProofApp joinLazyProof
 
 joinLazyProof :: LazyProof sym arch tp -> EquivM sym arch (PFI.ProofSymNonceExpr sym arch tp)
-joinLazyProof prf = do
+joinLazyProof prf = withValid $ do
   app <- case lazyProofBody prf of
     LazyProofBodyApp app -> joinLazyProofApp app
     LazyProofBodyFuture future -> Par.joinFuture future
-  let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app 
-  liftIO $ lazyProofFinalize prf nonce_prf 
+  let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app
+  liftIO $ lazyProofFinalize prf nonce_prf
   return nonce_prf

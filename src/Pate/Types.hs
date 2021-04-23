@@ -30,10 +30,12 @@ module Pate.Types
   , PatchPairEq(..)
   , ppPatchPair
   , PatchPairC(..)
+  , toPatchPairC
   , mergePatchPairCs
   , ppPatchPairCEq
   , ppPatchPairEq
   , ppPatchPairC
+  , zipMPatchPairC
   , BlockPair
   , ConcreteBlock(..)
   , equivBlocks
@@ -72,6 +74,7 @@ module Pate.Types
   , zipWithRegStatesM
   --- reporting
   , EquivalenceStatistics(..)
+  , EquivalenceStatus(..)
   , equivSuccess
   , ppEquivalenceStatistics
   , ppBlock
@@ -100,11 +103,12 @@ import qualified Data.Set as S
 import           Data.Typeable
 import qualified Prettyprinter as PP
 
-import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.Nonce as PN
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.TraversableFC as TFC
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
@@ -152,6 +156,9 @@ newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arc
   deriving (Eq, Ord)
 deriving instance Show (ConcreteAddress arch)
 
+instance PP.Pretty (ConcreteAddress arch) where
+  pretty (ConcreteAddress addr) = PP.pretty addr
+
 data PatchPair (tp :: WhichBinary -> DK.Type) = PatchPair
   { pOriginal :: tp 'Original
   , pPatched :: tp 'Patched
@@ -160,11 +167,17 @@ data PatchPair (tp :: WhichBinary -> DK.Type) = PatchPair
 class PatchPairEq tp where
   ppEq :: tp Original -> tp Patched -> Bool
 
+
 data PatchPairC tp = PatchPairC
   { pcOriginal :: tp
   , pcPatched :: tp
   }
   deriving (Eq, Ord, Functor, Foldable, Traversable)
+
+toPatchPairC ::
+  PatchPair (Const f) ->
+  PatchPairC f
+toPatchPairC (PatchPair (Const v1) (Const v2)) = PatchPairC v1 v2
 
 mergePatchPairCs ::
   PatchPairC a ->
@@ -172,6 +185,15 @@ mergePatchPairCs ::
   PatchPairC (a, b)
 mergePatchPairCs (PatchPairC o1 p1) (PatchPairC o2 p2) = PatchPairC (o1, o2) (p1, p2)
 
+zipMPatchPairC ::
+  Applicative m =>
+  PatchPairC a ->
+  PatchPairC b ->
+  (a -> b -> m c) ->
+  m (PatchPairC c)
+zipMPatchPairC (PatchPairC a1 a2) (PatchPairC b1 b2) f = PatchPairC
+  <$> f a1 b1
+  <*> f a2 b2
 
 instance TestEquality tp => Eq (PatchPair tp) where
   PatchPair o1 p1 == PatchPair o2 p2
@@ -370,6 +392,24 @@ instance Monoid EquivalenceStatistics where
   mempty = EquivalenceStatistics 0 0 0
 
 
+data EquivalenceStatus =
+    Equivalent
+  | Inequivalent
+  | ConditionallyEquivalent
+  | Errored String
+
+instance Semigroup EquivalenceStatus where
+  Errored err <> _ = Errored err
+  _ <> Errored err = Errored err
+  Inequivalent <> _ = Inequivalent
+  _ <> Inequivalent = Inequivalent
+  ConditionallyEquivalent <> _ = ConditionallyEquivalent
+  _ <> ConditionallyEquivalent = ConditionallyEquivalent
+  Equivalent <> Equivalent = Equivalent
+
+instance Monoid EquivalenceStatus where
+  mempty = Equivalent
+
 equivSuccess :: EquivalenceStatistics -> Bool
 equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
 
@@ -493,7 +533,7 @@ type ValidSym sym =
   )
 
 data Sym sym where
-  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => sym -> WS.SolverAdapter st -> Sym sym
+  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => PN.Nonce PN.GlobalNonceGenerator sym -> sym -> WS.SolverAdapter st -> Sym sym
 
 ----------------------------------
 
@@ -506,7 +546,7 @@ data InnerEquivalenceError arch
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
   | NoUniqueFunctionOwner (IM.Interval (ConcreteAddress arch)) [MM.ArchSegmentOff arch]
-  | LookupNotAtFunctionStart (ConcreteAddress arch)
+  | LookupNotAtFunctionStart (ConcreteAddress arch) (ConcreteAddress arch)
   | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (ConcreteAddress arch) (ConcreteAddress arch) (ConcreteAddress arch)
@@ -533,6 +573,10 @@ data InnerEquivalenceError arch
   | MissingTOCEntry (MM.ArchSegmentOff arch)
   | BlockEndClassificationFailure
   | InvalidCallTarget (ConcreteAddress arch)
+  | IncompatibleDomainPolarities
+  | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
+  | InconsistentSimplificationResult String String
+
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 
 data EquivalenceError arch where

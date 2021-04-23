@@ -1,0 +1,59 @@
+.sat-equivalent {
+    color: green;
+}
+
+.sat-indeterminate {
+    color: magenta;
+}
+
+.sat-inequivalent {
+    color: red;
+}
+
+.basic-block {
+    border-style: solid;
+    margin-bottom: 10px;
+}
+
+.source-listing {
+    padding: 10px;
+}
+
+.proof-graph-node-label {
+    font: '14px monospace';
+    width: 200px;
+    height: 50px;
+    overflow: auto;
+}
+
+.slice-graph-node-label {
+    font: '14px monospace';
+    width: 400px;
+    height: 500px;
+    overflow: auto;
+}
+
+.domain {
+    margin: 10px;
+}
+
+.proof-app {
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
+#proof-canvas {
+    width: 1600px;
+    height: 1000px;
+    display: block;
+    overflow: auto;
+    border: 2px dotted black;
+}
+
+#original-slice-graph, #patched-slice-graph {
+    width: 600px;
+    height: 1000px;
+    display: block;
+    overflow: auto;
+    border: 2px dotted black;
+}

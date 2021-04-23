@@ -23,8 +23,7 @@ Primitives for parallelism
 
 module Pate.Parallel
     ( IsFuture(..)
-    , Future(..)
-    , FutureF
+    , Future
     , ConstF(..)
     )
     where
@@ -85,9 +84,6 @@ data Future a where
   Present :: IO a -> Future a
   -- | An "immediate" value has already been evaluated.
   Immediate :: a -> Future a
-  
-
-type FutureF = ConstF Future
 
 -- | Cached evaluation that assumes the same value for 'b' will always be given.
 cachedEval :: (b -> IO a) -> IO (b -> IO a)

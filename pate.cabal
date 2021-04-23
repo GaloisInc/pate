@@ -15,6 +15,8 @@ maintainer:          tristan@galois.com, dmatichuk@galois.com
 category:            Verification
 build-type:          Simple
 extra-source-files:  CHANGELOG.md
+                     tools/pate/static/*.css
+                     tools/pate/static/*.js
 
 common shared
   build-depends:       base >= 4.10 && < 5,
@@ -37,6 +39,7 @@ common shared
                        lens >= 4 && < 6,
                        hashtables >= 1.2 && < 1.3,
                        mtl >= 2 && < 2.3,
+                       panic >= 0.4 && < 0.5,
                        lumberjack >= 0.1 && < 1.1,
                        prettyprinter >= 1.7 && < 1.8,
                        parameterized-utils,
@@ -50,6 +53,7 @@ common shared
                        macaw-loader-ppc,
                        unliftio-core >= 0.2 && < 0.3,
                        text >= 1 && < 1.3,
+                       transformers,
                        time >= 1 && < 2,
                        vector >= 0.10 && < 0.13
                        
@@ -73,7 +77,9 @@ library
                        Pate.Monad,
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
+                       Pate.Metrics,
                        Pate.SimulatorRegisters,
+                       Pate.Panic,
                        Pate.Parallel,
                        Pate.Proof,
                        Pate.Proof.Instances,
@@ -85,6 +91,8 @@ library
                        Pate.Utils,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
+                       What4.PathCondition,
+                       Data.Parameterized.SetF,
                        Pate.SimState,
                        Pate.Equivalence
 
@@ -167,9 +175,15 @@ executable pate-exec
   other-modules:       Pate.PPC,
                        Pate.AArch32,
                        Interactive,
+                       Interactive.Render.BlockPairDetail,
+                       Interactive.Render.Console,
+                       Interactive.Render.Proof,
+                       Interactive.Render.SliceGraph,
                        Interactive.State
   hs-source-dirs:      tools/pate tools arch
   build-depends:       async,
+                       aeson,
+                       temporary >= 1 && < 2,
                        prettyprinter,
                        prettyprinter-ansi-terminal >= 1.1 && < 1.2,
                        utf8-string >= 1 && < 2,
@@ -180,6 +194,7 @@ executable pate-exec
                        threepenny-gui >= 0.9 && < 0.10,
                        language-c >= 0.9 && < 0.10,
                        parameterized-utils,
+                       what4,
                        macaw-ppc,
                        macaw-ppc-symbolic,
                        dismantle-ppc,

@@ -43,3 +43,15 @@
 [submodule "submodules/renovate"]
 	path = submodules/renovate
 	url = git@github.com:GaloisInc/renovate.git
+[submodule "tools/pate/static/cytoscape.js"]
+	path = tools/pate/static/cytoscape.js
+	url = git@github.com:cytoscape/cytoscape.js.git
+[submodule "tools/pate/static/cytoscape-node-html-label"]
+	path = tools/pate/static/cytoscape-node-html-label
+	url = git@github.com:kaluginserg/cytoscape-node-html-label.git
+[submodule "tools/pate/static/dagre"]
+	path = tools/pate/static/dagre
+	url = git@github.com:dagrejs/dagre.git
+[submodule "tools/pate/static/cytoscape.js-dagre"]
+	path = tools/pate/static/cytoscape.js-dagre
+	url = git@github.com:cytoscape/cytoscape.js-dagre.git

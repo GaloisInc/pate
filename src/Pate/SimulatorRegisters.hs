@@ -68,6 +68,8 @@ data MacawRegVar sym (tp :: MT.Type) where
 instance (WI.IsExpr (WI.SymExpr sym), PC.ShowF (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of
     CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ ":" ++ PC.showF bv
+    CT.BoolRepr -> PC.showF v
+    CT.StructRepr Ctx.Empty -> "()"
     _ -> "macawRegEntry: unsupported"
 
 macawRegEntry :: CS.RegEntry sym (MS.ToCrucibleType tp) -> MacawRegEntry sym tp
