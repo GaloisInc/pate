@@ -31,16 +31,16 @@ jobs:
     name: GHC ${{ matrix.ghc }} on ${{ matrix.os }} pate-${{ matrix.arch }}
 
     steps:
-    - uses: actions/checkout@v2
-      with:
-        submodules: 'true'
-
     - uses: haskell/actions/setup@v1
       id: setup-haskell-cabal
       name: Setup Haskell
       with:
         ghc-version: ${{ matrix.ghc }}
         cabal-version: ${{ matrix.cabal }}
+
+    - uses: actions/checkout@v2
+      # with:
+      #   submodules: 'true'
 
     - uses: actions/cache@v2
       name: Cache cabal store
@@ -64,7 +64,13 @@ jobs:
 
     - name: Setup Cabal Configuration
       run: |
-        cp cabal.project.dist cabal.project
+        # cp cabal.project.dist cabal.project
+        git submodule update --init submodules/dismantle
+        cabal update || true
+        dir="$(dirname $(find dist-newstyle/src/asl-trans_-*/output/.gitkeep))"
+        touch "$dir"/empty.what4
+        cabal update
+        rm "$dir"/empty.what4
         cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j
 
     - name: Build dependencies
