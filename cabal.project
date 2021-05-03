@@ -3,77 +3,77 @@ packages: .
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/parameterized-utils.git
+  location: https://github.com/GaloisInc/parameterized-utils.git
   tag: b2e9cc34a58e5931cf14beca2c5bc28f343cf966
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/what4.git
+  location: https://github.com/GaloisInc/what4.git
   tag: 91200aa39565c156226cec6a9409a692e4022501
   subdir: what4
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/what4-serialize.git
+  location: https://github.com/GaloisInc/what4-serialize.git
   tag: c7e7da52089749cc7c114a6cf89f29a440976039
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/crucible.git
+  location: https://github.com/GaloisInc/crucible.git
   tag: a42ef5b65faea52d3530d53ed7ac800a3a14f1e3
   subdir: crucible crucible-llvm
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/macaw.git
+  location: https://github.com/GaloisInc/macaw.git
   tag: ff894f9286f976d0ab131325bea902ef6275aad2
   subdir: base symbolic x86 x86_symbolic macaw-semmc macaw-ppc macaw-ppc-symbolic macaw-aarch32 macaw-aarch32-symbolic
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/elf-edit.git
+  location: https://github.com/GaloisInc/elf-edit.git
   tag: 3623317aeca557f54d93ffbed5ae179054591f4a
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/macaw-loader.git
+  location: https://github.com/GaloisInc/macaw-loader.git
   tag: 79c1a214de19677197f2b7e5f38562b3ba925be9
   subdir: macaw-loader macaw-loader-x86 macaw-loader-ppc macaw-loader-aarch32
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/flexdis86.git
+  location: https://github.com/GaloisInc/flexdis86.git
   tag: ed859e7ed5786246755277f2537033326090def3
   subdir: . binary-symbols
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/semmc.git
+  location: https://github.com/GaloisInc/semmc.git
   tag: 4dc4439720b3b0de8812a68f8156dc89da76da57
   subdir: semmc semmc-ppc semmc-aarch32 semmc-synthesis semmc-learning
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/arm-asl-parser.git
+  location: https://github.com/GaloisInc/arm-asl-parser.git
   tag: afbeff2db4781e138bb8c920d803b7e7a88383b7
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/asl-translator.git
+  location: https://github.com/GaloisInc/asl-translator.git
   tag: 9906e850cd93cace9cd4fc2288b92c4b0822bdc0 
 
 source-repository-package
   type: git
-  location: git@github.com:travitch/dismantle.git
+  location: https://github.com/travitch/dismantle.git
   tag: 1c2e7892c6edc514cef94efa68717c7a7505140a
   subdir: dismantle-tablegen dismantle-ppc
 
 source-repository-package
   type: git
-  location: git@github.com:elliottt/llvm-pretty.git
+  location: https://github.com/elliottt/llvm-pretty.git
   tag: 0a4a21c6e8756947ac4716cc9d7628f8c48e38c4
 
 source-repository-package
   type: git
-  location: git@github.com:GaloisInc/dwarf.git
+  location: https://github.com/GaloisInc/dwarf.git
   tag: ab74e6e73ec92cf3219823d5336f190a1464118b
