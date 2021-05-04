@@ -22,6 +22,7 @@ jobs:
       TZ: America/Los_Angeles
 
     strategy:
+      fail-fast: false
       matrix:
         arch: [ 'ppc' ]
         ghc: ['8.6.5', '8.8.4', '8.10.3']
@@ -69,7 +70,7 @@ jobs:
         git submodule foreach git config --local 'url.https://github.com/.insteadOf' 'git@github.com:'
         git submodule update --init submodules/dismantle
         cabal update || true
-        dir="$(dirname $(find dist-newstyle/src/asl-trans_-*/output/.gitkeep))"
+        dir="$(dirname $(find dist-newstyle/src/asl-trans_-*/output/.gitkeep | tail -n1))"
         touch "$dir"/empty.what4
         cabal update
         rm "$dir"/empty.what4
