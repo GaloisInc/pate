@@ -40,8 +40,8 @@ jobs:
         cabal-version: ${{ matrix.cabal }}
 
     - uses: actions/checkout@v2
-      # with:
-      #   submodules: 'true'
+      with:
+        submodules: 'true'
 
     - uses: actions/cache@v2
       name: Cache cabal store
@@ -63,22 +63,11 @@ jobs:
         sudo locale-gen en_US.UTF-8
         sudo pip3 install toml
 
-    - name: Setup Cabal Configuration
+    - name: Build
       run: |
-        # cp cabal.project.dist cabal.project
-        git config --global 'url.https://github.com/.insteadOf' 'git@github.com:'
-        git submodule foreach git config --local 'url.https://github.com/.insteadOf' 'git@github.com:'
-        git submodule update --init submodules/dismantle
-        cabal update || true
-        dir="$(dirname $(find dist-newstyle/src/asl-trans_-*/output/.gitkeep | tail -n1))"
-        touch "$dir"/empty.what4
-        cabal update
-        rm "$dir"/empty.what4
+        cp cabal.project.dist cabal.project
         cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j
-
-    - name: Build dependencies
-      run: |
-        cabal build --only-dependencies
+        cabal build pkg:pate --only-dependencies
 
     - name: Build
       run: |
