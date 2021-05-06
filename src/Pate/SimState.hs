@@ -70,9 +70,6 @@ import           Control.Monad ( forM )
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.IO.Class as IO
 
-import qualified Data.Set as Set
-
-
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx

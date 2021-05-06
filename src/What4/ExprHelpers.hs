@@ -69,7 +69,6 @@ import           Control.Applicative
 import           Control.Monad.Except
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
-import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.State as CMS
 
@@ -80,7 +79,7 @@ import qualified Data.Text as T
 import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.List ( foldl', reverse )
+import           Data.List ( foldl' )
 import           Data.List.NonEmpty (NonEmpty(..))
 
 import qualified Data.Parameterized.Nonce as N
@@ -101,7 +100,6 @@ import qualified What4.Concrete as W4C
 import qualified What4.Symbol as W4
 import qualified What4.SemiRing as SR
 import qualified What4.Expr.BoolMap as BM
-import qualified What4.Utils.Arithmetic as WUA
 
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF 

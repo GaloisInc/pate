@@ -1217,14 +1217,6 @@ bindMemory ::
 bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
 
-mapExpr' ::
-  PEM.ExprMappable sym f =>
-  (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
-  f ->
-  EquivM sym arch f
-mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a) >>= fixMux sym ) e
-
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
 -- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.
