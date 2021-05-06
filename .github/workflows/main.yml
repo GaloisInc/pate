@@ -15,26 +15,33 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    env:
+      LANG: en_US.UTF-8
+      LANGUAGE: en_US:en
+      LC_ALL: en_US.UTF-8
+      TZ: America/Los_Angeles
+
     strategy:
+      fail-fast: false
       matrix:
         arch: [ 'ppc' ]
         ghc: ['8.6.5', '8.8.4', '8.10.3']
-        cabal: ['3.2.0.0']
-        os: [ubuntu-latest]
+        cabal: ['3.4.0.0']
+        os: [self-hosted]
 
     name: GHC ${{ matrix.ghc }} on ${{ matrix.os }} pate-${{ matrix.arch }}
 
     steps:
-    - uses: actions/checkout@v2
-      with:
-        submodules: 'true'
-
     - uses: haskell/actions/setup@v1
       id: setup-haskell-cabal
       name: Setup Haskell
       with:
         ghc-version: ${{ matrix.ghc }}
         cabal-version: ${{ matrix.cabal }}
+
+    - uses: actions/checkout@v2
+      with:
+        submodules: 'true'
 
     - uses: actions/cache@v2
       name: Cache cabal store
@@ -46,11 +53,25 @@ jobs:
         restore-keys: |
           cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles(format('cabal.GHC-{0}.config', matrix.ghc)) }}-
 
+    - name: System Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y software-properties-common apt-transport-https ca-certificates wget
+        sudo apt install -y curl zlibc zlib1g zlib1g-dev git zip \
+          libgmp3-dev build-essential libtinfo-dev autoconf automake gperf cmake locales \
+          python3-distutils python-setuptools antlr3 libantlr3c-dev libtool libtool-bin libboost-all-dev python3-pip libfftw3-dev
+        sudo locale-gen en_US.UTF-8
+        sudo pip3 install toml
+
     - name: Build
       run: |
         cp cabal.project.dist cabal.project
-        cabal v2-configure pkg:pate --write-ghc-environment-files=always --enable-tests -j1
-        cabal v2-build pkg:pate
+        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j
+        cabal build pkg:pate --only-dependencies
+
+    - name: Build
+      run: |
+        cabal build pkg:pate
 
     - name: Install Solvers
       run: .github/ci.sh install_system_deps
@@ -63,7 +84,7 @@ jobs:
     - name: Test
       if: runner.os == 'Linux'
       run: |
-        cabal v2-test pkg:pate
+        cabal test pkg:pate
 
     - name: Docs
       run: cabal haddock pkg:pate
