@@ -23,14 +23,11 @@ module Pate.MemCell (
   ) where
 
 import           Control.Monad ( foldM, forM )
-import           Data.Foldable (toList)
-import qualified Data.BitVector.Sized as BVS
 
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
 import qualified Data.Map.Merge.Strict as MapM
-import           Data.Parameterized.Some (Some(..))
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PNR

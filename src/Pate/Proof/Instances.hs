@@ -69,7 +69,6 @@ import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Map ( Pair(..) )
-import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Lang.Crucible.Types as CT
 import qualified Lang.Crucible.Simulator.RegValue as CS

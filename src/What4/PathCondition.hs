@@ -49,8 +49,6 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Expr.BoolMap as BM
 
-import qualified What4.ExprHelpers as WEH
-
 -- | Compute a predicate representing the path condition of the
 -- expression according to its internal mux structure.
 -- i.e. given the model @[x := 2, y := 5]@ and the expression
