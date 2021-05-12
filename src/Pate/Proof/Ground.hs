@@ -166,12 +166,10 @@ getGenPathCondition ::
   f ->
   IO (W4.Pred sym)
 getGenPathCondition sym (PT.SymGroundEvalFn fn) e = do
-  cache <- W4B.newIdxCache
   let
     f :: forall tp'. W4.SymExpr sym tp' -> W4.Pred sym -> IO (W4.Pred sym)
     f e' cond = do
-      stripped <- stripAsserts sym cache e'
-      cond' <- WPC.getPathCondition sym fn stripped
+      cond' <- WPC.getPathCondition sym fn e'
       W4.andPred sym cond cond'
   
   PEM.foldExpr sym f e (W4.truePred sym)

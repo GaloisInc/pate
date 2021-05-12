@@ -505,7 +505,7 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   -- Set up a wrapper around the ground evaluation function that removes some
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
-  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkSafeAsserts sym r')) pure r
+  let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
   runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings timeout sym adapter goal
 
 checkSatisfiableWithoutBindings
@@ -618,14 +618,6 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
-
-mapExpr' ::
-  PEM.ExprMappable sym f =>
-  (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
-  f ->
-  EquivM sym arch f
-mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a) ) e
 
 --------------------------------------
 -- UnliftIO
