@@ -504,7 +504,7 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   -- Set up a wrapper around the ground evaluation function that removes some
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
-  let mkResult r = W4R.traverseSatResult (\r' -> SymGroundEvalFn <$> liftIO (mkSafeAsserts sym r')) pure r
+  let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
   runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings timeout sym adapter goal
 
 checkSatisfiableWithoutBindings

@@ -77,7 +77,6 @@ import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), MaybeType, knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
-import What4.ExprHelpers (assertPrefix)
 import What4.Interface
 
 
@@ -100,7 +99,7 @@ import qualified What4.ExprHelpers as WEH
 -- | A collection of functions used to produce undefined values for each pointer operation.
 data UndefinedPtrOps sym =
   UndefinedPtrOps
-    { undefPtrOff :: (forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w))
+    { undefPtrOff :: (forall w. sym -> LLVMPtr sym w -> IO (SymBV sym w))
     , undefPtrLt :: UndefinedPtrPredOp sym
     , undefPtrLeq :: UndefinedPtrPredOp sym
     , undefPtrAdd :: UndefinedPtrBinOp sym
@@ -117,7 +116,6 @@ newtype UndefinedPtrBinOp sym =
     { mkUndefPtr ::
         forall w.
         sym ->
-        Pred sym ->
         LLVMPtr sym w ->
         LLVMPtr sym w ->
         IO (LLVMPtr sym w)
@@ -132,7 +130,6 @@ newtype UndefinedPtrPredOp sym =
     { mkUndefPred ::
         forall w.
         sym ->
-        Pred sym ->
         LLVMPtr sym w ->
         LLVMPtr sym w ->
         IO (Pred sym)
@@ -196,7 +193,7 @@ instance (HasNatAbs ctx, HasNatAbs tp) => HasNatAbs (ctx Ctx.::> tp) where
 data PolyFun sym args ret (w :: Nat) where
   PolyFun ::
     (HasNatAbs args, HasNatAbs ret) =>
-    (SymFn sym (NatAbs args w) (NatAbs ret w)) ->
+    (SymArray sym (NatAbs args w) (NatAbs ret w)) ->
     PolyFun sym args ret w
 
 newtype PolyFunMaker sym args ret =
@@ -210,7 +207,7 @@ mkBinUF nm  = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
-  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
+  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr ptrRepr)
 
 mkPtrAssert ::
   IsSymInterface sym =>
@@ -220,7 +217,7 @@ mkPtrAssert nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> BaseBoolRepr
-  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr ptrRepr
+  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr ptrRepr)
 
 mkBVAssert ::
   IsSymInterface sym =>
@@ -229,7 +226,7 @@ mkBVAssert ::
 mkBVAssert nm = PolyFunMaker $ \sym w -> do
   let
     repr = Empty :> BaseBVRepr w :> BaseBoolRepr
-  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
+  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr (BaseBVRepr w))
 
 mkPredAssert ::
   IsSymInterface sym =>
@@ -238,7 +235,7 @@ mkPredAssert ::
 mkPredAssert nm = PolyFunMaker $ \sym w -> do
   let
     repr = Empty :> BaseBoolRepr :> BaseBoolRepr
-  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
+  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr BaseBoolRepr)
 
 mkPredUF ::
   IsSymInterface sym =>
@@ -248,7 +245,7 @@ mkPredUF nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
-  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr BaseBoolRepr
+  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr BaseBoolRepr)
 
 mkOffUF ::
   IsSymInterface sym =>
@@ -258,7 +255,7 @@ mkOffUF nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr
-  PolyFun <$> freshTotalUninterpFn sym (polySymbol nm w) repr (BaseBVRepr w)
+  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr (BaseBVRepr w))
 
 
 cachedPolyFun ::
@@ -287,34 +284,28 @@ mkBinOp ::
   IsSymInterface sym =>
   sym ->
   String ->
-  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat) ->
   IO (UndefinedPtrBinOp sym)
-mkBinOp sym nm (PolyFunMaker mkAssert) = do
+mkBinOp sym nm = do
   PolyFunMaker fn' <- cachedPolyFun sym $ mkBinUF nm
-  return $ UndefinedPtrBinOp $ \sym' cond ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+  return $ UndefinedPtrBinOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
     sptr1 <- asSymPtr sym' ptr1
     sptr2 <- asSymPtr sym' ptr2
     PolyFun resultfn <- fn' sym' w
-    sptrResult <- applySymFn sym' resultfn (Empty :> sptr1 :> sptr2)
-    PolyFun doAssert <- mkAssert sym' w
-    sptrResult' <- applySymFn sym' doAssert (Empty :> sptrResult :> cond)
-    fromSymPtr sym' sptrResult'
+    sptrResult <- arrayLookup sym' resultfn (Empty :> sptr1 :> sptr2)
+    fromSymPtr sym' sptrResult
 
 mkPredOp ::
   IsSymInterface sym =>
   sym ->
   String ->
-  PolyFunMaker sym (EmptyCtx ::> BaseBoolType Ctx.::> BaseBoolType) BaseBoolType -> 
   IO (UndefinedPtrPredOp sym)
-mkPredOp sym nm (PolyFunMaker mkAssert) = do
+mkPredOp sym nm = do
   PolyFunMaker fn' <- cachedPolyFun sym $ mkPredUF nm
-  return $ UndefinedPtrPredOp $ \sym' cond ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+  return $ UndefinedPtrPredOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
     sptr1 <- asSymPtr sym' ptr1
     sptr2 <- asSymPtr sym' ptr2
     PolyFun resultfn <- fn' sym' w
-    result <- applySymFn sym' resultfn (Empty :> sptr1 :> sptr2)
-    PolyFun doAssert <- mkAssert sym' w
-    applySymFn sym' doAssert (Empty :> result :> cond)
+    arrayLookup sym' resultfn (Empty :> sptr1 :> sptr2)
 
 mkUndefinedPtrOps ::
   forall sym.
@@ -322,24 +313,19 @@ mkUndefinedPtrOps ::
   sym ->
   IO (UndefinedPtrOps sym)
 mkUndefinedPtrOps sym = do
-  ptrAssert <- cachedPolyFun sym $ mkPtrAssert assertPrefix
-  predAssert <- cachedPolyFun sym $ mkPredAssert assertPrefix
-  PolyFunMaker bvAssert <- cachedPolyFun sym $ mkBVAssert assertPrefix
   PolyFunMaker offFn <- cachedPolyFun sym $ mkOffUF "undefPtrOff"
   let
-    offPtrFn :: forall w. sym -> Pred sym -> LLVMPtr sym w -> IO (SymBV sym w)
-    offPtrFn sym' cond ptr = withPtrWidth ptr $ \w -> do
+    offPtrFn :: forall w. sym -> LLVMPtr sym w -> IO (SymBV sym w)
+    offPtrFn sym'  ptr = withPtrWidth ptr $ \w -> do
       sptr <- asSymPtr sym' ptr
       PolyFun resultfn <- offFn sym' w
-      result <- applySymFn sym' resultfn (Empty :> sptr)
-      PolyFun doAssert <- bvAssert sym' w
-      applySymFn sym' doAssert (Empty :> result :> cond)
+      arrayLookup sym' resultfn (Empty :> sptr)
 
-  undefPtrLt' <- mkPredOp sym "undefPtrLt" predAssert
-  undefPtrLeq' <- mkPredOp sym "undefPtrLeq'" predAssert
-  undefPtrAdd' <- mkBinOp sym "undefPtrAdd" ptrAssert
-  undefPtrSub' <- mkBinOp sym "undefPtrSub" ptrAssert
-  undefPtrAnd' <- mkBinOp sym "undefPtrAnd" ptrAssert
+  undefPtrLt' <- mkPredOp sym "undefPtrLt"
+  undefPtrLeq' <- mkPredOp sym "undefPtrLeq'"
+  undefPtrAdd' <- mkBinOp sym "undefPtrAdd"
+  undefPtrSub' <- mkBinOp sym "undefPtrSub"
+  undefPtrAnd' <- mkBinOp sym "undefPtrAnd"
   return $
     UndefinedPtrOps
       { undefPtrOff = offPtrFn
@@ -633,7 +619,7 @@ doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
         Just True -> return off
         _ -> do
           assert sym cond $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
-          undef <- undefPtrOff mkundef sym cond ptr
+          undef <- undefPtrOff mkundef sym ptr
           bvIte sym cond off undef
 
 liftToCrucibleState ::
@@ -735,7 +721,7 @@ ptrPredOp mkundef regconstraint f sym reg1 off1 reg2 off2  = do
     Just True -> return result
     _ -> do
       assert sym cond $ AssertFailureSimError "ptrPredOp" $ "ptrPredOp: " ++ regConstraintMsg regconstraint
-      undef <- mkUndefPred mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      undef <- mkUndefPred mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       itePred sym cond result undef
 
 muxPtr ::
@@ -764,7 +750,7 @@ ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
     Just True -> return result
     _ -> do
       assert sym cond $ AssertFailureSimError "ptrBinOp" $ "ptrBinOp: " ++ regConstraintMsg regconstraint
-      undef <- mkUndefPtr mkundef sym cond (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
+      undef <- mkUndefPtr mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       muxPtr sym cond result undef
 
 cases ::
