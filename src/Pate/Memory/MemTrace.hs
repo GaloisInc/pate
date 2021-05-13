@@ -166,38 +166,71 @@ polySymbol ::
   SolverSymbol
 polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
 
+type AnyNat = 0
 -- | Defines how a given type can be concretized to a specific type-level nat.
 -- This allows us to easily describe a type that is polymorphic in one natural,
 -- using existing type constructors.
-class HasNatAbs (tp :: k) where
-  -- | 'Apply' a specific type-level nat to the type
-  type NatAbs tp (w :: Nat) :: k
+type family NatAbs tp (w :: Nat) :: BaseType where
+  NatAbs (BasePtrType AnyNat) w' = BasePtrType w'
+  NatAbs (BasePtrType w) _ = BasePtrType w
+  NatAbs (BaseBVType AnyNat) w' = BaseBVType w'
+  NatAbs (BaseBVType w) _ = BaseBVType w
+  NatAbs BaseBoolType _ = BaseBoolType
+  NatAbs BaseIntegerType _ = BaseIntegerType
 
-type AnyNat = 0
+type family NatAbsCtx tp (w :: Nat) :: Ctx.Ctx BaseType where
+  NatAbsCtx EmptyCtx w = EmptyCtx
+  NatAbsCtx (ctx Ctx.::> tp) w' = NatAbsCtx ctx w' Ctx.::> NatAbs tp w'
 
-instance HasNatAbs (BasePtrType AnyNat) where
-  type NatAbs (BasePtrType AnyNat) w' = BasePtrType w'
-
-instance HasNatAbs (BaseBVType AnyNat) where
-  type NatAbs (BaseBVType AnyNat) w' = BaseBVType w'
-
-instance HasNatAbs BaseBoolType where
-  type NatAbs BaseBoolType _ = BaseBoolType
-
-instance HasNatAbs EmptyCtx where
-  type NatAbs EmptyCtx w = EmptyCtx
-
-instance (HasNatAbs ctx, HasNatAbs tp) => HasNatAbs (ctx Ctx.::> tp) where
-  type NatAbs (ctx Ctx.::> tp) w' = NatAbs ctx w' Ctx.::> NatAbs tp w'
+natAbsBVFixed :: 1 <= w => NatRepr w -> NatRepr w' -> (NatAbs (BaseBVType w) w' :~: BaseBVType w)
+natAbsBVFixed _ _ = unsafeCoerce Refl
 
 data PolyFun sym args ret (w :: Nat) where
   PolyFun ::
-    (HasNatAbs args, HasNatAbs ret) =>
-    (SymArray sym (NatAbs args w) (NatAbs ret w)) ->
-    PolyFun sym args ret w
+    { applyPolyFun :: Ctx.Assignment (SymExpr sym) (NatAbsCtx args w) -> IO (SymExpr sym (NatAbs ret w)) }
+    -> PolyFun sym args ret w
 
 newtype PolyFunMaker sym args ret =
   PolyFunMaker (forall w. 1 <= w => sym -> NatRepr w -> IO (PolyFun sym args ret w))
+
+-- avoiding struct-indexed arrays, which are unsupported by ground evaluation
+type family FlatStructs tp :: Ctx.Ctx BaseType where
+  FlatStructs (BaseStructType ctx) = FlatStructsCtx ctx
+  FlatStructs (BaseBVType w) = EmptyCtx ::> (BaseBVType w)
+  FlatStructs BaseIntegerType = EmptyCtx ::> BaseIntegerType
+  FlatStructs BaseBoolType = EmptyCtx ::> BaseBVType 1
+
+type family FlatStructsCtx ctx :: Ctx.Ctx BaseType where
+  FlatStructsCtx EmptyCtx = EmptyCtx
+  FlatStructsCtx (ctx ::> tp) = FlatStructsCtx ctx Ctx.<+> FlatStructs tp
+
+flattenStructRepr :: Ctx.Assignment BaseTypeRepr ctx -> Ctx.Assignment BaseTypeRepr (FlatStructsCtx ctx)
+flattenStructRepr Ctx.Empty = Ctx.Empty
+flattenStructRepr (ctx :> BaseStructRepr ctx') = flattenStructRepr ctx Ctx.<++> flattenStructRepr ctx'
+flattenStructRepr (ctx :> (BaseBVRepr w)) = flattenStructRepr ctx :> (BaseBVRepr w)
+flattenStructRepr (ctx :> BaseIntegerRepr) = flattenStructRepr ctx :> BaseIntegerRepr
+flattenStructRepr (ctx :> BaseBoolRepr) = flattenStructRepr ctx :> BaseBVRepr (knownNat @1)
+flattenStructRepr tp = error $ "flattenStructRepr: unsupported type:" ++ show tp
+
+flattenStructs ::
+  IsSymInterface sym =>
+  sym ->
+  Ctx.Assignment (SymExpr sym) ctx ->
+  IO (Ctx.Assignment (SymExpr sym) (FlatStructsCtx ctx))
+flattenStructs sym (ctx :> e) = do
+  ctx_flat <- flattenStructs sym ctx
+  case exprType e of
+    BaseStructRepr ctx' -> do
+      fields <- Ctx.traverseWithIndex (\idx _ -> structField sym e idx) ctx'
+      ctx'_flat <- flattenStructs sym fields
+      return $ ctx_flat Ctx.<++> ctx'_flat
+    BaseBVRepr _ -> return $ ctx_flat Ctx.:> e
+    BaseIntegerRepr -> return $ ctx_flat Ctx.:> e
+    BaseBoolRepr -> do
+      bv <- predToBV sym e (knownNat @1)
+      return $ ctx_flat Ctx.:> bv
+    tp -> fail $ "flattenStructs: unsupported type:" ++ show tp
+flattenStructs _sym Ctx.Empty = return Ctx.empty
 
 mkBinUF ::
   IsSymInterface sym =>
@@ -207,7 +240,24 @@ mkBinUF nm  = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
-  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr ptrRepr)
+  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
+  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
+
+mkPtrBVUF ::
+  forall ptrW sym.
+  IsSymInterface sym =>
+  KnownNat ptrW =>
+  1 <= ptrW =>
+  String ->
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BaseBVType ptrW) (BaseBVType ptrW)
+mkPtrBVUF nm = PolyFunMaker $ \sym w ->
+  case natAbsBVFixed (knownNat @ptrW) w of
+    Refl -> do
+      let
+        ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
+        repr = Empty :> ptrRepr :> BaseBVRepr (knownNat @ptrW)
+      c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr (knownNat @ptrW)))
+      return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 mkPtrAssert ::
   IsSymInterface sym =>
@@ -217,7 +267,8 @@ mkPtrAssert nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> BaseBoolRepr
-  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr ptrRepr)
+  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
+  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args 
 
 mkBVAssert ::
   IsSymInterface sym =>
@@ -226,26 +277,18 @@ mkBVAssert ::
 mkBVAssert nm = PolyFunMaker $ \sym w -> do
   let
     repr = Empty :> BaseBVRepr w :> BaseBoolRepr
-  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr (BaseBVRepr w))
-
-mkPredAssert ::
-  IsSymInterface sym =>
-  String ->
-  PolyFunMaker sym (EmptyCtx ::> BaseBoolType Ctx.::> BaseBoolType) BaseBoolType
-mkPredAssert nm = PolyFunMaker $ \sym w -> do
-  let
-    repr = Empty :> BaseBoolRepr :> BaseBoolRepr
-  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr BaseBoolRepr)
+  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr w))
+  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args 
 
 mkPredUF ::
   IsSymInterface sym =>
   String ->
-  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) BaseBoolType
+  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BasePtrType AnyNat) BaseBoolType
 mkPredUF nm = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
-    repr = Empty :> ptrRepr :> ptrRepr
-  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr BaseBoolRepr)
+    repr = Empty :> BaseIntegerRepr :> BaseBVRepr w :> BaseIntegerRepr :> BaseBVRepr w
+  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) BaseBoolRepr)
+  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 mkOffUF ::
   IsSymInterface sym =>
@@ -255,8 +298,8 @@ mkOffUF nm = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr
-  PolyFun <$> freshConstant sym (polySymbol nm w) (BaseArrayRepr repr (BaseBVRepr w))
-
+  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr w))
+  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 cachedPolyFun ::
   forall sym f g.
@@ -290,8 +333,8 @@ mkBinOp sym nm = do
   return $ UndefinedPtrBinOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
     sptr1 <- asSymPtr sym' ptr1
     sptr2 <- asSymPtr sym' ptr2
-    PolyFun resultfn <- fn' sym' w
-    sptrResult <- arrayLookup sym' resultfn (Empty :> sptr1 :> sptr2)
+    resultfn <- fn' sym' w
+    sptrResult <- applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
     fromSymPtr sym' sptrResult
 
 mkPredOp ::
@@ -304,8 +347,8 @@ mkPredOp sym nm = do
   return $ UndefinedPtrPredOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
     sptr1 <- asSymPtr sym' ptr1
     sptr2 <- asSymPtr sym' ptr2
-    PolyFun resultfn <- fn' sym' w
-    arrayLookup sym' resultfn (Empty :> sptr1 :> sptr2)
+    resultfn <- fn' sym' w
+    applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
 
 mkUndefinedPtrOps ::
   forall sym.
@@ -318,8 +361,8 @@ mkUndefinedPtrOps sym = do
     offPtrFn :: forall w. sym -> LLVMPtr sym w -> IO (SymBV sym w)
     offPtrFn sym'  ptr = withPtrWidth ptr $ \w -> do
       sptr <- asSymPtr sym' ptr
-      PolyFun resultfn <- offFn sym' w
-      arrayLookup sym' resultfn (Empty :> sptr)
+      resultfn <- offFn sym' w
+      applyPolyFun resultfn (Empty :> sptr)
 
   undefPtrLt' <- mkPredOp sym "undefPtrLt"
   undefPtrLeq' <- mkPredOp sym "undefPtrLeq'"
