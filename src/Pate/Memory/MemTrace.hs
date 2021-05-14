@@ -1241,8 +1241,8 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
   ptrWByteInteger = ptrWInteger `div` 8
   valWByteInteger = toInteger (natValue byteWidth)
   useEnd writeSize = case endianness of
-    BigEndian -> id
-    LittleEndian -> ((writeSize-1)-)
+    BigEndian -> ((writeSize-1)-)
+    LittleEndian -> id
 
 getMemByteOff :: forall sym ptrW.
   (MemWidth ptrW, IsExprBuilder sym) =>
