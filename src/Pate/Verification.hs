@@ -71,6 +71,7 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.Map as MapF
 
@@ -886,7 +887,10 @@ proveLocalPostcondition ::
 proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   undef <- CMR.asks envUndefinedPtrOps
   eqRel <- CMR.asks envBaseEquiv
-  (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
+  let simOutStateO = simOutState $ simOutO bundle
+      simOutStateP = simOutState $ simOutP bundle
+      memTraces = toPatchPairC . TF.fmapF (\ss -> Const (MT.memSeq (simMem ss))) $ PatchPair simOutStateO simOutStateP
+  (asm, postcond) <- liftIO $ bindSpec sym simOutStateO simOutStateP postcondSpec
   (_, postcondPred) <- liftIO $ getPostcondition sym undef bundle eqRel postcond
 
   eqInputs <- withAssumption_ (return asm) $ do
@@ -919,7 +923,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
               W4R.Sat fn -> do
                 preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
                 postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
-                ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
+                ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice memTraces fn
                 emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
                 return $ PF.VerificationFail ir
         let noCond = fmap (\ir -> (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))) status
@@ -941,7 +945,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                         W4R.Sat fn -> do
                           preUniv <- universalDomain
                           preUnivDomain <- PF.unNonceProof <$> PFO.statePredToPreDomain bundle preUniv
-                          ir <- PFG.getInequivalenceResult InvalidPostState preUnivDomain postDomain' blockSlice fn
+                          ir <- PFG.getInequivalenceResult InvalidPostState preUnivDomain postDomain' blockSlice memTraces fn
                           cr <- PFG.getCondEquivalenceResult cond'' fn
                           return $ PF.VerificationFail (ir, cr)
                         W4R.Unsat _ -> return $ noCond
@@ -1663,8 +1667,9 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
         -- post-domain because we're just making sure that the given cases cover all possible exits,
         -- without considering the equivalence of the state at those exit points.
         noDomain <- PF.unNonceProof <$> PFO.emptyDomain
-       
-        ir <- PFG.getInequivalenceResult InvalidCallPair preDomain' noDomain blockSlice fn
+        let memTraces = toPatchPairC . TF.fmapF (\so -> Const (MT.memSeq (simOutMem so))) $ PatchPair (simOutO bundle) (simOutP bundle)
+
+        ir <- PFG.getInequivalenceResult InvalidCallPair preDomain' noDomain blockSlice memTraces fn
         emit $ PE.BranchesIncomplete ir
         -- no conditional equivalence case
         return $ PF.VerificationFail (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))

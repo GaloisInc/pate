@@ -45,10 +45,12 @@ import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 
+import           Data.Foldable
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
 import           Numeric.Natural ( Natural )
 import           Data.Functor.Const
+import qualified Data.Sequence as Seq
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Context as Ctx
@@ -99,15 +101,18 @@ getInequivalenceResult ::
   -- | the transition that was attempted to be proven equivalent
   -- in the given domains
   PF.BlockSliceTransition (PFI.ProofSym sym arch) ->
+  -- | the record of what all was done to memory
+  PT.PatchPairC (MT.MemTraceSeq sym (MM.ArchAddrWidth arch)) ->
   -- | the model representing the counterexample from the solver
   PT.SymGroundEvalFn sym ->
   EquivM sym arch (PFI.InequivalenceResult arch)
-getInequivalenceResult defaultReason pre post slice fn = do
+getInequivalenceResult defaultReason pre post slice memTraces fn = do
   groundPre <- groundProofExpr fn pre
   groundPost <- groundProofExpr fn post
   gslice <- groundSlice fn slice
+  gmemTraces <- traverse (groundMemTrace fn) memTraces
   let reason = fromMaybe defaultReason (getInequivalenceReason groundPost (PF.slBlockPostState gslice))
-  return $ PFI.InequivalenceResult gslice groundPre groundPost reason
+  return $ PFI.InequivalenceResult gslice groundPre groundPost gmemTraces reason
 
 
 data Bindings sym tp where
@@ -236,6 +241,30 @@ groundProofExpr ::
   EquivM sym arch (PF.ProofExpr (PFI.ProofGround arch) tp)
 groundProofExpr fn = PF.transformProofExpr (groundProofTransformer fn)
 
+groundMemTrace :: forall sym arch.
+  PT.SymGroundEvalFn sym ->
+  MT.MemTraceSeq sym (MM.ArchAddrWidth arch) ->
+  EquivM sym arch (PFI.GroundMemTrace arch)
+groundMemTrace fn = go where
+  go :: MT.MemTraceSeq sym (MM.ArchAddrWidth arch) -> EquivM sym arch (PFI.GroundMemTrace arch)
+  go ops = fold <$> traverse groundMemOp ops
+
+  groundMemOp (MT.MemOp addr dir cond sz val endianness) = do
+    happened <- groundCondition cond
+    if not happened then pure Seq.empty else do
+      gaddr <- groundLLVMPointer fn addr
+      gval <- groundLLVMPointer fn val
+      pure . Seq.singleton $ PFI.GroundMemOp
+        gaddr dir
+        sz gval endianness
+
+  groundMemOp (MT.MergeOps cond opsTrue opsFalse) = do
+    gcond <- execGroundFn fn cond
+    go $ if gcond then opsTrue else opsFalse
+
+  groundCondition :: MT.MemOpCondition sym -> EquivM sym arch Bool
+  groundCondition MT.Unconditional = pure True
+  groundCondition (MT.Conditional cond) = execGroundFn fn cond
 
 isMemOpValid ::
   PA.ValidArch arch =>
@@ -298,11 +327,11 @@ groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
   let gbv = PFI.mkGroundBV w (integerToNat greg) goff
   return gbv
 
-groundLLVMPointer :: forall sym arch.
+groundLLVMPointer :: forall sym arch w.
   HasCallStack =>
   PT.SymGroundEvalFn sym ->
-  CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-  EquivM sym arch (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch))
+  CLM.LLVMPtr sym w ->
+  EquivM sym arch (PFI.GroundLLVMPointer w)
 groundLLVMPointer fn ptr = PFI.groundBVAsPointer <$> groundBV fn ptr
 
 

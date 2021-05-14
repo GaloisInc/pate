@@ -24,6 +24,8 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE NoStarIsType #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Pate.Proof.Instances
   ( ProofSym
@@ -47,7 +49,9 @@ module Pate.Proof.Instances
   , GroundMemCell(..)
   , GroundMacawValue(..)
   , GroundRegOp
-  , GroundMemOp
+  , GroundMemResult
+  , GroundMemTrace
+  , GroundMemOp(..)
   , cellInDomain
   , regInDomain
   , ppInequivalencePreRegs
@@ -57,11 +61,14 @@ module Pate.Proof.Instances
 
 import           Numeric
 import           GHC.Natural
+import           GHC.TypeLits
+import           Data.Foldable
 import           Data.Functor.Const
 import qualified Data.Kind as DK
 import           Control.Lens hiding ( op, pre )
 import           Data.Maybe
 import           Data.Proxy
+import           Data.Sequence ( Seq )
 
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
@@ -85,6 +92,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.MemCell as PMC
+import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 
@@ -105,6 +113,7 @@ data InequivalenceResult arch where
     { ineqSlice :: PF.BlockSliceTransition (ProofGround arch)
     , ineqPre :: GroundDomain arch
     , ineqPost :: GroundDomain arch
+    , ineqMemTrace :: PT.PatchPairC (GroundMemTrace arch)
     , ineqReason :: PT.InequivalenceReason
     } -> InequivalenceResult arch
 
@@ -420,6 +429,24 @@ instance OrdF GroundBV where
 instance Ord (GroundBV n) where
   compare bv bv' = toOrdering (compareF bv bv')
 
+data GroundMemOp ptrW where
+  GroundMemOp ::
+    GroundLLVMPointer ptrW -> PMT.MemOpDirection ->
+    W4.NatRepr w -> GroundLLVMPointer (8*w) -> MM.Endianness ->
+    GroundMemOp ptrW
+
+instance PP.Pretty (GroundMemOp ptrW) where
+  pretty (GroundMemOp addr dir _ val endianness) = PP.pretty . concat $
+    [ ppLLVMPointer addr
+    , case endianness of
+        MM.LittleEndian -> "·"
+        MM.BigEndian -> "⬤"
+    , case dir of
+        PMT.Read -> "→"
+        PMT.Write -> "←"
+    , ppLLVMPointer val
+    ]
+
 data GroundLLVMPointer n where
   GroundLLVMPointerC ::
       { ptrWidth :: W4.NatRepr n
@@ -526,22 +553,23 @@ data GroundBlockExit arch where
   deriving Eq
 
 instance PA.ValidArch arch => PP.Pretty (InequivalenceResult arch) where
-  pretty ineq = PP.vsep [ "Reason:" <+> PP.pretty (show (ineqReason ineq)), ppBlockSliceTransition (ineqPre ineq) (ineqPost ineq) (ineqSlice ineq) ]
+  pretty ineq = PP.vsep [ "Reason:" <+> PP.pretty (show (ineqReason ineq)), ppBlockSliceTransition (ineqPre ineq) (ineqPost ineq) (ineqSlice ineq) (ineqMemTrace ineq) ]
 
 type GroundDomain arch = PF.ProofExpr (ProofGround arch) PF.ProofDomainType
 type GroundRegOp arch = PF.BlockSliceRegOp (ProofGround arch)
-type GroundMemOp arch = PF.BlockSliceMemOp (ProofGround arch)
-  
+type GroundMemResult arch = PF.BlockSliceMemOp (ProofGround arch)
+type GroundMemTrace arch = Seq (GroundMemOp (MM.ArchAddrWidth arch))
 
-ppBlockSliceTransition ::
+ppBlockSliceTransition :: forall arch a.
   PA.ValidArch arch =>
   -- | pre-domain
   GroundDomain arch ->
   -- | post-domain
   GroundDomain arch ->
   PF.BlockSliceTransition (ProofGround arch) ->
+  PT.PatchPairC (GroundMemTrace arch) ->
   PP.Doc a
-ppBlockSliceTransition pre post bs = PP.vsep $
+ppBlockSliceTransition pre post bs memTraces = PP.vsep $
   [ "Block Exit Condition:" <+> PT.ppPatchPairCEq (PP.pretty . ppExitCase) (fmap grndBlockCase $ PF.slBlockExitCase bs)
   ,  "Initial register state:"
   , ppRegs pre (PF.slRegState $ PF.slBlockPreState bs)
@@ -549,6 +577,8 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , ppMemCellMap pre (PF.slMemState $ PF.slBlockPreState bs)
   , "Final register state:"
   , ppRegs post (PF.slRegState $ PF.slBlockPostState bs)
+  , "Memory traffic:"
+  , ppMemTraces @arch memTraces
   , "Final memory state:"
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
   , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
@@ -557,6 +587,23 @@ ppBlockSliceTransition pre post bs = PP.vsep $
         "Function Continue Address:" <+> PT.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PT.PatchPairC cont1 cont2)
       _ -> PP.emptyDoc
   ]
+
+ppMemTraces :: forall arch a. PT.PatchPairC (GroundMemTrace arch) -> PP.Doc a
+ppMemTraces traces = PP.indent 2 . PP.pretty . unlines $ adjacent traceOLens traceP where
+  adjacent os [] = map snd os
+  adjacent [] ps = map (replicate w ' ' ++) ps
+  adjacent ((len, o):os) (p:ps) = (o ++ replicate (w-len) ' ' ++ p) : adjacent os ps
+
+  traceP = "patched":lines traceP_
+  traceOLens = map (\s -> (length s, s)) ("original":lines traceO_)
+  widthO = maximum . (0:) . map fst $ traceOLens
+  separation = 4
+  w = widthO + separation
+
+  PT.PatchPairC traceO_ traceP_ = show . ppMemTrace @arch <$> traces
+
+ppMemTrace :: GroundMemTrace arch -> PP.Doc a
+ppMemTrace = PP.vcat . map PP.pretty . toList
 
 ppIPs ::
   PA.ValidArch arch =>
@@ -572,7 +619,7 @@ ppIPs st  =
 ppMemCellMap ::
   PA.ValidArch arch =>
   GroundDomain arch ->
-  MapF.MapF (GroundMemCell arch) (GroundMemOp arch) ->
+  MapF.MapF (GroundMemCell arch) (GroundMemResult arch) ->
   PP.Doc a
 ppMemCellMap dom cells = let
   ppCells = mapMaybe (\(Pair cell v) -> ppCellVal dom cell v) $ MapF.toList cells
@@ -635,7 +682,7 @@ ppCellVal ::
   PA.ValidArch arch =>
   GroundDomain arch ->
   GroundMemCell arch n ->
-  GroundMemOp arch tp ->
+  GroundMemResult arch tp ->
   Maybe (PP.Doc a)
 ppCellVal dom cell memOp = case PF.slMemOpCond memOp of
     True -> Just $ ppSlotVal
