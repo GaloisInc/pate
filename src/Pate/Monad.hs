@@ -183,6 +183,7 @@ data EquivEnv sym arch where
     , envNonceGenerator :: N.NonceGenerator IO (PF.ProofScope (PFI.ProofSym sym arch))
     , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
     -- ^ nonce of the parent proof node currently in scope
+    , envUndefPointerOps :: MT.UndefinedPtrOps sym
     } -> EquivEnv sym arch
 
 freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)

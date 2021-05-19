@@ -291,12 +291,53 @@ groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
   iReg <- liftIO $ W4.natToInteger sym reg
   greg <- execGroundFn fn iReg
   goff <- execGroundFn fn off
+  regionTag <- getPointerTag fn iReg
+  offTag <- getPointerTag fn off 
   let integerToNat :: Integer -> Natural
       integerToNat i
         | i >= 0 = fromIntegral i
         | otherwise = fromIntegral (negate i)
-  let gbv = PFI.mkGroundBV w (integerToNat greg) goff
+  let gbv = PFI.mkGroundBV w (mergeTags regionTag offTag) (integerToNat greg) goff
   return gbv
+
+mergeTags ::
+  Maybe MT.UndefPtrOpTag ->
+  Maybe MT.UndefPtrOpTag ->
+  Maybe MT.UndefPtrOpTag
+mergeTags (Just tag) _ = Just tag
+mergeTags _ (Just tag) = Just tag
+mergeTags Nothing Nothing = Nothing
+
+classifyBoundVars ::
+  forall sym arch tp.
+  W4.SymExpr sym tp ->
+  EquivM sym arch (Maybe MT.UndefPtrOpTag)
+classifyBoundVars e_outer = withValid $ do
+  classify <- CMR.asks (MT.undefPtrClassify . envUndefPointerOps)
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> EquivM sym arch (Maybe MT.UndefPtrOpTag)
+    go e = fmap getConst $ W4B.idxCacheEval cache e $ case e of
+      W4B.BoundVarExpr _ -> Const <$> (liftIO $ MT.classifyExpr classify e)
+      W4B.AppExpr a0 -> TFC.foldrMFC acc (Const Nothing) (W4B.appExprApp a0)
+      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc (Const Nothing) (W4B.nonceExprApp a0)
+      _ -> return $ Const Nothing
+
+    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (Maybe MT.UndefPtrOpTag) tp2 -> EquivM sym arch (Const (Maybe MT.UndefPtrOpTag) tp2)
+    acc e (Const Nothing) = do
+      tag' <- go e
+      return $ Const $ tag'
+    acc _ r = return r
+  go e_outer
+
+-- | Ground all inner muxes and resolve any undefined tags that are in the remaining term.
+getPointerTag ::
+  PT.SymGroundEvalFn sym -> 
+  W4.SymExpr sym tp -> 
+  EquivM sym arch (Maybe MT.UndefPtrOpTag) 
+getPointerTag (PT.SymGroundEvalFn fn) e = withValid $ withSym $ \sym -> do
+  e' <- liftIO $ WPC.resolveStaticMuxes sym fn e
+  classifyBoundVars e'
 
 groundLLVMPointer :: forall sym arch.
   HasCallStack =>

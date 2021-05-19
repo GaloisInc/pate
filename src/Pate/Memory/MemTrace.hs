@@ -44,6 +44,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           GHC.TypeNats (KnownNat, type Nat)
 
+import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 
@@ -105,7 +106,30 @@ data UndefinedPtrOps sym =
     , undefPtrAdd :: UndefinedPtrBinOp sym
     , undefPtrSub :: UndefinedPtrBinOp sym
     , undefPtrAnd :: UndefinedPtrBinOp sym
+    , undefPtrClassify :: UndefPtrClassify sym
     }
+
+data UndefPtrOpTag =
+    UndefPtrOff
+  | UndefPtrLt
+  | UndefPtrLeq
+  | UndefPtrAdd
+  | UndefPtrSub
+  | UndefPtrAnd
+  deriving (Show, Eq, Ord)
+
+-- | Classify an expression as representing an undefined pointer.
+newtype UndefPtrClassify sym =
+  UndefPtrClassify
+    { classifyExpr :: forall tp. SymExpr sym tp -> IO (Maybe UndefPtrOpTag) }
+
+instance Semigroup (UndefPtrClassify sym) where
+  f1 <> f2 = UndefPtrClassify $ \e -> classifyExpr f1 e >>= \case
+    Just tag -> return $ Just tag
+    _ -> classifyExpr f2 e
+
+instance Monoid (UndefPtrClassify sym) where
+  mempty = UndefPtrClassify $ \_ -> return Nothing
 
 -- | Wraps a function which is used to produce an "undefined" pointer that
 -- may result from a binary pointer operation.
@@ -161,10 +185,10 @@ fromSymPtr sym sptr = do
   return $ LLVMPointer nreg off
 
 polySymbol ::
-  String ->
+  UndefPtrOpTag ->
   NatRepr w ->
   SolverSymbol
-polySymbol nm w = safeSymbol $ nm ++ "_" ++ (show w)
+polySymbol tag w = safeSymbol $ (show tag) ++ "_" ++ (show w)
 
 type AnyNat = 0
 -- | Defines how a given type can be concretized to a specific type-level nat.
@@ -187,7 +211,9 @@ natAbsBVFixed _ _ = unsafeCoerce Refl
 
 data PolyFun sym args ret (w :: Nat) where
   PolyFun ::
-    { applyPolyFun :: Ctx.Assignment (SymExpr sym) (NatAbsCtx args w) -> IO (SymExpr sym (NatAbs ret w)) }
+    { polyFunClassify :: UndefPtrClassify sym
+    , applyPolyFun :: Ctx.Assignment (SymExpr sym) (NatAbsCtx args w) -> IO (SymExpr sym (NatAbs ret w))
+    }
     -> PolyFun sym args ret w
 
 newtype PolyFunMaker sym args ret =
@@ -232,91 +258,90 @@ flattenStructs sym (ctx :> e) = do
     tp -> fail $ "flattenStructs: unsupported type:" ++ show tp
 flattenStructs _sym Ctx.Empty = return Ctx.empty
 
+
+mkClassify ::
+  forall sym tp1 tp2.
+  IsSymInterface sym =>
+  UndefPtrOpTag ->
+  SymExpr sym tp1 ->
+  UndefPtrClassify sym
+mkClassify tag e1 = UndefPtrClassify $ \e2 -> case testEquality e1 e2 of
+  Just Refl -> return $ Just tag
+  _ -> return Nothing
+
 mkBinUF ::
   IsSymInterface sym =>
-  String ->
+  UndefPtrOpTag ->
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) (BasePtrType AnyNat)
-mkBinUF nm  = PolyFunMaker $ \sym w -> do
+mkBinUF tag  = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr :> ptrRepr
-  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
-  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
+  c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
+  return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 mkPtrBVUF ::
   forall ptrW sym.
   IsSymInterface sym =>
   KnownNat ptrW =>
   1 <= ptrW =>
-  String ->
+  UndefPtrOpTag ->
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BaseBVType ptrW) (BaseBVType ptrW)
-mkPtrBVUF nm = PolyFunMaker $ \sym w ->
+mkPtrBVUF tag = PolyFunMaker $ \sym w ->
   case natAbsBVFixed (knownNat @ptrW) w of
     Refl -> do
       let
         ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
         repr = Empty :> ptrRepr :> BaseBVRepr (knownNat @ptrW)
-      c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr (knownNat @ptrW)))
-      return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
-
-mkPtrAssert ::
-  IsSymInterface sym =>
-  String ->
-  PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BaseBoolType) (BasePtrType AnyNat)
-mkPtrAssert nm = PolyFunMaker $ \sym w -> do
-  let
-    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
-    repr = Empty :> ptrRepr :> BaseBoolRepr
-  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
-  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args 
-
-mkBVAssert ::
-  IsSymInterface sym =>
-  String ->
-  PolyFunMaker sym (EmptyCtx ::> BaseBVType AnyNat Ctx.::> BaseBoolType) (BaseBVType AnyNat)
-mkBVAssert nm = PolyFunMaker $ \sym w -> do
-  let
-    repr = Empty :> BaseBVRepr w :> BaseBoolRepr
-  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr w))
-  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args 
+      c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr (knownNat @ptrW)))
+      return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 mkPredUF ::
+  forall sym.
   IsSymInterface sym =>
-  String ->
+  UndefPtrOpTag ->
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat Ctx.::> BasePtrType AnyNat) BaseBoolType
-mkPredUF nm = PolyFunMaker $ \sym w -> do
+mkPredUF tag = PolyFunMaker $ \sym w -> do
   let
     repr = Empty :> BaseIntegerRepr :> BaseBVRepr w :> BaseIntegerRepr :> BaseBVRepr w
-  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) BaseBoolRepr)
-  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
+  c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) BaseBoolRepr)
+  return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 mkOffUF ::
+  forall sym.
   IsSymInterface sym =>
-  String ->
+  UndefPtrOpTag ->
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat) (BaseBVType AnyNat)
-mkOffUF nm = PolyFunMaker $ \sym w -> do
+mkOffUF tag = PolyFunMaker $ \sym w -> do
   let
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
     repr = Empty :> ptrRepr
-  c <- freshConstant sym (polySymbol nm w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr w))
-  return $ PolyFun $ \args -> arrayLookup sym c =<< flattenStructs sym args
+  c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr w))
+  return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 cachedPolyFun ::
   forall sym f g.
   sym ->
   PolyFunMaker sym f g ->
-  IO (PolyFunMaker sym f g)
+  IO (PolyFunMaker sym f g, UndefPtrClassify sym)
 cachedPolyFun _sym (PolyFunMaker f) = do
   ref <- newIORef (MapF.empty :: MapF.MapF NatRepr (PolyFun sym f g))
-  return $ PolyFunMaker $ \sym' nr -> do
-    m <- readIORef ref
-    case MapF.lookup nr m of
-      Just a -> return a
-      Nothing -> do
-        result <- f sym' nr
-        let m' = MapF.insert nr result m
-        writeIORef ref m'
-        return result
+  let
+    mker' = PolyFunMaker $ \sym' nr -> do
+      m <- readIORef ref
+      case MapF.lookup nr m of
+        Just a -> return a
+        Nothing -> do
+          result <- f sym' nr
+          let m' = MapF.insert nr result m
+          writeIORef ref m'
+          return result
+    classify = UndefPtrClassify $ \e -> do
+      m <- readIORef ref
+      let classifier = mconcat (map (\(Some pf) -> polyFunClassify pf) (MapF.elems m))
+      classifyExpr classifier e
+  return (mker', classify)
+      
 
 withPtrWidth :: IsExprBuilder sym => LLVMPtr sym w -> (1 <= w => NatRepr w -> a) -> a
 withPtrWidth (LLVMPointer _blk bv) f | BaseBVRepr w <- exprType bv = f w
@@ -326,29 +351,33 @@ mkBinOp ::
   forall sym.
   IsSymInterface sym =>
   sym ->
-  String ->
-  IO (UndefinedPtrBinOp sym)
-mkBinOp sym nm = do
-  PolyFunMaker fn' <- cachedPolyFun sym $ mkBinUF nm
-  return $ UndefinedPtrBinOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
-    sptr1 <- asSymPtr sym' ptr1
-    sptr2 <- asSymPtr sym' ptr2
-    resultfn <- fn' sym' w
-    sptrResult <- applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
-    fromSymPtr sym' sptrResult
+  UndefPtrOpTag ->
+  IO (UndefinedPtrBinOp sym, UndefPtrClassify sym)
+mkBinOp sym tag = do
+  (PolyFunMaker fn', classifier) <- cachedPolyFun sym $ mkBinUF tag
+  let binop =
+        UndefinedPtrBinOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+          sptr1 <- asSymPtr sym' ptr1
+          sptr2 <- asSymPtr sym' ptr2
+          resultfn <- fn' sym' w
+          sptrResult <- applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
+          fromSymPtr sym' sptrResult
+  return (binop, classifier)
 
 mkPredOp ::
   IsSymInterface sym =>
   sym ->
-  String ->
-  IO (UndefinedPtrPredOp sym)
-mkPredOp sym nm = do
-  PolyFunMaker fn' <- cachedPolyFun sym $ mkPredUF nm
-  return $ UndefinedPtrPredOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
-    sptr1 <- asSymPtr sym' ptr1
-    sptr2 <- asSymPtr sym' ptr2
-    resultfn <- fn' sym' w
-    applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
+  UndefPtrOpTag ->
+  IO (UndefinedPtrPredOp sym, UndefPtrClassify sym)
+mkPredOp sym tag = do
+  (PolyFunMaker fn', classifier) <- cachedPolyFun sym $ mkPredUF tag
+  let binop =
+        UndefinedPtrPredOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+          sptr1 <- asSymPtr sym' ptr1
+          sptr2 <- asSymPtr sym' ptr2
+          resultfn <- fn' sym' w
+          applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
+  return (binop, classifier)
 
 mkUndefinedPtrOps ::
   forall sym.
@@ -356,7 +385,7 @@ mkUndefinedPtrOps ::
   sym ->
   IO (UndefinedPtrOps sym)
 mkUndefinedPtrOps sym = do
-  PolyFunMaker offFn <- cachedPolyFun sym $ mkOffUF "undefPtrOff"
+  (PolyFunMaker offFn, classOff) <- cachedPolyFun sym $ mkOffUF UndefPtrOff
   let
     offPtrFn :: forall w. sym -> LLVMPtr sym w -> IO (SymBV sym w)
     offPtrFn sym'  ptr = withPtrWidth ptr $ \w -> do
@@ -364,11 +393,11 @@ mkUndefinedPtrOps sym = do
       resultfn <- offFn sym' w
       applyPolyFun resultfn (Empty :> sptr)
 
-  undefPtrLt' <- mkPredOp sym "undefPtrLt"
-  undefPtrLeq' <- mkPredOp sym "undefPtrLeq'"
-  undefPtrAdd' <- mkBinOp sym "undefPtrAdd"
-  undefPtrSub' <- mkBinOp sym "undefPtrSub"
-  undefPtrAnd' <- mkBinOp sym "undefPtrAnd"
+  (undefPtrLt', classLt) <- mkPredOp sym UndefPtrLt
+  (undefPtrLeq', classLeq) <- mkPredOp sym UndefPtrLeq
+  (undefPtrAdd', classAdd) <- mkBinOp sym UndefPtrAdd
+  (undefPtrSub', classSub) <- mkBinOp sym UndefPtrSub
+  (undefPtrAnd', classAnd) <- mkBinOp sym UndefPtrAnd
   return $
     UndefinedPtrOps
       { undefPtrOff = offPtrFn
@@ -377,6 +406,7 @@ mkUndefinedPtrOps sym = do
       , undefPtrAdd = undefPtrAdd'
       , undefPtrSub = undefPtrSub'
       , undefPtrAnd = undefPtrAnd'
+      , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd]
       }
 
 -- * Memory trace model

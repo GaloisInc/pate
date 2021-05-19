@@ -30,6 +30,7 @@ SAT models
 
 module What4.PathCondition
   ( getPathCondition
+  , resolveStaticMuxes
   )
   where
 
@@ -65,6 +66,15 @@ getPathCondition ::
   W4B.Expr t tp -> 
   IO (W4.Pred sym)
 getPathCondition sym fn expr = snd <$> runPathM sym fn (withPathCond expr)
+
+resolveStaticMuxes ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4G.GroundEvalFn t ->
+  W4B.Expr t tp -> 
+  IO (W4B.Expr t tp)
+resolveStaticMuxes sym fn expr = fst <$> runPathM sym fn (withPathCond expr)
 
 runPathM ::
   forall sym t solver fs a.
