@@ -68,7 +68,7 @@ import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator)
-import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer)
+import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, llvmPointer_bv)
 import Lang.Crucible.Simulator.ExecutionTree (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree)
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
 import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..), IntrinsicTypes)
@@ -106,6 +106,7 @@ data UndefinedPtrOps sym =
     , undefPtrAdd :: UndefinedPtrBinOp sym
     , undefPtrSub :: UndefinedPtrBinOp sym
     , undefPtrAnd :: UndefinedPtrBinOp sym
+    , undefPtrXor :: UndefinedPtrBinOp sym
     , undefPtrClassify :: UndefPtrClassify sym
     }
 
@@ -116,6 +117,7 @@ data UndefPtrOpTag =
   | UndefPtrAdd
   | UndefPtrSub
   | UndefPtrAnd
+  | UndefPtrXor
   deriving (Show, Eq, Ord)
 
 -- | Classify an expression as representing an undefined pointer.
@@ -398,6 +400,7 @@ mkUndefinedPtrOps sym = do
   (undefPtrAdd', classAdd) <- mkBinOp sym UndefPtrAdd
   (undefPtrSub', classSub) <- mkBinOp sym UndefPtrSub
   (undefPtrAnd', classAnd) <- mkBinOp sym UndefPtrAnd
+  (undefPtrXor', classXor) <- mkBinOp sym UndefPtrXor
   return $
     UndefinedPtrOps
       { undefPtrOff = offPtrFn
@@ -406,7 +409,8 @@ mkUndefinedPtrOps sym = do
       , undefPtrAdd = undefPtrAdd'
       , undefPtrSub = undefPtrSub'
       , undefPtrAnd = undefPtrAnd'
-      , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd]
+      , undefPtrXor = undefPtrXor'
+      , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd, classXor]
       }
 
 -- * Memory trace model
@@ -618,7 +622,14 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
         doCondWriteMem sym (regValue cond) addrWidth (regValue addr) (regValue def) memRepr
 
     MacawGlobalPtr w addr -> \cst -> addrWidthClass w $ doGetGlobal cst mvar globs addr
-    MacawFreshSymbolic _t -> error "MacawFreshSymbolic is unsupported in the trace memory model"
+    MacawFreshSymbolic t -> liftToCrucibleState mvar $ \sym -> case t of
+       MT.BoolTypeRepr -> liftIO $ freshConstant sym (safeSymbol "macawFresh") BaseBoolRepr
+       MT.BVTypeRepr n -> liftIO $ do
+         regI <- freshConstant sym (safeSymbol "macawFresh") BaseIntegerRepr
+         reg <- integerToNat sym regI
+         off <- freshConstant sym (safeSymbol "macawFresh") (BaseBVRepr n)
+         return $ LLVMPointer reg off
+       _ -> error ( "MacawFreshSymbolic is unsupported in the trace memory model: " ++ show t)
     MacawLookupFunctionHandle _typeReps _registers -> error "MacawLookupFunctionHandle is unsupported in the trace memory model"
 
     MacawArchStmtExtension archStmt -> archStmtFn mvar globs archStmt
@@ -662,6 +673,11 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       reg'' <- natIte sym regZero reg' reg
       off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
+
+    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) bothZero $ \sym _ off _ off' -> do
+      off'' <- bvXorBits sym off off'
+      llvmPointer_bv sym off''
+
 
 evalMacawExprExtensionTrace :: forall sym arch f tp
                        .  IsSymInterface sym
@@ -757,6 +773,15 @@ someZero = RegionConstraint "one pointer region must be zero" $ \sym reg1 reg2 -
   regZero1 <- isZero sym reg1
   regZero2 <- isZero sym reg2
   orPred sym regZero1 regZero2
+
+-- | A 'RegionConstraint' that requires that both of the regions are zero.
+bothZero ::
+  IsSymInterface sym =>
+  RegionConstraint sym
+bothZero = RegionConstraint "both pointer regions must be zero" $ \sym reg1 reg2 -> do
+  regZero1 <- isZero sym reg1
+  regZero2 <- isZero sym reg2
+  andPred sym regZero1 regZero2
 
 -- | A 'RegionConstraint' that defines when regions are compatible for subtraction:
 -- either the regions are equal or the first region is zero.
