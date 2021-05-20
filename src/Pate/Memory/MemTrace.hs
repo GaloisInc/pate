@@ -70,6 +70,7 @@ import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator)
+import Lang.Crucible.LLVM.Bytes (Bytes, bitsToBytes, bytesToNatural)
 import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, llvmPointer_bv)
 import Lang.Crucible.Simulator.ExecutionTree (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree)
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
@@ -411,7 +412,7 @@ mkUndefinedPtrOps sym = do
     ptrW = knownNat @ptrW
     ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr ptrW)
     
-  (PolyFunMaker undefWriteFn, classWrite) <- cachedPolyFun sym $ mkPtrBVUF @ptrW "undefWriteSize"
+  (PolyFunMaker undefWriteFn, classWrite) <- cachedPolyFun sym $ mkPtrBVUF @ptrW UndefWriteSize
 
   let
     undefWriteFn' :: forall valW. sym -> LLVMPtr sym valW -> SymBV sym ptrW -> IO (SymBV sym ptrW)
@@ -423,7 +424,7 @@ mkUndefinedPtrOps sym = do
 
     undefReadRepr = Empty :> ptrRepr :> BaseBVRepr ptrW
   
-  undefReadFn <- freshConstant sym (polySymbol "undefMismatchedRegionRead" ptrW)
+  undefReadFn <- freshConstant sym (polySymbol UndefRegionRead ptrW)
     (BaseArrayRepr (flattenStructRepr undefReadRepr) (BaseBVRepr (knownNat @8)))
 
   
@@ -452,9 +453,9 @@ mkUndefinedPtrOps sym = do
       , undefPtrSub = undefPtrSub'
       , undefPtrAnd = undefPtrAnd'
       , undefPtrXor = undefPtrXor'
-      , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd, classXor, classWrite, classRead]
       , undefWriteSize = undefWriteFn'
       , undefMismatchedRegionRead = undefReadFn'
+      , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd, classXor, classWrite, classRead]
       }
 
 -- * Memory trace model

@@ -258,7 +258,6 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
       , envCurrentFrame = mempty
       , envNonceGenerator = gen
       , envParentNonce = Some topNonce
-      , envUndefPointerOps = undefops
       }
 
   liftIO $ do

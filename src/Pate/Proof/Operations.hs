@@ -117,7 +117,7 @@ simBundleToSlice bundle = withSym $ \sym -> do
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp (PFI.ProofSym sym arch)))
     memCellToOp (PT.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
-      undef <- liftIO $ PMT.mkUndefinedPtrOps sym
+      undef <- CMR.asks envUndefinedPtrOps
       valO <- liftIO $ PMC.readMemCell sym undef (PS.simMem stO) cell
       valP <- liftIO $ PMC.readMemCell sym undef (PS.simMem stP) cell
       eqRel <- CMR.asks envBaseEquiv      
