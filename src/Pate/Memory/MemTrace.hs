@@ -120,18 +120,21 @@ data UndefPtrOpTag =
   | UndefPtrXor
   deriving (Show, Eq, Ord)
 
+type UndefPtrOpTags = Set UndefPtrOpTag
+
 -- | Classify an expression as representing an undefined pointer.
 newtype UndefPtrClassify sym =
   UndefPtrClassify
-    { classifyExpr :: forall tp. SymExpr sym tp -> IO (Maybe UndefPtrOpTag) }
+    { classifyExpr :: forall tp. SymExpr sym tp -> IO UndefPtrOpTags }
 
 instance Semigroup (UndefPtrClassify sym) where
-  f1 <> f2 = UndefPtrClassify $ \e -> classifyExpr f1 e >>= \case
-    Just tag -> return $ Just tag
-    _ -> classifyExpr f2 e
+  f1 <> f2 = UndefPtrClassify $ \e -> do
+    class1 <- classifyExpr f1 e
+    class2 <- classifyExpr f2 e
+    return $ class1 <> class2
 
 instance Monoid (UndefPtrClassify sym) where
-  mempty = UndefPtrClassify $ \_ -> return Nothing
+  mempty = UndefPtrClassify $ \_ -> return mempty
 
 -- | Wraps a function which is used to produce an "undefined" pointer that
 -- may result from a binary pointer operation.
@@ -262,14 +265,14 @@ flattenStructs _sym Ctx.Empty = return Ctx.empty
 
 
 mkClassify ::
-  forall sym tp1 tp2.
+  forall sym tp1.
   IsSymInterface sym =>
   UndefPtrOpTag ->
   SymExpr sym tp1 ->
   UndefPtrClassify sym
 mkClassify tag e1 = UndefPtrClassify $ \e2 -> case testEquality e1 e2 of
-  Just Refl -> return $ Just tag
-  _ -> return Nothing
+  Just Refl -> return $ Set.singleton tag
+  _ -> return mempty
 
 mkBinUF ::
   IsSymInterface sym =>

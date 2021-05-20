@@ -291,53 +291,53 @@ groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
   iReg <- liftIO $ W4.natToInteger sym reg
   greg <- execGroundFn fn iReg
   goff <- execGroundFn fn off
-  regionTag <- getPointerTag fn iReg
-  offTag <- getPointerTag fn off 
+  regionTags <- getPointerTags fn iReg
+  offTags <- getPointerTags fn off
   let integerToNat :: Integer -> Natural
       integerToNat i
         | i >= 0 = fromIntegral i
         | otherwise = fromIntegral (negate i)
-  let gbv = PFI.mkGroundBV w (mergeTags regionTag offTag) (integerToNat greg) goff
+  let gbv = PFI.mkGroundBV w (regionTags <> offTags) (integerToNat greg) goff
   return gbv
 
-mergeTags ::
-  Maybe MT.UndefPtrOpTag ->
-  Maybe MT.UndefPtrOpTag ->
-  Maybe MT.UndefPtrOpTag
-mergeTags (Just tag) _ = Just tag
-mergeTags _ (Just tag) = Just tag
-mergeTags Nothing Nothing = Nothing
-
-classifyBoundVars ::
+-- | Classify whether or not the given expression depends
+-- on undefined pointers in the given model
+getPointerTags ::
   forall sym arch tp.
+  PT.SymGroundEvalFn sym ->
   W4.SymExpr sym tp ->
-  EquivM sym arch (Maybe MT.UndefPtrOpTag)
-classifyBoundVars e_outer = withValid $ do
+  EquivM sym arch MT.UndefPtrOpTags
+getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
   classify <- CMR.asks (MT.undefPtrClassify . envUndefPointerOps)
   cache <- W4B.newIdxCache
   let
-    go :: forall tp'. W4.SymExpr sym tp' -> EquivM sym arch (Maybe MT.UndefPtrOpTag)
+    go :: forall tp'. W4.SymExpr sym tp' -> EquivM sym arch MT.UndefPtrOpTags
     go e = fmap getConst $ W4B.idxCacheEval cache e $ case e of
       W4B.BoundVarExpr _ -> Const <$> (liftIO $ MT.classifyExpr classify e)
-      W4B.AppExpr a0 -> TFC.foldrMFC acc (Const Nothing) (W4B.appExprApp a0)
-      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc (Const Nothing) (W4B.nonceExprApp a0)
-      _ -> return $ Const Nothing
+      W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+        W4B.BaseIte _ _ cond eT eF -> fmap Const $ do
+          cond_tags <- go cond
+          branch_tags <- execGroundFn fn cond >>= \case
+            True -> go eT
+            False -> go eF
+          return $ cond_tags <> branch_tags
+        app -> TFC.foldrMFC acc mempty app
+      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
+      _ -> return mempty
 
-    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (Maybe MT.UndefPtrOpTag) tp2 -> EquivM sym arch (Const (Maybe MT.UndefPtrOpTag) tp2)
-    acc e (Const Nothing) = do
-      tag' <- go e
-      return $ Const $ tag'
-    acc _ r = return r
-  go e_outer
+    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (MT.UndefPtrOpTags) tp2 -> EquivM sym arch (Const (MT.UndefPtrOpTags) tp2)
+    acc e (Const tags) = do
+      tags' <- go e
+      return $ Const $ tags <> tags'
 
--- | Ground all inner muxes and resolve any undefined tags that are in the remaining term.
-getPointerTag ::
-  PT.SymGroundEvalFn sym -> 
-  W4.SymExpr sym tp -> 
-  EquivM sym arch (Maybe MT.UndefPtrOpTag) 
-getPointerTag (PT.SymGroundEvalFn fn) e = withValid $ withSym $ \sym -> do
-  e' <- liftIO $ WPC.resolveStaticMuxes sym fn e
-  classifyBoundVars e'
+    resolveEq :: forall tp'.
+      W4.SymExpr sym tp' ->
+      W4.SymExpr sym tp' ->
+      EquivM sym arch (Maybe Bool)
+    resolveEq e1 e2 =
+      Just <$> (execGroundFn fn =<< (liftIO $ W4.isEq sym e1 e2))
+
+  go =<< resolveConcreteLookups sym resolveEq e_outer
 
 groundLLVMPointer :: forall sym arch.
   HasCallStack =>

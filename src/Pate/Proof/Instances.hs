@@ -63,6 +63,7 @@ import           Control.Lens hiding ( op, pre )
 import           Data.Maybe
 import           Data.Proxy
 
+import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
@@ -328,7 +329,7 @@ instance PT.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
      where
        prettyGV :: W4.BaseTypeRepr tp -> W4G.GroundValue tp -> PP.Doc a
        prettyGV W4.BaseBoolRepr b = PP.pretty $ show b
-       prettyGV (W4.BaseBVRepr w) bv = PP.pretty $ show (GroundBV Nothing w bv)
+       prettyGV (W4.BaseBVRepr w) bv = PP.pretty $ show (GroundBV mempty w bv)
        prettyGV (W4.BaseStructRepr Ctx.Empty) _ = "()"
        prettyGV _ _ = "Unsupported Type"
 
@@ -389,7 +390,7 @@ instance PA.ValidArch arch => PF.IsProof (ProofGround arch)
 
 
 data GroundBV n where
-  GroundBV :: Maybe MT.UndefPtrOpTag -> W4.NatRepr n -> BVS.BV n -> GroundBV n
+  GroundBV :: MT.UndefPtrOpTags -> W4.NatRepr n -> BVS.BV n -> GroundBV n
   GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
   deriving Eq
 
@@ -401,9 +402,10 @@ ppGroundBV gbv = case gbv of
   GroundBV tag w bv -> BVS.ppHex w bv ++ ppUndefPtrTag tag
   GroundLLVMPointer ptr -> ppLLVMPointer ptr 
 
-ppUndefPtrTag :: Maybe MT.UndefPtrOpTag -> String
-ppUndefPtrTag Nothing = ""
-ppUndefPtrTag (Just tag) = "(" ++ show tag ++ ")"
+ppUndefPtrTag :: MT.UndefPtrOpTags -> String
+ppUndefPtrTag tags = case Set.toList tags of
+  [] -> ""
+  tagsList -> show tagsList
 
 groundBVWidth :: GroundBV n -> W4.NatRepr n
 groundBVWidth gbv = case gbv of
@@ -430,7 +432,7 @@ data GroundLLVMPointer n where
       { ptrWidth :: W4.NatRepr n
       , _ptrRegion :: Natural
       , _ptrOffset :: BVS.BV n
-      , _ptrUndefTag :: Maybe MT.UndefPtrOpTag
+      , _ptrUndefTag :: MT.UndefPtrOpTags
       } -> GroundLLVMPointer n
   deriving Eq
 
@@ -471,7 +473,7 @@ instance Show (GroundLLVMPointer n) where
 
 mkGroundBV :: forall n.
   W4.NatRepr n ->
-  Maybe MT.UndefPtrOpTag ->
+  MT.UndefPtrOpTags ->
   Natural ->
   BVS.BV n ->
   GroundBV n
