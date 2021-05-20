@@ -337,7 +337,7 @@ getPointerTags ::
   W4.SymExpr sym tp ->
   EquivM sym arch MT.UndefPtrOpTags
 getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
-  classify <- CMR.asks (MT.undefPtrClassify . envUndefPointerOps)
+  classify <- CMR.asks (MT.undefPtrClassify . envUndefinedPtrOps)
   cache <- W4B.newIdxCache
   let
     go :: forall tp'. W4.SymExpr sym tp' -> EquivM sym arch MT.UndefPtrOpTags
