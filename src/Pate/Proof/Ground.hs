@@ -368,7 +368,7 @@ getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
 
   go =<< resolveConcreteLookups sym resolveEq e_outer
 
-groundLLVMPointer :: forall sym arch.
+groundLLVMPointer :: forall sym arch w.
   HasCallStack =>
   PT.SymGroundEvalFn sym ->
   CLM.LLVMPtr sym w ->
