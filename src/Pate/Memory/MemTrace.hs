@@ -1120,10 +1120,11 @@ readMemArr sym undef mem ptr repr = go 0 repr
     -- read memory
     LLVMPointer reg off <- arrayIdx sym ptr n
     regArray <- arrayLookup sym (memArr mem) . Ctx.singleton =<< natToInteger sym reg
-    memBytes@((valReg, valOff, _):_) <- forM [0 .. natValue ptrWRepr - 1] $ \byteOff -> do
+    
+    memBytes@((valReg, valOff, _):_) <- forM [0 .. (bytesToNatural ptrWBytes) - 1] $ \byteOff -> do
       off' <- bvAdd sym off =<< bvFromInteger sym ptrWRepr (toInteger byteOff)
       memByteFields sym =<< arrayLookup sym regArray (Ctx.singleton off')
-
+    
     -- check if we're reading a pointer
     (regsEq, offsEq, subOffsOrdered) <- foldM
       (extendPtrCond endianness valReg valOff)
@@ -1161,7 +1162,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
     IO conditions
   extendPtrCond endianness expectedReg expectedOff (regsEq, offsEq, subOffsOrdered) (ix, (reg, off, subOff)) = do
     expectedSubOff <- bvFromInteger sym ptrWRepr $ case endianness of
-      BigEndian -> toInteger (natValue ptrWRepr) - ix - 1
+      BigEndian -> toInteger (bytesToNatural ptrWBytes) - ix - 1
       LittleEndian -> ix
     regsEq' <- andPred sym regsEq =<< natEq sym expectedReg reg
     offsEq' <- andPred sym offsEq =<< bvEq sym expectedOff off
@@ -1217,6 +1218,9 @@ readMemArr sym undef mem ptr repr = go 0 repr
 
   ptrWRepr = let LLVMPointer _ off = ptr in bvWidth off
 
+  ptrWBytes :: Bytes
+  ptrWBytes = bitsToBytes (natValue ptrWRepr)
+    
 -- | Write to the memory array and set the dirty bits on
 -- any written addresses
 writeMemArr :: forall sym ptrW w.
