@@ -70,6 +70,7 @@ import           Data.Maybe
 import           Data.Proxy
 import           Data.Sequence ( Seq )
 
+import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
@@ -95,6 +96,7 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Memory.MemTrace as MT
 
 import qualified What4.Interface as W4
 import qualified What4.ExprHelpers as WEH
@@ -336,7 +338,7 @@ instance PT.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
      where
        prettyGV :: W4.BaseTypeRepr tp -> W4G.GroundValue tp -> PP.Doc a
        prettyGV W4.BaseBoolRepr b = PP.pretty $ show b
-       prettyGV (W4.BaseBVRepr w) bv = PP.pretty $ show (GroundBV w bv)
+       prettyGV (W4.BaseBVRepr w) bv = PP.pretty $ show (GroundBV mempty w bv)
        prettyGV (W4.BaseStructRepr Ctx.Empty) _ = "()"
        prettyGV _ _ = "Unsupported Type"
 
@@ -397,7 +399,7 @@ instance PA.ValidArch arch => PF.IsProof (ProofGround arch)
 
 
 data GroundBV n where
-  GroundBV :: W4.NatRepr n -> BVS.BV n -> GroundBV n
+  GroundBV :: MT.UndefPtrOpTags -> W4.NatRepr n -> BVS.BV n -> GroundBV n
   GroundLLVMPointer :: GroundLLVMPointer n -> GroundBV n
   deriving Eq
 
@@ -406,12 +408,17 @@ instance Show (GroundBV n) where
 
 ppGroundBV :: GroundBV w -> String
 ppGroundBV gbv = case gbv of
-  GroundBV w bv -> BVS.ppHex w bv
-  GroundLLVMPointer ptr -> ppLLVMPointer ptr
+  GroundBV tag w bv -> BVS.ppHex w bv ++ ppUndefPtrTag tag
+  GroundLLVMPointer ptr -> ppLLVMPointer ptr 
+
+ppUndefPtrTag :: MT.UndefPtrOpTags -> String
+ppUndefPtrTag tags = case Set.toList tags of
+  [] -> ""
+  tagsList -> show tagsList
 
 groundBVWidth :: GroundBV n -> W4.NatRepr n
 groundBVWidth gbv = case gbv of
-  GroundBV nr _ -> nr
+  GroundBV _ nr _ -> nr
   GroundLLVMPointer ptr -> ptrWidth ptr
 
 instance TestEquality GroundBV where
@@ -420,10 +427,10 @@ instance TestEquality GroundBV where
     _ -> Nothing
 
 instance OrdF GroundBV where
-  compareF (GroundBV w bv) (GroundBV w' bv') =
-    lexCompareF w w' $ fromOrdering $ compare bv bv'
+  compareF (GroundBV tag w bv) (GroundBV tag' w' bv') =
+    lexCompareF w w' $ fromOrdering $ compare bv bv' <> compare tag tag'
   compareF (GroundLLVMPointer ptr) (GroundLLVMPointer ptr') = compareF ptr ptr'
-  compareF (GroundBV _ _) _ = LTF
+  compareF (GroundBV _ _ _) _ = LTF
   compareF (GroundLLVMPointer _) _ = GTF
 
 instance Ord (GroundBV n) where
@@ -452,6 +459,7 @@ data GroundLLVMPointer n where
       { ptrWidth :: W4.NatRepr n
       , _ptrRegion :: Natural
       , _ptrOffset :: BVS.BV n
+      , _ptrUndefTag :: MT.UndefPtrOpTags
       } -> GroundLLVMPointer n
   deriving Eq
 
@@ -462,10 +470,11 @@ padWith :: Char -> Int -> String -> String
 padWith c n s = replicate (n-length s) c ++ s
 
 ppLLVMPointer :: GroundLLVMPointer w -> String
-ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV) = concat
+ppLLVMPointer (GroundLLVMPointerC bitWidthRepr reg offBV tag) = concat
   [ pad 3 (show reg)
   , "+0x"
   , padWith '0' (fromIntegral ((bitWidth+3)`div`4)) (showHex off "")
+  , ppUndefPtrTag tag
   ]
   where
     off = BVS.asUnsigned offBV
@@ -479,8 +488,8 @@ instance TestEquality GroundLLVMPointer where
   testEquality _ _ = Nothing
 
 instance Ord (GroundLLVMPointer n) where
-  compare (GroundLLVMPointerC _ reg off) (GroundLLVMPointerC _ reg' off') =
-    compare reg reg' <> compare off off'
+  compare (GroundLLVMPointerC _ reg off tag) (GroundLLVMPointerC _ reg' off' tag') =
+    compare reg reg' <> compare off off' <> compare tag tag'
 
 instance OrdF GroundLLVMPointer where
   compareF ptr ptr' =
@@ -491,17 +500,18 @@ instance Show (GroundLLVMPointer n) where
 
 mkGroundBV :: forall n.
   W4.NatRepr n ->
+  MT.UndefPtrOpTags ->
   Natural ->
   BVS.BV n ->
   GroundBV n
-mkGroundBV nr reg bv = case reg > 0 of
- True -> GroundLLVMPointer $ GroundLLVMPointerC nr reg bv
- False -> GroundBV nr bv
+mkGroundBV nr tag reg bv = case reg > 0 of
+ True -> GroundLLVMPointer $ GroundLLVMPointerC nr reg bv tag
+ False -> GroundBV tag nr bv
 
 groundBVAsPointer :: GroundBV n -> GroundLLVMPointer n
 groundBVAsPointer gbv = case gbv of
   GroundLLVMPointer ptr -> ptr
-  GroundBV w bv -> GroundLLVMPointerC w 0 bv
+  GroundBV tag w bv -> GroundLLVMPointerC w 0 bv tag
 
 type family ConcreteValue (tp :: CT.CrucibleType)
 type instance ConcreteValue (CLM.LLVMPointerType w) = GroundBV w
@@ -640,7 +650,7 @@ ppRegs dom regs = let
   
 
 isGroundBVZero :: GroundBV w -> Bool
-isGroundBVZero (GroundBV _ ptr) = BVS.asUnsigned ptr == 0
+isGroundBVZero (GroundBV _ _ ptr) = BVS.asUnsigned ptr == 0
 isGroundBVZero _ = False
 
 
