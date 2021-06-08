@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TemplateHaskell #-}
-module Interactive.State (
+module Pate.Interactive.State (
   SourcePair(..),
   EquivalenceTest(..),
   Failure(..),

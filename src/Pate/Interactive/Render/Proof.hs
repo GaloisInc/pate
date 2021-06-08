@@ -2,7 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-module Interactive.Render.Proof (
+module Pate.Interactive.Render.Proof (
     renderProof
   , renderProofApp
   ) where
@@ -38,7 +38,7 @@ import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 
-import qualified Interactive.State as IS
+import qualified Pate.Interactive.State as IS
 
 pp :: PP.Doc ann -> T.Text
 pp = PPT.renderStrict . PP.layoutCompact
