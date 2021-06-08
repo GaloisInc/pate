@@ -4,7 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
-module Interactive (
+module Pate.Interactive (
   consumeEvents,
   startInterface,
   StateRef,
@@ -38,10 +38,10 @@ import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Types as PT
 
-import qualified Interactive.Render.BlockPairDetail as IRB
-import qualified Interactive.Render.Console as IRC
-import qualified Interactive.Render.Proof as IRP
-import           Interactive.State
+import qualified Pate.Interactive.Render.BlockPairDetail as IRB
+import qualified Pate.Interactive.Render.Console as IRC
+import qualified Pate.Interactive.Render.Proof as IRP
+import           Pate.Interactive.State
 
 -- | Embed the CSS we need into the Haskell to ensure that binaries can be relocatable
 cssContent :: BS.ByteString

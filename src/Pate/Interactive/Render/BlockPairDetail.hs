@@ -1,5 +1,5 @@
 {-# LANGUAGE RankNTypes #-}
-module Interactive.Render.BlockPairDetail (
+module Pate.Interactive.Render.BlockPairDetail (
   renderBlockPairDetail
   ) where
 
@@ -21,8 +21,8 @@ import qualified Pate.Event as PE
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 
-import qualified Interactive.Render.SliceGraph as IRS
-import qualified Interactive.State as IS
+import qualified Pate.Interactive.Render.SliceGraph as IRS
+import qualified Pate.Interactive.State as IS
 
 renderCounterexample :: PE.EquivalenceResult arch -> [TP.UI TP.Element]
 renderCounterexample er =

@@ -1,5 +1,5 @@
 {-# LANGUAGE GADTs #-}
-module Interactive.Render.Console (
+module Pate.Interactive.Render.Console (
   renderConsole
   ) where
 
@@ -17,8 +17,8 @@ import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 
-import qualified Interactive.Render.BlockPairDetail as IRB
-import qualified Interactive.State as IS
+import qualified Pate.Interactive.Render.BlockPairDetail as IRB
+import qualified Pate.Interactive.State as IS
 
 -- | Show the original block at the given address (as well as its corresponding patched block)
 --

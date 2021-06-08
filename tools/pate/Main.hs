@@ -56,8 +56,8 @@ import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Types as PT
 
-import qualified Interactive as I
-import qualified Interactive.State as IS
+import qualified Pate.Interactive as I
+import qualified Pate.Interactive.State as IS
 
 parseHints
   :: LJ.LogAction IO (PE.Event arch)

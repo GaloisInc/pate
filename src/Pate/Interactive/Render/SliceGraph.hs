@@ -1,7 +1,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-module Interactive.Render.SliceGraph (
+module Pate.Interactive.Render.SliceGraph (
   renderSliceGraph
   ) where
 
