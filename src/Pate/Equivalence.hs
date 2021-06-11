@@ -35,6 +35,7 @@ module Pate.Equivalence
   , StatePredSpec
   , EquivRelation(..)
   , MemEquivRelation(..)
+  , applyMemEquivRelation
   , RegEquivRelation(..)
   , regPredAt
   , muxStatePred
@@ -57,6 +58,7 @@ module Pate.Equivalence
   , stateEquivalence
   , memEqAtRegion
   , memEqOutsideRegion
+  , statePredPre
   ) where
 
 import           GHC.Stack ( HasCallStack )
@@ -327,7 +329,20 @@ regPredAt sym reg stPred  = case M.lookup (Some reg) (predRegs stPred)  of
 --
 -- Note that this works at the level of bytes.
 newtype MemEquivRelation sym arch =
-  MemEquivRelation { applyMemEquivRelation :: (forall w. PMC.MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
+  MemEquivRelation
+    { memEquivCellCond :: forall w. PMC.MemCell sym arch w -> IO (W4.Pred sym) }
+
+
+applyMemEquivRelation ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  MemEquivRelation sym arch ->
+  PMC.MemCell sym arch w ->
+  CLM.LLVMPtr sym (8 W4.* w) ->
+  CLM.LLVMPtr sym (8 W4.* w) ->
+  IO (W4.Pred sym)
+applyMemEquivRelation sym memEq cell ptr1 ptr2 =
+  impM sym (memEquivCellCond memEq cell) (MT.llvmPtrEq sym ptr1 ptr2)
 
 -- | Check if two register values are the equivalent in the original and patched
 -- program states.
@@ -398,13 +413,8 @@ stateEquivalence sym stackRegion =
       let CLM.LLVMPointer region _ = PMC.cellPtr cell
       W4.natEq sym region stackRegion
 
-    memEq = MemEquivRelation $ \cell vO vP -> do
-      impM sym (isStackCell cell >>= W4.notPred sym) $
-        MT.llvmPtrEq sym vO vP
-
-    stackEq = MemEquivRelation $ \cell vO vP -> do
-      impM sym (isStackCell cell) $
-        MT.llvmPtrEq sym vO vP
+    memEq = MemEquivRelation $ \cell -> isStackCell cell >>= W4.notPred sym
+    stackEq = MemEquivRelation isStackCell
   in EquivRelation (registerEquivalence sym) stackEq memEq
 
 -- | Resolve a domain predicate and equivalence relation into a precondition
@@ -413,15 +423,14 @@ getPrecondition ::
   CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   -- | stack memory region
   W4.SymNat sym ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
   StatePred sym arch ->
   IO (W4.Pred sym)
-getPrecondition sym undef stackRegion bundle eqRel stPred = do
-  statePredPre sym undef stackRegion (simInO bundle) (simInP bundle) eqRel stPred
+getPrecondition sym stackRegion bundle eqRel stPred = do
+  statePredPre sym stackRegion (simInO bundle) (simInP bundle) eqRel stPred
 
 -- | True if the first precondition implies the second under the given
 -- equivalence relation
@@ -430,7 +439,6 @@ impliesPrecondition ::
   CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   -- | stack memory region
   W4.SymNat sym ->
   SimInput sym arch PT.Original ->
@@ -439,9 +447,10 @@ impliesPrecondition ::
   StatePred sym arch ->
   StatePred sym arch ->
   IO (W4.Pred sym)  
-impliesPrecondition sym undef stackRegion inO inP eqRel stPredAsm stPredConcl = do
-  asm <- statePredPre sym undef stackRegion inO inP eqRel stPredAsm
-  concl <- statePredPre sym undef stackRegion inO inP eqRel stPredConcl
+impliesPrecondition sym stackRegion inO inP eqRel stPredAsm stPredConcl = do
+  asm <- statePredPre sym stackRegion inO inP eqRel stPredAsm
+  concl <- statePredPre sym stackRegion inO inP eqRel stPredConcl
+
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate and equivalence relation into a postcondition and associated
@@ -477,12 +486,14 @@ weakenEquivRelation sym stPred eqRel =
           impM sym (return cond) $
             applyRegEquivRelation (eqRelRegs eqRel) r v1 v2
         Nothing -> return $ W4.truePred sym
-    stackFn = MemEquivRelation $ \cell v1 v2 -> do
-      impM sym (memPredAt sym (predStack stPred) cell) $
-        applyMemEquivRelation (eqRelStack eqRel) cell v1 v2
-    memFn = MemEquivRelation $ \cell v1 v2 -> do
-      impM sym (memPredAt sym (predMem stPred) cell) $
-        applyMemEquivRelation (eqRelMem eqRel) cell v1 v2
+    stackFn = MemEquivRelation $ \cell -> do
+      cond' <- memPredAt sym (predStack stPred) cell
+      cond <- memEquivCellCond (eqRelStack eqRel) cell
+      W4.andPred sym cond cond'
+    memFn = MemEquivRelation $ \cell -> do
+      cond' <- memPredAt sym (predMem stPred) cell
+      cond <- memEquivCellCond (eqRelMem eqRel) cell
+      W4.andPred sym cond cond'
   in EquivRelation regsFn stackFn memFn
 
 -- | Compute a predicate that is true iff the output states are equal according to
@@ -500,7 +511,7 @@ memPredPost ::
   IO (W4.Pred sym)
 memPredPost sym undef outO outP memEq memPred = do
   iteM sym (return $ (memPredPolarity memPred))
-    (positiveMemPred sym undef stO stP memEq memPred) negativePolarity
+    (positiveMemPredPost sym undef stO stP memEq memPred) negativePolarity
   where
     stO = simOutState outO
     stP = simOutState outP
@@ -516,7 +527,7 @@ memPredPost sym undef outO outP memEq memPred = do
       IO (W4.Pred sym)
     resolveCell cell cond = do
       impM sym (memPredAt sym memPred cell) $
-        resolveCellEquiv sym undef stO stP memEq cell cond
+        resolveCellPostEquiv sym undef stO stP memEq cell cond
 
     -- | For the negative case, we need to consider the domain of the state itself -
     -- we assure that all writes are equivalent when they have not been excluded
@@ -528,7 +539,7 @@ memPredPost sym undef outO outP memEq memPred = do
       footCells <- memPredToList <$> footPrintsToPred sym foot (W4.falsePred sym)
       foldr (\(Some cell, cond) -> andM sym (resolveCell cell cond)) (return $ W4.truePred sym) footCells
 
-positiveMemPred :: 
+positiveMemPredPost ::
   forall sym arch.
   CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
@@ -539,13 +550,49 @@ positiveMemPred ::
   MemEquivRelation sym arch ->
   MemPred sym arch ->
   IO (W4.Pred sym)
-positiveMemPred sym undef stO stP memEq memPred = do
+positiveMemPredPost sym undef stO stP memEq memPred = do
   let
     memCells = memPredToList memPred
-    resolveCellPos = resolveCellEquiv sym undef stO stP memEq
+    resolveCellPos = resolveCellPostEquiv sym undef stO stP memEq
   foldr (\(Some cell, cond) -> andM sym (resolveCellPos cell cond)) (return $ W4.truePred sym) memCells
 
-resolveCellEquiv ::
+-- | Assert equality on two memory states by stating that their underlying
+-- representations are equal at the given cells (without respect to how the memory
+-- model would resolve those cells as pointers)
+positiveMemPredPre ::
+  forall sym arch.
+  CB.IsSymInterface sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimState sym arch PT.Original ->
+  SimState sym arch PT.Patched ->
+  MemEquivRelation sym arch ->
+  MemPred sym arch ->
+  IO (W4.Pred sym)
+positiveMemPredPre sym stO stP memEq memPred = do
+  let
+    memCells = memPredToList memPred
+    resolveCellPos = resolveCellPreEquiv sym stO stP memEq
+  foldr (\(Some cell, cond) -> andM sym (resolveCellPos cell cond)) (return $ W4.truePred sym) memCells
+
+
+resolveCellPreEquiv ::
+  forall sym arch w.
+  CB.IsSymInterface sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  SimState sym arch PT.Original ->
+  SimState sym arch PT.Patched ->
+  MemEquivRelation sym arch ->
+  PMC.MemCell sym arch w ->
+  W4.Pred sym ->
+  IO (W4.Pred sym)
+resolveCellPreEquiv sym stO stP eqRel cell@(PMC.MemCell{}) cond =
+  impM sym (return cond) $
+  impM sym (memEquivCellCond eqRel cell) $
+  MT.memEqAt sym (simMem stO) (simMem stP) (PMC.cellPtr cell) (PMC.cellWidth cell)
+
+resolveCellPostEquiv ::
   forall sym arch w.
   CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
@@ -557,10 +604,10 @@ resolveCellEquiv ::
   PMC.MemCell sym arch w ->
   W4.Pred sym ->
   IO (W4.Pred sym)
-resolveCellEquiv sym undef stO stP eqRel cell cond = do
-  val1 <- PMC.readMemCell sym undef (simMem stO) cell
-  val2 <- PMC.readMemCell sym undef (simMem stP) cell
-  impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
+resolveCellPostEquiv sym _undef stO stP eqRel cell@(PMC.MemCell{}) cond =
+  impM sym (return cond) $
+  impM sym (memEquivCellCond eqRel cell) $
+  MT.memByteEqAt sym (simMem stO) (simMem stP) (PMC.cellPtr cell) (PMC.cellWidth cell)
 
 
 -- | Compute a precondition that is sufficiently strong to imply the given
@@ -571,16 +618,15 @@ memPredPre ::
   CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   MemRegionEquality sym arch ->
   SimInput sym arch PT.Original ->
   SimInput sym arch PT.Patched ->
   MemEquivRelation sym arch ->
   MemPred sym arch ->
   IO (W4.Pred sym)
-memPredPre sym undef memEqRegion inO inP memEq memPred  = do
+memPredPre sym memEqRegion inO inP memEq memPred  = do
   iteM sym (return $ (memPredPolarity memPred))
-    (positiveMemPred sym undef stO stP memEq memPred) negativePolarity
+    (positiveMemPredPre sym stO stP memEq memPred) negativePolarity
   where
     stO = simInState inO
     stP = simInState inP
@@ -599,10 +645,8 @@ memPredPre sym undef memEqRegion inO inP memEq memPred  = do
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do
-          fresh <- PMC.readMemCell sym undef memP cell
-          --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
-          --val <- W4.baseTypeIte sym cond fresh original
-          mem' <- PMC.writeMemCell sym undef mem cell fresh
+          fresh <- PMC.readMemCellChunk sym memP cell
+          mem' <- PMC.writeMemCellChunk sym mem cell fresh
           mem'' <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
           return $ mem { MT.memArr = mem'' }
 
@@ -671,7 +715,6 @@ statePredPre ::
   CB.IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   -- | stack memory region
   W4.SymNat sym ->
   SimInput sym arch PT.Original ->
@@ -679,16 +722,16 @@ statePredPre ::
   EquivRelation sym arch ->
   StatePred sym arch ->
   IO (W4.Pred sym)
-statePredPre sym undef stackRegion inO inP eqRel stPred  = do
+statePredPre sym stackRegion inO inP eqRel stPred  = do
   let
     stO = simInState inO
     stP = simInState inP
     
     regsEq = regPredRel sym stO stP (eqRelRegs eqRel) (predRegs stPred) 
     stacksEq =
-      memPredPre sym undef (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) (predStack stPred)
+      memPredPre sym (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) (predStack stPred)
     memEq =
-      memPredPre sym undef (memEqOutsideRegion sym stackRegion) inO inP (eqRelMem eqRel) (predMem stPred)
+      memPredPre sym (memEqOutsideRegion sym stackRegion) inO inP (eqRelMem eqRel) (predMem stPred)
   andM sym regsEq (andM sym stacksEq memEq)
 
 statePredPost ::

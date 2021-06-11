@@ -121,8 +121,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
       valO <- liftIO $ PMC.readMemCell sym undef (PS.simMem stO) cell
       valP <- liftIO $ PMC.readMemCell sym undef (PS.simMem stP) cell
       eqRel <- CMR.asks envBaseEquiv      
-      isValidStack <- liftIO $ PE.applyMemEquivRelation (PE.eqRelStack eqRel) cell valO valP
-      isValidGlobalMem <- liftIO $ PE.applyMemEquivRelation (PE.eqRelMem eqRel) cell valO valP
+      isValidStack <- liftIO $ PE.applyMemEquivRelation sym (PE.eqRelStack eqRel) cell valO valP
+      isValidGlobalMem <- liftIO $ PE.applyMemEquivRelation sym (PE.eqRelMem eqRel) cell valO valP
       isEquiv <- liftIO $ W4.andPred sym isValidStack isValidGlobalMem
       return $ MapF.Pair cell $ PF.BlockSliceMemOp
         { PF.slMemOpValues = PT.PatchPairC (PFI.SymBV valO) (PFI.SymBV valP)

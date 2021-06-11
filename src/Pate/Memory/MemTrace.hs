@@ -49,6 +49,7 @@ import           GHC.TypeNats (KnownNat, type Nat)
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.Vector as VF
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
@@ -1140,6 +1141,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
     reg0Off <- foldM appendMemByte bv0 (appendOrder endianness memBytes)
 
     -- bad case: mismatched regions. use an uninterpreted function
+    -- TODO: use a single uninterpreted function
     undefBytes <- forM memBytes $ \(badReg, badOff, badSubOff) ->
       undefMismatchedRegionRead undef sym (LLVMPointer badReg badOff) badSubOff
     predAvoidUndef <- andPred sym isPtr isReg0
@@ -1264,7 +1266,7 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
     nBV <- bvFromInteger sym ptrWRepr (useEnd ptrWByteInteger n)
     assert sym eqCond $ AssertFailureSimError "writeMemArr" $ "writeMemArr: expected write of size " ++ show ptrWInteger ++ ", saw " ++ show (8*valWByteInteger)
     undefBV <- undefWriteSize undef sym val nBV
-    writeByte (LLVMPointer natZero undefBV) n bvZero mem >>= goBV eqCond bvZero natZero (n+1)
+    writeByte sym ptr (LLVMPointer natZero undefBV) n bvZero mem >>= goBV eqCond bvZero natZero (n+1)
 
   goPtr ::
     w ~ ptrW =>
@@ -1274,7 +1276,7 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
   goPtr n mem | n == ptrWByteInteger = pure mem
   goPtr n mem = do
     nBV <- bvFromInteger sym ptrWRepr (useEnd ptrWByteInteger n)
-    writeByte val n nBV mem >>= goPtr (n+1)
+    writeByte sym ptr val n nBV mem >>= goPtr (n+1)
 
   goNonPtr ::
     (1 <= w, w + 1 <= ptrW) =>
@@ -1285,24 +1287,9 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
   goNonPtr n mem = do
     nBV <- bvFromInteger sym ptrWRepr (useEnd valWByteInteger n)
     valOffExt <- bvZext sym memWidthNatRepr valOff
-    writeByte (LLVMPointer valReg valOffExt) n nBV mem >>= goNonPtr (n+1)
+    writeByte sym ptr (LLVMPointer valReg valOffExt) n nBV mem >>= goNonPtr (n+1)
 
-  writeByte ::
-    LLVMPtr sym ptrW ->
-    Integer ->
-    SymBV sym ptrW ->
-    MemTraceImpl sym ptrW ->
-    IO (MemTraceImpl sym ptrW)
-  writeByte (LLVMPointer byteReg byteOff) nInteger nBV mem = do
-    LLVMPointer ptrReg ptrOff <- arrayIdx sym ptr nInteger
-    byteRegSI <- natToInteger sym byteReg
-    ptrRegSI <- natToInteger sym ptrReg
 
-    memByte <- mkStruct sym (Ctx.extend (Ctx.extend (Ctx.extend Ctx.empty byteRegSI) byteOff) nBV)
-    regArray <- arrayLookup sym (memArr mem) (Ctx.singleton ptrRegSI)
-    regArray' <- arrayUpdate sym regArray (Ctx.singleton ptrOff) memByte
-    regArray'' <- arrayUpdate sym (memArr mem) (Ctx.singleton ptrRegSI) regArray'
-    pure mem { memArr = regArray'' }
 
   bitWidth = natMultiply (knownNat @8) byteWidth
   ptrWRepr = let LLVMPointer _ off = ptr in bvWidth off
@@ -1312,6 +1299,211 @@ writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPoi
   useEnd writeSize = case endianness of
     BigEndian -> ((writeSize-1)-)
     LittleEndian -> id
+
+
+writeByte ::
+  MemWidth ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  -- | base address to write to
+  LLVMPtr sym ptrW ->
+  -- | base value to write
+  LLVMPtr sym ptrW ->
+  -- | offset from base address
+  Integer ->
+  -- | offset within value representing the byte
+  SymBV sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+writeByte sym ptr (LLVMPointer byteReg byteOff) n off mem = do
+  byteRegI <- natToInteger sym byteReg
+  writeByte' sym ptr byteRegI byteOff n off mem
+
+writeByte' ::
+  MemWidth ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  -- | base address to write to
+  LLVMPtr sym ptrW ->
+  -- | region of value to write
+  SymInteger sym ->
+  -- | base value to write
+  SymBV sym ptrW ->
+  -- | offset from base address
+  Integer ->
+  -- | offset within value representing the byte
+  SymBV sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+writeByte' sym ptr byteReg byteOff nInteger nBV mem = do
+  LLVMPointer ptrReg ptrOff <- arrayIdx sym ptr nInteger
+  ptrRegSI <- natToInteger sym ptrReg
+
+  memByte <- mkStruct sym (Ctx.extend (Ctx.extend (Ctx.extend Ctx.empty byteReg) byteOff) nBV)
+  regArray <- arrayLookup sym (memArr mem) (Ctx.singleton ptrRegSI)
+  regArray' <- arrayUpdate sym regArray (Ctx.singleton ptrOff) memByte
+  regArray'' <- arrayUpdate sym (memArr mem) (Ctx.singleton ptrRegSI) regArray'
+  pure mem { memArr = regArray'' }
+
+-- | An uninterpreted raw chunk of memory, representing 'w' bytes
+newtype ByteChunk sym ptrW w where
+  ByteChunk :: VF.Vector w (SymInteger sym, SymBV sym ptrW, SymBV sym ptrW) -> ByteChunk sym ptrW w
+
+instance PEM.ExprMappable sym (ByteChunk sym ptrW w) where
+  mapExpr _sym f (ByteChunk chunk) =
+    let
+      go (reg, byte, byteOff) = do
+        reg' <- f reg
+        byte' <- f byte
+        byteOff' <- f byteOff
+        return (reg', byte', byteOff')
+    in ByteChunk <$> traverse go chunk
+
+writeByteChunk ::
+  MemWidth ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  LLVMPtr sym ptrW ->
+  ByteChunk sym ptrW w ->
+  IO (MemTraceImpl sym ptrW)
+writeByteChunk sym mem ptr (ByteChunk chunk)  = do
+  foldM (\mem' (i, (reg, byte, byteOff)) -> writeByte' sym ptr reg byte i byteOff mem') mem (zip [0..] (VF.toList chunk))
+
+
+readByteChunk ::
+  forall sym ptrW w.
+  MemWidth ptrW =>
+  1 <= w =>
+  IsSymInterface sym =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  LLVMPtr sym ptrW ->
+  NatRepr w ->
+  IO (ByteChunk sym ptrW w)
+readByteChunk sym mem ptr size
+  | Refl <- minusPlusCancel size (knownNat @1) =
+      ByteChunk <$> VF.generateM (decNat size) go
+  where
+    go :: NatRepr h -> IO (SymInteger sym, SymBV sym ptrW, SymBV sym ptrW)
+    go n = do
+      LLVMPointer ptrReg ptrOff <- arrayIdx sym ptr (intValue n)
+      ptrRegSI <- natToInteger sym ptrReg
+      regArray <- arrayLookup sym (memArr mem) (Ctx.singleton ptrRegSI)
+      memByte <- arrayLookup sym regArray (Ctx.singleton ptrOff)
+      memByteFields' sym memByte
+
+-- | True iff the two memory states are representationally equal
+-- at the given address, for 'w' bytes read.
+-- Note: this is stronger than memory being semantically equivalent at the given addresses,
+-- as it asserts that the provenance of each byte is equal.
+-- There exist memory traces which would yield semantically equivalent memory states, but
+-- would not be equal according to this predicate.
+-- These differences should be unobservable according to the usual memory API, however.
+-- We may therefore soundly assume this predicate when constructing pre-domains, but
+-- it would be too strong to require it as the equivalence post-condition.
+memEqAt ::
+  forall sym ptrW w.
+  MemWidth ptrW =>
+  1 <= w =>
+  IsSymInterface sym =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  LLVMPtr sym ptrW ->
+  NatRepr w ->
+  IO (Pred sym)
+memEqAt sym mem1 mem2 ptr w = do
+  preds <- sequence (map go [0..(intValue w-1)])
+  WEH.allPreds sym preds
+  where
+    go :: Integer -> IO (Pred sym)
+    go n = do
+      LLVMPointer ptrReg ptrOff <- arrayIdx sym ptr n
+      ptrRegSI <- natToInteger sym ptrReg
+      regArray1 <- arrayLookup sym (memArr mem1) (Ctx.singleton ptrRegSI)
+      memByte1 <- arrayLookup sym regArray1 (Ctx.singleton ptrOff)
+      regArray2 <- arrayLookup sym (memArr mem2) (Ctx.singleton ptrRegSI)
+      memByte2 <- arrayLookup sym regArray2 (Ctx.singleton ptrOff)
+      isEq sym memByte1 memByte2
+
+-- | True iff 'w' bytes following the given pointer are semantically equivalent
+-- in memory, regardless of their representation.
+memByteEqAt ::
+  forall sym ptrW w.
+  MemWidth ptrW =>
+  1 <= w =>
+  IsSymInterface sym =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  LLVMPtr sym ptrW ->
+  NatRepr w ->
+  IO (Pred sym)
+memByteEqAt sym mem1 mem2 ptr w = do
+  preds <- sequence (map go [0..(intValue w-1)])
+  WEH.allPreds sym preds
+  where
+    go :: Integer -> IO (Pred sym)
+    go n = do
+      LLVMPointer ptrReg ptrOff <- arrayIdx sym ptr n
+      ptrRegSI <- natToInteger sym ptrReg
+      regArray1 <- arrayLookup sym (memArr mem1) (Ctx.singleton ptrRegSI)
+      memByte1 <- arrayLookup sym regArray1 (Ctx.singleton ptrOff)
+      regArray2 <- arrayLookup sym (memArr mem2) (Ctx.singleton ptrRegSI)
+      memByte2 <- arrayLookup sym regArray2 (Ctx.singleton ptrOff)
+      (reg1, byte1, off1) <- memByteFields' sym memByte1
+      (reg2, byte2, off2) <- memByteFields' sym memByte2
+
+      LeqProof <- return $ memWidthIsBig @ptrW @9
+      byte1' <- bvLshr sym byte1 off1 >>= bvTrunc sym (knownNat @8)
+      byte2' <- bvLshr sym byte2 off2 >>= bvTrunc sym (knownNat @8)
+
+      eqBytes <- isEq sym byte1' byte2'
+      eqRegs <- isEq sym reg1 reg2
+      andPred sym eqBytes eqRegs
+
+chunksEqual ::
+  forall sym ptrW w.
+  IsSymInterface sym =>
+  sym ->
+  ByteChunk sym ptrW w ->
+  ByteChunk sym ptrW w ->
+  IO (Pred sym)
+chunksEqual sym (ByteChunk chunk1) (ByteChunk chunk2) = do
+  preds <- VF.toList <$> VF.zipWithM go chunk1 chunk2
+  WEH.allPreds sym preds
+  where
+    go ::
+      (SymInteger sym, SymBV sym ptrW, SymBV sym ptrW) ->
+      (SymInteger sym, SymBV sym ptrW, SymBV sym ptrW) ->
+      IO (Pred sym)
+    go (reg1, byte1, byteOff1) (reg2, byte2, byteOff2) = do
+      regsEq <- isEq sym reg1 reg2
+      bytesEq <- isEq sym byte1 byte2
+      bytesOffEq <- isEq sym byteOff1 byteOff2
+      WEH.allPreds sym [regsEq, bytesEq, bytesOffEq]
+
+
+freshChunk ::
+  forall sym ptrW w.
+  MemWidth ptrW =>
+  1 <= w =>
+  IsSymInterface sym =>
+  sym ->
+  NatRepr w ->
+  IO (ByteChunk sym ptrW w)
+freshChunk sym w
+  | Refl <- minusPlusCancel w (knownNat @1) =
+      ByteChunk <$> VF.generateM (decNat w) (\_ -> go)
+  where
+    go :: IO (SymInteger sym, SymBV sym ptrW, SymBV sym ptrW)
+    go = do
+      reg <- freshConstant sym emptySymbol BaseIntegerRepr
+      byte <- freshConstant sym emptySymbol (BaseBVRepr (memWidthNatRepr @ptrW))
+      byteOff <- freshConstant sym emptySymbol (BaseBVRepr (memWidthNatRepr @ptrW))
+      return (reg, byte, byteOff)
+
 
 getMemByteOff :: forall sym ptrW.
   (MemWidth ptrW, IsExprBuilder sym) =>
@@ -1343,10 +1535,19 @@ memByteFields ::
   SymExpr sym (MemByteBaseType w) ->
   IO (SymNat sym, SymBV sym w, SymBV sym w)
 memByteFields sym memByte = do
-    regSI <- structField sym memByte (Ctx.skipIndex (Ctx.skipIndex Ctx.baseIndex))
+  (reg, off, subOff) <- memByteFields' sym memByte
+  regN <- integerToNat sym reg
+  return (regN, off, subOff)
+
+memByteFields' ::
+  IsExprBuilder sym =>
+  sym ->
+  SymExpr sym (MemByteBaseType w) ->
+  IO (SymInteger sym, SymBV sym w, SymBV sym w)
+memByteFields' sym memByte = do
+    reg <- structField sym memByte (Ctx.skipIndex (Ctx.skipIndex Ctx.baseIndex))
     off <- structField sym memByte (Ctx.extendIndex' (Ctx.extendRight Ctx.noDiff) (Ctx.lastIndex (Ctx.incSize (Ctx.incSize Ctx.zeroSize))))
     subOff <- structField sym memByte (Ctx.nextIndex (Ctx.incSize (Ctx.incSize Ctx.zeroSize)))
-    reg <- integerToNat sym regSI
     return (reg, off, subOff)
 
 memWidthIsBig :: (MemWidth ptrW, n <= 32) => LeqProof n ptrW

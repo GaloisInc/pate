@@ -171,7 +171,7 @@ data EquivEnv sym arch where
     , envGoalTriples :: [PF.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
     , envValidSym :: Sym sym
-    -- ^ expression builder, wrapped with a validity proof
+    -- ^ expression builder, wrappebd with a validity proof
     , envStartTime :: TM.UTCTime
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
     , envTocs :: PA.HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))

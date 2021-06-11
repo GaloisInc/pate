@@ -20,6 +20,8 @@ module Pate.MemCell (
   , inMemCells
   , readMemCell
   , writeMemCell
+  , readMemCellChunk
+  , writeMemCellChunk
   ) where
 
 import           Control.Monad ( foldM, forM )
@@ -228,6 +230,28 @@ writeMemCell sym undef mem cell@(MemCell{}) valPtr = do
   let
     repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
   PMT.writeMemArr sym undef mem (cellPtr cell) repr valPtr
+
+
+readMemCellChunk ::
+  CB.IsSymInterface sym =>
+  MC.RegisterInfo (MC.ArchReg arch) =>
+  sym ->
+  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
+  MemCell sym arch w ->
+  IO (PMT.ByteChunk sym (MC.ArchAddrWidth arch) w)
+readMemCellChunk sym mem cell@(MemCell{}) =
+  PMT.readByteChunk sym mem (cellPtr cell) (cellWidth cell)
+
+writeMemCellChunk ::
+  CB.IsSymInterface sym =>
+  MC.RegisterInfo (MC.ArchReg arch) =>
+  sym ->
+  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
+  MemCell sym arch w ->
+  PMT.ByteChunk sym (MC.ArchAddrWidth arch) w ->
+  IO (PMT.MemTraceImpl sym (MC.ArchAddrWidth arch))
+writeMemCellChunk sym mem cell@(MemCell{}) chunk =
+  PMT.writeByteChunk sym mem (cellPtr cell) chunk
 
 instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do

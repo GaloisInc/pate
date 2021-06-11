@@ -369,7 +369,6 @@ checkEquivalence ::
   EquivM sym arch PT.EquivalenceStatus
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
-  undef <- CMR.asks envUndefinedPtrOps
   eqRel <- CMR.asks envBaseEquiv
   stackRegion <- CMR.asks envStackRegion
   -- first try proving equivalence by assuming that exact equality
@@ -400,7 +399,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       inP = SimInput stP (pPatched pPair)
       precond = PF.eqPreDomain tripleBody
     (_, genPrecond) <- liftIO $ bindSpec sym stO stP genPrecondSpec
-    preImpliesGen <- liftIO $ impliesPrecondition sym undef stackRegion inO inP eqRel precond genPrecond
+    preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond genPrecond
     -- prove that the generated precondition is implied by the given precondition
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
     isPredTrue goalTimeout preImpliesGen >>= \case
@@ -885,8 +884,8 @@ proveLocalPostcondition ::
   StatePredSpec sym arch ->
   EquivM sym arch (BranchCase sym arch)
 proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
-  undef <- CMR.asks envUndefinedPtrOps
   eqRel <- CMR.asks envBaseEquiv
+  undef <- CMR.asks envUndefinedPtrOps
   let simOutStateO = simOutState $ simOutO bundle
       simOutStateP = simOutState $ simOutP bundle
       memTraces = toPatchPairC . TF.fmapF (\ss -> Const (MT.memSeq (simMem ss))) $ PatchPair simOutStateO simOutStateP
@@ -901,7 +900,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   let sliceState = PF.slBlockPostState blockSlice
        
   stackRegion <- CMR.asks envStackRegion
-  eqInputsPred <- liftIO $ getPrecondition sym undef stackRegion bundle eqRel eqInputs
+  eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
   notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- PD.getBlocks $ simPair bundle
@@ -1133,7 +1132,6 @@ simplifyPred_deep p = withSym $ \sym -> do
 
 guessMemoryDomain ::
   forall sym arch.
-  MT.UndefinedPtrOps sym (MM.ArchAddrWidth arch) ->
   SimBundle sym arch ->
   -- | the target postcondition that we are trying to satisfy
   W4.Pred sym ->
@@ -1146,7 +1144,7 @@ guessMemoryDomain ::
   -- the given domain
   (forall w. PMC.MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
   EquivM sym arch (MemPred sym arch)
-guessMemoryDomain undef bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
+guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
   foots <- getFootprints bundle
   cells <- do
     localPred <- liftIO $ addFootPrintsToPred sym foots memPred
@@ -1159,11 +1157,10 @@ guessMemoryDomain undef bundle goal (memP', goal') memPred cellFilter = withSym 
   -- to the polarity of the postcondition predicate
   result <- mapMemPredPar cells $ \cell p -> maybeEqualAt bundle cell p >>= \case
     True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (Par.present $ return polarity) $ do
-      let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       -- clobber the "patched" memory at exactly this cell
-      freshP <- liftIO $ freshPtrBytes sym (PMC.cellWidth cell)
+      freshP <- liftIO $ MT.freshChunk sym (PMC.cellWidth cell)
 
-      memP'' <- liftIO $ MT.writeMemArr sym undef memP (PMC.cellPtr cell) repr freshP
+      memP'' <- liftIO $ MT.writeByteChunk sym memP (PMC.cellPtr cell) freshP
       eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
 
       -- see if we can prove that the goal is independent of this clobbering
@@ -1251,7 +1248,6 @@ guessEquivalenceDomain ::
   EquivM sym arch (StatePred sym arch)
 guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   ExprFilter isBoundInGoal <- getIsBoundFilter' goal
-  undef <- CMR.asks envUndefinedPtrOps
   eqRel <- CMR.asks envBaseEquiv
   result <- zipRegStatesPar (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
@@ -1305,10 +1301,10 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   memP' <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   goal' <- bindMemory memP memP' goal_regsEq
 
-  stackDom <- guessMemoryDomain undef bundle_regsEq goal_regsEq (memP', goal') (predStack postcond_regsEq) isStackCell
-  let stackEq = liftIO $ memPredPre sym undef (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) stackDom
+  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predStack postcond_regsEq) isStackCell
+  let stackEq = liftIO $ memPredPre sym (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) stackDom
   memDom <- withAssumption_ stackEq $ do
-    guessMemoryDomain undef bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
+    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (predMem postcond_regsEq) isNotStackCell
 
   blocks <- PD.getBlocks $ simPair bundle
   
