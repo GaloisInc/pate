@@ -28,7 +28,6 @@ import qualified Data.Foldable as F
 import qualified Data.List.NonEmpty as DLN
 import           Data.Maybe ( isNothing, maybeToList )
 import qualified Data.Traversable as T
-import           Data.Word ( Word16 )
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
 import           Numeric ( showHex )
@@ -57,6 +56,7 @@ import qualified Pate.Timeout as PTi
 import qualified Pate.Types as PT
 
 import qualified Pate.Interactive as I
+import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
 
 parseHints
@@ -166,9 +166,9 @@ data CLIOptions = CLIOptions
   , probabilisticHints :: Maybe FilePath
   , csvFunctionHints :: Maybe FilePath
   , dwarfHints :: Bool
-  } deriving (Eq, Ord, Read, Show)
+  } deriving (Eq, Ord, Show)
 
-data LogTarget = Interactive Word16 (Maybe (IS.SourcePair FilePath))
+data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
                -- ^ Logs will go to an interactive viewer
                --
                -- If source files (corresponding to the original and patched
@@ -180,7 +180,7 @@ data LogTarget = Interactive Word16 (Maybe (IS.SourcePair FilePath))
                -- ^ Log to stdout
                | NullLogger
                -- ^ Discard logs
-               deriving (Eq, Ord, Read, Show)
+               deriving (Eq, Ord, Show)
 
 -- | Create a logger based on the user's desire for an interactive session.
 --
@@ -202,7 +202,7 @@ startLogger PA.ValidArchProxy lt chan =
       hdl <- IO.openFile fp IO.WriteMode
       IO.hSetBuffering hdl IO.LineBuffering
       logToHandle hdl
-    Interactive portNumber mSourceFiles -> do
+    Interactive port mSourceFiles -> do
       -- This odd structure makes all of the threading explicit at this top
       -- level so that there is no thread creation hidden in the Interactive
       -- module
@@ -213,7 +213,7 @@ startLogger PA.ValidArchProxy lt chan =
         mSourceContent <- join <$> T.traverse parseSources mSourceFiles
         stateRef <- I.newState mSourceContent
         watcher <- CCA.async $ I.consumeEvents chan stateRef
-        ui <- CCA.async $ I.startInterface stateRef portNumber
+        ui <- CCA.async $ I.startInterface port stateRef
         CCA.wait watcher
         CCA.wait ui
       return (logAct, Just consumer)
@@ -352,12 +352,14 @@ logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure St
                                      <> OA.short 'i'
                                      <> OA.help "Start a web server providing an interactive view of results"
                                      )
-                                    <*> OA.option OA.auto ( OA.long "port"
-                                                          <> OA.metavar "PORT"
-                                                          <> OA.help "The port to run the interactive UI on"
-                                                          <> OA.value 5000
-                                                          <> OA.showDefault
-                                                          )
+                                    <*> OA.option (OA.maybeReader PIP.portMaybe)
+                                         ( OA.long "port"
+                                         <> OA.short 'p'
+                                         <> OA.metavar "PORT"
+                                         <> OA.value (PIP.port 5000)
+                                         <> OA.showDefault
+                                         <> OA.help "The port to run the interactive visualizer on"
+                                         )
                                     <*> OA.optional parseSourceFiles
     parseSourceFiles = IS.SourcePair <$> OA.strOption (  OA.long "original-source"
                                                       <> OA.metavar "FILE"

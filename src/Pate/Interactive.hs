@@ -38,6 +38,7 @@ import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Types as PT
 
+import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.Render.BlockPairDetail as IRB
 import qualified Pate.Interactive.Render.Console as IRC
 import qualified Pate.Interactive.Render.Proof as IRP
@@ -118,8 +119,8 @@ addRecent n elt elts = elt : take (n - 1) elts
 
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier
-startInterface :: (PA.ArchConstraints arch, PA.ValidArch arch) => StateRef arch -> Word16 -> IO ()
-startInterface r portNumber = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
+startInterface :: (PA.ArchConstraints arch, PA.ValidArch arch) => PIP.Port -> StateRef arch -> IO ()
+startInterface port r = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  do
   -- Place the content of all of our static dependencies into the temporary
   -- directory so that it can be served by threepenny
   --
@@ -132,8 +133,7 @@ startInterface r portNumber = SIT.withSystemTempDirectory "pate" $ \tmpDir ->  d
   BS.writeFile (tmpDir </> "dagre.js") dagre
   BS.writeFile (tmpDir </> "cytoscape-dagre.js") cytoscapeDagre
 
-  -- Set the port to 5000 to match the Dockerfile as a default; users can change it if they wish
-  let uiConf = TP.defaultConfig { TP.jsPort = Just (fromIntegral portNumber)
+  let uiConf = TP.defaultConfig { TP.jsPort = Just (fromIntegral (PIP.portNumber port))
                                 , TP.jsStatic = Just tmpDir
                                 }
   TP.startGUI uiConf (uiSetup r)

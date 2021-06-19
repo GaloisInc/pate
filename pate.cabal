@@ -103,6 +103,7 @@ library
                        Pate.Equivalence,
 
                        Pate.Interactive,
+                       Pate.Interactive.Port,
                        Pate.Interactive.Render.BlockPairDetail,
                        Pate.Interactive.Render.Console,
                        Pate.Interactive.Render.Proof,
