@@ -86,7 +86,9 @@ ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
           PPr.ProofTriple {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofTriple is not a possible parent component for a ProofTriple"]
           PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
           PPr.ProofDomain {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofDomain is not a possible parent component for a ProofTriple"]
-      | otherwise -> error ("Missing parent for node " ++ show thisNonce ++ "(" ++ show parentNonce ++ ")")
+      | otherwise ->
+        -- See Note [Pending Nodes]
+        PP.pretty "<Pending>"
     PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus (Proxy @prf) st)
     PPr.ProofDomain {} -> PP.pretty "Domain"
 
@@ -330,3 +332,16 @@ renderProofApp app =
       TP.column [ TP.string "The domain of an individual equivalence proof"
                 , renderDomainApp app
                 ]
+
+{- Note [Pending Nodes]
+
+We verify proof nodes in parallel and mostly irrespective of dependency
+order. If we try to render a snapshot of the proof at an arbitrary time, there
+is a good chance that we will have verified a node without a parent in the
+graph.  If we throw an error in that case, the exception is caught uncleanly and
+seems to break the UI.
+
+Instead, we render a marker denoting that the part of the proof tree is still
+pending.
+
+-}
