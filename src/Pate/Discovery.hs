@@ -127,7 +127,7 @@ exactEquivalence inO inP = withSym $ \sym -> do
   eqRel <- CMR.asks envBaseEquiv
   regsEqs <- liftIO $ zipRegStates (PSS.simInRegs inO) (PSS.simInRegs inP) (PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel))
   regsEq <- liftIO $ WEH.allPreds sym regsEqs
-  memEq <- liftIO $ WI.isEq sym (MT.memArr (PSS.simInMem inO)) (MT.memArr (PSS.simInMem inP))
+  memEq <- liftIO $ MT.mtbsIdentical sym (MT.memArr (PSS.simInMem inO)) (MT.memArr (PSS.simInMem inP))
   liftIO $ WI.andPred sym regsEq memEq
 
 matchesBlockTarget ::

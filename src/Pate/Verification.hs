@@ -1161,7 +1161,7 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
       freshP <- liftIO $ MT.freshChunk sym (PMC.cellWidth cell)
 
       memP'' <- liftIO $ MT.writeByteChunk sym memP (PMC.cellPtr cell) freshP
-      eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
+      eqMemP <- liftIO $ MT.mtbsIdentical sym (MT.memArr memP') (MT.memArr memP'')
 
       -- see if we can prove that the goal is independent of this clobbering
       asm <- liftIO $ allPreds sym [p, eqMemP, goal]
@@ -1221,7 +1221,13 @@ bindMemory ::
   W4.SymExpr sym tp' ->
   EquivM sym arch (W4.SymExpr sym tp')  
 bindMemory memVar memVal expr = withSym $ \sym -> do
-  liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
+  let MT.MemTraceBytes regVar offVar subVar = MT.memArr memVar
+      MT.MemTraceBytes regVal offVal subVal = MT.memArr memVal
+      rebinding = Ctx.empty
+        Ctx.:> VarBinding regVar regVal
+        Ctx.:> VarBinding offVar offVal
+        Ctx.:> VarBinding subVar subVal
+  liftIO $ rebindExpr sym rebinding expr
 
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
@@ -1377,8 +1383,14 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
     inStP = simInState $ simInP bundle
 
 equateInitialMemory :: SimBundle sym arch -> EquivM sym arch (AssumptionFrame sym)
-equateInitialMemory bundle =
-  return $ exprBinding (MT.memArr (simInMem $ simInO bundle)) (MT.memArr (simInMem $ simInP bundle))
+equateInitialMemory bundle = do
+  let MT.MemTraceBytes oReg oOff oSub = MT.memArr (simInMem (simInO bundle))
+      MT.MemTraceBytes pReg pOff pSub = MT.memArr (simInMem (simInP bundle))
+      binding
+        =  exprBinding oReg pReg
+        <> exprBinding oOff pOff
+        <> exprBinding oSub pSub
+  return binding
 
 equateInitialStates :: SimBundle sym arch -> EquivM sym arch (AssumptionFrame sym)
 equateInitialStates bundle = do

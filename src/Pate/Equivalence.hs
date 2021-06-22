@@ -647,7 +647,7 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
         _ -> do
           fresh <- PMC.readMemCellChunk sym memP cell
           mem' <- PMC.writeMemCellChunk sym mem cell fresh
-          mem'' <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
+          mem'' <- MT.muxMemTraceBytes sym cond (MT.memArr mem') (MT.memArr mem)
           return $ mem { MT.memArr = mem'' }
 
     -- | For the negative case, we assume that the patched trace is equivalent
@@ -673,10 +673,8 @@ memEqOutsideRegion ::
   W4.SymNat sym ->
   MemRegionEquality sym arch
 memEqOutsideRegion sym region = MemRegionEquality $ \mem1 mem2 -> do
-  iRegion <- W4.natToInteger sym region
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iRegion)
-  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton iRegion) mem1Stack
-  W4.isEq sym (MT.memArr mem1) mem2'
+  mem2' <- MT.copyRegion sym region (MT.memArr mem1) (MT.memArr mem2)
+  MT.mtbsIdentical sym (MT.memArr mem1) mem2'
 
 
 -- | Memory states are equivalent in the given region.
@@ -687,11 +685,8 @@ memEqAtRegion ::
   -- | stack memory region
   W4.SymNat sym ->
   MemRegionEquality sym arch
-memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
-  iStackRegion <- W4.natToInteger sym stackRegion
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iStackRegion)
-  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton iStackRegion)
-  W4.isEq sym mem1Stack mem2Stack
+memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 ->
+  MT.mtbsIdenticalAt sym stackRegion (MT.memArr mem1) (MT.memArr mem2)
 
 regPredRel ::
   forall sym arch.

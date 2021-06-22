@@ -409,8 +409,8 @@ flatVars simVars =
       MM.regStateMap $
       (simVarRegs simVars)
     regVars = concat $ map (\(MapF.Pair _ (PSR.MacawRegVar _ vars)) -> TFC.toListFC Some vars) regVarPairs
-    MT.MemTraceVar memVar = simVarMem simVars
-  in ((Some memVar):regVars)
+    MT.MemTraceBytes varReg varOff varSubOff = simVarMem simVars
+  in (Some varReg:Some varOff:Some varSubOff:regVars)
 
 flatVarBinds ::
   forall sym arch bin.
@@ -441,9 +441,12 @@ flatVarBinds sym simVars mem regs = do
       CT.StructRepr Ctx.Empty -> return []
       repr -> error ("flatVarBinds: unsupported type " ++ show repr)
 
-  MT.MemTraceVar memVar <- return $ simVarMem simVars
-  let memBind = VarBinding memVar (MT.memArr mem)   
-  return $ ((Some memBind):regVarBinds)
+  let MT.MemTraceBytes varReg varOff varSub = simVarMem simVars
+      MT.MemTraceBytes valReg valOff valSub = MT.memArr mem
+      regBind = VarBinding varReg valReg
+      offBind = VarBinding varOff valOff
+      subBind = VarBinding varSub valSub
+  return $ (Some regBind:Some offBind:Some subBind:regVarBinds)
 
 
 bindSpec ::
