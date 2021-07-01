@@ -24,7 +24,6 @@ import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
-import           Data.Word ( Word16 )
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP

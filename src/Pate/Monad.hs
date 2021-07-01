@@ -692,14 +692,6 @@ memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
 
-mapExpr' ::
-  PEM.ExprMappable sym f =>
-  (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
-  f ->
-  EquivM sym arch f
-mapExpr' f e = withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a) ) e
-
 --------------------------------------
 -- UnliftIO
 

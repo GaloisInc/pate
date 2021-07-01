@@ -33,7 +33,6 @@ import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
-import qualified Data.Traversable as DT
 import           Data.Word ( Word64 )
 
 import qualified Data.Macaw.BinaryLoader as MBL

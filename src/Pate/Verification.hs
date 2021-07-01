@@ -31,7 +31,6 @@ import           GHC.Stack ( HasCallStack )
 
 import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( void, unless )
-import qualified Control.Concurrent as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
@@ -926,11 +925,6 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             , PF.prfBlockSliceTrans = blockSlice
             }
   return (precond, prf)
-  where
-    joinCase :: (a, (Par.Future b, c)) -> EquivM sym arch (a, (b, c))
-    joinCase (a, (bf, c)) = do
-      b <- Par.joinFuture bf
-      return (a, (b, c))
 
 withNoFrameGuessing ::
   Bool -> EquivM_ sym arch f -> EquivM_ sym arch f

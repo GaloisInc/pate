@@ -78,37 +78,31 @@ module Pate.Types
   , equivSuccess
   , ppEquivalenceStatistics
   , ppBlock
-  --, showModelForExpr
-  , mapExprPtr
-  , freshPtr
   , ptrEquality
   )
 where
 
-import           GHC.Stack
+import           GHC.Stack ( CallStack, prettyCallStack )
 
-import           Control.Exception
+import           Control.Exception ( Exception )
 import           Control.Lens hiding ( op, pre )
-import           Control.Monad.Except
+import           Control.Monad ( join )
 
-import qualified Data.BitVector.Sized as BVS
 import           Data.IntervalMap (IntervalMap)
 import qualified Data.IntervalMap as IM
 import qualified Data.Kind as DK
 import           Data.Map ( Map )
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
-import           Data.Set (Set)
-import qualified Data.Set as S
-import           Data.Typeable
+import           Data.Proxy ( Proxy(..) )
+import           Data.Typeable ( Typeable )
 import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as PN
-import           Data.Parameterized.Some
+import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.TraversableFC as TFC
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
@@ -120,12 +114,10 @@ import qualified Data.Macaw.Symbolic as MS
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
-import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Solver as WS
 
 import qualified Pate.Parallel as PP
 import qualified Pate.Arch as PA
-import           What4.ExprHelpers
 import qualified Pate.ExprMappable as PEM
 
 ----------------------------------
@@ -618,36 +610,6 @@ ppEquivalenceStatistics (EquivalenceStatistics checked equiv err) = unlines
 
 --------------------------------
 
-freeExprTerms :: forall sym t st fs tp.
-  sym ~ W4B.ExprBuilder t st fs =>
-  W4.SymExpr sym tp ->
-  IO (Set (Some (W4.SymExpr sym)))
-freeExprTerms expr = do
-  cache <- W4B.newIdxCache
-  let
-    go :: forall tp'. W4.SymExpr sym tp' -> IO (Const (Set (Some (W4.SymExpr sym))) tp')
-    go e = W4B.idxCacheEval cache e $ case e of
-      W4B.BoundVarExpr _ -> return $ Const $ S.singleton (Some e)
-      W4B.AppExpr appExpr -> do
-        TFC.foldrMFC (collect @tp') mempty $ W4B.appExprApp appExpr
-      W4B.NonceAppExpr naeE | W4B.FnApp fn args <- W4B.nonceExprApp naeE ->
-        case W4B.symFnInfo fn of
-          W4B.UninterpFnInfo _ _ -> TFC.foldrMFC (collect @tp') mempty args
-          -- FIXME : collect terms from function body as well?
-          W4B.DefinedFnInfo _ _ _ -> TFC.foldrMFC (collect @tp') mempty args
-          _ -> return $ mempty
-      _ -> return $ mempty
-    collect ::
-      forall tp'' tp'.
-      W4.SymExpr sym tp' ->
-      Const (Set (Some (W4.SymExpr sym))) tp'' ->
-      IO (Const (Set (Some (W4.SymExpr sym))) tp'')
-    collect e (Const s) = do
-      Const s' <- go e
-      return $ Const $ S.union s s'
-  getConst <$> go expr
-
-
 -- showModelForExpr :: forall sym tp.
 --   SymGroundEvalFn sym ->
 --   W4.SymExpr sym tp ->
@@ -667,13 +629,12 @@ freeExprTerms expr = do
 --       gv <- execGroundFnIO fn e
 --       return $ s ++ "\n" ++ show e ++ " :== " ++ showGroundValue (W4.exprType e) gv
 
-showGroundValue ::
-  W4.BaseTypeRepr tp ->
-  W4G.GroundValue tp ->
-  String
-showGroundValue repr gv = case repr of
-  W4.BaseBoolRepr -> show gv
-  W4.BaseBVRepr w -> BVS.ppHex w gv
-  W4.BaseIntegerRepr -> show gv
-  _ -> "Unsupported ground value"
-
+-- showGroundValue ::
+--   W4.BaseTypeRepr tp ->
+--   W4G.GroundValue tp ->
+--   String
+-- showGroundValue repr gv = case repr of
+--   W4.BaseBoolRepr -> show gv
+--   W4.BaseBVRepr w -> BVS.ppHex w gv
+--   W4.BaseIntegerRepr -> show gv
+--   _ -> "Unsupported ground value"
