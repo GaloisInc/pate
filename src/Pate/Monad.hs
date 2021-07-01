@@ -45,7 +45,9 @@ module Pate.Monad
   , emitEvent
   , emitWarning
   , getBinCtx
+  , SymGroundEvalFn
   , execGroundFn
+  , withGroundEvalFn
   , getFootprints
   , memOpCondition
   -- sat helpers
@@ -64,26 +66,35 @@ module Pate.Monad
   , withAssumptionFrame
   , withAssumptionFrame'
   , withAssumptionFrame_
+  , withEmptyAssumptionFrame
   , applyAssumptionFrame
   , applyCurrentFrame
   -- nonces
   , freshNonce
   , withProofNonce
+  -- caching
+  , BlockCache
+  , lookupBlockCache
+  , modifyBlockCache
+  , freshBlockCache
   )
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Control.Monad.Fail as MF
+import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
+import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
-import           Control.Monad.Catch hiding ( catch, catches, Handler )
+import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import           Control.Monad.Reader
 import           Control.Monad.Except
 import           Control.Monad.State
 
 import qualified Data.ElfEdit as E
 import           Data.Map (Map)
+import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Time as TM
@@ -108,7 +119,7 @@ import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic as MS
 
-
+import           What4.Utils.Process (filterAsync)
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
@@ -184,7 +195,46 @@ data EquivEnv sym arch where
     , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
     -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
+    , envParentBlocks :: [BlockPair arch]
+    -- ^ all block pairs on this path from the toplevel
+    , envProofCache :: ProofCache sym arch
+    -- ^ cache for intermediate proof results
+    , envExitPairsCache :: ExitPairCache arch
+    -- ^ cache for intermediate proof results
     } -> EquivEnv sym arch
+
+type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
+
+type ExitPairCache arch = BlockCache arch [PatchPair (BlockTarget arch)]
+
+data BlockCache arch a where
+  BlockCache :: IO.MVar (Map (BlockPair arch) a) -> BlockCache arch a
+
+freshBlockCache ::
+  IO (BlockCache arch a)
+freshBlockCache = BlockCache <$> IO.newMVar M.empty
+
+lookupBlockCache ::
+  (EquivEnv sym arch -> BlockCache arch a) ->
+  BlockPair arch ->
+  EquivM sym arch (Maybe a)
+lookupBlockCache f pPair = do
+  BlockCache cache <- asks f
+  cache' <- liftIO $ IO.readMVar cache
+  case M.lookup pPair cache' of
+    Just r -> return $ Just r
+    Nothing -> return Nothing
+
+modifyBlockCache ::
+  (EquivEnv sym arch -> BlockCache arch a) ->
+  BlockPair arch ->
+  (a -> a -> a) ->
+  a ->
+  EquivM sym arch ()
+modifyBlockCache f pPair merge val = do
+  BlockCache cache <- asks f
+  liftIO $ IO.modifyMVar_ cache
+    (\m -> return $ M.insertWith merge pPair val m)  
 
 freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
 freshNonce = do
@@ -422,6 +472,12 @@ withAssumptionFrame' asmf f = withSym $ \sym -> do
       (frame', a) <- f
       applyAssumptionFrame (asmFrame <> frame') a
 
+withEmptyAssumptionFrame ::
+  EquivM sym arch f ->
+  EquivM sym arch f
+withEmptyAssumptionFrame f =
+  local (\env -> env { envCurrentFrame = mempty }) $ f
+
 applyCurrentFrame ::
   forall sym arch f.
   PEM.ExprMappable sym f =>
@@ -488,6 +544,9 @@ withSatAssumption timeout asmf f = do
 --------------------------------------
 -- Sat helpers
 
+data SymGroundEvalFn sym where
+  SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
+
 -- | Check a predicate for satisfiability (in our monad)
 --
 -- FIXME: Add a facility for saving the SMT problem under the given name
@@ -501,22 +560,29 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   envFrame <- asks envCurrentFrame
   assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
-
+ -- handle <- liftIO $ IO.openFile "solver.out" IO.WriteMode
+  
   -- Set up a wrapper around the ground evaluation function that removes some
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
   let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings timeout sym adapter goal
+  r <- IO.withRunInIO $ \runInIO -> do
+    tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= k))
+
+  case r of
+    Left (_ :: SomeException) -> throwHere InconclusiveSAT
+    Right r' -> return r'
 
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
   => PT.Timeout
   -> sym
+  -> Maybe IO.Handle
   -> WSA.SolverAdapter st
   -> W4B.BoolExpr t
   -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
   -> IO a
-checkSatisfiableWithoutBindings timeout sym adapter p k =
+checkSatisfiableWithoutBindings timeout sym mhandle adapter p k =
   case PT.timeoutAsMicros timeout of
     Nothing -> doCheckSat
     Just micros -> do
@@ -525,11 +591,10 @@ checkSatisfiableWithoutBindings timeout sym adapter p k =
         Nothing -> k W4R.Unknown
         Just r -> return r
   where
-    doCheckSat = WSA.solver_adapter_check_sat adapter sym WSA.defaultLogData [p] $ \sr ->
-      case sr of
-        W4R.Unsat core -> k (W4R.Unsat core)
-        W4R.Unknown -> k W4R.Unknown
-        W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
+    doCheckSat = WSA.solver_adapter_check_sat adapter sym (WSA.defaultLogData { WSA.logHandle = mhandle }) [p] $ \sr -> case sr of
+         W4R.Unsat core -> k (W4R.Unsat core)
+         W4R.Unknown -> k W4R.Unknown
+         W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
 isPredSat ::
   PT.Timeout ->
@@ -590,17 +655,25 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   joinFuture future = withValid $ catchInIO $ Par.joinFuture future
   forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
 
+withGroundEvalFn ::
+  SymGroundEvalFn sym ->
+  (forall t st fs. sym ~ W4B.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
+  EquivM sym arch a
+withGroundEvalFn fn f = withValid $
+  IO.withRunInIO $ \runInIO -> f $ W4G.GroundEvalFn (\e -> runInIO (execGroundFn fn e))
+
 execGroundFn ::
   forall sym arch tp.
   HasCallStack =>
   SymGroundEvalFn sym  -> 
   W4.SymExpr sym tp -> 
   EquivM sym arch (W4G.GroundValue tp)  
-execGroundFn gfn e = do
+execGroundFn (SymGroundEvalFn fn) e = do
   groundTimeout <- asks (PC.cfgGroundTimeout . envConfig)
-  result <- liftIO $ (PT.timeout' groundTimeout $ execGroundFnIO gfn e) `catches`
+  result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`
     [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
     , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
+    , Handler (\(ie :: IOError) -> liftIO (putStrLn ("IOErr: " ++ show ie)) >> return Nothing)
     ]
   case result of
     Just a -> return a
@@ -618,6 +691,14 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
+
+mapExpr' ::
+  PEM.ExprMappable sym f =>
+  (forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)) ->
+  f ->
+  EquivM sym arch f
+mapExpr' f e = withSym $ \sym ->
+  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\a -> runInIO (f a) ) e
 
 --------------------------------------
 -- UnliftIO

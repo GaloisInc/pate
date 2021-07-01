@@ -28,8 +28,10 @@ module Pate.Verification
 import           Prelude hiding ( fail )
 
 import           GHC.Stack ( HasCallStack )
+
 import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( void, unless )
+import qualified Control.Concurrent as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
@@ -72,6 +74,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.Map as MapF
 
 import qualified Lang.Crucible.Backend.Simple as CB
@@ -210,7 +213,8 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
   -- are not practical to recover without major refactoring.  This is just as
   -- safe but makes things significantly easier.
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
-
+  prfCache <- liftIO $ freshBlockCache
+  ePairCache <- liftIO $ freshBlockCache
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -257,6 +261,9 @@ verifyPairs logAction mhints elf elf' blockMap vcfg pPairs = do
       , envNonceGenerator = gen
       , envParentNonce = Some topNonce
       , envUndefPointerOps = undefops
+      , envParentBlocks = mempty
+      , envProofCache = prfCache
+      , envExitPairsCache = ePairCache
       }
 
   liftIO $ do
@@ -557,26 +564,25 @@ withSimBundle ::
   BlockPair arch ->
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)
-withSimBundle pPair f = withSym $ \sym -> do
-  results <- CMS.gets stSimResults
-  bundleSpec <- case M.lookup pPair results of
-    Just bundleSpec -> return bundleSpec    
-    Nothing -> do
-      bundleSpec <- withFreshVars $ \stO stP -> do
-        let
-          simInO_ = SimInput stO (pOriginal pPair)
-          simInP_ = SimInput stP (pPatched pPair)
-        withAssumptionFrame' (validInitState (Just pPair) stO stP) $ do
-          (asmO, simOutO_) <- simulate simInO_
-          (asmP, simOutP_) <- simulate simInP_
-          (asmO', simOutO') <- withAssumptionFrame (validConcreteReads simOutO_) $ return simOutO_
-          (asmP', simOutP') <- withAssumptionFrame (validConcreteReads simOutP_) $ return simOutP_
+withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
+  withFreshVars $ \stO stP -> do
+    let
+      simInO_ = SimInput stO (pOriginal pPair)
+      simInP_ = SimInput stP (pPatched pPair)
 
-          asm <- liftIO $ allPreds sym [asmO, asmP, asmO', asmP']
-          return $ (frameAssume asm, SimBundle (PatchPair simInO_ simInP_) (PatchPair simOutO' simOutP'))
-      CMS.modify' $ \st -> st { stSimResults = M.insert pPair bundleSpec (stSimResults st) }
-      return bundleSpec
-  withSimSpec bundleSpec $ \_ _ bundle -> f bundle
+    withAssumptionFrame' (validInitState (Just pPair) stO stP) $ do
+      liftIO $ putStrLn "simulating.."
+      (asmO, simOutO_) <- simulate simInO_
+      (asmP, simOutP_) <- simulate simInP_
+      liftIO $ putStrLn "done"
+      (_, simOutO') <- withAssumptionFrame (validConcreteReads simOutO_) $ return simOutO_
+      (_, simOutP') <- withAssumptionFrame (validConcreteReads simOutP_) $ return simOutP_
+      
+      (asm,r) <- withAssumption (liftIO $ allPreds sym [asmO, asmP]) $ do
+        let bundle = SimBundle (PatchPair simInO_ simInP_) (PatchPair simOutO' simOutP')
+        bundle' <- applyCurrentFrame bundle
+        f bundle'
+      return (frameAssume asm, r)
 
 trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
 trivialGlobalMap _ _ reg off = pure (CLM.LLVMPointer reg off)
@@ -676,19 +682,87 @@ initSimContext = withValid $ withSym $ \sym -> do
 
 -- | Update 'envCurrentFunc' if the given pair 
 withPair :: BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
-withPair pPair f = case concreteBlockEntry $ pOriginal pPair of
-  BlockEntryInitFunction -> CMR.local (\env -> env { envCurrentFunc = pPair}) $ f
-  _ -> f
+withPair pPair f = do
+  env <- CMR.ask
+  let env' = env { envParentBlocks = pPair:envParentBlocks env }
+  case concreteBlockEntry $ pOriginal pPair of
+    BlockEntryInitFunction -> CMR.local (\_ -> env' { envCurrentFunc = pPair }) f
+    _ -> CMR.local (\_ -> env') f
 
 provePostcondition ::
   HasCallStack =>
   BlockPair arch ->
   StatePredSpec sym arch ->
   EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-provePostcondition pPair postcondSpec = startTimer $ withPair pPair $ do
+provePostcondition pPair postcondSpec = do
+  liftIO $ putStrLn "provePostcondition"
   emitPreamble pPair
-  fmap unzipProof $ withSimBundle pPair $ \bundle ->
+  catchSimBundle pPair postcondSpec $ \bundle ->
     provePostcondition' bundle postcondSpec
+
+catchSimBundle ::
+  forall sym arch ret.
+  ret ~ (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType) =>
+  BlockPair arch ->
+  StatePredSpec sym arch ->
+  (SimBundle sym arch -> EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)  ) ->
+  EquivM sym arch ret
+catchSimBundle pPair postcondSpec f = do
+  pblks <- CMR.asks envParentBlocks
+  cached <- concat <$> lookupBlockCache envProofCache pPair
+  firstCached cached >>= \case
+    Just r -> return r
+    Nothing -> withPair pPair $ do
+      liftIO $ putStrLn (show pblks)
+      (precondSpec, prf) <- case elem pPair pblks of
+        True -> do
+          liftIO $ putStrLn "loop detected"
+          errorResult
+        False -> (manifestError $ withSimBundle pPair $ f) >>= \case
+          Left _ -> errorResult
+          Right r -> return $ unzipProof r
+      let triple = fmap (\precond -> PF.EquivTripleBody pPair precond postcondSpec) precondSpec
+      future <- PFO.asFutureNonceApp prf
+      modifyBlockCache envProofCache pPair (++) [(triple, future)]
+      return $ (precondSpec, prf)
+  where
+    firstCached (x:xs) = getCached x >>= \case
+      Just r -> return $ Just r
+      Nothing -> firstCached xs
+    firstCached [] = return Nothing
+    
+    getCached ::
+      (PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType)) ->
+      EquivM sym arch (Maybe ret)
+    getCached (triple, futureProof) = do
+      liftIO $ putStrLn "checking cached result.."
+      impliesPostcond (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
+        True -> do
+          liftIO $ putStrLn "cache hit!"
+          prf' <- PFO.wrapFutureNonceApp futureProof
+          return $ Just (fmap PF.eqPreDomain triple, prf')
+        False -> do
+          liftIO $ putStrLn "cache miss"
+          return Nothing
+    
+    errorResult :: EquivM sym arch ret
+    errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars $ \stO stP -> do
+      let
+        simInO_ = SimInput stO (pOriginal pPair)
+        simInP_ = SimInput stP (pPatched pPair)
+      r <- trivialBlockSlice False (PatchPair simInO_ simInP_) postcondSpec
+      return $ (W4.truePred sym, r)
+
+impliesPostcond ::
+  StatePredSpec sym arch ->
+  StatePredSpec sym arch ->
+  EquivM sym arch Bool
+impliesPostcond stPredAsm stPredConcl = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  fmap specBody $ withFreshVars $ \stO stP -> do
+    p <- liftIO $ impliesPostcondPred sym (PT.PatchPair stO stP) stPredAsm stPredConcl
+    b <- isPredTrue' heuristicTimeout p
+    return $ (W4.truePred sym, b)
 
 data BranchCase sym arch =
   BranchCase
@@ -714,20 +788,29 @@ unzipProof spec = (fmap fst spec, snd $ specBody spec)
 -- Currently this is used to model syscalls, since we don't have a more precise
 -- semantics to decide the conditions under which they are equivalent.
 trivialBlockSlice ::
-  SimBundle sym arch ->
+  forall sym arch.
+  Bool  ->
+  PatchPair (SimInput sym arch) ->
   StatePredSpec sym arch ->
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-trivialBlockSlice bundle postcondSpec = do
-  transition <- PFO.noTransition (simIn bundle) (simOutBlockEnd $ simOutO bundle)
-  PFO.lazyProofEvent (simPair bundle) $ do
-    preUniv <- universalDomain
-    preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle preUniv
-    postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    status <- PFO.lazyProofApp $ PF.ProofStatus PF.VerificationSkipped
-    triple <- PFO.lazyProofApp $ PF.ProofTriple (simPair bundle) preDomain postDomain status
-    let prf = PF.ProofBlockSlice triple [] Nothing Nothing transition
-    return (preUniv, prf)
-
+trivialBlockSlice isSkipped in_ postcondSpec = withSym $ \sym -> do
+  blkEnd <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
+  transition <- PFO.noTransition in_ blkEnd
+  preUniv <- universalDomain
+  prf <- PFO.lazyProofEvent_ pPair $ do
+    triple <- PFO.lazyProofEvent_ pPair $ do
+      preDomain <- fmap PFO.asLazyProof $ PFO.proofNonceExpr $
+         PF.appDomain <$> PFO.statePredToDomain (TF.fmapF simInState in_) preUniv
+      postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+      status <- PFO.lazyProofApp $ case isSkipped of
+        True -> PF.ProofStatus PF.VerificationSkipped
+        False -> PF.ProofStatus PF.Unverified
+      return $ PF.ProofTriple pPair preDomain postDomain status
+    return $ PF.ProofBlockSlice triple [] Nothing Nothing transition
+  return (preUniv, prf)
+  where
+    pPair :: BlockPair arch
+    pPair = TF.fmapF simInBlock in_
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -739,9 +822,11 @@ provePostcondition' ::
   StatePredSpec sym arch ->
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ withSym $ \sym -> do
+  liftIO $ putStrLn "finding pairs..."
   pairs <- PD.discoverPairs bundle
+  liftIO $ putStrLn (show (length pairs) ++ " pairs found!")
   -- find all possible exits and propagate the postcondition backwards from them
-  funCallProofCases <- DT.forM pairs $ \(blktO, blktP) ->  do
+  funCallProofCases <- DT.forM pairs $ \(PatchPair blktO blktP) ->  do
     withAssumption (PD.matchesBlockTarget bundle blktO blktP) $
       PFO.lazyProofEvent (simPair bundle) $ do
       let
@@ -756,14 +841,14 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             _ -> throwHere $ BlockExitMismatch
           withNoFrameGuessing isSyscall $ do
             (contPre, contPrf) <- provePostcondition (PatchPair blkRetO blkRetP) postcondSpec
-            (funCallPre, funCallSlicePrf) <- fmap unzipProof $ withSimBundle pPair $ \bundleCall -> do
+            (funCallPre, funCallSlicePrf) <- catchSimBundle pPair postcondSpec $ \bundleCall -> do
               -- equivalence condition for when this function returns
               case isSyscall of
                 -- for arch exits (i.e. syscalls) we assume that equivalence will hold on
                 -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
                 -- treated as an uninterpreted function that reads the entire machine state
                 -- this can be relaxed with more information about the specific call
-                True -> trivialBlockSlice bundleCall postcondSpec
+                True -> trivialBlockSlice True (simIn bundle)  postcondSpec
                 False -> do
                   emitPreamble pPair
                   -- equivalence condition for calling this function
@@ -814,6 +899,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     univDom <- universalDomainSpec
     withNoFrameGuessing True $ proveLocalPostcondition bundle univDom
 
+  --funCallProofCases' <- mapM joinCase funCallProofCases
   let
     funCallCases = map (\(p, (br, _)) -> (p, br)) funCallProofCases
     funCallProofs = map (\(_, (br, prf)) -> (branchBlocks br, prf)) funCallProofCases
@@ -840,7 +926,11 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             , PF.prfBlockSliceTrans = blockSlice
             }
   return (precond, prf)
-  
+  where
+    joinCase :: (a, (Par.Future b, c)) -> EquivM sym arch (a, (b, c))
+    joinCase (a, (bf, c)) = do
+      b <- Par.joinFuture bf
+      return (a, (b, c))
 
 withNoFrameGuessing ::
   Bool -> EquivM_ sym arch f -> EquivM_ sym arch f
@@ -887,9 +977,11 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   (_, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
 
+  liftIO $ putStrLn "guessing equivalence domain.."
   eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle postcondPred postcond
-
+  liftIO $ putStrLn "done"
+  
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
@@ -904,7 +996,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
-    result <- PFO.forkProofEvent (simPair bundle) $ do
+    result <- PFO.forkProofEvent_ (simPair bundle) $ do
         status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
           checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
             case satRes of
@@ -1160,13 +1252,12 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
       eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
 
       -- see if we can prove that the goal is independent of this clobbering
-      asm <- liftIO $ allPreds sym [p, eqMemP, goal]
-      check <- liftIO $ W4.impliesPred sym asm goal'
       heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-      result <- isPredTruePar' heuristicTimeout check
-      Par.forFuture result $ \case
-        True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
-        False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
+      withAssumption_ (liftIO $ allPreds sym [p, eqMemP, goal]) $ do
+        result <- isPredTruePar' heuristicTimeout goal'
+        Par.forFuture result $ \case
+          True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
+          False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
     False -> Par.present $ liftIO $ W4.notPred sym polarity
   Par.joinFuture (result :: Par.Future (MemPred sym arch))
   where
@@ -1644,7 +1735,7 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
 
   notCheck <- liftIO $ W4.notPred sym someCase
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  PFO.forkProofEvent (simPair bundle) $ 
+  PFO.forkProofEvent_ (simPair bundle) $ 
     checkSatisfiableWithModel goalTimeout "checkCasesTotal" notCheck $ \satRes -> do
     let
       emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)

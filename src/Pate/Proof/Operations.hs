@@ -18,6 +18,7 @@ module Pate.Proof.Operations
   ( simBundleToSlice
   , noTransition
   , emptyDomain
+  , statePredToDomain
   , statePredToPreDomain
   , statePredToPostDomain
   , blockSliceBlocks
@@ -30,12 +31,16 @@ module Pate.Proof.Operations
   , joinLazyProof
   , asLazyProof
   , forkProof
+  , proofNonceExpr
   , lazyProofFinal
   , lazyProofEvent
   , lazyProofEvent_
   , forkProofFinal
+  , forkProofEvent_
   , forkProofEvent
   , flattenDomainConditions
+  , wrapFutureNonceApp
+  , asFutureNonceApp
   ) where
 
 import qualified Control.Monad.Reader as CMR
@@ -70,6 +75,10 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
 import qualified Pate.Parallel as Par
 import qualified Pate.Arch as PA
+import qualified What4.ExprHelpers as WEH
+import qualified What4.Expr.Builder as W4B
+
+import qualified Prettyprinter as PP
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -202,18 +211,16 @@ noTransition stIn blockEnd = do
 -- the corresponding types
 
 statePredToDomain ::
-  PA.ValidArch arch =>
-  PT.ValidSym sym =>
-  sym ->
   PT.PatchPair (PS.SimState sym arch) ->
   PE.StatePred sym arch ->
   EquivM sym arch (PFI.SymDomain sym arch)
-statePredToDomain sym states stPred = do
-  dom <- PF.ProofDomain
-    <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
-    <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
-    <*> (return $ memPredToDomain $ PE.predMem stPred)
-    <*> (return states)
+statePredToDomain states stPred = withSym $ \sym -> do
+  dom <-
+    PF.ProofDomain
+      <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
+      <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
+      <*> (return $ memPredToDomain $ PE.predMem stPred)
+      <*> (return states)
   return $ PF.ProofExpr dom
 
 flattenToStackRegion ::
@@ -259,24 +266,24 @@ statePredToPreDomain ::
   PS.SimBundle sym arch ->
   PE.StatePred sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-statePredToPreDomain bundle stPred = proofNonceExpr $ withSym $ \sym -> do
-  PF.appDomain <$> statePredToDomain sym states stPred
+statePredToPreDomain bundle stPred = proofNonceExpr $ do
+  PF.appDomain <$> statePredToDomain states stPred
   where
     states = TF.fmapF PS.simInState $ PS.simIn bundle
 
 statePredToPostDomain ::
   PE.StatePredSpec sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-statePredToPostDomain stPredSpec = proofNonceExpr $ withSym $ \sym -> do
+statePredToPostDomain stPredSpec = proofNonceExpr $ do
   let
     states = TF.fmapF PS.simVarState $ PS.specVars stPredSpec
     stPred = PS.specBody stPredSpec
-  PF.appDomain <$> statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain states stPred
 
 
 emptyDomain :: EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
 emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP -> do
-  dom <- PF.appDomain <$> statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym)
+  dom <- PF.appDomain <$> statePredToDomain (PT.PatchPair stO stP) (PE.statePredFalse sym)
   return $ (W4.truePred sym, dom)
 
 proofNonceExpr ::
@@ -381,26 +388,34 @@ asLazyProofApp app = LazyProofBodyApp $ PF.mapProofApp asLazyProof app
 forkProof ::
   EquivM sym arch (LazyProofApp sym arch tp) ->
   EquivM sym arch (LazyProof sym arch tp)
-forkProof f = forkProofFinal f (\_ -> return ())
+forkProof f = snd <$> forkProofFinal (f >>= \app -> return ((), app)) (\_ -> return ())
 
 -- | Same as 'forkProof' but with an additional action that runs after the
 -- proof has completed.
 forkProofFinal ::
-  forall sym arch tp.
-  EquivM sym arch (LazyProofApp sym arch tp) ->
+  forall sym arch tp a.
+  EquivM sym arch (a, LazyProofApp sym arch tp) ->
   (PFI.ProofSymNonceExpr sym arch tp -> EquivM sym arch ()) ->
-  EquivM sym arch (LazyProof sym arch tp)
-forkProofFinal f fin = snd <$> mkLazyProof go fin
+  EquivM sym arch (Par.Future a, LazyProof sym arch tp)
+forkProofFinal f fin = mkLazyProof go fin
   where
-    go :: EquivM sym arch ((), LazyProofBody sym arch tp)
+    go :: EquivM sym arch (Par.Future a, LazyProofBody sym arch tp)
     go = do
-      future <- Par.promise (f >>= joinLazyProofApp)
-      return ((), LazyProofBodyFuture future)
+      future <- Par.promise (f >>= \(a, app) -> (,) <$> pure a <*> joinLazyProofApp app)
+      futurePrf <- Par.forFuture future (\(_,prf) -> return prf)
+      futureRes <- Par.forFuture future (\(a,_) -> return a)
+      return (futureRes, LazyProofBodyFuture futurePrf)
 
-forkProofEvent ::
+forkProofEvent_ ::
   PT.BlockPair arch ->
   EquivM sym arch (LazyProofApp sym arch tp) ->
   EquivM sym arch (LazyProof sym arch tp)
+forkProofEvent_ ppair f = snd <$> forkProofEvent ppair (f >>= \app -> return ((), app)) 
+
+forkProofEvent ::
+  PT.BlockPair arch ->
+  EquivM sym arch (a, LazyProofApp sym arch tp) ->
+  EquivM sym arch (Par.Future a, LazyProof sym arch tp)
 forkProofEvent ppair f = forkProofFinal f $ \e -> do
   blocks <- PD.getBlocks ppair 
   vsym <- CMR.asks envValidSym
@@ -417,3 +432,15 @@ joinLazyProof prf = withValid $ do
   let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app
   liftIO $ lazyProofFinalize prf nonce_prf
   return nonce_prf
+
+asFutureNonceApp ::
+  LazyProof sym arch tp ->
+  EquivM sym arch (Par.Future (PFI.ProofSymNonceApp sym arch tp))
+asFutureNonceApp prf = case lazyProofBody prf of
+  LazyProofBodyFuture future -> return future
+  LazyProofBodyApp app -> Par.present $ joinLazyProofApp app
+
+wrapFutureNonceApp ::
+  Par.Future (PFI.ProofSymNonceApp sym arch tp) ->
+  EquivM sym arch (LazyProof sym arch tp)
+wrapFutureNonceApp future = snd <$> mkLazyProof (return ((), LazyProofBodyFuture future)) (\_ -> return ())

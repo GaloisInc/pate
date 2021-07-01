@@ -46,10 +46,12 @@ module Pate.Equivalence
   , getPostcondition
   , getPrecondition
   , impliesPrecondition
+  , impliesPostcondPred
   , footPrintsToPred
   , addFootPrintsToPred
   , statePredFalse
   , memPredToList
+  , memPredCells
   , listToMemPred
   , memPredPre
   , equalValuesIO
@@ -84,6 +86,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Arch as PA
 import qualified Pate.ExprMappable as PEM
@@ -166,6 +169,10 @@ memPredToList memPred =
   concat $
   map (\(MapF.Pair _ (PMC.MemCells cells)) -> map (\(cell, p) -> (Some cell, p)) $ M.toList cells) $
   MapF.toList (memPredLocs memPred)
+
+memPredCells ::
+  OrdF (W4.SymExpr sym) => MemPred sym arch -> Set (Some (PMC.MemCell sym arch))
+memPredCells memPred = S.fromList $ map fst (memPredToList memPred)
 
 listToMemPred ::
   W4.IsExprBuilder sym =>
@@ -440,6 +447,47 @@ impliesPrecondition sym stackRegion inO inP eqRel stPredAsm stPredConcl = do
   asm <- statePredPre sym stackRegion inO inP eqRel stPredAsm
   concl <- statePredPre sym stackRegion inO inP eqRel stPredConcl
   W4.impliesPred sym asm concl
+
+impliesPostcondPred ::
+  forall sym arch s st fs.
+  sym ~ W4B.ExprBuilder s st fs =>
+  PA.ValidArch arch =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  PT.PatchPair (SimState sym arch) ->
+  -- | assumed (i.e. stronger) post-condition
+  StatePredSpec sym arch ->
+  -- | implies (i.e. weaker) post-condition
+  StatePredSpec sym arch ->
+  IO (W4.Pred sym)  
+impliesPostcondPred sym (PT.PatchPair stO stP) stPredAsmSpec stPredConclSpec = do
+  (precondAsm, stPredAsm) <- bindSpec sym stO stP stPredAsmSpec
+  (precondConcl, stPredConcl) <- bindSpec sym stO stP stPredConclSpec
+  regImp <- allPreds sym =<< mapM (getReg stPredAsm) (M.assocs (predRegs stPredConcl))
+  let
+    stackCells = S.toList $ memPredCells (predStack stPredAsm) <> memPredCells (predStack stPredConcl)
+    memCells = S.toList $ memPredCells (predMem stPredAsm) <> memPredCells (predMem stPredConcl)
+  stackImp <- allPreds sym =<< mapM (getMem (predStack stPredAsm) (predStack stPredConcl)) stackCells
+  globalImp <- allPreds sym =<< mapM (getMem (predMem stPredAsm) (predMem stPredConcl)) memCells
+  allImps <- allPreds sym [precondConcl, regImp, stackImp, globalImp]
+  W4.impliesPred sym precondAsm allImps
+  where
+    getMem ::
+      MemPred sym arch ->
+      MemPred sym arch ->
+      (Some (PMC.MemCell sym arch)) ->
+      IO (W4.Pred sym)
+    getMem memAsm memConcl (Some cell) = do
+     mAsm <- memPredAt sym memAsm cell
+     mConcl <- memPredAt sym memConcl cell
+     W4.impliesPred sym mAsm mConcl
+      
+    getReg ::
+      StatePred sym arch ->
+      (Some (MM.ArchReg arch), W4.Pred sym) ->
+      IO (W4.Pred sym)
+    getReg stPredAsm (Some r, p) =
+      W4.impliesPred sym (regPredAt sym r stPredAsm) p
 
 -- | Resolve a domain predicate and equivalence relation into a postcondition and associated
 -- structured equivalence relation (for reporting counterexamples)
