@@ -566,7 +566,12 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
   let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
-  runInIO1 (mkResult >=> k) $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal
+  r <- IO.withRunInIO $ \runInIO -> do
+    tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= k))
+
+  case r of
+    Left (_ :: SomeException) -> throwHere InconclusiveSAT
+    Right r' -> return r'
 
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
