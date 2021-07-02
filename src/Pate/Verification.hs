@@ -712,7 +712,7 @@ catchSimBundle pPair postcondSpec f = do
   firstCached cached >>= \case
     Just r -> return r
     Nothing -> withPair pPair $ do
-      liftIO $ putStrLn (show pblks)
+      liftIO $ putStrLn ("  catchSimBundle blocks: " ++ show pblks)
       (precondSpec, prf) <- case elem pPair pblks of
         True -> do
           liftIO $ putStrLn "loop detected"
@@ -743,12 +743,16 @@ catchSimBundle pPair postcondSpec f = do
         False -> do
           liftIO $ putStrLn "cache miss"
           return Nothing
-    
+
+    -- FIXME[TR]: Modify all of the error handling to plumb the thrown
+    -- exceptions through with both context and expressive error messages. Then
+    -- stream them out here (and anywhere else where we catch exceptions)
     errorResult :: EquivM sym arch ret
     errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars $ \stO stP -> do
       let
         simInO_ = SimInput stO (pOriginal pPair)
         simInP_ = SimInput stP (pPatched pPair)
+      liftIO $ putStrLn ("Caught an error in " ++ ppBlock (pOriginal pPair) ++ " and making a trivial block slice")
       r <- trivialBlockSlice False (PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
@@ -1014,12 +1018,17 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   blocks <- PD.getBlocks $ simPair bundle
 
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  -- FIXME[TR]: The critical node seems to be missing from the UI. We need to
+  -- figure out if that is just a display issue or if the proof for that node is
+  -- actually failing quietly (or perhaps loudly, but in a way we aren't
+  -- tracking)
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
     result <- PFO.forkProofEvent_ (simPair bundle) $ do
         status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
-          checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
+          liftIO $ putStrLn ("  First SAT check for " ++ ppBlock (simInBlock (simInO bundle)))
+          r <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
             case satRes of
               W4R.Unsat _ -> do
                 emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
@@ -1033,9 +1042,12 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                 ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
                 emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
                 return $ PF.VerificationFail ir
+          liftIO $ putStrLn "  Finished SAT check"
+          return r
         let noCond = fmap (\ir -> (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))) status
         status' <- case status of
           PF.VerificationFail _ -> do
+            liftIO $ putStrLn ("VerificationFail for " ++ ppBlock (simInBlock (simInO bundle)))
             withAssumptionFrame_ (equateInitialStates bundle) $ do
               notGoal <- applyCurrentFrame notChecks
               goal <- applyCurrentFrame postcondPred
@@ -1047,6 +1059,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                     cond <- computeEqCondition bundle sliceState postDomain' notGoal
                     cond' <- weakenEqCondition bundle cond sliceState postDomain' goal
                     cond'' <- checkAndMinimizeEqCondition cond' goal
+                    liftIO $ putStrLn ("Checking for conditional equivalence in " ++ ppBlock (simInBlock (simInO bundle)))
                     checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
                       case satRes of
                         W4R.Sat fn -> do
