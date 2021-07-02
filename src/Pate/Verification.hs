@@ -694,7 +694,7 @@ provePostcondition ::
   StatePredSpec sym arch ->
   EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition pPair postcondSpec = do
-  liftIO $ putStrLn "provePostcondition"
+  liftIO $ putStrLn "  provePostcondition"
   emitPreamble pPair
   catchSimBundle pPair postcondSpec $ \bundle ->
     provePostcondition' bundle postcondSpec
@@ -822,6 +822,15 @@ provePostcondition' ::
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ withSym $ \sym -> do
   liftIO $ putStrLn "finding pairs..."
+  liftIO $ putStrLn ("  " ++ ppBlock (simInBlock (simInO bundle)))
+  -- FIXME: This is the other major call modified in the last set of changes, so
+  -- it looks like it cooperates with this function
+  --
+  -- NOTES:
+  --
+  -- * The failing FunctionPredomain proof nodes are missing the set of
+  --   locations assumed to be equivalent before the call (which seems to enable
+  --   it to easily find counterexamples)
   pairs <- PD.discoverPairs bundle
   liftIO $ putStrLn (show (length pairs) ++ " pairs found!")
   -- find all possible exits and propagate the postcondition backwards from them
@@ -832,14 +841,18 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
         blkO = targetCall blktO
         blkP = targetCall blktP
         pPair = PatchPair blkO blkP
+      liftIO $ putStrLn ("  targetCall: " ++ show blkO)
       case (targetReturn blktO, targetReturn blktP) of
         (Just blkRetO, Just blkRetP) -> do
+          liftIO $ putStrLn ("  Return target " ++ show blkRetO)
           isSyscall <- case (concreteBlockEntry blkO, concreteBlockEntry blkP) of
             (BlockEntryPostArch, BlockEntryPostArch) -> return True
             (entryO, entryP) | entryO == entryP -> return False
             _ -> throwHere $ BlockExitMismatch
+          liftIO $ putStrLn ("  Is Syscall? " ++ show isSyscall)
           withNoFrameGuessing isSyscall $ do
             (contPre, contPrf) <- provePostcondition (PatchPair blkRetO blkRetP) postcondSpec
+            liftIO $ putStrLn ("  finished proving postcondition for " ++ ppBlock (simInBlock (simInO bundle)))
             (funCallPre, funCallSlicePrf) <- catchSimBundle pPair postcondSpec $ \bundleCall -> do
               -- equivalence condition for when this function returns
               case isSyscall of
@@ -847,34 +860,46 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                 -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
                 -- treated as an uninterpreted function that reads the entire machine state
                 -- this can be relaxed with more information about the specific call
-                True -> trivialBlockSlice True (simIn bundle)  postcondSpec
+                True -> do
+                  liftIO $ putStrLn ("  Making a trivial block slice because this is a system call")
+                  trivialBlockSlice True (simIn bundle)  postcondSpec
                 False -> do
+                  liftIO $ putStrLn "  Not a syscall, emitting preamble pair"
                   emitPreamble pPair
                   -- equivalence condition for calling this function
+                  liftIO $ putStrLn "  Recursively proving the postcondition"
                   provePostcondition' bundleCall contPre
 
             -- equivalence condition for the function entry
             branchCase <- proveLocalPostcondition bundle funCallPre
+            liftIO $ putStrLn "  Generating a ProofFunctionCall obligation"
             let
+              md = PF.ProofFunctionCallMetadata { PF.prfFunctionCallMetadataAddress = PT.concreteAddress blkO
+                                                }
               prf = PF.ProofFunctionCall
                       { PF.prfFunctionCallPre = branchProofTriple branchCase
                       , PF.prfFunctionCallBody = funCallSlicePrf
                       , PF.prfFunctionCallContinue = Just contPrf
+                      , PF.prfFunctionCallMetadata = md
                       }
             return (branchCase, prf)
 
         (Nothing, Nothing) -> do
+          liftIO $ putStrLn ("  No return target identified")
           (contPre, contPrf) <- provePostcondition (PatchPair blkO blkP) postcondSpec
           branchCase <- proveLocalPostcondition bundle contPre
           let
+            md = PF.ProofFunctionCallMetadata { PF.prfFunctionCallMetadataAddress = PT.concreteAddress blkO
+                                              }
             prf = PF.ProofFunctionCall
                     { PF.prfFunctionCallPre = branchProofTriple branchCase
                     , PF.prfFunctionCallBody = contPrf
                     , PF.prfFunctionCallContinue = Nothing
+                    , PF.prfFunctionCallMetadata = md
                     }
           return (branchCase, prf)
         _ -> throwHere $ BlockExitMismatch
-
+  liftIO $ putStrLn ("  " ++ show (length funCallProofCases) ++ " call proof case obligations")
   -- if we have a "return" exit, prove that it satisfies the postcondition
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   precondReturn <- withSatAssumption goalTimeout (matchingExits bundle MS.MacawBlockEndReturn) $ do
@@ -971,10 +996,12 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   (_, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
 
-  liftIO $ putStrLn "guessing equivalence domain.."
+  -- FIXME[TR]: Question - is this failing in some of the external call cases?
+  -- It seems like that could explain why some of the preconditions are empty
+  liftIO $ putStrLn ("  guessing equivalence domain for " ++ ppBlock (simInBlock (simInO bundle)))
   eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle postcondPred postcond
-  liftIO $ putStrLn "done"
+  liftIO $ putStrLn ("  done: " ++ show (M.keys (predRegs eqInputs)))
   
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
@@ -1334,6 +1361,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
       isInP <- liftFilterMacaw isBoundInGoal vP
       let
         include = Par.present $ return $ Just (Some r, W4.truePred sym)
+        exclude :: EquivM sym arch (Par.Future (Maybe (Some (MM.ArchReg arch), W4B.Expr t W4.BaseBoolType)))
         exclude = Par.present $ return Nothing
       case registerCase (PSR.macawRegRepr vO) r of
         -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
@@ -1356,11 +1384,33 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
 
             heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
             withAssumption_ (return isFreshValid) $ do
+              -- FIXME[TR]: If this times out, do we get an empty register list? Is that too conservative?
               result <- isPredTruePar' heuristicTimeout goalIgnoresReg
               Par.forFuture result $ \case
-                True -> return Nothing
+                True -> do
+                  liftIO $ putStrLn ("  timeout while computing an equivalence domain for " ++ ppBlock (simInBlock (simInO bundle)))
+                  return Nothing
                 False -> return $ Just (Some r, W4.truePred sym)
-        _ -> exclude
+        _ -> do
+          -- FIXME[TR]: So at least some of the problematic external calls have no variables bound in their goals
+          --
+          -- That could imply that the goals are computed incorrectly. We should investigate what they are.
+          --
+          -- Could it be because there is another external call right before
+          -- this, which would be a strange environment where we really know
+          -- nothing
+          --
+          -- If we knew that the call was external, we could offer up some different logic here
+          --
+          -- FIXME: After fiddling with this (unsafely), it seems that R14 (the
+          -- link register on AArch32) generates a mismatch in the post-state,
+          -- which also makes sense and needs to be accounted for.  The two
+          -- variants can return to different locations when the code shifts.
+          --
+          -- We probably want to exclude the link register (like the IP) because
+          -- we have a concrete value
+          liftIO $ putStrLn ("  Not bound in goal for " ++ ppBlock (simInBlock (simInO bundle)))
+          exclude
   regsDom <- (M.fromList . catMaybes) <$> Par.joinFuture @_ @Par.Future result
   stackRegion <- CMR.asks envStackRegion
   let

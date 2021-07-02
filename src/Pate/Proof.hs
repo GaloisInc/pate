@@ -46,6 +46,7 @@ module Pate.Proof
   , traverseMemDomain
   , emptyDomain
   , appDomain
+  , ProofFunctionCallMetadata(..)
   , ProofNonce(..)
   , proofNonceValue
   , ProofNonceExpr(..)
@@ -207,6 +208,11 @@ data VerificationStatus ce =
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (VerificationStatus a) where
   mapExpr sym f = traverse (PEM.mapExpr sym f)
 
+data ProofFunctionCallMetadata where
+  ProofFunctionCallMetadata ::
+    { prfFunctionCallMetadataAddress :: PT.ConcreteAddress arch
+    } -> ProofFunctionCallMetadata
+
 -- | An abstract proof object, representing the overall structure of an equivalence proof.
 -- The type parameter 'prf' abstracts this structure over the specific types used in the proof,
 -- which may be symbolic or concrete (i.e. ground terms from a counterexample).
@@ -255,6 +261,8 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
       -- | Proof that the post-domain of the caller is satisifed, assuming the
       -- domain of @post(x)@ (i.e. the proof of @post(x)@).
     , prfFunctionCallContinue :: Maybe (node ProofBlockSliceType)
+      -- | Metadata identifying the call target and call site
+    , prfFunctionCallMetadata :: ProofFunctionCallMetadata
     } -> ProofApp prf node ProofFunctionCallType
 
   -- | Proof that two block slices are equal according to a given post-domain, assuming
@@ -320,10 +328,11 @@ traverseProofApp f = \case
     <*> traverse f a3
     <*> traverse f a4
     <*> pure a5
-  ProofFunctionCall a1 a2 a3 -> ProofFunctionCall
+  ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> f a1
     <*> f a2
     <*> traverse f a3
+    <*> pure md
   ProofTriple a1 a2 a3 a4 -> ProofTriple
     <$> pure a1
     <*> f a2
@@ -394,10 +403,11 @@ transformProofApp f app = prfConstraint f $ case app of
     <*> pure a3
     <*> pure a4
     <*> transformBlockSlice f a5
-  ProofFunctionCall a1 a2 a3 -> ProofFunctionCall
+  ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> pure a1
     <*> pure a2
     <*> pure a3
+    <*> pure md
   ProofTriple a1 a2 a3 a4 -> ProofTriple
     <$> pure a1
     <*> pure a2
