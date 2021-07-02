@@ -1402,6 +1402,10 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
           --
           -- If we knew that the call was external, we could offer up some different logic here
           --
+          -- FIXME: For the 0x1087c example, the two programs really do load
+          -- different values from memory.  This could very well be a simple
+          -- position independent reference
+          --
           -- FIXME: After fiddling with this (unsafely), it seems that R14 (the
           -- link register on AArch32) generates a mismatch in the post-state,
           -- which also makes sense and needs to be accounted for.  The two
