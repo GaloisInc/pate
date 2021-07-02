@@ -828,7 +828,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   --
   -- NOTES:
   --
-  -- * The failing FunctionPredomain proof nodes are missing the set of
+  -- - The failing FunctionPredomain proof nodes are missing the set of
   --   locations assumed to be equivalent before the call (which seems to enable
   --   it to easily find counterexamples)
   pairs <- PD.discoverPairs bundle
