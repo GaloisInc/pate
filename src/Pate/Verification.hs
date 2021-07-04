@@ -825,8 +825,7 @@ provePostcondition' ::
   StatePredSpec sym arch ->
   EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ withSym $ \sym -> do
-  liftIO $ putStrLn "finding pairs..."
-  liftIO $ putStrLn ("  " ++ ppBlock (simInBlock (simInO bundle)))
+  traceBundle bundle "Entering provePostcondition"
   -- FIXME: This is the other major call modified in the last set of changes, so
   -- it looks like it cooperates with this function
   --
@@ -836,27 +835,28 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   --   locations assumed to be equivalent before the call (which seems to enable
   --   it to easily find counterexamples)
   pairs <- PD.discoverPairs bundle
-  liftIO $ putStrLn (show (length pairs) ++ " pairs found!")
+  traceBundle bundle (show (length pairs) ++ " pairs found!")
   -- find all possible exits and propagate the postcondition backwards from them
-  funCallProofCases <- DT.forM pairs $ \(PatchPair blktO blktP) ->  do
+  funCallProofCases <- DT.forM (zip [0 :: Int ..] pairs) $ \(idx, PatchPair blktO blktP) ->  do
+    traceBundle bundle ("Handling proof case " ++ show idx)
     withAssumption (PD.matchesBlockTarget bundle blktO blktP) $
       PFO.lazyProofEvent (simPair bundle) $ do
       let
         blkO = targetCall blktO
         blkP = targetCall blktP
         pPair = PatchPair blkO blkP
-      liftIO $ putStrLn ("  targetCall: " ++ show blkO)
+      traceBundle bundle ("  targetCall: " ++ show blkO)
       case (targetReturn blktO, targetReturn blktP) of
         (Just blkRetO, Just blkRetP) -> do
-          liftIO $ putStrLn ("  Return target " ++ show blkRetO)
+          traceBundle bundle ("  Return target " ++ show blkRetO)
           isSyscall <- case (concreteBlockEntry blkO, concreteBlockEntry blkP) of
             (BlockEntryPostArch, BlockEntryPostArch) -> return True
             (entryO, entryP) | entryO == entryP -> return False
             _ -> throwHere $ BlockExitMismatch
-          liftIO $ putStrLn ("  Is Syscall? " ++ show isSyscall)
+          traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
           withNoFrameGuessing isSyscall $ do
             (contPre, contPrf) <- provePostcondition (PatchPair blkRetO blkRetP) postcondSpec
-            liftIO $ putStrLn ("  finished proving postcondition for " ++ ppBlock (simInBlock (simInO bundle)))
+            traceBundle bundle "finished proving postcondition"
             (funCallPre, funCallSlicePrf) <- catchSimBundle pPair postcondSpec $ \bundleCall -> do
               -- equivalence condition for when this function returns
               case isSyscall of
@@ -865,18 +865,19 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                 -- treated as an uninterpreted function that reads the entire machine state
                 -- this can be relaxed with more information about the specific call
                 True -> do
-                  liftIO $ putStrLn ("  Making a trivial block slice because this is a system call")
+                  traceBundle bundle ("  Making a trivial block slice because this is a system call")
                   trivialBlockSlice True (simIn bundle)  postcondSpec
                 False -> do
-                  liftIO $ putStrLn "  Not a syscall, emitting preamble pair"
+                  traceBundle bundle "  Not a syscall, emitting preamble pair"
                   emitPreamble pPair
                   -- equivalence condition for calling this function
-                  liftIO $ putStrLn "  Recursively proving the postcondition"
+                  traceBundle bundle "  Recursively proving the postcondition of the call target"
                   provePostcondition' bundleCall contPre
 
             -- equivalence condition for the function entry
+            traceBundle bundle "Proving local postcondition for call return"
             branchCase <- proveLocalPostcondition bundle funCallPre
-            liftIO $ putStrLn "  Generating a ProofFunctionCall obligation"
+            traceBundle bundle "Generating a ProofFunctionCall obligation"
             let
               md = PF.ProofFunctionCallMetadata { PF.prfFunctionCallMetadataAddress = PT.concreteAddress blkO
                                                 }
@@ -889,7 +890,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             return (branchCase, prf)
 
         (Nothing, Nothing) -> do
-          liftIO $ putStrLn ("  No return target identified")
+          traceBundle bundle "No return target identified"
           (contPre, contPrf) <- provePostcondition (PatchPair blkO blkP) postcondSpec
           branchCase <- proveLocalPostcondition bundle contPre
           let
@@ -902,11 +903,14 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                     , PF.prfFunctionCallMetadata = md
                     }
           return (branchCase, prf)
-        _ -> throwHere $ BlockExitMismatch
-  liftIO $ putStrLn ("  " ++ show (length funCallProofCases) ++ " call proof case obligations")
+        _ -> do
+          traceBundle bundle "BlockExitMismatch"
+          throwHere $ BlockExitMismatch
+  traceBundle bundle ("Finished proving obligations for all call targets (" ++ show (length funCallProofCases) ++ ")")
   -- if we have a "return" exit, prove that it satisfies the postcondition
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   precondReturn <- withSatAssumption goalTimeout (matchingExits bundle MS.MacawBlockEndReturn) $ do
+    traceBundle bundle "Attempting to prove local postconditions"
     proveLocalPostcondition bundle postcondSpec
   let
     -- for simplicitly, we drop the condition on the return case, and assume
@@ -915,12 +919,14 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
       Just (_, br) -> branchPreDomain br
       Nothing -> statePredFalse sym
 
+  traceBundle bundle "Checking exits"
   -- an exit that was not classified
   isUnknown <- do
     isJump <- matchingExits bundle MS.MacawBlockEndJump
     isFail <- matchingExits bundle MS.MacawBlockEndFail
     isBranch <- matchingExits bundle MS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
+  traceBundle bundle "Checking unknown"
   precondUnknown <- withSatAssumption goalTimeout (return isUnknown) $ do
     blocks <- PD.getBlocks (simPair bundle)
     emitWarning blocks BlockEndClassificationFailure
@@ -938,6 +944,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
     simplifySubPreds precond'
 
+  traceBundle bundle "Computing proof triple and ensuring that cases are total"
   -- TODO: this needs to be reorganized to make the domain results actually lazy
   blockSlice <- PFO.simBundleToSlice bundle
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
@@ -996,16 +1003,17 @@ proveLocalPostcondition ::
   StatePredSpec sym arch ->
   EquivM sym arch (BranchCase sym arch)
 proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
+  traceBundle bundle "proveLocalPostcondition"
   eqRel <- CMR.asks envBaseEquiv
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   (_, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
 
   -- FIXME[TR]: Question - is this failing in some of the external call cases?
   -- It seems like that could explain why some of the preconditions are empty
-  liftIO $ putStrLn ("  guessing equivalence domain for " ++ ppBlock (simInBlock (simInO bundle)))
+  traceBundle bundle "guessing equivalence domain"
   eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle postcondPred postcond
-  liftIO $ putStrLn ("  done: " ++ show (M.keys (predRegs eqInputs)))
+  traceBundle bundle ("Equivalence domain has: " ++ show (M.keys (predRegs eqInputs)))
   
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
@@ -1026,47 +1034,60 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
     result <- PFO.forkProofEvent_ (simPair bundle) $ do
+        traceBundle bundle "Starting forked thread in proveLocalPostcondition"
         status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
-          liftIO $ putStrLn ("  First SAT check for " ++ ppBlock (simInBlock (simInO bundle)))
+          traceBundle bundle "Starting first SAT check"
           r <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> do
             case satRes of
               W4R.Unsat _ -> do
+                traceBundle bundle "Unsat"
                 emitEvent (PE.CheckedEquivalence blocks PE.Equivalent)
                 return PF.VerificationSuccess
               W4R.Unknown -> do
+                traceBundle bundle "Unknown"
                 emitEvent (PE.CheckedEquivalence blocks PE.Inconclusive)
                 return PF.Unverified
               W4R.Sat fn -> do
+                traceBundle bundle "Sat"
                 preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
                 postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
                 ir <- PFG.getInequivalenceResult InvalidPostState preDomain' postDomain' blockSlice fn
+                traceBundle bundle "Got inequivalence result"
                 emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
                 return $ PF.VerificationFail ir
-          liftIO $ putStrLn "  Finished SAT check"
+          traceBundle bundle "Finished SAT check"
           return r
         let noCond = fmap (\ir -> (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))) status
         status' <- case status of
           PF.VerificationFail _ -> do
-            liftIO $ putStrLn ("VerificationFail for " ++ ppBlock (simInBlock (simInO bundle)))
+            traceBundle bundle "The verification failed"
             withAssumptionFrame_ (equateInitialStates bundle) $ do
               notGoal <- applyCurrentFrame notChecks
               goal <- applyCurrentFrame postcondPred
 
-              withAssumption_ (return asm ) $ do
+              traceBundle bundle "Checking goal satisfiability"
+              withAssumption_ (return asm) $ do
                 isPredSat goalTimeout goal >>= \case
                   True -> do
+                    traceBundle bundle "Minimizing condition"
                     postDomain' <- PF.unNonceProof <$> PFO.joinLazyProof postDomain
+                    traceBundle bundle "  computeEqCondition"
                     cond <- computeEqCondition bundle sliceState postDomain' notGoal
+                    traceBundle bundle "  weakenEqCondition"
                     cond' <- weakenEqCondition bundle cond sliceState postDomain' goal
+                    traceBundle bundle "  checkAndMinimizeEqCondition"
                     cond'' <- checkAndMinimizeEqCondition cond' goal
-                    liftIO $ putStrLn ("Checking for conditional equivalence in " ++ ppBlock (simInBlock (simInO bundle)))
+                    traceBundle bundle "Checking for conditional equivalence"
                     checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
                       case satRes of
                         W4R.Sat fn -> do
                           preUniv <- universalDomain
                           preUnivDomain <- PF.unNonceProof <$> PFO.statePredToPreDomain bundle preUniv
+                          traceBundle bundle "proveLocalPostcondition->getInequivalenceResult"
                           ir <- PFG.getInequivalenceResult InvalidPostState preUnivDomain postDomain' blockSlice fn
+                          traceBundle bundle "proveLocalPostcondition->getEquivalenceResult"
                           cr <- PFG.getCondEquivalenceResult cond'' fn
+                          traceBundle bundle ("conditionaEquivalenceResult: " ++ show (W4.printSymExpr (PFI.condEqPred cr)))
                           return $ PF.VerificationFail (ir, cr)
                         W4R.Unsat _ -> return $ noCond
                         W4R.Unknown -> return $ noCond
@@ -1077,6 +1098,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
 
+computeEqConditionGas :: Int
+computeEqConditionGas = 4
 
 -- | Incrementally build an equivalence condition by negating path conditions which
 -- induce inequality on the block slices.
@@ -1100,11 +1123,12 @@ computeEqCondition ::
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
 computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
-  cond <- go (W4.truePred sym)
+  cond <- go (W4.truePred sym) computeEqConditionGas
   simplifyPred cond
   where
-    go :: (W4.Pred sym) -> EquivM sym arch (W4.Pred sym)
-    go pathCond = withSym $ \sym -> do
+    go :: W4.Pred sym -> Int -> EquivM sym arch (W4.Pred sym)
+    go pathCond 0 = return pathCond
+    go pathCond gas = withSym $ \sym -> do
       -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
       result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
@@ -1113,8 +1137,15 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
           W4R.Unknown -> return Nothing
           -- counter-example, compute another path condition and continue
           W4R.Sat fn -> Just <$> do
+            -- FIXME[TR]: Hypothesis - if we have timed out and produced a
+            -- trivial slice, 'getPathCondition' doesn't make progress
+            --
+            -- Can we cut this short with a "gas" parameter? It seems like
+            -- stopping early is safe
             pathCond' <- PFG.getPathCondition bundle sliceState postDomain fn
-            flattenCondPair pathCond'
+            p <- flattenCondPair pathCond'
+            traceBundle bundle ("Computing a new path condition: " ++ show (length (show (W4.printSymExpr p))))
+            return p
       case result of
         -- no result, returning the accumulated path conditions
         Nothing -> return pathCond
@@ -1124,7 +1155,7 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
           pathCond' <- liftIO $ W4.andPred sym notThis pathCond
           -- assume this path is not taken and continue
           withAssumption_ (return notThis) $
-            go pathCond'
+            go pathCond' (gas - 1)
 
 -- | Weaken a given equality condition with alternative paths which also
 -- induce equality.
@@ -1343,6 +1374,9 @@ bindMemory ::
 bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
 
+traceBundle bundle msg =
+  liftIO $ putStrLn (ppBlock (simInBlock (simInO bundle)) ++ ": " ++ msg)
+
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
 -- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.
@@ -1367,6 +1401,7 @@ guessEquivalenceDomain ::
   StatePred sym arch ->
   EquivM sym arch (StatePred sym arch)
 guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
+  traceBundle bundle "Entering guessEquivalenceDomain"
   ExprFilter isBoundInGoal <- getIsBoundFilter' goal
   eqRel <- CMR.asks envBaseEquiv
   result <- zipRegStatesPar (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
@@ -1400,9 +1435,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
               -- FIXME[TR]: If this times out, do we get an empty register list? Is that too conservative?
               result <- isPredTruePar' heuristicTimeout goalIgnoresReg
               Par.forFuture result $ \case
-                True -> do
-                  liftIO $ putStrLn ("  timeout while computing an equivalence domain for " ++ ppBlock (simInBlock (simInO bundle)))
-                  return Nothing
+                True -> return Nothing
                 False -> return $ Just (Some r, W4.truePred sym)
         _ -> do
           -- FIXME[TR]: So at least some of the problematic external calls have no variables bound in their goals
@@ -1426,7 +1459,6 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
           --
           -- We probably want to exclude the link register (like the IP) because
           -- we have a concrete value
-          liftIO $ putStrLn ("  Not bound in goal for " ++ ppBlock (simInBlock (simInO bundle)))
           exclude
   regsDom <- (M.fromList . catMaybes) <$> Par.joinFuture @_ @Par.Future result
   stackRegion <- CMR.asks envStackRegion

@@ -354,6 +354,9 @@ lazyProofFinal ::
   EquivM sym arch (a, LazyProof sym arch tp)
 lazyProofFinal f fin = mkLazyProof (f >>= \(a, app) -> return (a, LazyProofBodyApp app)) fin
 
+-- | Make a proof event on the current thread
+--
+-- Despite the name, this does not lazily compute anything
 lazyProofEvent ::
   PT.BlockPair arch ->
   EquivM sym arch (a, LazyProofApp sym arch tp) ->
