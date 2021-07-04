@@ -24,9 +24,13 @@ import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Sequence as Seq
+import qualified Data.Text as DT
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
+import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.Text as PPRT
 import           System.FilePath ( (</>) )
 import qualified System.IO as IO
 import qualified System.IO.Temp as SIT
@@ -36,6 +40,7 @@ import qualified Pate.Event as PE
 import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Types as PT
+import qualified Pate.Verbosity as PV
 
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.Render.BlockPairDetail as IRB
@@ -68,12 +73,29 @@ dagre = $(DFE.embedFile "tools/pate/static/dagre/dist/dagre.js")
 cytoscapeDagre :: BS.ByteString
 cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js")
 
-consumeEvents :: (MM.MemWidth (MC.ArchAddrWidth arch)) => CC.Chan (Maybe (PE.Event arch)) -> StateRef arch -> IO ()
-consumeEvents chan r0 = do
+traceFormatEvent :: PE.Event arch -> PP.Doc ann
+traceFormatEvent evt =
+  case evt of
+    PE.ProofTraceEvent _stk origAddr _patchedAddr msg _tm ->
+      PP.pretty origAddr <> PP.pretty ": " <> PP.pretty msg <> PP.line
+    _ -> mempty
+
+consumeEvents
+  :: (MM.MemWidth (MC.ArchAddrWidth arch))
+  => CC.Chan (Maybe (PE.Event arch))
+  -> StateRef arch
+  -> PV.Verbosity
+  -> Maybe IO.Handle
+  -> IO ()
+consumeEvents chan r0 verb mTraceHandle = do
   mEvt <- CC.readChan chan
   case mEvt of
     Nothing -> return ()
     Just evt -> do
+      case mTraceHandle of
+        Nothing -> return ()
+        Just hdl -> PPRT.hPutDoc hdl (traceFormatEvent evt)
+
       case evt of
         PE.LoadedBinaries (oelf, omap) (pelf, pmap) -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just (oelf, omap)
@@ -101,6 +123,8 @@ consumeEvents chan r0 = do
                                                        )
         PE.ProvenGoal {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
+        PE.ProofTraceEvent _stk origAddr _patchedAddr msg _tm -> do
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & traceEvents %~ addTraceEvent origAddr msg, ())
         _ -> return ()
 
       -- Collect any metrics that we can from the event stream
@@ -108,7 +132,15 @@ consumeEvents chan r0 = do
 
       -- Notify the UI that we got a new result
       stateChangeEmitter r0 ()
-      consumeEvents chan r0
+      consumeEvents chan r0 verb mTraceHandle
+
+addTraceEvent
+  :: PT.ConcreteAddress arch
+  -> DT.Text
+  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq DT.Text)
+  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq DT.Text)
+addTraceEvent origAddr msg =
+  Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton msg)
 
 recentEventCount :: Int
 recentEventCount = 20

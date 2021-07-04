@@ -14,6 +14,7 @@ module Pate.Interactive.State (
   patchedBinary,
   sources,
   metrics,
+  traceEvents,
   ProofTreeNode(..),
   ProofTree(..),
   proofTree,
@@ -30,6 +31,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Sequence as Seq
+import qualified Data.Text as DT
 import qualified Data.Time as TM
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
@@ -89,6 +92,9 @@ data State arch =
         -- This is only updated at the user's direction so that they don't lose
         -- their place as new data streams in
         , _metrics :: PM.Metrics
+        -- ^ Aggregated metrics for display
+        , _traceEvents :: Map.Map (PT.ConcreteAddress arch) (Seq.Seq DT.Text)
+        -- ^ Debug trace events indexed by original (super-)block address
         }
 
 $(L.makeLenses 'State)
@@ -132,6 +138,7 @@ emptyState ms = State { _successful = Map.empty
                       , _proofTree = Nothing
                       , _activeProofTree = Nothing
                       , _metrics = PM.emptyMetrics
+                      , _traceEvents = Map.empty
                       }
 
 data StateRef arch =

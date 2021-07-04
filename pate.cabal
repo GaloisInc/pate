@@ -101,6 +101,7 @@ library
                        Data.Parameterized.SetF,
                        Pate.SimState,
                        Pate.Equivalence,
+                       Pate.Verbosity,
 
                        Pate.Interactive,
                        Pate.Interactive.Port,

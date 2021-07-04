@@ -16,6 +16,7 @@ import qualified Data.Macaw.Discovery as MD
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Word ( Word64 )
+import qualified GHC.Stack as GS
 
 import qualified Pate.Binary as PB
 import qualified Pate.Hints.CSV as PHC
@@ -72,3 +73,11 @@ data Event arch where
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
   HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch
+  -- | A very low-level event generated during the proof construction or evaluation
+  --
+  -- It records a pair of block addresses and a message that describes the state
+  -- of the proof for that block pair.
+  --
+  -- This is useful for debugging, but probably should not be shown/collected
+  -- unless explicitly asked for.
+  ProofTraceEvent :: GS.CallStack -> PT.ConcreteAddress arch -> PT.ConcreteAddress arch -> T.Text -> TM.NominalDiffTime -> Event arch

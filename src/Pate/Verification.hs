@@ -27,7 +27,7 @@ module Pate.Verification
 
 import           Prelude hiding ( fail )
 
-import           GHC.Stack ( HasCallStack )
+import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( void, unless )
@@ -113,6 +113,35 @@ import qualified Pate.Solver as PS
 import           Pate.Types
 import qualified Pate.Types as PT
 import           What4.ExprHelpers
+
+
+-- | Emit a trace event to the frontend
+--
+-- This variant takes a 'BlockPair' as an input to provide context
+traceBlockPair
+  :: (HasCallStack)
+  => BlockPair arch
+  -> String
+  -> EquivM sym arch ()
+traceBlockPair bp msg =
+  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
+  where
+    origAddr = PT.concreteAddress (PT.pOriginal bp)
+    patchedAddr = PT.concreteAddress (PT.pPatched bp)
+
+-- | Emit a trace event to the frontend
+--
+-- This variant takes a 'SimBundle' as an input to provide context
+traceBundle
+  :: (HasCallStack)
+  => SimBundle sym arch
+  -> String
+  -> EquivM sym arch ()
+traceBundle bundle msg =
+  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
+  where
+    origAddr = PT.concreteAddress (simInBlock (simInO bundle))
+    patchedAddr = PT.concreteAddress (simInBlock (simInP bundle))
 
 -- | We run discovery in parallel, since we need to run it two or three times
 --
@@ -559,7 +588,7 @@ externalTransitions internalAddrs pb =
 -- simulation. Execute the given function in a context where the given 'SimBundle'
 -- is valid (i.e. its bound variables are marked free and its preconditions are assumed).
 withSimBundle ::
-  PEM.ExprMappable sym f =>
+  (HasCallStack, PEM.ExprMappable sym f) =>
   BlockPair arch ->
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)
@@ -570,13 +599,14 @@ withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
       simInP_ = SimInput stP (pPatched pPair)
 
     withAssumptionFrame' (validInitState (Just pPair) stO stP) $ do
-      liftIO $ putStrLn "simulating.."
+      traceBlockPair pPair "Simulating original blocks"
       (asmO, simOutO_) <- simulate simInO_
+      traceBlockPair pPair "Simulating patched blocks"
       (asmP, simOutP_) <- simulate simInP_
-      liftIO $ putStrLn "done"
+      traceBlockPair pPair "Finished simulating blocks"
       (_, simOutO') <- withAssumptionFrame (validConcreteReads simOutO_) $ return simOutO_
       (_, simOutP') <- withAssumptionFrame (validConcreteReads simOutP_) $ return simOutP_
-      
+
       (asm,r) <- withAssumption (liftIO $ allPreds sym [asmO, asmP]) $ do
         let bundle = SimBundle (PatchPair simInO_ simInP_) (PatchPair simOutO' simOutP')
         bundle' <- applyCurrentFrame bundle
@@ -694,14 +724,14 @@ provePostcondition ::
   StatePredSpec sym arch ->
   EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition pPair postcondSpec = do
-  liftIO $ putStrLn "  provePostcondition"
+  traceBlockPair pPair "Entering provePostcondition"
   emitPreamble pPair
   catchSimBundle pPair postcondSpec $ \bundle ->
     provePostcondition' bundle postcondSpec
 
 catchSimBundle ::
   forall sym arch ret.
-  ret ~ (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType) =>
+  (HasCallStack, ret ~ (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)) =>
   BlockPair arch ->
   StatePredSpec sym arch ->
   (SimBundle sym arch -> EquivM sym arch (StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)  ) ->
@@ -712,10 +742,10 @@ catchSimBundle pPair postcondSpec f = do
   firstCached cached >>= \case
     Just r -> return r
     Nothing -> withPair pPair $ do
-      liftIO $ putStrLn ("  catchSimBundle blocks: " ++ show pblks)
+      traceBlockPair pPair ("catchSimBundle parent blocks: " ++ show pblks)
       (precondSpec, prf) <- case elem pPair pblks of
         True -> do
-          liftIO $ putStrLn "loop detected"
+          traceBlockPair pPair "Loop detected"
           errorResult
         False -> (manifestError $ withSimBundle pPair $ f) >>= \case
           Left _ -> errorResult
@@ -734,14 +764,14 @@ catchSimBundle pPair postcondSpec f = do
       (PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType)) ->
       EquivM sym arch (Maybe ret)
     getCached (triple, futureProof) = do
-      liftIO $ putStrLn "checking cached result.."
+      traceBlockPair pPair "Checking for cached result"
       impliesPostcond (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
         True -> do
-          liftIO $ putStrLn "cache hit!"
+          traceBlockPair pPair "Cache hit"
           prf' <- PFO.wrapFutureNonceApp futureProof
           return $ Just (fmap PF.eqPreDomain triple, prf')
         False -> do
-          liftIO $ putStrLn "cache miss"
+          traceBlockPair pPair "Cache miss"
           return Nothing
 
     -- FIXME[TR]: Modify all of the error handling to plumb the thrown
@@ -752,7 +782,7 @@ catchSimBundle pPair postcondSpec f = do
       let
         simInO_ = SimInput stO (pOriginal pPair)
         simInP_ = SimInput stP (pPatched pPair)
-      liftIO $ putStrLn ("Caught an error in " ++ ppBlock (pOriginal pPair) ++ " and making a trivial block slice")
+      traceBlockPair pPair "Caught an error, so making a trivial block slice"
       r <- trivialBlockSlice False (PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
@@ -1099,7 +1129,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
 
 computeEqConditionGas :: Int
-computeEqConditionGas = 4
+computeEqConditionGas = 20
 
 -- | Incrementally build an equivalence condition by negating path conditions which
 -- induce inequality on the block slices.
@@ -1374,9 +1404,6 @@ bindMemory ::
 bindMemory memVar memVal expr = withSym $ \sym -> do
   liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
 
-traceBundle bundle msg =
-  liftIO $ putStrLn (ppBlock (simInBlock (simInO bundle)) ++ ": " ++ msg)
-
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
 -- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.
@@ -1396,6 +1423,7 @@ traceBundle bundle msg =
 -- is incorrect (i.e. we incorrectly exclude some memory location) then that proof will fail.
 guessEquivalenceDomain ::
   forall sym arch.
+  (HasCallStack) =>
   SimBundle sym arch ->
   W4.Pred sym ->
   StatePred sym arch ->

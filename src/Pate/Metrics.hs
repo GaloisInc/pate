@@ -104,3 +104,4 @@ summarize e m =
     PE.HintErrorsCSV {} -> m
     PE.HintErrorsJSON {} -> m
     PE.HintErrorsDWARF {} -> m
+    PE.ProofTraceEvent {} -> m
