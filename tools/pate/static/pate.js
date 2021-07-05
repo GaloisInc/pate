@@ -51,7 +51,7 @@ function proofNodeColor(nodeType) {
     case 'Status(Inequivalent)':
         return 'red';
     case 'Status(Conditional)':
-        return 'red';
+        return 'yellow';
     case 'Status(Skipped)':
         return 'white';
     case 'Status(Unverified)':
