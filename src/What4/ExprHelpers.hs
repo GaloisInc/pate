@@ -233,7 +233,6 @@ freshPtr ::
   IO (CLM.LLVMPtr sym w)
 freshPtr sym name w = do
   off <- W4.freshConstant sym (WS.safeSymbol (name ++ "_offset")) (W4.BaseBVRepr w)
-  -- FIXME: If w ~ arch width, we can make the region concretely 0
   reg <- W4.freshNat sym (WS.safeSymbol (name ++ "_region"))
   return $ CLM.LLVMPointer reg off
 

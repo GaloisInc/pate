@@ -1541,7 +1541,7 @@ freshRegEntry initBlk r entry = withSym $ \sym -> do
       ptr <- freshPtr sym (PC.showF r) w
       return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
     CT.BoolRepr -> liftIO $ do
-      b <- W4.freshConstant sym (WS.safeSymbol "freshBoolRegister") WT.BaseBoolRepr
+      b <- W4.freshConstant sym (WS.safeSymbol (PC.showF r)) WT.BaseBoolRepr
       return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) b
     CT.StructRepr Ctx.Empty -> return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) Ctx.Empty
     repr -> throwHere $ UnsupportedRegisterType $ Some repr
