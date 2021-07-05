@@ -116,8 +116,8 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.Types as MM
 
 import           What4.Utils.Process (filterAsync)
 import qualified What4.Expr.Builder as W4B
@@ -386,16 +386,23 @@ archFuns = do
 
 unconstrainedRegister ::
   forall sym arch tp.
-  HasCallStack =>
+  (HasCallStack, MM.MemWidth (MM.ArchAddrWidth arch)) =>
   MM.ArchReg arch tp ->
   EquivM sym arch (PSR.MacawRegVar sym tp)
 unconstrainedRegister reg = do
   let repr = MM.typeRepr reg
   case repr of
-    MM.BVTypeRepr n -> withSymIO $ \sym -> do
-      ptr@(CLM.LLVMPointer region off) <- freshPtr sym (showF reg) n
-      iRegion <- W4.natToInteger sym region
-      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
+    MM.BVTypeRepr n
+      | Just Refl <- testEquality n (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)) -> withSymIO $ \sym -> do
+          ptr@(CLM.LLVMPointer region off) <- freshPtr sym (showF reg) n
+          iRegion <- W4.natToInteger sym region
+          return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
+      | otherwise -> withSymIO $ \sym -> do
+          -- For bitvector types that are not pointer width, fix their region number to 0 since they cannot be pointers
+          bits <- W4.freshConstant sym (WS.safeSymbol (showF reg)) (W4.BaseBVRepr n)
+          ptr <- CLM.llvmPointer_bv sym bits
+          zero <- W4.intLit sym 0
+          return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> zero Ctx.:> bits)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
       var <- W4.freshConstant sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) var) (Ctx.empty Ctx.:> var)
