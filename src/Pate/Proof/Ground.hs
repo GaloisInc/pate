@@ -39,16 +39,19 @@ module Pate.Proof.Ground
   , groundProofExpr
   ) where
 
-import           GHC.Stack ( HasCallStack )
+import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 
+import qualified Data.Foldable as F
+import           Data.Functor.Const
+import qualified Data.List as L
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.Text as T
 import           Numeric.Natural ( Natural )
-import           Data.Functor.Const
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Context as Ctx
@@ -70,16 +73,17 @@ import qualified What4.Partial as W4P
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
+import qualified Pate.Arch as PA
+import qualified Pate.Event as PE
+import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
+import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
-import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.SimState as PS
-import qualified Pate.Arch as PA
-import qualified Pate.ExprMappable as PEM
+import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Types as PT
 import           What4.ExprHelpers
 import qualified What4.PathCondition as WPC
 
@@ -174,10 +178,22 @@ getGenPathCondition sym fn e = do
   
   PEM.foldExpr sym f e (W4.truePred sym)
 
+traceBundle
+  :: (HasCallStack)
+  => SimBundle sym arch
+  -> String
+  -> EquivM sym arch ()
+traceBundle bundle msg =
+  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
+  where
+    origAddr = PT.concreteAddress (PS.simInBlock (PS.simInO bundle))
+    patchedAddr = PT.concreteAddress (PS.simInBlock (PS.simInP bundle))
+
 -- | Compute a domain that represents the path condition for
 -- values which disagree in the given counter-example
 getPathCondition ::
   forall sym arch.
+  (MM.RegisterInfo (MM.ArchReg arch)) =>
   PS.SimBundle sym arch ->
   PF.BlockSliceState (PFI.ProofSym sym arch) ->
   PFI.SymDomain sym arch ->
@@ -194,9 +210,21 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
     getRegPath reg regOp paths = do
       case PFI.regInDomain groundDom reg of
         True -> do
+          -- FIXME: In the failing case, there are *many* more registers in the
+          -- domain (1 for the simple case, probably 20 for the real example);
+          -- could that be related?
+          --
+          -- Need to check the intermediate terms generated; what is
+          -- getGenPathCondition doing? It seems to get the full path condition
+          -- from the what4 helpers
+          --
+          -- There doesn't actually seem to be much mux structure... (there is some)
           paths' <- withGroundEvalFn fn $ \fn' -> mapM (getGenPathCondition sym fn') (PF.slRegOpValues regOp)
+          traceBundle bundle ("getPathCondition.getRegPath for " ++ showF reg)
+          F.forM_ paths' $ \path' -> do
+            traceBundle bundle ("  " ++ show (W4.printSymExpr path'))
           liftIO $ PT.zipMPatchPairC paths paths' (W4.andPred sym)
-        _ -> return paths    
+        _ -> return paths
 
     getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
     getMemPath st = do

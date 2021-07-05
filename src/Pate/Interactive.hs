@@ -34,6 +34,8 @@ import qualified Prettyprinter.Render.Text as PPRT
 import           System.FilePath ( (</>) )
 import qualified System.IO as IO
 import qualified System.IO.Temp as SIT
+import qualified What4.Expr as WE
+import qualified What4.Interface as WI
 
 import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
@@ -78,6 +80,8 @@ traceFormatEvent evt =
   case evt of
     PE.ProofTraceEvent _stk origAddr _patchedAddr msg _tm ->
       PP.pretty origAddr <> PP.pretty ": " <> PP.pretty msg <> PP.line
+    PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
+      PP.pretty origAddr <> PP.pretty ": " <> WI.printSymExpr expr
     _ -> mempty
 
 consumeEvents
@@ -124,7 +128,9 @@ consumeEvents chan r0 verb mTraceHandle = do
         PE.ProvenGoal {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
         PE.ProofTraceEvent _stk origAddr _patchedAddr msg _tm -> do
-          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & traceEvents %~ addTraceEvent origAddr msg, ())
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & traceEvents %~ addTraceEventMessage origAddr msg, ())
+        PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr sym expr _tm -> do
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & traceEvents %~ addTraceEventFormula origAddr sym expr, ())
         _ -> return ()
 
       -- Collect any metrics that we can from the event stream
@@ -134,13 +140,23 @@ consumeEvents chan r0 verb mTraceHandle = do
       stateChangeEmitter r0 ()
       consumeEvents chan r0 verb mTraceHandle
 
-addTraceEvent
+addTraceEventFormula
+  :: (sym ~ WE.ExprBuilder t st fs)
+  => PT.ConcreteAddress arch
+  -> sym
+  -> WI.SymExpr sym tp
+  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+addTraceEventFormula origAddr sym expr =
+  Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton (TraceFormula sym expr))
+
+addTraceEventMessage
   :: PT.ConcreteAddress arch
   -> DT.Text
-  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq DT.Text)
-  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq DT.Text)
-addTraceEvent origAddr msg =
-  Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton msg)
+  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+addTraceEventMessage origAddr msg =
+  Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton (TraceText msg))
 
 recentEventCount :: Int
 recentEventCount = 20

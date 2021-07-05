@@ -105,3 +105,4 @@ summarize e m =
     PE.HintErrorsJSON {} -> m
     PE.HintErrorsDWARF {} -> m
     PE.ProofTraceEvent {} -> m
+    PE.ProofTraceFormulaEvent {} -> m

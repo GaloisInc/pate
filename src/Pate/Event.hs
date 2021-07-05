@@ -17,6 +17,8 @@ import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Word ( Word64 )
 import qualified GHC.Stack as GS
+import qualified What4.Expr as WE
+import qualified What4.Interface as WI
 
 import qualified Pate.Binary as PB
 import qualified Pate.Hints.CSV as PHC
@@ -81,3 +83,8 @@ data Event arch where
   -- This is useful for debugging, but probably should not be shown/collected
   -- unless explicitly asked for.
   ProofTraceEvent :: GS.CallStack -> PT.ConcreteAddress arch -> PT.ConcreteAddress arch -> T.Text -> TM.NominalDiffTime -> Event arch
+  -- | A low-level trace event that contains a formula that should be displayed
+  -- to the user in some structured way, when possible
+  --
+  -- This has to save enough constraints to allow us to traverse the term
+  ProofTraceFormulaEvent :: (sym ~ WE.ExprBuilder t st fs) => GS.CallStack -> PT.ConcreteAddress arch -> PT.ConcreteAddress arch -> sym -> WI.SymExpr sym tp -> TM.NominalDiffTime -> Event arch

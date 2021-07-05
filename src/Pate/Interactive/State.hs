@@ -3,6 +3,7 @@
 module Pate.Interactive.State (
   SourcePair(..),
   EquivalenceTest(..),
+  TraceEvent(..),
   Failure(..),
   State,
   emptyState,
@@ -36,6 +37,7 @@ import qualified Data.Text as DT
 import qualified Data.Time as TM
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
+import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
 import qualified Pate.Binary as PB
@@ -71,6 +73,15 @@ data ProofTree arch where
             -> Map.Map Int (Some (ProofTreeNode arch prf))
             -> ProofTree arch
 
+-- | Trace events that can be generated for debugging purposes
+--
+-- These are visualized in a separate window. This data type is intended to
+-- provide just enough structure to visualize complex terms when desired
+-- (ideally lazily)
+data TraceEvent where
+  TraceText :: DT.Text -> TraceEvent
+  TraceFormula :: (sym ~ WE.ExprBuilder t st fs) => sym -> WI.SymExpr sym tp -> TraceEvent
+
 -- | The state tracks verification successes and failures
 --
 -- The maps are keyed on the address of the original block being checked (that
@@ -93,7 +104,7 @@ data State arch =
         -- their place as new data streams in
         , _metrics :: PM.Metrics
         -- ^ Aggregated metrics for display
-        , _traceEvents :: Map.Map (PT.ConcreteAddress arch) (Seq.Seq DT.Text)
+        , _traceEvents :: Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
         -- ^ Debug trace events indexed by original (super-)block address
         }
 
