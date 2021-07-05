@@ -69,12 +69,13 @@ import qualified Data.Macaw.Memory.Permissions as MMP
 import qualified Data.Macaw.Symbolic as MS
 
 
+import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.TraversableFC as TFC
 
 import qualified Lang.Crucible.Backend.Simple as CB
 import qualified Lang.Crucible.CFG.Core as CC
@@ -1341,7 +1342,7 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (Par.present $ return polarity) $ do
       let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       -- clobber the "patched" memory at exactly this cell
-      CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym (PMC.cellWidth cell)
+      CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym "MemCell_guessMemoryDomain" (PMC.cellWidth cell)
 
       memP'' <- liftIO $ MT.writeMemArr sym memP (PMC.cellPtr cell) repr freshP
       eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
@@ -1537,7 +1538,7 @@ freshRegEntry ::
 freshRegEntry initBlk r entry = withSym $ \sym -> do
   fresh <- case PSR.macawRegRepr entry of
     CLM.LLVMPointerRepr w -> liftIO $ do
-      ptr <- freshPtr sym w
+      ptr <- freshPtr sym (PC.showF r) w
       return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
     CT.BoolRepr -> liftIO $ do
       b <- W4.freshConstant sym (WS.safeSymbol "freshBoolRegister") WT.BaseBoolRepr

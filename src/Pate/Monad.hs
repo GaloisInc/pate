@@ -393,7 +393,7 @@ unconstrainedRegister reg = do
   let repr = MM.typeRepr reg
   case repr of
     MM.BVTypeRepr n -> withSymIO $ \sym -> do
-      ptr@(CLM.LLVMPointer region off) <- freshPtr sym n
+      ptr@(CLM.LLVMPointer region off) <- freshPtr sym (showF reg) n
       iRegion <- W4.natToInteger sym region
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
