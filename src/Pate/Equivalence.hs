@@ -516,6 +516,3 @@ statePredPost sym outO outP eqRel stPred  = do
     stacksEq = memPredPost sym outO outP (eqRelStack eqRel) (PES.predStack stPred)
     memEq = memPredPost sym outO outP (eqRelMem eqRel) (PES.predMem stPred)
   andM sym regsEq (andM sym stacksEq memEq)
-
------------------------------------------
--- ExprMappable instances
