@@ -581,9 +581,7 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
     tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= k))
 
   case r of
-    Left (_ :: SomeException) -> do
-      liftIO $ putStrLn "Exception thrown during SAT check"
-      throwHere PEE.InconclusiveSAT
+    Left (_ :: SomeException) -> throwHere PEE.InconclusiveSAT
     Right r' -> return r'
 
 checkSatisfiableWithoutBindings
@@ -618,9 +616,7 @@ isPredSat timeout p = case W4.asConstantPred p of
   Nothing -> checkSatisfiableWithModel timeout "isPredSat" p $ \case
     W4R.Sat _ -> return True
     W4R.Unsat _ -> return False
-    W4R.Unknown -> do
-      liftIO $ putStrLn "Timed out and throwing"
-      throwHere PEE.InconclusiveSAT
+    W4R.Unknown -> throwHere PEE.InconclusiveSAT
 
 isPredTrue ::
   PT.Timeout ->
