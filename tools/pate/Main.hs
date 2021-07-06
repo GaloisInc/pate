@@ -215,6 +215,7 @@ printAtVerbosity verb evt =
     PV.Info ->
       case evt of
         PE.ProofTraceEvent {} -> False
+        PE.ProofTraceFormulaEvent {} -> False
         _ -> True
 
 -- | Create a logger based on the user's desire for an interactive session.
