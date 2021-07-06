@@ -211,16 +211,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
       EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
     getRegPath reg regOp paths = do
       case PFI.regInDomain groundDom reg of
-        True -> do --  "_R11" `L.isPrefixOf` showF reg -> do
-          -- FIXME: In the failing case, there are *many* more registers in the
-          -- domain (1 for the simple case, probably 20 for the real example);
-          -- could that be related?
-          --
-          -- Need to check the intermediate terms generated; what is
-          -- getGenPathCondition doing? It seems to get the full path condition
-          -- from the what4 helpers
-          --
-          -- There doesn't actually seem to be much mux structure... (there is some)
+        True -> do
           paths' <- withGroundEvalFn fn $ \fn' -> mapM (getGenPathCondition sym fn') (PF.slRegOpValues regOp)
           traceBundle bundle ("getPathCondition.getRegPath for " ++ showF reg)
           F.forM_ paths' $ \path' -> do
