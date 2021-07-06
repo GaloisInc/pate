@@ -37,9 +37,12 @@ import qualified System.IO.Temp as SIT
 import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
+import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Event as PE
 import qualified Pate.Metrics as PM
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PPr
 import qualified Pate.Types as PT
 import qualified Pate.Verbosity as PV
@@ -106,9 +109,9 @@ consumeEvents chan r0 verb mTraceHandle = do
                                                           & patchedBinary .~ Just (pelf, pmap), ())
         PE.ElfLoaderWarnings {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.CheckedEquivalence bpair@(PT.PatchPair (PE.Blocks blk _) _) res duration -> do
+        PE.CheckedEquivalence bpair@(PPa.PatchPair (PE.Blocks blk _) _) res duration -> do
           let
-            addr = PT.concreteAddress blk
+            addr = PB.concreteAddress blk
             et = EquivalenceTest bpair duration
           case res of
             PE.Equivalent ->
@@ -142,19 +145,19 @@ consumeEvents chan r0 verb mTraceHandle = do
 
 addTraceEventFormula
   :: (sym ~ WE.ExprBuilder t st fs)
-  => PT.ConcreteAddress arch
+  => PA.ConcreteAddress arch
   -> sym
   -> WI.SymExpr sym tp
-  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
-  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
+  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
 addTraceEventFormula origAddr sym expr =
   Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton (TraceFormula sym expr))
 
 addTraceEventMessage
-  :: PT.ConcreteAddress arch
+  :: PA.ConcreteAddress arch
   -> DT.Text
-  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
-  -> Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
+  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
 addTraceEventMessage origAddr msg =
   Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton (TraceText msg))
 
@@ -220,7 +223,7 @@ onProofNodeClicked r wd detailDiv ident = do
   st <- IOR.readIORef (stateRef r)
   case st ^. activeProofTree of
     Just (ProofTree (PT.Sym {}) nodes idx)
-      | Just (Some (ProofTreeNode (PT.PatchPair ob pb) (PPr.ProofNonceExpr _ parentNonce papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
+      | Just (Some (ProofTreeNode (PPa.PatchPair ob pb) (PPr.ProofNonceExpr _ parentNonce papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
           (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb Nothing
           appDetail <- IRP.renderProofApp nodes parentNonce papp
           content <- TP.column [ return appDetail # TP.set TP.class_ "proof-app"

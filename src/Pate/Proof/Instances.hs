@@ -83,8 +83,11 @@ import           Prettyprinter ( (<+>) )
 
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
+import qualified Pate.PatchPair as PPa
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
@@ -107,7 +110,7 @@ data InequivalenceResult arch where
     { ineqSlice :: PF.BlockSliceTransition (ProofGround arch)
     , ineqPre :: GroundDomain arch
     , ineqPost :: GroundDomain arch
-    , ineqReason :: PT.InequivalenceReason
+    , ineqReason :: PEE.InequivalenceReason
     } -> InequivalenceResult arch
 
 data CondEquivalenceResult sym arch where
@@ -135,7 +138,7 @@ ppInequivalencePreRegs (ineq@InequivalenceResult{}) =
 -- | Specializing 'ProofExpr' and a 'BlockSliceTransition' to symbolic values.
 data ProofSym sym arch
 
-type instance PF.ProofBlock (ProofSym sym arch) = PT.ConcreteBlock arch
+type instance PF.ProofBlock (ProofSym sym arch) = PB.ConcreteBlock arch
 type instance PF.ProofRegister (ProofSym sym arch) = MM.ArchReg arch
 type instance PF.ProofMemCell (ProofSym sym arch) = PMC.MemCell sym arch
 type instance PF.ProofBV (ProofSym sym arch) = SymBV sym
@@ -144,7 +147,7 @@ type instance PF.ProofCounterExample (ProofSym sym arch) = InequivalenceResult a
 type instance PF.ProofCondition (ProofSym sym arch) = CondEquivalenceResult sym arch
 type instance PF.ProofMacawValue (ProofSym sym arch) = PSR.MacawRegEntry sym
 type instance PF.ProofBlockExit (ProofSym sym arch) = CS.RegValue sym (MS.MacawBlockEndType arch)
-type instance PF.ProofContext (ProofSym sym arch) = PT.PatchPair (PS.SimState sym arch)
+type instance PF.ProofContext (ProofSym sym arch) = PPa.PatchPair (PS.SimState sym arch)
 type instance PF.ProofScope (ProofSym (W4B.ExprBuilder t st fs) arch) = t
 
 type SymDomain sym arch = PF.ProofExpr (ProofSym sym arch) PF.ProofDomainType
@@ -235,21 +238,21 @@ instance forall sym arch tp. (PA.ValidArch arch, PT.ValidSym sym) => PP.Pretty (
          ]
        Nothing -> []
    where
-     ppBlockPairReturn :: PT.BlockPair arch -> PP.Doc a
-     ppBlockPairReturn pPair = PT.ppPatchPairEq PT.equivBlocks go pPair
+     ppBlockPairReturn :: PPa.BlockPair arch -> PP.Doc a
+     ppBlockPairReturn pPair = PPa.ppPatchPairEq PB.equivBlocks go pPair
        where
-         go :: PT.ConcreteBlock arch bin -> PP.Doc a
-         go blk = PP.parens (PP.pretty (PT.ppBlock blk) <+> "-> return")
+         go :: PB.ConcreteBlock arch bin -> PP.Doc a
+         go blk = PP.parens (PP.pretty (PB.ppBlock blk) <+> "-> return")
 
-     ppBlockPairTarget :: PT.BlockPair arch -> PT.BlockPair arch -> PP.Doc a
-     ppBlockPairTarget (PT.PatchPair srcO srcP) (PT.PatchPair tgtO tgtP) =
-       if PT.ppEq srcO srcP && PT.ppEq tgtO tgtP then
+     ppBlockPairTarget :: PPa.BlockPair arch -> PPa.BlockPair arch -> PP.Doc a
+     ppBlockPairTarget (PPa.PatchPair srcO srcP) (PPa.PatchPair tgtO tgtP) =
+       if PPa.ppEq srcO srcP && PPa.ppEq tgtO tgtP then
          go (srcO, tgtO)
        else
          go (srcO, tgtO) <+> "(original) vs." <+> go (srcP, tgtP) <+> "(patched)"
        where
-         go :: (PT.ConcreteBlock arch bin, PT.ConcreteBlock arch bin) -> PP.Doc a
-         go (src, tgt) = PP.parens (PP.pretty (PT.ppBlock src)) <+> "->" <+> (PP.pretty (PT.ppBlock tgt))
+         go :: (PB.ConcreteBlock arch bin, PB.ConcreteBlock arch bin) -> PP.Doc a
+         go (src, tgt) = PP.parens (PP.pretty (PB.ppBlock src)) <+> "->" <+> (PP.pretty (PB.ppBlock tgt))
  pretty (PF.ProofExpr prf@PF.ProofBlockSlice{}) =
     PP.vsep
       [ PP.pretty (PF.prfBlockSliceTriple prf)
@@ -276,7 +279,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PT.ValidSym sym) => PP.Pretty (
  pretty (PF.ProofExpr prf@PF.ProofTriple{}) =
    PP.vsep
      [ "Block Transition:"
-     , PP.indent 4 $ PT.ppPatchPairEq PT.equivBlocks (PP.pretty . PT.ppBlock) (PF.prfTripleBlocks prf)
+     , PP.indent 4 $ PPa.ppPatchPairEq PB.equivBlocks (PP.pretty . PB.ppBlock) (PF.prfTripleBlocks prf)
      , "Pre-domain:"
      , PP.indent 4 $ PP.pretty (PF.prfTriplePreDomain prf)
      , "Post-domain:"
@@ -373,7 +376,7 @@ collapseProofMemoryDomain memdom = mapMaybe go $ MapF.toList (PF.prfMemoryDomain
 -- | Specializing 'ProofExpr' and 'BlockSliceTransition' to concrete values.
 data ProofGround arch
 
-type instance PF.ProofBlock (ProofGround arch) = PT.ConcreteBlock arch
+type instance PF.ProofBlock (ProofGround arch) = PB.ConcreteBlock arch
 type instance PF.ProofRegister (ProofGround arch) = MM.ArchReg arch
 type instance PF.ProofMemCell (ProofGround arch) = GroundMemCell arch
 type instance PF.ProofBV (ProofGround arch) = GroundBV
@@ -552,7 +555,7 @@ ppBlockSliceTransition ::
   PF.BlockSliceTransition (ProofGround arch) ->
   PP.Doc a
 ppBlockSliceTransition pre post bs = PP.vsep $
-  [ "Block Exit Condition:" <+> PT.ppPatchPairCEq (PP.pretty . ppExitCase) (fmap grndBlockCase $ PF.slBlockExitCase bs)
+  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (fmap grndBlockCase $ PF.slBlockExitCase bs)
   ,  "Initial register state:"
   , ppRegs pre (PF.slRegState $ PF.slBlockPreState bs)
   , "Initial memory state:"
@@ -563,8 +566,8 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
   , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
   , case fmap grndBlockReturn $ PF.slBlockExitCase bs of
-      PT.PatchPairC (Just cont1) (Just cont2) ->
-        "Function Continue Address:" <+> PT.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PT.PatchPairC cont1 cont2)
+      PPa.PatchPairC (Just cont1) (Just cont2) ->
+        "Function Continue Address:" <+> PPa.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PPa.PatchPairC cont1 cont2)
       _ -> PP.emptyDoc
   ]
 
@@ -576,8 +579,8 @@ ppIPs st  =
   let
     pcRegs = (PF.slRegState st) ^. MM.curIP
   in case PF.slRegOpEquiv pcRegs of
-    True -> PP.pretty $ PT.pcOriginal (PF.slRegOpValues pcRegs)
-    False -> PT.ppPatchPairC PP.pretty (PF.slRegOpValues pcRegs)
+    True -> PP.pretty $ PPa.pcOriginal (PF.slRegOpValues pcRegs)
+    False -> PPa.ppPatchPairC PP.pretty (PF.slRegOpValues pcRegs)
 
 ppMemCellMap ::
   PA.ValidArch arch =>
@@ -616,7 +619,7 @@ ppRegVal ::
 ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
   CLM.LLVMPointerRepr _ ->
     let
-      PT.PatchPairC (GroundMacawValue obv) (GroundMacawValue pbv) = vals
+      PPa.PatchPairC (GroundMacawValue obv) (GroundMacawValue pbv) = vals
     in case isGroundBVZero obv && isGroundBVZero pbv of
          True -> Nothing
          False -> Just $ ppSlotVal
@@ -630,8 +633,8 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
       False -> "| Excluded"
     
     ppVals = case PF.slRegOpEquiv regOp of
-      True -> PP.pretty $ PT.pcOriginal vals
-      False -> PT.ppPatchPairC PP.pretty vals
+      True -> PP.pretty $ PPa.pcOriginal vals
+      False -> PPa.ppPatchPairC PP.pretty vals
 
 regInDomain ::
   PA.ValidArch arch =>
@@ -659,8 +662,8 @@ ppCellVal dom cell memOp = case PF.slMemOpCond memOp of
       False -> "| Excluded"
     
     ppVals = case PF.slMemOpEquiv memOp of
-      True -> PP.pretty $ show (PT.pcOriginal vals)
-      False -> PT.ppPatchPairC (PP.pretty . show) vals
+      True -> PP.pretty $ show (PPa.pcOriginal vals)
+      False -> PPa.ppPatchPairC (PP.pretty . show) vals
 
 cellInMemDomain ::
   PA.ValidArch arch =>

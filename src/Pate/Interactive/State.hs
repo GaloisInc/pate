@@ -40,12 +40,14 @@ import qualified Language.C as LC
 import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
-import qualified Pate.Binary as PB
+import qualified Pate.Address as PA
 import qualified Pate.Event as PE
+import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
+
 
 data SourcePair f = SourcePair { originalSource :: f
                                , patchedSource :: f
@@ -87,13 +89,13 @@ data TraceEvent where
 -- The maps are keyed on the address of the original block being checked (that
 -- choice is arbitrary and doesn't matter much)
 data State arch =
-  State { _successful :: Map.Map (PT.ConcreteAddress arch) (EquivalenceTest arch)
-        , _indeterminate :: Map.Map (PT.ConcreteAddress arch) (EquivalenceTest arch)
-        , _failure :: Map.Map (PT.ConcreteAddress arch) (Failure arch)
+  State { _successful :: Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch)
+        , _indeterminate :: Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch)
+        , _failure :: Map.Map (PA.ConcreteAddress arch) (Failure arch)
         , _recentEvents :: [PE.Event arch]
         -- ^ The N most recent events (most recent first), to be shown in the console
-        , _originalBinary :: Maybe (PB.LoadedELF arch, PT.ParsedFunctionMap arch)
-        , _patchedBinary :: Maybe (PB.LoadedELF arch, PT.ParsedFunctionMap arch)
+        , _originalBinary :: Maybe (PLE.LoadedELF arch, PT.ParsedFunctionMap arch)
+        , _patchedBinary :: Maybe (PLE.LoadedELF arch, PT.ParsedFunctionMap arch)
         , _sources :: Maybe (SourcePair LC.CTranslUnit)
         , _proofTree :: Maybe (ProofTree arch)
         -- ^ All of the collected proof nodes received from the verifier
@@ -104,7 +106,7 @@ data State arch =
         -- their place as new data streams in
         , _metrics :: PM.Metrics
         -- ^ Aggregated metrics for display
-        , _traceEvents :: Map.Map (PT.ConcreteAddress arch) (Seq.Seq TraceEvent)
+        , _traceEvents :: Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
         -- ^ Debug trace events indexed by original (super-)block address
         }
 

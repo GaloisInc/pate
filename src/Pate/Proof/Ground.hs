@@ -46,8 +46,7 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 
 import qualified Data.Foldable as F
-import           Data.Functor.Const
-import qualified Data.List as L
+import           Data.Functor.Const ( Const(..) )
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
@@ -74,11 +73,14 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.SimState as PS
@@ -95,7 +97,7 @@ import qualified What4.PathCondition as WPC
 -- were assumed equivalent, and any concrete locations that are not equivalent
 -- after the block slice transition.
 getInequivalenceResult ::
-  PT.InequivalenceReason ->
+  PEE.InequivalenceReason ->
   -- | pre-domain
   PF.ProofExpr (PFI.ProofSym sym arch) PF.ProofDomainType ->
   -- | post-domain
@@ -186,8 +188,8 @@ traceBundle
 traceBundle bundle msg =
   emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
   where
-    origAddr = PT.concreteAddress (PS.simInBlock (PS.simInO bundle))
-    patchedAddr = PT.concreteAddress (PS.simInBlock (PS.simInP bundle))
+    origAddr = PB.concreteAddress (PS.simInBlock (PS.simInO bundle))
+    patchedAddr = PB.concreteAddress (PS.simInBlock (PS.simInP bundle))
 
 -- | Compute a domain that represents the path condition for
 -- values which disagree in the given counter-example
@@ -198,18 +200,18 @@ getPathCondition ::
   PF.BlockSliceState (PFI.ProofSym sym arch) ->
   PFI.SymDomain sym arch ->
   SymGroundEvalFn sym ->
-  EquivM sym arch (PT.PatchPairC (W4.Pred sym))
+  EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
 getPathCondition bundle slice dom fn = withSym $ \sym -> do
   groundDom <- groundProofExpr fn dom
   let
     getRegPath ::
       MM.ArchReg arch tp ->
       PF.BlockSliceRegOp (PFI.ProofSym sym arch) tp ->
-      PT.PatchPairC (W4.Pred sym) ->
-      EquivM sym arch (PT.PatchPairC (W4.Pred sym))
+      PPa.PatchPairC (W4.Pred sym) ->
+      EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
     getRegPath reg regOp paths = do
       case PFI.regInDomain groundDom reg of
-        True -> do
+        True -> do --  "_R11" `L.isPrefixOf` showF reg -> do
           -- FIXME: In the failing case, there are *many* more registers in the
           -- domain (1 for the simple case, probably 20 for the real example);
           -- could that be related?
@@ -223,7 +225,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
           traceBundle bundle ("getPathCondition.getRegPath for " ++ showF reg)
           F.forM_ paths' $ \path' -> do
             traceBundle bundle ("  " ++ show (W4.printSymExpr path'))
-          liftIO $ PT.zipMPatchPairC paths paths' (W4.andPred sym)
+          liftIO $ PPa.zipMPatchPairC paths paths' (W4.andPred sym)
         _ -> return paths
 
     getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
@@ -231,11 +233,11 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
       let mem = MT.memArr $ PS.simOutMem st
       Const <$> (withGroundEvalFn fn $ \fn' -> getGenPathCondition sym fn' mem)
 
-  let truePair = PT.PatchPairC (W4.truePred sym) (W4.truePred sym)
+  let truePair = PPa.PatchPairC (W4.truePred sym) (W4.truePred sym)
   regPath <- PF.foldrMBlockStateLocs getRegPath (\_ _ -> return) truePair slice
   
-  memPath <- PT.toPatchPairC <$> TF.traverseF getMemPath (PS.simOut bundle)
-  liftIO $ PT.zipMPatchPairC regPath memPath (W4.andPred sym)
+  memPath <- PPa.toPatchPairC <$> TF.traverseF getMemPath (PS.simOut bundle)
+  liftIO $ PPa.zipMPatchPairC regPath memPath (W4.andPred sym)
 
 
 groundProofTransformer ::
@@ -288,10 +290,10 @@ getInequivalenceReason ::
   PA.ValidArch arch =>
   PFI.GroundDomain arch ->
   PF.BlockSliceState (PFI.ProofGround arch) ->
-  Maybe PT.InequivalenceReason
+  Maybe PEE.InequivalenceReason
 getInequivalenceReason dom st =
-  if | not $ all (isMemOpValid dom) (MapF.toList $ PF.slMemState st) -> Just PT.InequivalentMemory
-     | not $ all (isRegValid dom) (MapF.toList $ MM.regStateMap $ PF.slRegState st) -> Just PT.InequivalentRegisters
+  if | not $ all (isMemOpValid dom) (MapF.toList $ PF.slMemState st) -> Just PEE.InequivalentMemory
+     | not $ all (isRegValid dom) (MapF.toList $ MM.regStateMap $ PF.slRegState st) -> Just PEE.InequivalentRegisters
      | otherwise -> Nothing
 
 
@@ -409,7 +411,7 @@ groundMacawValue fn e
   | CT.BoolRepr <- PSR.macawRegRepr e
   , val <- PSR.macawRegValue e = PFI.GroundMacawValue <$>  execGroundFn fn val
   | CT.StructRepr Ctx.Empty <- PSR.macawRegRepr e = PFI.GroundMacawValue <$> return ()
-  | otherwise = throwHere $ PT.UnsupportedRegisterType (Some $ PSR.macawRegRepr e)
+  | otherwise = throwHere $ PEE.UnsupportedRegisterType (Some $ PSR.macawRegRepr e)
 
 groundReturnPtr ::
   forall sym arch.

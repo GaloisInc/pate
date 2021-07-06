@@ -30,13 +30,14 @@ import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 import qualified What4.Interface as WI
 
-import qualified Pate.Arch as PA
+import qualified Pate.Arch as PAr
+import qualified Pate.Block as PB
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Panic as Panic
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Types as PT
 
 import qualified Pate.Interactive.State as IS
 
@@ -101,12 +102,12 @@ nodeLabel
   -> PE.BlocksPair arch
   -> PPr.ProofNonceExpr prf tp
   -> T.Text
-nodeLabel proofTreeNodes (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) expr =
+nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) expr =
   pp (mconcat [ ppAppTag proofTreeNodes expr
               , PP.line
-              , mconcat [ PP.pretty (PT.concreteAddress ob)
+              , mconcat [ PP.pretty (PB.concreteAddress ob)
                         , PP.pretty "/"
-                        , PP.pretty (PT.concreteAddress pb)
+                        , PP.pretty (PB.concreteAddress pb)
                         ]
               ])
 
@@ -271,7 +272,7 @@ renderDomainApp (PPr.ProofDomain regs stack mem _context) =
 
 renderCounterexample
   :: ( prf ~ PFI.ProofSym sym arch
-     , PA.ValidArch arch
+     , PAr.ValidArch arch
      )
   => PPr.ProofCounterExample prf
   -> TP.UI TP.Element
@@ -303,7 +304,7 @@ renderProofApp
    . ( prf ~ PFI.ProofSym sym arch
      , WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
-     , PA.ValidArch arch
+     , PAr.ValidArch arch
      )
   => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
   -> Some (PPr.ProofNonce prf)

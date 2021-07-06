@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 module Pate.Arch (
-  ValidArchProxy(..),
+  SomeValidArch(..),
   ArchConstraints(..),
   ValidArch(..),
   HasTOCDict(..),
@@ -26,6 +26,7 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MT
 
 import qualified Pate.Memory.MemTrace as PMT
+import qualified Pate.Verification.ExternalCall as PVE
 
 class
   ( MC.MemWidth (MC.ArchAddrWidth arch)
@@ -66,5 +67,13 @@ withTOCCases _ noToc hasToc = case tocProof @arch of
   Just HasTOCDict -> hasToc
   Nothing -> noToc
 
-data ValidArchProxy arch where
-  ValidArchProxy :: (ValidArch arch, ArchConstraints arch) => ValidArchProxy arch
+-- | A witness to the validity of an architecture, along with any
+-- architecture-specific data required for the verifier
+--
+-- The first external domain handles domains for system calls, while the second
+-- handles domains for external library calls
+data SomeValidArch arch where
+  SomeValidArch :: (ValidArch arch, ArchConstraints arch)
+                => PVE.ExternalDomain PVE.SystemCall arch
+                -> PVE.ExternalDomain PVE.ExternalCall arch
+                -> SomeValidArch arch

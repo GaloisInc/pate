@@ -11,7 +11,7 @@ main :: IO ()
 main = do
   let cfg = TestConfig
         { testArchName = "ppc"
-        , testArchProxy = PA.ValidArchProxy @PPC.PPC64
+        , testArchProxy = PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall
         , testExpectEquivalenceFailure =
             [
             -- see: https://github.com/GaloisInc/pate/issues/10

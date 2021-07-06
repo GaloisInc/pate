@@ -69,12 +69,16 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Pate.Arch,
+  exposed-modules:     Pate.Address,
+                       Pate.Arch,
                        Pate.Binary,
+                       Pate.Block,
                        Pate.Config,
                        Pate.Discovery,
                        Pate.Verification,
+                       Pate.Verification.ExternalCall,
                        Pate.Loader,
+                       Pate.Loader.ELF,
                        Pate.Event,
                        Pate.Hints,
                        Pate.Hints.CSV,
@@ -91,6 +95,7 @@ library
                        Pate.Proof.Instances,
                        Pate.Proof.Operations,
                        Pate.Proof.Ground,
+                       Pate.Register,
                        Pate.Solver,
                        Pate.Timeout,
                        Pate.Types,
@@ -101,7 +106,11 @@ library
                        Data.Parameterized.SetF,
                        Pate.SimState,
                        Pate.Equivalence,
+                       Pate.Equivalence.Error,
+                       Pate.Equivalence.MemPred,
+                       Pate.Equivalence.StatePred,
                        Pate.Verbosity,
+                       Pate.PatchPair,
 
                        Pate.Interactive,
                        Pate.Interactive.Port,
@@ -149,7 +158,9 @@ test-suite pate-test-ppc
   hs-source-dirs: tests, arch
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic,
-                 dismantle-ppc
+                 dismantle-ppc,
+                 semmc-ppc,
+                 what4
   ghc-options:   -Wcompat -Wall -O2 -threaded -rtsopts "-with-rtsopts=-N"
 
 test-suite pate-test-aarch32
@@ -162,6 +173,8 @@ test-suite pate-test-aarch32
                  macaw-aarch32,
                  macaw-aarch32-symbolic,
                  macaw-loader-aarch32,
+                 asl-translator,
+                 what4,
                  dismantle-arm-xml
 
 common shared-exec
@@ -202,6 +215,7 @@ executable pate-exec
                        what4,
                        macaw-ppc,
                        macaw-ppc-symbolic,
+                       semmc-ppc,
                        dismantle-ppc,
                        semmc-aarch32,
                        macaw-loader-aarch32,

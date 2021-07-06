@@ -15,11 +15,12 @@ import qualified Language.C as LC
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
 
-import qualified Pate.Arch as PA
+import qualified Pate.Arch as PAr
+import qualified Pate.Block as PB
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
+import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Types as PT
 
 import qualified Pate.Interactive.Render.SliceGraph as IRS
 import qualified Pate.Interactive.State as IS
@@ -38,15 +39,15 @@ renderCounterexample er =
 
 -- | Note that we always look up the original address because we key the
 -- function name off of that... we could do better
-renderSource :: (PA.ArchConstraints arch)
+renderSource :: (PAr.ArchConstraints arch)
              => IS.State arch
              -> (IS.SourcePair LC.CTranslUnit -> LC.CTranslUnit)
-             -> L.Getter (IS.State arch) (Maybe (PB.LoadedELF arch, b))
+             -> L.Getter (IS.State arch) (Maybe (PLE.LoadedELF arch, b))
              -> MC.MemAddr (MC.ArchAddrWidth arch)
              -> [TP.UI TP.Element]
 renderSource st getSource binL addr = fromMaybe [] $ do
   (lelf, _) <- st ^. binL
-  bname <- MBL.symbolFor (PB.loadedBinary lelf) addr
+  bname <- MBL.symbolFor (PLE.loadedBinary lelf) addr
   let sname = UTF8.toString (UTF8.fromRep bname)
   LC.CTranslUnit decls _ <- getSource <$> st ^. IS.sources
   fundef <- F.find (matchingFunctionName sname) decls
@@ -63,13 +64,13 @@ matchingFunctionName sname def =
         LC.CDeclr (Just ident) _ _ _ _ -> LC.identToString ident == sname
         LC.CDeclr Nothing _ _ _ _ -> False
 
-renderFunctionName :: (PA.ArchConstraints arch)
+renderFunctionName :: (PAr.ArchConstraints arch)
                    => IS.State arch
                    -> MC.MemAddr (MC.ArchAddrWidth arch)
                    -> [TP.UI TP.Element]
 renderFunctionName st origAddr = fromMaybe [] $ do
   (lelf, _) <- st ^. IS.originalBinary
-  bname <- MBL.symbolFor (PB.loadedBinary lelf) origAddr
+  bname <- MBL.symbolFor (PLE.loadedBinary lelf) origAddr
   let sname = UTF8.toString (UTF8.fromRep bname)
   return [TP.string ("(Function: " ++ sname ++ ")")]
 
@@ -77,10 +78,10 @@ renderAddr :: (Show a) => String -> a -> TP.UI TP.Element
 renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
 
 renderBlockPairDetail
-  :: (PA.ArchConstraints arch)
+  :: (PAr.ArchConstraints arch)
   => IS.State arch
-  -> PE.Blocks arch PT.Original
-  -> PE.Blocks arch PT.Patched
+  -> PE.Blocks arch PB.Original
+  -> PE.Blocks arch PB.Patched
   -> Maybe (PE.EquivalenceResult arch)
   -> TP.UI (TP.Element, TP.UI (), TP.UI ())
 renderBlockPairDetail st o@(PE.Blocks blkO _opbs) p@(PE.Blocks blkP _ppbs) res = do
@@ -93,7 +94,7 @@ renderBlockPairDetail st o@(PE.Blocks blkO _opbs) p@(PE.Blocks blkP _ppbs) res =
                ]
   return (g, origGraphSetup, patchedGraphSetup)
   where
-    origAddr = PT.blockMemAddr blkO
-    patchedAddr = PT.blockMemAddr blkP
+    origAddr = PB.blockMemAddr blkO
+    patchedAddr = PB.blockMemAddr blkP
     (origGraphDiv, origGraphSetup) = IRS.renderSliceGraph "original-slice-graph" o
     (patchedGraphDiv, patchedGraphSetup) = IRS.renderSliceGraph "patched-slice-graph" p

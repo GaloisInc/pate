@@ -41,20 +41,23 @@ import qualified Data.ElfEdit as DEE
 import qualified Data.Macaw.CFG as MC
 import           Data.Parameterized.Some ( Some(..) )
 
-import qualified Pate.AArch32 as AArch32
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Event as PE
-import qualified Pate.PPC as PPC
 import qualified Pate.Hints as PH
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Loader as PL
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Types as PT
 import qualified Pate.Verbosity as PV
+
+import qualified Pate.AArch32 as AArch32
+import qualified Pate.PPC as PPC
 
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
@@ -222,12 +225,12 @@ printAtVerbosity verb evt =
 --
 -- Otherwise, just make a basic logger that will write logs to a user-specified
 -- location
-startLogger :: PA.ValidArchProxy arch
+startLogger :: PA.SomeValidArch arch
             -> PV.Verbosity
             -> LogTarget
             -> CC.Chan (Maybe (PE.Event arch))
             -> IO (LJ.LogAction IO (PE.Event arch), Maybe (CCA.Async ()))
-startLogger PA.ValidArchProxy verb lt chan =
+startLogger (PA.SomeValidArch {}) verb lt chan =
   case lt of
     NullLogger -> return (LJ.LogAction $ \_ -> return (), Nothing)
     StdoutLogger -> logToHandle IO.stdout
@@ -298,16 +301,16 @@ terminalFormatEvent evt =
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
-    PE.AnalysisStart (PT.PatchPair blkO blkP) ->
+    PE.AnalysisStart (PPa.PatchPair blkO blkP) ->
       layout $ mconcat [ "Checking original block at "
-                       , PP.viaShow $ PT.concreteAddress blkO
+                       , PP.viaShow $ PB.concreteAddress blkO
                        , " against patched block at "
-                       , PP.viaShow $ PT.concreteAddress blkP
+                       , PP.viaShow $ PB.concreteAddress blkP
                        ]
-    PE.CheckedEquivalence (PT.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
+    PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
       let
-        origAddr = PT.concreteAddress blkO
-        patchedAddr = PT.concreteAddress blkP
+        origAddr = PB.concreteAddress blkO
+        patchedAddr = PB.concreteAddress blkP
         pfx = mconcat [ "Checked original block at "
                       , PP.viaShow origAddr
                       , " against patched block at "
@@ -351,7 +354,7 @@ data LoadError where
 deriving instance Show LoadError
 
 -- | Examine the input files to determine the architecture
-archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PA.ValidArchProxy))
+archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PA.SomeValidArch))
 archToProxy origBinaryPath patchedBinaryPath = do
   origBin <- BS.readFile origBinaryPath
   patchedBin <- BS.readFile patchedBinaryPath
@@ -373,12 +376,12 @@ archToProxy origBinaryPath patchedBinaryPath = do
       | otherwise ->
         return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
 
-machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.ValidArchProxy)
+machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.SomeValidArch)
 machineToProxy em =
   case em of
-    DEE.EM_PPC -> Right (Some (PA.ValidArchProxy @PPC.PPC32))
-    DEE.EM_PPC64 -> Right (Some (PA.ValidArchProxy @PPC.PPC64))
-    DEE.EM_ARM -> Right (Some (PA.ValidArchProxy @AArch32.AArch32))
+    DEE.EM_PPC -> Right (Some (PA.SomeValidArch @PPC.PPC32 PPC.handleSystemCall PPC.handleExternalCall))
+    DEE.EM_PPC64 -> Right (Some (PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall))
+    DEE.EM_ARM -> Right (Some (PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall))
     _ -> Left (UnsupportedArchitecture em)
 
 

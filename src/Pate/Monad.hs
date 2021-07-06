@@ -130,20 +130,23 @@ import qualified What4.Symbol as WS
 import           What4.ExprHelpers
 
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
 import qualified Pate.Config as PC
 import           Pate.Equivalence
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Parallel as Par
+import qualified Pate.PatchPair as PPa
+import qualified Pate.Proof as PF
+import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Timeout as PT
 import           Pate.Types
-import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Parallel as Par
 
-data BinaryContext sym arch (bin :: WhichBinary) = BinaryContext
+data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
@@ -156,15 +159,16 @@ data EquivalenceContext sym arch where
     { nonces :: N.NonceGenerator IO ids
     , handles :: CFH.HandleAllocator
     , exprBuilder :: sym
-    , originalCtx :: BinaryContext sym arch Original
-    , rewrittenCtx :: BinaryContext sym arch Patched
+    , originalCtx :: BinaryContext sym arch PBi.Original
+    , rewrittenCtx :: BinaryContext sym arch PBi.Patched
     } -> EquivalenceContext sym arch
 
 data EquivEnv sym arch where
   EquivEnv ::
     forall sym arch .
     (PA.ValidArch arch, ValidSym sym) =>
-    { envWhichBinary :: Maybe (Some WhichBinaryRepr)
+    { envWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
+    , envValidArch :: PA.SomeValidArch arch
     , envCtx :: EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
@@ -187,7 +191,7 @@ data EquivEnv sym arch where
     , envTocs :: PA.HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
     -- ^ table of contents for the original and patched binaries, if defined by the
     -- architecture
-    , envCurrentFunc :: BlockPair arch
+    , envCurrentFunc :: PPa.BlockPair arch
     -- ^ start of the function currently under analysis
     , envCurrentFrame :: AssumptionFrame sym
     -- ^ the current assumption frame, accumulated as assumptions are added
@@ -195,7 +199,7 @@ data EquivEnv sym arch where
     , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
     -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
-    , envParentBlocks :: [BlockPair arch]
+    , envParentBlocks :: [PPa.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel
     , envProofCache :: ProofCache sym arch
     -- ^ cache for intermediate proof results
@@ -205,10 +209,10 @@ data EquivEnv sym arch where
 
 type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
 
-type ExitPairCache arch = BlockCache arch [PatchPair (BlockTarget arch)]
+type ExitPairCache arch = BlockCache arch [PPa.PatchPair (BlockTarget arch)]
 
 data BlockCache arch a where
-  BlockCache :: IO.MVar (Map (BlockPair arch) a) -> BlockCache arch a
+  BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a
 
 freshBlockCache ::
   IO (BlockCache arch a)
@@ -216,7 +220,7 @@ freshBlockCache = BlockCache <$> IO.newMVar M.empty
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
-  BlockPair arch ->
+  PPa.BlockPair arch ->
   EquivM sym arch (Maybe a)
 lookupBlockCache f pPair = do
   BlockCache cache <- asks f
@@ -227,7 +231,7 @@ lookupBlockCache f pPair = do
 
 modifyBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
-  BlockPair arch ->
+  PPa.BlockPair arch ->
   (a -> a -> a) ->
   a ->
   EquivM sym arch ()
@@ -271,14 +275,14 @@ getDuration = do
 emitWarning ::
   HasCallStack =>
   PE.BlocksPair arch ->
-  InnerEquivalenceError arch ->
+  PEE.InnerEquivalenceError arch ->
   EquivM sym arch ()
 emitWarning blks innererr = do
   wb <- asks envWhichBinary
-  let err = EquivalenceError
-        { errWhichBinary = wb
-        , errStackTrace = Just callStack
-        , errEquivError = innererr
+  let err = PEE.EquivalenceError
+        { PEE.errWhichBinary = wb
+        , PEE.errStackTrace = Just callStack
+        , PEE.errEquivError = innererr
         }
   emitEvent (\_ -> PE.Warning blks err)
 
@@ -293,12 +297,12 @@ data EquivState sym arch where
   EquivState ::
     { stProofs :: [PFI.ProofSymExpr sym arch PF.ProofBlockSliceType]
     -- ^ all intermediate triples that were proven for each block slice
-    , stSimResults ::  Map (BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
+    , stSimResults ::  Map (PPa.BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
     -- ^ cached results of symbolic execution for a given block pair
     , stEqStats :: EquivalenceStatistics
     } -> EquivState sym arch
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (EquivalenceError arch) IO))) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (PEE.EquivalenceError arch) IO))) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -308,7 +312,7 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (State
            , MonadThrow
            , MonadCatch
            , MonadMask
-           , MonadError (EquivalenceError arch)
+           , MonadError (PEE.EquivalenceError arch)
            )
 
 -- instance MonadError (EquivalenceError arch) (EquivM_ sym arch) where
@@ -322,26 +326,26 @@ type EquivM sym arch a = (PA.ValidArch arch, ValidSym sym) => EquivM_ sym arch a
 
 withBinary ::
   forall bin sym arch a.
-  KnownBinary bin =>
+  PBi.KnownBinary bin =>
   EquivM sym arch a ->
   EquivM sym arch a
 withBinary f =
   let
-    repr :: WhichBinaryRepr bin = knownRepr
+    repr :: PBi.WhichBinaryRepr bin = knownRepr
   in local (\env -> env { envWhichBinary = Just (Some repr) }) f
 
 getBinCtx ::
   forall bin sym arch.
-  KnownRepr WhichBinaryRepr bin => 
+  KnownRepr PBi.WhichBinaryRepr bin =>
   EquivM sym arch (BinaryContext sym arch bin)
 getBinCtx = getBinCtx' knownRepr
 
 getBinCtx' ::
-  WhichBinaryRepr bin ->
+  PBi.WhichBinaryRepr bin ->
   EquivM sym arch (BinaryContext sym arch bin)
 getBinCtx' repr = case repr of
-  OriginalRepr -> asks (originalCtx . envCtx)
-  PatchedRepr -> asks (rewrittenCtx . envCtx)
+  PBi.OriginalRepr -> asks (originalCtx . envCtx)
+  PBi.PatchedRepr -> asks (rewrittenCtx . envCtx)
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => EquivM sym arch a) ->
@@ -408,12 +412,12 @@ unconstrainedRegister reg = do
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) var) (Ctx.empty Ctx.:> var)
     MM.TupleTypeRepr PL.Nil -> do
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
-    _ -> throwHere $ UnsupportedRegisterType (Some (MS.typeToCrucible repr))
+    _ -> throwHere $ PEE.UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 withSimSpec ::
   PEM.ExprMappable sym f =>
   SimSpec sym arch f ->
-  (SimState sym arch Original -> SimState sym arch Patched -> f -> EquivM sym arch g) ->
+  (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> f -> EquivM sym arch g) ->
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec spec f = withSym $ \sym -> do
   withFreshVars $ \stO stP -> do
@@ -430,13 +434,13 @@ freshSimVars = do
 
 
 withFreshVars ::
-  (SimState sym arch Original -> SimState sym arch Patched -> EquivM sym arch (W4.Pred sym, f)) ->
+  (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> EquivM sym arch (W4.Pred sym, f)) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars f = do
-  varsO <- freshSimVars @Original
-  varsP <- freshSimVars @Patched
+  varsO <- freshSimVars @PBi.Original
+  varsP <- freshSimVars @PBi.Patched
   (asm, result) <- f (simVarState varsO) (simVarState varsP)
-  return $ SimSpec (PatchPair varsO varsP) asm result
+  return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
 -- The resulting predicate is the conjunction of the initial assumptions and
@@ -579,7 +583,7 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   case r of
     Left (_ :: SomeException) -> do
       liftIO $ putStrLn "Exception thrown during SAT check"
-      throwHere InconclusiveSAT
+      throwHere PEE.InconclusiveSAT
     Right r' -> return r'
 
 checkSatisfiableWithoutBindings
@@ -616,7 +620,7 @@ isPredSat timeout p = case W4.asConstantPred p of
     W4R.Unsat _ -> return False
     W4R.Unknown -> do
       liftIO $ putStrLn "Timed out and throwing"
-      throwHere InconclusiveSAT
+      throwHere PEE.InconclusiveSAT
 
 isPredTrue ::
   PT.Timeout ->
@@ -688,7 +692,7 @@ execGroundFn (SymGroundEvalFn fn) e = do
     ]
   case result of
     Just a -> return a
-    Nothing -> throwHere InvalidSMTModel
+    Nothing -> throwHere PEE.InvalidSMTModel
 
 getFootprints ::
   SimBundle sym arch ->
@@ -718,7 +722,7 @@ catchInIO ::
   IO a ->
   EquivM sym arch a
 catchInIO f =
-  (liftIO $ catch (Right <$> f) (\(e :: EquivalenceError arch) -> return $ Left e)) >>= \case
+  (liftIO $ catch (Right <$> f) (\(e :: PEE.EquivalenceError arch) -> return $ Left e)) >>= \case
     Left err -> throwError err
     Right result -> return result
 
@@ -746,7 +750,7 @@ runEquivM ::
   EquivEnv sym arch ->
   EquivState sym arch ->
   EquivM sym arch a ->
-  ExceptT (EquivalenceError arch) IO a
+  ExceptT (PEE.EquivalenceError arch) IO a
 runEquivM env st f = withValidEnv env $ evalStateT (runReaderT (unEQ f) env) st
 
 ----------------------------------------
@@ -754,19 +758,19 @@ runEquivM env st f = withValidEnv env $ evalStateT (runReaderT (unEQ f) env) st
 
 throwHere ::
   HasCallStack =>
-  InnerEquivalenceError arch ->
+  PEE.InnerEquivalenceError arch ->
   EquivM_ sym arch a
 throwHere err = withValid $ do
   wb <- asks envWhichBinary
-  throwError $ EquivalenceError
-    { errWhichBinary = wb
-    , errStackTrace = Just callStack
-    , errEquivError = err
+  throwError $ PEE.EquivalenceError
+    { PEE.errWhichBinary = wb
+    , PEE.errStackTrace = Just callStack
+    , PEE.errEquivError = err
     }
 
 
 instance MF.MonadFail (EquivM_ sym arch) where
-  fail msg = throwHere $ EquivCheckFailure $ "Fail: " ++ msg
+  fail msg = throwHere $ PEE.EquivCheckFailure $ "Fail: " ++ msg
 
 manifestError :: MonadError e m => m a -> m (Either e a)
 manifestError act = catchError (Right <$> act) (pure . Left)
@@ -786,4 +790,4 @@ instance PF.IsBoolLike (PFI.ProofSym sym arch) (EquivM_ sym arch) where
   proofPredFalse = withValid $ withSym $ \sym -> return $ W4.falsePred sym
   proofPredAssertEqual p1 p2 = withValid $ case p1 == p2 of
     True -> return ()
-    False -> throwHere $ IncompatibleDomainPolarities
+    False -> throwHere $ PEE.IncompatibleDomainPolarities
