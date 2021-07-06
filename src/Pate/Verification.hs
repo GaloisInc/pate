@@ -788,9 +788,6 @@ catchSimBundle pPair postcondSpec f = do
           traceBlockPair pPair "Cache miss"
           return Nothing
 
-    -- FIXME[TR]: Modify all of the error handling to plumb the thrown
-    -- exceptions through with both context and expressive error messages. Then
-    -- stream them out here (and anywhere else where we catch exceptions)
     errorResult :: EquivM sym arch ret
     errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars $ \stO stP -> do
       let
@@ -845,7 +842,7 @@ trivialBlockSlice ::
 trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec = withSym $ \sym -> do
   blkEnd <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
   transition <- PFO.noTransition in_ blkEnd
-  preUniv <- externalDomain sym -- universalDomain
+  preUniv <- externalDomain sym
   prf <- PFO.lazyProofEvent_ pPair $ do
     triple <- PFO.lazyProofEvent_ pPair $ do
       preDomain <- fmap PFO.asLazyProof $ PFO.proofNonceExpr $
@@ -860,6 +857,7 @@ trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec
   where
     pPair :: PPa.BlockPair arch
     pPair = TF.fmapF simInBlock in_
+
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -872,14 +870,6 @@ provePostcondition' ::
   EquivM sym arch (PES.StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ withSym $ \sym -> do
   traceBundle bundle "Entering provePostcondition"
-  -- FIXME: This is the other major call modified in the last set of changes, so
-  -- it looks like it cooperates with this function
-  --
-  -- NOTES:
-  --
-  -- - The failing FunctionPredomain proof nodes are missing the set of
-  --   locations assumed to be equivalent before the call (which seems to enable
-  --   it to easily find counterexamples)
   pairs <- PD.discoverPairs bundle
   traceBundle bundle (show (length pairs) ++ " pairs found!")
   -- find all possible exits and propagate the postcondition backwards from them
@@ -1055,8 +1045,6 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
   (_, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
 
-  -- FIXME[TR]: Question - is this failing in some of the external call cases?
-  -- It seems like that could explain why some of the preconditions are empty
   traceBundle bundle "guessing equivalence domain"
   eqInputs <- withAssumption_ (return asm) $ do
     guessEquivalenceDomain bundle postcondPred postcond
@@ -1075,10 +1063,6 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   traceBundle bundle ("Postcondition Predicate:\n" ++ show (W4.printSymExpr postcondPred))
 
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  -- FIXME[TR]: The critical node seems to be missing from the UI. We need to
-  -- figure out if that is just a display issue or if the proof for that node is
-  -- actually failing quietly (or perhaps loudly, but in a way we aren't
-  -- tracking)
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
     preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain bundle eqInputs
     postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
@@ -1185,6 +1169,11 @@ computeEqConditionGas = 20
 -- - The computed path condition is the conjunction of the negations of the
 --   blocking clauses (i.e., saying that if we don't take any of the problematic
 --   paths, then the goal equivalence state is reached)
+--
+-- NOTE: The "gas" parameter prevents us from getting stuck in an infinite loop,
+-- but if it does cut us off, we are likely to not be able to identify a
+-- conditional equivalence condition (and will flag it as an unconditional
+-- failure)
 computeEqCondition ::
   forall sym arch.
   SimBundle sym arch ->
@@ -1210,11 +1199,6 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
           W4R.Unknown -> return Nothing
           -- counter-example, compute another path condition and continue
           W4R.Sat fn -> Just <$> do
-            -- FIXME[TR]: Hypothesis - if we have timed out and produced a
-            -- trivial slice, 'getPathCondition' doesn't make progress
-            --
-            -- Can we cut this short with a "gas" parameter? It seems like
-            -- stopping early is safe
             pathCond' <- PFG.getPathCondition bundle sliceState postDomain fn
             p <- flattenCondPair pathCond'
             traceBundle bundle ("Computing a new path condition:\n" ++ show (W4.printSymExpr p))
@@ -1503,34 +1487,11 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
 
             heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
             withAssumption_ (return isFreshValid) $ do
-              -- FIXME[TR]: If this times out, do we get an empty register list? Is that too conservative?
               result <- isPredTruePar' heuristicTimeout goalIgnoresReg
               Par.forFuture result $ \case
                 True -> return Nothing
                 False -> return $ Just (Some r, W4.truePred sym)
-        _ -> do
-          -- FIXME[TR]: So at least some of the problematic external calls have no variables bound in their goals
-          --
-          -- That could imply that the goals are computed incorrectly. We should investigate what they are.
-          --
-          -- Could it be because there is another external call right before
-          -- this, which would be a strange environment where we really know
-          -- nothing
-          --
-          -- If we knew that the call was external, we could offer up some different logic here
-          --
-          -- FIXME: For the 0x1087c example, the two programs really do load
-          -- different values from memory.  This could very well be a simple
-          -- position independent reference
-          --
-          -- FIXME: After fiddling with this (unsafely), it seems that R14 (the
-          -- link register on AArch32) generates a mismatch in the post-state,
-          -- which also makes sense and needs to be accounted for.  The two
-          -- variants can return to different locations when the code shifts.
-          --
-          -- We probably want to exclude the link register (like the IP) because
-          -- we have a concrete value
-          exclude
+        _ -> exclude
   regsDom <- (M.fromList . catMaybes) <$> Par.joinFuture @_ @Par.Future result
   stackRegion <- CMR.asks envStackRegion
   let
