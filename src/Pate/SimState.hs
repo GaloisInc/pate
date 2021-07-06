@@ -88,17 +88,20 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 
+import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.PatchPair as PPa
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Types as PT
 import           What4.ExprHelpers
 import qualified Data.Parameterized.SetF as SetF
 import           Data.Parameterized.SetF (SetF)
+
 ------------------------------------
 -- Crucible inputs and outputs
 
-data SimState sym arch (bin :: PT.WhichBinary) = SimState
+data SimState sym arch (bin :: PBi.WhichBinary) = SimState
   {
     simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
@@ -107,7 +110,7 @@ data SimState sym arch (bin :: PT.WhichBinary) = SimState
 data SimInput sym arch bin = SimInput
   {
     simInState :: SimState sym arch bin
-  , simInBlock :: PT.ConcreteBlock arch bin
+  , simInBlock :: PB.ConcreteBlock arch bin
   }
 
 
@@ -336,17 +339,17 @@ rebindWithFrame' sym cache asm e_outer = do
 
 data SimSpec sym arch f = SimSpec
   {
-    specVars :: PT.PatchPair (SimVars sym arch)
+    specVars :: PPa.PatchPair (SimVars sym arch)
   , specAsm :: W4.Pred sym
   , specBody :: f
   }
 
 
-specVarsO :: SimSpec sym arch f -> SimVars sym arch PT.Original
-specVarsO spec = PT.pOriginal $ specVars spec
+specVarsO :: SimSpec sym arch f -> SimVars sym arch PBi.Original
+specVarsO spec = PPa.pOriginal $ specVars spec
 
-specVarsP :: SimSpec sym arch f -> SimVars sym arch PT.Patched
-specVarsP spec = PT.pPatched $ specVars spec
+specVarsP :: SimSpec sym arch f -> SimVars sym arch PBi.Patched
+specVarsP spec = PPa.pPatched $ specVars spec
 
 instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) where
   mapExpr sym f spec = do
@@ -370,24 +373,24 @@ specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBod
 -- | The symbolic inputs and outputs of an original vs. patched block slice.
 data SimBundle sym arch = SimBundle
   {
-    simIn :: PT.PatchPair (SimInput sym arch)
-  , simOut :: PT.PatchPair (SimOutput sym arch)
+    simIn :: PPa.PatchPair (SimInput sym arch)
+  , simOut :: PPa.PatchPair (SimOutput sym arch)
   }
 
-simInO :: SimBundle sym arch -> SimInput sym arch PT.Original
-simInO = PT.pOriginal . simIn
+simInO :: SimBundle sym arch -> SimInput sym arch PBi.Original
+simInO = PPa.pOriginal . simIn
 
-simInP :: SimBundle sym arch -> SimInput sym arch PT.Patched
-simInP = PT.pPatched . simIn
+simInP :: SimBundle sym arch -> SimInput sym arch PBi.Patched
+simInP = PPa.pPatched . simIn
 
-simOutO :: SimBundle sym arch -> SimOutput sym arch PT.Original
-simOutO = PT.pOriginal . simOut
+simOutO :: SimBundle sym arch -> SimOutput sym arch PBi.Original
+simOutO = PPa.pOriginal . simOut
 
-simOutP :: SimBundle sym arch -> SimOutput sym arch PT.Patched
-simOutP = PT.pPatched . simOut
+simOutP :: SimBundle sym arch -> SimOutput sym arch PBi.Patched
+simOutP = PPa.pPatched . simOut
 
 
-simPair :: SimBundle sym arch -> PT.BlockPair arch
+simPair :: SimBundle sym arch -> PPa.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 ---------------------------------------
@@ -451,8 +454,8 @@ bindSpec ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
   sym -> 
-  SimState sym arch PT.Original ->
-  SimState sym arch PT.Patched ->
+  SimState sym arch PBi.Original ->
+  SimState sym arch PBi.Patched ->
   SimSpec sym arch f ->
   IO (W4.Pred sym, f)
 bindSpec sym stO stP spec = do

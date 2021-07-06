@@ -12,10 +12,12 @@ import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
 
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Event as PE
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Types as PT
 
 import qualified Pate.Interactive.Render.BlockPairDetail as IRB
 import qualified Pate.Interactive.State as IS
@@ -27,8 +29,8 @@ import qualified Pate.Interactive.State as IS
 showBlockPairDetail :: (PA.ArchConstraints arch)
                     => IS.State arch
                     -> TP.Element
-                    -> PE.Blocks arch PT.Original
-                    -> PE.Blocks arch PT.Patched
+                    -> PE.Blocks arch PBi.Original
+                    -> PE.Blocks arch PBi.Patched
                     -> Maybe (PE.EquivalenceResult arch)
                     -> a
                     -> TP.UI ()
@@ -83,10 +85,10 @@ renderEvent st detailDiv evt =
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       TP.ul #+ (map (\w -> TP.li #+ [TP.string (show w)]) pes)
-    PE.CheckedEquivalence (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
+    PE.CheckedEquivalence (PPa.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
       let
-        origAddr = PT.blockMemAddr blkO
-        patchedAddr = PT.blockMemAddr blkP
+        origAddr = PB.blockMemAddr blkO
+        patchedAddr = PB.blockMemAddr blkP
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
       TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb (Just res))
@@ -97,9 +99,9 @@ renderEvent st detailDiv evt =
                  , TP.string (" (in " ++ show duration ++ ")")
                  , renderEquivalenceResult res
                  ]
-    PE.ProofIntermediate (PT.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks _blkP _))
+    PE.ProofIntermediate (PPa.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks _blkP _))
                          (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
-      let origAddr = PT.blockMemAddr blkO
+      let origAddr = PB.blockMemAddr blkO
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)
       TP.on TP.click blockLink (showBlockPairDetail st detailDiv ob pb Nothing)

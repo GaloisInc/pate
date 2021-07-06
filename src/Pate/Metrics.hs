@@ -16,8 +16,8 @@ import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Time as TM
 
-import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
+import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
@@ -52,7 +52,7 @@ emptyMetrics =
 
 loadedBinaryMetrics
   :: (MM.MemWidth (MC.ArchAddrWidth arch))
-  => PB.LoadedELF arch
+  => PLE.LoadedELF arch
   -> PT.ParsedFunctionMap arch
   -> BinaryMetrics
 loadedBinaryMetrics le pfm =
@@ -62,7 +62,7 @@ loadedBinaryMetrics le pfm =
                 }
   where
     isExec = MMP.isExecutable . MM.segmentFlags
-    segs = MM.memSegments (MBL.memoryImage (PB.loadedBinary le))
+    segs = MM.memSegments (MBL.memoryImage (PLE.loadedBinary le))
 
     byteCount = sum [ if isExec seg then fromIntegral (MM.segmentSize seg) else 0
                     | seg <- segs
@@ -104,3 +104,5 @@ summarize e m =
     PE.HintErrorsCSV {} -> m
     PE.HintErrorsJSON {} -> m
     PE.HintErrorsDWARF {} -> m
+    PE.ProofTraceEvent {} -> m
+    PE.ProofTraceFormulaEvent {} -> m

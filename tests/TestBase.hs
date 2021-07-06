@@ -21,15 +21,18 @@ import qualified Test.Tasty.HUnit as T
 import qualified Test.Tasty.ExpectedFailure as T
 
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
-import qualified Pate.Loader as PL
-import qualified Pate.Types as PT
 import qualified Pate.Event as PE
+import qualified Pate.Loader as PL
+import qualified Pate.PatchPair as PPa
+import qualified Pate.Types as PT
 
 data TestConfig where
   TestConfig ::
     { testArchName :: String
-    , testArchProxy :: PA.ValidArchProxy arch
+    , testArchProxy :: PA.SomeValidArch arch
     , testExpectEquivalenceFailure :: [String]
     -- ^ tests which are failing now but eventually should succeed
     , testExpectSelfEquivalenceFailure :: [String]
@@ -68,8 +71,8 @@ expectEquivalenceFailure cfg fp =
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
   T.testGroup fp $
-    [ wrap $ T.testCase "original-self" $ doTest (Just PT.OriginalRepr) ShouldVerify proxy fp
-    , wrap $ T.testCase "patched-self" $ doTest (Just PT.PatchedRepr) ShouldVerify proxy fp
+    [ wrap $ T.testCase "original-self" $ doTest (Just PBi.OriginalRepr) ShouldVerify proxy fp
+    , wrap $ T.testCase "patched-self" $ doTest (Just PBi.PatchedRepr) ShouldVerify proxy fp
     , mkEquivTest cfg ShouldVerify fp
     ]
   where
@@ -87,12 +90,12 @@ mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
 
 doTest ::
   forall arch bin.
-  Maybe (PT.WhichBinaryRepr bin) ->
+  Maybe (PBi.WhichBinaryRepr bin) ->
   ShouldVerify ->
-  PA.ValidArchProxy arch ->
+  PA.SomeValidArch arch ->
   FilePath ->
   IO ()
-doTest mwb sv proxy@PA.ValidArchProxy fp = do
+doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
   let
     infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PC.noPatchData
@@ -113,10 +116,10 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
             PE.AnalysisStart pPair -> do
               putStrLn $ concat $
                 [ "Checking equivalence of "
-                , PT.ppBlock (PT.pOriginal pPair)
+                , PB.ppBlock (PPa.pOriginal pPair)
                 , " and "
-                , PT.ppBlock (PT.pPatched pPair)
-                , " (" ++ PT.ppBlockEntry (PT.concreteBlockEntry (PT.pOriginal pPair)) ++ ") "
+                , PB.ppBlock (PPa.pPatched pPair)
+                , " (" ++ PB.ppBlockEntry (PB.concreteBlockEntry (PPa.pOriginal pPair)) ++ ") "
                 , ": "
                 ]
             PE.CheckedEquivalence _ PE.Equivalent time -> do

@@ -46,6 +46,7 @@ module Pate.Proof
   , traverseMemDomain
   , emptyDomain
   , appDomain
+  , ProofFunctionCallMetadata(..)
   , ProofNonce(..)
   , proofNonceValue
   , ProofNonceExpr(..)
@@ -108,8 +109,12 @@ import qualified Data.Macaw.Types as MT
 
 import qualified Lang.Crucible.Types as CT
 
+import qualified Pate.Address as PA
+import qualified Pate.Binary as PBi
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Types as PT
 
@@ -123,10 +128,10 @@ import qualified What4.Interface as W4
 data EquivTripleBody sym arch where
   EquivTripleBody ::
     {
-      eqPair :: PT.BlockPair arch
+      eqPair :: PPa.BlockPair arch
       -- ^ the entry points that yield equivalent states on the post-domain
       -- after execution, assuming initially equivalent states on the pre-domain
-    , eqPreDomain :: PE.StatePred sym arch
+    , eqPreDomain :: PES.StatePred sym arch
       -- ^ the pre-domain: the state that was assumed initially equivalent
       -- closed over the bound variables representing the initial state
     , eqPostDomain :: PE.StatePredSpec sym arch
@@ -148,7 +153,7 @@ type EquivTriple sym arch = PS.SimSpec sym arch (EquivTripleBody sym arch)
 
 
 -- | A concrete block (instantiated to 'Pate.Type.ConcreteBlock')
-type family ProofBlock prf :: PT.WhichBinary -> DK.Type
+type family ProofBlock prf :: PBi.WhichBinary -> DK.Type
 -- | A machine register (instantiated to 'Data.Macaw.CFG.AssignRhs.ArchReg')
 type family ProofRegister prf :: MT.Type -> DK.Type
 -- | A predicate (instantiated to either 'What4.Interface.Pred' or 'Bool')
@@ -207,6 +212,11 @@ data VerificationStatus ce =
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (VerificationStatus a) where
   mapExpr sym f = traverse (PEM.mapExpr sym f)
 
+data ProofFunctionCallMetadata where
+  ProofFunctionCallMetadata ::
+    { prfFunctionCallMetadataAddress :: PA.ConcreteAddress arch
+    } -> ProofFunctionCallMetadata
+
 -- | An abstract proof object, representing the overall structure of an equivalence proof.
 -- The type parameter 'prf' abstracts this structure over the specific types used in the proof,
 -- which may be symbolic or concrete (i.e. ground terms from a counterexample).
@@ -227,7 +237,7 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
       -- | Proofs for all intermediate function calls between the start of this slice and the final
       -- exit of this slice, showing that the post-domain is satisfied by continuing after each
       -- function call returns.
-    , prfBlockSliceCalls :: [(PT.PatchPair (ProofBlock prf), node ProofFunctionCallType)]
+    , prfBlockSliceCalls :: [(PPa.PatchPair (ProofBlock prf), node ProofFunctionCallType)]
       -- | Proof that the post-domain is satisfied if this block slice exits with a return.
     , prfBlockSliceReturn :: Maybe (node ProofTripleType)
       -- | Proof that the post-domain is satisfied if this block slice exits with an unknown branch class.
@@ -255,13 +265,15 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
       -- | Proof that the post-domain of the caller is satisifed, assuming the
       -- domain of @post(x)@ (i.e. the proof of @post(x)@).
     , prfFunctionCallContinue :: Maybe (node ProofBlockSliceType)
+      -- | Metadata identifying the call target and call site
+    , prfFunctionCallMetadata :: ProofFunctionCallMetadata
     } -> ProofApp prf node ProofFunctionCallType
 
   -- | Proof that two block slices are equal according to a given post-domain, assuming
   -- a given pre-domain. The scope of the slice is dependent on which parent node
   -- this is attached to.
   ProofTriple ::
-    { prfTripleBlocks :: PT.PatchPair (ProofBlock prf)
+    { prfTripleBlocks :: PPa.PatchPair (ProofBlock prf)
     , prfTriplePreDomain :: node ProofDomainType
     , prfTriplePostDomain :: node ProofDomainType
     , prfTripleStatus :: node ProofStatusType
@@ -320,10 +332,11 @@ traverseProofApp f = \case
     <*> traverse f a3
     <*> traverse f a4
     <*> pure a5
-  ProofFunctionCall a1 a2 a3 -> ProofFunctionCall
+  ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> f a1
     <*> f a2
     <*> traverse f a3
+    <*> pure md
   ProofTriple a1 a2 a3 a4 -> ProofTriple
     <$> pure a1
     <*> f a2
@@ -394,10 +407,11 @@ transformProofApp f app = prfConstraint f $ case app of
     <*> pure a3
     <*> pure a4
     <*> transformBlockSlice f a5
-  ProofFunctionCall a1 a2 a3 -> ProofFunctionCall
+  ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> pure a1
     <*> pure a2
     <*> pure a3
+    <*> pure md
   ProofTriple a1 a2 a3 a4 -> ProofTriple
     <$> pure a1
     <*> pure a2
@@ -629,7 +643,7 @@ data BlockSliceTransition prf where
       -- | The post-states of the blocks after execution.
     , slBlockPostState :: BlockSliceState prf
       -- | The exit condition of the blocks (i.e. return, function call, etc)
-    , slBlockExitCase :: PT.PatchPairC (ProofBlockExit prf)
+    , slBlockExitCase :: PPa.PatchPairC (ProofBlockExit prf)
     } -> BlockSliceTransition prf
 
 -- | Traverse the leafs of a 'BlockSliceTransition' with the given 'ProofTransformer',
@@ -675,7 +689,7 @@ transformBlockSliceState f (BlockSliceState a1 a2) = prfConstraint f $
 -- | The original and patched values for a register.
 data BlockSliceRegOp prf tp where
   BlockSliceRegOp ::
-    { slRegOpValues :: PT.PatchPairC (ProofMacawValue prf tp)
+    { slRegOpValues :: PPa.PatchPairC (ProofMacawValue prf tp)
     , slRegOpRepr :: CT.TypeRepr (MS.ToCrucibleType tp)
     -- | True if these values are considered equivalent (without
     -- considering a particular equivalence domain).
@@ -697,7 +711,7 @@ transformBlockSliceRegOp f (BlockSliceRegOp a1 a2 a3) =
 -- 'w' represents the number of bytes read or written.
 data BlockSliceMemOp prf w where
   BlockSliceMemOp ::
-    { slMemOpValues :: PT.PatchPairC (ProofBV prf (8 W4.* w))
+    { slMemOpValues :: PPa.PatchPairC (ProofBV prf (8 W4.* w))
     -- | True if these values are considered equivalent (without
     -- considering a particular equivalence domain).
     , slMemOpEquiv :: ProofPredicate prf

@@ -3,6 +3,7 @@
 module Pate.Interactive.State (
   SourcePair(..),
   EquivalenceTest(..),
+  TraceEvent(..),
   Failure(..),
   State,
   emptyState,
@@ -14,6 +15,7 @@ module Pate.Interactive.State (
   patchedBinary,
   sources,
   metrics,
+  traceEvents,
   ProofTreeNode(..),
   ProofTree(..),
   proofTree,
@@ -30,17 +32,22 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Sequence as Seq
+import qualified Data.Text as DT
 import qualified Data.Time as TM
 import qualified Graphics.UI.Threepenny as TP
 import qualified Language.C as LC
+import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
-import qualified Pate.Binary as PB
+import qualified Pate.Address as PA
 import qualified Pate.Event as PE
+import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
+
 
 data SourcePair f = SourcePair { originalSource :: f
                                , patchedSource :: f
@@ -68,18 +75,27 @@ data ProofTree arch where
             -> Map.Map Int (Some (ProofTreeNode arch prf))
             -> ProofTree arch
 
+-- | Trace events that can be generated for debugging purposes
+--
+-- These are visualized in a separate window. This data type is intended to
+-- provide just enough structure to visualize complex terms when desired
+-- (ideally lazily)
+data TraceEvent where
+  TraceText :: DT.Text -> TraceEvent
+  TraceFormula :: (sym ~ WE.ExprBuilder t st fs) => sym -> WI.SymExpr sym tp -> TraceEvent
+
 -- | The state tracks verification successes and failures
 --
 -- The maps are keyed on the address of the original block being checked (that
 -- choice is arbitrary and doesn't matter much)
 data State arch =
-  State { _successful :: Map.Map (PT.ConcreteAddress arch) (EquivalenceTest arch)
-        , _indeterminate :: Map.Map (PT.ConcreteAddress arch) (EquivalenceTest arch)
-        , _failure :: Map.Map (PT.ConcreteAddress arch) (Failure arch)
+  State { _successful :: Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch)
+        , _indeterminate :: Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch)
+        , _failure :: Map.Map (PA.ConcreteAddress arch) (Failure arch)
         , _recentEvents :: [PE.Event arch]
         -- ^ The N most recent events (most recent first), to be shown in the console
-        , _originalBinary :: Maybe (PB.LoadedELF arch, PT.ParsedFunctionMap arch)
-        , _patchedBinary :: Maybe (PB.LoadedELF arch, PT.ParsedFunctionMap arch)
+        , _originalBinary :: Maybe (PLE.LoadedELF arch, PT.ParsedFunctionMap arch)
+        , _patchedBinary :: Maybe (PLE.LoadedELF arch, PT.ParsedFunctionMap arch)
         , _sources :: Maybe (SourcePair LC.CTranslUnit)
         , _proofTree :: Maybe (ProofTree arch)
         -- ^ All of the collected proof nodes received from the verifier
@@ -89,6 +105,9 @@ data State arch =
         -- This is only updated at the user's direction so that they don't lose
         -- their place as new data streams in
         , _metrics :: PM.Metrics
+        -- ^ Aggregated metrics for display
+        , _traceEvents :: Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
+        -- ^ Debug trace events indexed by original (super-)block address
         }
 
 $(L.makeLenses 'State)
@@ -132,6 +151,7 @@ emptyState ms = State { _successful = Map.empty
                       , _proofTree = Nothing
                       , _activeProofTree = Nothing
                       , _metrics = PM.emptyMetrics
+                      , _traceEvents = Map.empty
                       }
 
 data StateRef arch =

@@ -30,13 +30,14 @@ import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 import qualified What4.Interface as WI
 
-import qualified Pate.Arch as PA
+import qualified Pate.Arch as PAr
+import qualified Pate.Block as PB
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Panic as Panic
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Types as PT
 
 import qualified Pate.Interactive.State as IS
 
@@ -80,8 +81,9 @@ ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
             | Just unknownTriple <- mUnknownTriple
             , Just PC.Refl <- PC.testEquality (PPr.prfNonce unknownTriple) thisNonce -> PP.pretty "Triple(Unknown)"
             | otherwise -> Panic.panic Panic.Visualizer "ppAppTag" ["Invalid parent connection to a ProofBlockSlice for a ProofTriple: " ++ show thisNonce]
-          PPr.ProofFunctionCall funcPre _callBody _continuation
-            | Just PC.Refl <- PC.testEquality (PPr.prfNonce funcPre) thisNonce -> PP.pretty "Triple(FunctionPredomain)"
+          PPr.ProofFunctionCall funcPre _callBody _continuation _md
+            | Just PC.Refl <- PC.testEquality (PPr.prfNonce funcPre) thisNonce ->
+              PP.pretty "Triple" <> PP.parens (PP.pretty "FunctionPredomain")
             | otherwise -> Panic.panic Panic.Visualizer "ppAppTag" ["Unexpected parent for a ProofTriple: " ++ show (thisNonce, parentNonce)]
           PPr.ProofTriple {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofTriple is not a possible parent component for a ProofTriple"]
           PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
@@ -100,12 +102,12 @@ nodeLabel
   -> PE.BlocksPair arch
   -> PPr.ProofNonceExpr prf tp
   -> T.Text
-nodeLabel proofTreeNodes (PT.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) expr =
+nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) expr =
   pp (mconcat [ ppAppTag proofTreeNodes expr
               , PP.line
-              , mconcat [ PP.pretty (PT.concreteAddress ob)
+              , mconcat [ PP.pretty (PB.concreteAddress ob)
                         , PP.pretty "/"
-                        , PP.pretty (PT.concreteAddress pb)
+                        , PP.pretty (PB.concreteAddress pb)
                         ]
               ])
 
@@ -270,29 +272,51 @@ renderDomainApp (PPr.ProofDomain regs stack mem _context) =
 
 renderCounterexample
   :: ( prf ~ PFI.ProofSym sym arch
-     , PA.ValidArch arch
+     , PAr.ValidArch arch
      )
   => PPr.ProofCounterExample prf
   -> TP.UI TP.Element
 renderCounterexample ineqRes =
   TP.pre # TP.set TP.text (T.unpack (pp (PP.pretty ineqRes)))
 
+renderProofTripleLabel
+  :: (MapF.OrdF k)
+  => MapF.MapF k (IS.ProofTreeNode arch prf)
+  -> k tp
+  -> TP.UI TP.Element
+renderProofTripleLabel nodeMap parentNonce
+  | Just (IS.ProofTreeNode _blocks parentExpr _) <- MapF.lookup parentNonce nodeMap =
+      case PPr.prfNonceBody parentExpr of
+        PPr.ProofBlockSlice {} ->
+          TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
+        PPr.ProofFunctionCall _funcPre _callBody _cont (PPr.ProofFunctionCallMetadata targetAddr) ->
+          TP.string ("A proof that a call to the function at " ++ show targetAddr ++ " is safe")
+        PPr.ProofTriple {} ->
+          TP.string "Impossible proof structure with a triple as the parent of another triple"
+        PPr.ProofStatus {} ->
+          TP.string "Impossible proof structure with a status as the parent of a triple"
+        PPr.ProofDomain {} ->
+          TP.string "Impossible proof structure with a domain as the parent of a triple"
+  | otherwise = TP.string "Unknown proof triple"
+
 renderProofApp
   :: forall prf sym arch tp
    . ( prf ~ PFI.ProofSym sym arch
      , WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
-     , PA.ValidArch arch
+     , PAr.ValidArch arch
      )
-  => PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
+  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  -> Some (PPr.ProofNonce prf)
+  -> PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
   -> TP.UI TP.Element
-renderProofApp app =
+renderProofApp nodeMap (Some parentNonce) app =
   case app of
     PPr.ProofBlockSlice _domain _callees _mret _munknown _transition ->
       TP.div #+ [ TP.string "Proof that the post-domain of this slice of the program is satisfied when this slice returns, assuming its precondition"
                 ]
-    PPr.ProofFunctionCall _pre _body _cont ->
-      TP.div #+ [ TP.string "Proof that a function call is valid given its preconditions"
+    PPr.ProofFunctionCall _pre _body _cont (PPr.ProofFunctionCallMetadata targetAddr) ->
+      TP.div #+ [ TP.string ("Proof that a function call at " ++ show targetAddr ++ " is valid given its preconditions")
                 ]
     PPr.ProofTriple _blocks pre post (PPr.ProofNonceExpr _ _ (PPr.ProofStatus status)) ->
       let preElts = TP.column [ TP.h3 #+ [TP.string "Pre-domain"]
@@ -306,7 +330,7 @@ renderProofApp app =
           statusElts = TP.column [ TP.h3 #+ [TP.string "Status"]
                                  , text (ppStatus (Proxy @prf) status)
                                  ]
-      in TP.grid [ [TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"]
+      in TP.grid [ [renderProofTripleLabel nodeMap parentNonce]
                  , [preElts # TP.set TP.class_ "domain", postElts # TP.set TP.class_ "domain"]
                  , [statusElts]
                  ]

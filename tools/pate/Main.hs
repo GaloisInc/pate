@@ -41,23 +41,41 @@ import qualified Data.ElfEdit as DEE
 import qualified Data.Macaw.CFG as MC
 import           Data.Parameterized.Some ( Some(..) )
 
-import qualified Pate.AArch32 as AArch32
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Event as PE
-import qualified Pate.PPC as PPC
 import qualified Pate.Hints as PH
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Loader as PL
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Types as PT
+import qualified Pate.Verbosity as PV
+
+import qualified Pate.AArch32 as AArch32
+import qualified Pate.PPC as PPC
 
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
+
+-- | Post-process parsed command line options and normalize them as-needed
+--
+-- As a concrete example, this looks at the interactive mode trace file and
+-- switches the verbosity to Debug (no matter what the user specified, as the
+-- trace file specification takes precedence)
+validateOptions :: CLIOptions -> CLIOptions
+validateOptions = normalizeVerbosity
+  where
+    normalizeVerbosity o =
+      case logTarget o of
+        Interactive _port _srcs (Just _) -> o { verbosity = PV.Debug }
+        _ -> o
+
 
 parseHints
   :: LJ.LogAction IO (PE.Event arch)
@@ -109,13 +127,13 @@ parseHints logAction opts
 
 main :: IO ()
 main = do
-  opts <- OA.execParser cliOptions
+  opts <- validateOptions <$> OA.execParser cliOptions
   ep <- archToProxy (originalBinary opts) (patchedBinary opts)
   case ep of
     Left err -> SE.die (show err)
     Right (elfErrs, Some proxy) -> do
       chan <- CC.newChan
-      (logger, mConsumer) <- startLogger proxy (logTarget opts) chan
+      (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan
       mVerificationHints <- parseHints logger opts
       LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
       let
@@ -166,14 +184,19 @@ data CLIOptions = CLIOptions
   , probabilisticHints :: Maybe FilePath
   , csvFunctionHints :: Maybe FilePath
   , dwarfHints :: Bool
+  , verbosity :: PV.Verbosity
   } deriving (Eq, Ord, Show)
 
-data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
+data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
                -- ^ Logs will go to an interactive viewer
                --
                -- If source files (corresponding to the original and patched
                -- source) are provided, their contents are displayed when
                -- appropriate (on a per-function basis).
+               --
+               -- The third argument is an optional path to save trace-level
+               -- messages to; note that if this is provided, it implies that
+               -- the verbosity level is Debug
                | LogFile FilePath
                -- ^ Logs will go to a file (if present)
                | StdoutLogger
@@ -181,6 +204,19 @@ data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
                | NullLogger
                -- ^ Discard logs
                deriving (Eq, Ord, Show)
+
+printAtVerbosity
+  :: PV.Verbosity
+  -> PE.Event arch
+  -> Bool
+printAtVerbosity verb evt =
+  case verb of
+    PV.Debug -> True
+    PV.Info ->
+      case evt of
+        PE.ProofTraceEvent {} -> False
+        PE.ProofTraceFormulaEvent {} -> False
+        _ -> True
 
 -- | Create a logger based on the user's desire for an interactive session.
 --
@@ -190,11 +226,12 @@ data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
 --
 -- Otherwise, just make a basic logger that will write logs to a user-specified
 -- location
-startLogger :: PA.ValidArchProxy arch
+startLogger :: PA.SomeValidArch arch
+            -> PV.Verbosity
             -> LogTarget
             -> CC.Chan (Maybe (PE.Event arch))
             -> IO (LJ.LogAction IO (PE.Event arch), Maybe (CCA.Async ()))
-startLogger PA.ValidArchProxy lt chan =
+startLogger (PA.SomeValidArch {}) verb lt chan =
   case lt of
     NullLogger -> return (LJ.LogAction $ \_ -> return (), Nothing)
     StdoutLogger -> logToHandle IO.stdout
@@ -202,7 +239,8 @@ startLogger PA.ValidArchProxy lt chan =
       hdl <- IO.openFile fp IO.WriteMode
       IO.hSetBuffering hdl IO.LineBuffering
       logToHandle hdl
-    Interactive port mSourceFiles -> do
+    Interactive port mSourceFiles mTraceFile -> do
+      mTraceHandle <- T.traverse (\fp -> IO.openFile fp IO.WriteMode) mTraceFile
       -- This odd structure makes all of the threading explicit at this top
       -- level so that there is no thread creation hidden in the Interactive
       -- module
@@ -212,7 +250,7 @@ startLogger PA.ValidArchProxy lt chan =
       consumer <- CCA.async $ do
         mSourceContent <- join <$> T.traverse parseSources mSourceFiles
         stateRef <- I.newState mSourceContent
-        watcher <- CCA.async $ I.consumeEvents chan stateRef
+        watcher <- CCA.async $ I.consumeEvents chan stateRef verb mTraceHandle
         ui <- CCA.async $ I.startInterface port stateRef
         CCA.wait watcher
         CCA.wait ui
@@ -224,9 +262,11 @@ startLogger PA.ValidArchProxy lt chan =
             me <- CC.readChan chan
             case me of
               Nothing -> return ()
-              Just evt -> do
-                PPRT.renderIO hdl (terminalFormatEvent evt)
-                consumeLogs
+              Just evt
+                | printAtVerbosity verb evt -> do
+                    PPRT.renderIO hdl (terminalFormatEvent evt)
+                    consumeLogs
+                | otherwise -> consumeLogs
 
       consumer <- CCA.async consumeLogs
       return (logAct, Just consumer)
@@ -262,16 +302,16 @@ terminalFormatEvent evt =
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
-    PE.AnalysisStart (PT.PatchPair blkO blkP) ->
+    PE.AnalysisStart (PPa.PatchPair blkO blkP) ->
       layout $ mconcat [ "Checking original block at "
-                       , PP.viaShow $ PT.concreteAddress blkO
+                       , PP.viaShow $ PB.concreteAddress blkO
                        , " against patched block at "
-                       , PP.viaShow $ PT.concreteAddress blkP
+                       , PP.viaShow $ PB.concreteAddress blkP
                        ]
-    PE.CheckedEquivalence (PT.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
+    PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
       let
-        origAddr = PT.concreteAddress blkO
-        patchedAddr = PT.concreteAddress blkP
+        origAddr = PB.concreteAddress blkO
+        patchedAddr = PB.concreteAddress blkP
         pfx = mconcat [ "Checked original block at "
                       , PP.viaShow origAddr
                       , " against patched block at "
@@ -302,6 +342,8 @@ terminalFormatEvent evt =
     PE.FunctionsDiscoveredFromHints extraAddrs ->
       layout ("Additional functions discovered based on hits: " <> PP.line
              <> PP.vcat (map PP.viaShow extraAddrs))
+    PE.ProofTraceEvent _stack origAddr _patchedAddr msg _tm ->
+      layout (PP.pretty origAddr <> ": " <> PP.pretty msg)
     -- FIXME: handle other events
     _ -> layout ""
 
@@ -313,7 +355,7 @@ data LoadError where
 deriving instance Show LoadError
 
 -- | Examine the input files to determine the architecture
-archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PA.ValidArchProxy))
+archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PA.SomeValidArch))
 archToProxy origBinaryPath patchedBinaryPath = do
   origBin <- BS.readFile origBinaryPath
   patchedBin <- BS.readFile patchedBinaryPath
@@ -335,12 +377,12 @@ archToProxy origBinaryPath patchedBinaryPath = do
       | otherwise ->
         return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
 
-machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.ValidArchProxy)
+machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.SomeValidArch)
 machineToProxy em =
   case em of
-    DEE.EM_PPC -> Right (Some (PA.ValidArchProxy @PPC.PPC32))
-    DEE.EM_PPC64 -> Right (Some (PA.ValidArchProxy @PPC.PPC64))
-    DEE.EM_ARM -> Right (Some (PA.ValidArchProxy @AArch32.AArch32))
+    DEE.EM_PPC -> Right (Some (PA.SomeValidArch @PPC.PPC32 PPC.handleSystemCall PPC.handleExternalCall))
+    DEE.EM_PPC64 -> Right (Some (PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall))
+    DEE.EM_ARM -> Right (Some (PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall))
     _ -> Left (UnsupportedArchitecture em)
 
 
@@ -361,6 +403,10 @@ logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure St
                                          <> OA.help "The port to run the interactive visualizer on"
                                          )
                                     <*> OA.optional parseSourceFiles
+                                    <*> OA.optional (OA.strOption ( OA.long "trace-file"
+                                                     <> OA.metavar "FILE"
+                                                     <> OA.help "A file to save trace-level messages to (note: this implies trace-level debugging)"
+                                                     ))
     parseSourceFiles = IS.SourcePair <$> OA.strOption (  OA.long "original-source"
                                                       <> OA.metavar "FILE"
                                                       <> OA.help "The source file for the original program"
@@ -452,3 +498,9 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.switch ( OA.long "dwarf-hints"
                   <> OA.help "Extract hints from the unpatched DWARF binary"
                   )
+    <*> OA.option OA.auto ( OA.long "verbosity"
+                          <> OA.short 'V'
+                          <> OA.showDefault
+                          <> OA.value PV.Info
+                          <> OA.help "The verbosity of logging output"
+                          )
