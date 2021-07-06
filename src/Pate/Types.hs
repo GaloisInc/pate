@@ -134,6 +134,7 @@ data EquivalenceStatus =
   | Inequivalent
   | ConditionallyEquivalent
   | Errored String
+  deriving (Show)
 
 instance Semigroup EquivalenceStatus where
   Errored err <> _ = Errored err
