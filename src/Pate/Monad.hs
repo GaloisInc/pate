@@ -326,13 +326,6 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (State
            , MonadError (PEE.EquivalenceError arch)
            )
 
--- instance MonadError (EquivalenceError arch) (EquivM_ sym arch) where
---   throwError e = EquivM ( throwError e)
---   catchError (EquivM f) h = withValid $ do
---     sym <- asks envSym
---     asmSt <- liftIO $ CB.saveAssumptionState sym
---     EquivM $ catchError f (\e -> (liftIO $ CB.restoreAssumptionState sym asmSt) >> unEQ (h e))
-  
 type EquivM sym arch a = (PA.ValidArch arch, ValidSym sym) => EquivM_ sym arch a
 
 withBinary ::
