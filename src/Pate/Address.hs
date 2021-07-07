@@ -2,9 +2,8 @@
 {-# LANGUAGE StandaloneDeriving #-}
 module Pate.Address (
     ConcreteAddress(..)
-  , absoluteAddress
+  , addressFromMemAddr
   , addressAddOffset
-  , concreteFromAbsolute
   ) where
 
 import qualified Prettyprinter as PP
@@ -19,11 +18,6 @@ deriving instance Show (ConcreteAddress arch)
 instance PP.Pretty (ConcreteAddress arch) where
   pretty (ConcreteAddress addr) = PP.pretty addr
 
-absoluteAddress :: (MM.MemWidth (MM.ArchAddrWidth arch)) => ConcreteAddress arch -> MM.MemWord (MM.ArchAddrWidth arch)
-absoluteAddress (ConcreteAddress memAddr) = absAddr
-  where
-    Just absAddr = MM.asAbsoluteAddr memAddr
-
 addressAddOffset :: (MM.MemWidth (MM.ArchAddrWidth arch))
                  => ConcreteAddress arch
                  -> MM.MemWord (MM.ArchAddrWidth arch)
@@ -31,6 +25,7 @@ addressAddOffset :: (MM.MemWidth (MM.ArchAddrWidth arch))
 addressAddOffset (ConcreteAddress memAddr) memWord =
   ConcreteAddress (MM.incAddr (fromIntegral memWord) memAddr)
 
-concreteFromAbsolute :: MM.MemWord (MM.ArchAddrWidth arch)
-                     -> ConcreteAddress arch
-concreteFromAbsolute = ConcreteAddress . MM.absoluteAddr
+addressFromMemAddr
+  :: MM.MemAddr (MM.ArchAddrWidth arch)
+  -> ConcreteAddress arch
+addressFromMemAddr = ConcreteAddress

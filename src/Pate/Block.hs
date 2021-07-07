@@ -16,6 +16,7 @@ module Pate.Block (
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Parameterized.Classes as PC
+import qualified Prettyprinter as PP
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PB
@@ -56,10 +57,9 @@ getConcreteBlock ::
   MM.ArchSegmentOff arch ->
   BlockEntryKind arch ->
   PB.WhichBinaryRepr bin ->
-  Maybe (ConcreteBlock arch bin)
-getConcreteBlock off k bin = case MM.segoffAsAbsoluteAddr off of
-  Just addr -> Just $ ConcreteBlock (PA.ConcreteAddress (MM.absoluteAddr addr)) k bin
-  _ -> Nothing
+  ConcreteBlock arch bin
+getConcreteBlock off k bin =
+  ConcreteBlock (PA.ConcreteAddress (MM.segoffAddr off)) k bin
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
 blockMemAddr (ConcreteBlock (PA.ConcreteAddress addr) _ _) = addr
@@ -90,4 +90,7 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => PC.ShowF (ConcreteBlock arch) wh
   showF blk = show blk
 
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> String
-ppBlock b = show (PA.absoluteAddress (concreteAddress b))
+ppBlock b = show (concreteAddress b)
+
+instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch bin) where
+  pretty = PP.viaShow . concreteAddress

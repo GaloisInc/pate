@@ -275,9 +275,7 @@ mkConcreteBlock ::
   PB.BlockEntryKind arch ->
   MC.ArchSegmentOff arch ->
   EquivM sym arch (PB.ConcreteBlock arch bin)
-mkConcreteBlock k a = case PB.getConcreteBlock a k WI.knownRepr of
-  Just blk -> return blk
-  _ -> throwHere $ PEE.NonConcreteParsedBlockAddress a
+mkConcreteBlock k a = return (PB.getConcreteBlock a k WI.knownRepr)
 
 mkConcreteBlock' ::
   PB.KnownBinary bin =>
@@ -388,11 +386,9 @@ archSegmentOffToInterval ::
   MC.ArchSegmentOff arch ->
   Int ->
   m (IM.Interval (PA.ConcreteAddress arch))
-archSegmentOffToInterval segOff size = case MM.segoffAsAbsoluteAddr segOff of
-  Just w -> pure (IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size))
-    where start = PA.concreteFromAbsolute w
-  Nothing -> CME.throwError $ PEE.equivalenceError $ PEE.StrangeBlockAddress segOff
-
+archSegmentOffToInterval segOff size =
+  let start = PA.addressFromMemAddr (MM.segoffAddr segOff)
+  in pure (IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size))
 
 getBlocks ::
   PPa.BlockPair arch ->
@@ -437,20 +433,30 @@ lookupBlocks b = do
 segOffToAddr ::
   MC.ArchSegmentOff arch ->
   EquivM sym arch (PA.ConcreteAddress arch)
-segOffToAddr off = PA.concreteFromAbsolute <$>
-  liftMaybe (MM.segoffAsAbsoluteAddr off) (PEE.NonConcreteParsedBlockAddress off)
+segOffToAddr off = return (PA.addressFromMemAddr (MM.segoffAddr off))
 
-liftMaybe :: Maybe a -> PEE.InnerEquivalenceError arch -> EquivM sym arch a
-liftMaybe Nothing e = throwHere e
-liftMaybe (Just a) _ = pure a
-
+-- | Construct a symbolic pointer for the given 'ConcreteBlock'
+--
+-- This is actually potentially a bit complicated because macaw assigns
+-- relocatable addresses (i.e., segment /= 0) to code in position-independent
+-- binaries.  As long as we are only analyzing single binaries and ignoring
+-- their dependent shared libraries, it should be safe to just ignore the
+-- segment that macaw assigns and treat everything as if there was only a single
+-- static memory segment (modulo dynamic allocations).
+--
+-- NOTE: If we add the capability to load code from shared libraries, we will
+-- need to be much more intentional about this and change how the PC region is
+-- handled.
+--
+-- NOTE: This is assuming that data pointers are in the same region as code from
+-- the macaw point of view. This needs to be verified
 concreteToLLVM ::
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (CLM.LLVMPtr sym (MC.ArchAddrWidth arch))
 concreteToLLVM blk = withSym $ \sym -> do
   -- we assume a distinct region for all executable code
   region <- CMR.asks envPCRegion
-  let addr = PA.absoluteAddress (PB.concreteAddress blk)
+  let PA.ConcreteAddress (MM.MemAddr _base offset) = PB.concreteAddress blk
   liftIO $ do
-    offset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger addr))
-    pure (CLM.LLVMPointer region offset)
+    ptrOffset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger offset))
+    pure (CLM.LLVMPointer region ptrOffset)

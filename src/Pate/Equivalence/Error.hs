@@ -44,10 +44,8 @@ data InnerEquivalenceError arch
   | InconclusiveSAT
   | NoUniqueFunctionOwner (IM.Interval (PA.ConcreteAddress arch)) [MM.ArchSegmentOff arch]
   | LookupNotAtFunctionStart (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
-  | StrangeBlockAddress (MM.ArchSegmentOff arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (PA.ConcreteAddress arch) (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
-  | NonConcreteParsedBlockAddress (MM.ArchSegmentOff arch)
   | BlockExceedsItsSegment (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)
   | BlockEndsMidInstruction
   | BlockStartsEarly (MM.ArchAddrWord arch) (MM.ArchAddrWord arch)
