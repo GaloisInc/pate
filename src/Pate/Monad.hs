@@ -158,11 +158,7 @@ data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
 
 data EquivalenceContext sym arch where
   EquivalenceContext ::
-    forall sym ids arch.
-    (PA.ValidArch arch, ValidSym sym) =>
-    { nonces :: N.NonceGenerator IO ids
-    , handles :: CFH.HandleAllocator
-    , exprBuilder :: sym
+    { handles :: CFH.HandleAllocator
     , originalCtx :: BinaryContext sym arch PBi.Original
     , rewrittenCtx :: BinaryContext sym arch PBi.Patched
     } -> EquivalenceContext sym arch

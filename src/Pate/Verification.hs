@@ -207,9 +207,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
       , binEntry = pMain
       }
     ctxt = EquivalenceContext
-      { nonces = gen
-      , handles = ha
-      , exprBuilder = sym
+      { handles = ha
       , originalCtx = oCtx
       , rewrittenCtx = rCtx
 
