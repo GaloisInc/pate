@@ -2,6 +2,12 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+-- | This module provides the interface to the symbolic execution engine used by the pate verifier
+--
+-- It performs all of the setup and extraction of results, along with logic for
+-- converting superblocks (collections of basic blocks with no calls and no loop
+-- backedges) into programs suitable for symbolic execution (i.e., Crucible
+-- CFGs).
 module Pate.Verification.SymbolicExecution (
   simulate
   ) where
@@ -38,12 +44,17 @@ import           Pate.Monad
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 
+-- | Return a Crucible run-time repr for the architecture-specific register file
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
 archStructRepr = do
   archFs <- archFuns
   return $ CC.StructRepr $ MS.crucArchRegTypes archFs
 
-
+-- | Classify macaw blocks as terminal or non-terminal
+--
+-- Note that we consider any error blocks as terminal. We also consider any arch
+-- term statement as terminal; those are usually some kind of
+-- architecture-specific trap instruction.
 isTerminalBlock :: MD.ParsedBlock arch ids -> Bool
 isTerminalBlock pb = case MD.pblockTermStmt pb of
   MD.ParsedCall{} -> True
@@ -56,8 +67,9 @@ isTerminalBlock pb = case MD.pblockTermStmt pb of
   MD.ParsedTranslateError{} -> True
   MD.ClassifyFailure{} -> True
 
--- FIXME: this is hardly rigorous
 -- | Kill back jumps within the function
+--
+-- FIXME: This is not very rigorous
 backJumps ::
   Set.Set (MM.ArchSegmentOff arch) ->
   MD.ParsedBlock arch ids ->
@@ -73,10 +85,14 @@ backJumps internalAddrs pb =
   , tgt `Set.member` internalAddrs
   ]
 
-externalTransitions ::
-  Set.Set (MM.ArchSegmentOff arch) ->
-  MD.ParsedBlock arch ids ->
-  [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
+-- | Compute the /external/ edges induced by this 'MD.ParsedBlock' in the CFG that includes it
+--
+-- External edges are those that jump outside of the CFG
+externalTransitions
+  :: Set.Set (MM.ArchSegmentOff arch)
+  -- ^ The set of targets that are known to be internal to the CFG we are constructing
+  -> MD.ParsedBlock arch ids
+  -> [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
 externalTransitions internalAddrs pb =
   [ (MD.pblockAddr pb, tgt)
   | tgt <- case MD.pblockTermStmt pb of
@@ -92,11 +108,18 @@ externalTransitions internalAddrs pb =
   , tgt `Set.notMember` internalAddrs
   ]
 
+-- | Construct an initial 'CS.SimContext' for Crucible
+--
+-- Note that this differs from some other uses of Crucible for machine code in
+-- that it uses a custom memory model (see
+-- 'Pate.Memory.MemTrace.memTraceIntrinsicTypes'). Additionally, it does not
+-- support calls to functions; we only symbolically execute code that is loop-
+-- and call- free.
 initSimContext ::
   EquivM sym arch (CS.SimContext (MS.MacawSimulatorState sym) sym (MS.MacawExt arch))
 initSimContext = withValid $ withSym $ \sym -> do
   exts <- CMR.asks envExtensions
-  ha <- CMR.asks $ handles . envCtx
+  ha <- CMR.asks (handles . envCtx)
   return $
     CS.initSimContext
     sym
@@ -107,6 +130,7 @@ initSimContext = withValid $ withSym $ \sym -> do
     exts
     MS.MacawSimulatorState
 
+-- | Convert a macaw register state into a Crucible assignment
 regStateToAsn :: forall sym arch.
   HasCallStack =>
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
@@ -117,6 +141,20 @@ regStateToAsn regs = do
   return $ MS.macawAssignToCruc (\(PSR.MacawRegEntry _ v) -> CS.RV @sym v) $
     TFC.fmapFC (\r -> regs ^. MM.boundValue r) allRegsAsn
 
+-- | Convert a Crucible register state back into a Macaw register state
+structToRegState :: forall sym arch.
+  CS.RegEntry sym (MS.ArchRegStruct arch) ->
+  EquivM sym arch (MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym))
+structToRegState e = do
+  archVs <- CMR.asks $ envArchVals
+  return $ MM.mkRegState (PSR.macawRegEntry . MS.lookupReg archVs e)
+
+-- | Construct an initial global state for the symbolic execution engine
+--
+-- Note that this refers to crucible globals (and not global memory).  It
+-- populates the set of globals with the variable used for tracing memory
+-- operations and the special global that is used to determine how a branch
+-- exits (e.g., due to a call or loop backedge).
 getGlobals ::
   forall sym arch bin.
   PS.SimInput sym arch bin ->
@@ -129,7 +167,36 @@ getGlobals simInput = withValid $ withSym $ \sym -> do
     $ CGS.insertGlobal (envBlockEndVar env) blkend
     $ CGS.emptyGlobals
 
--- TODO: What should happen if the Pred sym in a PartialRes in pres or pres' is false?
+-- | Extract the final state after symbolic execution
+--
+-- This includes three things:
+--
+-- 1. The (symbolic) result value (which is a symbolic register
+-- state) produced by the function
+--
+-- 2. The state of memory, which has both the memory post state and a trace of
+-- operations
+--
+-- 3. The distinguished global that indicates the conditions under which the
+-- superblock exits (e.g., via a loop backedge or function call)
+--
+-- The latter two are stored in Crucible global variables
+--
+-- This function will throw an exception if either global is missing (which
+-- could actually be a panic condition) or if the symbolic execution times out
+-- or aborts. Note that there should not be any cases where symbolic execution
+-- aborts, as we have no assertions in the binary.
+--
+-- The return values are:
+--
+-- 1. The condition under which the result holds (this will often be @True@, but
+--    could be constrained if a path leads to e.g., a divide by zero)
+-- 2. The final register state resulting from the symbolic execution
+-- 3. The final memory state
+-- 4. The value indicating how the superblock exited (which can be symbolic)
+--
+-- TODO: What should happen if the Pred sym in a PartialRes in pres or pres' is
+-- false?
 getGPValueAndTrace ::
   forall sym arch p ext.
   CS.ExecResult p sym ext (CS.RegEntry sym (MS.ArchRegStruct arch)) ->
@@ -156,11 +223,15 @@ getGPValueAndTrace (CS.FinishedResult _ pres) = withSym $ \sym -> do
 getGPValueAndTrace (CS.AbortedResult _ ar) = throwHere . PEE.SymbolicExecutionFailed . ppAbortedResult $ ar
 getGPValueAndTrace (CS.TimeoutResult _) = throwHere (PEE.SymbolicExecutionFailed "timeout")
 
-evalCFG ::
-  CS.SymGlobalState sym ->
-  CS.RegMap sym tp ->
-  CC.CFG (MS.MacawExt arch) blocks tp (MS.ArchRegStruct arch) ->
-  EquivM sym arch (CS.ExecResult (MS.MacawSimulatorState sym) sym (MS.MacawExt arch) (CS.RegEntry sym (MS.ArchRegStruct arch)))
+-- | Run Crucible on the given CFG with the given initial conditions
+evalCFG
+  :: CS.SymGlobalState sym
+  -- ^ The initial globals to symbolically execute with
+  -> CS.RegMap sym tp
+  -- ^ The initial register state
+  -> CC.CFG (MS.MacawExt arch) blocks tp (MS.ArchRegStruct arch)
+  -- ^ The CFG to symbolically execute
+  -> EquivM sym arch (CS.ExecResult (MS.MacawSimulatorState sym) sym (MS.MacawExt arch) (CS.RegEntry sym (MS.ArchRegStruct arch)))
 evalCFG globals regs cfg = do
   archRepr <- archStructRepr
   initCtx <- initSimContext
@@ -173,15 +244,11 @@ evalCFG globals regs cfg = do
 ppAbortedResult :: CS.AbortedResult sym ext -> String
 ppAbortedResult (CS.AbortedExec reason _) = show reason
 ppAbortedResult (CS.AbortedExit code) = show code
-ppAbortedResult (CS.AbortedBranch loc _ t f) = "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
+ppAbortedResult (CS.AbortedBranch loc _ t f) =
+  "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
 
-structToRegState :: forall sym arch.
-  CS.RegEntry sym (MS.ArchRegStruct arch) ->
-  EquivM sym arch (MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym))
-structToRegState e = do
-  archVs <- CMR.asks $ envArchVals
-  return $ MM.mkRegState (PSR.macawRegEntry . MS.lookupReg archVs e)
-
+-- | Symbolically execute a chunk of code under the preconditions determined by
+-- the compositional analysis
 simulate ::
   forall sym arch bin.
   PBi.KnownBinary bin =>
@@ -191,46 +258,14 @@ simulate simInput = withBinary @bin $ do
   -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
   CC.SomeCFG cfg <- do
     CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (PS.simInBlock simInput)
+    -- See Note [Loop Breaking]
     let pb:pbs = DL.sortOn MD.pblockAddr pbs_
-        -- There's a slight hack here.
-        --
-        -- The core problem we're dealing with here is that renovate blocks
-        -- can have multiple basic blocks; and almost always do in the
-        -- rewritten binary. We want to stitch them together in the right
-        -- way, and part of that means deciding whether basic block
-        -- terminators are things we should "follow" to their target to
-        -- continue symbolically executing or not. Normally any block
-        -- terminator that goes to another basic block in the same renovate
-        -- block is one we want to keep symbolically executing through.
-        --
-        -- BUT if there is an actual self-contained loop within a single
-        -- renovate block, we want to avoid trying to symbolically execute
-        -- that forever, so we'd like to pick some of the edges in the
-        -- "block X can jump to block Y" graph that break all the cycles,
-        -- and mark all of those as terminal for the purposes of CFG
-        -- creation.
-        --
-        -- Instead of doing a careful analysis of that graph, we adopt the
-        -- following heuristic: kill any edges that point to the entry
-        -- point of the renovate block, and symbolically execute through
-        -- all the others. This catches at the very least any
-        -- single-basic-block loops in the original binary and in most
-        -- cases even their transformed version in the rewritten binary. If
-        -- we ever kill such an edge, we have certainly broken a cycle; but
-        -- cycles could appear in other ways that we don't catch.
-        --
-        -- This heuristic is reflected in the code like this: when deciding
-        -- if a jump should be killed, we compare jump targets to a
-        -- collection of "internal" addresses, and kill it if the target
-        -- isn't in that collection. Then we omit the entry point's address
-        -- from that collection, so that jumps to it are considered terminal.
-
         -- Multiple ParsedBlocks may have the same address, so the delete
         -- is really needed.
-        internalAddrs = Set.delete (MD.pblockAddr pb) $ Set.fromList [MD.pblockAddr b | b <- pbs]
-        (terminal_, nonTerminal) = DL.partition isTerminalBlock pbs
-        terminal = [pb | isTerminalBlock pb] ++ terminal_
-        killEdges =
+    let internalAddrs = Set.delete (MD.pblockAddr pb) $ Set.fromList [MD.pblockAddr b | b <- pbs]
+    let (terminal_, nonTerminal) = DL.partition isTerminalBlock pbs
+    let terminal = [pb | isTerminalBlock pb] ++ terminal_
+    let killEdges =
           concatMap (backJumps internalAddrs) (pb : pbs) ++
           concatMap (externalTransitions internalAddrs) (pb:pbs)
     fns <- archFuns
@@ -246,3 +281,40 @@ simulate simInput = withBinary @bin $ do
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
 
   return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs) exitClass)
+
+{- Note [Loop Breaking]
+
+There's a slight hack here.
+
+The core problem we're dealing with here is that renovate blocks
+can have multiple basic blocks; and almost always do in the
+rewritten binary. We want to stitch them together in the right
+way, and part of that means deciding whether basic block
+terminators are things we should "follow" to their target to
+continue symbolically executing or not. Normally any block
+terminator that goes to another basic block in the same renovate
+block is one we want to keep symbolically executing through.
+
+BUT if there is an actual self-contained loop within a single
+renovate block, we want to avoid trying to symbolically execute
+that forever, so we'd like to pick some of the edges in the
+"block X can jump to block Y" graph that break all the cycles,
+and mark all of those as terminal for the purposes of CFG
+creation.
+
+Instead of doing a careful analysis of that graph, we adopt the
+following heuristic: kill any edges that point to the entry
+point of the renovate block, and symbolically execute through
+all the others. This catches at the very least any
+single-basic-block loops in the original binary and in most
+cases even their transformed version in the rewritten binary. If
+we ever kill such an edge, we have certainly broken a cycle; but
+cycles could appear in other ways that we don't catch.
+
+This heuristic is reflected in the code like this: when deciding
+if a jump should be killed, we compare jump targets to a
+collection of "internal" addresses, and kill it if the target
+isn't in that collection. Then we omit the entry point's address
+from that collection, so that jumps to it are considered terminal.
+
+-}
