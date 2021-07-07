@@ -30,7 +30,6 @@ module Pate.Types
   , ParsedBlockMap(..)
   , ParsedFunctionMap
   , parsedFunctionEntries
-  , markEntryPoint
 
   , ValidSym
   , Sym(..)
@@ -88,12 +87,6 @@ type ParsedFunctionMap arch = IntervalMap (ConcreteAddress arch) (Map (MM.ArchSe
 -- | Return the list of entry points in the parsed function map
 parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
 parsedFunctionEntries = concatMap M.keys . IM.elems
-
-markEntryPoint ::
-  MM.ArchSegmentOff arch ->
-  ParsedBlockMap arch ids ->
-  ParsedFunctionMap arch
-markEntryPoint segOff blocks = M.singleton segOff (Some blocks) <$ getParsedBlockMap blocks
 
 ----------------------------------
 

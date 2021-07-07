@@ -353,6 +353,14 @@ addFunctionEntryHints _ mem (_name, addrWord) (invalid, entries) =
     Nothing -> (addrWord : invalid, entries)
     Just segOff -> (invalid, segOff : entries)
 
+
+markEntryPoint ::
+  MC.ArchSegmentOff arch ->
+  ParsedBlockMap arch ids ->
+  ParsedFunctionMap arch
+markEntryPoint segOff blocks = Map.singleton segOff (Some blocks) <$ getParsedBlockMap blocks
+
+
 runDiscovery ::
   forall arch .
   PA.ValidArch arch =>
