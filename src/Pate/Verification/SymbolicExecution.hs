@@ -81,7 +81,7 @@ backJumps internalAddrs pb =
      MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
      MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
      _ -> []
-  , tgt < MD.pblockAddr pb
+  , tgt <= MD.pblockAddr pb
   , tgt `Set.member` internalAddrs
   ]
 
