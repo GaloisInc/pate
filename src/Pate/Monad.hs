@@ -17,7 +17,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE ExistentialQuantification #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -170,8 +169,6 @@ data EquivalenceContext sym arch where
 
 data EquivEnv sym arch where
   EquivEnv ::
-    forall sym arch .
-    (PA.ValidArch arch, ValidSym sym) =>
     { envWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
     , envValidArch :: PA.SomeValidArch arch
     , envCtx :: EquivalenceContext sym arch
@@ -376,7 +373,7 @@ withValidEnv ::
   EquivEnv sym arch ->
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => a) ->
   a
-withValidEnv (EquivEnv { envValidSym = Sym {}}) f = f
+withValidEnv (EquivEnv { envValidSym = Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
 withSymSolver ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
