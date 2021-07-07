@@ -45,6 +45,9 @@ module Pate.Monad
   , emitEvent
   , emitWarning
   , getBinCtx
+  , ifConfig
+  , traceBundle
+  , traceBlockPair
   , SymGroundEvalFn
   , execGroundFn
   , withGroundEvalFn
@@ -97,6 +100,7 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
+import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Typeable
 
@@ -130,6 +134,7 @@ import qualified What4.Symbol as WS
 import           What4.ExprHelpers
 
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Binary as PBi
 import qualified Pate.Config as PC
 import           Pate.Equivalence
@@ -239,6 +244,15 @@ modifyBlockCache f pPair merge val = do
   BlockCache cache <- asks f
   liftIO $ IO.modifyMVar_ cache
     (\m -> return $ M.insertWith merge pPair val m)  
+
+ifConfig ::
+  (PC.VerificationConfig -> Bool) ->
+  EquivM sym arch a ->
+  EquivM sym arch a ->
+  EquivM sym arch a
+ifConfig checkCfg ifT ifF = (asks $ checkCfg . envConfig) >>= \case
+  True -> ifT
+  False -> ifF
 
 freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
 freshNonce = do
@@ -702,6 +716,34 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
+
+-- | Emit a trace event to the frontend
+--
+-- This variant takes a 'BlockPair' as an input to provide context
+traceBlockPair
+  :: (HasCallStack)
+  => PPa.BlockPair arch
+  -> String
+  -> EquivM sym arch ()
+traceBlockPair bp msg =
+  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
+  where
+    origAddr = PB.concreteAddress (PPa.pOriginal bp)
+    patchedAddr = PB.concreteAddress (PPa.pPatched bp)
+
+-- | Emit a trace event to the frontend
+--
+-- This variant takes a 'SimBundle' as an input to provide context
+traceBundle
+  :: (HasCallStack)
+  => SimBundle sym arch
+  -> String
+  -> EquivM sym arch ()
+traceBundle bundle msg =
+  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
+  where
+    origAddr = PB.concreteAddress (simInBlock (simInO bundle))
+    patchedAddr = PB.concreteAddress (simInBlock (simInP bundle))
 
 --------------------------------------
 -- UnliftIO
