@@ -23,7 +23,9 @@ import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Set as Set
 import           Data.String ( fromString )
-import           GHC.Stack ( HasCallStack )
+import qualified Data.Text as T
+import           GHC.Stack ( HasCallStack, callStack )
+import qualified Prettyprinter as PP
 import qualified System.IO as IO
 import qualified What4.Interface as W4
 import qualified What4.ProgramLoc as W4L
@@ -37,8 +39,10 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as PMT
 import           Pate.Monad
 import qualified Pate.SimState as PS
@@ -249,15 +253,25 @@ ppAbortedResult (CS.AbortedBranch loc _ t f) =
 
 -- | Symbolically execute a chunk of code under the preconditions determined by
 -- the compositional analysis
+--
+-- Returns:
+--
+-- 1. The assumption required for the symbolic execution to be total
+-- 2. The captured post-state
 simulate ::
   forall sym arch bin.
-  PBi.KnownBinary bin =>
+  (HasCallStack, PBi.KnownBinary bin) =>
   PS.SimInput sym arch bin ->
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch bin)
 simulate simInput = withBinary @bin $ do
   -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
   CC.SomeCFG cfg <- do
     CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (PS.simInBlock simInput)
+
+    let traceAddr = PB.concreteAddress (PS.simInBlock simInput)
+    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack "CFG:"))
+    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack (unlines (fmap (show . PP.pretty) pbs_))))
+
     -- See Note [Loop Breaking]
     let pb:pbs = DL.sortOn MD.pblockAddr pbs_
         -- Multiple ParsedBlocks may have the same address, so the delete
@@ -268,6 +282,10 @@ simulate simInput = withBinary @bin $ do
     let killEdges =
           concatMap (backJumps internalAddrs) (pb : pbs) ++
           concatMap (externalTransitions internalAddrs) (pb:pbs)
+
+    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack ("Block index: " ++ show internalAddrs)))
+    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack ("Discarding edges: " ++ show killEdges)))
+
     fns <- archFuns
     ha <- CMR.asks (handles . envCtx)
     be <- CMR.asks envBlockEndVar
