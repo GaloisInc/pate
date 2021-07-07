@@ -245,6 +245,10 @@ modifyBlockCache f pPair merge val = do
   liftIO $ IO.modifyMVar_ cache
     (\m -> return $ M.insertWith merge pPair val m)  
 
+-- | Execute actions if the given configuration flag is set (not set)
+--
+-- If the flag is set in the environment, execute the first action. Otherwise,
+-- execute the second.
 ifConfig ::
   (PC.VerificationConfig -> Bool) ->
   EquivM sym arch a ->
