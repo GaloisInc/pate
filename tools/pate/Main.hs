@@ -241,6 +241,8 @@ startLogger (PA.SomeValidArch {}) verb lt chan =
       logToHandle hdl
     Interactive port mSourceFiles mTraceFile -> do
       mTraceHandle <- T.traverse (\fp -> IO.openFile fp IO.WriteMode) mTraceFile
+      F.forM_ mTraceHandle $ \hdl -> do
+        IO.hSetBuffering hdl IO.NoBuffering
       -- This odd structure makes all of the threading explicit at this top
       -- level so that there is no thread creation hidden in the Interactive
       -- module
