@@ -39,17 +39,14 @@ module Pate.Proof.Ground
   , groundProofExpr
   ) where
 
-import           GHC.Stack ( HasCallStack, callStack )
-
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
-
 import qualified Data.Foldable as F
 import           Data.Functor.Const ( Const(..) )
 import           Data.Maybe (fromMaybe)
 import           Data.Proxy ( Proxy(..) )
-import qualified Data.Text as T
+import           GHC.Stack ( HasCallStack )
 import           Numeric.Natural ( Natural )
 
 import           Data.Parameterized.Some ( Some(..) )
@@ -73,9 +70,7 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Arch as PA
-import qualified Pate.Block as PB
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
@@ -179,17 +174,6 @@ getGenPathCondition sym fn e = do
       W4.andPred sym cond cond'
   
   PEM.foldExpr sym f e (W4.truePred sym)
-
-traceBundle
-  :: (HasCallStack)
-  => SimBundle sym arch
-  -> String
-  -> EquivM sym arch ()
-traceBundle bundle msg =
-  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
-  where
-    origAddr = PB.concreteAddress (PS.simInBlock (PS.simInO bundle))
-    patchedAddr = PB.concreteAddress (PS.simInBlock (PS.simInP bundle))
 
 -- | Compute a domain that represents the path condition for
 -- values which disagree in the given counter-example

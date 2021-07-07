@@ -25,76 +25,43 @@ module Pate.Verification
   ( verifyPairs
   ) where
 
-import           Prelude hiding ( fail )
-
-import           GHC.Stack ( HasCallStack, callStack )
-
 import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( void, unless )
+import qualified Control.Monad.Except as CME
+import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Trans as CMT
-
-import           Control.Applicative
-import           Control.Lens hiding ( op, pre )
-import qualified Control.Monad.Except as CME
-import           Control.Monad.IO.Class ( liftIO )
-
-import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
-import qualified Data.Functor.Compose as DFC
-import qualified Data.List as DL
-import           Data.Maybe ( catMaybes, maybeToList )
 import qualified Data.Map as M
-import           Data.Proxy ( Proxy(..) )
-import           Data.Set (Set)
-import qualified Data.Set as S
-import qualified Data.Sequence as Seq
-import           Data.String ( fromString )
-import qualified Data.Text as T
-import qualified Data.Time as TM
-import qualified Data.Traversable as DT
-import           GHC.TypeLits
-import qualified Lumberjack as LJ
-import qualified System.IO as IO
-import qualified Data.Word.Indexed as W
-
-import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..))
-import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
-import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Discovery as MD
-import qualified Data.Macaw.BinaryLoader as MBL
-import qualified Data.Macaw.Memory.Permissions as MMP
-import qualified Data.Macaw.Symbolic as MS
-
-
-import qualified Data.Parameterized.Classes as PC
-import qualified Data.Parameterized.Context as Ctx
+import           Data.Maybe ( catMaybes, maybeToList )
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.TraversableFC as TFC
+import           Data.Proxy ( Proxy(..) )
+import qualified Data.Set as S
+import qualified Data.Text as T
+import qualified Data.Time as TM
+import qualified Data.Traversable as DT
+import           GHC.Stack ( HasCallStack )
+import qualified Lumberjack as LJ
+import           Prelude hiding ( fail )
+import qualified What4.Expr.Builder as W4B
+import qualified What4.Interface as W4
+import qualified What4.SatResult as W4R
 
+import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..))
+import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Backend.Simple as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.Simulator.GlobalState as CGS
-import qualified Lang.Crucible.Types as CT
-
-import qualified What4.BaseTypes as WT
-import qualified What4.Expr.Builder as W4B
-import qualified What4.Interface as W4
-import qualified What4.ProgramLoc as W4L
-import qualified What4.Symbol as WS
-import qualified What4.SatResult as W4R
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
-import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
@@ -106,7 +73,6 @@ import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
-import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Parallel as Par
@@ -115,43 +81,16 @@ import qualified Pate.Proof as PF
 import           Pate.Proof.Ground as PFG
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Proof.Operations as PFO
-import qualified Pate.Register as PRe
 import           Pate.SimState
-import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PS
 import           Pate.Types
 import qualified Pate.Types as PT
+import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.ExternalCall as PVE
+import qualified Pate.Verification.Simplify as PVSi
+import qualified Pate.Verification.SymbolicExecution as PVSy
+import qualified Pate.Verification.Validity as PVV
 import           What4.ExprHelpers
-
-
--- | Emit a trace event to the frontend
---
--- This variant takes a 'BlockPair' as an input to provide context
-traceBlockPair
-  :: (HasCallStack)
-  => PPa.BlockPair arch
-  -> String
-  -> EquivM sym arch ()
-traceBlockPair bp msg =
-  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
-  where
-    origAddr = PB.concreteAddress (PPa.pOriginal bp)
-    patchedAddr = PB.concreteAddress (PPa.pPatched bp)
-
--- | Emit a trace event to the frontend
---
--- This variant takes a 'SimBundle' as an input to provide context
-traceBundle
-  :: (HasCallStack)
-  => SimBundle sym arch
-  -> String
-  -> EquivM sym arch ()
-traceBundle bundle msg =
-  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
-  where
-    origAddr = PB.concreteAddress (simInBlock (simInO bundle))
-    patchedAddr = PB.concreteAddress (simInBlock (simInP bundle))
 
 -- | We run discovery in parallel, since we need to run it two or three times
 --
@@ -389,15 +328,6 @@ runVerificationLoop env pPairs = do
         Right r -> return r
         Left err -> return (Errored (show err))
 
-ifConfig ::
-  (PC.VerificationConfig -> Bool) ->
-  EquivM sym arch a ->
-  EquivM sym arch a ->
-  EquivM sym arch a
-ifConfig checkCfg ifT ifF = (CMR.asks $ checkCfg . envConfig) >>= \case
-  True -> ifT
-  False -> ifF
-
 emitPreamble :: PPa.BlockPair arch -> EquivM sym arch ()
 emitPreamble pPair = emitEvent (\_ -> PE.AnalysisStart pPair)
 
@@ -477,124 +407,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
 --------------------------------------------------------
 -- Simulation
 
-simulate ::
-  forall sym arch bin.
-  PB.KnownBinary bin =>
-  SimInput sym arch bin ->
-  EquivM sym arch (W4.Pred sym, SimOutput sym arch bin)
-simulate simInput = withBinary @bin $ do
-  -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
-  CC.SomeCFG cfg <- do
-    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (simInBlock simInput)
-    let pb:pbs = DL.sortOn MD.pblockAddr pbs_
-        -- There's a slight hack here.
-        --
-        -- The core problem we're dealing with here is that renovate blocks
-        -- can have multiple basic blocks; and almost always do in the
-        -- rewritten binary. We want to stitch them together in the right
-        -- way, and part of that means deciding whether basic block
-        -- terminators are things we should "follow" to their target to
-        -- continue symbolically executing or not. Normally any block
-        -- terminator that goes to another basic block in the same renovate
-        -- block is one we want to keep symbolically executing through.
-        --
-        -- BUT if there is an actual self-contained loop within a single
-        -- renovate block, we want to avoid trying to symbolically execute
-        -- that forever, so we'd like to pick some of the edges in the
-        -- "block X can jump to block Y" graph that break all the cycles,
-        -- and mark all of those as terminal for the purposes of CFG
-        -- creation.
-        --
-        -- Instead of doing a careful analysis of that graph, we adopt the
-        -- following heuristic: kill any edges that point to the entry
-        -- point of the renovate block, and symbolically execute through
-        -- all the others. This catches at the very least any
-        -- single-basic-block loops in the original binary and in most
-        -- cases even their transformed version in the rewritten binary. If
-        -- we ever kill such an edge, we have certainly broken a cycle; but
-        -- cycles could appear in other ways that we don't catch.
-        --
-        -- This heuristic is reflected in the code like this: when deciding
-        -- if a jump should be killed, we compare jump targets to a
-        -- collection of "internal" addresses, and kill it if the target
-        -- isn't in that collection. Then we omit the entry point's address
-        -- from that collection, so that jumps to it are considered terminal.
 
-        -- Multiple ParsedBlocks may have the same address, so the delete
-        -- is really needed.
-        internalAddrs = S.delete (MD.pblockAddr pb) $ S.fromList [MD.pblockAddr b | b <- pbs]
-        (terminal_, nonTerminal) = DL.partition isTerminalBlock pbs
-        terminal = [pb | isTerminalBlock pb] ++ terminal_
-        killEdges =
-          concatMap (backJumps internalAddrs) (pb : pbs) ++
-          concatMap (externalTransitions internalAddrs) (pb:pbs)
-    fns <- archFuns
-    ha <- CMR.asks $ handles . envCtx
-    be <- CMR.asks envBlockEndVar
-    liftIO $ MS.mkBlockSliceCFG fns ha (W4L.OtherPos . fromString . show) pb nonTerminal terminal killEdges (Just be)
-  let preRegs = simInRegs simInput
-  preRegsAsn <- regStateToAsn preRegs
-  archRepr <- archStructRepr
-  let regs = CS.assignReg archRepr preRegsAsn CS.emptyRegMap
-  globals <- getGlobals simInput
-  cres <- evalCFG globals regs cfg
-  (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
-
-  return $ (asm, SimOutput (SimState memTrace postRegs) exitClass)
-
-archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
-archStructRepr = do
-  archFs <- archFuns
-  return $ CC.StructRepr $ MS.crucArchRegTypes archFs
-
-isTerminalBlock :: MD.ParsedBlock arch ids -> Bool
-isTerminalBlock pb = case MD.pblockTermStmt pb of
-  MD.ParsedCall{} -> True
-  MD.PLTStub{} -> True
-  MD.ParsedJump{} -> False
-  MD.ParsedBranch{} -> False
-  MD.ParsedLookupTable{} -> False
-  MD.ParsedReturn{} -> False
-  MD.ParsedArchTermStmt{} -> True -- TODO: think harder about this
-  MD.ParsedTranslateError{} -> True
-  MD.ClassifyFailure{} -> True
-
--- FIXME: this is hardly rigorous
--- | Kill back jumps within the function
-backJumps ::
-  Set (MM.ArchSegmentOff arch) ->
-  MD.ParsedBlock arch ids ->
-  [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
-backJumps internalAddrs pb =
-  [ (MD.pblockAddr pb, tgt)
-  | tgt <- case MD.pblockTermStmt pb of
-     MD.ParsedJump _ tgt -> [tgt]
-     MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
-     MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
-     _ -> []
-  , tgt < MD.pblockAddr pb
-  , tgt `S.member` internalAddrs
-  ]
-
-
-externalTransitions ::
-  Set (MM.ArchSegmentOff arch) ->
-  MD.ParsedBlock arch ids ->
-  [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
-externalTransitions internalAddrs pb =
-  [ (MD.pblockAddr pb, tgt)
-  | tgt <- case MD.pblockTermStmt pb of
-      MD.ParsedCall{} -> []
-      MD.PLTStub{} -> []
-      MD.ParsedJump _ tgt -> [tgt]
-      MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
-      MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
-      MD.ParsedReturn{} -> []
-      MD.ParsedArchTermStmt{} -> [] -- TODO: think harder about this
-      MD.ParsedTranslateError{} -> []
-      MD.ClassifyFailure{} -> []
-  , tgt `S.notMember` internalAddrs
-  ]
 
 -- | Simulate the given block pair, or retrieve a cached result from a previous
 -- simulation. Execute the given function in a context where the given 'SimBundle'
@@ -610,14 +423,14 @@ withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
       simInO_ = SimInput stO (PPa.pOriginal pPair)
       simInP_ = SimInput stP (PPa.pPatched pPair)
 
-    withAssumptionFrame' (validInitState (Just pPair) stO stP) $ do
+    withAssumptionFrame' (PVV.validInitState (Just pPair) stO stP) $ do
       traceBlockPair pPair "Simulating original blocks"
-      (asmO, simOutO_) <- simulate simInO_
+      (asmO, simOutO_) <- PVSy.simulate simInO_
       traceBlockPair pPair "Simulating patched blocks"
-      (asmP, simOutP_) <- simulate simInP_
+      (asmP, simOutP_) <- PVSy.simulate simInP_
       traceBlockPair pPair "Finished simulating blocks"
-      (_, simOutO') <- withAssumptionFrame (validConcreteReads simOutO_) $ return simOutO_
-      (_, simOutP') <- withAssumptionFrame (validConcreteReads simOutP_) $ return simOutP_
+      (_, simOutO') <- withAssumptionFrame (PVV.validConcreteReads simOutO_) $ return simOutO_
+      (_, simOutP') <- withAssumptionFrame (PVV.validConcreteReads simOutP_) $ return simOutP_
 
       (asm,r) <- withAssumption (liftIO $ allPreds sym [asmO, asmP]) $ do
         let bundle = SimBundle (PPa.PatchPair simInO_ simInP_) (PPa.PatchPair simOutO' simOutP')
@@ -627,96 +440,6 @@ withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
 
 trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
 trivialGlobalMap _ _ reg off = pure (CLM.LLVMPointer reg off)
-
--- TODO: What should happen if the Pred sym in a PartialRes in pres or pres' is false?
-getGPValueAndTrace ::
-  forall sym arch p ext.
-  CS.ExecResult p sym ext (CS.RegEntry sym (MS.ArchRegStruct arch)) ->
-  EquivM sym arch
-    ( W4.Pred sym
-    , MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
-    , MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-    , CS.RegValue sym (MS.MacawBlockEndType arch)
-    )
-getGPValueAndTrace (CS.FinishedResult _ pres) = withSym $ \sym -> do
-  mem <- CMR.asks envMemTraceVar
-  eclass <- CMR.asks envBlockEndVar
-  asm <- case pres of
-    CS.TotalRes _ -> return $ W4.truePred sym
-    CS.PartialRes _ p _ _ -> return p
-
-  case pres ^. CS.partialValue of
-    CS.GlobalPair val globs
-      | Just mt <- CGS.lookupGlobal mem globs
-      , Just ec <- CGS.lookupGlobal eclass globs -> withValid $ do
-        val' <- structToRegState @sym @arch val
-        return $ (asm, val', mt, ec)
-    _ -> throwHere PEE.MissingCrucibleGlobals
-getGPValueAndTrace (CS.AbortedResult _ ar) = throwHere . PEE.SymbolicExecutionFailed . ppAbortedResult $ ar
-getGPValueAndTrace (CS.TimeoutResult _) = throwHere (PEE.SymbolicExecutionFailed "timeout")
-
-ppAbortedResult :: CS.AbortedResult sym ext -> String
-ppAbortedResult (CS.AbortedExec reason _) = show reason
-ppAbortedResult (CS.AbortedExit code) = show code
-ppAbortedResult (CS.AbortedBranch loc _ t f) = "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
-
-structToRegState :: forall sym arch.
-  CS.RegEntry sym (MS.ArchRegStruct arch) ->
-  EquivM sym arch (MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym))
-structToRegState e = do
-  archVs <- CMR.asks $ envArchVals
-  return $ MM.mkRegState (PSR.macawRegEntry . MS.lookupReg archVs e)
-
-regStateToAsn :: forall sym arch.
-  HasCallStack =>
-  MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
-  EquivM sym arch (Ctx.Assignment (CS.RegValue' sym)  (MS.MacawCrucibleRegTypes arch))
-regStateToAsn regs = do
-  archFs <- archFuns
-  let allRegsAsn = MS.crucGenRegAssignment archFs
-  return $ MS.macawAssignToCruc (\(PSR.MacawRegEntry _ v) -> CS.RV @sym v) $
-    TFC.fmapFC (\r -> regs ^. MM.boundValue r) allRegsAsn
-
-getGlobals ::
-  forall sym arch bin.
-  SimInput sym arch bin ->
-  EquivM sym arch (CS.SymGlobalState sym)
-getGlobals simInput = withValid $ withSym $ \sym -> do
-  env <- CMR.ask
-  blkend <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
-  return $
-      CGS.insertGlobal (envMemTraceVar env) (simInMem simInput)
-    $ CGS.insertGlobal (envBlockEndVar env) blkend
-    $ CGS.emptyGlobals
-
-evalCFG ::
-  CS.SymGlobalState sym ->
-  CS.RegMap sym tp ->
-  CC.CFG (MS.MacawExt arch) blocks tp (MS.ArchRegStruct arch) ->
-  EquivM sym arch (CS.ExecResult (MS.MacawSimulatorState sym) sym (MS.MacawExt arch) (CS.RegEntry sym (MS.ArchRegStruct arch)))
-evalCFG globals regs cfg = do
-  archRepr <- archStructRepr
-  initCtx <- initSimContext
-  liftIO $ id
-    . CS.executeCrucible []
-    . CS.InitialState initCtx globals CS.defaultAbortHandler archRepr
-    . CS.runOverrideSim archRepr
-    $ CS.regValue <$> CS.callCFG cfg regs
-
-initSimContext ::
-  EquivM sym arch (CS.SimContext (MS.MacawSimulatorState sym) sym (MS.MacawExt arch))
-initSimContext = withValid $ withSym $ \sym -> do
-  exts <- CMR.asks envExtensions
-  ha <- CMR.asks $ handles . envCtx
-  return $
-    CS.initSimContext
-    sym
-    MT.memTraceIntrinsicTypes
-    ha
-    IO.stderr
-    (CS.FnBindings CFH.emptyHandleMap)
-    exts
-    MS.MacawSimulatorState
 
 --------------------------------------------------------
 -- Proving equivalence
@@ -967,7 +690,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   precondUnknown <- withSatAssumption goalTimeout (return isUnknown) $ do
     blocks <- PD.getBlocks (simPair bundle)
     emitWarning blocks PEE.BlockEndClassificationFailure
-    univDom <- universalDomainSpec
+    univDom <- PVD.universalDomainSpec
     withNoFrameGuessing True $ proveLocalPostcondition bundle univDom
 
   --funCallProofCases' <- mapM joinCase funCallProofCases
@@ -979,7 +702,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   precond' <- F.foldrM (\(p, br) stPred -> liftIO $ PES.muxStatePred sym p (branchPreDomain br) stPred)  returnByDefault funCallCases
 
   precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
-    simplifySubPreds precond'
+    PVSi.simplifySubPreds precond'
 
   traceBundle bundle "Computing proof triple and ensuring that cases are total"
   -- TODO: this needs to be reorganized to make the domain results actually lazy
@@ -1005,22 +728,6 @@ withNoFrameGuessing True f =
   CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = False} }) f
 withNoFrameGuessing False f = f
 
-simplifySubPreds ::
-  forall sym arch f.
-  HasCallStack =>
-  PEM.ExprMappable sym f =>
-  f ->
-  EquivM sym arch f
-simplifySubPreds a = withValid $ withSym $ \sym -> do
-  (cache :: W4B.IdxCache t (W4B.Expr t)) <- W4B.newIdxCache
-  let
-    simplifyPred' ::
-      W4B.Expr t tp ->
-      EquivM sym arch (W4B.Expr t tp)
-    simplifyPred' e = case W4.exprType e of
-      W4.BaseBoolRepr ->  W4B.idxCacheEval cache e $ simplifyPred e
-      _ -> return e
-  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (simplifyPred' e)) a
 
 matchingExits ::
   forall sym arch.
@@ -1047,7 +754,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   traceBundle bundle "guessing equivalence domain"
   eqInputs <- withAssumption_ (return asm) $ do
-    guessEquivalenceDomain bundle postcondPred postcond
+    PVD.guessEquivalenceDomain bundle postcondPred postcond
   traceBundle bundle ("Equivalence domain has: " ++ show (M.keys (PES.predRegs eqInputs)))
   
   -- TODO: avoid re-computing this
@@ -1094,7 +801,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
         status' <- case status of
           PF.VerificationFail _ -> do
             traceBundle bundle "The verification failed"
-            withAssumptionFrame_ (equateInitialStates bundle) $ do
+            withAssumptionFrame_ (PVD.equateInitialStates bundle) $ do
               notGoal <- applyCurrentFrame notChecks
               goal <- applyCurrentFrame postcondPred
 
@@ -1114,7 +821,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                     checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
                       case satRes of
                         W4R.Sat fn -> do
-                          preUniv <- universalDomain
+                          preUniv <- PVD.universalDomain
                           preUnivDomain <- PF.unNonceProof <$> PFO.statePredToPreDomain bundle preUniv
                           traceBundle bundle "proveLocalPostcondition->getInequivalenceResult"
                           ir <- PFG.getInequivalenceResult PEE.InvalidPostState preUnivDomain postDomain' blockSlice fn
@@ -1186,7 +893,7 @@ computeEqCondition ::
   EquivM sym arch (W4.Pred sym)
 computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
   cond <- go (W4.truePred sym) computeEqConditionGas
-  simplifyPred cond
+  PVSi.simplifyPred cond
   where
     go :: W4.Pred sym -> Int -> EquivM sym arch (W4.Pred sym)
     go pathCond 0 = return pathCond
@@ -1280,479 +987,11 @@ checkAndMinimizeEqCondition cond goal = withValid $ withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- this check is not strictly necessary, as the incremental checks should guarantee it
   -- for the moment it's a sanity check on this process as well as the final simplifications
-  result <- withSatAssumption goalTimeout (simplifyPred_deep cond) $ do
+  result <- withSatAssumption goalTimeout (PVSi.simplifyPred_deep cond) $ do
     isPredTrue' goalTimeout goal
   case result of
     Just (p, True) -> return p
     _ -> return $ W4.falsePred sym
-
--- | Simplify a predicate by considering the
--- logical necessity of each atomic sub-predicate under the current set of assumptions.
--- Additionally, simplify array lookups across unrelated updates.
-simplifyPred_deep ::
-  forall sym arch.
-  W4.Pred sym ->
-  EquivM sym arch (W4.Pred sym)
-simplifyPred_deep p = withSym $ \sym -> do
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  cache <- W4B.newIdxCache
-  let
-    checkPred :: W4.Pred sym -> EquivM sym arch Bool
-    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $
-      Const <$> isPredTrue' heuristicTimeout p'
-  -- remove redundant atoms
-  p1 <- minimalPredAtoms sym checkPred p
-  -- resolve array lookups across unrelated updates
-  p2 <- resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) p1
-  -- additional bitvector simplifications
-  p3 <- liftIO $ simplifyBVOps sym p2
-  -- drop any muxes across equality tests
-  p4 <- liftIO $ expandMuxEquality sym p3
-  -- remove redundant conjuncts
-  p_final <- simplifyConjuncts sym checkPred p4
-  -- TODO: redundant sanity check that simplification hasn't clobbered anything
-  validSimpl <- liftIO $ W4.isEq sym p p_final
-  isPredTrue' heuristicTimeout validSimpl >>= \case
-    True -> return p_final
-    False -> throwHere $ PEE.InconsistentSimplificationResult (CC.showF p) (CC.showF p_final)
-  
-
---------------------------------------------------------
--- Propagating preconditions
-
--- | Guess a sufficient memory domain that will cause the
--- given postcondition to be satisfied on the given equivalence relations.
---
--- We consider each 'MemCell' present in both the given target post-domain (the given 'MemPred')
--- as well as the trace of memory operations from the 'SimBundle'. For each cell we try to prove
--- that the goal is independent of its initial value - that is, the goal predicate implies
--- the same predicate where the initial value of that cell has been assigned an arbitary value.
--- Each cell is either proven to be irrelevant, and therefore excluded from the guessed pre-domain, or failed
--- to be proven irrelevant, and therefore included.
---
--- This is an imprecise guess for multiple reasons:
--- (1) It does not attempt to determine the exact conditions under which the memory cells may be
--- irrelevant. We assume the branch condition of the cell, and try to prove its irrelevance.
--- If this proof fails, we include it in the domain under the same condition. More precise
--- conditions may allow us to refine this - i.e. a memory cell may be unconditionally read, but
--- only copied to relevant state under some condition.
---
--- (2) If this proof times out, we conservatively include the cell in the domain.
-
-guessMemoryDomain ::
-  forall sym arch.
-  SimBundle sym arch ->
-  -- | the target postcondition that we are trying to satisfy
-  W4.Pred sym ->
-  -- | the same goal expression, but with its 'patched' memory array rebound to the given
-  -- 'MT.MemTraceImpl'
-  (MT.MemTraceImpl sym (MM.ArchAddrWidth arch), W4.Pred sym) ->
-  -- | the target memory domain used to generate the postcondition
-  PEM.MemPred sym arch ->
-  -- | filter for whether or not memory cells can possibly belong to
-  -- the given domain
-  (forall w. PMC.MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
-  EquivM sym arch (PEM.MemPred sym arch)
-guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
-  foots <- getFootprints bundle
-  cells <- do
-    localPred <- liftIO $ PEM.addFootPrintsToPred sym foots memPred
-    PEM.mapMemPred localPred $ \cell p -> do
-      isFiltered <- cellFilter cell
-      pathCond <- liftIO $ W4.andPred sym p isFiltered
-      simplifyPred pathCond
-
-  -- we take the entire reads set of the block and then filter it according
-  -- to the polarity of the postcondition predicate
-  result <- PEM.mapMemPredPar cells $ \cell p -> maybeEqualAt bundle cell p >>= \case
-    True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (Par.present $ return polarity) $ do
-      let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
-      -- clobber the "patched" memory at exactly this cell
-      CLM.LLVMPointer _ freshP <- liftIO $ freshPtrBytes sym "MemCell_guessMemoryDomain" (PMC.cellWidth cell)
-
-      memP'' <- liftIO $ MT.writeMemArr sym memP (PMC.cellPtr cell) repr freshP
-      eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
-
-      -- see if we can prove that the goal is independent of this clobbering
-      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-      withAssumption_ (liftIO $ allPreds sym [p, eqMemP, goal]) $ do
-        result <- isPredTruePar' heuristicTimeout goal'
-        Par.forFuture result $ \case
-          True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
-          False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
-    False -> Par.present $ liftIO $ W4.notPred sym polarity
-  Par.joinFuture (result :: Par.Future (PEM.MemPred sym arch))
-  where
-    polarity = PEM.memPredPolarity memPred
-    memP = simInMem $ simInP bundle
-
--- | True if it is possible for the initial value of this cell to be equivalent,
--- but it is not necessarily the case that they are equivalent. under
--- the current set of assumptions.
-maybeEqualAt ::
-  SimBundle sym arch ->
-  PMC.MemCell sym arch w ->
-  W4.Pred sym ->
-  EquivM sym arch Bool
-maybeEqualAt bundle cell@(PMC.MemCell{}) cond = withSym $ \sym -> do
-  valO <- liftIO $ PMC.readMemCell sym memO cell
-  valP <- liftIO $ PMC.readMemCell sym memP cell
-  ptrsEq <- liftIO $ MT.llvmPtrEq sym valO valP
-
-  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  withAssumption_ (return cond) $
-    isPredSat goalTimeout ptrsEq
-  where
-    memO = simInMem $ simInO bundle
-    memP = simInMem $ simInP bundle
-
-
--- | Under the current assumptions, attempt to collapse a predicate
--- into either trivially true or false
-simplifyPred ::
-  W4.Pred sym ->
-  EquivM sym arch (W4.Pred sym)
-simplifyPred p = withSym $ \sym -> do
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  isPredSat heuristicTimeout p >>= \case
-    True -> isPredTrue' heuristicTimeout p >>= \case
-      True -> return $ W4.truePred sym
-      False -> return p
-    False -> return $ W4.falsePred sym
-
-
-bindMemory ::
-  -- | value to rebind
-  MT.MemTraceImpl sym ptrW ->
-  -- | new value
-  MT.MemTraceImpl sym ptrW ->
-  W4.SymExpr sym tp' ->
-  EquivM sym arch (W4.SymExpr sym tp')  
-bindMemory memVar memVal expr = withSym $ \sym -> do
-  liftIO $ rebindExpr sym (Ctx.empty Ctx.:> VarBinding (MT.memArr memVar) (MT.memArr memVal)) expr
-
--- | Guess a sufficient domain that will cause the
--- given postcondition to be satisfied on the given equivalence relations.
--- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.
---
--- Each register is guessed by attempting to prove that the goal is independent of
--- its initial value.
--- See 'guessMemoryDomain' for an explanation for how the memory domains are guessed.
---
--- This guess is an over-approximation of the state that must be equal in order to
--- prove the given goal. The risk of getting this wrong is incidentally including state
--- that is actually irrelevant, and later cannot be proven equal when used as the post-domain
--- in a preceeding block. In other words, we may assume a precondition that is too strong when
--- it must be later proven as postcondition.
---
--- Importantly, the output of this function is not trusted. Once the guess is made, it is later used to
--- assemble and prove the precise equivalence property that we are interested in. If this guess
--- is incorrect (i.e. we incorrectly exclude some memory location) then that proof will fail.
-guessEquivalenceDomain ::
-  forall sym arch.
-  (HasCallStack) =>
-  SimBundle sym arch ->
-  W4.Pred sym ->
-  PES.StatePred sym arch ->
-  EquivM sym arch (PES.StatePred sym arch)
-guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
-  traceBundle bundle "Entering guessEquivalenceDomain"
-  ExprFilter isBoundInGoal <- getIsBoundFilter' goal
-  eqRel <- CMR.asks envBaseEquiv
-  result <- zipRegStatesPar (simRegs inStO) (simRegs inStP) $ \r vO vP -> do
-      isInO <- liftFilterMacaw isBoundInGoal vO
-      isInP <- liftFilterMacaw isBoundInGoal vP
-      let
-        include = Par.present $ return $ Just (Some r, W4.truePred sym)
-        exclude :: EquivM sym arch (Par.Future (Maybe (Some (MM.ArchReg arch), W4B.Expr t W4.BaseBoolType)))
-        exclude = Par.present $ return Nothing
-      case PRe.registerCase (PSR.macawRegRepr vO) r of
-        -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
-        -- to include them in the pre-domain
-        PRe.RegIP -> exclude
-        PRe.RegTOC -> exclude
-        -- this requires some more careful consideration. We don't want to include
-        -- the stack pointer in computed domains, because this unreasonably
-        -- restricts preceding blocks from having different numbers of stack allocations.
-        -- However our equivalence relation is not strong enough to handle mismatches in
-        -- values written to memory that happen to be stack addresses, if those
-        -- addresses were computed with different stack bases.
-        PRe.RegSP -> ifConfig PC.cfgComputeEquivalenceFrames exclude include
-        _ | isInO || isInP ->
-          ifConfig (not . PC.cfgComputeEquivalenceFrames) include $ do
-            (isFreshValid, freshO) <- freshRegEntry (PPa.pPatched $ simPair bundle) r vO
-
-            goal' <- bindMacawReg vO freshO goal
-            goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
-
-            heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-            withAssumption_ (return isFreshValid) $ do
-              result <- isPredTruePar' heuristicTimeout goalIgnoresReg
-              Par.forFuture result $ \case
-                True -> return Nothing
-                False -> return $ Just (Some r, W4.truePred sym)
-        _ -> exclude
-  regsDom <- (M.fromList . catMaybes) <$> Par.joinFuture @_ @Par.Future result
-  stackRegion <- CMR.asks envStackRegion
-  let
-    isStackCell cell = do
-      let CLM.LLVMPointer region _ = PMC.cellPtr cell
-      liftIO $ W4.natEq sym region stackRegion
-    isNotStackCell cell = do
-      p <- isStackCell cell
-      liftIO $ W4.notPred sym p
-
-  eqRegsFrame <- equateRegisters regsDom bundle
-   
-  -- rewrite the state elements to explicitly equate registers we have assumed equivalent
-  (_, bundle_regsEq) <- applyAssumptionFrame eqRegsFrame bundle
-  (_, goal_regsEq) <- applyAssumptionFrame eqRegsFrame goal
-  (_, postcond_regsEq) <- applyAssumptionFrame eqRegsFrame postcond
-  
-  memP' <- liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
-  goal' <- bindMemory memP memP' goal_regsEq
-
-  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predStack postcond_regsEq) isStackCell
-  let stackEq = liftIO $ memPredPre sym (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) stackDom
-  memDom <- withAssumption_ stackEq $ do
-    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predMem postcond_regsEq) isNotStackCell
-
-  blocks <- PD.getBlocks $ simPair bundle
-  
-  emitEvent (PE.ComputedPrecondition blocks)
-  return $ PES.StatePred
-    { PES.predRegs = regsDom
-    , PES.predStack = stackDom
-    , PES.predMem = memDom
-    }
-  where
-    memP = simInMem $ simInP bundle
-    inO = simInO bundle
-    inP = simInP bundle
-    inStO = simInState $ simInO bundle
-    inStP = simInState $ simInP bundle
-
-freshRegEntry ::
-  PB.KnownBinary bin =>
-  PB.ConcreteBlock arch bin ->
-  MM.ArchReg arch tp ->
-  PSR.MacawRegEntry sym tp ->
-  EquivM sym arch (W4.Pred sym, PSR.MacawRegEntry sym tp)
-freshRegEntry initBlk r entry = withSym $ \sym -> do
-  fresh <- case PSR.macawRegRepr entry of
-    CLM.LLVMPointerRepr w -> liftIO $ do
-      ptr <- freshPtr sym (PC.showF r) w
-      return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
-    CT.BoolRepr -> liftIO $ do
-      b <- W4.freshConstant sym (WS.safeSymbol (PC.showF r)) WT.BaseBoolRepr
-      return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) b
-    CT.StructRepr Ctx.Empty -> return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) Ctx.Empty
-    repr -> throwHere $ PEE.UnsupportedRegisterType $ Some repr
-  isValid <- validRegister (Just initBlk) fresh r
-  isValid_pred <- liftIO $ getAssumedPred sym isValid
-  return (isValid_pred, fresh)
-
-getIsBoundFilter' ::
-  W4.SymExpr sym tp ->
-  EquivM sym arch (ExprFilter sym)
-getIsBoundFilter' e = withValid $ liftIO $ getIsBoundFilter e
-
-liftFilterMacaw ::
-  (forall tp'. W4.SymExpr sym tp' -> IO Bool) ->
-  PSR.MacawRegEntry sym tp -> EquivM sym arch Bool
-liftFilterMacaw f entry = withSym $ \sym -> do
-  case PSR.macawRegRepr entry of
-    CLM.LLVMPointerRepr{} -> liftIO $ do
-      let CLM.LLVMPointer reg off = PSR.macawRegValue entry
-      iReg <- W4.natToInteger sym reg
-      reg' <- f iReg
-      off' <- f off
-      return $ reg' || off'
-    CT.BoolRepr -> liftIO $ f (PSR.macawRegValue entry)
-    CT.StructRepr Ctx.Empty -> return False
-    repr -> throwHere $ PEE.UnsupportedRegisterType (Some repr)
-
-
-equateRegisters ::
-  M.Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
-  SimBundle sym arch ->
-  EquivM sym arch (AssumptionFrame sym)
-equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
-  fmap (mconcat) $ zipRegStates (simRegs inStO) (simRegs inStP) $ \r vO vP -> case PRe.registerCase (PSR.macawRegRepr vO) r of
-    PRe.RegIP -> return mempty
-    _ -> case M.lookup (Some r) regRel of
-      Just cond | Just True <- W4.asConstantPred cond -> liftIO $ macawRegBinding sym vO vP
-      _ -> return mempty
-  where
-    inStO = simInState $ simInO bundle
-    inStP = simInState $ simInP bundle
-
-equateInitialMemory :: SimBundle sym arch -> EquivM sym arch (AssumptionFrame sym)
-equateInitialMemory bundle =
-  return $ exprBinding (MT.memArr (simInMem $ simInO bundle)) (MT.memArr (simInMem $ simInP bundle))
-
-equateInitialStates :: SimBundle sym arch -> EquivM sym arch (AssumptionFrame sym)
-equateInitialStates bundle = do
-  regDomain <- allRegistersDomain
-  eqRegs <- equateRegisters regDomain bundle
-  eqMem <- equateInitialMemory bundle
-  return $ eqRegs <> eqMem
-
-bindMacawReg ::
-  -- | value to rebind
-  PSR.MacawRegEntry sym tp ->
-  -- | new value
-  PSR.MacawRegEntry sym tp ->
-  W4.SymExpr sym tp' ->
-  EquivM sym arch (W4.SymExpr sym tp')
-bindMacawReg var val expr = withValid $ withSym $ \sym -> do
-  bind <- liftIO $ macawRegBinding sym var val
-  liftIO $ rebindWithFrame sym bind expr
-
-
-wLit :: (1 <= w) => W.W w -> EquivM sym arch (W4.SymBV sym w)
-wLit w = withSymIO $ \sym -> W4.bvLit sym (W.rep w) (BVS.mkBV (W.rep w) (W.unW w))
-
-functionSegOffs ::
-  PPa.BlockPair arch ->
-  EquivM sym arch (MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)
-functionSegOffs pPair = do
-  PPa.PatchPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- PD.getBlocks pPair
-  return $ (MD.pblockAddr pblkO, MD.pblockAddr pblkP)
-
-getCurrentTOCs :: PA.HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
-getCurrentTOCs = do
-  (tocO, tocP) <- CMR.asks envTocs
-  curFuncs <- CMR.asks envCurrentFunc
-  (addrO, addrP) <- functionSegOffs curFuncs
-  wO <- case TOC.lookupTOC tocO addrO of
-    Just w -> return w
-    Nothing -> throwHere $ PEE.MissingTOCEntry addrO
-  wP <- case TOC.lookupTOC tocP addrP of
-    Just w -> return w
-    Nothing -> throwHere $ PEE.MissingTOCEntry addrP
-  return $ (wO, wP)
-
---------------------------------------------------------
--- Initial state validity
-
-validRegister ::
-  forall bin sym arch tp.
-  PB.KnownBinary bin =>
-  -- | if this register is an initial state, the corresponding
-  -- starting block
-  Maybe (PB.ConcreteBlock arch bin) ->
-  PSR.MacawRegEntry sym tp ->
-  MM.ArchReg arch tp ->
-  EquivM sym arch (AssumptionFrame sym)
-validRegister mblockStart entry r = withSym $ \sym ->
-  case PRe.registerCase (PSR.macawRegRepr entry) r of
-    PRe.RegIP -> case mblockStart of
-      Just blockStart -> do
-        ptrO <- PD.concreteToLLVM blockStart
-        liftIO $ macawRegBinding sym entry (PSR.ptrToEntry ptrO)
-      Nothing -> return $ mempty
-    PRe.RegSP -> do
-      stackRegion <- CMR.asks envStackRegion
-      let
-        CLM.LLVMPointer region _ = PSR.macawRegValue entry
-      iRegion <- liftIO $ W4.natToInteger sym region
-      iStackRegion <- liftIO $ W4.natToInteger sym stackRegion
-      return $ exprBinding iRegion iStackRegion
-    PRe.RegBV -> liftIO $ do
-      let
-        CLM.LLVMPointer region _ = PSR.macawRegValue entry
-      zero <- W4.intLit sym 0
-      iRegion <- W4.natToInteger sym region
-      return $ exprBinding iRegion zero
-    PRe.RegTOC -> do
-      globalRegion <- CMR.asks envGlobalRegion
-      (tocO, tocP) <- getCurrentTOCs
-      tocBV <- case W4.knownRepr :: PB.WhichBinaryRepr bin of
-        PB.OriginalRepr -> wLit tocO
-        PB.PatchedRepr -> wLit tocP
-      let targetToc = CLM.LLVMPointer globalRegion tocBV
-      liftIO $ macawRegBinding sym entry (PSR.ptrToEntry targetToc)
-    _ -> return $ mempty
-
-
-validInitState ::
-  Maybe (PPa.BlockPair arch) ->
-  SimState sym arch PB.Original ->
-  SimState sym arch PB.Patched ->
-  EquivM sym arch (AssumptionFrame sym)
-validInitState mpPair stO stP = do
-  fmap mconcat $ zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP -> do
-    validO <- validRegister (fmap PPa.pOriginal mpPair) vO r
-    validP <- validRegister (fmap PPa.pPatched mpPair) vP r
-    return $ validO <> validP
-
--- | Reads from immutable data have known results.
--- We collect all the reads that occurred during the trace, and then
--- assert that those values are necessarily equivalent to the concrete
--- value from the binary
-validConcreteReads ::
-  forall bin sym arch.
-  PB.KnownBinary bin =>
-  SimOutput sym arch bin ->
-  EquivM sym arch (AssumptionFrame sym)
-validConcreteReads stOut = withSym $ \sym -> do
-  binCtx <- getBinCtx @bin
-  let
-    binmem = MBL.memoryImage $ binary binCtx
-
-    go :: Seq.Seq (MT.MemOp sym (MM.ArchAddrWidth arch)) -> EquivM sym arch (AssumptionFrame sym)
-    go mops = do
-      flatops <- fmap F.toList $ liftIO $ MT.flatMemOps sym mops
-      fmap mconcat $ mapM readConcrete flatops
-
-    readConcrete ::
-      MT.MemOp sym (MM.ArchAddrWidth arch) ->
-      EquivM sym arch (AssumptionFrame sym)
-    readConcrete (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz val end) = do
-      case (W4.asNat reg, W4.asBV off, dir) of
-        (Just 0, Just off', MT.Read) -> do
-          let
-            addr :: MM.MemAddr (MM.ArchAddrWidth arch) =
-              MM.absoluteAddr (MM.memWord (fromIntegral (BVS.asUnsigned off')))
-          W4.LeqProof <- return $ W4.leqMulPos (W4.knownNat @8) sz
-          let bits = W4.natMultiply (W4.knownNat @8) sz
-          case doStaticRead @arch binmem addr bits end of
-            Just bv -> liftIO $ do
-              let CLM.LLVMPointer _ bvval = val
-              lit_val <- W4.bvLit sym bits bv
-              -- FIXME: update when memory model has regions
-              -- unclear what to assert about the region
-              return $ exprBinding bvval lit_val
-            Nothing -> return $ mempty
-        _ -> return $ mempty
-    readConcrete (MT.MergeOps _ seq1 seq2) = liftA2 (<>) (go seq1) (go seq2)
-  go (MT.memSeq $ simOutMem $ stOut)
-
-doStaticRead ::
-  forall arch w .
-  MM.Memory (MM.ArchAddrWidth arch) ->
-  MM.MemAddr (MM.ArchAddrWidth arch) ->
-  W4.NatRepr w ->
-  MM.Endianness ->
-  Maybe (BVS.BV w)
-doStaticRead mem addr w end = case MM.asSegmentOff mem addr of
-  Just segoff | MMP.isReadonly $ MM.segmentFlags $ MM.segoffSegment segoff ->
-    fmap (BVS.mkBV w) $
-    case (W4.intValue w, end) of
-      (8, _) -> liftErr $ MM.readWord8 mem addr
-      (16, MM.BigEndian) -> liftErr $ MM.readWord16be mem addr
-      (16, MM.LittleEndian) -> liftErr $ MM.readWord16le mem addr
-      (32, MM.BigEndian) -> liftErr $ MM.readWord32be mem addr
-      (32, MM.LittleEndian) -> liftErr $ MM.readWord32le mem addr
-      (64, MM.BigEndian) -> liftErr $ MM.readWord64be mem addr
-      (64, MM.LittleEndian) -> liftErr $ MM.readWord64le mem addr
-      _ -> Nothing
-  _ -> Nothing
-  where
-    liftErr :: Integral a => Either e a -> Maybe Integer
-    liftErr (Left _) = Nothing
-    liftErr (Right a) = Just (fromIntegral a)
 
 --------------------------------------------------------
 -- Toplevel preconditions and postconditions
@@ -1771,25 +1010,13 @@ topLevelPostDomain ::
   EquivM sym arch (StatePredSpec sym arch)
 topLevelPostDomain = withFreshVars $ \stO stP -> withSym $ \sym -> do
   regDomain <- topLevelPostRegisterDomain
-  withAssumptionFrame (validInitState Nothing stO stP) $
+  withAssumptionFrame (PVV.validInitState Nothing stO stP) $
     return $ PES.StatePred
       {
         PES.predRegs = regDomain
       , PES.predStack = PEM.memPredFalse sym
       , PES.predMem = PEM.memPredTrue sym
       }
-
-allRegistersDomain ::
-  forall sym arch.
-  EquivM sym arch (M.Map (Some (MM.ArchReg arch)) (W4.Pred sym))
-allRegistersDomain = withSym $ \sym -> do
-  return $
-    M.fromList $
-    map (\(MapF.Pair r (Const p)) -> (Some r, p)) $
-    MapF.toList $
-    MM.regStateMap $
-    MM.mkRegState (\_ -> Const (W4.truePred sym))
-
 
 -- | Top-level equivalence check:
 --  predomain:
@@ -1802,7 +1029,7 @@ topLevelTriple ::
   PPa.BlockPair arch ->
   EquivM sym arch (PF.EquivTriple sym arch)
 topLevelTriple pPair = withPair pPair $ withFreshVars $ \stO stP -> withSym $ \sym -> do
-  regDomain <- allRegistersDomain
+  regDomain <- PVD.allRegistersDomain
   postcond <- topLevelPostDomain
   let
     precond = PES.StatePred
@@ -1811,33 +1038,9 @@ topLevelTriple pPair = withPair pPair $ withFreshVars $ \stO stP -> withSym $ \s
       , PES.predMem = PEM.memPredTrue sym
       }
   let triple = PF.EquivTripleBody pPair precond postcond
-  asm_frame <- validInitState (Just pPair) stO stP
+  asm_frame <- PVV.validInitState (Just pPair) stO stP
   asm <- liftIO $ getAssumedPred sym asm_frame
   return (asm, triple)
-
--- | Domain that includes entire state, except IP and SP registers
-universalDomain ::
-  forall sym arch.
-  EquivM sym arch (PES.StatePred sym arch)
-universalDomain =  withSym $ \sym -> do
-  regDomain <- allRegistersDomain
-  let regDomain' =
-        M.delete (Some (MM.sp_reg @(MM.ArchReg arch))) $
-        M.delete (Some (MM.ip_reg @(MM.ArchReg arch))) regDomain
-  return $ PES.StatePred
-    {
-      PES.predRegs = regDomain'
-    , PES.predStack = PEM.memPredTrue sym
-    , PES.predMem = PEM.memPredTrue sym
-    }
-
--- | Domain that includes entire state, except IP and SP registers
-universalDomainSpec ::
-  HasCallStack =>
-  EquivM sym arch (StatePredSpec sym arch)
-universalDomainSpec = withFreshVars $ \stO stP ->
-  withAssumptionFrame (validInitState Nothing stO stP) $
-  universalDomain
 
 --------------------------------------------------------
 -- Totality check - ensure that the verified exit pairs cover all possible
