@@ -34,6 +34,7 @@ module Pate.Equivalence
   , EquivRelation(..)
   , MemEquivRelation(..)
   , RegEquivRelation(..)
+  , EquivalenceStatus(..)
   , weakenEquivRelation
   , getPostcondition
   , getPrecondition
@@ -75,6 +76,25 @@ import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import qualified Pate.Equivalence.MemPred as PEM
 import qualified Pate.Equivalence.StatePred as PES
+
+data EquivalenceStatus =
+    Equivalent
+  | Inequivalent
+  | ConditionallyEquivalent
+  | Errored String
+  deriving (Show)
+
+instance Semigroup EquivalenceStatus where
+  Errored err <> _ = Errored err
+  _ <> Errored err = Errored err
+  Inequivalent <> _ = Inequivalent
+  _ <> Inequivalent = Inequivalent
+  ConditionallyEquivalent <> _ = ConditionallyEquivalent
+  _ <> ConditionallyEquivalent = ConditionallyEquivalent
+  Equivalent <> Equivalent = Equivalent
+
+instance Monoid EquivalenceStatus where
+  mempty = Equivalent
 
 type StatePredSpec sym arch = SimSpec sym arch (PES.StatePred sym arch)
 

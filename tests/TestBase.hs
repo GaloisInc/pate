@@ -24,10 +24,10 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Loader as PL
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Types as PT
 
 data TestConfig where
   TestConfig ::
@@ -143,15 +143,15 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg
   case result of
-    PT.Errored err -> T.assertFailure (show err)
-    PT.Equivalent -> case sv of
+    PEq.Errored err -> T.assertFailure (show err)
+    PEq.Equivalent -> case sv of
       ShouldVerify -> return ()
       _ -> T.assertFailure "Unexpectedly proved equivalence."
-    PT.Inequivalent -> case sv of
+    PEq.Inequivalent -> case sv of
       ShouldVerify -> T.assertFailure "Failed to prove equivalence."
       ShouldNotVerify -> return ()
       ShouldConditionallyVerify -> T.assertFailure "Failed to prove conditional equivalence."    
-    PT.ConditionallyEquivalent -> case sv of
+    PEq.ConditionallyEquivalent -> case sv of
       ShouldVerify -> T.assertFailure "Failed to prove equivalence."
       ShouldNotVerify -> T.assertFailure "Unexpectedly proved conditional equivalence."
       ShouldConditionallyVerify -> return ()

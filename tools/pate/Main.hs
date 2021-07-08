@@ -44,6 +44,7 @@ import           Data.Parameterized.Some ( Some(..) )
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Hints.CSV as PHC
@@ -53,7 +54,6 @@ import qualified Pate.Loader as PL
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
-import qualified Pate.Types as PT
 import qualified Pate.Verbosity as PV
 
 import qualified Pate.AArch32 as AArch32
@@ -160,7 +160,7 @@ main = do
             , PC.hints = mVerificationHints
             }
       PL.runEquivConfig cfg >>= \case
-        PT.Errored err -> SE.die (show err)
+        PEq.Errored err -> SE.die (show err)
         _ -> pure ()
 
       -- Shut down the logger cleanly (if we can - the interactive logger will be

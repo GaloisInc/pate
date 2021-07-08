@@ -34,11 +34,6 @@ module Pate.Types
   , ValidSym
   , Sym(..)
 
-  --- reporting
-  , EquivalenceStatistics(..)
-  , EquivalenceStatus(..)
-  , equivSuccess
-  , ppEquivalenceStatistics
   )
 where
 
@@ -94,56 +89,6 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) wher
 -- | Map from the start of original blocks to patched block addresses
 newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (ConcreteAddress arch))
 
-----------------------------------
-
-
-data EquivalenceStatistics = EquivalenceStatistics
-  { numPairsChecked :: Int
-  , numEquivalentPairs :: Int
-  , numPairsErrored :: Int
-  } deriving (Eq, Ord, Read, Show)
-
-instance Semigroup EquivalenceStatistics where
-  EquivalenceStatistics checked total errored <> EquivalenceStatistics checked' total' errored' = EquivalenceStatistics
-    (checked + checked')
-    (total + total')
-    (errored + errored')
-
-instance Monoid EquivalenceStatistics where
-  mempty = EquivalenceStatistics 0 0 0
-
-
-data EquivalenceStatus =
-    Equivalent
-  | Inequivalent
-  | ConditionallyEquivalent
-  | Errored String
-  deriving (Show)
-
-instance Semigroup EquivalenceStatus where
-  Errored err <> _ = Errored err
-  _ <> Errored err = Errored err
-  Inequivalent <> _ = Inequivalent
-  _ <> Inequivalent = Inequivalent
-  ConditionallyEquivalent <> _ = ConditionallyEquivalent
-  _ <> ConditionallyEquivalent = ConditionallyEquivalent
-  Equivalent <> Equivalent = Equivalent
-
-instance Monoid EquivalenceStatus where
-  mempty = Equivalent
-
-equivSuccess :: EquivalenceStatistics -> Bool
-equivSuccess (EquivalenceStatistics checked total errored) = errored == 0 && checked == total
-
-----------------------------------
-
-
-----------------------------------
-
--- Register helpers
-
-
-----------------------------------
 
 type ValidSym sym =
   ( W4.IsExprBuilder sym
@@ -159,13 +104,6 @@ data Sym sym where
 
 ----------------------------------
 
-ppEquivalenceStatistics :: EquivalenceStatistics -> String
-ppEquivalenceStatistics (EquivalenceStatistics checked equiv err) = unlines
-  [ "Summary of checking " ++ show checked ++ " pairs:"
-  , "\t" ++ show equiv ++ " equivalent"
-  , "\t" ++ show (checked-equiv-err) ++ " inequivalent"
-  , "\t" ++ show err ++ " skipped due to errors"
-  ]
 
 --------------------------------
 

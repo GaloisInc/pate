@@ -28,6 +28,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
@@ -64,7 +65,7 @@ runEquivVerification ::
   PC.VerificationConfig ->
   PLE.LoadedELF arch ->
   PLE.LoadedELF arch ->
-  IO PT.EquivalenceStatus
+  IO PEq.EquivalenceStatus
 runEquivVerification validArch@(PA.SomeValidArch {}) logAction mhints pd dcfg original patched = do
   let (bmap, ppairs) = unpackPatchData validArch pd
   liftToEquivStatus $ PV.verifyPairs validArch logAction mhints original patched bmap dcfg ppairs
@@ -72,13 +73,13 @@ runEquivVerification validArch@(PA.SomeValidArch {}) logAction mhints pd dcfg or
 liftToEquivStatus ::
   Show e =>
   Monad m =>
-  CME.ExceptT e m PT.EquivalenceStatus ->
-  m PT.EquivalenceStatus
+  CME.ExceptT e m PEq.EquivalenceStatus ->
+  m PEq.EquivalenceStatus
 liftToEquivStatus f = do
   v <- CME.runExceptT f
   case v of
-    Left err -> return $ PT.Errored $ show err
-    Right b -> return b  
+    Left err -> return $ PEq.Errored $ show err
+    Right b -> return b
 
 -- | Given a patch configuration, check that
 -- either the original or patched binary can be
@@ -86,7 +87,7 @@ liftToEquivStatus f = do
 runSelfEquivConfig :: forall arch bin.
   PC.RunConfig arch ->
   PB.WhichBinaryRepr bin ->
-  IO PT.EquivalenceStatus
+  IO PEq.EquivalenceStatus
 runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
     Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
@@ -112,7 +113,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
 
 runEquivConfig :: forall arch.
   PC.RunConfig arch ->
-  IO PT.EquivalenceStatus
+  IO PEq.EquivalenceStatus
 runEquivConfig cfg = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
     Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case

@@ -65,10 +65,11 @@ import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
-import           Pate.Equivalence
+import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemPred as PEM
 import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Hints as PH
@@ -84,7 +85,6 @@ import qualified Pate.Proof.Operations as PFO
 import           Pate.SimState
 import qualified Pate.Solver as PS
 import           Pate.Types
-import qualified Pate.Types as PT
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Simplify as PVSi
@@ -157,7 +157,7 @@ verifyPairs ::
   BlockMapping arch ->
   PC.VerificationConfig ->
   [PPa.BlockPair arch] ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO PT.EquivalenceStatus
+  CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
 verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
@@ -283,7 +283,7 @@ runVerificationLoop ::
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the start of a function.
   [PPa.BlockPair arch] ->
-  IO (PT.EquivalenceStatus, EquivalenceStatistics)
+  IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
   let
     st = EquivState
@@ -297,7 +297,7 @@ runVerificationLoop env pPairs = do
     Right r -> return r
 
   where
-    doVerify :: EquivM sym arch (PT.EquivalenceStatus, EquivalenceStatistics)
+    doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
     doVerify = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
         mainO <- CMR.asks $ binEntry . originalCtx . envCtx
@@ -313,14 +313,14 @@ runVerificationLoop env pPairs = do
       return (result, stats)
 
     go ::
-      PF.EquivTriple sym arch -> EquivM sym arch PT.EquivalenceStatus
+      PF.EquivTriple sym arch -> EquivM sym arch PEq.EquivalenceStatus
     go triple = do
       result <- manifestError $ checkEquivalence triple
       emitResult result
       normResult <- return $ case result of
-        Right PT.Equivalent -> EquivalenceStatistics 1 1 0
-        Left _ -> EquivalenceStatistics 1 0 1
-        Right _ -> EquivalenceStatistics 1 0 0
+        Right PEq.Equivalent -> PESt.EquivalenceStatistics 1 1 0
+        Left _ -> PESt.EquivalenceStatistics 1 0 1
+        Right _ -> PESt.EquivalenceStatistics 1 0 0
       CMS.modify' $ \st -> st { stEqStats = normResult <> (stEqStats st) }
       case result of
         Right r -> return r
@@ -340,7 +340,7 @@ emitResult (Right _) = return ()
 checkEquivalence ::
   HasCallStack =>
   PF.EquivTriple sym arch ->
-  EquivM sym arch PT.EquivalenceStatus
+  EquivM sym arch PEq.EquivalenceStatus
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   eqRel <- CMR.asks envBaseEquiv
@@ -391,11 +391,11 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   ifConfig (not . PC.cfgEmitProofs) (return ()) $ do
     emitEvent (PE.ProvenGoal blocks (PFI.SomeProofSym vsym proof))
   case PFO.proofResult (PF.unNonceProof proof) of
-    PF.VerificationSuccess -> return PT.Equivalent
+    PF.VerificationSuccess -> return PEq.Equivalent
     PF.VerificationFail (_, cond) -> case W4.asConstantPred (PFI.condEqPred cond) of
-      Just False -> return Inequivalent
-      _ -> return PT.ConditionallyEquivalent
-    _ -> return PT.Inequivalent
+      Just False -> return PEq.Inequivalent
+      _ -> return PEq.ConditionallyEquivalent
+    _ -> return PEq.Inequivalent
   where
     -- TODO: this breaks the model somewhat, since we're relying on these not containing
     -- the bound terms

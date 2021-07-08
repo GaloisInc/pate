@@ -30,6 +30,7 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Types as PT
 import qualified Pate.Loader.ELF as PLE
 
@@ -56,7 +57,7 @@ data BranchCompletenessResult arch = BranchesComplete
 -- This can include traditional logging information, but also statistics about
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
-  AnalysisEnd :: PT.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
+  AnalysisEnd :: PES.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
   AnalysisStart :: PPa.BlockPair arch -> Event arch
   ErrorRaised :: PEE.EquivalenceError arch -> Event arch
   Warning :: BlocksPair arch -> PEE.EquivalenceError arch -> Event arch

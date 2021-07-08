@@ -138,6 +138,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Config as PC
 import           Pate.Equivalence
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
@@ -310,7 +311,7 @@ data EquivState sym arch where
     -- ^ all intermediate triples that were proven for each block slice
     , stSimResults ::  Map (PPa.BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
     -- ^ cached results of symbolic execution for a given block pair
-    , stEqStats :: EquivalenceStatistics
+    , stEqStats :: PES.EquivalenceStatistics
     } -> EquivState sym arch
 
 newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (PEE.EquivalenceError arch) IO))) a }
