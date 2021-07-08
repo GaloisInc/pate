@@ -103,7 +103,6 @@ library
                        Pate.Solver,
                        Pate.Timeout,
                        Pate.Types,
-                       Pate.Utils,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
                        What4.PathCondition,
