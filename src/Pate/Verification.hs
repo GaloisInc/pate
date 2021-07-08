@@ -34,6 +34,7 @@ import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
+import qualified Data.IntervalMap as IM
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes, maybeToList )
 import qualified Data.Parameterized.Map as MapF
@@ -91,6 +92,10 @@ import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
 import           What4.ExprHelpers
+
+-- | Return the list of entry points in the parsed function map
+parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
+parsedFunctionEntries = concatMap M.keys . IM.elems
 
 -- | We run discovery in parallel, since we need to run it two or three times
 --
