@@ -1,15 +1,25 @@
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 -- | Definitions of solvers usable in the pate verifier
 module Pate.Solver (
-  Solver(..),
-  solverAdapter
+    Solver(..)
+  , solverAdapter
+  , ValidSym
+  , Sym(..)
   ) where
 
+import           Data.Parameterized.Classes ( ShowF )
+import qualified Data.Parameterized.Nonce as PN
 import qualified What4.Config as WC
+import qualified What4.Expr.Builder as WE
 import qualified What4.Interface as WI
 import qualified What4.Solver as WS
 import qualified What4.Solver.CVC4 as WSC
 import qualified What4.Solver.Yices as WSY
 import qualified What4.Solver.Z3 as WSZ
+
+import qualified Lang.Crucible.Backend as CB
 
 -- | The solvers supported by the pate verifier
 data Solver = CVC4
@@ -33,3 +43,12 @@ solverAdapter sym s = do
     Z3 -> do
       WC.extendConfig WSZ.z3Options cfg
       return WS.z3Adapter
+
+type ValidSym sym =
+  ( WI.IsExprBuilder sym
+  , CB.IsSymInterface sym
+  , ShowF (WI.SymExpr sym)
+  )
+
+data Sym sym where
+  Sym :: (sym ~ (WE.ExprBuilder t st fs), ValidSym sym) => PN.Nonce PN.GlobalNonceGenerator sym -> sym -> WS.SolverAdapter st -> Sym sym

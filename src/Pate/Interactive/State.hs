@@ -46,6 +46,7 @@ import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Metrics as PM
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Solver as PS
 import qualified Pate.Types as PT
 
 
@@ -70,7 +71,7 @@ data ProofTree arch where
   ProofTree :: ( prf ~ PFI.ProofSym sym arch
                , WI.IsSymExprBuilder sym
                )
-            => PT.Sym sym
+            => PS.Sym sym
             -> MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf)
             -> Map.Map Int (Some (ProofTreeNode arch prf))
             -> ProofTree arch
@@ -118,14 +119,14 @@ addProofTreeNode
   -> TM.NominalDiffTime
   -> Maybe (ProofTree arch)
   -> Maybe (ProofTree arch)
-addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PT.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
+addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PS.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
   case mpt of
     Nothing ->
       let proofNode = ProofTreeNode blockPair expr tm
       in Just (ProofTree oldSym
                          (MapF.singleton enonce proofNode)
                          (Map.singleton (asInt enonce) (Some proofNode)))
-    Just (ProofTree sym@(PT.Sym symNonce1 _ _) m idx)
+    Just (ProofTree sym@(PS.Sym symNonce1 _ _) m idx)
       | Just PC.Refl <- PC.testEquality symNonce0 symNonce1 ->
         let proofNode = ProofTreeNode blockPair expr tm
         in Just (ProofTree sym

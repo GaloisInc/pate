@@ -78,7 +78,7 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Types as PT
+import qualified Pate.Solver as PSo
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -236,7 +236,7 @@ flattenToStackRegion dom = do
 predRegsToDomain ::
   forall arch sym.
   PA.ValidArch arch =>
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   sym ->
   Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
   MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
@@ -249,7 +249,7 @@ predRegsToDomain sym regs = MM.mkRegState go
 
 -- TODO: flatten 'MemCells' to avoid rebuilding this map
 memPredToDomain ::
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   PEM.MemPred sym arch ->
   PF.ProofMemoryDomain (PFI.ProofSym sym arch)
 memPredToDomain memPred =
@@ -317,11 +317,11 @@ data LazyProofBody sym arch tp where
 
 type LazyProofApp sym arch = PF.ProofApp (PFI.ProofSym sym arch) (LazyProof sym arch)
 
-instance (PA.ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProofBody sym arch tp) where
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (LazyProofBody sym arch tp) where
   mapExpr sym f (LazyProofBodyApp app) = LazyProofBodyApp <$> PEM.mapExpr sym f app
   mapExpr sym f (LazyProofBodyFuture future) = LazyProofBodyFuture <$> PEM.mapExpr sym f future
 
-instance (PA.ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProof sym arch tp) where
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (LazyProof sym arch tp) where
   mapExpr sym f (LazyProof a1 a2 v fin) = do
     v' <- PEM.mapExpr sym f v
     return $ LazyProof a1 a2 v' fin

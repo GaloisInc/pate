@@ -80,7 +80,7 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Types as PT
+import qualified Pate.Solver as PSo
 import           What4.ExprHelpers
 import qualified What4.PathCondition as WPC
 
@@ -217,7 +217,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
 
 groundProofTransformer ::
   PA.ValidArch arch =>
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   SymGroundEvalFn sym ->
   PF.ProofTransformer (EquivM_ sym arch) (PFI.ProofSym sym arch) (PFI.ProofGround arch)
 groundProofTransformer fn = PF.ProofTransformer

@@ -24,7 +24,6 @@ module Pate.Monad
   , EquivM
   , EquivM_
   , runEquivM
-  , ValidSym
   , EquivalenceContext(..)
   , BinaryContext(..)
   , VerificationFailureMode(..)
@@ -148,6 +147,7 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
 import           Pate.Types
 
@@ -183,7 +183,7 @@ data EquivEnv sym arch where
     , envBaseEquiv :: EquivRelation sym arch
     , envGoalTriples :: [PF.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
-    , envValidSym :: Sym sym
+    , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof
     , envStartTime :: TM.UTCTime
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
@@ -327,7 +327,7 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (State
            , MonadError (PEE.EquivalenceError arch)
            )
 
-type EquivM sym arch a = (PA.ValidArch arch, ValidSym sym) => EquivM_ sym arch a
+type EquivM sym arch a = (PA.ValidArch arch, PSo.ValidSym sym) => EquivM_ sym arch a
 
 withBinary ::
   forall bin sym arch a.
@@ -353,7 +353,7 @@ getBinCtx' repr = case repr of
   PBi.PatchedRepr -> asks (rewrittenCtx . envCtx)
 
 withValid :: forall a sym arch.
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
   env <- ask
@@ -361,22 +361,22 @@ withValid f = do
 
 withValidEnv ::
   EquivEnv sym arch ->
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, ValidSym sym) => a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
   a
-withValidEnv (EquivEnv { envValidSym = Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
+withValidEnv (EquivEnv { envValidSym = PSo.Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
 withSymSolver ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
   EquivM sym arch a
 withSymSolver f = withValid $ do
-  Sym _ sym adapter <- asks envValidSym
+  PSo.Sym _ sym adapter <- asks envValidSym
   f sym adapter
 
 withSym ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
-  Sym _ sym _ <- asks envValidSym
+  PSo.Sym _ sym _ <- asks envValidSym
   f sym
 
 withSymIO :: forall sym arch a.

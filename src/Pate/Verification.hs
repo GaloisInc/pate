@@ -234,7 +234,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
       , envBaseEquiv = stateEquivalence sym stackRegion
       , envFailureMode = ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
-      , envValidSym = Sym symNonce sym adapter
+      , envValidSym = PS.Sym symNonce sym adapter
       , envStartTime = startedAt
       , envTocs = (TOC.getTOC $ PLE.loadedBinary elf, TOC.getTOC $ PLE.loadedBinary elf')
       -- TODO: restructure EquivEnv to avoid this

@@ -8,7 +8,6 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
@@ -29,10 +28,6 @@ module Pate.Types
   , BlockTarget(..)
   , ParsedBlockMap(..)
   , ParsedFunctionMap
-
-  , ValidSym
-  , Sym(..)
-
   )
 where
 
@@ -40,18 +35,10 @@ import           Data.IntervalMap (IntervalMap)
 import           Data.Map ( Map )
 import qualified Data.Map as M
 
-import           Data.Parameterized.Classes
-import qualified Data.Parameterized.Nonce as PN
 import           Data.Parameterized.Some ( Some(..) )
-
-import qualified Lang.Crucible.Backend as CB
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
-
-import qualified What4.Interface as W4
-import qualified What4.Expr.Builder as W4B
-import qualified What4.Solver as WS
 
 import           Pate.Address
 import           Pate.Block
@@ -84,14 +71,6 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) wher
 newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (ConcreteAddress arch))
 
 
-type ValidSym sym =
-  ( W4.IsExprBuilder sym
-  , CB.IsSymInterface sym
-  , ShowF (W4.SymExpr sym)
-  )
-
-data Sym sym where
-  Sym :: (sym ~ (W4B.ExprBuilder t st fs), ValidSym sym) => PN.Nonce PN.GlobalNonceGenerator sym -> sym -> WS.SolverAdapter st -> Sym sym
 
 ----------------------------------
 

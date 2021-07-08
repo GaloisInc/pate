@@ -84,13 +84,13 @@ import           Prettyprinter ( (<+>) )
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
-import qualified Pate.Types as PT
 import qualified Pate.Proof as PF
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PSo
 import qualified Pate.Memory.MemTrace as MT
 
 import qualified What4.Interface as W4
@@ -100,10 +100,10 @@ import qualified What4.Expr.GroundEval as W4G
 
 data SomeProofSym (arch :: DK.Type) tp where
   SomeProofSym :: PA.ValidArch arch =>
-    PT.Sym sym -> ProofSymNonceExpr sym arch tp -> SomeProofSym arch tp
+    PSo.Sym sym -> ProofSymNonceExpr sym arch tp -> SomeProofSym arch tp
 
 instance Show (SomeProofSym arch tp) where
-  show (SomeProofSym (PT.Sym{}) e) = show (PP.pretty (PF.unNonceProof e))
+  show (SomeProofSym (PSo.Sym{}) e) = show (PP.pretty (PF.unNonceProof e))
 
 data InequivalenceResult arch where
   InequivalenceResult :: PA.ValidArch arch =>
@@ -158,38 +158,38 @@ newtype SymBV sym w = SymBV (CLM.LLVMPtr sym w)
 instance PEM.ExprMappable sym (SymBV sym w) where
   mapExpr sym f (SymBV bv) = SymBV <$> WEH.mapExprPtr sym f bv
 
-instance (PA.ValidArch arch, PT.ValidSym sym) => PEM.ExprMappable sym (PF.ProofExpr (ProofSym sym arch) tp) where
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (PF.ProofExpr (ProofSym sym arch) tp) where
   mapExpr sym f (PF.ProofExpr app) = PF.ProofExpr <$> PEM.mapExpr sym f app
 
-instance (PA.ValidArch arch, PT.ValidSym sym) => PEM.ExprMappable sym (PF.ProofNonceExpr (ProofSym sym arch) tp) where
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (PF.ProofNonceExpr (ProofSym sym arch) tp) where
   mapExpr sym f (PF.ProofNonceExpr nonce parent app) = do
     app' <- PEM.mapExpr sym f app
     return $ PF.ProofNonceExpr nonce parent app'
 
 instance
   ( PA.ValidArch arch
-  , PT.ValidSym sym
+  , PSo.ValidSym sym
   ) =>
   PEM.ExprMappable sym (PF.BlockSliceMemOp (ProofSym sym arch) w) where
   mapExpr sym f memOp = PF.transformBlockSliceMemOp (mapExprTrans sym f) memOp
 
 instance
   ( PA.ValidArch arch
-  , PT.ValidSym sym
+  , PSo.ValidSym sym
   ) =>
   PEM.ExprMappable sym (PF.BlockSliceRegOp (ProofSym sym arch) w) where
   mapExpr sym f regOp = PF.transformBlockSliceRegOp (mapExprTrans sym f) regOp
 
 instance
   ( PA.ValidArch arch
-  , PT.ValidSym sym,
+  , PSo.ValidSym sym,
     forall ntp. PEM.ExprMappable sym (app ntp)) =>
   PEM.ExprMappable sym (PF.ProofApp (ProofSym sym arch) app tp) where
   mapExpr sym f = PF.transformProofApp (mapExprTrans sym f)
 
 mapExprTrans ::
   PA.ValidArch arch =>
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   sym ->
   (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
   PF.ProofTransformer IO (ProofSym sym arch) (ProofSym sym arch)
@@ -205,7 +205,7 @@ mapExprTrans sym f = PF.ProofTransformer
   , PF.prfConstraint = \a -> a
   }
 
-instance (PA.ValidArch arch, PT.ValidSym sym) => PF.IsProof (ProofSym sym arch)
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PF.IsProof (ProofSym sym arch)
 
 type ProofSymNonceExpr sym arch = PF.ProofNonceExpr (ProofSym sym arch)
 type ProofSymNonceApp sym arch = PF.ProofApp (ProofSym sym arch) (ProofSymNonceExpr sym arch)
@@ -213,7 +213,7 @@ type ProofSymNonceApp sym arch = PF.ProofApp (ProofSym sym arch) (ProofSymNonceE
 type ProofSymExpr sym arch = PF.ProofExpr (ProofSym sym arch)
 type ProofSymApp sym arch = PF.ProofApp (ProofSym sym arch) (ProofSymExpr sym arch)
 
-ppCell :: (PA.ValidArch arch, PT.ValidSym sym) => PMC.MemCell sym arch w -> PP.Doc a
+ppCell :: (PA.ValidArch arch, PSo.ValidSym sym) => PMC.MemCell sym arch w -> PP.Doc a
 ppCell cell =
   let CLM.LLVMPointer reg off = PMC.cellPtr cell
   in W4.printSymNat reg <> "+" <> PP.pretty (showF off)
@@ -222,7 +222,7 @@ ppMaybe :: Maybe f -> (f ->  PP.Doc a) -> PP.Doc a
 ppMaybe (Just f) pp = pp f
 ppMaybe Nothing _ = PP.emptyDoc
 
-instance forall sym arch tp. (PA.ValidArch arch, PT.ValidSym sym) => PP.Pretty (PF.ProofExpr (ProofSym sym arch) tp) where
+instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (PF.ProofExpr (ProofSym sym arch) tp) where
  pretty (PF.ProofExpr prf@PF.ProofFunctionCall{}) =
    PP.vsep $ 
      [ "Function pre-domain is satisfied before call:"
@@ -322,7 +322,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PT.ValidSym sym) => PP.Pretty (
    PF.VerificationSuccess -> "Succeeded"
    PF.VerificationFail (result, cond) -> PP.vsep [ "Failed:", PP.pretty result, PP.pretty cond ]
 
-instance PT.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
+instance PSo.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
   pretty (CondEquivalenceResult pExample pPred) =
     PP.vsep $
      [ "Equivalence Condition:"
@@ -343,7 +343,7 @@ instance PT.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
 
 collapseRegState ::
   forall sym arch.
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   PA.ValidArch arch =>
   Proxy sym ->
   MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym)) ->
@@ -359,7 +359,7 @@ collapseRegState _ regState =
 
 collapseProofMemoryDomain ::
   forall sym arch.
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   PA.ValidArch arch =>
   PF.ProofMemoryDomain (ProofSym sym arch) ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)]

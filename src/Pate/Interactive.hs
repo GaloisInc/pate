@@ -44,7 +44,7 @@ import qualified Pate.Event as PE
 import qualified Pate.Metrics as PM
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PPr
-import qualified Pate.Types as PT
+import qualified Pate.Solver as PS
 import qualified Pate.Verbosity as PV
 
 import qualified Pate.Interactive.Port as PIP
@@ -222,7 +222,7 @@ onProofNodeClicked
 onProofNodeClicked r wd detailDiv ident = do
   st <- IOR.readIORef (stateRef r)
   case st ^. activeProofTree of
-    Just (ProofTree (PT.Sym {}) nodes idx)
+    Just (ProofTree (PS.Sym {}) nodes idx)
       | Just (Some (ProofTreeNode (PPa.PatchPair ob pb) (PPr.ProofNonceExpr _ parentNonce papp) tm)) <- Map.lookup ident idx -> TP.runUI wd $ do
           (g, origGraphSetup, patchedGraphSetup) <- IRB.renderBlockPairDetail st ob pb Nothing
           appDetail <- IRP.renderProofApp nodes parentNonce papp
