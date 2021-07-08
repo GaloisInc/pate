@@ -75,6 +75,7 @@ import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Types as PT
@@ -95,8 +96,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
   preMem <- MapF.fromList <$> mapM (memCellToOp initState) memReads
   postMem <- MapF.fromList <$> mapM (memCellToOp finState) memWrites
 
-  preRegs <- PT.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) getReg
-  postRegs <- PT.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) getReg
+  preRegs <- PR.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) getReg
+  postRegs <- PR.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) getReg
   
   let
     preState = PF.BlockSliceState preMem preRegs

@@ -115,8 +115,8 @@ import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
-import qualified Pate.Types as PT
 
 import qualified What4.Interface as W4
 
@@ -575,7 +575,7 @@ mergeDomains ::
   ProofExpr prf ProofDomainType ->
   m (ProofExpr prf ProofDomainType )
 mergeDomains (unApp -> dom1) (unApp -> dom2) = do
-  regs <- PT.zipWithRegStatesM (prfDomainRegisters dom1) (prfDomainRegisters dom2)
+  regs <- PR.zipWithRegStatesM (prfDomainRegisters dom1) (prfDomainRegisters dom2)
     (\_ (Const p1) (Const p2) -> Const <$> proofPredOr @prf p1 p2)
   stack <- mergeMemDomains (prfDomainStackMemory dom1) (prfDomainStackMemory dom2)
   glob <- mergeMemDomains (prfDomainGlobalMemory dom1) (prfDomainGlobalMemory dom2)

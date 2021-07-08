@@ -54,7 +54,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
 import qualified Pate.SimState as PSi
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Types as PT
 import qualified Pate.Verification.Simplify as PVS
 import qualified Pate.Verification.Validity as PVV
 import qualified What4.ExprHelpers as WEH
@@ -221,7 +220,7 @@ equateRegisters ::
   SimBundle sym arch ->
   EquivM sym arch (PSi.AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
-  fmap (mconcat) $ PT.zipRegStates (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase (PSR.macawRegRepr vO) r of
+  fmap (mconcat) $ PRe.zipRegStates (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return mempty
     _ -> case M.lookup (Some r) regRel of
       Just cond | Just True <- W4.asConstantPred cond -> liftIO $ PSi.macawRegBinding sym vO vP
@@ -270,7 +269,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   traceBundle bundle "Entering guessEquivalenceDomain"
   WEH.ExprFilter isBoundInGoal <- getIsBoundFilter' goal
   eqRel <- CMR.asks envBaseEquiv
-  result <- PT.zipRegStatesPar (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> do
+  result <- PRe.zipRegStatesPar (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
       let

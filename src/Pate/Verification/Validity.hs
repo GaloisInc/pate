@@ -41,7 +41,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
-import           Pate.Types
 
 wLit :: (1 <= w) => W.W w -> EquivM sym arch (W4.SymBV sym w)
 wLit w = withSymIO $ \sym -> W4.bvLit sym (W.rep w) (BVS.mkBV (W.rep w) (W.unW w))
@@ -73,7 +72,7 @@ validInitState ::
   SimState sym arch PB.Patched ->
   EquivM sym arch (AssumptionFrame sym)
 validInitState mpPair stO stP = do
-  fmap mconcat $ zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP -> do
+  fmap mconcat $ PRe.zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP -> do
     validO <- validRegister (fmap PPa.pOriginal mpPair) vO r
     validP <- validRegister (fmap PPa.pPatched mpPair) vP r
     return $ validO <> validP

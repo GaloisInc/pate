@@ -63,6 +63,7 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Register as PR
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Types
@@ -139,7 +140,7 @@ exactEquivalence ::
   EquivM sym arch (WI.Pred sym)
 exactEquivalence inO inP = withSym $ \sym -> do
   eqRel <- CMR.asks envBaseEquiv
-  regsEqs <- liftIO $ zipRegStates (PSS.simInRegs inO) (PSS.simInRegs inP) (PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel))
+  regsEqs <- liftIO $ PR.zipRegStates (PSS.simInRegs inO) (PSS.simInRegs inP) (PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel))
 
   regsEq <- liftIO $ WEH.allPreds sym regsEqs
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
