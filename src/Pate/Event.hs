@@ -11,8 +11,6 @@ module Pate.Event (
 
 import qualified Data.ElfEdit as DEE
 import qualified Data.List.NonEmpty as DLN
-import qualified Data.Macaw.CFG as MC
-import qualified Data.Macaw.Discovery as MD
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Word ( Word64 )
@@ -20,19 +18,22 @@ import qualified GHC.Stack as GS
 import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
+import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.Discovery as MD
+
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
+import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Loader.Wrapper as PLW
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.PatchPair as PPa
-import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Types as PT
-import qualified Pate.Loader.ELF as PLE
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
@@ -72,7 +73,9 @@ data Event arch where
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
-  LoadedBinaries :: (PLE.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch
+  LoadedBinaries :: (PLW.SomeLoadedBinary arch, PT.ParsedFunctionMap arch)
+                 -> (PLW.SomeLoadedBinary arch, PT.ParsedFunctionMap arch)
+                 -> Event arch
   -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: [(T.Text, Word64)] -> Event arch
   -- | A list of functions discovered from provided hints that macaw code

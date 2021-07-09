@@ -1,10 +1,10 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 module Pate.Loader.ELF (
-    LoadedELF(..)
-  , loadELF
+  loadELF
   ) where
 
 import qualified Data.ByteString as BS
@@ -13,32 +13,22 @@ import           Data.Proxy ( Proxy(..) )
 
 import qualified Data.ElfEdit as E
 import qualified Data.Macaw.Memory.ElfLoader as MME
-import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.BinaryLoader as MBL
 
 import qualified Pate.Arch as PA
-
-data LoadedELF arch =
-  LoadedELF
-    { archInfo :: MI.ArchitectureInfo arch
-    , loadedBinary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
-    }
+import           Pate.Loader.Wrapper ( SomeLoadedBinary(..) )
 
 loadELF ::
   forall arch.
-  PA.ArchConstraints arch =>
+  (PA.ArchConstraints arch, MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))) =>
   Proxy arch ->
   FilePath ->
-  IO (LoadedELF arch)
+  IO (SomeLoadedBinary arch)
 loadELF _ path = do
   bs <- BS.readFile path
   elf <- doParse bs
-  mem <- MBL.loadBinary MME.defaultLoadOptions elf
-  return $ LoadedELF
-    { archInfo = PA.binArchInfo mem
-    , loadedBinary = mem
-    }
+  SomeLoadedBinary <$> MBL.loadBinary MME.defaultLoadOptions elf
   where
     archWidthRepr :: MC.AddrWidthRepr (MC.ArchAddrWidth arch)
     archWidthRepr = MC.addrWidthRepr (Proxy @(MC.ArchAddrWidth arch))

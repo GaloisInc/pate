@@ -83,6 +83,7 @@ library
                        Pate.Verification.Validity,
                        Pate.Loader,
                        Pate.Loader.ELF,
+                       Pate.Loader.Wrapper,
                        Pate.Event,
                        Pate.Hints,
                        Pate.Hints.CSV,

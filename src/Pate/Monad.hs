@@ -93,7 +93,6 @@ import           Control.Monad.Reader
 import           Control.Monad.Except
 import           Control.Monad.State
 
-import qualified Data.ElfEdit as E
 import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
@@ -116,7 +115,6 @@ import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
@@ -132,14 +130,15 @@ import qualified What4.Symbol as WS
 import           What4.ExprHelpers
 
 import qualified Pate.Arch as PA
-import qualified Pate.Block as PB
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import           Pate.Equivalence
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Loader.Wrapper as PLW
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
@@ -152,7 +151,7 @@ import qualified Pate.Timeout as PT
 import           Pate.Types
 
 data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
-  { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
+  { binary :: PLW.SomeLoadedBinary arch
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
   }

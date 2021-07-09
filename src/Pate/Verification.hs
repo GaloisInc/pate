@@ -74,7 +74,7 @@ import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Hints as PH
-import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Loader.Wrapper as PLW
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Parallel as Par
@@ -113,16 +113,16 @@ runDiscovery
   :: (PA.ValidArch arch)
   => LJ.LogAction IO (PE.Event arch)
   -> Maybe PH.VerificationHints
-  -> PLE.LoadedELF arch
-  -> PLE.LoadedELF arch
+  -> PLW.SomeLoadedBinary arch
+  -> PLW.SomeLoadedBinary arch
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (MM.ArchSegmentOff arch, ParsedFunctionMap arch, MM.ArchSegmentOff arch, ParsedFunctionMap arch)
-runDiscovery logAction mhints elf elf' = do
+runDiscovery logAction mhints bin bin' = do
   let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
-  origDiscovery <- discoverAsync elf mempty
-  mHintedDiscovery <- DT.traverse (discoverAsync elf) mhints
+  origDiscovery <- discoverAsync bin mempty
+  mHintedDiscovery <- DT.traverse (discoverAsync bin) mhints
   patchedDiscovery <- case mhints of
-    Just hints -> discoverAsync elf' hints
-    Nothing -> discoverAsync elf' mempty
+    Just hints -> discoverAsync bin' hints
+    Nothing -> discoverAsync bin' mempty
   (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
   (_, pMain, pPfm) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
   (oMain, oPfm) <- case mHintedDiscovery of
@@ -146,7 +146,7 @@ runDiscovery logAction mhints elf elf' = do
 
       return (oMain, oPfm)
 
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (bin, oPfm) (bin', pPfm))
   return (oMain, oPfm, pMain, pPfm)
 
 
@@ -157,13 +157,13 @@ verifyPairs ::
   PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
   Maybe PH.VerificationHints ->
-  PLE.LoadedELF arch ->
-  PLE.LoadedELF arch ->
+  PLW.SomeLoadedBinary arch ->
+  PLW.SomeLoadedBinary arch ->
   BlockMapping arch ->
   PC.VerificationConfig ->
   [PPa.BlockPair arch] ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
+verifyPairs validArch logAction mhints some_bin@(PLW.SomeLoadedBinary bin) some_bin'@(PLW.SomeLoadedBinary bin') blockMap vcfg pPairs = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
@@ -171,7 +171,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
 
-  (oMain, oPfm, pMain, pPfm) <- runDiscovery logAction mhints elf elf'
+  (oMain, oPfm, pMain, pPfm) <- runDiscovery logAction mhints some_bin some_bin'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
@@ -202,12 +202,12 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
     oCtx = BinaryContext
-      { binary = PLE.loadedBinary elf
+      { binary = bin
       , parsedFunctionMap = oPfm
       , binEntry = oMain
       }
     rCtx = BinaryContext
-      { binary = PLE.loadedBinary elf'
+      { binary = bin'
       , parsedFunctionMap = pPfm
       , binEntry = pMain
       }
@@ -236,7 +236,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
       , envGoalTriples = [] -- populated in runVerificationLoop
       , envValidSym = PS.Sym symNonce sym adapter
       , envStartTime = startedAt
-      , envTocs = (TOC.getTOC $ PLE.loadedBinary elf, TOC.getTOC $ PLE.loadedBinary elf')
+      , envTocs = (TOC.getTOC bin, TOC.getTOC bin')
       -- TODO: restructure EquivEnv to avoid this
       , envCurrentFunc = error "no function under analysis"
       , envCurrentFrame = mempty
@@ -1115,3 +1115,4 @@ buildBlockMap pairs bm = foldr go bm pairs
     go :: PPa.BlockPair arch -> BlockMapping arch -> BlockMapping arch
     go (PPa.PatchPair orig patched) (BlockMapping m) =
       BlockMapping $ M.alter (doAddAddr (PB.concreteAddress patched)) (PB.concreteAddress orig) m
+

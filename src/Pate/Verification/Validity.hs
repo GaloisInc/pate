@@ -22,6 +22,7 @@ import           GHC.TypeLits
 import qualified Data.Word.Indexed as W
 import qualified What4.Interface as W4
 
+import qualified Data.Macaw.BinaryLoader.PPC as TOC
 import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
@@ -35,6 +36,7 @@ import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
+import qualified Pate.Loader.Wrapper as PLW
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.PatchPair as PPa
@@ -54,7 +56,11 @@ functionSegOffs pPair = do
 
 getCurrentTOCs :: PA.HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
 getCurrentTOCs = do
-  (tocO, tocP) <- CMR.asks envTocs
+  -- (tocO, tocP) <- CMR.asks envTocs
+  PLW.SomeLoadedBinary binO <- CMR.asks (binary . originalCtx . envCtx)
+  PLW.SomeLoadedBinary binP <- CMR.asks (binary . rewrittenCtx . envCtx)
+  let tocO = TOC.getTOC binO
+  let tocP = TOC.getTOC binP
   curFuncs <- CMR.asks envCurrentFunc
   (addrO, addrP) <- functionSegOffs curFuncs
   wO <- case TOC.lookupTOC tocO addrO of
@@ -127,8 +133,9 @@ validConcreteReads ::
   EquivM sym arch (AssumptionFrame sym)
 validConcreteReads stOut = withSym $ \sym -> do
   binCtx <- getBinCtx @bin
+  PLW.SomeLoadedBinary lb <- return (binary binCtx)
   let
-    binmem = MBL.memoryImage $ binary binCtx
+    binmem = MBL.memoryImage lb
 
     go :: Seq.Seq (MT.MemOp sym (MM.ArchAddrWidth arch)) -> EquivM sym arch (AssumptionFrame sym)
     go mops = do

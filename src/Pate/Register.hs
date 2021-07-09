@@ -51,6 +51,20 @@ registerCase repr r = case PC.testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
   _ -> case PC.testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
     Just PC.Refl -> RegSP
     _ -> PA.withTOCCases (Proxy @arch) nontoc $
+    -- FIXME: If we pass this the binary, we could test equality with a binrepr
+    -- here. That doesn't automatically recover the dictionary.
+    --
+    -- Perhaps instead we could store a GADT that lets us test the architecture
+    -- and stores the HasTOC constraint for PowerPC; we could just check here
+    -- for whether or not the arch is PPC (and recover the dict at the same
+    -- time).
+    --
+    -- That is fine for the verifier, which is allowed to have a closed set of
+    -- supported architectures.
+    --
+    -- Instead, we could wrap the whole notion of special treatment of a
+    -- register more abstractly. Either way, we need to be very flexible because
+    -- PowerPC32 doesn't use a TOC
       case PC.testEquality r (PA.toc_reg @arch) of
         Just PC.Refl -> RegTOC
         _ -> nontoc

@@ -17,7 +17,7 @@ import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Time as TM
 
 import qualified Pate.Event as PE
-import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Loader.Wrapper as PLW
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Types as PT
@@ -52,17 +52,17 @@ emptyMetrics =
 
 loadedBinaryMetrics
   :: (MM.MemWidth (MC.ArchAddrWidth arch))
-  => PLE.LoadedELF arch
+  => MBL.LoadedBinary arch binFmt
   -> PT.ParsedFunctionMap arch
   -> BinaryMetrics
-loadedBinaryMetrics le pfm =
+loadedBinaryMetrics bin pfm =
   BinaryMetrics { executableBytes = byteCount
                 , numFunctions = length (IM.keys pfm)
                 , numBlocks = blockCount
                 }
   where
     isExec = MMP.isExecutable . MM.segmentFlags
-    segs = MM.memSegments (MBL.memoryImage (PLE.loadedBinary le))
+    segs = MM.memSegments (MBL.memoryImage bin)
 
     byteCount = sum [ if isExec seg then fromIntegral (MM.segmentSize seg) else 0
                     | seg <- segs
@@ -82,9 +82,9 @@ summarize e m =
     PE.AnalysisEnd _ dur -> m { duration = Just dur }
     PE.FunctionsDiscoveredFromHints entryPoints -> m { usedDiscoveryHints = length entryPoints }
     PE.FunctionEntryInvalidHints invalid -> m { invalidHints = length invalid }
-    PE.LoadedBinaries (origElf, origPFM) (patchedElf, patchedPFM) ->
-      m { originalBinaryMetrics = Just (loadedBinaryMetrics origElf origPFM)
-        , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedElf patchedPFM)
+    PE.LoadedBinaries (PLW.SomeLoadedBinary origBin, origPFM) (PLW.SomeLoadedBinary patchedBin, patchedPFM) ->
+      m { originalBinaryMetrics = Just (loadedBinaryMetrics origBin origPFM)
+        , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedBin patchedPFM)
         }
     PE.ProofIntermediate _bp (PFI.SomeProofSym _sym nonceExpr) _tm ->
       case PPr.prfNonceBody nonceExpr of
