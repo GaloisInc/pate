@@ -26,12 +26,12 @@ module Pate.Verification
   ) where
 
 import qualified Control.Concurrent.Async as CCA
+import qualified Control.Concurrent.MVar as MVar
 import           Control.Monad ( void, unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
-import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
 import qualified Data.IntervalMap as IM
@@ -198,6 +198,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
   prfCache <- liftIO $ freshBlockCache
   ePairCache <- liftIO $ freshBlockCache
+  statsVar <- liftIO $ MVar.newMVar mempty
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -246,6 +247,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
       , envParentBlocks = mempty
       , envProofCache = prfCache
       , envExitPairsCache = ePairCache
+      , envStatistics = statsVar
       }
 
   liftIO $ do
@@ -290,13 +292,7 @@ runVerificationLoop ::
   [PPa.BlockPair arch] ->
   IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
-  let
-    st = EquivState
-          { stProofs = []
-          , stSimResults = M.empty
-          , stEqStats = mempty
-          }
-  result <- CME.runExceptT $ runEquivM env st doVerify
+  result <- CME.runExceptT $ runEquivM env doVerify
   case result of
     Left err -> withValidEnv env $ error (show err)
     Right r -> return r
@@ -314,7 +310,8 @@ runVerificationLoop env pPairs = do
       triples <- DT.forM pPairs' $ topLevelTriple
       result <- CMR.local (\env' -> env' { envGoalTriples = triples } ) $
         CME.foldM (\a b -> (<>) a <$> go b) mempty triples
-      stats <- CMS.gets stEqStats
+      statVar <- CMR.asks envStatistics
+      stats <- liftIO $ MVar.readMVar statVar
       return (result, stats)
 
     go ::
@@ -326,7 +323,8 @@ runVerificationLoop env pPairs = do
         Right PEq.Equivalent -> PESt.EquivalenceStatistics 1 1 0
         Left _ -> PESt.EquivalenceStatistics 1 0 1
         Right _ -> PESt.EquivalenceStatistics 1 0 0
-      CMS.modify' $ \st -> st { stEqStats = normResult <> (stEqStats st) }
+      statVar <- CMR.asks envStatistics
+      liftIO $ MVar.modifyMVar_ statVar (\st -> return (normResult <> st))
       case result of
         Right r -> return r
         Left err -> return (Errored (show err))

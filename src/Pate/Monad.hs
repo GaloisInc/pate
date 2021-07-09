@@ -20,7 +20,6 @@
 
 module Pate.Monad
   ( EquivEnv(..)
-  , EquivState(..)
   , EquivM
   , EquivM_
   , runEquivM
@@ -87,11 +86,11 @@ import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
+import qualified Control.Concurrent.MVar as MVar
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import           Control.Monad.Reader
 import           Control.Monad.Except
-import           Control.Monad.State
 
 import qualified Data.ElfEdit as E
 import           Data.Map (Map)
@@ -204,6 +203,8 @@ data EquivEnv sym arch where
     -- ^ cache for intermediate proof results
     , envExitPairsCache :: ExitPairCache arch
     -- ^ cache for intermediate proof results
+    , envStatistics :: MVar.MVar PES.EquivalenceStatistics
+    -- ^ Statistics collected during verification
     } -> EquivEnv sym arch
 
 type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
@@ -304,23 +305,12 @@ emitEvent evt = do
   logAction <- asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-
-data EquivState sym arch where
-  EquivState ::
-    { stProofs :: [PFI.ProofSymExpr sym arch PF.ProofBlockSliceType]
-    -- ^ all intermediate triples that were proven for each block slice
-    , stSimResults ::  Map (PPa.BlockPair arch) (SimSpec sym arch (SimBundle sym arch))
-    -- ^ cached results of symbolic execution for a given block pair
-    , stEqStats :: PES.EquivalenceStatistics
-    } -> EquivState sym arch
-
-newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (StateT (EquivState sym arch) ((ExceptT (PEE.EquivalenceError arch) IO))) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (ExceptT (PEE.EquivalenceError arch) IO) a }
   deriving (Functor
            , Applicative
            , Monad
            , IO.MonadIO
            , MonadReader (EquivEnv sym arch)
-           , MonadState (EquivState sym arch)
            , MonadThrow
            , MonadCatch
            , MonadMask
@@ -739,12 +729,10 @@ traceBundle bundle msg =
 --------------------------------------
 -- UnliftIO
 
--- FIXME: state updates are not preserved
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- ask
-    st <- get
-    catchInIO (f (runEquivM' env st))
+    catchInIO (f (runEquivM' env))
 
 catchInIO ::
   forall sym arch a.
@@ -768,19 +756,17 @@ runInIO1 f g = IO.withRunInIO $ \runInIO -> g (\a -> runInIO (f a))
 
 runEquivM' ::
   EquivEnv sym arch ->
-  EquivState sym arch ->
   EquivM sym arch a ->
   IO a
-runEquivM' env st f = withValidEnv env $ (runExceptT $ evalStateT (runReaderT (unEQ f) env) st) >>= \case
+runEquivM' env f = withValidEnv env $ (runExceptT $ runReaderT (unEQ f) env) >>= \case
   Left err -> throwIO err
-  Right result -> return $ result
+  Right result -> return result
 
 runEquivM ::
   EquivEnv sym arch ->
-  EquivState sym arch ->
   EquivM sym arch a ->
   ExceptT (PEE.EquivalenceError arch) IO a
-runEquivM env st f = withValidEnv env $ evalStateT (runReaderT (unEQ f) env) st
+runEquivM env f = withValidEnv env $ runReaderT (unEQ f) env
 
 ----------------------------------------
 -- Errors
