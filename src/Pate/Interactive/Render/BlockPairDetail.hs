@@ -7,6 +7,7 @@ import           Control.Lens ( (^.) )
 import qualified Control.Lens as L
 import qualified Data.Foldable as F
 import           Data.Maybe ( fromMaybe )
+import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.String.UTF8 as UTF8
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
@@ -19,7 +20,7 @@ import qualified Pate.Arch as PAr
 import qualified Pate.Block as PB
 import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
-import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Loader as PL
 import qualified Pate.Proof.Instances as PFI
 
 import qualified Pate.Interactive.Render.SliceGraph as IRS
@@ -42,12 +43,12 @@ renderCounterexample er =
 renderSource :: (PAr.ArchConstraints arch)
              => IS.State arch
              -> (IS.SourcePair LC.CTranslUnit -> LC.CTranslUnit)
-             -> L.Getter (IS.State arch) (Maybe (PLE.LoadedELF arch, b))
+             -> L.Getter (IS.State arch) (Maybe (Some (MBL.LoadedBinary arch), b))
              -> MC.MemAddr (MC.ArchAddrWidth arch)
              -> [TP.UI TP.Element]
 renderSource st getSource binL addr = fromMaybe [] $ do
-  (lelf, _) <- st ^. binL
-  bname <- MBL.symbolFor (PLE.loadedBinary lelf) addr
+  (Some bin, _) <- st ^. binL
+  bname <- MBL.symbolFor bin addr
   let sname = UTF8.toString (UTF8.fromRep bname)
   LC.CTranslUnit decls _ <- getSource <$> st ^. IS.sources
   fundef <- F.find (matchingFunctionName sname) decls
@@ -69,8 +70,8 @@ renderFunctionName :: (PAr.ArchConstraints arch)
                    -> MC.MemAddr (MC.ArchAddrWidth arch)
                    -> [TP.UI TP.Element]
 renderFunctionName st origAddr = fromMaybe [] $ do
-  (lelf, _) <- st ^. IS.originalBinary
-  bname <- MBL.symbolFor (PLE.loadedBinary lelf) origAddr
+  (Some bin, _) <- st ^. IS.originalBinary
+  bname <- MBL.symbolFor bin origAddr
   let sname = UTF8.toString (UTF8.fromRep bname)
   return [TP.string ("(Function: " ++ sname ++ ")")]
 

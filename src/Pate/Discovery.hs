@@ -58,7 +58,7 @@ import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
-import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Loader.Wrapper as PLW
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Parallel as Par
@@ -364,14 +364,12 @@ markEntryPoint segOff blocks = Map.singleton segOff (Some blocks) <$ getParsedBl
 
 runDiscovery ::
   forall arch .
-  PA.ValidArch arch =>
-  PLE.LoadedELF arch ->
+  (PA.ValidArch arch, PA.ArchConstraints arch) =>
+  PLW.SomeLoadedBinary arch ->
   PH.VerificationHints ->
   CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), ParsedFunctionMap arch)
-runDiscovery elf hints = do
-  let
-    bin = PLE.loadedBinary elf
-    archInfo = PLE.archInfo elf
+runDiscovery (PLW.SomeLoadedBinary bin) hints = do
+  let archInfo = PA.binArchInfo bin
   entries <- F.toList <$> MBL.entryPoints bin
   let mem = MBL.memoryImage bin
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)

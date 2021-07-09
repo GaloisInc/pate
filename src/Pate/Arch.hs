@@ -30,12 +30,11 @@ import qualified Pate.Verification.ExternalCall as PVE
 
 class
   ( MC.MemWidth (MC.ArchAddrWidth arch)
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
   , E.ElfWidthConstraints (MC.ArchAddrWidth arch)
   , MS.SymArchConstraints arch
   , 16 <= MC.RegAddrWidth (MC.ArchReg arch)
   ) => ArchConstraints arch where
-  binArchInfo :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
+  binArchInfo :: MBL.LoadedBinary arch binFmt -> MI.ArchitectureInfo arch
 
 class TOC.HasTOC arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) => HasTOCReg arch where
   toc_reg :: MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch))
@@ -45,7 +44,6 @@ data HasTOCDict arch where
 
 class
   ( Typeable arch
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
   , MS.SymArchConstraints arch
   , MS.GenArchInfo PMT.MemTraceK arch
   , MC.ArchConstraints arch

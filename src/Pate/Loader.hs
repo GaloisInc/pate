@@ -10,6 +10,7 @@ module Pate.Loader
     runEquivVerification
   , runSelfEquivConfig
   , runEquivConfig
+  , SomeLoadedBinary(..)
   )
 where
 
@@ -32,6 +33,7 @@ import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
+import           Pate.Loader.Wrapper ( SomeLoadedBinary(..) )
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Types as PT
 import qualified Pate.Verification as PV
