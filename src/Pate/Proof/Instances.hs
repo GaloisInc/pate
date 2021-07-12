@@ -50,7 +50,10 @@ module Pate.Proof.Instances
   , GroundMemOp
   , cellInDomain
   , regInDomain
+  , ppLLVMPointer
   , ppInequivalencePreRegs
+  , ppExitCase
+  , isGroundBVZero
   )
   
   where
@@ -539,7 +542,9 @@ data GroundBlockExit arch where
   deriving Eq
 
 instance PA.ValidArch arch => PP.Pretty (InequivalenceResult arch) where
-  pretty ineq = PP.vsep [ "Reason:" <+> PP.pretty (show (ineqReason ineq)), ppBlockSliceTransition (ineqPre ineq) (ineqPost ineq) (ineqSlice ineq) ]
+  pretty ineq = PP.vsep [ "Reason:" <+> PP.pretty (show (ineqReason ineq))
+                        , ppBlockSliceTransition (ineqPre ineq) (ineqPost ineq) (ineqSlice ineq)
+                        ]
 
 type GroundDomain arch = PF.ProofExpr (ProofGround arch) PF.ProofDomainType
 type GroundRegOp arch = PF.BlockSliceRegOp (ProofGround arch)

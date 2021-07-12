@@ -16,6 +16,7 @@ module Pate.PPC (
 where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Parameterized.Classes as PC
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Word ( Word8 )
 import           GHC.TypeLits
@@ -54,6 +55,7 @@ instance PA.ValidArch PPC.PPC32 where
     PPC.PPC_VSCR -> True
     PPC.PPC_XER -> True
     _ -> False
+  displayRegister = display
 
 instance PA.ValidArch PPC.PPC64 where
   tocProof = Just PA.HasTOCDict
@@ -64,6 +66,12 @@ instance PA.ValidArch PPC.PPC64 where
     PPC.PPC_VSCR -> True
     PPC.PPC_XER -> True
     _ -> False
+  displayRegister = display
+
+-- | All of the PPC registers in use in macaw are user-level registers (except
+-- for PC, but we want to show that anyway)
+display :: PPC.PPCReg v tp -> PA.RegisterDisplay String
+display = PA.Normal <$> PC.showF
 
 gpr :: (1 <= SP.AddrWidth v) => Word8 -> PPC.PPCReg v (MT.BVType (SP.AddrWidth v))
 gpr = PPC.PPC_GP . PPC.GPR
