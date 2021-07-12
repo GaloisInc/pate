@@ -39,6 +39,7 @@ import           Control.Monad.State
 import qualified Data.BitVector.Sized as BV
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import           Data.Traversable
 import qualified Data.Vector as V
 import           Data.IORef
 import           Data.Proxy
@@ -113,7 +114,7 @@ data UndefinedPtrOps sym ptrW =
     , undefPtrXor :: UndefinedPtrBinOp sym
     , undefWriteSize :: forall valW. sym -> LLVMPtr sym valW -> SymBV sym ptrW -> IO (SymBV sym ptrW)
     -- ^ arguments are the value being written and the index of the byte within that value being written
-    , undefMismatchedRegionRead :: sym -> LLVMPtr sym ptrW -> SymBV sym ptrW -> IO (SymBV sym 8)   
+    , undefMismatchedRegionRead :: sym -> [(SymNat sym, SymBV sym ptrW)] -> IO (SymBV sym ptrW)
     , undefPtrClassify :: UndefPtrClassify sym
     }
 
@@ -398,7 +399,7 @@ mkUndefinedPtrOps ::
   forall sym ptrW.
   IsSymInterface sym =>
   KnownNat ptrW =>
-  1 <= ptrW =>
+  MemWidth ptrW =>
   sym ->
   IO (UndefinedPtrOps sym ptrW)
 mkUndefinedPtrOps sym = do
@@ -423,18 +424,36 @@ mkUndefinedPtrOps sym = do
       Refl <- return $ natAbsBVFixed ptrW w
       applyPolyFun resultfn (Empty :> sptr :> bv)
 
-    undefReadRepr = Empty :> ptrRepr :> BaseBVRepr ptrW
+    regSubOffRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr ptrW)
+
+    undefReadRepr :: Ctx.Assignment BaseTypeRepr (ReplicateDiv8 ptrW (BaseStructType (EmptyCtx ::> BaseIntegerType ::> BaseBVType ptrW)))
+    undefReadRepr = case addrWidthRepr @ptrW Proxy of
+      Addr32 -> Empty :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr
+      Addr64 -> Empty :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr :> regSubOffRepr
   
   undefReadFn <- freshConstant sym (polySymbol UndefRegionRead ptrW)
-    (BaseArrayRepr (flattenStructRepr undefReadRepr) (BaseBVRepr (knownNat @8)))
+    (BaseArrayRepr (flattenStructRepr undefReadRepr) (BaseBVRepr (knownNat @ptrW)))
 
   
 
   let
-    undefReadFn' :: sym -> LLVMPtr sym ptrW -> SymBV sym ptrW -> IO (SymBV sym 8)
-    undefReadFn' sym' ptr bv = do
-      sptr <- asSymPtr sym' ptr
-      arrayLookup sym undefReadFn =<< flattenStructs sym (Empty :> sptr :> bv)
+    undefReadFn' :: sym -> [(SymNat sym, SymBV sym ptrW)] -> IO (SymBV sym ptrW)
+    undefReadFn' sym' regSubOffs = do
+      regIntSubOffs <- for regSubOffs $ \(n, bv) -> do
+        nInt <- natToInteger sym n
+        mkStruct sym (Empty :> nInt :> bv)
+
+      -- this should never actually be used; callers should provide the right
+      -- number of regSubOffs
+      int0 <- intLit sym 0
+      bv0 <- bvFromInteger sym (knownRepr @_ @_ @ptrW) 0
+      regIntSubOffDef <- mkStruct sym (Empty :> int0 :> bv0)
+
+      case addrWidthRepr @ptrW Proxy of
+        Addr32 -> let [s0, s1, s2, s3] = take 4 (regIntSubOffs ++ repeat regIntSubOffDef)
+                  in arrayLookup sym undefReadFn =<< flattenStructs sym (Empty :> s0 :> s1 :> s2 :> s3)
+        Addr64 -> let [s0, s1, s2, s3, s4, s5, s6, s7] = take 8 (regIntSubOffs ++ repeat regIntSubOffDef)
+                  in arrayLookup sym undefReadFn =<< flattenStructs sym (Empty :> s0 :> s1 :> s2 :> s3 :> s4 :> s5 :> s6 :> s7)
 
     classRead :: UndefPtrClassify sym
     classRead = mkClassify UndefRegionRead undefReadFn
@@ -458,6 +477,13 @@ mkUndefinedPtrOps sym = do
       , undefMismatchedRegionRead = undefReadFn'
       , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd, classXor, classWrite, classRead]
       }
+
+-- We pass this to BaseArrayType, so we need it to be visible to the compiler
+-- that this isn't EmptyCtx
+type ReplicateDiv8 n a = ReplicateDiv8' (n-8) a ::> a
+type family ReplicateDiv8' n a where
+  ReplicateDiv8' 24 a = EmptyCtx ::> a ::> a ::> a
+  ReplicateDiv8' 56 a = EmptyCtx ::> a ::> a ::> a ::> a ::> a ::> a ::> a
 
 -- * Memory trace model
 
@@ -1141,13 +1167,9 @@ readMemArr sym undef mem ptr repr = go 0 repr
     reg0Off <- foldM appendMemByte bv0 (appendOrder endianness memBytes)
 
     -- bad case: mismatched regions. use an uninterpreted function
-    -- TODO: use a single uninterpreted function
-    undefBytes <- forM memBytes $ \(badReg, badOff, badSubOff) ->
-      undefMismatchedRegionRead undef sym (LLVMPointer badReg badOff) badSubOff
+    undefOff <- undefMismatchedRegionRead undef sym [(reg, subOff) | (reg, _, subOff) <- memBytes]
     predAvoidUndef <- andPred sym isPtr isReg0
     assert sym predAvoidUndef $ AssertFailureSimError "readMemArr" $ "readMemArr: reading bytes from mismatched regions"
-    appendByte <- mkAppendByte
-    undefOff <- foldM appendByte bv0 (appendOrder endianness undefBytes)
 
     -- put it all together
     regResult <- natIte sym regsEq valReg nat0
@@ -1189,13 +1211,6 @@ readMemArr sym undef mem ptr repr = go 0 repr
       subOff' <- bvShl sym subOff bv3
       off' <- bvLshr sym off subOff'
       bvOrBits sym bytes' =<< bvAndBits sym off' mask
-
-  mkAppendByte | LeqProof <- memWidthIsBig @ptrW @9 = do
-    bv8 <- bvFromInteger sym ptrWRepr 8
-    pure $ \bytes byte -> do
-      bytes' <- bvShl sym bytes bv8
-      byte' <- bvZext sym ptrWRepr byte
-      bvOrBits sym bytes' byte'
 
   goBV :: forall w. 1 <= w => Integer -> NatRepr w -> Endianness -> IO (LLVMPtr sym (8*w))
   goBV n byteWidth endianness =
