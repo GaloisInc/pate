@@ -9,6 +9,7 @@ module Pate.AArch32 (
   ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import qualified What4.Interface as WI
 
@@ -33,6 +34,21 @@ instance PA.ValidArch SA.AArch32 where
   tocProof = Nothing
   -- FIXME: define these
   rawBVReg _r = False
+  displayRegister = display
+
+-- | For the ARM architecture, we want to hide a few details of the translation
+-- that aren't actually user visible.  We also want to ensure that some of the
+-- magical architecture detail registers (e.g., @__Sleeping@) are sorted lower
+-- than the interesting registers.
+display :: ARMReg.ARMReg tp -> PA.RegisterDisplay String
+display reg =
+  case reg of
+    ARMReg.ARMDummyReg -> PA.Hidden
+    ARMReg.ARMGlobalBV ASL.MemoryRef -> PA.Hidden
+    ARMReg.ARMGlobalBV (ASL.GPRRef gr) -> ASL.withGPRRef gr $ \nr -> PA.Normal ("r" ++ show (PN.natValue nr))
+    ARMReg.ARMGlobalBV (ASL.SIMDRef sr) -> ASL.withSIMDRef sr $ \nr -> PA.Normal ("v" ++ show (PN.natValue nr))
+    ARMReg.ARMGlobalBV ref -> PA.Architectural (show (ASL.globalRefSymbol ref))
+    ARMReg.ARMGlobalBool ref -> PA.Architectural (show (ASL.globalRefSymbol ref))
 
 -- | The Linux syscall convention uses r0-r5 for registers, with r7 containing the system call number
 handleSystemCall :: PVE.ExternalDomain PVE.SystemCall SA.AArch32

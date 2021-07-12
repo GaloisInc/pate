@@ -33,7 +33,6 @@ data InequivalenceReason =
   | InequivalentMemory
   | InvalidCallPair
   | InvalidPostState
-  | PostRelationUnsat
   deriving (Eq, Ord, Show)
 
 data InnerEquivalenceError arch

@@ -7,13 +7,17 @@ module Pate.Interactive.Render.Proof (
   , renderProofApp
   ) where
 
+import           Control.Lens ((^.))
+import           Control.Monad ( guard )
 import qualified Data.Aeson as JSON
 import qualified Data.Foldable as F
 import qualified Data.Functor.Const as C
 import qualified Data.HashMap.Strict as HMS
+import qualified Data.List as DL
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.Types as MT
 import qualified Data.Map.Strict as Map
-import           Data.Maybe ( mapMaybe )
+import           Data.Maybe ( catMaybes, mapMaybe )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
@@ -32,6 +36,7 @@ import qualified What4.Interface as WI
 
 import qualified Pate.Arch as PAr
 import qualified Pate.Block as PB
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Panic as Panic
@@ -270,6 +275,108 @@ renderDomainApp (PPr.ProofDomain regs stack mem _context) =
             , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity mem)) (MapF.toList (PPr.prfMemoryDomain mem)))
             ]
 
+-- | Render the pretty version of a register pair in a ground state
+--
+-- If both registers are zero, return Nothing so that they can be elided.
+renderRegVal
+  :: (PAr.ValidArch arch)
+  => PFI.GroundDomain arch
+  -> MC.ArchReg arch tp
+  -> PFI.GroundRegOp arch tp
+  -> Maybe (PAr.RegisterDisplay (PP.Doc ()))
+renderRegVal domain reg regOp =
+  case PPr.slRegOpRepr regOp of
+    CLM.LLVMPointerRepr _ ->
+      case vals of
+        PPa.PatchPairC (PFI.GroundMacawValue obv) (PFI.GroundMacawValue pbv)
+          | PFI.isGroundBVZero obv && PFI.isGroundBVZero pbv -> Nothing
+          | otherwise -> Just prettySlotVal
+    _ -> Just prettySlotVal
+  where
+    vals = PPr.slRegOpValues regOp
+
+    ppDom =
+      case PFI.regInDomain domain reg of
+        True -> PP.emptyDoc
+        False -> PP.pretty "| Excluded"
+
+    ppVals =
+      case PPr.slRegOpEquiv regOp of
+        True -> PP.pretty (PPa.pcOriginal vals)
+        False -> PPa.ppPatchPairC PP.pretty vals
+
+    -- Use 'PAr.displayRegister' to find the display name of the register, while
+    -- transforming that name with extra data inside of the resulting classifier
+    -- container (to preserve sort order)
+    prettySlotVal :: PAr.RegisterDisplay (PP.Doc ())
+    prettySlotVal = (\rd -> PP.pretty rd <> PP.pretty ": " <> ppVals PP.<+> ppDom) <$> PAr.displayRegister reg
+
+-- | Render a concrete (ground) register state for display in a counterexample
+--
+-- Note that this suppresses any excluded all-zero registers for cleanliness,
+-- but it does report how many such registers were hidden.
+renderRegisterState
+  :: (PAr.ValidArch arch)
+  => PFI.GroundDomain arch
+  -> MC.RegState (PPr.ProofRegister (PFI.ProofGround arch)) (PPr.BlockSliceRegOp (PFI.ProofGround arch))
+  -> TP.UI TP.Element
+renderRegisterState domain regs =
+  TP.column (TP.h3 #+ [TP.string "Registers"] : map TP.string shownRegs ++ [text hidden])
+  where
+    renderedRegs = map (\(MapF.Pair reg op) -> renderRegVal domain reg op) (MapF.toList (MC.regStateMap regs))
+    shownRegs = reverse (DL.sort (fmap show (catMaybes (map PAr.fromRegisterDisplay (catMaybes renderedRegs)))))
+    numHidden = length renderedRegs - length shownRegs
+
+    hidden = PP.pretty "Eliding " <> PP.pretty numHidden <> PP.pretty " zero-valued registers"
+
+renderMemCellVal
+  :: (PAr.ValidArch arch)
+  => PFI.GroundDomain arch
+  -> PFI.GroundMemCell arch n
+  -> PFI.GroundMemOp arch tp
+  -> Maybe (PP.Doc a)
+renderMemCellVal domain cell memOp = do
+  guard (PPr.slMemOpCond memOp)
+  let vals = PPr.slMemOpValues memOp
+  let ppDom = case PFI.cellInDomain domain cell of
+        True -> PP.emptyDoc
+        False -> PP.pretty "| Excluded"
+  let ppVals = case PPr.slMemOpEquiv memOp of
+        True -> PP.viaShow (PPa.pcOriginal vals)
+        False -> PPa.ppPatchPairC PP.viaShow vals
+  return (PP.pretty cell <> PP.pretty ": " <> ppVals PP.<+> ppDom)
+
+renderMemoryState
+  :: (PAr.ValidArch arch)
+  => PFI.GroundDomain arch
+  -> MapF.MapF (PPr.ProofMemCell (PFI.ProofGround arch)) (PPr.BlockSliceMemOp (PFI.ProofGround arch))
+  -> TP.UI TP.Element
+renderMemoryState domain cells =
+  TP.column (TP.h3 #+ [TP.string "Memory"] : map text entries)
+  where
+    entries = mapMaybe (\(MapF.Pair cell v) -> renderMemCellVal domain cell v) (MapF.toList cells)
+
+renderIPs
+  :: ( MC.RegisterInfo (PPr.ProofRegister prf)
+     , PP.Pretty (PPr.ProofMacawValue prf (MT.BVType (MC.RegAddrWidth (PPr.ProofRegister prf))))
+     , PPr.ProofPredicate prf ~ Bool)
+  => PPr.BlockSliceState prf
+  -> PP.Doc ann
+renderIPs st
+  | PPr.slRegOpEquiv pcRegs = PP.pretty (PPa.pcOriginal (PPr.slRegOpValues pcRegs))
+  | otherwise = PPa.ppPatchPairC PP.pretty (PPr.slRegOpValues pcRegs)
+  where
+    pcRegs = PPr.slRegState st ^. MC.curIP
+
+renderReturn
+  :: PPa.PatchPairC (Maybe (PFI.GroundLLVMPointer w))
+  -> Maybe (TP.UI TP.Element)
+renderReturn ret =
+  case ret of
+    PPa.PatchPairC (Just c1) (Just c2) ->
+      Just (text (PP.pretty "Continues execution at: " <> PPa.ppPatchPairCEq (PP.pretty . PFI.ppLLVMPointer) (PPa.PatchPairC c1 c2)))
+    _ -> Nothing
+
 renderCounterexample
   :: ( prf ~ PFI.ProofSym sym arch
      , PAr.ValidArch arch
@@ -277,7 +384,34 @@ renderCounterexample
   => PPr.ProofCounterExample prf
   -> TP.UI TP.Element
 renderCounterexample ineqRes =
-  TP.pre # TP.set TP.text (T.unpack (pp (PP.pretty ineqRes)))
+  TP.grid [ [ renderInequalityReason (PFI.ineqReason ineqRes) ]
+          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (fmap PFI.grndBlockCase (PPr.slBlockExitCase (PFI.ineqSlice ineqRes)))) ]
+          , [ TP.h2 #+ [TP.string "Initial states"] ]
+          , [ renderRegisterState (PFI.ineqPre ineqRes) (PPr.slRegState (PPr.slBlockPreState (PFI.ineqSlice ineqRes)))
+            , renderMemoryState (PFI.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPreState (PFI.ineqSlice ineqRes)))
+            ]
+          , [ TP.h2 #+ [TP.string "Final states"] ]
+          , [ renderRegisterState (PFI.ineqPost ineqRes) (PPr.slRegState (PPr.slBlockPostState (PFI.ineqSlice ineqRes)))
+            , renderMemoryState (PFI.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPostState (PFI.ineqSlice ineqRes)))
+            ]
+          , [ TP.h2 #+ [TP.string "Continuation"] ]
+          , [ renderedContinuation ]
+          ]
+  where
+    renderInequalityReason rsn =
+      case rsn of
+        PEE.InequivalentRegisters ->
+          TP.string "The post-states of the original and patched programs contain inequivalent registers"
+        PEE.InequivalentMemory ->
+          TP.string "The post-states of the original and patched programs contain inequivalent memory locations"
+        PEE.InvalidCallPair ->
+          TP.string "The original and patched programs contain incomparable call pairs"
+        PEE.InvalidPostState ->
+          TP.string "The original and patched programs have generated invalid post states"
+
+    renderedContinuation = TP.column (catMaybes [ Just (text (PP.pretty "Next IP: " <> renderIPs (PPr.slBlockPostState (PFI.ineqSlice ineqRes))))
+                                                , renderReturn (fmap PFI.grndBlockReturn (PPr.slBlockExitCase (PFI.ineqSlice ineqRes)))
+                                                ])
 
 renderProofTripleLabel
   :: (MapF.OrdF k)
