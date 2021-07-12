@@ -559,7 +559,7 @@ data MemTraceImpl sym ptrW = MemTraceImpl
 -- uninterpreted function or drop the result into region 0, depending on
 -- exactly how they're mismatched.
 data MemTraceByte sym w = MemTraceByte
-  { mtbRegion :: SymNat sym
+  { mtbRegion :: SymInteger sym
   , mtbOffset :: SymBV sym w
   , mtbSubOff :: SymBV sym w
   }
@@ -568,7 +568,7 @@ muxMemTraceByte :: IsExprBuilder sym =>
   sym -> Pred sym ->
   MemTraceByte sym w -> MemTraceByte sym w -> IO (MemTraceByte sym w)
 muxMemTraceByte sym p t f = pure MemTraceByte
-  <*> natIte sym p (mtbRegion t) (mtbRegion f)
+  <*> baseTypeIte sym p (mtbRegion t) (mtbRegion f)
   <*> baseTypeIte sym p (mtbOffset t) (mtbOffset f)
   <*> baseTypeIte sym p (mtbSubOff t) (mtbSubOff f)
 
@@ -579,7 +579,7 @@ muxMemTraceByte sym p t f = pure MemTraceByte
 mtbIdentical :: IsExprBuilder sym =>
   sym -> MemTraceByte sym w -> MemTraceByte sym w -> IO (Pred sym)
 mtbIdentical sym mtb1 mtb2 = WEH.allPreds sym =<< sequence
-  [ natEq sym (mtbRegion mtb1) (mtbRegion mtb2)
+  [ isEq sym (mtbRegion mtb1) (mtbRegion mtb2)
   , isEq sym (mtbOffset mtb1) (mtbOffset mtb2)
   , isEq sym (mtbSubOff mtb1) (mtbSubOff mtb2)
   ]
@@ -593,7 +593,7 @@ mtbEq sym mtb1 mtb2 = do
   byte1 <- bvLshr sym (mtbOffset mtb1) (mtbSubOff mtb1) >>= bvTrunc sym (knownNat @8)
   byte2 <- bvLshr sym (mtbOffset mtb2) (mtbSubOff mtb2) >>= bvTrunc sym (knownNat @8)
   eqBytes <- isEq sym byte1 byte2
-  eqRegs <- natEq sym (mtbRegion mtb1) (mtbRegion mtb2)
+  eqRegs <- isEq sym (mtbRegion mtb1) (mtbRegion mtb2)
   andPred sym eqBytes eqRegs
 
 
@@ -636,7 +636,7 @@ readMemTraceByteMany sym (LLVMPointer reg off) n mtbs = do
   forM [0 .. n-1] $ \doff -> do
     off' <- pure . Ctx.singleton =<< bvAdd sym off =<< bvFromInteger sym (bvWidth off) doff
     pure MemTraceByte
-      <*> (integerToNat sym =<< arrayLookup sym regs off')
+      <*> arrayLookup sym regs off'
       <*> arrayLookup sym offs off'
       <*> arrayLookup sym subs off'
 
@@ -653,7 +653,7 @@ writeMemTraceByte sym (LLVMPointer reg off) mtb mtbs = do
   offs <- arrayLookup sym (mtbOffsets mtbs) reg'
   subs <- arrayLookup sym (mtbSubOffs mtbs) reg'
 
-  regs' <- arrayUpdate sym regs off' =<< natToInteger sym (mtbRegion mtb)
+  regs' <- arrayUpdate sym regs off' . mtbRegion $ mtb
   offs' <- arrayUpdate sym offs off' . mtbOffset $ mtb
   subs' <- arrayUpdate sym subs off' . mtbSubOff $ mtb
 
@@ -1276,30 +1276,31 @@ readMemArr sym undef mem ptr repr = go 0 repr
     isPtr <- andPred sym regsEq =<< andPred sym offsEq subOffsOrdered
 
     -- check if we're reading region-0 data; reassemble the individual bytes if so
-    nat0 <- natLit sym 0
-    isReg0 <- andPred sym regsEq =<< natEq sym valReg nat0
+    int0 <- intLit sym 0
+    isReg0 <- andPred sym regsEq =<< intEq sym valReg int0
     bv0 <- bvFromInteger sym ptrWRepr 0
     appendMemByte <- mkAppendMemByte
     reg0Off <- foldM appendMemByte bv0 (appendOrder endianness memBytes)
 
     -- bad case: mismatched regions. use an uninterpreted function
     -- TODO: use a single uninterpreted function
-    undefBytes <- forM memBytes $ \(MemTraceByte badReg badOff badSubOff) ->
-      undefMismatchedRegionRead undef sym (LLVMPointer badReg badOff) badSubOff
+    undefBytes <- forM memBytes $ \(MemTraceByte badReg badOff badSubOff) -> do
+      badRegNat <- integerToNat sym badReg
+      undefMismatchedRegionRead undef sym (LLVMPointer badRegNat badOff) badSubOff
     predAvoidUndef <- andPred sym isPtr isReg0
     assert sym predAvoidUndef $ AssertFailureSimError "readMemArr" $ "readMemArr: reading bytes from mismatched regions"
     appendByte <- mkAppendByte
     undefOff <- foldM appendByte bv0 (appendOrder endianness undefBytes)
 
     -- put it all together
-    regResult <- natIte sym regsEq valReg nat0
+    regResult <- integerToNat sym =<< intIte sym regsEq valReg int0
     offResult <- bvIte sym isPtr valOff =<< bvIte sym isReg0 reg0Off undefOff
     pure (LLVMPointer regResult offResult)
 
   extendPtrCond ::
     conditions ~ (Pred sym, Pred sym, Pred sym) =>
     Endianness ->
-    SymNat sym ->
+    SymInteger sym ->
     SymBV sym ptrW ->
     conditions ->
     (Integer, MemTraceByte sym ptrW) ->
@@ -1308,7 +1309,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
     expectedSubOff <- bvFromInteger sym ptrWRepr $ case endianness of
       BigEndian -> bytesToInteger ptrWBytes - ix - 1
       LittleEndian -> ix
-    regsEq' <- andPred sym regsEq =<< natEq sym expectedReg (mtbRegion mtb)
+    regsEq' <- andPred sym regsEq =<< intEq sym expectedReg (mtbRegion mtb)
     offsEq' <- andPred sym offsEq =<< bvEq sym expectedOff (mtbOffset mtb)
     subOffsOrdered' <- andPred sym subOffsOrdered =<< bvEq sym expectedSubOff (mtbSubOff mtb)
     pure (regsEq', offsEq', subOffsOrdered')
@@ -1379,56 +1380,62 @@ writeMemArr :: forall sym ptrW w.
   IO (MemTraceImpl sym ptrW)
 writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPointer valReg valOff)
   | Just Refl <- testByteSizeEquality @ptrW byteWidth
-    = goPtr 0 mem_init
+    = do
+      valRegInt <- natToInteger sym valReg
+      goPtr valRegInt 0 mem_init
   | Just 0 <- asNat valReg
   , NatLT _ <- compareNat (knownNat @0) bitWidth
   , NatLT _ <- compareNat bitWidth (memWidthNatRepr @ptrW)
-    = goNonPtr 0 mem_init
+    = do
+      valRegInt <- intLit sym 0 -- = valReg, per the Just 0 <- asNat valReg guard
+      goNonPtr valRegInt 0 mem_init
   | otherwise = case isZeroOrGT1 byteWidth of
     Left pf -> case pf of -- impossible, and obvious enough GHC can see it
     Right (mulMono @_ @_ @8 Proxy -> LeqProof) -> do
       bvZero <- bvFromInteger sym ptrWRepr 0
-      natZero <- natLit sym 0
+      intZero <- intLit sym 0
       bvPtrW <- bvFromInteger sym ptrWRepr ptrWInteger
       bvValW <- bvFromInteger sym ptrWRepr (8*valWByteInteger)
       eqCond <- bvEq sym bvPtrW bvValW
       -- treat any non-pointer-width writes as writing undefined values
-      goBV eqCond bvZero natZero 0 mem_init
+      goBV eqCond bvZero intZero 0 mem_init
   where
   goBV ::
     Pred sym ->
     SymBV sym ptrW ->
-    SymNat sym ->
+    SymInteger sym ->
     Integer ->
     MemTraceImpl sym ptrW ->
     IO (MemTraceImpl sym ptrW)
-  goBV _eqCond _bvZero _natZero n mem | n == valWByteInteger = pure mem
-  goBV eqCond bvZero natZero n mem = do
+  goBV _eqCond _bvZero _intZero n mem | n == valWByteInteger = pure mem
+  goBV eqCond bvZero intZero n mem = do
     nBV <- bvFromInteger sym ptrWRepr (useEnd ptrWByteInteger n)
     assert sym eqCond $ AssertFailureSimError "writeMemArr" $ "writeMemArr: expected write of size " ++ show ptrWInteger ++ ", saw " ++ show (8*valWByteInteger)
     undefBV <- undefWriteSize undef sym val nBV
-    writeByte sym ptr (MemTraceByte natZero undefBV bvZero) n mem >>= goBV eqCond bvZero natZero (n+1)
+    writeByte sym ptr (MemTraceByte intZero undefBV bvZero) n mem >>= goBV eqCond bvZero intZero (n+1)
 
   goPtr ::
     w ~ ptrW =>
+    SymInteger sym ->
     Integer ->
     MemTraceImpl sym ptrW ->
     IO (MemTraceImpl sym ptrW)
-  goPtr n mem | n == ptrWByteInteger = pure mem
-  goPtr n mem = do
+  goPtr valRegInt n mem | n == ptrWByteInteger = pure mem
+  goPtr valRegInt n mem = do
     nBV <- bvFromInteger sym ptrWRepr (useEnd ptrWByteInteger n)
-    writeByte sym ptr (MemTraceByte valReg valOff nBV) n mem >>= goPtr (n+1)
+    writeByte sym ptr (MemTraceByte valRegInt valOff nBV) n mem >>= goPtr valRegInt (n+1)
 
   goNonPtr ::
     (1 <= w, w + 1 <= ptrW) =>
+    SymInteger sym ->
     Integer ->
     MemTraceImpl sym ptrW ->
     IO (MemTraceImpl sym ptrW)
-  goNonPtr n mem | n == valWByteInteger = pure mem
-  goNonPtr n mem = do
+  goNonPtr valRegInt n mem | n == valWByteInteger = pure mem
+  goNonPtr valRegInt n mem = do
     nBV <- bvFromInteger sym ptrWRepr (useEnd valWByteInteger n)
     valOffExt <- bvZext sym memWidthNatRepr valOff
-    writeByte sym ptr (MemTraceByte valReg valOffExt nBV) n mem >>= goNonPtr (n+1)
+    writeByte sym ptr (MemTraceByte valRegInt valOffExt nBV) n mem >>= goNonPtr valRegInt (n+1)
 
 
 
@@ -1559,7 +1566,7 @@ freshChunk sym w
   where
     go :: IO (MemTraceByte sym ptrW)
     go = pure MemTraceByte
-      <*> (integerToNat sym =<< freshConstant sym emptySymbol BaseIntegerRepr)
+      <*> freshConstant sym emptySymbol BaseIntegerRepr
       <*> freshConstant sym emptySymbol (BaseBVRepr (memWidthNatRepr @ptrW))
       <*> freshConstant sym emptySymbol (BaseBVRepr (memWidthNatRepr @ptrW))
 
@@ -1581,9 +1588,10 @@ getMemByteOff sym undef ptrWRepr memByte
     knownByte <- bvTrunc sym knownRepr knownByteLong
 
     -- check if we're in region 0, and use an uninterpreted byte if not
-    useKnownByte <- natEq sym (mtbRegion memByte) =<< natLit sym 0
+    useKnownByte <- intEq sym (mtbRegion memByte) =<< intLit sym 0
+    reg <- integerToNat sym (mtbRegion memByte)
     -- TODO: use off + subOff w/ endianness as the pointer, then truncate to a byte
-    unknownByte <- undefPtrOff undef sym (LLVMPointer (mtbRegion memByte) knownByte)
+    unknownByte <- undefPtrOff undef sym (LLVMPointer reg knownByte)
     bvIte sym useKnownByte knownByte unknownByte
 
 memWidthIsBig :: (MemWidth ptrW, n <= 32) => LeqProof n ptrW
@@ -1845,7 +1853,7 @@ instance PEM.ExprMappable sym (MemOp sym w) where
 
 instance PEM.ExprMappable sym (MemTraceByte sym w) where
   mapExpr sym f mtb = pure MemTraceByte
-    <*> (integerToNat sym =<< f =<< natToInteger sym (mtbRegion mtb))
+    <*> f (mtbRegion mtb)
     <*> f (mtbOffset mtb)
     <*> f (mtbSubOff mtb)
 
