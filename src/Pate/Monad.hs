@@ -52,7 +52,6 @@ module Pate.Monad
   , memOpCondition
   -- sat helpers
   , checkSatisfiableWithModel
-  , isPredTrue
   , isPredSat
   , isPredTrue'
   , isPredTruePar'
@@ -612,20 +611,6 @@ isPredSat timeout p = case W4.asConstantPred p of
     W4R.Sat _ -> return True
     W4R.Unsat _ -> return False
     W4R.Unknown -> throwHere PEE.InconclusiveSAT
-
-isPredTrue ::
-  PT.Timeout ->
-  W4.Pred sym ->
-  EquivM sym arch Bool
-isPredTrue timeout p = case W4.asConstantPred p of
-  Just True -> return True
-  _ -> do
-    frame <- asks envCurrentFrame
-    case isAssumedPred frame p of
-      True -> return True
-      False -> do
-        notp <- withSymIO $ \sym -> W4.notPred sym p
-        not <$> isPredSat timeout notp
 
 -- | Same as 'isPredTrue' but does not throw an error if the result is inconclusive
 isPredTrue' ::

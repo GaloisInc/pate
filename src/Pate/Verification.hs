@@ -379,7 +379,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond genPrecond
     -- prove that the generated precondition is implied by the given precondition
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-    isPredTrue goalTimeout preImpliesGen >>= \case
+    isPredTrue' goalTimeout preImpliesGen >>= \case
       True -> return ()
       False -> throwHere PEE.ImpossibleEquivalence
 
