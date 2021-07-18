@@ -552,7 +552,12 @@ withSatAssumption timeout asmf f = do
 data SymGroundEvalFn sym where
   SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
 
--- | Check a predicate for satisfiability (in our monad)
+-- | Check a predicate for satisfiability (in our monad) subject to a timeout
+--
+-- This function wraps some lower-level functions and invokes the SMT solver in
+-- a way that allows async exceptions to propagate up (e.g., ctrl+c or signals),
+-- but it converts synchronous exceptions (e.g., errors raised by the solver or
+-- the code the parses the solver response) into values.
 --
 -- FIXME: Add a facility for saving the SMT problem under the given name
 checkSatisfiableWithModel ::
@@ -560,7 +565,7 @@ checkSatisfiableWithModel ::
   String ->
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
-  EquivM sym arch a
+  EquivM sym arch (Either SomeException a)
 checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   envFrame <- asks envCurrentFrame
   assumptions <- liftIO $ getAssumedPred sym envFrame
@@ -571,13 +576,20 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
   let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
-  r <- IO.withRunInIO $ \runInIO -> do
+  IO.withRunInIO $ \runInIO -> do
     tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= k))
 
-  case r of
-    Left (_ :: SomeException) -> throwHere PEE.InconclusiveSAT
-    Right r' -> return r'
-
+-- | Check the satisfiability of a predicate, with the result (including model,
+-- if applicable) available in the callback. This function implements all of the
+-- timeout logic. Note that it converts timeouts into 'W4R.Unknown' results.
+--
+-- Note that this can percolate up both async and synchronous exceptions. That
+-- can include errors in parsing the responses from the SMT solver.
+--
+-- Note that this should not be used directly /because/ it can expose those
+-- exceptions.  See 'checkSatisfiableWithModel' instead.
+--
+-- FIXME: Document what the bindings that we are doing without here.
 checkSatisfiableWithoutBindings
   :: (sym ~ W4B.ExprBuilder t st fs)
   => PT.Timeout
@@ -601,16 +613,26 @@ checkSatisfiableWithoutBindings timeout sym mhandle adapter p k =
          W4R.Unknown -> k W4R.Unknown
          W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
+-- | Returns True if the given predicate is satisfiable, and False otherwise
+--
+-- Note that this is strict: unsat and unknown are both treated as False.  Any
+-- exceptions thrown during this process (due to timeout or solver error) are
+-- also treated as False.
 isPredSat ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
 isPredSat timeout p = case W4.asConstantPred p of
   Just b -> return b
-  Nothing -> checkSatisfiableWithModel timeout "isPredSat" p $ \case
+  Nothing -> either (const False) id <$> checkSatisfiableWithModel timeout "isPredSat" p asSat
+
+-- | Convert a 'W4R.Sat' result to True, and other results to False
+asSat :: Monad m => W4R.SatResult mdl core -> m Bool
+asSat satRes =
+  case satRes of
     W4R.Sat _ -> return True
     W4R.Unsat _ -> return False
-    W4R.Unknown -> throwHere PEE.InconclusiveSAT
+    W4R.Unknown -> return False
 
 -- | Same as 'isPredTrue' but does not throw an error if the result is inconclusive
 isPredTrue' ::
@@ -632,11 +654,18 @@ isPredTruePar' timeout p = case W4.asConstantPred p of
       True -> Par.present $ return True
       False -> Par.promise $ do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        checkSatisfiableWithModel timeout "isPredTrue'" notp $ \case
-            W4R.Sat _ -> return False
-            W4R.Unsat _ -> return True
-            W4R.Unknown -> return False
+        -- Convert exceptions into False because we can't prove that it is true
+        either (const False) id <$> checkSatisfiableWithModel timeout "isPredTrue'" notp asProve
 
+-- | Convert a 'W4R.Unsat' result into True
+--
+-- Other SAT results become False
+asProve :: Monad m => W4R.SatResult mdl core -> m Bool
+asProve satRes =
+  case satRes of
+    W4R.Sat _ -> return False
+    W4R.Unsat _ -> return True
+    W4R.Unknown -> return False
 
 instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   present m = IO.withRunInIO $ \runInIO -> Par.present (runInIO m)

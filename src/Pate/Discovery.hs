@@ -105,17 +105,23 @@ discoverPairs bundle = do
             return $ Par.Immediate $ Nothing
           _ ->  do
             goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-            Par.promise $ checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
-              case satRes of
-                WR.Sat _ -> do
-                  emit PE.Reachable
-                  return $ Just $ PPa.PatchPair blktO blktP
-                WR.Unsat _ -> do
-                  emit PE.Unreachable
-                  return Nothing
-                WR.Unknown -> do
+            Par.promise $ do
+              er <- checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
+                case satRes of
+                  WR.Sat _ -> do
+                    emit PE.Reachable
+                    return $ Just $ PPa.PatchPair blktO blktP
+                  WR.Unsat _ -> do
+                    emit PE.Unreachable
+                    return Nothing
+                  WR.Unknown -> do
+                    emit PE.InconclusiveTarget
+                    throwHere PEE.InconclusiveSAT
+              case er of
+                Left err -> do
                   emit PE.InconclusiveTarget
                   throwHere PEE.InconclusiveSAT
+                Right r -> return r
       joined <- fmap catMaybes $ Par.joinFuture result
       modifyBlockCache envExitPairsCache pPair (++) joined
       return joined

@@ -797,7 +797,12 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                 emitEvent (PE.CheckedEquivalence blocks (PE.Inequivalent ir))
                 return $ PF.VerificationFail ir
           traceBundle bundle "Finished SAT check"
-          return r
+          case r of
+            Right r' -> return r'
+            Left exn -> do
+              traceBundle bundle ("Solver exception: " ++ show exn)
+              -- FIXME: Have a more detailed marker, possibly an explanation as to why it is unverified
+              return $ PF.Unverified
         let noCond = fmap (\ir -> (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))) status
         status' <- case status of
           PF.VerificationFail _ -> do
@@ -819,7 +824,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                     traceBundle bundle "  checkAndMinimizeEqCondition"
                     cond'' <- checkAndMinimizeEqCondition cond' goal
                     traceBundle bundle "Checking for conditional equivalence"
-                    checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
+                    er <- checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
                       case satRes of
                         W4R.Sat fn -> do
                           preUniv <- PVD.universalDomain
@@ -832,7 +837,11 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                           return $ PF.VerificationFail (ir, cr)
                         W4R.Unsat _ -> return $ noCond
                         W4R.Unknown -> return $ noCond
-
+                    case er of
+                      Right r -> return r
+                      Left exn -> do
+                        traceBundle bundle ("Solver failure: " ++ show exn)
+                        return noCond
                   False -> return $ noCond
           _ -> return $ noCond
         traceBundle bundle "Generating a status node"
@@ -901,7 +910,7 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
     go pathCond gas = withSym $ \sym -> do
       -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-      result <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
+      eresult <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
           W4R.Unsat _ -> return Nothing
           -- this is safe, because the resulting condition is still checked later
           W4R.Unknown -> return Nothing
@@ -911,7 +920,7 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
             p <- flattenCondPair pathCond'
             traceBundle bundle ("Computing a new path condition:\n" ++ show (W4.printSymExpr p))
             return p
-      case result of
+      case either (const Nothing) id eresult of
         -- no result, returning the accumulated path conditions
         Nothing -> return pathCond
       -- indeterminate result, failure
@@ -949,14 +958,15 @@ weakenEqCondition bundle pathCond_outer sliceState postDomain goal = withSym $ \
       -- we use the heuristic timeout here because we're refining the equivalence condition
       -- and failure simply means we fail to refine it further
 
-      result <- withAssumption_ (return notPathCond) $
-        checkSatisfiableWithModel heuristicTimeout "check" goal $ \satRes -> case satRes of
+      result <- withAssumption_ (return notPathCond) $ do
+        eres <- checkSatisfiableWithModel heuristicTimeout "check" goal $ \satRes -> case satRes of
           W4R.Unsat _ -> return Nothing
           W4R.Unknown -> return Nothing
           -- counter-example, compute another path condition and continue
           W4R.Sat fn -> Just <$> do
             pathCond' <- PFG.getPathCondition bundle sliceState postDomain fn
             flattenCondPair pathCond'
+        return (either (const Nothing) id eres)
       case result of
         Nothing -> return pathCond
         Just unequalPathCond -> do
@@ -1064,31 +1074,31 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
 
   notCheck <- liftIO $ W4.notPred sym someCase
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  PFO.forkProofEvent_ (simPair bundle) $ 
-    checkSatisfiableWithModel goalTimeout "checkCasesTotal" notCheck $ \satRes -> do
-    let
-      emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)
-    status <- case satRes of
-      W4R.Sat fn -> do
-        -- TODO: avoid re-computing this
-        blockSlice <- PFO.simBundleToSlice bundle
-        preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
-        -- TODO: a different counter-example type would be appropriate here, which explicitly
-        -- doesn't consider the post-state. At this point we aren't interested in the target
-        -- post-domain because we're just making sure that the given cases cover all possible exits,
-        -- without considering the equivalence of the state at those exit points.
-        noDomain <- PF.unNonceProof <$> PFO.emptyDomain
-       
-        ir <- PFG.getInequivalenceResult PEE.InvalidCallPair preDomain' noDomain blockSlice fn
-        emit $ PE.BranchesIncomplete ir
-        -- no conditional equivalence case
-        return $ PF.VerificationFail (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))
-      W4R.Unsat _ -> do
-        emit PE.BranchesComplete
-        return PF.VerificationSuccess
-      W4R.Unknown -> do
-        emit PE.InconclusiveBranches
-        return PF.Unverified
+  PFO.forkProofEvent_ (simPair bundle) $ do
+    estatus <- checkSatisfiableWithModel goalTimeout "checkCasesTotal" notCheck $ \satRes -> do
+      let emit r = emitEvent (PE.CheckedBranchCompleteness blocks r)
+      case satRes of
+        W4R.Sat fn -> do
+          -- TODO: avoid re-computing this
+          blockSlice <- PFO.simBundleToSlice bundle
+          preDomain' <- PF.unNonceProof <$> PFO.joinLazyProof preDomain
+          -- TODO: a different counter-example type would be appropriate here, which explicitly
+          -- doesn't consider the post-state. At this point we aren't interested in the target
+          -- post-domain because we're just making sure that the given cases cover all possible exits,
+          -- without considering the equivalence of the state at those exit points.
+          noDomain <- PF.unNonceProof <$> PFO.emptyDomain
+
+          ir <- PFG.getInequivalenceResult PEE.InvalidCallPair preDomain' noDomain blockSlice fn
+          emit $ PE.BranchesIncomplete ir
+          -- no conditional equivalence case
+          return $ PF.VerificationFail (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))
+        W4R.Unsat _ -> do
+          emit PE.BranchesComplete
+          return PF.VerificationSuccess
+        W4R.Unknown -> do
+          emit PE.InconclusiveBranches
+          return PF.Unverified
+    let status = either (const PF.Unverified) id estatus
     return $ PF.ProofStatus status
   where
     -- | a branch case is assuming the pre-domain predicate, that the branch condition holds
