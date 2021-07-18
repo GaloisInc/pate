@@ -82,7 +82,6 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                                , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")), WI.truePred sym)
                                , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")), WI.truePred sym)
                                , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R11")), WI.truePred sym)
                                ]
   return $ PES.StatePred { PES.predRegs = regDomain
                          , PES.predStack = PEM.memPredTrue sym
