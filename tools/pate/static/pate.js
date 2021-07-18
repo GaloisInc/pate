@@ -105,7 +105,7 @@ function initializeGraphIn(nodeClickCallback, divId, nodeConfig, graphData) {
             { selector: 'edge',
               style: {
                   'width': 3,
-                  'curve-style': 'bezier',
+                  'curve-style': 'taxi',
                   'line-color': '#ccc',
                   'target-arrow-color': '#ccc',
                   'target-arrow-shape': 'triangle'
