@@ -1163,8 +1163,28 @@ readMemArr sym undef mem ptr repr = go 0 repr
     nat0 <- natLit sym 0
     isReg0 <- andPred sym regsEq =<< natEq sym valReg nat0
     bv0 <- bvFromInteger sym ptrWRepr 0
-    appendMemByte <- mkAppendMemByte
-    reg0Off <- foldM appendMemByte bv0 (appendOrder endianness memBytes)
+    bv3 <- bvFromInteger sym ptrWRepr 3
+    LeqProof <- return $ memWidthIsBig @ptrW @8
+    offBytes <- forM (appendOrder endianness memBytes) $ \(_, off, subOff) ->
+      bvSelect sym (knownRepr :: NatRepr 0) (knownRepr :: NatRepr 8) =<<
+      bvLshr sym off =<<
+      bvShl sym subOff bv3
+    reg0Off <- case (addrWidthRepr mem, offBytes) of
+      (Addr32, [b0, b1, b2, b3]) ->
+        bvConcat sym b0 =<<
+        bvConcat sym b1 =<<
+        bvConcat sym b2 =<<
+        pure b3
+      (Addr64, [b0, b1, b2, b3, b4, b5, b6, b7]) ->
+        bvConcat sym b0 =<<
+        bvConcat sym b1 =<<
+        bvConcat sym b2 =<<
+        bvConcat sym b3 =<<
+        bvConcat sym b4 =<<
+        bvConcat sym b5 =<<
+        bvConcat sym b6 =<<
+        pure b7
+      _ -> undefined
 
     -- bad case: mismatched regions. use an uninterpreted function
     undefOff <- undefMismatchedRegionRead undef sym [(reg, subOff) | (reg, _, subOff) <- memBytes]
@@ -1195,22 +1215,6 @@ readMemArr sym undef mem ptr repr = go 0 repr
 
   appendOrder LittleEndian = reverse
   appendOrder BigEndian = id
-
-  -- Not perfectly named. We're not so much appending as shifting it in. If we
-  -- start with bytes = 0xAABBCCDD and a memByte representing 0xEE, we end with
-  -- 0xBBCCDDEE.
-  --
-  -- Accomplished by shifting `bytes` left, `off` right, and doing the usual
-  -- mask+combine dance we all know and love from our C days.
-  mkAppendMemByte = do
-    bv3 <- bvFromInteger sym ptrWRepr 3
-    bv8 <- bvFromInteger sym ptrWRepr 8
-    mask <- bvFromInteger sym ptrWRepr 0xff
-    pure $ \bytes (_, off, subOff) -> do
-      bytes' <- bvShl sym bytes bv8
-      subOff' <- bvShl sym subOff bv3
-      off' <- bvLshr sym off subOff'
-      bvOrBits sym bytes' =<< bvAndBits sym off' mask
 
   goBV :: forall w. 1 <= w => Integer -> NatRepr w -> Endianness -> IO (LLVMPtr sym (8*w))
   goBV n byteWidth endianness =
