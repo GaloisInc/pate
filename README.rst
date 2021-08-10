@@ -16,7 +16,7 @@ First, build the Docker image with the command::
 
 Next, run the verifier on an example from the test suite::
 
-  docker run -it -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe --interactive
+  docker run -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe --interactive
 
 Visit http://localhost:5000 to view the interactive proof explorer.
 
