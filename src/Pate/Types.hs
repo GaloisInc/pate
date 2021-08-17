@@ -26,34 +26,18 @@
 module Pate.Types
   ( BlockMapping(..)
   , BlockTarget(..)
-  , ParsedBlockMap(..)
-  , ParsedFunctionMap
   )
 where
 
-import           Data.IntervalMap (IntervalMap)
-import           Data.Map ( Map )
 import qualified Data.Map as M
 
-import           Data.Parameterized.Some ( Some(..) )
-
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Discovery as MD
 
 import           Pate.Address
 import           Pate.Block
 
 ----------------------------------
 
--- | Keys: basic block extent; values: parsed blocks
-newtype ParsedBlockMap arch ids = ParsedBlockMap
-  { getParsedBlockMap :: IntervalMap (ConcreteAddress arch) [MD.ParsedBlock arch ids]
-  }
-
--- | basic block extent -> function entry point -> basic block extent again -> parsed block
---
--- You should expect (and check) that exactly one key exists at the function entry point level.
-type ParsedFunctionMap arch = IntervalMap (ConcreteAddress arch) (Map (MM.ArchSegmentOff arch) (Some (ParsedBlockMap arch)))
 
 ----------------------------------
 

@@ -44,10 +44,10 @@ import qualified Pate.Address as PA
 import qualified Pate.Event as PE
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Metrics as PM
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Solver as PS
-import qualified Pate.Types as PT
 
 
 data SourcePair f = SourcePair { originalSource :: f
@@ -95,8 +95,8 @@ data State arch =
         , _failure :: Map.Map (PA.ConcreteAddress arch) (Failure arch)
         , _recentEvents :: [PE.Event arch]
         -- ^ The N most recent events (most recent first), to be shown in the console
-        , _originalBinary :: Maybe (PLE.LoadedELF arch, PT.ParsedFunctionMap arch)
-        , _patchedBinary :: Maybe (PLE.LoadedELF arch, PT.ParsedFunctionMap arch)
+        , _originalBinary :: Maybe (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch)
+        , _patchedBinary :: Maybe (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch)
         , _sources :: Maybe (SourcePair LC.CTranslUnit)
         , _proofTree :: Maybe (ProofTree arch)
         -- ^ All of the collected proof nodes received from the verifier

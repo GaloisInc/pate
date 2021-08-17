@@ -71,6 +71,7 @@ import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -227,7 +228,7 @@ flattenToStackRegion ::
   PF.ProofMemoryDomain (PFI.ProofSym sym arch) ->
   EquivM sym arch (PF.ProofMemoryDomain (PFI.ProofSym sym arch))
 flattenToStackRegion dom = do
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
     dom' = map (\(MapF.Pair cell p) -> MapF.Pair (PMC.setMemCellRegion stackRegion cell) p) (MapF.toList (PF.prfMemoryDomain dom))
   return $ dom { PF.prfMemoryDomain = MapF.fromList dom' }

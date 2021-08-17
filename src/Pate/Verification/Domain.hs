@@ -37,6 +37,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Types as CT
 
 
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
@@ -49,6 +50,7 @@ import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
@@ -220,7 +222,8 @@ equateRegisters ::
   SimBundle sym arch ->
   EquivM sym arch (PSi.AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
-  fmap (mconcat) $ PRe.zipRegStates (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase (PSR.macawRegRepr vO) r of
+  PA.SomeValidArch _ _ hdr <- CMR.asks envValidArch
+  fmap (mconcat) $ PRe.zipRegStates (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return mempty
     _ -> case M.lookup (Some r) regRel of
       Just cond | Just True <- W4.asConstantPred cond -> liftIO $ PSi.macawRegBinding sym vO vP
@@ -266,6 +269,7 @@ guessEquivalenceDomain ::
   PES.StatePred sym arch ->
   EquivM sym arch (PES.StatePred sym arch)
 guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
+  PA.SomeValidArch _ _ hdr <- CMR.asks envValidArch
   traceBundle bundle "Entering guessEquivalenceDomain"
   WEH.ExprFilter isBoundInGoal <- getIsBoundFilter' goal
   eqRel <- CMR.asks envBaseEquiv
@@ -276,11 +280,11 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
         include = Par.present $ return $ Just (Some r, W4.truePred sym)
         exclude :: EquivM sym arch (Par.Future (Maybe (Some (MM.ArchReg arch), W4B.Expr t W4.BaseBoolType)))
         exclude = Par.present $ return Nothing
-      case PRe.registerCase (PSR.macawRegRepr vO) r of
+      case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
         -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
         -- to include them in the pre-domain
         PRe.RegIP -> exclude
-        PRe.RegTOC -> exclude
+        PRe.RegDedicated _ -> exclude
         -- this requires some more careful consideration. We don't want to include
         -- the stack pointer in computed domains, because this unreasonably
         -- restricts preceding blocks from having different numbers of stack allocations.
@@ -303,7 +307,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
                 False -> return $ Just (Some r, W4.truePred sym)
         _ -> exclude
   regsDom <- (M.fromList . catMaybes) <$> Par.joinFuture @_ @Par.Future result
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
     isStackCell cell = do
       let CLM.LLVMPointer region _ = PMC.cellPtr cell

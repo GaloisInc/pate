@@ -1,20 +1,24 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.AArch32 (
     SA.AArch32
   , handleSystemCall
   , handleExternalCall
+  , hasDedicatedRegister
   ) where
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
 
 import qualified SemMC.Architecture.AArch32 as SA
 import           Data.Macaw.BinaryLoader.AArch32 ()
+import qualified Lang.Crucible.Types as LCT
 
 import qualified Data.Macaw.ARM as ARM
 import qualified Data.Macaw.ARM.ARMReg as ARMReg
@@ -26,12 +30,20 @@ import qualified Pate.Equivalence.MemPred as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Verification.ExternalCall as PVE
 
+data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
+
+type instance PA.DedicatedRegister SA.AArch32 = NoRegisters
+
+hasDedicatedRegister :: PA.HasDedicatedRegister SA.AArch32
+hasDedicatedRegister =
+  PA.HasDedicatedRegister { PA.asDedicatedRegister = const Nothing
+                          , PA.dedicatedRegisterValidity = \_ _ _ _ (NoRegisters v) -> absurd v
+                          }
+
 instance PA.ArchConstraints SA.AArch32 where
   binArchInfo = const ARM.arm_linux_info
 
 instance PA.ValidArch SA.AArch32 where
-  -- FIXME: generalize this properly for ARM
-  tocProof = Nothing
   -- FIXME: define these
   rawBVReg _r = False
   displayRegister = display

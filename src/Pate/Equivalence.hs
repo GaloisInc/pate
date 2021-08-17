@@ -163,10 +163,11 @@ registerEquivalence ::
   forall sym arch.
   PA.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
+  PA.HasDedicatedRegister arch ->
   sym ->
   RegEquivRelation sym arch
-registerEquivalence sym = RegEquivRelation $ \r vO vP -> do
-  case PRe.registerCase (PSR.macawRegRepr vO) r of
+registerEquivalence hdr sym = RegEquivRelation $ \r vO vP -> do
+  case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return $ W4.truePred sym
     PRe.RegSP -> do
       let
@@ -182,11 +183,12 @@ stateEquivalence ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
+  PA.HasDedicatedRegister arch ->
   sym ->
   -- | stack memory region
   W4.SymNat sym ->
   EquivRelation sym arch
-stateEquivalence sym stackRegion =
+stateEquivalence hdr sym stackRegion =
   let
     isStackCell cell = do
       let CLM.LLVMPointer region _ = PMC.cellPtr cell
@@ -199,7 +201,7 @@ stateEquivalence sym stackRegion =
     stackEq = MemEquivRelation $ \cell vO vP -> do
       impM sym (isStackCell cell) $
         MT.llvmPtrEq sym vO vP
-  in EquivRelation (registerEquivalence sym) stackEq memEq
+  in EquivRelation (registerEquivalence hdr sym) stackEq memEq
 
 -- | Resolve a domain predicate and equivalence relation into a precondition
 getPrecondition ::
