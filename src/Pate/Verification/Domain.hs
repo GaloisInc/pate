@@ -281,8 +281,11 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
         exclude :: EquivM sym arch (Par.Future (Maybe (Some (MM.ArchReg arch), W4B.Expr t W4.BaseBoolType)))
         exclude = Par.present $ return Nothing
       case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
-        -- we have concrete values for the pre-IP and the TOC (if arch-defined), so we don't need
+        -- we have concrete values for the pre-IP and dedicated registers, so we don't need
         -- to include them in the pre-domain
+        --
+        -- NOTE: We could extend this to make the handling of dedicated
+        -- registers a parameter via the HasDedicatedRegister type
         PRe.RegIP -> exclude
         PRe.RegDedicated _ -> exclude
         -- this requires some more careful consideration. We don't want to include
