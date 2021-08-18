@@ -78,26 +78,22 @@ ppc64AsDedicatedRegister reg =
     PPC.PPC_GP (PPC.GPR 2) -> Just RegTOC
     _ -> Nothing
 
--- | Look up the TOC for the function(s) currently being analyzed
+-- | Look up the TOC for the function currently being analyzed
 --
--- The returned values are the concrete addresses that would be in r2 at the
--- start of the respective functions
-getCurrentTOCs
+-- The returned value is the concrete address that would be in r2 at the
+-- start of the function
+getCurrentTOC
   :: PMC.EquivalenceContext sym PPC.PPC64
-  -> IO (W.W 64, W.W 64)
-getCurrentTOCs ctx = do
-  let tocO = TOC.getTOC (PMC.binary (PMC.originalCtx ctx))
-  let tocP = TOC.getTOC (PMC.binary (PMC.rewrittenCtx ctx))
+  -> PB.WhichBinaryRepr bin
+  -> IO (W.W 64)
+getCurrentTOC ctx binRepr = do
   PPa.PatchPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
-  let addrO = MD.pblockAddr pblkO
-  let addrP = MD.pblockAddr pblkP
-  wO <- case TOC.lookupTOC tocO addrO of
+  let (toc, addr) = case binRepr of
+        PB.OriginalRepr -> (TOC.getTOC (PMC.binary (PMC.originalCtx ctx)), MD.pblockAddr pblkO)
+        PB.PatchedRepr -> (TOC.getTOC (PMC.binary (PMC.rewrittenCtx ctx)), MD.pblockAddr pblkP)
+  case TOC.lookupTOC toc addr of
     Just w -> return w
-    Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addrO)
-  wP <- case TOC.lookupTOC tocP addrP of
-    Just w -> return w
-    Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addrP)
-  return (wO, wP)
+    Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addr)
 
 ppc64DedicatedRegisterFrame
   :: forall sym tp bin
@@ -111,10 +107,8 @@ ppc64DedicatedRegisterFrame
 ppc64DedicatedRegisterFrame sym ctx binRepr entry dr =
   case dr of
     RegTOC -> do
-      (tocO, tocP) <- getCurrentTOCs ctx
-      tocBV <- case binRepr of
-        PB.OriginalRepr -> WI.bvLit sym PN.knownNat (BVS.mkBV PN.knownNat (W.unW tocO))
-        PB.PatchedRepr -> WI.bvLit sym PN.knownNat (BVS.mkBV PN.knownNat (W.unW tocP))
+      tocW <- getCurrentTOC ctx binRepr
+      tocBV <- WI.bvLit sym PN.knownNat (BVS.mkBV PN.knownNat (W.unW tocW))
       let targetTOC = CLM.LLVMPointer (PMC.globalRegion ctx) tocBV
       PS.macawRegBinding sym entry (PSR.ptrToEntry targetTOC)
 
