@@ -135,7 +135,7 @@ instance PA.ArchConstraints PPC.PPC64 where
   binArchInfo = PPC.ppc64_linux_info
 
 instance PA.ArchConstraints PPC.PPC32 where
-  binArchInfo = PPC.ppc32_linux_info
+  binArchInfo = const PPC.ppc32_linux_info
 
 instance PA.ValidArch PPC.PPC32 where
   rawBVReg r = case r of
