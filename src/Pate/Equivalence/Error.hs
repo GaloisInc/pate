@@ -73,6 +73,7 @@ data InnerEquivalenceError arch
   | UnhandledLoop
 
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
+instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (InnerEquivalenceError arch)
 
 data EquivalenceError arch where
   EquivalenceError ::

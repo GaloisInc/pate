@@ -26,6 +26,7 @@ import qualified Pate.Block as PB
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.PatchPair as PPa
@@ -72,7 +73,7 @@ data Event arch where
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
-  LoadedBinaries :: (PLE.LoadedELF arch, PT.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PT.ParsedFunctionMap arch) -> Event arch
+  LoadedBinaries :: (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> Event arch
   -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: [(T.Text, Word64)] -> Event arch
   -- | A list of functions discovered from provided hints that macaw code

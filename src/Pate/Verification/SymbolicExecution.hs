@@ -45,6 +45,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as PMT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 
@@ -123,7 +124,7 @@ initSimContext ::
   EquivM sym arch (CS.SimContext (MS.MacawSimulatorState sym) sym (MS.MacawExt arch))
 initSimContext = withValid $ withSym $ \sym -> do
   exts <- CMR.asks envExtensions
-  ha <- CMR.asks (handles . envCtx)
+  ha <- CMR.asks (PMC.handles . envCtx)
   return $
     CS.initSimContext
     sym
@@ -287,7 +288,7 @@ simulate simInput = withBinary @bin $ do
     emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack ("Discarding edges: " ++ show killEdges)))
 
     fns <- archFuns
-    ha <- CMR.asks (handles . envCtx)
+    ha <- CMR.asks (PMC.handles . envCtx)
     be <- CMR.asks envBlockEndVar
     let posFn = W4L.OtherPos . fromString . show
     liftIO $ MS.mkBlockSliceCFG fns ha posFn pb nonTerminal terminal killEdges (Just be)

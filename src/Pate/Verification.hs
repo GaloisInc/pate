@@ -27,6 +27,7 @@ module Pate.Verification
 
 import qualified Control.Concurrent.Async as CCA
 import qualified Control.Concurrent.MVar as MVar
+import           Control.Lens ( (&), (.~) )
 import           Control.Monad ( void, unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -53,7 +54,6 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
 
-import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..))
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Backend.Simple as CB
@@ -77,6 +77,8 @@ import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
+import qualified Pate.Monad.Environment as PME
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -94,7 +96,7 @@ import qualified Pate.Verification.Validity as PVV
 import           What4.ExprHelpers
 
 -- | Return the list of entry points in the parsed function map
-parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
+parsedFunctionEntries :: PMC.ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
 parsedFunctionEntries = concatMap M.keys . IM.elems
 
 -- | We run discovery in parallel, since we need to run it two or three times
@@ -115,7 +117,7 @@ runDiscovery
   -> Maybe PH.VerificationHints
   -> PLE.LoadedELF arch
   -> PLE.LoadedELF arch
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MM.ArchSegmentOff arch, ParsedFunctionMap arch, MM.ArchSegmentOff arch, ParsedFunctionMap arch)
+  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch, MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch)
 runDiscovery logAction mhints elf elf' = do
   let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
   origDiscovery <- discoverAsync elf mempty
@@ -163,7 +165,7 @@ verifyPairs ::
   PC.VerificationConfig ->
   [PPa.BlockPair arch] ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
+verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction mhints elf elf' blockMap vcfg pPairs = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
@@ -202,21 +204,23 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
-    oCtx = BinaryContext
-      { binary = PLE.loadedBinary elf
-      , parsedFunctionMap = oPfm
-      , binEntry = oMain
+    oCtx = PMC.BinaryContext
+      { PMC.binary = PLE.loadedBinary elf
+      , PMC.parsedFunctionMap = oPfm
+      , PMC.binEntry = oMain
       }
-    rCtx = BinaryContext
-      { binary = PLE.loadedBinary elf'
-      , parsedFunctionMap = pPfm
-      , binEntry = pMain
+    rCtx = PMC.BinaryContext
+      { PMC.binary = PLE.loadedBinary elf'
+      , PMC.parsedFunctionMap = pPfm
+      , PMC.binEntry = pMain
       }
-    ctxt = EquivalenceContext
-      { handles = ha
-      , originalCtx = oCtx
-      , rewrittenCtx = rCtx
-
+    ctxt = PMC.EquivalenceContext
+      { PMC.handles = ha
+      , PMC.originalCtx = oCtx
+      , PMC.rewrittenCtx = rCtx
+      , PMC.stackRegion = stackRegion
+      , PMC.globalRegion = globalRegion
+      , PMC._currentFunc = error "No function under analysis at startup"
       }
     env = EquivEnv
       { envWhichBinary = Nothing
@@ -224,22 +228,17 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
       , envCtx = ctxt
       , envArchVals = vals
       , envExtensions = exts
-      , envStackRegion = stackRegion
-      , envGlobalRegion = globalRegion
       , envPCRegion = pcRegion
       , envMemTraceVar = model
       , envBlockEndVar = bvar
       , envBlockMapping = buildBlockMap pPairs blockMap
       , envLogger = logAction
       , envConfig = vcfg
-      , envBaseEquiv = stateEquivalence sym stackRegion
-      , envFailureMode = ThrowOnAnyFailure
+      , envBaseEquiv = stateEquivalence hdr sym stackRegion
+      , envFailureMode = PME.ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
       , envValidSym = PS.Sym symNonce sym adapter
       , envStartTime = startedAt
-      , envTocs = (TOC.getTOC $ PLE.loadedBinary elf, TOC.getTOC $ PLE.loadedBinary elf')
-      -- TODO: restructure EquivEnv to avoid this
-      , envCurrentFunc = error "no function under analysis"
       , envCurrentFrame = mempty
       , envNonceGenerator = gen
       , envParentNonce = Some topNonce
@@ -301,8 +300,8 @@ runVerificationLoop env pPairs = do
     doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
     doVerify = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
-        mainO <- CMR.asks $ binEntry . originalCtx . envCtx
-        mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
+        mainO <- CMR.asks $ PMC.binEntry . PMC.originalCtx . envCtx
+        mainP <- CMR.asks $ PMC.binEntry . PMC.rewrittenCtx . envCtx
         blkO <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainO
         blkP <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainP
         let pPair = PPa.PatchPair blkO blkP
@@ -347,7 +346,7 @@ checkEquivalence ::
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   eqRel <- CMR.asks envBaseEquiv
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   -- first try proving equivalence by assuming that exact equality
   -- is the only condition we are propagating backwards, so we
   -- don't do any work to try to intelligently narrow this down
@@ -451,7 +450,7 @@ withPair pPair f = do
   env <- CMR.ask
   let env' = env { envParentBlocks = pPair:envParentBlocks env }
   case PB.concreteBlockEntry $ PPa.pOriginal pPair of
-    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' { envCurrentFunc = pPair }) f
+    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
     _ -> CMR.local (\_ -> env') f
 
 provePostcondition ::
@@ -518,7 +517,7 @@ catchSimBundle pPair postcondSpec f = do
         simInO_ = SimInput stO (PPa.pOriginal pPair)
         simInP_ = SimInput stP (PPa.pPatched pPair)
       traceBlockPair pPair "Caught an error, so making a trivial block slice"
-      PA.SomeValidArch _ externalDomain <- CMR.asks envValidArch
+      PA.SomeValidArch _ externalDomain _ <- CMR.asks envValidArch
       r <- trivialBlockSlice False externalDomain (PPa.PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
@@ -626,7 +625,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                 -- this can be relaxed with more information about the specific call
                 True -> do
                   traceBundle bundle ("  Making a trivial block slice because this is a system call")
-                  PA.SomeValidArch syscallDomain _ <- CMR.asks envValidArch
+                  PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
                   trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
                 False -> do
                   traceBundle bundle "  Not a syscall, emitting preamble pair"
@@ -762,7 +761,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
        
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
   notChecks <- liftIO $ W4.notPred sym postcondPred

@@ -23,9 +23,6 @@ module Pate.Monad
   , EquivM
   , EquivM_
   , runEquivM
-  , EquivalenceContext(..)
-  , BinaryContext(..)
-  , VerificationFailureMode(..)
   , SimBundle(..)
   , withBinary
   , withValid
@@ -85,22 +82,17 @@ import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
-import qualified Control.Concurrent.MVar as MVar
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import           Control.Monad.Reader
 import           Control.Monad.Except
 
-import qualified Data.ElfEdit as E
-import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Typeable
-
-import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
@@ -110,11 +102,8 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.FunctionHandle as CFH
-import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
@@ -133,12 +122,12 @@ import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Binary as PBi
 import qualified Pate.Config as PC
-import           Pate.Equivalence
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Monad.Context as PMC
+import           Pate.Monad.Environment as PME
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -147,75 +136,6 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
-import           Pate.Types
-
-data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
-  { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , parsedFunctionMap :: ParsedFunctionMap arch
-  , binEntry :: MM.ArchSegmentOff arch
-  }
-
-data EquivalenceContext sym arch where
-  EquivalenceContext ::
-    { handles :: CFH.HandleAllocator
-    , originalCtx :: BinaryContext sym arch PBi.Original
-    , rewrittenCtx :: BinaryContext sym arch PBi.Patched
-    } -> EquivalenceContext sym arch
-
-data EquivEnv sym arch where
-  EquivEnv ::
-    { envWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
-    , envValidArch :: PA.SomeValidArch arch
-    , envCtx :: EquivalenceContext sym arch
-    , envArchVals :: MS.GenArchVals MT.MemTraceK arch
-    , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
-    , envStackRegion :: W4.SymNat sym
-    , envGlobalRegion :: W4.SymNat sym
-    , envPCRegion :: W4.SymNat sym
-    , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
-    , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
-    , envBlockMapping :: BlockMapping arch
-    , envLogger :: LJ.LogAction IO (PE.Event arch)
-    , envConfig :: PC.VerificationConfig
-    , envFailureMode :: VerificationFailureMode
-    , envBaseEquiv :: EquivRelation sym arch
-    , envGoalTriples :: [PF.EquivTriple sym arch]
-    -- ^ input equivalence problems to solve
-    , envValidSym :: PSo.Sym sym
-    -- ^ expression builder, wrapped with a validity proof
-    , envStartTime :: TM.UTCTime
-    -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
-    , envTocs :: PA.HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
-    -- ^ table of contents for the original and patched binaries, if defined by the
-    -- architecture
-    , envCurrentFunc :: PPa.BlockPair arch
-    -- ^ start of the function currently under analysis
-    , envCurrentFrame :: AssumptionFrame sym
-    -- ^ the current assumption frame, accumulated as assumptions are added
-    , envNonceGenerator :: N.NonceGenerator IO (PF.ProofScope (PFI.ProofSym sym arch))
-    , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
-    -- ^ nonce of the parent proof node currently in scope
-    , envUndefPointerOps :: MT.UndefinedPtrOps sym
-    , envParentBlocks :: [PPa.BlockPair arch]
-    -- ^ all block pairs on this path from the toplevel
-    , envProofCache :: ProofCache sym arch
-    -- ^ cache for intermediate proof results
-    , envExitPairsCache :: ExitPairCache arch
-    -- ^ cache for intermediate proof results
-    , envStatistics :: MVar.MVar PES.EquivalenceStatistics
-    -- ^ Statistics collected during verification
-    } -> EquivEnv sym arch
-
-type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
-
-type ExitPairCache arch = BlockCache arch [PPa.PatchPair (BlockTarget arch)]
-
-data BlockCache arch a where
-  BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a
-
-freshBlockCache ::
-  IO (BlockCache arch a)
-freshBlockCache = BlockCache <$> IO.newMVar M.empty
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -266,9 +186,6 @@ withProofNonce f = withValid $do
   let proofNonce = PF.ProofNonce nonce
   local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
 
-data VerificationFailureMode =
-    ThrowOnAnyFailure
-  | ContinueAfterFailure
 
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'
@@ -331,15 +248,15 @@ withBinary f =
 getBinCtx ::
   forall bin sym arch.
   KnownRepr PBi.WhichBinaryRepr bin =>
-  EquivM sym arch (BinaryContext sym arch bin)
+  EquivM sym arch (PMC.BinaryContext sym arch bin)
 getBinCtx = getBinCtx' knownRepr
 
 getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
-  EquivM sym arch (BinaryContext sym arch bin)
+  EquivM sym arch (PMC.BinaryContext sym arch bin)
 getBinCtx' repr = case repr of
-  PBi.OriginalRepr -> asks (originalCtx . envCtx)
-  PBi.PatchedRepr -> asks (rewrittenCtx . envCtx)
+  PBi.OriginalRepr -> asks (PMC.originalCtx . envCtx)
+  PBi.PatchedRepr -> asks (PMC.rewrittenCtx . envCtx)
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->

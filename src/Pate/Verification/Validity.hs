@@ -18,13 +18,9 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import qualified Data.Sequence as Seq
-import           GHC.TypeLits
-import qualified Data.Word.Indexed as W
 import qualified What4.Interface as W4
 
-import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.Memory.Permissions as MMP
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -33,38 +29,13 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
-import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
-
-wLit :: (1 <= w) => W.W w -> EquivM sym arch (W4.SymBV sym w)
-wLit w = withSymIO $ \sym -> W4.bvLit sym (W.rep w) (BVS.mkBV (W.rep w) (W.unW w))
-
-functionSegOffs ::
-  PPa.BlockPair arch ->
-  EquivM sym arch (MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)
-functionSegOffs pPair = do
-  PPa.PatchPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- PD.getBlocks pPair
-  return $ (MD.pblockAddr pblkO, MD.pblockAddr pblkP)
-
-getCurrentTOCs :: PA.HasTOCReg arch => EquivM sym arch (W.W (MM.ArchAddrWidth arch), W.W (MM.ArchAddrWidth arch))
-getCurrentTOCs = do
-  (tocO, tocP) <- CMR.asks envTocs
-  curFuncs <- CMR.asks envCurrentFunc
-  (addrO, addrP) <- functionSegOffs curFuncs
-  wO <- case TOC.lookupTOC tocO addrO of
-    Just w -> return w
-    Nothing -> throwHere $ PEE.MissingTOCEntry addrO
-  wP <- case TOC.lookupTOC tocP addrP of
-    Just w -> return w
-    Nothing -> throwHere $ PEE.MissingTOCEntry addrP
-  return $ (wO, wP)
-
 
 validInitState ::
   Maybe (PPa.BlockPair arch) ->
@@ -86,15 +57,16 @@ validRegister ::
   PSR.MacawRegEntry sym tp ->
   MM.ArchReg arch tp ->
   EquivM sym arch (AssumptionFrame sym)
-validRegister mblockStart entry r = withSym $ \sym ->
-  case PRe.registerCase (PSR.macawRegRepr entry) r of
+validRegister mblockStart entry r = withSym $ \sym -> do
+  PA.SomeValidArch _ _ hdr <- CMR.asks envValidArch
+  case PRe.registerCase hdr (PSR.macawRegRepr entry) r of
     PRe.RegIP -> case mblockStart of
       Just blockStart -> do
         ptrO <- PD.concreteToLLVM blockStart
         liftIO $ macawRegBinding sym entry (PSR.ptrToEntry ptrO)
       Nothing -> return $ mempty
     PRe.RegSP -> do
-      stackRegion <- CMR.asks envStackRegion
+      stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
       let
         CLM.LLVMPointer region _ = PSR.macawRegValue entry
       iRegion <- liftIO $ W4.natToInteger sym region
@@ -106,14 +78,10 @@ validRegister mblockStart entry r = withSym $ \sym ->
       zero <- W4.intLit sym 0
       iRegion <- W4.natToInteger sym region
       return $ exprBinding iRegion zero
-    PRe.RegTOC -> do
-      globalRegion <- CMR.asks envGlobalRegion
-      (tocO, tocP) <- getCurrentTOCs
-      tocBV <- case W4.knownRepr :: PB.WhichBinaryRepr bin of
-        PB.OriginalRepr -> wLit tocO
-        PB.PatchedRepr -> wLit tocP
-      let targetToc = CLM.LLVMPointer globalRegion tocBV
-      liftIO $ macawRegBinding sym entry (PSR.ptrToEntry targetToc)
+    PRe.RegDedicated dr -> do
+      ctx <- CMR.asks envCtx
+      let binRepr = W4.knownRepr :: PB.WhichBinaryRepr bin
+      liftIO $ PA.dedicatedRegisterValidity hdr sym ctx binRepr entry dr
     _ -> return $ mempty
 
 -- | Reads from immutable data have known results.
@@ -128,7 +96,7 @@ validConcreteReads ::
 validConcreteReads stOut = withSym $ \sym -> do
   binCtx <- getBinCtx @bin
   let
-    binmem = MBL.memoryImage $ binary binCtx
+    binmem = MBL.memoryImage $ PMC.binary binCtx
 
     go :: Seq.Seq (MT.MemOp sym (MM.ArchAddrWidth arch)) -> EquivM sym arch (AssumptionFrame sym)
     go mops = do

@@ -15,14 +15,16 @@ module Pate.Discovery (
   mkConcreteBlock,
   lookupBlocks,
   getBlocks,
+  getBlocks',
   matchesBlockTarget,
   concreteToLLVM
   ) where
 
 import           Control.Lens ( (^.) )
 import           Control.Monad ( when )
-import           Control.Monad.IO.Class ( liftIO )
+import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
+import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
@@ -33,6 +35,7 @@ import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
+import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -61,6 +64,7 @@ import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PR
@@ -232,9 +236,9 @@ getSubBlocks ::
   PB.ConcreteBlock arch bin ->
   EquivM sym arch [BlockTarget arch bin]
 getSubBlocks b = withBinary @bin $ do
-  pfm <- parsedFunctionMap <$> getBinCtx @bin
+  pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
   case Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm of
-    [(_, Some (ParsedBlockMap pbm))] -> do
+    [(_, Some (PMC.ParsedBlockMap pbm))] -> do
       let pbs = concat $ IM.elems $ IM.intersecting pbm i
       concat <$> mapM (concreteValidJumpTargets pbs) pbs
     blks -> throwHere $ PEE.NoUniqueFunctionOwner i (fst <$> blks)
@@ -252,8 +256,8 @@ concreteValidJumpTargets ::
   EquivM sym arch [BlockTarget arch bin]
 concreteValidJumpTargets allPbs pb = do
   targets <- concreteJumpTargets pb
-  thisAddr <- segOffToAddr (MD.pblockAddr pb)
-  addrs <- mapM (segOffToAddr . MD.pblockAddr) allPbs
+  let thisAddr = segOffToAddr (MD.pblockAddr pb)
+  let addrs = map (segOffToAddr . MD.pblockAddr) allPbs
   let
     isTargetExternal btgt = not ((PB.concreteAddress (targetCall btgt)) `elem` addrs)
     isTargetBackJump btgt = (PB.concreteAddress (targetCall btgt)) < thisAddr
@@ -363,9 +367,9 @@ addFunctionEntryHints _ mem (_name, addrWord) (invalid, entries) =
 
 markEntryPoint ::
   MC.ArchSegmentOff arch ->
-  ParsedBlockMap arch ids ->
-  ParsedFunctionMap arch
-markEntryPoint segOff blocks = Map.singleton segOff (Some blocks) <$ getParsedBlockMap blocks
+  PMC.ParsedBlockMap arch ids ->
+  PMC.ParsedFunctionMap arch
+markEntryPoint segOff blocks = Map.singleton segOff (Some blocks) <$ PMC.getParsedBlockMap blocks
 
 
 runDiscovery ::
@@ -373,7 +377,7 @@ runDiscovery ::
   PA.ValidArch arch =>
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), ParsedFunctionMap arch)
+  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), PMC.ParsedFunctionMap arch)
 runDiscovery elf hints = do
   let
     bin = PLE.loadedBinary elf
@@ -391,7 +395,7 @@ runDiscovery elf hints = do
     . Map.assocs
     $ ds ^. MD.funInfo
   goSomeDiscoveryFunInfo (entrySegOff, Some dfi) = markEntryPoint entrySegOff <$> goDiscoveryFunInfo dfi
-  goDiscoveryFunInfo dfi = fmap (ParsedBlockMap . IM.fromListWith (++)) . sequence $
+  goDiscoveryFunInfo dfi = fmap (PMC.ParsedBlockMap . IM.fromListWith (++)) . sequence $
     [ (\addrs -> (addrs, [pb])) <$> archSegmentOffToInterval blockSegOff (MD.blockSize pb)
     | (blockSegOff, pb) <- Map.assocs (dfi ^. MD.parsedBlocks)
     ]
@@ -404,6 +408,21 @@ archSegmentOffToInterval ::
 archSegmentOffToInterval segOff size =
   let start = PA.addressFromMemAddr (MM.segoffAddr segOff)
   in pure (IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size))
+
+getBlocks'
+  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch)
+  => PMC.EquivalenceContext sym arch
+  -> PPa.BlockPair arch
+  -> m (PE.BlocksPair arch)
+getBlocks' ctx pPair = do
+  Some (DFC.Compose opbs) <- lookupBlocks' (PMC.originalCtx ctx) blkO
+  let oBlocks = PE.Blocks blkO opbs
+  Some (DFC.Compose ppbs) <- lookupBlocks' (PMC.rewrittenCtx ctx) blkP
+  let pBlocks = PE.Blocks blkP ppbs
+  return $! PPa.PatchPair oBlocks pBlocks
+  where
+    blkO = PPa.pOriginal pPair
+    blkP = PPa.pPatched pPair
 
 getBlocks ::
   PPa.BlockPair arch ->
@@ -418,6 +437,32 @@ getBlocks pPair = do
     blkO = PPa.pOriginal pPair
     blkP = PPa.pPatched pPair
 
+lookupBlocks'
+  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch)
+  => PMC.BinaryContext sym arch bin
+  -> PB.ConcreteBlock arch bin
+  -> m (Some (DFC.Compose [] (MD.ParsedBlock arch)))
+lookupBlocks' binCtx b = do
+  let pfm = PMC.parsedFunctionMap binCtx
+  let fns = Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm
+  let fns' = fmap (\(segOff, pbm) -> (segOffToAddr segOff, pbm)) fns
+  case reverse $ filter (\(addr', _) -> addr' <= start) fns' of
+    ((funAddr, Some (PMC.ParsedBlockMap pbm)):_) -> do
+      case PB.concreteBlockEntry b of
+        PB.BlockEntryInitFunction -> do
+          when (funAddr /= start) $ do
+            CMC.throwM $ PEE.LookupNotAtFunctionStart funAddr start
+        _ -> return ()
+
+      let result = concat $ IM.elems $ IM.intersecting pbm i
+      return $ Some (DFC.Compose result)
+    _ -> CMC.throwM $ PEE.NoUniqueFunctionOwner i (fst <$> fns)
+  where
+    start@(PA.ConcreteAddress addr) = PB.concreteAddress b
+    end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase addr) maxBound)
+    i = IM.OpenInterval start end
+
+
 lookupBlocks ::
   forall sym arch bin.
   PB.KnownBinary bin =>
@@ -425,30 +470,12 @@ lookupBlocks ::
   EquivM sym arch (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
-  let
-    pfm = parsedFunctionMap binCtx
-    fns = Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm
-  fns' <- mapM (\(segOff, pbm) -> (,) <$> segOffToAddr segOff <*> pure pbm) fns
-  case reverse $ filter (\(addr', _) -> addr' <= start) fns' of
-    ((funAddr, Some (ParsedBlockMap pbm)):_) -> do
-      case PB.concreteBlockEntry b of
-        PB.BlockEntryInitFunction -> do
-          when (funAddr /= start) $ do
-            throwHere $ PEE.LookupNotAtFunctionStart funAddr start
-        _ -> return ()
-
-      let result = concat $ IM.elems $ IM.intersecting pbm i
-      return $ Some (DFC.Compose result)
-    _ -> throwHere $ PEE.NoUniqueFunctionOwner i (fst <$> fns)
-  where
-  start@(PA.ConcreteAddress addr) = PB.concreteAddress b
-  end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase addr) maxBound)
-  i = IM.OpenInterval start end
+  lookupBlocks' binCtx b
 
 segOffToAddr ::
   MC.ArchSegmentOff arch ->
-  EquivM sym arch (PA.ConcreteAddress arch)
-segOffToAddr off = return (PA.addressFromMemAddr (MM.segoffAddr off))
+  PA.ConcreteAddress arch
+segOffToAddr off = PA.addressFromMemAddr (MM.segoffAddr off)
 
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'
 --
