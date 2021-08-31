@@ -21,7 +21,6 @@ module Pate.Discovery (
   ) where
 
 import           Control.Lens ( (^.) )
-import           Control.Monad ( when )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -32,11 +31,13 @@ import qualified Data.Functor.Compose as DFC
 import qualified Data.IntervalMap.Strict as IM
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
+import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
+import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -269,7 +270,7 @@ concreteValidJumpTargets allPbs pb = do
   return validTargets
 
 validateBlockTarget ::
-  PB.KnownBinary bin =>
+  HasCallStack => PB.KnownBinary bin =>
   BlockTarget arch bin ->
   EquivM sym arch ()
 validateBlockTarget tgt = do
@@ -410,21 +411,24 @@ archSegmentOffToInterval segOff size =
   in pure (IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size))
 
 getBlocks'
-  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch)
+  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch, HasCallStack)
   => PMC.EquivalenceContext sym arch
   -> PPa.BlockPair arch
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
-  Some (DFC.Compose opbs) <- lookupBlocks' (PMC.originalCtx ctx) blkO
-  let oBlocks = PE.Blocks blkO opbs
-  Some (DFC.Compose ppbs) <- lookupBlocks' (PMC.rewrittenCtx ctx) blkP
-  let pBlocks = PE.Blocks blkP ppbs
-  return $! PPa.PatchPair oBlocks pBlocks
+  case (lookupBlocks' (PMC.originalCtx ctx) blkO, lookupBlocks' (PMC.rewrittenCtx ctx) blkP) of
+    (Right (Some (DFC.Compose opbs)), Right (Some (DFC.Compose ppbs))) -> do
+      let oBlocks = PE.Blocks blkO opbs
+      let pBlocks = PE.Blocks blkP ppbs
+      return $! PPa.PatchPair oBlocks pBlocks
+    (Left err, _) -> CMC.throwM err
+    (_, Left err) -> CMC.throwM err
   where
     blkO = PPa.pOriginal pPair
     blkP = PPa.pPatched pPair
 
 getBlocks ::
+  HasCallStack =>
   PPa.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
@@ -438,10 +442,10 @@ getBlocks pPair = do
     blkP = PPa.pPatched pPair
 
 lookupBlocks'
-  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch)
+  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack)
   => PMC.BinaryContext sym arch bin
   -> PB.ConcreteBlock arch bin
-  -> m (Some (DFC.Compose [] (MD.ParsedBlock arch)))
+  -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks' binCtx b = do
   let pfm = PMC.parsedFunctionMap binCtx
   let fns = Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm
@@ -449,14 +453,12 @@ lookupBlocks' binCtx b = do
   case reverse $ filter (\(addr', _) -> addr' <= start) fns' of
     ((funAddr, Some (PMC.ParsedBlockMap pbm)):_) -> do
       case PB.concreteBlockEntry b of
-        PB.BlockEntryInitFunction -> do
-          when (funAddr /= start) $ do
-            CMC.throwM $ PEE.LookupNotAtFunctionStart funAddr start
-        _ -> return ()
-
-      let result = concat $ IM.elems $ IM.intersecting pbm i
-      return $ Some (DFC.Compose result)
-    _ -> CMC.throwM $ PEE.NoUniqueFunctionOwner i (fst <$> fns)
+        PB.BlockEntryInitFunction
+          | funAddr /= start -> Left (PEE.LookupNotAtFunctionStart callStack funAddr start)
+        _ -> do
+          let result = concat $ IM.elems $ IM.intersecting pbm i
+          return $ Some (DFC.Compose result)
+    _ -> Left (PEE.NoUniqueFunctionOwner i (fst <$> fns))
   where
     start@(PA.ConcreteAddress addr) = PB.concreteAddress b
     end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase addr) maxBound)
@@ -465,12 +467,22 @@ lookupBlocks' binCtx b = do
 
 lookupBlocks ::
   forall sym arch bin.
+  HasCallStack =>
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
-  lookupBlocks' binCtx b
+  case lookupBlocks' binCtx b of
+    Left ierr -> do
+      let binRep :: PB.WhichBinaryRepr bin
+          binRep = PC.knownRepr
+      let err = PEE.EquivalenceError { PEE.errWhichBinary = Just (Some binRep)
+                                     , PEE.errStackTrace = Just callStack
+                                     , PEE.errEquivError = ierr
+                                     }
+      CME.throwError err
+    Right blocks -> return blocks
 
 segOffToAddr ::
   MC.ArchSegmentOff arch ->

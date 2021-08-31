@@ -30,6 +30,7 @@ import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Void ( Void, absurd )
 import           Data.Word ( Word8 )
+import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits
 import qualified What4.Interface as WI
 
@@ -83,7 +84,8 @@ ppc64AsDedicatedRegister reg =
 -- The returned value is the concrete address that would be in r2 at the
 -- start of the function
 getCurrentTOC
-  :: PMC.EquivalenceContext sym PPC.PPC64
+  :: (HasCallStack)
+  => PMC.EquivalenceContext sym PPC.PPC64
   -> PB.WhichBinaryRepr bin
   -> IO (W.W 64)
 getCurrentTOC ctx binRepr = do
