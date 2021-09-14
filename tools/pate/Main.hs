@@ -303,12 +303,13 @@ terminalFormatEvent evt =
     PE.LoadedBinaries {} -> layoutLn "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
-      in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ])
+      in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ]) <> PP.line
     PE.AnalysisStart (PPa.PatchPair blkO blkP) ->
       layout $ mconcat [ "Checking original block at "
                        , PP.viaShow $ PB.concreteAddress blkO
                        , " against patched block at "
                        , PP.viaShow $ PB.concreteAddress blkP
+                       , PP.line
                        ]
     PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
       let
@@ -340,10 +341,11 @@ terminalFormatEvent evt =
       layout ("Invalid function entry hints:" <> PP.line
                <> PP.vsep [ PP.pretty fn <> "@" <> ppHex addr
                           | (fn, addr) <- errs
-                          ])
+                          ]
+             <> PP.line)
     PE.FunctionsDiscoveredFromHints extraAddrs ->
       layout ("Additional functions discovered based on hits: " <> PP.line
-             <> PP.vcat (map PP.viaShow extraAddrs))
+             <> PP.vcat (map PP.viaShow extraAddrs) <> PP.line)
     PE.ProofTraceEvent _stack origAddr _patchedAddr msg _tm ->
       layout (PP.pretty origAddr <> ": " <> PP.pretty msg)
     -- FIXME: handle other events
