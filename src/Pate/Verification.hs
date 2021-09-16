@@ -1,22 +1,23 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE FlexibleInstances #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -37,7 +38,7 @@ import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
 import qualified Data.IntervalMap as IM
 import qualified Data.Map as M
-import           Data.Maybe ( catMaybes, maybeToList )
+import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
@@ -63,6 +64,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
@@ -99,10 +101,13 @@ import           What4.ExprHelpers
 parsedFunctionEntries :: PMC.ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
 parsedFunctionEntries = concatMap M.keys . IM.elems
 
--- | We run discovery in parallel, since we need to run it two or three times
+-- | Run code discovery using macaw
 --
--- Currently, we run discovery twice on the original binary: once without
--- hints and again if hints are available.
+-- We run discovery in parallel, since we need to run it two to four times.
+--
+-- If we have hints for a binary (original or patched), we run discovery twice:
+-- with and without hints. We then compare the two and report any discrepancies
+-- that indicate that the hints could be wrong.
 --
 -- We report any errors in the hints:
 --
@@ -114,42 +119,43 @@ parsedFunctionEntries = concatMap M.keys . IM.elems
 runDiscovery
   :: (PA.ValidArch arch)
   => LJ.LogAction IO (PE.Event arch)
-  -> Maybe PH.VerificationHints
-  -> PLE.LoadedELF arch
-  -> PLE.LoadedELF arch
+  -> PH.Hinted (PLE.LoadedELF arch)
+  -> PH.Hinted (PLE.LoadedELF arch)
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch, MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch)
-runDiscovery logAction mhints elf elf' = do
-  let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
-  origDiscovery <- discoverAsync elf mempty
-  mHintedDiscovery <- DT.traverse (discoverAsync elf) mhints
-  patchedDiscovery <- case mhints of
-    Just hints -> discoverAsync elf' hints
-    Nothing -> discoverAsync elf' mempty
-  (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
-  (_, pMain, pPfm) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
-  (oMain, oPfm) <- case mHintedDiscovery of
-    Nothing -> return (oMainUnhinted, oPfmUnhinted)
-    Just hintedDiscovery -> do
-      (hintErrors, oMain, oPfm) <- CME.liftEither =<< liftIO (CCA.wait hintedDiscovery)
-      unless (null hintErrors) $ do
-        let invalidSet = S.fromList hintErrors
-        let invalidEntries = [ (name, addr)
-                             | hints <- maybeToList mhints
-                             , (name, addr) <- PH.functionEntries hints
-                             , S.member addr invalidSet
-                             ]
-        liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints invalidEntries)
+runDiscovery logAction elf elf' = do
+  (oMain, oPfm) <- discoverCheckingHints PBi.OriginalRepr elf
+  (pMain, pPfm) <- discoverCheckingHints PBi.PatchedRepr elf'
 
-      let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfmUnhinted)
-      let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfm)
-      let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
-      unless (S.null newAddrs) $ do
-        liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints (F.toList newAddrs))
 
-      return (oMain, oPfm)
-
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, oPfm) (PH.hinted elf', pPfm))
   return (oMain, oPfm, pMain, pPfm)
+  where
+    discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
+    discoverCheckingHints repr e = do
+      unhintedAnalysis <- discoverAsync (PH.hinted e) mempty
+      if | PH.hints e == mempty -> do
+             (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             return (oMainUnhinted, oPfmUnhinted)
+         | otherwise -> do
+             hintedAnalysis <- discoverAsync (PH.hinted e) (PH.hints e)
+             (_, _oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             (hintErrors, oMainHinted, oPfmHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
+
+             unless (null hintErrors) $ do
+               let invalidSet = S.fromList hintErrors
+               let invalidEntries = [ (name, addr)
+                                    | (name, addr) <- PH.functionEntries (PH.hints e)
+                                    , S.member addr invalidSet
+                                    ]
+               liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
+
+             let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfmUnhinted)
+             let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfmHinted)
+             let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
+             unless (S.null newAddrs) $ do
+               liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
+
+             return (oMainHinted, oPfmHinted)
 
 
 -- | Verify equality of the given binaries.
@@ -158,14 +164,13 @@ verifyPairs ::
   PA.ValidArch arch =>
   PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
-  Maybe PH.VerificationHints ->
-  PLE.LoadedELF arch ->
-  PLE.LoadedELF arch ->
+  PH.Hinted (PLE.LoadedELF arch) ->
+  PH.Hinted (PLE.LoadedELF arch) ->
   BlockMapping arch ->
   PC.VerificationConfig ->
   [PPa.BlockPair arch] ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction mhints elf elf' blockMap vcfg pPairs = do
+verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcfg pPairs = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
@@ -173,7 +178,7 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction mhints elf elf' block
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
 
-  (oMain, oPfm, pMain, pPfm) <- runDiscovery logAction mhints elf elf'
+  (oMain, oPfm, pMain, pPfm) <- runDiscovery logAction elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
@@ -205,14 +210,16 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction mhints elf elf' block
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
     oCtx = PMC.BinaryContext
-      { PMC.binary = PLE.loadedBinary elf
+      { PMC.binary = PLE.loadedBinary (PH.hinted elf)
       , PMC.parsedFunctionMap = oPfm
       , PMC.binEntry = oMain
+      , PMC.hints = PH.hints elf
       }
     rCtx = PMC.BinaryContext
-      { PMC.binary = PLE.loadedBinary elf'
+      { PMC.binary = PLE.loadedBinary (PH.hinted elf')
       , PMC.parsedFunctionMap = pPfm
       , PMC.binEntry = pMain
+      , PMC.hints = PH.hints elf'
       }
     ctxt = PMC.EquivalenceContext
       { PMC.handles = ha

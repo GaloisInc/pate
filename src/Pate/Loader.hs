@@ -60,15 +60,14 @@ unpackPatchData proxy (PC.PatchData pairs bmap) =
 runEquivVerification ::
   PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
-  Maybe PH.VerificationHints ->
   PC.PatchData ->
   PC.VerificationConfig ->
-  PLE.LoadedELF arch ->
-  PLE.LoadedELF arch ->
+  PH.Hinted (PLE.LoadedELF arch) ->
+  PH.Hinted (PLE.LoadedELF arch) ->
   IO PEq.EquivalenceStatus
-runEquivVerification validArch@(PA.SomeValidArch {}) logAction mhints pd dcfg original patched = do
+runEquivVerification validArch@(PA.SomeValidArch {}) logAction pd dcfg original patched = do
   let (bmap, ppairs) = unpackPatchData validArch pd
-  liftToEquivStatus $ PV.verifyPairs validArch logAction mhints original patched bmap dcfg ppairs
+  liftToEquivStatus $ PV.verifyPairs validArch logAction original patched bmap dcfg ppairs
 
 liftToEquivStatus ::
   Show e =>
@@ -109,7 +108,8 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
       }
   PA.SomeValidArch {} <- return $ PC.archProxy cfg
   bin <- CME.lift $ PLE.loadELF @arch Proxy $ path
-  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData' (PC.verificationCfg cfg) bin bin
+  let hintedBin = PH.Hinted (PC.origHints cfg) bin
+  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData' (PC.verificationCfg cfg) hintedBin hintedBin
 
 runEquivConfig :: forall arch.
   PC.RunConfig arch ->
@@ -123,4 +123,6 @@ runEquivConfig cfg = liftToEquivStatus $ do
   PA.SomeValidArch {} <- return $ PC.archProxy cfg
   original <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.origPath cfg)
   patched <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.patchedPath cfg)
-  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData (PC.verificationCfg cfg) original patched
+  let hintedOrig = PH.Hinted (PC.origHints cfg) original
+  let hintedPatched = PH.Hinted (PC.patchedHints cfg) patched
+  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData (PC.verificationCfg cfg) hintedOrig hintedPatched

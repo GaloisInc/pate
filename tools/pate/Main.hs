@@ -26,7 +26,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
 import qualified Data.List.NonEmpty as DLN
-import           Data.Maybe ( isNothing, maybeToList )
+import           Data.Maybe ( maybeToList )
 import qualified Data.Traversable as T
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
@@ -80,11 +80,14 @@ validateOptions = normalizeVerbosity
 parseHints
   :: LJ.LogAction IO (PE.Event arch)
   -> CLIOptions
-  -> IO (Maybe PH.VerificationHints)
-parseHints logAction opts
-  | noHints = return Nothing
-  | otherwise = do
-      anvills <- T.forM (anvillHints opts) $ \anvillFile -> do
+  -> IO (PH.VerificationHints, PH.VerificationHints)
+parseHints logAction opts = do
+  oHints <- parseOne (originalBinary opts) (originalAnvillHints opts) (originalProbabilisticHints opts) (originalCsvFunctionHints opts) (dwarfHints opts)
+  pHints <- parseOne (patchedBinary opts) (patchedAnvillHints opts) (patchedProbabilisticHints opts) (patchedCsvFunctionHints opts) (dwarfHints opts)
+  return (oHints, pHints)
+  where
+    parseOne binPath anvillDir mprobFile mcsvFile useDwarf = do
+      anvills <- T.forM anvillDir $ \anvillFile -> do
         bytes <- BSL.readFile anvillFile
         let (hints, errs) = PHJ.parseAnvillSpecHints bytes
         case errs of
@@ -92,7 +95,7 @@ parseHints logAction opts
           _ -> return ()
         return hints
 
-      probs <- T.forM (maybeToList (probabilisticHints opts)) $ \probFile -> do
+      probs <- T.forM (maybeToList mprobFile) $ \probFile -> do
         bytes <- BSL.readFile probFile
         let (hints, errs) = PHJ.parseProbabilisticHints bytes
         case errs of
@@ -100,7 +103,7 @@ parseHints logAction opts
           _ -> return ()
         return hints
 
-      csvs <- T.forM (maybeToList (csvFunctionHints opts)) $ \csvFile -> do
+      csvs <- T.forM (maybeToList mcsvFile) $ \csvFile -> do
         bytes <- BSL.readFile csvFile
         let (hints, errs) = PHC.parseFunctionHints bytes
         case errs of
@@ -108,7 +111,7 @@ parseHints logAction opts
           _ -> return ()
         return hints
 
-      let dwarfSource = if dwarfHints opts then [originalBinary opts] else []
+      let dwarfSource = if useDwarf then [binPath] else []
       dwarves <- T.forM dwarfSource $ \elfFile -> do
         bytes <- BSL.readFile elfFile
         let (hints, errs) = PHD.parseDWARFHints bytes
@@ -117,13 +120,7 @@ parseHints logAction opts
           _ -> return ()
         return hints
 
-      return (Just (mconcat (concat [anvills, probs, csvs, dwarves])))
-  where
-    noHints = and [ null (anvillHints opts)
-                  , isNothing (probabilisticHints opts)
-                  , isNothing (csvFunctionHints opts)
-                  , not (dwarfHints opts)
-                  ]
+      return (mconcat (concat [anvills, probs, csvs, dwarves]))
 
 main :: IO ()
 main = do
@@ -134,7 +131,7 @@ main = do
     Right (elfErrs, Some proxy) -> do
       chan <- CC.newChan
       (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan
-      mVerificationHints <- parseHints logger opts
+      (origHints, patchedHints) <- parseHints logger opts
       LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
       let
         infoPath = case blockInfo opts of
@@ -157,16 +154,23 @@ main = do
             , PC.patchedPath = patchedBinary opts
             , PC.logger = logger
             , PC.verificationCfg = verificationCfg
-            , PC.hints = mVerificationHints
+            , PC.origHints = origHints
+            , PC.patchedHints = patchedHints
             }
-      PL.runEquivConfig cfg >>= \case
-        PEq.Errored err -> SE.die (show err)
-        _ -> pure ()
+
+
+      status <- PL.runEquivConfig cfg
+
 
       -- Shut down the logger cleanly (if we can - the interactive logger will be
       -- persistent until the user kills it)
       CC.writeChan chan Nothing
       F.forM_ mConsumer CCA.wait
+
+      case status of
+        PEq.Errored err -> SE.die (show err)
+        _ -> pure ()
+
 
 data CLIOptions = CLIOptions
   { originalBinary :: FilePath
@@ -180,9 +184,12 @@ data CLIOptions = CLIOptions
   , solver :: PS.Solver
   , goalTimeout :: PTi.Timeout
   , heuristicTimeout :: PTi.Timeout
-  , anvillHints :: [FilePath]
-  , probabilisticHints :: Maybe FilePath
-  , csvFunctionHints :: Maybe FilePath
+  , originalAnvillHints :: [FilePath]
+  , patchedAnvillHints :: [FilePath]
+  , originalProbabilisticHints :: Maybe FilePath
+  , patchedProbabilisticHints :: Maybe FilePath
+  , originalCsvFunctionHints :: Maybe FilePath
+  , patchedCsvFunctionHints :: Maybe FilePath
   , dwarfHints :: Bool
   , verbosity :: PV.Verbosity
   } deriving (Eq, Ord, Show)
@@ -337,13 +344,13 @@ terminalFormatEvent evt =
     PE.HintErrorsCSV errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsDWARF errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
-    PE.FunctionEntryInvalidHints errs ->
+    PE.FunctionEntryInvalidHints _ errs ->
       layout ("Invalid function entry hints:" <> PP.line
                <> PP.vsep [ PP.pretty fn <> "@" <> ppHex addr
                           | (fn, addr) <- errs
                           ]
              <> PP.line)
-    PE.FunctionsDiscoveredFromHints extraAddrs ->
+    PE.FunctionsDiscoveredFromHints _ extraAddrs ->
       layout ("Additional functions discovered based on hits: " <> PP.line
              <> PP.vcat (map PP.viaShow extraAddrs) <> PP.line)
     PE.ProofTraceEvent _stack origAddr _patchedAddr msg _tm ->
@@ -488,15 +495,27 @@ cliOptions = OA.info (OA.helper <*> parser)
                                     <> OA.help "The timeout for verifying heuristic goals in seconds"
                                     )))
     <*> OA.many (OA.strOption
-        ( OA.long "anvill-hints"
+        ( OA.long "original-anvill-hints"
+        <> OA.help "Parse an Anvill specification for code discovery hints"
+        ))
+    <*> OA.many (OA.strOption
+        ( OA.long "patched-anvill-hints"
         <> OA.help "Parse an Anvill specification for code discovery hints"
         ))
     <*> OA.optional (OA.strOption
-        ( OA.long "probabilistic-hints"
+        ( OA.long "original-probabilistic-hints"
         <> OA.help "Parse a JSON file containing probabilistic function name/address hints"
         ))
     <*> OA.optional (OA.strOption
-        ( OA.long "csv-function-hints"
+        ( OA.long "patched-probabilistic-hints"
+        <> OA.help "Parse a JSON file containing probabilistic function name/address hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "original-csv-function-hints"
+         <> OA.help "Parse a CSV file containing function name/address hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "patched-csv-function-hints"
          <> OA.help "Parse a CSV file containing function name/address hints"
         ))
     <*> OA.switch ( OA.long "dwarf-hints"
