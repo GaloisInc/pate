@@ -80,8 +80,8 @@ summarize :: (MM.MemWidth (MC.ArchAddrWidth arch)) => PE.Event arch -> Metrics -
 summarize e m =
   case e of
     PE.AnalysisEnd _ dur -> m { duration = Just dur }
-    PE.FunctionsDiscoveredFromHints entryPoints -> m { usedDiscoveryHints = length entryPoints }
-    PE.FunctionEntryInvalidHints invalid -> m { invalidHints = length invalid }
+    PE.FunctionsDiscoveredFromHints _ entryPoints -> m { usedDiscoveryHints = length entryPoints }
+    PE.FunctionEntryInvalidHints _ invalid -> m { invalidHints = length invalid }
     PE.LoadedBinaries (origElf, origPFM) (patchedElf, patchedPFM) ->
       m { originalBinaryMetrics = Just (loadedBinaryMetrics origElf origPFM)
         , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedElf patchedPFM)

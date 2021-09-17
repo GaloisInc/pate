@@ -75,10 +75,10 @@ data Event arch where
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> Event arch
   -- | Function/block start hints that point to unmapped addresses
-  FunctionEntryInvalidHints :: [(T.Text, Word64)] -> Event arch
+  FunctionEntryInvalidHints :: PB.WhichBinaryRepr bin -> [(T.Text, Word64)] -> Event arch
   -- | A list of functions discovered from provided hints that macaw code
   -- discovery was not able to identify by itself
-  FunctionsDiscoveredFromHints :: [MC.ArchSegmentOff arch] -> Event arch
+  FunctionsDiscoveredFromHints :: PB.WhichBinaryRepr bin -> [MC.ArchSegmentOff arch] -> Event arch
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
   HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch

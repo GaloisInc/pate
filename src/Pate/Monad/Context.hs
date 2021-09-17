@@ -25,6 +25,7 @@ import qualified What4.Interface as W4
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Hints as PH
 import qualified Pate.PatchPair as PPa
 
 -- | Keys: basic block extent; values: parsed blocks
@@ -41,6 +42,7 @@ data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
+  , hints :: PH.VerificationHints
   }
 
 data EquivalenceContext sym arch where
