@@ -36,6 +36,7 @@ import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Terminal as PPRT
 import qualified System.Exit as SE
 import qualified System.IO as IO
+import qualified What4.Interface as WI
 
 import qualified Data.ElfEdit as DEE
 import qualified Data.Macaw.CFG as MC
@@ -355,6 +356,8 @@ terminalFormatEvent evt =
              <> PP.vcat (map PP.viaShow extraAddrs) <> PP.line)
     PE.ProofTraceEvent _stack origAddr _patchedAddr msg _tm ->
       layout (PP.pretty origAddr <> ": " <> PP.pretty msg)
+    PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
+      layout (PP.pretty origAddr <> ": " <> WI.printSymExpr expr)
     -- FIXME: handle other events
     _ -> layout ""
 
