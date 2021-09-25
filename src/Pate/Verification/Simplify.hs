@@ -13,14 +13,13 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
+import           Debug.Trace ( traceM )
 import           GHC.Stack ( HasCallStack )
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
-
-import qualified Lang.Crucible.CFG.Core as CC
+import qualified What4.SatResult as W4R
 
 import qualified Pate.Config as PC
-import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.ExprMappable as PEM
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
@@ -81,6 +80,22 @@ simplifyPred_deep p = withSym $ \sym -> do
   p_final <- WEH.simplifyConjuncts sym checkPred p4
   -- TODO: redundant sanity check that simplification hasn't clobbered anything
   validSimpl <- liftIO $ W4.isEq sym p p_final
-  isPredTrue' heuristicTimeout validSimpl >>= \case
-    True -> return p_final
-    False -> throwHere $ PEE.InconsistentSimplificationResult (CC.showF p) (CC.showF p_final)
+  goal <- liftIO $ W4.notPred sym validSimpl
+  r <- checkSatisfiableWithModel heuristicTimeout "SimplifierConsistent" goal $ \sr ->
+    case sr of
+      W4R.Unsat _ -> return p_final
+      W4R.Sat _ -> do
+        traceM "ERROR: simplifyPred_deep: simplifier broken"
+        traceM "Original:"
+        traceM (show (W4.printSymExpr p))
+        traceM "Simplified:"
+        traceM (show (W4.printSymExpr p_final))
+        return p
+      W4R.Unknown -> do
+        traceM ("WARNING: simplifyPred_deep: simplifier timeout")
+        return p
+  case r of
+    Left exn -> do
+      traceM ("ERROR: simplifyPred_deep: exception " ++ show exn)
+      return p
+    Right r' -> return r'
