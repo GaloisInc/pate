@@ -69,7 +69,8 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Pate.Address,
+  exposed-modules:     Pate.Abort,
+                       Pate.Address,
                        Pate.Arch,
                        Pate.Binary,
                        Pate.Block,

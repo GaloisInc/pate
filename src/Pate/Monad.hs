@@ -149,24 +149,26 @@ import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
 import           Pate.Types
 
-data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
+data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
+  , binAbortFn :: Maybe (MM.ArchSegmentOff arch)
+  -- ^ address of special-purposes "abort" function that represents an abnormal
+  -- program exit
   }
 
-data EquivalenceContext sym arch where
+data EquivalenceContext arch where
   EquivalenceContext ::
     { handles :: CFH.HandleAllocator
-    , originalCtx :: BinaryContext sym arch PBi.Original
-    , rewrittenCtx :: BinaryContext sym arch PBi.Patched
-    } -> EquivalenceContext sym arch
+    , binCtxs :: PPa.PatchPair (BinaryContext arch)
+    } -> EquivalenceContext arch
 
 data EquivEnv sym arch where
   EquivEnv ::
     { envWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
     , envValidArch :: PA.SomeValidArch arch
-    , envCtx :: EquivalenceContext sym arch
+    , envCtx :: EquivalenceContext arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envStackRegion :: W4.SymNat sym
@@ -331,15 +333,13 @@ withBinary f =
 getBinCtx ::
   forall bin sym arch.
   KnownRepr PBi.WhichBinaryRepr bin =>
-  EquivM sym arch (BinaryContext sym arch bin)
+  EquivM sym arch (BinaryContext arch bin)
 getBinCtx = getBinCtx' knownRepr
 
 getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
-  EquivM sym arch (BinaryContext sym arch bin)
-getBinCtx' repr = case repr of
-  PBi.OriginalRepr -> asks (originalCtx . envCtx)
-  PBi.PatchedRepr -> asks (rewrittenCtx . envCtx)
+  EquivM sym arch (BinaryContext arch bin)
+getBinCtx' repr = PPa.getPair' repr <$> asks (binCtxs . envCtx)
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->

@@ -37,7 +37,6 @@ import qualified Data.Foldable as F
 import qualified Data.IntervalMap as IM
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes, maybeToList )
-import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
@@ -63,6 +62,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
+import qualified Pate.Abort as PAb
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
@@ -115,7 +115,7 @@ runDiscovery
   -> Maybe PH.VerificationHints
   -> PLE.LoadedELF arch
   -> PLE.LoadedELF arch
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MM.ArchSegmentOff arch, ParsedFunctionMap arch, MM.ArchSegmentOff arch, ParsedFunctionMap arch)
+  -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (BinaryContext arch))
 runDiscovery logAction mhints elf elf' = do
   let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
   origDiscovery <- discoverAsync elf mempty
@@ -123,12 +123,12 @@ runDiscovery logAction mhints elf elf' = do
   patchedDiscovery <- case mhints of
     Just hints -> discoverAsync elf' hints
     Nothing -> discoverAsync elf' mempty
-  (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
-  (_, pMain, pPfm) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
-  (oMain, oPfm) <- case mHintedDiscovery of
-    Nothing -> return (oMainUnhinted, oPfmUnhinted)
+  (_, binCtxOUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
+  (_, binCtxP) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
+  binCtxO <- case mHintedDiscovery of
+    Nothing -> return binCtxOUnhinted
     Just hintedDiscovery -> do
-      (hintErrors, oMain, oPfm) <- CME.liftEither =<< liftIO (CCA.wait hintedDiscovery)
+      (hintErrors, binCtxO) <- CME.liftEither =<< liftIO (CCA.wait hintedDiscovery)
       unless (null hintErrors) $ do
         let invalidSet = S.fromList hintErrors
         let invalidEntries = [ (name, addr)
@@ -138,17 +138,16 @@ runDiscovery logAction mhints elf elf' = do
                              ]
         liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints invalidEntries)
 
-      let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfmUnhinted)
-      let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries oPfm)
+      let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxOUnhinted)
+      let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxO)
       let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
       unless (S.null newAddrs) $ do
         liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints (F.toList newAddrs))
 
-      return (oMain, oPfm)
+      return binCtxO
 
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, oPfm) (elf', pPfm))
-  return (oMain, oPfm, pMain, pPfm)
-
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, parsedFunctionMap binCtxO) (elf', parsedFunctionMap binCtxP))
+  return $ PPa.PatchPair binCtxO binCtxP
 
 -- | Verify equality of the given binaries.
 verifyPairs ::
@@ -171,7 +170,7 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
 
-  (oMain, oPfm, pMain, pPfm) <- runDiscovery logAction mhints elf elf'
+  contexts <- runDiscovery logAction mhints elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
@@ -202,21 +201,9 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
-    oCtx = BinaryContext
-      { binary = PLE.loadedBinary elf
-      , parsedFunctionMap = oPfm
-      , binEntry = oMain
-      }
-    rCtx = BinaryContext
-      { binary = PLE.loadedBinary elf'
-      , parsedFunctionMap = pPfm
-      , binEntry = pMain
-      }
     ctxt = EquivalenceContext
       { handles = ha
-      , originalCtx = oCtx
-      , rewrittenCtx = rCtx
-
+      , binCtxs = contexts
       }
     env = EquivEnv
       { envWhichBinary = Nothing
@@ -301,8 +288,8 @@ runVerificationLoop env pPairs = do
     doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
     doVerify = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
-        mainO <- CMR.asks $ binEntry . originalCtx . envCtx
-        mainP <- CMR.asks $ binEntry . rewrittenCtx . envCtx
+        mainO <- CMR.asks $ binEntry . PPa.pOriginal . binCtxs . envCtx
+        mainP <- CMR.asks $ binEntry . PPa.pPatched . binCtxs . envCtx
         blkO <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainO
         blkP <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainP
         let pPair = PPa.PatchPair blkO blkP
@@ -803,7 +790,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
               traceBundle bundle ("Solver exception: " ++ show exn)
               -- FIXME: Have a more detailed marker, possibly an explanation as to why it is unverified
               return $ PF.Unverified
-        let noCond = fmap (\ir -> (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))) status
+        let noCond = fmap (\ir -> (ir, PFI.emptyCondEqResult sym)) status
         status' <- case status of
           PF.VerificationFail _ -> do
             traceBundle bundle "The verification failed"
@@ -832,7 +819,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                           traceBundle bundle "proveLocalPostcondition->getInequivalenceResult"
                           ir <- PFG.getInequivalenceResult PEE.InvalidPostState preUnivDomain postDomain' blockSlice fn
                           traceBundle bundle "proveLocalPostcondition->getEquivalenceResult"
-                          cr <- PFG.getCondEquivalenceResult cond'' fn
+                          cr <- getCondEquivalenceResult bundle cond'' fn
                           traceBundle bundle ("conditionalEquivalenceResult: " ++ show (W4.printSymExpr (PFI.condEqPred cr)))
                           return $ PF.VerificationFail (ir, cr)
                         W4R.Unsat _ -> return $ noCond
@@ -848,6 +835,22 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
         return $ PF.ProofStatus status'
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
   return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
+
+-- | Summarize the conditional equivalence result, including any bindings it induces to
+-- state variables and how it relates to the abort condition on the original program
+getCondEquivalenceResult ::
+  forall sym arch.
+  SimBundle sym arch ->
+  -- | computed equivalence condition
+  W4.Pred sym ->
+  -- | the model representing the counterexample from the solver
+  SymGroundEvalFn sym ->
+  EquivM sym arch (PFI.CondEquivalenceResult sym arch)
+getCondEquivalenceResult bundle eqCond fn = do
+  binds <- PFG.getCondEquivalenceBindings eqCond fn
+  abortValid <- PAb.proveAbortValid bundle eqCond
+  return $ PFI.CondEquivalenceResult binds eqCond abortValid
+  
 
 computeEqConditionGas :: Int
 computeEqConditionGas = 20
@@ -1091,7 +1094,7 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
           ir <- PFG.getInequivalenceResult PEE.InvalidCallPair preDomain' noDomain blockSlice fn
           emit $ PE.BranchesIncomplete ir
           -- no conditional equivalence case
-          return $ PF.VerificationFail (ir, PFI.CondEquivalenceResult MapF.empty (W4.falsePred sym))
+          return $ PF.VerificationFail (ir, PFI.emptyCondEqResult sym)
         W4R.Unsat _ -> do
           emit PE.BranchesComplete
           return PF.VerificationSuccess

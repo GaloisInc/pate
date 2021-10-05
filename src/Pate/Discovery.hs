@@ -6,6 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- | This module defines an interface to drive macaw code discovery and identify
 -- corresponding blocks in an original and patched binary
 module Pate.Discovery (
@@ -34,6 +35,7 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import           Data.Word ( Word64 )
+import qualified Data.Text as T
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -367,13 +369,17 @@ markEntryPoint ::
   ParsedFunctionMap arch
 markEntryPoint segOff blocks = Map.singleton segOff (Some blocks) <$ getParsedBlockMap blocks
 
+-- | Special-purpose function name that is treated as abnormal program exit
+abortFnName :: T.Text
+abortFnName = "__pate_abort"
 
 runDiscovery ::
-  forall arch .
+  forall arch bin.
+  PB.KnownBinary bin =>
   PA.ValidArch arch =>
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), ParsedFunctionMap arch)
+  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], BinaryContext arch bin)
 runDiscovery elf hints = do
   let
     bin = PLE.loadedBinary elf
@@ -383,7 +389,10 @@ runDiscovery elf hints = do
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
   pfm <- goDiscoveryState $
     MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
-  return (invalidHints, head entries, pfm)
+  let abortFnAddr = do
+        abortFnWord <- lookup abortFnName (PH.functionEntries hints)
+        MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
+  return $ (invalidHints, BinaryContext bin pfm (head entries) abortFnAddr)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)
