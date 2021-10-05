@@ -76,6 +76,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
@@ -362,7 +363,7 @@ isStackCell ::
   PMC.MemCell sym arch w ->
   EquivM sym arch (W4.Pred sym)
 isStackCell cell = withSym $ \sym -> do
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let CLM.LLVMPointer region _ = PMC.cellPtr cell
   liftIO $ W4.natEq sym region stackRegion
 

@@ -68,4 +68,5 @@ COPY --from=0 /usr/local/bin/pate \
               /usr/local/bin/yices-smt2 \
               /usr/local/bin/
 EXPOSE 5000
+ENV ADDR=0.0.0.0
 ENTRYPOINT ["/usr/local/bin/pate"]

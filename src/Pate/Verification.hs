@@ -1,22 +1,23 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE FlexibleInstances #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -27,6 +28,7 @@ module Pate.Verification
 
 import qualified Control.Concurrent.Async as CCA
 import qualified Control.Concurrent.MVar as MVar
+import           Control.Lens ( (&), (.~) )
 import           Control.Monad ( void, unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -52,7 +54,6 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
 
-import qualified Data.Macaw.BinaryLoader.PPC as TOC (HasTOC(..))
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Backend.Simple as CB
@@ -63,6 +64,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
 import qualified Pate.Abort as PAb
+import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
@@ -77,6 +79,8 @@ import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
+import qualified Pate.Monad.Environment as PME
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -94,13 +98,16 @@ import qualified Pate.Verification.Validity as PVV
 import           What4.ExprHelpers
 
 -- | Return the list of entry points in the parsed function map
-parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
+parsedFunctionEntries :: PMC.ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
 parsedFunctionEntries = concatMap M.keys . IM.elems
 
--- | We run discovery in parallel, since we need to run it two or three times
+-- | Run code discovery using macaw
 --
--- Currently, we run discovery twice on the original binary: once without
--- hints and again if hints are available.
+-- We run discovery in parallel, since we need to run it two to four times.
+--
+-- If we have hints for a binary (original or patched), we run discovery twice:
+-- with and without hints. We then compare the two and report any discrepancies
+-- that indicate that the hints could be wrong.
 --
 -- We report any errors in the hints:
 --
@@ -112,42 +119,40 @@ parsedFunctionEntries = concatMap M.keys . IM.elems
 runDiscovery
   :: (PA.ValidArch arch)
   => LJ.LogAction IO (PE.Event arch)
-  -> Maybe PH.VerificationHints
-  -> PLE.LoadedELF arch
-  -> PLE.LoadedELF arch
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (BinaryContext arch))
-runDiscovery logAction mhints elf elf' = do
-  let discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
-  origDiscovery <- discoverAsync elf mempty
-  mHintedDiscovery <- DT.traverse (discoverAsync elf) mhints
-  patchedDiscovery <- case mhints of
-    Just hints -> discoverAsync elf' hints
-    Nothing -> discoverAsync elf' mempty
-  (_, binCtxOUnhinted) <- CME.liftEither =<< liftIO (CCA.wait origDiscovery)
-  (_, binCtxP) <- CME.liftEither =<< liftIO (CCA.wait patchedDiscovery)
-  binCtxO <- case mHintedDiscovery of
-    Nothing -> return binCtxOUnhinted
-    Just hintedDiscovery -> do
-      (hintErrors, binCtxO) <- CME.liftEither =<< liftIO (CCA.wait hintedDiscovery)
-      unless (null hintErrors) $ do
-        let invalidSet = S.fromList hintErrors
-        let invalidEntries = [ (name, addr)
-                             | hints <- maybeToList mhints
-                             , (name, addr) <- PH.functionEntries hints
-                             , S.member addr invalidSet
-                             ]
-        liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints invalidEntries)
-
-      let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxOUnhinted)
-      let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxO)
-      let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
-      unless (S.null newAddrs) $ do
-        liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints (F.toList newAddrs))
-
-      return binCtxO
-
+  -> PH.Hinted (PLE.LoadedELF arch)
+  -> PH.Hinted (PLE.LoadedELF arch)
+  -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
+runDiscovery logAction elf elf' = do
+  binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
+  binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, parsedFunctionMap binCtxO) (elf', parsedFunctionMap binCtxP))
   return $ PPa.PatchPair binCtxO binCtxP
+  where
+    discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
+    discoverCheckingHints repr e = do
+      unhintedAnalysis <- discoverAsync (PH.hinted e) mempty
+      if | PH.hints e == mempty -> do
+             (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             return oCtxUnhinted
+         | otherwise -> do
+             hintedAnalysis <- discoverAsync (PH.hinted e) (PH.hints e)
+             (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
+
+             unless (null hintErrors) $ do
+               let invalidSet = S.fromList hintErrors
+               let invalidEntries = [ (name, addr)
+                                    | (name, addr) <- PH.functionEntries (PH.hints e)
+                                    , S.member addr invalidSet
+                                    ]
+               liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
+
+             let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxOUnhinted)
+             let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxOHinted)
+             let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
+             unless (S.null newAddrs) $ do
+               liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
+             return oCtxHinted
 
 -- | Verify equality of the given binaries.
 verifyPairs ::
@@ -155,21 +160,19 @@ verifyPairs ::
   PA.ValidArch arch =>
   PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
-  Maybe PH.VerificationHints ->
-  PLE.LoadedELF arch ->
-  PLE.LoadedELF arch ->
+  PH.Hinted (PLE.LoadedELF arch) ->
+  PH.Hinted (PLE.LoadedELF arch) ->
   BlockMapping arch ->
   PC.VerificationConfig ->
   [PPa.BlockPair arch] ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
+verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcfg pPairs = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-
   contexts <- runDiscovery logAction mhints elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
@@ -201,9 +204,12 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
-    ctxt = EquivalenceContext
-      { handles = ha
-      , binCtxs = contexts
+    ctxt = PMC.EquivalenceContext
+      { PMC.handles = ha
+      , PMC.binCtxs = contexts
+      , PMC.stackRegion = stackRegion
+      , PMC.globalRegion = globalRegion
+      , PMC._currentFunc = error "No function under analysis at startup"
       }
     env = EquivEnv
       { envWhichBinary = Nothing
@@ -211,22 +217,17 @@ verifyPairs validArch logAction mhints elf elf' blockMap vcfg pPairs = do
       , envCtx = ctxt
       , envArchVals = vals
       , envExtensions = exts
-      , envStackRegion = stackRegion
-      , envGlobalRegion = globalRegion
       , envPCRegion = pcRegion
       , envMemTraceVar = model
       , envBlockEndVar = bvar
       , envBlockMapping = buildBlockMap pPairs blockMap
       , envLogger = logAction
       , envConfig = vcfg
-      , envBaseEquiv = stateEquivalence sym stackRegion
-      , envFailureMode = ThrowOnAnyFailure
+      , envBaseEquiv = stateEquivalence hdr sym stackRegion
+      , envFailureMode = PME.ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
       , envValidSym = PS.Sym symNonce sym adapter
       , envStartTime = startedAt
-      , envTocs = (TOC.getTOC $ PLE.loadedBinary elf, TOC.getTOC $ PLE.loadedBinary elf')
-      -- TODO: restructure EquivEnv to avoid this
-      , envCurrentFunc = error "no function under analysis"
       , envCurrentFrame = mempty
       , envNonceGenerator = gen
       , envParentNonce = Some topNonce
@@ -334,7 +335,7 @@ checkEquivalence ::
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
   eqRel <- CMR.asks envBaseEquiv
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   -- first try proving equivalence by assuming that exact equality
   -- is the only condition we are propagating backwards, so we
   -- don't do any work to try to intelligently narrow this down
@@ -438,7 +439,7 @@ withPair pPair f = do
   env <- CMR.ask
   let env' = env { envParentBlocks = pPair:envParentBlocks env }
   case PB.concreteBlockEntry $ PPa.pOriginal pPair of
-    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' { envCurrentFunc = pPair }) f
+    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
     _ -> CMR.local (\_ -> env') f
 
 provePostcondition ::
@@ -505,7 +506,7 @@ catchSimBundle pPair postcondSpec f = do
         simInO_ = SimInput stO (PPa.pOriginal pPair)
         simInP_ = SimInput stP (PPa.pPatched pPair)
       traceBlockPair pPair "Caught an error, so making a trivial block slice"
-      PA.SomeValidArch _ externalDomain <- CMR.asks envValidArch
+      PA.SomeValidArch _ externalDomain _ <- CMR.asks envValidArch
       r <- trivialBlockSlice False externalDomain (PPa.PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
@@ -613,7 +614,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                 -- this can be relaxed with more information about the specific call
                 True -> do
                   traceBundle bundle ("  Making a trivial block slice because this is a system call")
-                  PA.SomeValidArch syscallDomain _ <- CMR.asks envValidArch
+                  PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
                   trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
                 False -> do
                   traceBundle bundle "  Not a syscall, emitting preamble pair"
@@ -749,7 +750,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
        
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
   notChecks <- liftIO $ W4.notPred sym postcondPred

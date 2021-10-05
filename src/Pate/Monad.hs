@@ -23,9 +23,6 @@ module Pate.Monad
   , EquivM
   , EquivM_
   , runEquivM
-  , EquivalenceContext(..)
-  , BinaryContext(..)
-  , VerificationFailureMode(..)
   , SimBundle(..)
   , withBinary
   , withValid
@@ -85,22 +82,17 @@ import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
-import qualified Control.Concurrent.MVar as MVar
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import           Control.Monad.Reader
 import           Control.Monad.Except
 
-import qualified Data.ElfEdit as E
-import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Typeable
-
-import qualified Data.Macaw.BinaryLoader.PPC.TOC as TOC
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
@@ -110,11 +102,8 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.FunctionHandle as CFH
-import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
@@ -133,12 +122,12 @@ import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Binary as PBi
 import qualified Pate.Config as PC
-import           Pate.Equivalence
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Monad.Context as PMC
+import           Pate.Monad.Environment as PME
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -153,16 +142,7 @@ data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
-  , binAbortFn :: Maybe (MM.ArchSegmentOff arch)
-  -- ^ address of special-purposes "abort" function that represents an abnormal
-  -- program exit
   }
-
-data EquivalenceContext arch where
-  EquivalenceContext ::
-    { handles :: CFH.HandleAllocator
-    , binCtxs :: PPa.PatchPair (BinaryContext arch)
-    } -> EquivalenceContext arch
 
 data EquivEnv sym arch where
   EquivEnv ::
@@ -268,9 +248,6 @@ withProofNonce f = withValid $do
   let proofNonce = PF.ProofNonce nonce
   local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
 
-data VerificationFailureMode =
-    ThrowOnAnyFailure
-  | ContinueAfterFailure
 
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'
@@ -333,7 +310,7 @@ withBinary f =
 getBinCtx ::
   forall bin sym arch.
   KnownRepr PBi.WhichBinaryRepr bin =>
-  EquivM sym arch (BinaryContext arch bin)
+  EquivM sym arch (PMC.BinaryContext arch bin)
 getBinCtx = getBinCtx' knownRepr
 
 getBinCtx' ::

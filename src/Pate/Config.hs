@@ -87,5 +87,6 @@ data RunConfig arch =
     , patchedPath :: FilePath
     , logger :: LJ.LogAction IO (PE.Event arch)
     , verificationCfg :: VerificationConfig
-    , hints :: Maybe PH.VerificationHints
+    , origHints :: PH.VerificationHints
+    , patchedHints :: PH.VerificationHints
     }

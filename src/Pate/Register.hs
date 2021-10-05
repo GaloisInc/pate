@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -15,7 +16,6 @@ import           Control.Monad ( join )
 import           Data.Functor.Const ( Const(..) )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
-import           Data.Proxy ( Proxy(..) )
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -31,36 +31,32 @@ data RegisterCase arch tp where
   RegIP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | stack pointer
   RegSP :: RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
-  -- | table of contents register (if defined)
-  RegTOC :: PA.HasTOCReg arch => RegisterCase arch (CLM.LLVMPointerType (MM.ArchAddrWidth arch))
   -- | non-specific bitvector (zero-region pointer) register
   RegBV :: RegisterCase arch (CLM.LLVMPointerType w)
   -- | non-specific pointer register
   RegGPtr :: RegisterCase arch (CLM.LLVMPointerType w)
-  -- | non-specific non-pointer reguster
+  -- | non-specific non-pointer register
   RegElse :: RegisterCase arch tp
+  -- | A dedicated register whose value is determined by the ABI (see
+  -- 'PA.DedicatedRegister' for details)
+  RegDedicated :: PA.DedicatedRegister arch tp -> RegisterCase arch tp
 
 registerCase ::
   forall arch tp.
   PA.ValidArch arch =>
+  PA.HasDedicatedRegister arch ->
   CC.TypeRepr (MS.ToCrucibleType tp) ->
   MM.ArchReg arch tp ->
   RegisterCase arch (MS.ToCrucibleType tp)
-registerCase repr r = case PC.testEquality r (MM.ip_reg @(MM.ArchReg arch)) of
-  Just PC.Refl -> RegIP
-  _ -> case PC.testEquality r (MM.sp_reg @(MM.ArchReg arch)) of
-    Just PC.Refl -> RegSP
-    _ -> PA.withTOCCases (Proxy @arch) nontoc $
-      case PC.testEquality r (PA.toc_reg @arch) of
-        Just PC.Refl -> RegTOC
-        _ -> nontoc
-  where
-    nontoc :: RegisterCase arch (MS.ToCrucibleType tp)
-    nontoc = case repr of
-      CLM.LLVMPointerRepr{} -> case PA.rawBVReg r of
-        True -> RegBV
-        False -> RegGPtr
-      _ -> RegElse
+registerCase hdr repr r =
+  if | Just PC.Refl <- PC.testEquality r (MM.ip_reg @(MM.ArchReg arch)) -> RegIP
+     | Just PC.Refl <- PC.testEquality r (MM.sp_reg @(MM.ArchReg arch)) -> RegSP
+     | Just dr <- PA.asDedicatedRegister hdr r -> RegDedicated dr
+     | CLM.LLVMPointerRepr {} <- repr ->
+       case PA.rawBVReg r of
+         True -> RegBV
+         False -> RegGPtr
+     | otherwise -> RegElse
 
 zipRegStatesPar :: PP.IsFuture m future
                 => MM.RegisterInfo r
