@@ -85,6 +85,10 @@ traceFormatEvent evt =
       PP.pretty origAddr <> PP.pretty ": " <> PP.pretty msg <> PP.line
     PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
       PP.pretty origAddr <> PP.pretty ": " <> WI.printSymExpr expr
+    PE.AnalysisEnd {} -> PP.pretty "Analysis ended"
+    PE.AnalysisStart {} -> PP.pretty "Analysis starting"
+    PE.ErrorRaised err -> PP.pretty "Error raised: " <> PP.viaShow err
+    PE.Warning _ warn -> PP.pretty ":Warning raised: " <> PP.viaShow warn
     _ -> mempty
 
 consumeEvents
