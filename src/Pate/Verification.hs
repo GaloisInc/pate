@@ -38,7 +38,7 @@ import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
 import qualified Data.IntervalMap as IM
 import qualified Data.Map as M
-import           Data.Maybe ( catMaybes, maybeToList )
+import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
@@ -125,7 +125,7 @@ runDiscovery
 runDiscovery logAction elf elf' = do
   binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
   binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (elf, parsedFunctionMap binCtxO) (elf', parsedFunctionMap binCtxP))
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', PMC.parsedFunctionMap binCtxP))
   return $ PPa.PatchPair binCtxO binCtxP
   where
     discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
@@ -147,8 +147,8 @@ runDiscovery logAction elf elf' = do
                                     ]
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
 
-             let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxOUnhinted)
-             let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . parsedFunctionMap $ binCtxOHinted)
+             let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . PMC.parsedFunctionMap $ oCtxUnhinted)
+             let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . PMC.parsedFunctionMap $ oCtxHinted)
              let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
              unless (S.null newAddrs) $ do
                liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
@@ -173,7 +173,7 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcf
     Nothing -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  contexts <- runDiscovery logAction mhints elf elf'
+  contexts <- runDiscovery logAction elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
@@ -289,8 +289,8 @@ runVerificationLoop env pPairs = do
     doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
     doVerify = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
-        mainO <- CMR.asks $ binEntry . PPa.pOriginal . binCtxs . envCtx
-        mainP <- CMR.asks $ binEntry . PPa.pPatched . binCtxs . envCtx
+        mainO <- CMR.asks $ PMC.binEntry . PPa.pOriginal . PMC.binCtxs . envCtx
+        mainP <- CMR.asks $ PMC.binEntry . PPa.pPatched . PMC.binCtxs . envCtx
         blkO <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainO
         blkP <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainP
         let pPair = PPa.PatchPair blkO blkP

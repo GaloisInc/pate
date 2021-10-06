@@ -136,68 +136,6 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
-import           Pate.Types
-
-data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
-  { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , parsedFunctionMap :: ParsedFunctionMap arch
-  , binEntry :: MM.ArchSegmentOff arch
-  }
-
-data EquivEnv sym arch where
-  EquivEnv ::
-    { envWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
-    , envValidArch :: PA.SomeValidArch arch
-    , envCtx :: EquivalenceContext arch
-    , envArchVals :: MS.GenArchVals MT.MemTraceK arch
-    , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
-    , envStackRegion :: W4.SymNat sym
-    , envGlobalRegion :: W4.SymNat sym
-    , envPCRegion :: W4.SymNat sym
-    , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
-    , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
-    , envBlockMapping :: BlockMapping arch
-    , envLogger :: LJ.LogAction IO (PE.Event arch)
-    , envConfig :: PC.VerificationConfig
-    , envFailureMode :: VerificationFailureMode
-    , envBaseEquiv :: EquivRelation sym arch
-    , envGoalTriples :: [PF.EquivTriple sym arch]
-    -- ^ input equivalence problems to solve
-    , envValidSym :: PSo.Sym sym
-    -- ^ expression builder, wrapped with a validity proof
-    , envStartTime :: TM.UTCTime
-    -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
-    , envTocs :: PA.HasTOCReg arch => (TOC.TOC (MM.ArchAddrWidth arch), TOC.TOC (MM.ArchAddrWidth arch))
-    -- ^ table of contents for the original and patched binaries, if defined by the
-    -- architecture
-    , envCurrentFunc :: PPa.BlockPair arch
-    -- ^ start of the function currently under analysis
-    , envCurrentFrame :: AssumptionFrame sym
-    -- ^ the current assumption frame, accumulated as assumptions are added
-    , envNonceGenerator :: N.NonceGenerator IO (PF.ProofScope (PFI.ProofSym sym arch))
-    , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
-    -- ^ nonce of the parent proof node currently in scope
-    , envUndefPointerOps :: MT.UndefinedPtrOps sym
-    , envParentBlocks :: [PPa.BlockPair arch]
-    -- ^ all block pairs on this path from the toplevel
-    , envProofCache :: ProofCache sym arch
-    -- ^ cache for intermediate proof results
-    , envExitPairsCache :: ExitPairCache arch
-    -- ^ cache for intermediate proof results
-    , envStatistics :: MVar.MVar PES.EquivalenceStatistics
-    -- ^ Statistics collected during verification
-    } -> EquivEnv sym arch
-
-type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
-
-type ExitPairCache arch = BlockCache arch [PPa.PatchPair (BlockTarget arch)]
-
-data BlockCache arch a where
-  BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a
-
-freshBlockCache ::
-  IO (BlockCache arch a)
-freshBlockCache = BlockCache <$> IO.newMVar M.empty
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -315,8 +253,8 @@ getBinCtx = getBinCtx' knownRepr
 
 getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
-  EquivM sym arch (BinaryContext arch bin)
-getBinCtx' repr = PPa.getPair' repr <$> asks (binCtxs . envCtx)
+  EquivM sym arch (PMC.BinaryContext arch bin)
+getBinCtx' repr = PPa.getPair' repr <$> asks (PMC.binCtxs . envCtx)
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->

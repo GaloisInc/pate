@@ -26,6 +26,7 @@ import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
 import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimulatorRegisters as PSR
@@ -40,7 +41,7 @@ isAbortedStatePred ::
   PB.KnownBinary bin =>
   PSS.SimOutput sym arch bin ->
   EquivM sym arch (WI.Pred sym)
-isAbortedStatePred stOut = (binAbortFn <$> getBinCtx @bin) >>= \case
+isAbortedStatePred stOut = (PMC.binAbortFn <$> getBinCtx @bin) >>= \case
   Just abortFn -> withSym $ \sym -> do
     abortBlk <- PD.mkConcreteBlock @bin PB.BlockEntryInitFunction abortFn
     abortPtr <- PD.concreteToLLVM abortBlk

@@ -89,10 +89,10 @@ getCurrentTOC
   -> PB.WhichBinaryRepr bin
   -> IO (W.W 64)
 getCurrentTOC ctx binRepr = do
-  PPa.PatchPair (PE.Blocks _ (pblkO:_)) (PE.Blocks _ (pblkP:_)) <- PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
-  let (toc, addr) = case binRepr of
-        PB.OriginalRepr -> (TOC.getTOC (PMC.binary (PMC.originalCtx ctx)), MD.pblockAddr pblkO)
-        PB.PatchedRepr -> (TOC.getTOC (PMC.binary (PMC.rewrittenCtx ctx)), MD.pblockAddr pblkP)
+  PE.Blocks _ (pblk:_) <- PPa.getPair' binRepr <$> PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+  let
+    toc = TOC.getTOC (PMC.binary $ PPa.getPair' binRepr (PMC.binCtxs ctx))
+    addr = MD.pblockAddr pblk
   case TOC.lookupTOC toc addr of
     Just w -> return w
     Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addr)

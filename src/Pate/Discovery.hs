@@ -17,6 +17,7 @@ module Pate.Discovery (
   lookupBlocks,
   getBlocks,
   getBlocks',
+  lookupBlocks',
   matchesBlockTarget,
   concreteToLLVM
   ) where
@@ -397,7 +398,7 @@ runDiscovery elf hints = do
   let abortFnAddr = do
         abortFnWord <- lookup abortFnName (PH.functionEntries hints)
         MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
-  return $ (invalidHints, BinaryContext bin pfm (head entries) abortFnAddr)
+  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints abortFnAddr)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)
@@ -425,7 +426,7 @@ getBlocks'
   -> PPa.BlockPair arch
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
-  case (lookupBlocks' (PMC.originalCtx ctx) blkO, lookupBlocks' (PMC.rewrittenCtx ctx) blkP) of
+  case (lookupBlocks' ctxO blkO, lookupBlocks' ctxP blkP) of
     (Right (Some (DFC.Compose opbs)), Right (Some (DFC.Compose ppbs))) -> do
       let oBlocks = PE.Blocks blkO opbs
       let pBlocks = PE.Blocks blkP ppbs
@@ -433,6 +434,9 @@ getBlocks' ctx pPair = do
     (Left err, _) -> CMC.throwM err
     (_, Left err) -> CMC.throwM err
   where
+    binCtxs = PMC.binCtxs ctx
+    ctxO = PPa.pOriginal binCtxs
+    ctxP = PPa.pPatched binCtxs
     blkO = PPa.pOriginal pPair
     blkP = PPa.pPatched pPair
 
@@ -452,7 +456,7 @@ getBlocks pPair = do
 
 lookupBlocks'
   :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack)
-  => PMC.BinaryContext sym arch bin
+  => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
   -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks' binCtx b = do
