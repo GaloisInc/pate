@@ -123,7 +123,7 @@ discoverPairs bundle = do
                     emit PE.InconclusiveTarget
                     throwHere PEE.InconclusiveSAT
               case er of
-                Left err -> do
+                Left _err -> do
                   emit PE.InconclusiveTarget
                   throwHere PEE.InconclusiveSAT
                 Right r -> return r
@@ -378,7 +378,7 @@ runDiscovery ::
   PA.ValidArch arch =>
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), PMC.ParsedFunctionMap arch)
+  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), MD.DiscoveryState arch, PMC.ParsedFunctionMap arch)
 runDiscovery elf hints = do
   let
     bin = PLE.loadedBinary elf
@@ -386,9 +386,9 @@ runDiscovery elf hints = do
   entries <- F.toList <$> MBL.entryPoints bin
   let mem = MBL.memoryImage bin
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
-  pfm <- goDiscoveryState $
-    MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
-  return (invalidHints, head entries, pfm)
+  let discoveryState = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
+  pfm <- goDiscoveryState discoveryState
+  return (invalidHints, head entries, discoveryState, pfm)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)

@@ -73,7 +73,8 @@ data Event arch where
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
-  LoadedBinaries :: (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> Event arch
+  LoadedBinaries :: (PLE.LoadedELF arch, MD.DiscoveryState arch, PMC.ParsedFunctionMap arch) ->
+                    (PLE.LoadedELF arch, MD.DiscoveryState arch, PMC.ParsedFunctionMap arch) -> Event arch
   -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: PB.WhichBinaryRepr bin -> [(T.Text, Word64)] -> Event arch
   -- | A list of functions discovered from provided hints that macaw code

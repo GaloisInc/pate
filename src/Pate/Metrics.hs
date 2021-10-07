@@ -82,7 +82,7 @@ summarize e m =
     PE.AnalysisEnd _ dur -> m { duration = Just dur }
     PE.FunctionsDiscoveredFromHints _ entryPoints -> m { usedDiscoveryHints = length entryPoints }
     PE.FunctionEntryInvalidHints _ invalid -> m { invalidHints = length invalid }
-    PE.LoadedBinaries (origElf, origPFM) (patchedElf, patchedPFM) ->
+    PE.LoadedBinaries (origElf, _, origPFM) (patchedElf, _, patchedPFM) ->
       m { originalBinaryMetrics = Just (loadedBinaryMetrics origElf origPFM)
         , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedElf patchedPFM)
         }

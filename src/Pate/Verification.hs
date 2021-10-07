@@ -121,25 +121,26 @@ runDiscovery
   => LJ.LogAction IO (PE.Event arch)
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PH.Hinted (PLE.LoadedELF arch)
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch, MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch)
+  -> CME.ExceptT (PEE.EquivalenceError arch) IO
+      (MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch, MM.ArchSegmentOff arch, PMC.ParsedFunctionMap arch)
 runDiscovery logAction elf elf' = do
-  (oMain, oPfm) <- discoverCheckingHints PBi.OriginalRepr elf
-  (pMain, pPfm) <- discoverCheckingHints PBi.PatchedRepr elf'
+  (oMain, oDiscState, oPfm) <- discoverCheckingHints PBi.OriginalRepr elf
+  (pMain, pDiscState, pPfm) <- discoverCheckingHints PBi.PatchedRepr elf'
 
 
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, oPfm) (PH.hinted elf', pPfm))
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, oDiscState, oPfm) (PH.hinted elf', pDiscState, pPfm))
   return (oMain, oPfm, pMain, pPfm)
   where
     discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
     discoverCheckingHints repr e = do
       unhintedAnalysis <- discoverAsync (PH.hinted e) mempty
       if | PH.hints e == mempty -> do
-             (_, oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
-             return (oMainUnhinted, oPfmUnhinted)
+             (_, oMainUnhinted, oDiscState, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             return (oMainUnhinted, oDiscState, oPfmUnhinted)
          | otherwise -> do
              hintedAnalysis <- discoverAsync (PH.hinted e) (PH.hints e)
-             (_, _oMainUnhinted, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
-             (hintErrors, oMainHinted, oPfmHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
+             (_, _oMainUnhinted, _, oPfmUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             (hintErrors, oMainHinted, oDiscState, oPfmHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
              unless (null hintErrors) $ do
                let invalidSet = S.fromList hintErrors
@@ -155,7 +156,7 @@ runDiscovery logAction elf elf' = do
              unless (S.null newAddrs) $ do
                liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
 
-             return (oMainHinted, oPfmHinted)
+             return (oMainHinted, oDiscState, oPfmHinted)
 
 
 -- | Verify equality of the given binaries.
