@@ -13,6 +13,7 @@ module Pate.Monad.Context (
 
 import qualified Control.Lens as L
 import           Data.IntervalMap (IntervalMap)
+import           Data.IntervalMap.Inteval (Interval, subsumes)
 import qualified Data.Map as Map
 import           Data.Parameterized.Some ( Some(..) )
 
@@ -56,3 +57,15 @@ data EquivalenceContext sym arch where
     } -> EquivalenceContext sym arch
 
 $(L.makeLenses ''EquivalenceContext)
+
+
+
+innermostInterval :: Ord a => [(Interval a,b)] -> Maybe (Interval a, b)
+innermostInterval [] = Nothing
+innermostInterval ((i0,x0):is0) = loop i0 x0 is0
+ where
+   loop i x [] = Just (i,x)
+   loop i x ((j,y):is)
+     | IM.subsumes i j = loop j y is
+     | IM.subsumes j i = loop i x is
+     | otherwise       = Nothing -- No interval is completely contained in another
