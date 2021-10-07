@@ -818,7 +818,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
               notGoal <- applyCurrentFrame notChecks
               goal <- applyCurrentFrame postcondPred
 
-              traceBundle bundle "Checking goal satisfiability"
+              traceBundle bundle ("Checking goal satisfiability\n" ++ show (W4.printSymExpr asm))
               withAssumption_ (return asm) $ do
                 isPredSat goalTimeout goal >>= \case
                   True -> do
