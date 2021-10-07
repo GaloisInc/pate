@@ -132,7 +132,7 @@ discoverPairs bundle = do
                     emit PE.InconclusiveTarget
                     throwHere PEE.InconclusiveSAT
               case er of
-                Left err -> do
+                Left _err -> do
                   emit PE.InconclusiveTarget
                   throwHere PEE.InconclusiveSAT
                 Right r -> return r
@@ -394,13 +394,12 @@ runDiscovery ::
   PB.WhichBinaryRepr bin ->
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
+  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin, MD.DiscoveryState arch)
 runDiscovery mCFGDir repr elf hints = do
   let archInfo = PLE.archInfo elf
   entries <- F.toList <$> MBL.entryPoints bin
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
-  let ds = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
-  pfm <- goDiscoveryState ds
+  let discoveryState = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
 
   -- If the user wants to persist macaw CFGs, do so here
   --
@@ -408,16 +407,17 @@ runDiscovery mCFGDir repr elf hints = do
   liftIO $ F.forM_ mCFGDir $ \cfgDir -> do
     let baseDir = cfgDir </> show repr
     SD.createDirectoryIfMissing True baseDir
-    F.forM_ (ds ^. MD.funInfo) $ \(Some dfi) -> do
+    F.forM_ (discoveryState ^. MD.funInfo) $ \(Some dfi) -> do
       let fname = baseDir </> show (MD.discoveredFunAddr dfi) <.> "cfg"
       IO.withFile fname IO.WriteMode $ \hdl -> do
         PPT.hPutDoc hdl (PP.pretty dfi)
 
+  pfm <- goDiscoveryState discoveryState
   let abortFnAddr = do
         abortFnWord <- PH.functionAddress <$> lookup abortFnName (PH.functionEntries hints)
         MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
-  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints idx abortFnAddr)
+  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints idx abortFnAddr, discoveryState)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)

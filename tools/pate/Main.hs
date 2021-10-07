@@ -40,6 +40,7 @@ import qualified What4.Interface as WI
 
 import qualified Data.ElfEdit as DEE
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.Discovery as MD
 import           Data.Parameterized.Some ( Some(..) )
 
 import qualified Pate.Arch as PA
@@ -310,7 +311,13 @@ ppHex i = PP.pretty (showHex i "")
 terminalFormatEvent :: (MC.MemWidth (MC.ArchAddrWidth arch)) => PE.Event arch -> PP.SimpleDocStream PPRT.AnsiStyle
 terminalFormatEvent evt =
   case evt of
-    PE.LoadedBinaries {} -> layoutLn "Loaded original and patched binaries"
+    PE.LoadedBinaries (_,oDiscState,_) (_,_pDiscState,_) ->
+      layoutLn $ mconcat
+        [ "Loaded original and patched binaries"
+        , " -- Original discovery state --"
+        , MD.ppDiscoveryStateBlocks oDiscState
+        ]
+      --layoutLn "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       let msg = "Warnings during ELF loading:"
       in layout $ PP.vsep (msg : [ "  " <> PP.viaShow err | err <- pes ]) <> PP.line

@@ -125,21 +125,21 @@ runDiscovery
   -> PH.Hinted (PLE.LoadedELF arch)
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
 runDiscovery logAction mCFGDir elf elf' = do
-  binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
-  binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', PMC.parsedFunctionMap binCtxP))
+  (binCtxO, oDiscState) <- discoverCheckingHints PBi.OriginalRepr elf
+  (binCtxP, pDiscState) <- discoverCheckingHints PBi.PatchedRepr elf'
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, oDiscState, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', pDiscState, PMC.parsedFunctionMap binCtxP))
   return $ PPa.PatchPair binCtxO binCtxP
   where
     discoverAsync repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mCFGDir repr e h)))
     discoverCheckingHints repr e = do
       unhintedAnalysis <- discoverAsync repr (PH.hinted e) mempty
       if | PH.hints e == mempty -> do
-             (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
-             return oCtxUnhinted
+             (_, oCtxUnhinted, oDiscState) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             return (oCtxUnhinted, oDiscState)
          | otherwise -> do
              hintedAnalysis <- discoverAsync repr (PH.hinted e) (PH.hints e)
-             (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
-             (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
+             (_, oCtxUnhinted, _) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             (hintErrors, oCtxHinted, oDiscState) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
              unless (null hintErrors) $ do
                let invalidSet = S.fromList hintErrors
@@ -155,7 +155,7 @@ runDiscovery logAction mCFGDir elf elf' = do
              let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
              unless (S.null newAddrs) $ do
                liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
-             return oCtxHinted
+             return (oCtxHinted, oDiscState)
 
 -- | Verify equality of the given binaries.
 verifyPairs ::

@@ -108,7 +108,7 @@ consumeEvents chan r0 verb mTraceHandle = do
         Just hdl -> PPRT.hPutDoc hdl (traceFormatEvent evt)
 
       case evt of
-        PE.LoadedBinaries (oelf, omap) (pelf, pmap) -> do
+        PE.LoadedBinaries (oelf, _, omap) (pelf, _, pmap) -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just (oelf, omap)
                                                           & patchedBinary .~ Just (pelf, pmap), ())
         PE.ElfLoaderWarnings {} ->
