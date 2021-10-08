@@ -7,13 +7,10 @@ module Pate.Metrics (
   , summarize
   ) where
 
-import qualified Data.IntervalMap as IM
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Memory.Permissions as MMP
-import qualified Data.Map.Strict as Map
-import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Time as TM
 
 import qualified Pate.Event as PE
@@ -57,8 +54,8 @@ loadedBinaryMetrics
   -> BinaryMetrics
 loadedBinaryMetrics le pfm =
   BinaryMetrics { executableBytes = byteCount
-                , numFunctions = length (IM.keys pfm)
-                , numBlocks = blockCount
+                , numFunctions = PMC.numParsedFunctions pfm
+                , numBlocks = PMC.numParsedBlocks pfm
                 }
   where
     isExec = MMP.isExecutable . MM.segmentFlags
@@ -67,12 +64,6 @@ loadedBinaryMetrics le pfm =
     byteCount = sum [ if isExec seg then fromIntegral (MM.segmentSize seg) else 0
                     | seg <- segs
                     ]
-
-    blockCount = sum [ length (IM.elems pbm)
-                     | bmap <- IM.elems pfm
-                     , Some (PMC.ParsedBlockMap pbm) <- Map.elems bmap
-                     ]
-
 
 
 -- | Summarize a single verifier event into the currently accumulated metrics
