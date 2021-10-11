@@ -1498,7 +1498,7 @@ validConcreteReads stOut = withSym $ \sym -> do
     readConcrete ::
       MT.MemOp sym (MM.ArchAddrWidth arch) ->
       EquivM sym arch (AssumptionFrame sym)
-    readConcrete (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz val end) = do
+    readConcrete (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz val end _valid) = do
       case (W4.asNat reg, W4.asBV off, dir) of
         (Just 0, Just off', MT.Read) -> do
           let

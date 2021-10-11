@@ -249,7 +249,7 @@ groundMemTrace fn = go where
   go :: MT.MemTraceSeq sym (MM.ArchAddrWidth arch) -> EquivM sym arch (PFI.GroundMemTrace arch)
   go ops = fold <$> traverse groundMemOp ops
 
-  groundMemOp (MT.MemOp addr dir cond sz val endianness) = do
+  groundMemOp (MT.MemOp addr dir cond sz val endianness _valid) = do
     happened <- groundCondition cond
     if not happened then pure Seq.empty else do
       gaddr <- groundLLVMPointer fn addr

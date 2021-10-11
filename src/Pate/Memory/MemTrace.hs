@@ -529,6 +529,10 @@ data MemOp sym ptrW where
     -- The value read or written during the operation
     LLVMPtr sym (8*w) ->
     Endianness ->
+    -- Under which conditions does the memory model have the right behavior?
+    -- (The slow memory model always puts truePred here, while the optimistic
+    -- memory model records side conditions here.)
+    Pred sym ->
     MemOp sym ptrW
   MergeOps ::
     Pred sym ->
@@ -548,13 +552,14 @@ instance OrdF (SymExpr sym) => Ord (MemOpCondition sym) where
   compare _ Unconditional = LT
 
 instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
-  MemOp (LLVMPointer addrR addrO) dir cond repr (LLVMPointer valR valO) end
-    == MemOp (LLVMPointer addrR' addrO') dir' cond' repr' (LLVMPointer valR' valO') end'
+  MemOp (LLVMPointer addrR addrO) dir cond repr (LLVMPointer valR valO) end valid
+    == MemOp (LLVMPointer addrR' addrO') dir' cond' repr' (LLVMPointer valR' valO') end' valid'
      | Just Refl <- testEquality repr repr'
      , addrR == addrR'
      , Just Refl <- testEquality addrO addrO'
      , valR == valR'
      , Just Refl <- testEquality valO valO'
+     , Just Refl <- testEquality valid valid'
     = cond == cond' && dir == dir' && end == end'
   MergeOps p opsT opsF == MergeOps p' opsT' opsF'
     | Just Refl <- testEquality p p'
@@ -971,9 +976,9 @@ doReadMem ::
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doReadMem sym undef ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
-  val <- liftIO $ readMemArr sym undef mem ptr memRepr
-  doMemOpInternal sym Read Unconditional undef ptrW ptr val memRepr
-  pure val
+  memBytes <- liftIO $ readMemArrOptimistic sym undef (memArr mem) ptr memRepr
+  doMemOpInternal sym Read Unconditional undef ptrW memBytes
+  pure (memReprBytesVal memBytes)
 
 doCondReadMem ::
   IsSymInterface sym =>
@@ -987,9 +992,9 @@ doCondReadMem ::
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doCondReadMem sym undef cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
-  val <- liftIO $ readMemArr sym undef mem ptr memRepr
-  doMemOpInternal sym Read (Conditional cond) undef ptrW ptr val memRepr
-  liftIO $ iteDeep sym cond val def memRepr
+  memBytes <- liftIO $ readMemArrOptimistic sym undef (memArr mem) ptr memRepr
+  doMemOpInternal sym Read (Conditional cond) undef ptrW memBytes
+  liftIO $ iteDeep sym cond memBytes def
 
 doWriteMem ::
   IsSymInterface sym =>
@@ -1001,7 +1006,7 @@ doWriteMem ::
   RegValue sym (MS.ToCrucibleType ty) ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
-doWriteMem sym = doMemOpInternal sym Write Unconditional
+doWriteMem sym undef ptrW addr val repr = valMemReprBytes sym repr addr val >>= doMemOpInternal sym Write Unconditional undef ptrW
 
 doCondWriteMem ::
   IsSymInterface sym =>
@@ -1014,7 +1019,7 @@ doCondWriteMem ::
   RegValue sym (MS.ToCrucibleType ty) ->
   MemRepr ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
-doCondWriteMem sym undef cond = doMemOpInternal sym Write (Conditional cond) undef
+doCondWriteMem sym undef cond ptrW addr val repr = valMemReprBytes sym repr addr val >>= doMemOpInternal sym Write (Conditional cond) undef ptrW
 
 ptrWidth :: IsExprBuilder sym => LLVMPtr sym w -> NatRepr w
 ptrWidth (LLVMPointer _blk bv) = bvWidth bv
@@ -1120,33 +1125,63 @@ compareByteSize w' = case addrWidthRepr @w Proxy of
   Addr32 -> leibnizMultiplication @8 (compareF (knownNat @4) w')
   Addr64 -> leibnizMultiplication @8 (compareF (knownNat @8) w')
 
+data MemReprBytes sym ptrW ty where
+    BVBytes :: (1 <= w) => LLVMPtr sym ptrW -> !(NatRepr w) -> LLVMPtr sym (8*w) -> Endianness -> Pred sym -> MemReprBytes sym ptrW (MT.BVType (8*w))
+    PackedVecBytes :: !(NatRepr n) -> V.Vector (MemReprBytes sym ptrW ty) -> MemReprBytes sym ptrW (MT.VecType n ty)
+
+memReprBytesVal :: MemReprBytes sym ptrW ty -> RegValue sym (MS.ToCrucibleType ty)
+memReprBytesVal (BVBytes _ _ v _ _) = v
+memReprBytesVal (PackedVecBytes _ v) = memReprBytesVal <$> v
+
+valMemReprBytes ::
+  1 <= ptrW =>
+  MonadIO m =>
+  IsExprBuilder sym =>
+  sym ->
+  MemRepr ty ->
+  LLVMPtr sym ptrW ->
+  RegValue sym (MS.ToCrucibleType ty) ->
+  m (MemReprBytes sym ptrW ty)
+valMemReprBytes sym memRepr addr val = case memRepr of
+  BVMemRepr widthRepr endianness -> pure (BVBytes addr widthRepr val endianness (truePred sym))
+  PackedVecMemRepr countRepr recRepr -> fmap (PackedVecBytes countRepr)
+    . liftIO
+    . V.generateM (fromInteger (intValue countRepr))
+    $ \i -> do
+      addr' <- arrayIdx sym addr (toInteger i*sz)
+      valMemReprBytes sym recRepr addr' (val V.! i)
+    where sz = memReprByteSize recRepr
+
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
   MemWidth ptrW =>
   IsSymInterface sym =>
   sym ->
   UndefinedPtrOps sym ptrW ->
-  MemTraceImpl sym ptrW ->
+  MemTraceArr sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
-  IO (RegValue sym (MS.ToCrucibleType ty))
+  IO (MemReprBytes sym ptrW ty)
 readMemArr sym undef mem ptr repr = go 0 repr
   where
-  go :: Integer -> MemRepr ty' -> IO (RegValue sym (MS.ToCrucibleType ty'))
-  go n (BVMemRepr byteWidth endianness)
-    | Just Refl <- testByteSizeEquality @ptrW byteWidth = goPtr n endianness
-    | otherwise = goBV n byteWidth endianness
+  go :: Integer -> MemRepr ty' -> IO (MemReprBytes sym ptrW ty')
+  go n (BVMemRepr byteWidth endianness) = do
+    ptr' <- arrayIdx sym ptr n
+    let wrap val = BVBytes ptr' byteWidth val endianness (truePred sym)
+    wrap <$> case testByteSizeEquality @ptrW byteWidth of
+      Just Refl -> goPtr ptr' endianness
+      Nothing -> goBV n byteWidth endianness
 
   go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
 
-  go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
+  go n (PackedVecMemRepr countRepr recRepr) = fmap (PackedVecBytes countRepr)
+    . V.generateM (fromInteger (intValue countRepr)) $ \i ->
       go (n + memReprByteSize recRepr * fromIntegral i) recRepr
 
-  goPtr :: Integer -> Endianness -> IO (LLVMPtr sym ptrW)
-  goPtr n endianness = do
+  goPtr :: LLVMPtr sym ptrW -> Endianness -> IO (LLVMPtr sym ptrW)
+  goPtr (LLVMPointer reg off) endianness = do
     -- read memory
-    LLVMPointer reg off <- arrayIdx sym ptr n
-    regArray <- arrayLookup sym (memArr mem) . Ctx.singleton =<< natToInteger sym reg
+    regArray <- arrayLookup sym mem . Ctx.singleton =<< natToInteger sym reg
     
     memBytes@((valReg, valOff, _):_) <- forM [0 .. (bytesToNatural ptrWBytes) - 1] $ \byteOff -> do
       off' <- bvAdd sym off =<< bvFromInteger sym ptrWRepr (toInteger byteOff)
@@ -1218,7 +1253,7 @@ readMemArr sym undef mem ptr repr = go 0 repr
       Left Refl
         | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
           LLVMPointer reg off <- arrayIdx sym ptr n
-          regArray <- arrayLookup sym (memArr mem) . Ctx.singleton =<< natToInteger sym reg
+          regArray <- arrayLookup sym mem . Ctx.singleton =<< natToInteger sym reg
           memByte <- arrayLookup sym regArray (Ctx.singleton off)
           content <- getMemByteOff sym undef ptrWRepr memByte
           blk0 <- natLit sym 0
@@ -1237,21 +1272,120 @@ readMemArr sym undef mem ptr repr = go 0 repr
 
   ptrWBytes :: Bytes
   ptrWBytes = bitsToBytes (natValue ptrWRepr)
-    
+
+-- | Read a packed value from the underlying array, optimistically assuming all
+-- the pointer regions/byte offsets line up appropriately
+readMemArrOptimistic :: forall sym ptrW ty.
+  MemWidth ptrW =>
+  IsSymInterface sym =>
+  sym ->
+  UndefinedPtrOps sym ptrW ->
+  MemTraceArr sym ptrW ->
+  LLVMPtr sym ptrW ->
+  MemRepr ty ->
+  IO (MemReprBytes sym ptrW ty)
+readMemArrOptimistic sym undef mem ptr repr = go 0 repr
+  where
+  go :: Integer -> MemRepr ty' -> IO (MemReprBytes sym ptrW ty')
+  go n (BVMemRepr byteWidth endianness)
+    | Just Refl <- testByteSizeEquality @ptrW byteWidth = goPtr n byteWidth endianness
+    | otherwise = do
+        (p, v) <- goBV n byteWidth endianness
+        ptr' <- arrayIdx sym ptr n
+        pure (BVBytes ptr' byteWidth v endianness p)
+
+  go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
+
+  go n (PackedVecMemRepr countRepr recRepr) = do
+    bytes <- V.generateM (fromInteger (intValue countRepr)) $ \i ->
+      go (n + memReprByteSize recRepr * fromIntegral i) recRepr
+    pure (PackedVecBytes countRepr bytes)
+
+  goPtr :: (1 <= w, (8*w) ~ ptrW) => Integer -> NatRepr w -> Endianness -> IO (MemReprBytes sym ptrW (MT.BVType ptrW))
+  goPtr n w endianness = do
+    -- read memory
+    ptr'@(LLVMPointer reg off) <- arrayIdx sym ptr n
+    regArray <- arrayLookup sym mem . Ctx.singleton =<< natToInteger sym reg
+
+    memBytes@((valReg, valOff, _):_) <- forM [0 .. ptrWBytesNat - 1] $ \byteOff -> do
+      off' <- bvAdd sym off =<< bvFromInteger sym ptrWRepr (toInteger byteOff)
+      memByteFields sym =<< arrayLookup sym regArray (Ctx.singleton off')
+
+    -- check if we're reading a pointer
+    (regsEq, offsEq, subOffsOrdered) <- foldM
+      (extendPtrCond endianness valReg valOff)
+      (truePred sym, truePred sym, truePred sym)
+      (zip [0..] memBytes)
+    isPtr <- andPred sym regsEq =<< andPred sym offsEq subOffsOrdered
+    zero <- natLit sym 0
+
+    -- TODO: Do we ever end up failing the isPtr test because we're recombining
+    -- bytes of two different region-0 values? If so, we could add some ite's
+    -- to handle that; at the moment, we simply demand that it doesn't happen
+    -- via isPtr.
+    pure (BVBytes ptr' w (LLVMPointer valReg valOff) endianness isPtr)
+
+  extendPtrCond ::
+    conditions ~ (Pred sym, Pred sym, Pred sym) =>
+    Endianness ->
+    SymNat sym ->
+    SymBV sym ptrW ->
+    conditions ->
+    (Integer, (SymNat sym, SymBV sym ptrW, SymBV sym ptrW)) ->
+    IO conditions
+  extendPtrCond endianness expectedReg expectedOff (regsEq, offsEq, subOffsOrdered) (ix, (reg, off, subOff)) = do
+    expectedSubOff <- bvFromInteger sym ptrWRepr $ case endianness of
+      BigEndian -> toInteger ptrWBytesNat - ix - 1
+      LittleEndian -> ix
+    regsEq' <- andPred sym regsEq =<< natEq sym expectedReg reg
+    offsEq' <- andPred sym offsEq =<< bvEq sym expectedOff off
+    subOffsOrdered' <- andPred sym subOffsOrdered =<< bvEq sym expectedSubOff subOff
+    pure (regsEq', offsEq', subOffsOrdered')
+
+  goBV :: forall w. 1 <= w => Integer -> NatRepr w -> Endianness -> IO (Pred sym, LLVMPtr sym (8*w))
+  goBV n byteWidth endianness =
+    case isZeroOrGT1 (decNat byteWidth) of
+      Left Refl
+        | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
+          LLVMPointer reg off <- arrayIdx sym ptr n
+          regArray <- arrayLookup sym mem . Ctx.singleton =<< natToInteger sym reg
+          memByte <- arrayLookup sym regArray (Ctx.singleton off)
+          content <- getMemByteOff sym undef ptrWRepr memByte
+          (valReg, _, _) <- memByteFields sym memByte
+          blk0 <- natLit sym 0
+          isBlk0 <- natEq sym valReg blk0
+          return $ (isBlk0, LLVMPointer blk0 content)
+      Right LeqProof
+        | byteWidth' <- decNat byteWidth
+        , Refl <- lemmaMul (knownNat @8) byteWidth
+        , Refl <- mulComm (knownNat @8) byteWidth'
+        , Refl <- mulComm (knownNat @8) byteWidth
+        , LeqProof <- mulMono (knownNat @8) byteWidth' -> do
+          (phd, hd) <- goBV n (knownNat @1) endianness
+          (ptl, tl) <- goBV (n + 1) byteWidth' endianness
+          liftA2 (,)
+            (andPred sym phd ptl)
+            (concatPtrs sym endianness hd tl)
+
+  ptrWRepr = let LLVMPointer _ off = ptr in bvWidth off
+  ptrWBytesNat = (natValue ptrWRepr + 7) `div` 8
+
 -- | Write to the memory array and set the dirty bits on
 -- any written addresses
-writeMemArr :: forall sym ptrW w.
-  1 <= ptrW =>
+writeMemArr :: forall sym ptrW w w'.
+  1 <= w' =>
+  (8*w') ~ w =>
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
   UndefinedPtrOps sym ptrW ->
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
-  MemRepr (MT.BVType w) ->
+  NatRepr w' ->
+  Endianness ->
   LLVMPtr sym w ->
   IO (MemTraceImpl sym ptrW)
-writeMemArr sym undef mem_init ptr (BVMemRepr byteWidth endianness) val@(LLVMPointer valReg valOff)
+writeMemArr sym undef mem_init ptr byteWidth endianness val@(LLVMPointer valReg valOff)
   | Just Refl <- testByteSizeEquality @ptrW byteWidth
     = goPtr 0 mem_init
   | Just 0 <- asNat valReg
@@ -1588,55 +1722,46 @@ doMemOpInternal :: forall sym ptrW ty.
   MemOpCondition sym ->
   UndefinedPtrOps sym ptrW ->
   AddrWidthRepr ptrW ->
-  LLVMPtr sym ptrW ->
-  RegValue sym (MS.ToCrucibleType ty) ->
-  MemRepr ty ->
+  MemReprBytes sym ptrW ty ->
   StateT (MemTraceImpl sym ptrW) IO ()
-doMemOpInternal sym dir cond undef ptrW = go where
-  go :: LLVMPtr sym ptrW -> RegValue sym (MS.ToCrucibleType ty') -> MemRepr ty' -> StateT (MemTraceImpl sym ptrW) IO ()
-  go ptr@(LLVMPointer reg off) regVal = \case
-    repr@(BVMemRepr byteWidth endianness)
+doMemOpInternal sym dir cond undef repr memBytes = do
+  arr0 <- gets memArr
+  go memBytes
+  arr1 <- gets memArr
+  arr2 <- liftIO $ ifCond sym cond arr1 arr0
+  modify $ \mem -> mem { memArr = arr2 }
+  where
+  go :: MemReprBytes sym ptrW ty' -> StateT (MemTraceImpl sym ptrW) IO ()
+  go = \case
+    BVBytes ptr byteWidth regVal endianness valid
       | LeqProof <- mulMono (knownNat @8) byteWidth
-      -> addrWidthsArePositive ptrW $ do
+      -> addrWidthsArePositive repr $ do
      
-      modify $ \mem -> mem { memSeq = (memSeq mem) Seq.:|> MemOp ptr dir cond byteWidth regVal endianness }
+      modify $ \mem -> mem { memSeq = (memSeq mem) Seq.:|> MemOp ptr dir cond byteWidth regVal endianness valid }
       case dir of
         Read -> return ()
         Write -> do
           mem <- get
-          mem' <- liftIO $ writeMemArr sym undef mem ptr repr regVal
-          arr <- liftIO $ ifCond sym cond (memArr mem') (memArr mem)
-          put $ mem { memArr = arr }
-    FloatMemRepr _infoRepr _endianness -> fail "reading floats not supported in doMemOpInternal"
-    PackedVecMemRepr _countRepr recRepr -> addrWidthsArePositive ptrW $ do
-      elemSize <- liftIO $ bvLit sym ptrWidthNatRepr (BV.mkBV ptrWidthNatRepr (memReprByteSize recRepr))
-      flip V.imapM_ regVal $ \i recRegVal -> do
-        off' <- liftIO $ do
-          symbolicI <- bvLit sym ptrWidthNatRepr (BV.mkBV ptrWidthNatRepr (toInteger i))
-          dOff <- bvMul sym symbolicI elemSize
-          bvAdd sym off dOff
-        go (LLVMPointer reg off') recRegVal recRepr
-
-  ptrWidthNatRepr = addrWidthNatRepr ptrW
+          mem' <- liftIO $ writeMemArr sym undef mem ptr byteWidth endianness regVal
+          put mem'
+    PackedVecBytes _countRepr vecBytes -> traverse_ go vecBytes
 
 iteDeep ::
   IsSymInterface sym =>
   sym ->
   Pred sym ->
+  MemReprBytes sym ptrW ty ->
   RegValue sym (MS.ToCrucibleType ty) ->
-  RegValue sym (MS.ToCrucibleType ty) ->
-  MemRepr ty ->
   IO (RegValue sym (MS.ToCrucibleType ty))
-iteDeep sym cond t f = \case
-  BVMemRepr byteWidth _endianness -> let
+iteDeep sym cond t_ f = case t_ of
+  BVBytes _ byteWidth t _ _ -> let
     bitWidth = natMultiply (knownNat @8) byteWidth
     LLVMPointer treg toff = t
     LLVMPointer freg foff = f
     in multiplicationIsMonotonic @8 bitWidth
     $ liftA2 LLVMPointer (natIte sym cond treg freg) (bvIte sym cond toff foff)
-  FloatMemRepr _infoRepr _endianness -> fail "ite on floats not supported in iteDeep"
-  PackedVecMemRepr countRepr recRepr -> V.generateM (fromInteger (intValue countRepr)) $ \i ->
-    iteDeep sym cond (t V.! i) (f V.! i) recRepr
+  PackedVecBytes countRepr t -> V.generateM (fromInteger (intValue countRepr)) $ \i ->
+    iteDeep sym cond (t V.! i) (f V.! i)
 
 addrWidthsArePositive :: AddrWidthRepr w -> (1 <= w => a) -> a
 addrWidthsArePositive Addr32 a = a
@@ -1704,9 +1829,9 @@ flatMemOp ::
   MemOp sym ptrW ->
   IO (Seq (MemOp sym ptrW))
 flatMemOp sym outer_cond mop = case mop of
-  MemOp ptr dir cond w val endianness -> do
+  MemOp ptr dir cond w val endianness valid -> do
     cond' <- andCond sym outer_cond cond
-    let wop = MemOp ptr dir cond' w val endianness
+    let wop = MemOp ptr dir cond' w val endianness valid
     return $ Seq.singleton wop
   MergeOps cond seqT seqF -> do
     cond' <- andCond sym outer_cond (Conditional cond)
@@ -1760,7 +1885,7 @@ instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
 memOpFootprint ::
   MemOp sym ptrW ->
   MemFootprint sym ptrW
-memOpFootprint (MemOp ptr dir cond w _ end) = MemFootprint ptr w dir cond end
+memOpFootprint (MemOp ptr dir cond w _ end _) = MemFootprint ptr w dir cond end
 memOpFootprint _ = error "Unexpected merge op"
 
 traceFootprint ::
@@ -1811,11 +1936,12 @@ instance PEM.ExprMappable sym (MemOpCondition sym) where
 
 instance PEM.ExprMappable sym (MemOp sym w) where
   mapExpr sym f = \case
-    MemOp ptr dir cond w val endian -> do
+    MemOp ptr dir cond w val endian valid -> do
       ptr' <- WEH.mapExprPtr sym f ptr
       val' <- WEH.mapExprPtr sym f val
       cond' <- PEM.mapExpr sym f cond
-      return $ MemOp ptr' dir cond' w val' endian
+      valid' <- f valid
+      return $ MemOp ptr' dir cond' w val' endian valid'
     MergeOps p seq1 seq2 -> do
       p' <- f p
       seq1' <- traverse (PEM.mapExpr sym f) seq1

@@ -214,7 +214,7 @@ readMemCell ::
   IO (CLM.LLVMPtr sym (8 WI.* w))
 readMemCell sym undef mem cell@(MemCell{}) = do
   let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-  PMT.readMemArr sym undef mem (cellPtr cell) repr
+  PMT.memReprBytesVal <$> PMT.readMemArrOptimistic sym undef (PMT.memArr mem) (cellPtr cell) repr
 
 -- FIXME: this currently drops the region due to weaknesses in the memory model
 writeMemCell ::
@@ -227,9 +227,7 @@ writeMemCell ::
   CLM.LLVMPtr sym (8 WI.* w) ->
   IO (PMT.MemTraceImpl sym (MC.ArchAddrWidth arch))
 writeMemCell sym undef mem cell@(MemCell{}) valPtr = do
-  let
-    repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-  PMT.writeMemArr sym undef mem (cellPtr cell) repr valPtr
+  PMT.writeMemArr sym undef mem (cellPtr cell) (cellWidth cell) (cellEndian cell) valPtr
 
 
 readMemCellChunk ::
