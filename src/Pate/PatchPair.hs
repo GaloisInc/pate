@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -18,6 +19,8 @@ module Pate.PatchPair (
   , ppPatchPairCEq
   , ppPatchPairEq
   , ppPatchPairC
+  , getPair
+  , getPair'
   ) where
 
 import           Data.Functor.Const ( Const(..) )
@@ -34,6 +37,13 @@ data PatchPair (tp :: PB.WhichBinary -> DK.Type) = PatchPair
   { pOriginal :: tp PB.Original
   , pPatched :: tp PB.Patched
   }
+
+getPair' :: PB.WhichBinaryRepr bin -> PatchPair tp -> tp bin
+getPair' PB.OriginalRepr pPair = pOriginal pPair
+getPair' PB.PatchedRepr pPair = pPatched pPair
+
+getPair :: PB.KnownBinary bin => PatchPair tp -> tp bin
+getPair = getPair' knownRepr
 
 class PatchPairEq tp where
   ppEq :: tp PB.Original -> tp PB.Patched -> Bool

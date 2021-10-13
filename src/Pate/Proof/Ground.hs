@@ -32,7 +32,7 @@ Presenting counter-examples to failed equivalence checks
 
 module Pate.Proof.Ground 
   ( getInequivalenceResult
-  , getCondEquivalenceResult
+  , getCondEquivalenceBindings
   , getPathCondition
   , groundMacawValue
   , groundProofTransformer
@@ -70,6 +70,7 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Arch as PA
+import qualified Pate.Abort as PAb
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
@@ -129,13 +130,13 @@ singleBinding e fn = do
   grnd <- execGroundFn fn e
   return $ Bindings $ MapF.singleton e (W4G.GVW grnd)
 
-getCondEquivalenceResult ::
+getCondEquivalenceBindings ::
   forall sym arch.
   W4.Pred sym ->
   -- | the model representing the counterexample from the solver
   SymGroundEvalFn sym ->
-  EquivM sym arch (PFI.CondEquivalenceResult sym arch)
-getCondEquivalenceResult eqCond fn = withValid $ do
+  EquivM sym arch (MapF.MapF (W4.SymExpr sym) W4G.GroundValueWrapper)
+getCondEquivalenceBindings eqCond fn = withValid $ do
   cache <- W4B.newIdxCache
   let
     acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Bindings sym tp2 -> EquivM sym arch (Bindings sym tp2)
@@ -157,7 +158,7 @@ getCondEquivalenceResult eqCond fn = withValid $ do
       W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
       _ -> return mempty
   Bindings binds <- go eqCond
-  return $ PFI.CondEquivalenceResult { PFI.condEqExample = binds, PFI.condEqPred = eqCond }
+  return binds
 
 getGenPathCondition ::
   forall sym  t st fs f.

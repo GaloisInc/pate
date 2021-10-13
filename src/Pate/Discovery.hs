@@ -6,6 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- | This module defines an interface to drive macaw code discovery and identify
 -- corresponding blocks in an original and patched binary
 module Pate.Discovery (
@@ -16,6 +17,7 @@ module Pate.Discovery (
   lookupBlocks,
   getBlocks,
   getBlocks',
+  lookupBlocks',
   matchesBlockTarget,
   concreteToLLVM
   ) where
@@ -37,6 +39,7 @@ import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
+import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -372,13 +375,17 @@ markEntryPoint ::
   PMC.ParsedFunctionMap arch
 markEntryPoint segOff blocks = Map.singleton segOff (Some blocks) <$ PMC.getParsedBlockMap blocks
 
+-- | Special-purpose function name that is treated as abnormal program exit
+abortFnName :: T.Text
+abortFnName = "__pate_abort"
 
 runDiscovery ::
-  forall arch .
+  forall arch bin.
+  PB.KnownBinary bin =>
   PA.ValidArch arch =>
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], MM.MemSegmentOff (MC.ArchAddrWidth arch), PMC.ParsedFunctionMap arch)
+  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
 runDiscovery elf hints = do
   let
     bin = PLE.loadedBinary elf
@@ -388,7 +395,10 @@ runDiscovery elf hints = do
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
   pfm <- goDiscoveryState $
     MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
-  return (invalidHints, head entries, pfm)
+  let abortFnAddr = do
+        abortFnWord <- lookup abortFnName (PH.functionEntries hints)
+        MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
+  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints abortFnAddr)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)
@@ -416,7 +426,7 @@ getBlocks'
   -> PPa.BlockPair arch
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
-  case (lookupBlocks' (PMC.originalCtx ctx) blkO, lookupBlocks' (PMC.rewrittenCtx ctx) blkP) of
+  case (lookupBlocks' ctxO blkO, lookupBlocks' ctxP blkP) of
     (Right (Some (DFC.Compose opbs)), Right (Some (DFC.Compose ppbs))) -> do
       let oBlocks = PE.Blocks blkO opbs
       let pBlocks = PE.Blocks blkP ppbs
@@ -424,6 +434,9 @@ getBlocks' ctx pPair = do
     (Left err, _) -> CMC.throwM err
     (_, Left err) -> CMC.throwM err
   where
+    binCtxs = PMC.binCtxs ctx
+    ctxO = PPa.pOriginal binCtxs
+    ctxP = PPa.pPatched binCtxs
     blkO = PPa.pOriginal pPair
     blkP = PPa.pPatched pPair
 
@@ -443,7 +456,7 @@ getBlocks pPair = do
 
 lookupBlocks'
   :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack)
-  => PMC.BinaryContext sym arch bin
+  => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
   -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks' binCtx b = do

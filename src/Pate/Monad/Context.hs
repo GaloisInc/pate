@@ -38,18 +38,20 @@ newtype ParsedBlockMap arch ids = ParsedBlockMap
 -- You should expect (and check) that exactly one key exists at the function entry point level.
 type ParsedFunctionMap arch = IntervalMap (PA.ConcreteAddress arch) (Map.Map (MM.ArchSegmentOff arch) (Some (ParsedBlockMap arch)))
 
-data BinaryContext sym arch (bin :: PBi.WhichBinary) = BinaryContext
+data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
   , hints :: PH.VerificationHints
+  , binAbortFn :: Maybe (MM.ArchSegmentOff arch)
+  -- ^ address of special-purposes "abort" function that represents an abnormal
+  -- program exit
   }
 
 data EquivalenceContext sym arch where
   EquivalenceContext ::
     { handles :: CFH.HandleAllocator
-    , originalCtx :: BinaryContext sym arch PBi.Original
-    , rewrittenCtx :: BinaryContext sym arch PBi.Patched
+    , binCtxs :: PPa.PatchPair (BinaryContext arch)
     , stackRegion :: W4.SymNat sym
     , globalRegion :: W4.SymNat sym
     , _currentFunc :: PPa.BlockPair arch

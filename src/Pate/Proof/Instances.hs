@@ -31,6 +31,7 @@ module Pate.Proof.Instances
   , SymDomain
   , InequivalenceResult(..)
   , CondEquivalenceResult(..)
+  , emptyCondEqResult
   , SymBV(..)
   , ProofSymExpr
   , ProofSymNonceExpr
@@ -118,20 +119,33 @@ data InequivalenceResult arch where
 
 data CondEquivalenceResult sym arch where
   CondEquivalenceResult :: PA.ValidArch arch =>
-    { -- bindings for variables in counter-example
-      condEqExample :: MapF.MapF (W4.SymExpr sym) W4G.GroundValueWrapper
+    { condEqExample :: MapF.MapF (W4.SymExpr sym) W4G.GroundValueWrapper
+    -- ^ bindings for variables in counter-example
     , condEqPred :: W4.Pred sym
+    -- ^ condition that is sufficient to imply equivalence
+    , condEqAbortValid :: Bool
+    -- ^ true if the negation of this predicate necessarily implies an
+    -- abort path on the original binary
     } -> CondEquivalenceResult sym arch
+
+emptyCondEqResult ::
+  forall arch sym.
+  PA.ValidArch arch =>
+  PSo.ValidSym sym =>
+  sym ->
+  CondEquivalenceResult sym arch
+emptyCondEqResult sym = CondEquivalenceResult MapF.empty (W4.falsePred sym) False
 
 -- trivial instance
 instance PEM.ExprMappable sym (InequivalenceResult arch) where
   mapExpr _sym _f = return
 
 instance PEM.ExprMappable sym (CondEquivalenceResult sym arch) where
-  mapExpr _sym f (CondEquivalenceResult e1 e2) =
+  mapExpr _sym f (CondEquivalenceResult e1 e2 b) =
     CondEquivalenceResult
       <$> (MapF.fromList <$> traverse (\(Pair e1' e2') -> Pair <$> f e1' <*> pure e2') (MapF.toList e1))
       <*> f e2
+      <*> pure b
 
 ppInequivalencePreRegs ::
   InequivalenceResult arch -> String
@@ -326,10 +340,11 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
    PF.VerificationFail (result, cond) -> PP.vsep [ "Failed:", PP.pretty result, PP.pretty cond ]
 
 instance PSo.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
-  pretty (CondEquivalenceResult pExample pPred) =
+  pretty (CondEquivalenceResult pExample pPred pAbortValid) =
     PP.vsep $
      [ "Equivalence Condition:"
      , PP.pretty (showF pPred)
+     , "Condition is abort-valid: " <> (PP.pretty pAbortValid)
      , "Bindings in Counter-example:"
      ] ++ map prettyBind (MapF.toList pExample)
      where

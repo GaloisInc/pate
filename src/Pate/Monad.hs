@@ -248,15 +248,13 @@ withBinary f =
 getBinCtx ::
   forall bin sym arch.
   KnownRepr PBi.WhichBinaryRepr bin =>
-  EquivM sym arch (PMC.BinaryContext sym arch bin)
+  EquivM sym arch (PMC.BinaryContext arch bin)
 getBinCtx = getBinCtx' knownRepr
 
 getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
-  EquivM sym arch (PMC.BinaryContext sym arch bin)
-getBinCtx' repr = case repr of
-  PBi.OriginalRepr -> asks (PMC.originalCtx . envCtx)
-  PBi.PatchedRepr -> asks (PMC.rewrittenCtx . envCtx)
+  EquivM sym arch (PMC.BinaryContext arch bin)
+getBinCtx' repr = PPa.getPair' repr <$> asks (PMC.binCtxs . envCtx)
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
