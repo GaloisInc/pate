@@ -83,4 +83,5 @@ simplifyPred_deep p = withSym $ \sym -> do
   validSimpl <- liftIO $ W4.isEq sym p p_final
   isPredTrue' heuristicTimeout validSimpl >>= \case
     True -> return p_final
-    False -> throwHere $ PEE.InconsistentSimplificationResult (CC.showF p) (CC.showF p_final)
+    False -> return p
+--    False -> throwHere $ PEE.InconsistentSimplificationResult (CC.showF p) (CC.showF p_final)
