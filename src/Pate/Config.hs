@@ -20,7 +20,6 @@ import qualified Pate.Hints as PH
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
 
-
 newtype Hex a = Hex a
   deriving (Eq, Ord, Num, PrintfArg)
 
@@ -82,12 +81,12 @@ defaultVerificationCfg =
 
 data RunConfig arch =
   RunConfig
-    { archProxy :: PA.ValidArchProxy arch
+    { archProxy :: PA.SomeValidArch arch
     , infoPath :: Either FilePath PatchData
     , origPath :: FilePath
     , patchedPath :: FilePath
     , logger :: LJ.LogAction IO (PE.Event arch)
     , verificationCfg :: VerificationConfig
-    , hints :: Maybe PH.VerificationHints
+    , origHints :: PH.VerificationHints
+    , patchedHints :: PH.VerificationHints
     }
-

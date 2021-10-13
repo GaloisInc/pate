@@ -42,6 +42,12 @@ common shared
                        panic >= 0.4 && < 0.5,
                        lumberjack >= 0.1 && < 1.1,
                        prettyprinter >= 1.7 && < 1.8,
+                       threepenny-gui >= 0.9 && < 0.10,
+                       filepath,
+                       temporary >= 1 && < 2,
+                       file-embed >= 0.0.12 && < 0.0.14,
+                       utf8-string >= 1 && < 2,
+                       language-c >= 0.9 && < 0.10,
                        parameterized-utils,
                        what4 >= 1 && < 2,
                        crucible,
@@ -49,8 +55,6 @@ common shared
                        macaw-base,
                        macaw-symbolic,
                        macaw-loader,
-                       -- for TOC module
-                       macaw-loader-ppc,
                        unliftio-core >= 0.2 && < 0.3,
                        text >= 1 && < 1.3,
                        transformers,
@@ -63,18 +67,28 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Pate.Arch,
+  exposed-modules:     Pate.Address,
+                       Pate.Arch,
                        Pate.Binary,
+                       Pate.Block,
                        Pate.Config,
                        Pate.Discovery,
                        Pate.Verification,
+                       Pate.Verification.Domain,
+                       Pate.Verification.ExternalCall,
+                       Pate.Verification.Simplify,
+                       Pate.Verification.SymbolicExecution,
+                       Pate.Verification.Validity,
                        Pate.Loader,
+                       Pate.Loader.ELF,
                        Pate.Event,
                        Pate.Hints,
                        Pate.Hints.CSV,
                        Pate.Hints.JSON,
                        Pate.Hints.DWARF,
                        Pate.Monad,
+                       Pate.Monad.Context,
+                       Pate.Monad.Environment,
                        Pate.MemCell,
                        Pate.Memory.MemTrace,
                        Pate.Metrics,
@@ -85,31 +99,50 @@ library
                        Pate.Proof.Instances,
                        Pate.Proof.Operations,
                        Pate.Proof.Ground,
+                       Pate.Register,
                        Pate.Solver,
                        Pate.Timeout,
                        Pate.Types,
-                       Pate.Utils,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
                        What4.PathCondition,
                        Data.Parameterized.SetF,
                        Pate.SimState,
-                       Pate.Equivalence
+                       Pate.Equivalence,
+                       Pate.Equivalence.Error,
+                       Pate.Equivalence.MemPred,
+                       Pate.Equivalence.StatePred,
+                       Pate.Equivalence.Statistics,
+                       Pate.Verbosity,
+                       Pate.PatchPair,
+
+                       Pate.Interactive,
+                       Pate.Interactive.Port,
+                       Pate.Interactive.Render.BlockPairDetail,
+                       Pate.Interactive.Render.Console,
+                       Pate.Interactive.Render.Proof,
+                       Pate.Interactive.Render.SliceGraph,
+                       Pate.Interactive.State
 
 common shared-test
   ghc-options: -Wall -Wcompat
   default-language: Haskell2010
   build-depends: base,
                  bytestring,
+                 bv-sized,
                  elf-edit >= 0.39,
+                 exceptions,
                  containers,
                  directory,
                  filepath,
                  filemanip,
+                 lens,
                  lumberjack,
                  macaw-base,
                  macaw-loader,
                  macaw-symbolic,
+                 crucible,
+                 crucible-llvm,
                  mtl,
                  parameterized-utils,
                  tasty < 1.3.1,
@@ -134,7 +167,26 @@ test-suite pate-test-ppc
   hs-source-dirs: tests, arch
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic,
-                 dismantle-ppc
+                 macaw-loader-ppc,
+                 dismantle-tablegen,
+                 dismantle-ppc,
+                 semmc-ppc,
+                 what4
+  ghc-options:   -Wcompat -Wall -O2 -threaded -rtsopts "-with-rtsopts=-N"
+
+test-suite pate-test-ppc32
+  import: shared-test
+  type: exitcode-stdio-1.0
+  main-is: PPC32TestMain.hs
+  other-modules: TestBase, Pate.PPC
+  hs-source-dirs: tests, arch
+  build-depends: macaw-ppc,
+                 macaw-ppc-symbolic,
+                 macaw-loader-ppc,
+                 dismantle-tablegen,
+                 dismantle-ppc,
+                 semmc-ppc,
+                 what4
   ghc-options:   -Wcompat -Wall -O2 -threaded -rtsopts "-with-rtsopts=-N"
 
 test-suite pate-test-aarch32
@@ -147,6 +199,8 @@ test-suite pate-test-aarch32
                  macaw-aarch32,
                  macaw-aarch32-symbolic,
                  macaw-loader-aarch32,
+                 asl-translator,
+                 what4,
                  dismantle-arm-xml
 
 common shared-exec
@@ -173,30 +227,23 @@ executable pate-exec
   import:              shared-exec, shared
   main-is:             Main.hs
   other-modules:       Pate.PPC,
-                       Pate.AArch32,
-                       Interactive,
-                       Interactive.Render.BlockPairDetail,
-                       Interactive.Render.Console,
-                       Interactive.Render.Proof,
-                       Interactive.Render.SliceGraph,
-                       Interactive.State
+                       Pate.AArch32
   hs-source-dirs:      tools/pate tools arch
   build-depends:       async,
                        aeson,
-                       temporary >= 1 && < 2,
                        prettyprinter,
                        prettyprinter-ansi-terminal >= 1.1 && < 1.2,
-                       utf8-string >= 1 && < 2,
-                       file-embed >= 0.0.12 && < 0.0.14,
                        time,
                        ansi-wl-pprint,
                        lumberjack >= 0.1 && < 1.1,
                        threepenny-gui >= 0.9 && < 0.10,
-                       language-c >= 0.9 && < 0.10,
                        parameterized-utils,
                        what4,
+                       dismantle-tablegen,
                        macaw-ppc,
                        macaw-ppc-symbolic,
+                       macaw-loader-ppc,
+                       semmc-ppc,
                        dismantle-ppc,
                        semmc-aarch32,
                        macaw-loader-aarch32,

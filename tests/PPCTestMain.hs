@@ -9,9 +9,9 @@ import           TestBase
 
 main :: IO ()
 main = do
-  let cfg = TestConfig
+  let cfg64 = TestConfig
         { testArchName = "ppc"
-        , testArchProxy = PA.ValidArchProxy @PPC.PPC64
+        , testArchProxy = PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc64HasDedicatedRegister
         , testExpectEquivalenceFailure =
             [
             -- see: https://github.com/GaloisInc/pate/issues/10
@@ -21,4 +21,4 @@ main = do
             ]
         , testExpectSelfEquivalenceFailure = []
         }
-  runTests cfg
+  runTests cfg64

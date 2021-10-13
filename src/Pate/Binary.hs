@@ -1,75 +1,69 @@
 {- Helper functions for loading binaries -}
 
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 
 module Pate.Binary
-  ( LoadedELF(..)
-  , loadELF
+  ( type WhichBinary
+  , KnownBinary
+  , Original
+  , Patched
+  , WhichBinaryRepr(..)
   )
 where
 
-import qualified Data.ByteString as BS
-import           Data.Proxy ( Proxy(..) )
-
 import           Data.Parameterized.Classes
 
-import qualified Data.ElfEdit as E
 
-import qualified Data.Macaw.Memory.ElfLoader as MME
-import qualified Data.Macaw.Architecture.Info as MI
-import qualified Data.Macaw.CFG as MC
-import qualified Data.Macaw.BinaryLoader as MBL
+-- | A type-level tag describing whether the data value is from an original binary or a patched binary
+data WhichBinary = Original | Patched deriving (Bounded, Enum, Eq, Ord, Read, Show)
 
-import qualified Pate.Arch as PA
+type Original = 'Original
+type Patched = 'Patched
 
-data LoadedELF arch =
-  LoadedELF
-    { archInfo :: MI.ArchitectureInfo arch
-    , loadedBinary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
-    }
+-- | A run-time representative of which type of binary (original or patched) this is
+data WhichBinaryRepr (bin :: WhichBinary) where
+  OriginalRepr :: WhichBinaryRepr 'Original
+  PatchedRepr :: WhichBinaryRepr 'Patched
 
-loadELF ::
-  forall arch.
-  PA.ArchConstraints arch =>
-  Proxy arch ->
-  FilePath ->
-  IO (LoadedELF arch)
-loadELF _ path = do
-  bs <- BS.readFile path
-  elf <- doParse bs
-  mem <- MBL.loadBinary MME.defaultLoadOptions elf
-  return $ LoadedELF
-    { archInfo = PA.binArchInfo mem
-    , loadedBinary = mem
-    }
-  where
-    archWidthRepr :: MC.AddrWidthRepr (MC.ArchAddrWidth arch)
-    archWidthRepr = MC.addrWidthRepr (Proxy @(MC.ArchAddrWidth arch))
+instance TestEquality WhichBinaryRepr where
+  testEquality repr1 repr2 = case (repr1, repr2) of
+    (OriginalRepr, OriginalRepr) -> Just Refl
+    (PatchedRepr, PatchedRepr) -> Just Refl
+    _ -> Nothing
 
-    doParse :: BS.ByteString -> IO (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
-    doParse bs = case E.decodeElfHeaderInfo bs of
-      Left (off, msg) -> error $ "Error while parsing ELF header at " ++ show off ++ ": " ++ msg
-      Right (E.SomeElf h) -> case E.headerClass (E.header h) of
-        E.ELFCLASS32 -> return $ getElf h
-        E.ELFCLASS64 -> return $ getElf h
-      
-    getElf :: forall w. MC.MemWidth w => E.ElfHeaderInfo w -> E.ElfHeaderInfo (MC.ArchAddrWidth arch)
-    getElf e = case testEquality (MC.addrWidthRepr e) archWidthRepr of
-      Just Refl -> e
-      Nothing -> error ("Unexpected arch pointer width; expected " ++ show archWidthRepr ++ " but got " ++ show (MC.addrWidthRepr e))
+instance OrdF WhichBinaryRepr where
+  compareF repr1 repr2 = case (repr1, repr2) of
+    (OriginalRepr, OriginalRepr) -> EQF
+    (PatchedRepr, PatchedRepr) -> EQF
+    (OriginalRepr, PatchedRepr) -> LTF
+    (PatchedRepr, OriginalRepr) -> GTF
+
+instance Show (WhichBinaryRepr bin) where
+  show OriginalRepr = "Original"
+  show PatchedRepr = "Patched"
+
+instance KnownRepr WhichBinaryRepr Original where
+  knownRepr = OriginalRepr
+
+instance KnownRepr WhichBinaryRepr Patched where
+  knownRepr = PatchedRepr
+
+type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin

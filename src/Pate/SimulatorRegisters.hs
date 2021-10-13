@@ -27,7 +27,6 @@ import qualified Lang.Crucible.Types as CT
 import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 
-import qualified Pate.Types as PT
 import qualified Pate.ExprMappable as PEM
 import qualified What4.ExprHelpers as WEH
 
@@ -51,9 +50,18 @@ data MacawRegEntry sym (tp :: MT.Type) where
     } ->
     MacawRegEntry sym tp
 
+ptrEquality ::
+  PC.TestEquality (WI.SymExpr sym) =>
+  CLM.LLVMPtr sym w1 ->
+  CLM.LLVMPtr sym w2 ->
+  Maybe (w1 PC.:~: w2)
+ptrEquality (CLM.LLVMPointer reg1 off1) (CLM.LLVMPointer reg2 off2)
+  | reg1 == reg2, Just PC.Refl <- PC.testEquality off1 off2 = Just PC.Refl
+ptrEquality _ _ = Nothing
+
 instance WI.IsSymExprBuilder sym => Eq (MacawRegEntry sym tp) where
   (MacawRegEntry repr v1) == (MacawRegEntry _ v2) = case repr of
-    CLM.LLVMPointerRepr{} | Just PC.Refl <- PT.ptrEquality v1 v2 -> True
+    CLM.LLVMPointerRepr{} | Just PC.Refl <- ptrEquality v1 v2 -> True
     CT.BoolRepr | Just PC.Refl <- WI.testEquality v1 v2 -> True
     CT.StructRepr Ctx.Empty -> True
     _ -> error "MacawRegEntry: unexpected type for equality comparison"

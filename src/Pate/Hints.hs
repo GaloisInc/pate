@@ -20,7 +20,8 @@ module Pate.Hints (
   VerificationHints(..),
   HintValidationFailure(..),
   validate,
-  ValidVerificationHints(..)
+  ValidVerificationHints(..),
+  Hinted(..)
   ) where
 
 import qualified Control.DeepSeq as CD
@@ -36,6 +37,12 @@ import           Data.Word ( Word32, Word64 )
 import           GHC.Generics ( Generic )
 import           Numeric ( showHex )
 import qualified Prettyprinter as PP
+
+
+-- | A wrapper to carry 'VerificationHints' with another object (e.g., the associated binary)
+data Hinted a = Hinted { hints :: VerificationHints
+                       , hinted :: a
+                       }
 
 -- | The address and size of memory referenced by a symbol
 data SymbolExtent =
@@ -65,7 +72,7 @@ data VerificationHints =
                     , dataSymbols :: [(T.Text, SymbolExtent)]
                     -- ^ Boundaries of data values
                     }
-  deriving (Read, Show, Generic)
+  deriving (Read, Show, Generic, Eq)
 
 instance CD.NFData VerificationHints
 

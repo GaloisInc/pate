@@ -16,11 +16,11 @@ import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Time as TM
 
-import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
+import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Types as PT
 
 data BinaryMetrics =
   BinaryMetrics { executableBytes :: !Int
@@ -52,8 +52,8 @@ emptyMetrics =
 
 loadedBinaryMetrics
   :: (MM.MemWidth (MC.ArchAddrWidth arch))
-  => PB.LoadedELF arch
-  -> PT.ParsedFunctionMap arch
+  => PLE.LoadedELF arch
+  -> PMC.ParsedFunctionMap arch
   -> BinaryMetrics
 loadedBinaryMetrics le pfm =
   BinaryMetrics { executableBytes = byteCount
@@ -62,7 +62,7 @@ loadedBinaryMetrics le pfm =
                 }
   where
     isExec = MMP.isExecutable . MM.segmentFlags
-    segs = MM.memSegments (MBL.memoryImage (PB.loadedBinary le))
+    segs = MM.memSegments (MBL.memoryImage (PLE.loadedBinary le))
 
     byteCount = sum [ if isExec seg then fromIntegral (MM.segmentSize seg) else 0
                     | seg <- segs
@@ -70,7 +70,7 @@ loadedBinaryMetrics le pfm =
 
     blockCount = sum [ length (IM.elems pbm)
                      | bmap <- IM.elems pfm
-                     , Some (PT.ParsedBlockMap pbm) <- Map.elems bmap
+                     , Some (PMC.ParsedBlockMap pbm) <- Map.elems bmap
                      ]
 
 
@@ -80,8 +80,8 @@ summarize :: (MM.MemWidth (MC.ArchAddrWidth arch)) => PE.Event arch -> Metrics -
 summarize e m =
   case e of
     PE.AnalysisEnd _ dur -> m { duration = Just dur }
-    PE.FunctionsDiscoveredFromHints entryPoints -> m { usedDiscoveryHints = length entryPoints }
-    PE.FunctionEntryInvalidHints invalid -> m { invalidHints = length invalid }
+    PE.FunctionsDiscoveredFromHints _ entryPoints -> m { usedDiscoveryHints = length entryPoints }
+    PE.FunctionEntryInvalidHints _ invalid -> m { invalidHints = length invalid }
     PE.LoadedBinaries (origElf, origPFM) (patchedElf, patchedPFM) ->
       m { originalBinaryMetrics = Just (loadedBinaryMetrics origElf origPFM)
         , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedElf patchedPFM)
@@ -104,3 +104,5 @@ summarize e m =
     PE.HintErrorsCSV {} -> m
     PE.HintErrorsJSON {} -> m
     PE.HintErrorsDWARF {} -> m
+    PE.ProofTraceEvent {} -> m
+    PE.ProofTraceFormulaEvent {} -> m

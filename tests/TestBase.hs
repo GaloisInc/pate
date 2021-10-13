@@ -21,15 +21,18 @@ import qualified Test.Tasty.HUnit as T
 import qualified Test.Tasty.ExpectedFailure as T
 
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
-import qualified Pate.Loader as PL
-import qualified Pate.Types as PT
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
+import qualified Pate.Loader as PL
+import qualified Pate.PatchPair as PPa
 
 data TestConfig where
   TestConfig ::
     { testArchName :: String
-    , testArchProxy :: PA.ValidArchProxy arch
+    , testArchProxy :: PA.SomeValidArch arch
     , testExpectEquivalenceFailure :: [String]
     -- ^ tests which are failing now but eventually should succeed
     , testExpectSelfEquivalenceFailure :: [String]
@@ -68,8 +71,8 @@ expectEquivalenceFailure cfg fp =
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
   T.testGroup fp $
-    [ wrap $ T.testCase "original-self" $ doTest (Just PT.OriginalRepr) ShouldVerify proxy fp
-    , wrap $ T.testCase "patched-self" $ doTest (Just PT.PatchedRepr) ShouldVerify proxy fp
+    [ wrap $ T.testCase "original-self" $ doTest (Just PBi.OriginalRepr) ShouldVerify proxy fp
+    , wrap $ T.testCase "patched-self" $ doTest (Just PBi.PatchedRepr) ShouldVerify proxy fp
     , mkEquivTest cfg ShouldVerify fp
     ]
   where
@@ -87,12 +90,12 @@ mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
 
 doTest ::
   forall arch bin.
-  Maybe (PT.WhichBinaryRepr bin) ->
+  Maybe (PBi.WhichBinaryRepr bin) ->
   ShouldVerify ->
-  PA.ValidArchProxy arch ->
+  PA.SomeValidArch arch ->
   FilePath ->
   IO ()
-doTest mwb sv proxy@PA.ValidArchProxy fp = do
+doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
   let
     infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PC.noPatchData
@@ -105,7 +108,8 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
       , PC.infoPath = infoPath
       , PC.origPath = fp <.> "original" <.> "exe"
       , PC.patchedPath = fp <.> "patched" <.> "exe"
-      , PC.hints = Nothing
+      , PC.origHints = mempty
+      , PC.patchedHints = mempty
       , PC.verificationCfg =
           PC.defaultVerificationCfg { PC.cfgComputeEquivalenceFrames = computeFrames }
       , PC.logger =
@@ -113,10 +117,10 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
             PE.AnalysisStart pPair -> do
               putStrLn $ concat $
                 [ "Checking equivalence of "
-                , PT.ppBlock (PT.pOriginal pPair)
+                , PB.ppBlock (PPa.pOriginal pPair)
                 , " and "
-                , PT.ppBlock (PT.pPatched pPair)
-                , " (" ++ PT.ppBlockEntry (PT.concreteBlockEntry (PT.pOriginal pPair)) ++ ") "
+                , PB.ppBlock (PPa.pPatched pPair)
+                , " (" ++ PB.ppBlockEntry (PB.concreteBlockEntry (PPa.pOriginal pPair)) ++ ") "
                 , ": "
                 ]
             PE.CheckedEquivalence _ PE.Equivalent time -> do
@@ -140,15 +144,15 @@ doTest mwb sv proxy@PA.ValidArchProxy fp = do
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg
   case result of
-    PT.Errored err -> T.assertFailure (show err)
-    PT.Equivalent -> case sv of
+    PEq.Errored err -> T.assertFailure (show err)
+    PEq.Equivalent -> case sv of
       ShouldVerify -> return ()
       _ -> T.assertFailure "Unexpectedly proved equivalence."
-    PT.Inequivalent -> case sv of
+    PEq.Inequivalent -> case sv of
       ShouldVerify -> T.assertFailure "Failed to prove equivalence."
       ShouldNotVerify -> return ()
       ShouldConditionallyVerify -> T.assertFailure "Failed to prove conditional equivalence."    
-    PT.ConditionallyEquivalent -> case sv of
+    PEq.ConditionallyEquivalent -> case sv of
       ShouldVerify -> T.assertFailure "Failed to prove equivalence."
       ShouldNotVerify -> T.assertFailure "Unexpectedly proved conditional equivalence."
       ShouldConditionallyVerify -> return ()

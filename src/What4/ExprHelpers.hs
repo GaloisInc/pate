@@ -94,9 +94,10 @@ import qualified What4.Interface as W4
 import qualified What4.Concrete as W4C
 import qualified What4.SemiRing as SR
 import qualified What4.Expr.BoolMap as BM
+import qualified What4.Symbol as WS
 
 import           Data.Parameterized.SetF (SetF)
-import qualified Data.Parameterized.SetF as SetF 
+import qualified Data.Parameterized.SetF as SetF
 
 iteM ::
   W4.IsExprBuilder sym =>
@@ -215,22 +216,24 @@ freshPtrBytes ::
   W4.IsSymExprBuilder sym =>
   1 <= w =>
   sym ->
+  String ->
   W4.NatRepr w ->
   IO (CLM.LLVMPtr sym (8 W4.* w))
-freshPtrBytes sym w
+freshPtrBytes sym name w
   | bvwidth <- W4.natMultiply (W4.knownNat @8) w
   , W4.LeqProof <- mulMono (W4.knownNat @8) w
-  = freshPtr sym bvwidth
+  = freshPtr sym name bvwidth
 
 freshPtr ::
   W4.IsSymExprBuilder sym =>
   1 <= w =>
   sym ->
+  String ->
   W4.NatRepr w ->
   IO (CLM.LLVMPtr sym w)
-freshPtr sym w = do
-  off <- W4.freshConstant sym W4.emptySymbol (W4.BaseBVRepr w)
-  reg <- W4.freshNat sym W4.emptySymbol
+freshPtr sym name w = do
+  off <- W4.freshConstant sym (WS.safeSymbol (name ++ "_offset")) (W4.BaseBVRepr w)
+  reg <- W4.freshNat sym (WS.safeSymbol (name ++ "_region"))
   return $ CLM.LLVMPointer reg off
 
 
@@ -347,6 +350,11 @@ fixMux' sym cache e_outer = do
                 , cond == cond2 ->  W4.baseTypeIte sym cond eT' eF2
                 | eT' == eT, eF' == eF -> return e
                 | otherwise -> W4.baseTypeIte sym cond eT' eF'
+      W4B.AppExpr a0
+         | W4B.BaseIte _ _ cond eT eF <- W4B.appExprApp a0
+         , Just (W4B.BaseIte _ _ cond2 eT2 _) <- W4B.asApp eT
+         , cond == cond2
+         -> go =<< W4.baseTypeIte sym cond eT2 eF
       W4B.AppExpr a0
          | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
          , Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF

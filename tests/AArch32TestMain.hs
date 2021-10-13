@@ -11,7 +11,7 @@ main :: IO ()
 main = do
   let cfg = TestConfig
         { testArchName = "aarch32"
-        , testArchProxy = PA.ValidArchProxy @AArch32.AArch32
+        , testArchProxy = PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall AArch32.hasDedicatedRegister
         , testExpectEquivalenceFailure =
             [
             -- see: https://github.com/GaloisInc/pate/issues/10

@@ -23,68 +23,70 @@ import           Text.Read ( readMaybe )
 
 import qualified Data.Macaw.Memory as MM
 
-
+import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
+import qualified Pate.Loader.ELF as PLE
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Types as PT
 import qualified Pate.Verification as PV
 
+hexToAddr :: PA.SomeValidArch arch -> PC.Hex Word64 -> PA.ConcreteAddress arch
+hexToAddr (PA.SomeValidArch {}) (PC.Hex w) = PA.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
 
-hexToAddr :: PA.ValidArchProxy arch -> PC.Hex Word64 -> PT.ConcreteAddress arch
-hexToAddr PA.ValidArchProxy (PC.Hex w) = PT.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
-
-unpackBlockData :: PT.KnownBinary bin => PA.ValidArchProxy arch -> PC.BlockData -> PT.ConcreteBlock arch bin
+unpackBlockData :: PB.KnownBinary bin => PA.SomeValidArch arch -> PC.BlockData -> PB.ConcreteBlock arch bin
 unpackBlockData proxy start =
-  PT.ConcreteBlock
-    { PT.concreteAddress = hexToAddr proxy start
+  PB.ConcreteBlock
+    { PB.concreteAddress = hexToAddr proxy start
       -- we assume that all provided blocks begin a function
-    , PT.concreteBlockEntry = PT.BlockEntryInitFunction
-    , PT.blockBinRepr = DPC.knownRepr
+    , PB.concreteBlockEntry = PB.BlockEntryInitFunction
+    , PB.blockBinRepr = DPC.knownRepr
     }
 
-unpackPatchData :: PA.ValidArchProxy arch -> PC.PatchData -> (PT.BlockMapping arch, [PT.BlockPair arch])
+unpackPatchData :: PA.SomeValidArch arch -> PC.PatchData -> (PT.BlockMapping arch, [PPa.BlockPair arch])
 unpackPatchData proxy (PC.PatchData pairs bmap) =
   let
     bmap' = PT.BlockMapping $ 
       Map.fromList $ map (\(addr, addr') -> (hexToAddr proxy addr, hexToAddr proxy addr')) bmap
-    ppairs = map (\(bd, bd') -> PT.PatchPair (unpackBlockData proxy bd) (unpackBlockData proxy bd')) pairs
+    ppairs = map (\(bd, bd') -> PPa.PatchPair (unpackBlockData proxy bd) (unpackBlockData proxy bd')) pairs
   in (bmap', ppairs)
 
 
 runEquivVerification ::
-  PA.ValidArchProxy arch ->
+  PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
-  Maybe PH.VerificationHints ->
   PC.PatchData ->
   PC.VerificationConfig ->
-  PB.LoadedELF arch ->
-  PB.LoadedELF arch ->
-  IO PT.EquivalenceStatus
-runEquivVerification proxy@PA.ValidArchProxy logAction mhints pd dcfg original patched = do
-  let (bmap, ppairs) = unpackPatchData proxy pd
-  liftToEquivStatus $ PV.verifyPairs logAction mhints original patched bmap dcfg ppairs
+  PH.Hinted (PLE.LoadedELF arch) ->
+  PH.Hinted (PLE.LoadedELF arch) ->
+  IO PEq.EquivalenceStatus
+runEquivVerification validArch@(PA.SomeValidArch {}) logAction pd dcfg original patched = do
+  let (bmap, ppairs) = unpackPatchData validArch pd
+  liftToEquivStatus $ PV.verifyPairs validArch logAction original patched bmap dcfg ppairs
 
 liftToEquivStatus ::
   Show e =>
   Monad m =>
-  CME.ExceptT e m PT.EquivalenceStatus ->
-  m PT.EquivalenceStatus
+  CME.ExceptT e m PEq.EquivalenceStatus ->
+  m PEq.EquivalenceStatus
 liftToEquivStatus f = do
   v <- CME.runExceptT f
   case v of
-    Left err -> return $ PT.Errored $ show err
-    Right b -> return b  
+    Left err -> return $ PEq.Errored $ show err
+    Right b -> return b
 
 -- | Given a patch configuration, check that
 -- either the original or patched binary can be
 -- proven self-equivalent
 runSelfEquivConfig :: forall arch bin.
   PC.RunConfig arch ->
-  PT.WhichBinaryRepr bin ->
-  IO PT.EquivalenceStatus
+  PB.WhichBinaryRepr bin ->
+  IO PEq.EquivalenceStatus
 runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
     Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
@@ -94,30 +96,33 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   let
     swapPair :: forall a. (a, a) -> (a, a)
     swapPair (a1, a2) = case wb of
-      PT.OriginalRepr -> (a1, a1)
-      PT.PatchedRepr -> (a2, a2)
+      PB.OriginalRepr -> (a1, a1)
+      PB.PatchedRepr -> (a2, a2)
     path :: String = case wb of
-      PT.OriginalRepr -> PC.origPath cfg
-      PT.PatchedRepr -> PC.patchedPath cfg
+      PB.OriginalRepr -> PC.origPath cfg
+      PB.PatchedRepr -> PC.patchedPath cfg
     pairs' = map swapPair $ PC.patchPairs patchData
     patchData' = PC.PatchData
       { PC.patchPairs = pairs'
       , PC.blockMapping = []
       }
-  PA.ValidArchProxy <- return $ PC.archProxy cfg
-  bin <- CME.lift $ PB.loadELF @arch Proxy $ path
-  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData' (PC.verificationCfg cfg) bin bin
+  PA.SomeValidArch {} <- return $ PC.archProxy cfg
+  bin <- CME.lift $ PLE.loadELF @arch Proxy $ path
+  let hintedBin = PH.Hinted (PC.origHints cfg) bin
+  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData' (PC.verificationCfg cfg) hintedBin hintedBin
 
 runEquivConfig :: forall arch.
   PC.RunConfig arch ->
-  IO PT.EquivalenceStatus
+  IO PEq.EquivalenceStatus
 runEquivConfig cfg = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
     Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
       Nothing -> CME.throwError "Bad patch info file"
       Just r -> return r
     Right r -> return r
-  PA.ValidArchProxy <- return $ PC.archProxy cfg
-  original <- CME.lift $ PB.loadELF @arch Proxy $ (PC.origPath cfg)
-  patched <- CME.lift $ PB.loadELF @arch Proxy $ (PC.patchedPath cfg)
-  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) (PC.hints cfg) patchData (PC.verificationCfg cfg) original patched
+  PA.SomeValidArch {} <- return $ PC.archProxy cfg
+  original <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.origPath cfg)
+  patched <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.patchedPath cfg)
+  let hintedOrig = PH.Hinted (PC.origHints cfg) original
+  let hintedPatched = PH.Hinted (PC.patchedHints cfg) patched
+  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData (PC.verificationCfg cfg) hintedOrig hintedPatched

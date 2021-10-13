@@ -771,9 +771,11 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) bothZero $ \sym _ off _ off' -> do
+    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) someZero $ \sym reg off reg' off' -> do
+      regZero <- isZero sym reg
+      reg'' <- natIte sym regZero reg' reg
       off'' <- bvXorBits sym off off'
-      llvmPointer_bv sym off''
+      pure (LLVMPointer reg'' off'')
 
 evalMacawExprExtensionTrace :: forall sym arch ptrW f tp
                        .  IsSymInterface sym

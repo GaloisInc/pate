@@ -18,6 +18,7 @@ module Pate.Proof.Operations
   ( simBundleToSlice
   , noTransition
   , emptyDomain
+  , statePredToDomain
   , statePredToPreDomain
   , statePredToPostDomain
   , blockSliceBlocks
@@ -30,12 +31,16 @@ module Pate.Proof.Operations
   , joinLazyProof
   , asLazyProof
   , forkProof
+  , proofNonceExpr
   , lazyProofFinal
   , lazyProofEvent
   , lazyProofEvent_
   , forkProofFinal
+  , forkProofEvent_
   , forkProofEvent
   , flattenDomainConditions
+  , wrapFutureNonceApp
+  , asFutureNonceApp
   ) where
 
 import qualified Control.Monad.Reader as CMR
@@ -57,20 +62,26 @@ import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
 
+import qualified Pate.Arch as PA
+import qualified Pate.Discovery as PD
+import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as PMT
 import           Pate.Monad
-import qualified Pate.Discovery as PD
-import qualified Pate.Equivalence as PE
-import qualified Pate.Event as PE
-import qualified Pate.SimState as PS
-import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Monad.Context as PMC
+import qualified Pate.Monad.Environment as PE
+import qualified Pate.Parallel as Par
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Types as PT
-import qualified Pate.Parallel as Par
-import qualified Pate.Arch as PA
+import qualified Pate.Register as PR
+import qualified Pate.SimState as PS
+import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PSo
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -82,19 +93,19 @@ simBundleToSlice bundle = withSym $ \sym -> do
     ecaseO = PS.simOutBlockEnd $ PS.simOutO $ bundle
     ecaseP = PS.simOutBlockEnd $ PS.simOutP $ bundle
   footprints <- getFootprints bundle
-  memReads <- PE.memPredToList <$> (liftIO $ PE.footPrintsToPred sym footprints (W4.truePred sym))
-  memWrites <- PE.memPredToList <$> (liftIO $ PE.footPrintsToPred sym footprints (W4.falsePred sym))
+  memReads <- PEM.memPredToList <$> (liftIO $ PEM.footPrintsToPred sym footprints (W4.truePred sym))
+  memWrites <- PEM.memPredToList <$> (liftIO $ PEM.footPrintsToPred sym footprints (W4.falsePred sym))
 
   preMem <- MapF.fromList <$> mapM (memCellToOp initState) memReads
   postMem <- MapF.fromList <$> mapM (memCellToOp finState) memWrites
 
-  preRegs <- PT.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) getReg
-  postRegs <- PT.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) getReg
+  preRegs <- PR.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) getReg
+  postRegs <- PR.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) getReg
   
   let
     preState = PF.BlockSliceState preMem preRegs
     postState = PF.BlockSliceState postMem postRegs
-  return $ PF.BlockSliceTransition preState postState (PT.PatchPairC ecaseO ecaseP)
+  return $ PF.BlockSliceTransition preState postState (PPa.PatchPairC ecaseO ecaseP)
   where
     initState = TF.fmapF PS.simInState (PS.simIn bundle)
     finState = TF.fmapF PS.simOutState (PS.simOut bundle)
@@ -108,16 +119,16 @@ simBundleToSlice bundle = withSym $ \sym -> do
       eqRel <- CMR.asks envBaseEquiv
       isEquiv <- liftIO $ PE.applyRegEquivRelation (PE.eqRelRegs eqRel) reg valO valP
       return $ PF.BlockSliceRegOp
-        (PT.PatchPairC valO valP)
+        (PPa.PatchPairC valO valP)
         (PSR.macawRegRepr valO)
         isEquiv
     
     memCellToOp ::
-      PT.PatchPair (PS.SimState sym arch) -> 
+      PPa.PatchPair (PS.SimState sym arch) ->
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp (PFI.ProofSym sym arch)))
-    memCellToOp (PT.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
-      undef <- CMR.asks envUndefinedPtrOps
+    memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
+      undef <- CMR.asks PE.envUndefPointerOps
       valO <- liftIO $ PMC.readMemCell sym undef (PS.simMem stO) cell
       valP <- liftIO $ PMC.readMemCell sym undef (PS.simMem stP) cell
       eqRel <- CMR.asks envBaseEquiv      
@@ -125,7 +136,7 @@ simBundleToSlice bundle = withSym $ \sym -> do
       isValidGlobalMem <- liftIO $ PE.applyMemEquivRelation sym (PE.eqRelMem eqRel) cell valO valP
       isEquiv <- liftIO $ W4.andPred sym isValidStack isValidGlobalMem
       return $ MapF.Pair cell $ PF.BlockSliceMemOp
-        { PF.slMemOpValues = PT.PatchPairC (PFI.SymBV valO) (PFI.SymBV valP)
+        { PF.slMemOpValues = PPa.PatchPairC (PFI.SymBV valO) (PFI.SymBV valP)
         , PF.slMemOpEquiv = isEquiv
         , PF.slMemOpCond = cond
         }
@@ -158,7 +169,7 @@ flattenDomainConditions domApp = withSym $ \sym -> do
       liftIO $ W4.andPred sym p' acc
       
 
-blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PT.BlockPair arch
+blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PPa.BlockPair arch
 blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF.unApp prf))
 
 -- | Compute an aggregate verification condition: preferring an inequivalence result
@@ -190,7 +201,7 @@ proofResult e = foldr merge PF.VerificationSuccess statuses
     go _ = []
 
 noTransition ::
-  PT.PatchPair (PS.SimInput sym arch) ->
+  PPa.PatchPair (PS.SimInput sym arch) ->
   CS.RegValue sym (MS.MacawBlockEndType arch) ->
   EquivM sym arch (PF.BlockSliceTransition (PFI.ProofSym sym arch))
 noTransition stIn blockEnd = do
@@ -204,25 +215,23 @@ noTransition stIn blockEnd = do
 -- the corresponding types
 
 statePredToDomain ::
-  PA.ValidArch arch =>
-  PT.ValidSym sym =>
-  sym ->
-  PT.PatchPair (PS.SimState sym arch) ->
-  PE.StatePred sym arch ->
+  PPa.PatchPair (PS.SimState sym arch) ->
+  PES.StatePred sym arch ->
   EquivM sym arch (PFI.SymDomain sym arch)
-statePredToDomain sym states stPred = do
-  dom <- PF.ProofDomain
-    <$> (return $ predRegsToDomain sym $ PE.predRegs stPred)
-    <*> (flattenToStackRegion $ memPredToDomain $ PE.predStack stPred)
-    <*> (return $ memPredToDomain $ PE.predMem stPred)
-    <*> (return states)
+statePredToDomain states stPred = withSym $ \sym -> do
+  dom <-
+    PF.ProofDomain
+      <$> (return $ predRegsToDomain sym $ PES.predRegs stPred)
+      <*> (flattenToStackRegion $ memPredToDomain $ PES.predStack stPred)
+      <*> (return $ memPredToDomain $ PES.predMem stPred)
+      <*> (return states)
   return $ PF.ProofExpr dom
 
 flattenToStackRegion ::
   PF.ProofMemoryDomain (PFI.ProofSym sym arch) ->
   EquivM sym arch (PF.ProofMemoryDomain (PFI.ProofSym sym arch))
 flattenToStackRegion dom = do
-  stackRegion <- CMR.asks envStackRegion
+  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
     dom' = map (\(MapF.Pair cell p) -> MapF.Pair (PMC.setMemCellRegion stackRegion cell) p) (MapF.toList (PF.prfMemoryDomain dom))
   return $ dom { PF.prfMemoryDomain = MapF.fromList dom' }
@@ -231,7 +240,7 @@ flattenToStackRegion dom = do
 predRegsToDomain ::
   forall arch sym.
   PA.ValidArch arch =>
-  PT.ValidSym sym =>
+  PSo.ValidSym sym =>
   sym ->
   Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
   MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
@@ -244,13 +253,13 @@ predRegsToDomain sym regs = MM.mkRegState go
 
 -- TODO: flatten 'MemCells' to avoid rebuilding this map
 memPredToDomain ::
-  PT.ValidSym sym =>
-  PE.MemPred sym arch ->
+  PSo.ValidSym sym =>
+  PEM.MemPred sym arch ->
   PF.ProofMemoryDomain (PFI.ProofSym sym arch)
 memPredToDomain memPred =
   PF.ProofMemoryDomain
-    { PF.prfMemoryDomain = MapF.fromList $ map go $ PE.memPredToList memPred
-    , PF.prfMemoryDomainPolarity = PE.memPredPolarity memPred
+    { PF.prfMemoryDomain = MapF.fromList $ map go $ PEM.memPredToList memPred
+    , PF.prfMemoryDomainPolarity = PEM.memPredPolarity memPred
     }
   where
     go :: (Some (PMC.MemCell sym arch), W4.Pred sym) ->
@@ -259,26 +268,26 @@ memPredToDomain memPred =
 
 statePredToPreDomain ::
   PS.SimBundle sym arch ->
-  PE.StatePred sym arch ->
+  PES.StatePred sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-statePredToPreDomain bundle stPred = proofNonceExpr $ withSym $ \sym -> do
-  PF.appDomain <$> statePredToDomain sym states stPred
+statePredToPreDomain bundle stPred = proofNonceExpr $ do
+  PF.appDomain <$> statePredToDomain states stPred
   where
     states = TF.fmapF PS.simInState $ PS.simIn bundle
 
 statePredToPostDomain ::
   PE.StatePredSpec sym arch ->
   EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-statePredToPostDomain stPredSpec = proofNonceExpr $ withSym $ \sym -> do
+statePredToPostDomain stPredSpec = proofNonceExpr $ do
   let
     states = TF.fmapF PS.simVarState $ PS.specVars stPredSpec
     stPred = PS.specBody stPredSpec
-  PF.appDomain <$> statePredToDomain sym states stPred
+  PF.appDomain <$> statePredToDomain states stPred
 
 
 emptyDomain :: EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
 emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP -> do
-  dom <- PF.appDomain <$> statePredToDomain sym (PT.PatchPair stO stP) (PE.statePredFalse sym)
+  dom <- PF.appDomain <$> statePredToDomain (PPa.PatchPair stO stP) (PES.statePredFalse sym)
   return $ (W4.truePred sym, dom)
 
 proofNonceExpr ::
@@ -312,11 +321,11 @@ data LazyProofBody sym arch tp where
 
 type LazyProofApp sym arch = PF.ProofApp (PFI.ProofSym sym arch) (LazyProof sym arch)
 
-instance (PA.ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProofBody sym arch tp) where
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (LazyProofBody sym arch tp) where
   mapExpr sym f (LazyProofBodyApp app) = LazyProofBodyApp <$> PEM.mapExpr sym f app
   mapExpr sym f (LazyProofBodyFuture future) = LazyProofBodyFuture <$> PEM.mapExpr sym f future
 
-instance (PA.ValidArch arch, ValidSym sym) => PEM.ExprMappable sym (LazyProof sym arch tp) where
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (LazyProof sym arch tp) where
   mapExpr sym f (LazyProof a1 a2 v fin) = do
     v' <- PEM.mapExpr sym f v
     return $ LazyProof a1 a2 v' fin
@@ -353,8 +362,11 @@ lazyProofFinal ::
   EquivM sym arch (a, LazyProof sym arch tp)
 lazyProofFinal f fin = mkLazyProof (f >>= \(a, app) -> return (a, LazyProofBodyApp app)) fin
 
+-- | Make a proof event on the current thread
+--
+-- Despite the name, this does not lazily compute anything
 lazyProofEvent ::
-  PT.BlockPair arch ->
+  PPa.BlockPair arch ->
   EquivM sym arch (a, LazyProofApp sym arch tp) ->
   EquivM sym arch (a, LazyProof sym arch tp)
 lazyProofEvent ppair f = lazyProofFinal f $ \e -> do
@@ -363,7 +375,7 @@ lazyProofEvent ppair f = lazyProofFinal f $ \e -> do
   emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofSym vsym e))
 
 lazyProofEvent_ ::
-  PT.BlockPair arch ->
+  PPa.BlockPair arch ->
   EquivM sym arch (LazyProofApp sym arch tp) ->
   EquivM sym arch (LazyProof sym arch tp)
 lazyProofEvent_ ppair f = snd <$> lazyProofEvent ppair (f >>= \a -> return ((), a))
@@ -383,26 +395,34 @@ asLazyProofApp app = LazyProofBodyApp $ PF.mapProofApp asLazyProof app
 forkProof ::
   EquivM sym arch (LazyProofApp sym arch tp) ->
   EquivM sym arch (LazyProof sym arch tp)
-forkProof f = forkProofFinal f (\_ -> return ())
+forkProof f = snd <$> forkProofFinal (f >>= \app -> return ((), app)) (\_ -> return ())
 
 -- | Same as 'forkProof' but with an additional action that runs after the
 -- proof has completed.
 forkProofFinal ::
-  forall sym arch tp.
-  EquivM sym arch (LazyProofApp sym arch tp) ->
+  forall sym arch tp a.
+  EquivM sym arch (a, LazyProofApp sym arch tp) ->
   (PFI.ProofSymNonceExpr sym arch tp -> EquivM sym arch ()) ->
-  EquivM sym arch (LazyProof sym arch tp)
-forkProofFinal f fin = snd <$> mkLazyProof go fin
+  EquivM sym arch (Par.Future a, LazyProof sym arch tp)
+forkProofFinal f fin = mkLazyProof go fin
   where
-    go :: EquivM sym arch ((), LazyProofBody sym arch tp)
+    go :: EquivM sym arch (Par.Future a, LazyProofBody sym arch tp)
     go = do
-      future <- Par.promise (f >>= joinLazyProofApp)
-      return ((), LazyProofBodyFuture future)
+      future <- Par.promise (f >>= \(a, app) -> (,) <$> pure a <*> joinLazyProofApp app)
+      futurePrf <- Par.forFuture future (\(_,prf) -> return prf)
+      futureRes <- Par.forFuture future (\(a,_) -> return a)
+      return (futureRes, LazyProofBodyFuture futurePrf)
+
+forkProofEvent_ ::
+  PPa.BlockPair arch ->
+  EquivM sym arch (LazyProofApp sym arch tp) ->
+  EquivM sym arch (LazyProof sym arch tp)
+forkProofEvent_ ppair f = snd <$> forkProofEvent ppair (f >>= \app -> return ((), app)) 
 
 forkProofEvent ::
-  PT.BlockPair arch ->
-  EquivM sym arch (LazyProofApp sym arch tp) ->
-  EquivM sym arch (LazyProof sym arch tp)
+  PPa.BlockPair arch ->
+  EquivM sym arch (a, LazyProofApp sym arch tp) ->
+  EquivM sym arch (Par.Future a, LazyProof sym arch tp)
 forkProofEvent ppair f = forkProofFinal f $ \e -> do
   blocks <- PD.getBlocks ppair 
   vsym <- CMR.asks envValidSym
@@ -419,3 +439,15 @@ joinLazyProof prf = withValid $ do
   let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app
   liftIO $ lazyProofFinalize prf nonce_prf
   return nonce_prf
+
+asFutureNonceApp ::
+  LazyProof sym arch tp ->
+  EquivM sym arch (Par.Future (PFI.ProofSymNonceApp sym arch tp))
+asFutureNonceApp prf = case lazyProofBody prf of
+  LazyProofBodyFuture future -> return future
+  LazyProofBodyApp app -> Par.present $ joinLazyProofApp app
+
+wrapFutureNonceApp ::
+  Par.Future (PFI.ProofSymNonceApp sym arch tp) ->
+  EquivM sym arch (LazyProof sym arch tp)
+wrapFutureNonceApp future = snd <$> mkLazyProof (return ((), LazyProofBodyFuture future)) (\_ -> return ())

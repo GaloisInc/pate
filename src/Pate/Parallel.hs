@@ -23,7 +23,7 @@ Primitives for parallelism
 
 module Pate.Parallel
     ( IsFuture(..)
-    , Future
+    , Future(..)
     , ConstF(..)
     )
     where
@@ -55,6 +55,9 @@ class Monad m => IsFuture m (future :: DK.Type -> DK.Type) where
     promises <- traverse f t
     present $ traverse joinFuture promises
 
+  forMPar :: Traversable t => t e -> (e -> m (future f)) -> m (future (t f))
+  forMPar t f = traversePar f t
+  
   forFuture :: future a -> (a -> m b) -> m (future b)
   forFuture m f = present $ do
     v <- joinFuture m
