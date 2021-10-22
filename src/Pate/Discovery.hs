@@ -43,6 +43,7 @@ import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack, callStack )
 
 import qualified Data.Macaw.BinaryLoader as MBL
+import qualified Data.Macaw.BinaryLoader.ELF as MBLE
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Memory as MM
@@ -360,14 +361,15 @@ addFunctionEntryHints
   :: (MM.MemWidth (MC.ArchAddrWidth arch))
   => proxy arch
   -> MM.Memory (MC.ArchAddrWidth arch)
-  -> (name, Word64)
+  -> (name, PH.FunctionDescriptor)
   -> ([Word64], [MC.ArchSegmentOff arch])
   -> ([Word64], [MC.ArchSegmentOff arch])
-addFunctionEntryHints _ mem (_name, addrWord) (invalid, entries) =
+addFunctionEntryHints _ mem (_name, fd) (invalid, entries) =
   case MM.resolveAbsoluteAddr mem (fromIntegral addrWord) of
     Nothing -> (addrWord : invalid, entries)
     Just segOff -> (invalid, segOff : entries)
-
+  where
+    addrWord = PH.functionAddress fd
 
 markEntryPoint ::
   MC.ArchSegmentOff arch ->
@@ -387,18 +389,16 @@ runDiscovery ::
   PH.VerificationHints ->
   CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
 runDiscovery elf hints = do
-  let
-    bin = PLE.loadedBinary elf
-    archInfo = PLE.archInfo elf
+  let archInfo = PLE.archInfo elf
   entries <- F.toList <$> MBL.entryPoints bin
-  let mem = MBL.memoryImage bin
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
   pfm <- goDiscoveryState $
     MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
   let abortFnAddr = do
-        abortFnWord <- lookup abortFnName (PH.functionEntries hints)
+        abortFnWord <- PH.functionAddress <$> lookup abortFnName (PH.functionEntries hints)
         MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
-  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints abortFnAddr)
+  let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
+  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints idx abortFnAddr)
   where
   goDiscoveryState ds = id
     . fmap (IM.unionsWith Map.union)
@@ -410,6 +410,17 @@ runDiscovery elf hints = do
     [ (\addrs -> (addrs, [pb])) <$> archSegmentOffToInterval blockSegOff (MD.blockSize pb)
     | (blockSegOff, pb) <- Map.assocs (dfi ^. MD.parsedBlocks)
     ]
+
+  bin = PLE.loadedBinary elf
+  mem = MBL.memoryImage bin
+
+  addFunctionEntryHint m (_, fd) =
+    let addrWord = PH.functionAddress fd
+    in case MBLE.resolveAbsoluteAddress mem (fromIntegral addrWord) of
+         Nothing -> m
+         Just segoff ->
+           let addr = PA.addressFromMemAddr (MM.segoffAddr segoff)
+           in Map.insert addr fd m
 
 archSegmentOffToInterval ::
   (PA.ValidArch arch, CME.MonadError (PEE.EquivalenceError arch) m) =>

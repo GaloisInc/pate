@@ -43,6 +43,9 @@ data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   , parsedFunctionMap :: ParsedFunctionMap arch
   , binEntry :: MM.ArchSegmentOff arch
   , hints :: PH.VerificationHints
+  , functionHintIndex :: Map.Map (PA.ConcreteAddress arch) PH.FunctionDescriptor
+  -- ^ An index of the binary hints by function entry point address, used in the
+  -- construction of function frames to name parameters
   , binAbortFn :: Maybe (MM.ArchSegmentOff arch)
   -- ^ address of special-purposes "abort" function that represents an abnormal
   -- program exit

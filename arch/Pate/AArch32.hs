@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
@@ -10,9 +11,12 @@ module Pate.AArch32 (
   , hasDedicatedRegister
   ) where
 
+import           Control.Lens ( (^?) )
+import qualified Control.Lens as L
 import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
 
@@ -47,6 +51,19 @@ instance PA.ValidArch SA.AArch32 where
   -- FIXME: define these
   rawBVReg _r = False
   displayRegister = display
+  argumentNameFrom = argumentNameFrom
+
+argumentNameFrom
+  :: [T.Text]
+  -> ARMReg.ARMReg tp
+  -> Maybe T.Text
+argumentNameFrom names reg
+  | ARMReg.ARMGlobalBV (ASL.GPRRef gr) <- reg =
+    ASL.withGPRRef gr $ \nr ->
+      let num = PN.natValue nr
+      in if | num >= 0 && num <= 3 -> names ^? L.traversed . L.index (fromIntegral num)
+            | otherwise -> Nothing
+  | otherwise = Nothing
 
 -- | For the ARM architecture, we want to hide a few details of the translation
 -- that aren't actually user visible.  We also want to ensure that some of the
