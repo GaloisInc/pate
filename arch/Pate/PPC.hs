@@ -21,13 +21,15 @@ module Pate.PPC (
   )
 where
 
-import           Control.Lens ( (^.) )
+import           Control.Lens ( (^.), (^?) )
+import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import           Data.Word ( Word8 )
 import           GHC.Stack ( HasCallStack )
@@ -148,6 +150,7 @@ instance PA.ValidArch PPC.PPC32 where
     PPC.PPC_XER -> True
     _ -> False
   displayRegister = display
+  argumentNameFrom = argumentNameFromGeneric
 
 instance PA.ValidArch PPC.PPC64 where
   rawBVReg r = case r of
@@ -158,6 +161,20 @@ instance PA.ValidArch PPC.PPC64 where
     PPC.PPC_XER -> True
     _ -> False
   displayRegister = display
+  argumentNameFrom = argumentNameFromGeneric
+
+-- | Determine the argument name for the argument held in the given register.
+--
+-- In PPC32 and PPC64, arguments are passed in r3-r10, with r3 getting the first
+-- argument (i.e., r3 is at index 0 in the list of argument names).
+argumentNameFromGeneric
+  :: [T.Text]
+  -> PPC.PPCReg v tp
+  -> Maybe T.Text
+argumentNameFromGeneric names reg
+  | PPC.PPC_GP (PPC.GPR n) <- reg
+  , n >= 3 && n <= 10 = names ^? L.traversed . L.index (fromIntegral n - 3)
+  | otherwise = Nothing
 
 -- | All of the PPC registers in use in macaw are user-level registers (except
 -- for PC, but we want to show that anyway)

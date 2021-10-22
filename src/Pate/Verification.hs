@@ -142,7 +142,8 @@ runDiscovery logAction elf elf' = do
              unless (null hintErrors) $ do
                let invalidSet = S.fromList hintErrors
                let invalidEntries = [ (name, addr)
-                                    | (name, addr) <- PH.functionEntries (PH.hints e)
+                                    | (name, fd) <- PH.functionEntries (PH.hints e)
+                                    , let addr = PH.functionAddress fd
                                     , S.member addr invalidSet
                                     ]
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
@@ -358,7 +359,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
-  void $ withSimSpec triple $ \stO stP tripleBody -> do
+  void $ withSimSpec pPair triple $ \stO stP tripleBody -> do
     let
       inO = SimInput stO (PPa.pOriginal pPair)
       inP = SimInput stP (PPa.pPatched pPair)
@@ -407,7 +408,7 @@ withSimBundle ::
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)
 withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
-  withFreshVars $ \stO stP -> do
+  withFreshVars pPair $ \stO stP -> do
     let
       simInO_ = SimInput stO (PPa.pOriginal pPair)
       simInP_ = SimInput stP (PPa.pPatched pPair)
@@ -491,7 +492,7 @@ catchSimBundle pPair postcondSpec f = do
       EquivM sym arch (Maybe ret)
     getCached (triple, futureProof) = do
       traceBlockPair pPair "Checking for cached result"
-      impliesPostcond (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
+      impliesPostcond pPair (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
         True -> do
           traceBlockPair pPair "Cache hit"
           prf' <- PFO.wrapFutureNonceApp futureProof
@@ -501,7 +502,7 @@ catchSimBundle pPair postcondSpec f = do
           return Nothing
 
     errorResult :: EquivM sym arch ret
-    errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars $ \stO stP -> do
+    errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars pPair $ \stO stP -> do
       let
         simInO_ = SimInput stO (PPa.pOriginal pPair)
         simInP_ = SimInput stP (PPa.pPatched pPair)
@@ -511,12 +512,13 @@ catchSimBundle pPair postcondSpec f = do
       return $ (W4.truePred sym, r)
 
 impliesPostcond ::
+  PPa.BlockPair arch ->
   StatePredSpec sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch Bool
-impliesPostcond stPredAsm stPredConcl = withSym $ \sym -> do
+impliesPostcond blocks stPredAsm stPredConcl = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  fmap specBody $ withFreshVars $ \stO stP -> do
+  fmap specBody $ withFreshVars blocks $ \stO stP -> do
     p <- liftIO $ impliesPostcondPred sym (PPa.PatchPair stO stP) stPredAsm stPredConcl
     b <- isPredTrue' heuristicTimeout p
     return $ (W4.truePred sym, b)
@@ -679,7 +681,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   precondUnknown <- withSatAssumption goalTimeout (return isUnknown) $ do
     blocks <- PD.getBlocks (simPair bundle)
     emitWarning blocks PEE.BlockEndClassificationFailure
-    univDom <- PVD.universalDomainSpec
+    univDom <- PVD.universalDomainSpec (simPair bundle)
     withNoFrameGuessing True $ proveLocalPostcondition bundle univDom
 
   --funCallProofCases' <- mapM joinCase funCallProofCases
@@ -1022,8 +1024,9 @@ topLevelPostRegisterDomain = return M.empty
 --   global (non-stack) memory
 topLevelPostDomain ::
   HasCallStack =>
+  PPa.BlockPair arch ->
   EquivM sym arch (StatePredSpec sym arch)
-topLevelPostDomain = withFreshVars $ \stO stP -> withSym $ \sym -> do
+topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> do
   regDomain <- topLevelPostRegisterDomain
   withAssumptionFrame (PVV.validInitState Nothing stO stP) $
     return $ PES.StatePred
@@ -1043,9 +1046,9 @@ topLevelTriple ::
   HasCallStack =>
   PPa.BlockPair arch ->
   EquivM sym arch (PF.EquivTriple sym arch)
-topLevelTriple pPair = withPair pPair $ withFreshVars $ \stO stP -> withSym $ \sym -> do
+topLevelTriple pPair = withPair pPair $ withFreshVars pPair $ \stO stP -> withSym $ \sym -> do
   regDomain <- PVD.allRegistersDomain
-  postcond <- topLevelPostDomain
+  postcond <- topLevelPostDomain pPair
   let
     precond = PES.StatePred
       { PES.predRegs = regDomain
@@ -1090,7 +1093,7 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
           -- doesn't consider the post-state. At this point we aren't interested in the target
           -- post-domain because we're just making sure that the given cases cover all possible exits,
           -- without considering the equivalence of the state at those exit points.
-          noDomain <- PF.unNonceProof <$> PFO.emptyDomain
+          noDomain <- PF.unNonceProof <$> PFO.emptyDomain (simPair bundle)
 
           ir <- PFG.getInequivalenceResult PEE.InvalidCallPair preDomain' noDomain blockSlice fn
           emit $ PE.BranchesIncomplete ir

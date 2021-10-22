@@ -26,6 +26,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack )
 import qualified What4.BaseTypes as WT
 import qualified What4.Expr.Builder as W4B
@@ -64,15 +65,17 @@ freshRegEntry ::
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   MM.ArchReg arch tp ->
+  Maybe T.Text ->
   PSR.MacawRegEntry sym tp ->
   EquivM sym arch (W4.Pred sym, PSR.MacawRegEntry sym tp)
-freshRegEntry initBlk r entry = withSym $ \sym -> do
+freshRegEntry initBlk r margName entry = withSym $ \sym -> do
+  let name = maybe (PC.showF r) T.unpack margName
   fresh <- case PSR.macawRegRepr entry of
     CLM.LLVMPointerRepr w -> liftIO $ do
-      ptr <- WEH.freshPtr sym (PC.showF r) w
+      ptr <- WEH.freshPtr sym name w
       return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) ptr
     CT.BoolRepr -> liftIO $ do
-      b <- W4.freshConstant sym (WS.safeSymbol (PC.showF r)) WT.BaseBoolRepr
+      b <- W4.freshConstant sym (WS.safeSymbol name) WT.BaseBoolRepr
       return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) b
     CT.StructRepr Ctx.Empty -> return $ PSR.MacawRegEntry (PSR.macawRegRepr entry) Ctx.Empty
     repr -> throwHere $ PEE.UnsupportedRegisterType $ Some repr
@@ -243,7 +246,6 @@ equateInitialStates bundle = do
   eqMem <- equateInitialMemory bundle
   return $ eqRegs <> eqMem
 
-
 -- | Guess a sufficient domain that will cause the
 -- given postcondition to be satisfied on the given equivalence relations.
 -- This domain includes: the registers, the stack and the global (i.e. non-stack) memory.
@@ -269,6 +271,8 @@ guessEquivalenceDomain ::
   PES.StatePred sym arch ->
   EquivM sym arch (PES.StatePred sym arch)
 guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
+  -- See Note [Names for Inputs]
+  argNames <- lookupArgumentNames (PSi.simPair bundle)
   PA.SomeValidArch _ _ hdr <- CMR.asks envValidArch
   traceBundle bundle "Entering guessEquivalenceDomain"
   WEH.ExprFilter isBoundInGoal <- getIsBoundFilter' goal
@@ -297,7 +301,8 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
         PRe.RegSP -> ifConfig PC.cfgComputeEquivalenceFrames exclude include
         _ | isInO || isInP ->
           ifConfig (not . PC.cfgComputeEquivalenceFrames) include $ do
-            (isFreshValid, freshO) <- freshRegEntry (PPa.pPatched $ PSi.simPair bundle) r vO
+            let margName = PA.argumentNameFrom argNames r
+            (isFreshValid, freshO) <- freshRegEntry (PPa.pPatched $ PSi.simPair bundle) r margName vO
 
             goal' <- bindMacawReg vO freshO goal
             goalIgnoresReg <- liftIO $ W4.impliesPred sym goal goal'
@@ -368,7 +373,34 @@ universalDomain =  withSym $ \sym -> do
 -- | Domain that includes entire state, except IP and SP registers
 universalDomainSpec ::
   HasCallStack =>
+  PPa.BlockPair arch ->
   EquivM sym arch (PEq.StatePredSpec sym arch)
-universalDomainSpec = withFreshVars $ \stO stP ->
+universalDomainSpec blocks = withFreshVars blocks $ \stO stP ->
   withAssumptionFrame (PVV.validInitState Nothing stO stP) $
   universalDomain
+
+
+{- Note [Names for Inputs]
+
+Our goal here is to assign meaningful names to function inputs so that they
+appear in generated differential summaries.
+
+This code looks up the entry point address of the current slice in the
+VerificationHints (extracted from metadata) and attempts to use those names when
+allocating the symbolic values for registers.
+
+The location of that original entry point is a bit involved. We use the
+'SimBundle', which has a 'SimInput' (at least a pair of them)
+
+> 'simInBlock' :: 'SimInput' sym arch bin -> 'ConcreteBlock' arch bin
+
+Using that address, we can look up the argument names in the metadata. Note
+that there is a single set of inputs allocated for both blocks, so plan
+accordingly (we only need the input block names)
+
+Note that this currently only handles supplying names to arguments in integer
+registers, and will misbehave if there are arguments actually passed on the
+stack or in floating point registers. Longer term, this code should use the
+abide library to map arguments to registers.
+
+-}
