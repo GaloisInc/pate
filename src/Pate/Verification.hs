@@ -119,23 +119,25 @@ parsedFunctionEntries = concatMap M.keys . IM.elems
 runDiscovery
   :: (PA.ValidArch arch)
   => LJ.LogAction IO (PE.Event arch)
+  -> Maybe FilePath
+  -- ^ Directory to save macaw CFGs to
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PH.Hinted (PLE.LoadedELF arch)
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
-runDiscovery logAction elf elf' = do
+runDiscovery logAction mCFGDir elf elf' = do
   binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
   binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', PMC.parsedFunctionMap binCtxP))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
+    discoverAsync repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mCFGDir repr e h)))
     discoverCheckingHints repr e = do
-      unhintedAnalysis <- discoverAsync (PH.hinted e) mempty
+      unhintedAnalysis <- discoverAsync repr (PH.hinted e) mempty
       if | PH.hints e == mempty -> do
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              return oCtxUnhinted
          | otherwise -> do
-             hintedAnalysis <- discoverAsync (PH.hinted e) (PH.hints e)
+             hintedAnalysis <- discoverAsync repr (PH.hinted e) (PH.hints e)
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
@@ -174,7 +176,7 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcf
     Nothing -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  contexts <- runDiscovery logAction elf elf'
+  contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)

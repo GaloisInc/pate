@@ -25,7 +25,6 @@ import qualified Data.Set as Set
 import           Data.String ( fromString )
 import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack, callStack )
-import qualified Prettyprinter as PP
 import qualified System.IO as IO
 import qualified What4.Interface as W4
 import qualified What4.ProgramLoc as W4L
@@ -270,8 +269,6 @@ simulate simInput = withBinary @bin $ do
     CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (PS.simInBlock simInput)
 
     let traceAddr = PB.concreteAddress (PS.simInBlock simInput)
-    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack "CFG:"))
-    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack (unlines (fmap (show . PP.pretty) pbs_))))
 
     -- See Note [Loop Breaking]
     let pb:pbs = DL.sortOn MD.pblockAddr pbs_

@@ -65,6 +65,8 @@ data VerificationConfig =
     , cfgGroundTimeout :: PT.Timeout
     -- ^ The timeout to use when grounding terms. We expect this to be
     -- fast and therefore a delay indicates a problem with the solver
+    , cfgMacawDir :: Maybe FilePath
+    -- ^ The directory to save macaw CFGs to
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -77,6 +79,7 @@ defaultVerificationCfg =
                      , cfgHeuristicTimeout = PT.Seconds 10
                      , cfgGoalTimeout = PT.Minutes 5
                      , cfgGroundTimeout = PT.Seconds 5
+                     , cfgMacawDir = Nothing
                      }
 
 data RunConfig arch =

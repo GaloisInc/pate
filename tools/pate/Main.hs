@@ -147,6 +147,7 @@ main = do
             , PC.cfgSolver = solver opts
             , PC.cfgHeuristicTimeout = heuristicTimeout opts
             , PC.cfgGoalTimeout = goalTimeout opts
+            , PC.cfgMacawDir = saveMacawCFGs opts
             }
         cfg = PC.RunConfig
             { PC.archProxy = proxy
@@ -193,6 +194,7 @@ data CLIOptions = CLIOptions
   , patchedCsvFunctionHints :: Maybe FilePath
   , dwarfHints :: Bool
   , verbosity :: PV.Verbosity
+  , saveMacawCFGs :: Maybe FilePath
   } deriving (Eq, Ord, Show)
 
 data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
@@ -530,3 +532,7 @@ cliOptions = OA.info (OA.helper <*> parser)
                           <> OA.value PV.Info
                           <> OA.help "The verbosity of logging output"
                           )
+    <*> OA.optional (OA.strOption
+         ( OA.long "save-macaw-cfgs"
+         <> OA.help "Save macaw CFGs to the provided directory"
+         ))

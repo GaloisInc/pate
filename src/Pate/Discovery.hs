@@ -37,10 +37,15 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
-import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack, callStack )
+import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.Text as PPT
+import qualified System.Directory as SD
+import           System.FilePath ( (</>), (<.>) )
+import qualified System.IO as IO
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.BinaryLoader.ELF as MBLE
@@ -385,15 +390,29 @@ runDiscovery ::
   forall arch bin.
   PB.KnownBinary bin =>
   PA.ValidArch arch =>
+  Maybe FilePath ->
+  PB.WhichBinaryRepr bin ->
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
   CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
-runDiscovery elf hints = do
+runDiscovery mCFGDir repr elf hints = do
   let archInfo = PLE.archInfo elf
   entries <- F.toList <$> MBL.entryPoints bin
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
-  pfm <- goDiscoveryState $
-    MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
+  let ds = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
+  pfm <- goDiscoveryState ds
+
+  -- If the user wants to persist macaw CFGs, do so here
+  --
+  -- Save these CFGs to <dir>/<repr>/<address>
+  liftIO $ F.forM_ mCFGDir $ \cfgDir -> do
+    let baseDir = cfgDir </> show repr
+    SD.createDirectoryIfMissing True baseDir
+    F.forM_ (ds ^. MD.funInfo) $ \(Some dfi) -> do
+      let fname = baseDir </> show (MD.discoveredFunAddr dfi) <.> "cfg"
+      IO.withFile fname IO.WriteMode $ \hdl -> do
+        PPT.hPutDoc hdl (PP.pretty dfi)
+
   let abortFnAddr = do
         abortFnWord <- PH.functionAddress <$> lookup abortFnName (PH.functionEntries hints)
         MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
