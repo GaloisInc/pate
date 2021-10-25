@@ -130,14 +130,15 @@ runDiscovery logAction mCFGDir elf elf' = do
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', PMC.parsedFunctionMap binCtxP))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discoverAsync repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mCFGDir repr e h)))
+    discoverAsync mdir repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr e h)))
     discoverCheckingHints repr e = do
-      unhintedAnalysis <- discoverAsync repr (PH.hinted e) mempty
       if | PH.hints e == mempty -> do
+             unhintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) mempty
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              return oCtxUnhinted
          | otherwise -> do
-             hintedAnalysis <- discoverAsync repr (PH.hinted e) (PH.hints e)
+             unhintedAnalysis <- discoverAsync Nothing repr (PH.hinted e) mempty
+             hintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) (PH.hints e)
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
