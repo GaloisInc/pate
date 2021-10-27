@@ -64,6 +64,11 @@ challenge03: challenge03/challenge03.original.exe challenge03/challenge03.patche
 							   --blockinfo challenge03/challenge03.info \
 							   --ignoremain
 
-
+.PHONY: abort
+abort: abort/test-abort.original.exe abort/test-abort.patched.exe abort/test-abort.hints.csv
+	cabal v2-run exe:pate-exec -- \
+		                       --original abort/test-abort.original.exe \
+	                           --patched abort/test-abort.patched.exe \
+							   --original-csv-function-hints abort/test-abort.hints.csv
 %.i: %.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
