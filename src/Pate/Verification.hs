@@ -657,8 +657,17 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
           throwHere $ PEE.BlockExitMismatch
   traceBundle bundle ("Finished proving obligations for all call targets (" ++ show (length funCallProofCases) ++ ")")
   -- if we have a "return" exit, prove that it satisfies the postcondition
+  -- as a special case, if the original binary is determined to abort,
+  -- we consider that to be equivalent to a return
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  precondReturn <- withSatAssumption goalTimeout (matchingExits bundle MS.MacawBlockEndReturn) $ do
+  isReturn <- do
+    bothReturn <- matchingExits bundle MS.MacawBlockEndReturn
+    abortO <- PAb.isAbortedStatePred (PPa.getPair @PBi.Original (simOut bundle))
+    returnP <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) MS.MacawBlockEndReturn
+    abortCase <- liftIO $ W4.andPred sym abortO returnP
+    liftIO $ W4.orPred sym bothReturn abortCase
+
+  precondReturn <- withSatAssumption goalTimeout (return isReturn) $ do
     traceBundle bundle "Attempting to prove local postconditions"
     proveLocalPostcondition bundle postcondSpec
   let
