@@ -32,7 +32,6 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PES
-import qualified Pate.Types as PT
 import qualified Pate.Loader.ELF as PLE
 
 -- | The macaw blocks relevant for a given code address
@@ -69,7 +68,7 @@ data Event arch where
   ProofStarted :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
 
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
-  DiscoverBlockPair :: BlocksPair arch -> PT.BlockTarget arch PB.Original -> PT.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
+  DiscoverBlockPair :: BlocksPair arch -> PB.BlockTarget arch PB.Original -> PB.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch

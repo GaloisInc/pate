@@ -78,7 +78,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
-import           Pate.Types
 import qualified What4.ExprHelpers as WEH
 
 --------------------------------------------------------
@@ -88,7 +87,7 @@ import qualified What4.ExprHelpers as WEH
 discoverPairs ::
   forall sym arch.
   SimBundle sym arch ->
-  EquivM sym arch [PPa.PatchPair (BlockTarget arch)]
+  EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
 discoverPairs bundle = do
   lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
@@ -142,12 +141,12 @@ discoverPairs bundle = do
 -- | True for a pair of original and patched block targets that represent a valid pair of
 -- jumps
 compatibleTargets ::
-  BlockTarget arch PB.Original ->
-  BlockTarget arch PB.Patched ->
+  PB.BlockTarget arch PB.Original ->
+  PB.BlockTarget arch PB.Patched ->
   Bool
 compatibleTargets blkt1 blkt2 =
-  PB.concreteBlockEntry (targetCall blkt1) == PB.concreteBlockEntry (targetCall blkt2) &&
-  case (targetReturn blkt1, targetReturn blkt2) of
+  PB.concreteBlockEntry (PB.targetCall blkt1) == PB.concreteBlockEntry (PB.targetCall blkt2) &&
+  case (PB.targetReturn blkt1, PB.targetReturn blkt2) of
     (Just blk1, Just blk2) -> PB.concreteBlockEntry blk1 == PB.concreteBlockEntry blk2
     (Nothing, Nothing) -> True
     _ -> False
@@ -177,13 +176,13 @@ exactEquivalence inO inP = withSym $ \sym -> do
 matchesBlockTarget ::
   forall sym arch.
   SimBundle sym arch ->
-  BlockTarget arch PB.Original ->
-  BlockTarget arch PB.Patched ->
+  PB.BlockTarget arch PB.Original ->
+  PB.BlockTarget arch PB.Patched ->
   EquivM sym arch (WI.Pred sym)
 matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
   -- true when the resulting IPs call the given block targets
-  ptrO <- concreteToLLVM (targetCall blktO)
-  ptrP <- concreteToLLVM (targetCall blktP)
+  ptrO <- concreteToLLVM (PB.targetCall blktO)
+  ptrP <- concreteToLLVM (PB.targetCall blktP)
 
   eqCall <- liftIO $ do
     eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue ipO)
@@ -228,9 +227,9 @@ liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = WI.notPred sym p2
 liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = WI.notPred sym p1
 
 targetReturnPtr ::
-  BlockTarget arch bin ->
+  PB.BlockTarget arch bin ->
   EquivM sym arch (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MC.ArchAddrWidth arch))))
-targetReturnPtr blkt | Just blk <- targetReturn blkt = withSym $ \sym -> do
+targetReturnPtr blkt | Just blk <- PB.targetReturn blkt = withSym $ \sym -> do
   ptr <- concreteToLLVM blk
   return $ WP.justPartExpr sym ptr
 targetReturnPtr _ = withSym $ \sym -> return $ WP.maybePartExpr sym Nothing
@@ -242,7 +241,7 @@ getSubBlocks ::
   forall sym arch bin.
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
-  EquivM sym arch [BlockTarget arch bin]
+  EquivM sym arch [PB.BlockTarget arch bin]
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
@@ -260,15 +259,15 @@ concreteValidJumpTargets ::
   PB.ConcreteBlock arch bin ->
   [MD.ParsedBlock arch ids] ->
   MD.ParsedBlock arch ids ->
-  [BlockTarget arch bin]
+  [PB.BlockTarget arch bin]
 concreteValidJumpTargets from allPbs pb =
   let targets = concreteJumpTargets from pb
       thisAddr = segOffToAddr (MD.pblockAddr pb)
       addrs = map (segOffToAddr . MD.pblockAddr) allPbs
 
-      isTargetExternal btgt = not ((PB.concreteAddress (targetCall btgt)) `elem` addrs)
-      isTargetBackJump btgt = (PB.concreteAddress (targetCall btgt)) < thisAddr
-      isTargetArch btgt = PB.concreteBlockEntry (targetCall btgt) == PB.BlockEntryPostArch
+      isTargetExternal btgt = not ((PB.concreteAddress (PB.targetCall btgt)) `elem` addrs)
+      isTargetBackJump btgt = (PB.concreteAddress (PB.targetCall btgt)) < thisAddr
+      isTargetArch btgt = PB.concreteBlockEntry (PB.targetCall btgt) == PB.BlockEntryPostArch
 
       isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
 
@@ -277,10 +276,10 @@ concreteValidJumpTargets from allPbs pb =
 validateBlockTarget ::
   HasCallStack =>
   PB.KnownBinary bin =>
-  BlockTarget arch bin ->
+  PB.BlockTarget arch bin ->
   EquivM sym arch ()
 validateBlockTarget tgt = do
-  let blk = targetCall tgt
+  let blk = PB.targetCall tgt
   case PB.concreteBlockEntry blk of
     PB.BlockEntryInitFunction -> do
       (manifestError $ lookupBlocks blk) >>= \case
@@ -316,7 +315,7 @@ concreteJumpTargets ::
   PA.ValidArch arch =>
   PB.ConcreteBlock arch bin ->
   MD.ParsedBlock arch ids ->
-  [BlockTarget arch bin]
+  [PB.BlockTarget arch bin]
 concreteJumpTargets from pb = case MD.pblockTermStmt pb of
   MD.ParsedCall st ret ->
     callTargets from (concreteNextIPs st) ret
@@ -337,7 +336,7 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
 
   MD.ParsedArchTermStmt _ st ret ->
     let ret_blk = fmap (mkConcreteBlock from PB.BlockEntryPostArch) ret
-     in [ BlockTarget (mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
+     in [ PB.BlockTarget (mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
         | next <- (concreteNextIPs st)
         ]
 
@@ -348,23 +347,23 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
 jumpTarget ::
     PB.ConcreteBlock arch bin ->
     MC.ArchSegmentOff arch ->
-    BlockTarget arch bin
-jumpTarget from to = BlockTarget (mkConcreteBlock from PB.BlockEntryJump to) Nothing
+    PB.BlockTarget arch bin
+jumpTarget from to = PB.BlockTarget (mkConcreteBlock from PB.BlockEntryJump to) Nothing
 
 jumpTarget' ::
     PB.ConcreteBlock arch bin ->
     PA.ConcreteAddress arch ->
-    BlockTarget arch bin
-jumpTarget' from to = BlockTarget (mkConcreteBlock' from PB.BlockEntryJump to) Nothing
+    PB.BlockTarget arch bin
+jumpTarget' from to = PB.BlockTarget (mkConcreteBlock' from PB.BlockEntryJump to) Nothing
 
 callTargets ::
     PB.ConcreteBlock arch bin ->
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
-    [BlockTarget arch bin]
+    [PB.BlockTarget arch bin]
 callTargets from next_ips ret =
    let ret_blk = fmap (mkConcreteBlock from PB.BlockEntryPostFunction) ret
-    in [ BlockTarget (mkConcreteBlock' from PB.BlockEntryInitFunction next) ret_blk | next <- next_ips ]
+    in [ PB.BlockTarget (mkConcreteBlock' from PB.BlockEntryInitFunction next) ret_blk | next <- next_ips ]
 
 mkConcreteBlock ::
   PB.ConcreteBlock arch bin ->

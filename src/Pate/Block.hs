@@ -6,6 +6,7 @@
 module Pate.Block (
     BlockEntryKind(..)
   , ConcreteBlock(..)
+  , BlockTarget(..)
   , concreteEntryPoint
   , equivBlocks
   , blockMemAddr
@@ -96,3 +97,14 @@ ppBlock b = show (concreteAddress b)
 
 instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch bin) where
   pretty = PP.viaShow . concreteAddress
+
+
+data BlockTarget arch bin =
+  BlockTarget
+    { targetCall :: ConcreteBlock arch bin
+    , targetReturn :: Maybe (ConcreteBlock arch bin)
+    }
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
+  show (BlockTarget a b) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
+

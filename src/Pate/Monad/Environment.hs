@@ -30,6 +30,7 @@ import qualified What4.Interface as W4
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import           Pate.Equivalence
 import qualified Pate.Equivalence.Statistics as PES
@@ -42,7 +43,6 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.Solver as PSo
-import           Pate.Types
 
 data VerificationFailureMode =
     ThrowOnAnyFailure
@@ -86,7 +86,7 @@ data EquivEnv sym arch where
 
 type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
 
-type ExitPairCache arch = BlockCache arch [PPa.PatchPair (BlockTarget arch)]
+type ExitPairCache arch = BlockCache arch [PPa.PatchPair (PB.BlockTarget arch)]
 
 data BlockCache arch a where
   BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a

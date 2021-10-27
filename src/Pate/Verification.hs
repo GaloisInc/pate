@@ -87,7 +87,6 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Proof.Operations as PFO
 import           Pate.SimState
 import qualified Pate.Solver as PS
-import           Pate.Types
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Simplify as PVSi
@@ -587,11 +586,11 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     withAssumption (PD.matchesBlockTarget bundle blktO blktP) $
       PFO.lazyProofEvent (simPair bundle) $ do
       let
-        blkO = targetCall blktO
-        blkP = targetCall blktP
+        blkO = PB.targetCall blktO
+        blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
       traceBundle bundle ("  targetCall: " ++ show blkO)
-      case (targetReturn blktO, targetReturn blktP) of
+      case (PB.targetReturn blktO, PB.targetReturn blktP) of
         (Just blkRetO, Just blkRetP) -> do
           traceBundle bundle ("  Return target " ++ show blkRetO)
           isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
