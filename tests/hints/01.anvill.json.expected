@@ -1,7 +1,7 @@
 VerificationHints { blockMappings = []
-                  , functionEntries = [ ("printf", 4195440)
-                                      , ("main", 4195712)
-                                      , ("puts", 4195424)
+                  , functionEntries = [ ("printf", FunctionDescriptor { functionSymbol = "printf", functionAddress = 4195440, functionArguments = [] })
+                                      , ("main", FunctionDescriptor { functionSymbol = "main", functionAddress = 4195712, functionArguments = [] })
+                                      , ("puts", FunctionDescriptor { functionSymbol = "puts", functionAddress = 4195424, functionArguments = [] })
                                       ]
                   , dataSymbols = [ ("errno", SymbolExtent { symbolLocation = 400, symbolSize = 4} )
                                   ]

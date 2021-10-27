@@ -42,6 +42,7 @@ module Pate.Monad
   , ifConfig
   , traceBundle
   , traceBlockPair
+  , lookupArgumentNames
   , SymGroundEvalFn
   , execGroundFn
   , withGroundEvalFn
@@ -84,7 +85,7 @@ import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
-import           Control.Monad.Reader
+import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Except
 
 import qualified Data.Map as M
@@ -119,12 +120,13 @@ import qualified What4.Symbol as WS
 import           What4.ExprHelpers
 
 import qualified Pate.Arch as PA
-import qualified Pate.Block as PB
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import           Pate.Monad.Environment as PME
@@ -142,7 +144,7 @@ lookupBlockCache ::
   PPa.BlockPair arch ->
   EquivM sym arch (Maybe a)
 lookupBlockCache f pPair = do
-  BlockCache cache <- asks f
+  BlockCache cache <- CMR.asks f
   cache' <- liftIO $ IO.readMVar cache
   case M.lookup pPair cache' of
     Just r -> return $ Just r
@@ -155,7 +157,7 @@ modifyBlockCache ::
   a ->
   EquivM sym arch ()
 modifyBlockCache f pPair merge val = do
-  BlockCache cache <- asks f
+  BlockCache cache <- CMR.asks f
   liftIO $ IO.modifyMVar_ cache
     (\m -> return $ M.insertWith merge pPair val m)  
 
@@ -168,13 +170,13 @@ ifConfig ::
   EquivM sym arch a ->
   EquivM sym arch a ->
   EquivM sym arch a
-ifConfig checkCfg ifT ifF = (asks $ checkCfg . envConfig) >>= \case
+ifConfig checkCfg ifT ifF = (CMR.asks $ checkCfg . envConfig) >>= \case
   True -> ifT
   False -> ifF
 
 freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
 freshNonce = do
-  gen <- asks envNonceGenerator
+  gen <- CMR.asks envNonceGenerator
   liftIO $ N.freshNonce gen
 
 withProofNonce ::
@@ -184,7 +186,7 @@ withProofNonce ::
 withProofNonce f = withValid $do
   nonce <- freshNonce
   let proofNonce = PF.ProofNonce nonce
-  local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
+  CMR.local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
 
 
 -- | Start the timer to be used as the initial time when computing
@@ -192,12 +194,12 @@ withProofNonce f = withValid $do
 startTimer :: EquivM sym arch a -> EquivM sym arch a
 startTimer f = do
   startTime <- liftIO TM.getCurrentTime
-  local (\env -> env { envStartTime = startTime}) f
+  CMR.local (\env -> env { envStartTime = startTime}) f
 
 -- | Time since the most recent 'startTimer'
 getDuration :: EquivM sym arch TM.NominalDiffTime
 getDuration = do
-  startedAt <- asks envStartTime
+  startedAt <- CMR.asks envStartTime
   finishedBy <- liftIO TM.getCurrentTime
   return $ TM.diffUTCTime finishedBy startedAt
 
@@ -207,7 +209,7 @@ emitWarning ::
   PEE.InnerEquivalenceError arch ->
   EquivM sym arch ()
 emitWarning blks innererr = do
-  wb <- asks envWhichBinary
+  wb <- CMR.asks envWhichBinary
   let err = PEE.EquivalenceError
         { PEE.errWhichBinary = wb
         , PEE.errStackTrace = Just callStack
@@ -218,15 +220,15 @@ emitWarning blks innererr = do
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
   duration <- getDuration
-  logAction <- asks envLogger
+  logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: ReaderT (EquivEnv sym arch) (ExceptT (PEE.EquivalenceError arch) IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT (PEE.EquivalenceError arch) IO) a }
   deriving (Functor
            , Applicative
            , Monad
            , IO.MonadIO
-           , MonadReader (EquivEnv sym arch)
+           , CMR.MonadReader (EquivEnv sym arch)
            , MonadThrow
            , MonadCatch
            , MonadMask
@@ -243,7 +245,7 @@ withBinary ::
 withBinary f =
   let
     repr :: PBi.WhichBinaryRepr bin = knownRepr
-  in local (\env -> env { envWhichBinary = Just (Some repr) }) f
+  in CMR.local (\env -> env { envWhichBinary = Just (Some repr) }) f
 
 getBinCtx ::
   forall bin sym arch.
@@ -254,13 +256,13 @@ getBinCtx = getBinCtx' knownRepr
 getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
   EquivM sym arch (PMC.BinaryContext arch bin)
-getBinCtx' repr = PPa.getPair' repr <$> asks (PMC.binCtxs . envCtx)
+getBinCtx' repr = PPa.getPair' repr <$> CMR.asks (PMC.binCtxs . envCtx)
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
-  env <- ask
+  env <- CMR.ask
   withValidEnv env $ f
 
 withValidEnv ::
@@ -273,14 +275,14 @@ withSymSolver ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
   EquivM sym arch a
 withSymSolver f = withValid $ do
-  PSo.Sym _ sym adapter <- asks envValidSym
+  PSo.Sym _ sym adapter <- CMR.asks envValidSym
   f sym adapter
 
 withSym ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
-  PSo.Sym _ sym _ <- asks envValidSym
+  PSo.Sym _ sym _ <- CMR.asks envValidSym
   f sym
 
 withSymIO :: forall sym arch a.
@@ -291,7 +293,7 @@ withSymIO f = withSym (\sym -> liftIO (f sym))
 archFuns :: forall sym arch.
   EquivM sym arch (MS.MacawSymbolicArchFunctions arch)
 archFuns = do
-  archVals <- asks envArchVals
+  archVals <- CMR.asks envArchVals
   return $ MS.archFunctions archVals
 
 -----------------------------------------------
@@ -300,14 +302,17 @@ archFuns = do
 unconstrainedRegister ::
   forall sym arch tp.
   (HasCallStack, MM.MemWidth (MM.ArchAddrWidth arch)) =>
+  [T.Text] ->
   MM.ArchReg arch tp ->
   EquivM sym arch (PSR.MacawRegVar sym tp)
-unconstrainedRegister reg = do
+unconstrainedRegister argNames reg = do
   let repr = MM.typeRepr reg
   case repr of
     MM.BVTypeRepr n
       | Just Refl <- testEquality n (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)) -> withSymIO $ \sym -> do
-          ptr@(CLM.LLVMPointer region off) <- freshPtr sym (showF reg) n
+          let margName = PA.argumentNameFrom argNames reg
+          let name = maybe (showF reg) T.unpack margName
+          ptr@(CLM.LLVMPointer region off) <- freshPtr sym name n
           iRegion <- W4.natToInteger sym region
           return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
       | otherwise -> withSymIO $ \sym -> do
@@ -325,29 +330,49 @@ unconstrainedRegister reg = do
 
 withSimSpec ::
   PEM.ExprMappable sym f =>
+  PPa.BlockPair arch ->
   SimSpec sym arch f ->
   (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> f -> EquivM sym arch g) ->
   EquivM sym arch (SimSpec sym arch g)
-withSimSpec spec f = withSym $ \sym -> do
-  withFreshVars $ \stO stP -> do
+withSimSpec blocks spec f = withSym $ \sym -> do
+  withFreshVars blocks $ \stO stP -> do
     (asm, body) <- liftIO $ bindSpec sym stO stP spec
     withAssumption (return asm) $ f stO stP body
 
+-- | Look up the arguments for this block slice if it is a function entry point
+-- (and there are sufficient metadata hints)
+lookupArgumentNames
+  :: PPa.BlockPair arch
+  -> EquivM sym arch [T.Text]
+lookupArgumentNames pp = do
+  let origEntryAddr = PB.concreteAddress (PPa.pOriginal pp)
+
+  ctx <- CMR.asks envCtx
+  let origCtx = PPa.pOriginal (PMC.binCtxs ctx)
+  let funcHintIdx = PMC.functionHintIndex origCtx
+
+  case M.lookup origEntryAddr funcHintIdx of
+    Nothing -> return []
+    Just fd -> return (PH.functionArguments fd)
+
 freshSimVars ::
   forall bin sym arch.
+  PPa.BlockPair arch ->
   EquivM sym arch (SimVars sym arch bin)
-freshSimVars = do
+freshSimVars blocks = do
   (memtrace, memtraceVar) <- withSymIO $ \sym -> MT.initMemTraceVar sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
-  regs <- MM.mkRegStateM unconstrainedRegister
+  argNames <- lookupArgumentNames blocks
+  regs <- MM.mkRegStateM (unconstrainedRegister argNames)
   return $ SimVars memtraceVar regs (SimState memtrace (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
 withFreshVars ::
+  PPa.BlockPair arch ->
   (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> EquivM sym arch (W4.Pred sym, f)) ->
   EquivM sym arch (SimSpec sym arch f)
-withFreshVars f = do
-  varsO <- freshSimVars @PBi.Original
-  varsP <- freshSimVars @PBi.Patched
+withFreshVars blocks f = do
+  varsO <- freshSimVars @PBi.Original blocks
+  varsP <- freshSimVars @PBi.Patched blocks
   (asm, result) <- f (simVarState varsO) (simVarState varsP)
   return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
@@ -361,8 +386,8 @@ withAssumption' ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption' asmf f = withSym $ \sym -> do
   asm <- asmf
-  frame <- asks envCurrentFrame
-  (asm', a) <- local (\env -> env { envCurrentFrame = frameAssume asm <> frame }) $ f
+  frame <- CMR.asks envCurrentFrame
+  (asm', a) <- CMR.local (\env -> env { envCurrentFrame = frameAssume asm <> frame }) $ f
   asm'' <- liftIO $ W4.andPred sym asm asm'
   return (asm'', a)
 
@@ -386,8 +411,8 @@ withAssumptionFrame' ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumptionFrame' asmf f = withSym $ \sym -> do
   asmFrame <- asmf
-  envFrame <- asks envCurrentFrame
-  local (\env -> env { envCurrentFrame = asmFrame <> envFrame }) $ do
+  envFrame <- CMR.asks envCurrentFrame
+  CMR.local (\env -> env { envCurrentFrame = asmFrame <> envFrame }) $ do
     withAssumption' (liftIO $ getAssumedPred sym (asmFrame <> envFrame)) $ do
       (frame', a) <- f
       applyAssumptionFrame (asmFrame <> frame') a
@@ -396,14 +421,14 @@ withEmptyAssumptionFrame ::
   EquivM sym arch f ->
   EquivM sym arch f
 withEmptyAssumptionFrame f =
-  local (\env -> env { envCurrentFrame = mempty }) $ f
+  CMR.local (\env -> env { envCurrentFrame = mempty }) $ f
 
 applyCurrentFrame ::
   forall sym arch f.
   PEM.ExprMappable sym f =>
   f ->
   EquivM sym arch f
-applyCurrentFrame f = snd <$> withAssumptionFrame (asks envCurrentFrame) (return f)
+applyCurrentFrame f = snd <$> withAssumptionFrame (CMR.asks envCurrentFrame) (return f)
 
 applyAssumptionFrame ::
   forall sym arch f.
@@ -482,7 +507,7 @@ checkSatisfiableWithModel ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch (Either SomeException a)
 checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
-  envFrame <- asks envCurrentFrame
+  envFrame <- CMR.asks envCurrentFrame
   assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
  -- handle <- liftIO $ IO.openFile "solver.out" IO.WriteMode
@@ -564,7 +589,7 @@ isPredTruePar' ::
 isPredTruePar' timeout p = case W4.asConstantPred p of
   Just b -> Par.present $ return b
   _ -> do
-    frame <- asks envCurrentFrame
+    frame <- CMR.asks envCurrentFrame
     case isAssumedPred frame p of
       True -> Par.present $ return True
       False -> Par.promise $ do
@@ -604,7 +629,7 @@ execGroundFn ::
   W4.SymExpr sym tp -> 
   EquivM sym arch (W4G.GroundValue tp)  
 execGroundFn (SymGroundEvalFn fn) e = do
-  groundTimeout <- asks (PC.cfgGroundTimeout . envConfig)
+  groundTimeout <- CMR.asks (PC.cfgGroundTimeout . envConfig)
   result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`
     [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
     , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
@@ -660,7 +685,7 @@ traceBundle bundle msg =
 
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
-    env <- ask
+    env <- CMR.ask
     catchInIO (f (runEquivM' env))
 
 catchInIO ::
@@ -687,7 +712,7 @@ runEquivM' ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   IO a
-runEquivM' env f = withValidEnv env $ (runExceptT $ runReaderT (unEQ f) env) >>= \case
+runEquivM' env f = withValidEnv env $ (runExceptT $ CMR.runReaderT (unEQ f) env) >>= \case
   Left err -> throwIO err
   Right result -> return result
 
@@ -695,7 +720,7 @@ runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   ExceptT (PEE.EquivalenceError arch) IO a
-runEquivM env f = withValidEnv env $ runReaderT (unEQ f) env
+runEquivM env f = withValidEnv env $ CMR.runReaderT (unEQ f) env
 
 ----------------------------------------
 -- Errors
@@ -705,7 +730,7 @@ throwHere ::
   PEE.InnerEquivalenceError arch ->
   EquivM_ sym arch a
 throwHere err = withValid $ do
-  wb <- asks envWhichBinary
+  wb <- CMR.asks envWhichBinary
   throwError $ PEE.EquivalenceError
     { PEE.errWhichBinary = wb
     , PEE.errStackTrace = Just callStack

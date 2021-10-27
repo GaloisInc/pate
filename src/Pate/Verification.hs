@@ -36,7 +36,6 @@ import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
-import qualified Data.IntervalMap as IM
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Nonce as N
@@ -97,10 +96,6 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
 import           What4.ExprHelpers
 
--- | Return the list of entry points in the parsed function map
-parsedFunctionEntries :: PMC.ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
-parsedFunctionEntries = concatMap M.keys . IM.elems
-
 -- | Run code discovery using macaw
 --
 -- We run discovery in parallel, since we need to run it two to four times.
@@ -119,36 +114,40 @@ parsedFunctionEntries = concatMap M.keys . IM.elems
 runDiscovery
   :: (PA.ValidArch arch)
   => LJ.LogAction IO (PE.Event arch)
+  -> Maybe FilePath
+  -- ^ Directory to save macaw CFGs to
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PH.Hinted (PLE.LoadedELF arch)
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
-runDiscovery logAction elf elf' = do
+runDiscovery logAction mCFGDir elf elf' = do
   binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
   binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', PMC.parsedFunctionMap binCtxP))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discoverAsync e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery e h)))
+    discoverAsync mdir repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr e h)))
     discoverCheckingHints repr e = do
-      unhintedAnalysis <- discoverAsync (PH.hinted e) mempty
       if | PH.hints e == mempty -> do
+             unhintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) mempty
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              return oCtxUnhinted
          | otherwise -> do
-             hintedAnalysis <- discoverAsync (PH.hinted e) (PH.hints e)
+             unhintedAnalysis <- discoverAsync Nothing repr (PH.hinted e) mempty
+             hintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) (PH.hints e)
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
              unless (null hintErrors) $ do
                let invalidSet = S.fromList hintErrors
                let invalidEntries = [ (name, addr)
-                                    | (name, addr) <- PH.functionEntries (PH.hints e)
+                                    | (name, fd) <- PH.functionEntries (PH.hints e)
+                                    , let addr = PH.functionAddress fd
                                     , S.member addr invalidSet
                                     ]
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
 
-             let unhintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . PMC.parsedFunctionMap $ oCtxUnhinted)
-             let hintedDiscoveredAddresses = S.fromList (parsedFunctionEntries . PMC.parsedFunctionMap $ oCtxHinted)
+             let unhintedDiscoveredAddresses = S.fromList (PMC.parsedFunctionEntries (PMC.parsedFunctionMap oCtxUnhinted))
+             let hintedDiscoveredAddresses = S.fromList (PMC.parsedFunctionEntries (PMC.parsedFunctionMap oCtxHinted))
              let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
              unless (S.null newAddrs) $ do
                liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
@@ -173,7 +172,7 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcf
     Nothing -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
-  contexts <- runDiscovery logAction elf elf'
+  contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) elf elf'
 
   sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
@@ -358,7 +357,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
-  void $ withSimSpec triple $ \stO stP tripleBody -> do
+  void $ withSimSpec pPair triple $ \stO stP tripleBody -> do
     let
       inO = SimInput stO (PPa.pOriginal pPair)
       inP = SimInput stP (PPa.pPatched pPair)
@@ -407,7 +406,7 @@ withSimBundle ::
   (SimBundle sym arch -> EquivM sym arch f) ->
   EquivM sym arch (SimSpec sym arch f)
 withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
-  withFreshVars $ \stO stP -> do
+  withFreshVars pPair $ \stO stP -> do
     let
       simInO_ = SimInput stO (PPa.pOriginal pPair)
       simInP_ = SimInput stP (PPa.pPatched pPair)
@@ -491,7 +490,7 @@ catchSimBundle pPair postcondSpec f = do
       EquivM sym arch (Maybe ret)
     getCached (triple, futureProof) = do
       traceBlockPair pPair "Checking for cached result"
-      impliesPostcond (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
+      impliesPostcond pPair (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
         True -> do
           traceBlockPair pPair "Cache hit"
           prf' <- PFO.wrapFutureNonceApp futureProof
@@ -501,7 +500,7 @@ catchSimBundle pPair postcondSpec f = do
           return Nothing
 
     errorResult :: EquivM sym arch ret
-    errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars $ \stO stP -> do
+    errorResult = fmap unzipProof $ withSym $ \sym -> withFreshVars pPair $ \stO stP -> do
       let
         simInO_ = SimInput stO (PPa.pOriginal pPair)
         simInP_ = SimInput stP (PPa.pPatched pPair)
@@ -511,12 +510,13 @@ catchSimBundle pPair postcondSpec f = do
       return $ (W4.truePred sym, r)
 
 impliesPostcond ::
+  PPa.BlockPair arch ->
   StatePredSpec sym arch ->
   StatePredSpec sym arch ->
   EquivM sym arch Bool
-impliesPostcond stPredAsm stPredConcl = withSym $ \sym -> do
+impliesPostcond blocks stPredAsm stPredConcl = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  fmap specBody $ withFreshVars $ \stO stP -> do
+  fmap specBody $ withFreshVars blocks $ \stO stP -> do
     p <- liftIO $ impliesPostcondPred sym (PPa.PatchPair stO stP) stPredAsm stPredConcl
     b <- isPredTrue' heuristicTimeout p
     return $ (W4.truePred sym, b)
@@ -688,7 +688,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   precondUnknown <- withSatAssumption goalTimeout (return isUnknown) $ do
     blocks <- PD.getBlocks (simPair bundle)
     emitWarning blocks PEE.BlockEndClassificationFailure
-    univDom <- PVD.universalDomainSpec
+    univDom <- PVD.universalDomainSpec (simPair bundle)
     withNoFrameGuessing True $ proveLocalPostcondition bundle univDom
 
   --funCallProofCases' <- mapM joinCase funCallProofCases
@@ -1031,8 +1031,9 @@ topLevelPostRegisterDomain = return M.empty
 --   global (non-stack) memory
 topLevelPostDomain ::
   HasCallStack =>
+  PPa.BlockPair arch ->
   EquivM sym arch (StatePredSpec sym arch)
-topLevelPostDomain = withFreshVars $ \stO stP -> withSym $ \sym -> do
+topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> do
   regDomain <- topLevelPostRegisterDomain
   withAssumptionFrame (PVV.validInitState Nothing stO stP) $
     return $ PES.StatePred
@@ -1052,9 +1053,9 @@ topLevelTriple ::
   HasCallStack =>
   PPa.BlockPair arch ->
   EquivM sym arch (PF.EquivTriple sym arch)
-topLevelTriple pPair = withPair pPair $ withFreshVars $ \stO stP -> withSym $ \sym -> do
+topLevelTriple pPair = withPair pPair $ withFreshVars pPair $ \stO stP -> withSym $ \sym -> do
   regDomain <- PVD.allRegistersDomain
-  postcond <- topLevelPostDomain
+  postcond <- topLevelPostDomain pPair
   let
     precond = PES.StatePred
       { PES.predRegs = regDomain
@@ -1099,7 +1100,7 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
           -- doesn't consider the post-state. At this point we aren't interested in the target
           -- post-domain because we're just making sure that the given cases cover all possible exits,
           -- without considering the equivalence of the state at those exit points.
-          noDomain <- PF.unNonceProof <$> PFO.emptyDomain
+          noDomain <- PF.unNonceProof <$> PFO.emptyDomain (simPair bundle)
 
           ir <- PFG.getInequivalenceResult PEE.InvalidCallPair preDomain' noDomain blockSlice fn
           emit $ PE.BranchesIncomplete ir

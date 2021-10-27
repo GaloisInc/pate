@@ -35,7 +35,7 @@ data JSONError = JSONParseError String
                | InvalidAddress T.Text
   deriving (Show, Eq)
 
-readProbabilisticNameMap :: JSON.Value -> ([(T.Text, Word64)], [JSONError])
+readProbabilisticNameMap :: JSON.Value -> ([(T.Text, PH.FunctionDescriptor)], [JSONError])
 readProbabilisticNameMap val =
   case val of
     JSON.Object o -> F.foldl' collectProbabilisticMappings ([], []) (HMS.toList o)
@@ -53,16 +53,21 @@ parseAddress = MP.parseMaybe parseCodeHex
 
 -- | The values are expected to be objects with a @matches@ key
 collectProbabilisticMappings
-  :: ([(T.Text, Word64)], [JSONError])
+  :: ([(T.Text, PH.FunctionDescriptor)], [JSONError])
   -> (T.Text, JSON.Value)
-  -> ([(T.Text, Word64)], [JSONError])
+  -> ([(T.Text, PH.FunctionDescriptor)], [JSONError])
 collectProbabilisticMappings (mapping, errs) (textAddr, val) =
   case parseAddress textAddr of
     Nothing -> (mapping, InvalidAddress textAddr : errs)
     Just addr ->
       case parseMappingVal addr val of
         Left err -> (mapping, err : errs)
-        Right name -> ((name, addr) : mapping, errs)
+        Right name ->
+          let fd = PH.FunctionDescriptor { PH.functionSymbol = name
+                                         , PH.functionAddress = addr
+                                         , PH.functionArguments = []
+                                         }
+          in ((name, fd) : mapping, errs)
 
 parseMappingVal :: Word64 -> JSON.Value -> Either JSONError T.Text
 parseMappingVal addr val0 =
@@ -119,15 +124,20 @@ parseProbabilisticHints bs =
       in (mempty { PH.functionEntries = mappings }, errs)
 
 collectAnvillFunctions :: HMS.HashMap Word64 T.Text
-                       -> ([(T.Text, Word64)], [JSONError])
+                       -> ([(T.Text, PH.FunctionDescriptor)], [JSONError])
                        -> JSON.Value
-                       -> ([(T.Text, Word64)], [JSONError])
+                       -> ([(T.Text, PH.FunctionDescriptor)], [JSONError])
 collectAnvillFunctions addrSymMap (fnSpecs, errs) v =
   case v of
     JSON.Object o
       | Just (JSON.Number fnAddrS) <- HMS.lookup (T.pack "address") o
       , Just fnAddr <- DS.toBoundedInteger fnAddrS
-      , Just fnName <- HMS.lookup fnAddr addrSymMap -> ((fnName, fnAddr) : fnSpecs, errs)
+      , Just fnName <- HMS.lookup fnAddr addrSymMap ->
+        let fd = PH.FunctionDescriptor { PH.functionSymbol = fnName
+                                       , PH.functionAddress = fnAddr
+                                       , PH.functionArguments = []
+                                       }
+        in ((fnName, fd) : fnSpecs, errs)
     _ -> (fnSpecs, UnexpectedTopLevel "Function" v : errs)
 
 -- | Return the size corresponding to an Anvill type spec

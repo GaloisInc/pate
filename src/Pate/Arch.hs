@@ -18,6 +18,7 @@ module Pate.Arch (
   ) where
 
 import qualified Data.Kind as DK
+import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           GHC.TypeLits ( type (<=) )
 
@@ -107,6 +108,14 @@ class
   -- | Determine how a register should be displayed to a user in reports and an
   -- interactive context
   displayRegister :: forall tp . MC.ArchReg arch tp -> RegisterDisplay String
+  -- | From a name of formal argument parameters, determine the name of the
+  -- parameter in the given register (if any)
+  --
+  -- FIXME: To be correct, this really needs to account for the types of
+  -- arguments (e.g., large arguments are on the stack, while floating point
+  -- arguments are in FP registers). Longer term, this should use the abide
+  -- library
+  argumentNameFrom :: forall tp . [T.Text] -> MC.ArchReg arch tp -> Maybe T.Text
 
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier

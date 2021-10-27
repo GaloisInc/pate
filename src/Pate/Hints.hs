@@ -17,6 +17,7 @@
 -- don't impose any additional dependencies on the core verifier.
 module Pate.Hints (
   SymbolExtent(..),
+  FunctionDescriptor(..),
   VerificationHints(..),
   HintValidationFailure(..),
   validate,
@@ -56,6 +57,18 @@ instance CD.NFData SymbolExtent
 instance PP.Pretty SymbolExtent where
   pretty symExt = PP.brackets (ppHex (symbolLocation symExt) <> PP.pretty ":" <> PP.pretty (symbolSize symExt))
 
+data FunctionDescriptor =
+  FunctionDescriptor { functionSymbol :: T.Text
+                     , functionAddress :: Word64
+                     , functionArguments :: [T.Text]
+                     -- ^ Names of function arguments; FIXME: Will eventually
+                     -- need type annotations. For now, assume all arguments are
+                     -- ints
+                     }
+  deriving (Read, Show, Generic, Eq, Ord)
+
+instance CD.NFData FunctionDescriptor
+
 -- | The user-facing structure for defining the hints supported by the pate tools
 --
 -- Parsers generate these, which are then combined and validated with the
@@ -64,7 +77,7 @@ data VerificationHints =
   VerificationHints { blockMappings :: [(Word64, Word64)]
                     -- ^ A mapping from original block addresses to their
                     -- corresponding address in the patched binary
-                    , functionEntries :: [(T.Text, Word64)]
+                    , functionEntries :: [(T.Text, FunctionDescriptor)]
                     -- ^ Addresses of function entry points (along with corresponding symbol names)
                     --
                     -- Note that symbols are assumed to be representable as
@@ -204,9 +217,10 @@ addBlockMapping (origAddr, patchedAddr) = do
       let msg = DuplicateBlockMapping origAddr mappedAddr patchedAddr
       sValidation %= (Seq.|> msg)
 
-addFunctionEntry :: (T.Text, Word64) -> Validator ()
-addFunctionEntry (name, addr) = do
+addFunctionEntry :: (T.Text, FunctionDescriptor) -> Validator ()
+addFunctionEntry (name, fd) = do
   fm <- CMS.gets _sFunctionMap
+  let addr = functionAddress fd
   case Map.lookup name fm of
     Nothing -> sFunctionMap %= Map.insert name addr
     Just oldAddr -> do

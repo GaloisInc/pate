@@ -147,6 +147,7 @@ main = do
             , PC.cfgSolver = solver opts
             , PC.cfgHeuristicTimeout = heuristicTimeout opts
             , PC.cfgGoalTimeout = goalTimeout opts
+            , PC.cfgMacawDir = saveMacawCFGs opts
             }
         cfg = PC.RunConfig
             { PC.archProxy = proxy
@@ -193,6 +194,7 @@ data CLIOptions = CLIOptions
   , patchedCsvFunctionHints :: Maybe FilePath
   , dwarfHints :: Bool
   , verbosity :: PV.Verbosity
+  , saveMacawCFGs :: Maybe FilePath
   } deriving (Eq, Ord, Show)
 
 data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
@@ -340,11 +342,11 @@ terminalFormatEvent evt =
         PE.Inequivalent _mdl ->
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
           in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
-    PE.ErrorRaised err -> layout (PP.pretty $ show err)
-    PE.ProvenGoal _ prf _ -> layout (PP.viaShow prf)
-    PE.HintErrorsCSV errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
-    PE.HintErrorsJSON errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
-    PE.HintErrorsDWARF errs -> layout (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.ErrorRaised err -> layoutLn (PP.viaShow err)
+    PE.ProvenGoal _ prf _ -> layoutLn (PP.viaShow prf)
+    PE.HintErrorsCSV errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.HintErrorsJSON errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.HintErrorsDWARF errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.FunctionEntryInvalidHints _ errs ->
       layout ("Invalid function entry hints:" <> PP.line
                <> PP.vsep [ PP.pretty fn <> "@" <> ppHex addr
@@ -355,9 +357,9 @@ terminalFormatEvent evt =
       layout ("Additional functions discovered based on hits: " <> PP.line
              <> PP.vcat (map PP.viaShow extraAddrs) <> PP.line)
     PE.ProofTraceEvent _stack origAddr _patchedAddr msg _tm ->
-      layout (PP.pretty origAddr <> ": " <> PP.pretty msg)
+      layout (PP.pretty origAddr <> ": " <> PP.pretty msg <> PP.line)
     PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
-      layout (PP.pretty origAddr <> ": " <> WI.printSymExpr expr)
+      layout (PP.pretty origAddr <> ": " <> WI.printSymExpr expr <> PP.line)
     -- FIXME: handle other events
     _ -> layout ""
 
@@ -530,3 +532,7 @@ cliOptions = OA.info (OA.helper <*> parser)
                           <> OA.value PV.Info
                           <> OA.help "The verbosity of logging output"
                           )
+    <*> OA.optional (OA.strOption
+         ( OA.long "save-macaw-cfgs"
+         <> OA.help "Save macaw CFGs to the provided directory"
+         ))

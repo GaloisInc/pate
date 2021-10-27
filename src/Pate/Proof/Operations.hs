@@ -282,8 +282,8 @@ statePredToPostDomain stPredSpec = proofNonceExpr $ do
   PF.appDomain <$> statePredToDomain states stPred
 
 
-emptyDomain :: EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
-emptyDomain = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars $ \stO stP -> do
+emptyDomain :: PPa.BlockPair arch -> EquivM sym arch (PFI.ProofSymNonceExpr sym arch PF.ProofDomainType)
+emptyDomain blocks = proofNonceExpr $ withSym $ \sym -> fmap PS.specBody $ withFreshVars blocks $ \stO stP -> do
   dom <- PF.appDomain <$> statePredToDomain (PPa.PatchPair stO stP) (PES.statePredFalse sym)
   return $ (W4.truePred sym, dom)
 

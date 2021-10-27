@@ -112,19 +112,47 @@ variableHints dieMap reader attrs =
               (mempty, [UnexpectedVariableLocation name nBytes op])
         Just atval -> (mempty, [DIEAttributeInvalidValueType DD.DW_TAG_variable DD.DW_AT_location atval])
 
+atvalAsText :: DD.DW_ATVAL -> Maybe T.Text
+atvalAsText atv =
+  case atv of
+    DD.DW_ATVAL_STRING nameBytes -> Just (TE.decodeUtf8With TE.lenientDecode nameBytes)
+    DD.DW_ATVAL_BLOB nameBytes -> Just (TE.decodeUtf8With TE.lenientDecode nameBytes)
+    DD.DW_ATVAL_INT _ -> Nothing
+    DD.DW_ATVAL_UINT _ -> Nothing
+    DD.DW_ATVAL_REF _ -> Nothing
+    DD.DW_ATVAL_BOOL _ -> Nothing
+
+subprogramArguments
+  :: [DD.DIE]
+  -> [T.Text]
+subprogramArguments children =
+  [ nm
+  | d <- children
+  , DD.DW_TAG_formal_parameter <- return (DD.dieTag d)
+  , (DD.DW_AT_name, val) <- DD.dieAttributes d
+  , Just nm <- return (atvalAsText val)
+  ]
+
 -- | Subprograms have two things we are interested in:
 --
 -- 1. DW_AT_name
 -- 2. DW_AT_low_pc
-subprogramHints :: [(DD.DW_AT, DD.DW_ATVAL)] -> (PH.VerificationHints, [DWARFError])
-subprogramHints attrs =
+subprogramHints
+  :: [DD.DIE]
+  -> [(DD.DW_AT, DD.DW_ATVAL)]
+  -> (PH.VerificationHints, [DWARFError])
+subprogramHints children attrs =
   withName DD.DW_TAG_subprogram attrs subprogramEntry
   where
     subprogramEntry name =
       case lookup DD.DW_AT_low_pc attrs of
         Nothing -> (mempty, [DIEMissingAttribute DD.DW_TAG_subprogram DD.DW_AT_low_pc])
         Just (DD.DW_ATVAL_UINT addr) ->
-          let entry = (name, fromIntegral addr)
+          let fd = PH.FunctionDescriptor { PH.functionSymbol = name
+                                         , PH.functionAddress = fromIntegral addr
+                                         , PH.functionArguments = subprogramArguments children
+                                         }
+              entry = (name, fd)
           in (mempty { PH.functionEntries = [entry] }, [])
         Just atval -> (mempty, [DIEAttributeInvalidValueType DD.DW_TAG_subprogram DD.DW_AT_low_pc atval])
 
@@ -133,7 +161,7 @@ subprogramHints attrs =
 traverseDIE :: Map.Map DD.DieID DD.DIE -> DD.DIE -> (PH.VerificationHints, [DWARFError])
 traverseDIE dieMap d =
   case DD.dieTag d of
-    DD.DW_TAG_subprogram -> subprogramHints (DD.dieAttributes d)
+    DD.DW_TAG_subprogram -> subprogramHints (DD.dieChildren d) (DD.dieAttributes d)
     DD.DW_TAG_variable -> variableHints dieMap (DD.dieReader d) (DD.dieAttributes d)
     _ -> let (hints, errs) = unzip $ map (traverseDIE dieMap) (DD.dieChildren d)
          in (mconcat hints, mconcat errs)

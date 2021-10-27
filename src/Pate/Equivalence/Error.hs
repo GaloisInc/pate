@@ -11,7 +11,6 @@ module Pate.Equivalence.Error (
   ) where
 
 import qualified Control.Exception as X
-import qualified Data.IntervalMap as IM
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Typeable ( Typeable )
@@ -41,7 +40,7 @@ data InnerEquivalenceError arch
   | UnsupportedRegisterType (Some CT.TypeRepr)
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
-  | NoUniqueFunctionOwner (IM.Interval (PA.ConcreteAddress arch)) [MM.ArchSegmentOff arch]
+  | NoUniqueFunctionOwner (PA.ConcreteAddress arch) [MM.ArchSegmentOff arch]
   | LookupNotAtFunctionStart CallStack (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (PA.ConcreteAddress arch) (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
