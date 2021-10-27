@@ -290,8 +290,8 @@ runVerificationLoop env pPairs = do
       pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
         mainO <- CMR.asks $ PMC.binEntry . PPa.pOriginal . PMC.binCtxs . envCtx
         mainP <- CMR.asks $ PMC.binEntry . PPa.pPatched . PMC.binCtxs . envCtx
-        blkO <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainO
-        blkP <- PD.mkConcreteBlock PB.BlockEntryInitFunction mainP
+        let blkO = PB.concreteEntryPoint mainO PBi.OriginalRepr
+        let blkP = PB.concreteEntryPoint mainP PBi.PatchedRepr
         let pPair = PPa.PatchPair blkO blkP
         return $ pPair : pPairs
       triples <- DT.forM pPairs' $ topLevelTriple

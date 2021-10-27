@@ -6,9 +6,9 @@
 module Pate.Block (
     BlockEntryKind(..)
   , ConcreteBlock(..)
+  , concreteEntryPoint
   , equivBlocks
   , blockMemAddr
-  , getConcreteBlock
   -- * Pretty Printers
   , ppBlockEntry
   , ppBlock
@@ -47,19 +47,21 @@ data ConcreteBlock arch (bin :: PB.WhichBinary) =
                 , blockBinRepr :: PB.WhichBinaryRepr bin
                 }
 
+concreteEntryPoint ::
+  MM.ArchSegmentOff arch ->
+  PB.WhichBinaryRepr bin ->
+  ConcreteBlock arch bin
+concreteEntryPoint off repr =
+  ConcreteBlock
+  { concreteAddress    = PA.addressFromMemAddr (MM.segoffAddr off)
+  , concreteBlockEntry = BlockEntryInitFunction
+  , blockBinRepr       = repr
+  }
+
 equivBlocks :: ConcreteBlock arch PB.Original -> ConcreteBlock arch PB.Patched -> Bool
 equivBlocks blkO blkP =
   concreteAddress blkO == concreteAddress blkP &&
   concreteBlockEntry blkO == concreteBlockEntry blkP
-
-getConcreteBlock ::
-  MM.MemWidth (MM.ArchAddrWidth arch) =>
-  MM.ArchSegmentOff arch ->
-  BlockEntryKind arch ->
-  PB.WhichBinaryRepr bin ->
-  ConcreteBlock arch bin
-getConcreteBlock off k bin =
-  ConcreteBlock (PA.ConcreteAddress (MM.segoffAddr off)) k bin
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
 blockMemAddr (ConcreteBlock (PA.ConcreteAddress addr) _ _) = addr
