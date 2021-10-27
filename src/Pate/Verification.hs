@@ -61,6 +61,7 @@ import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Arch as PA
+import qualified Pate.Address as PAd
 import qualified Pate.Abort as PAb
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
@@ -160,9 +161,9 @@ verifyPairs ::
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PC.VerificationConfig ->
-  [PPa.BlockPair arch] ->
+  PC.PatchData ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pPairs = do
+verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
@@ -233,12 +234,39 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pPairs 
       , envStatistics = statsVar
       }
 
+  pPairs <- unpackPatchData contexts pd
+
   liftIO $ do
     (result, stats) <- runVerificationLoop env pPairs
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
     return $ result
+
+
+unpackBlockData ::
+  PBi.KnownBinary bin =>
+  PA.ValidArch arch =>
+  PMC.BinaryContext arch bin ->
+  PC.BlockData ->
+  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.ConcreteBlock arch bin)
+unpackBlockData _ctxt (PC.Hex w) = pure $
+  PB.ConcreteBlock
+    { PB.concreteAddress = PAd.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
+      -- we assume that all provided blocks begin a function
+    , PB.concreteBlockEntry = PB.BlockEntryInitFunction
+    , PB.blockBinRepr = W4.knownRepr
+    }
+
+unpackPatchData ::
+  PA.ValidArch arch =>
+  PPa.PatchPair (PMC.BinaryContext arch) ->
+  PC.PatchData ->
+  CME.ExceptT (PEE.EquivalenceError arch) IO [PPa.BlockPair arch]
+unpackPatchData contexts (PC.PatchData pairs) = DT.forM pairs $
+   \(bd, bd') -> PPa.PatchPair
+       <$> unpackBlockData (PPa.pOriginal contexts) bd
+       <*> unpackBlockData (PPa.pPatched contexts) bd'
 
 ---------------------------------------------
 -- Top-level loop
@@ -270,8 +298,9 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pPairs 
 -- the likely future requirement for equivalence checks to emit deferred equivalence
 runVerificationLoop ::
   forall sym arch.
+  PA.ValidArch arch =>
   EquivEnv sym arch ->
-  -- | A list of block pairs to test for equivalence. They must be the start of a function.
+  -- | A list of block pairs to test for equivalence. They must be the entry points of a functions.
   [PPa.BlockPair arch] ->
   IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
@@ -349,7 +378,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     -- FIXME: this should fail early, rather than waiting for the entire proof result
     case PFO.proofResult (PF.unNonceProof proof) of
       PF.VerificationSuccess -> return (spec, proof)
-      _ -> 
+      _ ->
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
@@ -387,7 +416,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
     -- the bound terms
     pPair = PF.eqPair $ specBody triple
     postcondSpec = PF.eqPostDomain $ specBody triple
-  
+
 --------------------------------------------------------
 -- Simulation
 
@@ -428,7 +457,7 @@ trivialGlobalMap _ _ reg off = pure (CLM.LLVMPointer reg off)
 --------------------------------------------------------
 -- Proving equivalence
 
--- | Update 'envCurrentFunc' if the given pair 
+-- | Update 'envCurrentFunc' if the given pair
 withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
 withPair pPair f = do
   env <- CMR.ask
@@ -480,7 +509,7 @@ catchSimBundle pPair postcondSpec f = do
       Just r -> return $ Just r
       Nothing -> firstCached xs
     firstCached [] = return Nothing
-    
+
     getCached ::
       (PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType)) ->
       EquivM sym arch (Maybe ret)
@@ -683,7 +712,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     funCallCases = map (\(p, (br, _)) -> (p, br)) funCallProofCases
     funCallProofs = map (\(_, (br, prf)) -> (branchBlocks br, prf)) funCallProofCases
     allPreconds = catMaybes [precondReturn,precondUnknown] ++ funCallCases
-  
+
   precond' <- F.foldrM (\(p, br) stPred -> liftIO $ PES.muxStatePred sym p (branchPreDomain br) stPred)  returnByDefault funCallCases
 
   precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
@@ -722,7 +751,7 @@ matchingExits ::
 matchingExits bundle ecase = withSym $ \sym -> do
   case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutO bundle) ecase
   case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) ecase
-  liftIO $ W4.andPred sym case1 case2  
+  liftIO $ W4.andPred sym case1 case2
 
 
 -- | Prove a local postcondition (i.e. it must hold when the slice exits) for a pair of slices
@@ -741,11 +770,11 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   eqInputs <- withAssumption_ (return asm) $ do
     PVD.guessEquivalenceDomain bundle postcondPred postcond
   traceBundle bundle ("Equivalence domain has: " ++ show (M.keys (PES.predRegs eqInputs)))
-  
+
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
-       
+
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
 
@@ -847,7 +876,7 @@ getCondEquivalenceResult bundle eqCond fn = do
   binds <- PFG.getCondEquivalenceBindings eqCond fn
   abortValid <- PAb.proveAbortValid bundle eqCond
   return $ PFI.CondEquivalenceResult binds eqCond abortValid
-  
+
 
 computeEqConditionGas :: Int
 computeEqConditionGas = 20
@@ -908,7 +937,7 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
     go :: W4.Pred sym -> Int -> EquivM sym arch (W4.Pred sym)
     go pathCond 0 = return pathCond
     go pathCond gas = withSym $ \sym -> do
-      -- can we satisfy equivalence, assuming that none of the given path conditions are taken?  
+      -- can we satisfy equivalence, assuming that none of the given path conditions are taken?
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
       eresult <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
           W4R.Unsat _ -> return Nothing
@@ -1035,7 +1064,7 @@ topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> d
 --   all registers, stack, and memory
 --   IPs match given patchpair
 -- postdomain:
---   global (non-stack) memory  
+--   global (non-stack) memory
 topLevelTriple ::
   HasCallStack =>
   PPa.BlockPair arch ->
