@@ -58,7 +58,6 @@ data EquivEnv sym arch where
     , envPCRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
-    , envBlockMapping :: BlockMapping arch
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode

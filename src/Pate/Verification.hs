@@ -60,7 +60,6 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
 import qualified Pate.Abort as PAb
 import qualified Pate.Binary as PBi
@@ -161,11 +160,10 @@ verifyPairs ::
   LJ.LogAction IO (PE.Event arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  BlockMapping arch ->
   PC.VerificationConfig ->
   [PPa.BlockPair arch] ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcfg pPairs = do
+verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pPairs = do
   startTime <- liftIO TM.getCurrentTime
   Some gen <- liftIO N.newIONonceGenerator
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
@@ -219,7 +217,6 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' blockMap vcf
       , envPCRegion = pcRegion
       , envMemTraceVar = model
       , envBlockEndVar = bvar
-      , envBlockMapping = buildBlockMap pPairs blockMap
       , envLogger = logAction
       , envConfig = vcfg
       , envBaseEquiv = stateEquivalence hdr sym stackRegion
@@ -1110,21 +1107,3 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
     getCase :: (W4.Pred sym, BranchCase sym arch) -> EquivM sym arch (W4.Pred sym)
     getCase (cond, br) = withSym $ \sym ->
       liftIO $ W4.impliesPred sym (branchPrePred br) cond
-
--- | Prefer existing entries
-doAddAddr ::
-  PA.ConcreteAddress arch ->
-  Maybe (PA.ConcreteAddress arch) ->
-  Maybe (PA.ConcreteAddress arch)
-doAddAddr _ (Just addr) = Just addr
-doAddAddr addr Nothing = Just addr
-
-buildBlockMap ::
-  [PPa.BlockPair arch] ->
-  BlockMapping arch ->
-  BlockMapping arch
-buildBlockMap pairs bm = foldr go bm pairs
-  where
-    go :: PPa.BlockPair arch -> BlockMapping arch -> BlockMapping arch
-    go (PPa.PatchPair orig patched) (BlockMapping m) =
-      BlockMapping $ M.alter (doAddAddr (PB.concreteAddress patched)) (PB.concreteAddress orig) m

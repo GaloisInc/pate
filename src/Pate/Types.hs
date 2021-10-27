@@ -24,16 +24,12 @@
 {-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Types
-  ( BlockMapping(..)
-  , BlockTarget(..)
+  ( BlockTarget(..)
   )
 where
 
-import qualified Data.Map as M
-
 import qualified Data.Macaw.CFG as MM
 
-import           Pate.Address
 import           Pate.Block
 
 ----------------------------------
@@ -50,10 +46,6 @@ data BlockTarget arch bin =
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
   show (BlockTarget a b) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
-
--- | Map from the start of original blocks to patched block addresses
-newtype BlockMapping arch = BlockMapping (M.Map (ConcreteAddress arch) (ConcreteAddress arch))
-
 
 
 ----------------------------------
