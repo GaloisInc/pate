@@ -4,17 +4,27 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE UndecidableInstances #-}
 module Pate.Block (
+  -- * Block data
     BlockEntryKind(..)
   , ConcreteBlock(..)
   , BlockTarget(..)
-  , concreteEntryPoint
   , equivBlocks
   , blockMemAddr
+  , mkConcreteBlock
+  , mkConcreteBlock'
+
+  -- * Function entry data
+  , FunctionEntry(..)
+  , functionAddress
+  , functionEntryToConcreteBlock
+
   -- * Pretty Printers
   , ppBlockEntry
   , ppBlock
+  , ppFunctionEntry
   ) where
 
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Parameterized.Classes as PC
 import qualified Prettyprinter as PP
@@ -48,17 +58,6 @@ data ConcreteBlock arch (bin :: PB.WhichBinary) =
                 , blockBinRepr :: PB.WhichBinaryRepr bin
                 }
 
-concreteEntryPoint ::
-  MM.ArchSegmentOff arch ->
-  PB.WhichBinaryRepr bin ->
-  ConcreteBlock arch bin
-concreteEntryPoint off repr =
-  ConcreteBlock
-  { concreteAddress    = PA.addressFromMemAddr (MM.segoffAddr off)
-  , concreteBlockEntry = BlockEntryInitFunction
-  , blockBinRepr       = repr
-  }
-
 equivBlocks :: ConcreteBlock arch PB.Original -> ConcreteBlock arch PB.Patched -> Bool
 equivBlocks blkO blkP =
   concreteAddress blkO == concreteAddress blkP &&
@@ -66,6 +65,31 @@ equivBlocks blkO blkP =
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
 blockMemAddr (ConcreteBlock (PA.ConcreteAddress addr) _ _) = addr
+
+mkConcreteBlock ::
+  ConcreteBlock arch bin ->
+  BlockEntryKind arch ->
+  MM.ArchSegmentOff arch ->
+  ConcreteBlock arch bin
+mkConcreteBlock from k a =
+  ConcreteBlock
+  { concreteAddress = PA.addressFromMemAddr (MM.segoffAddr a)
+  , concreteBlockEntry = k
+  , blockBinRepr = blockBinRepr from
+  }
+
+mkConcreteBlock' ::
+  ConcreteBlock arch bin ->
+  BlockEntryKind arch ->
+  PA.ConcreteAddress arch ->
+  ConcreteBlock arch bin
+mkConcreteBlock' from k a =
+  ConcreteBlock
+  { concreteAddress = a
+  , concreteBlockEntry = k
+  , blockBinRepr = blockBinRepr from
+  }
+
 
 instance PC.TestEquality (ConcreteBlock arch) where
   testEquality (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
@@ -108,3 +132,50 @@ data BlockTarget arch bin =
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
   show (BlockTarget a b) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
 
+
+data FunctionEntry arch (bin :: PB.WhichBinary) =
+  FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch
+                , functionSymbol  :: Maybe BSC.ByteString
+                , functionBinRepr :: PB.WhichBinaryRepr bin
+                }
+
+functionAddress :: FunctionEntry arch bin -> PA.ConcreteAddress arch
+functionAddress fe = PA.ConcreteAddress (MM.segoffAddr (functionSegAddr fe))
+
+ppFunctionEntry :: MM.MemWidth (MM.ArchAddrWidth arch) => FunctionEntry arch bin -> String
+ppFunctionEntry fe = show (functionAddress fe)
+
+instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (FunctionEntry arch bin) where
+  pretty = PP.viaShow . functionAddress
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (FunctionEntry arch bin) where
+  show fe = ppFunctionEntry fe
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => PC.ShowF (FunctionEntry arch) where
+  showF fe = show fe
+
+instance PC.TestEquality (FunctionEntry arch) where
+  testEquality (FunctionEntry segAddr1 _s1 binrepr1) (FunctionEntry segAddr2 _s2 binrepr2) =
+    case PC.testEquality binrepr1 binrepr2 of
+      Just PC.Refl | segAddr1 == segAddr2 -> Just PC.Refl
+      _ -> Nothing
+
+instance Eq (FunctionEntry arch bin) where
+  fe1 == fe2 = PC.isJust $ PC.testEquality fe1 fe2
+
+instance PC.OrdF (FunctionEntry arch) where
+  compareF (FunctionEntry segAddr1 _s1 binrepr1) (FunctionEntry segAddr2 _s2 binrepr2) =
+    PC.lexCompareF binrepr1 binrepr2 $ PC.fromOrdering $
+      compare segAddr1 segAddr2
+
+
+instance Ord (FunctionEntry arch bin) where
+  compare fe1 fe2 = PC.toOrdering $ PC.compareF fe1 fe2
+
+functionEntryToConcreteBlock :: FunctionEntry arch bin -> ConcreteBlock arch bin
+functionEntryToConcreteBlock (FunctionEntry segAddr _s binRepr) =
+  ConcreteBlock
+  { concreteAddress    = PA.ConcreteAddress (MM.segoffAddr segAddr)
+  , concreteBlockEntry = BlockEntryInitFunction
+  , blockBinRepr       = binRepr
+  } 

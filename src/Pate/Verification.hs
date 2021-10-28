@@ -234,10 +234,18 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
       , envStatistics = statsVar
       }
 
+  -- compute function entry pairs from the input PatchData
   pPairs <- unpackPatchData contexts pd
+  -- include the process entry point, if configured to do so
+  pPairs' <- if PC.cfgPairMain vcfg then
+               do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
+                  let mainP = PMC.binEntry . PPa.pPatched $ contexts
+                  return (PPa.PatchPair mainO mainP : pPairs)
+              else
+                return pPairs
 
   liftIO $ do
-    (result, stats) <- runVerificationLoop env pPairs
+    (result, stats) <- runVerificationLoop env pPairs'
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
@@ -249,20 +257,15 @@ unpackBlockData ::
   PA.ValidArch arch =>
   PMC.BinaryContext arch bin ->
   PC.BlockData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.ConcreteBlock arch bin)
-unpackBlockData _ctxt (PC.Hex w) = pure $
-  PB.ConcreteBlock
-    { PB.concreteAddress = PAd.ConcreteAddress $ MM.absoluteAddr $ MM.memWord w
-      -- we assume that all provided blocks begin a function
-    , PB.concreteBlockEntry = PB.BlockEntryInitFunction
-    , PB.blockBinRepr = W4.knownRepr
-    }
+  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
+unpackBlockData ctxt (PC.Hex w) =
+  PD.lookupFunctionEntry (PMC.functionEntryMap ctxt) (PAd.ConcreteAddress (MM.absoluteAddr (MM.memWord w)))
 
 unpackPatchData ::
   PA.ValidArch arch =>
   PPa.PatchPair (PMC.BinaryContext arch) ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO [PPa.BlockPair arch]
+  CME.ExceptT (PEE.EquivalenceError arch) IO [PPa.FunPair arch]
 unpackPatchData contexts (PC.PatchData pairs) = DT.forM pairs $
    \(bd, bd') -> PPa.PatchPair
        <$> unpackBlockData (PPa.pOriginal contexts) bd
@@ -301,7 +304,7 @@ runVerificationLoop ::
   PA.ValidArch arch =>
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the entry points of a functions.
-  [PPa.BlockPair arch] ->
+  [PPa.FunPair arch] ->
   IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
   result <- CME.runExceptT $ runEquivM env doVerify
@@ -312,14 +315,7 @@ runVerificationLoop env pPairs = do
   where
     doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
     doVerify = do
-      pPairs' <- ifConfig (not . PC.cfgPairMain) (return pPairs) $ do
-        mainO <- CMR.asks $ PMC.binEntry . PPa.pOriginal . PMC.binCtxs . envCtx
-        mainP <- CMR.asks $ PMC.binEntry . PPa.pPatched . PMC.binCtxs . envCtx
-        let blkO = PB.concreteEntryPoint mainO PBi.OriginalRepr
-        let blkP = PB.concreteEntryPoint mainP PBi.PatchedRepr
-        let pPair = PPa.PatchPair blkO blkP
-        return $ pPair : pPairs
-      triples <- DT.forM pPairs' $ topLevelTriple
+      triples <- DT.forM pPairs $ topLevelTriple
       result <- CMR.local (\env' -> env' { envGoalTriples = triples } ) $
         CME.foldM (\a b -> (<>) a <$> go b) mempty triples
       statVar <- CMR.asks envStatistics
@@ -1067,21 +1063,25 @@ topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> d
 --   global (non-stack) memory
 topLevelTriple ::
   HasCallStack =>
-  PPa.BlockPair arch ->
+  PPa.FunPair arch ->
   EquivM sym arch (PF.EquivTriple sym arch)
-topLevelTriple pPair = withPair pPair $ withFreshVars pPair $ \stO stP -> withSym $ \sym -> do
-  regDomain <- PVD.allRegistersDomain
-  postcond <- topLevelPostDomain pPair
-  let
-    precond = PES.StatePred
-      { PES.predRegs = regDomain
-      , PES.predStack = PEM.memPredTrue sym
-      , PES.predMem = PEM.memPredTrue sym
-      }
-  let triple = PF.EquivTripleBody pPair precond postcond
-  asm_frame <- PVV.validInitState (Just pPair) stO stP
-  asm <- liftIO $ getAssumedPred sym asm_frame
-  return (asm, triple)
+topLevelTriple fnPair =
+  let pPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair in
+  withPair pPair $
+  withFreshVars pPair $ \stO stP ->
+  withSym $ \sym -> do
+    regDomain <- PVD.allRegistersDomain
+    postcond <- topLevelPostDomain pPair
+    let
+      precond = PES.StatePred
+        { PES.predRegs = regDomain
+        , PES.predStack = PEM.memPredTrue sym
+        , PES.predMem = PEM.memPredTrue sym
+        }
+    let triple = PF.EquivTripleBody pPair precond postcond
+    asm_frame <- PVV.validInitState (Just pPair) stO stP
+    asm <- liftIO $ getAssumedPred sym asm_frame
+    return (asm, triple)
 
 --------------------------------------------------------
 -- Totality check - ensure that the verified exit pairs cover all possible

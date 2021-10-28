@@ -41,7 +41,7 @@ data InnerEquivalenceError arch
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
   | NoUniqueFunctionOwner (PA.ConcreteAddress arch) [MM.ArchSegmentOff arch]
-  | LookupNotAtFunctionStart CallStack (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
+  | LookupNotAtFunctionStart CallStack (PA.ConcreteAddress arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (PA.ConcreteAddress arch) (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
   | BlockExceedsItsSegment (MM.ArchSegmentOff arch) (MM.ArchAddrWord arch)

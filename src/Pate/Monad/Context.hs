@@ -12,6 +12,7 @@ module Pate.Monad.Context (
   , parsedFunctionEntries
   , parsedFunctionContaining
   , buildParsedFunctionMap
+  , buildFunctionEntryMap
 
   , ParsedBlockMap
   , parsedBlocksContaining
@@ -38,6 +39,7 @@ import qualified What4.Interface as W4
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Hints as PH
 import qualified Pate.PatchPair as PPa
 
@@ -103,31 +105,15 @@ archSegmentOffToInterval segOff size =
   in IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size)
 
 
-{- This doesn't seem to work correctly...
 parsedFunctionContaining ::
   MM.ArchConstraints arch =>
   PA.ConcreteAddress arch ->
   ParsedFunctionMap arch ->
-  Either [MM.ArchSegmentOff arch] (MM.ArchSegmentOff arch, Some (ParsedBlockMap arch))
-parsedFunctionContaining addr (ParsedFunctionMap pfm) =
-  case Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm of
-    [x]  -> Right x
-    blks -> Left (fst <$> blks)
-  where
-  start@(PA.ConcreteAddress saddr) = addr
-  end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
-  i = IM.OpenInterval start end
--}
-
-parsedFunctionContaining ::
-  MM.ArchConstraints arch =>
-  PA.ConcreteAddress arch ->
-  ParsedFunctionMap arch ->
-  Either [MM.ArchSegmentOff arch] (PA.ConcreteAddress arch, Some (ParsedBlockMap arch))
+  Either [MM.ArchSegmentOff arch] (MM.ArchSegmentOff arch, PA.ConcreteAddress arch, Some (ParsedBlockMap arch))
 parsedFunctionContaining addr (ParsedFunctionMap pfm) =
   let fns = Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm
-      fns' = fmap (\(segOff, pbm) -> (segOffToAddr segOff, pbm)) fns
-  in case reverse $ filter (\(addr', _) -> addr' <= start) fns' of
+      fns' = fmap (\(segOff, pbm) -> (segOff, segOffToAddr segOff, pbm)) fns
+  in case reverse $ filter (\(_, addr', _) -> addr' <= start) fns' of
        (x:_) -> Right x
        [] -> Left (fst <$> fns)
  where
@@ -153,17 +139,45 @@ segOffToAddr ::
 segOffToAddr off = PA.addressFromMemAddr (MM.segoffAddr off)
 
 
+buildFunctionEntryMap ::
+  PBi.WhichBinaryRepr bin ->
+  Map.Map (MM.ArchSegmentOff arch) (Some (MD.DiscoveryFunInfo arch)) ->
+  Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin)
+buildFunctionEntryMap binRepr disMap = Map.fromList
+  [ (segOffToAddr segOff, funInfoToFunEntry binRepr fi)
+  | (segOff, Some fi) <- Map.assocs disMap
+  ]
+
+funInfoToFunEntry ::
+  PBi.WhichBinaryRepr bin ->
+  MD.DiscoveryFunInfo arch ids ->
+  PB.FunctionEntry arch bin
+funInfoToFunEntry binRepr dfi =
+  PB.FunctionEntry
+  { PB.functionSegAddr = MD.discoveredFunAddr dfi
+  , PB.functionSymbol  = MD.discoveredFunSymbol dfi
+  , PB.functionBinRepr = binRepr
+  }
+
 data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
+
   , parsedFunctionMap :: ParsedFunctionMap arch
-  , binEntry :: MM.ArchSegmentOff arch
+
+  , binEntry :: PB.FunctionEntry arch bin
+
   , hints :: PH.VerificationHints
+
   , functionHintIndex :: Map.Map (PA.ConcreteAddress arch) PH.FunctionDescriptor
   -- ^ An index of the binary hints by function entry point address, used in the
   -- construction of function frames to name parameters
-  , binAbortFn :: Maybe (MM.ArchSegmentOff arch)
+
+  , binAbortFn :: Maybe (PB.FunctionEntry arch bin)
   -- ^ address of special-purposes "abort" function that represents an abnormal
   -- program exit
+
+  , functionEntryMap :: Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin)
+  -- ^ A map of all the function entrypoints we know about
   }
 
 data EquivalenceContext sym arch where
@@ -172,6 +186,8 @@ data EquivalenceContext sym arch where
     , binCtxs :: PPa.PatchPair (BinaryContext arch)
     , stackRegion :: W4.SymNat sym
     , globalRegion :: W4.SymNat sym
+      -- NB, currentFunc is misnamed, as it corresponds to a pair of blocks under consideration,
+      -- but they might not be function entry points
     , _currentFunc :: PPa.BlockPair arch
     } -> EquivalenceContext sym arch
 

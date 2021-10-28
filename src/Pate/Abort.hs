@@ -43,7 +43,7 @@ isAbortedStatePred ::
   EquivM sym arch (WI.Pred sym)
 isAbortedStatePred stOut = (PMC.binAbortFn <$> getBinCtx @bin) >>= \case
   Just abortFn -> withSym $ \sym -> do
-    let abortBlk = PB.concreteEntryPoint @_ @bin abortFn WI.knownRepr
+    let abortBlk = PB.functionEntryToConcreteBlock abortFn
     abortPtr <- PD.concreteToLLVM abortBlk
     liftIO $ MT.llvmPtrEq sym abortPtr (PSR.macawRegValue ip)
   Nothing -> withSym $ \sym -> return $ WI.falsePred sym

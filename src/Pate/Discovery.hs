@@ -16,9 +16,9 @@ module Pate.Discovery (
   lookupBlocks,
   getBlocks,
   getBlocks',
-  lookupBlocks',
   matchesBlockTarget,
-  concreteToLLVM
+  concreteToLLVM,
+  lookupFunctionEntry
   ) where
 
 import           Control.Lens ( (^.) )
@@ -246,7 +246,7 @@ getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
      tgts <- case PMC.parsedFunctionContaining addr pfm of
-       Right (_, Some pbm) -> do
+       Right (_, _, Some pbm) -> do
          let pbs = PMC.parsedBlocksContaining addr pbm
          return (concatMap (concreteValidJumpTargets b pbs) pbs)
        Left allAddrs -> throwHere $ PEE.NoUniqueFunctionOwner addr allAddrs
@@ -307,7 +307,7 @@ concreteValueAddress = \case
     MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress b1 ++ concreteValueAddress b2
     _ -> []
   _ -> []
- -- TODO ^ is this complete?
+  -- TODO ^ is this complete?
 
 
 concreteJumpTargets ::
@@ -335,8 +335,8 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
     [ jumpTarget' from next | next <- concreteNextIPs st ]
 
   MD.ParsedArchTermStmt _ st ret ->
-    let ret_blk = fmap (mkConcreteBlock from PB.BlockEntryPostArch) ret
-     in [ PB.BlockTarget (mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
+    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
+     in [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
         | next <- (concreteNextIPs st)
         ]
 
@@ -348,13 +348,13 @@ jumpTarget ::
     PB.ConcreteBlock arch bin ->
     MC.ArchSegmentOff arch ->
     PB.BlockTarget arch bin
-jumpTarget from to = PB.BlockTarget (mkConcreteBlock from PB.BlockEntryJump to) Nothing
+jumpTarget from to = PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing
 
 jumpTarget' ::
     PB.ConcreteBlock arch bin ->
     PA.ConcreteAddress arch ->
     PB.BlockTarget arch bin
-jumpTarget' from to = PB.BlockTarget (mkConcreteBlock' from PB.BlockEntryJump to) Nothing
+jumpTarget' from to = PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing
 
 callTargets ::
     PB.ConcreteBlock arch bin ->
@@ -362,32 +362,8 @@ callTargets ::
     Maybe (MC.ArchSegmentOff arch) ->
     [PB.BlockTarget arch bin]
 callTargets from next_ips ret =
-   let ret_blk = fmap (mkConcreteBlock from PB.BlockEntryPostFunction) ret
-    in [ PB.BlockTarget (mkConcreteBlock' from PB.BlockEntryInitFunction next) ret_blk | next <- next_ips ]
-
-mkConcreteBlock ::
-  PB.ConcreteBlock arch bin ->
-  PB.BlockEntryKind arch ->
-  MC.ArchSegmentOff arch ->
-  PB.ConcreteBlock arch bin
-mkConcreteBlock from k a =
-  PB.ConcreteBlock
-  { PB.concreteAddress = PA.addressFromMemAddr (MM.segoffAddr a)
-  , PB.concreteBlockEntry = k
-  , PB.blockBinRepr = PB.blockBinRepr from
-  }
-
-mkConcreteBlock' ::
-  PB.ConcreteBlock arch bin ->
-  PB.BlockEntryKind arch ->
-  PA.ConcreteAddress arch ->
-  PB.ConcreteBlock arch bin
-mkConcreteBlock' from k a =
-  PB.ConcreteBlock
-  { PB.concreteAddress = a
-  , PB.concreteBlockEntry = k
-  , PB.blockBinRepr = PB.blockBinRepr from
-  }
+   let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
+    in [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryInitFunction next) ret_blk | next <- next_ips ]
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map
@@ -410,6 +386,17 @@ addFunctionEntryHints _ mem (_name, fd) (invalid, entries) =
 abortFnName :: T.Text
 abortFnName = "__pate_abort"
 
+lookupFunctionEntry ::
+  HasCallStack =>
+  PA.ValidArch arch =>
+  Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin) ->
+  PA.ConcreteAddress arch ->
+  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
+lookupFunctionEntry fnmap a =
+  case Map.lookup a fnmap of
+    Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack a))
+    Just fe -> pure fe
+
 runDiscovery ::
   forall arch bin.
   PB.KnownBinary bin =>
@@ -422,6 +409,7 @@ runDiscovery ::
 runDiscovery mCFGDir repr elf hints = do
   let archInfo = PLE.archInfo elf
   entries <- F.toList <$> MBL.entryPoints bin
+
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
   let ds = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
 
@@ -437,11 +425,17 @@ runDiscovery mCFGDir repr elf hints = do
         PPT.hPutDoc hdl (PP.pretty dfi)
 
   let pfm = PMC.buildParsedFunctionMap ds
-  let abortFnAddr = do
-        abortFnWord <- PH.functionAddress <$> lookup abortFnName (PH.functionEntries hints)
-        MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
-  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints idx abortFnAddr)
+  let fnmap = PMC.buildFunctionEntryMap repr (ds ^. MD.funInfo)
+
+  let startEntry = head entries -- can't fail because entryPoints returns a NonEmpty
+  startEntry' <- lookupFunctionEntry fnmap (PA.ConcreteAddress (MM.segoffAddr startEntry))
+
+  abortFnEntry <- traverse
+      (\fnDesc -> lookupFunctionEntry fnmap (PA.ConcreteAddress (MM.absoluteAddr (MM.memWord (PH.functionAddress fnDesc)))))
+      (lookup abortFnName (PH.functionEntries hints))
+
+  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry fnmap)
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin
@@ -495,10 +489,10 @@ lookupBlocks'
   -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks' binCtx b = do
   case PMC.parsedFunctionContaining addr (PMC.parsedFunctionMap binCtx) of
-    Right (funAddr, Some pbm) ->
+    Right (_segOff, funAddr, Some pbm) ->
       case PB.concreteBlockEntry b of
         PB.BlockEntryInitFunction
-          | funAddr /= addr -> Left (PEE.LookupNotAtFunctionStart callStack funAddr addr)
+          | funAddr /= addr -> Left (PEE.LookupNotAtFunctionStart callStack addr)
         _ -> do
           let result = PMC.parsedBlocksContaining addr pbm
           return $ Some (DFC.Compose result)

@@ -11,6 +11,7 @@
 module Pate.PatchPair (
     PatchPair(..)
   , BlockPair
+  , FunPair
   , PatchPairC(..)
   , PatchPairEq(..)
   , toPatchPairC
@@ -108,6 +109,12 @@ instance ShowF tp => Show (PatchPair tp) where
 
 instance (PatchPairEq f, (forall bin. PP.Pretty (f bin))) => PP.Pretty (PatchPair f) where
   pretty = ppPatchPairEq ppEq PP.pretty
+
+
+type FunPair arch = PatchPair (PBl.FunctionEntry arch)
+
+instance PatchPairEq (PBl.FunctionEntry arch) where
+  ppEq x y = PBl.functionAddress x == PBl.functionAddress y
 
 
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
