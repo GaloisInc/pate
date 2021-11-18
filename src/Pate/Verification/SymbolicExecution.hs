@@ -266,12 +266,12 @@ simulate ::
 simulate simInput = withBinary @bin $ do
   -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
   CC.SomeCFG cfg <- do
-    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (PS.simInBlock simInput)
+    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks True (PS.simInBlock simInput)
 
     let traceAddr = PB.concreteAddress (PS.simInBlock simInput)
 
     -- See Note [Loop Breaking]
-    let pb:pbs = DL.sortOn MD.pblockAddr pbs_
+    let pb:pbs = DL.sortOn MD.pblockAddr $ pbs_
         -- Multiple ParsedBlocks may have the same address, so the delete
         -- is really needed.
     let internalAddrs = Set.delete (MD.pblockAddr pb) $ Set.fromList [MD.pblockAddr b | b <- pbs]
