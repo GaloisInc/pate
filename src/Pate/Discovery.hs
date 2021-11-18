@@ -22,6 +22,7 @@ module Pate.Discovery (
   ) where
 
 import           Control.Lens ( (^.) )
+import           Control.Monad (forM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -248,7 +249,7 @@ getSubBlocks b = withBinary @bin $
      tgts <- case PMC.parsedFunctionContaining addr pfm of
        Right (_, _, Some pbm) -> do
          let pbs = PMC.parsedBlocksContaining addr pbm
-         return (concatMap (concreteValidJumpTargets b pbs) pbs)
+         concat <$> mapM (concreteValidJumpTargets b pbs) pbs
        Left allAddrs -> throwHere $ PEE.NoUniqueFunctionOwner addr allAddrs
      mapM_ validateBlockTarget tgts
      return tgts
@@ -256,12 +257,14 @@ getSubBlocks b = withBinary @bin $
 
 concreteValidJumpTargets ::
   PA.ValidArch arch =>
+  PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   [MD.ParsedBlock arch ids] ->
   MD.ParsedBlock arch ids ->
-  [PB.BlockTarget arch bin]
-concreteValidJumpTargets from allPbs pb =
-  let targets = concreteJumpTargets from pb
+  EquivM sym arch [PB.BlockTarget arch bin]
+concreteValidJumpTargets from allPbs pb = do
+  targets <- concreteJumpTargets from pb
+  let
       thisAddr = segOffToAddr (MD.pblockAddr pb)
       addrs = map (segOffToAddr . MD.pblockAddr) allPbs
 
@@ -271,7 +274,7 @@ concreteValidJumpTargets from allPbs pb =
 
       isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
 
-  in filter isTargetValid targets
+  return $ filter isTargetValid targets
 
 validateBlockTarget ::
   HasCallStack =>
@@ -311,11 +314,13 @@ concreteValueAddress = \case
 
 
 concreteJumpTargets ::
-  forall bin arch ids.
+  forall sym bin arch ids.
+  HasCallStack =>
+  PB.KnownBinary bin =>
   PA.ValidArch arch =>
   PB.ConcreteBlock arch bin ->
   MD.ParsedBlock arch ids ->
-  [PB.BlockTarget arch bin]
+  EquivM sym arch [PB.BlockTarget arch bin]
 concreteJumpTargets from pb = case MD.pblockTermStmt pb of
   MD.ParsedCall st ret ->
     callTargets from (concreteNextIPs st) ret
@@ -323,24 +328,24 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
   MD.PLTStub st _ _ ->
     case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
       Just addr -> callTargets from (concreteValueAddress addr) Nothing
-      _ -> []
+      _ -> return [] -- TODO? this doesn't seem right
 
   MD.ParsedJump _ tgt ->
-    [ jumpTarget from tgt ]
+    return [ jumpTarget from tgt ]
 
   MD.ParsedBranch _ _ t f ->
-    [ jumpTarget from t, jumpTarget from f ]
+    return [ jumpTarget from t, jumpTarget from f ]
 
   MD.ParsedLookupTable _jt st _ _ ->
-    [ jumpTarget' from next | next <- concreteNextIPs st ]
+    return [ jumpTarget' from next | next <- concreteNextIPs st ]
 
-  MD.ParsedArchTermStmt _ st ret ->
+  MD.ParsedArchTermStmt _ st ret -> do
     let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
-     in [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
-        | next <- (concreteNextIPs st)
-        ]
+    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
+           | next <- (concreteNextIPs st)
+           ]
 
-  _ -> []
+  _ -> return []
   -- TODO ^ is this complete?
 
 
@@ -357,13 +362,19 @@ jumpTarget' ::
 jumpTarget' from to = PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing
 
 callTargets ::
+    HasCallStack =>
+    PB.KnownBinary bin =>
     PB.ConcreteBlock arch bin ->
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
-    [PB.BlockTarget arch bin]
-callTargets from next_ips ret =
+    EquivM sym arch [PB.BlockTarget arch bin]
+callTargets from next_ips ret = do
    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
-    in [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryInitFunction next) ret_blk | next <- next_ips ]
+   fnmap <- PMC.functionEntryMap <$> getBinCtx
+   forM next_ips $ \next ->
+     case Map.lookup next fnmap of
+       Just fe -> return (PB.BlockTarget (PB.functionEntryToConcreteBlock fe) ret_blk)
+       Nothing -> throwHere (PEE.LookupNotAtFunctionStart callStack next)
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map

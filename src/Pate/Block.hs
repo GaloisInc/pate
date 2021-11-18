@@ -56,15 +56,17 @@ data ConcreteBlock arch (bin :: PB.WhichBinary) =
   ConcreteBlock { concreteAddress :: PA.ConcreteAddress arch
                 , concreteBlockEntry :: BlockEntryKind arch
                 , blockBinRepr :: PB.WhichBinaryRepr bin
+                , blockFunctionEntry :: FunctionEntry arch bin
                 }
 
 equivBlocks :: ConcreteBlock arch PB.Original -> ConcreteBlock arch PB.Patched -> Bool
 equivBlocks blkO blkP =
   concreteAddress blkO == concreteAddress blkP &&
-  concreteBlockEntry blkO == concreteBlockEntry blkP
+  concreteBlockEntry blkO == concreteBlockEntry blkP &&
+  equivFuns (blockFunctionEntry blkO) (blockFunctionEntry blkP)
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
-blockMemAddr (ConcreteBlock (PA.ConcreteAddress addr) _ _) = addr
+blockMemAddr ConcreteBlock{ concreteAddress = PA.ConcreteAddress addr } = addr
 
 mkConcreteBlock ::
   ConcreteBlock arch bin ->
@@ -76,6 +78,7 @@ mkConcreteBlock from k a =
   { concreteAddress = PA.addressFromMemAddr (MM.segoffAddr a)
   , concreteBlockEntry = k
   , blockBinRepr = blockBinRepr from
+  , blockFunctionEntry = blockFunctionEntry from
   }
 
 mkConcreteBlock' ::
@@ -88,13 +91,14 @@ mkConcreteBlock' from k a =
   { concreteAddress = a
   , concreteBlockEntry = k
   , blockBinRepr = blockBinRepr from
+  , blockFunctionEntry = blockFunctionEntry from
   }
 
 
 instance PC.TestEquality (ConcreteBlock arch) where
-  testEquality (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
+  testEquality (ConcreteBlock addr1 entry1 binrepr1 fe1) (ConcreteBlock addr2 entry2 binrepr2 fe2) =
     case PC.testEquality binrepr1 binrepr2 of
-      Just PC.Refl | addr1 == addr2 && entry1 == entry2 -> Just PC.Refl
+      Just PC.Refl | addr1 == addr2 && entry1 == entry2 && fe1 == fe2 -> Just PC.Refl
       _ -> Nothing
 
 instance Eq (ConcreteBlock arch bin) where
@@ -102,10 +106,11 @@ instance Eq (ConcreteBlock arch bin) where
   _ == _ = False
 
 instance PC.OrdF (ConcreteBlock arch) where
-  compareF (ConcreteBlock addr1 entry1 binrepr1) (ConcreteBlock addr2 entry2 binrepr2) =
+  compareF (ConcreteBlock addr1 entry1 binrepr1 fe1) (ConcreteBlock addr2 entry2 binrepr2 fe2) =
     PC.lexCompareF binrepr1 binrepr2 $ PC.fromOrdering $
       compare addr1 addr2 <>
-      compare entry1 entry2
+      compare entry1 entry2 <>
+      compare fe1 fe2
 
 instance Ord (ConcreteBlock arch bin) where
   compare blk1 blk2 = PC.toOrdering $ PC.compareF blk1 blk2
@@ -138,6 +143,11 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 , functionSymbol  :: Maybe BSC.ByteString
                 , functionBinRepr :: PB.WhichBinaryRepr bin
                 }
+
+equivFuns :: FunctionEntry arch PB.Original -> FunctionEntry arch PB.Patched -> Bool
+equivFuns fn1 fn2 =
+  functionSegAddr fn1 == functionSegAddr fn2
+
 
 functionAddress :: FunctionEntry arch bin -> PA.ConcreteAddress arch
 functionAddress fe = PA.ConcreteAddress (MM.segoffAddr (functionSegAddr fe))
@@ -173,9 +183,10 @@ instance Ord (FunctionEntry arch bin) where
   compare fe1 fe2 = PC.toOrdering $ PC.compareF fe1 fe2
 
 functionEntryToConcreteBlock :: FunctionEntry arch bin -> ConcreteBlock arch bin
-functionEntryToConcreteBlock (FunctionEntry segAddr _s binRepr) =
+functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr) =
   ConcreteBlock
   { concreteAddress    = PA.ConcreteAddress (MM.segoffAddr segAddr)
   , concreteBlockEntry = BlockEntryInitFunction
   , blockBinRepr       = binRepr
-  } 
+  , blockFunctionEntry = fe
+  }
