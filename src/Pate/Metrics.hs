@@ -50,7 +50,7 @@ emptyMetrics =
 loadedBinaryMetrics
   :: (MM.MemWidth (MC.ArchAddrWidth arch))
   => PLE.LoadedELF arch
-  -> PMC.ParsedFunctionMap arch
+  -> PMC.ParsedFunctionMap arch bin
   -> BinaryMetrics
 loadedBinaryMetrics le pfm =
   BinaryMetrics { executableBytes = byteCount

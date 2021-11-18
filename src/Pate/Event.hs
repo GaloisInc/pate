@@ -11,7 +11,6 @@ module Pate.Event (
 
 import qualified Data.ElfEdit as DEE
 import qualified Data.List.NonEmpty as DLN
-import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Text as T
 import qualified Data.Time as TM
@@ -72,12 +71,15 @@ data Event arch where
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
-  LoadedBinaries :: (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> Event arch
+  LoadedBinaries ::
+    (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch PB.Original) ->
+    (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch PB.Patched) ->
+    Event arch
   -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: PB.WhichBinaryRepr bin -> [(T.Text, Word64)] -> Event arch
   -- | A list of functions discovered from provided hints that macaw code
   -- discovery was not able to identify by itself
-  FunctionsDiscoveredFromHints :: PB.WhichBinaryRepr bin -> [MC.ArchSegmentOff arch] -> Event arch
+  FunctionsDiscoveredFromHints :: PB.WhichBinaryRepr bin -> [PB.FunctionEntry arch bin] -> Event arch
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
   HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch

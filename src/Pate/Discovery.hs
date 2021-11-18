@@ -246,8 +246,8 @@ getSubBlocks ::
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
-     tgts <- case PMC.parsedFunctionContaining addr pfm of
-       Right (_, _, Some pbm) -> do
+     tgts <- case PMC.parsedFunctionContaining b pfm of
+       Right (Some pbm) -> do
          let pbs = PMC.parsedBlocksContaining addr pbm
          concat <$> mapM (concreteValidJumpTargets b pbs) pbs
        Left allAddrs -> throwHere $ PEE.NoUniqueFunctionOwner addr allAddrs
@@ -499,13 +499,9 @@ lookupBlocks'
   -> PB.ConcreteBlock arch bin
   -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
 lookupBlocks' binCtx b = do
-  case PMC.parsedFunctionContaining addr (PMC.parsedFunctionMap binCtx) of
-    Right (_segOff, funAddr, Some pbm) ->
-      case PB.concreteBlockEntry b of
-        PB.BlockEntryInitFunction
-          | funAddr /= addr -> Left (PEE.LookupNotAtFunctionStart callStack addr)
-        _ -> do
-          let result = PMC.parsedBlocksContaining addr pbm
+  case PMC.parsedFunctionContaining b (PMC.parsedFunctionMap binCtx) of
+    Right (Some pbm) ->
+       do let result = PMC.parsedBlocksContaining addr pbm
           return $ Some (DFC.Compose result)
     Left addrs -> Left (PEE.NoUniqueFunctionOwner addr addrs)
 
