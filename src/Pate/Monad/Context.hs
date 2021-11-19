@@ -15,7 +15,6 @@ module Pate.Monad.Context (
   , buildFunctionEntryMap
 
   , ParsedBlockMap
-  , parsedBlocksForward
   , allParsedBlocks
 
   , BinaryContext(..)
@@ -131,19 +130,6 @@ parsedFunctionContaining blk (ParsedFunctionMap pfm) =
   case Map.lookup (PB.blockFunctionEntry blk) pfm of
     Just pbm -> Right pbm
     Nothing -> Left []
-
--- | Find all the blocks in a parsed block map with addresses
---   greater or equal to the given address.
-parsedBlocksForward ::
-  MM.ArchConstraints arch =>
-  PA.ConcreteAddress arch ->
-  ParsedBlockMap arch ids ->
-  [MD.ParsedBlock arch ids]
-parsedBlocksForward addr (ParsedBlockMap pbm) =
-    concat $ IM.elems $ IM.intersecting pbm i
-  where
-   saddr = PA.addrToMemAddr addr
-   i = IM.OpenInterval saddr (MM.MemAddr (MM.addrBase saddr) maxBound)
 
 allParsedBlocks ::
   MM.ArchConstraints arch =>

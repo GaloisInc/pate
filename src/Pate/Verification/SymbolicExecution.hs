@@ -226,7 +226,7 @@ simulate ::
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch bin)
 simulate simInput = withBinary @bin $ do
   CC.SomeCFG cfg <- do
-    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks False (PS.simInBlock simInput)
+    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (PS.simInBlock simInput)
 
     let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
 
@@ -261,7 +261,7 @@ data SliceBodyInfo arch ids =
   }
 
 -- | Perform a depth-first search on the structure of the parsed blocks we have
---   in hand, starting from the given entry address. WE want to find all the
+--   in hand, starting from the given entry address. We want to find all the
 --   reachable blocks, identify the back edges in the graph, and identify
 --   what edges correspond to jumps outside the collection of blocks we have.
 --   Return a @SliceBodyInfo@ cpturing this information, and the parsed block
