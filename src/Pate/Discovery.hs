@@ -29,7 +29,6 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
-import qualified Data.Functor.Compose as DFC
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Classes as PC
@@ -248,10 +247,9 @@ getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
      tgts <- case PMC.parsedFunctionContaining b pfm of
-       Right (Some pbm) -> do
-         let pbs = PMC.allParsedBlocks pbm
+       Just (PMC.ParsedBlocks pbs) ->
          concat <$> mapM (concreteValidJumpTargets b pbs) pbs
-       Left allAddrs -> throwHere $ PEE.NoUniqueFunctionOwner addr allAddrs
+       Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ validateBlockTarget tgts
      return tgts
 
@@ -469,7 +467,7 @@ getBlocks'
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
   case (lookupBlocks' ctxO blkO, lookupBlocks' ctxP blkP) of
-    (Right (Some (DFC.Compose opbs)), Right (Some (DFC.Compose ppbs))) -> do
+    (Right (PMC.ParsedBlocks opbs), Right (PMC.ParsedBlocks ppbs)) -> do
       let oBlocks = PE.Blocks blkO opbs
       let pBlocks = PE.Blocks blkP ppbs
       return $! PPa.PatchPair oBlocks pBlocks
@@ -487,9 +485,9 @@ getBlocks ::
   PPa.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
-  Some (DFC.Compose opbs) <- lookupBlocks blkO
+  PMC.ParsedBlocks opbs <- lookupBlocks blkO
   let oBlocks = PE.Blocks blkO opbs
-  Some (DFC.Compose ppbs) <- lookupBlocks blkP
+  PMC.ParsedBlocks ppbs <- lookupBlocks blkP
   let pBlocks = PE.Blocks blkP ppbs
   return $ PPa.PatchPair oBlocks pBlocks
   where
@@ -500,23 +498,18 @@ lookupBlocks'
   :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack)
   => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
-  -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
+  -> Either (PEE.InnerEquivalenceError arch) (PMC.ParsedBlocks arch)
 lookupBlocks' binCtx b = do
   case PMC.parsedFunctionContaining b (PMC.parsedFunctionMap binCtx) of
-    Right (Some pbm) ->
-       do let result = PMC.allParsedBlocks pbm
-          return $ Some (DFC.Compose result)
-    Left addrs -> Left (PEE.NoUniqueFunctionOwner addr addrs)
-
-  where
-    addr = PB.concreteAddress b
+    Just pbs -> return pbs
+    Nothing  -> Left (PEE.UnknownFunctionEntry (PB.concreteAddress b))
 
 lookupBlocks ::
   forall sym arch bin.
   HasCallStack =>
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
-  EquivM sym arch (Some (DFC.Compose [] (MD.ParsedBlock arch)))
+  EquivM sym arch (PMC.ParsedBlocks arch)
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
   case lookupBlocks' binCtx b of

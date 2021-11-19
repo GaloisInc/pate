@@ -15,7 +15,6 @@ module Pate.Verification.SymbolicExecution (
 import           Control.Lens ( (^.) )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
-import qualified Data.Functor.Compose as DFC
 import qualified Data.List as DL
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
@@ -226,7 +225,7 @@ simulate ::
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch bin)
 simulate simInput = withBinary @bin $ do
   CC.SomeCFG cfg <- do
-    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks (PS.simInBlock simInput)
+    PMC.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)
 
     let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
 
@@ -264,7 +263,7 @@ data SliceBodyInfo arch ids =
 --   in hand, starting from the given entry address. We want to find all the
 --   reachable blocks, identify the back edges in the graph, and identify
 --   what edges correspond to jumps outside the collection of blocks we have.
---   Return a @SliceBodyInfo@ cpturing this information, and the parsed block
+--   Return a @SliceBodyInfo@ capturing this information, and the parsed block
 --   corresponding to the entry point.
 computeSliceBodyInfo :: forall arch ids.
   PA.ConcreteAddress arch ->
