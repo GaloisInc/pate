@@ -530,6 +530,7 @@ catchSimBundle pPair postcondSpec f = do
       r <- trivialBlockSlice False externalDomain (PPa.PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
+
 impliesPostcond ::
   PPa.BlockPair arch ->
   StatePredSpec sym arch ->
@@ -626,18 +627,19 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
           withNoFrameGuessing isSyscall $ do
             (contPre, contPrf) <- provePostcondition (PPa.PatchPair blkRetO blkRetP) postcondSpec
             traceBundle bundle "finished proving postcondition"
-            (funCallPre, funCallSlicePrf) <- catchSimBundle pPair postcondSpec $ \bundleCall -> do
+            (funCallPre, funCallSlicePrf) <-
               -- equivalence condition for when this function returns
               case isSyscall of
                 -- for arch exits (i.e. syscalls) we assume that equivalence will hold on
                 -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
                 -- treated as an uninterpreted function that reads the entire machine state
                 -- this can be relaxed with more information about the specific call
-                True -> do
+                True -> fmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do
                   traceBundle bundle ("  Making a trivial block slice because this is a system call")
                   PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
-                  trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
-                False -> do
+                  r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
+                  return $ (W4.truePred sym, r)
+                False -> catchSimBundle pPair postcondSpec $ \bundleCall -> do
                   traceBundle bundle "  Not a syscall, emitting preamble pair"
                   emitPreamble pPair
                   -- equivalence condition for calling this function
