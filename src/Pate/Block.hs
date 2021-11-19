@@ -40,6 +40,8 @@ data BlockEntryKind arch =
     -- ^ block is an intermediate point in a function, after a function call
   | BlockEntryPostArch
     -- ^ block is an intermediate point in a function, after an arch function call
+  | BlockEntryPreArch
+    -- ^ block is an intermediate point in a function, about to make an arch function call
   | BlockEntryJump
     -- ^ block was entered by an arbitrary jump
     -- problems
@@ -49,6 +51,7 @@ ppBlockEntry :: BlockEntryKind arch -> String
 ppBlockEntry be = case be of
   BlockEntryInitFunction -> "function entry point"
   BlockEntryPostFunction -> "intermediate function point"
+  BlockEntryPreArch -> "intermediate function point (before syscall)"
   BlockEntryPostArch -> "intermediate function point (after syscall)"
   BlockEntryJump -> "unknown program point"
 
@@ -66,7 +69,7 @@ equivBlocks blkO blkP =
   equivFuns (blockFunctionEntry blkO) (blockFunctionEntry blkP)
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
-blockMemAddr ConcreteBlock{ concreteAddress = PA.ConcreteAddress addr } = addr
+blockMemAddr b = PA.addrToMemAddr (concreteAddress b)
 
 mkConcreteBlock ::
   ConcreteBlock arch bin ->
@@ -75,7 +78,7 @@ mkConcreteBlock ::
   ConcreteBlock arch bin
 mkConcreteBlock from k a =
   ConcreteBlock
-  { concreteAddress = PA.addressFromMemAddr (MM.segoffAddr a)
+  { concreteAddress = PA.segOffToAddr a
   , concreteBlockEntry = k
   , blockBinRepr = blockBinRepr from
   , blockFunctionEntry = blockFunctionEntry from
@@ -150,7 +153,7 @@ equivFuns fn1 fn2 =
 
 
 functionAddress :: FunctionEntry arch bin -> PA.ConcreteAddress arch
-functionAddress fe = PA.ConcreteAddress (MM.segoffAddr (functionSegAddr fe))
+functionAddress fe = PA.segOffToAddr (functionSegAddr fe)
 
 ppFunctionEntry :: MM.MemWidth (MM.ArchAddrWidth arch) => FunctionEntry arch bin -> String
 ppFunctionEntry fe = show (functionAddress fe)
@@ -185,7 +188,7 @@ instance Ord (FunctionEntry arch bin) where
 functionEntryToConcreteBlock :: FunctionEntry arch bin -> ConcreteBlock arch bin
 functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr) =
   ConcreteBlock
-  { concreteAddress    = PA.ConcreteAddress (MM.segoffAddr segAddr)
+  { concreteAddress    = PA.segOffToAddr segAddr
   , concreteBlockEntry = BlockEntryInitFunction
   , blockBinRepr       = binRepr
   , blockFunctionEntry = fe

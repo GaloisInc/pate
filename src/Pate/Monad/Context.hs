@@ -46,7 +46,7 @@ import qualified Pate.PatchPair as PPa
 
 -- | Keys: basic block extent; values: parsed blocks
 newtype ParsedBlockMap arch ids = ParsedBlockMap
-  { getParsedBlockMap :: IntervalMap (PA.ConcreteAddress arch) [MD.ParsedBlock arch ids]
+  { getParsedBlockMap :: IntervalMap (MM.MemAddr (MM.ArchAddrWidth arch)) [MD.ParsedBlock arch ids]
   }
 
 newtype ParsedFunctionMap arch bin = ParsedFunctionMap
@@ -87,16 +87,27 @@ buildParsedBlockMap ::
   MD.DiscoveryFunInfo arch ids ->
   ParsedBlockMap arch ids
 buildParsedBlockMap dfi = ParsedBlockMap . IM.fromListWith (++) $
-  [ (archSegmentOffToInterval blockSegOff (MD.blockSize pb), [pb])
+  [ (archSegmentOffToInterval dfi blockSegOff (MD.blockSize pb), [pb])
   | (blockSegOff, pb) <- Map.assocs (dfi ^. MD.parsedBlocks)
   ]
+
+archSegmentOffToInterval ::
+  MM.ArchConstraints arch =>
+  MD.DiscoveryFunInfo arch ids ->
+  MM.ArchSegmentOff arch ->
+  Int ->
+  IM.Interval (MM.MemAddr (MM.ArchAddrWidth arch))
+archSegmentOffToInterval _ segOff size =
+  let start = MM.segoffAddr segOff
+  in IM.IntervalCO start (MM.incAddr (fromIntegral size) start)
+
 
 buildFunctionEntryMap ::
   PBi.WhichBinaryRepr bin ->
   Map.Map (MM.ArchSegmentOff arch) (Some (MD.DiscoveryFunInfo arch)) ->
   Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin)
 buildFunctionEntryMap binRepr disMap = Map.fromList
-  [ (segOffToAddr segOff, funInfoToFunEntry binRepr fi)
+  [ (PA.segOffToAddr segOff, funInfoToFunEntry binRepr fi)
   | (segOff, Some fi) <- Map.assocs disMap
   ]
 
@@ -110,16 +121,6 @@ funInfoToFunEntry binRepr dfi =
   , PB.functionSymbol  = MD.discoveredFunSymbol dfi
   , PB.functionBinRepr = binRepr
   }
-
-archSegmentOffToInterval ::
-  MM.ArchConstraints arch =>
-  MM.ArchSegmentOff arch ->
-  Int ->
-  IM.Interval (PA.ConcreteAddress arch)
-archSegmentOffToInterval segOff size =
-  let start = segOffToAddr segOff
-  in IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size)
-
 
 parsedFunctionContaining ::
   MM.ArchConstraints arch =>
@@ -141,23 +142,14 @@ parsedBlocksForward ::
 parsedBlocksForward addr (ParsedBlockMap pbm) =
     concat $ IM.elems $ IM.intersecting pbm i
   where
-   start@(PA.ConcreteAddress saddr) = addr
-   end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
-   i = IM.OpenInterval start end
+   saddr = PA.addrToMemAddr addr
+   i = IM.OpenInterval saddr (MM.MemAddr (MM.addrBase saddr) maxBound)
 
 allParsedBlocks ::
   MM.ArchConstraints arch =>
   ParsedBlockMap arch ids ->
   [MD.ParsedBlock arch ids]
 allParsedBlocks (ParsedBlockMap pbm) = concat $ IM.elems $ pbm
-
-
-segOffToAddr ::
-  MM.ArchSegmentOff arch ->
-  PA.ConcreteAddress arch
-segOffToAddr off = PA.addressFromMemAddr (MM.segoffAddr off)
-
-
 
 data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))

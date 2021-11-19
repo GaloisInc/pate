@@ -259,7 +259,7 @@ unpackBlockData ::
   PC.BlockData ->
   CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
 unpackBlockData ctxt (PC.Hex w) =
-  PD.lookupFunctionEntry (PMC.functionEntryMap ctxt) (PAd.ConcreteAddress (MM.absoluteAddr (MM.memWord w)))
+  PD.lookupFunctionEntry (PMC.functionEntryMap ctxt) (PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord w)))
 
 unpackPatchData ::
   PA.ValidArch arch =>
@@ -619,7 +619,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
         (Just blkRetO, Just blkRetP) -> do
           traceBundle bundle ("  Return target " ++ show blkRetO)
           isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
-            (PB.BlockEntryPostArch, PB.BlockEntryPostArch) -> return True
+            (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
             (entryO, entryP) | entryO == entryP -> return False
             _ -> throwHere $ PEE.BlockExitMismatch
           traceBundle bundle ("  Is Syscall? " ++ show isSyscall)

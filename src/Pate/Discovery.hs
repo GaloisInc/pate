@@ -266,8 +266,8 @@ concreteValidJumpTargets ::
 concreteValidJumpTargets from allPbs pb = do
   targets <- concreteJumpTargets from pb
   let
-      thisAddr = segOffToAddr (MD.pblockAddr pb)
-      addrs = map (segOffToAddr . MD.pblockAddr) allPbs
+      thisAddr = PA.segOffToAddr (MD.pblockAddr pb)
+      addrs = map (PA.segOffToAddr . MD.pblockAddr) allPbs
 
       isTargetExternal btgt = not ((PB.concreteAddress (PB.targetCall btgt)) `elem` addrs)
       isTargetBackJump btgt = (PB.concreteAddress (PB.targetCall btgt)) < thisAddr
@@ -303,10 +303,10 @@ concreteValueAddress ::
   MC.Value arch ids (MT.BVType (MC.ArchAddrWidth arch)) ->
   [PA.ConcreteAddress arch]
 concreteValueAddress = \case
-  MC.RelocatableValue _ addr -> [PA.ConcreteAddress addr]
+  MC.RelocatableValue _ addr -> [ PA.memAddrToAddr addr ]
   MC.BVValue w bv |
     Just WI.Refl <- WI.testEquality w (MM.memWidthNatRepr @(MC.ArchAddrWidth arch)) ->
-      [PA.ConcreteAddress (MM.absoluteAddr (MM.memWord (fromIntegral bv)))]
+      [ PA.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral bv))) ]
   MC.AssignedValue (MC.Assignment _ rhs) -> case rhs of
     MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress b1 ++ concreteValueAddress b2
     _ -> []
@@ -324,11 +324,11 @@ concreteJumpTargets ::
   EquivM sym arch [PB.BlockTarget arch bin]
 concreteJumpTargets from pb = case MD.pblockTermStmt pb of
   MD.ParsedCall st ret ->
-    callTargets from (concreteNextIPs st) ret
+    callTargets from (concreteNextIPs st) ret PB.BlockEntryPostFunction
 
   MD.PLTStub st _ _ ->
     case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
-      Just addr -> callTargets from (concreteValueAddress addr) Nothing
+      Just addr -> callTargets from (concreteValueAddress addr) Nothing PB.BlockEntryPostFunction
       _ -> return [] -- TODO? this doesn't seem right
 
   MD.ParsedJump _ tgt ->
@@ -341,8 +341,9 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
     return [ jumpTarget' from next | next <- concreteNextIPs st ]
 
   MD.ParsedArchTermStmt _ st ret -> do
+--    callTargets from (concreteNextIPs st) ret PB.BlockEntryPostArch
     let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
-    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPostArch next) ret_blk -- TODO? is this right?
+    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk -- TODO? is this right?
            | next <- (concreteNextIPs st)
            ]
 
@@ -368,9 +369,10 @@ callTargets ::
     PB.ConcreteBlock arch bin ->
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
+    PB.BlockEntryKind arch ->
     EquivM sym arch [PB.BlockTarget arch bin]
-callTargets from next_ips ret = do
-   let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
+callTargets from next_ips ret bkind = do
+   let ret_blk = fmap (PB.mkConcreteBlock from bkind) ret
    fnmap <- PMC.functionEntryMap <$> getBinCtx
    forM next_ips $ \next ->
      case Map.lookup next fnmap of
@@ -441,10 +443,10 @@ runDiscovery mCFGDir repr elf hints = do
   let fnmap = PMC.buildFunctionEntryMap repr (ds ^. MD.funInfo)
 
   let startEntry = head entries -- can't fail because entryPoints returns a NonEmpty
-  startEntry' <- lookupFunctionEntry fnmap (PA.ConcreteAddress (MM.segoffAddr startEntry))
+  startEntry' <- lookupFunctionEntry fnmap (PA.segOffToAddr startEntry)
 
   abortFnEntry <- traverse
-      (\fnDesc -> lookupFunctionEntry fnmap (PA.ConcreteAddress (MM.absoluteAddr (MM.memWord (PH.functionAddress fnDesc)))))
+      (\fnDesc -> lookupFunctionEntry fnmap (PA.memAddrToAddr (MM.absoluteAddr (MM.memWord (PH.functionAddress fnDesc)))))
       (lookup abortFnName (PH.functionEntries hints))
 
   return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry fnmap)
@@ -457,7 +459,7 @@ runDiscovery mCFGDir repr elf hints = do
       in case MBLE.resolveAbsoluteAddress mem (fromIntegral addrWord) of
            Nothing -> m
            Just segoff ->
-             let addr = PA.addressFromMemAddr (MM.segoffAddr segoff)
+             let addr = PA.segOffToAddr segoff
              in Map.insert addr fd m
 
 getBlocks'
@@ -530,11 +532,6 @@ lookupBlocks forwardOnly b = do
       CME.throwError err
     Right blocks -> return blocks
 
-segOffToAddr ::
-  MC.ArchSegmentOff arch ->
-  PA.ConcreteAddress arch
-segOffToAddr off = PA.addressFromMemAddr (MM.segoffAddr off)
-
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'
 --
 -- This is actually potentially a bit complicated because macaw assigns
@@ -556,7 +553,7 @@ concreteToLLVM ::
 concreteToLLVM blk = withSym $ \sym -> do
   -- we assume a distinct region for all executable code
   region <- CMR.asks envPCRegion
-  let PA.ConcreteAddress (MM.MemAddr _base offset) = PB.concreteAddress blk
+  let MM.MemAddr _base offset = PA.addrToMemAddr (PB.concreteAddress blk)
   liftIO $ do
     ptrOffset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger offset))
     pure (CLM.LLVMPointer region ptrOffset)
