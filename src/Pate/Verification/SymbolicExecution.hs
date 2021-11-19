@@ -15,12 +15,12 @@ module Pate.Verification.SymbolicExecution (
 import           Control.Lens ( (^.) )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
-import qualified Data.Foldable as F
 import qualified Data.Functor.Compose as DFC
 import qualified Data.List as DL
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.String ( fromString )
 import qualified Data.Text as T
@@ -31,6 +31,7 @@ import qualified What4.ProgramLoc as W4L
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
+import qualified Data.Macaw.Discovery.State as MD
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
@@ -38,6 +39,7 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 
 import qualified Pate.Binary as PBi
+import qualified Pate.Address as PA
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
@@ -70,47 +72,6 @@ isTerminalBlock pb = case MD.pblockTermStmt pb of
   MD.ParsedArchTermStmt{} -> True -- TODO: think harder about this
   MD.ParsedTranslateError{} -> True
   MD.ClassifyFailure{} -> True
-
--- | Kill back jumps within the function
---
--- FIXME: This is not very rigorous
-backJumps ::
-  Set.Set (MM.ArchSegmentOff arch) ->
-  MD.ParsedBlock arch ids ->
-  [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
-backJumps internalAddrs pb =
-  [ (MD.pblockAddr pb, tgt)
-  | tgt <- case MD.pblockTermStmt pb of
-     MD.ParsedJump _ tgt -> [tgt]
-     MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
-     MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
-     _ -> []
-  , tgt <= MD.pblockAddr pb
-  , tgt `Set.member` internalAddrs
-  ]
-
--- | Compute the /external/ edges induced by this 'MD.ParsedBlock' in the CFG that includes it
---
--- External edges are those that jump outside of the CFG
-externalTransitions
-  :: Set.Set (MM.ArchSegmentOff arch)
-  -- ^ The set of targets that are known to be internal to the CFG we are constructing
-  -> MD.ParsedBlock arch ids
-  -> [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
-externalTransitions internalAddrs pb =
-  [ (MD.pblockAddr pb, tgt)
-  | tgt <- case MD.pblockTermStmt pb of
-      MD.ParsedCall{} -> []
-      MD.PLTStub{} -> []
-      MD.ParsedJump _ tgt -> [tgt]
-      MD.ParsedBranch _ _ tgt tgt' -> [tgt, tgt']
-      MD.ParsedLookupTable _jt _ _ tgts -> F.toList tgts
-      MD.ParsedReturn{} -> []
-      MD.ParsedArchTermStmt{} -> [] -- TODO: think harder about this
-      MD.ParsedTranslateError{} -> []
-      MD.ClassifyFailure{} -> []
-  , tgt `Set.notMember` internalAddrs
-  ]
 
 -- | Construct an initial 'CS.SimContext' for Crucible
 --
@@ -264,25 +225,16 @@ simulate ::
   PS.SimInput sym arch bin ->
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch bin)
 simulate simInput = withBinary @bin $ do
-  -- rBlock/rb for renovate-style block, mBlocks/mbs for macaw-style blocks
   CC.SomeCFG cfg <- do
-    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks True (PS.simInBlock simInput)
+    CC.Some (DFC.Compose pbs_) <- PD.lookupBlocks False (PS.simInBlock simInput)
 
-    let traceAddr = PB.concreteAddress (PS.simInBlock simInput)
+    let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
 
-    -- See Note [Loop Breaking]
-    let pb:pbs = DL.sortOn MD.pblockAddr $ pbs_
-        -- Multiple ParsedBlocks may have the same address, so the delete
-        -- is really needed.
-    let internalAddrs = Set.delete (MD.pblockAddr pb) $ Set.fromList [MD.pblockAddr b | b <- pbs]
-    let (terminal_, nonTerminal) = DL.partition isTerminalBlock pbs
-    let terminal = [pb | isTerminalBlock pb] ++ terminal_
-    let killEdges =
-          concatMap (backJumps internalAddrs) (pb : pbs) ++
-          concatMap (externalTransitions internalAddrs) (pb:pbs)
+    let (pb,sbi) = computeSliceBodyInfo entryAddr pbs_
+    let (terminal, nonTerminal) = DL.partition isTerminalBlock (sbiReachableBlocks sbi)
+    let killEdges = sbiBackEdges sbi ++ sbiExitEdges sbi
 
-    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack ("Block index: " ++ show internalAddrs)))
-    emitEvent (PE.ProofTraceEvent callStack traceAddr traceAddr (T.pack ("Discarding edges: " ++ show killEdges)))
+    emitEvent (PE.ProofTraceEvent callStack entryAddr entryAddr (T.pack ("Discarding edges: " ++ show killEdges)))
 
     fns <- archFuns
     ha <- CMR.asks (PMC.handles . envCtx)
@@ -299,39 +251,57 @@ simulate simInput = withBinary @bin $ do
 
   return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs) exitClass)
 
-{- Note [Loop Breaking]
 
-There's a slight hack here.
+data SliceBodyInfo arch ids =
+  SliceBodyInfo
+  { sbiReachableAddrs  :: Set.Set (MM.ArchSegmentOff arch)
+  , sbiReachableBlocks :: [ MD.ParsedBlock arch ids ]
+  , sbiBackEdges       :: [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
+  , sbiExitEdges       :: [(MM.ArchSegmentOff arch, MM.ArchSegmentOff arch)]
+  }
 
-The core problem we're dealing with here is that renovate blocks
-can have multiple basic blocks; and almost always do in the
-rewritten binary. We want to stitch them together in the right
-way, and part of that means deciding whether basic block
-terminators are things we should "follow" to their target to
-continue symbolically executing or not. Normally any block
-terminator that goes to another basic block in the same renovate
-block is one we want to keep symbolically executing through.
+-- | Perform a depth-first search on the structure of the parsed blocks we have
+--   in hand, starting from the given entry address. WE want to find all the
+--   reachable blocks, identify the back edges in the graph, and identify
+--   what edges correspond to jumps outside the collection of blocks we have.
+--   Return a @SliceBodyInfo@ cpturing this information, and the parsed block
+--   corresponding to the entry point.
+computeSliceBodyInfo :: forall arch ids.
+  PA.ConcreteAddress arch ->
+  [ MD.ParsedBlock arch ids ] ->
+  ( MD.ParsedBlock arch ids, SliceBodyInfo arch ids)
+computeSliceBodyInfo entryAddr blks =
+   case Map.lookup entryAddr blkmap of
+     Nothing -> error $ unlines ["Could not find entry point in block map:"
+                                , show entryAddr
+                                , unwords (map (show . PA.segOffToAddr @arch . MD.pblockAddr) blks)
+                                ]
+     Just eblk -> 
+        let sbi = dfs Set.empty eblk (SliceBodyInfo Set.empty [] [] [])
+         in (eblk, sbi)
 
-BUT if there is an actual self-contained loop within a single
-renovate block, we want to avoid trying to symbolically execute
-that forever, so we'd like to pick some of the edges in the
-"block X can jump to block Y" graph that break all the cycles,
-and mark all of those as terminal for the purposes of CFG
-creation.
+  where
+    blkmap = Map.fromList [ (PA.segOffToAddr (MD.pblockAddr blk), blk) | blk <- blks ]
 
-Instead of doing a careful analysis of that graph, we adopt the
-following heuristic: kill any edges that point to the entry
-point of the renovate block, and symbolically execute through
-all the others. This catches at the very least any
-single-basic-block loops in the original binary and in most
-cases even their transformed version in the rewritten binary. If
-we ever kill such an edge, we have certainly broken a cycle; but
-cycles could appear in other ways that we don't catch.
+    dfs ancestors pb sbi =
+          let addr       = MD.pblockAddr pb
+              ancestors' = Set.insert addr ancestors
+              ss         = DL.nub (MD.parsedTermSucc (MD.pblockTermStmt pb))
+              sbi'       = foldl (visit_edge ancestors' addr) sbi ss
+              raddrs     = Set.insert addr (sbiReachableAddrs sbi')
+              rblks      = pb : sbiReachableBlocks sbi'
+          in sbi'{ sbiReachableAddrs = raddrs, sbiReachableBlocks = rblks }
 
-This heuristic is reflected in the code like this: when deciding
-if a jump should be killed, we compare jump targets to a
-collection of "internal" addresses, and kill it if the target
-isn't in that collection. Then we omit the entry point's address
-from that collection, so that jumps to it are considered terminal.
+    visit_edge ancestors from sbi to
+        -- back edge case
+      | Set.member to ancestors = sbi{ sbiBackEdges = (from,to):sbiBackEdges sbi }
 
--}
+        -- cross/forward edge
+      | Set.member to (sbiReachableAddrs sbi) = sbi
+
+        -- tree edge
+      | otherwise =
+          case Map.lookup (PA.segOffToAddr to) blkmap of
+            Nothing -> sbi{ sbiExitEdges = (from,to) : sbiExitEdges sbi }
+            Just pb -> dfs ancestors pb sbi
+
