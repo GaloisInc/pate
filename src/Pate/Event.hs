@@ -11,7 +11,6 @@ module Pate.Event (
 
 import qualified Data.ElfEdit as DEE
 import qualified Data.List.NonEmpty as DLN
-import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Text as T
 import qualified Data.Time as TM
@@ -32,7 +31,6 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PES
-import qualified Pate.Types as PT
 import qualified Pate.Loader.ELF as PLE
 
 -- | The macaw blocks relevant for a given code address
@@ -69,16 +67,19 @@ data Event arch where
   ProofStarted :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
 
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
-  DiscoverBlockPair :: BlocksPair arch -> PT.BlockTarget arch PB.Original -> PT.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
+  DiscoverBlockPair :: BlocksPair arch -> PB.BlockTarget arch PB.Original -> PB.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
-  LoadedBinaries :: (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch) -> Event arch
+  LoadedBinaries ::
+    (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch PB.Original) ->
+    (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch PB.Patched) ->
+    Event arch
   -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: PB.WhichBinaryRepr bin -> [(T.Text, Word64)] -> Event arch
   -- | A list of functions discovered from provided hints that macaw code
   -- discovery was not able to identify by itself
-  FunctionsDiscoveredFromHints :: PB.WhichBinaryRepr bin -> [MC.ArchSegmentOff arch] -> Event arch
+  FunctionsDiscoveredFromHints :: PB.WhichBinaryRepr bin -> [PB.FunctionEntry arch bin] -> Event arch
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
   HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch

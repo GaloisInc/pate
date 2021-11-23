@@ -41,6 +41,7 @@ import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
 import qualified Pate.Address as PA
+import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Metrics as PM
@@ -95,8 +96,8 @@ data State arch =
         , _failure :: Map.Map (PA.ConcreteAddress arch) (Failure arch)
         , _recentEvents :: [PE.Event arch]
         -- ^ The N most recent events (most recent first), to be shown in the console
-        , _originalBinary :: Maybe (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch)
-        , _patchedBinary :: Maybe (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch)
+        , _originalBinary :: Maybe (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch PB.Original)
+        , _patchedBinary :: Maybe (PLE.LoadedELF arch, PMC.ParsedFunctionMap arch PB.Patched)
         , _sources :: Maybe (SourcePair LC.CTranslUnit)
         , _proofTree :: Maybe (ProofTree arch)
         -- ^ All of the collected proof nodes received from the verifier

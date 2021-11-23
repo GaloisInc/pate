@@ -12,9 +12,9 @@ module Pate.Monad.Context (
   , parsedFunctionEntries
   , parsedFunctionContaining
   , buildParsedFunctionMap
+  , buildFunctionEntryMap
 
-  , ParsedBlockMap
-  , parsedBlocksContaining
+  , ParsedBlocks(..)
 
   , BinaryContext(..)
   , EquivalenceContext(..)
@@ -24,8 +24,6 @@ module Pate.Monad.Context (
 
 import           Control.Lens ( (^.) )
 import qualified Control.Lens as L
-import           Data.IntervalMap (IntervalMap)
-import qualified Data.IntervalMap as IM
 import qualified Data.Map as Map
 import           Data.Parameterized.Some ( Some(..) )
 
@@ -38,132 +36,89 @@ import qualified What4.Interface as W4
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Hints as PH
 import qualified Pate.PatchPair as PPa
 
--- | Keys: basic block extent; values: parsed blocks
-newtype ParsedBlockMap arch ids = ParsedBlockMap
-  { getParsedBlockMap :: IntervalMap (PA.ConcreteAddress arch) [MD.ParsedBlock arch ids]
-  }
+data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
--- | basic block extent -> function entry point -> basic block extent again -> parsed block
---
--- You should expect (and check) that exactly one key exists at the function entry point level.
-newtype ParsedFunctionMap arch = ParsedFunctionMap
-  { getParsedFunctionMap :: IntervalMap (PA.ConcreteAddress arch) (Map.Map (MM.ArchSegmentOff arch) (Some (ParsedBlockMap arch)))
-  }
+newtype ParsedFunctionMap arch bin =
+  ParsedFunctionMap (Map.Map (PB.FunctionEntry arch bin) (ParsedBlocks arch))
 
-numParsedFunctions :: ParsedFunctionMap arch -> Int
-numParsedFunctions (ParsedFunctionMap pfm) = length (IM.keys pfm)
+numParsedFunctions :: ParsedFunctionMap arch bin -> Int
+numParsedFunctions (ParsedFunctionMap pfm) = Map.size pfm
 
-numParsedBlocks :: ParsedFunctionMap arch -> Int
+numParsedBlocks :: ParsedFunctionMap arch bin -> Int
 numParsedBlocks (ParsedFunctionMap pfm) =
-   sum [ length (IM.elems pbm)
-       | bmap <- IM.elems pfm
-       , Some (ParsedBlockMap pbm) <- Map.elems bmap
-       ]
+   sum [ length pbs | ParsedBlocks pbs <- Map.elems pfm ]
 
 -- | Return the list of entry points in the parsed function map
-parsedFunctionEntries :: ParsedFunctionMap arch -> [MM.ArchSegmentOff arch]
-parsedFunctionEntries = concatMap Map.keys . IM.elems . getParsedFunctionMap
+parsedFunctionEntries :: ParsedFunctionMap arch bin -> [PB.FunctionEntry arch bin]
+parsedFunctionEntries (ParsedFunctionMap pfm) = Map.keys pfm
 
-buildParsedFunctionMap :: forall arch.
+buildParsedFunctionMap :: forall arch bin.
   MM.ArchConstraints arch =>
+  PBi.KnownBinary bin =>
   MD.DiscoveryState arch ->
-  ParsedFunctionMap arch
+  ParsedFunctionMap arch bin
 buildParsedFunctionMap ds =
   let fns = Map.assocs (ds ^. MD.funInfo)
       xs = map processDiscoveryFunInfo fns
-   in ParsedFunctionMap (IM.unionsWith Map.union xs)
-
+   in ParsedFunctionMap (Map.fromList xs)
  where
-  processDiscoveryFunInfo ::
-    (MM.ArchSegmentOff arch, Some (MD.DiscoveryFunInfo arch)) ->
-    IntervalMap (PA.ConcreteAddress arch) (Map.Map (MM.ArchSegmentOff arch) (Some (ParsedBlockMap arch)))
-  processDiscoveryFunInfo (entrySegOff, Some dfi) =
-    let blocks = buildParsedBlockMap dfi
-     in Map.singleton entrySegOff (Some blocks) <$ getParsedBlockMap blocks
+  processDiscoveryFunInfo (_entrySegOff, Some dfi) =
+    (funInfoToFunEntry W4.knownRepr dfi, buildParsedBlocks dfi)
 
-buildParsedBlockMap ::
-  MM.ArchConstraints arch =>
-  MD.DiscoveryFunInfo arch ids ->
-  ParsedBlockMap arch ids
-buildParsedBlockMap dfi = ParsedBlockMap . IM.fromListWith (++) $
-  [ (archSegmentOffToInterval blockSegOff (MD.blockSize pb), [pb])
-  | (blockSegOff, pb) <- Map.assocs (dfi ^. MD.parsedBlocks)
+buildParsedBlocks :: MD.DiscoveryFunInfo arch ids -> ParsedBlocks arch
+buildParsedBlocks dfi = ParsedBlocks (Map.elems (dfi ^. MD.parsedBlocks))
+
+buildFunctionEntryMap ::
+  PBi.WhichBinaryRepr bin ->
+  Map.Map (MM.ArchSegmentOff arch) (Some (MD.DiscoveryFunInfo arch)) ->
+  Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin)
+buildFunctionEntryMap binRepr disMap = Map.fromList
+  [ (PA.segOffToAddr segOff, funInfoToFunEntry binRepr fi)
+  | (segOff, Some fi) <- Map.assocs disMap
   ]
 
-archSegmentOffToInterval ::
-  MM.ArchConstraints arch =>
-  MM.ArchSegmentOff arch ->
-  Int ->
-  IM.Interval (PA.ConcreteAddress arch)
-archSegmentOffToInterval segOff size =
-  let start = segOffToAddr segOff
-  in IM.IntervalCO start (start `PA.addressAddOffset` fromIntegral size)
-
-
-{- This doesn't seem to work correctly...
-parsedFunctionContaining ::
-  MM.ArchConstraints arch =>
-  PA.ConcreteAddress arch ->
-  ParsedFunctionMap arch ->
-  Either [MM.ArchSegmentOff arch] (MM.ArchSegmentOff arch, Some (ParsedBlockMap arch))
-parsedFunctionContaining addr (ParsedFunctionMap pfm) =
-  case Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm of
-    [x]  -> Right x
-    blks -> Left (fst <$> blks)
-  where
-  start@(PA.ConcreteAddress saddr) = addr
-  end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
-  i = IM.OpenInterval start end
--}
+funInfoToFunEntry ::
+  PBi.WhichBinaryRepr bin ->
+  MD.DiscoveryFunInfo arch ids ->
+  PB.FunctionEntry arch bin
+funInfoToFunEntry binRepr dfi =
+  PB.FunctionEntry
+  { PB.functionSegAddr = MD.discoveredFunAddr dfi
+  , PB.functionSymbol  = MD.discoveredFunSymbol dfi
+  , PB.functionBinRepr = binRepr
+  }
 
 parsedFunctionContaining ::
   MM.ArchConstraints arch =>
-  PA.ConcreteAddress arch ->
-  ParsedFunctionMap arch ->
-  Either [MM.ArchSegmentOff arch] (PA.ConcreteAddress arch, Some (ParsedBlockMap arch))
-parsedFunctionContaining addr (ParsedFunctionMap pfm) =
-  let fns = Map.assocs $ Map.unions $ fmap snd $ IM.lookupLE i pfm
-      fns' = fmap (\(segOff, pbm) -> (segOffToAddr segOff, pbm)) fns
-  in case reverse $ filter (\(addr', _) -> addr' <= start) fns' of
-       (x:_) -> Right x
-       [] -> Left (fst <$> fns)
- where
-  start@(PA.ConcreteAddress saddr) = addr
-  end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
-  i = IM.OpenInterval start end
-
-parsedBlocksContaining ::
-  MM.ArchConstraints arch =>
-  PA.ConcreteAddress arch ->
-  ParsedBlockMap arch ids ->
-  [MD.ParsedBlock arch ids]
-parsedBlocksContaining addr (ParsedBlockMap pbm) =
-    concat $ IM.elems $ IM.intersecting pbm i
-  where
-   start@(PA.ConcreteAddress saddr) = addr
-   end = PA.ConcreteAddress (MM.MemAddr (MM.addrBase saddr) maxBound)
-   i = IM.OpenInterval start end
-
-segOffToAddr ::
-  MM.ArchSegmentOff arch ->
-  PA.ConcreteAddress arch
-segOffToAddr off = PA.addressFromMemAddr (MM.segoffAddr off)
-
+  PB.ConcreteBlock arch bin ->
+  ParsedFunctionMap arch bin ->
+  Maybe (ParsedBlocks arch)
+parsedFunctionContaining blk (ParsedFunctionMap pfm) =
+  Map.lookup (PB.blockFunctionEntry blk) pfm
 
 data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
-  , parsedFunctionMap :: ParsedFunctionMap arch
-  , binEntry :: MM.ArchSegmentOff arch
+
+  , parsedFunctionMap :: ParsedFunctionMap arch bin
+
+  , binEntry :: PB.FunctionEntry arch bin
+
   , hints :: PH.VerificationHints
+
   , functionHintIndex :: Map.Map (PA.ConcreteAddress arch) PH.FunctionDescriptor
   -- ^ An index of the binary hints by function entry point address, used in the
   -- construction of function frames to name parameters
-  , binAbortFn :: Maybe (MM.ArchSegmentOff arch)
+
+  , binAbortFn :: Maybe (PB.FunctionEntry arch bin)
   -- ^ address of special-purposes "abort" function that represents an abnormal
   -- program exit
+
+  , functionEntryMap :: Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin)
+  -- ^ A map of all the function entrypoints we know about
   }
 
 data EquivalenceContext sym arch where
@@ -172,6 +127,8 @@ data EquivalenceContext sym arch where
     , binCtxs :: PPa.PatchPair (BinaryContext arch)
     , stackRegion :: W4.SymNat sym
     , globalRegion :: W4.SymNat sym
+      -- NB, currentFunc is misnamed, as it corresponds to a pair of blocks under consideration,
+      -- but they might not be function entry points
     , _currentFunc :: PPa.BlockPair arch
     } -> EquivalenceContext sym arch
 

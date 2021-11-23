@@ -13,23 +13,22 @@ module Pate.Discovery (
   discoverPairs,
   exactEquivalence,
   runDiscovery,
-  mkConcreteBlock,
   lookupBlocks,
   getBlocks,
   getBlocks',
-  lookupBlocks',
   matchesBlockTarget,
-  concreteToLLVM
+  concreteToLLVM,
+  lookupFunctionEntry
   ) where
 
 import           Control.Lens ( (^.) )
+import           Control.Monad (forM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
-import qualified Data.Functor.Compose as DFC
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Classes as PC
@@ -79,7 +78,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
-import           Pate.Types
 import qualified What4.ExprHelpers as WEH
 
 --------------------------------------------------------
@@ -89,7 +87,7 @@ import qualified What4.ExprHelpers as WEH
 discoverPairs ::
   forall sym arch.
   SimBundle sym arch ->
-  EquivM sym arch [PPa.PatchPair (BlockTarget arch)]
+  EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
 discoverPairs bundle = do
   lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
@@ -102,7 +100,7 @@ discoverPairs bundle = do
         allCalls = [ (blkO, blkP)
                    | blkO <- blksO
                    , blkP <- blksP
-                   , compatibleTargets blkO blkP]  
+                   , compatibleTargets blkO blkP]
       blocks <- getBlocks $ PSS.simPair bundle
 
       result <- Par.forMPar allCalls $ \(blktO, blktP) -> startTimer $ do
@@ -131,7 +129,7 @@ discoverPairs bundle = do
                     emit PE.InconclusiveTarget
                     throwHere PEE.InconclusiveSAT
               case er of
-                Left err -> do
+                Left _err -> do
                   emit PE.InconclusiveTarget
                   throwHere PEE.InconclusiveSAT
                 Right r -> return r
@@ -140,15 +138,16 @@ discoverPairs bundle = do
       return joined
   where
     pPair = PSS.simPair bundle
+
 -- | True for a pair of original and patched block targets that represent a valid pair of
 -- jumps
 compatibleTargets ::
-  BlockTarget arch PB.Original ->
-  BlockTarget arch PB.Patched ->
+  PB.BlockTarget arch PB.Original ->
+  PB.BlockTarget arch PB.Patched ->
   Bool
 compatibleTargets blkt1 blkt2 =
-  PB.concreteBlockEntry (targetCall blkt1) == PB.concreteBlockEntry (targetCall blkt2) &&
-  case (targetReturn blkt1, targetReturn blkt2) of
+  PB.concreteBlockEntry (PB.targetCall blkt1) == PB.concreteBlockEntry (PB.targetCall blkt2) &&
+  case (PB.targetReturn blkt1, PB.targetReturn blkt2) of
     (Just blk1, Just blk2) -> PB.concreteBlockEntry blk1 == PB.concreteBlockEntry blk2
     (Nothing, Nothing) -> True
     _ -> False
@@ -166,25 +165,25 @@ exactEquivalence inO inP = withSym $ \sym -> do
   isPredSat heuristicTimeout regsEq >>= \case
     True -> return ()
     False -> CME.fail "exactEquivalence: regsEq: assumed false"
-    
+
   memEq <- liftIO $ WI.isEq sym (MT.memArr (PSS.simInMem inO)) (MT.memArr (PSS.simInMem inP))
 
   isPredSat heuristicTimeout memEq >>= \case
     True -> return ()
     False -> CME.fail "exactEquivalence: memEq: assumed false"
-    
+
   liftIO $ WI.andPred sym regsEq memEq
 
 matchesBlockTarget ::
   forall sym arch.
   SimBundle sym arch ->
-  BlockTarget arch PB.Original ->
-  BlockTarget arch PB.Patched ->
+  PB.BlockTarget arch PB.Original ->
+  PB.BlockTarget arch PB.Patched ->
   EquivM sym arch (WI.Pred sym)
 matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
   -- true when the resulting IPs call the given block targets
-  ptrO <- concreteToLLVM (targetCall blktO)
-  ptrP <- concreteToLLVM (targetCall blktP)
+  ptrO <- concreteToLLVM (PB.targetCall blktO)
+  ptrP <- concreteToLLVM (PB.targetCall blktP)
 
   eqCall <- liftIO $ do
     eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue ipO)
@@ -229,9 +228,9 @@ liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = WI.notPred sym p2
 liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = WI.notPred sym p1
 
 targetReturnPtr ::
-  BlockTarget arch bin ->
+  PB.BlockTarget arch bin ->
   EquivM sym arch (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MC.ArchAddrWidth arch))))
-targetReturnPtr blkt | Just blk <- targetReturn blkt = withSym $ \sym -> do
+targetReturnPtr blkt | Just blk <- PB.targetReturn blkt = withSym $ \sym -> do
   ptr <- concreteToLLVM blk
   return $ WP.justPartExpr sym ptr
 targetReturnPtr _ = withSym $ \sym -> return $ WP.maybePartExpr sym Nothing
@@ -243,59 +242,52 @@ getSubBlocks ::
   forall sym arch bin.
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
-  EquivM sym arch [BlockTarget arch bin]
+  EquivM sym arch [PB.BlockTarget arch bin]
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
-     tgts <- case PMC.parsedFunctionContaining addr pfm of
-       Right (_, Some pbm) -> do
-         let pbs = PMC.parsedBlocksContaining addr pbm
-         concat <$> mapM (concreteValidJumpTargets pbs) pbs
-       Left allAddrs -> throwHere $ PEE.NoUniqueFunctionOwner addr allAddrs
+     tgts <- case PMC.parsedFunctionContaining b pfm of
+       Just (PMC.ParsedBlocks pbs) ->
+         concat <$> mapM (concreteValidJumpTargets b pbs) pbs
+       Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ validateBlockTarget tgts
      return tgts
 
 
 concreteValidJumpTargets ::
-  forall bin arch ids m.
-  Monad m =>
-  PB.KnownBinary bin =>
   PA.ValidArch arch =>
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
   [MD.ParsedBlock arch ids] ->
   MD.ParsedBlock arch ids ->
-  m [BlockTarget arch bin]
-concreteValidJumpTargets allPbs pb = do
-  targets <- concreteJumpTargets pb
-  let thisAddr = segOffToAddr (MD.pblockAddr pb)
-  let addrs = map (segOffToAddr . MD.pblockAddr) allPbs
+  EquivM sym arch [PB.BlockTarget arch bin]
+concreteValidJumpTargets from allPbs pb = do
+  targets <- concreteJumpTargets from pb
   let
-    isTargetExternal btgt = not ((PB.concreteAddress (targetCall btgt)) `elem` addrs)
-    isTargetBackJump btgt = (PB.concreteAddress (targetCall btgt)) < thisAddr
-    isTargetArch btgt = PB.concreteBlockEntry (targetCall btgt) == PB.BlockEntryPostArch
+      thisAddr = PA.segOffToAddr (MD.pblockAddr pb)
+      addrs = map (PA.segOffToAddr . MD.pblockAddr) allPbs
 
-    isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
-  let validTargets = filter isTargetValid targets
-  return validTargets
+      isTargetExternal btgt = not ((PB.concreteAddress (PB.targetCall btgt)) `elem` addrs)
+      isTargetBackJump btgt = (PB.concreteAddress (PB.targetCall btgt)) < thisAddr
+      isTargetArch btgt = PB.concreteBlockEntry (PB.targetCall btgt) == PB.BlockEntryPostArch
+
+      isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
+
+  return $ filter isTargetValid targets
 
 validateBlockTarget ::
-  HasCallStack => PB.KnownBinary bin =>
-  BlockTarget arch bin ->
+  HasCallStack =>
+  PB.KnownBinary bin =>
+  PB.BlockTarget arch bin ->
   EquivM sym arch ()
 validateBlockTarget tgt = do
-  let blk = targetCall tgt
+  let blk = PB.targetCall tgt
   case PB.concreteBlockEntry blk of
     PB.BlockEntryInitFunction -> do
       (manifestError $ lookupBlocks blk) >>= \case
         Left err -> throwHere $ PEE.InvalidCallTarget (PB.concreteAddress blk) err
         Right _ -> return ()
     _ -> return ()
-
-mkConcreteBlock' ::
-  PB.KnownBinary bin =>
-  PB.BlockEntryKind arch ->
-  PA.ConcreteAddress arch ->
-  PB.ConcreteBlock arch bin
-mkConcreteBlock' k a = PB.ConcreteBlock a k WI.knownRepr
 
 concreteNextIPs ::
   PA.ValidArch arch =>
@@ -309,58 +301,79 @@ concreteValueAddress ::
   MC.Value arch ids (MT.BVType (MC.ArchAddrWidth arch)) ->
   [PA.ConcreteAddress arch]
 concreteValueAddress = \case
-  MC.RelocatableValue _ addr -> [PA.ConcreteAddress addr]
+  MC.RelocatableValue _ addr -> [ PA.memAddrToAddr addr ]
   MC.BVValue w bv |
     Just WI.Refl <- WI.testEquality w (MM.memWidthNatRepr @(MC.ArchAddrWidth arch)) ->
-      [PA.ConcreteAddress (MM.absoluteAddr (MM.memWord (fromIntegral bv)))]
+      [ PA.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral bv))) ]
   MC.AssignedValue (MC.Assignment _ rhs) -> case rhs of
     MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress b1 ++ concreteValueAddress b2
     _ -> []
   _ -> []
+  -- TODO ^ is this complete?
+
 
 concreteJumpTargets ::
-  forall bin arch ids m.
-  Monad m =>
+  forall sym bin arch ids.
+  HasCallStack =>
   PB.KnownBinary bin =>
   PA.ValidArch arch =>
+  PB.ConcreteBlock arch bin ->
   MD.ParsedBlock arch ids ->
-  m [BlockTarget arch bin]
-concreteJumpTargets pb = case MD.pblockTermStmt pb of
-  MD.ParsedCall st ret -> go (concreteNextIPs st) ret
-  MD.PLTStub st _ _ -> case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
-    Just addr -> go (concreteValueAddress addr) Nothing
-    _ -> return $ []
-  MD.ParsedJump _ tgt -> do
-    blk <- mkConcreteBlock PB.BlockEntryJump tgt
-    return $ [ BlockTarget blk Nothing ]
-  MD.ParsedBranch _ _ t f -> do
-    blk_t <- mkConcreteBlock PB.BlockEntryJump t
-    blk_f <- mkConcreteBlock PB.BlockEntryJump f
-    return $ [ BlockTarget blk_t Nothing, BlockTarget blk_f Nothing ]
-  MD.ParsedLookupTable _jt st _ _ -> go (concreteNextIPs st) Nothing
-  MD.ParsedArchTermStmt _ st ret -> do
-    ret_blk <- mapM (mkConcreteBlock PB.BlockEntryPostArch) ret
-    return $ [ BlockTarget (mkConcreteBlock' PB.BlockEntryPostArch next) ret_blk
-             | next <- (concreteNextIPs st) ]
-  _ -> return []
-  where
-    go ::
-      [PA.ConcreteAddress arch] ->
-      Maybe (MC.ArchSegmentOff arch) ->
-      m [BlockTarget arch bin]
-    go next_ips ret = do
-      ret_blk <- mapM (mkConcreteBlock PB.BlockEntryPostFunction) ret
-      return $ [ BlockTarget (mkConcreteBlock' PB.BlockEntryInitFunction next) ret_blk | next <- next_ips ]
+  EquivM sym arch [PB.BlockTarget arch bin]
+concreteJumpTargets from pb = case MD.pblockTermStmt pb of
+  MD.ParsedCall st ret ->
+    callTargets from (concreteNextIPs st) ret
 
-mkConcreteBlock ::
-  forall bin arch m .
-  Applicative m =>
-  PA.ValidArch arch =>
-  PB.KnownBinary bin =>
-  PB.BlockEntryKind arch ->
-  MC.ArchSegmentOff arch ->
-  m (PB.ConcreteBlock arch bin)
-mkConcreteBlock k a = pure (PB.getConcreteBlock a k WI.knownRepr)
+  MD.PLTStub st _ _ ->
+    case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
+      Just addr -> callTargets from (concreteValueAddress addr) Nothing
+      _ -> error "Could not resolve IP register in PLTStub"
+
+  MD.ParsedJump _ tgt ->
+    return [ jumpTarget from tgt ]
+
+  MD.ParsedBranch _ _ t f ->
+    return [ jumpTarget from t, jumpTarget from f ]
+
+  MD.ParsedLookupTable _jt st _ _ ->
+    return [ jumpTarget' from next | next <- concreteNextIPs st ]
+
+  MD.ParsedArchTermStmt _ st ret -> do
+    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
+    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk
+           | next <- (concreteNextIPs st)
+           ]
+
+  MD.ParsedReturn{} -> return []
+  MD.ParsedTranslateError{} -> return []
+  MD.ClassifyFailure{} -> return []
+
+jumpTarget ::
+    PB.ConcreteBlock arch bin ->
+    MC.ArchSegmentOff arch ->
+    PB.BlockTarget arch bin
+jumpTarget from to = PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing
+
+jumpTarget' ::
+    PB.ConcreteBlock arch bin ->
+    PA.ConcreteAddress arch ->
+    PB.BlockTarget arch bin
+jumpTarget' from to = PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing
+
+callTargets ::
+    HasCallStack =>
+    PB.KnownBinary bin =>
+    PB.ConcreteBlock arch bin ->
+    [PA.ConcreteAddress arch] ->
+    Maybe (MC.ArchSegmentOff arch) ->
+    EquivM sym arch [PB.BlockTarget arch bin]
+callTargets from next_ips ret = do
+   let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
+   fnmap <- PMC.functionEntryMap <$> getBinCtx
+   forM next_ips $ \next ->
+     case Map.lookup next fnmap of
+       Just fe -> return (PB.BlockTarget (PB.functionEntryToConcreteBlock fe) ret_blk)
+       Nothing -> throwHere (PEE.LookupNotAtFunctionStart callStack next)
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map
@@ -383,6 +396,17 @@ addFunctionEntryHints _ mem (_name, fd) (invalid, entries) =
 abortFnName :: T.Text
 abortFnName = "__pate_abort"
 
+lookupFunctionEntry ::
+  HasCallStack =>
+  PA.ValidArch arch =>
+  Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin) ->
+  PA.ConcreteAddress arch ->
+  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
+lookupFunctionEntry fnmap a =
+  case Map.lookup a fnmap of
+    Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack a))
+    Just fe -> pure fe
+
 runDiscovery ::
   forall arch bin.
   PB.KnownBinary bin =>
@@ -395,6 +419,7 @@ runDiscovery ::
 runDiscovery mCFGDir repr elf hints = do
   let archInfo = PLE.archInfo elf
   entries <- F.toList <$> MBL.entryPoints bin
+
   let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
   let ds = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
 
@@ -410,11 +435,17 @@ runDiscovery mCFGDir repr elf hints = do
         PPT.hPutDoc hdl (PP.pretty dfi)
 
   let pfm = PMC.buildParsedFunctionMap ds
-  let abortFnAddr = do
-        abortFnWord <- PH.functionAddress <$> lookup abortFnName (PH.functionEntries hints)
-        MM.resolveAbsoluteAddr mem (fromIntegral abortFnWord)
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
-  return $ (invalidHints, PMC.BinaryContext bin pfm (head entries) hints idx abortFnAddr)
+  let fnmap = PMC.buildFunctionEntryMap repr (ds ^. MD.funInfo)
+
+  let startEntry = head entries -- can't fail because entryPoints returns a NonEmpty
+  startEntry' <- lookupFunctionEntry fnmap (PA.segOffToAddr startEntry)
+
+  abortFnEntry <- traverse
+      (\fnDesc -> lookupFunctionEntry fnmap (PA.memAddrToAddr (MM.absoluteAddr (MM.memWord (PH.functionAddress fnDesc)))))
+      (lookup abortFnName (PH.functionEntries hints))
+
+  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry fnmap)
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin
@@ -424,7 +455,7 @@ runDiscovery mCFGDir repr elf hints = do
       in case MBLE.resolveAbsoluteAddress mem (fromIntegral addrWord) of
            Nothing -> m
            Just segoff ->
-             let addr = PA.addressFromMemAddr (MM.segoffAddr segoff)
+             let addr = PA.segOffToAddr segoff
              in Map.insert addr fd m
 
 getBlocks'
@@ -434,7 +465,7 @@ getBlocks'
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
   case (lookupBlocks' ctxO blkO, lookupBlocks' ctxP blkP) of
-    (Right (Some (DFC.Compose opbs)), Right (Some (DFC.Compose ppbs))) -> do
+    (Right (PMC.ParsedBlocks opbs), Right (PMC.ParsedBlocks ppbs)) -> do
       let oBlocks = PE.Blocks blkO opbs
       let pBlocks = PE.Blocks blkP ppbs
       return $! PPa.PatchPair oBlocks pBlocks
@@ -452,9 +483,9 @@ getBlocks ::
   PPa.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
-  Some (DFC.Compose opbs) <- lookupBlocks blkO
+  PMC.ParsedBlocks opbs <- lookupBlocks blkO
   let oBlocks = PE.Blocks blkO opbs
-  Some (DFC.Compose ppbs) <- lookupBlocks blkP
+  PMC.ParsedBlocks ppbs <- lookupBlocks blkP
   let pBlocks = PE.Blocks blkP ppbs
   return $ PPa.PatchPair oBlocks pBlocks
   where
@@ -465,27 +496,18 @@ lookupBlocks'
   :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack)
   => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
-  -> Either (PEE.InnerEquivalenceError arch) (Some (DFC.Compose [] (MD.ParsedBlock arch)))
+  -> Either (PEE.InnerEquivalenceError arch) (PMC.ParsedBlocks arch)
 lookupBlocks' binCtx b = do
-  case PMC.parsedFunctionContaining addr (PMC.parsedFunctionMap binCtx) of
-    Right (funAddr, Some pbm) ->
-      case PB.concreteBlockEntry b of
-        PB.BlockEntryInitFunction
-          | funAddr /= addr -> Left (PEE.LookupNotAtFunctionStart callStack funAddr addr)
-        _ -> do
-          let result = PMC.parsedBlocksContaining addr pbm
-          return $ Some (DFC.Compose result)
-    Left addrs -> Left (PEE.NoUniqueFunctionOwner addr addrs)
-
-  where
-    addr = PB.concreteAddress b
+  case PMC.parsedFunctionContaining b (PMC.parsedFunctionMap binCtx) of
+    Just pbs -> return pbs
+    Nothing  -> Left (PEE.UnknownFunctionEntry (PB.concreteAddress b))
 
 lookupBlocks ::
   forall sym arch bin.
   HasCallStack =>
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
-  EquivM sym arch (Some (DFC.Compose [] (MD.ParsedBlock arch)))
+  EquivM sym arch (PMC.ParsedBlocks arch)
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
   case lookupBlocks' binCtx b of
@@ -498,11 +520,6 @@ lookupBlocks b = do
                                      }
       CME.throwError err
     Right blocks -> return blocks
-
-segOffToAddr ::
-  MC.ArchSegmentOff arch ->
-  PA.ConcreteAddress arch
-segOffToAddr off = PA.addressFromMemAddr (MM.segoffAddr off)
 
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'
 --
@@ -525,7 +542,7 @@ concreteToLLVM ::
 concreteToLLVM blk = withSym $ \sym -> do
   -- we assume a distinct region for all executable code
   region <- CMR.asks envPCRegion
-  let PA.ConcreteAddress (MM.MemAddr _base offset) = PB.concreteAddress blk
+  let MM.MemAddr _base offset = PA.addrToMemAddr (PB.concreteAddress blk)
   liftIO $ do
     ptrOffset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger offset))
     pure (CLM.LLVMPointer region ptrOffset)

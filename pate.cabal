@@ -104,7 +104,6 @@ library
                        Pate.Register,
                        Pate.Solver,
                        Pate.Timeout,
-                       Pate.Types,
                        Pate.ExprMappable,
                        What4.ExprHelpers,
                        What4.PathCondition,

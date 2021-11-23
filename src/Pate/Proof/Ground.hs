@@ -70,7 +70,6 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Arch as PA
-import qualified Pate.Abort as PAb
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
