@@ -322,12 +322,12 @@ concreteJumpTargets ::
   EquivM sym arch [PB.BlockTarget arch bin]
 concreteJumpTargets from pb = case MD.pblockTermStmt pb of
   MD.ParsedCall st ret ->
-    callTargets from (concreteNextIPs st) ret PB.BlockEntryPostFunction
+    callTargets from (concreteNextIPs st) ret
 
   MD.PLTStub st _ _ ->
     case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
-      Just addr -> callTargets from (concreteValueAddress addr) Nothing PB.BlockEntryPostFunction
-      _ -> return [] -- TODO? this doesn't seem right
+      Just addr -> callTargets from (concreteValueAddress addr) Nothing
+      _ -> error "Could not resolve IP register in PLTStub"
 
   MD.ParsedJump _ tgt ->
     return [ jumpTarget from tgt ]
@@ -339,15 +339,14 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
     return [ jumpTarget' from next | next <- concreteNextIPs st ]
 
   MD.ParsedArchTermStmt _ st ret -> do
---    callTargets from (concreteNextIPs st) ret PB.BlockEntryPostArch
     let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
-    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk -- TODO? is this right?
+    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk
            | next <- (concreteNextIPs st)
            ]
 
-  _ -> return []
-  -- TODO ^ is this complete?
-
+  MD.ParsedReturn{} -> return []
+  MD.ParsedTranslateError{} -> return []
+  MD.ClassifyFailure{} -> return []
 
 jumpTarget ::
     PB.ConcreteBlock arch bin ->
@@ -367,10 +366,9 @@ callTargets ::
     PB.ConcreteBlock arch bin ->
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
-    PB.BlockEntryKind arch ->
     EquivM sym arch [PB.BlockTarget arch bin]
-callTargets from next_ips ret bkind = do
-   let ret_blk = fmap (PB.mkConcreteBlock from bkind) ret
+callTargets from next_ips ret = do
+   let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
    fnmap <- PMC.functionEntryMap <$> getBinCtx
    forM next_ips $ \next ->
      case Map.lookup next fnmap of
