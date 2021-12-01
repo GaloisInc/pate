@@ -29,6 +29,7 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
+import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Classes as PC
@@ -418,9 +419,9 @@ runDiscovery ::
   CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
 runDiscovery mCFGDir repr elf hints = do
   let archInfo = PLE.archInfo elf
-  entries <- F.toList <$> MBL.entryPoints bin
+  entries <- MBL.entryPoints bin
 
-  let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], entries) (PH.functionEntries hints)
+  let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
   let ds = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
 
   -- If the user wants to persist macaw CFGs, do so here
@@ -438,7 +439,7 @@ runDiscovery mCFGDir repr elf hints = do
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
   let fnmap = PMC.buildFunctionEntryMap repr (ds ^. MD.funInfo)
 
-  let startEntry = head entries -- can't fail because entryPoints returns a NonEmpty
+  let startEntry = DLN.head entries
   startEntry' <- lookupFunctionEntry fnmap (PA.segOffToAddr startEntry)
 
   abortFnEntry <- traverse
