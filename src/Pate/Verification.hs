@@ -46,13 +46,14 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import qualified Data.Traversable as DT
-import           GHC.Stack ( HasCallStack )
+import           GHC.Stack ( HasCallStack, callStack )
 import qualified Lumberjack as LJ
 import           Prelude hiding ( fail )
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
 
+import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Backend.Simple as CB
@@ -60,9 +61,9 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
-import qualified Pate.Arch as PA
-import qualified Pate.Address as PAd
 import qualified Pate.Abort as PAb
+import qualified Pate.Address as PAd
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
@@ -76,6 +77,7 @@ import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
@@ -121,7 +123,7 @@ runDiscovery
 runDiscovery logAction mCFGDir elf elf' = do
   binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
   binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
-  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf, PMC.parsedFunctionMap binCtxO) (PH.hinted elf', PMC.parsedFunctionMap binCtxP))
+  liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf) (PH.hinted elf'))
   return $ PPa.PatchPair binCtxO binCtxP
   where
     discoverAsync mdir repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr e h)))
@@ -131,9 +133,7 @@ runDiscovery logAction mCFGDir elf elf' = do
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              return oCtxUnhinted
          | otherwise -> do
-             unhintedAnalysis <- discoverAsync Nothing repr (PH.hinted e) mempty
              hintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) (PH.hints e)
-             (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
              unless (null hintErrors) $ do
@@ -144,12 +144,6 @@ runDiscovery logAction mCFGDir elf elf' = do
                                     , S.member addr invalidSet
                                     ]
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
-
-             let unhintedDiscoveredAddresses = S.fromList (PMC.parsedFunctionEntries (PMC.parsedFunctionMap oCtxUnhinted))
-             let hintedDiscoveredAddresses = S.fromList (PMC.parsedFunctionEntries (PMC.parsedFunctionMap oCtxHinted))
-             let newAddrs = hintedDiscoveredAddresses `S.difference` unhintedDiscoveredAddresses
-             unless (S.null newAddrs) $ do
-               liftIO $ LJ.writeLog logAction (PE.FunctionsDiscoveredFromHints repr (F.toList newAddrs))
              return oCtxHinted
 
 -- | Verify equality of the given binaries.
@@ -253,15 +247,29 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
 
 
 unpackBlockData ::
+  HasCallStack =>
   PBi.KnownBinary bin =>
   PA.ValidArch arch =>
   PMC.BinaryContext arch bin ->
   PC.BlockData ->
   CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
 unpackBlockData ctxt (PC.Hex w) =
-  PD.lookupFunctionEntry (PMC.functionEntryMap ctxt) (PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord w)))
+  case PM.resolveAbsoluteAddress mem (fromIntegral w) of
+    Just segAddr ->
+      -- We don't include a symbol for this entry point because we don't really
+      -- have one conveniently available.  That name is never actually
+      -- referenced, so it doesn't seem too problematic.
+      return PB.FunctionEntry { PB.functionSegAddr = segAddr
+                              , PB.functionSymbol = Nothing
+                              , PB.functionBinRepr = W4.knownRepr
+                              }
+    Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack caddr))
+  where
+    mem = MBL.memoryImage (PMC.binary ctxt)
+    caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord w))
 
 unpackPatchData ::
+  HasCallStack =>
   PA.ValidArch arch =>
   PPa.PatchPair (PMC.BinaryContext arch) ->
   PC.PatchData ->
