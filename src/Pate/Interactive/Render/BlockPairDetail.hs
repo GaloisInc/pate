@@ -42,11 +42,11 @@ renderCounterexample er =
 renderSource :: (PAr.ArchConstraints arch)
              => IS.State arch
              -> (IS.SourcePair LC.CTranslUnit -> LC.CTranslUnit)
-             -> L.Getter (IS.State arch) (Maybe (PLE.LoadedELF arch, b))
+             -> L.Getter (IS.State arch) (Maybe (PLE.LoadedELF arch))
              -> MC.MemAddr (MC.ArchAddrWidth arch)
              -> [TP.UI TP.Element]
 renderSource st getSource binL addr = fromMaybe [] $ do
-  (lelf, _) <- st ^. binL
+  lelf <- st ^. binL
   bname <- MBL.symbolFor (PLE.loadedBinary lelf) addr
   let sname = UTF8.toString (UTF8.fromRep bname)
   LC.CTranslUnit decls _ <- getSource <$> st ^. IS.sources
@@ -69,7 +69,7 @@ renderFunctionName :: (PAr.ArchConstraints arch)
                    -> MC.MemAddr (MC.ArchAddrWidth arch)
                    -> [TP.UI TP.Element]
 renderFunctionName st origAddr = fromMaybe [] $ do
-  (lelf, _) <- st ^. IS.originalBinary
+  lelf <- st ^. IS.originalBinary
   bname <- MBL.symbolFor (PLE.loadedBinary lelf) origAddr
   let sname = UTF8.toString (UTF8.fromRep bname)
   return [TP.string ("(Function: " ++ sname ++ ")")]

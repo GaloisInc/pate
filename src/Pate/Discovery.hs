@@ -25,7 +25,7 @@ import           Control.Lens ( (^.) )
 import           Control.Monad (forM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
-import           Control.Monad.IO.Class ( liftIO )
+import           Control.Monad.IO.Class ( liftIO, MonadIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
@@ -37,14 +37,10 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 import           GHC.Stack ( HasCallStack, callStack )
-import qualified Prettyprinter as PP
-import qualified Prettyprinter.Render.Text as PPT
-import qualified System.Directory as SD
-import           System.FilePath ( (</>), (<.>) )
-import qualified System.IO as IO
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.BinaryLoader.ELF as MBLE
@@ -71,11 +67,13 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Panic as Panic
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
@@ -247,7 +245,8 @@ getSubBlocks ::
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
-     tgts <- case PMC.parsedFunctionContaining b pfm of
+     mtgt <- liftIO $ PMC.parsedFunctionContaining b pfm
+     tgts <- case mtgt of
        Just (PMC.ParsedBlocks pbs) ->
          concat <$> mapM (concreteValidJumpTargets b pbs) pbs
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
@@ -362,6 +361,7 @@ jumpTarget' ::
 jumpTarget' from to = PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing
 
 callTargets ::
+    forall bin arch sym .
     HasCallStack =>
     PB.KnownBinary bin =>
     PB.ConcreteBlock arch bin ->
@@ -370,11 +370,17 @@ callTargets ::
     EquivM sym arch [PB.BlockTarget arch bin]
 callTargets from next_ips ret = do
    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
-   fnmap <- PMC.functionEntryMap <$> getBinCtx
-   forM next_ips $ \next ->
-     case Map.lookup next fnmap of
-       Just fe -> return (PB.BlockTarget (PB.functionEntryToConcreteBlock fe) ret_blk)
-       Nothing -> throwHere (PEE.LookupNotAtFunctionStart callStack next)
+   binCtx <- getBinCtx @bin
+   let mem = MBL.memoryImage (PMC.binary binCtx)
+   forM next_ips $ \next -> do
+     let nextMem = PA.addrToMemAddr next
+     let Just segoff = MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem)
+     let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
+                               , PB.functionSymbol = Nothing
+                               , PB.functionBinRepr = PC.knownRepr
+                               }
+     let pb = PB.functionEntryToConcreteBlock fe
+     return (PB.BlockTarget pb ret_blk)
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map
@@ -408,6 +414,19 @@ lookupFunctionEntry fnmap a =
     Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack a))
     Just fe -> pure fe
 
+addAddrSym
+  :: (w ~ MC.ArchAddrWidth arch, MM.MemWidth w, HasCallStack)
+  => MM.Memory w
+  -> MD.AddrSymMap w
+  -> PH.FunctionDescriptor
+  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MD.AddrSymMap w)
+addAddrSym mem m funcDesc = do
+  let symbol = TE.encodeUtf8 (PH.functionSymbol funcDesc)
+  let addr0 = PH.functionAddress funcDesc
+  case PM.resolveAbsoluteAddress mem (fromIntegral addr0) of
+    Just segoff -> return (Map.insert segoff symbol m)
+    Nothing -> Panic.panic Panic.Discovery "addAddrSym" ["Invalid function entry point: " ++ show addr0]
+
 runDiscovery ::
   forall arch bin.
   PB.KnownBinary bin =>
@@ -420,33 +439,26 @@ runDiscovery ::
 runDiscovery mCFGDir repr elf hints = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
+  addrSyms <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
+  let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
-  let (invalidHints, hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
-  let ds = MD.cfgFromAddrs archInfo mem Map.empty hintedEntries []
-
-  -- If the user wants to persist macaw CFGs, do so here
-  --
-  -- Save these CFGs to <dir>/<repr>/<address>
-  liftIO $ F.forM_ mCFGDir $ \cfgDir -> do
-    let baseDir = cfgDir </> show repr
-    SD.createDirectoryIfMissing True baseDir
-    F.forM_ (ds ^. MD.funInfo) $ \(Some dfi) -> do
-      let fname = baseDir </> show (MD.discoveredFunAddr dfi) <.> "cfg"
-      IO.withFile fname IO.WriteMode $ \hdl -> do
-        PPT.hPutDoc hdl (PP.pretty dfi)
-
-  let pfm = PMC.buildParsedFunctionMap ds
+  pfm <- liftIO $ PMC.newParsedFunctionMap mem addrSyms archInfo mCFGDir
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
-  let fnmap = PMC.buildFunctionEntryMap repr (ds ^. MD.funInfo)
 
   let startEntry = DLN.head entries
-  startEntry' <- lookupFunctionEntry fnmap (PA.segOffToAddr startEntry)
+  let startEntry' = PB.FunctionEntry { PB.functionSegAddr = startEntry
+                                     , PB.functionSymbol = Nothing
+                                     , PB.functionBinRepr = repr
+                                     }
+  let abortFnEntry = do
+        fnDesc <- lookup abortFnName (PH.functionEntries hints)
+        abortFnAddr <- PM.resolveAbsoluteAddress mem (MM.memWord (PH.functionAddress fnDesc))
+        return PB.FunctionEntry { PB.functionSegAddr = abortFnAddr
+                                , PB.functionSymbol = Just (TE.encodeUtf8 abortFnName)
+                                , PB.functionBinRepr = repr
+                                }
 
-  abortFnEntry <- traverse
-      (\fnDesc -> lookupFunctionEntry fnmap (PA.memAddrToAddr (MM.absoluteAddr (MM.memWord (PH.functionAddress fnDesc)))))
-      (lookup abortFnName (PH.functionEntries hints))
-
-  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry fnmap)
+  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry)
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin
@@ -460,12 +472,14 @@ runDiscovery mCFGDir repr elf hints = do
              in Map.insert addr fd m
 
 getBlocks'
-  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch, HasCallStack)
+  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m)
   => PMC.EquivalenceContext sym arch
   -> PPa.BlockPair arch
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
-  case (lookupBlocks' ctxO blkO, lookupBlocks' ctxP blkP) of
+  bs1 <- liftIO $ lookupBlocks' ctxO blkO
+  bs2 <- liftIO $ lookupBlocks' ctxP blkP
+  case (bs1, bs2) of
     (Right (PMC.ParsedBlocks opbs), Right (PMC.ParsedBlocks ppbs)) -> do
       let oBlocks = PE.Blocks blkO opbs
       let pBlocks = PE.Blocks blkP ppbs
@@ -494,14 +508,15 @@ getBlocks pPair = do
     blkP = PPa.pPatched pPair
 
 lookupBlocks'
-  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack)
+  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, PB.KnownBinary bin)
   => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
-  -> Either (PEE.InnerEquivalenceError arch) (PMC.ParsedBlocks arch)
+  -> IO (Either (PEE.InnerEquivalenceError arch) (PMC.ParsedBlocks arch))
 lookupBlocks' binCtx b = do
-  case PMC.parsedFunctionContaining b (PMC.parsedFunctionMap binCtx) of
-    Just pbs -> return pbs
-    Nothing  -> Left (PEE.UnknownFunctionEntry (PB.concreteAddress b))
+  mfn <- PMC.parsedFunctionContaining b (PMC.parsedFunctionMap binCtx)
+  case mfn of
+    Just pbs -> return (Right pbs)
+    Nothing  -> return (Left (PEE.UnknownFunctionEntry (PB.concreteAddress b)))
 
 lookupBlocks ::
   forall sym arch bin.
@@ -511,7 +526,8 @@ lookupBlocks ::
   EquivM sym arch (PMC.ParsedBlocks arch)
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
-  case lookupBlocks' binCtx b of
+  ebs <- liftIO $ lookupBlocks' binCtx b
+  case ebs of
     Left ierr -> do
       let binRep :: PB.WhichBinaryRepr bin
           binRep = PC.knownRepr

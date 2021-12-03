@@ -108,9 +108,9 @@ consumeEvents chan r0 verb mTraceHandle = do
         Just hdl -> PPRT.hPutDoc hdl (traceFormatEvent evt)
 
       case evt of
-        PE.LoadedBinaries (oelf, omap) (pelf, pmap) -> do
-          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just (oelf, omap)
-                                                          & patchedBinary .~ Just (pelf, pmap), ())
+        PE.LoadedBinaries oelf pelf -> do
+          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just oelf
+                                                          & patchedBinary .~ Just pelf, ())
         PE.ElfLoaderWarnings {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
         PE.CheckedEquivalence bpair@(PPa.PatchPair (PE.Blocks blk _) _) res duration -> do
@@ -350,7 +350,7 @@ binaryStats
 binaryStats st accessor label = do
   bm <- st ^. metrics . L.to accessor
   return [ TP.bold #+ [TP.string (label ++ " Binary Stats")]
-         , TP.string ("Size (bytes): " ++ show (PM.executableBytes bm) ++ " / # Functions: " ++ show (PM.numFunctions bm) ++ " / # Blocks: " ++ show (PM.numBlocks bm))
+         , TP.string ("Size (bytes): " ++ show (PM.executableBytes bm))
          ]
 
 {- Note [Monitoring Proof Construction and Evaluation]
