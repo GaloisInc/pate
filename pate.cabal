@@ -253,4 +253,10 @@ executable pate-exec
                        macaw-aarch32-symbolic,
                        asl-translator
   default-language: Haskell2010
-  ghc-options: -Wall -Wcompat -O2 -threaded -rtsopts "-with-rtsopts=-N"
+  -- Bake in RTS options to use multiple threads and to control the GC
+  --
+  -- We use a larger allocation area to reduce the number of GCs
+  --
+  -- We use the compacting collector for the oldest generation, since a very
+  -- large part of our memory is almost always live
+  ghc-options: -Wall -Wcompat -O2 -threaded -rtsopts "-with-rtsopts=-N -A16M -c"
