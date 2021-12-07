@@ -33,11 +33,12 @@ type BlockData = Hex Word64
 
 data PatchData =
   PatchData { patchPairs :: [(BlockData, BlockData)]
+            , ignorePointers :: ([BlockData],[BlockData])
             }
   deriving (Read, Show, Eq)
 
 noPatchData :: PatchData
-noPatchData = PatchData []
+noPatchData = PatchData [] ([],[])
 
 ----------------------------------
 -- Verification configuration

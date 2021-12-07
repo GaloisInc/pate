@@ -205,6 +205,8 @@ data EquivalenceContext sym arch where
       -- NB, currentFunc is misnamed, as it corresponds to a pair of blocks under consideration,
       -- but they might not be function entry points
     , _currentFunc :: PPa.BlockPair arch
+    , originalIgnorePtrs :: [PA.ConcreteAddress arch]
+    , patchedIgnorePtrs :: [PA.ConcreteAddress arch]
     } -> EquivalenceContext sym arch
 
 $(L.makeLenses ''EquivalenceContext)

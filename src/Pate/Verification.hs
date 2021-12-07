@@ -192,6 +192,17 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
   prfCache <- liftIO $ freshBlockCache
   ePairCache <- liftIO $ freshBlockCache
   statsVar <- liftIO $ MVar.newMVar mempty
+
+  -- compute function entry pairs from the input PatchData
+  (pPairs, oIgn, pIgn) <- unpackPatchData contexts pd
+  -- include the process entry point, if configured to do so
+  pPairs' <- if PC.cfgPairMain vcfg then
+               do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
+                  let mainP = PMC.binEntry . PPa.pPatched $ contexts
+                  return (PPa.PatchPair mainO mainP : pPairs)
+              else
+                return pPairs
+
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -201,6 +212,8 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
       , PMC.stackRegion = stackRegion
       , PMC.globalRegion = globalRegion
       , PMC._currentFunc = error "No function under analysis at startup"
+      , PMC.originalIgnorePtrs = oIgn
+      , PMC.patchedIgnorePtrs = pIgn
       }
     env = EquivEnv
       { envWhichBinary = Nothing
@@ -227,16 +240,6 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
       }
-
-  -- compute function entry pairs from the input PatchData
-  pPairs <- unpackPatchData contexts pd
-  -- include the process entry point, if configured to do so
-  pPairs' <- if PC.cfgPairMain vcfg then
-               do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
-                  let mainP = PMC.binEntry . PPa.pPatched $ contexts
-                  return (PPa.PatchPair mainO mainP : pPairs)
-              else
-                return pPairs
 
   liftIO $ do
     (result, stats) <- runVerificationLoop env pPairs'
@@ -273,11 +276,21 @@ unpackPatchData ::
   PA.ValidArch arch =>
   PPa.PatchPair (PMC.BinaryContext arch) ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO [PPa.FunPair arch]
-unpackPatchData contexts (PC.PatchData pairs) = DT.forM pairs $
-   \(bd, bd') -> PPa.PatchPair
-       <$> unpackBlockData (PPa.pOriginal contexts) bd
-       <*> unpackBlockData (PPa.pPatched contexts) bd'
+  CME.ExceptT (PEE.EquivalenceError arch) IO ([PPa.FunPair arch], [PAd.ConcreteAddress arch], [PAd.ConcreteAddress arch])
+unpackPatchData contexts (PC.PatchData pairs (oIgn,pIgn)) = 
+   do pairs' <-
+         DT.forM pairs $ \(bd, bd') ->
+            PPa.PatchPair
+              <$> unpackBlockData (PPa.pOriginal contexts) bd
+              <*> unpackBlockData (PPa.pPatched contexts) bd'
+
+      let f (PC.Hex w) = PAd.memAddrToAddr . MM.absoluteAddr . MM.memWord $ w
+
+      let oIgn' = map f oIgn
+      let pIgn' = map f pIgn
+
+      return (pairs', oIgn', pIgn')
+
 
 ---------------------------------------------
 -- Top-level loop
