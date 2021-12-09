@@ -35,7 +35,17 @@ type FunctionAddr = Hex Word64
 
 data PatchData =
   PatchData { patchPairs :: [(BlockData, BlockData)]
-            , ignorePointers :: ([BlockData],[BlockData])
+            , ignorePointers :: ([(BlockData,Hex Word64)],[(BlockData,Hex Word64)])
+            -- ^ For the original and patched program, each may come with a list of
+            --   "ignorable" pointers.  Each pair in the list consists of a location
+            --   and a length.  The locations refer to positions in the global memory
+            --   of the programs where pointers may be stored during the program run.
+            --   The regions of memory pointed to (with the given length) are inteded
+            --   to be ignored by the verifier, so that differences between the two runs
+            --   do not result in equivalence failures. Note that this is an _indirect_
+            --   notion of ignorability; the locations specified here are themselves
+            --   are not ignored, but rather the memory to which they point.
+
             , equatedFunctions :: [(FunctionAddr, FunctionAddr)]
             -- ^ Pairs of functions (named by their address) that should be
             -- considered to be equivalent, even if they actually have different

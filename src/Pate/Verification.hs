@@ -275,8 +275,8 @@ unpackBlockData ctxt (PC.Hex w) =
 
 data UnpackedPatchData arch =
   UnpackedPatchData { unpackedPairs :: [PPa.FunPair arch]
-                    , unpackedOrigIgnore :: [PAd.ConcreteAddress arch]
-                    , unpackedPatchIgnore :: [PAd.ConcreteAddress arch]
+                    , unpackedOrigIgnore :: [(PAd.ConcreteAddress arch, Integer)]
+                    , unpackedPatchIgnore :: [(PAd.ConcreteAddress arch, Integer)]
                     , unpackedEquatedFuncs :: [(PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)]
                     }
 
@@ -294,9 +294,10 @@ unpackPatchData contexts (PC.PatchData pairs (oIgn,pIgn) eqFuncs) =
               <*> unpackBlockData (PPa.pPatched contexts) bd'
 
       let f (PC.Hex w) = PAd.memAddrToAddr . MM.absoluteAddr . MM.memWord $ w
+      let g (loc, PC.Hex len) = (f loc, toInteger len)
 
-      let oIgn' = map f oIgn
-      let pIgn' = map f pIgn
+      let oIgn' = map g oIgn
+      let pIgn' = map g pIgn
 
       let eqFuncs' = [ (f o, f p)
                      | (o, p) <- eqFuncs
