@@ -245,7 +245,7 @@ getSubBlocks ::
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
-     mtgt <- liftIO $ PMC.parsedFunctionContaining b pfm
+     mtgt <- liftIO $ PMC.parsedBlocksContaining b pfm
      tgts <- case mtgt of
        Just (PMC.ParsedBlocks pbs) ->
          concat <$> mapM (concreteValidJumpTargets b pbs) pbs
@@ -513,7 +513,7 @@ lookupBlocks'
   -> PB.ConcreteBlock arch bin
   -> IO (Either (PEE.InnerEquivalenceError arch) (PMC.ParsedBlocks arch))
 lookupBlocks' binCtx b = do
-  mfn <- PMC.parsedFunctionContaining b (PMC.parsedFunctionMap binCtx)
+  mfn <- PMC.parsedBlocksContaining b (PMC.parsedFunctionMap binCtx)
   case mfn of
     Just pbs -> return (Right pbs)
     Nothing  -> return (Left (PEE.UnknownFunctionEntry (PB.concreteAddress b)))
