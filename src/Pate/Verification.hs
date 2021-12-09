@@ -28,7 +28,7 @@ module Pate.Verification
 
 import qualified Control.Concurrent.Async as CCA
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Lens ( (&), (.~) )
+import           Control.Lens ( (&), (.~), view )
 import           Control.Monad ( void, unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -194,14 +194,14 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
   statsVar <- liftIO $ MVar.newMVar mempty
 
   -- compute function entry pairs from the input PatchData
-  (pPairs, oIgn, pIgn) <- unpackPatchData contexts pd
+  upData <- unpackPatchData contexts pd
   -- include the process entry point, if configured to do so
   pPairs' <- if PC.cfgPairMain vcfg then
                do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
                   let mainP = PMC.binEntry . PPa.pPatched $ contexts
-                  return (PPa.PatchPair mainO mainP : pPairs)
+                  return (PPa.PatchPair mainO mainP : unpackedPairs upData)
               else
-                return pPairs
+                return (unpackedPairs upData)
 
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
@@ -212,8 +212,9 @@ verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
       , PMC.stackRegion = stackRegion
       , PMC.globalRegion = globalRegion
       , PMC._currentFunc = error "No function under analysis at startup"
-      , PMC.originalIgnorePtrs = oIgn
-      , PMC.patchedIgnorePtrs = pIgn
+      , PMC.originalIgnorePtrs = unpackedOrigIgnore upData
+      , PMC.patchedIgnorePtrs = unpackedPatchIgnore upData
+      , PMC.equatedFunctions = unpackedEquatedFuncs upData
       }
     env = EquivEnv
       { envWhichBinary = Nothing
@@ -271,13 +272,20 @@ unpackBlockData ctxt (PC.Hex w) =
     mem = MBL.memoryImage (PMC.binary ctxt)
     caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord w))
 
+data UnpackedPatchData arch =
+  UnpackedPatchData { unpackedPairs :: [PPa.FunPair arch]
+                    , unpackedOrigIgnore :: [PAd.ConcreteAddress arch]
+                    , unpackedPatchIgnore :: [PAd.ConcreteAddress arch]
+                    , unpackedEquatedFuncs :: [(PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)]
+                    }
+
 unpackPatchData ::
   HasCallStack =>
   PA.ValidArch arch =>
   PPa.PatchPair (PMC.BinaryContext arch) ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([PPa.FunPair arch], [PAd.ConcreteAddress arch], [PAd.ConcreteAddress arch])
-unpackPatchData contexts (PC.PatchData pairs (oIgn,pIgn)) = 
+  CME.ExceptT (PEE.EquivalenceError arch) IO (UnpackedPatchData arch)
+unpackPatchData contexts (PC.PatchData pairs (oIgn,pIgn) eqFuncs) =
    do pairs' <-
          DT.forM pairs $ \(bd, bd') ->
             PPa.PatchPair
@@ -289,8 +297,15 @@ unpackPatchData contexts (PC.PatchData pairs (oIgn,pIgn)) =
       let oIgn' = map f oIgn
       let pIgn' = map f pIgn
 
-      return (pairs', oIgn', pIgn')
+      let eqFuncs' = [ (f o, f p)
+                     | (o, p) <- eqFuncs
+                     ]
 
+      return UnpackedPatchData { unpackedPairs = pairs'
+                               , unpackedOrigIgnore = oIgn'
+                               , unpackedPatchIgnore = pIgn'
+                               , unpackedEquatedFuncs = eqFuncs'
+                               }
 
 ---------------------------------------------
 -- Top-level loop
@@ -613,6 +628,42 @@ trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec
     pPair :: PPa.BlockPair arch
     pPair = TF.fmapF simInBlock in_
 
+-- | Returns 'True' if the equated function pair (specified by address) matches
+-- the current call target
+matchEquatedAddress
+  :: PPa.BlockPair arch
+  -- ^ Addresses of the call targets in the original and patched binaries (in
+  -- the 'proveLocalPostcondition' loop)
+  -> (PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)
+  -- ^ Equated function pair
+  -> Bool
+matchEquatedAddress pPair (origAddr, patchedAddr) =
+  and [ origAddr == PB.concreteAddress (PPa.pOriginal pPair)
+      , patchedAddr == PB.concreteAddress (PPa.pPatched pPair)
+      ]
+
+-- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
+-- for the two equated callees (as directed by the user) that only reports
+-- memory effects that are not explicitly ignored.
+--
+-- Unlike the normal loop of 'provePostcondition', this path effectively inlines
+-- callees (rather than breaking them into slices compositionally) to produce
+-- monolithic summaries. The main goal of this is to enable us to more
+-- accurately capture all of the memory effects of the two functions.  This
+-- function uses the standard implementation of symbolic execution of machine
+-- code provided by macaw-symbolic, rather than the slice-based decomposition.
+--
+-- The premise is that the two callees (in the original and patched binaries)
+-- are actually quite different, but the user would like to reason about their
+-- unintended effects.
+inlineCallee
+  :: (HasCallStack)
+  => SimBundle sym arch
+  -> StatePredSpec sym arch
+  -> PPa.BlockPair arch
+  -> EquivM sym arch (PES.StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
+inlineCallee = undefined
+
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -646,6 +697,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             _ -> throwHere $ PEE.BlockExitMismatch
           traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
           withNoFrameGuessing isSyscall $ do
+            -- These are the preconditions that must hold *when the callee returns*
             (contPre, contPrf) <- provePostcondition (PPa.PatchPair blkRetO blkRetP) postcondSpec
             traceBundle bundle "finished proving postcondition"
             (funCallPre, funCallSlicePrf) <-
@@ -661,11 +713,33 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                   r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
                   return $ (W4.truePred sym, r)
                 False -> catchSimBundle pPair postcondSpec $ \bundleCall -> do
-                  traceBundle bundle "  Not a syscall, emitting preamble pair"
+                  traceBundle bundle ("  Not a syscall, emitting preamble pair " ++ show pPair)
                   emitPreamble pPair
-                  -- equivalence condition for calling this function
-                  traceBundle bundle "  Recursively proving the postcondition of the call target"
-                  provePostcondition' bundleCall contPre
+
+                  -- FIXME: If the call is to our distinguished function
+                  -- (provided as an input), do not call
+                  -- provePostcondition'. Instead, symbolically execute the
+                  -- function (with whatever setup is required to enable us to
+                  -- summarize the memory effects) using more traditional
+                  -- macaw-symbolic setups.
+                  --
+                  -- Note that, in that case, we might not need contPre at all,
+                  -- as that represents the "rest" of the program under the
+                  -- call. Or does it represent the code that is returned to?
+                  -- It turns out that contPre *is* the return frame, which is
+                  -- very important and the one we want to build off of.
+                  --
+                  -- We just need to replace the result of this analysis of
+                  -- bundleCall with the inlined version
+                  --
+                  -- Otherwise, just recursively traverse the callee
+                  ctx <- view PME.envCtxL
+                  if | any (matchEquatedAddress pPair) (PMC.equatedFunctions ctx) -> do
+                         traceBundle bundle ("  Inlining equated callees " ++ show pPair)
+                         inlineCallee bundleCall contPre pPair
+                     | otherwise -> do
+                         traceBundle bundle ("  Recursively proving the postcondition of the call target " ++ show pPair)
+                         provePostcondition' bundleCall contPre
 
             -- equivalence condition for the function entry
             traceBundle bundle "Proving local postcondition for call return"

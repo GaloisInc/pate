@@ -207,6 +207,7 @@ data EquivalenceContext sym arch where
     , _currentFunc :: PPa.BlockPair arch
     , originalIgnorePtrs :: [PA.ConcreteAddress arch]
     , patchedIgnorePtrs :: [PA.ConcreteAddress arch]
+    , equatedFunctions :: [(PA.ConcreteAddress arch, PA.ConcreteAddress arch)]
     } -> EquivalenceContext sym arch
 
 $(L.makeLenses ''EquivalenceContext)

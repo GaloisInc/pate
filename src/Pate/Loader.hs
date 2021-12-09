@@ -76,6 +76,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
     patchData' = PC.PatchData
       { PC.patchPairs = pairs'
       , PC.ignorePointers = (oIgn, oIgn)
+      , PC.equatedFunctions = PC.equatedFunctions patchData
       }
   PA.SomeValidArch {} <- return $ PC.archProxy cfg
   bin <- CME.lift $ PLE.loadELF @arch Proxy $ path

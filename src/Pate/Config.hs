@@ -2,6 +2,7 @@
 module Pate.Config (
   Hex(..),
   BlockData,
+  FunctionAddr,
   PatchData(..),
   noPatchData,
   RunConfig(..),
@@ -30,15 +31,33 @@ instance (Read a) => Read (Hex a) where
   readsPrec i s = [ (Hex a, s') | (a, s') <- readsPrec i s ]
 
 type BlockData = Hex Word64
+type FunctionAddr = Hex Word64
 
 data PatchData =
   PatchData { patchPairs :: [(BlockData, BlockData)]
             , ignorePointers :: ([BlockData],[BlockData])
+            , equatedFunctions :: [(FunctionAddr, FunctionAddr)]
+            -- ^ Pairs of functions (named by their address) that should be
+            -- considered to be equivalent, even if they actually have different
+            -- effects. This is intended to work with the 'ignorePointers'
+            -- feature to enable users to specify that memory changes to certain
+            -- memory locations should be ignored, while verifying that the side
+            -- effects of the 'equatedFunctions' are benign.
+            --
+            -- The functions in this list are paired up by call site, and must
+            -- be called at aligned call sites in the original and patched
+            -- binaries, respectively.
+            --
+            -- See the documentation on the function replacement verification
+            -- feature.
             }
   deriving (Read, Show, Eq)
 
 noPatchData :: PatchData
-noPatchData = PatchData [] ([],[])
+noPatchData = PatchData { patchPairs = []
+                        , ignorePointers = ([],[])
+                        , equatedFunctions = []
+                        }
 
 ----------------------------------
 -- Verification configuration
