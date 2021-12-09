@@ -92,6 +92,7 @@ import           Pate.SimState
 import qualified Pate.Solver as PS
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.ExternalCall as PVE
+import           Pate.Verification.InlineCallee ( inlineCallee )
 import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
@@ -642,28 +643,6 @@ matchEquatedAddress pPair (origAddr, patchedAddr) =
       , patchedAddr == PB.concreteAddress (PPa.pPatched pPair)
       ]
 
--- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
--- for the two equated callees (as directed by the user) that only reports
--- memory effects that are not explicitly ignored.
---
--- Unlike the normal loop of 'provePostcondition', this path effectively inlines
--- callees (rather than breaking them into slices compositionally) to produce
--- monolithic summaries. The main goal of this is to enable us to more
--- accurately capture all of the memory effects of the two functions.  This
--- function uses the standard implementation of symbolic execution of machine
--- code provided by macaw-symbolic, rather than the slice-based decomposition.
---
--- The premise is that the two callees (in the original and patched binaries)
--- are actually quite different, but the user would like to reason about their
--- unintended effects.
-inlineCallee
-  :: (HasCallStack)
-  => SimBundle sym arch
-  -> StatePredSpec sym arch
-  -> PPa.BlockPair arch
-  -> EquivM sym arch (PES.StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee = undefined
-
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -700,46 +679,43 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
             -- These are the preconditions that must hold *when the callee returns*
             (contPre, contPrf) <- provePostcondition (PPa.PatchPair blkRetO blkRetP) postcondSpec
             traceBundle bundle "finished proving postcondition"
-            (funCallPre, funCallSlicePrf) <-
-              -- equivalence condition for when this function returns
-              case isSyscall of
-                -- for arch exits (i.e. syscalls) we assume that equivalence will hold on
-                -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
-                -- treated as an uninterpreted function that reads the entire machine state
-                -- this can be relaxed with more information about the specific call
-                True -> fmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do
-                  traceBundle bundle ("  Making a trivial block slice because this is a system call")
-                  PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
-                  r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
-                  return $ (W4.truePred sym, r)
-                False -> catchSimBundle pPair postcondSpec $ \bundleCall -> do
-                  traceBundle bundle ("  Not a syscall, emitting preamble pair " ++ show pPair)
-                  emitPreamble pPair
 
-                  -- FIXME: If the call is to our distinguished function
-                  -- (provided as an input), do not call
-                  -- provePostcondition'. Instead, symbolically execute the
-                  -- function (with whatever setup is required to enable us to
-                  -- summarize the memory effects) using more traditional
-                  -- macaw-symbolic setups.
-                  --
-                  -- Note that, in that case, we might not need contPre at all,
-                  -- as that represents the "rest" of the program under the
-                  -- call. Or does it represent the code that is returned to?
-                  -- It turns out that contPre *is* the return frame, which is
-                  -- very important and the one we want to build off of.
-                  --
-                  -- We just need to replace the result of this analysis of
-                  -- bundleCall with the inlined version
-                  --
-                  -- Otherwise, just recursively traverse the callee
-                  ctx <- view PME.envCtxL
-                  if | any (matchEquatedAddress pPair) (PMC.equatedFunctions ctx) -> do
-                         traceBundle bundle ("  Inlining equated callees " ++ show pPair)
-                         inlineCallee bundleCall contPre pPair
-                     | otherwise -> do
-                         traceBundle bundle ("  Recursively proving the postcondition of the call target " ++ show pPair)
-                         provePostcondition' bundleCall contPre
+            -- Now figure out how to handle the callee
+            ctx <- view PME.envCtxL
+            let isEquatedCallSite = any (matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+
+            (funCallPre, funCallSlicePrf) <-
+              if | isSyscall -> fmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do
+                   -- For arch exits (i.e. syscalls) we assume that equivalence will hold on
+                   -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
+                   -- treated as an uninterpreted function that reads the entire machine state
+                   -- this can be relaxed with more information about the specific callfmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do
+                   traceBundle bundle ("  Making a trivial block slice because this is a system call")
+                   PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
+                   r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
+                   return $ (W4.truePred sym, r)
+                 | isEquatedCallSite -> do
+                     -- FIXME: If the call is to our distinguished function
+                     -- (provided as an input), do not call
+                     -- provePostcondition'. Instead, symbolically execute the
+                     -- function (with whatever setup is required to enable us to
+                     -- summarize the memory effects) using more traditional
+                     -- macaw-symbolic setups.
+                     --
+                     -- Note that, in that case, we might not need contPre at all,
+                     -- as that represents the "rest" of the program under the
+                     -- call. Or does it represent the code that is returned to?
+                     -- It turns out that contPre *is* the return frame, which is
+                     -- very important and the one we want to build off of.
+                     --
+                     -- We just need to replace the result of this analysis of
+                     -- bundleCall with the inlined version
+                     traceBundle bundle ("  Inlining equated callees " ++ show pPair)
+                     inlineCallee contPre pPair
+                 | otherwise -> catchSimBundle pPair postcondSpec $ \bundleCall -> do
+                     -- Otherwise, just recursively traverse the callee
+                     traceBundle bundle ("  Recursively proving the postcondition of the call target " ++ show pPair)
+                     provePostcondition' bundleCall contPre
 
             -- equivalence condition for the function entry
             traceBundle bundle "Proving local postcondition for call return"
