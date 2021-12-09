@@ -26,9 +26,32 @@
 #endif
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
-
-
-module Pate.Memory.MemTrace where
+module Pate.Memory.MemTrace
+( MemTraceImpl(..)
+, MemTraceVar(..)
+, MemTrace
+, llvmPtrEq
+, readMemArr
+, writeMemArr
+, MemFootprint(..)
+, MemOpDirection(..)
+, getCond
+, MemTraceK
+, traceFootprint
+, UndefPtrOpTag
+, UndefPtrOpTags
+, UndefinedPtrOps(..)
+, initMemTraceVar
+, MemOpCondition(..)
+, MemOp(..)
+, flatMemOps
+, memTraceIntrinsicTypes
+, initMemTrace
+, classifyExpr
+, mkMemTraceVar
+, mkUndefinedPtrOps
+, macawTraceExtensions
+) where
 
 import Unsafe.Coerce
 import           Data.Foldable
@@ -211,8 +234,10 @@ type family NatAbsCtx tp (w :: Nat) :: Ctx.Ctx BaseType where
   NatAbsCtx EmptyCtx w = EmptyCtx
   NatAbsCtx (ctx Ctx.::> tp) w' = NatAbsCtx ctx w' Ctx.::> NatAbs tp w'
 
+{-
 natAbsBVFixed :: 1 <= w => NatRepr w -> NatRepr w' -> (NatAbs (BaseBVType w) w' :~: BaseBVType w)
 natAbsBVFixed _ _ = unsafeCoerce Refl
+-}
 
 data PolyFun sym args ret (w :: Nat) where
   PolyFun ::
@@ -285,6 +310,7 @@ mkBinUF tag  = PolyFunMaker $ \sym w -> do
   c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
   return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
+{-
 mkPtrBVUF ::
   forall ptrW sym.
   IsSymInterface sym =>
@@ -300,6 +326,7 @@ mkPtrBVUF tag = PolyFunMaker $ \sym w ->
         repr = Empty :> ptrRepr :> BaseBVRepr (knownNat @ptrW)
       c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr (knownNat @ptrW)))
       return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
+-}
 
 mkPredUF ::
   forall sym.
@@ -350,7 +377,7 @@ cachedPolyFun _sym (PolyFunMaker f) = do
 
 withPtrWidth :: IsExprBuilder sym => LLVMPtr sym w -> (1 <= w => NatRepr w -> a) -> a
 withPtrWidth (LLVMPointer _blk bv) f | BaseBVRepr w <- exprType bv = f w
-withPtrWidth _ _ = error "impossible"
+--withPtrWidth _ _ = error "impossible"
 
 mkBinOp ::
   forall sym.
@@ -516,8 +543,8 @@ instance IsMemoryModel MemTraceK where
   type MemModelType MemTraceK arch = MemTrace arch
   type MemModelConstraint MemTraceK sym = ()
 
-memTraceRepr :: (KnownNat (ArchAddrWidth arch), 1 <= ArchAddrWidth arch) => TypeRepr (MemTrace arch)
-memTraceRepr = knownRepr
+--memTraceRepr :: (KnownNat (ArchAddrWidth arch), 1 <= ArchAddrWidth arch) => TypeRepr (MemTrace arch)
+--memTraceRepr = knownRepr
 
 mkMemTraceVar ::
   forall arch.
@@ -526,12 +553,14 @@ mkMemTraceVar ::
   IO (GlobalVar (MemTrace arch))
 mkMemTraceVar ha = freshGlobalVar ha (pack "llvm_memory_trace") knownRepr
 
+{-
 mkReturnIPVar ::
   forall arch.
   (KnownNat (ArchAddrWidth arch), 1 <= ArchAddrWidth arch) =>
   HandleAllocator ->
   IO (GlobalVar (MaybeType (LLVMPointerType (ArchAddrWidth arch))))
 mkReturnIPVar ha = freshGlobalVar ha (pack "ret_ip") knownRepr
+-}
 
 initMemTrace ::
   forall sym ptrW.
@@ -726,6 +755,7 @@ liftToCrucibleState mvar f cst = do
   (a, mem') <- runStateT (f (cst ^. stateSymInterface)) mem
   pure (a, setGlobalVar cst mvar mem')
 
+{-
 asCrucibleStateT ::
   (sym -> StateT (CrucibleState p sym ext rtp blocks r ctx) IO a) ->
   CrucibleState p sym ext rtp blocks r ctx ->
@@ -733,6 +763,7 @@ asCrucibleStateT ::
 asCrucibleStateT f cst = do
   (a, cst') <- runStateT (f (cst ^. stateSymInterface)) cst
   pure (a, cst')
+-}
 
 readOnlyWithSym ::
   (sym -> IO a) ->
@@ -759,10 +790,12 @@ data RegionConstraint sym =
     }
 
 -- | A 'RegionConstraint' that permits pointers from any two regions.
+{-
 natAny ::
   IsSymInterface sym =>
   RegionConstraint sym
 natAny = RegionConstraint "impossible" $ \sym _ _ -> return $ truePred sym
+-}
 
 -- | A 'RegionConstraint' that permits pointers from any two regions.
 natEqConstraint ::
@@ -779,6 +812,7 @@ someZero = RegionConstraint "one pointer region must be zero" $ \sym reg1 reg2 -
   regZero2 <- isZero sym reg2
   orPred sym regZero1 regZero2
 
+{-
 -- | A 'RegionConstraint' that requires that both of the regions are zero.
 bothZero ::
   IsSymInterface sym =>
@@ -787,6 +821,7 @@ bothZero = RegionConstraint "both pointer regions must be zero" $ \sym reg1 reg2
   regZero1 <- isZero sym reg1
   regZero2 <- isZero sym reg2
   andPred sym regZero1 regZero2
+-}
 
 -- | A 'RegionConstraint' that defines when regions are compatible for subtraction:
 -- either the regions are equal or the first region is zero.
@@ -856,6 +891,7 @@ ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
       undef <- mkUndefPtr mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       muxPtr sym cond result undef
 
+{-
 cases ::
   IsExprBuilder sym =>
   sym ->
@@ -869,12 +905,14 @@ cases sym branches def = go branches where
     vT <- iov
     vF <- go bs
     baseTypeIte sym p vT vF
+-}
 
 isZero :: IsExprBuilder sym => sym -> SymNat sym -> IO (Pred sym)
 isZero sym reg = do
   zero <- natLit sym 0
   natEq sym reg zero
 
+{-
 andIOPred :: IsExprBuilder sym => sym -> IO (Pred sym) -> IO (Pred sym) -> IO (Pred sym)
 andIOPred sym p1_ p2_ = do
   p1 <- p1_
@@ -886,7 +924,7 @@ orIOPred sym p1_ p2_ = do
   p1 <- p1_
   p2 <- p2_
   orPred sym p1 p2
-
+-}
 
 doReadMem ::
   IsSymInterface sym =>
@@ -942,6 +980,7 @@ doCondWriteMem sym cond = doMemOpInternal sym Write (Conditional cond)
 ptrWidth :: IsExprBuilder sym => LLVMPtr sym w -> NatRepr w
 ptrWidth (LLVMPointer _blk bv) = bvWidth bv
 
+{-
 ptrAdd :: (1 <= w, IsExprBuilder sym)
        => sym
        -> NatRepr w
@@ -950,6 +989,7 @@ ptrAdd :: (1 <= w, IsExprBuilder sym)
        -> IO (LLVMPtr sym w)
 ptrAdd sym _w (LLVMPointer base off1) off2 =
   LLVMPointer base <$> bvAdd sym off1 off2
+-}
 
 -- | Calculate an index into the memory array from a pointer
 arrayIdx ::
@@ -966,6 +1006,7 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   ireg <- natToInteger sym reg
   return $ Empty :> ireg :> bvIdx
 
+{-
 eqIdx ::
   IsSymInterface sym =>
   sym ->
@@ -988,6 +1029,8 @@ leIdx sym (_ :> reg1 :> off1) (_ :> reg2 :> off2) = do
   eqReg <- isEq sym reg1 reg2
   eqOff <- bvUle sym off1 off2
   andPred sym eqReg eqOff
+-}
+
 
 concatPtrs ::
   1 <= w1 =>
@@ -1052,6 +1095,7 @@ chunkBV sym endianness w bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
 
+{-
 data ReadStatus sym =
   ReadStatus
     { readDirty :: Pred sym
@@ -1085,6 +1129,8 @@ mergeReadStatus sym st1 st2 = do
   dirty <- andPred sym (readDirty st1) (readDirty st2)
   fresh <- andPred sym (readFresh st1) (readFresh st2)
   return $ ReadStatus dirty fresh
+-}
+
 
 -- | Read a packed value from the underlying array
 readMemArr :: forall sym ptrW ty.
@@ -1253,10 +1299,12 @@ ioFreshConstant sym nm ty = do
   symbol <- ioSolverSymbol nm
   freshConstant sym symbol ty
 
+{-
 ioFreshVar :: IsSymExprBuilder sym => sym -> String -> BaseTypeRepr tp -> IO (BoundVar sym tp)
 ioFreshVar sym nm ty = do
   symbol <- ioSolverSymbol nm
   freshBoundVar sym symbol ty
+-}
 
 --------------------------------------------------------
 -- Axioms on type-level naturals
@@ -1328,8 +1376,10 @@ data MemFootprint sym ptrW where
     Endianness ->
     MemFootprint sym ptrW
 
+{-
 memFootDir :: MemFootprint sym ptrW -> MemOpDirection
 memFootDir (MemFootprint _ _ dir _ _) = dir
+-}
 
 instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
   (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
@@ -1376,7 +1426,7 @@ llvmPtrEq sym (LLVMPointer region offset) (LLVMPointer region' offset') = do
   offsetsEq <- isEq sym offset offset'
   andPred sym regionsEq offsetsEq
 
-
+{-
 traceFootprints ::
   IsSymInterface sym =>
   sym ->
@@ -1387,6 +1437,7 @@ traceFootprints sym mem1 mem2 = do
   foot1 <- traceFootprint sym (memSeq mem1)
   foot2 <- traceFootprint sym (memSeq mem2)
   return $ Set.toList (Set.union foot1 foot2)
+-}
 
 getCond ::
   IsExprBuilder sym =>
