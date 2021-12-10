@@ -45,7 +45,6 @@ import qualified What4.Interface as WI
 import qualified What4.ProgramLoc as WP
 import qualified What4.Symbol as WS
 
-import qualified Pate.Abort as PAb
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -54,6 +53,7 @@ import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
+import qualified Pate.Panic as PP
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
@@ -95,6 +95,7 @@ mkInitialRegVal
   :: ( LCB.IsSymInterface sym
      , DMT.HasRepr (DMC.ArchReg arch) DMT.TypeRepr
      , PA.ValidArch arch
+     , HasCallStack
      )
   => DMS.MacawSymbolicArchFunctions arch
   -> sym
@@ -111,6 +112,12 @@ mkInitialRegVal symArchFns sym sp_val r
         c <- WI.freshConstant sym regName (WT.BaseBVRepr w)
         LCS.RV <$> LCLM.llvmPointer_bv sym c
       DMT.TupleTypeRepr PL.Nil -> return (LCS.RV Ctx.Empty)
+      DMT.TupleTypeRepr _ ->
+        PP.panic PP.InlineCallee "mkInitialRegVal" ["Tuple types are not supported initial register values"]
+      DMT.FloatTypeRepr _ ->
+        PP.panic PP.InlineCallee "mkInitialRegVal" ["Floating point types are not supported initial register values"]
+      DMT.VecTypeRepr {} ->
+        PP.panic PP.InlineCallee "mkInitialRegVal" ["Vector types are not supported initial register values"]
 
 stackSizeBytes :: Integer
 stackSizeBytes = 1024 * 2

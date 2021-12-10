@@ -9,6 +9,7 @@ import qualified Panic as P
 data PateComponent = Verifier
                    | Visualizer
                    | ProofConstruction
+                   | InlineCallee
                    | Discovery
                    deriving (Show)
 
