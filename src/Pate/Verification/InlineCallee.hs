@@ -19,10 +19,12 @@ import qualified Data.Parameterized.List as PL
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import           Data.String ( fromString )
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
+import qualified System.IO as IO
 
 import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Discovery as DMD
@@ -33,6 +35,7 @@ import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.CFG.Core as CCC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
+import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Types as LCT
@@ -137,14 +140,19 @@ allocateStack _proxy sym mem0 = do
   sp <- LCLM.ptrAdd sym WI.knownRepr stackBasePtr stackInitialOffsetBV
   return (mem2, sp)
 
-symbolicallyExecute
-  :: forall arch sym ids
-   . DMD.DiscoveryFunInfo arch ids
-  -> EquivM sym arch ()
-symbolicallyExecute dfi = withSym $ \sym -> do
-  CCC.SomeCFG cfg <- toCrucibleCFG dfi
-
-  symArchFns <- L.view (L.to envArchVals . L.to DMS.archFunctions)
+allocateInitialState
+  :: forall arch sym w
+   . ( LCB.IsSymInterface sym
+     , w ~ DMC.ArchAddrWidth arch
+     , 16 <= w
+     , PA.ValidArch arch
+     )
+  => DMS.MacawSymbolicArchFunctions arch
+  -> sym
+  -> IO ( LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+        , LCLM.MemImpl sym
+        )
+allocateInitialState symArchFns sym = do
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
 
@@ -154,10 +162,61 @@ symbolicallyExecute dfi = withSym $ \sym -> do
   initialRegisters <- liftIO $ DMS.macawAssignToCrucM (mkInitialRegVal symArchFns sym sp) (DMS.crucGenRegAssignment symArchFns)
   let initialRegsEntry = LCS.RegEntry regsRepr initialRegisters
 
+  return (initialRegsEntry, mem1)
 
-  undefined initialRegsEntry
+-- | Symbolically execute a macaw function with a given initial state, returning
+-- the final memory state
+--
+-- Note that we have to pass in a 'DSM.ArchVals' because the one in 'EquivM' has
+-- a different type parameter for the memory model than what we want to use for
+-- this symbolic execution.
+symbolicallyExecute
+  :: forall arch sym ids
+   . DMS.ArchVals arch
+  -> DMD.DiscoveryFunInfo arch ids
+  -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+  -- ^ Initial registers to simulate with
+  -> LCLM.MemImpl sym
+  -- ^ Initial memory to simulate with
+  -> EquivM sym arch (LCLM.MemImpl sym)
+symbolicallyExecute archVals dfi initRegs initMem = withSym $ \sym -> do
+  let ?recordLLVMAnnotation = \_ _ -> return ()
+
+  let symArchFns = DMS.archFunctions archVals
+  let crucRegTypes = DMS.crucArchRegTypes symArchFns
+  let regsRepr = LCT.StructRepr crucRegTypes
+
+  CCC.SomeCFG cfg <- toCrucibleCFG dfi
+  let arguments = LCS.RegMap (Ctx.singleton initRegs)
+  let simAction = LCS.runOverrideSim regsRepr (LCS.regValue <$> LCS.callCFG cfg arguments)
+
+
+  let lookupFunction = undefined
+  let validityCheck = undefined
+
+  halloc <- liftIO $ CFH.newHandleAllocator
+  memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
+
+  let globals = undefined
+  let globalMap = undefined
+
+  DMS.withArchEval archVals sym $ \archEvalFn -> do
+    let extImpl = DMS.macawExtensions archEvalFn memVar globalMap lookupFunction validityCheck
+    -- Note: the 'Handle' here is the target of any print statements in the
+    -- Crucible CFG; we shouldn't have any, but if we did it would be better to
+    -- capture the output over a pipe.
+    let fnBindings = undefined
+    let ctx = LCS.initSimContext sym LCLI.llvmIntrinsicTypes halloc IO.stdout (LCS.FnBindings fnBindings) extImpl DMS.MacawSimulatorState
+    let s0 = LCS.InitialState ctx globals LCS.defaultAbortHandler regsRepr simAction
+
+    let execFeatures = []
+    let executionFeatures = fmap LCS.genericToExecutionFeature execFeatures
+    res <- liftIO $ LCS.executeCrucible executionFeatures s0
+    undefined res
 
 -- | Look up the macaw CFG for the given function address
+--
+-- Throws an exception if the function cannot be found
 functionFor
   :: forall bin arch sym
    . (PBi.KnownBinary bin)
@@ -188,11 +247,12 @@ functionFor pb = do
 -- are actually quite different, but the user would like to reason about their
 -- unintended effects.
 inlineCallee
-  :: (HasCallStack)
+  :: forall arch sym
+   . (HasCallStack)
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = do
+inlineCallee contPre pPair = withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
@@ -201,10 +261,24 @@ inlineCallee contPre pPair = do
   Some oDFI <- functionFor @PBi.Original (PPa.pOriginal pPair)
   Some pDFI <- functionFor @PBi.Patched (PPa.pPatched pPair)
 
-  symbolicallyExecute oDFI
-  symbolicallyExecute pDFI
+  -- Note that we need to get a different archVals here - we can't use the one
+  -- in the environment because it is fixed to a different memory model - the
+  -- trace based memory model. We need to use the traditional LLVM memory model
+  -- for this part of the verifier.
+  let archVals = undefined
+
+  -- We allocate a shared initial state to execute both functions on so that we
+  -- can compare their final memory states
+  let symArchFns = DMS.archFunctions archVals
+  (initRegs, initMem) <- liftIO $ allocateInitialState @arch symArchFns sym
+
+
+  oPostMem <- symbolicallyExecute archVals oDFI initRegs initMem
+  pPostMem <- symbolicallyExecute archVals pDFI initRegs initMem
+
+  let statePredSpec = undefined oPostMem pPostMem
 
   let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                     }
   lproof <- PFO.lazyProofApp prfNode
-  return (undefined, lproof)
+  return (statePredSpec, lproof)
