@@ -232,6 +232,14 @@ functionFor pb = do
           repr = PC.knownRepr @_ @_ @bin
       in CMC.throwM (PEE.equivalenceErrorFor repr (PEE.MissingExpectedEquivalentFunction addr))
 
+-- | Analyze the post memory states to compute the separation frame for the inlined calls
+buildCallFrame
+  :: LCLM.MemImpl sym
+  -> LCLM.MemImpl sym
+  -> LCLM.MemImpl sym
+  -> EquivM sym arch (StatePredSpec sym arch)
+buildCallFrame initMem oPostMem pPostMem = undefined
+
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
 -- memory effects that are not explicitly ignored.
@@ -276,7 +284,7 @@ inlineCallee contPre pPair = withSym $ \sym -> do
   oPostMem <- symbolicallyExecute archVals oDFI initRegs initMem
   pPostMem <- symbolicallyExecute archVals pDFI initRegs initMem
 
-  let statePredSpec = undefined oPostMem pPostMem
+  statePredSpec <- buildCallFrame initMem oPostMem pPostMem
 
   let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                     }
