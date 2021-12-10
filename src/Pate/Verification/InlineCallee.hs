@@ -32,23 +32,28 @@ import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Types as DMT
 import qualified Lang.Crucible.Backend as LCB
+import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.CFG.Core as CCC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
+import qualified Lang.Crucible.Simulator.GlobalState as LCSG
+import qualified Lang.Crucible.Simulator.PathSatisfiability as LCSP
 import qualified Lang.Crucible.Types as LCT
 import qualified What4.BaseTypes as WT
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as WI
 import qualified What4.ProgramLoc as WP
+import qualified What4.Protocol.Online as WPO
 import qualified What4.Symbol as WS
 
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
+import qualified Pate.Config as PCo
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
@@ -57,6 +62,7 @@ import qualified Pate.Panic as PP
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
+import qualified Pate.Solver as PS
 
 
 -- | Create a crucible-friendly name for a macaw function
@@ -178,15 +184,20 @@ allocateInitialState symArchFns sym = do
 -- a different type parameter for the memory model than what we want to use for
 -- this symbolic execution.
 symbolicallyExecute
-  :: forall arch sym ids
-   . DMS.ArchVals arch
+  :: forall arch sym ids scope solver fs sym'
+   . ( sym ~ LCBO.OnlineBackend scope solver fs
+     , LCB.IsSymInterface sym
+     , WPO.OnlineSolver solver
+     )
+  => DMS.ArchVals arch
+  -> sym
   -> DMD.DiscoveryFunInfo arch ids
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
   -> LCLM.MemImpl sym
   -- ^ Initial memory to simulate with
-  -> EquivM sym arch (LCLM.MemImpl sym)
-symbolicallyExecute archVals dfi initRegs initMem = withSym $ \sym -> do
+  -> EquivM sym' arch (LCLM.MemImpl sym)
+symbolicallyExecute archVals sym dfi initRegs initMem = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
   let symArchFns = DMS.archFunctions archVals
@@ -204,7 +215,7 @@ symbolicallyExecute archVals dfi initRegs initMem = withSym $ \sym -> do
   halloc <- liftIO $ CFH.newHandleAllocator
   memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
 
-  let globals = undefined
+  let globals = LCSG.insertGlobal memVar initMem LCS.emptyGlobals
   let globalMap = undefined
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
@@ -216,7 +227,8 @@ symbolicallyExecute archVals dfi initRegs initMem = withSym $ \sym -> do
     let ctx = LCS.initSimContext sym LCLI.llvmIntrinsicTypes halloc IO.stdout (LCS.FnBindings fnBindings) extImpl DMS.MacawSimulatorState
     let s0 = LCS.InitialState ctx globals LCS.defaultAbortHandler regsRepr simAction
 
-    let execFeatures = []
+    psf <- liftIO $ LCSP.pathSatisfiabilityFeature sym (LCBO.considerSatisfiability sym)
+    let execFeatures = [psf]
     let executionFeatures = fmap LCS.genericToExecutionFeature execFeatures
     res <- liftIO $ LCS.executeCrucible executionFeatures s0
     undefined res
@@ -241,9 +253,9 @@ functionFor pb = do
 
 -- | Analyze the post memory states to compute the separation frame for the inlined calls
 buildCallFrame
-  :: LCLM.MemImpl sym
-  -> LCLM.MemImpl sym
-  -> LCLM.MemImpl sym
+  :: LCLM.MemImpl sym'
+  -> LCLM.MemImpl sym'
+  -> LCLM.MemImpl sym'
   -> EquivM sym arch (StatePredSpec sym arch)
 buildCallFrame initMem oPostMem pPostMem = undefined
 
@@ -267,7 +279,7 @@ inlineCallee
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = withSym $ \sym -> do
+inlineCallee contPre pPair = do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
@@ -276,24 +288,30 @@ inlineCallee contPre pPair = withSym $ \sym -> do
   Some oDFI <- functionFor @PBi.Original (PPa.pOriginal pPair)
   Some pDFI <- functionFor @PBi.Patched (PPa.pPatched pPair)
 
-  -- Note that we need to get a different archVals here - we can't use the one
-  -- in the environment because it is fixed to a different memory model - the
-  -- trace based memory model. We need to use the traditional LLVM memory model
-  -- for this part of the verifier.
-  let archVals = undefined
+  -- Note that we use a separate symbolic backend here because we need an online
+  -- solver for path satisfiability checking. The rest of the verifier does not
+  -- need path satisfiability checking, as it ignores all loop backedges.
+  solver <- L.view (L.to envConfig . L.to PCo.cfgSolver)
+  ng <- L.view (L.to envNonceGenerator)
+  PS.withOnlineSolver solver ng $ \sym -> do
+    -- Note that we need to get a different archVals here - we can't use the one
+    -- in the environment because it is fixed to a different memory model - the
+    -- trace based memory model. We need to use the traditional LLVM memory model
+    -- for this part of the verifier.
+    let archVals = undefined
 
-  -- We allocate a shared initial state to execute both functions on so that we
-  -- can compare their final memory states
-  let symArchFns = DMS.archFunctions archVals
-  (initRegs, initMem) <- liftIO $ allocateInitialState @arch symArchFns sym
+    -- We allocate a shared initial state to execute both functions on so that we
+    -- can compare their final memory states
+    let symArchFns = DMS.archFunctions archVals
+    (initRegs, initMem) <- liftIO $ allocateInitialState @arch symArchFns sym
 
 
-  oPostMem <- symbolicallyExecute archVals oDFI initRegs initMem
-  pPostMem <- symbolicallyExecute archVals pDFI initRegs initMem
+    oPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem
+    pPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem
 
-  statePredSpec <- buildCallFrame initMem oPostMem pPostMem
+    statePredSpec <- buildCallFrame initMem oPostMem pPostMem
 
-  let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
-                                    }
-  lproof <- PFO.lazyProofApp prfNode
-  return (statePredSpec, lproof)
+    let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
+                                      }
+    lproof <- PFO.lazyProofApp prfNode
+    return (statePredSpec, lproof)
