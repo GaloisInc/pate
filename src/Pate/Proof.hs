@@ -247,6 +247,11 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
     , prfBlockSliceTrans :: BlockSliceTransition prf
     } -> ProofApp prf node ProofBlockSliceType
 
+  ProofInlinedCall ::
+    { -- | The addresses of the functions considered equal and inlined into the proof
+      prfInlinedCallees :: PPa.BlockPair arch
+    } -> ProofApp prf node ProofBlockSliceType
+
   -- | Proof that a function call is valid. Specifically, if a function 'g' is called from
   -- 'f', we represent this as follows:
   -- > f(x) =
@@ -332,6 +337,7 @@ traverseProofApp f = \case
     <*> traverse f a3
     <*> traverse f a4
     <*> pure a5
+  ProofInlinedCall pb -> pure (ProofInlinedCall pb)
   ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> f a1
     <*> f a2
@@ -407,6 +413,7 @@ transformProofApp f app = prfConstraint f $ case app of
     <*> pure a3
     <*> pure a4
     <*> transformBlockSlice f a5
+  ProofInlinedCall pb -> pure (ProofInlinedCall pb)
   ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> pure a1
     <*> pure a2

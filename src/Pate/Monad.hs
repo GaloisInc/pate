@@ -39,6 +39,7 @@ module Pate.Monad
   , emitEvent
   , emitWarning
   , getBinCtx
+  , getBinCtx'
   , ifConfig
   , traceBundle
   , traceBlockPair

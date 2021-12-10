@@ -101,6 +101,7 @@ class
   , MS.SymArchConstraints arch
   , MS.GenArchInfo PMT.MemTraceK arch
   , MC.ArchConstraints arch
+  , 16 <= MC.ArchAddrWidth arch
   ) => ValidArch arch where
   -- | Registers which are used for "raw" bitvectors (i.e. they are not
   -- used for pointers). These are assumed to always have region 0.
