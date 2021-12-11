@@ -9,14 +9,17 @@
 {-# LANGUAGE TypeOperators #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
+import           Control.Lens ( (^.) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
+import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
 import           Data.Parameterized.Some ( Some(..) )
+import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
 import           Data.String ( fromString )
 import qualified Data.Text as T
@@ -39,6 +42,7 @@ import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
+import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
 import qualified Lang.Crucible.Simulator.GlobalState as LCSG
 import qualified Lang.Crucible.Simulator.PathSatisfiability as LCSP
 import qualified Lang.Crucible.Types as LCT
@@ -177,6 +181,46 @@ allocateInitialState symArchFns sym = do
 
   return (initialRegsEntry, mem1)
 
+data GlobalStateError = Timeout
+                      | AbortedExit
+
+
+getFinalGlobalValue
+  :: (LCS.RegValue sym LCT.BoolType -> LCS.RegValue sym tp -> LCS.RegValue sym tp -> IO (LCS.RegValue sym tp))
+  -> LCS.GlobalVar tp
+  -> LCS.ExecResult p sym ext u
+  -> IO (Either GlobalStateError (LCS.RegValue sym tp))
+getFinalGlobalValue mergeBranches global execResult = CME.runExceptT $ do
+  case execResult of
+    LCS.AbortedResult _ res -> handleAbortedResult res
+    LCS.FinishedResult _ res ->
+      case res of
+        LCS.TotalRes gp -> return (getValue global gp)
+        LCS.PartialRes _ cond gp abortedRes -> do
+          let value = getValue global gp
+          onAbort <- handleAbortedResult abortedRes
+          CME.lift $ mergeBranches cond value onAbort
+    LCS.TimeoutResult {} -> CME.throwError Timeout
+  where
+    handleAbortedResult res =
+      case res of
+        LCS.AbortedExec _ gp -> return (getValue global gp)
+        LCS.AbortedBranch _ cond onOK onAbort -> do
+          okVal <- handleAbortedResult onOK
+          abortVal <- handleAbortedResult onAbort
+          CME.lift $ mergeBranches cond okVal abortVal
+        LCS.AbortedExit {} -> CME.throwError AbortedExit
+    getValue glob gp =
+      case LCSG.lookupGlobal glob (gp ^. LCS.gpGlobals) of
+        Just value -> value
+        Nothing ->
+          -- This case is a programming error (the requested global was
+          -- expected), so we can fail loudly
+          PP.panic PP.InlineCallee "getFinalGlobalValue" ["Missing expected global: " ++ show glob]
+
+muxMemImpl :: (LCB.IsSymInterface sym) => sym -> LCS.RegValue sym LCT.BoolType -> LCLM.MemImpl sym -> LCLM.MemImpl sym -> IO (LCLM.MemImpl sym)
+muxMemImpl sym = LCSI.muxIntrinsic sym undefined (knownSymbol @"LLVM_memory") Ctx.empty
+
 -- | Symbolically execute a macaw function with a given initial state, returning
 -- the final memory state
 --
@@ -196,7 +240,7 @@ symbolicallyExecute
   -- ^ Initial registers to simulate with
   -> LCLM.MemImpl sym
   -- ^ Initial memory to simulate with
-  -> EquivM sym' arch (LCLM.MemImpl sym)
+  -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym))
 symbolicallyExecute archVals sym dfi initRegs initMem = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
@@ -231,7 +275,7 @@ symbolicallyExecute archVals sym dfi initRegs initMem = do
     let execFeatures = [psf]
     let executionFeatures = fmap LCS.genericToExecutionFeature execFeatures
     res <- liftIO $ LCS.executeCrucible executionFeatures s0
-    undefined res
+    liftIO $ getFinalGlobalValue (muxMemImpl sym) memVar res
 
 -- | Look up the macaw CFG for the given function address
 --
@@ -306,12 +350,15 @@ inlineCallee contPre pPair = do
     (initRegs, initMem) <- liftIO $ allocateInitialState @arch symArchFns sym
 
 
-    oPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem
-    pPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem
+    eoPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem
+    epPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem
 
-    statePredSpec <- buildCallFrame initMem oPostMem pPostMem
+    case (eoPostMem, epPostMem) of
+      -- FIXME: In the error cases, generate a default frame and a proof error node
+      (Right oPostMem, Right pPostMem) -> do
+        statePredSpec <- buildCallFrame initMem oPostMem pPostMem
 
-    let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
-                                      }
-    lproof <- PFO.lazyProofApp prfNode
-    return (statePredSpec, lproof)
+        let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
+                                          }
+        lproof <- PFO.lazyProofApp prfNode
+        return (statePredSpec, lproof)
