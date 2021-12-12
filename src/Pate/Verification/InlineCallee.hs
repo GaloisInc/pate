@@ -352,6 +352,15 @@ inlineCallee contPre pPair = do
 
     eoPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem
     epPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem
+    -- Note: we are symbolically executing both functions to get their memory
+    -- post states. We explicitly do *not* want to try to prove all of their
+    -- memory safety side conditions (or any other side conditions), since we
+    -- can't really assume that either program is correct. We *only* care about
+    -- their differences in observable behavior.
+    --
+    -- In addition to memory, we could *also* collect a symbolic sequence of
+    -- observable effects in each function and attempt to prove that those
+    -- sequences are the same.
 
     case (eoPostMem, epPostMem) of
       -- FIXME: In the error cases, generate a default frame and a proof error node
