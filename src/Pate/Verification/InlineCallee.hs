@@ -256,8 +256,12 @@ getFinalGlobalValue mergeBranches global execResult = CME.runExceptT $ do
           PP.panic PP.InlineCallee "getFinalGlobalValue" ["Missing expected global: " ++ show glob]
 
 -- | The mux operation for the global memory state
+--
+-- Note that we pass in an empty set of intrinsic types here; this happens to be
+-- fine for LLVM_memory, as its implementation of the mux operation ignores that
+-- argument.
 muxMemImpl :: (LCB.IsSymInterface sym) => sym -> LCS.RegValue sym LCT.BoolType -> LCLM.MemImpl sym -> LCLM.MemImpl sym -> IO (LCLM.MemImpl sym)
-muxMemImpl sym = LCSI.muxIntrinsic sym undefined (knownSymbol @"LLVM_memory") Ctx.empty
+muxMemImpl sym = LCSI.muxIntrinsic sym LCSI.emptyIntrinsicTypes (knownSymbol @"LLVM_memory") Ctx.empty
 
 -- | We do not actually want to check the validity of pointer operations in this
 -- part of the verifier. We have no particular reason to believe that functions
