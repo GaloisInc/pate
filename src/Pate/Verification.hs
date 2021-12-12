@@ -689,7 +689,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                    -- For arch exits (i.e. syscalls) we assume that equivalence will hold on
                    -- any post domain if the pre-domain is exactly equal: i.e. any syscall is
                    -- treated as an uninterpreted function that reads the entire machine state
-                   -- this can be relaxed with more information about the specific callfmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do
+                   -- this can be relaxed with more information about the specific call
                    traceBundle bundle ("  Making a trivial block slice because this is a system call")
                    PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
                    r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
