@@ -218,8 +218,18 @@ getFinalGlobalValue mergeBranches global execResult = CME.runExceptT $ do
           -- expected), so we can fail loudly
           PP.panic PP.InlineCallee "getFinalGlobalValue" ["Missing expected global: " ++ show glob]
 
+-- | The mux operation for the global memory state
 muxMemImpl :: (LCB.IsSymInterface sym) => sym -> LCS.RegValue sym LCT.BoolType -> LCLM.MemImpl sym -> LCLM.MemImpl sym -> IO (LCLM.MemImpl sym)
 muxMemImpl sym = LCSI.muxIntrinsic sym undefined (knownSymbol @"LLVM_memory") Ctx.empty
+
+-- | We do not actually want to check the validity of pointer operations in this
+-- part of the verifier. We have no particular reason to believe that functions
+-- we are verifying are memory safe. We just want to relate the behaviors of the
+-- pre- and post-patch programs.
+--
+-- Never generate additional validity assertions
+validityCheck :: DMS.MkGlobalPointerValidityAssertion sym w
+validityCheck _ _ _ _ = return Nothing
 
 -- | Symbolically execute a macaw function with a given initial state, returning
 -- the final memory state
@@ -254,7 +264,6 @@ symbolicallyExecute archVals sym dfi initRegs initMem = do
 
 
   let lookupFunction = undefined
-  let validityCheck = undefined
 
   halloc <- liftIO $ CFH.newHandleAllocator
   memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
