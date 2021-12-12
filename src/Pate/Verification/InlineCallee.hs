@@ -29,10 +29,13 @@ import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified System.IO as IO
 
+import qualified Data.Macaw.Architecture.Info as DMAI
+import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Discovery as DMD
 import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as DMS
+import qualified Data.Macaw.Symbolic.Memory as DMSM
 import qualified Data.Macaw.Types as DMT
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
@@ -42,8 +45,8 @@ import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
-import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
 import qualified Lang.Crucible.Simulator.GlobalState as LCSG
+import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
 import qualified Lang.Crucible.Simulator.PathSatisfiability as LCSP
 import qualified Lang.Crucible.Types as LCT
 import qualified What4.BaseTypes as WT
@@ -135,6 +138,8 @@ stackSizeBytes = 1024 * 2
 stackInitialOffset :: Integer
 stackInitialOffset = 1024
 
+-- | Allocate a stack in a fresh region, returning the 1. updated memory impl and
+-- 2. the value of the initial stack pointer
 allocateStack
   :: ( LCB.IsSymInterface sym
      , PA.ValidArch arch
@@ -157,29 +162,61 @@ allocateStack _proxy sym mem0 = do
   sp <- LCLM.ptrAdd sym WI.knownRepr stackBasePtr stackInitialOffsetBV
   return (mem2, sp)
 
+toCrucibleEndian :: DMM.Endianness -> LCLD.EndianForm
+toCrucibleEndian macawEnd =
+  case macawEnd of
+    DMM.LittleEndian -> LCLD.LittleEndian
+    DMM.BigEndian -> LCLD.BigEndian
+
+-- | Allocate an initial register and memory state for the symbolic execution step
+--
+-- NOTE: The same initial state should be used for both functions, to ensure
+-- that the post-states are comparable.
+--
+-- NOTE: The memory setup is currently taken from the original binary. The
+-- patched binary could technically have a different initial state that we do
+-- not account for right now. It is not clear how to reconcile the two if they
+-- are different. The best approach is probably to compute a sound
+-- over-approximation of the available memory.
 allocateInitialState
   :: forall arch sym w
    . ( LCB.IsSymInterface sym
      , w ~ DMC.ArchAddrWidth arch
      , 16 <= w
      , PA.ValidArch arch
+     , PA.ArchConstraints arch
      )
   => DMS.MacawSymbolicArchFunctions arch
   -> sym
+  -> DMAI.ArchitectureInfo arch
+  -> DMM.Memory w
   -> IO ( LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
         , LCLM.MemImpl sym
+        , DMSM.MemPtrTable sym w
         )
-allocateInitialState symArchFns sym = do
+allocateInitialState symArchFns sym archInfo memory = do
+  let ?recordLLVMAnnotation = \_ _ -> return ()
+  let proxy = Proxy @arch
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
 
-  let mem0 = undefined
+  let endianness = toCrucibleEndian (DMAI.archEndianness archInfo)
+  -- Treat all mutable values in the global memory as symbolic
+  --
+  -- This is the safer strategy in this case, since we don't have any of the
+  -- context of the program before this function, so any mutable memory
+  -- locations could theoretically have any value. This could be problematic if
+  -- it causes global state to be under-constrained; safely handling this is
+  -- complicated, and would require significant infrastructure in the rest of
+  -- the verifier to propagate known facts.
+  let memModelContents = DMSM.SymbolicMutable
+  (mem0, memPtrTbl) <- DMSM.newGlobalMemory proxy sym endianness memModelContents memory
 
-  (mem1, sp) <- liftIO $ allocateStack (Proxy @arch) sym mem0
+  (mem1, sp) <- liftIO $ allocateStack proxy sym mem0
   initialRegisters <- liftIO $ DMS.macawAssignToCrucM (mkInitialRegVal symArchFns sym sp) (DMS.crucGenRegAssignment symArchFns)
   let initialRegsEntry = LCS.RegEntry regsRepr initialRegisters
 
-  return (initialRegsEntry, mem1)
+  return (initialRegsEntry, mem1, memPtrTbl)
 
 data GlobalStateError = Timeout
                       | AbortedExit
@@ -231,6 +268,16 @@ muxMemImpl sym = LCSI.muxIntrinsic sym undefined (knownSymbol @"LLVM_memory") Ct
 validityCheck :: DMS.MkGlobalPointerValidityAssertion sym w
 validityCheck _ _ _ _ = return Nothing
 
+-- | Given a register state corresponding to a function call, use the
+-- instruction pointer to look up the called function and return an appropriate
+-- function handle.
+--
+-- This function is able to update the Crucible state, which we use to do
+-- incremental code discovery (only binding function handles and doing code
+-- discovery on demand).
+lookupFunction :: DMS.LookupFunctionHandle sym arch
+lookupFunction = undefined
+
 -- | Symbolically execute a macaw function with a given initial state, returning
 -- the final memory state
 --
@@ -238,10 +285,11 @@ validityCheck _ _ _ _ = return Nothing
 -- a different type parameter for the memory model than what we want to use for
 -- this symbolic execution.
 symbolicallyExecute
-  :: forall arch sym ids scope solver fs sym'
+  :: forall arch sym ids scope solver fs sym' w
    . ( sym ~ LCBO.OnlineBackend scope solver fs
      , LCB.IsSymInterface sym
      , WPO.OnlineSolver solver
+     , w ~ DMC.ArchAddrWidth arch
      )
   => DMS.ArchVals arch
   -> sym
@@ -250,8 +298,9 @@ symbolicallyExecute
   -- ^ Initial registers to simulate with
   -> LCLM.MemImpl sym
   -- ^ Initial memory to simulate with
+  -> DMSM.MemPtrTable sym w
   -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym))
-symbolicallyExecute archVals sym dfi initRegs initMem = do
+symbolicallyExecute archVals sym dfi initRegs initMem memPtrTbl = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
   let symArchFns = DMS.archFunctions archVals
@@ -262,22 +311,23 @@ symbolicallyExecute archVals sym dfi initRegs initMem = do
   let arguments = LCS.RegMap (Ctx.singleton initRegs)
   let simAction = LCS.runOverrideSim regsRepr (LCS.regValue <$> LCS.callCFG cfg arguments)
 
-
-  let lookupFunction = undefined
-
   halloc <- liftIO $ CFH.newHandleAllocator
   memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
 
   let globals = LCSG.insertGlobal memVar initMem LCS.emptyGlobals
-  let globalMap = undefined
+  let globalMap = DMSM.mapRegionPointers memPtrTbl
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
     let extImpl = DMS.macawExtensions archEvalFn memVar globalMap lookupFunction validityCheck
+    -- We start with no handles bound for crucible; we'll add them dynamically
+    -- as we find callees via lookupHandle
+    --
+    -- NOTE: This may need an initial set of overrides
+    let fnBindings = LCS.FnBindings CFH.emptyHandleMap
     -- Note: the 'Handle' here is the target of any print statements in the
     -- Crucible CFG; we shouldn't have any, but if we did it would be better to
     -- capture the output over a pipe.
-    let fnBindings = undefined
-    let ctx = LCS.initSimContext sym LCLI.llvmIntrinsicTypes halloc IO.stdout (LCS.FnBindings fnBindings) extImpl DMS.MacawSimulatorState
+    let ctx = LCS.initSimContext sym LCLI.llvmIntrinsicTypes halloc IO.stdout fnBindings extImpl DMS.MacawSimulatorState
     let s0 = LCS.InitialState ctx globals LCS.defaultAbortHandler regsRepr simAction
 
     psf <- liftIO $ LCSP.pathSatisfiabilityFeature sym (LCBO.considerSatisfiability sym)
@@ -332,7 +382,7 @@ inlineCallee
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = do
+inlineCallee contPre pPair = withValid $ do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
@@ -346,6 +396,11 @@ inlineCallee contPre pPair = do
   -- need path satisfiability checking, as it ignores all loop backedges.
   solver <- L.view (L.to envConfig . L.to PCo.cfgSolver)
   ng <- L.view (L.to envNonceGenerator)
+
+  origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
+  let origMemory = MBL.memoryImage origBinary
+  let archInfo = PA.binArchInfo origBinary
+
   PS.withOnlineSolver solver ng $ \sym -> do
     -- Note that we need to get a different archVals here - we can't use the one
     -- in the environment because it is fixed to a different memory model - the
@@ -356,11 +411,11 @@ inlineCallee contPre pPair = do
     -- We allocate a shared initial state to execute both functions on so that we
     -- can compare their final memory states
     let symArchFns = DMS.archFunctions archVals
-    (initRegs, initMem) <- liftIO $ allocateInitialState @arch symArchFns sym
+    (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
 
-    eoPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem
-    epPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem
+    eoPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem memPtrTbl
+    epPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem memPtrTbl
     -- Note: we are symbolically executing both functions to get their memory
     -- post states. We explicitly do *not* want to try to prove all of their
     -- memory safety side conditions (or any other side conditions), since we

@@ -260,7 +260,7 @@ getBinCtx' ::
 getBinCtx' repr = PPa.getPair' repr <$> CMR.asks (PMC.binCtxs . envCtx)
 
 withValid :: forall a sym arch.
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ArchConstraints arch, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
   env <- CMR.ask
@@ -268,7 +268,7 @@ withValid f = do
 
 withValidEnv ::
   EquivEnv sym arch ->
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ArchConstraints arch, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
   a
 withValidEnv (EquivEnv { envValidSym = PSo.Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
