@@ -5,6 +5,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
@@ -65,6 +66,7 @@ import qualified Pate.Block as PB
 import qualified Pate.Config as PCo
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Memory as PM
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Panic as PP
@@ -283,6 +285,50 @@ insertFnBinding
 insertFnBinding (LCS.FnBinding h s) m =
   LCS.FnBindings (CFH.insertHandleMap h s (LCS.fnBindings m))
 
+data IncrementalDiscoveryError where
+  CannotResolveSegmentFor :: BVS.BV w -> IncrementalDiscoveryError
+
+deriving instance Show IncrementalDiscoveryError
+
+-- | Given a function address as a raw bitvector, convert it into a
+-- 'PB.ConcreteBlock' (which, despite the name, doesn't include any code data or
+-- metadata - it is basically just a wrapper around the address)
+--
+-- Note that we are converting the raw bitvector to an address without special
+-- regard for the region that would appear in a MemSegmentOff. All code
+-- addresses are in region 0 in the memory model we set up for machine code
+-- symbolic execution (in large part because they are constructed from literals
+-- in the binary with no associated region).
+concreteBlockFromBVAddr
+  :: forall w arch bin proxy
+   . ( w ~ DMC.ArchAddrWidth arch
+     , DMM.MemWidth w
+     )
+  => proxy arch
+  -> PBi.WhichBinaryRepr bin
+  -> DMM.Memory w
+  -> BVS.BV w
+  -> Either IncrementalDiscoveryError (PB.ConcreteBlock arch bin)
+concreteBlockFromBVAddr _proxy binRepr mem bv =
+  case PM.resolveAbsoluteAddress mem addrWord of
+    Nothing -> Left (CannotResolveSegmentFor bv)
+    Just segOff -> do
+      let fn = PB.FunctionEntry { PB.functionSegAddr = segOff
+                                , PB.functionSymbol = Nothing
+                                , PB.functionBinRepr = binRepr
+                                }
+      return PB.ConcreteBlock { PB.concreteAddress = addr
+                              , PB.concreteBlockEntry = PB.BlockEntryInitFunction
+                              , PB.blockBinRepr = binRepr
+                              , PB.blockFunctionEntry = fn
+                              }
+
+  where
+    addrWord :: DMM.MemWord w
+    addrWord = fromIntegral (BVS.asUnsigned bv)
+    addr :: PAd.ConcreteAddress arch
+    addr = PAd.memAddrToAddr (DMM.absoluteAddr addrWord)
+
 -- | Given a register state corresponding to a function call, use the
 -- instruction pointer to look up the called function and return an appropriate
 -- function handle.
@@ -291,15 +337,16 @@ insertFnBinding (LCS.FnBinding h s) m =
 -- incremental code discovery (only binding function handles and doing code
 -- discovery on demand).
 lookupFunction
-  :: forall sym arch bin mem
+  :: forall sym arch bin mem binFmt
    . ( PA.ValidArch arch
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
      )
   => PMC.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
+  -> MBL.LoadedBinary arch binFmt
   -> DMS.LookupFunctionHandle sym arch
-lookupFunction pfm archVals = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
+lookupFunction pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
   let sym = crucState ^. LCS.stateContext . LCS.ctxSymInterface
   let regsRepr = LCT.StructRepr (DMS.crucArchRegTypes (DMS.archFunctions archVals))
   let regsEntry = LCS.RegEntry regsRepr regs
@@ -307,30 +354,37 @@ lookupFunction pfm archVals = DMS.LookupFunctionHandle $ \crucState _mem0 regs -
   ipBV <- LCLM.projectLLVM_bv sym (LCS.regValue ipPtr)
   case WI.asBV ipBV of
     Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr ipBV)]
-    Just bv -> do
-      -- FIXME: Here we are decoding the function at the given address in our
-      -- binary. We need to also take in a symbol table to let us identify
-      -- external calls (or calls to named functions) that we might have
-      -- overrides for.
-      let pb = undefined
-      mdfi <- PMC.parsedFunctionContaining pb pfm
-      case mdfi of
-        -- FIXME: This probably shouldn't be a panic - rather an exception, or perhaps an uninterpreted effect
-        Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Unable to find mapping for address " ++ show bv]
-        Just (Some dfi) -> do
-          CCC.SomeCFG cfg <- toCrucibleCFG (DMS.archFunctions archVals) dfi
-          -- Return a 'FnHandle' and an updated 'CrucibleState'
+    Just bv ->
+      case concreteBlockFromBVAddr (Proxy @arch) PC.knownRepr (MBL.memoryImage loadedBinary) bv of
+        -- FIXME: This should probably be an exception, rather than a panic
+        --
+        -- It is plausible that a user could feed us a binary that triggered
+        -- this (it would be a very strange and probably bad binary, but still
+        -- externally triggerable)
+        Left err -> PP.panic PP.InlineCallee "lookupFunction" ["Error while interpreting instruction pointer: " ++ show err]
+        Right blk -> do
+          -- FIXME: Here we are decoding the function at the given address in our
+          -- binary. We need to also take in a symbol table to let us identify
+          -- external calls (or calls to named functions) that we might have
+          -- overrides for.
+          mdfi <- PMC.parsedFunctionContaining blk pfm
+          case mdfi of
+            -- FIXME: This probably shouldn't be a panic - rather an exception, or perhaps an uninterpreted effect
+            Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Unable to find mapping for address " ++ show bv]
+            Just (Some dfi) -> do
+              CCC.SomeCFG cfg <- toCrucibleCFG (DMS.archFunctions archVals) dfi
+              -- Return a 'FnHandle' and an updated 'CrucibleState'
 
-          -- We could thread the handle allocator through, but it actually has
-          -- no data now, so allocating one is essentially free and doesn't have
-          -- any correctness downsides
-          let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
-          hdl <- CFH.mkHandle' halloc (discoveryFunName dfi) (Ctx.singleton regsRepr) regsRepr
+              -- We could thread the handle allocator through, but it actually has
+              -- no data now, so allocating one is essentially free and doesn't have
+              -- any correctness downsides
+              let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
+              hdl <- CFH.mkHandle' halloc (discoveryFunName dfi) (Ctx.singleton regsRepr) regsRepr
 
-          let fnState = LCS.UseCFG cfg (LCAP.postdomInfo cfg)
-          let fnBinding = LCS.FnBinding hdl fnState
-          let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
-          return (hdl, crucState')
+              let fnState = LCS.UseCFG cfg (LCAP.postdomInfo cfg)
+              let fnBinding = LCS.FnBinding hdl fnState
+              let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
+              return (hdl, crucState')
 
 -- | Symbolically execute a macaw function with a given initial state, returning
 -- the final memory state
@@ -339,7 +393,7 @@ lookupFunction pfm archVals = DMS.LookupFunctionHandle $ \crucState _mem0 regs -
 -- a different type parameter for the memory model than what we want to use for
 -- this symbolic execution.
 symbolicallyExecute
-  :: forall arch sym ids scope solver fs sym' w bin
+  :: forall arch sym ids scope solver fs sym' w bin binFmt
    . ( sym ~ LCBO.OnlineBackend scope solver fs
      , LCB.IsSymInterface sym
      , WPO.OnlineSolver solver
@@ -349,6 +403,7 @@ symbolicallyExecute
   => DMS.ArchVals arch
   -> sym
   -> PBi.WhichBinaryRepr bin
+  -> MBL.LoadedBinary arch binFmt
   -> DMD.DiscoveryFunInfo arch ids
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
@@ -356,7 +411,7 @@ symbolicallyExecute
   -- ^ Initial memory to simulate with
   -> DMSM.MemPtrTable sym w
   -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym))
-symbolicallyExecute archVals sym binRepr dfi initRegs initMem memPtrTbl = do
+symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTbl = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
   let symArchFns = DMS.archFunctions archVals
@@ -376,7 +431,7 @@ symbolicallyExecute archVals sym binRepr dfi initRegs initMem memPtrTbl = do
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
-    let doLookup = lookupFunction pfm archVals
+    let doLookup = lookupFunction pfm archVals loadedBin
     let extImpl = DMS.macawExtensions archEvalFn memVar globalMap doLookup validityCheck
     -- We start with no handles bound for crucible; we'll add them dynamically
     -- as we find callees via lookupHandle
@@ -457,6 +512,7 @@ inlineCallee contPre pPair = withValid $ do
   ng <- L.view (L.to envNonceGenerator)
 
   origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
+  patchedBinary <- PMC.binary <$> getBinCtx' PBi.PatchedRepr
   let origMemory = MBL.memoryImage origBinary
   let archInfo = PA.binArchInfo origBinary
 
@@ -473,8 +529,8 @@ inlineCallee contPre pPair = withValid $ do
     (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
 
-    eoPostMem <- symbolicallyExecute archVals sym PBi.OriginalRepr oDFI initRegs initMem memPtrTbl
-    epPostMem <- symbolicallyExecute archVals sym PBi.PatchedRepr pDFI initRegs initMem memPtrTbl
+    eoPostMem <- symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
+    epPostMem <- symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
     -- Note: we are symbolically executing both functions to get their memory
     -- post states. We explicitly do *not* want to try to prove all of their
     -- memory safety side conditions (or any other side conditions), since we
