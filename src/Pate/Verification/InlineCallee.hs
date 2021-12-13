@@ -9,7 +9,7 @@
 {-# LANGUAGE TypeOperators #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
-import           Control.Lens ( (^.) )
+import           Control.Lens ( (&), (%~), (^.) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
@@ -37,6 +37,7 @@ import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Symbolic.Memory as DMSM
 import qualified Data.Macaw.Types as DMT
+import qualified Lang.Crucible.Analysis.Postdom as LCAP
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.CFG.Core as CCC
@@ -47,6 +48,7 @@ import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.GlobalState as LCSG
 import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
+import qualified Lang.Crucible.Simulator.OverrideSim as LCSO
 import qualified Lang.Crucible.Simulator.PathSatisfiability as LCSP
 import qualified Lang.Crucible.Types as LCT
 import qualified What4.BaseTypes as WT
@@ -87,16 +89,17 @@ discoveryFunName dfi =
 
 -- | Construct a Crucible CFG for a macaw function
 toCrucibleCFG
-  :: DMD.DiscoveryFunInfo arch ids
-  -> EquivM sym arch (CCC.SomeCFG (DMS.MacawExt arch)
-                                  (Ctx.EmptyCtx Ctx.::> LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
-                                  (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch))))
-toCrucibleCFG dfi = do
-  archFns <- L.view (L.to envArchVals . L.to DMS.archFunctions)
-  halloc <- liftIO $ CFH.newHandleAllocator
+  :: (DMM.MemWidth (DMC.ArchAddrWidth arch))
+  => DMS.MacawSymbolicArchFunctions arch
+  -> DMD.DiscoveryFunInfo arch ids
+  -> IO (CCC.SomeCFG (DMS.MacawExt arch)
+                     (Ctx.EmptyCtx Ctx.::> LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+                     (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch))))
+toCrucibleCFG archFns dfi = do
+  halloc <- CFH.newHandleAllocator
   let fnName = discoveryFunName dfi
   let posFn = WP.OtherPos . fromString . show
-  liftIO $ DMS.mkFunCFG archFns halloc fnName posFn dfi
+  DMS.mkFunCFG archFns halloc fnName posFn dfi
 
 -- | Allocate an initial simulator value for a given machine register
 --
@@ -272,6 +275,14 @@ muxMemImpl sym = LCSI.muxIntrinsic sym LCSI.emptyIntrinsicTypes (knownSymbol @"L
 validityCheck :: DMS.MkGlobalPointerValidityAssertion sym w
 validityCheck _ _ _ _ = return Nothing
 
+-- | A convenient Lens-styled combinator for updating a 'LCSO.FnBinding'
+insertFnBinding
+  :: LCSO.FnBinding p sym ext
+  -> LCS.FunctionBindings p sym ext
+  -> LCS.FunctionBindings p sym ext
+insertFnBinding (LCS.FnBinding h s) m =
+  LCS.FnBindings (CFH.insertHandleMap h s (LCS.fnBindings m))
+
 -- | Given a register state corresponding to a function call, use the
 -- instruction pointer to look up the called function and return an appropriate
 -- function handle.
@@ -279,8 +290,47 @@ validityCheck _ _ _ _ = return Nothing
 -- This function is able to update the Crucible state, which we use to do
 -- incremental code discovery (only binding function handles and doing code
 -- discovery on demand).
-lookupFunction :: DMS.LookupFunctionHandle sym arch
-lookupFunction = undefined
+lookupFunction
+  :: forall sym arch bin mem
+   . ( PA.ValidArch arch
+     , LCB.IsSymInterface sym
+     , PBi.KnownBinary bin
+     )
+  => PMC.ParsedFunctionMap arch bin
+  -> DMS.GenArchVals mem arch
+  -> DMS.LookupFunctionHandle sym arch
+lookupFunction pfm archVals = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
+  let sym = crucState ^. LCS.stateContext . LCS.ctxSymInterface
+  let regsRepr = LCT.StructRepr (DMS.crucArchRegTypes (DMS.archFunctions archVals))
+  let regsEntry = LCS.RegEntry regsRepr regs
+  let ipPtr = DMS.lookupReg archVals regsEntry DMC.ip_reg
+  ipBV <- LCLM.projectLLVM_bv sym (LCS.regValue ipPtr)
+  case WI.asBV ipBV of
+    Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr ipBV)]
+    Just bv -> do
+      -- FIXME: Here we are decoding the function at the given address in our
+      -- binary. We need to also take in a symbol table to let us identify
+      -- external calls (or calls to named functions) that we might have
+      -- overrides for.
+      let pb = undefined
+      mdfi <- PMC.parsedFunctionContaining pb pfm
+      case mdfi of
+        -- FIXME: This probably shouldn't be a panic - rather an exception, or perhaps an uninterpreted effect
+        Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Unable to find mapping for address " ++ show bv]
+        Just (Some dfi) -> do
+          CCC.SomeCFG cfg <- toCrucibleCFG (DMS.archFunctions archVals) dfi
+          -- Return a 'FnHandle' and an updated 'CrucibleState'
+
+          -- We could thread the handle allocator through, but it actually has
+          -- no data now, so allocating one is essentially free and doesn't have
+          -- any correctness downsides
+          let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
+          hdl <- CFH.mkHandle' halloc (discoveryFunName dfi) (Ctx.singleton regsRepr) regsRepr
+
+          let fnState = LCS.UseCFG cfg (LCAP.postdomInfo cfg)
+          let fnBinding = LCS.FnBinding hdl fnState
+          let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
+          return (hdl, crucState')
 
 -- | Symbolically execute a macaw function with a given initial state, returning
 -- the final memory state
@@ -289,14 +339,16 @@ lookupFunction = undefined
 -- a different type parameter for the memory model than what we want to use for
 -- this symbolic execution.
 symbolicallyExecute
-  :: forall arch sym ids scope solver fs sym' w
+  :: forall arch sym ids scope solver fs sym' w bin
    . ( sym ~ LCBO.OnlineBackend scope solver fs
      , LCB.IsSymInterface sym
      , WPO.OnlineSolver solver
      , w ~ DMC.ArchAddrWidth arch
+     , PBi.KnownBinary bin
      )
   => DMS.ArchVals arch
   -> sym
+  -> PBi.WhichBinaryRepr bin
   -> DMD.DiscoveryFunInfo arch ids
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
@@ -304,14 +356,14 @@ symbolicallyExecute
   -- ^ Initial memory to simulate with
   -> DMSM.MemPtrTable sym w
   -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym))
-symbolicallyExecute archVals sym dfi initRegs initMem memPtrTbl = do
+symbolicallyExecute archVals sym binRepr dfi initRegs initMem memPtrTbl = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
   let symArchFns = DMS.archFunctions archVals
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
 
-  CCC.SomeCFG cfg <- toCrucibleCFG dfi
+  CCC.SomeCFG cfg <- liftIO $ toCrucibleCFG symArchFns dfi
   let arguments = LCS.RegMap (Ctx.singleton initRegs)
   let simAction = LCS.runOverrideSim regsRepr (LCS.regValue <$> LCS.callCFG cfg arguments)
 
@@ -321,8 +373,11 @@ symbolicallyExecute archVals sym dfi initRegs initMem memPtrTbl = do
   let globals = LCSG.insertGlobal memVar initMem LCS.emptyGlobals
   let globalMap = DMSM.mapRegionPointers memPtrTbl
 
+  pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
+
   DMS.withArchEval archVals sym $ \archEvalFn -> do
-    let extImpl = DMS.macawExtensions archEvalFn memVar globalMap lookupFunction validityCheck
+    let doLookup = lookupFunction pfm archVals
+    let extImpl = DMS.macawExtensions archEvalFn memVar globalMap doLookup validityCheck
     -- We start with no handles bound for crucible; we'll add them dynamically
     -- as we find callees via lookupHandle
     --
@@ -418,8 +473,8 @@ inlineCallee contPre pPair = withValid $ do
     (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
 
-    eoPostMem <- symbolicallyExecute archVals sym oDFI initRegs initMem memPtrTbl
-    epPostMem <- symbolicallyExecute archVals sym pDFI initRegs initMem memPtrTbl
+    eoPostMem <- symbolicallyExecute archVals sym PBi.OriginalRepr oDFI initRegs initMem memPtrTbl
+    epPostMem <- symbolicallyExecute archVals sym PBi.PatchedRepr pDFI initRegs initMem memPtrTbl
     -- Note: we are symbolically executing both functions to get their memory
     -- post states. We explicitly do *not* want to try to prove all of their
     -- memory safety side conditions (or any other side conditions), since we
