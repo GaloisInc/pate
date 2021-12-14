@@ -163,7 +163,8 @@ verifyPairs ::
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   let solver = PC.cfgSolver vcfg
-  PS.withOnlineSolver solver gen $ doVerifyPairs validArch logAction elf elf' vcfg pd gen
+  let saveInteraction = PC.cfgSolverInteractionFile vcfg
+  PS.withOnlineSolver solver saveInteraction gen $ doVerifyPairs validArch logAction elf elf' vcfg pd gen
 
 -- | Verify equality of the given binaries.
 doVerifyPairs ::

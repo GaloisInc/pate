@@ -148,6 +148,7 @@ main = do
             , PC.cfgHeuristicTimeout = heuristicTimeout opts
             , PC.cfgGoalTimeout = goalTimeout opts
             , PC.cfgMacawDir = saveMacawCFGs opts
+            , PC.cfgSolverInteractionFile = solverInteractionFile opts
             }
         cfg = PC.RunConfig
             { PC.archProxy = proxy
@@ -195,6 +196,7 @@ data CLIOptions = CLIOptions
   , dwarfHints :: Bool
   , verbosity :: PV.Verbosity
   , saveMacawCFGs :: Maybe FilePath
+  , solverInteractionFile :: Maybe FilePath
   } deriving (Eq, Ord, Show)
 
 data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
@@ -534,5 +536,11 @@ cliOptions = OA.info (OA.helper <*> parser)
                           )
     <*> OA.optional (OA.strOption
          ( OA.long "save-macaw-cfgs"
+         <> OA.metavar "DIR"
          <> OA.help "Save macaw CFGs to the provided directory"
+         ))
+    <*> OA.optional (OA.strOption
+         ( OA.long "solver-interaction-file"
+         <> OA.metavar "FILE"
+         <> OA.help "Save interactions with the SMT solver during symbolic execution to this file"
          ))

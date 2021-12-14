@@ -96,6 +96,11 @@ data VerificationConfig =
     -- fast and therefore a delay indicates a problem with the solver
     , cfgMacawDir :: Maybe FilePath
     -- ^ The directory to save macaw CFGs to
+    , cfgSolverInteractionFile :: Maybe FilePath
+    -- ^ A file to save online SMT solver interactions to
+    --
+    -- This only captures the interaction with the solver during symbolic
+    -- execution, and not the one-off queries issued by the rest of the verifier
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -109,6 +114,7 @@ defaultVerificationCfg =
                      , cfgGoalTimeout = PT.Minutes 5
                      , cfgGroundTimeout = PT.Seconds 5
                      , cfgMacawDir = Nothing
+                     , cfgSolverInteractionFile = Nothing
                      }
 
 data RunConfig arch =

@@ -12,9 +12,12 @@ module Pate.Solver (
   ) where
 
 import           Control.Monad.Catch ( MonadMask )
-import           Control.Monad.IO.Class ( MonadIO )
+import           Control.Monad.IO.Class ( MonadIO, liftIO )
+import           Data.Bits ( (.|.) )
 import           Data.Parameterized.Classes ( ShowF )
 import qualified Data.Parameterized.Nonce as PN
+import qualified Data.Text as T
+import qualified What4.Config as WC
 import qualified What4.Expr.Builder as WE
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
@@ -38,16 +41,30 @@ withOnlineSolver
   :: (MonadIO m, MonadMask m)
   => Solver
   -- ^ The chosen solver
-  -- -> WE.FloatModeRepr fm
+  -> Maybe FilePath
+  -- ^ A file to save solver interactions to
   -> PN.NonceGenerator IO scope
   -> (forall sym solver fm . (sym ~ CBO.OnlineBackend scope solver (WE.Flags fm), WPO.OnlineSolver solver, CB.IsSymInterface sym) => CBO.OnlineBackend scope solver (WE.Flags fm) -> m a)
   -- ^ The continuation where the online solver connection is active
   -> m a
-withOnlineSolver solver ng k =
+withOnlineSolver solver mif ng k =
   case solver of
-    CVC4 -> CBO.withCVC4OnlineBackend WE.FloatRealRepr ng CBO.NoUnsatFeatures WP.noFeatures k
-    Yices -> CBO.withYicesOnlineBackend WE.FloatRealRepr ng CBO.NoUnsatFeatures WP.noFeatures k
-    Z3 -> CBO.withZ3OnlineBackend WE.FloatRealRepr ng CBO.NoUnsatFeatures WP.noFeatures k
+    CVC4 -> CBO.withCVC4OnlineBackend WE.FloatRealRepr ng CBO.NoUnsatFeatures probFeatures (installSolverInteraction mif k)
+    Yices -> CBO.withYicesOnlineBackend WE.FloatRealRepr ng CBO.NoUnsatFeatures probFeatures (installSolverInteraction mif k)
+    Z3 -> CBO.withZ3OnlineBackend WE.FloatRealRepr ng CBO.NoUnsatFeatures probFeatures (installSolverInteraction mif k)
+  where
+    -- Install some selected SMT problem features, as the online backend is not
+    -- able to analyze the query to determine what features are needed (since it
+    -- doesn't get to preview any formulas)
+    probFeatures = WP.useSymbolicArrays .|. WP.useStructs .|. WP.useBitvectors
+
+    -- A wrapper to install a solver interaction file, if requested by the user
+    installSolverInteraction Nothing k' sym = k' sym
+    installSolverInteraction (Just interactionFile) k' sym = do
+      let conf = WI.getConfiguration sym
+      setSIF <- liftIO $ WC.getOptionSetting CBO.solverInteractionFile conf
+      _diags <- liftIO $ WC.setOpt setSIF (T.pack interactionFile)
+      k' sym
 
 -- | Convert the solver selector type ('Solver') into a what4
 -- 'WS.SolverAdapter', extending the symbolic backend with the necessary options
