@@ -15,15 +15,11 @@ import           Control.Monad.Catch ( MonadMask )
 import           Control.Monad.IO.Class ( MonadIO )
 import           Data.Parameterized.Classes ( ShowF )
 import qualified Data.Parameterized.Nonce as PN
-import qualified What4.Config as WC
 import qualified What4.Expr.Builder as WE
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
 import qualified What4.ProblemFeatures as WP
 import qualified What4.Solver as WS
-import qualified What4.Solver.CVC4 as WSC
-import qualified What4.Solver.Yices as WSY
-import qualified What4.Solver.Z3 as WSZ
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
@@ -57,18 +53,11 @@ withOnlineSolver solver ng k =
 -- 'WS.SolverAdapter', extending the symbolic backend with the necessary options
 -- (which requires IO)
 solverAdapter :: (WI.IsExprBuilder sym) => sym -> Solver -> IO (WS.SolverAdapter st)
-solverAdapter sym s = do
-  let cfg = WI.getConfiguration sym
+solverAdapter _sym s =
   case s of
-    CVC4 -> do
-      WC.extendConfig WSC.cvc4Options cfg
-      return WS.cvc4Adapter
-    Yices -> do
-      WC.extendConfig WSY.yicesOptions cfg
-      return WS.yicesAdapter
-    Z3 -> do
-      WC.extendConfig WSZ.z3Options cfg
-      return WS.z3Adapter
+    CVC4 -> return WS.cvc4Adapter
+    Yices -> return WS.yicesAdapter
+    Z3 -> return WS.z3Adapter
 
 type ValidSym sym =
   ( WI.IsExprBuilder sym
