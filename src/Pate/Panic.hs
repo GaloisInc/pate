@@ -11,6 +11,7 @@ data PateComponent = Verifier
                    | ProofConstruction
                    | InlineCallee
                    | Discovery
+                   | Solver
                    deriving (Show)
 
 instance P.PanicComponent PateComponent where

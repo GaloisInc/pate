@@ -541,7 +541,7 @@ inlineCallee
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = withSymBackendLock $ withValid $ withSym $ \sym -> do
+inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
@@ -568,9 +568,9 @@ inlineCallee contPre pPair = withSymBackendLock $ withValid $ withSym $ \sym -> 
   (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
   (eoPostMem, oIgnPtrs) <-
-     symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
+    withSymBackendLock $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
   (epPostMem, pIgnPtrs) <-
-     symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
+    withSymBackendLock $ symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
 
   -- Note: we are symbolically executing both functions to get their memory
   -- post states. We explicitly do *not* want to try to prove all of their

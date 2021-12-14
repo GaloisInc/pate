@@ -135,6 +135,7 @@ import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import           Pate.Monad.Environment as PME
+import qualified Pate.Panic as PP
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -664,7 +665,17 @@ withSymBackendLock k = do
   mv <- CMR.asks envSymBackendLock
   UE.bracket (liftIO (IO.takeMVar mv))
              (liftIO . IO.putMVar mv)
-             (\_ -> k)
+             (\_ -> inNewFrame k)
+
+inNewFrame
+  :: EquivM sym arch a
+  -> EquivM sym arch a
+inNewFrame k = withSym $ \sym -> do
+  kio <- IO.toIO k
+  liftIO $ LCBO.withSolverProcess sym doPanic $ \sp -> do
+    WPO.inNewFrame sp kio
+  where
+    doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]
 
 -- | Emit a trace event to the frontend
 --
