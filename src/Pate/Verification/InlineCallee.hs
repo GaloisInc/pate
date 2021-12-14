@@ -12,8 +12,10 @@ module Pate.Verification.InlineCallee ( inlineCallee ) where
 
 import           Control.Lens ( (&), (%~), (^.) )
 import qualified Control.Lens as L
+import           Control.Monad (foldM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
+import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Parameterized.Classes as PC
@@ -43,6 +45,7 @@ import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.CFG.Core as CCC
 import qualified Lang.Crucible.FunctionHandle as CFH
+import qualified Lang.Crucible.LLVM.Bytes as LCLB
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
@@ -69,6 +72,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Memory as PM
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
+import qualified Pate.Monad.Environment as PME
 import qualified Pate.Panic as PP
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -167,6 +171,39 @@ allocateStack _proxy sym mem0 = do
   sp <- LCLM.ptrAdd sym WI.knownRepr stackBasePtr stackInitialOffsetBV
   return (mem2, sp)
 
+allocateIgnorableRegions
+  :: ( LCB.IsSymInterface sym
+     , PA.ValidArch arch
+     , w ~ DMC.ArchAddrWidth arch
+     , 16 <= w
+     )
+  => proxy arch
+  -> sym
+  -> LCLM.MemImpl sym
+  -> [(DMM.MemWord (DMC.ArchAddrWidth arch), Integer)]
+  -> IO (LCLM.MemImpl sym, [LCLM.LLVMPtr sym w])
+allocateIgnorableRegions _proxy sym mem0 = foldM allocateIgnPtr (mem0,mempty)
+  where
+    allocateIgnPtr (mem,ptrs) (loc, len) =
+      do let ?recordLLVMAnnotation = \_ _ -> return ()
+         let ?ptrWidth = WI.knownRepr
+
+         -- allocate a heap region region 
+         len' <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr len)
+         (ptr, mem1) <- LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable "ignorable_region" mem len' LCLD.noAlignment
+
+         -- poke the pointer to that region into the global memory at the correct location
+         let locBits = BVS.mkBV WI.knownRepr (DMM.memWordToUnsigned loc)
+         locPtr <- LCLM.llvmPointer_bv sym =<< WI.bvLit sym WI.knownRepr locBits
+         let st = LCLM.bitvectorType (LCLB.bitsToBytes (WI.intValue ?ptrWidth))
+         mem2 <- LCLM.storeRaw sym mem1 locPtr st LCLD.noAlignment (LCLM.ptrToPtrVal ptr)
+
+         -- write a backing array of fresh bytes into the region
+         regionArrayStorage <- WI.freshConstant sym (WS.safeSymbol "ignorable_region_array") WI.knownRepr
+         mem3 <- LCLM.doArrayStore sym mem2 ptr LCLD.noAlignment regionArrayStorage len'
+
+         return (mem3, (ptr:ptrs))
+
 toCrucibleEndian :: DMM.Endianness -> LCLD.EndianForm
 toCrucibleEndian macawEnd =
   case macawEnd of
@@ -217,7 +254,7 @@ allocateInitialState symArchFns sym archInfo memory = do
   let memModelContents = DMSM.SymbolicMutable
   (mem0, memPtrTbl) <- DMSM.newGlobalMemory proxy sym endianness memModelContents memory
 
-  (mem1, sp) <- liftIO $ allocateStack proxy sym mem0
+  (mem1, sp) <- allocateStack proxy sym mem0
   initialRegisters <- liftIO $ DMS.macawAssignToCrucM (mkInitialRegVal symArchFns sym sp) (DMS.crucGenRegAssignment symArchFns)
   let initialRegsEntry = LCS.RegEntry regsRepr initialRegisters
 
@@ -410,7 +447,7 @@ symbolicallyExecute
   -> LCLM.MemImpl sym
   -- ^ Initial memory to simulate with
   -> DMSM.MemPtrTable sym w
-  -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym))
+  -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
 symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTbl = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
@@ -425,7 +462,12 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTb
   halloc <- liftIO $ CFH.newHandleAllocator
   memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
 
-  let globals = LCSG.insertGlobal memVar initMem LCS.emptyGlobals
+  ignPtrs <- case binRepr of
+               PBi.OriginalRepr -> PMC.originalIgnorePtrs . PME.envCtx <$> CMR.ask
+               PBi.PatchedRepr  -> PMC.patchedIgnorePtrs  . PME.envCtx <$> CMR.ask
+  (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
+
+  let globals = LCSG.insertGlobal memVar initMem' LCS.emptyGlobals
   let globalMap = DMSM.mapRegionPointers memPtrTbl
 
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
@@ -448,7 +490,8 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTb
     let execFeatures = [psf]
     let executionFeatures = fmap LCS.genericToExecutionFeature execFeatures
     res <- liftIO $ LCS.executeCrucible executionFeatures s0
-    liftIO $ getFinalGlobalValue (muxMemImpl sym) memVar res
+    finalMem <- liftIO $ getFinalGlobalValue (muxMemImpl sym) memVar res
+    return (finalMem, ignorableRegions)
 
 -- | Look up the macaw CFG for the given function address
 --
@@ -468,13 +511,15 @@ functionFor pb = do
           repr = PC.knownRepr @_ @_ @bin
       in CMC.throwM (PEE.equivalenceErrorFor repr (PEE.MissingExpectedEquivalentFunction addr))
 
--- | Analyze the post memory states to compute the separation frame for the inlined calls
+-- | Analyze the post memory states to compute the separation frame for the inlined calls.
 buildCallFrame
-  :: LCLM.MemImpl sym'
-  -> LCLM.MemImpl sym'
-  -> LCLM.MemImpl sym'
+  :: LCLM.MemImpl sym' -- ^ Memory pre state
+  -> (LCLM.MemImpl sym', [LCLM.LLVMPtr sym' (DMD.ArchAddrWidth arch)])
+       -- ^ Original binary post state and ignorable region base pointers
+  -> (LCLM.MemImpl sym', [LCLM.LLVMPtr sym' (DMD.ArchAddrWidth arch)])
+       -- ^ Patched binary post state and ignorable region base pointers
   -> EquivM sym arch (StatePredSpec sym arch)
-buildCallFrame initMem oPostMem pPostMem = undefined
+buildCallFrame initMem (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) = undefined
 
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
@@ -528,9 +573,11 @@ inlineCallee contPre pPair = withValid $ do
     let symArchFns = DMS.archFunctions archVals
     (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
+    (eoPostMem, oIgnPtrs) <-
+       symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
+    (epPostMem, pIgnPtrs) <-
+       symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
 
-    eoPostMem <- symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
-    epPostMem <- symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
     -- Note: we are symbolically executing both functions to get their memory
     -- post states. We explicitly do *not* want to try to prove all of their
     -- memory safety side conditions (or any other side conditions), since we
@@ -544,7 +591,7 @@ inlineCallee contPre pPair = withValid $ do
     case (eoPostMem, epPostMem) of
       -- FIXME: In the error cases, generate a default frame and a proof error node
       (Right oPostMem, Right pPostMem) -> do
-        statePredSpec <- buildCallFrame initMem oPostMem pPostMem
+        statePredSpec <- buildCallFrame initMem (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
 
         let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                           }
