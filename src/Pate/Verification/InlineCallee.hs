@@ -66,7 +66,6 @@ import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
-import qualified Pate.Config as PCo
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Memory as PM
@@ -77,8 +76,6 @@ import qualified Pate.Panic as PP
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
-import qualified Pate.Solver as PS
-
 
 -- | Create a crucible-friendly name for a macaw function
 --
@@ -430,7 +427,7 @@ lookupFunction pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState
 -- a different type parameter for the memory model than what we want to use for
 -- this symbolic execution.
 symbolicallyExecute
-  :: forall arch sym ids scope solver fs sym' w bin binFmt
+  :: forall arch sym ids scope solver fs w bin binFmt
    . ( sym ~ LCBO.OnlineBackend scope solver fs
      , LCB.IsSymInterface sym
      , WPO.OnlineSolver solver
