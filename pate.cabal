@@ -57,6 +57,7 @@ common shared
                        macaw-symbolic,
                        macaw-loader,
                        unliftio-core >= 0.2 && < 0.3,
+                       unliftio >= 0.2 && < 0.3,
                        text >= 1 && < 1.3,
                        transformers,
                        time >= 1 && < 2,

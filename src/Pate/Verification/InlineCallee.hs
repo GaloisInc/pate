@@ -541,7 +541,7 @@ inlineCallee
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
+inlineCallee contPre pPair = withSymBackendLock $ withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated

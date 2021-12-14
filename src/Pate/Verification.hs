@@ -226,6 +226,8 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd ge
               else
                 return (unpackedPairs upData)
 
+  symBackendLock <- liftIO $ MVar.newMVar ()
+
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -263,6 +265,7 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd ge
       , envProofCache = prfCache
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
+      , envSymBackendLock = symBackendLock
       }
 
   liftIO $ do

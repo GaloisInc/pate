@@ -82,6 +82,10 @@ data EquivEnv sym arch where
     -- ^ cache for intermediate proof results
     , envStatistics :: MVar.MVar PES.EquivalenceStatistics
     -- ^ Statistics collected during verification
+    , envSymBackendLock :: MVar.MVar ()
+    -- ^ A lock to serialize access to the 'PSo.Sym'
+    --
+    -- See Note [Symbolic Backend Locking] for more details
     } -> EquivEnv sym arch
 
 type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
@@ -97,3 +101,22 @@ envCtxL f ee = fmap (\c' -> ee { envCtx = c' }) (f (envCtx ee))
 freshBlockCache ::
   IO (BlockCache arch a)
 freshBlockCache = BlockCache <$> IO.newMVar M.empty
+
+{- Note [Symbolic Backend Locking]
+
+We spawn multiple threads to do a great deal of work in generating and
+discharging the equivalence proof. Unfortunately, symbolic execution is not
+thread safe, as the assumption stack is stored in an IORef. To make this safe,
+until we can develop a safer data sharing strategy, we use an MVar as a lock
+that must be acquired before symbolically executing any code.
+
+Note that the lock is just a `MVar ()` instead of an `MVar SymBackend`. This is
+because many places in the verifier use the symbolic backend in ways that *are*
+thread safe. Only symbolic execution is not. Thus, we have a separate lock just
+for symbolic execution instead of serializing all accesses to the symbolic
+backend (e.g., term creation).
+
+It would be an interesting experiment to make an alternative backend that stored
+thread-local assumption stacks (e.g., keyed by threadid).
+
+-}

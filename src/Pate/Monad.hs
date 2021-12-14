@@ -31,6 +31,7 @@ module Pate.Monad
   , withSym
   , archFuns
   , runInIO1
+  , withSymBackendLock
   , manifestError
   , implicitError
   , throwHere
@@ -83,6 +84,7 @@ import           GHC.Stack ( HasCallStack, callStack )
 import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
+import qualified UnliftIO.Exception as UE
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
@@ -654,6 +656,15 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
+
+withSymBackendLock
+  :: EquivM sym arch a
+  -> EquivM sym arch a
+withSymBackendLock k = do
+  mv <- CMR.asks envSymBackendLock
+  UE.bracket (liftIO (IO.takeMVar mv))
+             (liftIO . IO.putMVar mv)
+             (\_ -> k)
 
 -- | Emit a trace event to the frontend
 --
