@@ -49,14 +49,17 @@ import qualified Data.Traversable as DT
 import           GHC.Stack ( HasCallStack, callStack )
 import qualified Lumberjack as LJ
 import           Prelude hiding ( fail )
+import qualified What4.Expr as WE
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
+import qualified What4.Protocol.Online as WPO
 import qualified What4.SatResult as W4R
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
-import qualified Lang.Crucible.Backend.Simple as CB
+import qualified Lang.Crucible.Backend as CB
+import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -147,7 +150,6 @@ runDiscovery logAction mCFGDir elf elf' = do
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
              return oCtxHinted
 
--- | Verify equality of the given binaries.
 verifyPairs ::
   forall arch.
   PA.ValidArch arch =>
@@ -158,16 +160,36 @@ verifyPairs ::
   PC.VerificationConfig ->
   PC.PatchData ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-verifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd = do
-  startTime <- liftIO TM.getCurrentTime
+verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
+  let solver = PC.cfgSolver vcfg
+  PS.withOnlineSolver solver gen $ doVerifyPairs validArch logAction elf elf' vcfg pd gen
+
+-- | Verify equality of the given binaries.
+doVerifyPairs ::
+  forall arch sym s solver fm .
+  ( PA.ValidArch arch
+  , sym ~ CBO.OnlineBackend s solver (WE.Flags fm)
+  , WPO.OnlineSolver solver
+  , CB.IsSymInterface sym
+  ) =>
+  PA.SomeValidArch arch ->
+  LJ.LogAction IO (PE.Event arch) ->
+  PH.Hinted (PLE.LoadedELF arch) ->
+  PH.Hinted (PLE.LoadedELF arch) ->
+  PC.VerificationConfig ->
+  PC.PatchData ->
+  N.NonceGenerator IO s ->
+  sym ->
+  CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
+doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd gen sym = do
+  startTime <- liftIO TM.getCurrentTime
   vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
     Nothing -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
     Just vs -> pure vs
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) elf elf'
 
-  sym <- liftIO $ CB.newSimpleBackend W4B.FloatRealRepr gen
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
 
   eval <- CMT.lift (MS.withArchEval vals sym pure)

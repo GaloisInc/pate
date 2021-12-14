@@ -91,4 +91,12 @@ type ValidSym sym =
 -- This type allows us to unwrap the constraints when we need them to observe
 -- the relationships between these otherwise internal types.
 data Sym sym where
-  Sym :: (sym ~ (WE.ExprBuilder t st fs), ValidSym sym) => PN.Nonce PN.GlobalNonceGenerator sym -> sym -> WS.SolverAdapter st -> Sym sym
+  Sym :: ( sym ~ CBO.OnlineBackend scope solver (WE.Flags fm)
+         , WPO.OnlineSolver solver
+         , ValidSym sym
+         , st ~ CBO.OnlineBackendState solver CBO.EmptyUserState
+         )
+      => PN.Nonce PN.GlobalNonceGenerator sym
+      -> sym
+      -> WS.SolverAdapter st
+      -> Sym sym

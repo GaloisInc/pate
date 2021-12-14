@@ -447,7 +447,7 @@ symbolicallyExecute
   -> LCLM.MemImpl sym
   -- ^ Initial memory to simulate with
   -> DMSM.MemPtrTable sym w
-  -> EquivM sym' arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
+  -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
 symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTbl = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
@@ -513,10 +513,10 @@ functionFor pb = do
 
 -- | Analyze the post memory states to compute the separation frame for the inlined calls.
 buildCallFrame
-  :: LCLM.MemImpl sym' -- ^ Memory pre state
-  -> (LCLM.MemImpl sym', [LCLM.LLVMPtr sym' (DMD.ArchAddrWidth arch)])
+  :: LCLM.MemImpl sym -- ^ Memory pre state
+  -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
        -- ^ Original binary post state and ignorable region base pointers
-  -> (LCLM.MemImpl sym', [LCLM.LLVMPtr sym' (DMD.ArchAddrWidth arch)])
+  -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
        -- ^ Patched binary post state and ignorable region base pointers
   -> EquivM sym arch (StatePredSpec sym arch)
 buildCallFrame initMem (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) = undefined
@@ -541,7 +541,7 @@ inlineCallee
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = withValid $ do
+inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
@@ -550,50 +550,44 @@ inlineCallee contPre pPair = withValid $ do
   Some oDFI <- functionFor @PBi.Original (PPa.pOriginal pPair)
   Some pDFI <- functionFor @PBi.Patched (PPa.pPatched pPair)
 
-  -- Note that we use a separate symbolic backend here because we need an online
-  -- solver for path satisfiability checking. The rest of the verifier does not
-  -- need path satisfiability checking, as it ignores all loop backedges.
-  solver <- L.view (L.to envConfig . L.to PCo.cfgSolver)
-  ng <- L.view (L.to envNonceGenerator)
-
   origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
   patchedBinary <- PMC.binary <$> getBinCtx' PBi.PatchedRepr
   let origMemory = MBL.memoryImage origBinary
   let archInfo = PA.binArchInfo origBinary
 
-  PS.withOnlineSolver solver ng $ \sym -> do
-    -- Note that we need to get a different archVals here - we can't use the one
-    -- in the environment because it is fixed to a different memory model - the
-    -- trace based memory model. We need to use the traditional LLVM memory model
-    -- for this part of the verifier.
-    let archVals = undefined
 
-    -- We allocate a shared initial state to execute both functions on so that we
-    -- can compare their final memory states
-    let symArchFns = DMS.archFunctions archVals
-    (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
+  -- Note that we need to get a different archVals here - we can't use the one
+  -- in the environment because it is fixed to a different memory model - the
+  -- trace based memory model. We need to use the traditional LLVM memory model
+  -- for this part of the verifier.
+  let archVals = undefined
 
-    (eoPostMem, oIgnPtrs) <-
-       symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
-    (epPostMem, pIgnPtrs) <-
-       symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
+  -- We allocate a shared initial state to execute both functions on so that we
+  -- can compare their final memory states
+  let symArchFns = DMS.archFunctions archVals
+  (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
-    -- Note: we are symbolically executing both functions to get their memory
-    -- post states. We explicitly do *not* want to try to prove all of their
-    -- memory safety side conditions (or any other side conditions), since we
-    -- can't really assume that either program is correct. We *only* care about
-    -- their differences in observable behavior.
-    --
-    -- In addition to memory, we could *also* collect a symbolic sequence of
-    -- observable effects in each function and attempt to prove that those
-    -- sequences are the same.
+  (eoPostMem, oIgnPtrs) <-
+     symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
+  (epPostMem, pIgnPtrs) <-
+     symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
 
-    case (eoPostMem, epPostMem) of
-      -- FIXME: In the error cases, generate a default frame and a proof error node
-      (Right oPostMem, Right pPostMem) -> do
-        statePredSpec <- buildCallFrame initMem (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
+  -- Note: we are symbolically executing both functions to get their memory
+  -- post states. We explicitly do *not* want to try to prove all of their
+  -- memory safety side conditions (or any other side conditions), since we
+  -- can't really assume that either program is correct. We *only* care about
+  -- their differences in observable behavior.
+  --
+  -- In addition to memory, we could *also* collect a symbolic sequence of
+  -- observable effects in each function and attempt to prove that those
+  -- sequences are the same.
 
-        let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
-                                          }
-        lproof <- PFO.lazyProofApp prfNode
-        return (statePredSpec, lproof)
+  case (eoPostMem, epPostMem) of
+    -- FIXME: In the error cases, generate a default frame and a proof error node
+    (Right oPostMem, Right pPostMem) -> do
+      statePredSpec <- buildCallFrame initMem (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
+
+      let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
+                                        }
+      lproof <- PFO.lazyProofApp prfNode
+      return (statePredSpec, lproof)

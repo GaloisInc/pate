@@ -104,19 +104,21 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
+import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 
-import           What4.Utils.Process (filterAsync)
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
+import qualified What4.Protocol.Online as WPO
 import qualified What4.SatResult as W4R
 import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
+import           What4.Utils.Process (filterAsync)
 
 import           What4.ExprHelpers
 
@@ -280,7 +282,7 @@ withSymSolver f = withValid $ do
   f sym adapter
 
 withSym ::
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
+  (forall scope solver fm . (sym ~ LCBO.OnlineBackend scope solver (W4B.Flags fm), WPO.OnlineSolver solver) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
   PSo.Sym _ sym _ <- CMR.asks envValidSym
