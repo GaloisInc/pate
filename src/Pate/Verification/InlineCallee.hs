@@ -445,4 +445,4 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
       let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                         }
       lproof <- PFO.lazyProofApp prfNode
-      return (statePredSpec, lproof)
+      return (contPre, lproof)
