@@ -1,19 +1,27 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Pate.Verification.Override (
     Override(..)
   , SomeOverride(..)
   , ArgumentMapping(..)
+  , buildArgumentRegisterAssignment
   ) where
 
+import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.NatRepr as PN
+import           GHC.Stack ( HasCallStack )
 import qualified What4.FunctionName as WF
 
 import qualified Data.Macaw.Symbolic as DMS
 
 import qualified Lang.Crucible.Backend as LCB
+import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Types as LCT
+
+import qualified Pate.Panic as PP
 
 -- | An 'Override' captures the information necessary to call a crucible
 -- override with "natural" arguments (i.e., a C-like argument list, rather than
@@ -56,3 +64,40 @@ data ArgumentMapping arch sym =
         -- the register state that is updated by the called function
         -> LCS.OverrideSim p sym (DMS.MacawExt arch) r args rtp (LCS.RegValue sym (DMS.ArchRegStruct arch))
     }
+
+-- | Build an Assignment representing the arguments to a function from a list of
+-- registers
+buildArgumentRegisterAssignment
+  :: forall w args sym
+    . (HasCallStack)
+  => PN.NatRepr w
+  -- ^ Pointer width
+  -> LCT.CtxRepr args
+  -- ^ Types of arguments
+  -> [LCS.RegEntry sym (LCLM.LLVMPointerType w)]
+  -- ^ List of argument registers
+  -> Ctx.Assignment (LCS.RegEntry sym) args
+  -- ^ Argument values
+buildArgumentRegisterAssignment ptrW argTyps regEntries = go argTyps regEntries'
+  where
+    -- Drop unused registers from regEntries and reverse list to account for
+    -- right-to-left processing when using 'Ctx.viewAssign'
+    regEntries' = reverse (take (Ctx.sizeInt (Ctx.size argTyps)) regEntries)
+
+    go :: forall args'
+        . LCT.CtxRepr args'
+       -> [LCS.RegEntry sym (LCLM.LLVMPointerType w)]
+       -> Ctx.Assignment (LCS.RegEntry sym) args'
+    go typs regs =
+      case Ctx.viewAssign typs of
+        Ctx.AssignEmpty -> Ctx.empty
+        Ctx.AssignExtend typs' (LCLM.LLVMPointerRepr w) | Just PC.Refl <- PC.testEquality w ptrW ->
+          case regs of
+            [] -> PP.panic PP.Override
+                           "buildArgumentRegisterAssignment"
+                           ["Override expects too many arguments"]
+            reg : regs' ->
+              (go typs' regs') Ctx.:> reg
+        _ -> PP.panic PP.Override
+                      "buildArgumentRegisterAssignment"
+                      ["Currently only LLVMPointer arguments are supported"]

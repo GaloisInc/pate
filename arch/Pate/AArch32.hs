@@ -9,20 +9,25 @@ module Pate.AArch32 (
   , handleSystemCall
   , handleExternalCall
   , hasDedicatedRegister
+  , argumentMapping
   ) where
 
 import           Control.Lens ( (^?) )
 import qualified Control.Lens as L
 import qualified Data.Map.Strict as Map
+import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
 
-import qualified SemMC.Architecture.AArch32 as SA
+import qualified Data.Macaw.AArch32.Symbolic as DMAS
 import           Data.Macaw.BinaryLoader.AArch32 ()
+import qualified Lang.Crucible.LLVM.MemModel as LCLM
+import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Types as LCT
+import qualified SemMC.Architecture.AArch32 as SA
 
 import qualified Data.Macaw.ARM as ARM
 import qualified Data.Macaw.ARM.ARMReg as ARMReg
@@ -32,7 +37,9 @@ import qualified Language.ASL.Globals as ASL
 import qualified Pate.Arch as PA
 import qualified Pate.Equivalence.MemPred as PEM
 import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Panic as PP
 import qualified Pate.Verification.ExternalCall as PVE
+import qualified Pate.Verification.Override as PVO
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -116,3 +123,25 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                          , PES.predStack = PEM.memPredTrue sym
                          , PES.predMem = PEM.memPredTrue sym
                          }
+
+argumentMapping :: PVO.ArgumentMapping SA.AArch32 sym
+argumentMapping =
+  PVO.ArgumentMapping { PVO.functionIntegerArgumentRegisters = \actualsRepr registerFile ->
+                          let ptrWidth = PN.knownNat @32
+                              lookupReg r = LCS.RegEntry (LCLM.LLVMPointerRepr ptrWidth) (LCS.unRV (DMAS.lookupReg r registerFile))
+                              regList = map lookupReg [ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
+                                                      , ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
+                                                      , ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
+                                                      , ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
+                                                      ]
+                          in PVO.buildArgumentRegisterAssignment ptrWidth actualsRepr regList
+                      , PVO.functionReturnRegister = \retRepr override registerFile ->
+                          case retRepr of
+                            LCT.UnitRepr -> override >> return registerFile
+                            LCLM.LLVMPointerRepr w
+                              | Just PC.Refl <- PC.testEquality w (PN.knownNat @32) -> do
+                                  result <- override
+                                  let r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
+                                  return $! DMAS.updateReg r0 (const (LCS.RV result)) registerFile
+                            _ -> PP.panic PP.AArch32 "argumentMapping" ["Unsupported return value type: " ++ show retRepr]
+                      }

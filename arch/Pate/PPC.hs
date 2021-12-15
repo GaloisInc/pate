@@ -18,6 +18,7 @@ module Pate.PPC (
   , handleExternalCall
   , ppc64HasDedicatedRegister
   , ppc32HasDedicatedRegister
+  , argumentMapping
   )
 where
 
@@ -63,6 +64,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
+import qualified Pate.Verification.Override as PVO
 
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where
@@ -218,3 +220,6 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                          , PES.predStack = PEM.memPredTrue sym
                          , PES.predMem = PEM.memPredTrue sym
                          }
+
+argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v) sym
+argumentMapping = undefined

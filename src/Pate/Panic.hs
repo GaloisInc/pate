@@ -12,6 +12,8 @@ data PateComponent = Verifier
                    | InlineCallee
                    | Discovery
                    | Solver
+                   | Override
+                   | AArch32
                    deriving (Show)
 
 instance P.PanicComponent PateComponent where
