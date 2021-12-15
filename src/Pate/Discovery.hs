@@ -71,12 +71,13 @@ import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
+import qualified Pate.Panic as Panic
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Panic as Panic
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.SymbolTable as PSym
 import qualified What4.ExprHelpers as WEH
 
 --------------------------------------------------------
@@ -458,7 +459,8 @@ runDiscovery mCFGDir repr elf hints = do
                                 , PB.functionBinRepr = repr
                                 }
 
-  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry)
+  -- FIXME: Fill in the symbol table based on the hints and the dynamic symbol table
+  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry PSym.emptySymbolTable)
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin

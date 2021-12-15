@@ -44,6 +44,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Hints as PH
 import qualified Pate.PatchPair as PPa
+import qualified Pate.SymbolTable as PSym
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -204,6 +205,13 @@ data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   , binAbortFn :: Maybe (PB.FunctionEntry arch bin)
   -- ^ address of special-purposes "abort" function that represents an abnormal
   -- program exit
+  , symbolTable :: PSym.SymbolTable arch
+  -- ^ A mapping of addresses to symbols used to match overrides to callees
+  -- during symbolic execution in the inline-callee mode
+  --
+  -- Note that this table has more entries than the 'functionHintIndex', as it
+  -- also includes entries from the dynamic symbol table representing the
+  -- addresses of PLT stubs that call out to shared library functions
   }
 
 data EquivalenceContext sym arch where

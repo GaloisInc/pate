@@ -15,9 +15,10 @@ import qualified Control.Lens as L
 import           Control.Monad (foldM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
-import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
+import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
+import qualified Data.Map as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
@@ -76,6 +77,8 @@ import qualified Pate.Panic as PP
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
+import qualified Pate.SymbolTable as PSym
+import qualified Pate.Verification.Override as PVO
 
 -- | Create a crucible-friendly name for a macaw function
 --
@@ -363,6 +366,112 @@ concreteBlockFromBVAddr _proxy binRepr mem bv =
     addr :: PAd.ConcreteAddress arch
     addr = PAd.memAddrToAddr (DMM.absoluteAddr addrWord)
 
+-- | Call an override (specified as a pate 'PVO.Override') at this call site
+--
+-- This wrapper suitably transforms from machine arguments (i.e., the register
+-- file representation) to logical C-like arguments, calls the override, and
+-- then updates the machine state as-needed.
+--
+-- Like 'decodeAndCallFunction', this returns the function handle corresponding
+-- to this override (newly-allocated) and updates the crucible state with the
+-- appropriate mapping from handle to override.
+callOverride
+  :: forall arch sym p r f a ret args
+   . (LCB.IsSymInterface sym)
+  => LCS.SimState p sym (DMS.MacawExt arch) r f a
+  -- ^ The crucible state at the call site
+  -> LCT.TypeRepr (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+  -- ^ The type of the register file
+  -> PVO.ArgumentMapping arch sym
+  -- ^ The schema for converting from machine registers to structured argument lists
+  -> PVO.Override sym args (DMS.MacawExt arch) ret
+  -- ^ The override to arrange to be called from this call site
+  -> IO ( CFH.FnHandle (LCT.EmptyCtx LCT.::> LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+                       (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+        , LCS.SimState p sym (DMS.MacawExt arch) r f a
+        )
+callOverride crucState regsRepr argMap ov = do
+  let sym = crucState ^. LCS.stateContext . LCS.ctxSymInterface
+  let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
+  hdl <- CFH.mkHandle' halloc (PVO.functionName ov) (Ctx.singleton regsRepr) regsRepr
+
+  -- Create a wrapper override that extracts actual arguments (in a C-like
+  -- argument list) from the raw machine state, which is represented as a
+  -- register file. This also extracts the return value and suitably updates the
+  -- register state when the override returns.
+  let wrappedOverride = LCS.mkOverride' (PVO.functionName ov) regsRepr $ do
+        initialMachineArgs <- LCS.getOverrideArgs
+        let registerFile = LCS.regMap initialMachineArgs ^. Ctx.field @0
+        let projectedActuals = PVO.functionIntegerArgumentRegisters argMap (PVO.functionArgsRepr ov) (LCS.regValue registerFile)
+        let theOverride = PVO.functionOverride ov sym projectedActuals
+        PVO.functionReturnRegister argMap (PVO.functionRetRepr ov) theOverride (LCS.regValue registerFile)
+
+  let fnState = LCS.UseOverride wrappedOverride
+  let fnBinding = LCS.FnBinding hdl fnState
+  let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
+  return (hdl, crucState')
+
+-- | Decode a function from the binary at the given 'BVS.BV' address using
+-- macaw, translate it into a Crucible CFG, and bind it to a fresh function
+-- handle that is ultimately used in 'lookupFunction'.
+--
+-- The return value is 1. the fresh function handle, and 2. the updated crucible
+-- state with that handle bound to an appropriate CFG.
+--
+-- This is a key component of the incremental code discovery (and is the default
+-- case if we do not have an override for the function)
+decodeAndCallFunction
+  :: forall sym arch bin mem binFmt p r f a
+   . ( PA.ValidArch arch
+     , LCB.IsSymInterface sym
+     , PBi.KnownBinary bin
+     )
+  => PMC.ParsedFunctionMap arch bin
+  -> DMS.GenArchVals mem arch
+  -> MBL.LoadedBinary arch binFmt
+  -> LCS.SimState p sym (DMS.MacawExt arch) r f a
+  -- ^ The current crucible state while handling a macaw 'LookupFunctionHandle'
+  -> LCT.TypeRepr (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+  -- ^ The type of the machine register file
+  -> BVS.BV (DMC.ArchAddrWidth arch)
+  -- ^ The instruction pointer to decode a function for
+  -> IO ( CFH.FnHandle (LCT.EmptyCtx LCT.::> LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+                       (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+        , LCS.SimState p sym (DMS.MacawExt arch) r f a
+        )
+decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bvAddr =
+  case concreteBlockFromBVAddr (Proxy @arch) PC.knownRepr (MBL.memoryImage loadedBinary) bvAddr of
+    -- FIXME: This should probably be an exception, rather than a panic
+    --
+    -- It is plausible that a user could feed us a binary that triggered
+    -- this (it would be a very strange and probably bad binary, but still
+    -- externally triggerable)
+    Left err -> PP.panic PP.InlineCallee "decodeAndCallFunction" ["Error while interpreting instruction pointer: " ++ show err]
+    Right blk -> do
+      -- FIXME: Here we are decoding the function at the given address in our
+      -- binary. We need to also take in a symbol table to let us identify
+      -- external calls (or calls to named functions) that we might have
+      -- overrides for.
+      mdfi <- PMC.parsedFunctionContaining blk pfm
+      case mdfi of
+        -- FIXME: This probably shouldn't be a panic - rather an exception, or perhaps an uninterpreted effect
+        Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Unable to find mapping for address " ++ show bvAddr]
+        Just (Some dfi) -> do
+          CCC.SomeCFG cfg <- toCrucibleCFG (DMS.archFunctions archVals) dfi
+          -- Return a 'FnHandle' and an updated 'CrucibleState'
+
+          -- We could thread the handle allocator through, but it actually has
+          -- no data now, so allocating one is essentially free and doesn't have
+          -- any correctness downsides
+          let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
+          hdl <- CFH.mkHandle' halloc (discoveryFunName dfi) (Ctx.singleton regsRepr) regsRepr
+
+          let fnState = LCS.UseCFG cfg (LCAP.postdomInfo cfg)
+          let fnBinding = LCS.FnBinding hdl fnState
+          let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
+          return (hdl, crucState')
+
+
 -- | Given a register state corresponding to a function call, use the
 -- instruction pointer to look up the called function and return an appropriate
 -- function handle.
@@ -376,11 +485,14 @@ lookupFunction
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
      )
-  => PMC.ParsedFunctionMap arch bin
+  => PVO.ArgumentMapping arch sym
+  -> Map.Map T.Text (PVO.SomeOverride arch sym)
+  -> PSym.SymbolTable arch
+  -> PMC.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
   -> MBL.LoadedBinary arch binFmt
   -> DMS.LookupFunctionHandle sym arch
-lookupFunction pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
+lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
   let sym = crucState ^. LCS.stateContext . LCS.ctxSymInterface
   let regsRepr = LCT.StructRepr (DMS.crucArchRegTypes (DMS.archFunctions archVals))
   let regsEntry = LCS.RegEntry regsRepr regs
@@ -388,37 +500,11 @@ lookupFunction pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState
   ipBV <- LCLM.projectLLVM_bv sym (LCS.regValue ipPtr)
   case WI.asBV ipBV of
     Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr ipBV)]
-    Just bv ->
-      case concreteBlockFromBVAddr (Proxy @arch) PC.knownRepr (MBL.memoryImage loadedBinary) bv of
-        -- FIXME: This should probably be an exception, rather than a panic
-        --
-        -- It is plausible that a user could feed us a binary that triggered
-        -- this (it would be a very strange and probably bad binary, but still
-        -- externally triggerable)
-        Left err -> PP.panic PP.InlineCallee "lookupFunction" ["Error while interpreting instruction pointer: " ++ show err]
-        Right blk -> do
-          -- FIXME: Here we are decoding the function at the given address in our
-          -- binary. We need to also take in a symbol table to let us identify
-          -- external calls (or calls to named functions) that we might have
-          -- overrides for.
-          mdfi <- PMC.parsedFunctionContaining blk pfm
-          case mdfi of
-            -- FIXME: This probably shouldn't be a panic - rather an exception, or perhaps an uninterpreted effect
-            Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Unable to find mapping for address " ++ show bv]
-            Just (Some dfi) -> do
-              CCC.SomeCFG cfg <- toCrucibleCFG (DMS.archFunctions archVals) dfi
-              -- Return a 'FnHandle' and an updated 'CrucibleState'
-
-              -- We could thread the handle allocator through, but it actually has
-              -- no data now, so allocating one is essentially free and doesn't have
-              -- any correctness downsides
-              let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
-              hdl <- CFH.mkHandle' halloc (discoveryFunName dfi) (Ctx.singleton regsRepr) regsRepr
-
-              let fnState = LCS.UseCFG cfg (LCAP.postdomInfo cfg)
-              let fnBinding = LCS.FnBinding hdl fnState
-              let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
-              return (hdl, crucState')
+    Just bv
+      | Just calleeSymbol <- PSym.lookupSymbol bv symtab
+      , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides ->
+        callOverride crucState regsRepr argMap ov
+      | otherwise -> decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bv
 
 -- | Symbolically execute a macaw function with a given initial state, returning
 -- the final memory state
@@ -468,9 +554,13 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTb
   let globalMap = DMSM.mapRegionPointers memPtrTbl
 
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
+  symtab <- PMC.symbolTable <$> getBinCtx' binRepr
+  argMap <- CMR.asks envArgumentMapping
+  overrides <- CMR.asks envOverrides
+
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
-    let doLookup = lookupFunction pfm archVals loadedBin
+    let doLookup = lookupFunction argMap overrides symtab pfm archVals loadedBin
     let extImpl = DMS.macawExtensions archEvalFn memVar globalMap doLookup validityCheck
     -- We start with no handles bound for crucible; we'll add them dynamically
     -- as we find callees via lookupHandle

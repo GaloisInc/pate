@@ -267,6 +267,8 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd ge
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
       , envSymBackendLock = symBackendLock
+      , envOverrides = error "Fill in overrides"
+      , envArgumentMapping = error "Fill in argument mapping"
       }
 
   liftIO $ do
