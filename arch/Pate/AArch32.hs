@@ -124,7 +124,7 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                          , PES.predMem = PEM.memPredTrue sym
                          }
 
-argumentMapping :: PVO.ArgumentMapping SA.AArch32 sym
+argumentMapping :: PVO.ArgumentMapping SA.AArch32
 argumentMapping =
   PVO.ArgumentMapping { PVO.functionIntegerArgumentRegisters = \actualsRepr registerFile ->
                           let ptrWidth = PN.knownNat @32

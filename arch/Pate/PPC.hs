@@ -221,5 +221,5 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                          , PES.predMem = PEM.memPredTrue sym
                          }
 
-argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v) sym
+argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined

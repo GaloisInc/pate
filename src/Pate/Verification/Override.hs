@@ -42,13 +42,13 @@ data Override sym args ext ret =
 data SomeOverride arch sym where
   SomeOverride :: Override sym args (DMS.MacawExt arch) ret -> SomeOverride arch sym
 
-data ArgumentMapping arch sym =
+data ArgumentMapping arch =
   ArgumentMapping {
       -- | A function to map machine registers (the 'Ctx.Assignment' of
       -- 'LCS.RegValue'') to a structured argument list in the style of a C
       -- function, intended to be passed to an 'Override'
       functionIntegerArgumentRegisters
-        :: forall atps
+        :: forall atps sym
          . Ctx.Assignment LCT.TypeRepr atps
         -> Ctx.Assignment (LCS.RegValue' sym) (DMS.MacawCrucibleRegTypes arch)
         -> Ctx.Assignment (LCS.RegEntry sym) atps
@@ -56,7 +56,7 @@ data ArgumentMapping arch sym =
       -- value (e.g., the 'functionOverride' in an 'Override'), construct an
       -- 'LCS.OverrideSim' action that returns a machine register state.
     , functionReturnRegister
-        :: forall t r args rtp p
+        :: forall t r args rtp p sym
          . LCT.TypeRepr t
         -> LCS.OverrideSim p sym (DMS.MacawExt arch) r args rtp (LCS.RegValue sym t)
         -> LCS.RegValue sym (DMS.ArchRegStruct arch)

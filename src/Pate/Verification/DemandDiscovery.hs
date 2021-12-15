@@ -151,7 +151,7 @@ callOverride
   -- ^ The crucible state at the call site
   -> LCT.TypeRepr (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ The type of the register file
-  -> PVO.ArgumentMapping arch sym
+  -> PVO.ArgumentMapping arch
   -- ^ The schema for converting from machine registers to structured argument lists
   -> PVO.Override sym args (DMS.MacawExt arch) ret
   -- ^ The override to arrange to be called from this call site
@@ -254,7 +254,7 @@ lookupFunction
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
      )
-  => PVO.ArgumentMapping arch sym
+  => PVO.ArgumentMapping arch
   -> Map.Map T.Text (PVO.SomeOverride arch sym)
   -> PSym.SymbolTable arch
   -> PMC.ParsedFunctionMap arch bin
