@@ -185,15 +185,15 @@ doVerifyPairs ::
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
 doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
-  vals <- case MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) of
-    Nothing -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
-    Just vs -> pure vs
+  (traceVals, llvmVals) <- case (MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch), MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch)) of
+    (Just vs1, Just vs2) -> pure (vs1, vs2)
+    _ -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) elf elf'
 
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
 
-  eval <- CMT.lift (MS.withArchEval vals sym pure)
+  eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   model <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
   undefops <- liftIO $ MT.mkUndefinedPtrOps sym
@@ -246,7 +246,8 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd ge
       { envWhichBinary = Nothing
       , envValidArch = validArch
       , envCtx = ctxt
-      , envArchVals = vals
+      , envArchVals = traceVals
+      , envLLVMArchVals = llvmVals
       , envExtensions = exts
       , envPCRegion = pcRegion
       , envMemTraceVar = model

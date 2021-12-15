@@ -415,7 +415,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- in the environment because it is fixed to a different memory model - the
   -- trace based memory model. We need to use the traditional LLVM memory model
   -- for this part of the verifier.
-  let archVals = undefined
+  archVals <- CMR.asks envLLVMArchVals
 
   -- We allocate a shared initial state to execute both functions on so that we
   -- can compare their final memory states

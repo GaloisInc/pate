@@ -56,6 +56,7 @@ data EquivEnv sym arch where
     , envValidArch :: PA.SomeValidArch arch
     , envCtx :: PMC.EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
+    , envLLVMArchVals :: MS.GenArchVals MS.LLVMMemory arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envPCRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
