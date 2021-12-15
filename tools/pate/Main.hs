@@ -398,9 +398,9 @@ archToProxy origBinaryPath patchedBinaryPath = do
 machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.SomeValidArch)
 machineToProxy em =
   case em of
-    DEE.EM_PPC -> Right (Some (PA.SomeValidArch @PPC.PPC32 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc32HasDedicatedRegister))
-    DEE.EM_PPC64 -> Right (Some (PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc64HasDedicatedRegister))
-    DEE.EM_ARM -> Right (Some (PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall AArch32.hasDedicatedRegister))
+    DEE.EM_PPC -> Right (Some (PA.SomeValidArch @PPC.PPC32 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc32HasDedicatedRegister PPC.argumentMapping))
+    DEE.EM_PPC64 -> Right (Some (PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc64HasDedicatedRegister PPC.argumentMapping))
+    DEE.EM_ARM -> Right (Some (PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall AArch32.hasDedicatedRegister AArch32.argumentMapping))
     _ -> Left (UnsupportedArchitecture em)
 
 

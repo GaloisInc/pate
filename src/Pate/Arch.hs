@@ -36,6 +36,7 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
+import qualified Pate.Verification.Override as PVO
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -128,4 +129,5 @@ data SomeValidArch arch where
                 => PVE.ExternalDomain PVE.SystemCall arch
                 -> PVE.ExternalDomain PVE.ExternalCall arch
                 -> HasDedicatedRegister arch
+                -> PVO.ArgumentMapping arch
                 -> SomeValidArch arch

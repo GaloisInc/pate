@@ -183,7 +183,7 @@ doVerifyPairs ::
   N.NonceGenerator IO s ->
   sym ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd gen sym = do
+doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr _) logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case (MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch), MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch)) of
     (Just vs1, Just vs2) -> pure (vs1, vs2)
@@ -269,7 +269,6 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr) logAction elf elf' vcfg pd ge
       , envStatistics = statsVar
       , envSymBackendLock = symBackendLock
       , envOverrides = error "Fill in overrides"
-      , envArgumentMapping = error "Fill in argument mapping"
       }
 
   liftIO $ do
@@ -593,7 +592,7 @@ catchSimBundle pPair postcondSpec f = do
         simInO_ = SimInput stO (PPa.pOriginal pPair)
         simInP_ = SimInput stP (PPa.pPatched pPair)
       traceBlockPair pPair "Caught an error, so making a trivial block slice"
-      PA.SomeValidArch _ externalDomain _ <- CMR.asks envValidArch
+      PA.SomeValidArch _ externalDomain _ _ <- CMR.asks envValidArch
       r <- trivialBlockSlice False externalDomain (PPa.PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
@@ -721,7 +720,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                    -- treated as an uninterpreted function that reads the entire machine state
                    -- this can be relaxed with more information about the specific call
                    traceBundle bundle ("  Making a trivial block slice because this is a system call")
-                   PA.SomeValidArch syscallDomain _ _ <- CMR.asks envValidArch
+                   PA.SomeValidArch syscallDomain _ _ _ <- CMR.asks envValidArch
                    r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
                    return $ (W4.truePred sym, r)
                  | isEquatedCallSite -> do

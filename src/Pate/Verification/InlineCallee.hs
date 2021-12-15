@@ -323,7 +323,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTb
 
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
   symtab <- PMC.symbolTable <$> getBinCtx' binRepr
-  argMap <- CMR.asks envArgumentMapping
+  PA.SomeValidArch _ _ _ argMap <- CMR.asks envValidArch
   overrides <- CMR.asks envOverrides
 
 

@@ -89,8 +89,6 @@ data EquivEnv sym arch where
     -- ^ A lock to serialize access to the 'PSo.Sym'
     --
     -- See Note [Symbolic Backend Locking] for more details
-    , envArgumentMapping :: PVO.ArgumentMapping arch
-    -- ^ The strategy for mapping machine registers to override arguments
     , envOverrides :: M.Map T.Text (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch

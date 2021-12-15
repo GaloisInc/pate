@@ -225,7 +225,7 @@ equateRegisters ::
   SimBundle sym arch ->
   EquivM sym arch (PSi.AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
-  PA.SomeValidArch _ _ hdr <- CMR.asks envValidArch
+  PA.SomeValidArch _ _ hdr _ <- CMR.asks envValidArch
   fmap (mconcat) $ PRe.zipRegStates (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return mempty
     _ -> case M.lookup (Some r) regRel of
@@ -273,7 +273,7 @@ guessEquivalenceDomain ::
 guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   -- See Note [Names for Inputs]
   argNames <- lookupArgumentNames (PSi.simPair bundle)
-  PA.SomeValidArch _ _ hdr <- CMR.asks envValidArch
+  PA.SomeValidArch _ _ hdr _ <- CMR.asks envValidArch
   traceBundle bundle "Entering guessEquivalenceDomain"
   WEH.ExprFilter isBoundInGoal <- getIsBoundFilter' goal
   eqRel <- CMR.asks envBaseEquiv
