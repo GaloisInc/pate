@@ -293,13 +293,16 @@ symbolicallyExecute
   -> PBi.WhichBinaryRepr bin
   -> MBL.LoadedBinary arch binFmt
   -> DMD.DiscoveryFunInfo arch ids
+  -> [(DMM.MemWord (DMC.ArchAddrWidth arch), Integer)]
+  -- ^ Addresses of pointers in global memory whose contents should be ignored
+  -- (along with their length) for the purposes of post-state equivalence
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
   -> LCLM.MemImpl sym
   -- ^ Initial memory to simulate with
   -> DMSM.MemPtrTable sym w
   -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
-symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTbl = do
+symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs initMem memPtrTbl = do
   let ?recordLLVMAnnotation = \_ _ -> return ()
 
   let symArchFns = DMS.archFunctions archVals
@@ -313,9 +316,6 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi initRegs initMem memPtrTb
   halloc <- liftIO $ CFH.newHandleAllocator
   memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
 
-  ignPtrs <- case binRepr of
-               PBi.OriginalRepr -> PMC.originalIgnorePtrs . PME.envCtx <$> CMR.ask
-               PBi.PatchedRepr  -> PMC.patchedIgnorePtrs  . PME.envCtx <$> CMR.ask
   (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
 
   let globals = LCSG.insertGlobal memVar initMem' LCS.emptyGlobals
@@ -411,6 +411,9 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   let archInfo = PA.binArchInfo origBinary
 
 
+  origIgnore <- PMC.originalIgnorePtrs . PME.envCtx <$> CMR.ask
+  patchedIgnore <- PMC.patchedIgnorePtrs  . PME.envCtx <$> CMR.ask
+
   -- Note that we need to get a different archVals here - we can't use the one
   -- in the environment because it is fixed to a different memory model - the
   -- trace based memory model. We need to use the traditional LLVM memory model
@@ -423,9 +426,9 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
   (eoPostMem, oIgnPtrs) <-
-    withSymBackendLock $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI initRegs initMem memPtrTbl
+    withSymBackendLock $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegs initMem memPtrTbl
   (epPostMem, pIgnPtrs) <-
-    withSymBackendLock $ symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI initRegs initMem memPtrTbl
+    withSymBackendLock $ symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegs initMem memPtrTbl
 
   -- Note: we are symbolically executing both functions to get their memory
   -- post states. We explicitly do *not* want to try to prove all of their
