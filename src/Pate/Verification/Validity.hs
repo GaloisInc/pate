@@ -6,6 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 module Pate.Verification.Validity (
     validInitState
   , validRegister
@@ -58,7 +59,7 @@ validRegister ::
   MM.ArchReg arch tp ->
   EquivM sym arch (AssumptionFrame sym)
 validRegister mblockStart entry r = withSym $ \sym -> do
-  PA.SomeValidArch _ _ hdr _ <- CMR.asks envValidArch
+  PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
   case PRe.registerCase hdr (PSR.macawRegRepr entry) r of
     PRe.RegIP -> case mblockStart of
       Just blockStart -> do

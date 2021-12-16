@@ -28,16 +28,19 @@ import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO, MonadIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
+import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 import           GHC.Stack ( HasCallStack, callStack )
@@ -428,16 +431,48 @@ addAddrSym mem m funcDesc = do
     Just segoff -> return (Map.insert segoff symbol m)
     Nothing -> Panic.panic Panic.Discovery "addAddrSym" ["Invalid function entry point: " ++ show addr0]
 
+-- | Build a symbol table used to support invoking overrides in the "inline
+-- callee" feature using traditional symbolic execution
+--
+-- This differs from the other symbol table introduced by 'addAddrSym' in that
+-- it has extra entries that also cover assigning names to PLT stubs (enabling
+-- us to override calls to missing shared library functions).
+--
+-- We should ultimately combine the two and use this map in
+-- 'newParsedFunctionMap'; that map is just used to provide names to discovered
+-- functions, which should *never* need the extra names (but for which it
+-- wouldn't hurt to have them), as we should never be running code discovery
+-- over PLT stubs.
+buildSymbolTable
+  :: forall arch
+   . (MT.KnownNat (MC.ArchAddrWidth arch))
+  => PH.VerificationHints
+  -> Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
+  -> PSym.SymbolTable arch
+buildSymbolTable hints extraSyms =
+  F.foldl' addPLTStub (F.foldl' addHintEntry PSym.emptySymbolTable funHints) (Map.toList extraSyms)
+  where
+    funHints = fmap snd (PH.functionEntries hints)
+    addHintEntry st funcDesc =
+      let addr = BVS.mkBV (PN.knownNat @(MC.ArchAddrWidth arch)) (toInteger (PH.functionAddress funcDesc))
+          name = PH.functionSymbol funcDesc
+      in PSym.addSymbolTableEntry addr name st
+    addPLTStub st (bsName, addr) =
+      let tname = TE.decodeUtf8With TEE.lenientDecode bsName
+      in PSym.addSymbolTableEntry addr tname st
+
+
 runDiscovery ::
   forall arch bin.
   PB.KnownBinary bin =>
   PA.ValidArch arch =>
   Maybe FilePath ->
   PB.WhichBinaryRepr bin ->
+  Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch)) ->
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
   CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
-runDiscovery mCFGDir repr elf hints = do
+runDiscovery mCFGDir repr extraSyms elf hints = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
   addrSyms <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
@@ -459,8 +494,10 @@ runDiscovery mCFGDir repr elf hints = do
                                 , PB.functionBinRepr = repr
                                 }
 
+  let symTab = buildSymbolTable hints extraSyms
+
   -- FIXME: Fill in the symbol table based on the hints and the dynamic symbol table
-  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry PSym.emptySymbolTable)
+  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry symTab)
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin

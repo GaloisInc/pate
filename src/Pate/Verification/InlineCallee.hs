@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
 import           Control.Lens ( (^.) )
@@ -322,7 +323,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs initMem 
 
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
   symtab <- PMC.symbolTable <$> getBinCtx' binRepr
-  PA.SomeValidArch _ _ _ argMap <- CMR.asks envValidArch
+  PA.SomeValidArch (PA.validArchArgumentMapping -> argMap) <- CMR.asks envValidArch
   overrides <- CMR.asks envOverrides
 
 

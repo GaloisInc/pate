@@ -19,6 +19,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -126,23 +127,24 @@ runDiscovery
   => LJ.LogAction IO (PE.Event arch)
   -> Maybe FilePath
   -- ^ Directory to save macaw CFGs to
+  -> PA.SomeValidArch arch
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PH.Hinted (PLE.LoadedELF arch)
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
-runDiscovery logAction mCFGDir elf elf' = do
-  binCtxO <- discoverCheckingHints PBi.OriginalRepr elf
-  binCtxP <- discoverCheckingHints PBi.PatchedRepr elf'
+runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' = do
+  binCtxO <- discoverCheckingHints PBi.OriginalRepr (PA.validArchOrigExtraSymbols archData) elf
+  binCtxP <- discoverCheckingHints PBi.PatchedRepr (PA.validArchPatchedExtraSymbols archData) elf'
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf) (PH.hinted elf'))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discoverAsync mdir repr e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr e h)))
-    discoverCheckingHints repr e = do
+    discoverAsync mdir repr extra e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr extra e h)))
+    discoverCheckingHints repr extra e = do
       if | PH.hints e == mempty -> do
-             unhintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) mempty
+             unhintedAnalysis <- discoverAsync mCFGDir repr extra (PH.hinted e) mempty
              (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
              return oCtxUnhinted
          | otherwise -> do
-             hintedAnalysis <- discoverAsync mCFGDir repr (PH.hinted e) (PH.hints e)
+             hintedAnalysis <- discoverAsync mCFGDir repr extra (PH.hinted e) (PH.hints e)
              (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
 
              unless (null hintErrors) $ do
@@ -188,13 +190,13 @@ doVerifyPairs ::
   N.NonceGenerator IO s ->
   sym ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr _) logAction elf elf' vcfg pd gen sym = do
+doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case (MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch), MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch)) of
     (Just vs1, Just vs2) -> pure (vs1, vs2)
     _ -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
   ha <- liftIO CFH.newHandleAllocator
-  contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) elf elf'
+  contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf'
 
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
 
@@ -605,7 +607,7 @@ catchSimBundle pPair postcondSpec f = do
         simInO_ = SimInput stO (PPa.pOriginal pPair)
         simInP_ = SimInput stP (PPa.pPatched pPair)
       traceBlockPair pPair "Caught an error, so making a trivial block slice"
-      PA.SomeValidArch _ externalDomain _ _ <- CMR.asks envValidArch
+      PA.SomeValidArch (PA.validArchFunctionDomain -> externalDomain) <- CMR.asks envValidArch
       r <- trivialBlockSlice False externalDomain (PPa.PatchPair simInO_ simInP_) postcondSpec
       return $ (W4.truePred sym, r)
 
@@ -733,7 +735,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                    -- treated as an uninterpreted function that reads the entire machine state
                    -- this can be relaxed with more information about the specific call
                    traceBundle bundle ("  Making a trivial block slice because this is a system call")
-                   PA.SomeValidArch syscallDomain _ _ _ <- CMR.asks envValidArch
+                   PA.SomeValidArch (PA.validArchSyscallDomain -> syscallDomain) <- CMR.asks envValidArch
                    r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
                    return $ (W4.truePred sym, r)
                  | isEquatedCallSite -> do

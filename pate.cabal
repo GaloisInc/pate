@@ -76,6 +76,7 @@ library
                        Pate.Block,
                        Pate.Config,
                        Pate.Discovery,
+                       Pate.Discovery.PLT,
                        Pate.Verification,
                        Pate.Verification.DemandDiscovery,
                        Pate.Verification.Domain,

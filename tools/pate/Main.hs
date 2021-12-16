@@ -27,6 +27,7 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
 import qualified Data.List.NonEmpty as DLN
 import           Data.Maybe ( maybeToList )
+import           Data.Proxy ( Proxy(..) )
 import qualified Data.Traversable as T
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
@@ -39,12 +40,16 @@ import qualified System.IO as IO
 import qualified What4.Interface as WI
 
 import qualified Data.ElfEdit as DEE
+import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Parameterized.Classes as PC
 import           Data.Parameterized.Some ( Some(..) )
+import qualified SemMC.Architecture.AArch32 as SA
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Discovery.PLT as PLT
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
@@ -367,7 +372,7 @@ terminalFormatEvent evt =
 
 data LoadError where
   ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
-  ElfArchitectureMismatch :: [DEE.ElfParseError] -> DEE.ElfMachine -> DEE.ElfMachine -> LoadError
+  ElfArchitectureMismatch :: FilePath -> FilePath -> LoadError
   UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
 
 deriving instance Show LoadError
@@ -377,30 +382,60 @@ archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError]
 archToProxy origBinaryPath patchedBinaryPath = do
   origBin <- BS.readFile origBinaryPath
   patchedBin <- BS.readFile patchedBinaryPath
-  case (DEE.parseElf origBin, DEE.parseElf patchedBin) of
-    (DEE.ElfHeaderError off msg, _) -> return (Left (ElfHeaderParseError origBinaryPath off msg))
-    (_, DEE.ElfHeaderError off msg) -> return (Left (ElfHeaderParseError patchedBinaryPath off msg))
-    (DEE.Elf32Res errs32 e32, DEE.Elf64Res errs64 e64) ->
-      return (Left (ElfArchitectureMismatch (errs32 ++ errs64) (DEE.elfMachine e32) (DEE.elfMachine e64)))
-    (DEE.Elf64Res errs64 e64, DEE.Elf32Res errs32 e32) ->
-      return (Left (ElfArchitectureMismatch (errs64 ++ errs32) (DEE.elfMachine e64) (DEE.elfMachine e32)))
-    (DEE.Elf32Res origErrs (DEE.elfMachine -> origMachine), DEE.Elf32Res patchedErrs (DEE.elfMachine -> patchedMachine))
-      | origMachine == patchedMachine ->
-        return (fmap (origErrs ++ patchedErrs,) (machineToProxy origMachine))
-      | otherwise ->
-        return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
-    (DEE.Elf64Res origErrs (DEE.elfMachine -> origMachine), DEE.Elf64Res patchedErrs (DEE.elfMachine -> patchedMachine))
-      | origMachine == patchedMachine ->
-        return (fmap (origErrs ++ patchedErrs,) (machineToProxy origMachine))
-      | otherwise ->
-        return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
+  case (EEP.decodeElfHeaderInfo origBin, EEP.decodeElfHeaderInfo patchedBin) of
+    (Right (EEP.SomeElf origHdr), Right (EEP.SomeElf patchedHdr))
+      | Just PC.Refl <- PC.testEquality (DEE.headerClass (DEE.header origHdr)) (DEE.headerClass (DEE.header patchedHdr))
+      , DEE.headerMachine (DEE.header origHdr) == DEE.headerMachine (DEE.header patchedHdr) ->
+        let (origParseErrors, _origElf) = DEE.getElf origHdr
+            (patchedParseErrors, _patchedElf) = DEE.getElf patchedHdr
+            origMachine = DEE.headerMachine (DEE.header origHdr)
+        in return (fmap (origParseErrors ++ patchedParseErrors,) (machineToProxy origMachine origHdr patchedHdr))
+    (Left (off, msg), _) -> return (Left (ElfHeaderParseError origBinaryPath off msg))
+    (_, Left (off, msg)) -> return (Left (ElfHeaderParseError patchedBinaryPath off msg))
+    _ -> return (Left (ElfArchitectureMismatch origBinaryPath patchedBinaryPath))
 
-machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.SomeValidArch)
-machineToProxy em =
-  case em of
-    DEE.EM_PPC -> Right (Some (PA.SomeValidArch @PPC.PPC32 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc32HasDedicatedRegister PPC.argumentMapping))
-    DEE.EM_PPC64 -> Right (Some (PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc64HasDedicatedRegister PPC.argumentMapping))
-    DEE.EM_ARM -> Right (Some (PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall AArch32.hasDedicatedRegister AArch32.argumentMapping))
+-- | Create a 'PA.SomeValidArch' from parsed ELF files
+--
+-- Note that we do additional ELF parsing here so that we do not have to
+-- propagate ELF-specific constraints throughout the analysis.  This includes
+-- finding additional (dynamic) symbols from ELF files, which requires deep
+-- ELF-specific inspection.
+machineToProxy
+  :: DEE.ElfMachine
+  -> EEP.ElfHeaderInfo w
+  -> EEP.ElfHeaderInfo w
+  -> Either LoadError (Some PA.SomeValidArch)
+machineToProxy em origHdr patchedHdr =
+  case (em, EEP.headerClass (EEP.header origHdr)) of
+    (DEE.EM_PPC, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
+                                 , PA.validArchFunctionDomain = PPC.handleExternalCall
+                                 , PA.validArchDedicatedRegisters = PPC.ppc32HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = PPC.argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    (DEE.EM_PPC64, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
+                                 , PA.validArchFunctionDomain = PPC.handleExternalCall
+                                 , PA.validArchDedicatedRegisters = PPC.ppc64HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = PPC.argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    (DEE.EM_ARM, EEP.ELFCLASS32) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = AArch32.handleSystemCall
+                                 , PA.validArchFunctionDomain = AArch32.handleExternalCall
+                                 , PA.validArchDedicatedRegisters = AArch32.hasDedicatedRegister
+                                 , PA.validArchArgumentMapping = AArch32.argumentMapping
+                                 , PA.validArchOrigExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
+                                 , PA.validArchPatchedExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
     _ -> Left (UnsupportedArchitecture em)
 
 
