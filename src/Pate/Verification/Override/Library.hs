@@ -24,6 +24,11 @@ import qualified Lang.Crucible.Types as LCT
 import qualified Pate.Verification.Override as PVO
 
 -- | All overrides defined for the inline-callee symbolic execution phase
+--
+-- Note that all of the overrides in this module use unadorned names.  Our
+-- symbols for PLT stubs have more complex names (e.g., @malloc\@plt@). The
+-- logic to ensure that these overrides can be applied both for unadorned
+-- symbols and PLT stubs is handled when the overrides are registered.
 overrides
   :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions)
   => LCS.GlobalVar LCLM.Mem

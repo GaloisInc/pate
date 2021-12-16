@@ -456,10 +456,10 @@ buildSymbolTable hints extraSyms =
     addHintEntry st funcDesc =
       let addr = BVS.mkBV (PN.knownNat @(MC.ArchAddrWidth arch)) (toInteger (PH.functionAddress funcDesc))
           name = PH.functionSymbol funcDesc
-      in PSym.addSymbolTableEntry addr name st
+      in PSym.addSymbolTableEntry addr (PSym.LocalSymbol name) st
     addPLTStub st (bsName, addr) =
       let tname = TE.decodeUtf8With TEE.lenientDecode bsName
-      in PSym.addSymbolTableEntry addr tname st
+      in PSym.addSymbolTableEntry addr (PSym.PLTSymbol tname) st
 
 
 runDiscovery ::

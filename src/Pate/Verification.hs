@@ -97,6 +97,7 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Proof.Operations as PFO
 import           Pate.SimState
 import qualified Pate.Solver as PS
+import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.ExternalCall as PVE
 import           Pate.Verification.InlineCallee ( inlineCallee )
@@ -284,11 +285,16 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
       , envSymBackendLock = symBackendLock
-      , envOverrides = M.fromList [ (WF.functionName (PVO.functionName o), ov)
+      , envOverrides = M.fromList [ (n, ov)
                                   | ov@(PVO.SomeOverride o) <- PVOL.overrides llvmMemVar
+                                  , let txtName = WF.functionName (PVO.functionName o)
+                                  , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
                                   ]
       }
-
+  -- Note from above: we are installing overrides for each override that cover
+  -- both local symbol definitions and the corresponding PLT stubs for each
+  -- override so that they cover both statically linked and dynamically-linked
+  -- function calls.
   liftIO $ do
     (result, stats) <- runVerificationLoop env pPairs'
     endTime <- TM.getCurrentTime

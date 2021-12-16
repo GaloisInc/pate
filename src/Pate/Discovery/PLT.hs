@@ -23,8 +23,6 @@ import           GHC.TypeLits ( KnownNat )
 -- *real* function implementation in the shared library via the Global Offset
 -- Table.  The GOT is populated by the dynamic loader.
 --
--- The name for the PLT stub for the @read@ function will be named @read\@plt@.
---
 -- See Note [PLT Stub Names] for details
 pltStubSymbols
   :: forall arch w proxy reloc
@@ -59,7 +57,7 @@ pltStubSymbols _ _ elfHeaderInfo = Map.fromList $ fromMaybe [] $ do
   let nameRelaMap = zip [0..] (reverse revNameRelaMap)
   pltGotSec <- listToMaybe (EE.findSectionByName (BSC.pack ".plt.got") elf)
   let pltGotBase = EE.elfSectionAddr pltGotSec
-  return [ (symName <> BSC.pack "@plt", BVS.mkBV BVS.knownNat addr)
+  return [ (symName, BVS.mkBV BVS.knownNat addr)
          | (idx, (symName, _)) <- nameRelaMap
          , let addr = toInteger ((idx + 1) * 16 + pltGotBase)
          ]

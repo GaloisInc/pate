@@ -16,7 +16,6 @@ import qualified Control.Lens as L
 
 import           Data.Map (Map)
 import qualified Data.Map as M
-import qualified Data.Text as T
 import qualified Data.Time as TM
 
 import qualified Data.Parameterized.Nonce as N
@@ -45,6 +44,7 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.Solver as PSo
+import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 
 data VerificationFailureMode =
@@ -93,7 +93,7 @@ data EquivEnv sym arch where
     -- ^ A lock to serialize access to the 'PSo.Sym'
     --
     -- See Note [Symbolic Backend Locking] for more details
-    , envOverrides :: M.Map T.Text (PVO.SomeOverride arch sym)
+    , envOverrides :: M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
 

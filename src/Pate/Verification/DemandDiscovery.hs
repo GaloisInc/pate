@@ -25,7 +25,6 @@ import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import           Data.String ( fromString )
-import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 
@@ -255,7 +254,7 @@ lookupFunction
      , PBi.KnownBinary bin
      )
   => PVO.ArgumentMapping arch
-  -> Map.Map T.Text (PVO.SomeOverride arch sym)
+  -> Map.Map PSym.Symbol (PVO.SomeOverride arch sym)
   -> PSym.SymbolTable arch
   -> PMC.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
