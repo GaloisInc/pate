@@ -114,13 +114,14 @@ allocateStack
      , PA.ValidArch arch
      , w ~ DMC.ArchAddrWidth arch
      , 16 <= w
+     , LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions
      )
   => proxy arch
   -> sym
   -> LCLM.MemImpl sym
   -> IO (LCLM.MemImpl sym, LCS.RegValue sym (LCLM.LLVMPointerType w))
 allocateStack _proxy sym mem0 = do
-  let ?recordLLVMAnnotation = \_ _ -> return ()
   stackArrayStorage <- WI.freshConstant sym (WS.safeSymbol "stack_array") WI.knownRepr
   stackSizeBV <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr stackSizeBytes)
   let ?ptrWidth = WI.knownRepr
@@ -135,7 +136,9 @@ allocateIgnorableRegions
   :: ( LCB.IsSymInterface sym
      , PA.ValidArch arch
      , w ~ DMC.ArchAddrWidth arch
-     , 16 <= w
+     , LCLM.HasLLVMAnn sym
+     , LCLM.HasPtrWidth w
+     , ?memOpts :: LCLM.MemOptions
      )
   => proxy arch
   -> sym
@@ -145,10 +148,7 @@ allocateIgnorableRegions
 allocateIgnorableRegions _proxy sym mem0 = foldM allocateIgnPtr (mem0,mempty)
   where
     allocateIgnPtr (mem,ptrs) (loc, len) =
-      do let ?recordLLVMAnnotation = \_ _ -> return ()
-         let ?ptrWidth = WI.knownRepr
-
-         -- allocate a heap region region 
+      do -- allocate a heap region region
          len' <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr len)
          (ptr, mem1) <- LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable "ignorable_region" mem len' LCLD.noAlignment
 
@@ -184,9 +184,11 @@ allocateInitialState
   :: forall arch sym w
    . ( LCB.IsSymInterface sym
      , w ~ DMC.ArchAddrWidth arch
-     , 16 <= w
      , PA.ValidArch arch
      , PA.ArchConstraints arch
+     , LCLM.HasPtrWidth w
+     , LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions
      )
   => DMS.MacawSymbolicArchFunctions arch
   -> sym
@@ -197,7 +199,6 @@ allocateInitialState
         , DMSM.MemPtrTable sym w
         )
 allocateInitialState symArchFns sym archInfo memory = do
-  let ?recordLLVMAnnotation = \_ _ -> return ()
   let proxy = Proxy @arch
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
@@ -287,6 +288,9 @@ symbolicallyExecute
      , WPO.OnlineSolver solver
      , w ~ DMC.ArchAddrWidth arch
      , PBi.KnownBinary bin
+     , LCLM.HasPtrWidth w
+     , LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions
      )
   => DMS.ArchVals arch
   -> sym
@@ -303,8 +307,6 @@ symbolicallyExecute
   -> DMSM.MemPtrTable sym w
   -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
 symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs initMem memPtrTbl = do
-  let ?recordLLVMAnnotation = \_ _ -> return ()
-
   let symArchFns = DMS.archFunctions archVals
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
@@ -329,7 +331,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs initMem 
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
     let doLookup = PVD.lookupFunction argMap overrides symtab pfm archVals loadedBin
-    let extImpl = DMS.macawExtensions archEvalFn memVar globalMap doLookup validityCheck
+    let extImpl = DMS.macawExtensions archEvalFn memVar globalMap doLookup (DMS.unsupportedSyscalls "pate-inline-call") validityCheck
     -- We start with no handles bound for crucible; we'll add them dynamically
     -- as we find callees via lookupHandle
     --
@@ -414,6 +416,10 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   origIgnore <- PMC.originalIgnorePtrs . PME.envCtx <$> CMR.ask
   patchedIgnore <- PMC.patchedIgnorePtrs  . PME.envCtx <$> CMR.ask
 
+  let ?recordLLVMAnnotation = \_ _ _ -> return ()
+  let ?memOpts = LCLM.laxPointerMemOptions
+  let ?ptrWidth = PC.knownRepr
+
   -- Note that we need to get a different archVals here - we can't use the one
   -- in the environment because it is fixed to a different memory model - the
   -- trace based memory model. We need to use the traditional LLVM memory model
@@ -423,6 +429,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- We allocate a shared initial state to execute both functions on so that we
   -- can compare their final memory states
   let symArchFns = DMS.archFunctions archVals
+
   (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
 
   (eoPostMem, oIgnPtrs) <-

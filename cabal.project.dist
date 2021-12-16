@@ -4,6 +4,7 @@ packages: .
           submodules/what4/what4
           submodules/what4-serialize
           submodules/crucible/crucible
+          submodules/crucible/crucible-symio
           submodules/crucible/crucible-llvm
           submodules/arm-asl-parser
           submodules/asl-translator

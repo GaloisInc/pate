@@ -25,14 +25,14 @@ import qualified Pate.Verification.Override as PVO
 
 -- | All overrides defined for the inline-callee symbolic execution phase
 overrides
-  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym)
+  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions)
   => LCS.GlobalVar LCLM.Mem
   -> [PVO.SomeOverride arch sym]
 overrides memVar = [ ovMalloc memVar
                    , ovFree memVar
                    ]
 
-ovFree :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
+ovFree :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
 ovFree memVar = PVO.SomeOverride ov
   where
     ov = PVO.Override { PVO.functionName = "free"
@@ -42,7 +42,7 @@ ovFree memVar = PVO.SomeOverride ov
                       }
 
 doFree
-  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, LCB.IsSymInterface sym)
+  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, LCB.IsSymInterface sym, ?memOpts :: LCLM.MemOptions)
   => LCS.GlobalVar LCLM.Mem
   -> sym
   -> Ctx.Assignment (LCS.RegEntry sym) (Ctx.EmptyCtx Ctx.::> LCLM.LLVMPointerType w)
@@ -52,7 +52,7 @@ doFree memVar sym (Ctx.Empty Ctx.:> ptr) =
     mem' <- LCLM.doFree sym mem (LCS.regValue ptr)
     return ((), mem')
 
-ovMalloc :: (LCLM.HasPtrWidth w) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
+ovMalloc :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
 ovMalloc memVar = PVO.SomeOverride ov
   where
     ov = PVO.Override { PVO.functionName = "malloc"
@@ -62,7 +62,7 @@ ovMalloc memVar = PVO.SomeOverride ov
                       }
 
 doMalloc
-  :: (LCLM.HasPtrWidth w, LCB.IsSymInterface sym)
+  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, LCB.IsSymInterface sym, ?memOpts :: LCLM.MemOptions)
   => LCS.GlobalVar LCLM.Mem
   -> sym
   -> Ctx.Assignment (LCS.RegEntry sym) (Ctx.EmptyCtx Ctx.::> LCLM.LLVMPointerType w)

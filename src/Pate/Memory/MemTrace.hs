@@ -663,6 +663,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
          return $ LLVMPointer reg off
        _ -> error ( "MacawFreshSymbolic is unsupported in the trace memory model: " ++ show t)
     MacawLookupFunctionHandle _typeReps _registers -> error "MacawLookupFunctionHandle is unsupported in the trace memory model"
+    MacawLookupSyscallHandle {} -> error "MacawLookupSyscallHandle is unsupported in the trace memory model"
 
     MacawArchStmtExtension archStmt -> archStmtFn mvar globs archStmt
 
@@ -713,19 +714,20 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off'' <- bvXorBits sym off off'
       pure (LLVMPointer reg'' off'')
 
-evalMacawExprExtensionTrace :: forall sym arch f tp
+evalMacawExprExtensionTrace :: forall sym arch f tp p rtp blocks r ctx ext
                        .  IsSymInterface sym
                        => UndefinedPtrOps sym
                        -> sym
                        -> IntrinsicTypes sym
                        -> (Int -> String -> IO ())
+                       -> CrucibleState p sym ext rtp blocks r ctx
                        -> (forall utp . f utp -> IO (RegValue sym utp))
                        -> MacawExprExtension arch f tp
                        -> IO (RegValue sym tp)
-evalMacawExprExtensionTrace undefptr sym iTypes logFn f e0 =
+evalMacawExprExtensionTrace undefptr sym iTypes logFn cst f e0 =
   case e0 of
     PtrToBits _w x  -> doPtrToBits sym undefptr =<< f x
-    _ -> evalMacawExprExtension sym iTypes logFn f e0
+    _ -> evalMacawExprExtension sym iTypes logFn cst f e0
 
 doPtrToBits ::
   (IsSymInterface sym, 1 <= w) =>

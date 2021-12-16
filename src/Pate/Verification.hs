@@ -192,13 +192,20 @@ doVerifyPairs ::
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
 doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
-  (traceVals, llvmVals) <- case (MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch), MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch)) of
+  (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
+                                , MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch) Nothing) of
     (Just vs1, Just vs2) -> pure (vs1, vs2)
     _ -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf'
 
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
+
+
+  -- Implicit parameters for the LLVM memory model
+  let ?ptrWidth = PN.knownNat @(MM.ArchAddrWidth arch)
+  let ?recordLLVMAnnotation = \_ _ _ -> return ()
+  let ?memOpts = CLM.laxPointerMemOptions
 
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   model <- CMT.lift (MT.mkMemTraceVar @arch ha)
@@ -236,10 +243,6 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
                 return (unpackedPairs upData)
 
   symBackendLock <- liftIO $ MVar.newMVar ()
-
-  -- Implicit parameters for the LLVM memory model
-  let ?ptrWidth = PN.knownNat @(MM.ArchAddrWidth arch)
-  let ?recordLLVMAnnotation = \_ _ -> return ()
 
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
