@@ -11,7 +11,7 @@
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
 import           Control.Lens ( (^.) )
-import           Control.Monad (foldM)
+import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -20,6 +20,7 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
+import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
@@ -170,6 +171,25 @@ toCrucibleEndian macawEnd =
     DMM.LittleEndian -> LCLD.LittleEndian
     DMM.BigEndian -> LCLD.BigEndian
 
+-- | We don't have external libraries available, so references to their data or
+-- code (via relocation) can't really be resolved. We will represent those
+-- pointer values as fully symbolic bytes and hope for the best.
+--
+-- Any uses of this kind of data would need to be handled via override.
+populateRelocation
+  :: forall sym w
+   . ( LCB.IsSymInterface sym
+     , LCLM.HasPtrWidth w
+     )
+  => sym
+  -> DMC.Relocation w
+  -> IO [WI.SymExpr sym (WI.BaseBVType 8)]
+populateRelocation sym _reloc =
+  replicateM nBytes (WI.freshConstant sym (WS.safeSymbol "reloc_byte") byteRep)
+  where
+    nBytes = fromIntegral (PN.natValue ?ptrWidth)
+    byteRep = WT.BaseBVRepr (WI.knownNat @8)
+
 -- | Allocate an initial register and memory state for the symbolic execution step
 --
 -- NOTE: The same initial state should be used for both functions, to ensure
@@ -213,7 +233,8 @@ allocateInitialState symArchFns sym archInfo memory = do
   -- complicated, and would require significant infrastructure in the rest of
   -- the verifier to propagate known facts.
   let memModelContents = DMSM.SymbolicMutable
-  (mem0, memPtrTbl) <- DMSM.newGlobalMemory proxy sym endianness memModelContents memory
+  let globalMemConfig = DMSM.GlobalMemoryHooks { DMSM.populateRelocation = populateRelocation }
+  (mem0, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
 
   (mem1, sp) <- allocateStack proxy sym mem0
   initialRegisters <- liftIO $ DMS.macawAssignToCrucM (mkInitialRegVal symArchFns sym sp) (DMS.crucGenRegAssignment symArchFns)
