@@ -25,6 +25,7 @@ import           Data.Parameterized.Some
 import qualified Lumberjack as LJ
 
 import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified What4.Interface as W4
@@ -61,6 +62,9 @@ data EquivEnv sym arch where
     , envPCRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
+    , envLLVMMemVar :: CS.GlobalVar LCLM.Mem
+    -- ^ The global variable used to hold memory for the LLVM memory model while
+    -- symbolically executing functions in the "inline callee" feature
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode

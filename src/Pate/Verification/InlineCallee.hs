@@ -22,7 +22,6 @@ import qualified Data.Parameterized.List as PL
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
-import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified System.IO as IO
@@ -314,7 +313,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs initMem 
   let simAction = LCS.runOverrideSim regsRepr (LCS.regValue <$> LCS.callCFG cfg arguments)
 
   halloc <- liftIO $ CFH.newHandleAllocator
-  memVar <- liftIO $ LCLM.mkMemVar (T.pack "pate-verifier::memory") halloc
+  memVar <- CMR.asks envLLVMMemVar
 
   (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
 

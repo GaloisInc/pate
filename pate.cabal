@@ -82,6 +82,7 @@ library
                        Pate.Verification.ExternalCall,
                        Pate.Verification.InlineCallee,
                        Pate.Verification.Override,
+                       Pate.Verification.Override.Library,
                        Pate.Verification.Simplify,
                        Pate.Verification.SymbolicExecution,
                        Pate.Verification.Validity,

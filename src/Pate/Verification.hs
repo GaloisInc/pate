@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE MultiWayIf #-}
@@ -38,6 +39,7 @@ import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
+import qualified Data.Parameterized.NatRepr as PN
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
@@ -51,6 +53,7 @@ import qualified Lumberjack as LJ
 import           Prelude hiding ( fail )
 import qualified What4.Expr as WE
 import qualified What4.Expr.Builder as W4B
+import qualified What4.FunctionName as WF
 import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as WPO
 import qualified What4.SatResult as W4R
@@ -96,6 +99,8 @@ import qualified Pate.Solver as PS
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.ExternalCall as PVE
 import           Pate.Verification.InlineCallee ( inlineCallee )
+import qualified Pate.Verification.Override as PVO
+import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
@@ -196,6 +201,7 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr _) logAction elf elf' vcfg pd 
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   model <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
+  llvmMemVar <- CMT.lift (CC.freshGlobalVar ha (T.pack "pate-verifier::memory") W4.knownRepr)
   undefops <- liftIO $ MT.mkUndefinedPtrOps sym
 
   -- PC values are assumed to be absolute
@@ -229,6 +235,10 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr _) logAction elf elf' vcfg pd 
 
   symBackendLock <- liftIO $ MVar.newMVar ()
 
+  -- Implicit parameters for the LLVM memory model
+  let ?ptrWidth = PN.knownNat @(MM.ArchAddrWidth arch)
+  let ?recordLLVMAnnotation = \_ _ -> return ()
+
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -252,6 +262,7 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr _) logAction elf elf' vcfg pd 
       , envPCRegion = pcRegion
       , envMemTraceVar = model
       , envBlockEndVar = bvar
+      , envLLVMMemVar = llvmMemVar
       , envLogger = logAction
       , envConfig = vcfg
       , envBaseEquiv = stateEquivalence hdr sym stackRegion
@@ -268,7 +279,9 @@ doVerifyPairs validArch@(PA.SomeValidArch _ _ hdr _) logAction elf elf' vcfg pd 
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
       , envSymBackendLock = symBackendLock
-      , envOverrides = error "Fill in overrides"
+      , envOverrides = M.fromList [ (WF.functionName (PVO.functionName o), ov)
+                                  | ov@(PVO.SomeOverride o) <- PVOL.overrides llvmMemVar
+                                  ]
       }
 
   liftIO $ do
