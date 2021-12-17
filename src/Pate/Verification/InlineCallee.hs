@@ -363,7 +363,12 @@ symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs
     let executionFeatures = fmap LCS.genericToExecutionFeature execFeatures
     res <- liftIO $ LCS.executeCrucible executionFeatures s0
     finalMem <- liftIO $ getFinalGlobalValue (muxMemImpl sym) memVar res
-    return (finalMem, ignorableRegions)
+
+    -- try to resolve as many symbolic values in the memory state as possible
+    -- by asking the solver if there are unique models for them
+    finalMem' <- liftIO $ traverse (concreteizeMemory sym) finalMem
+
+    return (finalMem', ignorableRegions)
 
 -- | Look up the macaw CFG for the given function address
 --
@@ -385,13 +390,38 @@ functionFor pb = do
 
 -- | Analyze the post memory states to compute the separation frame for the inlined calls.
 buildCallFrame
-  :: (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
+  :: (LCB.IsSymInterface sym
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     ) =>
+  sym
+  -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
        -- ^ Original binary post state and ignorable region base pointers
   -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
        -- ^ Patched binary post state and ignorable region base pointers
-  -> EquivM sym arch (StatePredSpec sym arch)
-buildCallFrame (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) =
-  error "Compute memory post-state diff"
+  -> EquivM sym arch ()
+buildCallFrame sym (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) =
+  liftIO $ do
+    putStrLn "================ Original Memory ========================="
+    LCLM.doDumpMem IO.stdout oPostMem
+
+    putStrLn "================ Patched Memory ========================="
+    LCLM.doDumpMem IO.stdout pPostMem
+
+concreteizeMemory :: forall sym scope solver fs.
+ (LCB.IsSymInterface sym
+   , sym ~ LCBO.OnlineBackend scope solver fs
+   , WPO.OnlineSolver solver
+   ) =>
+  sym ->
+  LCLM.MemImpl sym -> IO (LCLM.MemImpl sym)
+concreteizeMemory sym = LCLM.concMemImpl sym f
+  where
+    f :: forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)
+    f ex = case WI.exprType ex of
+             WI.BaseBVRepr w  -> PVD.resolveSingletonSymbolicValue sym w ex
+             WI.BaseIntegerRepr -> PVD.resolveSingletonSymbolicValueInt sym ex
+             tp -> PP.panic PP.InlineCallee "concreteizeMemory" ["Don't know how to concreteize ", show tp]
 
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
@@ -476,7 +506,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   case (eoPostMem, epPostMem) of
     -- FIXME: In the error cases, generate a default frame and a proof error node
     (Right oPostMem, Right pPostMem) -> do
-      statePredSpec <- buildCallFrame (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
+      buildCallFrame sym (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
 
       let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                         }
