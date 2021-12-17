@@ -3,6 +3,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.AArch32 (
     SA.AArch32
@@ -12,16 +13,20 @@ module Pate.AArch32 (
   , argumentMapping
   ) where
 
-import           Control.Lens ( (^?) )
+import           Control.Lens ( (^?), (^.) )
 import qualified Control.Lens as L
 import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
 
+import qualified Data.Macaw.AbsDomain.AbsState as MA
+import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.Architecture.Info as MAI
 import qualified Data.Macaw.AArch32.Symbolic as DMAS
 import           Data.Macaw.BinaryLoader.AArch32 ()
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
@@ -30,6 +35,7 @@ import qualified Lang.Crucible.Types as LCT
 import qualified SemMC.Architecture.AArch32 as SA
 
 import qualified Data.Macaw.ARM as ARM
+import qualified Data.Macaw.ARM.Arch as MAA
 import qualified Data.Macaw.ARM.ARMReg as ARMReg
 import           Data.Macaw.AArch32.Symbolic ()
 import qualified Language.ASL.Globals as ASL
@@ -51,14 +57,40 @@ hasDedicatedRegister =
                           , PA.dedicatedRegisterValidity = \_ _ _ _ (NoRegisters v) -> absurd v
                           }
 
+
+hackyExtractBlockPrecond
+  :: MC.ArchSegmentOff SA.AArch32
+  -> MA.AbsBlockState (MC.ArchReg SA.AArch32)
+  -> Either String (MC.ArchBlockPrecond SA.AArch32)
+hackyExtractBlockPrecond _ absState =
+  case absState ^. MA.absRegState . MC.boundValue (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) of
+    MA.FinSet (Set.toList -> [bi]) -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = bi == 1 })
+    MA.FinSet {} -> Left "Multiple FinSet values for PSTATE_T"
+    MA.StridedInterval {} -> Left "StridedInterval where PSTATE_T expected"
+    MA.SubValue {} -> Left "SubValue where PSTATE_T expected"
+    MA.TopV -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False })
+
+-- | A modified version of the AArch32 code discovery configuration
+--
+-- This is an unfortunate (and hopefully temporary) hack to deal with some
+-- issues relating to Thumb code discovery in macaw-aarch32. This is safe as
+-- long as your program does not use Thumb mode (and, more specifically, as long
+-- as it doesn't issue a mode switch in the middle of a thumb function).
+--
+-- See Note [Thumb Code Discovery Hacks] for details
+hacky_arm_linux_info :: MAI.ArchitectureInfo SA.AArch32
+hacky_arm_linux_info =
+  ARM.arm_linux_info { MAI.extractBlockPrecond = hackyExtractBlockPrecond }
+
 instance PA.ArchConstraints SA.AArch32 where
-  binArchInfo = const ARM.arm_linux_info
+  binArchInfo = const hacky_arm_linux_info
 
 instance PA.ValidArch SA.AArch32 where
   -- FIXME: define these
   rawBVReg _r = False
   displayRegister = display
   argumentNameFrom = argumentNameFrom
+
 
 argumentNameFrom
   :: [T.Text]
@@ -145,3 +177,39 @@ argumentMapping =
                                   return $! DMAS.updateReg r0 (const (LCS.RV result)) registerFile
                             _ -> PP.panic PP.AArch32 "argumentMapping" ["Unsupported return value type: " ++ show retRepr]
                       }
+
+
+{- Note [Thumb Code Discovery Hacks]
+
+The underlying problem here is that macaw's code discovery configuration is not
+quite expressive enough to handle AArch32 completely (doing so safely is a huge
+problem that would technically require whole program analysis or context
+dependent analysis).
+
+The proximate error is that calls issued via @blx@ (branch with possible mode
+switch) can break code discovery at the return address. There are a number of
+issues that all collide here:
+
+1. When the address being jumped to is symbolic (e.g., read from memory), the
+   abstract interpretation has no idea what the value of PSTATE_T will be (since
+   it can't tell if the low bit is set or not)
+
+2. Because PSTATE_T is symbolic at the call site, it is symbolic at the start of
+   the return site, which causes 'extractBlockPrecond' to fail (in the default
+   macaw-aarch32)
+
+3. Even if that could be resolved, it would be wrong to take the PSTATE_T at the
+   call as the PSTATE_T in the return block, as the callee is *highly* likely to
+   switch the mode back (but is not required to do so)
+
+All told, macaw is not currently set up to handle this.  The most desirable
+outcome would probably be to preserve the PSTATE_T from before the @blx@
+instruction, but we don't have a good way to do that.
+
+This hack just defaults PSTATE_T to ARM mode if it can't tell what it should be,
+which is unsafe in general, but fine under the caveats:
+
+- The program does not use Thumb mode at all
+- The program does not issue a @blx@ instruction (or similar) in the middle of a function
+
+-}
