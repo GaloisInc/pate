@@ -7,6 +7,7 @@
 module Pate.Verification.Override.Library (
     overrides
   , ovMalloc
+  , ovCalloc
   , ovFree
   , ovMemcpy
   , ovMemcpyChk
@@ -44,6 +45,7 @@ overrides
   => LCS.GlobalVar LCLM.Mem
   -> [PVO.SomeOverride arch sym]
 overrides memVar = [ ovMalloc memVar
+                   , ovCalloc memVar
                    , ovFree memVar
                    , ovMemcpy memVar
                    , ovMemcpyChk memVar
@@ -96,6 +98,31 @@ doMalloc memVar sym (Ctx.Empty Ctx.:> nBytes) =
     let display = "<malloc at " ++ show loc ++ ">"
     sz <- LCLM.projectLLVM_bv sym (LCS.regValue nBytes)
     LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem sz LCLD.noAlignment
+
+ovCalloc :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
+ovCalloc memVar = PVO.SomeOverride ov
+  where
+    ov = PVO.Override { PVO.functionName = "calloc"
+                      , PVO.functionArgsRepr = Ctx.Empty Ctx.:> LCLM.LLVMPointerRepr ?ptrWidth
+                                                         Ctx.:> LCLM.LLVMPointerRepr ?ptrWidth
+                      , PVO.functionRetRepr = LCLM.LLVMPointerRepr ?ptrWidth
+                      , PVO.functionOverride = doCalloc memVar
+                      }
+
+doCalloc
+  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, LCB.IsSymInterface sym, ?memOpts :: LCLM.MemOptions)
+  => LCS.GlobalVar LCLM.Mem
+  -> sym
+  -> Ctx.Assignment (LCS.RegEntry sym) (Ctx.EmptyCtx Ctx.::> LCLM.LLVMPointerType w Ctx.::> LCLM.LLVMPointerType w)
+  -> LCS.OverrideSim p sym ext rtp args ret (LCS.RegValue sym (LCLM.LLVMPointerType w))
+doCalloc memVar sym (Ctx.Empty Ctx.:> nmemb Ctx.:> size) =
+  LCSO.modifyGlobal memVar $ \mem -> liftIO $ do
+    loc <- WP.plSourceLoc <$> WI.getCurrentProgramLoc sym
+    let display = "<calloc at " ++ show loc ++ ">"
+    nmembBV <- LCLM.projectLLVM_bv sym (LCS.regValue nmemb)
+    sizeBV <- LCLM.projectLLVM_bv sym (LCS.regValue size)
+    nBytesBV <- WI.bvMul sym nmembBV sizeBV
+    LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem nBytesBV LCLD.noAlignment
 
 ovMemcpy :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
 ovMemcpy memVar = PVO.SomeOverride ov
