@@ -7,6 +7,8 @@ module Pate.Verification.Override.Library (
     overrides
   , ovMalloc
   , ovFree
+  , ovMemcpy
+  , ovMemcpyChk
   ) where
 
 import           Control.Monad.IO.Class ( liftIO )
@@ -35,6 +37,8 @@ overrides
   -> [PVO.SomeOverride arch sym]
 overrides memVar = [ ovMalloc memVar
                    , ovFree memVar
+                   , ovMemcpy memVar
+                   , ovMemcpyChk memVar
                    ]
 
 ovFree :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
@@ -78,3 +82,35 @@ doMalloc memVar sym (Ctx.Empty Ctx.:> nBytes) =
     let display = "<malloc at " ++ show loc ++ ">"
     sz <- LCLM.projectLLVM_bv sym (LCS.regValue nBytes)
     LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem sz LCLD.noAlignment
+
+ovMemcpy :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
+ovMemcpy memVar = PVO.SomeOverride ov
+  where
+    ov = PVO.Override { PVO.functionName = "memcpy"
+                      , PVO.functionArgsRepr = Ctx.Empty Ctx.:> LCLM.LLVMPointerRepr ?ptrWidth
+                                                         Ctx.:> LCLM.LLVMPointerRepr ?ptrWidth
+                                                         Ctx.:> LCLM.LLVMPointerRepr ?ptrWidth
+                      , PVO.functionRetRepr = LCLM.LLVMPointerRepr ?ptrWidth
+                      , PVO.functionOverride = doMemcpy memVar
+                      }
+
+-- A checked memcpy that takes an additional destlen parameter
+--
+-- Note that this override does *not* perform the check explicitly and just
+-- reuses the underlying memcpy; the memory model will flag memory errors.
+ovMemcpyChk :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions) => LCS.GlobalVar LCLM.Mem -> PVO.SomeOverride arch sym
+ovMemcpyChk memVar =
+  case ovMemcpy memVar of
+    PVO.SomeOverride ov -> PVO.SomeOverride (ov { PVO.functionName = "__memcpy_chk" })
+
+doMemcpy
+  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, LCB.IsSymInterface sym, ?memOpts :: LCLM.MemOptions)
+  => LCS.GlobalVar LCLM.Mem
+  -> sym
+  -> Ctx.Assignment (LCS.RegEntry sym) (Ctx.EmptyCtx Ctx.::> LCLM.LLVMPointerType w Ctx.::> LCLM.LLVMPointerType w Ctx.::> LCLM.LLVMPointerType w)
+  -> LCS.OverrideSim p sym ext rtp args ret (LCS.RegValue sym (LCLM.LLVMPointerType w))
+doMemcpy memVar sym (Ctx.Empty Ctx.:> dest Ctx.:> src Ctx.:> nBytes) =
+  LCSO.modifyGlobal memVar $ \mem -> liftIO $ do
+    nBytesBV <- LCLM.projectLLVM_bv sym (LCS.regValue nBytes)
+    mem' <- LCLM.doMemcpy sym ?ptrWidth mem False (LCS.regValue dest) (LCS.regValue src) nBytesBV
+    return (LCS.regValue dest, mem')
