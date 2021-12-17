@@ -22,11 +22,15 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.Map as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import           Data.String ( fromString )
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
+import qualified Data.Traversable as T
+import           GHC.Stack ( HasCallStack )
+import           GHC.TypeLits ( type (<=) )
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as DMC
@@ -35,15 +39,21 @@ import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Lang.Crucible.Analysis.Postdom as LCAP
 import qualified Lang.Crucible.Backend as LCB
+import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.CFG.Core as CCC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.OverrideSim as LCSO
 import qualified Lang.Crucible.Types as LCT
+import qualified What4.BaseTypes as WT
+import qualified What4.Expr.GroundEval as WEG
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as WI
 import qualified What4.ProgramLoc as WP
+import qualified What4.Protocol.Online as WPO
+import qualified What4.Protocol.SMTWriter as WPS
+import qualified What4.SatResult as WSat
 
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
@@ -145,7 +155,7 @@ concreteBlockFromBVAddr _proxy binRepr mem bv =
 -- appropriate mapping from handle to override.
 callOverride
   :: forall arch sym p r f a ret args
-   . (LCB.IsSymInterface sym)
+   . (LCB.IsSymInterface sym, HasCallStack)
   => LCS.SimState p sym (DMS.MacawExt arch) r f a
   -- ^ The crucible state at the call site
   -> LCT.TypeRepr (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
@@ -193,6 +203,7 @@ decodeAndCallFunction
    . ( PA.ValidArch arch
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
+     , HasCallStack
      )
   => PMC.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
@@ -239,6 +250,44 @@ decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bvAddr =
           let crucState' = crucState & LCS.stateContext . LCS.functionBindings %~ insertFnBinding fnBinding
           return (hdl, crucState')
 
+-- | Attempt to resolve the given 'WI.SymExpr' to a concrete value using the SMT solver
+--
+-- This asks for a model. If it gets one, it adds a blocking clause and asks for
+-- another. If there was only one model, concretize the initial value and return
+-- it. Otherwise, return the original symbolic value
+resolveSingletonSymbolicValue
+  :: ( LCB.IsSymInterface sym
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     , 1 <= w
+     , HasCallStack
+     )
+  => sym
+  -> PN.NatRepr w
+  -> WI.SymExpr sym (WT.BaseBVType w)
+  -> IO (WI.SymExpr sym (WT.BaseBVType w))
+resolveSingletonSymbolicValue sym w val = do
+  LCBO.withSolverProcess sym onlinePanic $ \sp -> do
+    val' <- WPO.inNewFrame sp $ do
+      msat <- WPO.checkAndGetModel sp "Concretize value (with no assumptions)"
+      mmodel <- case msat of
+        WSat.Unknown -> return Nothing
+        WSat.Unsat {} -> return Nothing
+        WSat.Sat mdl -> return (Just mdl)
+      T.forM mmodel $ \mdl -> WEG.groundEval mdl val
+    case val' of
+      Nothing -> return val -- We failed to get a model... leave it symbolic
+      Just concVal -> do
+        WPO.inNewFrame sp $ do
+          block <- WI.notPred sym =<< WI.bvEq sym val =<< WI.bvLit sym w concVal
+          WPS.assume (WPO.solverConn sp) block
+          msat <- WPO.check sp "Concretize value (with blocking clause)"
+          case msat of
+            WSat.Unknown -> return val -- Total failure
+            WSat.Sat {} -> return val  -- There are multiple models
+            WSat.Unsat {} -> WI.bvLit sym w concVal -- There is a single concrete result
+  where
+    onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
 
 -- | Given a register state corresponding to a function call, use the
 -- instruction pointer to look up the called function and return an appropriate
@@ -248,10 +297,13 @@ decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bvAddr =
 -- incremental code discovery (only binding function handles and doing code
 -- discovery on demand).
 lookupFunction
-  :: forall sym arch bin mem binFmt
+  :: forall sym arch bin mem binFmt solver fs scope
    . ( PA.ValidArch arch
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     , HasCallStack
      )
   => PVO.ArgumentMapping arch
   -> Map.Map PSym.Symbol (PVO.SomeOverride arch sym)
@@ -266,8 +318,20 @@ lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFun
   let regsEntry = LCS.RegEntry regsRepr regs
   let ipPtr = DMS.lookupReg archVals regsEntry DMC.ip_reg
   ipBV <- LCLM.projectLLVM_bv sym (LCS.regValue ipPtr)
-  case WI.asBV ipBV of
-    Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr ipBV)]
+
+  -- Note that the IP could be "slightly" symbolic here. For example, a concrete
+  -- function pointer value could be spilled to the stack.  When it is read back
+  -- from the SMT memory model, it is just a symbolic term with no obvious
+  -- structure: only the SMT solver knows that it really can only be a single
+  -- value.  Use the solver to try to enumerate models; if there is just one,
+  -- concretize it so that we can use it for lookups here.
+  --
+  -- Note that if there are multiple actual values, this will remain a symbolic
+  -- term and we will fail (because Crucible cannot yet mux function handles).
+  singletonIP <- resolveSingletonSymbolicValue sym PN.knownNat ipBV
+
+  case WI.asBV singletonIP of
+    Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr singletonIP)]
     Just bv
       | Just calleeSymbol <- PSym.lookupSymbol bv symtab
       , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides ->
