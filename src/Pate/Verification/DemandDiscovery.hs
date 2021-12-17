@@ -64,7 +64,7 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.Panic as PP
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
-
+import Debug.Trace
 -- | A convenient Lens-styled combinator for updating a 'LCSO.FnBinding'
 insertFnBinding
   :: LCSO.FnBinding p sym ext
@@ -267,25 +267,29 @@ resolveSingletonSymbolicValue
   -> WI.SymExpr sym (WT.BaseBVType w)
   -> IO (WI.SymExpr sym (WT.BaseBVType w))
 resolveSingletonSymbolicValue sym w val = do
-  LCBO.withSolverProcess sym onlinePanic $ \sp -> do
-    val' <- WPO.inNewFrame sp $ do
-      msat <- WPO.checkAndGetModel sp "Concretize value (with no assumptions)"
-      mmodel <- case msat of
-        WSat.Unknown -> return Nothing
-        WSat.Unsat {} -> return Nothing
-        WSat.Sat mdl -> return (Just mdl)
-      T.forM mmodel $ \mdl -> WEG.groundEval mdl val
-    case val' of
-      Nothing -> return val -- We failed to get a model... leave it symbolic
-      Just concVal -> do
-        WPO.inNewFrame sp $ do
-          block <- WI.notPred sym =<< WI.bvEq sym val =<< WI.bvLit sym w concVal
-          WPS.assume (WPO.solverConn sp) block
-          msat <- WPO.check sp "Concretize value (with blocking clause)"
-          case msat of
-            WSat.Unknown -> return val -- Total failure
-            WSat.Sat {} -> return val  -- There are multiple models
-            WSat.Unsat {} -> WI.bvLit sym w concVal -- There is a single concrete result
+  case WI.asBV val of
+    Just _ -> return val
+    Nothing -> do
+      LCBO.withSolverProcess sym onlinePanic $ \sp -> do
+        val' <- WPO.inNewFrame sp $ do
+          msat <- WPO.checkAndGetModel sp "Concretize value (with no assumptions)"
+          mmodel <- case msat of
+            WSat.Unknown -> return Nothing
+            WSat.Unsat {} -> return Nothing
+            WSat.Sat mdl -> return (Just mdl)
+          T.forM mmodel $ \mdl -> WEG.groundEval mdl val
+        putStrLn ("Initial model is: " ++ show val')
+        case val' of
+          Nothing -> return val -- We failed to get a model... leave it symbolic
+          Just concVal -> do
+            WPO.inNewFrame sp $ do
+              block <- WI.notPred sym =<< WI.bvEq sym val =<< WI.bvLit sym w concVal
+              WPS.assume (WPO.solverConn sp) block
+              msat <- WPO.check sp "Concretize value (with blocking clause)"
+              case msat of
+                WSat.Unknown -> return val -- Total failure
+                WSat.Sat {} -> return val  -- There are multiple models
+                WSat.Unsat {} -> WI.bvLit sym w concVal -- There is a single concrete result
   where
     onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
 
@@ -333,7 +337,9 @@ lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFun
   case WI.asBV singletonIP of
     Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr singletonIP)]
     Just bv
+      | trace ("Next IP = " ++ show bv) False -> undefined
       | Just calleeSymbol <- PSym.lookupSymbol bv symtab
-      , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides ->
-        callOverride crucState regsRepr argMap ov
+      , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides -> do
+          putStrLn ("Invoking override " ++ show calleeSymbol)
+          callOverride crucState regsRepr argMap ov
       | otherwise -> decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bv

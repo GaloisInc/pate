@@ -82,25 +82,22 @@ mkInitialRegVal
      )
   => DMS.MacawSymbolicArchFunctions arch
   -> sym
-  -> LCS.RegValue sym (LCLM.LLVMPointerType (DMC.ArchAddrWidth arch))
   -> DMC.ArchReg arch tp
   -> IO (LCS.RegValue' sym (DMS.ToCrucibleType tp))
-mkInitialRegVal symArchFns sym sp_val r
-  | Just PC.Refl <- PC.testEquality r DMC.sp_reg = return (LCS.RV sp_val)
-  | otherwise = do
-    let regName = DMS.crucGenArchRegName symArchFns r
-    case DMT.typeRepr r of
-      DMT.BoolTypeRepr -> LCS.RV <$> WI.freshConstant sym regName WT.BaseBoolRepr
-      DMT.BVTypeRepr w -> do
-        c <- WI.freshConstant sym regName (WT.BaseBVRepr w)
-        LCS.RV <$> LCLM.llvmPointer_bv sym c
-      DMT.TupleTypeRepr PL.Nil -> return (LCS.RV Ctx.Empty)
-      DMT.TupleTypeRepr _ ->
-        PP.panic PP.InlineCallee "mkInitialRegVal" ["Tuple types are not supported initial register values"]
-      DMT.FloatTypeRepr _ ->
-        PP.panic PP.InlineCallee "mkInitialRegVal" ["Floating point types are not supported initial register values"]
-      DMT.VecTypeRepr {} ->
-        PP.panic PP.InlineCallee "mkInitialRegVal" ["Vector types are not supported initial register values"]
+mkInitialRegVal symArchFns sym r = do
+  let regName = DMS.crucGenArchRegName symArchFns r
+  case DMT.typeRepr r of
+    DMT.BoolTypeRepr -> LCS.RV <$> WI.freshConstant sym regName WT.BaseBoolRepr
+    DMT.BVTypeRepr w -> do
+      c <- WI.freshConstant sym regName (WT.BaseBVRepr w)
+      LCS.RV <$> LCLM.llvmPointer_bv sym c
+    DMT.TupleTypeRepr PL.Nil -> return (LCS.RV Ctx.Empty)
+    DMT.TupleTypeRepr _ ->
+      PP.panic PP.InlineCallee "mkInitialRegVal" ["Tuple types are not supported initial register values"]
+    DMT.FloatTypeRepr _ ->
+      PP.panic PP.InlineCallee "mkInitialRegVal" ["Floating point types are not supported initial register values"]
+    DMT.VecTypeRepr {} ->
+      PP.panic PP.InlineCallee "mkInitialRegVal" ["Vector types are not supported initial register values"]
 
 stackSizeBytes :: Integer
 stackSizeBytes = 1024 * 2
@@ -210,19 +207,15 @@ allocateInitialState
      , LCLM.HasLLVMAnn sym
      , ?memOpts :: LCLM.MemOptions
      )
-  => DMS.MacawSymbolicArchFunctions arch
-  -> sym
+  => sym
   -> DMAI.ArchitectureInfo arch
   -> DMM.Memory w
-  -> IO ( LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
+  -> IO ( LCS.RegValue sym (DMS.ToCrucibleType (DMT.BVType (DMC.ArchAddrWidth arch)))
         , LCLM.MemImpl sym
         , DMSM.MemPtrTable sym w
         )
-allocateInitialState symArchFns sym archInfo memory = do
+allocateInitialState sym archInfo memory = do
   let proxy = Proxy @arch
-  let crucRegTypes = DMS.crucArchRegTypes symArchFns
-  let regsRepr = LCT.StructRepr crucRegTypes
-
   let endianness = toCrucibleEndian (DMAI.archEndianness archInfo)
   -- Treat all mutable values in the global memory as symbolic
   --
@@ -235,12 +228,9 @@ allocateInitialState symArchFns sym archInfo memory = do
   let memModelContents = DMSM.SymbolicMutable
   let globalMemConfig = DMSM.GlobalMemoryHooks { DMSM.populateRelocation = populateRelocation }
   (mem0, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
-
   (mem1, sp) <- allocateStack proxy sym mem0
-  initialRegisters <- liftIO $ DMS.macawAssignToCrucM (mkInitialRegVal symArchFns sym sp) (DMS.crucGenRegAssignment symArchFns)
-  let initialRegsEntry = LCS.RegEntry regsRepr initialRegisters
 
-  return (initialRegsEntry, mem1, memPtrTbl)
+  return (sp, mem1, memPtrTbl)
 
 data GlobalStateError = Timeout
                       | AbortedExit
@@ -312,8 +302,11 @@ symbolicallyExecute
      , LCLM.HasPtrWidth w
      , LCLM.HasLLVMAnn sym
      , ?memOpts :: LCLM.MemOptions
+     , PA.ValidArch arch
+     , PA.ArchConstraints arch
      )
-  => DMS.ArchVals arch
+  => DMAI.ArchitectureInfo arch
+  -> DMS.ArchVals arch
   -> sym
   -> PBi.WhichBinaryRepr bin
   -> MBL.LoadedBinary arch binFmt
@@ -323,23 +316,24 @@ symbolicallyExecute
   -- (along with their length) for the purposes of post-state equivalence
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
-  -> LCLM.MemImpl sym
-  -- ^ Initial memory to simulate with
-  -> DMSM.MemPtrTable sym w
   -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
-symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs initMem memPtrTbl = do
+symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs = do
   let symArchFns = DMS.archFunctions archVals
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
 
+
+  (sp, initMem, memPtrTbl) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage loadedBin)
+  let spRegs = DMS.updateReg archVals initRegs DMC.sp_reg sp
+  (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
+
   CCC.SomeCFG cfg <- liftIO $ PVD.toCrucibleCFG symArchFns dfi
-  let arguments = LCS.RegMap (Ctx.singleton initRegs)
+  let arguments = LCS.RegMap (Ctx.singleton spRegs)
   let simAction = LCS.runOverrideSim regsRepr (LCS.regValue <$> LCS.callCFG cfg arguments)
 
   halloc <- liftIO $ CFH.newHandleAllocator
   memVar <- CMR.asks envLLVMMemVar
 
-  (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
 
   let globals = LCSG.insertGlobal memVar initMem' LCS.emptyGlobals
   let globalMap = DMSM.mapRegionPointers memPtrTbl
@@ -391,13 +385,13 @@ functionFor pb = do
 
 -- | Analyze the post memory states to compute the separation frame for the inlined calls.
 buildCallFrame
-  :: LCLM.MemImpl sym -- ^ Memory pre state
-  -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
+  :: (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
        -- ^ Original binary post state and ignorable region base pointers
   -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
        -- ^ Patched binary post state and ignorable region base pointers
   -> EquivM sym arch (StatePredSpec sym arch)
-buildCallFrame initMem (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) = undefined
+buildCallFrame (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) =
+  error "Compute memory post-state diff"
 
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
@@ -430,7 +424,6 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
 
   origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
   patchedBinary <- PMC.binary <$> getBinCtx' PBi.PatchedRepr
-  let origMemory = MBL.memoryImage origBinary
   let archInfo = PA.binArchInfo origBinary
 
 
@@ -451,12 +444,24 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- can compare their final memory states
   let symArchFns = DMS.archFunctions archVals
 
-  (initRegs, initMem, memPtrTbl) <- liftIO $ allocateInitialState @arch symArchFns sym archInfo origMemory
+  -- We start off with a shared initial set of registers (representing
+  -- equivalent function arguments)
+  --
+  -- Otherwise, we use separate memory images because the two binaries likely
+  -- have different contents -- particularly in the .text section. We will be
+  -- probing the memories for equivalence byte-by-byte (based on the respective
+  -- write logs). Since the data sections may be offset, we may have to correct
+  -- pointers between the two. We assume that the data sections are *largely*
+  -- aligned
+  initRegs <- liftIO $ DMS.macawAssignToCrucM (mkInitialRegVal symArchFns sym) (DMS.crucGenRegAssignment symArchFns)
+  let crucRegTypes = DMS.crucArchRegTypes symArchFns
+  let regsRepr = LCT.StructRepr crucRegTypes
+  let initRegsEntry = LCS.RegEntry regsRepr initRegs
 
   (eoPostMem, oIgnPtrs) <-
-    withSymBackendLock $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegs initMem memPtrTbl
+    withSymBackendLock $ symbolicallyExecute archInfo archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry
   (epPostMem, pIgnPtrs) <-
-    withSymBackendLock $ symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegs initMem memPtrTbl
+    withSymBackendLock $ symbolicallyExecute archInfo archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry
 
   -- Note: we are symbolically executing both functions to get their memory
   -- post states. We explicitly do *not* want to try to prove all of their
@@ -471,7 +476,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   case (eoPostMem, epPostMem) of
     -- FIXME: In the error cases, generate a default frame and a proof error node
     (Right oPostMem, Right pPostMem) -> do
-      statePredSpec <- buildCallFrame initMem (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
+      statePredSpec <- buildCallFrame (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
 
       let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                         }
