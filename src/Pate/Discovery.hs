@@ -74,7 +74,6 @@ import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
-import qualified Pate.Panic as Panic
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PR
@@ -429,7 +428,7 @@ addAddrSym mem m funcDesc = do
   let addr0 = PH.functionAddress funcDesc
   case PM.resolveAbsoluteAddress mem (fromIntegral addr0) of
     Just segoff -> return (Map.insert segoff symbol m)
-    Nothing -> Panic.panic Panic.Discovery "addAddrSym" ["Invalid function entry point: " ++ show addr0]
+    Nothing -> return m
 
 -- | Build a symbol table used to support invoking overrides in the "inline
 -- callee" feature using traditional symbolic execution

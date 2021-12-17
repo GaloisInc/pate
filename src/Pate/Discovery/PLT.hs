@@ -6,6 +6,7 @@ module Pate.Discovery.PLT (
   pltStubSymbols
   ) where
 
+import           Control.Applicative ( (<|>) )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -15,6 +16,10 @@ import qualified Data.Foldable as F
 import qualified Data.Map as Map
 import           Data.Maybe ( fromMaybe, listToMaybe )
 import           GHC.TypeLits ( KnownNat )
+import           Data.Word ( Word32 )
+
+data SomeRel tp where
+  SomeRel :: [r tp] -> (r tp -> Word32) -> SomeRel tp
 
 -- | Match up names PLT stub entries
 --
@@ -38,38 +43,42 @@ pltStubSymbols
 pltStubSymbols _ _ elfHeaderInfo = Map.fromList $ fromMaybe [] $ do
   let (_, elf) = EE.getElf elfHeaderInfo
   vam <- EEP.virtAddrMap elfBytes phdrs
-
   rawDynSec <- listToMaybe (EE.findSectionByName (BSC.pack ".dynamic") elf)
+
   let dynBytes = EE.elfSectionData rawDynSec
   dynSec <- case EEP.dynamicEntries (EE.elfData elf) (EE.elfClass elf) dynBytes of
     Left _dynErr -> Nothing
     Right dynSec -> return dynSec
 
-  relas <- case EEP.dynPLTRel @reloc dynSec vam of
-    Right (EEP.PLTRela relas) -> return relas
+  SomeRel rels getRelSymIdx <- case EEP.dynPLTRel @reloc dynSec vam of
+    Right (EEP.PLTRela relas) -> return (SomeRel relas EEP.relaSym)
+    Right (EEP.PLTRel rels) -> return (SomeRel rels EEP.relSym)
     _ -> Nothing
 
   vreqm <- case EEP.dynVersionReqMap dynSec vam of
     Left _dynErr -> Nothing
     Right vm -> return vm
 
-  let (_, revNameRelaMap) = F.foldl' (pltStubAddress dynSec vam vreqm) (1, []) relas
+  let revNameRelaMap = F.foldl' (pltStubAddress dynSec vam vreqm getRelSymIdx) [] rels
   let nameRelaMap = zip [0..] (reverse revNameRelaMap)
   pltGotSec <- listToMaybe (EE.findSectionByName (BSC.pack ".plt.got") elf)
+           <|> listToMaybe (EE.findSectionByName (BSC.pack ".plt") elf)
   let pltGotBase = EE.elfSectionAddr pltGotSec
+
+  -- FIXME: This calculation is right for a .plt section; I think that the
+  -- .plt.got variant is 16 bytes per entry
   return [ (symName, BVS.mkBV BVS.knownNat addr)
-         | (idx, (symName, _)) <- nameRelaMap
-         , let addr = toInteger ((idx + 1) * 16 + pltGotBase)
+         | (idx, symName) <- nameRelaMap
+         , let addr = 20 + idx * 12 + toInteger pltGotBase
          ]
   where
     phdrs = EE.headerPhdrs elfHeaderInfo
     elfBytes = EE.headerFileContents elfHeaderInfo
 
-    pltStubAddress dynSec vam vreqm (idx, accum) rela
-      | Right (symtabEntry, _versionedVal) <- EEP.dynSymEntry dynSec vam vreqm idx
-      , EE.steType symtabEntry == EE.STT_FUNC =
-        (idx + 1, (EE.steName symtabEntry, EE.relaAddr rela) : accum)
-      | otherwise = pltStubAddress dynSec vam vreqm (idx+1, accum) rela
+    pltStubAddress dynSec vam vreqm getRelSymIdx accum rel
+      | Right (symtabEntry, _versionedVal) <- EEP.dynSymEntry dynSec vam vreqm (getRelSymIdx rel) =
+          EE.steName symtabEntry : accum
+      | otherwise = accum
 
 {- Note [PLT Stub Names]
 
