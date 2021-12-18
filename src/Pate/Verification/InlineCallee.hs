@@ -662,7 +662,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   --
   -- We put those initial allocations in the shared frame, while performing each
   -- of the symbolic executions in separate frames to isolate them. This
-  -- *should* be safe, as the results of the symbolic execution do not depend on
+  -- /should/ be safe, as the results of the symbolic execution do not depend on
   -- the assumptions that are transiently in scope during symbolic execution
   -- (except where they have been encoded into formulas).
   withSymBackendLock $ do
