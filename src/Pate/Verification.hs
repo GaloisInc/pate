@@ -40,7 +40,6 @@ import qualified Control.Monad.Trans as CMT
 import qualified Data.Foldable as F
 import qualified Data.Map as M
 import           Data.Maybe ( catMaybes )
-import qualified Data.Parameterized.NatRepr as PN
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableF as TF
@@ -204,14 +203,11 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
 
 
   -- Implicit parameters for the LLVM memory model
-  let ?ptrWidth = PN.knownNat @(MM.ArchAddrWidth arch)
-  let ?recordLLVMAnnotation = \_ _ _ -> return ()
   let ?memOpts = CLM.laxPointerMemOptions
 
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   model <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
-  llvmMemVar <- CMT.lift (CC.freshGlobalVar ha (T.pack "pate-verifier::memory") W4.knownRepr)
   undefops <- liftIO $ MT.mkUndefinedPtrOps sym
 
   -- PC values are assumed to be absolute
@@ -268,7 +264,6 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envPCRegion = pcRegion
       , envMemTraceVar = model
       , envBlockEndVar = bvar
-      , envLLVMMemVar = llvmMemVar
       , envLogger = logAction
       , envConfig = vcfg
       , envBaseEquiv = stateEquivalence hdr sym stackRegion
@@ -285,11 +280,11 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
       , envSymBackendLock = symBackendLock
-      , envOverrides = M.fromList [ (n, ov)
-                                  | ov@(PVO.SomeOverride o) <- PVOL.overrides llvmMemVar
-                                  , let txtName = WF.functionName (PVO.functionName o)
-                                  , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
-                                  ]
+      , envOverrides = \ovCfg -> M.fromList [ (n, ov)
+                                            | ov@(PVO.SomeOverride o) <- PVOL.overrides ovCfg
+                                            , let txtName = WF.functionName (PVO.functionName o)
+                                            , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
+                                            ]
       }
   -- Note from above: we are installing overrides for each override that cover
   -- both local symbol definitions and the corresponding PLT stubs for each

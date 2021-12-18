@@ -24,6 +24,7 @@ import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified System.IO as IO
@@ -67,6 +68,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
 import qualified Pate.Verification.DemandDiscovery as PVD
+import qualified Pate.Verification.Override.Library as PVOL
 
 -- | Allocate an initial simulator value for a given machine register
 --
@@ -332,7 +334,7 @@ symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs
   let simAction = LCS.runOverrideSim regsRepr (LCS.regValue <$> LCS.callCFG cfg arguments)
 
   halloc <- liftIO $ CFH.newHandleAllocator
-  memVar <- CMR.asks envLLVMMemVar
+  memVar <- liftIO $ CCC.freshGlobalVar halloc (T.pack "pate-verifier::memory") WI.knownRepr
 
 
   let globals = LCSG.insertGlobal memVar initMem' LCS.emptyGlobals
@@ -341,7 +343,11 @@ symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
   symtab <- PMC.symbolTable <$> getBinCtx' binRepr
   PA.SomeValidArch (PA.validArchArgumentMapping -> argMap) <- CMR.asks envValidArch
-  overrides <- CMR.asks envOverrides
+
+  let ovCfg = PVOL.OverrideConfig { PVOL.ocMemVar = memVar
+                                  , PVOL.ocPointerMap = memPtrTbl
+                                  }
+  overrides <- ($ovCfg) <$> CMR.asks envOverrides
 
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do

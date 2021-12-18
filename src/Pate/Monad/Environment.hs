@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RankNTypes #-}
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -23,9 +24,10 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.LLVM.MemModel as LCLM
+import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as MS
+import qualified Lang.Crucible.LLVM.MemModel as LCLM
+import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
 
@@ -46,6 +48,7 @@ import           Pate.SimState
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
+import qualified Pate.Verification.Override.Library as PVOL
 
 data VerificationFailureMode =
     ThrowOnAnyFailure
@@ -62,7 +65,6 @@ data EquivEnv sym arch where
     , envPCRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
-    , envLLVMMemVar :: CS.GlobalVar LCLM.Mem
     -- ^ The global variable used to hold memory for the LLVM memory model while
     -- symbolically executing functions in the "inline callee" feature
     , envLogger :: LJ.LogAction IO (PE.Event arch)
@@ -93,7 +95,10 @@ data EquivEnv sym arch where
     -- ^ A lock to serialize access to the 'PSo.Sym'
     --
     -- See Note [Symbolic Backend Locking] for more details
-    , envOverrides :: M.Map PSym.Symbol (PVO.SomeOverride arch sym)
+    , envOverrides :: forall w
+                    . (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
+                   => PVOL.OverrideConfig sym w
+                   -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
 
