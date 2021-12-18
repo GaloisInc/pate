@@ -82,6 +82,7 @@ library
                        Pate.Verification.Domain,
                        Pate.Verification.ExternalCall,
                        Pate.Verification.InlineCallee,
+                       Pate.Verification.MemoryLog,
                        Pate.Verification.Override,
                        Pate.Verification.Override.Library,
                        Pate.Verification.Simplify,

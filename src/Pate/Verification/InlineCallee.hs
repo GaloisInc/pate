@@ -11,12 +11,16 @@
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
 import           Control.Lens ( (^.), folded )
+import qualified Control.Lens as L
 import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
+import qualified Data.Foldable as F
+import qualified Data.IntervalMap.Interval as IM
+import qualified Data.IntervalMap.Strict as IM
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
@@ -24,10 +28,8 @@ import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
-import qualified Data.Text as T
-import qualified Data.IntervalMap.Strict as IM
-import qualified Data.IntervalMap.Interval as IM
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import qualified Data.Traversable as T
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
@@ -50,6 +52,7 @@ import qualified Lang.Crucible.LLVM.Bytes as LCLB
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
+import qualified Lang.Crucible.LLVM.MemModel.MemLog as LCLMM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.GlobalState as LCSG
 import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
@@ -77,6 +80,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
 import qualified Pate.Verification.DemandDiscovery as PVD
+import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.Verification.Override.Library as PVOL
 
 -- | Allocate an initial simulator value for a given machine register
@@ -346,6 +350,10 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, ini
   let spRegs = DMS.updateReg archVals initRegs DMC.sp_reg sp
 
   (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
+
+  liftIO $ putStrLn ("Ignorable regions for: " ++ show binRepr)
+  F.forM_ ignorableRegions $ \(ptr, len) -> do
+    liftIO $ putStrLn ("  " ++ show (LCLM.ppPtr ptr) ++ " for " ++ show len ++ " bytes")
 
   CCC.SomeCFG cfg <- liftIO $ PVD.toCrucibleCFG symArchFns dfi
   let arguments = LCS.RegMap (Ctx.singleton spRegs)
@@ -689,9 +697,21 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
     case (eoPostMem, epPostMem) of
       -- FIXME: In the error cases, generate a default frame and a proof error node
       (Right oPostMem, Right pPostMem) -> do
-        buildCallFrame sym WI.knownRepr
-           (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
-           (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
+        -- buildCallFrame sym WI.knownRepr
+        --    (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
+        --    (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
+
+        -- liftIO $ LCLM.doDumpMem IO.stdout pPostMem
+        pWrites0 <- liftIO $ PVM.memoryOperationFootprint sym pPostMem
+        pWrites1 <- liftIO $ PVM.concretizeWrites sym pWrites0
+
+        liftIO $ putStrLn ("# writes found in original program: " ++ show (length pWrites0))
+
+        F.forM_ pWrites1 $ \w -> do
+          case w of
+            PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
+            PVM.MemoryWrite _w ptr len -> liftIO $ do
+              putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes")
 
         let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                           }
