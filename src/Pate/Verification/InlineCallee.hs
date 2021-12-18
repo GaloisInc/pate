@@ -10,7 +10,7 @@
 {-# LANGUAGE ViewPatterns #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
-import           Control.Lens ( (^.) )
+import           Control.Lens ( (^.), folded )
 import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
@@ -24,6 +24,10 @@ import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.IntervalMap.Strict as IM
+import qualified Data.IntervalMap.Interval as IM
+import qualified Data.Set as Set
+import qualified Data.Traversable as T
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified System.IO as IO
@@ -33,6 +37,7 @@ import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Discovery as DMD
 import qualified Data.Macaw.Memory as DMM
+import qualified Data.Macaw.Memory.Permissions as Perm
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Symbolic.Memory as DMSM
 import qualified Data.Macaw.Types as DMT
@@ -53,6 +58,10 @@ import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
 import qualified What4.Symbol as WS
+import qualified What4.Expr.GroundEval as WEG
+import qualified What4.Protocol.SMTWriter as WPS
+import qualified What4.SatResult as WSat
+
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -142,7 +151,7 @@ allocateIgnorableRegions
   -> sym
   -> LCLM.MemImpl sym
   -> [(DMM.MemWord (DMC.ArchAddrWidth arch), Integer)]
-  -> IO (LCLM.MemImpl sym, [LCLM.LLVMPtr sym w])
+  -> IO (LCLM.MemImpl sym, [(LCLM.LLVMPtr sym w, Integer)])
 allocateIgnorableRegions _proxy sym mem0 = foldM allocateIgnPtr (mem0,mempty)
   where
     allocateIgnPtr (mem,ptrs) (loc, len) =
@@ -160,7 +169,7 @@ allocateIgnorableRegions _proxy sym mem0 = foldM allocateIgnPtr (mem0,mempty)
          regionArrayStorage <- WI.freshConstant sym (WS.safeSymbol "ignorable_region_array") WI.knownRepr
          mem3 <- LCLM.doArrayStore sym mem2 ptr LCLD.noAlignment regionArrayStorage len'
 
-         return (mem3, (ptr:ptrs))
+         return (mem3, ((ptr,len):ptrs))
 
 toCrucibleEndian :: DMM.Endianness -> LCLD.EndianForm
 toCrucibleEndian macawEnd =
@@ -212,6 +221,7 @@ allocateInitialState
   -> DMM.Memory w
   -> IO ( LCS.RegValue sym (DMS.ToCrucibleType (DMT.BVType (DMC.ArchAddrWidth arch)))
         , LCLM.MemImpl sym
+        , DMSM.InitialBytesArray sym arch
         , DMSM.MemPtrTable sym w
         )
 allocateInitialState sym archInfo memory = do
@@ -227,10 +237,10 @@ allocateInitialState sym archInfo memory = do
   -- the verifier to propagate known facts.
   let memModelContents = DMSM.SymbolicMutable
   let globalMemConfig = DMSM.GlobalMemoryHooks { DMSM.populateRelocation = populateRelocation }
-  (mem0, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
+  (mem0, initBytes, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
   (mem1, sp) <- allocateStack proxy sym mem0
 
-  return (sp, mem1, memPtrTbl)
+  return (sp, mem1, initBytes, memPtrTbl)
 
 data GlobalStateError = Timeout
                       | AbortedExit
@@ -316,14 +326,17 @@ symbolicallyExecute
   -- (along with their length) for the purposes of post-state equivalence
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
-  -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym), [LCLM.LLVMPtr sym w])
+  -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym)
+                     , DMSM.InitialBytesArray sym arch
+                     , DMSM.MemPtrTable sym w
+                     , [(LCLM.LLVMPtr sym w,Integer)])
 symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs = do
   let symArchFns = DMS.archFunctions archVals
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
 
 
-  (sp, initMem, memPtrTbl) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage loadedBin)
+  (sp, initMem, initBytes, memPtrTbl) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage loadedBin)
   let spRegs = DMS.updateReg archVals initRegs DMC.sp_reg sp
   (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
 
@@ -366,9 +379,9 @@ symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs
 
     -- try to resolve as many symbolic values in the memory state as possible
     -- by asking the solver if there are unique models for them
-    finalMem' <- liftIO $ traverse (concreteizeMemory sym) finalMem
+    --finalMem' <- liftIO $ traverse (concreteizeMemory sym) finalMem
 
-    return (finalMem', ignorableRegions)
+    return (finalMem, initBytes, memPtrTbl, ignorableRegions)
 
 -- | Look up the macaw CFG for the given function address
 --
@@ -390,23 +403,166 @@ functionFor pb = do
 
 -- | Analyze the post memory states to compute the separation frame for the inlined calls.
 buildCallFrame
-  :: (LCB.IsSymInterface sym
+  :: ( LCB.IsSymInterface sym
      , sym ~ LCBO.OnlineBackend scope solver fs
      , WPO.OnlineSolver solver
+     , w ~ DMC.ArchAddrWidth arch
+     , LCLM.HasPtrWidth w
+     , LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions
+     , PA.ValidArch arch
+     , PA.ArchConstraints arch
      ) =>
   sym
-  -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
+  -> WI.NatRepr w
+  -> ( DMM.Memory w
+     , LCLM.MemImpl sym
+     , DMSM.InitialBytesArray sym arch
+     , DMSM.MemPtrTable sym (DMD.ArchAddrWidth arch)
+     , [(LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch),Integer)])
        -- ^ Original binary post state and ignorable region base pointers
-  -> (LCLM.MemImpl sym, [LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch)])
-       -- ^ Patched binary post state and ignorable region base pointers
-  -> EquivM sym arch ()
-buildCallFrame sym (oPostMem,oIgnPtrs) (pPostMem,pIgnPtrs) =
-  liftIO $ do
-    putStrLn "================ Original Memory ========================="
-    LCLM.doDumpMem IO.stdout oPostMem
 
-    putStrLn "================ Patched Memory ========================="
+  -> ( DMM.Memory w
+     , LCLM.MemImpl sym
+     , DMSM.InitialBytesArray sym arch
+     , DMSM.MemPtrTable sym (DMD.ArchAddrWidth arch)
+     , [(LCLM.LLVMPtr sym (DMD.ArchAddrWidth arch),Integer)])
+       -- ^ Patched binary post state and ignorable region base pointers
+
+  -> EquivM sym arch ()
+buildCallFrame sym w (oMacawMem, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
+                     (pMacawMem, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs) =
+  liftIO $ do
+    IO.hPutStrLn IO.stderr "Starting buildCallFrame memory probe!"
+
+    IO.hPutStrLn IO.stdout "======= Patched mem ======="
     LCLM.doDumpMem IO.stdout pPostMem
+
+    -- create an aribtrary pointer into global memory
+    blk <- WI.natLit sym 1
+    off <- WI.freshConstant sym (WI.safeSymbol "probe") (WI.BaseBVRepr w)
+
+    let ?ptrWidth = w
+    let ?recordLLVMAnnotation = \_ _ _ -> return ()
+
+    -- probe the memory models at that pointer
+    oByte <- LCLM.loadRaw sym oPostMem (LCLM.LLVMPointer blk off) (LCLM.bitvectorType 1) LCLD.noAlignment
+    pByte <- LCLM.loadRaw sym pPostMem (LCLM.LLVMPointer blk off) (LCLM.bitvectorType 1) LCLD.noAlignment
+
+    -- compute cases where there is a difference
+    diff <- case (oByte, pByte) of
+              (LCLM.NoErr p1 (LCLM.LLVMValInt b1 o1), LCLM.NoErr p2 (LCLM.LLVMValInt b2 o2))
+                | Just WI.Refl <- WI.testEquality (WI.bvWidth o1) (WI.bvWidth o2)
+                -> do p <- WI.xorPred sym p1 p2
+                      neq1 <- WI.notPred sym =<< WI.natEq sym b1 b2
+                      neq2 <- WI.notPred sym =<< WI.bvEq sym o1 o2
+                      WI.orPred sym p =<< WI.orPred sym neq1 neq2
+              (LCLM.NoErr p1 _, LCLM.Err _) -> return p1
+              (LCLM.Err _, LCLM.NoErr p2 _) -> return p2
+              (LCLM.Err _, LCLM.Err _)      -> return (WI.falsePred sym)
+
+              _ -> return (WI.truePred sym) -- don't report differences for things that we don't know what to do with
+
+    frame <- WI.arrayEq sym oInitBytes pInitBytes
+
+    let oMutableSegs = IM.fromList
+          [ (IM.IntervalCO (DMM.segmentOffset seg) (DMM.segmentOffset seg + DMM.segmentSize seg), ())
+          | seg <- DMM.memSegments oMacawMem
+          , DMM.segmentBase seg == 0
+          , Perm.hasPerm (DMM.segmentFlags seg) Perm.write
+          ]
+    let pMutableSegs = IM.fromList
+          [ (IM.IntervalCO (DMM.segmentOffset seg) (DMM.segmentOffset seg + DMM.segmentSize seg), ())
+          | seg <- DMM.memSegments pMacawMem
+          , DMM.segmentBase seg == 0
+          , Perm.hasPerm (DMM.segmentFlags seg) Perm.write
+          ]
+
+    putStrLn "== Original binary segments == "
+    print $ oMutableSegs
+
+    putStrLn "== Patched binary segments == "
+    print $ pMutableSegs
+
+    let combinedMutableSegs = IM.union oMutableSegs pMutableSegs
+
+    regions <- T.forM (IM.keys combinedMutableSegs) $ \iv ->
+      do lo <- WI.bvLit sym w (BVS.mkBV w (DMM.memWordToUnsigned (IM.lowerBound iv)))
+         hi <- WI.bvLit sym w (BVS.mkBV w (DMM.memWordToUnsigned (IM.upperBound iv)))
+         lop <- if IM.leftClosed iv  then WI.bvUle sym lo off else WI.bvUlt sym lo off
+         hip <- if IM.rightClosed iv then WI.bvUle sym off hi else WI.bvUlt sym off hi
+         WI.andPred sym lop hip
+
+    interestingRegion <- WI.orOneOf sym folded regions
+
+    -- TODO!! Hardcoded regions for a specific example!! Super gross!!
+    ignRegions <- T.forM [(0x21f08, 0x22048),(0x220e0,0x224e0),(0x21f00,0x21f08)] $ \(lo,hi) ->
+      do lo' <- WI.bvLit sym w (BVS.mkBV w lo)
+         hi' <- WI.bvLit sym w (BVS.mkBV w hi)
+         lop <- WI.bvUle sym lo' off
+         hip <- WI.bvUlt sym off hi'
+         WI.andPred sym lop hip
+
+    ignoreRegions <- WI.orOneOf sym folded ignRegions
+
+    q <- WI.andPred sym diff =<<
+         WI.andPred sym frame =<<
+         WI.andPred sym interestingRegion =<<
+         WI.notPred sym ignoreRegions
+
+    -- ask the solver for models of the difference
+    diffs <- findDiffs q off
+
+    putStrLn "--All differences--"
+    printDiffs (filterDiffs (Set.toList diffs))
+
+  where
+    printDiffs = putStrLn . unwords . map showDiff
+
+    showDiff (lo,hi) | lo == hi  = BVS.ppHex w lo
+                     | otherwise = "(" ++ BVS.ppHex w lo ++ ", " ++ BVS.ppHex w hi ++ ")"
+
+    filterDiffs []     = []
+    filterDiffs (x:xs) = filterDiffsAux x x xs
+
+    filterDiffsAux lo hi [] = [(lo,hi)]
+    filterDiffsAux lo hi (x:xs)
+      | BVS.asUnsigned hi + 1 == BVS.asUnsigned x = filterDiffsAux lo x xs
+      | otherwise = (lo,hi) : filterDiffs (x:xs)
+
+    findDiffs q off =
+      LCBO.withSolverProcess sym onlinePanic $ \sp -> do
+        WPO.inNewFrame sp $ do
+          WPS.assume (WPO.solverConn sp) q
+          msat <- WPO.checkAndGetModel sp "memory difference probe"
+          case msat of
+            WSat.Unknown  -> do putStrLn "No differences found!"
+                                return Set.empty
+            WSat.Unsat {} -> do putStrLn "No differences found!"
+                                return Set.empty
+            WSat.Sat mdl ->
+              do val <- WEG.groundEval mdl off
+                 putStrLn ("Difference in memory found at: " ++ show val)
+                 findMoreDifferences sp (1::Integer) (Set.singleton val) val off
+
+    findMoreDifferences sp n locs val off
+      | n >= 100 = do putStrLn ("Found 100 distinct location, stopped looking")
+                      return locs
+      | otherwise =
+         do valLit <- WI.bvLit sym w val
+            block <- WI.notPred sym =<< WI.bvEq sym off valLit
+            WPS.assume (WPO.solverConn sp) block
+            msat <- WPO.checkAndGetModel sp "memory difference probe"
+            case msat of
+              WSat.Unknown -> return locs
+              WSat.Unsat {} -> return locs
+              WSat.Sat mdl ->
+                do newval <- WEG.groundEval mdl off
+                   putStrLn ("Difference in memory found at: " ++ show newval)
+                   findMoreDifferences sp (n+1) (Set.insert newval locs) newval off
+
+    onlinePanic = PP.panic PP.InlineCallee "buildCallFrame" ["Online solver "]
+
 
 concreteizeMemory :: forall sym scope solver fs.
  (LCB.IsSymInterface sym
@@ -488,9 +644,9 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   let regsRepr = LCT.StructRepr crucRegTypes
   let initRegsEntry = LCS.RegEntry regsRepr initRegs
 
-  (eoPostMem, oIgnPtrs) <-
+  (eoPostMem, oInitBytes, oPtrTbl, oIgnPtrs) <-
     withSymBackendLock $ symbolicallyExecute archInfo archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry
-  (epPostMem, pIgnPtrs) <-
+  (epPostMem, pInitBytes, pPtrTbl, pIgnPtrs) <-
     withSymBackendLock $ symbolicallyExecute archInfo archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry
 
   -- Note: we are symbolically executing both functions to get their memory
@@ -506,7 +662,9 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   case (eoPostMem, epPostMem) of
     -- FIXME: In the error cases, generate a default frame and a proof error node
     (Right oPostMem, Right pPostMem) -> do
-      buildCallFrame sym (oPostMem, oIgnPtrs) (pPostMem,pIgnPtrs)
+      buildCallFrame sym WI.knownRepr
+         (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
+         (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
 
       let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                         }
