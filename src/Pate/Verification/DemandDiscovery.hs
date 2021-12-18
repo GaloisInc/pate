@@ -14,6 +14,8 @@
 module Pate.Verification.DemandDiscovery (
     lookupFunction
   , toCrucibleCFG
+  , resolveSingletonSymbolicValue
+  , resolveSingletonSymbolicValueInt
   ) where
 
 import           Control.Lens ( (&), (%~), (^.) )
@@ -292,6 +294,44 @@ resolveSingletonSymbolicValue sym w val = do
                 WSat.Unsat {} -> WI.bvLit sym w concVal -- There is a single concrete result
   where
     onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
+
+resolveSingletonSymbolicValueInt
+  :: ( LCB.IsSymInterface sym
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     , HasCallStack
+     )
+  => sym
+  -> WI.SymExpr sym WT.BaseIntegerType
+  -> IO (WI.SymExpr sym WT.BaseIntegerType)
+resolveSingletonSymbolicValueInt sym val = do
+ case WI.asInteger val of
+    Just _ -> return val
+    Nothing -> do
+      LCBO.withSolverProcess sym onlinePanic $ \sp -> do
+        val' <- WPO.inNewFrame sp $ do
+          msat <- WPO.checkAndGetModel sp "Concretize value (with no assumptions)"
+          mmodel <- case msat of
+            WSat.Unknown -> return Nothing
+            WSat.Unsat {} -> return Nothing
+            WSat.Sat mdl -> return (Just mdl)
+          T.forM mmodel $ \mdl -> WEG.groundEval mdl val
+        putStrLn ("Initial model is: " ++ show val')
+        case val' of
+          Nothing -> return val -- We failed to get a model... leave it symbolic
+          Just concVal -> do
+            WPO.inNewFrame sp $ do
+              block <- WI.notPred sym =<< WI.intEq sym val =<< WI.intLit sym concVal
+              WPS.assume (WPO.solverConn sp) block
+              msat <- WPO.check sp "Concretize value (with blocking clause)"
+              case msat of
+                WSat.Unknown -> return val -- Total failure
+                WSat.Sat {} -> return val  -- There are multiple models
+                WSat.Unsat {} -> WI.intLit sym concVal -- There is a single concrete result
+  where
+    onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
+
+
 
 -- | Given a register state corresponding to a function call, use the
 -- instruction pointer to look up the called function and return an appropriate
