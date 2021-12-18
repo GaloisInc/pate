@@ -32,6 +32,7 @@ module Pate.Monad
   , archFuns
   , runInIO1
   , withSymBackendLock
+  , inNewFrame
   , manifestError
   , implicitError
   , throwHere

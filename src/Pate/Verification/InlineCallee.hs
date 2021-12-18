@@ -317,8 +317,7 @@ symbolicallyExecute
      , PA.ValidArch arch
      , PA.ArchConstraints arch
      )
-  => DMAI.ArchitectureInfo arch
-  -> DMS.ArchVals arch
+  => DMS.ArchVals arch
   -> sym
   -> PBi.WhichBinaryRepr bin
   -> MBL.LoadedBinary arch binFmt
@@ -328,18 +327,24 @@ symbolicallyExecute
   -- (along with their length) for the purposes of post-state equivalence
   -> LCS.RegEntry sym (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ Initial registers to simulate with
+  -> ( LCS.RegValue sym (DMS.ToCrucibleType (DMT.BVType (DMC.ArchAddrWidth arch)))
+     , LCLM.MemImpl sym
+     , DMSM.InitialBytesArray sym arch
+     , DMSM.MemPtrTable sym w
+     )
+  -- ^ Initial memory state and associated metadata; this needs to be allocated
+  -- before the frame used for this symbolic execution, hence passing all of
+  -- this in rather than just allocating it in this function
   -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym)
                      , DMSM.InitialBytesArray sym arch
                      , DMSM.MemPtrTable sym w
                      , [(LCLM.LLVMPtr sym w,Integer)])
-symbolicallyExecute archInfo archVals sym binRepr loadedBin dfi ignPtrs initRegs = do
+symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, initMem, initBytes, memPtrTbl) = do
   let symArchFns = DMS.archFunctions archVals
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
-
-
-  (sp, initMem, initBytes, memPtrTbl) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage loadedBin)
   let spRegs = DMS.updateReg archVals initRegs DMC.sp_reg sp
+
   (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
 
   CCC.SomeCFG cfg <- liftIO $ PVD.toCrucibleCFG symArchFns dfi
@@ -650,29 +655,45 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   let regsRepr = LCT.StructRepr crucRegTypes
   let initRegsEntry = LCS.RegEntry regsRepr initRegs
 
-  (eoPostMem, oInitBytes, oPtrTbl, oIgnPtrs) <-
-    withSymBackendLock $ symbolicallyExecute archInfo archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry
-  (epPostMem, pInitBytes, pPtrTbl, pIgnPtrs) <-
-    withSymBackendLock $ symbolicallyExecute archInfo archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry
-
-  -- Note: we are symbolically executing both functions to get their memory
-  -- post states. We explicitly do *not* want to try to prove all of their
-  -- memory safety side conditions (or any other side conditions), since we
-  -- can't really assume that either program is correct. We *only* care about
-  -- their differences in observable behavior.
+  -- Acquiring the lock makes a fresh frame. We want to ensure that all of the
+  -- analysis happens within this frame, as the initial memory states are
+  -- encoded as assumptions, and the analysis must be carried out with those
+  -- assumptions in scope.
   --
-  -- In addition to memory, we could *also* collect a symbolic sequence of
-  -- observable effects in each function and attempt to prove that those
-  -- sequences are the same.
+  -- We put those initial allocations in the shared frame, while performing each
+  -- of the symbolic executions in separate frames to isolate them. This
+  -- *should* be safe, as the results of the symbolic execution do not depend on
+  -- the assumptions that are transiently in scope during symbolic execution
+  -- (except where they have been encoded into formulas).
+  withSymBackendLock $ do
+    -- The two initial memory states (which are encoded as assumptions, see
+    -- Data.Macaw.Symbolic.Memory for details)
+    oInitState <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage origBinary)
+    pInitState <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage patchedBinary)
 
-  case (eoPostMem, epPostMem) of
-    -- FIXME: In the error cases, generate a default frame and a proof error node
-    (Right oPostMem, Right pPostMem) -> do
-      buildCallFrame sym WI.knownRepr
-         (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
-         (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
+    (eoPostMem, oInitBytes, oPtrTbl, oIgnPtrs) <-
+      inNewFrame $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry oInitState
+    (epPostMem, pInitBytes, pPtrTbl, pIgnPtrs) <-
+      inNewFrame $ symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry pInitState
 
-      let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
-                                        }
-      lproof <- PFO.lazyProofApp prfNode
-      return (contPre, lproof)
+    -- Note: we are symbolically executing both functions to get their memory
+    -- post states. We explicitly do *not* want to try to prove all of their
+    -- memory safety side conditions (or any other side conditions), since we
+    -- can't really assume that either program is correct. We *only* care about
+    -- their differences in observable behavior.
+    --
+    -- In addition to memory, we could *also* collect a symbolic sequence of
+    -- observable effects in each function and attempt to prove that those
+    -- sequences are the same.
+
+    case (eoPostMem, epPostMem) of
+      -- FIXME: In the error cases, generate a default frame and a proof error node
+      (Right oPostMem, Right pPostMem) -> do
+        buildCallFrame sym WI.knownRepr
+           (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
+           (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
+
+        let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
+                                          }
+        lproof <- PFO.lazyProofApp prfNode
+        return (contPre, lproof)
