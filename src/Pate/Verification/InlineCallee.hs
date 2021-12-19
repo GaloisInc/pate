@@ -701,17 +701,27 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         --    (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
         --    (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
 
-        -- liftIO $ LCLM.doDumpMem IO.stdout pPostMem
+        oWrites0 <- liftIO $ PVM.memoryOperationFootprint sym oPostMem
+        oWrites1 <- liftIO $ PVM.concretizeWrites sym oWrites0
+
         pWrites0 <- liftIO $ PVM.memoryOperationFootprint sym pPostMem
         pWrites1 <- liftIO $ PVM.concretizeWrites sym pWrites0
 
-        liftIO $ putStrLn ("# writes found in original program: " ++ show (length pWrites0))
+        liftIO $ putStrLn ("# writes found in original program: " ++ show (length oWrites0))
+
+        F.forM_ oWrites1 $ \w -> do
+          case w of
+            PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
+            PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
+              putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
+
+        liftIO $ putStrLn ("# writes found in patched program: " ++ show (length pWrites0))
 
         F.forM_ pWrites1 $ \w -> do
           case w of
             PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
-            PVM.MemoryWrite _w ptr len -> liftIO $ do
-              putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes")
+            PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
+              putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
 
         let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                           }

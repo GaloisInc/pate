@@ -21,6 +21,7 @@ module Pate.Verification.Override.Library (
   ) where
 
 import           Control.Monad.IO.Class ( liftIO )
+import qualified Data.BitVector.Sized as BVS
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.NatRepr as PN
 import qualified What4.FunctionName as WF
@@ -186,9 +187,39 @@ doMemcpy ovCfg sym (Ctx.Empty Ctx.:> (LCS.regValue -> dest) Ctx.:> (LCS.regValue
     srcPtr <- mapPtr (LCLM.llvmPointerBlock src) (LCLM.llvmPointerOffset src)
 
     nBytesBV <- LCLM.projectLLVM_bv sym nBytes
+
+    -- FIXME: Temporarily use the broken memcpy (that doesn't map its dest or
+    -- src to real pointers), as doing the "right thing" seems to make the IP
+    -- too symbolic later
     mem' <- LCLM.doMemcpy sym ?ptrWidth mem False dest src nBytesBV
     return (dest, mem')
-
+    {-
+    case WI.asBV nBytesBV of
+      Nothing -> do
+        putStrLn "Symbolic memcpy"
+        -- If the number of bytes is symbolic, use the special memcpy primitive
+        -- in the memory model
+        mem' <- LCLM.doMemcpy sym ?ptrWidth mem False destPtr srcPtr nBytesBV
+        return (destPtr, mem')
+      Just (BVS.asNatural -> nBytesNat) -> do
+        putStrLn "Concrete memcpy"
+        -- Otherwise, implement it as a byte-by-byte copy
+        --
+        -- This avoid some SMT CopyArray primitives, which have caused problems
+        -- somehow in the memory model
+        let byteRep = LCLM.LLVMPointerRepr (PN.knownNat @8)
+        let byteStorage = LCLM.bitvectorType 1
+        let copyByte mem1 byteNum
+              | byteNum == nBytesNat = return (destPtr, mem1)
+              | otherwise = do
+                  bvOff <- WI.bvLit sym ?ptrWidth (BVS.mkBV ?ptrWidth (toInteger byteNum))
+                  srcAddr <- LCLM.ptrAdd sym ?ptrWidth srcPtr bvOff
+                  theByte <- LCLM.doLoad sym mem1 srcAddr byteStorage byteRep LCLD.noAlignment
+                  dstAddr <- LCLM.ptrAdd sym ?ptrWidth destPtr bvOff
+                  mem2 <- LCLM.doStore sym mem1 dstAddr byteRep byteStorage LCLD.noAlignment theByte
+                  copyByte mem2 (byteNum + 1)
+        copyByte mem 0
+-}
 ovMemset
   :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
   => OverrideConfig sym w
@@ -224,11 +255,35 @@ doMemset ovCfg sym (Ctx.Empty Ctx.:> (LCS.regValue -> dest) Ctx.:> (LCS.regValue
 
     destPtr <- mapPtr (LCLM.llvmPointerBlock dest) (LCLM.llvmPointerOffset dest)
 
-    nBytesBV <- LCLM.projectLLVM_bv sym nBytes
     valBV <- LCLM.projectLLVM_bv sym val
     fillByteBV <- WI.bvTrunc sym (PN.knownNat @8) valBV
-    mem' <- LCLM.doMemset sym ?ptrWidth mem dest fillByteBV nBytesBV
-    return (dest, mem')
+
+    nBytesBV <- LCLM.projectLLVM_bv sym nBytes
+
+    case WI.asBV nBytesBV of
+      Nothing -> do
+        -- If the number of bytes is symbolic, use the special memset primitive.
+        mem' <- LCLM.doMemset sym ?ptrWidth mem dest fillByteBV nBytesBV
+        return (dest, mem')
+      Just (BVS.asNatural -> nBytesNat) -> do
+        -- If the number of bytes is concrete, implement this as a direct
+        -- byte-by-byte write
+        --
+        -- It seems like it should be better to use the specialized primitives,
+        -- but they are implemented using SMT array copies, which have caused
+        -- various problems with yices.
+        fillByteAsPtr <- LCLM.llvmPointer_bv sym fillByteBV
+        let byteRep = LCLM.LLVMPointerRepr (PN.knownNat @8)
+        let storeByte mem1 byteNum
+              | byteNum == nBytesNat = return (destPtr, mem1)
+              | otherwise = do
+                  bvOff <- WI.bvLit sym ?ptrWidth (BVS.mkBV ?ptrWidth (toInteger byteNum))
+                  ptr <- LCLM.ptrAdd sym ?ptrWidth destPtr bvOff
+
+                  mem2 <- LCLM.doStore sym mem ptr byteRep (LCLM.bitvectorType 1) LCLD.noAlignment fillByteAsPtr
+                  storeByte mem2 (byteNum + 1)
+        storeByte mem 0
+
 
 -- | A no-op @fwrite@ that always indicates success by reporting that it wrote
 -- the number of bytes requested
