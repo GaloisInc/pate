@@ -685,7 +685,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off'' <- bvIte sym p off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAdd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAdd mkundef) someZero $ \sym reg off reg' off' -> do
+    PtrAdd w x y -> ptrOpNR w x y $ ptrBinOp (undefPtrAdd mkundef) someZero $ \sym reg off reg' off' -> do
       regZero <- isZero sym reg
 
       reg'' <- natIte sym regZero reg' reg
@@ -713,6 +713,14 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       reg'' <- natIte sym regZero reg' reg
       off'' <- bvXorBits sym off off'
       pure (LLVMPointer reg'' off'')
+
+    PtrTrunc w (RegEntry _ (LLVMPointer region offset)) -> readOnlyWithSym $ \sym -> do
+      off' <- bvTrunc sym w offset
+      pure (LLVMPointer region off')
+
+    PtrUExt w (RegEntry _ (LLVMPointer region offset)) -> readOnlyWithSym $ \sym -> do
+      off' <- bvZext sym w offset
+      pure (LLVMPointer region off')
 
 evalMacawExprExtensionTrace :: forall sym arch f tp p rtp blocks r ctx ext
                        .  IsSymInterface sym
@@ -836,6 +844,18 @@ compatSub = RegionConstraint msg $ \sym reg1 reg2 -> do
   orPred sym regZero1 regEq
   where
     msg = "first pointer region must be zero, or both regions must be equal"
+
+ptrOpNR ::
+  (1 <= w) =>
+  NatRepr w ->
+  RegEntry sym (LLVMPointerType w) ->
+  RegEntry sym (LLVMPointerType w) ->
+  (1 <= w => sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO a) ->
+  CrucibleState p sym ext rtp blocks r ctx ->
+  IO (a, CrucibleState p sym ext rtp blocks r ctx)
+ptrOpNR _w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region' offset')) f =
+  readOnlyWithSym $ \sym -> do
+    f sym region offset region' offset'
 
 ptrOp ::
   AddrWidthRepr w ->
