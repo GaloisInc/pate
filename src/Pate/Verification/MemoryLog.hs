@@ -11,6 +11,8 @@
 -- | Functions to analyze LLVM memory post-states
 module Pate.Verification.MemoryLog (
     MemoryWrite(..)
+  , Footprint(..)
+  , writtenLocations
   , memoryOperationFootprint
   , concretizeWrites
   , InvalidWritePolicy(..)
@@ -30,6 +32,7 @@ import qualified Data.Foldable as F
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.NatRepr as PN
+import qualified Data.Sequence as Seq
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified What4.BaseTypes as WT
@@ -60,6 +63,15 @@ data MemoryWrite sym where
   MemoryWrite :: (1 <= w) => String -> PN.NatRepr w -> LCLM.LLVMPtr sym w -> WI.SymBV sym w  -> MemoryWrite sym
   -- | A write with a length that is entirely unknown
   UnboundedWrite :: (1 <= w) => LCLM.LLVMPtr sym w -> MemoryWrite sym
+
+data Footprint sym =
+  Footprint { _writtenLocations :: !(Seq.Seq (MemoryWrite sym))
+            -- ^ Writes that we observe
+            , _freedAllocations :: !(Seq.Seq (WI.SymNat sym))
+            -- ^ Allocation numbers that are freed in the scope of the calculation
+            }
+
+$(LTH.makeLenses ''Footprint)
 
 data InvalidWritePolicy = Ignore | Keep
   deriving (Eq, Ord, Show)
@@ -102,16 +114,24 @@ satisfyPolicy p ignoreRegions w =
 
 -- | Apply a filter policy to discard the requested writes
 --
+-- It also discards writes to regions that are concretely known to be freed
+--
 -- It is most useful to apply this after concretizing writes, as this filter
--- does not use the solver to attempt to resolve symbolic terms
+-- does not use the solver to attempt to resolve symbolic terms.
 filterWrites
   :: (LCB.IsSymInterface sym)
   => FilterPolicy sym w
-  -> [MemoryWrite sym]
-  -> [MemoryWrite sym]
-filterWrites policy = filter (satisfyPolicy policy ignoreRegions)
+  -> Footprint sym
+  -> Footprint sym
+filterWrites policy fp =
+  Footprint { _writtenLocations = Seq.fromList $ filter (satisfyPolicy policy ignoreRegions) (F.toList (fp ^. writtenLocations))
+            , _freedAllocations = fp ^. freedAllocations
+            }
   where
-    ignoreRegions = fmap (fst . LCLM.llvmPointerView) (filterWritesToRegions policy)
+    -- Also ignore writes to freed allocations
+    ignoreRegions = concat [ fmap (fst . LCLM.llvmPointerView) (filterWritesToRegions policy)
+                           , F.toList (fp ^. freedAllocations)
+                           ]
 
 
 -- | Make a best-effort attempt to concretize the pointers and lengths of each
@@ -123,10 +143,18 @@ concretizeWrites
      , HasCallStack
      )
   => sym
-  -> [MemoryWrite sym]
-  -> IO [MemoryWrite sym]
-concretizeWrites sym = mapM concWrite
+  -> Footprint sym
+  -> IO (Footprint sym)
+concretizeWrites sym fp = do
+  locs' <- mapM concWrite (fp ^. writtenLocations)
+  frees' <- mapM concFree (fp ^. freedAllocations)
+  return Footprint { _writtenLocations = locs'
+                   , _freedAllocations = frees'
+                   }
   where
+    concFree r =
+      WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger sym =<< WI.natToInteger sym r
+
     concWrite mw =
       case mw of
         UnboundedWrite ptr -> do
@@ -136,6 +164,23 @@ concretizeWrites sym = mapM concWrite
           ptr' <- PVC.resolveSingletonPointer sym ptr
           len' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) sym len
           return (MemoryWrite rsn w ptr' len')
+
+emptyFootprint :: Footprint sym
+emptyFootprint = Footprint { _writtenLocations = mempty
+                           , _freedAllocations = mempty
+                           }
+
+addWrite
+  :: (CMS.MonadState (Footprint sym) m)
+  => MemoryWrite sym
+  -> m ()
+addWrite w = writtenLocations %= (<> Seq.singleton w)
+
+addFree
+  :: (CMS.MonadState (Footprint sym) m)
+  => WI.SymNat sym
+  -> m ()
+addFree bid = freedAllocations %= (<> Seq.singleton bid)
 
 -- | Compute the "footprint" exhibited by a memory post state
 --
@@ -151,11 +196,11 @@ memoryOperationFootprint
      )
   => sym
   -> LCLM.MemImpl sym
-  -> IO [MemoryWrite sym]
+  -> IO (Footprint sym)
 memoryOperationFootprint sym memImpl =
-  CMS.execStateT (traverseWriteLog (memImpl ^. L.to LCLM.memImplHeap . LCLMM.memState)) []
+  CMS.execStateT (traverseWriteLog (memImpl ^. L.to LCLM.memImplHeap . LCLMM.memState)) emptyFootprint
   where
-    processWrite :: LCLMM.MemWrite sym -> CMS.StateT [MemoryWrite sym] IO ()
+    processWrite :: LCLMM.MemWrite sym -> CMS.StateT (Footprint sym) IO ()
     processWrite mw =
       case mw of
         LCLMM.WriteMerge _ ws1 ws2 -> do
@@ -167,21 +212,21 @@ memoryOperationFootprint sym memImpl =
           -- dest pointer.
           case src of
             LCLMM.MemCopy _src len ->
-              CMS.modify' (MemoryWrite "MemCopy" w dst len:)
+              addWrite (MemoryWrite "MemCopy" w dst len)
             LCLMM.MemSet _byte len ->
-              CMS.modify' (MemoryWrite "MemSet" w dst len:)
+              addWrite (MemoryWrite "MemSet" w dst len)
             LCLMM.MemStore _llvmVal storageType _align -> do
               len <- liftIO $ WI.bvLit sym w (BVS.mkBV w (LCLB.bytesToInteger (LCLM.storageTypeSize storageType)))
-              CMS.modify' (MemoryWrite "MemStore" w dst len:)
+              addWrite (MemoryWrite "MemStore" w dst len)
             LCLMM.MemArrayStore symArr (Just len) ->
               case symArr of
-                WEB.BoundVarExpr {} -> CMS.modify' (MemoryWrite "MemArrayStore[BoundVarExpr]" w dst len:)
+                WEB.BoundVarExpr {} -> addWrite (MemoryWrite "MemArrayStore[BoundVarExpr]" w dst len)
                 WEB.NonceAppExpr nae ->
                   case WEB.nonceExprApp nae of
-                    WEB.ArrayFromFn {} -> CMS.modify' (MemoryWrite "MemArrayStore[ArrayFromFn]" w dst len:)
-                    WEB.MapOverArrays {} -> CMS.modify' (MemoryWrite "MemArrayStore[MapOverArrays]" w dst len:)
-                    WEB.FnApp {} -> CMS.modify' (MemoryWrite "MemArrayStore[FnApp]" w dst len:)
-                    _ -> CMS.modify' (MemoryWrite "MemArrayStore[OtherNonceApp]" w dst len:)
+                    WEB.ArrayFromFn {} -> addWrite (MemoryWrite "MemArrayStore[ArrayFromFn]" w dst len)
+                    WEB.MapOverArrays {} -> addWrite (MemoryWrite "MemArrayStore[MapOverArrays]" w dst len)
+                    WEB.FnApp {} -> addWrite (MemoryWrite "MemArrayStore[FnApp]" w dst len)
+                    _ -> addWrite (MemoryWrite "MemArrayStore[OtherNonceApp]" w dst len)
                 WEB.AppExpr appE ->
                   case WEB.appExprApp appE of
                     WEB.UpdateArray _eltRepr idxReprs _symArr idxs _newElt -> do
@@ -199,29 +244,42 @@ memoryOperationFootprint sym memImpl =
                             let tag = "MemArrayStore@"
                             let dst' = LCLM.LLVMPointer (fst (LCLM.llvmPointerView dst)) idx
                             len1 <- liftIO $ WI.bvLit sym w (BVS.mkBV w 1)
-                            CMS.modify' (MemoryWrite tag w dst' len1:)
-                    WEB.ArrayMap {} -> CMS.modify' (MemoryWrite "MemArrayStore[ArrayMap]" w dst len:)
-                    WEB.ConstantArray {} -> CMS.modify' (MemoryWrite "MemArrayStore[ConstantArray]" w dst len:)
-                    WEB.SelectArray {} -> CMS.modify' (MemoryWrite "MemArrayStore[SelectArray]" w dst len:)
-                    WEB.BaseIte {} -> CMS.modify' (MemoryWrite "MemArrayStore[ite]" w dst len:)
-                    _ -> CMS.modify' (MemoryWrite "MemArrayStore[unknown/app]" w dst len:)
-            LCLMM.MemArrayStore _ Nothing -> CMS.modify' (UnboundedWrite dst:)
+                            addWrite (MemoryWrite tag w dst' len1)
+                    WEB.ArrayMap {} -> addWrite (MemoryWrite "MemArrayStore[ArrayMap]" w dst len)
+                    WEB.ConstantArray {} -> addWrite (MemoryWrite "MemArrayStore[ConstantArray]" w dst len)
+                    WEB.SelectArray {} -> addWrite (MemoryWrite "MemArrayStore[SelectArray]" w dst len)
+                    WEB.BaseIte {} -> addWrite (MemoryWrite "MemArrayStore[ite]" w dst len)
+                    _ -> addWrite (MemoryWrite "MemArrayStore[unknown/app]" w dst len)
+            LCLMM.MemArrayStore _ Nothing -> addWrite (UnboundedWrite dst)
             LCLMM.MemInvalidate _ len ->
-              CMS.modify' (MemoryWrite "MemInvalidate" w dst len:)
+              addWrite (MemoryWrite "MemInvalidate" w dst len)
 
     processChunk c =
       case c of
         LCLMM.MemWritesChunkFlat mws -> mapM_ processWrite mws
         LCLMM.MemWritesChunkIndexed mws -> mapM_ (mapM_ processWrite) mws
 
+    processAlloc a =
+      case a of
+        LCLMM.Allocations {} -> return ()
+        LCLMM.MemFree r _ -> addFree r
+        LCLMM.AllocMerge _ allocs1 allocs2 -> do
+          processAllocs allocs1
+          processAllocs allocs2
+
     processWrites (LCLMM.MemWrites chunks) = mapM_ processChunk chunks
+    processAllocs (LCLMM.MemAllocs allocs) = mapM_ processAlloc allocs
     traverseWriteLog memState =
       case memState of
-        LCLMM.EmptyMem _ _ (_allocs, writes) -> processWrites writes
-        LCLMM.StackFrame _ _ _ (_allocs, writes) memState' -> do
+        LCLMM.EmptyMem _ _ (allocs, writes) -> do
+          processAllocs allocs
+          processWrites writes
+        LCLMM.StackFrame _ _ _ (allocs, writes) memState' -> do
+          processAllocs allocs
           processWrites writes
           traverseWriteLog memState'
-        LCLMM.BranchFrame _ _ (_allocs, writes) memState' -> do
+        LCLMM.BranchFrame _ _ (allocs, writes) memState' -> do
+          processAllocs allocs
           processWrites writes
           traverseWriteLog memState'
 
@@ -308,8 +366,8 @@ compareMemoryTraces
      , LCLM.HasPtrWidth w
      )
   => sym
-  -> (LCLM.MemImpl sym, [MemoryWrite sym])
-  -> (LCLM.MemImpl sym, [MemoryWrite sym])
+  -> (LCLM.MemImpl sym, Footprint sym)
+  -> (LCLM.MemImpl sym, Footprint sym)
   -> IO (WriteSummary sym w)
 compareMemoryTraces sym (oMem, oWrites) (pMem, pWrites) =
   CMS.execStateT doAnalysis s0
@@ -320,5 +378,5 @@ compareMemoryTraces sym (oMem, oWrites) (pMem, pWrites) =
                       , _unhandledPointers = []
                       }
     doAnalysis = do
-      mapM_ (compareWrite differingOrigHeapLocations sym oMem pMem) oWrites
-      mapM_ (compareWrite differingPatchedHeapLocations sym oMem pMem) pWrites
+      mapM_ (compareWrite differingOrigHeapLocations sym oMem pMem) (oWrites ^. writtenLocations)
+      mapM_ (compareWrite differingPatchedHeapLocations sym oMem pMem) (pWrites ^. writtenLocations)

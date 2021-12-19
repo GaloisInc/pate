@@ -730,11 +730,11 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         pWrites1 <- liftIO $ PVM.concretizeWrites sym pWrites0
         let pWrites2 = PVM.filterWrites pPolicy pWrites1
 
-        liftIO $ putStrLn ("# writes found in original program: " ++ show (length oWrites0))
-        liftIO $ F.forM_ oWrites1 printWrite
+        liftIO $ putStrLn ("# writes found in original program: " ++ show (length (oWrites0 ^. PVM.writtenLocations)))
+        liftIO $ F.forM_ (oWrites2 ^. PVM.writtenLocations) printWrite
 
-        liftIO $ putStrLn ("# writes found in patched program: " ++ show (length pWrites0))
-        liftIO $ F.forM_ pWrites1 printWrite
+        liftIO $ putStrLn ("# writes found in patched program: " ++ show (length (pWrites0 ^. PVM.writtenLocations)))
+        liftIO $ F.forM_ (pWrites2 ^. PVM.writtenLocations) printWrite
 
 
         writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
