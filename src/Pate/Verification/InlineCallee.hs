@@ -420,6 +420,8 @@ functionFor pb = do
           repr = PC.knownRepr @_ @_ @bin
       in CMC.throwM (PEE.equivalenceErrorFor repr (PEE.MissingExpectedEquivalentFunction addr))
 
+{-
+
 -- | Analyze the post memory states to compute the separation frame for the inlined calls.
 buildCallFrame
   :: ( LCB.IsSymInterface sym
@@ -582,7 +584,6 @@ buildCallFrame sym w (oMacawMem, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
 
     onlinePanic = PP.panic PP.InlineCallee "buildCallFrame" ["Online solver "]
 
-
 concreteizeMemory :: forall sym scope solver fs.
  (LCB.IsSymInterface sym
    , sym ~ LCBO.OnlineBackend scope solver fs
@@ -597,6 +598,8 @@ concreteizeMemory sym = LCLM.concMemImpl sym f
              WI.BaseBVRepr w  -> PVD.resolveSingletonSymbolicValue sym w ex
              WI.BaseIntegerRepr -> PVD.resolveSingletonSymbolicValueInt sym ex
              tp -> PP.panic PP.InlineCallee "concreteizeMemory" ["Don't know how to concreteize ", show tp]
+
+-}
 
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
@@ -676,8 +679,8 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   withSymBackendLock $ do
     -- The two initial memory states (which are encoded as assumptions, see
     -- Data.Macaw.Symbolic.Memory for details)
-    oInitState <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage origBinary)
-    pInitState <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage patchedBinary)
+    oInitState@(oSP, _, _, _) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage origBinary)
+    pInitState@(pSP, _, _, _) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage patchedBinary)
 
     (eoPostMem, oInitBytes, oPtrTbl, oIgnPtrs) <-
       inNewFrame $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry oInitState
@@ -701,15 +704,25 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         --    (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
         --    (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
 
+        let oPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = oSP : fmap fst oIgnPtrs
+                                       , PVM.invalidWritePolicy = PVM.Ignore
+                                       , PVM.unboundedWritePolicy = PVM.Ignore
+                                       }
         oWrites0 <- liftIO $ PVM.memoryOperationFootprint sym oPostMem
         oWrites1 <- liftIO $ PVM.concretizeWrites sym oWrites0
+        let oWrites2 = PVM.filterWrites oPolicy oWrites1
 
+        let pPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = pSP : fmap fst pIgnPtrs
+                                       , PVM.invalidWritePolicy = PVM.Ignore
+                                       , PVM.unboundedWritePolicy = PVM.Ignore
+                                       }
         pWrites0 <- liftIO $ PVM.memoryOperationFootprint sym pPostMem
         pWrites1 <- liftIO $ PVM.concretizeWrites sym pWrites0
+        let pWrites2 = PVM.filterWrites pPolicy pWrites1
 
         liftIO $ putStrLn ("# writes found in original program: " ++ show (length oWrites0))
 
-        F.forM_ oWrites1 $ \w -> do
+        F.forM_ oWrites2 $ \w -> do
           case w of
             PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
             PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
@@ -717,7 +730,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
 
         liftIO $ putStrLn ("# writes found in patched program: " ++ show (length pWrites0))
 
-        F.forM_ pWrites1 $ \w -> do
+        F.forM_ pWrites2 $ \w -> do
           case w of
             PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
             PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
