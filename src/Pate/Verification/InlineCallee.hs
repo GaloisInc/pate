@@ -736,6 +736,8 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
             PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
               putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
 
+        writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
+
         let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                           }
         lproof <- PFO.lazyProofApp prfNode
