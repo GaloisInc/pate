@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -22,9 +23,12 @@ module Pate.Verification.SimulatorHooks (
   ) where
 
 import           Control.Lens ( (^.), (&), (%~) )
+import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
+import qualified Data.Traversable as T
 import qualified Data.Vector as V
 import           GHC.Stack ( HasCallStack )
+import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
 
 import qualified Data.Macaw.CFG as DMC
@@ -102,6 +106,65 @@ resolveMemVal (DMC.PackedVecMemRepr n eltType) stp val =
         LCLM.LLVMValArray eltStp (resolveMemVal eltType eltStp <$> val)
     _ -> PP.panic PP.InlineCallee "resolveMemVal" ["Unexpected storage type for packed vec"]
 
+memValToCrucible
+  :: ( LCB.IsSymInterface sym
+     )
+  => DMC.MemRepr ty
+  -> LCLM.LLVMVal sym
+  -> Either String (LCS.RegValue sym (DMS.ToCrucibleType ty))
+memValToCrucible memRep val =
+  case memRep of
+    -- Convert memory model value to pointer
+    DMC.BVMemRepr bytes _endian ->
+      do let bitw  = PN.natMultiply (PN.knownNat @8) bytes
+         case val of
+           LCLM.LLVMValInt base off
+             | Just PC.Refl <- PC.testEquality (WI.bvWidth off) bitw ->
+                 pure (LCLM.LLVMPointer base off)
+           _ -> unexpectedMemVal
+
+    DMC.FloatMemRepr floatRep _endian ->
+      case val of
+        LCLM.LLVMValFloat sz fltVal ->
+          case (floatRep, sz) of
+            (DMC.SingleFloatRepr, LCLM.SingleSize) ->
+              pure fltVal
+            (DMC.DoubleFloatRepr, LCLM.DoubleSize) ->
+              pure fltVal
+            (DMC.X86_80FloatRepr, LCLM.X86_FP80Size) ->
+              pure fltVal
+            _ -> unexpectedMemVal
+        _ -> unexpectedMemVal
+
+    DMC.PackedVecMemRepr _expectedLen eltMemRepr -> do
+      case val of
+        LCLM.LLVMValArray _ v -> do
+          T.traverse (memValToCrucible eltMemRepr) v
+        _ -> unexpectedMemVal
+  where
+    unexpectedMemVal = Left "Unexpected value read from memory"
+
+tryGlobPtr
+  :: (LCB.IsSymInterface sym)
+  => sym
+  -> LCS.RegValue sym LCLM.Mem
+  -> DMS.GlobalMap sym LCLM.Mem w
+  -> LCLM.LLVMPtr sym w
+  -> IO (LCLM.LLVMPtr sym w)
+tryGlobPtr sym mem mapBVAddress val@(LCLM.LLVMPointer base offset)
+  | Just blockId <- WI.asNat base
+  , blockId /= 0 = do
+      -- If we know that the blockId is concretely not zero, the pointer is
+      -- already translated into an LLVM pointer and can be passed through.
+      return val
+  | otherwise = do
+      -- If the blockId is zero, we have to translate it into a proper LLVM
+      -- pointer
+      --
+      -- Otherwise, the blockId is symbolic and we need to create a mux that
+      -- conditionally performs the translation.
+      mapBVAddress sym mem base offset
+
 
 concretizingWrite
   :: ( LCB.IsSymInterface sym
@@ -109,9 +172,11 @@ concretizingWrite
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth ptrW
      , LCLM.HasLLVMAnn sym
+     , ptrW ~ DMC.ArchAddrWidth arch
      , HasCallStack
      )
   => LCS.GlobalVar LCLM.Mem
+  -> DMS.GlobalMap sym LCLM.Mem ptrW
   -> sym
   -> LCS.CrucibleState (DMS.MacawSimulatorState (LCBO.OnlineBackend scope solver fs))
                        (LCBO.OnlineBackend scope solver fs)
@@ -131,14 +196,51 @@ concretizingWrite
                                blocks
                                r
                                ctx)
-concretizingWrite memVar sym crucState _addrWidth memRep (LCS.regValue -> ptr) (LCS.regValue -> value) = do
+concretizingWrite memVar globs sym crucState _addrWidth memRep (LCS.regValue -> ptr) (LCS.regValue -> value) = do
   mem <- getMem crucState memVar
   -- Attempt to concretize the pointer we are writing to, so that we can minimize symbolic writes
-  ptr' <- PVC.resolveSingletonPointer sym ptr
+  ptr' <- tryGlobPtr sym mem globs ptr
+  ptr'' <- PVC.resolveSingletonPointer sym ptr'
   ty <- memReprToStorageType memRep
   let memVal = resolveMemVal memRep ty value
-  mem' <- LCLM.storeRaw sym mem ptr' ty LCLD.noAlignment memVal
+  mem' <- LCLM.storeRaw sym mem ptr'' ty LCLD.noAlignment memVal
   return ((), setMem crucState memVar mem')
+
+concretizingRead
+  :: ( LCB.IsSymInterface sym
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     , LCLM.HasPtrWidth ptrW
+     , ptrW ~ DMC.ArchAddrWidth arch
+     , LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions
+     , HasCallStack
+     )
+  => LCS.GlobalVar LCLM.Mem
+  -> DMS.GlobalMap sym LCLM.Mem ptrW
+  -> sym
+  -> LCS.CrucibleState (DMS.MacawSimulatorState (LCBO.OnlineBackend scope solver fs))
+                       (LCBO.OnlineBackend scope solver fs)
+                       (DMS.MacawExt arch)
+                       rtp
+                       blocks
+                       r
+                       ctx
+  -> DMC.AddrWidthRepr ptrW
+  -> DMC.MemRepr ty
+  -> LCS.RegEntry sym (LCLM.LLVMPointerType ptrW)
+  -> IO (LCS.RegValue sym (DMS.ToCrucibleType ty))
+concretizingRead memVar globs sym crucState _addrWidth memRep (LCS.regValue -> ptr) = do
+  mem <- getMem crucState memVar
+  -- Attempt to concretize the pointer we are reading from, avoiding a symbolic
+  -- read if possible
+  ptr' <- tryGlobPtr sym mem globs ptr
+  ptr'' <- PVC.resolveSingletonPointer sym ptr'
+  ty <- memReprToStorageType memRep
+  res <- LCLM.assertSafe sym =<< LCLM.loadRaw sym mem ptr'' ty LCLD.noAlignment
+  case memValToCrucible memRep res of
+    Left err -> PP.panic PP.InlineCallee "concretizingRead" [err]
+    Right crucVal -> return crucVal
 
 statementWrapper
   :: ( LCB.IsSymInterface sym
@@ -146,16 +248,20 @@ statementWrapper
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth (DMC.ArchAddrWidth arch)
      , LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions
      , HasCallStack
      )
   => LCS.GlobalVar LCLM.Mem
+  -> DMS.GlobalMap sym LCLM.Mem (DMC.ArchAddrWidth arch)
   -> sym
   -> LCS.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
   -> DMSB.MacawEvalStmtFunc (DMS.MacawStmtExtension arch) (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
-statementWrapper mvar sym baseExt stmt crucState =
+statementWrapper mvar globs sym baseExt stmt crucState =
   case stmt of
     DMS.MacawWriteMem addrWidth memRep ptr value ->
-      concretizingWrite mvar sym crucState addrWidth memRep ptr value
+      concretizingWrite mvar globs sym crucState addrWidth memRep ptr value
+    DMS.MacawReadMem addrWidth memRep ptr ->
+      (, crucState) <$> concretizingRead mvar globs sym crucState addrWidth memRep ptr
     _ -> LCS.extensionExec baseExt stmt crucState
 
 -- | Macaw extensions for Crucible that have some optimizations required for the
@@ -187,6 +293,6 @@ hookedMacawExtensions
   -- ^ A function to make memory validity predicates (see 'MkGlobalPointerValidityAssertion' for details)
   -> LCS.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
 hookedMacawExtensions sym f mvar globs lookupH lookupSyscall toMemPred =
-  baseExtension { LCS.extensionExec = statementWrapper mvar sym baseExtension }
+  baseExtension { LCS.extensionExec = statementWrapper mvar globs sym baseExtension }
   where
     baseExtension = DMS.macawExtensions f mvar globs lookupH lookupSyscall toMemPred
