@@ -87,6 +87,7 @@ library
                        Pate.Verification.Override,
                        Pate.Verification.Override.Library,
                        Pate.Verification.Simplify,
+                       Pate.Verification.SimulatorHooks,
                        Pate.Verification.SymbolicExecution,
                        Pate.Verification.Validity,
                        Pate.Loader,

@@ -27,10 +27,12 @@ import qualified Data.Parameterized.NatRepr as PN
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as WI
 import qualified What4.ProgramLoc as WP
+import qualified What4.Protocol.Online as WPO
 
 import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic.Memory as DMSM
 import qualified Lang.Crucible.Backend as LCB
+import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.LLVM.MemModel.Pointer as LCLM
@@ -38,6 +40,7 @@ import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.OverrideSim as LCSO
 import qualified Lang.Crucible.Types as LCT
 
+import qualified Pate.Verification.Concretize as PVC
 import qualified Pate.Verification.Override as PVO
 
 -- | Data necessary to fully instantiate the overrides
@@ -55,7 +58,10 @@ data OverrideConfig sym w =
 -- logic to ensure that these overrides can be applied both for unadorned
 -- symbols and PLT stubs is handled when the overrides are registered.
 overrides
-  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
+  :: ( LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     )
   => OverrideConfig sym w
   -> [PVO.SomeOverride arch sym]
 overrides ovCfg = [ ovMalloc ovCfg
@@ -117,7 +123,9 @@ doMalloc memVar sym (Ctx.Empty Ctx.:> nBytes) =
     loc <- WP.plSourceLoc <$> WI.getCurrentProgramLoc sym
     let display = "<malloc at " ++ show loc ++ ">"
     sz <- LCLM.projectLLVM_bv sym (LCS.regValue nBytes)
-    LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem sz LCLD.noAlignment
+    (ptr, mem') <- LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem sz LCLD.noAlignment
+    putStrLn ("  ptr: " ++ show (LCLM.ppPtr ptr))
+    return (ptr, mem')
 
 ovCalloc
   :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions)
@@ -148,7 +156,10 @@ doCalloc memVar sym (Ctx.Empty Ctx.:> nmemb Ctx.:> size) =
     LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem nBytesBV LCLD.noAlignment
 
 ovMemcpy
-  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
+  :: ( LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     )
   => OverrideConfig sym w
   -> PVO.SomeOverride arch sym
 ovMemcpy ovCfg = PVO.SomeOverride ov
@@ -166,7 +177,10 @@ ovMemcpy ovCfg = PVO.SomeOverride ov
 -- Note that this override does *not* perform the check explicitly and just
 -- reuses the underlying memcpy; the memory model will flag memory errors.
 ovMemcpyChk
-  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
+  :: ( LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     )
   => OverrideConfig sym w
   -> PVO.SomeOverride arch sym
 ovMemcpyChk ovCfg =
@@ -174,7 +188,12 @@ ovMemcpyChk ovCfg =
     PVO.SomeOverride ov -> PVO.SomeOverride (ov { PVO.functionName = "__memcpy_chk" })
 
 doMemcpy
-  :: (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, LCB.IsSymInterface sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
+  :: ( LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym
+     , ?memOpts :: LCLM.MemOptions, DMM.MemWidth w
+     , LCB.IsSymInterface sym
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     )
   => OverrideConfig sym w
   -> sym
   -> Ctx.Assignment (LCS.RegEntry sym) (Ctx.EmptyCtx Ctx.::> LCLM.LLVMPointerType w Ctx.::> LCLM.LLVMPointerType w Ctx.::> LCLM.LLVMPointerType w)
@@ -186,12 +205,16 @@ doMemcpy ovCfg sym (Ctx.Empty Ctx.:> (LCS.regValue -> dest) Ctx.:> (LCS.regValue
     destPtr <- mapPtr (LCLM.llvmPointerBlock dest) (LCLM.llvmPointerOffset dest)
     srcPtr <- mapPtr (LCLM.llvmPointerBlock src) (LCLM.llvmPointerOffset src)
 
+    destPtr' <- PVC.resolveSingletonPointer sym destPtr
+    srcPtr' <- PVC.resolveSingletonPointer sym srcPtr
+
     nBytesBV <- LCLM.projectLLVM_bv sym nBytes
 
     -- FIXME: Temporarily use the broken memcpy (that doesn't map its dest or
     -- src to real pointers), as doing the "right thing" seems to make the IP
     -- too symbolic later
-    mem' <- LCLM.doMemcpy sym ?ptrWidth mem False dest src nBytesBV
+    liftIO $ putStrLn ("memcpy to:\n" ++ show (LCLM.ppPtr destPtr') ++ "\nuntranslated:\n" ++ show (LCLM.ppPtr dest))
+    mem' <- LCLM.doMemcpy sym ?ptrWidth mem False destPtr' srcPtr' nBytesBV
     return (dest, mem')
     {-
     case WI.asBV nBytesBV of

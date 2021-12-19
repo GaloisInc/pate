@@ -82,6 +82,7 @@ import qualified Pate.Proof.Operations as PFO
 import qualified Pate.Verification.DemandDiscovery as PVD
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.Verification.Override.Library as PVOL
+import qualified Pate.Verification.SimulatorHooks as PVS
 
 -- | Allocate an initial simulator value for a given machine register
 --
@@ -156,9 +157,10 @@ allocateIgnorableRegions
   => proxy arch
   -> sym
   -> LCLM.MemImpl sym
+  -> DMSM.MemPtrTable sym w
   -> [(DMM.MemWord (DMC.ArchAddrWidth arch), Integer)]
   -> IO (LCLM.MemImpl sym, [(LCLM.LLVMPtr sym w, Integer)])
-allocateIgnorableRegions _proxy sym mem0 = foldM allocateIgnPtr (mem0,mempty)
+allocateIgnorableRegions _proxy sym mem0 memPtrTbl = foldM allocateIgnPtr (mem0,mempty)
   where
     allocateIgnPtr (mem,ptrs) (loc, len) =
       do -- allocate a heap region region
@@ -167,9 +169,17 @@ allocateIgnorableRegions _proxy sym mem0 = foldM allocateIgnPtr (mem0,mempty)
 
          -- poke the pointer to that region into the global memory at the correct location
          let locBits = BVS.mkBV WI.knownRepr (DMM.memWordToUnsigned loc)
-         locPtr <- LCLM.llvmPointer_bv sym =<< WI.bvLit sym WI.knownRepr locBits
+         -- FIXME: Translate this pointer so that it is in region 1
+         --
+         -- We need to manually translate here, unfortunately. The automatic
+         -- translation only applies to code generated during macaw->crucible
+         -- translation.  Using the crucible-llvm memory model functions (like
+         -- storeRaw) does *not* receive the automated translation
+         LCLM.LLVMPointer locPtrRegion locPtrOffset <- LCLM.llvmPointer_bv sym =<< WI.bvLit sym WI.knownRepr locBits
+         locPtr1 <- DMSM.mapRegionPointers memPtrTbl sym mem1 locPtrRegion locPtrOffset
+         putStrLn ("  ignorable stored to: " ++ show (LCLM.ppPtr locPtr1))
          let st = LCLM.bitvectorType (LCLB.bitsToBytes (WI.intValue ?ptrWidth))
-         mem2 <- LCLM.storeRaw sym mem1 locPtr st LCLD.noAlignment (LCLM.ptrToPtrVal ptr)
+         mem2 <- LCLM.storeRaw sym mem1 locPtr1 st LCLD.noAlignment (LCLM.ptrToPtrVal ptr)
 
          -- write a backing array of fresh bytes into the region
          regionArrayStorage <- WI.freshConstant sym (WS.safeSymbol "ignorable_region_array") WI.knownRepr
@@ -349,7 +359,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, ini
   let regsRepr = LCT.StructRepr crucRegTypes
   let spRegs = DMS.updateReg archVals initRegs DMC.sp_reg sp
 
-  (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem ignPtrs
+  (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem memPtrTbl ignPtrs
 
   liftIO $ putStrLn ("Ignorable regions for: " ++ show binRepr)
   F.forM_ ignorableRegions $ \(ptr, len) -> do
@@ -378,7 +388,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, ini
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
     let doLookup = PVD.lookupFunction argMap overrides symtab pfm archVals loadedBin
-    let extImpl = DMS.macawExtensions archEvalFn memVar globalMap doLookup (DMS.unsupportedSyscalls "pate-inline-call") validityCheck
+    let extImpl = PVS.hookedMacawExtensions sym archEvalFn memVar globalMap doLookup (DMS.unsupportedSyscalls "pate-inline-call") validityCheck
     -- We start with no handles bound for crucible; we'll add them dynamically
     -- as we find callees via lookupHandle
     --
@@ -721,10 +731,10 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         let pWrites2 = PVM.filterWrites pPolicy pWrites1
 
         liftIO $ putStrLn ("# writes found in original program: " ++ show (length oWrites0))
-        liftIO $ F.forM_ oWrites2 printWrite
+        liftIO $ F.forM_ oWrites1 printWrite
 
         liftIO $ putStrLn ("# writes found in patched program: " ++ show (length pWrites0))
-        liftIO $ F.forM_ pWrites2 printWrite
+        liftIO $ F.forM_ pWrites1 printWrite
 
 
         writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
