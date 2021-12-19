@@ -7,6 +7,7 @@ module Pate.Verification.Concretize (
   , concreteBV
   , concreteInteger
   , resolveSingletonSymbolicAs
+  , resolveSingletonPointer
   ) where
 
 import qualified Data.Parameterized.NatRepr as PN
@@ -93,3 +94,20 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
                 WSat.Unsat {} -> injectSymbolic sym concVal -- There is a single concrete result
   where
     onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
+
+resolveSingletonPointer
+  :: ( LCB.IsSymInterface sym
+     , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
+     , 1 <= w
+     , HasCallStack
+     )
+  => sym
+  -- ^ The symbolic backend
+  -> LCLM.LLVMPtr sym w
+  -- ^ The symbolic term to concretize
+  -> IO (LCLM.LLVMPtr sym w)
+resolveSingletonPointer sym ptr@(LCLM.LLVMPointer base off) = do
+  base' <- WI.integerToNat sym =<< resolveSingletonSymbolicAs concreteInteger sym =<< WI.natToInteger sym base
+  off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) sym off
+  return (LCLM.LLVMPointer base' off')
