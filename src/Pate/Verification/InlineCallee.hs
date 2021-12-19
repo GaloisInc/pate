@@ -721,20 +721,11 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         let pWrites2 = PVM.filterWrites pPolicy pWrites1
 
         liftIO $ putStrLn ("# writes found in original program: " ++ show (length oWrites0))
-
-        F.forM_ oWrites2 $ \w -> do
-          case w of
-            PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
-            PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
-              putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
+        liftIO $ F.forM_ oWrites2 printWrite
 
         liftIO $ putStrLn ("# writes found in patched program: " ++ show (length pWrites0))
+        liftIO $ F.forM_ pWrites2 printWrite
 
-        F.forM_ pWrites2 $ \w -> do
-          case w of
-            PVM.UnboundedWrite _ -> liftIO (putStrLn "Unbounded write")
-            PVM.MemoryWrite rsn _w ptr len -> liftIO $ do
-              putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
 
         writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
 
@@ -742,3 +733,10 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
                                           }
         lproof <- PFO.lazyProofApp prfNode
         return (contPre, lproof)
+
+printWrite :: (LCB.IsSymInterface sym) => PVM.MemoryWrite sym -> IO ()
+printWrite w =
+  case w of
+    PVM.UnboundedWrite _ -> putStrLn "Unbounded write"
+    PVM.MemoryWrite rsn _w ptr len ->
+      putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)

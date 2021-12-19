@@ -60,7 +60,7 @@ data MemoryWrite sym where
   -- The String is the write source type
   MemoryWrite :: (1 <= w) => String -> PN.NatRepr w -> LCLM.LLVMPtr sym w -> WI.SymBV sym w  -> MemoryWrite sym
   -- | A write with a length that is entirely unknown
-  UnboundedWrite :: LCLM.LLVMPtr sym w -> MemoryWrite sym
+  UnboundedWrite :: (1 <= w) => LCLM.LLVMPtr sym w -> MemoryWrite sym
 
 data InvalidWritePolicy = Ignore | Keep
   deriving (Eq, Ord, Show)
@@ -236,7 +236,7 @@ data WriteSummary sym w =
                , _differingOrigHeapLocations :: [LCLM.LLVMPtr sym w]
                -- ^ Heap pointers that seem to be different
                , _differingPatchedHeapLocations :: [LCLM.LLVMPtr sym w]
-               , _unhandledPointers :: [LCLM.LLVMPtr sym w]
+               , _unhandledPointers :: [LCLM.SomePointer sym]
                -- ^ Pointers that the verifier cannot reason about effectively
                -- (e.g., fully symbolic writes)
                }
@@ -244,6 +244,10 @@ data WriteSummary sym w =
 $(LTH.makeLenses ''WriteSummary)
 
 -- | Returns 'True' if the two values read from memory are always equal
+--
+-- The two values have been read from memory, but are partial (or potentially
+-- just straight up errors).  If either is an error, return False.  Otherwise,
+-- assume the necessary predicates and compare.
 proveBytesEqual
   :: ( LCB.IsSymInterface sym
      , sym ~ LCBO.OnlineBackend scope solver fs
@@ -271,11 +275,7 @@ compareWrite whichHeap sym oMem pMem w =
   case w of
     UnboundedWrite p -> do
       -- There really isn't anything we can say about these, but they will be useful for diagnostics
-      case PC.testEquality ?ptrWidth (llvmPtrWidth p) of
-        Just PC.Refl -> do
-          unhandledPointers %= (p:)
-          return ()
-        Nothing -> return ()
+      unhandledPointers %= (LCLM.SomePointer p:)
     MemoryWrite _rsn width ptr len -> do
       case WI.asBV len of
         Nothing -> return ()
@@ -299,7 +299,7 @@ compareWrite whichHeap sym oMem pMem w =
                    , Just bvAddr <- WI.asBV (snd (LCLM.llvmPointerView thisPtr)) ->
                      differingGlobalMemoryLocations %= (bvAddr:)
                    | otherwise -> whichHeap %= (thisPtr:)
-          | otherwise -> return ()
+          | otherwise -> unhandledPointers %= (LCLM.SomePointer ptr:)
 
 -- | Compare the locations written in both binaries
 --
