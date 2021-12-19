@@ -286,7 +286,7 @@ lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFun
   --
   -- Note that if there are multiple actual values, this will remain a symbolic
   -- term and we will fail (because Crucible cannot yet mux function handles).
-  singletonIP <- PVC.resolveSingletonSymbolicValue sym PN.knownNat ipBV
+  singletonIP <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV PN.knownNat) sym ipBV
 
   case WI.asBV singletonIP of
     Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: "] -- ++ show (WI.printSymExpr singletonIP)]

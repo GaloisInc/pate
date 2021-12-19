@@ -130,15 +130,15 @@ concretizeWrites sym = mapM concWrite
     concWrite mw =
       case mw of
         UnboundedWrite (LCLM.LLVMPointer blk off) -> do
-          blk' <- WI.integerToNat sym =<< PVC.resolveSingletonSymbolicValueInt sym =<< WI.natToInteger sym blk
+          blk' <- WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger sym =<< WI.natToInteger sym blk
           case WI.exprType off of
             WT.BaseBVRepr w -> do
-              off' <- PVC.resolveSingletonSymbolicValue sym w off
+              off' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) sym off
               return (UnboundedWrite (LCLM.LLVMPointer blk' off'))
         MemoryWrite rsn w (LCLM.LLVMPointer blk off) len -> do
-          blk' <- WI.integerToNat sym =<< PVC.resolveSingletonSymbolicValueInt sym =<< WI.natToInteger sym blk
-          off' <- PVC.resolveSingletonSymbolicValue sym w off
-          len' <- PVC.resolveSingletonSymbolicValue sym w len
+          blk' <- WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger sym =<< WI.natToInteger sym blk
+          off' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) sym off
+          len' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) sym len
           return (MemoryWrite rsn w (LCLM.LLVMPointer blk' off') len')
 
 -- | Compute the "footprint" exhibited by a memory post state
