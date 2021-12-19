@@ -45,8 +45,7 @@ import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.LLVM.MemModel.MemLog as LCLMM
 import qualified Lang.Crucible.LLVM.MemModel.Partial as Partial
 
-import qualified Pate.Verification.DemandDiscovery as PVD
-
+import qualified Pate.Verification.Concretize as PVC
 
 llvmPtrWidth :: (LCB.IsSymInterface sym) => LCLM.LLVMPtr sym w -> PN.NatRepr w
 llvmPtrWidth ptr =
@@ -131,15 +130,15 @@ concretizeWrites sym = mapM concWrite
     concWrite mw =
       case mw of
         UnboundedWrite (LCLM.LLVMPointer blk off) -> do
-          blk' <- WI.integerToNat sym =<< PVD.resolveSingletonSymbolicValueInt sym =<< WI.natToInteger sym blk
+          blk' <- WI.integerToNat sym =<< PVC.resolveSingletonSymbolicValueInt sym =<< WI.natToInteger sym blk
           case WI.exprType off of
             WT.BaseBVRepr w -> do
-              off' <- PVD.resolveSingletonSymbolicValue sym w off
+              off' <- PVC.resolveSingletonSymbolicValue sym w off
               return (UnboundedWrite (LCLM.LLVMPointer blk' off'))
         MemoryWrite rsn w (LCLM.LLVMPointer blk off) len -> do
-          blk' <- WI.integerToNat sym =<< PVD.resolveSingletonSymbolicValueInt sym =<< WI.natToInteger sym blk
-          off' <- PVD.resolveSingletonSymbolicValue sym w off
-          len' <- PVD.resolveSingletonSymbolicValue sym w len
+          blk' <- WI.integerToNat sym =<< PVC.resolveSingletonSymbolicValueInt sym =<< WI.natToInteger sym blk
+          off' <- PVC.resolveSingletonSymbolicValue sym w off
+          len' <- PVC.resolveSingletonSymbolicValue sym w len
           return (MemoryWrite rsn w (LCLM.LLVMPointer blk' off') len')
 
 -- | Compute the "footprint" exhibited by a memory post state

@@ -78,6 +78,7 @@ library
                        Pate.Discovery,
                        Pate.Discovery.PLT,
                        Pate.Verification,
+                       Pate.Verification.Concretize,
                        Pate.Verification.DemandDiscovery,
                        Pate.Verification.Domain,
                        Pate.Verification.ExternalCall,
