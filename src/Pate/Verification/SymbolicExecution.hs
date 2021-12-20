@@ -245,7 +245,7 @@ simulate simInput = withBinary @bin $ do
   archRepr <- archStructRepr
   let regs = CS.assignReg archRepr preRegsAsn CS.emptyRegMap
   globals <- getGlobals simInput
-  cres <- evalCFG globals regs cfg
+  cres <- withSymBackendLock $ evalCFG globals regs cfg
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
 
   return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs) exitClass)

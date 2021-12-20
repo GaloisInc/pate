@@ -31,6 +31,8 @@ module Pate.Monad
   , withSym
   , archFuns
   , runInIO1
+  , withSymBackendLock
+  , inNewFrame
   , manifestError
   , implicitError
   , throwHere
@@ -39,6 +41,7 @@ module Pate.Monad
   , emitEvent
   , emitWarning
   , getBinCtx
+  , getBinCtx'
   , ifConfig
   , traceBundle
   , traceBlockPair
@@ -82,6 +85,7 @@ import           GHC.Stack ( HasCallStack, callStack )
 import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
+import qualified UnliftIO.Exception as UE
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
@@ -103,19 +107,21 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
+import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 
-import           What4.Utils.Process (filterAsync)
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
+import qualified What4.Protocol.Online as WPO
 import qualified What4.SatResult as W4R
 import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
+import           What4.Utils.Process (filterAsync)
 
 import           What4.ExprHelpers
 
@@ -130,6 +136,7 @@ import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import           Pate.Monad.Environment as PME
+import qualified Pate.Panic as PP
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -259,7 +266,7 @@ getBinCtx' ::
 getBinCtx' repr = PPa.getPair' repr <$> CMR.asks (PMC.binCtxs . envCtx)
 
 withValid :: forall a sym arch.
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ArchConstraints arch, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
   env <- CMR.ask
@@ -267,7 +274,7 @@ withValid f = do
 
 withValidEnv ::
   EquivEnv sym arch ->
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ArchConstraints arch, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
   a
 withValidEnv (EquivEnv { envValidSym = PSo.Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
@@ -279,7 +286,7 @@ withSymSolver f = withValid $ do
   f sym adapter
 
 withSym ::
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
+  (forall scope solver fm . (sym ~ LCBO.OnlineBackend scope solver (W4B.Flags fm), WPO.OnlineSolver solver) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
   PSo.Sym _ sym _ <- CMR.asks envValidSym
@@ -651,6 +658,25 @@ memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
 memOpCondition = \case
   MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
   MT.Conditional p -> return p
+
+withSymBackendLock
+  :: EquivM sym arch a
+  -> EquivM sym arch a
+withSymBackendLock k = do
+  mv <- CMR.asks envSymBackendLock
+  UE.bracket (liftIO (IO.takeMVar mv))
+             (liftIO . IO.putMVar mv)
+             (\_ -> inNewFrame k)
+
+inNewFrame
+  :: EquivM sym arch a
+  -> EquivM sym arch a
+inNewFrame k = withSym $ \sym -> do
+  kio <- IO.toIO k
+  liftIO $ LCBO.withSolverProcess sym doPanic $ \sp -> do
+    WPO.inNewFrame sp kio
+  where
+    doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]
 
 -- | Emit a trace event to the frontend
 --

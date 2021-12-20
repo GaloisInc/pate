@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -27,6 +28,7 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
 import qualified Data.List.NonEmpty as DLN
 import           Data.Maybe ( maybeToList )
+import           Data.Proxy ( Proxy(..) )
 import qualified Data.Traversable as T
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
@@ -39,12 +41,16 @@ import qualified System.IO as IO
 import qualified What4.Interface as WI
 
 import qualified Data.ElfEdit as DEE
+import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Parameterized.Classes as PC
 import           Data.Parameterized.Some ( Some(..) )
+import qualified SemMC.Architecture.AArch32 as SA
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Discovery.PLT as PLT
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
@@ -60,6 +66,7 @@ import qualified Pate.Verbosity as PV
 import qualified Pate.AArch32 as AArch32
 import qualified Pate.PPC as PPC
 
+import qualified JSONReport as JR
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
@@ -130,8 +137,9 @@ main = do
   case ep of
     Left err -> SE.die (show err)
     Right (elfErrs, Some proxy) -> do
+      proofConsumer <- T.traverse JR.consumeProofEvents (proofSummaryJSON opts)
       chan <- CC.newChan
-      (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan
+      (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan proofConsumer
       (origHints, patchedHints) <- parseHints logger opts
       LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
       let
@@ -148,6 +156,7 @@ main = do
             , PC.cfgHeuristicTimeout = heuristicTimeout opts
             , PC.cfgGoalTimeout = goalTimeout opts
             , PC.cfgMacawDir = saveMacawCFGs opts
+            , PC.cfgSolverInteractionFile = solverInteractionFile opts
             }
         cfg = PC.RunConfig
             { PC.archProxy = proxy
@@ -168,6 +177,7 @@ main = do
       -- persistent until the user kills it)
       CC.writeChan chan Nothing
       F.forM_ mConsumer CCA.wait
+      _ <- T.traverse JR.waitForConsumer proofConsumer
 
       case status of
         PEq.Errored err -> SE.die (show err)
@@ -195,6 +205,8 @@ data CLIOptions = CLIOptions
   , dwarfHints :: Bool
   , verbosity :: PV.Verbosity
   , saveMacawCFGs :: Maybe FilePath
+  , solverInteractionFile :: Maybe FilePath
+  , proofSummaryJSON :: Maybe FilePath
   } deriving (Eq, Ord, Show)
 
 data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
@@ -240,8 +252,9 @@ startLogger :: PA.SomeValidArch arch
             -> PV.Verbosity
             -> LogTarget
             -> CC.Chan (Maybe (PE.Event arch))
+            -> Maybe (JR.ProofEventConsumer arch)
             -> IO (LJ.LogAction IO (PE.Event arch), Maybe (CCA.Async ()))
-startLogger (PA.SomeValidArch {}) verb lt chan =
+startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
   case lt of
     NullLogger -> return (LJ.LogAction $ \_ -> return (), Nothing)
     StdoutLogger -> logToHandle IO.stdout
@@ -273,12 +286,18 @@ startLogger (PA.SomeValidArch {}) verb lt chan =
       let consumeLogs = do
             me <- CC.readChan chan
             case me of
-              Nothing -> return ()
-              Just evt
-                | printAtVerbosity verb evt -> do
-                    PPRT.renderIO hdl (terminalFormatEvent evt)
-                    consumeLogs
-                | otherwise -> consumeLogs
+              Nothing -> do
+                -- Shut down the proof summary process once we are out of events
+                _ <- T.traverse (\pc -> JR.sendEvent pc Nothing) proofConsumer
+                return ()
+              Just evt -> do
+                case (proofConsumer, evt) of
+                  (Just pc, PE.ProofIntermediate bp sp _) -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
+                  _ -> return ()
+                if | printAtVerbosity verb evt -> do
+                       PPRT.renderIO hdl (terminalFormatEvent evt)
+                       consumeLogs
+                   | otherwise -> consumeLogs
 
       consumer <- CCA.async consumeLogs
       return (logAct, Just consumer)
@@ -365,7 +384,7 @@ terminalFormatEvent evt =
 
 data LoadError where
   ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
-  ElfArchitectureMismatch :: [DEE.ElfParseError] -> DEE.ElfMachine -> DEE.ElfMachine -> LoadError
+  ElfArchitectureMismatch :: FilePath -> FilePath -> LoadError
   UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
 
 deriving instance Show LoadError
@@ -375,30 +394,60 @@ archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError]
 archToProxy origBinaryPath patchedBinaryPath = do
   origBin <- BS.readFile origBinaryPath
   patchedBin <- BS.readFile patchedBinaryPath
-  case (DEE.parseElf origBin, DEE.parseElf patchedBin) of
-    (DEE.ElfHeaderError off msg, _) -> return (Left (ElfHeaderParseError origBinaryPath off msg))
-    (_, DEE.ElfHeaderError off msg) -> return (Left (ElfHeaderParseError patchedBinaryPath off msg))
-    (DEE.Elf32Res errs32 e32, DEE.Elf64Res errs64 e64) ->
-      return (Left (ElfArchitectureMismatch (errs32 ++ errs64) (DEE.elfMachine e32) (DEE.elfMachine e64)))
-    (DEE.Elf64Res errs64 e64, DEE.Elf32Res errs32 e32) ->
-      return (Left (ElfArchitectureMismatch (errs64 ++ errs32) (DEE.elfMachine e64) (DEE.elfMachine e32)))
-    (DEE.Elf32Res origErrs (DEE.elfMachine -> origMachine), DEE.Elf32Res patchedErrs (DEE.elfMachine -> patchedMachine))
-      | origMachine == patchedMachine ->
-        return (fmap (origErrs ++ patchedErrs,) (machineToProxy origMachine))
-      | otherwise ->
-        return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
-    (DEE.Elf64Res origErrs (DEE.elfMachine -> origMachine), DEE.Elf64Res patchedErrs (DEE.elfMachine -> patchedMachine))
-      | origMachine == patchedMachine ->
-        return (fmap (origErrs ++ patchedErrs,) (machineToProxy origMachine))
-      | otherwise ->
-        return (Left (ElfArchitectureMismatch (origErrs ++ patchedErrs) origMachine patchedMachine))
+  case (EEP.decodeElfHeaderInfo origBin, EEP.decodeElfHeaderInfo patchedBin) of
+    (Right (EEP.SomeElf origHdr), Right (EEP.SomeElf patchedHdr))
+      | Just PC.Refl <- PC.testEquality (DEE.headerClass (DEE.header origHdr)) (DEE.headerClass (DEE.header patchedHdr))
+      , DEE.headerMachine (DEE.header origHdr) == DEE.headerMachine (DEE.header patchedHdr) ->
+        let (origParseErrors, _origElf) = DEE.getElf origHdr
+            (patchedParseErrors, _patchedElf) = DEE.getElf patchedHdr
+            origMachine = DEE.headerMachine (DEE.header origHdr)
+        in return (fmap (origParseErrors ++ patchedParseErrors,) (machineToProxy origMachine origHdr patchedHdr))
+    (Left (off, msg), _) -> return (Left (ElfHeaderParseError origBinaryPath off msg))
+    (_, Left (off, msg)) -> return (Left (ElfHeaderParseError patchedBinaryPath off msg))
+    _ -> return (Left (ElfArchitectureMismatch origBinaryPath patchedBinaryPath))
 
-machineToProxy :: DEE.ElfMachine -> Either LoadError (Some PA.SomeValidArch)
-machineToProxy em =
-  case em of
-    DEE.EM_PPC -> Right (Some (PA.SomeValidArch @PPC.PPC32 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc32HasDedicatedRegister))
-    DEE.EM_PPC64 -> Right (Some (PA.SomeValidArch @PPC.PPC64 PPC.handleSystemCall PPC.handleExternalCall PPC.ppc64HasDedicatedRegister))
-    DEE.EM_ARM -> Right (Some (PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall AArch32.hasDedicatedRegister))
+-- | Create a 'PA.SomeValidArch' from parsed ELF files
+--
+-- Note that we do additional ELF parsing here so that we do not have to
+-- propagate ELF-specific constraints throughout the analysis.  This includes
+-- finding additional (dynamic) symbols from ELF files, which requires deep
+-- ELF-specific inspection.
+machineToProxy
+  :: DEE.ElfMachine
+  -> EEP.ElfHeaderInfo w
+  -> EEP.ElfHeaderInfo w
+  -> Either LoadError (Some PA.SomeValidArch)
+machineToProxy em origHdr patchedHdr =
+  case (em, EEP.headerClass (EEP.header origHdr)) of
+    (DEE.EM_PPC, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
+                                 , PA.validArchFunctionDomain = PPC.handleExternalCall
+                                 , PA.validArchDedicatedRegisters = PPC.ppc32HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = PPC.argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    (DEE.EM_PPC64, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
+                                 , PA.validArchFunctionDomain = PPC.handleExternalCall
+                                 , PA.validArchDedicatedRegisters = PPC.ppc64HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = PPC.argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    (DEE.EM_ARM, EEP.ELFCLASS32) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = AArch32.handleSystemCall
+                                 , PA.validArchFunctionDomain = AArch32.handleExternalCall
+                                 , PA.validArchDedicatedRegisters = AArch32.hasDedicatedRegister
+                                 , PA.validArchArgumentMapping = AArch32.argumentMapping
+                                 , PA.validArchOrigExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
+                                 , PA.validArchPatchedExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
     _ -> Left (UnsupportedArchitecture em)
 
 
@@ -534,5 +583,16 @@ cliOptions = OA.info (OA.helper <*> parser)
                           )
     <*> OA.optional (OA.strOption
          ( OA.long "save-macaw-cfgs"
+         <> OA.metavar "DIR"
          <> OA.help "Save macaw CFGs to the provided directory"
          ))
+    <*> OA.optional (OA.strOption
+         ( OA.long "solver-interaction-file"
+         <> OA.metavar "FILE"
+         <> OA.help "Save interactions with the SMT solver during symbolic execution to this file"
+         ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "proof-summary-json"
+        <> OA.metavar "FILE"
+        <> OA.help "A file to save interesting proof results to in JSON format"
+        ))

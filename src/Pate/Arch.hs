@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeOperators #-}
 module Pate.Arch (
   SomeValidArch(..),
+  ValidArchData(..),
   ArchConstraints(..),
   ValidArch(..),
   DedicatedRegister,
@@ -17,7 +18,10 @@ module Pate.Arch (
   fromRegisterDisplay
   ) where
 
+import qualified Data.BitVector.Sized as BVS
+import qualified Data.ByteString as BS
 import qualified Data.Kind as DK
+import qualified Data.Map as Map
 import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           GHC.TypeLits ( type (<=) )
@@ -36,6 +40,7 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
+import qualified Pate.Verification.Override as PVO
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -101,6 +106,7 @@ class
   , MS.SymArchConstraints arch
   , MS.GenArchInfo PMT.MemTraceK arch
   , MC.ArchConstraints arch
+  , 16 <= MC.ArchAddrWidth arch
   ) => ValidArch arch where
   -- | Registers which are used for "raw" bitvectors (i.e. they are not
   -- used for pointers). These are assumed to always have region 0.
@@ -117,14 +123,22 @@ class
   -- library
   argumentNameFrom :: forall tp . [T.Text] -> MC.ArchReg arch tp -> Maybe T.Text
 
+data ValidArchData arch =
+  ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
+                , validArchFunctionDomain :: PVE.ExternalDomain PVE.ExternalCall arch
+                , validArchDedicatedRegisters :: HasDedicatedRegister arch
+                , validArchArgumentMapping :: PVO.ArgumentMapping arch
+                , validArchOrigExtraSymbols :: Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
+                -- ^ Extra symbols obtained by unspecified means
+                --
+                -- For example, these could be PLT stub symbols for ELF binaries
+                , validArchPatchedExtraSymbols :: Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
+                }
+
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier
 --
 -- The first external domain handles domains for system calls, while the second
 -- handles domains for external library calls
 data SomeValidArch arch where
-  SomeValidArch :: (ValidArch arch, ArchConstraints arch)
-                => PVE.ExternalDomain PVE.SystemCall arch
-                -> PVE.ExternalDomain PVE.ExternalCall arch
-                -> HasDedicatedRegister arch
-                -> SomeValidArch arch
+  SomeValidArch :: (ValidArch arch, ArchConstraints arch) => ValidArchData arch -> SomeValidArch arch

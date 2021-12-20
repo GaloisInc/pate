@@ -1,6 +1,3 @@
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module Main ( main ) where
 
 import qualified Pate.Arch as PA
@@ -9,9 +6,16 @@ import           TestBase
 
 main :: IO ()
 main = do
+  let archData = PA.ValidArchData { PA.validArchSyscallDomain = AArch32.handleSystemCall
+                                  , PA.validArchFunctionDomain = AArch32.handleExternalCall
+                                  , PA.validArchDedicatedRegisters = AArch32.hasDedicatedRegister
+                                  , PA.validArchArgumentMapping = AArch32.argumentMapping
+                                  , PA.validArchOrigExtraSymbols = mempty
+                                  , PA.validArchPatchedExtraSymbols = mempty
+                                  }
   let cfg = TestConfig
         { testArchName = "aarch32"
-        , testArchProxy = PA.SomeValidArch @AArch32.AArch32 AArch32.handleSystemCall AArch32.handleExternalCall AArch32.hasDedicatedRegister
+        , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
             [
             -- see: https://github.com/GaloisInc/pate/issues/10

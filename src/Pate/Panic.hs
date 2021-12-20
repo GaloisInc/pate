@@ -9,7 +9,11 @@ import qualified Panic as P
 data PateComponent = Verifier
                    | Visualizer
                    | ProofConstruction
+                   | InlineCallee
                    | Discovery
+                   | Solver
+                   | Override
+                   | AArch32
                    deriving (Show)
 
 instance P.PanicComponent PateComponent where

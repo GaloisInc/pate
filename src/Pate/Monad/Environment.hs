@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RankNTypes #-}
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -23,8 +24,10 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.Simulator as CS
+import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as MS
+import qualified Lang.Crucible.LLVM.MemModel as LCLM
+import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
 
@@ -43,6 +46,9 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.Solver as PSo
+import qualified Pate.SymbolTable as PSym
+import qualified Pate.Verification.Override as PVO
+import qualified Pate.Verification.Override.Library as PVOL
 
 data VerificationFailureMode =
     ThrowOnAnyFailure
@@ -54,10 +60,13 @@ data EquivEnv sym arch where
     , envValidArch :: PA.SomeValidArch arch
     , envCtx :: PMC.EquivalenceContext sym arch
     , envArchVals :: MS.GenArchVals MT.MemTraceK arch
+    , envLLVMArchVals :: MS.GenArchVals MS.LLVMMemory arch
     , envExtensions :: CS.ExtensionImpl (MS.MacawSimulatorState sym) sym (MS.MacawExt arch)
     , envPCRegion :: W4.SymNat sym
     , envMemTraceVar :: CS.GlobalVar (MT.MemTrace arch)
     , envBlockEndVar :: CS.GlobalVar (MS.MacawBlockEndType arch)
+    -- ^ The global variable used to hold memory for the LLVM memory model while
+    -- symbolically executing functions in the "inline callee" feature
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode
@@ -82,6 +91,15 @@ data EquivEnv sym arch where
     -- ^ cache for intermediate proof results
     , envStatistics :: MVar.MVar PES.EquivalenceStatistics
     -- ^ Statistics collected during verification
+    , envSymBackendLock :: MVar.MVar ()
+    -- ^ A lock to serialize access to the 'PSo.Sym'
+    --
+    -- See Note [Symbolic Backend Locking] for more details
+    , envOverrides :: forall w
+                    . (LCLM.HasPtrWidth w, LCLM.HasLLVMAnn sym, ?memOpts :: LCLM.MemOptions, DMM.MemWidth w)
+                   => PVOL.OverrideConfig sym w
+                   -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
+    -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
 
 type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
@@ -97,3 +115,22 @@ envCtxL f ee = fmap (\c' -> ee { envCtx = c' }) (f (envCtx ee))
 freshBlockCache ::
   IO (BlockCache arch a)
 freshBlockCache = BlockCache <$> IO.newMVar M.empty
+
+{- Note [Symbolic Backend Locking]
+
+We spawn multiple threads to do a great deal of work in generating and
+discharging the equivalence proof. Unfortunately, symbolic execution is not
+thread safe, as the assumption stack is stored in an IORef. To make this safe,
+until we can develop a safer data sharing strategy, we use an MVar as a lock
+that must be acquired before symbolically executing any code.
+
+Note that the lock is just a `MVar ()` instead of an `MVar SymBackend`. This is
+because many places in the verifier use the symbolic backend in ways that *are*
+thread safe. Only symbolic execution is not. Thus, we have a separate lock just
+for symbolic execution instead of serializing all accesses to the symbolic
+backend (e.g., term creation).
+
+It would be an interesting experiment to make an alternative backend that stored
+thread-local assumption stacks (e.g., keyed by threadid).
+
+-}

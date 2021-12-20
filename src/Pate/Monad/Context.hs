@@ -10,6 +10,7 @@ module Pate.Monad.Context (
     ParsedFunctionMap
   , newParsedFunctionMap
   , parsedFunctionContaining
+  , parsedBlocksContaining
   , ParsedBlocks(..)
   , BinaryContext(..)
   , EquivalenceContext(..)
@@ -23,7 +24,7 @@ import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
 import qualified Data.Parameterized.Classes as PC
-import           Data.Parameterized.Some ( Some(..) )
+import           Data.Parameterized.Some ( Some(..), viewSome )
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 import qualified System.Directory as SD
@@ -43,11 +44,12 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Hints as PH
 import qualified Pate.PatchPair as PPa
+import qualified Pate.SymbolTable as PSym
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
 data ParsedFunctionState arch bin =
-  ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (ParsedBlocks arch)
+  ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (Some (MD.DiscoveryFunInfo arch))
                       , discoveryState :: MD.DiscoveryState arch
                       }
 
@@ -117,8 +119,8 @@ saveCFG mCFGDir repr dfi =
     IO.withFile fname IO.WriteMode $ \hdl -> do
       PPT.hPutDoc hdl (PP.pretty dfi)
 
--- | Return the basic blocks corresponding to the function that contains the
--- given basic block
+-- | Return the 'MD.DiscoveryFunInfo' (raw macaw code discovery artifact)
+-- corresponding to the function that contains the given basic block
 --
 -- This will return a cached parsed function if possible, or run the macaw
 -- analysis on a new address and cache the result.
@@ -132,7 +134,7 @@ parsedFunctionContaining ::
   (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
-  IO (Maybe (ParsedBlocks arch))
+  IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
 parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir) = do
   let baddr = PA.addrToMemAddr (PB.concreteAddress blk)
   st <- IORef.readIORef pfmRef
@@ -140,7 +142,7 @@ parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir) = do
   let mem = MD.memory ds1
   -- First, check if we have a cached set of blocks for this state
   case Map.lookup (PB.blockFunctionEntry blk) (parsedFunctionCache st) of
-    Just blks -> return (Just blks)
+    Just sdfi -> return (Just sdfi)
     Nothing -> do
       -- Otherwise, run code discovery at this address
       case MM.resolveRegionOff mem (MM.addrBase baddr) (MM.addrOffset baddr) of
@@ -155,11 +157,11 @@ parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir) = do
           -- IORef that might be evaluated multiple times if there is a lot of
           -- contention. If that becomes a problem, we may want to change this
           -- to an MVar where we fully evaluate each result before updating it.
-          (Some dfi, blks) <- IORef.atomicModifyIORef' pfmRef (atomicAnalysis faddr)
+          Some dfi <- IORef.atomicModifyIORef' pfmRef (atomicAnalysis faddr)
           let binRep :: PBi.WhichBinaryRepr bin
               binRep = PC.knownRepr
           saveCFG mCFGDir binRep dfi
-          return (Just blks)
+          return (Just (Some dfi))
   where
     -- The entire analysis is bundled up in here so that we can issue an atomic
     -- update to the cache that preserves the discovery state. If we didn't do
@@ -172,11 +174,20 @@ parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir) = do
       in case MD.analyzeFunction faddr rsn (discoveryState st) of
            (ds2, Some dfi) ->
              let entry = funInfoToFunEntry W4.knownRepr dfi
-                 pbs = buildParsedBlocks dfi
-             in (st { parsedFunctionCache = Map.insert entry pbs (parsedFunctionCache st)
+             in (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
                     , discoveryState = ds2
-                    }, (Some dfi, pbs))
+                    }, Some dfi)
 
+-- | Similar to 'parsedFunctionContaining', except that it constructs the
+-- 'ParsedBlocks' structure used in most of the verifier.
+parsedBlocksContaining ::
+  forall bin arch .
+  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  PB.ConcreteBlock arch bin ->
+  ParsedFunctionMap arch bin ->
+  IO (Maybe (ParsedBlocks arch))
+parsedBlocksContaining blk pfm =
+  fmap (viewSome buildParsedBlocks) <$> parsedFunctionContaining blk pfm
 
 data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   { binary :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MM.ArchAddrWidth arch))
@@ -194,6 +205,13 @@ data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   , binAbortFn :: Maybe (PB.FunctionEntry arch bin)
   -- ^ address of special-purposes "abort" function that represents an abnormal
   -- program exit
+  , symbolTable :: PSym.SymbolTable arch
+  -- ^ A mapping of addresses to symbols used to match overrides to callees
+  -- during symbolic execution in the inline-callee mode
+  --
+  -- Note that this table has more entries than the 'functionHintIndex', as it
+  -- also includes entries from the dynamic symbol table representing the
+  -- addresses of PLT stubs that call out to shared library functions
   }
 
 data EquivalenceContext sym arch where
@@ -205,6 +223,9 @@ data EquivalenceContext sym arch where
       -- NB, currentFunc is misnamed, as it corresponds to a pair of blocks under consideration,
       -- but they might not be function entry points
     , _currentFunc :: PPa.BlockPair arch
+    , originalIgnorePtrs :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
+    , patchedIgnorePtrs :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
+    , equatedFunctions :: [(PA.ConcreteAddress arch, PA.ConcreteAddress arch)]
     } -> EquivalenceContext sym arch
 
 $(L.makeLenses ''EquivalenceContext)

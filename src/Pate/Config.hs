@@ -2,6 +2,7 @@
 module Pate.Config (
   Hex(..),
   BlockData,
+  FunctionAddr,
   PatchData(..),
   noPatchData,
   RunConfig(..),
@@ -30,14 +31,43 @@ instance (Read a) => Read (Hex a) where
   readsPrec i s = [ (Hex a, s') | (a, s') <- readsPrec i s ]
 
 type BlockData = Hex Word64
+type FunctionAddr = Hex Word64
 
 data PatchData =
   PatchData { patchPairs :: [(BlockData, BlockData)]
+            , ignorePointers :: ([(BlockData,Hex Word64)],[(BlockData,Hex Word64)])
+            -- ^ For the original and patched program, each may come with a list of
+            --   "ignorable" pointers.  Each pair in the list consists of a location
+            --   and a length.  The locations refer to positions in the global memory
+            --   of the programs where pointers may be stored during the program run.
+            --   The regions of memory pointed to (with the given length) are inteded
+            --   to be ignored by the verifier, so that differences between the two runs
+            --   do not result in equivalence failures. Note that this is an _indirect_
+            --   notion of ignorability; the locations specified here are themselves
+            --   are not ignored, but rather the memory to which they point.
+
+            , equatedFunctions :: [(FunctionAddr, FunctionAddr)]
+            -- ^ Pairs of functions (named by their address) that should be
+            -- considered to be equivalent, even if they actually have different
+            -- effects. This is intended to work with the 'ignorePointers'
+            -- feature to enable users to specify that memory changes to certain
+            -- memory locations should be ignored, while verifying that the side
+            -- effects of the 'equatedFunctions' are benign.
+            --
+            -- The functions in this list are paired up by call site, and must
+            -- be called at aligned call sites in the original and patched
+            -- binaries, respectively.
+            --
+            -- See the documentation on the function replacement verification
+            -- feature.
             }
   deriving (Read, Show, Eq)
 
 noPatchData :: PatchData
-noPatchData = PatchData []
+noPatchData = PatchData { patchPairs = []
+                        , ignorePointers = ([],[])
+                        , equatedFunctions = []
+                        }
 
 ----------------------------------
 -- Verification configuration
@@ -66,6 +96,11 @@ data VerificationConfig =
     -- fast and therefore a delay indicates a problem with the solver
     , cfgMacawDir :: Maybe FilePath
     -- ^ The directory to save macaw CFGs to
+    , cfgSolverInteractionFile :: Maybe FilePath
+    -- ^ A file to save online SMT solver interactions to
+    --
+    -- This only captures the interaction with the solver during symbolic
+    -- execution, and not the one-off queries issued by the rest of the verifier
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -79,6 +114,7 @@ defaultVerificationCfg =
                      , cfgGoalTimeout = PT.Minutes 5
                      , cfgGroundTimeout = PT.Seconds 5
                      , cfgMacawDir = Nothing
+                     , cfgSolverInteractionFile = Nothing
                      }
 
 data RunConfig arch =

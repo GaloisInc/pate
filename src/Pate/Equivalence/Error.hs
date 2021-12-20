@@ -8,13 +8,14 @@ module Pate.Equivalence.Error (
   , InequivalenceReason(..)
   , EquivalenceError(..)
   , equivalenceError
+  , equivalenceErrorFor
   ) where
 
 import qualified Control.Exception as X
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Typeable ( Typeable )
-import           GHC.Stack ( CallStack, prettyCallStack )
+import           GHC.Stack ( HasCallStack, CallStack, prettyCallStack, callStack )
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
@@ -70,6 +71,7 @@ data InnerEquivalenceError arch
   | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
   | InconsistentSimplificationResult String String
   | UnhandledLoop
+  | MissingExpectedEquivalentFunction (PA.ConcreteAddress arch)
 
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (InnerEquivalenceError arch)
@@ -91,9 +93,20 @@ instance Show (EquivalenceError arch) where
 
 instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (EquivalenceError arch)
 
-equivalenceError :: PAr.ValidArch arch => InnerEquivalenceError arch -> EquivalenceError arch
+equivalenceError :: (HasCallStack, PAr.ValidArch arch) => InnerEquivalenceError arch -> EquivalenceError arch
 equivalenceError err = EquivalenceError
   { errWhichBinary = Nothing
-  , errStackTrace = Nothing
+  , errStackTrace = Just callStack
   , errEquivError = err
   }
+
+equivalenceErrorFor
+  :: (HasCallStack, PAr.ValidArch arch)
+  => PBi.WhichBinaryRepr bin
+  -> InnerEquivalenceError arch
+  -> EquivalenceError arch
+equivalenceErrorFor repr err =
+  EquivalenceError { errWhichBinary = Just (Some repr)
+                   , errStackTrace = Just callStack
+                   , errEquivError = err
+                   }

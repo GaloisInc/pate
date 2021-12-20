@@ -59,13 +59,13 @@ module Pate.Proof.Instances
   
   where
 
-import           Numeric
-import           GHC.Natural
-import           Data.Functor.Const
-import qualified Data.Kind as DK
 import           Control.Lens hiding ( op, pre )
+import qualified Data.IntervalMap.Interval as DII
+import qualified Data.Kind as DK
 import           Data.Maybe
 import           Data.Proxy
+import           GHC.Natural
+import           Numeric
 
 import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
@@ -96,6 +96,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Verification.MemoryLog as PVM
 
 import qualified What4.Interface as W4
 import qualified What4.ExprHelpers as WEH
@@ -166,6 +167,7 @@ type instance PF.ProofMacawValue (ProofSym sym arch) = PSR.MacawRegEntry sym
 type instance PF.ProofBlockExit (ProofSym sym arch) = CS.RegValue sym (MS.MacawBlockEndType arch)
 type instance PF.ProofContext (ProofSym sym arch) = PPa.PatchPair (PS.SimState sym arch)
 type instance PF.ProofScope (ProofSym (W4B.ExprBuilder t st fs) arch) = t
+type instance PF.ProofInlinedResult (ProofSym sym arch) = PVM.SomeWriteSummary (MM.ArchAddrWidth arch)
 
 type SymDomain sym arch = PF.ProofExpr (ProofSym sym arch) PF.ProofDomainType
 
@@ -240,18 +242,47 @@ ppMaybe (Just f) pp = pp f
 ppMaybe Nothing _ = PP.emptyDoc
 
 instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (PF.ProofExpr (ProofSym sym arch) tp) where
- pretty (PF.ProofExpr prf@PF.ProofFunctionCall{}) =
-   PP.vsep $ 
+ pretty (PF.ProofExpr prf@PF.ProofFunctionCall { PF.prfFunctionCallBody = PF.ProofExpr (PF.ProofInlinedCall {}) }) =
+   PP.vsep $
      [ "Function pre-domain is satisfied before call:"
-     , PP.indent 4 $ ppBlockPairTarget (PF.prfTripleBlocks $ PF.unApp $ PF.prfFunctionCallPre prf) (PF.prfTripleBlocks $ PF.unApp $ PF.prfBlockSliceTriple $ PF.unApp $ PF.prfFunctionCallBody prf)
+     -- , PP.indent 4 $ ppBlockPairTarget (PF.prfTripleBlocks $ PF.unApp $ PF.prfFunctionCallPre prf) (PF.prfTripleBlocks $ PF.unApp $ PF.prfBlockSliceTriple slice)
      , PP.indent 4 $ PP.pretty $ PF.prfFunctionCallPre prf
      , "Function satisfies post-domain upon return:"
      , PP.indent 4 $ PP.pretty $ PF.prfFunctionCallBody prf
      ] ++ case PF.prfFunctionCallContinue prf of
-       Just cont ->
+       Just cont@(PF.ProofExpr (contSlice@PF.ProofBlockSlice {})) ->
          [ "Continuing after function return satisfies post-domain for caller."
-         , PP.indent 4 $ ppBlockPairReturn (PF.prfTripleBlocks $ PF.unApp $ PF.prfBlockSliceTriple $ PF.unApp cont)
+         , PP.indent 4 $ ppBlockPairReturn (PF.prfTripleBlocks $ PF.unApp $ PF.prfBlockSliceTriple contSlice)
          , PP.indent 4 $ PP.pretty $ cont
+         ]
+       Just cont@(PF.ProofExpr (PF.ProofInlinedCall {})) ->
+         [ "Continuing after inlined function return"
+         , PP.indent 4 $ PP.pretty cont
+         ]
+       Nothing -> []
+   where
+     ppBlockPairReturn :: PPa.BlockPair arch -> PP.Doc a
+     ppBlockPairReturn pPair = PPa.ppPatchPairEq PB.equivBlocks go pPair
+       where
+         go :: PB.ConcreteBlock arch bin -> PP.Doc a
+         go blk = PP.parens (PP.pretty (PB.ppBlock blk) <+> "-> return")
+
+ pretty (PF.ProofExpr prf@PF.ProofFunctionCall { PF.prfFunctionCallBody = PF.ProofExpr (slice@PF.ProofBlockSlice {}) }) =
+   PP.vsep $
+     [ "Function pre-domain is satisfied before call:"
+     , PP.indent 4 $ ppBlockPairTarget (PF.prfTripleBlocks $ PF.unApp $ PF.prfFunctionCallPre prf) (PF.prfTripleBlocks $ PF.unApp $ PF.prfBlockSliceTriple slice)
+     , PP.indent 4 $ PP.pretty $ PF.prfFunctionCallPre prf
+     , "Function satisfies post-domain upon return:"
+     , PP.indent 4 $ PP.pretty $ PF.prfFunctionCallBody prf
+     ] ++ case PF.prfFunctionCallContinue prf of
+       Just cont@(PF.ProofExpr (contSlice@PF.ProofBlockSlice {})) ->
+         [ "Continuing after function return satisfies post-domain for caller."
+         , PP.indent 4 $ ppBlockPairReturn (PF.prfTripleBlocks $ PF.unApp $ PF.prfBlockSliceTriple contSlice)
+         , PP.indent 4 $ PP.pretty $ cont
+         ]
+       Just cont@(PF.ProofExpr (PF.ProofInlinedCall {})) ->
+         [ "Continuing after inlined function return"
+         , PP.indent 4 $ PP.pretty cont
          ]
        Nothing -> []
    where
@@ -339,6 +370,16 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
    PF.VerificationSuccess -> "Succeeded"
    PF.VerificationFail (result, cond) -> PP.vsep [ "Failed:", PP.pretty result, PP.pretty cond ]
 
+ pretty (PF.ProofExpr (PF.ProofInlinedCall blks (PVM.SomeWriteSummary _sym writeSummary))) =
+   PP.vsep [ "Inlined callees: " <> PP.pretty blks
+           , "Global addresses with different contents: "
+           , PP.indent 2 $ PP.vsep (map ppRange locRanges)
+           ]
+   where
+     ptrW = writeSummary ^. PVM.pointerWidth
+     locRanges = PVM.indexWriteAddresses ptrW (writeSummary ^. PVM.differingGlobalMemoryLocations)
+     ppRange r = "[" <> PP.pretty (BVS.ppHex ptrW (DII.lowerBound r)) <> "-" <> PP.pretty (BVS.ppHex ptrW (DII.upperBound r)) <> "]"
+
 instance PSo.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
   pretty (CondEquivalenceResult pExample pPred pAbortValid) =
     PP.vsep $
@@ -405,6 +446,7 @@ type instance PF.ProofMacawValue (ProofGround arch) = GroundMacawValue
 type instance PF.ProofBlockExit (ProofGround arch) = GroundBlockExit arch
 -- no additional context needed for ground values
 type instance PF.ProofContext (ProofGround arch) = ()
+type instance PF.ProofInlinedResult (ProofGround arch) = PVM.SomeWriteSummary (MM.ArchAddrWidth arch)
 
 instance PA.ValidArch arch => PF.IsProof (ProofGround arch)
 
