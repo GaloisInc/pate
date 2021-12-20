@@ -288,7 +288,7 @@ lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFun
   singletonIP <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV PN.knownNat) sym ipBV
 
   case WI.asBV singletonIP of
-    Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: "] -- ++ show (WI.printSymExpr singletonIP)]
+    Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr singletonIP)]
     Just bv
       | Just calleeSymbol <- PSym.lookupSymbol bv symtab
       , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides -> do
