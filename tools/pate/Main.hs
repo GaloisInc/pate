@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 {-# LANGUAGE NoMonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -65,6 +66,7 @@ import qualified Pate.Verbosity as PV
 import qualified Pate.AArch32 as AArch32
 import qualified Pate.PPC as PPC
 
+import qualified JSONReport as JR
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
@@ -135,8 +137,9 @@ main = do
   case ep of
     Left err -> SE.die (show err)
     Right (elfErrs, Some proxy) -> do
+      proofConsumer <- T.traverse JR.consumeProofEvents (proofSummaryJSON opts)
       chan <- CC.newChan
-      (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan
+      (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan proofConsumer
       (origHints, patchedHints) <- parseHints logger opts
       LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
       let
@@ -174,6 +177,7 @@ main = do
       -- persistent until the user kills it)
       CC.writeChan chan Nothing
       F.forM_ mConsumer CCA.wait
+      _ <- T.traverse JR.waitForConsumer proofConsumer
 
       case status of
         PEq.Errored err -> SE.die (show err)
@@ -202,6 +206,7 @@ data CLIOptions = CLIOptions
   , verbosity :: PV.Verbosity
   , saveMacawCFGs :: Maybe FilePath
   , solverInteractionFile :: Maybe FilePath
+  , proofSummaryJSON :: Maybe FilePath
   } deriving (Eq, Ord, Show)
 
 data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
@@ -247,8 +252,9 @@ startLogger :: PA.SomeValidArch arch
             -> PV.Verbosity
             -> LogTarget
             -> CC.Chan (Maybe (PE.Event arch))
+            -> Maybe (JR.ProofEventConsumer arch)
             -> IO (LJ.LogAction IO (PE.Event arch), Maybe (CCA.Async ()))
-startLogger (PA.SomeValidArch {}) verb lt chan =
+startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
   case lt of
     NullLogger -> return (LJ.LogAction $ \_ -> return (), Nothing)
     StdoutLogger -> logToHandle IO.stdout
@@ -280,12 +286,18 @@ startLogger (PA.SomeValidArch {}) verb lt chan =
       let consumeLogs = do
             me <- CC.readChan chan
             case me of
-              Nothing -> return ()
-              Just evt
-                | printAtVerbosity verb evt -> do
-                    PPRT.renderIO hdl (terminalFormatEvent evt)
-                    consumeLogs
-                | otherwise -> consumeLogs
+              Nothing -> do
+                -- Shut down the proof summary process once we are out of events
+                _ <- T.traverse (\pc -> JR.sendEvent pc Nothing) proofConsumer
+                return ()
+              Just evt -> do
+                case (proofConsumer, evt) of
+                  (Just pc, PE.ProofIntermediate bp sp _) -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
+                  _ -> return ()
+                if | printAtVerbosity verb evt -> do
+                       PPRT.renderIO hdl (terminalFormatEvent evt)
+                       consumeLogs
+                   | otherwise -> consumeLogs
 
       consumer <- CCA.async consumeLogs
       return (logAct, Just consumer)
@@ -579,3 +591,8 @@ cliOptions = OA.info (OA.helper <*> parser)
          <> OA.metavar "FILE"
          <> OA.help "Save interactions with the SMT solver during symbolic execution to this file"
          ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "proof-summary-json"
+        <> OA.metavar "FILE"
+        <> OA.help "A file to save interesting proof results to in JSON format"
+        ))

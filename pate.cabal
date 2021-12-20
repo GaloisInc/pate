@@ -239,7 +239,8 @@ executable pate-exec
   import:              shared-exec, shared
   main-is:             Main.hs
   other-modules:       Pate.PPC,
-                       Pate.AArch32
+                       Pate.AArch32,
+                       JSONReport
   hs-source-dirs:      tools/pate tools arch
   build-depends:       async,
                        aeson,
