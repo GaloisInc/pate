@@ -18,6 +18,7 @@ import           Data.Maybe ( fromMaybe, listToMaybe )
 import           GHC.TypeLits ( KnownNat )
 import           Data.Word ( Word32 )
 
+-- | A wrapper type to make it easier to extract both Rel and Rela entries
 data SomeRel tp where
   SomeRel :: [r tp] -> (r tp -> Word32) -> SomeRel tp
 
