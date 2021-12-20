@@ -86,8 +86,7 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
               msat <- WPO.checkAndGetModel sp "Concretize value (with blocking clause)"
               case msat of
                 WSat.Unknown -> return val -- Total failure
-                WSat.Sat _mdl -> do
-                  return val  -- There are multiple models
+                WSat.Sat _mdl -> return val  -- There are multiple models
                 WSat.Unsat {} -> injectSymbolic sym concVal -- There is a single concrete result
   where
     onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
