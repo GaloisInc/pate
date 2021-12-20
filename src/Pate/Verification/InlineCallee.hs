@@ -243,14 +243,15 @@ allocateInitialState
 allocateInitialState sym archInfo memory = do
   let proxy = Proxy @arch
   let endianness = toCrucibleEndian (DMAI.archEndianness archInfo)
-  -- Treat all mutable values in the global memory as symbolic
+  -- Treat all mutable values in the global memory as concrete
   --
-  -- This is the safer strategy in this case, since we don't have any of the
-  -- context of the program before this function, so any mutable memory
-  -- locations could theoretically have any value. This could be problematic if
-  -- it causes global state to be under-constrained; safely handling this is
-  -- complicated, and would require significant infrastructure in the rest of
-  -- the verifier to propagate known facts.
+  -- The safer strategy would be to treat them as all symbolic, but that doesn't
+  -- work well in practice (i.e., it turns into symbolic reads and writes really
+  -- quickly).  Treating the initial bytes as concrete is not necessarily safe,
+  -- but it generally produces an informative result (as opposed to no result).
+  --
+  -- It would be nice to revisit this with additional context propagated from
+  -- the outer verification pass.
   let memModelContents = DMSM.ConcreteMutable
   let globalMemConfig = DMSM.GlobalMemoryHooks { DMSM.populateRelocation = populateRelocation }
   (mem0, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
