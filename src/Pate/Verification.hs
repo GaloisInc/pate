@@ -743,21 +743,11 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
                    r <- trivialBlockSlice True syscallDomain (simIn bundle) postcondSpec
                    return $ (W4.truePred sym, r)
                  | isEquatedCallSite -> do
-                     -- FIXME: If the call is to our distinguished function
-                     -- (provided as an input), do not call
-                     -- provePostcondition'. Instead, symbolically execute the
-                     -- function (with whatever setup is required to enable us to
-                     -- summarize the memory effects) using more traditional
-                     -- macaw-symbolic setups.
-                     --
-                     -- Note that, in that case, we might not need contPre at all,
-                     -- as that represents the "rest" of the program under the
-                     -- call. Or does it represent the code that is returned to?
-                     -- It turns out that contPre *is* the return frame, which is
-                     -- very important and the one we want to build off of.
-                     --
-                     -- We just need to replace the result of this analysis of
-                     -- bundleCall with the inlined version
+                     -- If the call is to our distinguished function (provided
+                     -- as an input), do not call provePostcondition'. Instead,
+                     -- symbolically execute the function (with whatever setup
+                     -- is required to enable us to summarize the memory
+                     -- effects) using more traditional macaw-symbolic setups.
                      traceBundle bundle ("  Inlining equated callees " ++ show pPair)
                      inlineCallee contPre pPair
                  | otherwise -> catchSimBundle pPair postcondSpec $ \bundleCall -> do
