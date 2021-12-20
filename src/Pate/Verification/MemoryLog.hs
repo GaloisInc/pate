@@ -19,6 +19,10 @@ module Pate.Verification.MemoryLog (
   , FilterPolicy(..)
   , filterWrites
   , WriteSummary(..)
+  , differingGlobalMemoryLocations
+  , differingOrigHeapLocations
+  , differingPatchedHeapLocations
+  , unhandledPointers
   , compareMemoryTraces
   ) where
 
@@ -39,6 +43,8 @@ import qualified What4.BaseTypes as WT
 import qualified What4.Expr.Builder as WEB
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
+import qualified What4.Protocol.SMTWriter as WPS
+import qualified What4.SatResult as WSat
 
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
@@ -48,6 +54,7 @@ import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.LLVM.MemModel.MemLog as LCLMM
 import qualified Lang.Crucible.LLVM.MemModel.Partial as Partial
 
+import qualified Pate.Panic as PP
 import qualified Pate.Verification.Concretize as PVC
 
 llvmPtrWidth :: (LCB.IsSymInterface sym) => LCLM.LLVMPtr sym w -> PN.NatRepr w
@@ -296,6 +303,15 @@ data WriteSummary sym w =
 
 $(LTH.makeLenses ''WriteSummary)
 
+bvWidth
+  :: (LCB.IsSymInterface sym)
+  => sym
+  -> WI.SymExpr sym (WT.BaseBVType w)
+  -> PN.NatRepr w
+bvWidth _ e =
+  case WI.exprType e of
+    WT.BaseBVRepr w -> w
+
 -- | Returns 'True' if the two values read from memory are always equal
 --
 -- The two values have been read from memory, but are partial (or potentially
@@ -304,18 +320,41 @@ $(LTH.makeLenses ''WriteSummary)
 proveBytesEqual
   :: ( LCB.IsSymInterface sym
      , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth w
+     , HasCallStack
      )
   => sym
   -> Partial.PartLLVMVal sym
   -> Partial.PartLLVMVal sym
   -> IO Bool
-proveBytesEqual = undefined
+proveBytesEqual _ (Partial.Err _) _ = return False
+proveBytesEqual _ _ (Partial.Err _) = return False
+proveBytesEqual sym (Partial.NoErr p1 v1) (Partial.NoErr p2 v2) =
+  case (v1, v2) of
+    (LCLM.LLVMValInt _ b1, LCLM.LLVMValInt _ b2)
+      | Just PC.Refl <- PC.testEquality (bvWidth sym b1) (bvWidth sym b2) -> do
+          LCBO.withSolverProcess sym doPanic $ \sp -> WPO.inNewFrame sp $ do
+            let conn = WPO.solverConn sp
+            WPS.assume conn p1
+            WPS.assume conn p2
+            areEq <- WI.bvEq sym b1 b2
+            goal <- WI.notPred sym areEq
+            WPS.assume conn goal
+            msat <- WPO.check sp "Prove byte equality"
+            case msat of
+              WSat.Unknown -> return False
+              WSat.Sat {} -> return False
+              WSat.Unsat {} -> return True
+    _ -> PP.panic PP.InlineCallee "proveBytesEqual" ["Impossible value type"]
+  where
+    doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]
 
 compareWrite
   :: forall sym scope solver fs w
    . ( LCB.IsSymInterface sym
      , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth w
      )
   => L.Lens' (WriteSummary sym w) [LCLM.LLVMPtr sym w]
@@ -363,6 +402,7 @@ compareMemoryTraces
   :: forall sym scope solver fs w
    . ( LCB.IsSymInterface sym
      , sym ~ LCBO.OnlineBackend scope solver fs
+     , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth w
      )
   => sym

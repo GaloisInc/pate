@@ -10,8 +10,8 @@
 {-# LANGUAGE ViewPatterns #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
-import           Control.Lens ( (^.), folded )
-import qualified Control.Lens as L
+import           Control.Applicative ( (<|>) )
+import           Control.Lens ( (^.) )
 import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
@@ -19,8 +19,8 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
-import qualified Data.IntervalMap.Interval as IM
-import qualified Data.IntervalMap.Strict as IM
+import qualified Data.IntervalSet as DI
+import qualified Data.IntervalMap.Interval as DII
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
@@ -28,9 +28,7 @@ import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.SymbolRepr ( knownSymbol )
 import           Data.Proxy ( Proxy(..) )
-import qualified Data.Set as Set
 import qualified Data.Text as T
-import qualified Data.Traversable as T
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified System.IO as IO
@@ -40,7 +38,6 @@ import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Discovery as DMD
 import qualified Data.Macaw.Memory as DMM
-import qualified Data.Macaw.Memory.Permissions as Perm
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Symbolic.Memory as DMSM
 import qualified Data.Macaw.Types as DMT
@@ -52,7 +49,6 @@ import qualified Lang.Crucible.LLVM.Bytes as LCLB
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.Intrinsics as LCLI
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
-import qualified Lang.Crucible.LLVM.MemModel.MemLog as LCLMM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.GlobalState as LCSG
 import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
@@ -62,10 +58,6 @@ import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
 import qualified What4.Symbol as WS
-import qualified What4.Expr.GroundEval as WEG
-import qualified What4.Protocol.SMTWriter as WPS
-import qualified What4.SatResult as WSat
-
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -611,6 +603,21 @@ concreteizeMemory sym = LCLM.concMemImpl sym f
 
 -}
 
+-- | Summarize global writes that are adjacent to one another as ranges
+indexWrites
+  :: PN.NatRepr w
+  -> [BVS.BV w]
+  -> [DII.Interval (BVS.BV w)]
+indexWrites width = DI.elems . DI.flattenWith combine . F.foldl' addSingleton DI.empty
+  where
+    combine a b = DII.combine a b <|> adjacent a b
+    adjacent (DII.ClosedInterval l1 h1) (DII.ClosedInterval l2 h2)
+      | BVS.add width h1 (BVS.mkBV width 1) == l2 = Just (DII.ClosedInterval l1 h2)
+      | otherwise = Nothing
+    adjacent _ _ = Nothing
+    addSingleton s i = DI.insert (DII.ClosedInterval i i) s
+
+
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
 -- memory effects that are not explicitly ignored.
@@ -738,6 +745,15 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
 
 
         writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
+
+        liftIO $ putStrLn "Differing global memory locations"
+        liftIO $ F.forM_ (writeSummary ^. PVM.differingGlobalMemoryLocations) $ \bv -> do
+          putStrLn ("  " ++ BVS.ppHex ?ptrWidth bv)
+
+        let writeRanges = indexWrites ?ptrWidth (writeSummary ^. PVM.differingGlobalMemoryLocations)
+        liftIO $ putStrLn "Ranges: "
+        liftIO $ F.forM_ writeRanges $ \r -> do
+          putStrLn ("  " ++ show (fmap (BVS.ppHex ?ptrWidth) r))
 
         let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
                                           }
