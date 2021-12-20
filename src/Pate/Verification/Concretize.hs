@@ -91,6 +91,10 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
   where
     onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
 
+-- | Resolve an 'LCLM.LLVMPtr' to concrete, if possible
+--
+-- The block id and offset are concretized independently, and either (or
+-- neither) could be updated
 resolveSingletonPointer
   :: ( LCB.IsSymInterface sym
      , sym ~ LCBO.OnlineBackend scope solver fs
