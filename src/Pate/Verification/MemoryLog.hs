@@ -19,13 +19,17 @@ module Pate.Verification.MemoryLog (
   , FilterPolicy(..)
   , filterWrites
   , WriteSummary(..)
+  , SomeWriteSummary(..)
   , differingGlobalMemoryLocations
   , differingOrigHeapLocations
   , differingPatchedHeapLocations
+  , pointerWidth
+  , indexWriteAddresses
   , unhandledPointers
   , compareMemoryTraces
   ) where
 
+import           Control.Applicative ( (<|>) )
 import           Control.Lens ( (^.), (%=) )
 import qualified Control.Lens as L
 import qualified Control.Lens.TH as LTH
@@ -33,6 +37,8 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.State as CMS
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
+import qualified Data.IntervalSet as DI
+import qualified Data.IntervalMap.Interval as DII
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.NatRepr as PN
@@ -290,6 +296,18 @@ memoryOperationFootprint sym memImpl =
           processWrites writes
           traverseWriteLog memState'
 
+-- | A wrapper around the symbolic backend that captures enough to inspect some
+-- terms, but not enough to persist the online connection, which could disappear.
+--
+-- This is primarily here so that we can sink the 'WriteSummary' down into a
+-- proof node, where referring to a symbolic backend is a bit tricky. Proofs in
+-- "symbolic" mode can refer to symbolic backends in the type parameter, but
+-- "grounded" proofs cannot.
+--
+-- By making this the proof payload, we can use the same type in both proof modes.
+data SomeWriteSummary w where
+  SomeWriteSummary :: (LCB.IsSymInterface sym) => sym -> WriteSummary sym w -> SomeWriteSummary w
+
 data WriteSummary sym w =
   WriteSummary { _differingGlobalMemoryLocations :: [BVS.BV w]
                -- ^ Global memory locations that differ
@@ -299,9 +317,26 @@ data WriteSummary sym w =
                , _unhandledPointers :: [LCLM.SomePointer sym]
                -- ^ Pointers that the verifier cannot reason about effectively
                -- (e.g., fully symbolic writes)
+               , _pointerWidth :: PN.NatRepr w
                }
 
 $(LTH.makeLenses ''WriteSummary)
+
+-- | Summarize global writes that are adjacent to one another as ranges
+indexWriteAddresses
+  :: PN.NatRepr w
+  -> [BVS.BV w]
+  -> [DII.Interval (BVS.BV w)]
+indexWriteAddresses width =
+  DI.elems . DI.flattenWith combine . F.foldl' addSingleton DI.empty
+  where
+    combine a b = DII.combine a b <|> adjacent a b
+    adjacent (DII.ClosedInterval l1 h1) (DII.ClosedInterval l2 h2)
+      | BVS.add width h1 (BVS.mkBV width 1) == l2 = Just (DII.ClosedInterval l1 h2)
+      | otherwise = Nothing
+    adjacent _ _ = Nothing
+    addSingleton s i = DI.insert (DII.ClosedInterval i i) s
+
 
 bvWidth
   :: (LCB.IsSymInterface sym)
@@ -416,6 +451,7 @@ compareMemoryTraces sym (oMem, oWrites) (pMem, pWrites) =
                       , _differingOrigHeapLocations = []
                       , _differingPatchedHeapLocations = []
                       , _unhandledPointers = []
+                      , _pointerWidth = ?ptrWidth
                       }
     doAnalysis = do
       mapM_ (compareWrite differingOrigHeapLocations sym oMem pMem) (oWrites ^. writtenLocations)

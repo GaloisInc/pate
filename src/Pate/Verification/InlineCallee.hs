@@ -10,7 +10,6 @@
 {-# LANGUAGE ViewPatterns #-}
 module Pate.Verification.InlineCallee ( inlineCallee ) where
 
-import           Control.Applicative ( (<|>) )
 import           Control.Lens ( (^.) )
 import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
@@ -19,8 +18,6 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
-import qualified Data.IntervalSet as DI
-import qualified Data.IntervalMap.Interval as DII
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
@@ -427,21 +424,6 @@ functionFor pb = do
           repr = PC.knownRepr @_ @_ @bin
       in CMC.throwM (PEE.equivalenceErrorFor repr (PEE.MissingExpectedEquivalentFunction addr))
 
--- | Summarize global writes that are adjacent to one another as ranges
-indexWriteAddresses
-  :: PN.NatRepr w
-  -> [BVS.BV w]
-  -> [DII.Interval (BVS.BV w)]
-indexWriteAddresses width =
-  DI.elems . DI.flattenWith combine . F.foldl' addSingleton DI.empty
-  where
-    combine a b = DII.combine a b <|> adjacent a b
-    adjacent (DII.ClosedInterval l1 h1) (DII.ClosedInterval l2 h2)
-      | BVS.add width h1 (BVS.mkBV width 1) == l2 = Just (DII.ClosedInterval l1 h2)
-      | otherwise = Nothing
-    adjacent _ _ = Nothing
-    addSingleton s i = DI.insert (DII.ClosedInterval i i) s
-
 printWrite :: (LCB.IsSymInterface sym) => PVM.MemoryWrite sym -> IO ()
 printWrite w =
   case w of
@@ -573,12 +555,13 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
 
 
         writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
-        let writeRanges = indexWriteAddresses ?ptrWidth (writeSummary ^. PVM.differingGlobalMemoryLocations)
+        let writeRanges = PVM.indexWriteAddresses ?ptrWidth (writeSummary ^. PVM.differingGlobalMemoryLocations)
         liftIO $ putStrLn "Ranges: "
         liftIO $ F.forM_ writeRanges $ \r -> do
           putStrLn ("  " ++ show (fmap (BVS.ppHex ?ptrWidth) r))
 
-        let prfNode = PF.ProofInlinedCall { PF.prfInlinedCallees = pPair
-                                          }
-        lproof <- PFO.lazyProofApp prfNode
+        let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
+                                         , PF.prfInlinedResults = PVM.SomeWriteSummary sym writeSummary
+                                         }
+        lproof <- PFO.lazyProofApp prfRes
         return (contPre, lproof)

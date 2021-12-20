@@ -167,7 +167,10 @@ flattenDomainConditions domApp = withSym $ \sym -> do
       
 
 blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PPa.BlockPair arch
-blockSliceBlocks prf = PF.prfTripleBlocks $ PF.unApp (PF.prfBlockSliceTriple (PF.unApp prf))
+blockSliceBlocks prf =
+  case PF.unApp prf of
+    PF.ProofBlockSlice { PF.prfBlockSliceTriple = app } -> PF.prfTripleBlocks (PF.unApp app)
+    PF.ProofInlinedCall { PF.prfInlinedBlocks = blks } -> blks
 
 -- | Compute an aggregate verification condition: preferring an inequivalence result
 -- if it exists, but potentially yielding an 'PF.Unverified' result.

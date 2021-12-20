@@ -77,6 +77,7 @@ module Pate.Proof
   , type ProofTripleType
   , type ProofFunctionCallType
   , type ProofStatusType
+  , type ProofInlineType
   -- leafs
   , ProofBlock
   , ProofRegister
@@ -88,6 +89,7 @@ module Pate.Proof
   , ProofCondition
   , ProofContext
   , ProofBlockExit
+  , ProofInlinedResult
   ) where
 
 import           Control.Applicative
@@ -176,6 +178,8 @@ type family ProofBlockExit prf :: DK.Type
 -- | A register value, parameterized over a macaw type.
 -- (instantiated to either 'Pate.SimulatorRegisters.MacawRegEntry' or 'Pate.Proof.Instances.GroundMacawValue')
 type family ProofMacawValue prf :: MT.Type -> DK.Type
+-- | The results of the inline-callee analysis (instantiated to 'Pate.Verification.MemoryLog.WriteSummary')
+type family ProofInlinedResult prf :: DK.Type
 
 class (MM.RegisterInfo (ProofRegister prf),
        OrdF (ProofMemCell prf)) => IsProof prf
@@ -194,12 +198,14 @@ data ProofNodeType =
   | ProofDomainType
   | ProofBlockSliceType
   | ProofStatusType
+  | ProofInlineType
 
 type ProofDomainType = 'ProofDomainType
 type ProofTripleType = 'ProofTripleType
 type ProofFunctionCallType = 'ProofFunctionCallType
 type ProofBlockSliceType = 'ProofBlockSliceType
 type ProofStatusType = 'ProofStatusType
+type ProofInlineType = 'ProofInlineType
 
 
 data VerificationStatus ce =
@@ -247,9 +253,18 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
     , prfBlockSliceTrans :: BlockSliceTransition prf
     } -> ProofApp prf node ProofBlockSliceType
 
+  -- | A proof node for a sub-tree of the call graph that is simulated as a unit
+  -- (rather than in the sliced up manner of the rest of the verifier)
+  --
+  -- This node enables much more fine-grained comparison of memory post-states
+  -- in the presence of significant control flow changes (e.g., with calls to
+  -- different functions in the different sub-trees).
+  --
+  -- The post-states indicate what memory locations have different values after
+  -- the two programs execute
   ProofInlinedCall ::
-    { -- | The addresses of the functions considered equal and inlined into the proof
-      prfInlinedCallees :: PPa.BlockPair arch
+    { prfInlinedBlocks :: PPa.PatchPair (ProofBlock prf)
+    , prfInlinedResults :: ProofInlinedResult prf
     } -> ProofApp prf node ProofBlockSliceType
 
   -- | Proof that a function call is valid. Specifically, if a function 'g' is called from
@@ -337,7 +352,7 @@ traverseProofApp f = \case
     <*> traverse f a3
     <*> traverse f a4
     <*> pure a5
-  ProofInlinedCall pb -> pure (ProofInlinedCall pb)
+  ProofInlinedCall pp res -> pure (ProofInlinedCall pp res)
   ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> f a1
     <*> f a2
@@ -380,7 +395,8 @@ data ProofTransformer m prf prf' where
     , prfConstraint ::
         forall a. ((IsProof prf'
                    , ProofRegister prf ~ ProofRegister prf'
-                   , ProofBlock prf ~ ProofBlock prf') => a) -> a
+                   , ProofBlock prf ~ ProofBlock prf'
+                   , ProofInlinedResult prf ~ ProofInlinedResult prf') => a) -> a
     } -> ProofTransformer m prf prf'
 
 transformMemDomain ::
@@ -413,7 +429,7 @@ transformProofApp f app = prfConstraint f $ case app of
     <*> pure a3
     <*> pure a4
     <*> transformBlockSlice f a5
-  ProofInlinedCall pb -> pure (ProofInlinedCall pb)
+  ProofInlinedCall pp res -> pure (ProofInlinedCall pp res)
   ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
     <$> pure a1
     <*> pure a2
