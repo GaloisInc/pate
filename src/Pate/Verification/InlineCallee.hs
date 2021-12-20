@@ -563,5 +563,5 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
                                          , PF.prfInlinedResults = PVM.SomeWriteSummary sym writeSummary
                                          }
-        lproof <- PFO.lazyProofApp prfRes
+        ((), lproof) <- PFO.lazyProofEvent pPair (return ((), prfRes))
         return (contPre, lproof)
