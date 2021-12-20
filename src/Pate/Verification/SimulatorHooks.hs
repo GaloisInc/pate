@@ -28,8 +28,10 @@ import qualified Data.Parameterized.NatRepr as PN
 import qualified Data.Traversable as T
 import qualified Data.Vector as V
 import           GHC.Stack ( HasCallStack )
+import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
+import qualified What4.Symbol as WS
 
 import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Symbolic as DMS
@@ -235,12 +237,27 @@ concretizingRead memVar globs sym crucState _addrWidth memRep (LCS.regValue -> p
   -- Attempt to concretize the pointer we are reading from, avoiding a symbolic
   -- read if possible
   ptr' <- tryGlobPtr sym mem globs ptr
-  ptr'' <- PVC.resolveSingletonPointer sym ptr'
-  ty <- memReprToStorageType memRep
-  res <- LCLM.assertSafe sym =<< LCLM.loadRaw sym mem ptr'' ty LCLD.noAlignment
-  case memValToCrucible memRep res of
-    Left err -> PP.panic PP.InlineCallee "concretizingRead" [err]
-    Right crucVal -> return crucVal
+  ptr''@(LCLM.LLVMPointer _ off) <- PVC.resolveSingletonPointer sym ptr'
+  case WI.asBV off of
+    Just _ -> do
+      ty <- memReprToStorageType memRep
+      res <- LCLM.assertSafe sym =<< LCLM.loadRaw sym mem ptr'' ty LCLD.noAlignment
+      case memValToCrucible memRep res of
+        Left err -> PP.panic PP.InlineCallee "concretizingRead" [err]
+        Right crucVal -> return crucVal
+    Nothing -> do
+      -- As an experiment, consider: what happens if we just return arbitrary
+      -- symbolic values for symbolic reads? We know that the verifier will
+      -- never return if we actually try one.
+      case memRep of
+        DMC.BVMemRepr nBytesRepr _endianness -> do
+          let bitw = PN.natMultiply (PN.knownNat @8) nBytesRepr
+          case PC.testEquality (WI.bvWidth off) bitw of
+            Just PC.Refl -> do
+              symOff <- WI.freshConstant sym (WS.safeSymbol "symbolicReadBytes") (WT.BaseBVRepr bitw)
+              LCLM.llvmPointer_bv sym symOff
+            _ -> PP.panic PP.InlineCallee "concretizingRead" ["Unsupported memRepr: " ++ show memRep]
+        _ -> PP.panic PP.InlineCallee "concretizingRead" ["Unsupported memRepr: " ++ show memRep]
 
 statementWrapper
   :: ( LCB.IsSymInterface sym
