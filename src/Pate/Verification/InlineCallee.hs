@@ -138,6 +138,19 @@ allocateStack _proxy sym mem0 = do
   sp <- LCLM.ptrAdd sym WI.knownRepr stackBasePtr stackInitialOffsetBV
   return (mem2, sp)
 
+-- | Record the details of a region of memory that the user has requested that we ignore
+--
+-- The first element is the address at which the pointer to the region is stored
+--
+-- The second is the allocated LLVMPointer
+--
+-- The third is the size of the region in bytes
+data IgnorableRegion sym arch where
+  IgnorableRegion :: (w ~ DMC.ArchAddrWidth arch) => DMM.MemWord w -> LCLM.LLVMPtr sym w -> Integer -> IgnorableRegion sym arch
+
+ignorableRegionPtr :: (w ~ DMC.ArchAddrWidth arch) => IgnorableRegion sym arch -> LCLM.LLVMPtr sym w
+ignorableRegionPtr (IgnorableRegion _ ptr _) = ptr
+
 allocateIgnorableRegions
   :: ( LCB.IsSymInterface sym
      , PA.ValidArch arch
@@ -151,7 +164,7 @@ allocateIgnorableRegions
   -> LCLM.MemImpl sym
   -> DMSM.MemPtrTable sym w
   -> [(DMM.MemWord (DMC.ArchAddrWidth arch), Integer)]
-  -> IO (LCLM.MemImpl sym, [(LCLM.LLVMPtr sym w, Integer)])
+  -> IO (LCLM.MemImpl sym, [IgnorableRegion sym arch])
 allocateIgnorableRegions _proxy sym mem0 memPtrTbl = foldM allocateIgnPtr (mem0,mempty)
   where
     allocateIgnPtr (mem,ptrs) (loc, len) =
@@ -168,7 +181,6 @@ allocateIgnorableRegions _proxy sym mem0 memPtrTbl = foldM allocateIgnPtr (mem0,
          -- storeRaw) does *not* receive the automated translation
          LCLM.LLVMPointer locPtrRegion locPtrOffset <- LCLM.llvmPointer_bv sym =<< WI.bvLit sym WI.knownRepr locBits
          locPtr1 <- DMSM.mapRegionPointers memPtrTbl sym mem1 locPtrRegion locPtrOffset
-         putStrLn ("  ignorable stored to: " ++ show (LCLM.ppPtr locPtr1))
          let st = LCLM.bitvectorType (LCLB.bitsToBytes (WI.intValue ?ptrWidth))
          mem2 <- LCLM.storeRaw sym mem1 locPtr1 st LCLD.noAlignment (LCLM.ptrToPtrVal ptr)
 
@@ -176,7 +188,8 @@ allocateIgnorableRegions _proxy sym mem0 memPtrTbl = foldM allocateIgnPtr (mem0,
          regionArrayStorage <- WI.freshConstant sym (WS.safeSymbol "ignorable_region_array") WI.knownRepr
          mem3 <- LCLM.doArrayStore sym mem2 ptr LCLD.noAlignment regionArrayStorage len'
 
-         return (mem3, ((ptr,len):ptrs))
+         let region = IgnorableRegion loc ptr len
+         return (mem3, (region:ptrs))
 
 toCrucibleEndian :: DMM.Endianness -> LCLD.EndianForm
 toCrucibleEndian macawEnd =
@@ -339,7 +352,7 @@ symbolicallyExecute
   -- before the frame used for this symbolic execution, hence passing all of
   -- this in rather than just allocating it in this function
   -> EquivM sym arch ( Either GlobalStateError (LCLM.MemImpl sym)
-                     , [(LCLM.LLVMPtr sym w,Integer)]
+                     , [IgnorableRegion sym arch]
                      )
 symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, initMem, memPtrTbl) = do
   let symArchFns = DMS.archFunctions archVals
@@ -350,8 +363,8 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, ini
   (initMem', ignorableRegions) <- liftIO $ allocateIgnorableRegions archVals sym initMem memPtrTbl ignPtrs
 
   liftIO $ putStrLn ("Ignorable regions for: " ++ show binRepr)
-  F.forM_ ignorableRegions $ \(ptr, len) -> do
-    liftIO $ putStrLn ("  " ++ show (LCLM.ppPtr ptr) ++ " for " ++ show len ++ " bytes")
+  F.forM_ ignorableRegions $ \(IgnorableRegion loc ptr len) -> do
+    liftIO $ putStrLn ("  " ++ show loc ++ " -> " ++ show (LCLM.ppPtr ptr) ++ " for " ++ show len ++ " bytes")
 
   CCC.SomeCFG cfg <- liftIO $ PVD.toCrucibleCFG symArchFns dfi
   let arguments = LCS.RegMap (Ctx.singleton spRegs)
@@ -536,7 +549,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
     case (eoPostMem, epPostMem) of
       -- FIXME: In the error cases, generate a default frame and a proof error node
       (Right oPostMem, Right pPostMem) -> do
-        let oPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = oSP : fmap fst oIgnPtrs
+        let oPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = oSP : fmap ignorableRegionPtr oIgnPtrs
                                        , PVM.invalidWritePolicy = PVM.Ignore
                                        , PVM.unboundedWritePolicy = PVM.Ignore
                                        }
@@ -544,7 +557,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         oWrites1 <- liftIO $ PVM.concretizeWrites sym oWrites0
         let oWrites2 = PVM.filterWrites oPolicy oWrites1
 
-        let pPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = pSP : fmap fst pIgnPtrs
+        let pPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = pSP : fmap ignorableRegionPtr pIgnPtrs
                                        , PVM.invalidWritePolicy = PVM.Ignore
                                        , PVM.unboundedWritePolicy = PVM.Ignore
                                        }
@@ -560,11 +573,6 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
 
 
         writeSummary <- liftIO $ PVM.compareMemoryTraces sym (oPostMem, oWrites2) (pPostMem, pWrites2)
-
-        liftIO $ putStrLn "Differing global memory locations"
-        liftIO $ F.forM_ (writeSummary ^. PVM.differingGlobalMemoryLocations) $ \bv -> do
-          putStrLn ("  " ++ BVS.ppHex ?ptrWidth bv)
-
         let writeRanges = indexWriteAddresses ?ptrWidth (writeSummary ^. PVM.differingGlobalMemoryLocations)
         liftIO $ putStrLn "Ranges: "
         liftIO $ F.forM_ writeRanges $ \r -> do

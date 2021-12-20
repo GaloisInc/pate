@@ -59,7 +59,6 @@ import qualified Pate.Panic as PP
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Concretize as PVC
 import qualified Pate.Verification.Override as PVO
-import Debug.Trace
 
 -- | A convenient Lens-styled combinator for updating a 'LCSO.FnBinding'
 insertFnBinding
@@ -291,9 +290,7 @@ lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFun
   case WI.asBV singletonIP of
     Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: "] -- ++ show (WI.printSymExpr singletonIP)]
     Just bv
-      | trace ("Next IP = " ++ show bv) False -> undefined
       | Just calleeSymbol <- PSym.lookupSymbol bv symtab
       , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides -> do
-          putStrLn ("Invoking override " ++ show calleeSymbol)
           callOverride crucState regsRepr argMap ov
       | otherwise -> decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bv

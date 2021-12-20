@@ -77,7 +77,6 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
             WSat.Unsat {} -> return Nothing
             WSat.Sat mdl -> return (Just mdl)
           T.forM mmodel $ \mdl -> WEG.groundEval mdl val
-        putStrLn ("Initial model is: " ++ show val')
         case val' of
           Nothing -> return val -- We failed to get a model... leave it symbolic
           Just concVal -> do
@@ -87,9 +86,7 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
               msat <- WPO.checkAndGetModel sp "Concretize value (with blocking clause)"
               case msat of
                 WSat.Unknown -> return val -- Total failure
-                WSat.Sat mdl -> do
-                  other <- WEG.groundEval mdl val
-                  putStrLn ("  Second model is: " ++ show other)
+                WSat.Sat _mdl -> do
                   return val  -- There are multiple models
                 WSat.Unsat {} -> injectSymbolic sym concVal -- There is a single concrete result
   where

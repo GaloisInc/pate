@@ -123,7 +123,6 @@ doMalloc memVar sym (Ctx.Empty Ctx.:> nBytes) =
     let display = "<malloc at " ++ show loc ++ ">"
     sz <- LCLM.projectLLVM_bv sym (LCS.regValue nBytes)
     (ptr, mem') <- LCLM.doMalloc sym LCLM.HeapAlloc LCLM.Mutable display mem sz LCLD.noAlignment
-    putStrLn ("  ptr: " ++ show (LCLM.ppPtr ptr))
     return (ptr, mem')
 
 ovCalloc
