@@ -279,6 +279,16 @@ statementWrapper mvar globs sym baseExt stmt crucState =
       concretizingWrite mvar globs sym crucState addrWidth memRep ptr value
     DMS.MacawReadMem addrWidth memRep ptr ->
       (, crucState) <$> concretizingRead mvar globs sym crucState addrWidth memRep ptr
+    DMS.PtrMux _w (LCS.regValue -> c) (LCS.regValue -> x) (LCS.regValue -> y) -> do
+      -- The macaw-symbolic version of this operator adds a number of safety
+      -- checks to try to decide early if the input pointers are valid.  This
+      -- version is lazier and just constructs the pointer.
+      --
+      -- The macaw-symbolic defensive checks add an "undefined" pointer into the
+      -- mux as a fallthrough case, which turns into a symbolic read if used as
+      -- a memory address.
+      ptr <- LCLM.muxLLVMPtr sym c x y
+      return (ptr, crucState)
     _ -> LCS.extensionExec baseExt stmt crucState
 
 -- | Macaw extensions for Crucible that have some optimizations required for the
