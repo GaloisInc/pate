@@ -251,7 +251,7 @@ allocateInitialState sym archInfo memory = do
   -- it causes global state to be under-constrained; safely handling this is
   -- complicated, and would require significant infrastructure in the rest of
   -- the verifier to propagate known facts.
-  let memModelContents = DMSM.SymbolicMutable
+  let memModelContents = DMSM.ConcreteMutable
   let globalMemConfig = DMSM.GlobalMemoryHooks { DMSM.populateRelocation = populateRelocation }
   (mem0, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
   (mem1, sp) <- allocateStack proxy sym mem0
