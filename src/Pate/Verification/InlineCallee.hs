@@ -161,9 +161,8 @@ allocateIgnorableRegions _proxy sym mem0 memPtrTbl = foldM allocateIgnPtr (mem0,
 
          -- poke the pointer to that region into the global memory at the correct location
          let locBits = BVS.mkBV WI.knownRepr (DMM.memWordToUnsigned loc)
-         -- FIXME: Translate this pointer so that it is in region 1
-         --
-         -- We need to manually translate here, unfortunately. The automatic
+
+         -- We need to manually translate this pointer, unfortunately. The automatic
          -- translation only applies to code generated during macaw->crucible
          -- translation.  Using the crucible-llvm memory model functions (like
          -- storeRaw) does *not* receive the automated translation
@@ -229,7 +228,6 @@ allocateInitialState
   -> DMM.Memory w
   -> IO ( LCS.RegValue sym (DMS.ToCrucibleType (DMT.BVType (DMC.ArchAddrWidth arch)))
         , LCLM.MemImpl sym
-        , DMSM.InitialBytesArray sym arch
         , DMSM.MemPtrTable sym w
         )
 allocateInitialState sym archInfo memory = do
@@ -245,10 +243,10 @@ allocateInitialState sym archInfo memory = do
   -- the verifier to propagate known facts.
   let memModelContents = DMSM.SymbolicMutable
   let globalMemConfig = DMSM.GlobalMemoryHooks { DMSM.populateRelocation = populateRelocation }
-  (mem0, initBytes, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
+  (mem0, memPtrTbl) <- DMSM.newGlobalMemoryWith globalMemConfig proxy sym endianness memModelContents memory
   (mem1, sp) <- allocateStack proxy sym mem0
 
-  return (sp, mem1, initBytes, memPtrTbl)
+  return (sp, mem1, memPtrTbl)
 
 data GlobalStateError = Timeout
                       | AbortedExit
@@ -335,17 +333,15 @@ symbolicallyExecute
   -- ^ Initial registers to simulate with
   -> ( LCS.RegValue sym (DMS.ToCrucibleType (DMT.BVType (DMC.ArchAddrWidth arch)))
      , LCLM.MemImpl sym
-     , DMSM.InitialBytesArray sym arch
      , DMSM.MemPtrTable sym w
      )
   -- ^ Initial memory state and associated metadata; this needs to be allocated
   -- before the frame used for this symbolic execution, hence passing all of
   -- this in rather than just allocating it in this function
-  -> EquivM sym arch (Either GlobalStateError (LCLM.MemImpl sym)
-                     , DMSM.InitialBytesArray sym arch
-                     , DMSM.MemPtrTable sym w
-                     , [(LCLM.LLVMPtr sym w,Integer)])
-symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, initMem, initBytes, memPtrTbl) = do
+  -> EquivM sym arch ( Either GlobalStateError (LCLM.MemImpl sym)
+                     , [(LCLM.LLVMPtr sym w,Integer)]
+                     )
+symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, initMem, memPtrTbl) = do
   let symArchFns = DMS.archFunctions archVals
   let crucRegTypes = DMS.crucArchRegTypes symArchFns
   let regsRepr = LCT.StructRepr crucRegTypes
@@ -398,11 +394,7 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, ini
     res <- liftIO $ LCS.executeCrucible executionFeatures s0
     finalMem <- liftIO $ getFinalGlobalValue (muxMemImpl sym) memVar res
 
-    -- try to resolve as many symbolic values in the memory state as possible
-    -- by asking the solver if there are unique models for them
-    --finalMem' <- liftIO $ traverse (concreteizeMemory sym) finalMem
-
-    return (finalMem, initBytes, memPtrTbl, ignorableRegions)
+    return (finalMem, ignorableRegions)
 
 -- | Look up the macaw CFG for the given function address
 --
@@ -423,11 +415,12 @@ functionFor pb = do
       in CMC.throwM (PEE.equivalenceErrorFor repr (PEE.MissingExpectedEquivalentFunction addr))
 
 -- | Summarize global writes that are adjacent to one another as ranges
-indexWrites
+indexWriteAddresses
   :: PN.NatRepr w
   -> [BVS.BV w]
   -> [DII.Interval (BVS.BV w)]
-indexWrites width = DI.elems . DI.flattenWith combine . F.foldl' addSingleton DI.empty
+indexWriteAddresses width =
+  DI.elems . DI.flattenWith combine . F.foldl' addSingleton DI.empty
   where
     combine a b = DII.combine a b <|> adjacent a b
     adjacent (DII.ClosedInterval l1 h1) (DII.ClosedInterval l2 h2)
@@ -435,6 +428,13 @@ indexWrites width = DI.elems . DI.flattenWith combine . F.foldl' addSingleton DI
       | otherwise = Nothing
     adjacent _ _ = Nothing
     addSingleton s i = DI.insert (DII.ClosedInterval i i) s
+
+printWrite :: (LCB.IsSymInterface sym) => PVM.MemoryWrite sym -> IO ()
+printWrite w =
+  case w of
+    PVM.UnboundedWrite _ -> putStrLn "Unbounded write"
+    PVM.MemoryWrite rsn _w ptr len ->
+      putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
 
 
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
@@ -515,12 +515,12 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   withSymBackendLock $ do
     -- The two initial memory states (which are encoded as assumptions, see
     -- Data.Macaw.Symbolic.Memory for details)
-    oInitState@(oSP, _, _, _) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage origBinary)
-    pInitState@(pSP, _, _, _) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage patchedBinary)
+    oInitState@(oSP, _, _) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage origBinary)
+    pInitState@(pSP, _, _) <- liftIO $ allocateInitialState sym archInfo (MBL.memoryImage patchedBinary)
 
-    (eoPostMem, oInitBytes, oPtrTbl, oIgnPtrs) <-
+    (eoPostMem, oIgnPtrs) <-
       inNewFrame $ symbolicallyExecute archVals sym PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry oInitState
-    (epPostMem, pInitBytes, pPtrTbl, pIgnPtrs) <-
+    (epPostMem, pIgnPtrs) <-
       inNewFrame $ symbolicallyExecute archVals sym PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry pInitState
 
     -- Note: we are symbolically executing both functions to get their memory
@@ -536,10 +536,6 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
     case (eoPostMem, epPostMem) of
       -- FIXME: In the error cases, generate a default frame and a proof error node
       (Right oPostMem, Right pPostMem) -> do
-        -- buildCallFrame sym WI.knownRepr
-        --    (MBL.memoryImage origBinary, oPostMem, oInitBytes, oPtrTbl, oIgnPtrs)
-        --    (MBL.memoryImage patchedBinary, pPostMem, pInitBytes, pPtrTbl, pIgnPtrs)
-
         let oPolicy = PVM.FilterPolicy { PVM.filterWritesToRegions = oSP : fmap fst oIgnPtrs
                                        , PVM.invalidWritePolicy = PVM.Ignore
                                        , PVM.unboundedWritePolicy = PVM.Ignore
@@ -569,7 +565,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
         liftIO $ F.forM_ (writeSummary ^. PVM.differingGlobalMemoryLocations) $ \bv -> do
           putStrLn ("  " ++ BVS.ppHex ?ptrWidth bv)
 
-        let writeRanges = indexWrites ?ptrWidth (writeSummary ^. PVM.differingGlobalMemoryLocations)
+        let writeRanges = indexWriteAddresses ?ptrWidth (writeSummary ^. PVM.differingGlobalMemoryLocations)
         liftIO $ putStrLn "Ranges: "
         liftIO $ F.forM_ writeRanges $ \r -> do
           putStrLn ("  " ++ show (fmap (BVS.ppHex ?ptrWidth) r))
@@ -578,10 +574,3 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
                                           }
         lproof <- PFO.lazyProofApp prfNode
         return (contPre, lproof)
-
-printWrite :: (LCB.IsSymInterface sym) => PVM.MemoryWrite sym -> IO ()
-printWrite w =
-  case w of
-    PVM.UnboundedWrite _ -> putStrLn "Unbounded write"
-    PVM.MemoryWrite rsn _w ptr len ->
-      putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
