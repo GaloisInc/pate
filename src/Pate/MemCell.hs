@@ -12,10 +12,7 @@ module Pate.MemCell (
     MemCell(..)
   , setMemCellRegion
   , MemCells(..)
-  , mapCellPreds
-  , mergeMemCells
   , mergeMemCellsMap
-  , muxMemCells
   , muxMemCellsMap
   , inMemCells
   , readMemCell

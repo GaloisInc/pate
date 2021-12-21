@@ -21,7 +21,6 @@ module Pate.Proof.Operations
   , statePredToDomain
   , statePredToPreDomain
   , statePredToPostDomain
-  , blockSliceBlocks
   , proofResult
     -- lazy proofs
   , LazyProof(..)
@@ -38,7 +37,6 @@ module Pate.Proof.Operations
   , forkProofFinal
   , forkProofEvent_
   , forkProofEvent
-  , flattenDomainConditions
   , wrapFutureNonceApp
   , asFutureNonceApp
   ) where
@@ -137,40 +135,6 @@ simBundleToSlice bundle = withSym $ \sym -> do
         , PF.slMemOpEquiv = isEquiv
         , PF.slMemOpCond = cond
         }
-
--- | Compute a single predicate representing the conjunction of all conditions
--- in the domain. Conditions in negative polarity domains are negated.
-flattenDomainConditions ::
-  forall sym arch.
-  PF.ProofExpr (PFI.ProofSym sym arch) PF.ProofDomainType ->
-  EquivM sym arch (W4.Pred sym)
-flattenDomainConditions domApp = withSym $ \sym -> do
-  reg_cond <- MapF.foldrMWithKey (\_ (Const p) p' -> liftIO $ W4.andPred sym p p') (W4.truePred sym) (MM.regStateMap $ PF.prfDomainRegisters dom)
-  stack_cond <- MapF.foldrMWithKey (go stack_pol) reg_cond (PF.prfMemoryDomain $ PF.prfDomainStackMemory dom)
-  MapF.foldrMWithKey (go glob_pol) stack_cond (PF.prfMemoryDomain $ PF.prfDomainGlobalMemory dom)
-  where
-    dom = PF.unApp domApp
-    stack_pol = PF.prfMemoryDomainPolarity $ PF.prfDomainStackMemory dom
-    glob_pol = PF.prfMemoryDomainPolarity $ PF.prfDomainGlobalMemory dom
-    go ::
-      -- | polarity
-      W4.Pred sym ->
-      PMC.MemCell sym arch w ->
-      -- | condition
-      Const (W4.Pred sym) w ->
-      -- | accumulator
-      W4.Pred sym ->
-      EquivM sym arch (W4.Pred sym)
-    go pol _cell (Const p) acc = withSym $ \sym -> do
-      p' <- liftIO $ W4.isEq sym pol p
-      liftIO $ W4.andPred sym p' acc
-      
-
-blockSliceBlocks :: PFI.ProofSymExpr sym arch PF.ProofBlockSliceType -> PPa.BlockPair arch
-blockSliceBlocks prf =
-  case PF.unApp prf of
-    PF.ProofBlockSlice { PF.prfBlockSliceTriple = app } -> PF.prfTripleBlocks (PF.unApp app)
-    PF.ProofInlinedCall { PF.prfInlinedBlocks = blks } -> blks
 
 -- | Compute an aggregate verification condition: preferring an inequivalence result
 -- if it exists, but potentially yielding an 'PF.Unverified' result.

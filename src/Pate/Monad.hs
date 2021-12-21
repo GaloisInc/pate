@@ -34,7 +34,6 @@ module Pate.Monad
   , withSymBackendLock
   , inNewFrame
   , manifestError
-  , implicitError
   , throwHere
   , getDuration
   , startTimer
@@ -50,7 +49,6 @@ module Pate.Monad
   , execGroundFn
   , withGroundEvalFn
   , getFootprints
-  , memOpCondition
   -- sat helpers
   , checkSatisfiableWithModel
   , isPredSat
@@ -654,11 +652,6 @@ getFootprints bundle = withSym $ \sym -> do
   footP <- liftIO $ MT.traceFootprint sym (MT.memSeq $ simOutMem $ simOutP bundle)
   return $ S.union footO footP
 
-memOpCondition :: MT.MemOpCondition sym -> EquivM sym arch (W4.Pred sym)
-memOpCondition = \case
-  MT.Unconditional -> withSymIO $ \sym -> return $ W4.truePred sym
-  MT.Conditional p -> return p
-
 withSymBackendLock
   :: EquivM sym arch a
   -> EquivM sym arch a
@@ -769,10 +762,6 @@ instance MF.MonadFail (EquivM_ sym arch) where
 
 manifestError :: MonadError e m => m a -> m (Either e a)
 manifestError act = catchError (Right <$> act) (pure . Left)
-
-implicitError :: MonadError e m => Either e a -> m a
-implicitError (Left e) = throwError e
-implicitError (Right a) = pure a
 
 ----------------------------------------
 -- Proof instances

@@ -38,12 +38,8 @@ module Pate.Proof
   , ProofMemoryDomain(..)
   , IsProof
   , IsBoolLike(..)
-  , flattenDomainConditions
-  , mergeDomains
   , traverseProofApp
   , mapProofApp
-  , traverseDomain
-  , traverseMemDomain
   , emptyDomain
   , appDomain
   , ProofFunctionCallMetadata(..)
@@ -54,9 +50,7 @@ module Pate.Proof
   , ProofScope
   , unNonceProof
   , ProofExpr(..)
-  , traverseProofExpr
   , collectProofExpr
-  , appProofExpr
   , ProofTransformer(..)
   , transformProofApp
   , transformProofExpr
@@ -64,12 +58,10 @@ module Pate.Proof
   , transformBlockSlice
   , transformBlockSliceRegOp
   , transformBlockSliceMemOp
-  , foldrMBlockSliceLocs
   , foldrMBlockStateLocs
   , BlockSliceState(..)
   , BlockSliceRegOp(..)
   , BlockSliceMemOp(..)
-  , blockSliceToDomain
   -- nodes
   , type ProofNodeType
   , type ProofBlockSliceType
@@ -103,7 +95,6 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -117,7 +108,6 @@ import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
 
 import qualified What4.Interface as W4
@@ -472,18 +462,6 @@ transformProofExpr ::
 transformProofExpr f (ProofExpr app) =
   ProofExpr <$> (traverseProofApp (transformProofExpr f) =<< (transformProofApp f app))
 
-appProofExpr ::
-  forall m prf app tp.
-  Monad m =>
-  (forall tp2. app tp2 -> m (ProofApp prf app tp2)) ->
-  ProofApp prf app tp ->
-  m (ProofExpr prf tp)  
-appProofExpr f app =
-  ProofExpr <$> traverseProofApp go app
-  where
-     go :: forall tp2. app tp2 -> m (ProofExpr prf tp2)
-     go app' = appProofExpr f =<< f app'
-
 -- | Collect results from all sub-expressions
 collectProofExpr ::
   forall w prf tp.
@@ -498,41 +476,12 @@ collectProofExpr f e_outer = runIdentity $ CMW.execWriterT (traverseProofExpr go
       CMW.tell (f e)
       return e
 
-traverseDomainApp ::
-  Applicative m =>
-  (forall tp. ProofRegister prf tp -> ProofPredicate prf -> m (ProofPredicate prf)) ->
-  (forall tp. ProofMemCell prf tp -> ProofPredicate prf -> m (ProofPredicate prf)) ->
-  ProofApp prf app ProofDomainType ->
-  m (ProofApp prf app ProofDomainType)
-traverseDomainApp f_reg f_mem (ProofDomain regs stack glob domCtx) = ProofDomain
-  <$> MM.traverseRegsWith (\r (Const p) -> Const <$> f_reg r p) regs
-  <*> traverseMemDomain f_mem stack
-  <*> traverseMemDomain f_mem glob
-  <*> pure domCtx
-
 -- | A domain expression is actually independent of the 'app' parameter, so we can
 -- project it to any one.
 appDomain ::
   ProofExpr prf ProofDomainType ->
   ProofApp prf app ProofDomainType
 appDomain (ProofExpr (ProofDomain regs stack glob domCtx)) = ProofDomain regs stack glob domCtx
-
-traverseDomain ::
-  Applicative m =>
-  (forall tp. ProofRegister prf tp -> ProofPredicate prf -> m (ProofPredicate prf)) ->
-  (forall tp. ProofMemCell prf tp -> ProofPredicate prf -> m (ProofPredicate prf)) ->
-  ProofExpr prf ProofDomainType ->
-  m (ProofExpr prf ProofDomainType)
-traverseDomain f_reg f_mem (ProofExpr app) = ProofExpr <$> traverseDomainApp f_reg f_mem app
-
-traverseMemDomain ::
-  Applicative m =>
-  (forall tp. ProofMemCell prf tp -> ProofPredicate prf -> m (ProofPredicate prf)) ->
-  ProofMemoryDomain prf ->
-  m (ProofMemoryDomain prf)
-traverseMemDomain f (ProofMemoryDomain cells polarity) = ProofMemoryDomain
-  <$> MapF.traverseWithKey (\cell (Const p) -> Const <$> f cell p) cells
-  <*> pure polarity
 
 emptyDomain ::
   forall prf m.
@@ -555,72 +504,6 @@ emptyMemDomain ::
 emptyMemDomain = do
   falsePred <- proofPredFalse @prf
   return $ ProofMemoryDomain MapF.empty falsePred
-
--- | Compute a single predicate representing the conjunction of all conditions
--- in the domain. Conditions in negative polarity domains are negated.
-flattenDomainConditions ::
-  forall prf m.
-  Monad m =>
-  IsBoolLike prf m =>
-  ProofExpr prf ProofDomainType ->
-  m (ProofPredicate prf)
-flattenDomainConditions domApp = do
-  truePred <- proofPredTrue @prf
-  reg_cond <- MapF.foldrMWithKey (\_ (Const p) p' -> proofPredAnd @prf p p') truePred (MM.regStateMap $ prfDomainRegisters dom)
-  stack_cond <- MapF.foldrMWithKey (go stack_pol) reg_cond (prfMemoryDomain $ prfDomainStackMemory dom)
-  MapF.foldrMWithKey (go glob_pol) stack_cond (prfMemoryDomain $ prfDomainGlobalMemory dom)
-  where
-    dom = unApp domApp
-    stack_pol = prfMemoryDomainPolarity $ prfDomainStackMemory dom
-    glob_pol = prfMemoryDomainPolarity $ prfDomainGlobalMemory dom
-    go ::
-      -- | polarity
-      ProofPredicate prf ->
-      ProofMemCell prf w ->
-      -- | condition
-      Const (ProofPredicate prf) w ->
-      -- | accumulator
-      ProofPredicate prf ->
-      m (ProofPredicate prf)
-    go pol _cell (Const p) acc = do
-      p' <- proofPredEq @prf pol p
-      proofPredAnd @prf acc p'
-
--- | Merge the domains by setting the condition on each location to be the disjunction
--- of the two predicates.
--- The memory domains must have the same polarity, and the left proof context is taken in the result.
-mergeDomains ::
-  forall prf m.
-  Monad m =>
-  IsBoolLike prf m  =>
-  IsProof prf =>
-  ProofExpr prf ProofDomainType ->
-  ProofExpr prf ProofDomainType ->
-  m (ProofExpr prf ProofDomainType )
-mergeDomains (unApp -> dom1) (unApp -> dom2) = do
-  regs <- PR.zipWithRegStatesM (prfDomainRegisters dom1) (prfDomainRegisters dom2)
-    (\_ (Const p1) (Const p2) -> Const <$> proofPredOr @prf p1 p2)
-  stack <- mergeMemDomains (prfDomainStackMemory dom1) (prfDomainStackMemory dom2)
-  glob <- mergeMemDomains (prfDomainGlobalMemory dom1) (prfDomainGlobalMemory dom2)
-  return $ ProofExpr $ ProofDomain regs stack glob (prfDomainContext dom1)
-
-mergeMemDomains ::
-  forall prf m.
-  Monad m =>
-  IsBoolLike prf m =>
-  IsProof prf =>
-  ProofMemoryDomain prf ->
-  ProofMemoryDomain prf ->
-  m (ProofMemoryDomain prf)
-mergeMemDomains mem1 mem2 = do
-  dom <- MapF.mergeWithKeyM
-    (\_ (Const p1) (Const p2) -> (Just . Const) <$> proofPredOr @prf p1 p2)
-    return
-    return
-    (prfMemoryDomain mem1)
-    (prfMemoryDomain mem2)
-  proofPredAssertEqual @prf (prfMemoryDomainPolarity mem1) (prfMemoryDomainPolarity mem2)
-  return $ ProofMemoryDomain dom (prfMemoryDomainPolarity mem1)
 
 type family ProofScope prf :: DK.Type
 
@@ -753,44 +636,6 @@ transformBlockSliceMemOp f (BlockSliceMemOp a1 a2 a3) =
       <$> traverse (prfBVTrans f) a1
       <*> prfPredTrans f a2
       <*> prfPredTrans f a3
-
--- | Derive a domain from a slice state by computing an inclusion criteria for each individual location.
-blockSliceToDomain ::
-  Monad m =>
-  (forall tp. ProofRegister prf tp -> BlockSliceRegOp prf tp -> m (ProofPredicate prf)) ->
-  -- | a pair of predicate for each memory cell, representing inclusion in the stack domain
-  -- and global domain respectively
-  (forall tp. ProofMemCell prf tp -> BlockSliceMemOp prf tp -> m (ProofPredicate prf, ProofPredicate prf)) ->
-  -- | stack polarity
-  ProofPredicate prf ->
-  -- | global memory polarity
-  ProofPredicate prf ->
-  ProofContext prf ->
-  BlockSliceState prf ->
-  m (ProofExpr prf ProofDomainType)
-blockSliceToDomain f_reg f_mem pol_stack pol_glob domCtx slice = do
-  mem_zipped <- MapF.traverseWithKey (\cell memOp -> Const <$> f_mem cell memOp) $ slMemState slice
-  let
-    mem_stack = TF.fmapF (\(Const (stack,_)) -> Const stack) mem_zipped
-    mem_glob = TF.fmapF (\(Const (_,glob)) -> Const glob) mem_zipped
-  regs <- MM.traverseRegsWith (\r regOp -> Const <$> f_reg r regOp) $ slRegState slice
-  return $ ProofExpr $ ProofDomain
-    { prfDomainRegisters = regs
-    , prfDomainStackMemory = ProofMemoryDomain mem_stack pol_stack
-    , prfDomainGlobalMemory =ProofMemoryDomain mem_glob pol_glob
-    , prfDomainContext = domCtx
-    }
-  
-foldrMBlockSliceLocs ::
-  Monad m =>
-  (forall tp. ProofRegister prf tp -> BlockSliceRegOp prf tp -> b -> m b) ->
-  (forall w. ProofMemCell prf w -> BlockSliceMemOp prf w -> b -> m b) ->
-  b ->
-  BlockSliceTransition prf ->
-  m b
-foldrMBlockSliceLocs f_reg f_mem b (BlockSliceTransition a1 a2 _a3) = do
-  b' <- foldrMBlockStateLocs f_reg f_mem b a1
-  foldrMBlockStateLocs f_reg f_mem b' a2
 
 foldrMBlockStateLocs ::
   Monad m =>

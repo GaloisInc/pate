@@ -14,7 +14,6 @@ module Pate.Equivalence.MemPred (
   , memPredFalse
   , memPredToList
   , memPredCells
-  , listToMemPred
   , footPrintsToPred
   , addFootPrintsToPred
   , memPredAt
