@@ -35,17 +35,13 @@ module Pate.Equivalence
   , MemEquivRelation(..)
   , RegEquivRelation(..)
   , EquivalenceStatus(..)
-  , weakenEquivRelation
   , getPostcondition
   , getPrecondition
   , impliesPrecondition
   , impliesPostcondPred
   , memPredPre
-  , equalValuesIO
-  , registerEquivalence
   , stateEquivalence
   , memEqAtRegion
-  , memEqOutsideRegion
   ) where
 
 import           Control.Lens hiding ( op, pre )

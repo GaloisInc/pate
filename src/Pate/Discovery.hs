@@ -11,14 +11,12 @@
 -- corresponding blocks in an original and patched binary
 module Pate.Discovery (
   discoverPairs,
-  exactEquivalence,
   runDiscovery,
   lookupBlocks,
   getBlocks,
   getBlocks',
   matchesBlockTarget,
-  concreteToLLVM,
-  lookupFunctionEntry
+  concreteToLLVM
   ) where
 
 import           Control.Lens ( (^.) )
@@ -405,17 +403,6 @@ addFunctionEntryHints _ mem (_name, fd) (invalid, entries) =
 -- | Special-purpose function name that is treated as abnormal program exit
 abortFnName :: T.Text
 abortFnName = "__pate_abort"
-
-lookupFunctionEntry ::
-  HasCallStack =>
-  PA.ValidArch arch =>
-  Map.Map (PA.ConcreteAddress arch) (PB.FunctionEntry arch bin) ->
-  PA.ConcreteAddress arch ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
-lookupFunctionEntry fnmap a =
-  case Map.lookup a fnmap of
-    Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack a))
-    Just fe -> pure fe
 
 addAddrSym
   :: (w ~ MC.ArchAddrWidth arch, MM.MemWidth w, HasCallStack)
