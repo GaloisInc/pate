@@ -137,12 +137,6 @@ ppc32HasDedicatedRegister =
                           , PA.dedicatedRegisterValidity = \_ _ _ _ (NoRegisters v) -> absurd v
                           }
 
-instance PA.ArchConstraints PPC.PPC64 where
-  binArchInfo = PPC.ppc64_linux_info
-
-instance PA.ArchConstraints PPC.PPC32 where
-  binArchInfo = const PPC.ppc32_linux_info
-
 instance PA.ValidArch PPC.PPC32 where
   rawBVReg r = case r of
     PPC.PPC_FR _ -> True
@@ -153,6 +147,7 @@ instance PA.ValidArch PPC.PPC32 where
     _ -> False
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
+  binArchInfo = const PPC.ppc32_linux_info
 
 instance PA.ValidArch PPC.PPC64 where
   rawBVReg r = case r of
@@ -164,6 +159,7 @@ instance PA.ValidArch PPC.PPC64 where
     _ -> False
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
+  binArchInfo = PPC.ppc64_linux_info
 
 -- | Determine the argument name for the argument held in the given register.
 --

@@ -39,7 +39,7 @@ renderCounterexample er =
 
 -- | Note that we always look up the original address because we key the
 -- function name off of that... we could do better
-renderSource :: (PAr.ArchConstraints arch)
+renderSource :: (PAr.ValidArch arch)
              => IS.State arch
              -> (IS.SourcePair LC.CTranslUnit -> LC.CTranslUnit)
              -> L.Getter (IS.State arch) (Maybe (PLE.LoadedELF arch))
@@ -64,7 +64,7 @@ matchingFunctionName sname def =
         LC.CDeclr (Just ident) _ _ _ _ -> LC.identToString ident == sname
         LC.CDeclr Nothing _ _ _ _ -> False
 
-renderFunctionName :: (PAr.ArchConstraints arch)
+renderFunctionName :: (PAr.ValidArch arch)
                    => IS.State arch
                    -> MC.MemAddr (MC.ArchAddrWidth arch)
                    -> [TP.UI TP.Element]
@@ -78,7 +78,7 @@ renderAddr :: (Show a) => String -> a -> TP.UI TP.Element
 renderAddr label addr = TP.string (label ++ " (" ++ show addr ++ ")")
 
 renderBlockPairDetail
-  :: (PAr.ArchConstraints arch)
+  :: (PAr.ValidArch arch)
   => IS.State arch
   -> PE.Blocks arch PB.Original
   -> PE.Blocks arch PB.Patched

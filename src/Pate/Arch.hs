@@ -10,7 +10,6 @@
 module Pate.Arch (
   SomeValidArch(..),
   ValidArchData(..),
-  ArchConstraints(..),
   ValidArch(..),
   DedicatedRegister,
   HasDedicatedRegister(..),
@@ -68,15 +67,6 @@ data HasDedicatedRegister arch =
                        -- ^ Compute an assumption frame for the given arch-specific 'DedicatedRegister'
                        }
 
-class
-  ( MC.MemWidth (MC.ArchAddrWidth arch)
-  , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
-  , E.ElfWidthConstraints (MC.ArchAddrWidth arch)
-  , MS.SymArchConstraints arch
-  , 16 <= MC.RegAddrWidth (MC.ArchReg arch)
-  ) => ArchConstraints arch where
-  binArchInfo :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
-
 -- | An indicator of how a register should be displayed
 --
 -- The ADT tag carries the semantics of the register (e.g., if it is a normal
@@ -123,6 +113,8 @@ class
   -- library
   argumentNameFrom :: forall tp . [T.Text] -> MC.ArchReg arch tp -> Maybe T.Text
 
+  binArchInfo :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
+
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
                 , validArchFunctionDomain :: PVE.ExternalDomain PVE.ExternalCall arch
@@ -141,4 +133,4 @@ data ValidArchData arch =
 -- The first external domain handles domains for system calls, while the second
 -- handles domains for external library calls
 data SomeValidArch arch where
-  SomeValidArch :: (ValidArch arch, ArchConstraints arch) => ValidArchData arch -> SomeValidArch arch
+  SomeValidArch :: (ValidArch arch) => ValidArchData arch -> SomeValidArch arch

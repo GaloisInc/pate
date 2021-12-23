@@ -27,7 +27,7 @@ data LoadedELF arch =
 
 loadELF ::
   forall arch.
-  PA.ArchConstraints arch =>
+  PA.ValidArch arch =>
   Proxy arch ->
   FilePath ->
   IO (LoadedELF arch)

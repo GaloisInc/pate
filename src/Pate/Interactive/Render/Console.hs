@@ -26,7 +26,7 @@ import qualified Pate.Interactive.State as IS
 --
 -- Note that the totally unconstrained argument is the data payload passed in by
 -- the event handler (e.g., click event), which is not used.
-showBlockPairDetail :: (PA.ArchConstraints arch)
+showBlockPairDetail :: (PA.ValidArch arch)
                     => IS.State arch
                     -> TP.Element
                     -> PE.Blocks arch PBi.Original
@@ -79,7 +79,7 @@ renderProofApp app =
     PPr.ProofStatus vs -> TP.string ("ProofStatus=" ++ verificationStatusTag vs)
     PPr.ProofDomain {} -> TP.string "ProofDomain"
 
-renderEvent :: (PA.ArchConstraints arch) => IS.State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
+renderEvent :: (PA.ValidArch arch) => IS.State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
 renderEvent st detailDiv evt =
   case evt of
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
@@ -121,7 +121,7 @@ renderEvent st detailDiv evt =
 --
 -- The most recent event will be on the bottom (as in a normal scrolling
 -- terminal), which requires us to reverse the events list
-renderConsole :: (PA.ArchConstraints arch)
+renderConsole :: (PA.ValidArch arch)
               => IS.StateRef arch
               -> TP.Element
               -> TP.UI TP.Element

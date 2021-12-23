@@ -82,14 +82,12 @@ hacky_arm_linux_info :: MAI.ArchitectureInfo SA.AArch32
 hacky_arm_linux_info =
   ARM.arm_linux_info { MAI.extractBlockPrecond = hackyExtractBlockPrecond }
 
-instance PA.ArchConstraints SA.AArch32 where
-  binArchInfo = const hacky_arm_linux_info
-
 instance PA.ValidArch SA.AArch32 where
   -- FIXME: define these
   rawBVReg _r = False
   displayRegister = display
   argumentNameFrom = argumentNameFrom
+  binArchInfo = const hacky_arm_linux_info
 
 
 argumentNameFrom
