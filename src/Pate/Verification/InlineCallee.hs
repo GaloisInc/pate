@@ -228,7 +228,6 @@ allocateInitialState
    . ( LCB.IsSymInterface sym
      , w ~ DMC.ArchAddrWidth arch
      , PA.ValidArch arch
-     , PA.ArchConstraints arch
      , LCLM.HasPtrWidth w
      , LCLM.HasLLVMAnn sym
      , ?memOpts :: LCLM.MemOptions
@@ -330,7 +329,6 @@ symbolicallyExecute
      , LCLM.HasLLVMAnn sym
      , ?memOpts :: LCLM.MemOptions
      , PA.ValidArch arch
-     , PA.ArchConstraints arch
      )
   => DMS.ArchVals arch
   -> sym

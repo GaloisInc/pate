@@ -23,14 +23,14 @@ import qualified Data.Macaw.Discovery.State as MDS
 import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
 
-addrIdent :: (PA.ArchConstraints arch) => proxy arch -> MC.ArchSegmentOff arch -> T.Text
+addrIdent :: (PA.ValidArch arch) => proxy arch -> MC.ArchSegmentOff arch -> T.Text
 addrIdent _ = T.pack . show
 
 -- | Convert a 'MD.ParsedBlock' to the format described in the documentation of
 -- 'renderSliceGraph' (adding it to the accumulated map)
 blockNode
   :: forall arch ids
-   . (PA.ArchConstraints arch)
+   . (PA.ValidArch arch)
   => Map.Map (MC.ArchSegmentOff arch) JSON.Value
   -> MD.ParsedBlock arch ids
   -> Map.Map (MC.ArchSegmentOff arch) JSON.Value
@@ -45,7 +45,7 @@ blockNode m pb =
 
 blockEdges
   :: forall arch ids v
-   . (PA.ArchConstraints arch)
+   . (PA.ValidArch arch)
   => Map.Map (MC.ArchSegmentOff arch) v
   -> [[JSON.Value]]
   -> MD.ParsedBlock arch ids
@@ -86,7 +86,7 @@ initializeGraph divId graphData = TP.ffi "initializeGraphIn(null, %1, sliceGraph
 --
 -- Note that this code uses block addresses (stringified) as identifiers.
 renderSliceGraph
-  :: (PA.ArchConstraints arch)
+  :: (PA.ValidArch arch)
   => String
   -> PE.Blocks arch bkind
   -> (TP.UI TP.Element, TP.UI ())
