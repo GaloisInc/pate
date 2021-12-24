@@ -233,7 +233,7 @@ writeBV sym dstPtr endianness (LCLM.LLVMPointer valBlock valOff0) = go 0 valOff0
     go :: forall w
         . (1 <= w)
        => Integer
-        -> WI.SymBV sym (8 * w)
+       -> WI.SymBV sym (8 * w)
        -> PN.NatRepr w
        -> WI.SymArray sym (Ctx.EmptyCtx Ctx.::> WT.BaseIntegerType Ctx.::> WT.BaseBVType ptrW) (WT.BaseBVType 8)
        -> IO (WI.SymArray sym (Ctx.EmptyCtx Ctx.::> WT.BaseIntegerType Ctx.::> WT.BaseBVType ptrW) (WT.BaseBVType 8))
