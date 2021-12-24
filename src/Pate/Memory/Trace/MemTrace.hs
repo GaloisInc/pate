@@ -110,7 +110,7 @@ instance (WI.IsSymExprBuilder sym) => LCSI.IntrinsicClass sym "memory_trace" whe
     return MemoryTraceImpl { memTraceOperations = ops
                            , memTraceBytes = arr
                            }
-  muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
+  muxIntrinsic _ _ _ _ _ _ _ = PP.panic PP.MemoryModel "muxIntrinsic" ["Unexpected operands in memory_trace mux"]
 
 newMemTrace
   :: (1 <= ptrW, KnownNat ptrW, LCB.IsSymInterface sym)
