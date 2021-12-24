@@ -113,7 +113,7 @@ consumeEvents chan r0 verb mTraceHandle = do
                                                           & patchedBinary .~ Just pelf, ())
         PE.ElfLoaderWarnings {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.CheckedEquivalence bpair@(PPa.PatchPair (PE.Blocks blk _) _) res duration -> do
+        PE.CheckedEquivalence bpair@(PPa.PatchPair (PE.Blocks _ blk _) _) res duration -> do
           let
             addr = PB.concreteAddress blk
             et = EquivalenceTest bpair duration

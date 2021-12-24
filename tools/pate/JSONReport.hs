@@ -49,12 +49,16 @@ data SavedProofNode = InlineResultNode { inlineOriginalFunctionAddress :: Addres
                                        , inlinePatchedFunctionAddress :: Address
                                        , differingGlobalMemoryLocations :: [(Address, Address)]
                                        }
+                    | InlineErrorNode { inlineOriginalErrorAddress :: Address
+                                      , inlinePatchedErrorAddress :: Address
+                                      , inlineCallError :: String
+                                      }
   deriving (Generic)
 
 instance JSON.ToJSON SavedProofNode
 
-blockAddress :: (DMC.MemWidth (DMC.ArchAddrWidth arch)) => PN.NatRepr w -> PE.Blocks arch bin -> Address
-blockAddress w (PE.Blocks cb _) =
+blockAddress :: (DMC.MemWidth (DMC.ArchAddrWidth arch)) => PE.Blocks arch bin -> Address
+blockAddress (PE.Blocks w cb _) =
   Address w (BVS.mkBV w (toInteger (DMM.addrOffset memAddr)))
   where
     memAddr = PA.addrToMemAddr (PB.concreteAddress cb)
@@ -63,15 +67,21 @@ toJSON :: SomeProofEvent arch -> Maybe JSON.Value
 toJSON (SomeProofEvent blks proofSym) = do
   PFI.SomeProofSym _sym (PF.ProofNonceExpr _ _ app) <- return proofSym
   case app of
-    PF.ProofInlinedCall _blks (PVM.SomeWriteSummary _sym inlineResult) -> do
+    PF.ProofInlinedCall _blks (Right (PVM.SomeWriteSummary _sym inlineResult)) -> do
       let w = inlineResult ^. PVM.pointerWidth
       let idx = PVM.indexWriteAddresses w (inlineResult ^. PVM.differingGlobalMemoryLocations)
-      let node = InlineResultNode { inlineOriginalFunctionAddress = blockAddress w (PPa.pOriginal blks)
-                                  , inlinePatchedFunctionAddress = blockAddress w (PPa.pPatched blks)
+      let node = InlineResultNode { inlineOriginalFunctionAddress = blockAddress (PPa.pOriginal blks)
+                                  , inlinePatchedFunctionAddress = blockAddress (PPa.pPatched blks)
                                   , differingGlobalMemoryLocations = [ (Address w lo, Address w hi)
                                                                      | DII.ClosedInterval lo hi <- idx
                                                                      ]
                                   }
+      return (JSON.toJSON node)
+    PF.ProofInlinedCall _blks (Left err) -> do
+      let node = InlineErrorNode { inlineOriginalErrorAddress = blockAddress (PPa.pOriginal blks)
+                                 , inlinePatchedErrorAddress = blockAddress (PPa.pPatched blks)
+                                 , inlineCallError = err
+                                 }
       return (JSON.toJSON node)
     _ -> Nothing
 
