@@ -102,6 +102,7 @@ library
                        Pate.Monad.Environment,
                        Pate.MemCell,
                        Pate.Memory,
+                       Pate.Memory.Trace.MemTrace,
                        Pate.Memory.MemTrace,
                        Pate.Metrics,
                        Pate.SimulatorRegisters,

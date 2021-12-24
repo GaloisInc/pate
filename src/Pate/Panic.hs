@@ -14,6 +14,7 @@ data PateComponent = Verifier
                    | Solver
                    | Override
                    | AArch32
+                   | MemoryModel
                    deriving (Show)
 
 instance P.PanicComponent PateComponent where
