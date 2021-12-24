@@ -78,6 +78,7 @@ renderProofApp app =
     PPr.ProofTriple {} -> TP.string "ProofTriple"
     PPr.ProofStatus vs -> TP.string ("ProofStatus=" ++ verificationStatusTag vs)
     PPr.ProofDomain {} -> TP.string "ProofDomain"
+    PPr.ProofInlinedCall {} -> TP.string "InlinedCall"
 
 renderEvent :: (PA.ValidArch arch) => IS.State arch -> TP.Element -> PE.Event arch -> TP.UI TP.Element
 renderEvent st detailDiv evt =
@@ -85,7 +86,7 @@ renderEvent st detailDiv evt =
     PE.LoadedBinaries {} -> TP.string "Loaded original and patched binaries"
     PE.ElfLoaderWarnings pes ->
       TP.ul #+ (map (\w -> TP.li #+ [TP.string (show w)]) pes)
-    PE.CheckedEquivalence (PPa.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks blkP _)) res duration -> do
+    PE.CheckedEquivalence (PPa.PatchPair ob@(PE.Blocks _ blkO _) pb@(PE.Blocks _ blkP _)) res duration -> do
       let
         origAddr = PB.blockMemAddr blkO
         patchedAddr = PB.blockMemAddr blkP
@@ -99,7 +100,7 @@ renderEvent st detailDiv evt =
                  , TP.string (" (in " ++ show duration ++ ")")
                  , renderEquivalenceResult res
                  ]
-    PE.ProofIntermediate (PPa.PatchPair ob@(PE.Blocks blkO _) pb@(PE.Blocks _blkP _))
+    PE.ProofIntermediate (PPa.PatchPair ob@(PE.Blocks _ blkO _) pb@(PE.Blocks _ _blkP _))
                          (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
       let origAddr = PB.blockMemAddr blkO
       blockLink <- TP.a # TP.set TP.text (show origAddr)

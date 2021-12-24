@@ -90,7 +90,7 @@ renderSliceGraph
   => String
   -> PE.Blocks arch bkind
   -> (TP.UI TP.Element, TP.UI ())
-renderSliceGraph divId (PE.Blocks _ parsedBlocks) =
+renderSliceGraph divId (PE.Blocks _ _ parsedBlocks) =
   (TP.div # TP.set TP.id_ divId, TP.runFunction (initializeGraph divId (JSON.Object graph)))
   where
     nodes = F.foldl' blockNode Map.empty parsedBlocks

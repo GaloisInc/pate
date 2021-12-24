@@ -10,9 +10,11 @@ module Pate.Interactive.Render.Proof (
 import           Control.Lens ((^.))
 import           Control.Monad ( guard )
 import qualified Data.Aeson as JSON
+import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import qualified Data.Functor.Const as C
 import qualified Data.HashMap.Strict as HMS
+import qualified Data.IntervalMap.Interval as DII
 import qualified Data.List as DL
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Types as MT
@@ -43,6 +45,7 @@ import qualified Pate.Panic as Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PPr
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Verification.MemoryLog as PVM
 
 import qualified Pate.Interactive.State as IS
 
@@ -93,11 +96,13 @@ ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
           PPr.ProofTriple {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofTriple is not a possible parent component for a ProofTriple"]
           PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
           PPr.ProofDomain {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofDomain is not a possible parent component for a ProofTriple"]
+          PPr.ProofInlinedCall {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofInlinedCall is not a possible parent component for a ProofTriple"]
       | otherwise ->
         -- See Note [Pending Nodes]
         PP.pretty "<Pending>"
     PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus (Proxy @prf) st)
     PPr.ProofDomain {} -> PP.pretty "Domain"
+    PPr.ProofInlinedCall {} -> PP.pretty "Inlined Call"
 
 nodeLabel
   :: ( prf ~ PFI.ProofSym sym arch
@@ -107,7 +112,7 @@ nodeLabel
   -> PE.BlocksPair arch
   -> PPr.ProofNonceExpr prf tp
   -> T.Text
-nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks ob _) (PE.Blocks pb _)) expr =
+nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks _ ob _) (PE.Blocks _ pb _)) expr =
   pp (mconcat [ ppAppTag proofTreeNodes expr
               , PP.line
               , mconcat [ PP.pretty (PB.concreteAddress ob)
@@ -431,7 +436,36 @@ renderProofTripleLabel nodeMap parentNonce
           TP.string "Impossible proof structure with a status as the parent of a triple"
         PPr.ProofDomain {} ->
           TP.string "Impossible proof structure with a domain as the parent of a triple"
+        PPr.ProofInlinedCall {} ->
+          TP.string "A proof that two equated callees have equivalent behavior"
   | otherwise = TP.string "Unknown proof triple"
+
+-- | Render the results from inlining a call
+renderInlinedCall
+  :: PPa.PatchPair (PB.ConcreteBlock arch)
+  -> Either String (PVM.SomeWriteSummary (MC.ArchAddrWidth arch))
+  -> TP.UI TP.Element
+renderInlinedCall (PPa.PatchPair ob pb) results =
+  case results of
+    Left err -> TP.column [ TP.string (T.unpack renderBlocks)
+                          , TP.string err
+                          ]
+    Right (PVM.SomeWriteSummary _ (PVM.WriteSummary ranges _ _ _ w)) ->
+      let ppHex bv = PP.pretty (BVS.ppHex w bv)
+          ppRange l h = text (ppHex l <> PP.pretty "-" <> ppHex h)
+      in TP.column [ TP.string "The following global memory ranges differ between the original and patched programs"
+                   , TP.ul #+ [ TP.li #+ [ppRange l h]
+                              | DII.ClosedInterval l h <- PVM.indexWriteAddresses w ranges
+                              ]
+                   ]
+  where
+    renderBlocks =
+      pp (mconcat [ PP.pretty (PB.concreteAddress ob)
+                  , PP.pretty "/"
+                  , PP.pretty (PB.concreteAddress pb)
+                  ]
+         )
+
 
 renderProofApp
   :: forall prf sym arch tp
@@ -489,6 +523,10 @@ renderProofApp nodeMap (Some parentNonce) app =
     PPr.ProofDomain {} ->
       TP.column [ TP.string "The domain of an individual equivalence proof"
                 , renderDomainApp app
+                ]
+    PPr.ProofInlinedCall blks results ->
+      TP.column [ TP.string "The results of inlining equated call sites"
+                , renderInlinedCall blks results
                 ]
 
 {- Note [Pending Nodes]

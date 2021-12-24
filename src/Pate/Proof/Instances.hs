@@ -370,15 +370,20 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
    PF.VerificationSuccess -> "Succeeded"
    PF.VerificationFail (result, cond) -> PP.vsep [ "Failed:", PP.pretty result, PP.pretty cond ]
 
- pretty (PF.ProofExpr (PF.ProofInlinedCall blks (PVM.SomeWriteSummary _sym writeSummary))) =
-   PP.vsep [ "Inlined callees: " <> PP.pretty blks
-           , "Global addresses with different contents: "
-           , PP.indent 2 $ PP.vsep (map ppRange locRanges)
-           ]
-   where
-     ptrW = writeSummary ^. PVM.pointerWidth
-     locRanges = PVM.indexWriteAddresses ptrW (writeSummary ^. PVM.differingGlobalMemoryLocations)
-     ppRange r = "[" <> PP.pretty (BVS.ppHex ptrW (DII.lowerBound r)) <> "-" <> PP.pretty (BVS.ppHex ptrW (DII.upperBound r)) <> "]"
+ pretty (PF.ProofExpr (PF.ProofInlinedCall blks res)) =
+   case res of
+     Left err ->
+       PP.vsep [ "Inlined callees: " <> PP.pretty blks
+               , "  Error: " <> PP.pretty err
+               ]
+     Right (PVM.SomeWriteSummary _sym writeSummary) ->
+       let ptrW = writeSummary ^. PVM.pointerWidth
+           locRanges = PVM.indexWriteAddresses ptrW (writeSummary ^. PVM.differingGlobalMemoryLocations)
+           ppRange r = "[" <> PP.pretty (BVS.ppHex ptrW (DII.lowerBound r)) <> "-" <> PP.pretty (BVS.ppHex ptrW (DII.upperBound r)) <> "]"
+       in PP.vsep [ "Inlined callees: " <> PP.pretty blks
+                  , "Global addresses with different contents: "
+                  , PP.indent 2 $ PP.vsep (map ppRange locRanges)
+                  ]
 
 instance PSo.ValidSym sym => PP.Pretty (CondEquivalenceResult sym arch) where
   pretty (CondEquivalenceResult pExample pPred pAbortValid) =

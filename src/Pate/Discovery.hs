@@ -506,8 +506,8 @@ getBlocks' ctx pPair = do
   bs2 <- liftIO $ lookupBlocks' ctxP blkP
   case (bs1, bs2) of
     (Right (PMC.ParsedBlocks opbs), Right (PMC.ParsedBlocks ppbs)) -> do
-      let oBlocks = PE.Blocks blkO opbs
-      let pBlocks = PE.Blocks blkP ppbs
+      let oBlocks = PE.Blocks PC.knownRepr blkO opbs
+      let pBlocks = PE.Blocks PC.knownRepr blkP ppbs
       return $! PPa.PatchPair oBlocks pBlocks
     (Left err, _) -> CMC.throwM err
     (_, Left err) -> CMC.throwM err
@@ -524,9 +524,9 @@ getBlocks ::
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
   PMC.ParsedBlocks opbs <- lookupBlocks blkO
-  let oBlocks = PE.Blocks blkO opbs
+  let oBlocks = PE.Blocks PC.knownRepr blkO opbs
   PMC.ParsedBlocks ppbs <- lookupBlocks blkP
-  let pBlocks = PE.Blocks blkP ppbs
+  let pBlocks = PE.Blocks PC.knownRepr blkP ppbs
   return $ PPa.PatchPair oBlocks pBlocks
   where
     blkO = PPa.pOriginal pPair

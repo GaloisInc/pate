@@ -11,7 +11,9 @@ module Pate.Event (
 
 import qualified Data.ElfEdit as DEE
 import qualified Data.List.NonEmpty as DLN
+import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Discovery as MD
+import qualified Data.Parameterized.NatRepr as PN
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Word ( Word64 )
@@ -34,7 +36,7 @@ import qualified Pate.Loader.ELF as PLE
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
-  Blocks :: PB.ConcreteBlock arch bin -> [MD.ParsedBlock arch ids] -> Blocks arch bin
+  Blocks :: PN.NatRepr (DMC.ArchAddrWidth arch) -> PB.ConcreteBlock arch bin -> [MD.ParsedBlock arch ids] -> Blocks arch bin
 
 type BlocksPair arch = PPa.PatchPair (Blocks arch)
 

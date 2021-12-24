@@ -340,7 +340,7 @@ terminalFormatEvent evt =
                        , PP.viaShow $ PB.concreteAddress blkP
                        , PP.line
                        ]
-    PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks blkO _) (PE.Blocks blkP _)) res duration ->
+    PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks _ blkO _) (PE.Blocks _ blkP _)) res duration ->
       let
         origAddr = PB.concreteAddress blkO
         patchedAddr = PB.concreteAddress blkP

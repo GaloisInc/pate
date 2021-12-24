@@ -260,7 +260,7 @@ allocateInitialState sym archInfo memory = do
 
 data GlobalStateError = Timeout
                       | AbortedExit
-
+                      deriving (Show)
 
 getFinalGlobalValue
   :: (LCS.RegValue sym LCT.BoolType -> LCS.RegValue sym tp -> LCS.RegValue sym tp -> IO (LCS.RegValue sym tp))
@@ -560,7 +560,25 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
           putStrLn ("  " ++ show (fmap (BVS.ppHex ?ptrWidth) r))
 
         let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
-                                         , PF.prfInlinedResults = PVM.SomeWriteSummary sym writeSummary
+                                         , PF.prfInlinedResults = Right (PVM.SomeWriteSummary sym writeSummary)
+                                         }
+        ((), lproof) <- PFO.lazyProofEvent pPair (return ((), prfRes))
+        return (contPre, lproof)
+      (Left oErr, Left pErr) -> do
+        let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
+                                         , PF.prfInlinedResults = Left ("Original execution: " ++ show oErr ++ ", Patched execution: " ++ show pErr)
+                                         }
+        ((), lproof) <- PFO.lazyProofEvent pPair (return ((), prfRes))
+        return (contPre, lproof)
+      (Left oErr, _) -> do
+        let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
+                                         , PF.prfInlinedResults = Left ("Original execution: " ++ show oErr)
+                                         }
+        ((), lproof) <- PFO.lazyProofEvent pPair (return ((), prfRes))
+        return (contPre, lproof)
+      (_, Left pErr) -> do
+        let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
+                                         , PF.prfInlinedResults = Left ("Patched execution: " ++ show pErr)
                                          }
         ((), lproof) <- PFO.lazyProofEvent pPair (return ((), prfRes))
         return (contPre, lproof)

@@ -254,7 +254,7 @@ data ProofApp prf (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
   -- the two programs execute
   ProofInlinedCall ::
     { prfInlinedBlocks :: PPa.PatchPair (ProofBlock prf)
-    , prfInlinedResults :: ProofInlinedResult prf
+    , prfInlinedResults :: Either String (ProofInlinedResult prf)
     } -> ProofApp prf node ProofBlockSliceType
 
   -- | Proof that a function call is valid. Specifically, if a function 'g' is called from

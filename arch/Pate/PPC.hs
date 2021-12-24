@@ -93,7 +93,7 @@ getCurrentTOC
   -> PB.WhichBinaryRepr bin
   -> IO (W.W 64)
 getCurrentTOC ctx binRepr = do
-  PE.Blocks _ (pblk:_) <- PPa.getPair' binRepr <$> PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+  PE.Blocks _ _ (pblk:_) <- PPa.getPair' binRepr <$> PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
   let
     toc = TOC.getTOC (PMC.binary $ PPa.getPair' binRepr (PMC.binCtxs ctx))
     addr = MD.pblockAddr pblk
