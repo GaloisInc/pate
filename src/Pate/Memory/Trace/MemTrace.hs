@@ -19,6 +19,7 @@ module Pate.Memory.Trace.MemTrace (
     TraceMemoryModel
   , newMemTrace
   , memTraceIntrinsicTypes
+  , readMemory
   , writeMemory
   ) where
 
@@ -29,7 +30,7 @@ import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
 import qualified Data.Parameterized.SymbolRepr as PS
 import           GHC.Stack ( HasCallStack )
-import           GHC.TypeLits ( KnownNat, type (<=), type (*), type (-) )
+import           GHC.TypeLits ( KnownNat, type (<=), type (*), type (-), type (+) )
 import qualified Unsafe.Coerce as UC
 import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
@@ -68,7 +69,7 @@ data MemoryWrite sym ptrW numBytes =
               -- ^ The address written to
               , storeCondition :: Condition sym
               -- ^ The conditions under which the write applies
-              , numBytesRepr :: PN.NatRepr numBytes
+              , storeBytesRepr :: PN.NatRepr numBytes
               -- ^ A type repr for the number of bytes written
               , storeValue :: LCLM.LLVMPtr sym (8 * numBytes)
               -- ^ The value stored
@@ -76,8 +77,22 @@ data MemoryWrite sym ptrW numBytes =
               -- ^ The endianness of the operation
               }
 
+-- | The set of information characterizing a memory read operation
+data MemoryRead sym ptrW numBytes =
+  MemoryRead { loadAddress :: LCLM.LLVMPtr sym ptrW
+             -- ^ The address being read from
+             , loadCondition :: Condition sym
+             -- ^ The condition under which the write applies
+             , loadBytesRepr :: PN.NatRepr numBytes
+             -- ^ The number of bytes being read (type level representative)
+             , loadEndianness :: DMM.Endianness
+             -- ^ The endianness of the operation
+             }
+
+-- | A memory operation recorded in the memory trace
 data MemoryOperation sym ptrW where
   MemoryWriteOperation :: (1 <= ptrW) => MemoryWrite sym ptrW bytes -> MemoryOperation sym ptrW
+  MemoryReadOperation :: (1 <= ptrW) => MemoryRead sym ptrW bytes -> MemoryOperation sym ptrW
 
 -- | The core data structure of the memory model
 --
@@ -96,6 +111,7 @@ data MemoryTraceImpl sym ptrW =
 -- | The intrinsic type in the Crucible type system
 type MemoryTrace arch = LCT.IntrinsicType "memory_trace" (Ctx.EmptyCtx Ctx.::> LCT.BVType (DMC.ArchAddrWidth arch))
 
+-- | A memory model for machine code that records a trace of operations
 data TraceMemoryModel
 
 instance DMS.IsMemoryModel TraceMemoryModel where
@@ -112,6 +128,7 @@ instance (WI.IsSymExprBuilder sym) => LCSI.IntrinsicClass sym "memory_trace" whe
                            }
   muxIntrinsic _ _ _ _ _ _ _ = PP.panic PP.MemoryModel "muxIntrinsic" ["Unexpected operands in memory_trace mux"]
 
+-- | Allocate a new memory model implementation
 newMemTrace
   :: (1 <= ptrW, KnownNat ptrW, LCB.IsSymInterface sym)
   => sym
@@ -123,6 +140,7 @@ newMemTrace sym = do
                          , memTraceBytes = byteArr
                          }
 
+-- | The intrinsic types that must be registered for the memory trace memory model
 memTraceIntrinsicTypes :: LCB.IsSymInterface sym => LCSI.IntrinsicTypes sym
 memTraceIntrinsicTypes =
   MapF.fromList [ MapF.Pair (PS.knownSymbol @"memory_trace") LCSI.IntrinsicMuxFn
@@ -256,7 +274,6 @@ writeBV sym dstPtr endianness (LCLM.LLVMPointer valBlock valOff0) = go 0 valOff0
           byteArr' <- WI.arrayUpdate sym byteArr idx thisByte
           go (byteIdx + 1) restBytes (PN.decNat numBytes) byteArr'
 
-
 -- | Write a value to memory
 writeMemory
   :: ( LCB.IsSymInterface sym
@@ -280,7 +297,7 @@ writeMemory sym cond dstPtr memRepr value memTrace0 =
     DMC.BVMemRepr byteWidth endianness -> do
       let writeOp = MemoryWrite { storeAddress = dstPtr
                                 , storeCondition = cond
-                                , numBytesRepr = byteWidth
+                                , storeBytesRepr = byteWidth
                                 , storeValue = value
                                 , storeEndianness = endianness
                                 }
@@ -297,6 +314,104 @@ writeMemory sym cond dstPtr memRepr value memTrace0 =
       PP.panic PP.MemoryModel "writeMemory" ["Writing floating point values is not currently supported"]
     DMC.PackedVecMemRepr {} ->
       PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
+
+-- | Concat a byte onto a larger word, respecting endianness
+concatBytes
+  :: ( LCB.IsSymInterface sym
+     , 1 <= w
+     )
+  => sym
+  -> DMM.Endianness
+  -> WI.SymBV sym 8
+  -> WI.SymBV sym w
+  -> IO (WI.SymBV sym (8 + w))
+concatBytes sym endianness byte bytes =
+  case endianness of
+    DMM.BigEndian -> WI.bvConcat sym byte bytes
+    DMM.LittleEndian -> do
+      PC.Refl <- return $ PN.plusComm (WI.bvWidth byte) (WI.bvWidth bytes)
+      WI.bvConcat sym bytes byte
+
+readBV
+  :: forall sym ptrW numBytes
+   . ( LCB.IsSymInterface sym
+     , 1 <= ptrW
+     , 1 <= numBytes
+     )
+  => sym
+  -> LCLM.LLVMPtr sym ptrW
+  -> DMM.Endianness
+  -> WI.SymArray sym (Ctx.EmptyCtx Ctx.::> WT.BaseIntegerType Ctx.::> WT.BaseBVType ptrW) (WT.BaseBVType 8)
+  -> PN.NatRepr numBytes
+  -> IO (WI.SymBV sym (8 * numBytes))
+readBV sym srcPtr endianness byteArr = go 0
+  where
+    go :: forall bytesLeft . (1 <= bytesLeft) => Integer -> PN.NatRepr bytesLeft -> IO (WI.SymBV sym (8 * bytesLeft))
+    go byteNum resWidth =
+      case PN.isZeroOrGT1 (PN.decNat resWidth) of
+        Left PC.Refl -> do
+          -- This is the base case where we just have one byte left to read
+          PC.Refl <- return $ zeroSubEq resWidth (PN.knownNat @1)
+          -- FIXME: This is where we assume that the block ID of the read value
+          -- is 0; we don't have a choice at the moment because we aren't
+          -- storing it when we write the pointer.
+          WI.arrayLookup sym byteArr =<< arrayIdxFrom sym srcPtr byteNum
+        Right PN.LeqProof -> do
+          let recByteWidth = PN.decNat resWidth
+          thisByte <- WI.arrayLookup sym byteArr =<< arrayIdxFrom sym srcPtr byteNum
+          restBytes <- go (byteNum + 1) recByteWidth
+
+          -- Prove to 'concatBytes' that we are passing in well-formed arguments
+          PC.Refl <- return $ PN.lemmaMul (PN.knownNat @8) resWidth
+          PC.Refl <- return $ PN.mulComm (PN.knownNat @8) recByteWidth
+          PC.Refl <- return $ PN.mulComm (PN.knownNat @8) resWidth
+          PN.LeqProof <- return $ mulMono (PN.knownNat @8) recByteWidth
+          concatBytes sym endianness thisByte restBytes
+
+-- | Read a value from memory
+--
+-- Note that, unlike some other memory models, this returns an updated memory
+-- model as the trace is updated, even though there is no observable effect.
+readMemory
+  :: ( LCB.IsSymInterface sym
+     , HasCallStack
+     , 1 <= ptrW
+     )
+  => sym
+  -- ^ The condition under which the read occurs
+  -> LCLM.LLVMPtr sym ptrW
+  -- ^ The pointer read from
+  -> DMC.MemRepr ty
+  -- ^ The memory representation of the value to be read
+  -> MemoryTraceImpl sym ptrW
+  -- ^ The memory model value to read from and update
+  -> IO (LCS.RegValue sym (DMS.ToCrucibleType ty), MemoryTraceImpl sym ptrW)
+readMemory sym srcPtr memRepr memTrace0 =
+  case memRepr of
+    DMC.BVMemRepr byteWidth endianness -> do
+      let readOp = MemoryRead { loadAddress = srcPtr
+                              , loadCondition = Unconditional
+                              , loadBytesRepr = byteWidth
+                              , loadEndianness = endianness
+                              }
+      let memOp = MemoryReadOperation readOp
+      ops <- LCSS.consSymSequence sym memOp (memTraceOperations memTrace0)
+
+      bv <- readBV sym srcPtr endianness (memTraceBytes memTrace0) byteWidth
+      -- NOTE/FIXME: We wrap the bitvector in an LLVMPointer, but we don't have
+      -- a real block ID. We need to store block IDs to be able to soundly
+      -- reproduce the right pointer here
+      ptr <- LCLM.llvmPointer_bv sym bv
+
+      let memTrace1 = MemoryTraceImpl { memTraceOperations = ops
+                                      , memTraceBytes = memTraceBytes memTrace0
+                                      }
+      return (ptr, memTrace1)
+    DMC.FloatMemRepr {} ->
+      PP.panic PP.MemoryModel "writeMemory" ["Writing floating point values is not currently supported"]
+    DMC.PackedVecMemRepr {} ->
+      PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
+
 
 {- Note [Write Strategy]
 
