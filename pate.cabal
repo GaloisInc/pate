@@ -104,6 +104,7 @@ library
                        Pate.Memory,
                        Pate.Memory.Trace.MemTrace,
                        Pate.Memory.Trace.Operations,
+                       Pate.Memory.Trace.Undefined,
                        Pate.Memory.MemTrace,
                        Pate.Metrics,
                        Pate.SimulatorRegisters,
