@@ -25,11 +25,10 @@ module Pate.Memory.Trace.MemTrace (
   , readMemoryConditional
   , writeMemory
   , writeMemoryConditional
+  -- * Low-level operations for the verifier but *not* the symbolic exeuction
+  , writeBV
+  , readBV
   -- * Trace Inspection
-  , Condition(..)
-  , MemoryWrite(..)
-  , MemoryRead(..)
-  , MemoryOperation(..)
   , traceFootprint
   ) where
 
@@ -57,53 +56,9 @@ import qualified Lang.Crucible.Simulator.Intrinsics as LCSI
 import qualified Lang.Crucible.Simulator.SymSequence as LCSS
 import qualified Lang.Crucible.Types as LCT
 
+import qualified Pate.Memory.Trace.Operations as PMTO
 import qualified Pate.Panic as PP
 
--- | The conditions under which a write occurs
-data Condition sym = Unconditional
-                   | Conditional (WI.Pred sym)
-
--- | The logical predicate corresponding to the condition
-conditionPred
-  :: (LCB.IsSymInterface sym)
-  => sym
-  -> Condition sym
-  -> WI.Pred sym
-conditionPred sym c =
-  case c of
-    Unconditional -> WI.truePred sym
-    Conditional p -> p
-
--- | The set of information characterizing a memory write operation
-data MemoryWrite sym ptrW numBytes =
-  MemoryWrite { storeAddress :: LCLM.LLVMPtr sym ptrW
-              -- ^ The address written to
-              , storeCondition :: Condition sym
-              -- ^ The conditions under which the write applies
-              , storeBytesRepr :: PN.NatRepr numBytes
-              -- ^ A type repr for the number of bytes written
-              , storeValue :: LCLM.LLVMPtr sym (8 * numBytes)
-              -- ^ The value stored
-              , storeEndianness :: DMM.Endianness
-              -- ^ The endianness of the operation
-              }
-
--- | The set of information characterizing a memory read operation
-data MemoryRead sym ptrW numBytes =
-  MemoryRead { loadAddress :: LCLM.LLVMPtr sym ptrW
-             -- ^ The address being read from
-             , loadCondition :: Condition sym
-             -- ^ The condition under which the write applies
-             , loadBytesRepr :: PN.NatRepr numBytes
-             -- ^ The number of bytes being read (type level representative)
-             , loadEndianness :: DMM.Endianness
-             -- ^ The endianness of the operation
-             }
-
--- | A memory operation recorded in the memory trace
-data MemoryOperation sym ptrW where
-  MemoryWriteOperation :: (1 <= ptrW) => MemoryWrite sym ptrW bytes -> MemoryOperation sym ptrW
-  MemoryReadOperation :: (1 <= ptrW) => MemoryRead sym ptrW bytes -> MemoryOperation sym ptrW
 
 -- | The core data structure of the memory model
 --
@@ -111,7 +66,7 @@ data MemoryOperation sym ptrW where
 -- the Crucible type system.  There is a single value of this type that is
 -- stored in a global variable, very similar to the LLVM memory model
 data MemoryTraceImpl sym ptrW =
-  MemoryTraceImpl { memTraceOperations :: LCSS.SymSequence sym (MemoryOperation sym ptrW)
+  MemoryTraceImpl { memTraceOperations :: LCSS.SymSequence sym (PMTO.MemoryOperation sym ptrW)
                -- ^ The (symbolic) trace of operations that were performed on
                -- this memory model instance.  Note that this is a symbolic
                -- sequence, and thus can contain symbolic branches
@@ -292,7 +247,7 @@ writeMemoryInternal
      , 1 <= ptrW
      )
   => sym
-  -> Condition sym
+  -> PMTO.Condition sym
   -- ^ The condition under which the write occurs
   -> LCLM.LLVMPtr sym ptrW
   -- ^ The pointer written to
@@ -306,18 +261,18 @@ writeMemoryInternal
 writeMemoryInternal sym cond dstPtr memRepr value memTrace0 =
   case memRepr of
     DMC.BVMemRepr byteWidth endianness -> do
-      let writeOp = MemoryWrite { storeAddress = dstPtr
-                                , storeCondition = cond
-                                , storeBytesRepr = byteWidth
-                                , storeValue = value
-                                , storeEndianness = endianness
-                                }
-      let memOp = MemoryWriteOperation writeOp
+      let writeOp = PMTO.MemoryWrite { PMTO.storeAddress = dstPtr
+                                     , PMTO.storeCondition = cond
+                                     , PMTO.storeBytesRepr = byteWidth
+                                     , PMTO.storeValue = value
+                                     , PMTO.storeEndianness = endianness
+                                     }
+      let memOp = PMTO.MemoryWriteOperation writeOp
       ops <- LCSS.consSymSequence sym memOp (memTraceOperations memTrace0)
 
       let origBytes = memTraceBytes memTrace0
       bytes' <- writeBV sym dstPtr endianness value byteWidth origBytes
-      bytes'' <- WI.baseTypeIte sym (conditionPred sym cond) bytes' origBytes
+      bytes'' <- WI.baseTypeIte sym (PMTO.conditionPred sym cond) bytes' origBytes
       return MemoryTraceImpl { memTraceOperations = ops
                              , memTraceBytes = bytes''
                              }
@@ -341,7 +296,7 @@ writeMemory
   -> MemoryTraceImpl sym ptrW
   -- ^ The memory model value to update
   -> IO (MemoryTraceImpl sym ptrW)
-writeMemory sym = writeMemoryInternal sym Unconditional
+writeMemory sym = writeMemoryInternal sym PMTO.Unconditional
 
 writeMemoryConditional
   :: ( LCB.IsSymInterface sym
@@ -360,7 +315,7 @@ writeMemoryConditional
   -> MemoryTraceImpl sym ptrW
   -- ^ The memory model value to update
   -> IO (MemoryTraceImpl sym ptrW)
-writeMemoryConditional sym p = writeMemoryInternal sym (Conditional p)
+writeMemoryConditional sym p = writeMemoryInternal sym (PMTO.Conditional p)
 
 -- | Concat a byte onto a larger word, respecting endianness
 concatBytes
@@ -469,12 +424,12 @@ readMemory sym srcPtr memRepr memTrace0 = do
   val <- readMemoryInternal sym srcPtr memRepr memTrace0
   case memRepr of
     DMC.BVMemRepr byteWidth endianness -> do
-      let readOp = MemoryRead { loadAddress = srcPtr
-                              , loadCondition = Unconditional
-                              , loadBytesRepr = byteWidth
-                              , loadEndianness = endianness
-                              }
-      let memOp = MemoryReadOperation readOp
+      let readOp = PMTO.MemoryRead { PMTO.loadAddress = srcPtr
+                                   , PMTO.loadCondition = PMTO.Unconditional
+                                   , PMTO.loadBytesRepr = byteWidth
+                                   , PMTO.loadEndianness = endianness
+                                   }
+      let memOp = PMTO.MemoryReadOperation readOp
       ops <- LCSS.consSymSequence sym memOp (memTraceOperations memTrace0)
       let memTrace1 = MemoryTraceImpl { memTraceOperations = ops
                                       , memTraceBytes = memTraceBytes memTrace0
@@ -505,12 +460,12 @@ readMemoryConditional
 readMemoryConditional sym cond srcPtr memRepr defVal memTrace0 = do
   case memRepr of
     DMC.BVMemRepr byteWidth endianness -> do
-      let readOp = MemoryRead { loadAddress = srcPtr
-                              , loadCondition = Conditional cond
-                              , loadBytesRepr = byteWidth
-                              , loadEndianness = endianness
-                              }
-      let memOp = MemoryReadOperation readOp
+      let readOp = PMTO.MemoryRead { PMTO.loadAddress = srcPtr
+                                   , PMTO.loadCondition = PMTO.Conditional cond
+                                   , PMTO.loadBytesRepr = byteWidth
+                                   , PMTO.loadEndianness = endianness
+                                   }
+      let memOp = PMTO.MemoryReadOperation readOp
       ops <- LCSS.consSymSequence sym memOp (memTraceOperations memTrace0)
       let memTrace1 = MemoryTraceImpl { memTraceOperations = ops
                                       , memTraceBytes = memTraceBytes memTrace0
@@ -530,7 +485,7 @@ readMemoryConditional sym cond srcPtr memRepr defVal memTrace0 = do
 -- | Extract a footprint from a memory state
 --
 -- The footprint is the set of memory addresses it touches
-traceFootprint :: sym -> MemoryTraceImpl sym ptrW -> IO [MemoryOperation sym ptrW]
+traceFootprint :: sym -> MemoryTraceImpl sym ptrW -> IO [PMTO.MemoryOperation sym ptrW]
 traceFootprint sym impl =
   CMS.execStateT (LCSS.traverseSymSequence sym recordOp (memTraceOperations impl)) []
   where
