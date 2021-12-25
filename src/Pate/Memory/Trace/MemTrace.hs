@@ -22,6 +22,7 @@ module Pate.Memory.Trace.MemTrace (
   , newMemTrace
   , memTraceIntrinsicTypes
   , readMemory
+  , readMemoryConditional
   , writeMemory
   , writeMemoryConditional
   -- * Trace Inspection
@@ -414,6 +415,39 @@ readBV sym srcPtr endianness byteArr = go 0
           PN.LeqProof <- return $ mulMono (PN.knownNat @8) recByteWidth
           concatBytes sym endianness thisByte restBytes
 
+-- | The internal implementation of the memory read operations
+--
+-- Note that this does *not* update the 'MemoryTraceImpl', as that is easier to
+-- do in the callers of this function.
+readMemoryInternal
+  :: ( LCB.IsSymInterface sym
+     , HasCallStack
+     , 1 <= ptrW
+     )
+  => sym
+  -> LCLM.LLVMPtr sym ptrW
+  -- ^ The pointer read from
+  -> DMC.MemRepr ty
+  -- ^ The memory representation of the value to be read
+  -> MemoryTraceImpl sym ptrW
+  -- ^ The memory model value to read from and update
+  -> IO (LCS.RegValue sym (DMS.ToCrucibleType ty))
+readMemoryInternal sym srcPtr memRepr memTrace0 =
+  case memRepr of
+    DMC.BVMemRepr byteWidth endianness -> do
+      bv <- readBV sym srcPtr endianness (memTraceBytes memTrace0) byteWidth
+      -- NOTE/FIXME: We wrap the bitvector in an LLVMPointer, but we don't have
+      -- a real block ID. We need to store block IDs to be able to soundly
+      -- reproduce the right pointer here
+      ptr <- LCLM.llvmPointer_bv sym bv
+
+      return ptr
+    DMC.FloatMemRepr {} ->
+      PP.panic PP.MemoryModel "writeMemory" ["Writing floating point values is not currently supported"]
+    DMC.PackedVecMemRepr {} ->
+      PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
+
+
 -- | Read a value from memory
 --
 -- Note that, unlike some other memory models, this returns an updated memory
@@ -424,7 +458,6 @@ readMemory
      , 1 <= ptrW
      )
   => sym
-  -- ^ The condition under which the read occurs
   -> LCLM.LLVMPtr sym ptrW
   -- ^ The pointer read from
   -> DMC.MemRepr ty
@@ -432,7 +465,8 @@ readMemory
   -> MemoryTraceImpl sym ptrW
   -- ^ The memory model value to read from and update
   -> IO (LCS.RegValue sym (DMS.ToCrucibleType ty), MemoryTraceImpl sym ptrW)
-readMemory sym srcPtr memRepr memTrace0 =
+readMemory sym srcPtr memRepr memTrace0 = do
+  val <- readMemoryInternal sym srcPtr memRepr memTrace0
   case memRepr of
     DMC.BVMemRepr byteWidth endianness -> do
       let readOp = MemoryRead { loadAddress = srcPtr
@@ -442,21 +476,56 @@ readMemory sym srcPtr memRepr memTrace0 =
                               }
       let memOp = MemoryReadOperation readOp
       ops <- LCSS.consSymSequence sym memOp (memTraceOperations memTrace0)
-
-      bv <- readBV sym srcPtr endianness (memTraceBytes memTrace0) byteWidth
-      -- NOTE/FIXME: We wrap the bitvector in an LLVMPointer, but we don't have
-      -- a real block ID. We need to store block IDs to be able to soundly
-      -- reproduce the right pointer here
-      ptr <- LCLM.llvmPointer_bv sym bv
-
       let memTrace1 = MemoryTraceImpl { memTraceOperations = ops
                                       , memTraceBytes = memTraceBytes memTrace0
                                       }
-      return (ptr, memTrace1)
+      return (val, memTrace1)
     DMC.FloatMemRepr {} ->
       PP.panic PP.MemoryModel "writeMemory" ["Writing floating point values is not currently supported"]
     DMC.PackedVecMemRepr {} ->
       PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
+
+readMemoryConditional
+  :: ( LCB.IsSymInterface sym
+     , HasCallStack
+     , 1 <= ptrW
+     )
+  => sym
+  -> WI.Pred sym
+  -- ^ The condition under which the read occurs
+  -> LCLM.LLVMPtr sym ptrW
+  -- ^ The pointer read from
+  -> DMC.MemRepr ty
+  -- ^ The memory representation of the value to be read
+  -> LCS.RegValue sym (DMS.ToCrucibleType ty)
+  -- ^ The default value to return if the condition is false
+  -> MemoryTraceImpl sym ptrW
+  -- ^ The memory model value to read from and update
+  -> IO (LCS.RegValue sym (DMS.ToCrucibleType ty), MemoryTraceImpl sym ptrW)
+readMemoryConditional sym cond srcPtr memRepr defVal memTrace0 = do
+  case memRepr of
+    DMC.BVMemRepr byteWidth endianness -> do
+      let readOp = MemoryRead { loadAddress = srcPtr
+                              , loadCondition = Conditional cond
+                              , loadBytesRepr = byteWidth
+                              , loadEndianness = endianness
+                              }
+      let memOp = MemoryReadOperation readOp
+      ops <- LCSS.consSymSequence sym memOp (memTraceOperations memTrace0)
+      let memTrace1 = MemoryTraceImpl { memTraceOperations = ops
+                                      , memTraceBytes = memTraceBytes memTrace0
+                                      }
+
+      val <- readMemoryInternal sym srcPtr memRepr memTrace0
+      PN.LeqProof <- return $ mulMono (PN.knownNat @8) byteWidth
+      result <- LCLM.muxLLVMPtr sym cond val defVal
+      return (result, memTrace1)
+    DMC.FloatMemRepr {} ->
+      PP.panic PP.MemoryModel "writeMemory" ["Writing floating point values is not currently supported"]
+    DMC.PackedVecMemRepr {} ->
+      PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
+
+
 
 -- | Extract a footprint from a memory state
 --
