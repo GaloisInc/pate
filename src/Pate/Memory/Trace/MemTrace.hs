@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -16,13 +17,22 @@
 --
 -- The intent is that the data types defined in this module can remain opaque
 module Pate.Memory.Trace.MemTrace (
+  -- * Core memory operations
     TraceMemoryModel
   , newMemTrace
   , memTraceIntrinsicTypes
   , readMemory
   , writeMemory
+  , writeMemoryConditional
+  -- * Trace Inspection
+  , Condition(..)
+  , MemoryWrite(..)
+  , MemoryRead(..)
+  , MemoryOperation(..)
+  , traceFootprint
   ) where
 
+import qualified Control.Monad.State as CMS
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
@@ -275,7 +285,7 @@ writeBV sym dstPtr endianness (LCLM.LLVMPointer valBlock valOff0) = go 0 valOff0
           go (byteIdx + 1) restBytes (PN.decNat numBytes) byteArr'
 
 -- | Write a value to memory
-writeMemory
+writeMemoryInternal
   :: ( LCB.IsSymInterface sym
      , HasCallStack
      , 1 <= ptrW
@@ -292,7 +302,7 @@ writeMemory
   -> MemoryTraceImpl sym ptrW
   -- ^ The memory model value to update
   -> IO (MemoryTraceImpl sym ptrW)
-writeMemory sym cond dstPtr memRepr value memTrace0 =
+writeMemoryInternal sym cond dstPtr memRepr value memTrace0 =
   case memRepr of
     DMC.BVMemRepr byteWidth endianness -> do
       let writeOp = MemoryWrite { storeAddress = dstPtr
@@ -314,6 +324,42 @@ writeMemory sym cond dstPtr memRepr value memTrace0 =
       PP.panic PP.MemoryModel "writeMemory" ["Writing floating point values is not currently supported"]
     DMC.PackedVecMemRepr {} ->
       PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
+
+writeMemory
+  :: ( LCB.IsSymInterface sym
+     , HasCallStack
+     , 1 <= ptrW
+     )
+  => sym
+  -> LCLM.LLVMPtr sym ptrW
+  -- ^ The pointer written to
+  -> DMC.MemRepr ty
+  -- ^ The memory representation of the written value
+  -> LCS.RegValue sym (DMS.ToCrucibleType ty)
+  -- ^ The value to be written
+  -> MemoryTraceImpl sym ptrW
+  -- ^ The memory model value to update
+  -> IO (MemoryTraceImpl sym ptrW)
+writeMemory sym = writeMemoryInternal sym Unconditional
+
+writeMemoryConditional
+  :: ( LCB.IsSymInterface sym
+     , HasCallStack
+     , 1 <= ptrW
+     )
+  => sym
+  -> WI.Pred sym
+  -- ^ The condition under which the write occurs
+  -> LCLM.LLVMPtr sym ptrW
+  -- ^ The pointer written to
+  -> DMC.MemRepr ty
+  -- ^ The memory representation of the written value
+  -> LCS.RegValue sym (DMS.ToCrucibleType ty)
+  -- ^ The value to be written
+  -> MemoryTraceImpl sym ptrW
+  -- ^ The memory model value to update
+  -> IO (MemoryTraceImpl sym ptrW)
+writeMemoryConditional sym p = writeMemoryInternal sym (Conditional p)
 
 -- | Concat a byte onto a larger word, respecting endianness
 concatBytes
@@ -412,6 +458,16 @@ readMemory sym srcPtr memRepr memTrace0 =
     DMC.PackedVecMemRepr {} ->
       PP.panic PP.MemoryModel "writeMemory" ["Writing packed vector values is not currently supported"]
 
+-- | Extract a footprint from a memory state
+--
+-- The footprint is the set of memory addresses it touches
+traceFootprint :: sym -> MemoryTraceImpl sym ptrW -> IO [MemoryOperation sym ptrW]
+traceFootprint sym impl =
+  CMS.execStateT (LCSS.traverseSymSequence sym recordOp (memTraceOperations impl)) []
+  where
+    recordOp o = do
+      CMS.modify' (o:)
+      return ()
 
 {- Note [Write Strategy]
 
