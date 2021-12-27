@@ -21,8 +21,10 @@ import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified What4.Interface as WI
 
+import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Symbolic.Backend as DMSB
+import qualified Data.Macaw.Symbolic.MemOps as DMSM
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
@@ -99,28 +101,109 @@ execMacawStmt
   :: ( LCB.IsSymInterface sym
      , DMS.SymArchConstraints arch
      , HasCallStack
+     , mem ~ PMTM.MemoryTrace arch
      )
-  => DMS.MacawArchEvalFn sym (PMTM.MemoryTrace arch) arch
+  => DMS.MacawArchEvalFn sym mem arch
   -> PMTU.UndefinedPtrOps sym
-  -> LCS.GlobalVar (PMTM.MemoryTrace arch)
+  -> LCS.GlobalVar mem
+  -> DMS.GlobalMap sym mem (DMC.ArchAddrWidth arch)
   -> DMSB.MacawEvalStmtFunc (DMS.MacawStmtExtension arch) (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
-execMacawStmt (DMSB.MacawArchEvalFn archStmtFn) undefPtrOps memVar stmt crucState =
+execMacawStmt (DMSB.MacawArchEvalFn archStmtFn) undefPtrOps memVar globalMap stmt crucState = do
+  let sym = crucState ^. LCSE.stateSymInterface
   case stmt of
     DMS.MacawReadMem _addrWidth memRepr (LCS.regValue -> addr) -> do
       memImpl0 <- getGlobalVar crucState memVar
-      let sym = crucState ^. LCSE.stateSymInterface
+      -- NOTE: There are no provisions here for resolving constants or pointers
+      -- constructed from global values (e.g., properly building pointers on ARM
+      -- where the real address is computed as an offset from the PC using an
+      -- offset table embedded in the .text section.
+      --
+      -- This is really important to ensure that multiple references to the same
+      -- memory location in a slice are consistent.
+      --
+      -- Note that, to do that, we need to populate the read-only portion of
+      -- memory with initial contents
       (res, memImpl1) <- PMTM.readMemory sym addr memRepr memImpl0
       return (res, setGlobalVar crucState memVar memImpl1)
 
     DMS.MacawCondReadMem _addrWidth memRepr (LCS.regValue -> cond) (LCS.regValue -> addr) (LCS.regValue -> def) -> do
       memImpl0 <- getGlobalVar crucState memVar
-      let sym = crucState ^. LCSE.stateSymInterface
       (res, memImpl1) <- PMTM.readMemoryConditional sym cond addr memRepr def memImpl0
       return (res, setGlobalVar crucState memVar memImpl1)
 
+    DMS.MacawWriteMem _addrWidth memRepr (LCS.regValue -> addr) (LCS.regValue -> value) -> do
+      memImpl0 <- getGlobalVar crucState memVar
+      memImpl1 <- PMTM.writeMemory sym addr memRepr value memImpl0
+      return ((), setGlobalVar crucState memVar memImpl1)
+
+    DMS.MacawCondWriteMem _addrWidth memRepr (LCS.regValue -> cond) (LCS.regValue -> addr) (LCS.regValue -> val) -> do
+      memImpl0 <- getGlobalVar crucState memVar
+      memImpl1 <- PMTM.writeMemoryConditional sym cond addr memRepr val memImpl0
+      return ((), setGlobalVar crucState memVar memImpl1)
+
+    DMS.MacawGlobalPtr _w addr -> DMSM.doGetGlobal crucState memVar globalMap addr
+
+    DMS.PtrEq _w (LCS.regValue -> (LCLM.LLVMPointer xRegion xOffset)) (LCS.regValue -> (LCLM.LLVMPointer yRegion yOffset)) -> do
+      regionEq <- WI.natEq sym xRegion yRegion
+      offsetEq <- WI.bvEq sym xOffset yOffset
+      p <- WI.andPred sym regionEq offsetEq
+      return (p, crucState)
+
+    DMS.PtrLeq _w (LCS.regValue -> (LCLM.LLVMPointer xRegion xOffset)) (LCS.regValue -> (LCLM.LLVMPointer yRegion yOffset)) -> do
+      p <- WI.bvUle sym xOffset yOffset
+      return (p, crucState)
+
+    DMS.PtrLt _w (LCS.regValue -> (LCLM.LLVMPointer xRegion xOffset)) (LCS.regValue -> (LCLM.LLVMPointer yRegion yOffset)) -> do
+      p <- WI.bvUlt sym xOffset yOffset
+      return (p, crucState)
+
+    DMS.PtrMux _w (LCS.regValue -> cond) (LCS.regValue -> x) (LCS.regValue -> y) -> do
+      ptr <- LCLM.muxLLVMPtr sym cond x y
+      return (ptr, crucState)
+
+    DMS.PtrAdd _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
+      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
+      region <- WI.natIte sym isXRegionZero yRegion xRegion
+      offset <- WI.bvAdd sym xOffset yOffset
+
+      return (LCLM.LLVMPointer region offset, crucState)
+
+    DMS.PtrSub _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
+      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
+      region <- WI.natIte sym isXRegionZero yRegion xRegion
+      offset <- WI.bvSub sym xOffset yOffset
+
+      return (LCLM.LLVMPointer region offset, crucState)
+
+    DMS.PtrAnd _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
+      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
+      region <- WI.natIte sym isXRegionZero yRegion xRegion
+      offset <- WI.bvAndBits sym xOffset yOffset
+
+      return (LCLM.LLVMPointer region offset, crucState)
+
+    DMS.PtrXor _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
+      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
+      region <- WI.natIte sym isXRegionZero yRegion xRegion
+      offset <- WI.bvXorBits sym xOffset yOffset
+
+      return (LCLM.LLVMPointer region offset, crucState)
+
+    DMS.PtrTrunc w (LCS.regValue -> LCLM.LLVMPointer region offset) -> do
+      offset' <- WI.bvTrunc sym w offset
+      return (LCLM.LLVMPointer region offset', crucState)
+
+    DMS.PtrUExt w (LCS.regValue -> LCLM.LLVMPointer region offset) -> do
+      offset' <- WI.bvZext sym w offset
+      return (LCLM.LLVMPointer region offset', crucState)
+
+    DMS.MacawArchStmtExtension archStmt -> archStmtFn memVar globalMap archStmt crucState
 
     DMS.MacawArchStateUpdate {} -> return ((), crucState)
     DMS.MacawInstructionStart {} -> return ((), crucState)
+
+    DMS.MacawFreshSymbolic {} ->
+      PP.panic PP.MemoryModel "execMacawStmt" ["Fresh values are not supported in the compositional verification extension"]
     DMS.MacawLookupFunctionHandle {} ->
       PP.panic PP.MemoryModel "execMacawStmt" ["Function calls are not supported in the compositional verification extension"]
     DMS.MacawLookupSyscallHandle {} ->
@@ -130,12 +213,14 @@ macawTraceExtensions
   :: ( LCB.IsSymInterface sym
      , DMS.SymArchConstraints arch
      , HasCallStack
+     , mem ~ PMTM.MemoryTrace arch
      )
-  => DMS.MacawArchEvalFn sym (PMTM.MemoryTrace arch) arch
+  => DMS.MacawArchEvalFn sym mem arch
   -> PMTU.UndefinedPtrOps sym
-  -> LCS.GlobalVar (PMTM.MemoryTrace arch)
+  -> LCS.GlobalVar mem
+  -> DMS.GlobalMap sym mem (DMC.ArchAddrWidth arch)
   -> LCSE.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
-macawTraceExtensions archEval undefPtrOps memVar =
+macawTraceExtensions archEval undefPtrOps memVar globalMap =
   LCSE.ExtensionImpl { LCSE.extensionEval = evalMacawExpr undefPtrOps
-                     , LCSE.extensionExec = execMacawStmt archEval undefPtrOps memVar
+                     , LCSE.extensionExec = execMacawStmt archEval undefPtrOps memVar globalMap
                      }
