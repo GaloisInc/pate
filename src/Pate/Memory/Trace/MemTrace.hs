@@ -18,7 +18,8 @@
 -- The intent is that the data types defined in this module can remain opaque
 module Pate.Memory.Trace.MemTrace (
   -- * Core memory operations
-    TraceMemoryModel
+    MemoryTrace
+  , TraceMemoryModel
   , newMemTrace
   , memTraceIntrinsicTypes
   , readMemory
