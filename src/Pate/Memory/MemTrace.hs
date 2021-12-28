@@ -497,12 +497,15 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ the sequence of memory operations in execution order
   , memArr :: MemTraceArr sym ptrW
   -- ^ the logical contents of memory
+  , memReg :: MemTraceReg sym ptrW
+  -- ^ the regions for pointers stored in memory
   }
 
 data MemTraceVar sym ptrW = MemTraceVar (SymExpr sym (MemArrBaseType ptrW))
 
 type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
+type MemTraceReg sym ptrW = MemArrBase sym ptrW BaseIntegerType
 
 type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
 
@@ -541,10 +544,12 @@ initMemTrace ::
   IO (MemTraceImpl sym ptrW)
 initMemTrace sym Addr32 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ MemTraceImpl mempty arr
+  reg <- ioFreshConstant sym "InitReg" knownRepr
+  return $ MemTraceImpl mempty arr reg
 initMemTrace sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ MemTraceImpl mempty arr
+  reg <- ioFreshConstant sym "InitReg" knownRepr
+  return $ MemTraceImpl mempty arr reg
 
 initMemTraceVar ::
   forall sym ptrW.
@@ -554,10 +559,12 @@ initMemTraceVar ::
   IO (MemTraceImpl sym ptrW, MemTraceVar sym ptrW)
 initMemTraceVar sym Addr32 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ (MemTraceImpl mempty arr, MemTraceVar arr)
+  reg <- ioFreshConstant sym "InitReg" knownRepr
+  return $ (MemTraceImpl mempty arr reg, MemTraceVar arr)
 initMemTraceVar sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ (MemTraceImpl mempty arr, MemTraceVar arr)
+  reg <- ioFreshConstant sym "InitReg" knownRepr
+  return $ (MemTraceImpl mempty arr reg, MemTraceVar arr)
 
 equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
 equalPrefixOf s1 s2 = go s1 s2 Seq.empty
@@ -587,7 +594,8 @@ instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
   muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
     s <- muxTraces p (memSeq t) (memSeq f)
     arr <- baseTypeIte sym p (memArr t) (memArr f)
-    return $ MemTraceImpl s arr
+    reg <- baseTypeIte sym p (memReg t) (memReg f)
+    return $ MemTraceImpl s arr reg
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -1105,8 +1113,9 @@ readMemArr sym mem ptr repr = go 0 repr
           (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
           regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
           content <- arrayLookup sym regArray (Ctx.singleton off)
-          blk0 <- natLit sym 0
-          return $ LLVMPointer blk0 content
+          regArray' <- arrayLookup sym (memReg mem) (Ctx.singleton reg)
+          blk <- arrayLookup sym regArray' (Ctx.singleton off) >>= integerToNat sym
+          return $ LLVMPointer blk content
       Right LeqProof
         | byteWidth' <- decNat byteWidth
         , tailRepr <- BVMemRepr byteWidth' endianness
@@ -1133,25 +1142,31 @@ writeMemArr :: forall sym ptrW w.
   MemTraceImpl sym ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr (MT.BVType w) ->
-  SymBV sym w ->
+  LLVMPtr sym w ->
   IO (MemTraceImpl sym ptrW)
-writeMemArr sym mem_init ptr repr val = go 0 repr val mem_init
+writeMemArr sym mem_init ptr repr (LLVMPointer valReg valBV) = do
+  valRegInteger <- natToInteger sym valReg
+  go 0 repr valRegInteger valBV mem_init
   where
   go ::
     Integer ->
     MemRepr (MT.BVType w') ->
+    SymInteger sym ->
     SymBV sym w' ->
     MemTraceImpl sym ptrW ->
     IO (MemTraceImpl sym ptrW)
-  go n (BVMemRepr byteWidth endianness) bv mem =
+  go n (BVMemRepr byteWidth endianness) valRegI bv mem =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl -> do
-        (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
+        (_ Ctx.:> ptrReg Ctx.:> off) <- arrayIdx sym ptr n
         Refl <- return $ zeroSubEq byteWidth (knownNat @1)
-        regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+        regArray <- arrayLookup sym (memArr mem) (Ctx.singleton ptrReg)
         regArray' <- arrayUpdate sym regArray (Ctx.singleton off) bv
-        arr <- arrayUpdate sym (memArr mem) (Ctx.singleton reg) regArray'
-        return $ mem { memArr = arr }
+        arr <- arrayUpdate sym (memArr mem) (Ctx.singleton ptrReg) regArray'
+        regArray'' <- arrayLookup sym (memReg mem) (Ctx.singleton ptrReg)
+        regArray''' <- arrayUpdate sym regArray'' (Ctx.singleton off) valRegI
+        regs <- arrayUpdate sym (memReg mem) (Ctx.singleton ptrReg) regArray'''
+        return $ mem { memArr = arr, memReg = regs }
       Right LeqProof -> do
         let
           byteWidth' = decNat byteWidth
@@ -1159,8 +1174,8 @@ writeMemArr sym mem_init ptr repr val = go 0 repr val mem_init
           reprHead = BVMemRepr (knownNat @1) endianness
         LeqProof <- return $ oneSubEq byteWidth
         (hd, tl) <- chunkBV sym endianness byteWidth bv
-        mem1 <- go n reprHead hd mem
-        go (n + 1) repr' tl mem1
+        mem1 <- go n reprHead valRegI hd mem
+        go (n + 1) repr' valRegI tl mem1
 
 ifCond ::
   IsSymInterface sym =>
@@ -1194,9 +1209,8 @@ doMemOpInternal sym dir cond ptrW = go where
       case dir of
         Read -> return ()
         Write -> do
-          LLVMPointer _ rawBv <- return regVal
           mem <- get
-          mem' <- liftIO $ writeMemArr sym mem ptr repr rawBv
+          mem' <- liftIO $ writeMemArr sym mem ptr repr regVal
           arr <- liftIO $ ifCond sym cond (memArr mem') (memArr mem)
           put $ mem { memArr = arr }
     FloatMemRepr _infoRepr _endianness -> fail "reading floats not supported in doMemOpInternal"
@@ -1418,7 +1432,8 @@ instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do
     memSeq' <- traverse (PEM.mapExpr sym f) $ memSeq mem
     memArr' <- f $ memArr mem
-    return $ MemTraceImpl memSeq' memArr'
+    memReg' <- f $ memReg mem
+    return $ MemTraceImpl memSeq' memArr' memReg'
 
 instance PEM.ExprMappable sym (MemFootprint sym arch) where
   mapExpr sym f (MemFootprint ptr w dir cond end) = do

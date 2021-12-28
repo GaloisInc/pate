@@ -191,14 +191,15 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (Par.present $ return polarity) $ do
       let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       -- clobber the "patched" memory at exactly this cell
-      CLM.LLVMPointer _ freshP <- liftIO $ WEH.freshPtrBytes sym "MemCell_guessMemoryDomain" (PMC.cellWidth cell)
+      freshP <- liftIO $ WEH.freshPtrBytes sym "MemCell_guessMemoryDomain" (PMC.cellWidth cell)
 
       memP'' <- liftIO $ MT.writeMemArr sym memP (PMC.cellPtr cell) repr freshP
       eqMemP <- liftIO $ W4.isEq sym (MT.memArr memP') (MT.memArr memP'')
+      eqRegP <- liftIO $ W4.isEq sym (MT.memReg memP') (MT.memReg memP'')
 
       -- see if we can prove that the goal is independent of this clobbering
       heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-      withAssumption_ (liftIO $ WEH.allPreds sym [p, eqMemP, goal]) $ do
+      withAssumption_ (liftIO $ WEH.allPreds sym [p, eqMemP, eqRegP, goal]) $ do
         result <- isPredTruePar' heuristicTimeout goal'
         Par.forFuture result $ \case
           True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p

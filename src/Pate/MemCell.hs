@@ -224,8 +224,7 @@ writeMemCell ::
 writeMemCell sym mem cell@(MemCell{}) valPtr = do
   let
     repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-    CLM.LLVMPointer _ val = valPtr
-  PMT.writeMemArr sym mem (cellPtr cell) repr val
+  PMT.writeMemArr sym mem (cellPtr cell) repr valPtr
 
 instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do

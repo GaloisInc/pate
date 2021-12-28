@@ -433,8 +433,9 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
           --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
           --val <- W4.baseTypeIte sym cond fresh original
           mem' <- PMC.writeMemCell sym mem cell fresh
-          mem'' <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
-          return $ mem { MT.memArr = mem'' }
+          memA <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
+          memR <- W4.baseTypeIte sym cond (MT.memReg mem') (MT.memReg mem)
+          return $ mem { MT.memArr = memA, MT.memReg = memR }
 
     -- | For the negative case, we assume that the patched trace is equivalent
     -- to the original trace with arbitrary modifications to excluded addresses
