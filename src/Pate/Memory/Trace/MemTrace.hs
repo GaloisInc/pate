@@ -19,6 +19,7 @@
 module Pate.Memory.Trace.MemTrace (
   -- * Core memory operations
     MemoryTrace
+  , memoryTraceRepr
   , TraceMemoryModel
   , newMemTrace
   , memTraceIntrinsicTypes
@@ -77,6 +78,9 @@ data MemoryTraceImpl sym ptrW =
 
 -- | The intrinsic type in the Crucible type system
 type MemoryTrace arch = LCT.IntrinsicType "memory_trace" (Ctx.EmptyCtx Ctx.::> LCT.BVType (DMC.ArchAddrWidth arch))
+
+memoryTraceRepr :: (w ~ DMC.ArchAddrWidth arch, 1 <= w, KnownNat w) => proxy arch -> LCT.TypeRepr (MemoryTrace arch)
+memoryTraceRepr _ = LCT.IntrinsicRepr PC.knownRepr PC.knownRepr
 
 -- | A memory model for machine code that records a trace of operations
 data TraceMemoryModel

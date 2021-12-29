@@ -106,6 +106,7 @@ library
                        Pate.Memory.Trace.Operations,
                        Pate.Memory.Trace.Undefined,
                        Pate.Memory.Trace.ValidityPolicy,
+                       Pate.Memory.Trace.ValidityPolicy.None,
                        Pate.Memory.Trace,
                        Pate.Memory.MemTrace,
                        Pate.Metrics,

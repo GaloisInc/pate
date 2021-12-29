@@ -1,10 +1,14 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeOperators #-}
 module Pate.Memory.Trace.ValidityPolicy (
-    ValidityPolicy(..)
-  , noValidityChecks
+  ValidityPolicy(..)
   ) where
 
+import           GHC.TypeLits ( type (<=) )
 
+import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Simulator as LCS
@@ -37,19 +41,23 @@ import qualified Lang.Crucible.Simulator as LCS
 -- It is expected that the second option will be more efficient, as we generally
 -- want to avoid exploding the complexity of individual terms (particularly
 -- those that are carried between slices).
-data ValidityPolicy arch =
-  ValidityPolicy { validateExpression :: forall sym tp . (LCB.IsSymInterface sym)
-                                      => sym
+--
+-- There is a secondary component to the second strategy. In that case, the
+-- extension must maintain a parallel, conservative, state of the world with the
+-- necessary validity checks embedded in formulas that can be used when required
+-- (i.e., when the checks on the side fail).
+--
+-- Note that these policies are intended to be invoked only for the pointer
+-- operations; other uses may generate errors.
+data ValidityPolicy sym arch =
+  ValidityPolicy { validateExpression :: forall tp
+                                       . sym
                                       -> DMS.MacawExprExtension arch (LCS.RegValue' sym) tp
-                                      -> IO (DMS.MacawExprExtension arch (LCS.RegValue' sym) tp)
-                 , validateStatement :: forall sym tp . (LCB.IsSymInterface sym)
+                                      -> IO (LCS.RegValue sym tp)
+                 , validateStatement :: forall tp
+                                      . (1 <= DMC.ArchAddrWidth arch)
                                      => sym
                                      -> DMS.MacawStmtExtension arch (LCS.RegEntry sym) tp
-                                     -> IO (DMS.MacawStmtExtension arch (LCS.RegEntry sym) tp)
+                                     -> IO (LCS.RegValue sym tp)
                  }
 
--- | A set of validity checks that do no additional checking
-noValidityChecks :: ValidityPolicy arch
-noValidityChecks = ValidityPolicy { validateExpression = \_ e -> return e
-                                  , validateStatement = \_ s -> return s
-                                  }

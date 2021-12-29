@@ -3,6 +3,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
 -- | A crucible extension for macaw IR using the trace memory model
@@ -20,14 +21,12 @@ module Pate.Memory.Trace (
 import           Control.Lens ( (^.), (&), (%~) )
 import qualified Data.Parameterized.TraversableFC as FC
 import           GHC.Stack ( HasCallStack )
-import qualified What4.Interface as WI
 
 import qualified Data.Macaw.CFG as DMC
 import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Symbolic.Backend as DMSB
 import qualified Data.Macaw.Symbolic.MemOps as DMSM
 import qualified Lang.Crucible.Backend as LCB
-import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.ExecutionTree as LCSE
 import qualified Lang.Crucible.Simulator.GlobalState as LCSG
@@ -44,7 +43,7 @@ evalMacawExpr
   :: forall f sym arch tp p ext rtp blocks r ctx
    . ( LCB.IsSymInterface sym
      )
-  => PMTV.ValidityPolicy arch
+  => PMTV.ValidityPolicy sym arch
   -> sym
   -> LCS.IntrinsicTypes sym
   -> (Int -> String -> IO ())
@@ -58,9 +57,8 @@ evalMacawExpr validityPolicy sym intrinsics logFn crucState f expr = do
   let f' :: forall ytp . f ytp -> IO (LCS.RegValue' sym ytp)
       f' v = LCS.RV <$> f v
   expr' <- FC.traverseFC f' expr
-  expr'' <- PMTV.validateExpression validityPolicy sym expr'
-  case expr'' of
-    DMS.PtrToBits _w (LCS.RV (LCLM.LLVMPointer _base offset)) -> return offset
+  case expr' of
+    DMS.PtrToBits _w _ptr -> PMTV.validateExpression validityPolicy sym expr'
     _ ->
       -- NOTE: We don't use the validated expressions for these default cases
       -- since the types aren't set up properly.  If validation is required for
@@ -94,14 +92,13 @@ execMacawStmt
      , mem ~ PMTM.MemoryTrace arch
      )
   => DMS.MacawArchEvalFn sym mem arch
-  -> PMTV.ValidityPolicy arch
+  -> PMTV.ValidityPolicy sym arch
   -> LCS.GlobalVar mem
   -> DMS.GlobalMap sym mem (DMC.ArchAddrWidth arch)
   -> DMSB.MacawEvalStmtFunc (DMS.MacawStmtExtension arch) (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
 execMacawStmt (DMSB.MacawArchEvalFn archStmtFn) validityPolicy memVar globalMap stmt crucState = do
   let sym = crucState ^. LCSE.stateSymInterface
-  stmt' <- PMTV.validateStatement validityPolicy sym stmt
-  case stmt' of
+  case stmt of
     DMS.MacawReadMem _addrWidth memRepr (LCS.regValue -> addr) -> do
       memImpl0 <- getGlobalVar crucState memVar
       -- NOTE: There are no provisions here for resolving constants or pointers
@@ -134,59 +131,20 @@ execMacawStmt (DMSB.MacawArchEvalFn archStmtFn) validityPolicy memVar globalMap 
 
     DMS.MacawGlobalPtr _w addr -> DMSM.doGetGlobal crucState memVar globalMap addr
 
-    DMS.PtrEq _w (LCS.regValue -> (LCLM.LLVMPointer xRegion xOffset)) (LCS.regValue -> (LCLM.LLVMPointer yRegion yOffset)) -> do
-      regionEq <- WI.natEq sym xRegion yRegion
-      offsetEq <- WI.bvEq sym xOffset yOffset
-      p <- WI.andPred sym regionEq offsetEq
-      return (p, crucState)
-
-    DMS.PtrLeq _w (LCS.regValue -> (LCLM.LLVMPointer xRegion xOffset)) (LCS.regValue -> (LCLM.LLVMPointer yRegion yOffset)) -> do
-      p <- WI.bvUle sym xOffset yOffset
-      return (p, crucState)
-
-    DMS.PtrLt _w (LCS.regValue -> (LCLM.LLVMPointer xRegion xOffset)) (LCS.regValue -> (LCLM.LLVMPointer yRegion yOffset)) -> do
-      p <- WI.bvUlt sym xOffset yOffset
-      return (p, crucState)
-
-    DMS.PtrMux _w (LCS.regValue -> cond) (LCS.regValue -> x) (LCS.regValue -> y) -> do
-      ptr <- LCLM.muxLLVMPtr sym cond x y
-      return (ptr, crucState)
-
-    DMS.PtrAdd _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
-      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
-      region <- WI.natIte sym isXRegionZero yRegion xRegion
-      offset <- WI.bvAdd sym xOffset yOffset
-
-      return (LCLM.LLVMPointer region offset, crucState)
-
-    DMS.PtrSub _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
-      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
-      region <- WI.natIte sym isXRegionZero yRegion xRegion
-      offset <- WI.bvSub sym xOffset yOffset
-
-      return (LCLM.LLVMPointer region offset, crucState)
-
-    DMS.PtrAnd _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
-      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
-      region <- WI.natIte sym isXRegionZero yRegion xRegion
-      offset <- WI.bvAndBits sym xOffset yOffset
-
-      return (LCLM.LLVMPointer region offset, crucState)
-
-    DMS.PtrXor _w (LCS.regValue -> LCLM.LLVMPointer xRegion xOffset) (LCS.regValue -> LCLM.LLVMPointer yRegion yOffset) -> do
-      isXRegionZero <- WI.natEq sym xRegion =<< WI.natLit sym 0
-      region <- WI.natIte sym isXRegionZero yRegion xRegion
-      offset <- WI.bvXorBits sym xOffset yOffset
-
-      return (LCLM.LLVMPointer region offset, crucState)
-
-    DMS.PtrTrunc w (LCS.regValue -> LCLM.LLVMPointer region offset) -> do
-      offset' <- WI.bvTrunc sym w offset
-      return (LCLM.LLVMPointer region offset', crucState)
-
-    DMS.PtrUExt w (LCS.regValue -> LCLM.LLVMPointer region offset) -> do
-      offset' <- WI.bvZext sym w offset
-      return (LCLM.LLVMPointer region offset', crucState)
+    DMS.PtrMux _w _ _ _ ->
+      -- NOTE: There don't need to be any validity checks for pointer muxes
+      (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrEq _w _ _ ->
+      -- NOTE: There don't need to be any validity checks for pointer equality either
+      (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrLeq _w _ _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrLt _w _ _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrAdd _w _ _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrSub _w _ _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrAnd _w _ _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrXor _w _ _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrTrunc _w _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
+    DMS.PtrUExt _w _ -> (, crucState) <$> PMTV.validateStatement validityPolicy sym stmt
 
     DMS.MacawArchStmtExtension archStmt -> archStmtFn memVar globalMap archStmt crucState
 
@@ -200,6 +158,26 @@ execMacawStmt (DMSB.MacawArchEvalFn archStmtFn) validityPolicy memVar globalMap 
     DMS.MacawLookupSyscallHandle {} ->
       PP.panic PP.MemoryModel "execMacawStmt" ["System calls are not supported in the compositional verification extension"]
 
+-- | A Crucible extension for symbolically executing machine code using the
+-- trace-based memory model
+--
+-- The major configuration option is the 'PMTV.ValidityPolicy', which controls
+-- how pointer operations are validated.  We want to experiment with these to
+-- maximize efficiency while preserving soundness.
+--
+-- The intent is that we can use this configurability to run each symbolic
+-- execution of a slice twice: once in "optimistic" mode where we generate side
+-- conditions to check the validity of all pointer operations and again in
+-- "conservative" mode to generate defensive terms that can be compared for
+-- equi-undefinedness.  We can then arrange for the outer pate verifier to
+-- attempt to prove all of the side conditions.  If it can prove them, it is
+-- allowed to use the optimistic memory model.  Otherwise, it has to use the
+-- results from the conservative one.
+--
+-- Ideally we would be able to maintain both the optimistic and conservative
+-- interpretations of the memory state in the same memory model, but we can't
+-- return two different values from the pointer operation interpreter (e.g.,
+-- PtrAdd).
 macawTraceExtensions
   :: ( LCB.IsSymInterface sym
      , DMS.SymArchConstraints arch
@@ -207,7 +185,7 @@ macawTraceExtensions
      , mem ~ PMTM.MemoryTrace arch
      )
   => DMS.MacawArchEvalFn sym mem arch
-  -> PMTV.ValidityPolicy arch
+  -> PMTV.ValidityPolicy sym arch
   -> LCS.GlobalVar mem
   -> DMS.GlobalMap sym mem (DMC.ArchAddrWidth arch)
   -> LCSE.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
@@ -215,3 +193,35 @@ macawTraceExtensions archEval validityPolicy memVar globalMap =
   LCSE.ExtensionImpl { LCSE.extensionEval = evalMacawExpr validityPolicy
                      , LCSE.extensionExec = execMacawStmt archEval validityPolicy memVar globalMap
                      }
+
+{- Note [Optimistic Memory Model Design]
+
+The optimistic memory model will return unadorned terms accompanied by a set of
+validity assertions. Those assertions should be maintained in an IORef separate
+from the normal assertion stack, as we don't want to check any of the validity
+assertions that are generated as a side effect of symbolic execution.  The
+allocator for the ValidityPolicy should be in IO and return an additional value:
+a newtype wrapper around the IORef.  The interface should expose a function to
+consume that value and:
+
+1. Attempt to prove the side conditions
+2. Report the failures if there were any
+
+Note that we could also maintain a side mapping (via the Annotation mechanism)
+that can flag which values the side conditions are for. It isn't obvious if we
+need that.
+
+If there are verification failures, the verifier should re-run the symbolic
+execution with the conservative memory model that contains the elaborated terms.
+Perhaps that could actually only provide elaborated terms for the terms that
+actually failed. Note that it is likely to be the case that relating the values
+across the two runs is probably not practical. In the worst case, we can just
+use conservative values for all values in the slice. We can use the SMT solver
+to attempt to resolve all of the muxes and prove them away.
+
+We then need to duplicate some of the infrastructure (but maybe not all) to
+implement a function from symbolic terms to the set of undefined behaviors that
+they can exhibit, as those are annotated onto ground values.  It will probably
+be a lot easier to use the annotation mechanism for that.
+
+-}
