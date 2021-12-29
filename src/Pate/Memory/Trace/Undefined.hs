@@ -25,11 +25,9 @@ module Pate.Memory.Trace.Undefined (
   ) where
 
 import qualified Data.IORef as IORef
-import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
-import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.TraversableFC as FC
 import qualified Data.Set as Set
 import           GHC.TypeLits ( Nat, type (<=) )
@@ -85,20 +83,11 @@ data UndefPtrOpTag =
   | UndefPtrXor
   deriving (Show, Eq, Ord)
 
--- | Classify an expression as representing an undefined pointer.
-newtype UndefPtrClassify sym =
-  UndefPtrClassify
-    { classifyExpr :: forall tp. WI.SymExpr sym tp -> IO (Set.Set UndefPtrOpTag) }
-
-instance Semigroup (UndefPtrClassify sym) where
-  f1 <> f2 = UndefPtrClassify $ \e -> do
-    class1 <- classifyExpr f1 e
-    class2 <- classifyExpr f2 e
-    return $ class1 <> class2
-
-instance Monoid (UndefPtrClassify sym) where
-  mempty = UndefPtrClassify $ \_ -> return mempty
-
+-- | This is a newtype wrapper around 'UndefPtrOpTag' that has a phantom type
+-- parameter to enable them to be stored in a 'MapF.MapF'
+--
+-- Making a newtype with a fixed kind on the type parameter helps avoid a number
+-- of annoying errors that can arise with 'Const' due to it being too poly-kinded.
 newtype TypedUndefTag (tp :: WT.BaseType) = TypedUndefTag UndefPtrOpTag
 
 -- | A collection of functions used to produce undefined values for each pointer operation.
@@ -111,7 +100,6 @@ data UndefinedPtrOps sym =
     , undefPtrSub :: UndefinedPtrBinOp sym
     , undefPtrAnd :: UndefinedPtrBinOp sym
     , undefPtrXor :: UndefinedPtrBinOp sym
-    , undefPtrClassify :: UndefPtrClassify sym
     , undefPtrTerms :: IORef.IORef (MapF.MapF (WI.SymAnnotation sym) TypedUndefTag)
     -- ^ Maintains the mapping from what4 term annotations to undefined pointer
     -- operation tags; as undefined pointer operation terms are created, they
@@ -195,8 +183,7 @@ type family NatAbsCtx tp (w :: Nat) :: Ctx.Ctx WT.BaseType where
 
 data PolyFun sym args ret (w :: Nat) where
   PolyFun ::
-    { polyFunClassify :: UndefPtrClassify sym
-    , applyPolyFun :: Ctx.Assignment (WI.SymExpr sym) (NatAbsCtx args w) -> IO (WI.SymExpr sym (NatAbs ret w))
+    { applyPolyFun :: Ctx.Assignment (WI.SymExpr sym) (NatAbsCtx args w) -> IO (WI.SymExpr sym (NatAbs ret w))
     }
     -> PolyFun sym args ret w
 
@@ -242,16 +229,6 @@ flattenStructs sym (ctx Ctx.:> e) = do
     tp -> fail ("flattenStructs: unsupported type:" ++ show tp)
 flattenStructs _sym Ctx.Empty = return Ctx.empty
 
-mkClassify
-  :: forall sym tp1
-   . (LCB.IsSymInterface sym)
-  => UndefPtrOpTag
-  -> WI.SymExpr sym tp1
-  -> UndefPtrClassify sym
-mkClassify tag e1 = UndefPtrClassify $ \e2 -> case PC.testEquality e1 e2 of
-  Just PC.Refl -> return $ Set.singleton tag
-  _ -> return mempty
-
 polySymbol :: UndefPtrOpTag -> PN.NatRepr w -> WS.SolverSymbol
 polySymbol tag w = WS.safeSymbol $ (show tag) ++ "_" ++ (show w)
 
@@ -264,7 +241,7 @@ mkBinUF tag  = PolyFunMaker $ \sym w -> do
   let ptrRepr = WT.BaseStructRepr (Ctx.Empty Ctx.:> WT.BaseIntegerRepr Ctx.:> WT.BaseBVRepr w)
       repr = Ctx.Empty Ctx.:> ptrRepr Ctx.:> ptrRepr
   c <- WI.freshConstant sym (polySymbol tag w) (WT.BaseArrayRepr (flattenStructRepr repr) ptrRepr)
-  return $ PolyFun (mkClassify tag c) $ \args -> WI.arrayLookup sym c =<< flattenStructs sym args
+  return $ PolyFun $ \args -> WI.arrayLookup sym c =<< flattenStructs sym args
 
 mkPredUF
   :: forall sym
@@ -274,7 +251,7 @@ mkPredUF
 mkPredUF tag = PolyFunMaker $ \sym w -> do
   let repr = Ctx.Empty Ctx.:> WT.BaseIntegerRepr Ctx.:> WT.BaseBVRepr w Ctx.:> WT.BaseIntegerRepr Ctx.:> WT.BaseBVRepr w
   c <- WI.freshConstant sym (polySymbol tag w) (WT.BaseArrayRepr (flattenStructRepr repr) WT.BaseBoolRepr)
-  return $ PolyFun (mkClassify tag c) $ \args -> WI.arrayLookup sym c =<< flattenStructs sym args
+  return $ PolyFun $ \args -> WI.arrayLookup sym c =<< flattenStructs sym args
 
 mkOffUF
   :: forall sym
@@ -285,13 +262,13 @@ mkOffUF tag = PolyFunMaker $ \sym w -> do
   let ptrRepr = WT.BaseStructRepr (Ctx.Empty Ctx.:> WT.BaseIntegerRepr Ctx.:> WT.BaseBVRepr w)
       repr = Ctx.Empty Ctx.:> ptrRepr
   c <- WI.freshConstant sym (polySymbol tag w) (WT.BaseArrayRepr (flattenStructRepr repr) (WT.BaseBVRepr w))
-  return $ PolyFun (mkClassify tag c) $ \args -> WI.arrayLookup sym c =<< flattenStructs sym args
+  return $ PolyFun $ \args -> WI.arrayLookup sym c =<< flattenStructs sym args
 
 cachedPolyFun
   :: forall sym f g
    . sym
   -> PolyFunMaker sym f g
-  -> IO (PolyFunMaker sym f g, UndefPtrClassify sym)
+  -> IO (PolyFunMaker sym f g)
 cachedPolyFun _sym (PolyFunMaker f) = do
   ref <- IORef.newIORef (MapF.empty :: MapF.MapF PN.NatRepr (PolyFun sym f g))
   let
@@ -304,11 +281,7 @@ cachedPolyFun _sym (PolyFunMaker f) = do
           let m' = MapF.insert nr result m
           IORef.writeIORef ref m'
           return result
-    classify = UndefPtrClassify $ \e -> do
-      m <- IORef.readIORef ref
-      let classifier = mconcat (map (\(Some pf) -> polyFunClassify pf) (MapF.elems m))
-      classifyExpr classifier e
-  return (mker', classify)
+  return mker'
 
 mkBinOp
   :: forall sym
@@ -316,9 +289,9 @@ mkBinOp
   => sym
   -> IORef.IORef (MapF.MapF (WI.SymAnnotation sym) TypedUndefTag)
   -> UndefPtrOpTag
-  -> IO (UndefinedPtrBinOp sym, UndefPtrClassify sym)
+  -> IO (UndefinedPtrBinOp sym)
 mkBinOp sym mapRef tag = do
-  (PolyFunMaker fn', classifier) <- cachedPolyFun sym $ mkBinUF tag
+  PolyFunMaker fn' <- cachedPolyFun sym $ mkBinUF tag
   let binop =
         UndefinedPtrBinOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
           sptr1 <- asSymPtr sym' ptr1
@@ -331,16 +304,16 @@ mkBinOp sym mapRef tag = do
           -- annotating both the region and offset of this pointer
           sptrResult' <- recordTermAnnotation sym' mapRef tag sptrResult
           fromSymPtr sym' sptrResult'
-  return (binop, classifier)
+  return binop
 
 mkPredOp
   :: (LCB.IsSymInterface sym)
   => sym
   -> IORef.IORef (MapF.MapF (WI.SymAnnotation sym) TypedUndefTag)
   -> UndefPtrOpTag
-  -> IO (UndefinedPtrPredOp sym, UndefPtrClassify sym)
+  -> IO (UndefinedPtrPredOp sym)
 mkPredOp sym mapRef tag = do
-  (PolyFunMaker fn', classifier) <- cachedPolyFun sym $ mkPredUF tag
+  PolyFunMaker fn' <- cachedPolyFun sym $ mkPredUF tag
   let binop =
         UndefinedPtrPredOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
           sptr1 <- asSymPtr sym' ptr1
@@ -348,7 +321,7 @@ mkPredOp sym mapRef tag = do
           resultfn <- fn' sym' w
           res <- applyPolyFun resultfn (Ctx.Empty Ctx.:> sptr1 Ctx.:> sptr2)
           recordTermAnnotation sym' mapRef tag res
-  return (binop, classifier)
+  return binop
 
 mkUndefinedPtrOps
   :: forall sym
@@ -365,7 +338,7 @@ mkUndefinedPtrOps sym = do
   -- behavior tags (which are not obviously accessible at call sites).
   mapRef <- IORef.newIORef MapF.empty
 
-  (PolyFunMaker offFn, classOff) <- cachedPolyFun sym $ mkOffUF UndefPtrOff
+  PolyFunMaker offFn <- cachedPolyFun sym $ mkOffUF UndefPtrOff
   let offPtrFn :: forall w. sym -> LCLM.LLVMPtr sym w -> IO (WI.SymBV sym w)
       offPtrFn sym'  ptr = withPtrWidth ptr $ \w -> do
         sptr <- asSymPtr sym' ptr
@@ -373,12 +346,12 @@ mkUndefinedPtrOps sym = do
         res <- applyPolyFun resultfn (Ctx.Empty Ctx.:> sptr)
         recordTermAnnotation sym mapRef UndefPtrOff res
 
-  (undefPtrLt', classLt) <- mkPredOp sym mapRef UndefPtrLt
-  (undefPtrLeq', classLeq) <- mkPredOp sym mapRef UndefPtrLeq
-  (undefPtrAdd', classAdd) <- mkBinOp sym mapRef UndefPtrAdd
-  (undefPtrSub', classSub) <- mkBinOp sym mapRef UndefPtrSub
-  (undefPtrAnd', classAnd) <- mkBinOp sym mapRef UndefPtrAnd
-  (undefPtrXor', classXor) <- mkBinOp sym mapRef UndefPtrXor
+  undefPtrLt' <- mkPredOp sym mapRef UndefPtrLt
+  undefPtrLeq' <- mkPredOp sym mapRef UndefPtrLeq
+  undefPtrAdd' <- mkBinOp sym mapRef UndefPtrAdd
+  undefPtrSub' <- mkBinOp sym mapRef UndefPtrSub
+  undefPtrAnd' <- mkBinOp sym mapRef UndefPtrAnd
+  undefPtrXor' <- mkBinOp sym mapRef UndefPtrXor
 
   return $
     UndefinedPtrOps
@@ -389,7 +362,6 @@ mkUndefinedPtrOps sym = do
       , undefPtrSub = undefPtrSub'
       , undefPtrAnd = undefPtrAnd'
       , undefPtrXor = undefPtrXor'
-      , undefPtrClassify = mconcat [classOff, classLt, classLeq, classAdd, classSub, classAnd, classXor]
       , undefPtrTerms = mapRef
       }
 
@@ -514,6 +486,8 @@ inlineUndefinedValidityChecks undefPtrOps =
                          PP.panic PP.MemoryModel "noValidityChecks" ["Instruction starts are not handled in the validity checker"]
                  }
 
+-- | Like 'TypedUndefTag', add a fixed kind phantom type parameter to avoid kind
+-- ambiguity with 'Const' (this one is just used for the cache during term traversal).
 data TypedTags (tp :: WT.BaseType) where
   TypedTags :: Set.Set UndefPtrOpTag -> TypedTags tp
 
