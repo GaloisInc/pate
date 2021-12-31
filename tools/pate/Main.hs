@@ -36,6 +36,8 @@ import           Numeric ( showHex )
 import qualified Options.Applicative as OA
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Terminal as PPRT
+import qualified Prettyprinter.Render.Text as PPText
+import qualified System.Console.ANSI as SCA
 import qualified System.Exit as SE
 import qualified System.IO as IO
 import qualified What4.Interface as WI
@@ -261,6 +263,7 @@ startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
     LogFile fp -> do
       hdl <- IO.openFile fp IO.WriteMode
       IO.hSetBuffering hdl IO.LineBuffering
+      IO.hSetEncoding hdl IO.utf8
       logToHandle hdl
     Interactive port mSourceFiles mTraceFile -> do
       mTraceHandle <- T.traverse (\fp -> IO.openFile fp IO.WriteMode) mTraceFile
@@ -283,6 +286,7 @@ startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
   where
     logAct = LJ.LogAction $ \evt -> CC.writeChan chan (Just evt)
     logToHandle hdl = do
+      isTerm <- SCA.hSupportsANSIColor hdl
       let consumeLogs = do
             me <- CC.readChan chan
             case me of
@@ -295,7 +299,9 @@ startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
                   (Just pc, PE.ProofIntermediate bp sp _) -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
                   _ -> return ()
                 if | printAtVerbosity verb evt -> do
-                       PPRT.renderIO hdl (terminalFormatEvent evt)
+                       if isTerm
+                         then PPRT.renderIO hdl (terminalFormatEvent evt)
+                         else PPText.renderIO hdl (PP.unAnnotateS (terminalFormatEvent evt))
                        consumeLogs
                    | otherwise -> consumeLogs
 

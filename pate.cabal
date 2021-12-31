@@ -247,6 +247,7 @@ executable pate-exec
                        prettyprinter,
                        prettyprinter-ansi-terminal >= 1.1 && < 1.2,
                        time,
+                       ansi-terminal >= 0.7 && < 0.12,
                        ansi-wl-pprint,
                        lumberjack >= 0.1 && < 1.1,
                        threepenny-gui >= 0.9 && < 0.10,
