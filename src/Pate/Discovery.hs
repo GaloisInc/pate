@@ -166,7 +166,7 @@ exactEquivalence inO inP = withSym $ \sym -> do
     True -> return ()
     False -> CME.fail "exactEquivalence: regsEq: assumed false"
 
-  memEq <- liftIO $ WI.isEq sym (MT.memArr (PSS.simInMem inO)) (MT.memArr (PSS.simInMem inP))
+  memEq <- liftIO $ MT.memEqExact sym (MT.memState $ PSS.simInMem inO) (MT.memState $ PSS.simInMem inP)
 
   isPredSat heuristicTimeout memEq >>= \case
     True -> return ()

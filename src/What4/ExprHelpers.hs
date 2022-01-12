@@ -35,7 +35,14 @@ module What4.ExprHelpers (
   , orM
   , allPreds
   , anyPred
-  , VarBinding(..)
+  , ExprBindings
+  , mergeBindings
+  , applyExprBindings
+  , applyExprBindings'
+  , VarBindCache
+  , freshVarBindCache
+  , rewriteSubExprs
+  , rewriteSubExprs'
   , mapExprPtr
   , freshPtr
   , freshPtrBytes
@@ -82,6 +89,8 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Map ( Pair(..) )
 
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -181,23 +190,139 @@ anyPred ::
 anyPred sym preds = foldr (\p -> orM sym (return p)) (return $ W4.falsePred sym) preds
 
 
-data VarBinding sym tp =
-  VarBinding
-   {
-     bindVar :: W4.SymExpr sym tp
-   , bindVal :: W4.SymExpr sym tp
-   }
+-- | A variable binding environment used internally by 'rewriteSubExprs', associating
+-- sub-expressions which have been replaced by variables
+newtype VarBinds sym = VarBinds (MapF.MapF (W4.SymExpr sym) (SetF (W4.BoundVar sym)))
 
-instance TestEquality (W4.SymExpr sym) => TestEquality (VarBinding sym) where
-  testEquality (VarBinding var1 val1) (VarBinding var2 val2)
-    | Just Refl <- testEquality var1 var2
-    , Just Refl <- testEquality val1 val2
-    = Just Refl
-  testEquality _ _ = Nothing
+instance (OrdF (W4.BoundVar sym), OrdF (W4.SymExpr sym)) => Semigroup (VarBinds sym) where
+  (VarBinds v1) <> (VarBinds v2) = VarBinds $
+    MapF.mergeWithKey (\_ bvs1 bvs2 -> Just (bvs1 <> bvs2)) id id v1 v2
 
-instance OrdF (W4.SymExpr sym) => OrdF (VarBinding sym) where
-  compareF (VarBinding var1 val1) (VarBinding var2 val2) =
-    lexCompareF var1 var2 (compareF val1 val2)
+instance (OrdF (W4.BoundVar sym), OrdF (W4.SymExpr sym)) => Monoid (VarBinds sym) where
+  mempty = VarBinds MapF.empty
+
+toAssignmentPair ::
+  [Pair f g] ->
+  Pair (Ctx.Assignment f) (Ctx.Assignment g)
+toAssignmentPair [] = Pair Ctx.empty Ctx.empty
+toAssignmentPair ((Pair a1 a2):xs) | Pair a1' a2' <- toAssignmentPair xs =
+  Pair (a1' Ctx.:> a1) (a2' Ctx.:> a2)
+
+flattenVarBinds ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  VarBinds sym ->
+  [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
+flattenVarBinds (VarBinds binds) = concat $ map go (MapF.toList binds)
+  where
+    go :: Pair (W4.SymExpr sym) (SetF (W4.BoundVar sym)) -> [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
+    go (Pair e bvs) = map (\bv -> Pair bv e) $ SetF.toList bvs
+
+toBindings ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  VarBinds sym ->
+  Pair (Ctx.Assignment (W4.BoundVar sym)) (Ctx.Assignment (W4.SymExpr sym))
+toBindings varBinds = toAssignmentPair (flattenVarBinds varBinds)
+
+-- | Traverse an expression and rewrite any sub-expressions according to the given
+-- replacement function, rebuilding as necessary
+rewriteSubExprs ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  (forall tp'. W4B.Expr t tp' -> Maybe (W4B.Expr t tp')) ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+rewriteSubExprs sym f e = do
+  cache <- freshVarBindCache
+  rewriteSubExprs' sym cache f e
+
+data VarBindCache sym where
+  VarBindCache :: sym ~ W4B.ExprBuilder t solver fs => W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t)) -> VarBindCache sym
+
+freshVarBindCache ::
+  forall sym t solver fs.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  IO (VarBindCache sym)
+freshVarBindCache = VarBindCache <$> W4B.newIdxCache
+
+rewriteSubExprs' ::
+  forall sym tp.
+  sym ->
+  VarBindCache sym ->
+  (forall tp'. W4.SymExpr sym tp' -> Maybe (W4.SymExpr sym tp')) ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+rewriteSubExprs' sym (VarBindCache cache) = rewriteSubExprs'' sym cache
+
+rewriteSubExprs'' ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t))  ->
+  (forall tp'. W4B.Expr t tp' -> Maybe (W4B.Expr t tp')) ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+rewriteSubExprs'' sym cache f e_outer = do
+  let
+    go :: forall tp'. W4B.Expr t tp' -> CMW.WriterT (VarBinds sym) IO (W4B.Expr t tp')
+    go e = idxCacheEvalWriter cache e $ case f e of
+      Just e' -> do
+        bv <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType e')
+        CMW.tell $ VarBinds $ MapF.singleton e' (SetF.singleton bv)
+        return $ W4.varExpr sym bv
+      Nothing -> case e of
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else IO.liftIO $ W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else IO.liftIO $ W4B.sbNonceExpr sym a0'
+        _ -> return e
+  (e', binds) <- CMW.runWriterT (go e_outer)
+  Pair vars vals <- return $ toBindings binds
+  fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
+  W4.applySymFn sym fn vals >>= fixMux sym
+
+
+type ExprBindings sym = MapF.MapF (W4.SymExpr sym) (W4.SymExpr sym)
+
+mergeBindings ::
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  ExprBindings sym ->
+  ExprBindings sym ->
+  IO (ExprBindings sym)
+mergeBindings _sym binds1 binds2 =
+  MapF.mergeWithKeyM (\_ e1 e2 -> case testEquality e1 e2 of
+                         Just _ -> return $ Just e1
+                         Nothing -> fail "mergeBindings: unexpected variable clash")
+    return
+    return
+    binds1
+    binds2
+
+applyExprBindings ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  ExprBindings sym ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+applyExprBindings sym binds = rewriteSubExprs sym (\e' -> MapF.lookup e' binds)
+
+applyExprBindings' ::
+  forall sym tp.
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  VarBindCache sym ->
+  ExprBindings sym ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+applyExprBindings' sym cache binds = rewriteSubExprs' sym cache (\e' -> MapF.lookup e' binds)
 
 mapExprPtr ::
   forall sym w.

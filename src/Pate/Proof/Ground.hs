@@ -206,7 +206,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
 
     getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
     getMemPath st = do
-      let mem = MT.memArr $ PS.simOutMem st
+      let mem = MT.memState $ PS.simOutMem st
       Const <$> (withGroundEvalFn fn $ \fn' -> getGenPathCondition sym fn' mem)
 
   let truePair = PPa.PatchPairC (W4.truePred sym) (W4.truePred sym)

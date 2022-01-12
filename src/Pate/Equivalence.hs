@@ -35,13 +35,13 @@ module Pate.Equivalence
   , MemEquivRelation(..)
   , RegEquivRelation(..)
   , EquivalenceStatus(..)
+  , MemRegionEquality(..)
   , getPostcondition
   , getPrecondition
   , impliesPrecondition
   , impliesPostcondPred
   , memPredPre
   , stateEquivalence
-  , memEqAtRegion
   ) where
 
 import           Control.Lens hiding ( op, pre )
@@ -60,6 +60,7 @@ import qualified What4.Interface as W4
 import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Types as CT
+import           Lang.Crucible.Backend (IsSymInterface)
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -202,7 +203,7 @@ stateEquivalence hdr sym stackRegion =
 -- | Resolve a domain predicate and equivalence relation into a precondition
 getPrecondition ::
   forall sym arch.
-  W4.IsSymExprBuilder sym =>
+  IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
@@ -218,7 +219,7 @@ getPrecondition sym stackRegion bundle eqRel stPred = do
 -- equivalence relation
 impliesPrecondition ::
   forall sym arch.
-  W4.IsSymExprBuilder sym =>
+  IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
@@ -351,8 +352,8 @@ memPredPost sym outO outP memEq memPred = do
     -- we assure that all writes are equivalent when they have not been excluded
     negativePolarity :: IO (W4.Pred sym)
     negativePolarity = do
-      footO <- MT.traceFootprint sym (MT.memSeq $ memO)
-      footP <- MT.traceFootprint sym (MT.memSeq $ memP)
+      footO <- MT.traceFootprint sym memO
+      footP <- MT.traceFootprint sym memP
       let foot = S.union footO footP
       footCells <- PEM.memPredToList <$> PEM.footPrintsToPred sym foot (W4.falsePred sym)
       foldr (\(Some cell, cond) -> andM sym (resolveCell cell cond)) (return $ W4.truePred sym) footCells
@@ -385,8 +386,8 @@ resolveCellEquiv ::
   W4.Pred sym ->
   IO (W4.Pred sym)
 resolveCellEquiv sym stO stP eqRel cell cond = do
-  val1 <- PMC.readMemCell sym (simMem stO) cell
-  val2 <- PMC.readMemCell sym (simMem stP) cell
+  val1 <- PMC.readMemCell sym (MT.memState $ simMem stO) cell
+  val2 <- PMC.readMemCell sym (MT.memState $ simMem stP) cell
   impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
 
 
@@ -395,7 +396,7 @@ resolveCellEquiv sym stO stP eqRel cell cond = do
 -- This predicate is meant to be *assumed* true.
 memPredPre ::
   forall sym arch.
-  W4.IsSymExprBuilder sym =>
+  IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   MemRegionEquality sym arch ->
@@ -419,61 +420,31 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
     freshWrite ::
       PMC.MemCell sym arch w ->
       W4.Pred sym ->
-      MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
-      IO (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
+      MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
+      IO (MT.MemTraceState sym (MM.ArchAddrWidth arch))
     freshWrite cell@(PMC.MemCell{}) cond mem =
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do
-          fresh <- PMC.readMemCell sym memP cell
+          fresh <- PMC.readMemCell sym (MT.memState memP) cell
           --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
           --val <- W4.baseTypeIte sym cond fresh original
-          mem' <- PMC.writeMemCell sym mem cell fresh
-          mem'' <- W4.baseTypeIte sym cond (MT.memArr mem') (MT.memArr mem)
-          return $ mem { MT.memArr = mem'' }
+          PMC.writeMemCell sym cond mem cell fresh
 
     -- | For the negative case, we assume that the patched trace is equivalent
     -- to the original trace with arbitrary modifications to excluded addresses
     negativePolarity :: IO (W4.Pred sym)
     negativePolarity = do
-      mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') memO (PEM.memPredToList memPred)
-      getRegionEquality memEqRegion mem' memP
+      mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) (PEM.memPredToList memPred)
+      getRegionEquality memEqRegion mem' (MT.memState memP)
 
 newtype MemRegionEquality sym arch =
   MemRegionEquality
     { getRegionEquality ::
-        MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
-        MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+        MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
+        MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
         IO (W4.Pred sym)
     }
-
--- | Memory states are equivalent everywhere but the given region.
-memEqOutsideRegion ::
-  forall sym arch.
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  W4.SymNat sym ->
-  MemRegionEquality sym arch
-memEqOutsideRegion sym region = MemRegionEquality $ \mem1 mem2 -> do
-  iRegion <- W4.natToInteger sym region
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iRegion)
-  mem2' <- W4.arrayUpdate sym (MT.memArr mem2) (Ctx.singleton iRegion) mem1Stack
-  W4.isEq sym (MT.memArr mem1) mem2'
-
-
--- | Memory states are equivalent in the given region.
-memEqAtRegion ::
-  forall sym arch.
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  -- | stack memory region
-  W4.SymNat sym ->
-  MemRegionEquality sym arch
-memEqAtRegion sym stackRegion = MemRegionEquality $ \mem1 mem2 -> do
-  iStackRegion <- W4.natToInteger sym stackRegion
-  mem1Stack <- W4.arrayLookup sym (MT.memArr mem1) (Ctx.singleton iStackRegion)
-  mem2Stack <- W4.arrayLookup sym (MT.memArr mem2) (Ctx.singleton iStackRegion)
-  W4.isEq sym mem1Stack mem2Stack
 
 regPredRel ::
   forall sym arch.
@@ -494,7 +465,7 @@ regPredRel sym stO stP regEquiv regPred  = do
   foldr (\(Some r, p) -> andM sym (regRel r p)) (return $ W4.truePred sym) (M.toList regPred)
 
 statePredPre ::
-  W4.IsSymExprBuilder sym =>
+  IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   -- | stack memory region
@@ -511,9 +482,9 @@ statePredPre sym stackRegion inO inP eqRel stPred  = do
     
     regsEq = regPredRel sym stO stP (eqRelRegs eqRel) (PES.predRegs stPred)
     stacksEq =
-      memPredPre sym (memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) (PES.predStack stPred)
+      memPredPre sym (MemRegionEquality $ MT.memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) (PES.predStack stPred)
     memEq =
-      memPredPre sym (memEqOutsideRegion sym stackRegion) inO inP (eqRelMem eqRel) (PES.predMem stPred)
+      memPredPre sym (MemRegionEquality $ MT.memEqOutsideRegion sym stackRegion) inO inP (eqRelMem eqRel) (PES.predMem stPred)
   andM sym regsEq (andM sym stacksEq memEq)
 
 statePredPost ::
