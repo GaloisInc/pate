@@ -226,7 +226,8 @@ toBindings ::
 toBindings varBinds = toAssignmentPair (flattenVarBinds varBinds)
 
 -- | Traverse an expression and rewrite any sub-expressions according to the given
--- replacement function, rebuilding as necessary
+-- replacement function, rebuilding as necessary. If a replacement occurs, the resulting
+-- sub-expression is not traversed any further.
 rewriteSubExprs ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
@@ -265,6 +266,11 @@ rewriteSubExprs'' ::
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
 rewriteSubExprs'' sym cache f e_outer = do
+  -- During this recursive descent, we find any sub-expressions which need to be rewritten
+  -- and perform an in-place replacement with a bound variable, and track that replacement
+  -- in the 'VarBinds' environment.
+  -- i.e. given a map which takes 'x -> a' and 'z -> b', we would replace 'x + z' with 'bv_0 + bv_1' and
+  -- record that 'a -> bv_0' and 'b -> bv_1'.
   let
     go :: forall tp'. W4B.Expr t tp' -> CMW.WriterT (VarBinds sym) IO (W4B.Expr t tp')
     go e = idxCacheEvalWriter cache e $ case f e of
@@ -283,13 +289,25 @@ rewriteSubExprs'' sym cache f e_outer = do
           else IO.liftIO $ W4B.sbNonceExpr sym a0'
         _ -> return e
   (e', binds) <- CMW.runWriterT (go e_outer)
+  -- Now we take our rewritten expression and use it to construct a function application.
+  -- i.e. we define 'f(bv_0, bv_1) := bv_0 + bv_1', and then return 'f(a, b)', unfolding in-place.
+  -- This ensures that the What4 expression builder correctly re-establishes any invariants it requires
+  -- after rebinding.
   Pair vars vals <- return $ toBindings binds
   fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
   W4.applySymFn sym fn vals >>= fixMux sym
 
-
+-- | An expression binding environment. When applied to an expression 'e'
+-- with 'applyExprBindings', each sub-expression of 'e' is recursively inspected
+-- and rebound if it appears in the environment.
+-- Note that this does not apply iteratively, once a sub-expression has been rebound the result
+-- is not traversed further. This implicitly assumes that
+-- the expressions used for the domain do not appear anywhere in the range.
 type ExprBindings sym = MapF.MapF (W4.SymExpr sym) (W4.SymExpr sym)
 
+-- | Merge two 'ExprBindings' together.
+-- Throws a runtime exception if there are any clashes between the environments
+-- (i.e. each environment binds an expression to different values)
 mergeBindings ::
   OrdF (W4.SymExpr sym) =>
   sym ->
@@ -305,6 +323,7 @@ mergeBindings _sym binds1 binds2 =
     binds1
     binds2
 
+-- | Rewrite the sub-expressions of an expression according to the given binding environment.
 applyExprBindings ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>

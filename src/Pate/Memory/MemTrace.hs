@@ -519,8 +519,6 @@ type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
 
 type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
 
-type MemArrBaseType ptrW = BaseArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) (BaseBVType 8))
-
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
 data MemTraceK
@@ -552,10 +550,10 @@ initMemTrace sym Addr64 = do
 
 mkMemoryBinding ::
   forall sym ptrW.
+  -- | initial memory state (appears in the the given expression when the binding is applied)
   MemTraceState sym ptrW ->
-  -- ^ initial memory state (appears in the the given expression when the binding is applied)
+  -- | target memory state (to appear in the resulting expression when the binding is applied)
   MemTraceState sym ptrW ->
-  -- ^ target memory state (to appear in the resulting expression when the binding is applied)
   WEH.ExprBindings sym
 mkMemoryBinding memSrc memTgt =
   let

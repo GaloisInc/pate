@@ -1,12 +1,11 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE PackageImports #-}
 
 module Pate.Panic (
   P.panic,
   PateComponent(..)
   ) where
 
-import qualified "panic" Panic as P
+import qualified Panic as P
 
 data PateComponent = Verifier
                    | Visualizer
