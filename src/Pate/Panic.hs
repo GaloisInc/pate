@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+
 module Pate.Panic (
   P.panic,
   PateComponent(..)

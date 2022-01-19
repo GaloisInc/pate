@@ -68,6 +68,7 @@ import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
+import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
@@ -124,8 +125,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp (PFI.ProofSym sym arch)))
     memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
-      valO <- liftIO $ PMC.readMemCell sym (PS.simMem stO) cell
-      valP <- liftIO $ PMC.readMemCell sym (PS.simMem stP) cell
+      valO <- liftIO $ PMC.readMemCell sym (MT.memState $ PS.simMem stO) cell
+      valP <- liftIO $ PMC.readMemCell sym (MT.memState $ PS.simMem stP) cell
       eqRel <- CMR.asks envBaseEquiv      
       isValidStack <- liftIO $ PE.applyMemEquivRelation (PE.eqRelStack eqRel) cell valO valP
       isValidGlobalMem <- liftIO $ PE.applyMemEquivRelation (PE.eqRelMem eqRel) cell valO valP

@@ -51,15 +51,14 @@ module Pate.SimState
   -- variable binding
   , SimVars(..)
   , bindSpec
-  , flatVars
   -- assumption frames
   , AssumptionFrame(..)
   , isAssumedPred
   , exprBinding
+  , bindingToFrame
   , macawRegBinding
   , frameAssume
   , getAssumedPred
-  , rebindExpr
   , rebindWithFrame
   , rebindWithFrame'
   ) where
@@ -67,15 +66,11 @@ module Pate.SimState
 import           GHC.Stack ( HasCallStack )
 
 import           Control.Monad ( forM )
-import qualified Control.Monad.Writer as CMW
-import qualified Control.Monad.IO.Class as IO
 
-import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Map ( Pair(..) )
-import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.Symbolic as MS
@@ -96,7 +91,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import qualified Data.Parameterized.SetF as SetF
-import           Data.Parameterized.SetF (SetF)
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -163,6 +157,15 @@ instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionFrame sym) where
 
 instance OrdF (W4.SymExpr sym) => Monoid (AssumptionFrame sym) where
   mempty = AssumptionFrame mempty MapF.empty
+
+-- | Lift an expression binding environment into an assumption frame
+bindingToFrame ::
+  forall sym.
+  W4.IsSymExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  ExprBindings sym ->
+  AssumptionFrame sym
+bindingToFrame binds = AssumptionFrame { asmPreds = mempty, asmBinds = MapF.map SetF.singleton binds }
 
 exprBinding ::
   forall sym tp.
@@ -245,22 +248,6 @@ isAssumedPred ::
   Bool
 isAssumedPred frame asm = SetF.member asm (asmPreds frame)
 
-rebindExpr ::
-  forall sym t st fs ctx tp.
-  ( sym ~ W4B.ExprBuilder t st fs )
-  => sym
-  -> Ctx.Assignment (VarBinding sym) ctx
-  -> W4.SymExpr sym tp
-  -> IO (W4.SymExpr sym tp)
-rebindExpr sym bindings expr =
-  rebindWithFrame sym frame expr
-  where
-    frame = AssumptionFrame { asmPreds = mempty
-                            , asmBinds = TFC.foldrFC addSingletonBinding MapF.empty bindings
-                            }
-    addSingletonBinding varBinding =
-      MapF.insert (bindVar varBinding) (SetF.singleton (bindVal varBinding))
-
 -- | Explicitly rebind any known sub-expressions that are in the frame.
 rebindWithFrame ::
   forall sym t solver fs tp.
@@ -270,72 +257,18 @@ rebindWithFrame ::
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
 rebindWithFrame sym asm e = do
-  cache <- W4B.newIdxCache
+  cache <- freshVarBindCache
   rebindWithFrame' sym cache asm e
-
-newtype VarBinds sym = VarBinds (MapF.MapF (W4.SymExpr sym) (SetF (W4.BoundVar sym)))
-
-instance (OrdF (W4.BoundVar sym), OrdF (W4.SymExpr sym)) => Semigroup (VarBinds sym) where
-  (VarBinds v1) <> (VarBinds v2) = VarBinds $
-    MapF.mergeWithKey (\_ bvs1 bvs2 -> Just (bvs1 <> bvs2)) id id v1 v2
-
-instance (OrdF (W4.BoundVar sym), OrdF (W4.SymExpr sym)) => Monoid (VarBinds sym) where
-  mempty = VarBinds MapF.empty
-
-toAssignmentPair ::
-  [Pair f g] ->
-  Pair (Ctx.Assignment f) (Ctx.Assignment g)
-toAssignmentPair [] = Pair Ctx.empty Ctx.empty
-toAssignmentPair ((Pair a1 a2):xs) | Pair a1' a2' <- toAssignmentPair xs =
-  Pair (a1' Ctx.:> a1) (a2' Ctx.:> a2)
-
-flattenVarBinds ::
-  forall sym t solver fs.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  VarBinds sym ->
-  [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
-flattenVarBinds (VarBinds binds) = concat $ map go (MapF.toList binds)
-  where
-    go :: Pair (W4.SymExpr sym) (SetF (W4.BoundVar sym)) -> [Pair (W4.BoundVar sym) (W4.SymExpr sym)]
-    go (Pair e bvs) = map (\bv -> Pair bv e) $ SetF.toList bvs
-
-toBindings ::
-  forall sym t solver fs.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  VarBinds sym ->
-  Pair (Ctx.Assignment (W4.BoundVar sym)) (Ctx.Assignment (W4.SymExpr sym))
-toBindings varBinds = toAssignmentPair (flattenVarBinds varBinds)
 
 rebindWithFrame' ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t)) ->
+  VarBindCache sym ->
   AssumptionFrame sym ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
-rebindWithFrame' sym cache asm e_outer = do
-  let
-    go :: forall tp'. W4B.Expr t tp' -> CMW.WriterT (VarBinds sym) IO (W4B.Expr t tp')
-    go e = idxCacheEvalWriter cache e $ case getUniqueBinding sym asm e of
-      Just e' -> do
-        bv <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType e')
-        CMW.tell $ VarBinds $ MapF.singleton e' (SetF.singleton bv)
-        return $ W4.varExpr sym bv
-      Nothing -> case e of
-        W4B.AppExpr a0 -> do
-          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-          if (W4B.appExprApp a0) == a0' then return e
-          else IO.liftIO $ W4B.sbMakeExpr sym a0'
-        W4B.NonceAppExpr a0 -> do
-          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-          if (W4B.nonceExprApp a0) == a0' then return e
-          else IO.liftIO $ W4B.sbNonceExpr sym a0'
-        _ -> return e
-  (e', binds) <- CMW.runWriterT (go e_outer)
-  Pair vars vals <- return $ toBindings binds
-  fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
-  W4.applySymFn sym fn vals >>= fixMux sym
+rebindWithFrame' sym cache asm = rewriteSubExprs' sym cache (getUniqueBinding sym asm)
 
 data SimSpec sym arch f = SimSpec
   {
@@ -398,35 +331,25 @@ simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 data SimVars sym arch bin = SimVars
   {
-    simVarMem :: MT.MemTraceVar sym (MM.ArchAddrWidth arch)
-  , simVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
+    simVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
   , simVarState :: SimState sym arch bin
   }
 
-flatVars ::
-  SimVars sym arch bin -> [Some (W4.SymExpr sym)]
-flatVars simVars =
-  let
-    regVarPairs =
-      MapF.toList $
-      MM.regStateMap $
-      (simVarRegs simVars)
-    regVars = concat $ map (\(MapF.Pair _ (PSR.MacawRegVar _ vars)) -> TFC.toListFC Some vars) regVarPairs
-    MT.MemTraceVar memVar = simVarMem simVars
-  in ((Some memVar):regVars)
 
-flatVarBinds ::
+mkVarBinds ::
   forall sym arch bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
   sym ->
   SimVars sym arch bin ->
-  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+  MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
-  IO [Some (VarBinding sym)]
-flatVarBinds sym simVars mem regs = do
+  IO (ExprBindings sym)
+mkVarBinds sym simVars mem regs = do
   let
+    memVar = MT.memState $ simMem $ simVarState simVars
     regBinds =
       MapF.toList $
       MM.regStateMap $
@@ -437,17 +360,14 @@ flatVarBinds sym simVars mem regs = do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
         iRegion <- W4.natToInteger sym region
-        return $ [Some (VarBinding regVar iRegion), Some (VarBinding offVar off)]
+        return $ [Pair regVar iRegion, Pair offVar off]
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars
-        return [Some (VarBinding var (PSR.macawRegValue val))]
+        return [Pair var (PSR.macawRegValue val)]
       CT.StructRepr Ctx.Empty -> return []
-      repr -> error ("flatVarBinds: unsupported type " ++ show repr)
+      repr -> error ("mkVarBinds: unsupported type " ++ show repr)
 
-  MT.MemTraceVar memVar <- return $ simVarMem simVars
-  let memBind = VarBinding memVar (MT.memArr mem)   
-  return $ ((Some memBind):regVarBinds)
-
+  mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
 
 bindSpec ::
   PEM.ExprMappable sym f =>
@@ -459,11 +379,13 @@ bindSpec ::
   SimSpec sym arch f ->
   IO (W4.Pred sym, f)
 bindSpec sym stO stP spec = do
-  flatO <- flatVarBinds sym (specVarsO spec) (simMem stO) (simRegs stO)
-  flatP <- flatVarBinds sym (specVarsP spec) (simMem stP) (simRegs stP)
-  Some flatCtx <- return $ Ctx.fromList (flatO ++ flatP)
-  body <- PEM.mapExpr sym (rebindExpr sym flatCtx) (specBody spec)
-  asm <- rebindExpr sym flatCtx (specAsm spec)
+  bindsO <- mkVarBinds sym (specVarsO spec) (MT.memState $ simMem stO) (simRegs stO)
+  bindsP <- mkVarBinds sym (specVarsP spec) (MT.memState $ simMem stP) (simRegs stP)
+  binds <- mergeBindings sym bindsO bindsP
+  cache <- freshVarBindCache
+  let doRewrite = applyExprBindings' sym cache binds
+  body <- PEM.mapExpr sym doRewrite (specBody spec)
+  asm <- doRewrite (specAsm spec)
   return $ (asm, body)
 
 ------------------------------------

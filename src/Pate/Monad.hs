@@ -365,10 +365,10 @@ freshSimVars ::
   PPa.BlockPair arch ->
   EquivM sym arch (SimVars sym arch bin)
 freshSimVars blocks = do
-  (memtrace, memtraceVar) <- withSymIO $ \sym -> MT.initMemTraceVar sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+  mem <- withSymIO $ \sym -> MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   argNames <- lookupArgumentNames blocks
   regs <- MM.mkRegStateM (unconstrainedRegister argNames)
-  return $ SimVars memtraceVar regs (SimState memtrace (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
+  return $ SimVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
 withFreshVars ::
@@ -442,7 +442,7 @@ applyAssumptionFrame ::
   f ->
   EquivM sym arch (W4.Pred sym, f)
 applyAssumptionFrame frame f = withSym $ \sym -> do
-  cache <- W4B.newIdxCache
+  cache <- liftIO freshVarBindCache
   let
     doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
     doRebind = rebindWithFrame' sym cache frame
@@ -648,8 +648,8 @@ getFootprints ::
   SimBundle sym arch ->
   EquivM sym arch (Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)))
 getFootprints bundle = withSym $ \sym -> do
-  footO <- liftIO $ MT.traceFootprint sym (MT.memSeq $ simOutMem $ simOutO bundle)
-  footP <- liftIO $ MT.traceFootprint sym (MT.memSeq $ simOutMem $ simOutP bundle)
+  footO <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutO bundle)
+  footP <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutP bundle)
   return $ S.union footO footP
 
 withSymBackendLock

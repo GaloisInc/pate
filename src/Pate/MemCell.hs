@@ -21,6 +21,7 @@ module Pate.MemCell (
 
 import           Control.Monad ( foldM, forM )
 
+
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
@@ -31,6 +32,7 @@ import qualified Data.Parameterized.NatRepr as PNR
 import qualified Data.Parameterized.TraversableF as TF
 import           GHC.TypeLits ( type (<=) )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
+import           Lang.Crucible.Backend (IsSymInterface)
 import qualified What4.Interface as WI
 
 import qualified Pate.ExprMappable as PEM
@@ -202,27 +204,27 @@ readMemCell ::
   WI.IsSymExprBuilder sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
+  PMT.MemTraceState sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   IO (CLM.LLVMPtr sym (8 WI.* w))
 readMemCell sym mem cell@(MemCell{}) = do
   let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-  PMT.readMemArr sym mem (cellPtr cell) repr
+  PMT.readMemState sym mem (cellPtr cell) repr
 
 -- FIXME: this currently drops the region due to weaknesses in the memory model
 writeMemCell ::
-  WI.IsSymExprBuilder sym =>
+  IsSymInterface sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
+  -- | write condition
+  WI.Pred sym ->
+  PMT.MemTraceState sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   CLM.LLVMPtr sym (8 WI.* w) ->
-  IO (PMT.MemTraceImpl sym (MC.ArchAddrWidth arch))
-writeMemCell sym mem cell@(MemCell{}) valPtr = do
-  let
-    repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-    CLM.LLVMPointer _ val = valPtr
-  PMT.writeMemArr sym mem (cellPtr cell) repr val
+  IO (PMT.MemTraceState sym (MC.ArchAddrWidth arch))
+writeMemCell sym cond mem cell@(MemCell{}) valPtr = do
+  let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
+  PMT.writeMemState sym cond mem (cellPtr cell) repr valPtr
 
 instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do
