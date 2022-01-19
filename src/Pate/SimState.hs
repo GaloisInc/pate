@@ -66,15 +66,11 @@ module Pate.SimState
 import           GHC.Stack ( HasCallStack )
 
 import           Control.Monad ( forM )
-import qualified Control.Monad.Writer as CMW
-import qualified Control.Monad.IO.Class as IO
 
-import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Map ( Pair(..) )
-import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.Symbolic as MS
@@ -95,7 +91,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import qualified Data.Parameterized.SetF as SetF
-import           Data.Parameterized.SetF (SetF)
 
 ------------------------------------
 -- Crucible inputs and outputs

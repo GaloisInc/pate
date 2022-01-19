@@ -216,8 +216,8 @@ writeMemCell ::
   IsSymInterface sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
+  -- | write condition
   WI.Pred sym ->
-  -- ^ write condition
   PMT.MemTraceState sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   CLM.LLVMPtr sym (8 WI.* w) ->
