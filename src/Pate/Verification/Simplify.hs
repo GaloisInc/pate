@@ -69,7 +69,7 @@ simplifyPred_deep p = withSym $ \sym -> do
     checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $
       Const <$> isPredTrue' heuristicTimeout p'
   -- remove redundant atoms
-  p1 <- WEH.minimalPredAtoms sym checkPred p
+  p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
   -- resolve array lookups across unrelated updates
   p2 <- WEH.resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) p1
   -- additional bitvector simplifications
@@ -77,7 +77,7 @@ simplifyPred_deep p = withSym $ \sym -> do
   -- drop any muxes across equality tests
   p4 <- liftIO $ WEH.expandMuxEquality sym p3
   -- remove redundant conjuncts
-  p_final <- WEH.simplifyConjuncts sym checkPred p4
+  p_final <- WEH.simplifyConjuncts sym (\x -> checkPred x) p4
   -- TODO: redundant sanity check that simplification hasn't clobbered anything
   validSimpl <- liftIO $ W4.isEq sym p p_final
   goal <- liftIO $ W4.notPred sym validSimpl

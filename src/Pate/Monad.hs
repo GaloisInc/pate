@@ -361,13 +361,13 @@ lookupArgumentNames pp = do
     Just fd -> return (PH.functionArguments fd)
 
 freshSimVars ::
-  forall bin sym arch.
+  forall sym (bin :: PBi.WhichBinary) arch.
   PPa.BlockPair arch ->
   EquivM sym arch (SimVars sym arch bin)
 freshSimVars blocks = do
   mem <- withSymIO $ \sym -> MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   argNames <- lookupArgumentNames blocks
-  regs <- MM.mkRegStateM (unconstrainedRegister argNames)
+  regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
   return $ SimVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
@@ -376,8 +376,8 @@ withFreshVars ::
   (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> EquivM sym arch (W4.Pred sym, f)) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
-  varsO <- freshSimVars @PBi.Original blocks
-  varsP <- freshSimVars @PBi.Patched blocks
+  varsO <- freshSimVars @_ @PBi.Original blocks
+  varsP <- freshSimVars @_ @PBi.Patched blocks
   (asm, result) <- f (simVarState varsO) (simVarState varsP)
   return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
@@ -522,7 +522,7 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   -- unbound variables (consistent with the initial query)
   let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
   IO.withRunInIO $ \runInIO -> do
-    tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= k))
+    tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= (\x -> k x)))
 
 -- | Check the satisfiability of a predicate, with the result (including model,
 -- if applicable) available in the callback. This function implements all of the
@@ -564,12 +564,13 @@ checkSatisfiableWithoutBindings timeout sym mhandle adapter p k =
 -- exceptions thrown during this process (due to timeout or solver error) are
 -- also treated as False.
 isPredSat ::
+  forall sym arch .
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
 isPredSat timeout p = case W4.asConstantPred p of
   Just b -> return b
-  Nothing -> either (const False) id <$> checkSatisfiableWithModel timeout "isPredSat" p asSat
+  Nothing -> either (const False) id <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
 
 -- | Convert a 'W4R.Sat' result to True, and other results to False
 asSat :: Monad m => W4R.SatResult mdl core -> m Bool
@@ -600,7 +601,7 @@ isPredTruePar' timeout p = case W4.asConstantPred p of
       False -> Par.promise $ do
         notp <- withSymIO $ \sym -> W4.notPred sym p
         -- Convert exceptions into False because we can't prove that it is true
-        either (const False) id <$> checkSatisfiableWithModel timeout "isPredTrue'" notp asProve
+        either (const False) id <$> checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)
 
 -- | Convert a 'W4R.Unsat' result into True
 --
@@ -705,7 +706,7 @@ traceBundle bundle msg =
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- CMR.ask
-    catchInIO (f (runEquivM' env))
+    catchInIO (f (\x -> runEquivM' env x))
 
 catchInIO ::
   forall sym arch a.

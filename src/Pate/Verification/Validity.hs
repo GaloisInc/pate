@@ -102,7 +102,7 @@ validConcreteReads stOut = withSym $ \sym -> do
     go :: Seq.Seq (MT.MemOp sym (MM.ArchAddrWidth arch)) -> EquivM sym arch (AssumptionFrame sym)
     go mops = do
       flatops <- fmap F.toList $ liftIO $ MT.flatMemOps sym mops
-      fmap mconcat $ mapM readConcrete flatops
+      fmap mconcat $ mapM (\x -> readConcrete x) flatops
 
     readConcrete ::
       MT.MemOp sym (MM.ArchAddrWidth arch) ->

@@ -151,10 +151,10 @@ getCondEquivalenceBindings eqCond fn = withValid $ do
       W4B.AppExpr a0 -> case W4B.appExprApp a0 of
         W4B.SelectArray _ _ idx -> do
           binds' <- singleBinding e fn
-          binds'' <- TFC.foldrMFC acc mempty idx
+          binds'' <- TFC.foldrMFC (\x a -> acc x a) mempty idx
           return $ binds' <> binds''
-        app -> TFC.foldrMFC acc mempty app
-      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
+        app -> TFC.foldrMFC (\x a -> acc x a) mempty app
+      W4B.NonceAppExpr a0 -> TFC.foldrMFC (\x a -> acc x a) mempty (W4B.nonceExprApp a0)
       _ -> return mempty
   Bindings binds <- go eqCond
   return binds
@@ -210,10 +210,10 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
       Const <$> (withGroundEvalFn fn $ \fn' -> getGenPathCondition sym fn' mem)
 
   let truePair = PPa.PatchPairC (W4.truePred sym) (W4.truePred sym)
-  regPath <- PF.foldrMBlockStateLocs getRegPath (\_ _ -> return) truePair slice
+  regPath <- PF.foldrMBlockStateLocs (\x1 x2 x3 -> getRegPath x1 x2 x3) (\_ _ r -> return r) truePair slice
   
-  memPath <- PPa.toPatchPairC <$> TF.traverseF getMemPath (PS.simOut bundle)
-  liftIO $ PPa.zipMPatchPairC regPath memPath (W4.andPred sym)
+  memPath <- PPa.toPatchPairC <$> TF.traverseF (\x -> getMemPath x) (PS.simOut bundle)
+  liftIO $ PPa.zipMPatchPairC (\x1 x2 x3 -> regPath x1 x2 x3) memPath (W4.andPred sym)
 
 
 groundProofTransformer ::
