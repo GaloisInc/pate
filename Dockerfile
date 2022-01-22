@@ -60,7 +60,12 @@ RUN cabal configure pkg:pate -w ghc-8.10.4 && \
 RUN cp $(cabal exec -- which pate-exec) /usr/local/bin/pate
 
 FROM ubuntu:20.04
-RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0
+RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
+
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
+ENV LC_ALL en_US.UTF-8
+
 COPY --from=0 /usr/local/bin/pate \
               /usr/local/bin/cvc4 \
               /usr/local/bin/z3 \
