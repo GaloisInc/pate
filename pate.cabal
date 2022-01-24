@@ -235,7 +235,7 @@ common shared-exec
                  pate 
 
 
-executable pate-exec
+executable pate
   import:              shared-exec, shared
   main-is:             Main.hs
   other-modules:       Pate.PPC,
