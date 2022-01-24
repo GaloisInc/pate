@@ -400,7 +400,7 @@ runVerificationLoop env pPairs = do
   where
     doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
     doVerify = do
-      triples <- DT.forM pPairs $ topLevelTriple
+      triples <- DT.forM pPairs $ \p -> topLevelTriple p
       result <- CMR.local (\env' -> env' { envGoalTriples = triples } ) $
         CME.foldM (\a b -> (<>) a <$> go b) mempty triples
       statVar <- CMR.asks envStatistics
@@ -1219,7 +1219,7 @@ checkCasesTotal ::
 checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
   blocks <- PD.getBlocks $ simPair bundle
   someCase <- do
-    casePreds <- mapM getCase cases
+    casePreds <- mapM (\c -> getCase c) cases
     liftIO $ anyPred sym casePreds
 
   notCheck <- liftIO $ W4.notPred sym someCase
