@@ -66,7 +66,7 @@ jobs:
     - name: Build
       run: |
         cp cabal.project.dist cabal.project
-        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j
+        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base
         cabal build pkg:pate --only-dependencies
 
     - name: Build
