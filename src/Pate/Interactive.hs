@@ -29,8 +29,6 @@ import qualified Data.Text as DT
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
-import qualified Prettyprinter as PP
-import qualified Prettyprinter.Render.Text as PPRT
 import           System.FilePath ( (</>) )
 import qualified System.IO as IO
 import qualified System.IO.Temp as SIT
@@ -78,35 +76,17 @@ dagre = $(DFE.embedFile "tools/pate/static/dagre/dist/dagre.js")
 cytoscapeDagre :: BS.ByteString
 cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js")
 
-traceFormatEvent :: PE.Event arch -> PP.Doc ann
-traceFormatEvent evt =
-  case evt of
-    PE.ProofTraceEvent _stk origAddr _patchedAddr msg _tm ->
-      PP.pretty origAddr <> PP.pretty ": " <> PP.pretty msg <> PP.line
-    PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
-      PP.pretty origAddr <> PP.pretty ": " <> WI.printSymExpr expr
-    PE.AnalysisEnd {} -> PP.pretty "Analysis ended"
-    PE.AnalysisStart {} -> PP.pretty "Analysis starting"
-    PE.ErrorRaised err -> PP.pretty "Error raised: " <> PP.viaShow err
-    PE.Warning _ warn -> PP.pretty ":Warning raised: " <> PP.viaShow warn
-    _ -> mempty
-
 consumeEvents
   :: (MM.MemWidth (MC.ArchAddrWidth arch))
   => CC.Chan (Maybe (PE.Event arch))
   -> StateRef arch
   -> PV.Verbosity
-  -> Maybe IO.Handle
   -> IO ()
-consumeEvents chan r0 verb mTraceHandle = do
+consumeEvents chan r0 verb = do
   mEvt <- CC.readChan chan
   case mEvt of
     Nothing -> return ()
     Just evt -> do
-      case mTraceHandle of
-        Nothing -> return ()
-        Just hdl -> PPRT.hPutDoc hdl (traceFormatEvent evt)
-
       case evt of
         PE.LoadedBinaries oelf pelf -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just oelf
@@ -145,7 +125,7 @@ consumeEvents chan r0 verb mTraceHandle = do
 
       -- Notify the UI that we got a new result
       stateChangeEmitter r0 ()
-      consumeEvents chan r0 verb mTraceHandle
+      consumeEvents chan r0 verb
 
 addTraceEventFormula
   :: (sym ~ WE.ExprBuilder t st fs)
