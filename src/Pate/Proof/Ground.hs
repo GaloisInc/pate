@@ -151,10 +151,10 @@ getCondEquivalenceBindings eqCond fn = withValid $ do
       W4B.AppExpr a0 -> case W4B.appExprApp a0 of
         W4B.SelectArray _ _ idx -> do
           binds' <- singleBinding e fn
-          binds'' <- TFC.foldrMFC acc mempty idx
+          binds'' <- TFC.foldrMFC (\x a -> acc x a) mempty idx
           return $ binds' <> binds''
-        app -> TFC.foldrMFC acc mempty app
-      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
+        app -> TFC.foldrMFC (\x a -> acc x a) mempty app
+      W4B.NonceAppExpr a0 -> TFC.foldrMFC (\x a -> acc x a) mempty (W4B.nonceExprApp a0)
       _ -> return mempty
   Bindings binds <- go eqCond
   return binds
@@ -210,9 +210,9 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
       Const <$> (withGroundEvalFn fn $ \fn' -> getGenPathCondition sym fn' mem)
 
   let truePair = PPa.PatchPairC (W4.truePred sym) (W4.truePred sym)
-  regPath <- PF.foldrMBlockStateLocs getRegPath (\_ _ -> return) truePair slice
+  regPath <- PF.foldrMBlockStateLocs (\x1 x2 x3 -> getRegPath x1 x2 x3) (\_ _ r -> return r) truePair slice
   
-  memPath <- PPa.toPatchPairC <$> TF.traverseF getMemPath (PS.simOut bundle)
+  memPath <- PPa.toPatchPairC <$> TF.traverseF (\x -> getMemPath x) (PS.simOut bundle)
   liftIO $ PPa.zipMPatchPairC regPath memPath (W4.andPred sym)
 
 
@@ -222,12 +222,12 @@ groundProofTransformer ::
   SymGroundEvalFn sym ->
   PF.ProofTransformer (EquivM_ sym arch) (PFI.ProofSym sym arch) (PFI.ProofGround arch)
 groundProofTransformer fn = PF.ProofTransformer
-  { PF.prfPredTrans = execGroundFn fn
-  , PF.prfMemCellTrans = groundMemCell fn
+  { PF.prfPredTrans = \e -> execGroundFn fn e
+  , PF.prfMemCellTrans = \mc -> groundMemCell fn mc
   , PF.prfBVTrans = \(PFI.SymBV bv) -> groundBV fn bv
   , PF.prfExitTrans = \e ->
       PFI.GroundBlockExit <$> (groundBlockEndCase fn e) <*> (groundReturnPtr fn e)
-  , PF.prfValueTrans = groundMacawValue fn
+  , PF.prfValueTrans = \e -> groundMacawValue fn e
   , PF.prfContextTrans = \_ -> return ()
   , PF.prfCounterExampleTrans = return
   , PF.prfConditionTrans = \_ -> return ()
@@ -235,16 +235,18 @@ groundProofTransformer fn = PF.ProofTransformer
   }
 
 groundSlice ::
+  (PA.ValidArch arch, PSo.ValidSym sym) =>
   SymGroundEvalFn sym ->
   PF.BlockSliceTransition (PFI.ProofSym sym arch) ->
-  EquivM sym arch (PF.BlockSliceTransition (PFI.ProofGround arch))
+  EquivM_ sym arch (PF.BlockSliceTransition (PFI.ProofGround arch))
 groundSlice fn = PF.transformBlockSlice (groundProofTransformer fn)
 
 
 groundProofExpr ::
+  (PA.ValidArch arch, PSo.ValidSym sym) =>
   SymGroundEvalFn sym ->
   PF.ProofExpr (PFI.ProofSym sym arch) tp ->
-  EquivM sym arch (PF.ProofExpr (PFI.ProofGround arch) tp)
+  EquivM_ sym arch (PF.ProofExpr (PFI.ProofGround arch) tp)
 groundProofExpr fn = PF.transformProofExpr (groundProofTransformer fn)
 
 
@@ -332,8 +334,8 @@ getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
             True -> go eT
             False -> go eF
           return $ cond_tags <> branch_tags
-        app -> TFC.foldrMFC acc mempty app
-      W4B.NonceAppExpr a0 -> TFC.foldrMFC acc mempty (W4B.nonceExprApp a0)
+        app -> TFC.foldrMFC (\e' tags -> acc e' tags) mempty app
+      W4B.NonceAppExpr a0 -> TFC.foldrMFC (\e' tags -> acc e' tags) mempty (W4B.nonceExprApp a0)
       _ -> return mempty
 
     acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (MT.UndefPtrOpTags) tp2 -> EquivM sym arch (Const (MT.UndefPtrOpTags) tp2)
@@ -345,10 +347,12 @@ getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
       W4.SymExpr sym tp' ->
       W4.SymExpr sym tp' ->
       EquivM sym arch (Maybe Bool)
-    resolveEq e1 e2 =
-      Just <$> (execGroundFn fn =<< (liftIO $ W4.isEq sym e1 e2))
+    resolveEq e1 e2 = do
+      areEq <- liftIO $ W4.isEq sym e1 e2
+      Just <$> execGroundFn fn areEq
 
-  go =<< resolveConcreteLookups sym resolveEq e_outer
+  e_outer' <- resolveConcreteLookups sym (\e1 e2 -> resolveEq e1 e2) e_outer
+  go e_outer'
 
 groundLLVMPointer :: forall sym arch.
   HasCallStack =>

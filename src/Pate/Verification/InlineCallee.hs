@@ -380,7 +380,8 @@ symbolicallyExecute archVals sym binRepr loadedBin dfi ignPtrs initRegs (sp, ini
   let ovCfg = PVOL.OverrideConfig { PVOL.ocMemVar = memVar
                                   , PVOL.ocPointerMap = memPtrTbl
                                   }
-  overrides <- ($ovCfg) <$> CMR.asks envOverrides
+  env <- CMR.ask
+  let overrides = envOverrides env ovCfg
 
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do

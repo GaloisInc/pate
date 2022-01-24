@@ -93,11 +93,11 @@ simBundleToSlice bundle = withSym $ \sym -> do
   memReads <- PEM.memPredToList <$> (liftIO $ PEM.footPrintsToPred sym footprints (W4.truePred sym))
   memWrites <- PEM.memPredToList <$> (liftIO $ PEM.footPrintsToPred sym footprints (W4.falsePred sym))
 
-  preMem <- MapF.fromList <$> mapM (memCellToOp initState) memReads
-  postMem <- MapF.fromList <$> mapM (memCellToOp finState) memWrites
+  preMem <- MapF.fromList <$> mapM (\x -> memCellToOp initState x) memReads
+  postMem <- MapF.fromList <$> mapM (\x -> memCellToOp finState x) memWrites
 
-  preRegs <- PR.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) getReg
-  postRegs <- PR.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) getReg
+  preRegs <- PR.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) (\r vo vp -> getReg r vo vp)
+  postRegs <- PR.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) (\r vo vp -> getReg r vo vp)
   
   let
     preState = PF.BlockSliceState preMem preRegs
@@ -394,7 +394,7 @@ forkProofEvent ppair f = forkProofFinal f $ \e -> do
   emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofSym vsym e))
 
 joinLazyProofApp :: LazyProofApp sym arch tp -> EquivM sym arch (PFI.ProofSymNonceApp sym arch tp)
-joinLazyProofApp = PF.traverseProofApp joinLazyProof
+joinLazyProofApp pa = PF.traverseProofApp (\x -> joinLazyProof x) pa
 
 joinLazyProof :: LazyProof sym arch tp -> EquivM sym arch (PFI.ProofSymNonceExpr sym arch tp)
 joinLazyProof prf = withValid $ do

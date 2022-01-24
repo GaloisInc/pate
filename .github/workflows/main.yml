@@ -25,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ 'ppc' ]
-        ghc: ['8.6.5', '8.8.4', '8.10.3']
+        ghc: ['8.8.4', '8.10.7', '9.0.2']
         cabal: ['3.4.0.0']
         os: [self-hosted]
 
@@ -66,7 +66,7 @@ jobs:
     - name: Build
       run: |
         cp cabal.project.dist cabal.project
-        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j
+        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base
         cabal build pkg:pate --only-dependencies
 
     - name: Build

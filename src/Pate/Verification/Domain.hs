@@ -330,10 +330,10 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   let memP_to_memP' = MT.mkMemoryBinding memP memP'
   goal' <- liftIO $ WEH.applyExprBindings sym memP_to_memP' goal_regsEq
 
-  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predStack postcond_regsEq) isStackCell
+  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predStack postcond_regsEq) (\c -> isStackCell c)
   let stackEq = liftIO $ PEq.memPredPre sym (PEq.MemRegionEquality $ MT.memEqAtRegion sym stackRegion) inO inP (PEq.eqRelStack eqRel) stackDom
   memDom <- withAssumption_ stackEq $ do
-    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predMem postcond_regsEq) isNotStackCell
+    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predMem postcond_regsEq) (\x -> isNotStackCell x)
 
   blocks <- PD.getBlocks $ PSi.simPair bundle
 

@@ -249,9 +249,9 @@ getSubBlocks b = withBinary @bin $
      mtgt <- liftIO $ PMC.parsedBlocksContaining b pfm
      tgts <- case mtgt of
        Just (PMC.ParsedBlocks pbs) ->
-         concat <$> mapM (concreteValidJumpTargets b pbs) pbs
+         concat <$> mapM (\x -> concreteValidJumpTargets b pbs x) pbs
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
-     mapM_ validateBlockTarget tgts
+     mapM_ (\x -> validateBlockTarget x) tgts
      return tgts
 
 

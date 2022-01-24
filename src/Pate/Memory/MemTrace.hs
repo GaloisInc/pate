@@ -442,7 +442,7 @@ macawTraceExtensions ::
   ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
 macawTraceExtensions archStmtFn mvar globs undefptr =
   ExtensionImpl
-    { extensionEval = evalMacawExprExtensionTrace undefptr
+    { extensionEval = \sym iTypes logFn cst g -> evalMacawExprExtensionTrace undefptr sym iTypes logFn cst g
     , extensionExec = execMacawStmtExtension archStmtFn undefptr mvar globs
     }
 
