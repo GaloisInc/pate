@@ -57,7 +57,7 @@ RUN ln -sf cabal.project.dist cabal.project
 RUN cabal configure pkg:pate -w ghc-8.10.4 && \
   cabal build pkg:pate -j5
 
-RUN cp $(cabal exec -- which pate-exec) /usr/local/bin/pate
+RUN cp $(cabal exec -- which pate) /usr/local/bin/pate
 
 FROM ubuntu:20.04
 RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8

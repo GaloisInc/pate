@@ -73,20 +73,6 @@ import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
 
--- | Post-process parsed command line options and normalize them as-needed
---
--- As a concrete example, this looks at the interactive mode trace file and
--- switches the verbosity to Debug (no matter what the user specified, as the
--- trace file specification takes precedence)
-validateOptions :: CLIOptions -> CLIOptions
-validateOptions = normalizeVerbosity
-  where
-    normalizeVerbosity o =
-      case logTarget o of
-        Interactive _port _srcs (Just _) -> o { verbosity = PV.Debug }
-        _ -> o
-
-
 parseHints
   :: LJ.LogAction IO (PE.Event arch)
   -> CLIOptions
@@ -134,16 +120,25 @@ parseHints logAction opts = do
 
 main :: IO ()
 main = do
-  opts <- validateOptions <$> OA.execParser cliOptions
+  opts <- OA.execParser cliOptions
   ep <- archToProxy (originalBinary opts) (patchedBinary opts)
   case ep of
     Left err -> SE.die (show err)
     Right (elfErrs, Some proxy) -> do
-      proofConsumer <- T.traverse JR.consumeProofEvents (proofSummaryJSON opts)
-      chan <- CC.newChan
-      (logger, mConsumer) <- startLogger proxy (verbosity opts) (logTarget opts) chan proofConsumer
-      (origHints, patchedHints) <- parseHints logger opts
-      LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
+      (logger, consumers) <- startLogger proxy (verbosity opts) (interactiveConfig opts) (logFile opts)
+      (logger', consumers') <- do
+        case proofSummaryJSON opts of
+          Nothing -> return (logger, consumers)
+          Just proofJSONFile -> do
+            pc <- JR.consumeProofEvents proofJSONFile
+            let recordProofEvent evt =
+                  case evt of
+                    PE.ProofIntermediate bp sp _ -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
+                    _ -> return ()
+            let jl = LJ.LogAction recordProofEvent
+            return (logger <> jl, (JR.waitForConsumer pc, JR.sendEvent pc Nothing) : consumers)
+      (origHints, patchedHints) <- parseHints logger' opts
+      LJ.writeLog logger' (PE.ElfLoaderWarnings elfErrs)
       let
         infoPath = case blockInfo opts of
           Just path -> Left path
@@ -165,7 +160,7 @@ main = do
             , PC.infoPath = infoPath
             , PC.origPath = originalBinary opts
             , PC.patchedPath = patchedBinary opts
-            , PC.logger = logger
+            , PC.logger = logger'
             , PC.verificationCfg = verificationCfg
             , PC.origHints = origHints
             , PC.patchedHints = patchedHints
@@ -177,9 +172,12 @@ main = do
 
       -- Shut down the logger cleanly (if we can - the interactive logger will be
       -- persistent until the user kills it)
-      CC.writeChan chan Nothing
-      F.forM_ mConsumer CCA.wait
-      _ <- T.traverse JR.waitForConsumer proofConsumer
+      --
+      -- Each log consumer has its own shutdown action that we have to invoke
+      -- before the async action will finish; we then wait for each one to
+      -- finish.
+      F.forM_ consumers' $ \(_wait, shutdown) -> shutdown
+      F.forM_ consumers' $ \(wait, _shutdown) -> wait
 
       case status of
         PEq.Errored err -> SE.die (show err)
@@ -190,7 +188,7 @@ data CLIOptions = CLIOptions
   { originalBinary :: FilePath
   , patchedBinary :: FilePath
   , blockInfo :: Maybe FilePath
-  , logTarget :: LogTarget
+  , interactiveConfig :: Maybe InteractiveConfig
   , noPairMain :: Bool
   , noDiscoverFuns :: Bool
   , noProofs :: Bool
@@ -209,24 +207,16 @@ data CLIOptions = CLIOptions
   , saveMacawCFGs :: Maybe FilePath
   , solverInteractionFile :: Maybe FilePath
   , proofSummaryJSON :: Maybe FilePath
+  , logFile :: Maybe FilePath
+  -- ^ The path to store trace information to (logs will be discarded if not provided)
   } deriving (Eq, Ord, Show)
 
-data LogTarget = Interactive PIP.Port (Maybe (IS.SourcePair FilePath)) (Maybe FilePath)
+data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
                -- ^ Logs will go to an interactive viewer
                --
                -- If source files (corresponding to the original and patched
                -- source) are provided, their contents are displayed when
                -- appropriate (on a per-function basis).
-               --
-               -- The third argument is an optional path to save trace-level
-               -- messages to; note that if this is provided, it implies that
-               -- the verbosity level is Debug
-               | LogFile FilePath
-               -- ^ Logs will go to a file (if present)
-               | StdoutLogger
-               -- ^ Log to stdout
-               | NullLogger
-               -- ^ Discard logs
                deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -250,54 +240,56 @@ printAtVerbosity verb evt =
 --
 -- Otherwise, just make a basic logger that will write logs to a user-specified
 -- location
+--
+-- The 'LJ.LogAction' returned is the logger to be used in the entire
+-- application. It will forward messages to consumers as appropriate. Each
+-- consumer is an action to call after shutting down the 'CCA.Async', which is
+-- paired up with an associated action that should be run to shut down the async
+-- cleanly.
 startLogger :: PA.SomeValidArch arch
             -> PV.Verbosity
-            -> LogTarget
-            -> CC.Chan (Maybe (PE.Event arch))
-            -> Maybe (JR.ProofEventConsumer arch)
-            -> IO (LJ.LogAction IO (PE.Event arch), Maybe (CCA.Async ()))
-startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
-  case lt of
-    NullLogger -> return (LJ.LogAction $ \_ -> return (), Nothing)
-    StdoutLogger -> logToHandle IO.stdout
-    LogFile fp -> do
-      hdl <- IO.openFile fp IO.WriteMode
-      IO.hSetBuffering hdl IO.LineBuffering
-      IO.hSetEncoding hdl IO.utf8
-      logToHandle hdl
-    Interactive port mSourceFiles mTraceFile -> do
-      mTraceHandle <- T.traverse (\fp -> IO.openFile fp IO.WriteMode) mTraceFile
-      F.forM_ mTraceHandle $ \hdl -> do
-        IO.hSetBuffering hdl IO.NoBuffering
+            -> Maybe InteractiveConfig
+            -> Maybe FilePath
+            -> IO (LJ.LogAction IO (PE.Event arch), [(IO (), IO ())])
+startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile = do
+  (fileLogger, loggerAsync) <- case mLogFile of
+        Nothing -> return (LJ.LogAction $ \_ -> return (), [])
+        Just fp -> do
+          hdl <- IO.openFile fp IO.WriteMode
+          IO.hSetBuffering hdl IO.LineBuffering
+          IO.hSetEncoding hdl IO.utf8
+          logToHandle hdl
+  case mIntConf of
+    Nothing -> return (fileLogger, loggerAsync)
+    Just (Interactive port mSourceFiles) -> do
+      -- We need to duplicate the channel so that both the file logger and the
+      -- UI can read events from it
+      uiChan <- CC.newChan
       -- This odd structure makes all of the threading explicit at this top
       -- level so that there is no thread creation hidden in the Interactive
       -- module
       --
       -- The data producer/manager and the UI communicate via an IORef, which
       -- contains the up-to-date version of the state
+      let uiLogger = LJ.LogAction $ \evt -> CC.writeChan uiChan (Just evt)
       consumer <- CCA.async $ do
         mSourceContent <- join <$> T.traverse parseSources mSourceFiles
         stateRef <- I.newState mSourceContent
-        watcher <- CCA.async $ I.consumeEvents chan stateRef verb mTraceHandle
+        watcher <- CCA.async $ I.consumeEvents uiChan stateRef verb
         ui <- CCA.async $ I.startInterface port stateRef
         CCA.wait watcher
         CCA.wait ui
-      return (logAct, Just consumer)
+      let shutdown = CC.writeChan uiChan Nothing
+      return (uiLogger <> fileLogger, [(CCA.wait consumer, shutdown)] <> loggerAsync)
   where
-    logAct = LJ.LogAction $ \evt -> CC.writeChan chan (Just evt)
     logToHandle hdl = do
+      chan <- CC.newChan
       isTerm <- SCA.hSupportsANSIColor hdl
       let consumeLogs = do
             me <- CC.readChan chan
             case me of
-              Nothing -> do
-                -- Shut down the proof summary process once we are out of events
-                _ <- T.traverse (\pc -> JR.sendEvent pc Nothing) proofConsumer
-                return ()
-              Just evt -> do
-                case (proofConsumer, evt) of
-                  (Just pc, PE.ProofIntermediate bp sp _) -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
-                  _ -> return ()
+              Nothing -> return ()
+              Just evt ->
                 if | printAtVerbosity verb evt -> do
                        if isTerm
                          then PPRT.renderIO hdl (terminalFormatEvent evt)
@@ -306,7 +298,9 @@ startLogger (PA.SomeValidArch {}) verb lt chan proofConsumer =
                    | otherwise -> consumeLogs
 
       consumer <- CCA.async consumeLogs
-      return (logAct, Just consumer)
+      let logAct = LJ.LogAction $ \evt -> CC.writeChan chan (Just evt)
+      let shutdown = CC.writeChan chan Nothing
+      return (logAct, [(CCA.wait consumer, shutdown)])
 
 parseSources :: IS.SourcePair FilePath -> IO (Maybe (IS.SourcePair LC.CTranslUnit))
 parseSources (IS.SourcePair os ps) = do
@@ -457,8 +451,8 @@ machineToProxy em origHdr patchedHdr =
     _ -> Left (UnsupportedArchitecture em)
 
 
-logParser :: OA.Parser LogTarget
-logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure StdoutLogger
+logParser :: OA.Parser (Maybe InteractiveConfig)
+logParser = (Just <$> interactiveParser) <|> pure Nothing
   where
     interactiveParser = Interactive <$  OA.flag' ()
                                      (  OA.long "interactive"
@@ -474,10 +468,6 @@ logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure St
                                          <> OA.help "The port to run the interactive visualizer on"
                                          )
                                     <*> OA.optional parseSourceFiles
-                                    <*> OA.optional (OA.strOption ( OA.long "trace-file"
-                                                     <> OA.metavar "FILE"
-                                                     <> OA.help "A file to save trace-level messages to (note: this implies trace-level debugging)"
-                                                     ))
     parseSourceFiles = IS.SourcePair <$> OA.strOption (  OA.long "original-source"
                                                       <> OA.metavar "FILE"
                                                       <> OA.help "The source file for the original program"
@@ -486,15 +476,6 @@ logParser = interactiveParser <|> logFileParser <|> nullLoggerParser <|> pure St
                                                       <> OA.metavar "FILE"
                                                       <> OA.help "The source file for the patched program"
                                                       )
-    nullLoggerParser = OA.flag' NullLogger
-                    (  OA.long "discard-logs"
-                    <> OA.help "Discard all logging information"
-                    )
-    logFileParser = LogFile <$> OA.strOption
-                             (  OA.long "log-file"
-                             <> OA.metavar "FILE"
-                             <> OA.help "Record logs in the given file"
-                             )
 
 cliOptions :: OA.ParserInfo CLIOptions
 cliOptions = OA.info (OA.helper <*> parser)
@@ -601,4 +582,9 @@ cliOptions = OA.info (OA.helper <*> parser)
         ( OA.long "proof-summary-json"
         <> OA.metavar "FILE"
         <> OA.help "A file to save interesting proof results to in JSON format"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "log-file"
+        <> OA.metavar "FILE"
+        <> OA.help "A file to save debug logs to"
         ))
