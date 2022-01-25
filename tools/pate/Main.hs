@@ -125,10 +125,20 @@ main = do
   case ep of
     Left err -> SE.die (show err)
     Right (elfErrs, Some proxy) -> do
-      proofConsumer <- T.traverse JR.consumeProofEvents (proofSummaryJSON opts)
-      (logger, consumers) <- startLogger proxy (verbosity opts) (interactiveConfig opts) (logFile opts) proofConsumer
-      (origHints, patchedHints) <- parseHints logger opts
-      LJ.writeLog logger (PE.ElfLoaderWarnings elfErrs)
+      (logger, consumers) <- startLogger proxy (verbosity opts) (interactiveConfig opts) (logFile opts)
+      (logger', consumers') <- do
+        case proofSummaryJSON opts of
+          Nothing -> return (logger, consumers)
+          Just proofJSONFile -> do
+            pc <- JR.consumeProofEvents proofJSONFile
+            let recordProofEvent evt =
+                  case evt of
+                    PE.ProofIntermediate bp sp _ -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
+                    _ -> return ()
+            let jl = LJ.LogAction recordProofEvent
+            return (logger <> jl, (JR.waitForConsumer pc, JR.sendEvent pc Nothing) : consumers)
+      (origHints, patchedHints) <- parseHints logger' opts
+      LJ.writeLog logger' (PE.ElfLoaderWarnings elfErrs)
       let
         infoPath = case blockInfo opts of
           Just path -> Left path
@@ -150,7 +160,7 @@ main = do
             , PC.infoPath = infoPath
             , PC.origPath = originalBinary opts
             , PC.patchedPath = patchedBinary opts
-            , PC.logger = logger
+            , PC.logger = logger'
             , PC.verificationCfg = verificationCfg
             , PC.origHints = origHints
             , PC.patchedHints = patchedHints
@@ -166,9 +176,8 @@ main = do
       -- Each log consumer has its own shutdown action that we have to invoke
       -- before the async action will finish; we then wait for each one to
       -- finish.
-      F.forM_ consumers $ \(_c, shutdown) -> shutdown
-      F.forM_ consumers $ \(c, _shutdown) -> CCA.wait c
-      _ <- T.traverse JR.waitForConsumer proofConsumer
+      F.forM_ consumers' $ \(_wait, shutdown) -> shutdown
+      F.forM_ consumers' $ \(wait, _shutdown) -> wait
 
       case status of
         PEq.Errored err -> SE.die (show err)
@@ -234,15 +243,15 @@ printAtVerbosity verb evt =
 --
 -- The 'LJ.LogAction' returned is the logger to be used in the entire
 -- application. It will forward messages to consumers as appropriate. Each
--- consumer is a 'CCA.Async', which is paired up with an associated action that
--- should be run to shut down the async cleanly.
+-- consumer is an action to call after shutting down the 'CCA.Async', which is
+-- paired up with an associated action that should be run to shut down the async
+-- cleanly.
 startLogger :: PA.SomeValidArch arch
             -> PV.Verbosity
             -> Maybe InteractiveConfig
             -> Maybe FilePath
-            -> Maybe (JR.ProofEventConsumer arch)
-            -> IO (LJ.LogAction IO (PE.Event arch), [(CCA.Async (), IO ())])
-startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile proofConsumer = do
+            -> IO (LJ.LogAction IO (PE.Event arch), [(IO (), IO ())])
+startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile = do
   (fileLogger, loggerAsync) <- case mLogFile of
         Nothing -> return (LJ.LogAction $ \_ -> return (), [])
         Just fp -> do
@@ -271,7 +280,7 @@ startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile proofConsumer = do
         CCA.wait watcher
         CCA.wait ui
       let shutdown = CC.writeChan uiChan Nothing
-      return (uiLogger <> fileLogger, [(consumer, shutdown)] <> loggerAsync)
+      return (uiLogger <> fileLogger, [(CCA.wait consumer, shutdown)] <> loggerAsync)
   where
     logToHandle hdl = do
       chan <- CC.newChan
@@ -279,14 +288,8 @@ startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile proofConsumer = do
       let consumeLogs = do
             me <- CC.readChan chan
             case me of
-              Nothing -> do
-                -- Shut down the proof summary process once we are out of events
-                _ <- T.traverse (\pc -> JR.sendEvent pc Nothing) proofConsumer
-                return ()
-              Just evt -> do
-                case (proofConsumer, evt) of
-                  (Just pc, PE.ProofIntermediate bp sp _) -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
-                  _ -> return ()
+              Nothing -> return ()
+              Just evt ->
                 if | printAtVerbosity verb evt -> do
                        if isTerm
                          then PPRT.renderIO hdl (terminalFormatEvent evt)
@@ -297,7 +300,7 @@ startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile proofConsumer = do
       consumer <- CCA.async consumeLogs
       let logAct = LJ.LogAction $ \evt -> CC.writeChan chan (Just evt)
       let shutdown = CC.writeChan chan Nothing
-      return (logAct, [(consumer, shutdown)])
+      return (logAct, [(CCA.wait consumer, shutdown)])
 
 parseSources :: IS.SourcePair FilePath -> IO (Maybe (IS.SourcePair LC.CTranslUnit))
 parseSources (IS.SourcePair os ps) = do

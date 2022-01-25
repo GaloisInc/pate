@@ -25,17 +25,13 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Sequence as Seq
-import qualified Data.Text as DT
 import qualified Foreign.JavaScript as FJ
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
 import qualified Graphics.UI.Threepenny as TP
 import           System.FilePath ( (</>) )
 import qualified System.IO as IO
 import qualified System.IO.Temp as SIT
-import qualified What4.Expr as WE
-import qualified What4.Interface as WI
 
-import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Event as PE
@@ -114,10 +110,6 @@ consumeEvents chan r0 verb = do
                                                        )
         PE.ProvenGoal {} ->
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.ProofTraceEvent _stk origAddr _patchedAddr msg _tm -> do
-          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & traceEvents %~ addTraceEventMessage origAddr msg, ())
-        PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr sym expr _tm -> do
-          IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & traceEvents %~ addTraceEventFormula origAddr sym expr, ())
         _ -> return ()
 
       -- Collect any metrics that we can from the event stream
@@ -127,29 +119,11 @@ consumeEvents chan r0 verb = do
       stateChangeEmitter r0 ()
       consumeEvents chan r0 verb
 
-addTraceEventFormula
-  :: (sym ~ WE.ExprBuilder t st fs)
-  => PA.ConcreteAddress arch
-  -> sym
-  -> WI.SymExpr sym tp
-  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
-  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
-addTraceEventFormula origAddr sym expr =
-  Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton (TraceFormula sym expr))
-
-addTraceEventMessage
-  :: PA.ConcreteAddress arch
-  -> DT.Text
-  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
-  -> Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
-addTraceEventMessage origAddr msg =
-  Map.insertWith (\new old -> old <> new) origAddr (Seq.singleton (TraceText msg))
-
 recentEventCount :: Int
 recentEventCount = 20
 
-addRecent :: Int -> a -> [a] -> [a]
-addRecent n elt elts = elt : take (n - 1) elts
+addRecent :: Int -> a -> Seq.Seq a -> Seq.Seq a
+addRecent n elt elts = elt Seq.<| Seq.take (n - 1) elts
 
 -- | Start a persistent interface for the user to inspect data coming out of the
 -- verifier

@@ -6,6 +6,7 @@ module Pate.Interactive.Render.Console (
 import           Control.Lens ( (^.) )
 import           Control.Monad ( void )
 import           Control.Monad.IO.Class ( liftIO )
+import qualified Data.Foldable as F
 import qualified Data.IORef as IOR
 import           Data.Parameterized.Some ( Some(..) )
 import           Graphics.UI.Threepenny ( (#), (#+), (#.) )
@@ -128,4 +129,4 @@ renderConsole :: (PA.ValidArch arch)
               -> TP.UI TP.Element
 renderConsole r detailDiv = do
   state <- liftIO $ IOR.readIORef (IS.stateRef r)
-  TP.ul #+ (map (\evt -> TP.li #+ [renderEvent state detailDiv evt]) (reverse (state ^. IS.recentEvents)))
+  TP.ul #+ (map (\evt -> TP.li #+ [renderEvent state detailDiv evt]) (reverse (F.toList (state ^. IS.recentEvents))))

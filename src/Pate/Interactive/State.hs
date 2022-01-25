@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TemplateHaskell #-}
 module Pate.Interactive.State (
@@ -55,15 +56,15 @@ data SourcePair f = SourcePair { originalSource :: f
                   deriving (Eq, Ord, Read, Show)
 
 data EquivalenceTest arch where
-  EquivalenceTest :: PE.BlocksPair arch -> TM.NominalDiffTime -> EquivalenceTest arch
+  EquivalenceTest :: !(PE.BlocksPair arch) -> TM.NominalDiffTime -> EquivalenceTest arch
 
 data Failure arch where
-  Failure :: PFI.InequivalenceResult arch -> EquivalenceTest arch -> Failure arch
+  Failure :: !(PFI.InequivalenceResult arch) -> !(EquivalenceTest arch) -> Failure arch
 
 data ProofTreeNode arch prf tp where
-  ProofTreeNode :: PE.BlocksPair arch
-                -> PPr.ProofNonceExpr prf tp
-                -> TM.NominalDiffTime
+  ProofTreeNode :: !(PE.BlocksPair arch)
+                -> !(PPr.ProofNonceExpr prf tp)
+                -> !TM.NominalDiffTime
                 -> ProofTreeNode arch prf tp
 
 data ProofTree arch where
@@ -71,8 +72,8 @@ data ProofTree arch where
                , WI.IsSymExprBuilder sym
                )
             => PS.Sym sym
-            -> MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf)
-            -> Map.Map Int (Some (ProofTreeNode arch prf))
+            -> !(MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf))
+            -> !(Map.Map Int (Some (ProofTreeNode arch prf)))
             -> ProofTree arch
 
 -- | Trace events that can be generated for debugging purposes
@@ -89,10 +90,10 @@ data TraceEvent where
 -- The maps are keyed on the address of the original block being checked (that
 -- choice is arbitrary and doesn't matter much)
 data State arch =
-  State { _successful :: Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch)
-        , _indeterminate :: Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch)
-        , _failure :: Map.Map (PA.ConcreteAddress arch) (Failure arch)
-        , _recentEvents :: [PE.Event arch]
+  State { _successful :: !(Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch))
+        , _indeterminate :: !(Map.Map (PA.ConcreteAddress arch) (EquivalenceTest arch))
+        , _failure :: !(Map.Map (PA.ConcreteAddress arch) (Failure arch))
+        , _recentEvents :: !(Seq.Seq (PE.Event arch))
         -- ^ The N most recent events (most recent first), to be shown in the console
         , _originalBinary :: Maybe (PLE.LoadedELF arch)
         , _patchedBinary :: Maybe (PLE.LoadedELF arch)
@@ -104,9 +105,9 @@ data State arch =
         --
         -- This is only updated at the user's direction so that they don't lose
         -- their place as new data streams in
-        , _metrics :: PM.Metrics
+        , _metrics :: !PM.Metrics
         -- ^ Aggregated metrics for display
-        , _traceEvents :: Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent)
+        , _traceEvents :: !(Map.Map (PA.ConcreteAddress arch) (Seq.Seq TraceEvent))
         -- ^ Debug trace events indexed by original (super-)block address
         }
 
@@ -121,7 +122,7 @@ addProofTreeNode
 addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PS.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
   case mpt of
     Nothing ->
-      let proofNode = ProofTreeNode blockPair expr tm
+      let !proofNode = ProofTreeNode blockPair expr tm
       in Just (ProofTree oldSym
                          (MapF.singleton enonce proofNode)
                          (Map.singleton (asInt enonce) (Some proofNode)))
@@ -144,7 +145,7 @@ emptyState :: Maybe (SourcePair LC.CTranslUnit) -> State arch
 emptyState ms = State { _successful = Map.empty
                       , _indeterminate = Map.empty
                       , _failure = Map.empty
-                      , _recentEvents = []
+                      , _recentEvents = mempty
                       , _originalBinary = Nothing
                       , _patchedBinary = Nothing
                       , _sources = ms
