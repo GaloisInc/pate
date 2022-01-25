@@ -3,7 +3,7 @@ cabal-version:       2.2
 --  further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                pate
-version:             0.1.0.0
+version:             0.5.0
 synopsis:            A tool for building assurance for patches applied to binaries
 -- description:
 -- bug-reports:
