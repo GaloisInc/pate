@@ -1,0 +1,29 @@
+\section{Inlining Calls}\label{sec:inlining}
+
+If the compositional equivalence proof method described in \cref{sec:equivalence} cannot provide a useful diagnostic of a patch, \TOOL{} supports \emph{symbolic call inlining} as an alternative proof method that can be used to isolate larger binary differences and reason about them in a structured way. %
+Examples of scenarios where this feature are useful include: %
+\begin{itemize}
+\item If the behavior of the program has changed \emph{unconditionally} (i.e., it always has different behavior in the patched binary); in this case, there is no sensible differential summary (besides \lstinline{true})
+\item As an example of that, consider replacing one function with another that has different behavior, but ``acceptable'' behavioral differences
+\item If precise reasoning about looping (but symbolically terminating) code is required
+\item If substantial code changes make one-to-one code alignment between the original and patched binaries impossible
+\end{itemize}
+
+The result of using this feature is a summary of the difference in memory post-states after the two equated functions return to their callers. %
+This information enables analysts using \TOOL{} to determine whether or not their patches have unintended affects on the memory of the program that may impact functionality. %
+
+To enable this feature for corresponding regions of code in the original and patched binaries (available at the function level), see the \lstinline{--blockinfo} option and the file format described in \cref{sec:options:block-info}. %
+Inlining calls enables \TOOL{} to reason about a larger scope within the input programs, which can improve precision compared to the compositional verification approach. %
+It also enables more precise reasoning about loops. %
+The tradeoff for using this feature is that it can be less scalable, depending on the nature of the code being inlined. %
+We refer to it as \emph{call inlining} because an entire sub-tree of the call graph is ``inlined'' into a single node within the compositional equivalence proof. %
+
+As a general guideline, when using this feature, the functions that should be ``equated'' using the \lstinline{equatedFunctions} configuration option should be parents (formally, graph dominators) of all of the code that has been patched. %
+Compared to the compositional proof, the inlined equated callees are:
+\begin{enumerate}
+\item Initialized with identical symbolic states
+\item Each symbolically executed independently
+\end{enumerate}
+After symbolic execution, \TOOL{} attempts to prove that every byte in their memory post-states always has the same value. %
+Any bytes that cannot be proven to be equal are summarized in different ranges of addresses and reported to the user. %
+As an optimization, \TOOL{} only attempts to prove that addresses that have been written to during symbolic execution are equal. %

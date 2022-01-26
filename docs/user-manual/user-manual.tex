@@ -1,0 +1,45 @@
+\documentclass{article}
+
+\usepackage{acronym}
+\usepackage{listings}
+\usepackage{color}
+\usepackage{paralist}
+\usepackage[inline]{enumitem}
+\usepackage[bookmarks]{hyperref}
+\usepackage{bookmark}
+\usepackage[capitalise,noabbrev]{cleveref}
+\usepackage{hypernat}
+\usepackage{url}
+
+\lstset{basicstyle=\ttfamily}
+
+\setitemize{noitemsep,topsep=0pt,parsep=0pt,partopsep=0pt}
+\setenumerate{noitemsep,topsep=0pt,parsep=0pt,partopsep=0pt}
+\setdescription{noitemsep,topsep=0pt,parsep=0pt,partopsep=0pt}
+
+\newcommand{\TOOL}{\texttt{pate}}
+
+\acrodef{DSL}{domain-specific language}
+\acrodef{VM}{virtual machine}
+\acrodef{SMT}{Satisfiability Modulo Theories}
+\acrodef{IR}{intermediate representation}
+
+\title{\TOOL{} User Manual (Version 0.5)}
+\author{Galois (\href{mailto:pate-darpa-amp@galois.com}{pate-darpa-amp@galois.com})}
+
+\begin{document}
+\vspace*{-3cm}
+{\let\newpage\relax\maketitle}
+
+\input{1-frontmatter}
+\tableofcontents
+\newpage
+
+\acresetall
+
+\input{2-introduction}
+\input{3-options}
+\input{4-equivalence}
+\input{5-inlining}
+
+\end{document}

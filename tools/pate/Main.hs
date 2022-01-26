@@ -78,8 +78,8 @@ parseHints
   -> CLIOptions
   -> IO (PH.VerificationHints, PH.VerificationHints)
 parseHints logAction opts = do
-  oHints <- parseOne (originalBinary opts) (originalAnvillHints opts) (originalProbabilisticHints opts) (originalCsvFunctionHints opts) (dwarfHints opts)
-  pHints <- parseOne (patchedBinary opts) (patchedAnvillHints opts) (patchedProbabilisticHints opts) (patchedCsvFunctionHints opts) (dwarfHints opts)
+  oHints <- parseOne (originalBinary opts) (originalAnvillHints opts) (originalProbabilisticHints opts) (originalCsvFunctionHints opts) (not (noDwarfHints opts))
+  pHints <- parseOne (patchedBinary opts) (patchedAnvillHints opts) (patchedProbabilisticHints opts) (patchedCsvFunctionHints opts) (not (noDwarfHints opts))
   return (oHints, pHints)
   where
     parseOne binPath anvillDir mprobFile mcsvFile useDwarf = do
@@ -202,7 +202,7 @@ data CLIOptions = CLIOptions
   , patchedProbabilisticHints :: Maybe FilePath
   , originalCsvFunctionHints :: Maybe FilePath
   , patchedCsvFunctionHints :: Maybe FilePath
-  , dwarfHints :: Bool
+  , noDwarfHints :: Bool
   , verbosity :: PV.Verbosity
   , saveMacawCFGs :: Maybe FilePath
   , solverInteractionFile :: Maybe FilePath
@@ -559,8 +559,8 @@ cliOptions = OA.info (OA.helper <*> parser)
         ( OA.long "patched-csv-function-hints"
          <> OA.help "Parse a CSV file containing function name/address hints"
         ))
-    <*> OA.switch ( OA.long "dwarf-hints"
-                  <> OA.help "Extract hints from the unpatched DWARF binary"
+    <*> OA.switch ( OA.long "no-dwarf-hints"
+                  <> OA.help "Do not extract metadata from the DWARF information in the binaries"
                   )
     <*> OA.option OA.auto ( OA.long "verbosity"
                           <> OA.short 'V'

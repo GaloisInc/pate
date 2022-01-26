@@ -1,0 +1,99 @@
+\section{Introduction}\label{sec:introduction}
+
+The \TOOL{} verifier is a static relation verifier for binaries that builds assurance that micropatches have not had any adverse effects. %
+\TOOL{} is a static relational verifier that attempts to prove that two binaries have the same observable behaviors. %
+When it cannot, \TOOL{} provides detailed explanations that precisely characterize the difference in behavior between the two binaries. %
+\TOOL{} is intended to be usable by \emph{domain experts}, rather than verification experts, and its explanations are designed to be in domain terms as much as possible. %
+After applying a micropatch to a binary, domain experts can apply \TOOL{} to ensure that the effects are intended. %
+
+Note that while \TOOL{} attempts to prove that the original and patched binaries have the same observable behaviors under all possible inputs, it is expected that they do not (or the patch would have had no effect). %
+When the two binaries can exhibit different behaviors, \TOOL{} can give the user either: %
+\begin{itemize}
+\item a \emph{differential summary} (\cref{sec:equivalence}) that explains the conditions under which the two binaries exhibit different behaviors, or
+\item a \emph{memory differential} (\cref{sec:inlining}) that explains how memory values will differ at binary locations with different behaviors.
+\end{itemize}
+
+\subsection{Quick Start}\label{sec:quick-start}
+
+The \TOOL{} verifier is a command line tool, but provides an optional web UI\@. %
+A typical use looks like: %
+
+\begin{lstlisting}
+BINDIR=/path/to/binaries
+pate --original $BINDIR/original.exe \
+     --patched $BINDIR/patched.exe \
+     --interactive --port 5000 \
+     --proof-summary-json report.json
+\end{lstlisting}
+
+This command runs the verifier on \lstinline{original.exe} and \lstinline{patched.exe} and generates a JSON report describing any differences between the two. %
+It also starts up a local webserver on port 5000 that enables the user to interactive examine the proof that the verifier constructs. %
+\Crefrange{sec:equivalence}{sec:inlining} explain the exact properties verified by \TOOL{}, along with the semantics of the summaries they report. %
+
+\subsection{Building \TOOL{}}
+
+The \TOOL{} verifier can be built through either Docker or from source; this section includes instructions for both. %
+
+\subsubsection{Docker}
+
+\paragraph{Using a Pre-Built Docker Image} %
+If you have a pre-built Docker image, it can be loaded as follows:
+
+\begin{lstlisting}
+# Assuming that the distributed Docker image file is pate.tar
+docker load < pate.tar
+\end{lstlisting}
+
+\paragraph{Building the Docker Image} %
+To build the Docker image from scratch, use the following commands:
+
+\begin{lstlisting}
+git clone git@github.com:GaloisInc/pate.git
+cd pate
+git submodule update --init
+docker build . -t pate
+\end{lstlisting}
+
+\paragraph{Using the Docker Image} %
+To run \TOOL{} from the Docker image, use a command like the following:
+
+\begin{lstlisting}
+docker run --rm -it -v /path/to/binaries:/binaries pate \
+  --original /binaries/original.exe \
+  --patched /binaries/patched.exe \
+  --proof-summary-json /binaries/report.json
+\end{lstlisting}
+
+While the Docker image contains all of the support files necessary to run the verifier, extra arguments are required to make the local filesystem (and the binaries to verify) accessible to the running Docker container. %
+In this example, we can use the \lstinline{-v} option to map a directory on the local filesystem into the Docker container, which both enables the verifier to read the binaries and persist a JSON report outside of the container. %
+
+\subsubsection{Building from Source}
+
+The \TOOL{} verifier is written in the Haskell programming language. %
+Building it requires the GHC compiler\footnote{https://www.haskell.org/ghc/} (versions 8.8 through 9.0) and the Cabal\footnote{https://www.haskell.org/cabal/} build system, both of which can be installed via ghcup\footnote{https://www.haskell.org/ghcup/}. %
+
+\begin{lstlisting}
+ghcup install ghc 8.10.7
+ghcup install cabal 3.6.2.0
+export PATH=$HOME/.ghcup/bin:$PATH
+
+git clone git@github.com:GaloisInc/pate.git
+cd pate
+git submodule update --init
+ln -s cabal.project.dist cabal.project
+cabal configure -w ghc-8.10.7
+cabal build pkg:pate
+
+\end{lstlisting}
+
+Note that running the verifier will require the yices SMT solver\footnote{https://yices.csl.sri.com/} to be in the user's \lstinline{PATH}. %
+The Docker image contains the necessary solvers to run \TOOL{}. %
+
+\subsection{Improving Analysis Results}
+
+If DWARF information is available in either the original or patched binary, \TOOL{} will use that information to improve diagnostics. %
+Currently, function names, function argument names, local variable names, and global variable names can be used to make diagnostics more readable, for example, by replacing synthetic names with their source-level counterparts. %
+If working with binaries that do not come with DWARF debug information natively, see the \lstinline{dwarf-writer}\footnote{https://github.com/immunant/dwarf-writer} tool for a possible approach to adding DWARF debug information. %
+
+Note that recompiling a binary with a source patch applied can work for the purposes of the analysis, but can introduce complexities in cases where the compiler substantially rearranges code in response to the patch (which is common). %
+When the compiler re-arranges code, \TOOL{} has a more difficult time aligning the code in the original and patched binaries, which can lead to confusing or unhelpful diagnostics. %

@@ -1,0 +1,64 @@
+\section{Options}\label{sec:options}
+
+The full list of options supported by \TOOL{} is documented in this section.
+
+\begin{description}[style=nextline]
+  \item[-h,--help]                Show the help text
+  \item[-o,--original EXE]        The path to the original binary on disk
+  \item[-p,--patched EXE]         The path to the patched binary on disk
+  \item[-b,--blockinfo FILENAME]  A file containing additional information for the verifier (see \cref{sec:options:block-info} for details)
+  \item[--proof-summary-json FILE] A file to save important proof results to in JSON format
+  \item[-V,--verbosity ARG]       The verbosity of logging output (default: Info, alternative: Debug)
+  \item[--log-file FILE]          A file to save debug logs to (the verbosity is controlled by the \texttt{--verbosity} flag)
+  \item[-i,--interactive]         Start a web server providing an interactive view of results
+  \item[-p,--port PORT]           The port to run the interactive visualizer web server on (default: 5000)
+  \item[--original-source FILE]   The source file for the original program (for visualization in the interactive UI)
+  \item[--patched-source FILE]    The source file for the patched program (for visualization in the interactive UI)
+  \item[-m,--ignoremain]          Don't add the main entry points to the set of function equivalence checks
+  \item[--solver ARG]             The SMT solver to use to solve verification conditions. One of CVC4, Yices, or (default: Yices)
+  \item[--goal-timeout ARG]       The timeout for verifying individual goals in seconds (default: 300)
+  \item[--heuristic-timeout ARG]  The timeout for verifying heuristic goals in seconds (default: 10)
+  \item[--no-dwarf-hints]         Do not use DWARF debug information in the original and patched binaries to improve diagnostics
+  \item[--save-macaw-cfgs DIR]    Save intermediate code discovery results (as printed CFGs) to the provided directory (for debugging purposes)
+  \item[--solver-interaction-file FILE] Save interactions with the SMT solver during symbolic execution to this file (for debugging purposes)
+\end{description}
+
+\subsection{Block Info Format}\label{sec:options:block-info}
+
+The \texttt{--blockinfo=FILE} argument enables users to provide extra information to the verifier to improve its results.  The file it requires has the following format:
+
+\begin{lstlisting}
+  PatchData { patchPairs = [(origEntryAddr, patchedEntryAddr)]
+            , ignoredPointers = ([(origDataAddr, origDataSize)]
+                               , [(patchedDataAddr, patchedDataSize)]
+                               )
+            , equatedFunctions = [(inlineOrigAddr, inlinePatchedAddr)]
+            }
+\end{lstlisting}
+
+where the values on the right-hand sides of the assignments are concrete values to be filled in.  Each field has the following meaning:
+
+\begin{description}[style=nextline]
+\item[\texttt{patchPairs}] A list of pairs of addresses. Each pair of addresses specifies function addresses in the original and patched binaries, respectively, that the user asserts to be equivalent. The first entry is used as the program entry point if the user has specified the \texttt{--ignoremain} option.  Otherwise, the analysis will start from the program entry points declared in the ELF header.
+\item[\texttt{ignoredPointers}] Together with the \texttt{equatedFunctions} field, this enables the inline callee functionality described in \cref{sec:inlining}. The elements of the pair are lists of memory regions whose contents should be ignored while verifying equivalence of two programs (specifically under the scope of a pair of equated functions). The first element of the pair are ignored memory regions for the original binary, while the second element are ignored memory regions for the patched binary. Precisely, each location specification is of the form \emph{(dataAddr, dataSize)}, where the \emph{dataAddr} is the address of a pointer that points to \emph{dataSize} bytes of memory. This is an important subtlety: it really refers to the address of a pointer, and the buffer referred to is the buffer at the address pointed to. This enables the inline callee feature to refer to dynamically allocated memory that does not have a fixed global memory location.
+\item[\texttt{equatedFunctions}] A list of pairs of function addresses that are intended to be equivalent for the purposes of the inline callee feature.
+\end{description}
+
+% \subsection{Logging Output}\label{sec:options:logging-output}
+
+\subsection{Interactive UI}\label{sec:options:interaction}
+
+\TOOL{} provides an interactive UI for monitoring proof progress and for exploring proof results.  To enable it, pass the \texttt{--interactive} flag (optionally using the \texttt{--port} flag to control the port that the web server will listen on).  Visiting \texttt{localhost} on the specified port will bring up the interactive UI, which serves two purposes:
+
+\begin{enumerate}
+\item Streaming analysis events into a virtual console in the browser window
+\item Taking snapshots of the automatically generated equivalence proof, enabling exploration of the proof goals and the results of attempting to prove them
+\end{enumerate}
+
+The interactive view enables visualization of the proof graph, which mirrors the call graph of the program. Clicking on any node in the proof graph displays detailed information about the corresponding code, as well as the proof obligations at that location. If source code is provided with the \texttt{--original-source} and \texttt{--patched-source} options, function source code will be shown for each node in the proof graph.
+
+\subsection{Debugging Options}
+
+There are a number of options useful for debugging the \TOOL{} verifier. The \texttt{--save-macaw-cfgs} option enables users to save intermediate artifacts from code discovery for later inspection. This is most useful for identifying code discovery failures, unsupported instructions, incorrect semantics, or control flow within functions.
+
+The \texttt{--solver-interaction-file} option enables users to save the interactions between the \TOOL{} verifier and the SMT solver. This can be useful for diagnosing slow queries or SMT solver bugs (e.g., invalid models). The recorded interaction session can be replayed by simply running the SMT solver directly on it. It also records SMT solver responses (e.g., models from counterexamples).
