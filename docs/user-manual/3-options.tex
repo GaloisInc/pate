@@ -18,7 +18,7 @@ The full list of options supported by \TOOL{} is documented in this section.
   \item[--solver ARG]             The SMT solver to use to solve verification conditions. One of CVC4, Yices, or (default: Yices)
   \item[--goal-timeout ARG]       The timeout for verifying individual goals in seconds (default: 300)
   \item[--heuristic-timeout ARG]  The timeout for verifying heuristic goals in seconds (default: 10)
-  \item[--dwarf-hints]            Use DWARF debug information in the original and patched binaries to improve diagnostics
+  \item[--no-dwarf-hints]         Do not use DWARF debug information in the original and patched binaries to improve diagnostics
   \item[--save-macaw-cfgs DIR]    Save intermediate code discovery results (as printed CFGs) to the provided directory (for debugging purposes)
   \item[--solver-interaction-file FILE] Save interactions with the SMT solver during symbolic execution to this file (for debugging purposes)
 \end{description}
