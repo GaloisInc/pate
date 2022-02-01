@@ -19,6 +19,7 @@ import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified What4.BaseTypes as WT
+import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as WEG
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
@@ -54,22 +55,23 @@ concreteInteger = Concretize WT.BaseIntegerRepr WI.asInteger toBlocking injectSy
 -- it. Otherwise, return the original symbolic value
 resolveSingletonSymbolicAs
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , HasCallStack
      )
   => Concretize sym tp
   -- ^ The strategy for concretizing the type
-  -> sym
+  -> LCBO.OnlineBackend solver scope st fs
   -- ^ The symbolic backend
   -> WI.SymExpr sym tp
   -- ^ The symbolic term to concretize
   -> IO (WI.SymExpr sym tp)
-resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic) sym val =
+resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic) bak val =
+  let sym = LCB.backendGetSym bak in
   case asConcrete val of
     Just _ -> return val
     Nothing -> do
-      LCBO.withSolverProcess sym onlinePanic $ \sp -> do
+      LCBO.withSolverProcess bak onlinePanic $ \sp -> do
         val' <- WPO.inNewFrame sp $ do
           msat <- WPO.checkAndGetModel sp "Concretize value (with no assumptions)"
           mmodel <- case msat of
@@ -97,17 +99,18 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
 -- neither) could be updated
 resolveSingletonPointer
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , 1 <= w
      , HasCallStack
      )
-  => sym
+  => LCBO.OnlineBackend solver scope st fs
   -- ^ The symbolic backend
   -> LCLM.LLVMPtr sym w
   -- ^ The symbolic term to concretize
   -> IO (LCLM.LLVMPtr sym w)
-resolveSingletonPointer sym ptr@(LCLM.LLVMPointer base off) = do
-  base' <- WI.integerToNat sym =<< resolveSingletonSymbolicAs concreteInteger sym =<< WI.natToInteger sym base
-  off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) sym off
+resolveSingletonPointer bak ptr@(LCLM.LLVMPointer base off) = do
+  let sym = LCB.backendGetSym bak
+  base' <- WI.integerToNat sym =<< resolveSingletonSymbolicAs concreteInteger bak =<< WI.natToInteger sym base
+  off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) bak off
   return (LCLM.LLVMPointer base' off')

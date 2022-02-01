@@ -81,12 +81,12 @@ isTerminalBlock pb = case MD.pblockTermStmt pb of
 -- and call- free.
 initSimContext ::
   EquivM sym arch (CS.SimContext (MS.MacawSimulatorState sym) sym (MS.MacawExt arch))
-initSimContext = withValid $ withSym $ \sym -> do
+initSimContext = withValid $ withBackend $ \bak -> do
   exts <- CMR.asks envExtensions
   ha <- CMR.asks (PMC.handles . envCtx)
   return $
     CS.initSimContext
-    sym
+    bak
     PMT.memTraceIntrinsicTypes
     ha
     IO.stderr

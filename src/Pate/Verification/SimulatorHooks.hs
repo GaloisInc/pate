@@ -29,6 +29,7 @@ import qualified Data.Traversable as T
 import qualified Data.Vector as V
 import           GHC.Stack ( HasCallStack )
 import qualified What4.BaseTypes as WT
+import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
 import qualified What4.Symbol as WS
@@ -147,13 +148,13 @@ memValToCrucible memRep val =
     unexpectedMemVal = Left "Unexpected value read from memory"
 
 tryGlobPtr
-  :: (LCB.IsSymInterface sym)
-  => sym
+  :: (LCB.IsSymBackend sym bak)
+  => bak
   -> LCS.RegValue sym LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem w
   -> LCLM.LLVMPtr sym w
   -> IO (LCLM.LLVMPtr sym w)
-tryGlobPtr sym mem mapBVAddress val@(LCLM.LLVMPointer base offset)
+tryGlobPtr bak mem mapBVAddress val@(LCLM.LLVMPointer base offset)
   | Just blockId <- WI.asNat base
   , blockId /= 0 = do
       -- If we know that the blockId is concretely not zero, the pointer is
@@ -165,12 +166,12 @@ tryGlobPtr sym mem mapBVAddress val@(LCLM.LLVMPointer base offset)
       --
       -- Otherwise, the blockId is symbolic and we need to create a mux that
       -- conditionally performs the translation.
-      mapBVAddress sym mem base offset
+      DMS.applyGlobalMap mapBVAddress bak mem base offset
 
 
 concretizingWrite
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth ptrW
      , LCLM.HasLLVMAnn sym
@@ -179,9 +180,9 @@ concretizingWrite
      )
   => LCS.GlobalVar LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem ptrW
-  -> sym
-  -> LCS.CrucibleState (DMS.MacawSimulatorState (LCBO.OnlineBackend scope solver fs))
-                       (LCBO.OnlineBackend scope solver fs)
+  -> LCBO.OnlineBackend solver scope st fs
+  -> LCS.CrucibleState (DMS.MacawSimulatorState sym)
+                       sym
                        (DMS.MacawExt arch)
                        rtp
                        blocks
@@ -191,26 +192,26 @@ concretizingWrite
   -> DMC.MemRepr ty
   -> LCS.RegEntry sym (LCLM.LLVMPointerType ptrW)
   -> LCS.RegEntry sym (DMS.ToCrucibleType ty)
-  -> IO ((), LCS.CrucibleState (DMS.MacawSimulatorState (LCBO.OnlineBackend scope solver fs))
-                               (LCBO.OnlineBackend scope solver fs)
+  -> IO ((), LCS.CrucibleState (DMS.MacawSimulatorState sym)
+                               sym
                                (DMS.MacawExt arch)
                                rtp
                                blocks
                                r
                                ctx)
-concretizingWrite memVar globs sym crucState _addrWidth memRep (LCS.regValue -> ptr) (LCS.regValue -> value) = do
+concretizingWrite memVar globs bak crucState _addrWidth memRep (LCS.regValue -> ptr) (LCS.regValue -> value) = do
   mem <- getMem crucState memVar
   -- Attempt to concretize the pointer we are writing to, so that we can minimize symbolic writes
-  ptr' <- tryGlobPtr sym mem globs ptr
-  ptr'' <- PVC.resolveSingletonPointer sym ptr'
+  ptr' <- tryGlobPtr bak mem globs ptr
+  ptr'' <- PVC.resolveSingletonPointer bak ptr'
   ty <- memReprToStorageType memRep
   let memVal = resolveMemVal memRep ty value
-  mem' <- LCLM.storeRaw sym mem ptr'' ty LCLD.noAlignment memVal
+  mem' <- LCLM.storeRaw bak mem ptr'' ty LCLD.noAlignment memVal
   return ((), setMem crucState memVar mem')
 
 concretizingRead
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth ptrW
      , ptrW ~ DMC.ArchAddrWidth arch
@@ -220,9 +221,9 @@ concretizingRead
      )
   => LCS.GlobalVar LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem ptrW
-  -> sym
-  -> LCS.CrucibleState (DMS.MacawSimulatorState (LCBO.OnlineBackend scope solver fs))
-                       (LCBO.OnlineBackend scope solver fs)
+  -> LCBO.OnlineBackend solver scope st fs
+  -> LCS.CrucibleState (DMS.MacawSimulatorState sym)
+                       sym
                        (DMS.MacawExt arch)
                        rtp
                        blocks
@@ -232,16 +233,17 @@ concretizingRead
   -> DMC.MemRepr ty
   -> LCS.RegEntry sym (LCLM.LLVMPointerType ptrW)
   -> IO (LCS.RegValue sym (DMS.ToCrucibleType ty))
-concretizingRead memVar globs sym crucState _addrWidth memRep (LCS.regValue -> ptr) = do
+concretizingRead memVar globs bak crucState _addrWidth memRep (LCS.regValue -> ptr) = do
+  let sym = LCB.backendGetSym bak
   mem <- getMem crucState memVar
   -- Attempt to concretize the pointer we are reading from, avoiding a symbolic
   -- read if possible
-  ptr' <- tryGlobPtr sym mem globs ptr
-  ptr''@(LCLM.LLVMPointer _ off) <- PVC.resolveSingletonPointer sym ptr'
+  ptr' <- tryGlobPtr bak mem globs ptr
+  ptr''@(LCLM.LLVMPointer _ off) <- PVC.resolveSingletonPointer bak ptr'
   case WI.asBV off of
     Just _ -> do
       ty <- memReprToStorageType memRep
-      res <- LCLM.assertSafe sym =<< LCLM.loadRaw sym mem ptr'' ty LCLD.noAlignment
+      res <- LCLM.assertSafe bak =<< LCLM.loadRaw sym mem ptr'' ty LCLD.noAlignment
       case memValToCrucible memRep res of
         Left err -> PP.panic PP.InlineCallee "concretizingRead" [err]
         Right crucVal -> return crucVal
@@ -261,7 +263,7 @@ concretizingRead memVar globs sym crucState _addrWidth memRep (LCS.regValue -> p
 
 statementWrapper
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth (DMC.ArchAddrWidth arch)
      , LCLM.HasLLVMAnn sym
@@ -270,15 +272,16 @@ statementWrapper
      )
   => LCS.GlobalVar LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem (DMC.ArchAddrWidth arch)
-  -> sym
+  -> LCBO.OnlineBackend solver scope st fs
   -> LCS.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
   -> DMSB.MacawEvalStmtFunc (DMS.MacawStmtExtension arch) (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
-statementWrapper mvar globs sym baseExt stmt crucState =
+statementWrapper mvar globs bak baseExt stmt crucState =
+  let sym = LCB.backendGetSym bak in
   case stmt of
     DMS.MacawWriteMem addrWidth memRep ptr value ->
-      concretizingWrite mvar globs sym crucState addrWidth memRep ptr value
+      concretizingWrite mvar globs bak crucState addrWidth memRep ptr value
     DMS.MacawReadMem addrWidth memRep ptr ->
-      (, crucState) <$> concretizingRead mvar globs sym crucState addrWidth memRep ptr
+      (, crucState) <$> concretizingRead mvar globs bak crucState addrWidth memRep ptr
     DMS.PtrMux _w (LCS.regValue -> c) (LCS.regValue -> x) (LCS.regValue -> y) -> do
       -- The macaw-symbolic version of this operator adds a number of safety
       -- checks to try to decide early if the input pointers are valid.  This
@@ -295,13 +298,13 @@ statementWrapper mvar globs sym baseExt stmt crucState =
 -- pate verifier to scale
 hookedMacawExtensions
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasLLVMAnn sym
      , LCLM.HasPtrWidth (DMC.ArchAddrWidth arch)
      , ?memOpts :: LCLM.MemOptions
      )
-  => sym
+  => LCBO.OnlineBackend solver scope st fs
   -- ^ The (online) symbolic backend
   -> DMS.MacawArchEvalFn sym LCLM.Mem arch
   -- ^ A set of interpretations for architecture-specific functions
@@ -319,7 +322,7 @@ hookedMacawExtensions
   -> DMS.MkGlobalPointerValidityAssertion sym (DMC.ArchAddrWidth arch)
   -- ^ A function to make memory validity predicates (see 'MkGlobalPointerValidityAssertion' for details)
   -> LCS.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
-hookedMacawExtensions sym f mvar globs lookupH lookupSyscall toMemPred =
-  baseExtension { LCS.extensionExec = statementWrapper mvar globs sym baseExtension }
+hookedMacawExtensions bak f mvar globs lookupH lookupSyscall toMemPred =
+  baseExtension { LCS.extensionExec = statementWrapper mvar globs bak baseExtension }
   where
     baseExtension = DMS.macawExtensions f mvar globs lookupH lookupSyscall toMemPred

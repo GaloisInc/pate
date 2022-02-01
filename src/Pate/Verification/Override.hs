@@ -17,9 +17,12 @@ import qualified What4.FunctionName as WF
 import qualified Data.Macaw.Symbolic as DMS
 
 import qualified Lang.Crucible.Backend as LCB
+import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Types as LCT
+import qualified What4.Expr as WE
+import qualified What4.Protocol.Online as WPO
 
 import qualified Pate.Panic as PP
 
@@ -30,9 +33,9 @@ data Override sym args ext ret =
   Override { functionName :: WF.FunctionName
            , functionArgsRepr :: Ctx.Assignment LCT.TypeRepr args
            , functionRetRepr :: LCT.TypeRepr ret
-           , functionOverride :: forall rtp args' ret' p
-                               . (LCB.IsSymInterface sym)
-                              => sym
+           , functionOverride :: forall solver scope st fs rtp args' ret' p
+                               . (LCB.IsSymInterface sym, WPO.OnlineSolver solver, sym ~ WE.ExprBuilder scope st fs)
+                              => LCBO.OnlineBackend solver scope st fs
                               -> Ctx.Assignment (LCS.RegEntry sym) args
                               -> LCS.OverrideSim p sym ext rtp args' ret' (LCS.RegValue sym ret)
            }
