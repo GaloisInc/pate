@@ -29,6 +29,7 @@ module Pate.Monad
   , withValidEnv
   , withSymIO
   , withSym
+  , withBackend
   , archFuns
   , runInIO1
   , withSymBackendLock
@@ -105,6 +106,7 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
+import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
@@ -112,6 +114,8 @@ import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 
+
+import qualified What4.Expr as WE
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
@@ -280,18 +284,25 @@ withSymSolver ::
   (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
   EquivM sym arch a
 withSymSolver f = withValid $ do
-  PSo.Sym _ sym adapter <- CMR.asks envValidSym
-  f sym adapter
+  PSo.Sym _ bak adapter <- CMR.asks envValidSym
+  f (LCB.backendGetSym bak) adapter
+
+withBackend ::
+  (forall solver scope st fm.
+    (sym ~ WE.ExprBuilder scope st (W4B.Flags fm), WPO.OnlineSolver solver) =>
+    LCBO.OnlineBackend solver scope st (W4B.Flags fm) -> EquivM sym arch a) ->
+  EquivM sym arch a
+withBackend f = withValid $ do
+  PSo.Sym _ bak _ <- CMR.asks envValidSym
+  f bak
 
 withSym ::
-  (forall scope solver fm . (sym ~ LCBO.OnlineBackend scope solver (W4B.Flags fm), WPO.OnlineSolver solver) => sym -> EquivM sym arch a) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
-withSym f = withValid $ do
-  PSo.Sym _ sym _ <- CMR.asks envValidSym
-  f sym
+withSym f = withBackend (\bak -> f (LCB.backendGetSym bak))
 
 withSymIO :: forall sym arch a.
-  ( sym -> IO a ) ->
+  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> IO a) ->
   EquivM sym arch a
 withSymIO f = withSym (\sym -> liftIO (f sym))
 
@@ -665,9 +676,9 @@ withSymBackendLock k = do
 inNewFrame
   :: EquivM sym arch a
   -> EquivM sym arch a
-inNewFrame k = withSym $ \sym -> do
+inNewFrame k = withBackend $ \bak -> do
   kio <- IO.toIO k
-  liftIO $ LCBO.withSolverProcess sym doPanic $ \sp -> do
+  liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
     WPO.inNewFrame sp kio
   where
     doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]

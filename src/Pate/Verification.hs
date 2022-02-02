@@ -171,15 +171,16 @@ verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
-  PS.withOnlineSolver solver saveInteraction gen $ doVerifyPairs validArch logAction elf elf' vcfg pd gen
+  PS.withOnlineSolver solver saveInteraction gen $
+    doVerifyPairs validArch logAction elf elf' vcfg pd gen
 
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
-  forall arch sym s solver fm .
+  forall arch sym solver scope st fm.
   ( PA.ValidArch arch
-  , sym ~ CBO.OnlineBackend s solver (WE.Flags fm)
-  , WPO.OnlineSolver solver
+  , sym ~ WE.ExprBuilder scope st (WE.Flags fm)
   , CB.IsSymInterface sym
+  , WPO.OnlineSolver solver
   ) =>
   PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
@@ -187,10 +188,11 @@ doVerifyPairs ::
   PH.Hinted (PLE.LoadedELF arch) ->
   PC.VerificationConfig ->
   PC.PatchData ->
-  N.NonceGenerator IO s ->
-  sym ->
+  N.NonceGenerator IO scope ->
+  CBO.OnlineBackend solver scope st (WE.Flags fm) ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen sym = do
+doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen bak = do
+  let sym = CB.backendGetSym bak
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
                                 , MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch) Nothing) of
@@ -269,7 +271,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envBaseEquiv = stateEquivalence hdr sym stackRegion
       , envFailureMode = PME.ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
-      , envValidSym = PS.Sym symNonce sym adapter
+      , envValidSym = PS.Sym symNonce bak adapter
       , envStartTime = startedAt
       , envCurrentFrame = mempty
       , envNonceGenerator = gen
@@ -533,7 +535,7 @@ withSimBundle pPair f = withEmptyAssumptionFrame $ withSym $ \sym -> do
       return (frameAssume asm, r)
 
 trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
-trivialGlobalMap _ _ reg off = pure (CLM.LLVMPointer reg off)
+trivialGlobalMap = MS.GlobalMap $ \_ _ reg off -> pure (CLM.LLVMPointer reg off)
 
 --------------------------------------------------------
 -- Proving equivalence

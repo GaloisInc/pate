@@ -44,6 +44,7 @@ import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Simulator.OverrideSim as LCSO
 import qualified Lang.Crucible.Types as LCT
+import qualified What4.Expr as WE
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as WI
 import qualified What4.ProgramLoc as WP
@@ -149,9 +150,11 @@ concreteBlockFromBVAddr _proxy binRepr mem bv =
 -- to this override (newly-allocated) and updates the crucible state with the
 -- appropriate mapping from handle to override.
 callOverride
-  :: forall arch sym p r f a ret args
-   . (LCB.IsSymInterface sym, HasCallStack)
-  => LCS.SimState p sym (DMS.MacawExt arch) r f a
+  :: forall arch sym solver scope st fs p r f a ret args
+   . (LCB.IsSymInterface sym, sym ~ WE.ExprBuilder scope st fs
+     , WPO.OnlineSolver solver, HasCallStack)
+  => LCBO.OnlineBackend solver scope st fs
+  -> LCS.SimState p sym (DMS.MacawExt arch) r f a
   -- ^ The crucible state at the call site
   -> LCT.TypeRepr (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
   -- ^ The type of the register file
@@ -163,8 +166,7 @@ callOverride
                        (LCT.StructType (DMS.CtxToCrucibleType (DMS.ArchRegContext arch)))
         , LCS.SimState p sym (DMS.MacawExt arch) r f a
         )
-callOverride crucState regsRepr argMap ov = do
-  let sym = crucState ^. LCS.stateContext . LCS.ctxSymInterface
+callOverride bak crucState regsRepr argMap ov = do
   let halloc = crucState ^. LCS.stateContext . L.to LCS.simHandleAllocator
   hdl <- CFH.mkHandle' halloc (PVO.functionName ov) (Ctx.singleton regsRepr) regsRepr
 
@@ -176,7 +178,7 @@ callOverride crucState regsRepr argMap ov = do
         initialMachineArgs <- LCS.getOverrideArgs
         let registerFile = LCS.regMap initialMachineArgs ^. Ctx.field @0
         let projectedActuals = PVO.functionIntegerArgumentRegisters argMap (PVO.functionArgsRepr ov) (LCS.regValue registerFile)
-        let theOverride = PVO.functionOverride ov sym projectedActuals
+        let theOverride = PVO.functionOverride ov bak projectedActuals
         PVO.functionReturnRegister argMap (PVO.functionRetRepr ov) theOverride (LCS.regValue registerFile)
 
   let fnState = LCS.UseOverride wrappedOverride
@@ -254,27 +256,27 @@ decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bvAddr =
 -- incremental code discovery (only binding function handles and doing code
 -- discovery on demand).
 lookupFunction
-  :: forall sym arch bin mem binFmt solver fs scope
+  :: forall sym arch bin mem binFmt solver scope st fs
    . ( PA.ValidArch arch
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , HasCallStack
      )
-  => PVO.ArgumentMapping arch
+  => LCBO.OnlineBackend solver scope st fs
+  -> PVO.ArgumentMapping arch
   -> Map.Map PSym.Symbol (PVO.SomeOverride arch sym)
   -> PSym.SymbolTable arch
   -> PMC.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
   -> MBL.LoadedBinary arch binFmt
   -> DMS.LookupFunctionHandle sym arch
-lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
-  let sym = crucState ^. LCS.stateContext . LCS.ctxSymInterface
+lookupFunction bak argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
   let regsRepr = LCT.StructRepr (DMS.crucArchRegTypes (DMS.archFunctions archVals))
   let regsEntry = LCS.RegEntry regsRepr regs
   let ipPtr = DMS.lookupReg archVals regsEntry DMC.ip_reg
-  ipBV <- LCLM.projectLLVM_bv sym (LCS.regValue ipPtr)
+  ipBV <- LCLM.projectLLVM_bv bak (LCS.regValue ipPtr)
 
   -- Note that the IP could be "slightly" symbolic here. For example, a concrete
   -- function pointer value could be spilled to the stack.  When it is read back
@@ -285,12 +287,12 @@ lookupFunction argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFun
   --
   -- Note that if there are multiple actual values, this will remain a symbolic
   -- term and we will fail (because Crucible cannot yet mux function handles).
-  singletonIP <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV PN.knownNat) sym ipBV
+  singletonIP <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV PN.knownNat) bak ipBV
 
   case WI.asBV singletonIP of
     Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Non-constant target IP for call: " ++ show (WI.printSymExpr singletonIP)]
     Just bv
       | Just calleeSymbol <- PSym.lookupSymbol bv symtab
       , Just (PVO.SomeOverride ov) <- Map.lookup calleeSymbol overrides -> do
-          callOverride crucState regsRepr argMap ov
+          callOverride bak crucState regsRepr argMap ov
       | otherwise -> decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bv

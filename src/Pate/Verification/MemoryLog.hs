@@ -46,6 +46,7 @@ import qualified Data.Sequence as Seq
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
 import qualified What4.BaseTypes as WT
+import qualified What4.Expr as WE
 import qualified What4.Expr.Builder as WEB
 import qualified What4.Interface as WI
 import qualified What4.Protocol.Online as WPO
@@ -151,31 +152,33 @@ filterWrites policy fp =
 -- write operation by querying the SMT solver for models
 concretizeWrites
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , HasCallStack
      )
-  => sym
+  => LCBO.OnlineBackend solver scope st fs
   -> Footprint sym
   -> IO (Footprint sym)
-concretizeWrites sym fp = do
+concretizeWrites bak fp = do
   locs' <- mapM concWrite (fp ^. writtenLocations)
   frees' <- mapM concFree (fp ^. freedAllocations)
   return Footprint { _writtenLocations = locs'
                    , _freedAllocations = frees'
                    }
   where
+    sym = LCB.backendGetSym bak
+
     concFree r =
-      WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger sym =<< WI.natToInteger sym r
+      WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger bak =<< WI.natToInteger sym r
 
     concWrite mw =
       case mw of
         UnboundedWrite ptr -> do
-          ptr' <- PVC.resolveSingletonPointer sym ptr
+          ptr' <- PVC.resolveSingletonPointer bak ptr
           return (UnboundedWrite ptr')
         MemoryWrite rsn w ptr len -> do
-          ptr' <- PVC.resolveSingletonPointer sym ptr
-          len' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) sym len
+          ptr' <- PVC.resolveSingletonPointer bak ptr
+          len' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) bak len
           return (MemoryWrite rsn w ptr' len')
 
 emptyFootprint :: Footprint sym
@@ -203,16 +206,18 @@ addFree bid = freedAllocations %= (<> Seq.singleton bid)
 --
 -- Note that the order of writes has no particular meaning
 memoryOperationFootprint
-  :: forall sym scope solver fs
+  :: forall sym scope solver st fs
    . ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      )
-  => sym
+  => LCBO.OnlineBackend solver scope st fs
   -> LCLM.MemImpl sym
   -> IO (Footprint sym)
-memoryOperationFootprint sym memImpl =
+memoryOperationFootprint bak memImpl =
   CMS.execStateT (traverseWriteLog (memImpl ^. L.to LCLM.memImplHeap . LCLMM.memState)) emptyFootprint
   where
+    sym = LCB.backendGetSym bak
+
     processWrite :: LCLMM.MemWrite sym -> CMS.StateT (Footprint sym) IO ()
     processWrite mw =
       case mw of
@@ -354,22 +359,23 @@ bvWidth _ e =
 -- assume the necessary predicates and compare.
 proveBytesEqual
   :: ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth w
      , HasCallStack
      )
-  => sym
+  => LCBO.OnlineBackend solver scope st fs
   -> Partial.PartLLVMVal sym
   -> Partial.PartLLVMVal sym
   -> IO Bool
 proveBytesEqual _ (Partial.Err _) _ = return False
 proveBytesEqual _ _ (Partial.Err _) = return False
-proveBytesEqual sym (Partial.NoErr p1 v1) (Partial.NoErr p2 v2) =
+proveBytesEqual bak (Partial.NoErr p1 v1) (Partial.NoErr p2 v2) =
+  let sym = LCB.backendGetSym bak in
   case (v1, v2) of
     (LCLM.LLVMValInt _ b1, LCLM.LLVMValInt _ b2)
       | Just PC.Refl <- PC.testEquality (bvWidth sym b1) (bvWidth sym b2) -> do
-          LCBO.withSolverProcess sym doPanic $ \sp -> WPO.inNewFrame sp $ do
+          LCBO.withSolverProcess bak doPanic $ \sp -> WPO.inNewFrame sp $ do
             let conn = WPO.solverConn sp
             WPS.assume conn p1
             WPS.assume conn p2
@@ -386,19 +392,20 @@ proveBytesEqual sym (Partial.NoErr p1 v1) (Partial.NoErr p2 v2) =
     doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]
 
 compareWrite
-  :: forall sym scope solver fs w
+  :: forall sym solver scope st fs w
    . ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth w
      )
   => L.Lens' (WriteSummary sym w) [LCLM.LLVMPtr sym w]
-  -> sym
+  -> LCBO.OnlineBackend solver scope st fs
   -> LCLM.MemImpl sym
   -> LCLM.MemImpl sym
   -> MemoryWrite sym
   -> CMS.StateT (WriteSummary sym w) IO ()
-compareWrite whichHeap sym oMem pMem w =
+compareWrite whichHeap bak oMem pMem w =
+  let sym = LCB.backendGetSym bak in
   case w of
     UnboundedWrite p -> do
       -- There really isn't anything we can say about these, but they will be useful for diagnostics
@@ -420,7 +427,7 @@ compareWrite whichHeap sym oMem pMem w =
                 oVal <- liftIO $ LCLM.loadRaw sym oMem thisPtr byteRep LCLD.noAlignment
                 pVal <- liftIO $ LCLM.loadRaw sym pMem thisPtr byteRep LCLD.noAlignment
 
-                areAlwaysEqual <- liftIO $ proveBytesEqual sym oVal pVal
+                areAlwaysEqual <- liftIO $ proveBytesEqual bak oVal pVal
                 if | areAlwaysEqual -> return ()
                    | WI.asNat (fst (LCLM.llvmPointerView ptr)) == Just 1
                    , Just bvAddr <- WI.asBV (snd (LCLM.llvmPointerView thisPtr)) ->
@@ -434,17 +441,17 @@ compareWrite whichHeap sym oMem pMem w =
 -- for all possible executions.  For each location that does not have the same
 -- value, record it in the 'WriteSummary'.
 compareMemoryTraces
-  :: forall sym scope solver fs w
+  :: forall sym solver scope st fs w
    . ( LCB.IsSymInterface sym
-     , sym ~ LCBO.OnlineBackend scope solver fs
+     , sym ~ WE.ExprBuilder scope st fs
      , WPO.OnlineSolver solver
      , LCLM.HasPtrWidth w
      )
-  => sym
+  => LCBO.OnlineBackend solver scope st fs
   -> (LCLM.MemImpl sym, Footprint sym)
   -> (LCLM.MemImpl sym, Footprint sym)
   -> IO (WriteSummary sym w)
-compareMemoryTraces sym (oMem, oWrites) (pMem, pWrites) =
+compareMemoryTraces bak (oMem, oWrites) (pMem, pWrites) =
   CMS.execStateT doAnalysis s0
   where
     s0 = WriteSummary { _differingGlobalMemoryLocations = []
@@ -454,5 +461,5 @@ compareMemoryTraces sym (oMem, oWrites) (pMem, pWrites) =
                       , _pointerWidth = ?ptrWidth
                       }
     doAnalysis = do
-      mapM_ (compareWrite differingOrigHeapLocations sym oMem pMem) (oWrites ^. writtenLocations)
-      mapM_ (compareWrite differingPatchedHeapLocations sym oMem pMem) (pWrites ^. writtenLocations)
+      mapM_ (compareWrite differingOrigHeapLocations bak oMem pMem) (oWrites ^. writtenLocations)
+      mapM_ (compareWrite differingPatchedHeapLocations bak oMem pMem) (pWrites ^. writtenLocations)

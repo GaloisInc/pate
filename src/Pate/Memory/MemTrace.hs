@@ -91,11 +91,12 @@ import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
 import Data.Parameterized.Context (pattern (:>), pattern Empty, Assignment)
 import qualified Data.Parameterized.Map as MapF
 import Data.Text (pack)
-import Lang.Crucible.Backend (IsSymInterface, assert)
+import Lang.Crucible.Backend (IsSymInterface, IsSymBackend, HasSymInterface(..), assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator)
 import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer)
-import Lang.Crucible.Simulator.ExecutionTree (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree)
+import Lang.Crucible.Simulator.ExecutionTree
+         (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree, withBackend, stateContext)
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
 import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..), IntrinsicTypes)
 import Lang.Crucible.Simulator.RegMap (RegEntry(..))
@@ -442,7 +443,7 @@ macawTraceExtensions ::
   ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
 macawTraceExtensions archStmtFn mvar globs undefptr =
   ExtensionImpl
-    { extensionEval = \sym iTypes logFn cst g -> evalMacawExprExtensionTrace undefptr sym iTypes logFn cst g
+    { extensionEval = \bak iTypes logFn cst g -> evalMacawExprExtensionTrace undefptr bak iTypes logFn cst g
     , extensionExec = execMacawStmtExtension archStmtFn undefptr mvar globs
     }
 
@@ -643,7 +644,8 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
     MacawInstructionStart{} -> \cst -> pure ((), cst)
 
-    PtrEq w x y -> ptrOp w x y $ \sym reg off reg' off' -> do
+    PtrEq w x y -> ptrOp w x y $ \bak reg off reg' off' -> do
+      let sym = backendGetSym bak
       regEq <- natEq sym reg reg'
       offEq <- bvEq sym off off'
       andPred sym regEq offEq
@@ -653,19 +655,23 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
 
     PtrLt w x y -> ptrOp w x y $ ptrPredOp (undefPtrLt mkundef) natEqConstraint $ \sym _reg off _reg' off' -> bvUlt sym off off'
 
-    PtrMux w (RegEntry _ p) x y -> ptrOp w x y $ \sym reg off reg' off' -> do
+    PtrMux w (RegEntry _ p) x y -> ptrOp w x y $ \bak reg off reg' off' -> do
+      let sym = backendGetSym bak
       reg'' <- natIte sym p reg reg'
       off'' <- bvIte sym p off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAdd w x y -> ptrOpNR w x y $ ptrBinOp (undefPtrAdd mkundef) someZero $ \sym reg off reg' off' -> do
+    PtrAdd w x y -> ptrOpNR w x y $ ptrBinOp (undefPtrAdd mkundef) someZero $ \bak reg off reg' off' -> do
+      let sym = backendGetSym bak
+
       regZero <- isZero sym reg
 
       reg'' <- natIte sym regZero reg' reg
       off'' <- bvAdd sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrSub w x y -> ptrOp w x y $ ptrBinOp (undefPtrSub mkundef) compatSub $ \sym reg off reg' off' -> do
+    PtrSub w x y -> ptrOp w x y $ ptrBinOp (undefPtrSub mkundef) compatSub $ \bak reg off reg' off' -> do
+      let sym = backendGetSym bak
       regEq <- natEq sym reg reg'
       zero <- natLit sym 0
 
@@ -673,14 +679,16 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off'' <- bvSub sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrAnd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAnd mkundef) someZero $ \sym reg off reg' off' -> do
+    PtrAnd w x y -> ptrOp w x y $ ptrBinOp (undefPtrAnd mkundef) someZero $ \bak reg off reg' off' -> do
+      let sym = backendGetSym bak
       regZero <- isZero sym reg
 
       reg'' <- natIte sym regZero reg' reg
       off'' <- bvAndBits sym off off'
       pure (LLVMPointer reg'' off'')
 
-    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) someZero $ \sym reg off reg' off' -> do
+    PtrXor w x y -> ptrOp w x y $ ptrBinOp (undefPtrXor mkundef) someZero $ \bak reg off reg' off' -> do
+      let sym = backendGetSym bak
       regZero <- isZero sym reg
 
       reg'' <- natIte sym regZero reg' reg
@@ -695,28 +703,29 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
       off' <- bvZext sym w offset
       pure (LLVMPointer region off')
 
-evalMacawExprExtensionTrace :: forall sym arch f tp p rtp blocks r ctx ext
-                       .  IsSymInterface sym
+evalMacawExprExtensionTrace :: forall sym bak arch f tp p rtp blocks r ctx ext
+                       .  IsSymBackend sym bak
                        => UndefinedPtrOps sym
-                       -> sym
+                       -> bak
                        -> IntrinsicTypes sym
                        -> (Int -> String -> IO ())
                        -> CrucibleState p sym ext rtp blocks r ctx
                        -> (forall utp . f utp -> IO (RegValue sym utp))
                        -> MacawExprExtension arch f tp
                        -> IO (RegValue sym tp)
-evalMacawExprExtensionTrace undefptr sym iTypes logFn cst f e0 =
+evalMacawExprExtensionTrace undefptr bak iTypes logFn cst f e0 =
   case e0 of
-    PtrToBits _w x  -> doPtrToBits sym undefptr =<< f x
-    _ -> evalMacawExprExtension sym iTypes logFn cst f e0
+    PtrToBits _w x  -> doPtrToBits bak undefptr =<< f x
+    _ -> evalMacawExprExtension bak iTypes logFn cst f e0
 
 doPtrToBits ::
-  (IsSymInterface sym, 1 <= w) =>
-  sym ->
+  (IsSymBackend sym bak, 1 <= w) =>
+  bak ->
   UndefinedPtrOps sym ->
   LLVMPtr sym w ->
   IO (SymBV sym w)
-doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
+doPtrToBits bak mkundef ptr@(LLVMPointer base off) = do
+  let sym = backendGetSym bak
   case asNat base of
     Just 0 -> return off
     _ -> do
@@ -724,7 +733,7 @@ doPtrToBits sym mkundef ptr@(LLVMPointer base off) = do
       case asConstantPred cond of
         Just True -> return off
         _ -> do
-          assert sym cond $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
+          assert bak cond $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
           undef <- undefPtrOff mkundef sym ptr
           bvIte sym cond off undef
 
@@ -743,6 +752,15 @@ readOnlyWithSym ::
   CrucibleState p sym ext rtp blocks r ctx ->
   IO (a, CrucibleState p sym ext rtp blocks r ctx)
 readOnlyWithSym f cst = flip (,) cst <$> f (cst ^. stateSymInterface)
+
+readOnlyWithBak ::
+  (forall bak. IsSymBackend sym bak => bak -> IO a) ->
+  CrucibleState p sym ext rtp blocks r ctx ->
+  IO (a, CrucibleState p sym ext rtp blocks r ctx)
+readOnlyWithBak f cst =
+  withBackend (cst ^. stateContext) $ \bak ->
+    do a <- f bak
+       pure (a, cst)
 
 getGlobalVar :: CrucibleState s sym ext rtp blocks r ctx -> GlobalVar mem -> IO (RegValue sym mem)
 getGlobalVar cst gv = case lookupGlobal gv (cst ^. stateTree . actFrame . gpGlobals) of
@@ -794,37 +812,38 @@ ptrOpNR ::
   NatRepr w ->
   RegEntry sym (LLVMPointerType w) ->
   RegEntry sym (LLVMPointerType w) ->
-  (1 <= w => sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO a) ->
+  (forall bak. (1 <= w, IsSymBackend sym bak) => bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO a) ->
   CrucibleState p sym ext rtp blocks r ctx ->
   IO (a, CrucibleState p sym ext rtp blocks r ctx)
 ptrOpNR _w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region' offset')) f =
-  readOnlyWithSym $ \sym -> do
-    f sym region offset region' offset'
+  readOnlyWithBak $ \bak ->
+    f bak region offset region' offset'
 
 ptrOp ::
   AddrWidthRepr w ->
   RegEntry sym (LLVMPointerType w) ->
   RegEntry sym (LLVMPointerType w) ->
-  (1 <= w => sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO a) ->
+  (forall bak. (1 <= w, IsSymBackend sym bak) => bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO a) ->
   CrucibleState p sym ext rtp blocks r ctx ->
   IO (a, CrucibleState p sym ext rtp blocks r ctx)
 ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region' offset')) f =
-  addrWidthsArePositive w $ readOnlyWithSym $ \sym -> do
-    f sym region offset region' offset'
+  addrWidthsArePositive w $ readOnlyWithBak $ \bak -> do
+    f bak region offset region' offset'
         
 ptrPredOp ::
-  IsSymInterface sym =>
+  IsSymBackend sym bak =>
   UndefinedPtrPredOp sym ->
   RegionConstraint sym ->
   (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)) ->
-  sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)
-ptrPredOp mkundef regconstraint f sym reg1 off1 reg2 off2  = do
+  bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)
+ptrPredOp mkundef regconstraint f bak reg1 off1 reg2 off2  = do
+  let sym = backendGetSym bak
   cond <- regConstraintEval regconstraint sym reg1 reg2
   result <- f sym reg1 off1 reg2 off2
   case asConstantPred cond of
     Just True -> return result
     _ -> do
-      assert sym cond $ AssertFailureSimError "ptrPredOp" $ "ptrPredOp: " ++ regConstraintMsg regconstraint
+      assert bak cond $ AssertFailureSimError "ptrPredOp" $ "ptrPredOp: " ++ regConstraintMsg regconstraint
       undef <- mkUndefPred mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       itePred sym cond result undef
 
@@ -842,18 +861,19 @@ muxPtr sym p (LLVMPointer region offset) (LLVMPointer region' offset') = do
   return $ LLVMPointer reg'' off''
 
 ptrBinOp ::
-  IsSymInterface sym =>
+  IsSymBackend sym bak =>
   UndefinedPtrBinOp sym ->
   RegionConstraint sym ->
-  (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)) ->
-  sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)
-ptrBinOp mkundef regconstraint f sym reg1 off1 reg2 off2 = do
+  (bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)) ->
+  bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)
+ptrBinOp mkundef regconstraint f bak reg1 off1 reg2 off2 = do
+  let sym = backendGetSym bak
   cond <- regConstraintEval regconstraint sym reg1 reg2
-  result <- f sym reg1 off1 reg2 off2
+  result <- f bak reg1 off1 reg2 off2
   case asConstantPred cond of
     Just True -> return result
     _ -> do
-      assert sym cond $ AssertFailureSimError "ptrBinOp" $ "ptrBinOp: " ++ regConstraintMsg regconstraint
+      assert bak cond $ AssertFailureSimError "ptrBinOp" $ "ptrBinOp: " ++ regConstraintMsg regconstraint
       undef <- mkUndefPtr mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
       muxPtr sym cond result undef
 
