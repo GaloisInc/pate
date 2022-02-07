@@ -31,7 +31,6 @@ module Pate.Monad
   , withSym
   , archFuns
   , runInIO1
-  , withSymBackendLock
   , manifestError
   , throwHere
   , getDuration
@@ -82,7 +81,6 @@ import           GHC.Stack ( HasCallStack, callStack )
 import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
-import qualified UnliftIO.Exception as UE
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
@@ -104,8 +102,6 @@ import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
 
-import qualified Lang.Crucible.Backend as LCB
-import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.CFG as MM
@@ -113,11 +109,10 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 
 
+import qualified What4.Config as WC
 import qualified What4.Expr as WE
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as WPO
 import qualified What4.SatResult as W4R
 import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
@@ -265,7 +260,7 @@ getBinCtx' ::
 getBinCtx' repr = PPa.getPair' repr <$> CMR.asks (PMC.binCtxs . envCtx)
 
 withValid :: forall a sym arch.
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
+  (forall t st fs . (sym ~ WE.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
   EquivM_ sym arch a
 withValid f = do
   env <- CMR.ask
@@ -273,33 +268,28 @@ withValid f = do
 
 withValidEnv ::
   EquivEnv sym arch ->
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
+  (forall t st fs . (sym ~ WE.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
   a
 withValidEnv (EquivEnv { envValidSym = PSo.Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
 withSymSolver ::
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
+  (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
   EquivM sym arch a
 withSymSolver f = withValid $ do
-  PSo.Sym _ bak adapter <- CMR.asks envValidSym
-  f (LCB.backendGetSym bak) adapter
-
-withBackend ::
-  (forall solver scope st fs.
-    (sym ~ WE.ExprBuilder scope st fs, WPO.OnlineSolver solver) =>
-    LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
-  EquivM sym arch a
-withBackend f = withValid $ do
-  PSo.Sym _ bak _ <- CMR.asks envValidSym
-  f bak
+  PSo.Sym _ sym adapter <- CMR.asks envValidSym
+  sym' <- liftIO $ WE.exprBuilderSplitConfig sym
+  liftIO $ WC.extendConfig (WSA.solver_adapter_config_options adapter) (W4.getConfiguration sym')
+  f sym' adapter
 
 withSym ::
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
+  (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
-withSym f = withBackend (\bak -> f (LCB.backendGetSym bak))
+withSym f = withValid $ do
+  PSo.Sym _ sym _ <- CMR.asks envValidSym
+  f sym
 
 withSymIO :: forall sym arch a.
-  (forall t st fs . (sym ~ W4B.ExprBuilder t st fs) => sym -> IO a) ->
+  (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> IO a) ->
   EquivM sym arch a
 withSymIO f = withSym (\sym -> liftIO (f sym))
 
@@ -503,7 +493,7 @@ withSatAssumption timeout asmf f = do
 -- Sat helpers
 
 data SymGroundEvalFn sym where
-  SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (W4B.ExprBuilder scope solver fs)
+  SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (WE.ExprBuilder scope solver fs)
 
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --
@@ -544,12 +534,12 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
 --
 -- FIXME: Document what the bindings that we are doing without here.
 checkSatisfiableWithoutBindings
-  :: (sym ~ W4B.ExprBuilder t st fs)
+  :: (sym ~ WE.ExprBuilder t st fs)
   => PT.Timeout
   -> sym
   -> Maybe IO.Handle
   -> WSA.SolverAdapter st
-  -> W4B.BoolExpr t
+  -> WE.BoolExpr t
   -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
   -> IO a
 checkSatisfiableWithoutBindings timeout sym mhandle adapter p k =
@@ -609,7 +599,10 @@ isPredTruePar' timeout p = case W4.asConstantPred p of
       False -> Par.promise $ do
         notp <- withSymIO $ \sym -> W4.notPred sym p
         -- Convert exceptions into False because we can't prove that it is true
-        either (const False) id <$> checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)
+        res <- checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)
+        case res of
+          Left _ex -> return False -- TODO!!! This swallows the exception!
+          Right x -> return x
 
 -- | Convert a 'W4R.Unsat' result into True
 --
@@ -631,7 +624,7 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
 
 withGroundEvalFn ::
   SymGroundEvalFn sym ->
-  (forall t st fs. sym ~ W4B.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
+  (forall t st fs. sym ~ WE.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
   EquivM sym arch a
 withGroundEvalFn fn f = withValid $
   IO.withRunInIO $ \runInIO -> f $ W4G.GroundEvalFn (\e -> runInIO (execGroundFn fn e))
@@ -660,18 +653,6 @@ getFootprints bundle = withSym $ \sym -> do
   footO <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutO bundle)
   footP <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutP bundle)
   return $ S.union footO footP
-
-withSymBackendLock
-  ::(forall solver scope st fs.
-      (sym ~ WE.ExprBuilder scope st fs, WPO.OnlineSolver solver) =>
-      LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
-  EquivM sym arch a
-withSymBackendLock k = do
-  mv <- CMR.asks envSymBackendLock
-  PSo.Sym _ bak _ <- CMR.asks envValidSym
-  UE.bracket (liftIO (IO.takeMVar mv))
-             (liftIO . IO.putMVar mv)
-             (\_ -> k bak)
 
 -- | Emit a trace event to the frontend
 --

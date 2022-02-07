@@ -103,10 +103,9 @@ type ValidSym sym =
 -- the relationships between these otherwise internal types.
 data Sym sym where
   Sym :: ( sym ~ WE.ExprBuilder scope st fs
-         , WPO.OnlineSolver solver
          , ValidSym sym
          )
       => PN.Nonce PN.GlobalNonceGenerator sym
-      -> CBO.OnlineBackend solver scope st fs
+      -> sym
       -> WS.SolverAdapter st
       -> Sym sym

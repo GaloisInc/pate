@@ -55,14 +55,12 @@ import qualified What4.Expr as WE
 import qualified What4.Expr.Builder as W4B
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as WPO
 import qualified What4.SatResult as W4R
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Backend as CB
-import qualified Lang.Crucible.Backend.Online as CBO
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -170,18 +168,14 @@ verifyPairs ::
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
-  let solver = PC.cfgSolver vcfg
-  let saveInteraction = PC.cfgSolverInteractionFile vcfg
-  PS.withOnlineSolver solver saveInteraction sym $
-    doVerifyPairs validArch logAction elf elf' vcfg pd gen
+  doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
-  forall arch sym solver scope st fs.
+  forall arch sym scope st fs.
   ( PA.ValidArch arch
   , sym ~ WE.ExprBuilder scope st fs
   , CB.IsSymInterface sym
-  , WPO.OnlineSolver solver
   ) =>
   PA.SomeValidArch arch ->
   LJ.LogAction IO (PE.Event arch) ->
@@ -190,10 +184,9 @@ doVerifyPairs ::
   PC.VerificationConfig ->
   PC.PatchData ->
   N.NonceGenerator IO scope ->
-  CBO.OnlineBackend solver scope st fs ->
+  sym ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen bak = do
-  let sym = CB.backendGetSym bak
+doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
                                 , MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch) Nothing) of
@@ -242,8 +235,6 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
               else
                 return (unpackedPairs upData)
 
-  symBackendLock <- liftIO $ MVar.newMVar ()
-
   let
     exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
 
@@ -272,7 +263,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envBaseEquiv = stateEquivalence hdr sym stackRegion
       , envFailureMode = PME.ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
-      , envValidSym = PS.Sym symNonce bak adapter
+      , envValidSym = PS.Sym symNonce sym adapter
       , envStartTime = startedAt
       , envCurrentFrame = mempty
       , envNonceGenerator = gen
@@ -282,7 +273,6 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envProofCache = prfCache
       , envExitPairsCache = ePairCache
       , envStatistics = statsVar
-      , envSymBackendLock = symBackendLock
       , envOverrides = \ovCfg -> M.fromList [ (n, ov)
                                             | ov@(PVO.SomeOverride o) <- PVOL.overrides ovCfg
                                             , let txtName = WF.functionName (PVO.functionName o)
