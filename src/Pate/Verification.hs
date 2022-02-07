@@ -169,16 +169,17 @@ verifyPairs ::
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
+  sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
-  PS.withOnlineSolver solver saveInteraction gen $
+  PS.withOnlineSolver solver saveInteraction sym $
     doVerifyPairs validArch logAction elf elf' vcfg pd gen
 
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
-  forall arch sym solver scope st fm.
+  forall arch sym solver scope st fs.
   ( PA.ValidArch arch
-  , sym ~ WE.ExprBuilder scope st (WE.Flags fm)
+  , sym ~ WE.ExprBuilder scope st fs
   , CB.IsSymInterface sym
   , WPO.OnlineSolver solver
   ) =>
@@ -189,7 +190,7 @@ doVerifyPairs ::
   PC.VerificationConfig ->
   PC.PatchData ->
   N.NonceGenerator IO scope ->
-  CBO.OnlineBackend solver scope st (WE.Flags fm) ->
+  CBO.OnlineBackend solver scope st fs ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
 doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen bak = do
   let sym = CB.backendGetSym bak

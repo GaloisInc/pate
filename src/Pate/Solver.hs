@@ -38,23 +38,25 @@ data Solver = CVC4
 
 -- | Start a connection to an online solver (using the chosen 'Solver')
 withOnlineSolver
-  :: (MonadIO m, MonadMask m)
+  :: (MonadIO m, MonadMask m, sym ~ WE.ExprBuilder scope st fs, CB.IsSymInterface sym)
   => Solver
   -- ^ The chosen solver
   -> Maybe FilePath
   -- ^ A file to save solver interactions to
-  -> PN.NonceGenerator IO scope
-  -> (forall sym solver st fm .
-       (sym ~ WE.ExprBuilder scope st (WE.Flags fm), WPO.OnlineSolver solver, CB.IsSymInterface sym) =>
-       CBO.OnlineBackend solver scope st (WE.Flags fm) -> m a)
+  -> WE.ExprBuilder scope st fs
+  -> (forall solver. WPO.OnlineSolver solver =>
+       CBO.OnlineBackend solver scope st fs -> m a)
   -- ^ The continuation where the online solver connection is active
   -> m a
-withOnlineSolver solver mif ng k = do
-  sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState ng 
+withOnlineSolver solver mif sym k = do
   case solver of
-    CVC4 -> CBO.withCVC4OnlineBackend sym CBO.NoUnsatFeatures probFeatures (installSolverInteraction mif k)
-    Yices -> CBO.withYicesOnlineBackend sym CBO.NoUnsatFeatures probFeatures (installSolverInteraction mif k)
-    Z3 -> CBO.withZ3OnlineBackend sym CBO.NoUnsatFeatures probFeatures (installSolverInteraction mif k)
+    CVC4 -> CBO.withCVC4OnlineBackend sym CBO.NoUnsatFeatures probFeatures
+                  (\bak -> installSolverInteraction mif >> k bak)
+    Yices -> CBO.withYicesOnlineBackend sym CBO.NoUnsatFeatures probFeatures
+                  (\bak -> installSolverInteraction mif >> k bak)
+    Z3 -> CBO.withZ3OnlineBackend sym CBO.NoUnsatFeatures probFeatures
+                  (\bak -> installSolverInteraction mif >> k bak)
+
   where
     -- Install some selected SMT problem features, as the online backend is not
     -- able to analyze the query to determine what features are needed (since it
@@ -62,13 +64,12 @@ withOnlineSolver solver mif ng k = do
     probFeatures = WP.useSymbolicArrays .|. WP.useStructs .|. WP.useBitvectors
 
     -- A wrapper to install a solver interaction file, if requested by the user
-    installSolverInteraction Nothing k' bak = k' bak
-    installSolverInteraction (Just interactionFile) k' bak = do
-      let sym = CB.backendGetSym bak
+    installSolverInteraction Nothing = return ()
+    installSolverInteraction (Just interactionFile) = do
       let conf = WI.getConfiguration sym
       setSIF <- liftIO $ WC.getOptionSetting CBO.solverInteractionFile conf
       _diags <- liftIO $ WC.setOpt setSIF (T.pack interactionFile)
-      k' bak
+      return ()
 
 -- | Convert the solver selector type ('Solver') into a what4
 -- 'WS.SolverAdapter', extending the symbolic backend with the necessary options
@@ -101,11 +102,11 @@ type ValidSym sym =
 -- This type allows us to unwrap the constraints when we need them to observe
 -- the relationships between these otherwise internal types.
 data Sym sym where
-  Sym :: ( sym ~ WE.ExprBuilder scope st (WE.Flags fm)
+  Sym :: ( sym ~ WE.ExprBuilder scope st fs
          , WPO.OnlineSolver solver
          , ValidSym sym
          )
       => PN.Nonce PN.GlobalNonceGenerator sym
-      -> CBO.OnlineBackend solver scope st (WE.Flags fm)
+      -> CBO.OnlineBackend solver scope st fs
       -> WS.SolverAdapter st
       -> Sym sym

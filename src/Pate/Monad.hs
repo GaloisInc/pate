@@ -29,11 +29,9 @@ module Pate.Monad
   , withValidEnv
   , withSymIO
   , withSym
-  , withBackend
   , archFuns
   , runInIO1
   , withSymBackendLock
-  , inNewFrame
   , manifestError
   , throwHere
   , getDuration
@@ -138,7 +136,6 @@ import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import           Pate.Monad.Environment as PME
-import qualified Pate.Panic as PP
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -168,7 +165,7 @@ modifyBlockCache ::
 modifyBlockCache f pPair merge val = do
   BlockCache cache <- CMR.asks f
   liftIO $ IO.modifyMVar_ cache
-    (\m -> return $ M.insertWith merge pPair val m)  
+    (\m -> return $ M.insertWith merge pPair val m)
 
 -- | Execute actions if the given configuration flag is set (not set)
 --
@@ -288,9 +285,9 @@ withSymSolver f = withValid $ do
   f (LCB.backendGetSym bak) adapter
 
 withBackend ::
-  (forall solver scope st fm.
-    (sym ~ WE.ExprBuilder scope st (W4B.Flags fm), WPO.OnlineSolver solver) =>
-    LCBO.OnlineBackend solver scope st (W4B.Flags fm) -> EquivM sym arch a) ->
+  (forall solver scope st fs.
+    (sym ~ WE.ExprBuilder scope st fs, WPO.OnlineSolver solver) =>
+    LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
   EquivM sym arch a
 withBackend f = withValid $ do
   PSo.Sym _ bak _ <- CMR.asks envValidSym
@@ -527,7 +524,7 @@ checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
   assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
  -- handle <- liftIO $ IO.openFile "solver.out" IO.WriteMode
-  
+
   -- Set up a wrapper around the ground evaluation function that removes some
   -- unwanted terms and performs an equivalent substitution step to remove
   -- unbound variables (consistent with the initial query)
@@ -642,9 +639,9 @@ withGroundEvalFn fn f = withValid $
 execGroundFn ::
   forall sym arch tp.
   HasCallStack =>
-  SymGroundEvalFn sym  -> 
-  W4.SymExpr sym tp -> 
-  EquivM sym arch (W4G.GroundValue tp)  
+  SymGroundEvalFn sym  ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4G.GroundValue tp)
 execGroundFn (SymGroundEvalFn fn) e = do
   groundTimeout <- CMR.asks (PC.cfgGroundTimeout . envConfig)
   result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`
@@ -665,23 +662,16 @@ getFootprints bundle = withSym $ \sym -> do
   return $ S.union footO footP
 
 withSymBackendLock
-  :: EquivM sym arch a
-  -> EquivM sym arch a
+  ::(forall solver scope st fs.
+      (sym ~ WE.ExprBuilder scope st fs, WPO.OnlineSolver solver) =>
+      LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
+  EquivM sym arch a
 withSymBackendLock k = do
   mv <- CMR.asks envSymBackendLock
+  PSo.Sym _ bak _ <- CMR.asks envValidSym
   UE.bracket (liftIO (IO.takeMVar mv))
              (liftIO . IO.putMVar mv)
-             (\_ -> inNewFrame k)
-
-inNewFrame
-  :: EquivM sym arch a
-  -> EquivM sym arch a
-inNewFrame k = withBackend $ \bak -> do
-  kio <- IO.toIO k
-  liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
-    WPO.inNewFrame sp kio
-  where
-    doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]
+             (\_ -> k bak)
 
 -- | Emit a trace event to the frontend
 --
