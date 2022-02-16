@@ -34,6 +34,8 @@ import qualified Data.Macaw.Discovery.State as MD
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
+import qualified Lang.Crucible.Backend as CB
+import qualified Lang.Crucible.Backend.Simple as CB
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 
@@ -80,8 +82,10 @@ isTerminalBlock pb = case MD.pblockTermStmt pb of
 -- support calls to functions; we only symbolically execute code that is loop-
 -- and call- free.
 initSimContext ::
+  CB.IsSymBackend sym bak =>
+  bak ->
   EquivM sym arch (CS.SimContext (MS.MacawSimulatorState sym) sym (MS.MacawExt arch))
-initSimContext = withValid $ withBackend $ \bak -> do
+initSimContext bak = withValid $ do
   exts <- CMR.asks envExtensions
   ha <- CMR.asks (PMC.handles . envCtx)
   return $
@@ -196,14 +200,16 @@ evalCFG
   -> CC.CFG (MS.MacawExt arch) blocks tp (MS.ArchRegStruct arch)
   -- ^ The CFG to symbolically execute
   -> EquivM sym arch (CS.ExecResult (MS.MacawSimulatorState sym) sym (MS.MacawExt arch) (CS.RegEntry sym (MS.ArchRegStruct arch)))
-evalCFG globals regs cfg = do
-  archRepr <- archStructRepr
-  initCtx <- initSimContext
-  liftIO $ id
-    . CS.executeCrucible []
-    . CS.InitialState initCtx globals CS.defaultAbortHandler archRepr
-    . CS.runOverrideSim archRepr
-    $ CS.regValue <$> CS.callCFG cfg regs
+evalCFG globals regs cfg =
+  withSym $ \sym ->
+  do bak <- liftIO $ CB.newSimpleBackend sym
+     archRepr <- archStructRepr
+     initCtx <- initSimContext bak
+     liftIO $ id
+       . CS.executeCrucible []
+       . CS.InitialState initCtx globals CS.defaultAbortHandler archRepr
+       . CS.runOverrideSim archRepr
+       $ CS.regValue <$> CS.callCFG cfg regs
 
 ppAbortedResult :: CS.AbortedResult sym ext -> String
 ppAbortedResult (CS.AbortedExec reason _) = show reason
@@ -245,7 +251,7 @@ simulate simInput = withBinary @bin $ do
   archRepr <- archStructRepr
   let regs = CS.assignReg archRepr preRegsAsn CS.emptyRegMap
   globals <- getGlobals simInput
-  cres <- withSymBackendLock $ evalCFG globals regs cfg
+  cres <- evalCFG globals regs cfg
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
 
   return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs) exitClass)

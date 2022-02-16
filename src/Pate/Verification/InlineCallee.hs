@@ -15,6 +15,7 @@ import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
+import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
@@ -69,6 +70,8 @@ import qualified Pate.Panic as PP
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
+import qualified Pate.Solver as PS
+import qualified Pate.Config as PCfg
 import qualified Pate.Verification.DemandDiscovery as PVD
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.Verification.Override.Library as PVOL
@@ -436,6 +439,34 @@ printWrite w =
     PVM.MemoryWrite rsn _w ptr len ->
       putStrLn ("Write to " ++ show (LCLM.ppPtr ptr) ++ " of " ++ show (WI.printSymExpr len) ++ " bytes / " ++ rsn)
 
+inNewFrame ::
+   (sym ~ WE.ExprBuilder scope st fs, WPO.OnlineSolver solver) =>
+   LCBO.OnlineBackend solver scope st fs ->
+   EquivM sym arch a ->
+   EquivM sym arch a
+inNewFrame bak k = do
+  kio <- IO.toIO k
+  liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
+    WPO.inNewFrame sp kio
+  where
+    doPanic = PP.panic PP.Solver "inNewFrame" ["Online solving not enabled"]
+
+
+{-
+withOnlineSolver
+  :: (MonadIO m, MonadMask m)
+  => Solver
+  -- ^ The chosen solver
+  -> Maybe FilePath
+  -- ^ A file to save solver interactions to
+  -> ExprBuilder scope st (WE.Flags fm)
+  -> (forall sym solver st fm .
+       (sym ~ WE.ExprBuilder scope st (WE.Flags fm), WPO.OnlineSolver solver, CB.IsSymInterface sym) =>
+       CBO.OnlineBackend solver scope st (WE.Flags fm) -> m a)
+  -- ^ The continuation where the online solver connection is active
+  -> m a
+-}
+
 
 -- | Symbolically execute the given callees and synthesize a new 'PES.StatePred'
 -- for the two equated callees (as directed by the user) that only reports
@@ -457,8 +488,7 @@ inlineCallee
   => StatePredSpec sym arch
   -> PPa.BlockPair arch
   -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = withValid $ withBackend $ \bak -> do
-  let sym = LCB.backendGetSym bak
+inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
@@ -474,10 +504,6 @@ inlineCallee contPre pPair = withValid $ withBackend $ \bak -> do
 
   origIgnore <- PMC.originalIgnorePtrs . PME.envCtx <$> CMR.ask
   patchedIgnore <- PMC.patchedIgnorePtrs  . PME.envCtx <$> CMR.ask
-
-  let ?recordLLVMAnnotation = \_ _ _ -> return ()
-  let ?memOpts = LCLM.laxPointerMemOptions
-  let ?ptrWidth = PC.knownRepr
 
   -- Note that we need to get a different archVals here - we can't use the one
   -- in the environment because it is fixed to a different memory model - the
@@ -513,16 +539,24 @@ inlineCallee contPre pPair = withValid $ withBackend $ \bak -> do
   -- /should/ be safe, as the results of the symbolic execution do not depend on
   -- the assumptions that are transiently in scope during symbolic execution
   -- (except where they have been encoded into formulas).
-  withSymBackendLock $ do
+
+  vcfg <- CMR.asks envConfig
+  let solver = PCfg.cfgSolver vcfg
+  let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
+  PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
+    let ?memOpts = LCLM.laxPointerMemOptions
+    let ?ptrWidth = PC.knownRepr
+    let ?recordLLVMAnnotation = \_ _ _ -> return ()
+
     -- The two initial memory states (which are encoded as assumptions, see
     -- Data.Macaw.Symbolic.Memory for details)
     oInitState@(oSP, _, _) <- liftIO $ allocateInitialState bak archInfo (MBL.memoryImage origBinary)
     pInitState@(pSP, _, _) <- liftIO $ allocateInitialState bak archInfo (MBL.memoryImage patchedBinary)
 
     (eoPostMem, oIgnPtrs) <-
-      inNewFrame $ symbolicallyExecute archVals bak PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry oInitState
+      inNewFrame bak $ symbolicallyExecute archVals bak PBi.OriginalRepr origBinary oDFI origIgnore initRegsEntry oInitState
     (epPostMem, pIgnPtrs) <-
-      inNewFrame $ symbolicallyExecute archVals bak PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry pInitState
+      inNewFrame bak $ symbolicallyExecute archVals bak PBi.PatchedRepr patchedBinary pDFI patchedIgnore initRegsEntry pInitState
 
     -- Note: we are symbolically executing both functions to get their memory
     -- post states. We explicitly do *not* want to try to prove all of their
