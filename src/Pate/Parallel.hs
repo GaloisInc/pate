@@ -23,15 +23,14 @@ Primitives for parallelism
 
 module Pate.Parallel
     ( IsFuture(..)
-    , Future(..)
+    , Future
     , ConstF(..)
     )
     where
 
-import           Control.Exception (SomeException)
-
+import qualified Control.Concurrent.Async as A
 import qualified Control.Concurrent as IO
-import           Control.Exception (throwIO)
+
 import           Control.Monad.Trans
 import qualified Data.Kind as DK
 import           Data.Parameterized.TraversableF as TF
@@ -71,17 +70,20 @@ class Monad m => IsFuture m (future :: DK.Type -> DK.Type) where
   -- | An explicitly lazy result, but evaluated on the current thread
   present :: m a -> m (future a)
 
+  immediate :: a -> m (future a)
+
 -- | Any monad trivially produces its own future results
 instance Monad m => IsFuture m m where
   joinFuture f = f
   forFuture f g = return $ f >>= g
   present f = return f
   promise = present
+  immediate = return . return
 
 data Future a where
   -- | A "future" value is a handle on a forked thread, with a
   -- finalization action
-  Future :: IO.ThreadId -> IO.MVar (Either SomeException a) -> (a -> IO b) -> Future b
+  Future :: A.Async a -> (a -> IO b) -> Future b
   -- | A "present" value is evaluated lazily when the future is joined, but on the
   -- joining thread
   Present :: IO a -> Future a
@@ -100,17 +102,13 @@ cachedEval f = do
   return f'
 
 instance IsFuture IO Future where
-  joinFuture (Future _ a_var fin) = do
-    v <- IO.readMVar a_var
-    case v of
-      Left e -> throwIO e
-      Right a -> fin a
+  joinFuture (Future a_var fin) = fin =<< A.wait a_var
   joinFuture (Present f) = f
   joinFuture (Immediate a) = return a
 
-  forFuture (Future tid a_var g) f = do
+  forFuture (Future a_var g) f = do
     f' <- liftIO $ cachedEval f
-    return $ Future tid a_var (\a -> g a >>= f')
+    return $ Future a_var (\a -> g a >>= f')
   forFuture (Present g) f = do
     f' <- liftIO $ cachedEval f
     return $ Present (g >>= f')
@@ -121,6 +119,7 @@ instance IsFuture IO Future where
     return $ Present (f' ())
 
   promise m = do
-    var <- IO.newEmptyMVar
-    tid <- IO.forkFinally m (IO.putMVar var)
-    return $ Future tid var return
+    a_var <- A.async m
+    return $ Future a_var return
+
+  immediate = return . Immediate

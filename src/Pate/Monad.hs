@@ -621,6 +621,7 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
   joinFuture future = withValid $ catchInIO $ Par.joinFuture future
   forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
+  immediate a = liftIO (Par.immediate a)
 
 withGroundEvalFn ::
   SymGroundEvalFn sym ->

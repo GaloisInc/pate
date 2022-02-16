@@ -103,17 +103,17 @@ discoverPairs bundle = do
                    , compatibleTargets blkO blkP]
       blocks <- getBlocks $ PSS.simPair bundle
 
-      result <- Par.forMPar allCalls $ \(blktO, blktP) -> startTimer $ do
+      result <- Par.forMPar @_ @Par.Future allCalls $ \(blktO, blktP) -> startTimer $ do
         let emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
         matches <- matchesBlockTarget bundle blktO blktP
         check <- withSymIO $ \sym -> WI.andPred sym precond matches
         case WI.asConstantPred check of
           Just True -> do
             emit PE.Reachable
-            return $ Par.Immediate $ Just $ PPa.PatchPair blktO blktP
+            Par.immediate $ Just $ PPa.PatchPair blktO blktP
           Just False -> do
             emit PE.Unreachable
-            return $ Par.Immediate $ Nothing
+            Par.immediate $ Nothing
           _ ->  do
             goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
             Par.promise $ do
