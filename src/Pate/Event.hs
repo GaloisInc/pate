@@ -42,7 +42,7 @@ type BlocksPair arch = PPa.PatchPair (Blocks arch)
 
 data EquivalenceResult arch = Equivalent
                             | Inconclusive
-                            | Inequivalent (PFI.InequivalenceResult arch)
+                            | Inequivalent (PF.InequivalenceResult arch)
 
 data BlockTargetResult = Reachable
                        | InconclusiveTarget
@@ -50,7 +50,7 @@ data BlockTargetResult = Reachable
 
 data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches
-                                   | BranchesIncomplete (PFI.InequivalenceResult arch)
+                                   | BranchesIncomplete (PF.InequivalenceResult arch)
 
 -- | Events that can be reported from the verifier
 --
