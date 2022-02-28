@@ -39,6 +39,7 @@ import qualified Data.Macaw.Symbolic as DMS
 import qualified Data.Macaw.Symbolic.Backend as DMSB
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
+import qualified Lang.Crucible.CFG.Extension as LCCE
 import qualified Lang.Crucible.LLVM.Bytes as LCLB
 import qualified Lang.Crucible.LLVM.DataLayout as LCLD
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
@@ -181,7 +182,7 @@ concretizingWrite
   => LCS.GlobalVar LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem ptrW
   -> LCBO.OnlineBackend solver scope st fs
-  -> LCS.CrucibleState (DMS.MacawSimulatorState sym)
+  -> LCS.CrucibleState p
                        sym
                        (DMS.MacawExt arch)
                        rtp
@@ -192,7 +193,7 @@ concretizingWrite
   -> DMC.MemRepr ty
   -> LCS.RegEntry sym (LCLM.LLVMPointerType ptrW)
   -> LCS.RegEntry sym (DMS.ToCrucibleType ty)
-  -> IO ((), LCS.CrucibleState (DMS.MacawSimulatorState sym)
+  -> IO ((), LCS.CrucibleState p
                                sym
                                (DMS.MacawExt arch)
                                rtp
@@ -222,7 +223,7 @@ concretizingRead
   => LCS.GlobalVar LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem ptrW
   -> LCBO.OnlineBackend solver scope st fs
-  -> LCS.CrucibleState (DMS.MacawSimulatorState sym)
+  -> LCS.CrucibleState p
                        sym
                        (DMS.MacawExt arch)
                        rtp
@@ -273,8 +274,8 @@ statementWrapper
   => LCS.GlobalVar LCLM.Mem
   -> DMS.GlobalMap sym LCLM.Mem (DMC.ArchAddrWidth arch)
   -> LCBO.OnlineBackend solver scope st fs
-  -> LCS.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
-  -> DMSB.MacawEvalStmtFunc (DMS.MacawStmtExtension arch) (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
+  -> LCS.ExtensionImpl p sym (DMS.MacawExt arch)
+  -> DMSB.MacawEvalStmtFunc (LCCE.StmtExtension (DMS.MacawExt arch)) p sym (DMS.MacawExt arch)
 statementWrapper mvar globs bak baseExt stmt crucState =
   let sym = LCB.backendGetSym bak in
   case stmt of
@@ -306,22 +307,22 @@ hookedMacawExtensions
      )
   => LCBO.OnlineBackend solver scope st fs
   -- ^ The (online) symbolic backend
-  -> DMS.MacawArchEvalFn sym LCLM.Mem arch
+  -> DMS.MacawArchEvalFn p sym LCLM.Mem arch
   -- ^ A set of interpretations for architecture-specific functions
   -> LCS.GlobalVar LCLM.Mem
   -- ^ The Crucible global variable containing the current state of the memory
   -- model
   -> DMS.GlobalMap sym LCLM.Mem (DMC.ArchAddrWidth arch)
   -- ^ A function that maps bitvectors to valid memory model pointers
-  -> DMS.LookupFunctionHandle sym arch
+  -> DMS.LookupFunctionHandle p sym arch
   -- ^ A function to translate virtual addresses into function handles
   -- dynamically during symbolic execution
-  -> DMS.LookupSyscallHandle sym arch
+  -> DMS.LookupSyscallHandle p sym arch
   -- ^ A function to examine the machine state to determine which system call
   -- should be invoked; returns the function handle to invoke
   -> DMS.MkGlobalPointerValidityAssertion sym (DMC.ArchAddrWidth arch)
   -- ^ A function to make memory validity predicates (see 'MkGlobalPointerValidityAssertion' for details)
-  -> LCS.ExtensionImpl (DMS.MacawSimulatorState sym) sym (DMS.MacawExt arch)
+  -> LCS.ExtensionImpl p sym (DMS.MacawExt arch)
 hookedMacawExtensions bak f mvar globs lookupH lookupSyscall toMemPred =
   baseExtension { LCS.extensionExec = statementWrapper mvar globs bak baseExtension }
   where
