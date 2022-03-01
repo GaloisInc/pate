@@ -21,6 +21,7 @@ import qualified Pate.Binary as PB
 import qualified Pate.Event as PE
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Proof as PPr
 
 import qualified Pate.Interactive.Render.SliceGraph as IRS
 import qualified Pate.Interactive.State as IS
@@ -30,9 +31,9 @@ renderCounterexample er =
   case er of
     PE.Equivalent -> []
     PE.Inconclusive -> []
-    PE.Inequivalent ir ->
-          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show (PFI.ineqReason ir))
-                               , TP.pre #+ [TP.string (PFI.ppInequivalencePreRegs ir)]
+    PE.Inequivalent ir' -> PPr.withIneqResult ir' $ \ir ->
+          [TP.ul #+ [ TP.li #+ [ TP.string ("Reason: " ++ show (PPr.ineqReason ir))
+                               , TP.pre #+ [TP.string (PFI.ppInequivalencePreRegs ir')]
                                ]
                    ]
           ]

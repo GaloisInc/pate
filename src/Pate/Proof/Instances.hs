@@ -26,21 +26,23 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE ConstraintKinds #-}
 
 module Pate.Proof.Instances
-  ( ProofSym
-  , ProofGround
-  , SomeProofSym(..)
+  ( SomeProofSym(..)
   , GroundBV(..)
+  , groundBV
   , mkGroundBV
   , groundBVAsPointer
   , ConcreteValue
   , GroundLLVMPointer(..)
   , GroundBlockExit(..)
+  , groundBlockEnd
   , GroundMacawValue(..)
+  , groundMacawValue
   , cellInDomain
   , regInDomain
   , ppLLVMPointer
   , ppInequivalencePreRegs
   , ppExitCase
+  , ppGroundCell
   , isGroundBVZero
   )
   
@@ -76,6 +78,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Proof as PF
+import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.MemCell as PMC
@@ -104,7 +107,7 @@ ppInequivalencePreRegs gineq = PF.withIneqResult gineq $ \ineq ->
   show $ ppRegs (PF.ineqPre ineq) (PF.slRegState $ PF.slBlockPreState (PF.ineqSlice ineq))
 
 -- | Specializing 'ProofExpr' and a 'BlockSliceTransition' to symbolic values.
-data ProofSym sym arch
+-- data ProofSym sym arch
 
 -- type instance PF.ProofBlock (ProofSym sym arch) = PB.ConcreteBlock arch
 -- type instance PF.ProofRegister (ProofSym sym arch) = MM.ArchReg arch
@@ -142,7 +145,6 @@ ppMaybe (Just f) pp = pp f
 ppMaybe Nothing _ = PP.emptyDoc
 
 instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (PF.ProofExpr sym arch tp) where
- pretty (PF.ProofExpr (PF.ProofLeaf{})) = "<leaf>"
  pretty (PF.ProofExpr prf@PF.ProofFunctionCall { PF.prfFunctionCallBody = PF.ProofExpr (PF.ProofInlinedCall {}) }) =
    PP.vsep $
      [ "Function pre-domain is satisfied before call:"
@@ -249,21 +251,22 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
                  , "Global addresses with different contents: "
                  , PP.indent 2 $ PP.vsep (map ppRange locRanges)
                  ]
-
+ pretty (PF.ProofExpr (PF.ProofDomain dom)) = PP.pretty dom
+ pretty (PF.ProofExpr (PF.ProofStatus st)) = PP.pretty st
 
 instance forall sym arch.
   (PA.ValidArch arch, PSo.ValidSym sym) =>
-  PP.Pretty (PF.ProofDomain sym arch) where
+  PP.Pretty (PF.EquivalenceDomain sym arch) where
   pretty prf = PP.vsep
     [ "Registers:"
     , PP.indent 4 $ prettyRegs
-    , "Stack Memory:" <+> ppPolarity (PF.prfMemoryDomainPolarity $ PF.prfDomainStackMemory prf)
-    , PP.indent 4 $ prettyMem (PF.prfDomainStackMemory prf)
-    , "Global Memory:" <+> ppPolarity (PF.prfMemoryDomainPolarity $ PF.prfDomainGlobalMemory prf)
-    , PP.indent 4 $ prettyMem (PF.prfDomainGlobalMemory prf)
+    , "Stack Memory:" <+> ppPolarity (PF.memoryDomainPolarity $ PF.eqDomainStackMemory prf)
+    , PP.indent 4 $ prettyMem (PF.eqDomainStackMemory prf)
+    , "Global Memory:" <+> ppPolarity (PF.memoryDomainPolarity $ PF.eqDomainGlobalMemory prf)
+    , PP.indent 4 $ prettyMem (PF.eqDomainGlobalMemory prf)
     ]
     where
-      prettyRegs = PP.vsep (map ppReg (collapseRegState (Proxy @sym) (PF.prfDomainRegisters prf)))
+      prettyRegs = PP.vsep (map ppReg (collapseRegState (Proxy @sym) (PF.eqDomainRegisters prf)))
 
       ppReg :: (Some (MM.ArchReg arch), W4.Pred sym) -> PP.Doc a
       ppReg (Some reg, p) = case W4.asConstantPred p of
@@ -336,9 +339,9 @@ collapseProofMemoryDomain ::
   forall sym arch.
   PSo.ValidSym sym =>
   PA.ValidArch arch =>
-  PF.ProofMemoryDomain sym arch ->
+  PF.MemoryDomain sym arch ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)]
-collapseProofMemoryDomain memdom = mapMaybe go $ MapF.toList (PF.prfMemoryDomain memdom)
+collapseProofMemoryDomain memdom = mapMaybe go $ MapF.toList (PF.memoryDomain memdom)
   where
     go :: MapF.Pair (PMC.MemCell sym arch)
                     (Const (W4.Pred sym))
@@ -350,7 +353,7 @@ collapseProofMemoryDomain memdom = mapMaybe go $ MapF.toList (PF.prfMemoryDomain
 
 -- | Specializing 'ProofExpr' and 'BlockSliceTransition' to concrete values.
 
-data ProofGround arch
+-- data ProofGround arch
 
 -- type instance PF.ProofBlock (ProofGround arch) = PB.ConcreteBlock arch
 -- type instance PF.ProofRegister (ProofGround arch) = MM.ArchReg arch
@@ -499,11 +502,11 @@ instance PA.ValidArch arch => PP.Pretty (PF.InequivalenceResult arch) where
 ppBlockSliceTransition ::
   forall grnd arch a.
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   -- | pre-domain
-  PF.ProofDomain grnd arch ->
+  PF.EquivalenceDomain grnd arch ->
   -- | post-domain
-  PF.ProofDomain grnd arch ->
+  PF.EquivalenceDomain grnd arch ->
   PF.BlockSliceTransition grnd arch ->
   PP.Doc a
 ppBlockSliceTransition pre post bs = PP.vsep $
@@ -527,21 +530,21 @@ ppBlockSliceTransition pre post bs = PP.vsep $
 
 ppIPs ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   PF.BlockSliceState grnd arch ->
   PP.Doc a
 ppIPs st  =
   let
     pcRegs = (PF.slRegState st) ^. MM.curIP
     vals = fmap groundMacawValue (PF.slRegOpValues pcRegs)
-  in case PF.getGroundValue $ PF.slRegOpEquiv pcRegs of
+  in case PG.groundValue $ PF.slRegOpEquiv pcRegs of
     True -> PP.pretty $ PPa.pcOriginal vals
     False -> PPa.ppPatchPairC PP.pretty vals
 
 ppMemCellMap ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
-  PF.ProofDomain grnd arch ->
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
   MapF.MapF (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) ->
   PP.Doc a
 ppMemCellMap dom cells = let
@@ -550,9 +553,9 @@ ppMemCellMap dom cells = let
 
 ppRegs ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   -- | domain that this register set was checked for equivalence under
-  PF.ProofDomain grnd arch ->
+  PF.EquivalenceDomain grnd arch ->
   MM.RegState (MM.ArchReg arch) (PF.BlockSliceRegOp grnd) ->
   PP.Doc a
 ppRegs dom regs = let
@@ -569,34 +572,34 @@ isGroundBVZero _ = False
 
 
 groundLLVMPointer :: forall sym w.
-  PF.IsGroundSym sym =>
+  PG.IsGroundSym sym =>
   CLM.LLVMPtr sym w ->
   GroundLLVMPointer w
 groundLLVMPointer ptr = groundBVAsPointer $ groundBV ptr
 
 isStackCell :: forall grnd arch w.
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   PMC.MemCell grnd arch w ->
   Bool
 isStackCell cell =
   let CLM.LLVMPointer reg _ = PMC.cellPtr cell
-  in PF.isStackRegion reg
+  in PG.isStackRegion reg
 
 groundBV ::
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   CLM.LLVMPtr grnd w ->
   GroundBV w
 groundBV (CLM.LLVMPointer reg off)
   | W4.BaseBVRepr w <- W4.exprType off
-  , Some regionTags <- PF.getGroundTagNat reg =
+  , Some regionTags <- PG.groundTagNat reg =
   let
-    greg = PF.getConcreteNat reg
-    goff = PF.getGroundValue off
-    offTags = PF.getGroundTag off
-  in mkGroundBV w ((PF.undefTags regionTags) <> (PF.undefTags offTags)) greg goff
+    greg = PG.groundNat reg
+    goff = PG.groundValue off
+    offTags = PG.groundTag off
+  in mkGroundBV w ((PG.undefTags regionTags) <> (PG.undefTags offTags)) greg goff
 
 groundMacawValue ::
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   PSR.MacawRegEntry grnd tp ->
   GroundMacawValue tp
 groundMacawValue e
@@ -604,27 +607,27 @@ groundMacawValue e
   , ptr <- PSR.macawRegValue e = do
     GroundMacawValue $ groundBV ptr
   | CT.BoolRepr <- PSR.macawRegRepr e
-  , val <- PSR.macawRegValue e = GroundMacawValue $ PF.getGroundValue val
+  , val <- PSR.macawRegValue e = GroundMacawValue $ PG.groundValue val
   | CT.StructRepr Ctx.Empty <- PSR.macawRegRepr e = GroundMacawValue ()
   | otherwise = error $ "groundMacawValue: unexpected register type:" ++ show (PSR.macawRegRepr e)
 
 
 groundBlockEnd ::
   forall grnd arch.
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   Proxy arch ->
   CS.RegValue grnd (MS.MacawBlockEndType arch) ->
   GroundBlockExit arch
 groundBlockEnd arch blkend =
   GroundBlockExit
-    (PF.getGroundEndCase arch blkend)
-    (fmap groundLLVMPointer $ PF.getGroundPart (MS.blockEndReturn arch blkend))
+    (PG.groundMacawEndCase arch blkend)
+    (fmap groundLLVMPointer $ PG.groundPartial (MS.blockEndReturn arch blkend))
 
   
 ppRegVal ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
-  PF.ProofDomain grnd arch ->
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
   MM.ArchReg arch tp ->
   PF.BlockSliceRegOp grnd tp ->
   Maybe (PP.Doc a)
@@ -644,27 +647,27 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
       True -> PP.emptyDoc
       False -> "| Excluded"
     
-    ppVals = case PF.getGroundValue $ PF.slRegOpEquiv regOp of
+    ppVals = case PG.groundValue $ PF.slRegOpEquiv regOp of
       True -> PP.pretty $ PPa.pcOriginal vals
       False -> PPa.ppPatchPairC PP.pretty vals
 
 regInDomain ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
-  PF.ProofDomain grnd arch ->
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
   MM.ArchReg arch tp ->
   Bool
-regInDomain dom r = PF.getGroundValue $ getConst $ PF.prfDomainRegisters dom ^. MM.boundValue r 
+regInDomain dom r = PG.groundValue $ getConst $ PF.eqDomainRegisters dom ^. MM.boundValue r 
 
 
 ppCellVal ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
-  PF.ProofDomain grnd arch ->
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   PF.BlockSliceMemOp grnd tp ->
   Maybe (PP.Doc a)
-ppCellVal dom cell memOp = case PF.getGroundValue $ PF.slMemOpCond memOp of
+ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
     True -> Just $ ppSlotVal
     False -> Nothing
   where
@@ -674,38 +677,43 @@ ppCellVal dom cell memOp = case PF.getGroundValue $ PF.slMemOpCond memOp of
     ppDom = case cellInDomain dom cell of
       True -> PP.emptyDoc
       False -> "| Excluded"
-    
-    ppVals = case PF.getGroundValue $ PF.slMemOpEquiv memOp of
+ 
+    ppVals = case PG.groundValue $ PF.slMemOpEquiv memOp of
       True -> PP.pretty $ show (PPa.pcOriginal vals)
       False -> PPa.ppPatchPairC (PP.pretty . show) vals
 
 ppGroundCell ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
+  PG.IsGroundSym grnd =>
   PMC.MemCell grnd arch n ->
   PP.Doc a
 ppGroundCell cell = PP.pretty $ (show $ groundLLVMPointer (PMC.cellPtr cell))
 
+-- TODO: we can't rely on MapF.lookup being consistent here because it's relying on
+-- term equality for annotated terms.
+-- The easiest solution is to just traverse the domain and use equality on ground terms,
+-- but we could also consider generalizing this container type to support lookups
+-- based on abstract domains (see CachedArray from crucible symio).
 cellInMemDomain ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
-  PF.ProofMemoryDomain grnd arch ->
+  PG.IsGroundSym grnd =>
+  PF.MemoryDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
-cellInMemDomain dom cell  = case MapF.lookup cell (PF.prfMemoryDomain dom) of
-    Just (Const p) -> PF.getGroundValue p == (PF.getGroundValue $ PF.prfMemoryDomainPolarity dom)
-    Nothing -> not $ (PF.getGroundValue $ PF.prfMemoryDomainPolarity dom)
+cellInMemDomain dom cell  = case MapF.lookup cell (PF.memoryDomain dom) of
+    Just (Const p) -> PG.groundValue p == (PG.groundValue $ PF.memoryDomainPolarity dom)
+    Nothing -> not $ (PG.groundValue $ PF.memoryDomainPolarity dom)
 
 
 cellInDomain ::
   PA.ValidArch arch =>
-  PF.IsGroundSym grnd =>
-  PF.ProofDomain grnd arch ->
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
 cellInDomain dom cell = case isStackCell cell of
-  True -> cellInMemDomain (PF.prfDomainStackMemory dom) cell
-  False -> cellInMemDomain (PF.prfDomainGlobalMemory dom) cell
+  True -> cellInMemDomain (PF.eqDomainStackMemory dom) cell
+  False -> cellInMemDomain (PF.eqDomainGlobalMemory dom) cell
 
 ppExitCase :: MS.MacawBlockEndCase -> String
 ppExitCase ec = case ec of

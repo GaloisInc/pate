@@ -56,6 +56,11 @@ data PatchPairC tp = PatchPairC
   }
   deriving (Eq, Ord, Functor, Foldable, Traversable)
 
+instance (PEM.ExprMappable sym tp) => PEM.ExprMappable sym (PatchPairC tp) where
+  mapExpr sym f (PatchPairC a1 a2) = PatchPairC
+    <$> PEM.mapExpr sym f a1
+    <*> PEM.mapExpr sym f a2
+
 toPatchPairC ::
   PatchPair (Const f) ->
   PatchPairC f

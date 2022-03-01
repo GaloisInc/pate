@@ -36,7 +36,7 @@ module Pate.Proof
   , EquivTriple
   , VerificationStatus(..)
   , ProofApp(..)
-  , ProofMemoryDomain(..)
+  , MemoryDomain(..)
   , traverseProofApp
   , mapProofApp
   , ProofNonce(..)
@@ -57,24 +57,15 @@ module Pate.Proof
   , type ProofDomainType
   , type ProofTripleType
   , type ProofFunctionCallType
+  , type ProofStatusType
+  , type SymScope
   -- leaves
   , InequivalenceResultC(..)
   , InequivalenceResult
-  , CondEquivalenceResult(..)
-  , ProofDomain(..)
-  , withGroundSym
   , withIneqResult
-  , IsGroundSym
-  , getGroundTag
-  , getGroundTagNat
-  , getGroundValue
-  , getGroundEndCase
-  , getGroundPart
-  , getConcreteValue
-  , getConcreteNat
-  , isStackRegion
-  , GroundTag(..)
-  , Grounded
+  , CondEquivalenceResult(..)
+  , emptyCondEqResult
+  , EquivalenceDomain(..)
   ) where
 
 import           Control.Applicative
@@ -108,6 +99,7 @@ import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Solver as PSo
@@ -159,130 +151,37 @@ data ProofNodeType where
     ProofFunctionCallType :: ProofNodeType
     ProofDomainType :: ProofNodeType
     ProofBlockSliceType :: ProofNodeType
-    ProofLeafType :: a -> ProofNodeType
+    ProofStatusType :: ProofNodeType
 
 type ProofDomainType = 'ProofDomainType
 type ProofTripleType = 'ProofTripleType
 type ProofFunctionCallType = 'ProofFunctionCallType
 type ProofBlockSliceType = 'ProofBlockSliceType
-type ProofLeafType a = 'ProofLeafType a
+type ProofStatusType = 'ProofStatusType
 
--- | A wrapper indicating that the inner expressions of
--- a datatype are fully concrete values
-
-data GroundTag (tp :: W4.BaseType) where
-  GroundTag ::
-    { undefTags :: MT.UndefPtrOpTags } -> GroundTag tp
-
-data GroundData sym where
-  GroundData ::  W4.IsSymExprBuilder sym =>
-    { grndSym :: sym
-    , grndAnn :: MapF.MapF (W4.SymAnnotation sym) GroundTag
-    -- workaround for nats, since they aren't expressions
-    -- we rely on the inner int being annotated to distinguish these
-    , grndAnnNat :: Map (W4.SymNat sym) (Some GroundTag)
-    -- workaround for missing concrete end case function from macaw
-    , grndEndCase :: forall arch. Proxy arch -> CS.RegValue sym (MS.MacawBlockEndType arch) -> MS.MacawBlockEndCase
-    , grndStackRegion :: Natural
-    } -> GroundData sym
-
-type HasGroundData sym = (?grndData :: GroundData sym)
-
-type IsGroundSym sym = (HasGroundData sym, W4.IsSymExprBuilder sym)
-
-getGroundTag :: IsGroundSym sym => W4.SymExpr sym tp -> GroundTag tp
-getGroundTag e =
-  let grnd = ?grndData
-  in case W4.getAnnotation (grndSym grnd) e of
-    Just ann -> case MapF.lookup ann (grndAnn grnd) of
-      Just tag -> tag
-      Nothing -> GroundTag mempty
-    Nothing -> GroundTag mempty
-
-
-getGroundTagNat :: IsGroundSym sym => W4.SymNat sym -> Some GroundTag
-getGroundTagNat e =
-  let grnd = ?grndData
-  in case Map.lookup e (grndAnnNat grnd) of
-    Just tag -> tag
-    Nothing -> Some (GroundTag mempty)
-
-getGroundEndCase ::
-  forall sym arch.
-  IsGroundSym sym =>
-  Proxy arch ->
-  CS.RegValue sym (MS.MacawBlockEndType arch) ->
-  MS.MacawBlockEndCase
-getGroundEndCase p e =
-  let grnd = ?grndData
-  in grndEndCase grnd p e
-
-
-getGroundValue :: IsGroundSym sym => W4.SymExpr sym tp -> W4G.GroundValue tp
-getGroundValue e = case W4.asConcrete e of
-  Just c -> concreteToGround c
-  Nothing -> error $ "getGroundValue: unexpected symbolic value: " ++ (show $ W4.printSymExpr e)
-
-getGroundPart :: IsGroundSym sym => W4P.PartExpr (W4.Pred sym) a -> Maybe a
-getGroundPart = \case
-  W4P.Unassigned -> Nothing
-  W4P.PE p v -> case getGroundValue p of
-    True -> Just v
-    False -> Nothing
-
-getConcreteValue :: IsGroundSym sym => W4.SymExpr sym tp -> W4C.ConcreteVal tp
-getConcreteValue e = case W4.asConcrete e of
-  Just c -> c
-  Nothing -> error $ "getConcreteValue: unexpected symbolic value: " ++ (show $ W4.printSymExpr e)
-
-getConcreteNat :: IsGroundSym sym => W4.SymNat sym -> Natural
-getConcreteNat e = case W4.asNat e of
-  Just n -> n
-  Nothing -> error $ "getConcreteNat: unexpected symbolic value: " ++ (show $ W4.printSymNat e)
-
-isStackRegion :: IsGroundSym sym => W4.SymNat sym -> Bool
-isStackRegion e = grndStackRegion ?grndData == getConcreteNat e
-
-concreteToGround :: W4C.ConcreteVal tp -> W4G.GroundValue tp
-concreteToGround c = case c of
-  W4C.ConcreteBool b ->  b
-  W4C.ConcreteInteger i -> i
-  W4C.ConcreteBV _ bv -> bv
-  W4C.ConcreteStruct s -> FC.fmapFC (W4G.GVW . concreteToGround) s
-  _ -> error $ "concreteToGround: unexpected concrete value: " ++ (show $ W4C.ppConcrete c)
-
-data Grounded (a :: grnd -> DK.Type) where
-  Grounded ::
-    { grndVal :: a grnd
-    , grndData :: GroundData grnd
-    } -> Grounded a
-
--- trivial instance - grounded values should not be modified
--- by expression maps
-instance PEM.ExprMappable sym (Grounded a) where
-  mapExpr _sym _f = return
-
-withGroundSym ::
-  Grounded tp ->
-  (forall grnd. IsGroundSym grnd => tp grnd -> a) ->
-  a
-withGroundSym (Grounded v d@(GroundData{})) f = let ?grndData = d in f v
 
 data InequivalenceResultC arch grnd where
-  InequivalenceResult :: (PA.ValidArch arch, IsGroundSym grnd) =>
+  InequivalenceResult :: PA.ValidArch arch =>
     { ineqSlice :: BlockSliceTransition grnd arch
-    , ineqPre :: ProofDomain grnd arch
-    , ineqPost :: ProofDomain grnd arch
+    , ineqPre :: EquivalenceDomain grnd arch
+    , ineqPost :: EquivalenceDomain grnd arch
     , ineqReason :: PEE.InequivalenceReason
     } -> InequivalenceResultC arch grnd
 
-type InequivalenceResult arch = Grounded (InequivalenceResultC arch)
+instance PEM.ExprMappable grnd (InequivalenceResultC arch grnd) where
+  mapExpr sym f (InequivalenceResult a1 a2 a3 a4) = InequivalenceResult
+    <$> PEM.mapExpr sym f a1
+    <*> PEM.mapExpr sym f a2
+    <*> PEM.mapExpr sym f a3
+    <*> pure a4
+
+type InequivalenceResult arch = PG.Grounded (InequivalenceResultC arch)
 
 withIneqResult ::
   InequivalenceResult arch ->
-  (forall grnd. PA.ValidArch arch => IsGroundSym grnd => InequivalenceResultC arch grnd -> a) ->
+  (forall grnd. PA.ValidArch arch => PG.IsGroundSym grnd => InequivalenceResultC arch grnd -> a) ->
   a
-withIneqResult ineq f = withGroundSym ineq $ \ineq'@InequivalenceResult{} -> f ineq'
+withIneqResult ineq f = PG.withGroundSym ineq $ \ineq'@InequivalenceResult{} -> f ineq'
 
 data CondEquivalenceResult sym arch where
   CondEquivalenceResult :: PA.ValidArch arch =>
@@ -406,37 +305,41 @@ data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) 
   -- this is attached to.
   ProofTriple ::
     { prfTripleBlocks :: PPa.BlockPair arch
-    , prfTriplePreDomain :: node (ProofLeafType (ProofDomain sym arch))
-    , prfTriplePostDomain :: node (ProofLeafType (ProofDomain sym arch))
-    , prfTripleStatus :: node (ProofLeafType (VerificationStatus sym arch))
+    , prfTriplePreDomain :: node ProofDomainType
+    , prfTriplePostDomain :: node ProofDomainType
+    , prfTripleStatus :: node ProofStatusType
     } -> ProofApp sym arch node ProofTripleType
 
-  -- | A leaf of the proof tree containing no sub-trees
-  ProofLeaf :: PEM.ExprMappable sym a => { prfLeaf :: a } -> ProofApp sym arch node (ProofLeafType a)
-
-
+  -- TODO: where does it make sense to manage the bound variables in domains?
+  -- Since we're not consuming these at the moment it's not an issue, but this needs to
+  -- be solved in order to unify 'StatePred', 'EquivalenceDomain' and 'ProofTriple' types
+  ProofDomain :: EquivalenceDomain sym arch -> ProofApp sym arch node ProofDomainType
+  ProofStatus :: VerificationStatus sym arch -> ProofApp sym arch node ProofStatusType
 
 -- | The domain of an equivalence problem: representing the state that is either
 -- assumed (in a pre-domain) or proven (in a post-domain) to be equivalent.
-data ProofDomain sym arch where
-  ProofDomain ::
+data EquivalenceDomain sym arch where
+  EquivalenceDomain ::
     { -- | Each register is considered to be in this domain if the given predicate is true.
-      prfDomainRegisters :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
+      eqDomainRegisters :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
       -- | The memory domain that is specific to stack variables.
-    , prfDomainStackMemory :: ProofMemoryDomain sym arch
+    , eqDomainStackMemory :: MemoryDomain sym arch
       -- | The memory domain that is specific to non-stack (i.e. global) variables.
-    , prfDomainGlobalMemory :: ProofMemoryDomain sym arch
-      -- | Additional context for the domain. In the case of symbolic leafs, this
-      -- corresponds to the bound variables appearing in the symbolic terms in this domain.
-    , prfDomainContext :: PPa.PatchPair (PS.SimState sym arch)
-    }  -> ProofDomain sym arch
+    , eqDomainGlobalMemory :: MemoryDomain sym arch
+    }  -> EquivalenceDomain sym arch
+
+instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
+  mapExpr sym f (EquivalenceDomain a1 a2 a3) = EquivalenceDomain
+    <$> MM.traverseRegsWith (\_ (Const p) -> Const <$> f p) a1
+    <*> PEM.mapExpr sym f a2
+    <*> PEM.mapExpr sym f a3
 
 -- | A memory domain for an equivalence problem.
-data ProofMemoryDomain sym arch where
-  ProofMemoryDomain ::
+data MemoryDomain sym arch where
+  MemoryDomain ::
     { -- | Associating each memory location (i.e. an address and a number of bytes) with
       -- a predicate.
-      prfMemoryDomain :: MapF.MapF (PMC.MemCell sym arch) (Const (W4.Pred sym))
+      memoryDomain :: MapF.MapF (PMC.MemCell sym arch) (Const (W4.Pred sym))
       -- | A predicate indicating if this domain is inclusive or exclusive.
       -- * For positive polarity:
       --   a location is in this domain if it is in the map, and its associated predicate
@@ -444,8 +347,19 @@ data ProofMemoryDomain sym arch where
       -- * For negative polarity:
       --   a location is in this domain if it is not in the map,
       --   or it is in the map and its associated predicate is false.
-    , prfMemoryDomainPolarity :: W4.Pred sym
-    }  -> ProofMemoryDomain sym arch
+    , memoryDomainPolarity :: W4.Pred sym
+    }  -> MemoryDomain sym arch
+
+
+instance PEM.ExprMappable sym (MemoryDomain sym arch) where
+  mapExpr sym f (MemoryDomain a1 a2) = 
+     MemoryDomain
+       <$> (MapF.fromList <$> (traverse transMemCell (MapF.toList a1)))
+       <*> f a2
+   where
+     transMemCell (MapF.Pair cell (Const p)) = MapF.Pair
+       <$> PEM.mapExpr sym f cell
+       <*> (Const <$> f p)
 
 -- | Traverse the nodes of a 'ProofApp', changing the
 -- recursive 'node' type while leaving the leafs (i.e. the 'prf' type) unchanged.
@@ -474,7 +388,8 @@ traverseProofApp f = \case
     <*> f a2
     <*> f a3
     <*> f a4
-  ProofLeaf a1 -> ProofLeaf <$> pure a1
+  ProofDomain a1 -> ProofDomain <$> pure a1
+  ProofStatus a1 -> ProofStatus <$> pure a1
 
 -- instance
 --   (forall tp. PEM.ExprMappable sym (node tp)) =>
@@ -630,7 +545,7 @@ collectProofExpr f e_outer = runIdentity $ CMW.execWriterT (traverseProofExpr go
 --
 
 type family SymScope sym :: DK.Type
-type instance SymScope (W4B.ExprBuilder t fs scope) = scope
+type instance SymScope (W4B.ExprBuilder t fs scope) = t
 
 -- | A nonce representing an indirect reference to a proof node.
 data ProofNonce sym (tp :: ProofNodeType) where
@@ -677,6 +592,12 @@ data BlockSliceTransition sym arch where
     , slBlockExitCase :: PPa.PatchPairC (CS.RegValue sym (MS.MacawBlockEndType arch))
     } -> BlockSliceTransition sym arch
 
+instance PEM.ExprMappable sym (BlockSliceTransition sym arch) where
+  mapExpr sym f (BlockSliceTransition a1 a2 a3) = 
+     BlockSliceTransition
+       <$> PEM.mapExpr sym f a1
+       <*> PEM.mapExpr sym f a2
+       <*> PEM.mapExpr sym f a3
 
 -- | Traverse the leafs of a 'BlockSliceTransition' with the given 'ProofTransformer',
 -- changing the 'prf' type. In particular, this is used to ground a counterexample.
@@ -701,6 +622,16 @@ data BlockSliceState sym arch where
       -- | The state of all registers.
     , slRegState :: MM.RegState (MM.ArchReg arch) (BlockSliceRegOp sym)
     } -> BlockSliceState sym arch
+
+instance PEM.ExprMappable sym (BlockSliceState sym arch) where
+  mapExpr sym f (BlockSliceState a1 a2) = 
+     BlockSliceState
+       <$> (MapF.fromList <$> (traverse transMemCell (MapF.toList a1)))
+       <*> MM.traverseRegsWith (\_ v -> PEM.mapExpr sym f v) a2
+   where
+     transMemCell (MapF.Pair cell mop) = MapF.Pair
+       <$> PEM.mapExpr sym f cell
+       <*> PEM.mapExpr sym f mop
 
 -- transformBlockSliceState ::
 --   forall m prf prf'.

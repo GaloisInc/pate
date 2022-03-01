@@ -67,7 +67,7 @@ toJSON :: SomeProofEvent arch -> Maybe JSON.Value
 toJSON (SomeProofEvent blks proofSym) = do
   PFI.SomeProofSym _sym (PF.ProofNonceExpr _ _ app) <- return proofSym
   case app of
-    PF.ProofInlinedCall _blks (Right (PVM.SomeWriteSummary _sym inlineResult)) -> do
+    PF.ProofInlinedCall _blks (Right inlineResult) -> do
       let w = inlineResult ^. PVM.pointerWidth
       let idx = PVM.indexWriteAddresses w (inlineResult ^. PVM.differingGlobalMemoryLocations)
       let node = InlineResultNode { inlineOriginalFunctionAddress = blockAddress (PPa.pOriginal blks)

@@ -61,16 +61,16 @@ renderEquivalenceResult res =
                                        , TP.string "]"
                                        ]
 
-verificationStatusTag :: PPr.VerificationStatus ce -> String
+verificationStatusTag :: PPr.VerificationStatus sym arch -> String
 verificationStatusTag vs =
   case vs of
     PPr.Unverified -> "Unverified"
     PPr.VerificationSkipped -> "Skipped"
     PPr.VerificationSuccess -> "Verified"
-    PPr.VerificationFail _ -> "Failed"
+    PPr.VerificationFail{} -> "Failed"
 
 renderProofApp
-  :: PPr.ProofApp prf node tp
+  :: PPr.ProofApp sym arch node tp
   -> TP.UI TP.Element
 renderProofApp app =
   case app of

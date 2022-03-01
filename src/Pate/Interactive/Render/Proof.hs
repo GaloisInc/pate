@@ -17,7 +17,6 @@ import qualified Data.HashMap.Strict as HMS
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.List as DL
 import qualified Data.Macaw.CFG as MC
-import qualified Data.Macaw.Types as MT
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes, mapMaybe )
 import qualified Data.Parameterized.Classes as PC
@@ -40,6 +39,7 @@ import qualified Pate.Arch as PAr
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
+import qualified Pate.Ground as PG
 import qualified Pate.MemCell as PMC
 import qualified Pate.Panic as Panic
 import qualified Pate.PatchPair as PPa
@@ -52,28 +52,25 @@ import qualified Pate.Interactive.State as IS
 pp :: PP.Doc ann -> T.Text
 pp = PPT.renderStrict . PP.layoutCompact
 
-ppStatus :: ( prf ~ PFI.ProofSym sym arch
-            , WI.IsSymExprBuilder sym
+ppStatus :: ( WI.IsSymExprBuilder sym
             )
-         => proxy prf
-         -> PPr.VerificationStatus (PPr.ProofCounterExample prf, PPr.ProofCondition prf)
+         => PPr.VerificationStatus sym arch
          -> PP.Doc ann
-ppStatus _ st =
+ppStatus st =
   case st of
     PPr.Unverified -> PP.pretty "Unverified"
     PPr.VerificationSkipped -> PP.pretty "Skipped"
     PPr.VerificationSuccess -> PP.pretty "Success"
-    PPr.VerificationFail (_cex, diffSummary)
-      | Just False <- WI.asConstantPred (PFI.condEqPred diffSummary) -> PP.pretty "Inequivalent"
+    PPr.VerificationFail _cex diffSummary
+      | Just False <- WI.asConstantPred (PPr.condEqPred diffSummary) -> PP.pretty "Inequivalent"
       | otherwise -> PP.pretty "Conditional"
 
 ppAppTag
-  :: forall prf tp arch ann sym
-   . ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: forall tp arch ann sym
+   . ( WI.IsSymExprBuilder sym
      )
-  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
-  -> PPr.ProofNonceExpr prf tp
+  => MapF.MapF (PPr.ProofNonce sym) (IS.ProofTreeNode sym arch)
+  -> PPr.ProofNonceExpr sym arch tp
   -> PP.Doc ann
 ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
   case app of
@@ -94,23 +91,22 @@ ppAppTag proofTreeNodes (PPr.ProofNonceExpr thisNonce (Some parentNonce) app) =
               PP.pretty "Triple" <> PP.parens (PP.pretty "FunctionPredomain")
             | otherwise -> Panic.panic Panic.Visualizer "ppAppTag" ["Unexpected parent for a ProofTriple: " ++ show (thisNonce, parentNonce)]
           PPr.ProofTriple {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofTriple is not a possible parent component for a ProofTriple"]
-          PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
-          PPr.ProofDomain {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofDomain is not a possible parent component for a ProofTriple"]
           PPr.ProofInlinedCall {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofInlinedCall is not a possible parent component for a ProofTriple"]
+          PPr.ProofDomain {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofDomain is not a possible parent component for a ProofTriple"]
+          PPr.ProofStatus {} -> Panic.panic Panic.Visualizer "ppAppTag" ["ProofStatus is not a possible parent component for a ProofTriple"]
       | otherwise ->
         -- See Note [Pending Nodes]
         PP.pretty "<Pending>"
-    PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus (Proxy @prf) st)
+    PPr.ProofStatus st -> PP.pretty "Status" <> PP.parens (ppStatus st)
     PPr.ProofDomain {} -> PP.pretty "Domain"
     PPr.ProofInlinedCall {} -> PP.pretty "Inlined Call"
 
 nodeLabel
-  :: ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: ( WI.IsSymExprBuilder sym
      )
-  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
+  => MapF.MapF (PPr.ProofNonce sym) (IS.ProofTreeNode sym arch)
   -> PE.BlocksPair arch
-  -> PPr.ProofNonceExpr prf tp
+  -> PPr.ProofNonceExpr sym arch tp
   -> T.Text
 nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks _ ob _) (PE.Blocks _ pb _)) expr =
   pp (mconcat [ ppAppTag proofTreeNodes expr
@@ -130,13 +126,12 @@ nodeId = PPr.proofNonceValue
 -- 'Interactive' module, we set up some callbacks to allow users to ask for more
 -- information on individual nodes.
 blockNode
-  :: ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: ( WI.IsSymExprBuilder sym
      )
-  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
-  -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
-  -> Some (IS.ProofTreeNode arch prf)
-  -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
+  => MapF.MapF (PPr.ProofNonce sym) (IS.ProofTreeNode sym arch)
+  -> Map.Map (Some (PPr.ProofNonce sym)) JSON.Value
+  -> Some (IS.ProofTreeNode sym arch)
+  -> Map.Map (Some (PPr.ProofNonce sym)) JSON.Value
 blockNode proofTreeNodes m (Some (IS.ProofTreeNode blockPair expr@(PPr.ProofNonceExpr thisNonce _parentNonce _app) _tm)) =
   Map.insert (Some thisNonce) (JSON.Object node) m
   where
@@ -168,10 +163,10 @@ blockEdges edges (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr thisNonce (Some p
 -- nonce of the root node directly, but the quantification of the scope variable
 -- in the nonce (and the proof type) make that a bit complicated.
 generateRoot
-  :: MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
-  -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
-  -> Some (IS.ProofTreeNode arch prf)
-  -> Map.Map (Some (PPr.ProofNonce prf)) JSON.Value
+  :: MapF.MapF (PPr.ProofNonce sym) (IS.ProofTreeNode sym arch)
+  -> Map.Map (Some (PPr.ProofNonce sym)) JSON.Value
+  -> Some (IS.ProofTreeNode sym arch)
+  -> Map.Map (Some (PPr.ProofNonce sym)) JSON.Value
 generateRoot proofTree newRoots (Some (IS.ProofTreeNode _ (PPr.ProofNonceExpr _ (Some src) _) _))
   | Just _ <- MapF.lookup src proofTree = newRoots
   | otherwise = Map.insert (Some src) (JSON.Object node) newRoots
@@ -213,12 +208,11 @@ renderProof clickCallback divId (IS.ProofTree _sym proofTreeNodes _) =
 -- If the predicate is syntactically true, the register is always in the domain
 -- and no additional information about the formula is displayed for simplicity.
 renderProofRegisterDomain
-  :: ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: ( WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
      )
-  => proxy prf
-  -> MapF.Pair (PPr.ProofRegister prf) (C.Const (PPr.ProofPredicate prf))
+  => Proxy sym
+  -> MapF.Pair (MC.ArchReg arch) (C.Const (WI.Pred sym))
   -> Maybe (TP.UI TP.Element)
 renderProofRegisterDomain _ (MapF.Pair reg (C.Const predicate))
   | Just False <- WI.asConstantPred predicate = Nothing
@@ -228,11 +222,10 @@ renderProofRegisterDomain _ (MapF.Pair reg (C.Const predicate))
                               ]
 
 renderProofMemoryDomain
-  :: ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: ( WI.IsSymExprBuilder sym
      )
-  => PPr.ProofPredicate prf
-  -> MapF.Pair (PPr.ProofMemCell prf) (C.Const (PPr.ProofPredicate prf))
+  => WI.Pred sym
+  -> MapF.Pair (PMC.MemCell sym arch) (C.Const (WI.Pred sym))
   -> Maybe (TP.UI TP.Element)
 renderProofMemoryDomain polarity (MapF.Pair memCell (C.Const predicate))
   | WI.asConstantPred polarity /= WI.asConstantPred predicate =
@@ -242,13 +235,12 @@ renderProofMemoryDomain polarity (MapF.Pair memCell (C.Const predicate))
   | otherwise = Nothing
 
 renderDomainExpr
-  :: ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: ( WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
      )
-  => PPr.ProofNonceExpr prf PPr.ProofDomainType
+  => PPr.ProofNonceExpr sym arch PPr.ProofDomainType
   -> TP.UI TP.Element
-renderDomainExpr (PPr.ProofNonceExpr _ _ app) = renderDomainApp app
+renderDomainExpr (PPr.ProofNonceExpr _ _ (PPr.ProofDomain dom)) = renderDomain dom
 
 ppPolarityDescription :: WI.IsExpr e => e WI.BaseBoolType -> PP.Doc ann
 ppPolarityDescription predicate
@@ -261,33 +253,34 @@ ppPolarityDescription predicate
 text :: PP.Doc ann -> TP.UI TP.Element
 text = TP.string . T.unpack . pp
 
-renderDomainApp
-  :: forall prf node sym arch
-   . ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+renderDomain
+  :: forall sym arch
+   . ( WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
      )
-  => PPr.ProofApp prf node PPr.ProofDomainType
+  => PPr.EquivalenceDomain sym arch
   -> TP.UI TP.Element
-renderDomainApp (PPr.ProofDomain regs stack mem _context) =
+renderDomain (PPr.EquivalenceDomain regs stack mem) =
   TP.column [ TP.h4 #+ [TP.string "Registers"]
-            , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @prf)) (MapF.toList (MC.regStateMap regs)))
+            , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (MapF.toList (MC.regStateMap regs)))
             , TP.h4 #+ [TP.string "Stack Memory"]
-            , text (ppPolarityDescription (PPr.prfMemoryDomainPolarity stack))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity stack)) (MapF.toList (PPr.prfMemoryDomain stack)))
+            , text (ppPolarityDescription (PPr.memoryDomainPolarity stack))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.memoryDomainPolarity stack)) (MapF.toList (PPr.memoryDomain stack)))
             , TP.h4 #+ [TP.string "Other Memory"]
-            , text (ppPolarityDescription (PPr.prfMemoryDomainPolarity mem))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.prfMemoryDomainPolarity mem)) (MapF.toList (PPr.prfMemoryDomain mem)))
+            , text (ppPolarityDescription (PPr.memoryDomainPolarity mem))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.memoryDomainPolarity mem)) (MapF.toList (PPr.memoryDomain mem)))
             ]
 
 -- | Render the pretty version of a register pair in a ground state
 --
 -- If both registers are zero, return Nothing so that they can be elided.
 renderRegVal
-  :: (PAr.ValidArch arch)
-  => PFI.GroundDomain arch
+  :: ( PAr.ValidArch arch
+     , PG.IsGroundSym grnd
+     )
+  => PPr.EquivalenceDomain grnd arch
   -> MC.ArchReg arch tp
-  -> PFI.GroundRegOp arch tp
+  -> PPr.BlockSliceRegOp grnd tp
   -> Maybe (PAr.RegisterDisplay (PP.Doc ()))
 renderRegVal domain reg regOp =
   case PPr.slRegOpRepr regOp of
@@ -298,7 +291,7 @@ renderRegVal domain reg regOp =
           | otherwise -> Just prettySlotVal
     _ -> Just prettySlotVal
   where
-    vals = PPr.slRegOpValues regOp
+    vals = fmap PFI.groundMacawValue $ PPr.slRegOpValues regOp
 
     ppDom =
       case PFI.regInDomain domain reg of
@@ -306,7 +299,7 @@ renderRegVal domain reg regOp =
         False -> PP.pretty "| Excluded"
 
     ppVals =
-      case PPr.slRegOpEquiv regOp of
+      case PG.groundValue $ PPr.slRegOpEquiv regOp of
         True -> PP.pretty (PPa.pcOriginal vals)
         False -> PPa.ppPatchPairC PP.pretty vals
 
@@ -321,9 +314,11 @@ renderRegVal domain reg regOp =
 -- Note that this suppresses any excluded all-zero registers for cleanliness,
 -- but it does report how many such registers were hidden.
 renderRegisterState
-  :: (PAr.ValidArch arch)
-  => PFI.GroundDomain arch
-  -> MC.RegState (PPr.ProofRegister (PFI.ProofGround arch)) (PPr.BlockSliceRegOp (PFI.ProofGround arch))
+  :: ( PAr.ValidArch arch
+     , PG.IsGroundSym grnd
+     )
+  => PPr.EquivalenceDomain grnd arch
+  -> MC.RegState (MC.ArchReg arch) (PPr.BlockSliceRegOp grnd)
   -> TP.UI TP.Element
 renderRegisterState domain regs =
   TP.column (TP.h3 #+ [TP.string "Registers"] : map TP.string shownRegs ++ [text hidden])
@@ -335,26 +330,30 @@ renderRegisterState domain regs =
     hidden = PP.pretty "Eliding " <> PP.pretty numHidden <> PP.pretty " zero-valued registers"
 
 renderMemCellVal
-  :: (PAr.ValidArch arch)
-  => PFI.GroundDomain arch
-  -> PFI.GroundMemCell arch n
-  -> PFI.GroundMemOp arch tp
+  :: ( PAr.ValidArch arch
+     , PG.IsGroundSym grnd
+     )
+  => PPr.EquivalenceDomain grnd arch
+  -> PMC.MemCell grnd arch n
+  -> PPr.BlockSliceMemOp grnd tp
   -> Maybe (PP.Doc a)
 renderMemCellVal domain cell memOp = do
-  guard (PPr.slMemOpCond memOp)
-  let vals = PPr.slMemOpValues memOp
+  guard (PG.groundValue $ PPr.slMemOpCond memOp)
+  let vals = fmap PFI.groundBV $ PPr.slMemOpValues memOp
   let ppDom = case PFI.cellInDomain domain cell of
         True -> PP.emptyDoc
         False -> PP.pretty "| Excluded"
-  let ppVals = case PPr.slMemOpEquiv memOp of
+  let ppVals = case PG.groundValue $ PPr.slMemOpEquiv memOp of
         True -> PP.viaShow (PPa.pcOriginal vals)
         False -> PPa.ppPatchPairC PP.viaShow vals
-  return (PP.pretty cell <> PP.pretty ": " <> ppVals PP.<+> ppDom)
+  return (PFI.ppGroundCell cell <> PP.pretty ": " <> ppVals PP.<+> ppDom)
 
 renderMemoryState
-  :: (PAr.ValidArch arch)
-  => PFI.GroundDomain arch
-  -> MapF.MapF (PPr.ProofMemCell (PFI.ProofGround arch)) (PPr.BlockSliceMemOp (PFI.ProofGround arch))
+  :: ( PAr.ValidArch arch
+     , PG.IsGroundSym grnd
+     )
+  => PPr.EquivalenceDomain grnd arch
+  -> MapF.MapF (PMC.MemCell grnd arch) (PPr.BlockSliceMemOp grnd)
   -> TP.UI TP.Element
 renderMemoryState domain cells =
   TP.column (TP.h3 #+ [TP.string "Memory"] : map text entries)
@@ -362,15 +361,16 @@ renderMemoryState domain cells =
     entries = mapMaybe (\(MapF.Pair cell v) -> renderMemCellVal domain cell v) (MapF.toList cells)
 
 renderIPs
-  :: ( MC.RegisterInfo (PPr.ProofRegister prf)
-     , PP.Pretty (PPr.ProofMacawValue prf (MT.BVType (MC.RegAddrWidth (PPr.ProofRegister prf))))
-     , PPr.ProofPredicate prf ~ Bool)
-  => PPr.BlockSliceState prf
+  :: ( MC.RegisterInfo (MC.ArchReg arch)
+     , PG.IsGroundSym grnd
+     )
+  => PPr.BlockSliceState grnd arch
   -> PP.Doc ann
 renderIPs st
-  | PPr.slRegOpEquiv pcRegs = PP.pretty (PPa.pcOriginal (PPr.slRegOpValues pcRegs))
-  | otherwise = PPa.ppPatchPairC PP.pretty (PPr.slRegOpValues pcRegs)
+  | (PG.groundValue $ PPr.slRegOpEquiv pcRegs) = PP.pretty (PPa.pcOriginal vals)
+  | otherwise = PPa.ppPatchPairC PP.pretty vals
   where
+    vals = fmap PFI.groundMacawValue (PPr.slRegOpValues pcRegs)
     pcRegs = PPr.slRegState st ^. MC.curIP
 
 renderReturn
@@ -383,26 +383,13 @@ renderReturn ret =
     _ -> Nothing
 
 renderCounterexample
-  :: ( prf ~ PFI.ProofSym sym arch
-     , PAr.ValidArch arch
-     )
-  => PPr.ProofCounterExample prf
+  :: forall arch
+   . ( PAr.ValidArch arch )
+  => PPr.InequivalenceResult arch
   -> TP.UI TP.Element
-renderCounterexample ineqRes =
-  TP.grid [ [ renderInequalityReason (PFI.ineqReason ineqRes) ]
-          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (fmap PFI.grndBlockCase (PPr.slBlockExitCase (PFI.ineqSlice ineqRes)))) ]
-          , [ TP.h2 #+ [TP.string "Initial states"] ]
-          , [ renderRegisterState (PFI.ineqPre ineqRes) (PPr.slRegState (PPr.slBlockPreState (PFI.ineqSlice ineqRes)))
-            , renderMemoryState (PFI.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPreState (PFI.ineqSlice ineqRes)))
-            ]
-          , [ TP.h2 #+ [TP.string "Final states"] ]
-          , [ renderRegisterState (PFI.ineqPost ineqRes) (PPr.slRegState (PPr.slBlockPostState (PFI.ineqSlice ineqRes)))
-            , renderMemoryState (PFI.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPostState (PFI.ineqSlice ineqRes)))
-            ]
-          , [ TP.h2 #+ [TP.string "Continuation"] ]
-          , [ renderedContinuation ]
-          ]
-  where
+renderCounterexample ineqRes' = PPr.withIneqResult ineqRes' $ \ineqRes ->
+  let
+    groundEnd = fmap (PFI.groundBlockEnd (Proxy @arch)) $ PPr.slBlockExitCase (PPr.ineqSlice ineqRes)
     renderInequalityReason rsn =
       case rsn of
         PEE.InequivalentRegisters ->
@@ -414,9 +401,25 @@ renderCounterexample ineqRes =
         PEE.InvalidPostState ->
           TP.string "The original and patched programs have generated invalid post states"
 
-    renderedContinuation = TP.column (catMaybes [ Just (text (PP.pretty "Next IP: " <> renderIPs (PPr.slBlockPostState (PFI.ineqSlice ineqRes))))
-                                                , renderReturn (fmap PFI.grndBlockReturn (PPr.slBlockExitCase (PFI.ineqSlice ineqRes)))
+    renderedContinuation = TP.column (catMaybes [ Just (text (PP.pretty "Next IP: " <> renderIPs (PPr.slBlockPostState (PPr.ineqSlice ineqRes))))
+                                                , renderReturn (fmap PFI.grndBlockReturn groundEnd)
                                                 ])
+    in
+    TP.grid [ [ renderInequalityReason (PPr.ineqReason ineqRes) ]
+          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (fmap PFI.grndBlockCase groundEnd)) ]
+          , [ TP.h2 #+ [TP.string "Initial states"] ]
+          , [ renderRegisterState (PPr.ineqPre ineqRes) (PPr.slRegState (PPr.slBlockPreState (PPr.ineqSlice ineqRes)))
+            , renderMemoryState (PPr.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPreState (PPr.ineqSlice ineqRes)))
+            ]
+          , [ TP.h2 #+ [TP.string "Final states"] ]
+          , [ renderRegisterState (PPr.ineqPost ineqRes) (PPr.slRegState (PPr.slBlockPostState (PPr.ineqSlice ineqRes)))
+            , renderMemoryState (PPr.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPostState (PPr.ineqSlice ineqRes)))
+            ]
+          , [ TP.h2 #+ [TP.string "Continuation"] ]
+          , [ renderedContinuation ]
+          ]
+  where
+
 
 renderProofTripleLabel
   :: (MapF.OrdF k)
@@ -428,7 +431,7 @@ renderProofTripleLabel nodeMap parentNonce
       case PPr.prfNonceBody parentExpr of
         PPr.ProofBlockSlice {} ->
           TP.string "A proof that block slices are equivalent (i.e., satisfy their postconditions) under their preconditions"
-        PPr.ProofFunctionCall _funcPre _callBody _cont (PPr.ProofFunctionCallMetadata targetAddr) ->
+        PPr.ProofFunctionCall _funcPre _callBody _cont targetAddr ->
           TP.string ("A proof that a call to the function at " ++ show targetAddr ++ " is safe")
         PPr.ProofTriple {} ->
           TP.string "Impossible proof structure with a triple as the parent of another triple"
@@ -443,14 +446,14 @@ renderProofTripleLabel nodeMap parentNonce
 -- | Render the results from inlining a call
 renderInlinedCall
   :: PPa.PatchPair (PB.ConcreteBlock arch)
-  -> Either String (PVM.SomeWriteSummary (MC.ArchAddrWidth arch))
+  -> Either String (PVM.WriteSummary sym (MC.ArchAddrWidth arch))
   -> TP.UI TP.Element
 renderInlinedCall (PPa.PatchPair ob pb) results =
   case results of
     Left err -> TP.column [ TP.string (T.unpack renderBlocks)
                           , TP.string err
                           ]
-    Right (PVM.SomeWriteSummary _ (PVM.WriteSummary ranges _ _ _ w)) ->
+    Right (PVM.WriteSummary ranges _ _ _ w) ->
       let ppHex bv = PP.pretty (BVS.ppHex w bv)
           ppRange l h = text (ppHex l <> PP.pretty "-" <> ppHex h)
       in TP.column [ TP.string "The following global memory ranges differ between the original and patched programs"
@@ -466,24 +469,48 @@ renderInlinedCall (PPa.PatchPair ob pb) results =
                   ]
          )
 
+renderStatus
+  :: forall sym arch
+   . ( WI.IsSymExprBuilder sym
+     , MC.ArchConstraints arch
+     , PAr.ValidArch arch
+     )  
+  => PPr.VerificationStatus sym arch
+  -> TP.UI TP.Element
+renderStatus st = case st of
+  PPr.VerificationFail cex diffSummary
+    | Just False <- WI.asConstantPred (PPr.condEqPred diffSummary) ->
+      TP.column [ text (PP.pretty "Proof Status: " <> ppStatus st)
+                , TP.string "The patched program always exhibits different behavior if this program location is reached"
+                , TP.string "Counterexample:"
+                , renderCounterexample cex
+                ]
+    | otherwise ->
+      TP.column [ text (PP.pretty "Proof Status: " <> ppStatus st)
+                , TP.string "The patched program exhibits identical behavior to the original under the following conditions:"
+                , TP.pre # TP.set TP.text (T.unpack (pp (WI.printSymExpr (PPr.condEqPred diffSummary))))
+                , TP.string "Counterexample:"
+                , renderCounterexample cex
+                ]
+  _ -> TP.div #+ [ text (PP.pretty "Proof Status: " <> ppStatus st)
+                 ]
 
 renderProofApp
-  :: forall prf sym arch tp
-   . ( prf ~ PFI.ProofSym sym arch
-     , WI.IsSymExprBuilder sym
+  :: forall sym arch tp
+   . ( WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
      , PAr.ValidArch arch
      )
-  => MapF.MapF (PPr.ProofNonce prf) (IS.ProofTreeNode arch prf)
-  -> Some (PPr.ProofNonce prf)
-  -> PPr.ProofApp prf (PPr.ProofNonceExpr prf) tp
+  => MapF.MapF (PPr.ProofNonce sym) (IS.ProofTreeNode sym arch)
+  -> Some (PPr.ProofNonce sym)
+  -> PPr.ProofApp sym arch (PPr.ProofNonceExpr sym arch) tp
   -> TP.UI TP.Element
 renderProofApp nodeMap (Some parentNonce) app =
   case app of
     PPr.ProofBlockSlice _domain _callees _mret _munknown _transition ->
       TP.div #+ [ TP.string "Proof that the post-domain of this slice of the program is satisfied when this slice returns, assuming its precondition"
                 ]
-    PPr.ProofFunctionCall _pre _body _cont (PPr.ProofFunctionCallMetadata targetAddr) ->
+    PPr.ProofFunctionCall _pre _body _cont targetAddr ->
       TP.div #+ [ TP.string ("Proof that a function call at " ++ show targetAddr ++ " is valid given its preconditions")
                 ]
     PPr.ProofTriple _blocks pre post (PPr.ProofNonceExpr _ _ (PPr.ProofStatus status)) ->
@@ -496,39 +523,23 @@ renderProofApp nodeMap (Some parentNonce) app =
                                , renderDomainExpr post
                                ]
           statusElts = TP.column [ TP.h3 #+ [TP.string "Status"]
-                                 , text (ppStatus (Proxy @prf) status)
+                                 , text (ppStatus status)
                                  ]
       in TP.grid [ [renderProofTripleLabel nodeMap parentNonce]
                  , [preElts # TP.set TP.class_ "domain", postElts # TP.set TP.class_ "domain"]
                  , [statusElts]
                  ]
-    PPr.ProofStatus st ->
-      case st of
-        PPr.VerificationFail (cex, diffSummary)
-          | Just False <- WI.asConstantPred (PFI.condEqPred diffSummary) ->
-            TP.column [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
-                      , TP.string "The patched program always exhibits different behavior if this program location is reached"
-                      , TP.string "Counterexample:"
-                      , renderCounterexample cex
-                      ]
-          | otherwise ->
-            TP.column [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
-                      , TP.string "The patched program exhibits identical behavior to the original under the following conditions:"
-                      , TP.pre # TP.set TP.text (T.unpack (pp (WI.printSymExpr (PFI.condEqPred diffSummary))))
-                      , TP.string "Counterexample:"
-                      , renderCounterexample cex
-                      ]
-        _ -> TP.div #+ [ text (PP.pretty "Proof Status: " <> ppStatus (Proxy @prf) st)
-                       ]
-    PPr.ProofDomain {} ->
-      TP.column [ TP.string "The domain of an individual equivalence proof"
-                , renderDomainApp app
-                ]
     PPr.ProofInlinedCall blks results ->
       TP.column [ TP.string "The results of inlining equated call sites"
                 , renderInlinedCall blks results
                 ]
+    PPr.ProofStatus st -> renderStatus st
+    PPr.ProofDomain dom ->
+      TP.column [ TP.string "The domain of an individual equivalence proof"
+                , renderDomain dom
+                ]
 
+-- 
 {- Note [Pending Nodes]
 
 We verify proof nodes in parallel and mostly irrespective of dependency

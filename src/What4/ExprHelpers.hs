@@ -821,11 +821,12 @@ expandMuxEquality sym outer = do
         _ -> return e
   go outer
 
-
+-- | Simplification cases for 'simplifyBVOps'
 simplifyBVOpInner ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
+  -- | Recursive call to outer simplification function
   (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) ->
   W4B.App (W4B.Expr t) tp ->
   Maybe (IO (W4.SymExpr sym tp))
