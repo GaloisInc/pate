@@ -63,6 +63,7 @@ module What4.ExprHelpers (
   , setProgramLoc
   , idxCacheEvalWriter
   , Tagged
+  , natToIntegerPure
   ) where
 
 import           GHC.TypeNats
@@ -107,6 +108,13 @@ import qualified What4.Symbol as WS
 
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
+
+
+-- FIXME: this is a workaround for the fact that 'natToInteger' from What4.Interface
+-- is in the IO monad, but doesn't need to be.
+natToIntegerPure ::
+  W4.IsExprBuilder sym => sym -> W4.SymNat sym -> W4.SymInteger sym
+natToIntegerPure _sym n = unsafeCoerce n
 
 iteM ::
   W4.IsExprBuilder sym =>

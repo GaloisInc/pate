@@ -590,13 +590,16 @@ groundBV ::
   CLM.LLVMPtr grnd w ->
   GroundBV w
 groundBV (CLM.LLVMPointer reg off)
-  | W4.BaseBVRepr w <- W4.exprType off
-  , Some regionTags <- PG.groundTagNat reg =
+  | W4.BaseBVRepr w <- W4.exprType off =
   let
-    greg = PG.groundNat reg
-    goff = PG.groundValue off
-    offTags = PG.groundTag off
-  in mkGroundBV w ((PG.undefTags regionTags) <> (PG.undefTags offTags)) greg goff
+    regInfo = PG.groundInfoNat reg
+    offInfo = PG.groundInfo off
+    tags = PG.groundPtrTag regInfo <> (PG.groundPtrTag offInfo)
+    integerToNat :: Integer -> Natural
+    integerToNat i
+      | i >= 0 = fromIntegral i
+      | otherwise = 0
+  in mkGroundBV w tags (integerToNat (PG.groundVal regInfo)) (PG.groundVal offInfo)
 
 groundMacawValue ::
   PG.IsGroundSym grnd =>

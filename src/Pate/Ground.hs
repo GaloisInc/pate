@@ -35,13 +35,13 @@ module Pate.Ground
   ( IsGroundSym
   , Grounded
   , GroundData
-  , GroundTag(..)
+  , GroundInfo(..)
   , withGroundSym
   , ground
   , groundValue
   , groundPartial
-  , groundTag
-  , groundTagNat
+  , groundInfo
+  , groundInfoNat
   , groundNat
   , isStackRegion
   , groundMacawEndCase
@@ -53,12 +53,14 @@ import qualified Data.Map as Map
 import           Numeric.Natural ( Natural )
 import qualified Data.Kind as DK
 import qualified Control.Monad.IO.Class as IO
-
+import qualified Data.BitVector.Sized as BV
 
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as FC
 import qualified Data.Parameterized.TraversableF as TF
+import           Data.Parameterized.Context (EmptyCtx, (::>), pattern Empty, pattern (:>))
+import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Symbolic as MS
 
@@ -72,6 +74,7 @@ import qualified What4.Concrete as W4C
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
+import qualified What4.ExprHelpers as WEH
 
 import qualified Pate.Panic as PP
 
@@ -137,37 +140,23 @@ groundInfo e =
     Just info -> info
     Nothing -> PP.panic PP.ProofConstruction "groundInfo" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
 
-
-groundTag :: IsGroundSym sym => W4.SymExpr sym tp -> MT.UndefPtrOpTags
-groundTag e =
+groundInfoNat :: IsGroundSym sym => W4.SymNat sym -> GroundInfo W4.BaseIntegerType
+groundInfoNat e =
   let grnd = ?grndData
-  in case MapF.lookup e (grndInfoMap grnd) of
-      Just tag -> groundPtrTag tag
-      Nothing -> mempty
+  in groundInfo $ WEH.natToIntegerPure (grndSym grnd) e
 
-groundTagNat :: IsGroundSym sym => W4.SymNat sym -> MT.UndefPtrOpTags
-groundTagNat e =
-  let grnd = ?grndData
-  in case Map.lookup e (grndAnnNat grnd) of
-    Just tag -> groundPtrTag tag
-    Nothing -> mempty
-
+-- TODO: this breaks the abstraction boundary for block ends
 groundMacawEndCase ::
   forall sym arch.
   IsGroundSym sym =>
   Proxy arch ->
   CS.RegValue sym (MS.MacawBlockEndType arch) ->
   MS.MacawBlockEndCase
-groundMacawEndCase p e =
-  let grnd = ?grndData
-  in case MS.concreteEndCase p (grndSym grnd) e of
-    Just ec -> ec
-    Nothing -> PP.panic PP.ProofConstruction "groundMacawEndCase" ["Unexpected symbolic value"]
+groundMacawEndCase _ (_ Ctx.:> CS.RV blend Ctx.:> _) =
+  (toEnum (fromIntegral (BV.asUnsigned (groundValue blend))))
 
 groundValue :: IsGroundSym sym => W4.SymExpr sym tp -> W4G.GroundValue tp
-groundValue e = case W4.asConcrete e of
-  Just c -> concreteToGround c
-  Nothing -> PP.panic PP.ProofConstruction "groundValue" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
+groundValue e = groundVal $ groundInfo e 
 
 groundPartial :: IsGroundSym sym => W4P.PartExpr (W4.Pred sym) a -> Maybe a
 groundPartial = \case
@@ -176,11 +165,6 @@ groundPartial = \case
     True -> Just v
     False -> Nothing
 
-concreteValue :: IsGroundSym sym => W4.SymExpr sym tp -> W4C.ConcreteVal tp
-concreteValue e = case W4.asConcrete e of
-  Just c -> c
-  Nothing -> PP.panic PP.ProofConstruction "concreteValue" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
-
 groundNat :: IsGroundSym sym => W4.SymNat sym -> Natural
 groundNat e = case W4.asNat e of
   Just n -> n
@@ -188,15 +172,6 @@ groundNat e = case W4.asNat e of
 
 isStackRegion :: IsGroundSym sym => W4.SymNat sym -> Bool
 isStackRegion e = grndStackRegion ?grndData == groundNat e
-
-concreteToGround :: W4C.ConcreteVal tp -> W4G.GroundValue tp
-concreteToGround c = case c of
-  W4C.ConcreteBool b ->  b
-  W4C.ConcreteInteger i -> i
-  W4C.ConcreteBV _ bv -> bv
-  W4C.ConcreteStruct s -> FC.fmapFC (W4G.GVW . concreteToGround) s
-  _ -> PP.panic PP.ProofConstruction "concreteToGround" ["Unexpected concrete value: ", show $ W4C.ppConcrete c]
-
 
 ground ::
   forall sym a.

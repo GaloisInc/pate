@@ -123,27 +123,16 @@ ground ::
 ground fn a =  withSym $ \sym -> do
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   IO.withRunInIO $ \f ->
-    PG.ground sym stackRegion (\e -> f (mkGroundTag fn e)) (\e -> f (mkConcreteVal fn e)) a
+    PG.ground sym stackRegion (\e -> f (mkGroundInfo fn e)) a
 
-mkGroundTag ::
+mkGroundInfo ::
   SymGroundEvalFn sym ->
   W4.SymExpr sym tp ->
-  EquivM sym arch (Maybe (PG.GroundTag tp))
-mkGroundTag fn e = do
+  EquivM sym arch (PG.GroundInfo tp)
+mkGroundInfo fn e = do
   ptrOpTags <- getPointerTags fn e
-  case ptrOpTags == mempty of
-    True -> return Nothing
-    False -> return $ Just $ PG.GroundTag ptrOpTags
-
-mkConcreteVal ::
-  SymGroundEvalFn sym ->
-  W4.SymExpr sym tp ->
-  EquivM sym arch (W4C.ConcreteVal tp)
-mkConcreteVal fn e = do
-  c <- execGroundFn fn e
-  case groundToConcrete (W4.exprType e) c of
-    Just g -> return g
-    Nothing -> throwHere $ PEE.UnsupportedGroundType (W4.exprType e)
+  val <- execGroundFn fn e
+  return $ PG.GroundInfo ptrOpTags val
 
 data Bindings sym tp where
   Bindings :: MapF.MapF (W4.SymExpr sym) W4G.GroundValueWrapper -> Bindings sym tp
