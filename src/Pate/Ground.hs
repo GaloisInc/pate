@@ -140,10 +140,12 @@ groundInfo e =
     Just info -> info
     Nothing -> PP.panic PP.ProofConstruction "groundInfo" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
 
-groundInfoNat :: IsGroundSym sym => W4.SymNat sym -> GroundInfo W4.BaseIntegerType
+groundInfoNat :: IsGroundSym sym => W4.SymNat sym -> (MT.UndefPtrOpTags, Natural)
 groundInfoNat e =
-  let grnd = ?grndData
-  in groundInfo $ WEH.natToIntegerPure (grndSym grnd) e
+  let
+    grnd = ?grndData
+    info = groundInfo $ WEH.natToIntegerPure (grndSym grnd) e
+  in (groundPtrTag info, integerToNat (groundVal info))
 
 -- TODO: this breaks the abstraction boundary for block ends
 groundMacawEndCase ::
@@ -166,12 +168,15 @@ groundPartial = \case
     False -> Nothing
 
 groundNat :: IsGroundSym sym => W4.SymNat sym -> Natural
-groundNat e = case W4.asNat e of
-  Just n -> n
-  Nothing -> PP.panic PP.ProofConstruction "groundNat" ["Unexpected symbolic value:", show $ W4.printSymNat e]
+groundNat e = snd $ groundInfoNat e
 
 isStackRegion :: IsGroundSym sym => W4.SymNat sym -> Bool
 isStackRegion e = grndStackRegion ?grndData == groundNat e
+
+integerToNat :: Integer -> Natural
+integerToNat i
+  | i >= 0 = fromIntegral i
+  | otherwise = 0
 
 ground ::
   forall sym a.
@@ -198,11 +203,7 @@ ground sym stackRegion mkinfo a = do
       return $ gdata { grndInfoMap = upd }
   gdata <- PEM.foldExpr sym f' a initGround
   return $ Grounded a gdata
-  where
-    integerToNat :: Integer -> Natural
-    integerToNat i
-      | i >= 0 = fromIntegral i
-      | otherwise = 0
+
 -- trivial instance - grounded values should not be modified
 -- by expression maps
 instance PEM.ExprMappable sym (Grounded a) where

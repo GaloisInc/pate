@@ -592,14 +592,10 @@ groundBV ::
 groundBV (CLM.LLVMPointer reg off)
   | W4.BaseBVRepr w <- W4.exprType off =
   let
-    regInfo = PG.groundInfoNat reg
+    (regTags, groundReg) = PG.groundInfoNat reg
     offInfo = PG.groundInfo off
-    tags = PG.groundPtrTag regInfo <> (PG.groundPtrTag offInfo)
-    integerToNat :: Integer -> Natural
-    integerToNat i
-      | i >= 0 = fromIntegral i
-      | otherwise = 0
-  in mkGroundBV w tags (integerToNat (PG.groundVal regInfo)) (PG.groundVal offInfo)
+    tags = regTags <> (PG.groundPtrTag offInfo)
+  in mkGroundBV w tags groundReg (PG.groundVal offInfo)
 
 groundMacawValue ::
   PG.IsGroundSym grnd =>
@@ -692,20 +688,31 @@ ppGroundCell ::
   PP.Doc a
 ppGroundCell cell = PP.pretty $ (show $ groundLLVMPointer (PMC.cellPtr cell))
 
--- TODO: we can't rely on MapF.lookup being consistent here because it's relying on
--- term equality for annotated terms.
--- The easiest solution is to just traverse the domain and use equality on ground terms,
--- but we could also consider generalizing this container type to support lookups
--- based on abstract domains (see CachedArray from crucible symio).
+
+eqGroundMemCells ::
+  PG.IsGroundSym grnd =>
+  PMC.MemCell grnd arch n1 ->
+  PMC.MemCell grnd arch n2 ->
+  Bool  
+eqGroundMemCells cell1 cell2 =
+  case testEquality (PMC.cellWidth cell1) (PMC.cellWidth cell2) of
+    Just Refl ->
+      let
+        CLM.LLVMPointer reg1 off1 = PMC.cellPtr cell1
+        CLM.LLVMPointer reg2 off2 = PMC.cellPtr cell2
+      in PG.groundNat reg1 == PG.groundNat reg2 && PG.groundValue off1 == PG.groundValue off2
+    Nothing -> False
+
+
 cellInMemDomain ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
   PF.MemoryDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
-cellInMemDomain dom cell  = case MapF.lookup cell (PF.memoryDomain dom) of
-    Just (Const p) -> PG.groundValue p == (PG.groundValue $ PF.memoryDomainPolarity dom)
-    Nothing -> not $ (PG.groundValue $ PF.memoryDomainPolarity dom)
+cellInMemDomain dom cell = case PG.groundValue $ PF.memoryDomainPolarity dom of
+  True -> MapF.foldrWithKey (\cell' (Const p) p' -> p' || (eqGroundMemCells cell cell' && PG.groundValue p)) False (PF.memoryDomain dom)
+  False -> MapF.foldrWithKey (\cell' (Const p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PF.memoryDomain dom)
 
 
 cellInDomain ::
