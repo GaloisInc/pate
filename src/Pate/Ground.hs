@@ -72,10 +72,13 @@ import qualified What4.ExprHelpers as WEH
 import qualified Pate.Panic as PP
 
 -- | This module allows a model from What4 to be captured with respect to
--- some expression-containing type. A 'Grounded' value contains a binding
+-- some expression-containing type. This is used to ground concrete counter-examples
+-- from the verifier which prove inequivalence of block slices.
+-- A 'Grounded' value contains a binding
 -- environment which is sufficient to ground any of the inner expressions of
 -- the type via 'groundValue'. Here an "inner" expression is defined by the
 -- traversal of the type according to 'PEM.ExprMappable'.
+
 
 -- | A value wrapped with a grounding environment, sufficient to
 -- concretely evaluate its inner expressions.
@@ -88,7 +91,9 @@ data Grounded (a :: sym -> DK.Type) where
     , _grndData :: GroundData sym
     } -> Grounded a
 
-
+-- | Interpret the given 'Grounded' by establishing 'IsGroundSym' for its 'sym' type
+-- parameter, which implicitly binds the grounding environment used by
+-- 'groundValue', 'groundInfo', etc.
 withGroundSym ::
   Grounded tp ->
   (forall grnd. IsGroundSym grnd => tp grnd -> a) ->
@@ -132,6 +137,8 @@ type HasGroundData sym = (?grndData :: GroundData sym)
 
 type IsGroundSym sym = (HasGroundData sym, PS.ValidSym sym)
 
+-- | Retrieve the ground information of a symbolic expression with respect to the
+-- grounding environment bound by 'IsGroundSym'
 groundInfo :: IsGroundSym sym => W4.SymExpr sym tp -> GroundInfo tp
 groundInfo e = 
   let grnd = ?grndData
@@ -139,6 +146,8 @@ groundInfo e =
     Just info -> info
     Nothing -> PP.panic PP.ProofConstruction "groundInfo" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
 
+-- | Retrieve the ground information of a symbolic natural with respect to the
+-- grounding environment bound by 'IsGroundSym'
 groundInfoNat :: IsGroundSym sym => W4.SymNat sym -> (MT.UndefPtrOpTags, Natural)
 groundInfoNat e =
   let
@@ -147,6 +156,15 @@ groundInfoNat e =
   in (groundPtrTag info, integerToNat (groundVal info))
 
 -- TODO: this breaks the abstraction boundary for block ends
+-- The main issue is that we want to leave this as a pure function.
+-- We would like to abstract away the specific encoding of 'MacawBlockEndType', but
+-- the only function from macaw for interpreting it is 'Macaw.Symbolic.blockEndCase'
+-- Ideally we could break up 'MacawBlockEndType' into its components and define a pure function
+-- in Macaw: 'GroundValue MacawBlockEndType -> MacawBlockEndCase'
+
+-- | Retrieve the concrete 'MS.MacawBlockEndCase' of
+-- a symbolic 'MS.MacawBlockEndType' with respect to the
+-- grounding environment bound by 'IsGroundSym'
 groundMacawEndCase ::
   forall sym arch.
   IsGroundSym sym =>
@@ -156,9 +174,13 @@ groundMacawEndCase ::
 groundMacawEndCase _ (_ Ctx.:> CS.RV blend Ctx.:> _) =
   (toEnum (fromIntegral (BV.asUnsigned (groundValue blend))))
 
+-- | Retrieve the concrete value of a symbolic expression with respect to the
+-- grounding environment bound by 'IsGroundSym'
 groundValue :: IsGroundSym sym => W4.SymExpr sym tp -> W4G.GroundValue tp
 groundValue e = groundVal $ groundInfo e 
 
+-- | Ground the predicate in a 'W4P.PartExpr' with respect to the grounding environment
+-- bound by 'IsGroundSym' and return the inner value if it evaluates to True.
 groundPartial :: IsGroundSym sym => W4P.PartExpr (W4.Pred sym) a -> Maybe a
 groundPartial = \case
   W4P.Unassigned -> Nothing
@@ -166,9 +188,13 @@ groundPartial = \case
     True -> Just v
     False -> Nothing
 
+-- | Retrieve the concrete value of a symbolic natural with respect to the
+-- grounding environment bound by 'IsGroundSym'
 groundNat :: IsGroundSym sym => W4.SymNat sym -> Natural
 groundNat e = snd $ groundInfoNat e
 
+-- | True if the concrete value of the given symbolic natural is equivalent
+-- to the "stack" memory region.
 isStackRegion :: IsGroundSym sym => W4.SymNat sym -> Bool
 isStackRegion e = grndStackRegion ?grndData == groundNat e
 
