@@ -72,21 +72,15 @@ import           Control.Applicative
 import           Control.Monad.Identity
 import           Control.Monad.Writer.Strict as CMW
 import qualified Data.Kind as DK
-import           GHC.TypeNats
 import           Numeric.Natural ( Natural )
-import           Data.Map ( Map )
-import qualified Data.Map as Map
-import           Data.Proxy
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.TraversableFC as FC
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
-import qualified Data.Macaw.Types as MT
 
 import qualified Lang.Crucible.Types as CT
 import qualified Lang.Crucible.Simulator as CS
@@ -94,7 +88,6 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
-import qualified Pate.Binary as PBi
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.StatePred as PES
@@ -105,15 +98,12 @@ import qualified Pate.SimState as PS
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.MemCell as PMC
-import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.SimulatorRegisters as PSR
 
 import qualified What4.ExprHelpers as W4H
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
-import qualified What4.Concrete as W4C
-import qualified What4.Partial as W4P
 
 ---------------------------------------------
 -- proof objects
@@ -391,14 +381,6 @@ traverseProofApp f = \case
   ProofDomain a1 -> ProofDomain <$> pure a1
   ProofStatus a1 -> ProofStatus <$> pure a1
 
--- instance
---   (forall tp. PEM.ExprMappable sym (node tp)) =>
---   PEM.ExprMappable sym (ProofApp sym arch node utp) where
---   mapExpr sym f = \case
---     ProofLeaf a1 -> ProofLeaf <$> PEM.mapExpr sym f a1
---     app -> traverseProofApp (PEM.mapExpr sym f) app
---
-
 -- | Map over the nodes of a 'ProofApp', changing the
 -- 'node' type while leaving the leafs (i.e. the 'prf' type) unchanged.
 mapProofApp ::
@@ -406,76 +388,6 @@ mapProofApp ::
   ProofApp sym arch node utp ->
   ProofApp sym arch node' utp
 mapProofApp f app = runIdentity $ traverseProofApp (\app' -> Identity $ f app') app
-
--- -- | A bundle of functions for converting the leafs of a proof graph
--- data ProofTransformer m prf prf' where
---   ProofTransformer ::
---     {
---       prfPredTrans :: ProofPredicate prf -> m (ProofPredicate prf')
---     , prfMemCellTrans :: forall n. ProofMemCell prf n -> m (ProofMemCell prf' n)
---     , prfBVTrans :: forall n. ProofBV prf n -> m (ProofBV prf' n)
---     , prfExitTrans :: ProofBlockExit prf -> m (ProofBlockExit prf')
---     , prfValueTrans :: forall tp. ProofMacawValue prf tp -> m (ProofMacawValue prf' tp)
---     , prfContextTrans :: ProofContext prf -> m (ProofContext prf')
---     , prfCounterExampleTrans :: ProofCounterExample prf -> m (ProofCounterExample prf')
---     , prfConditionTrans :: ProofCondition prf -> m (ProofCondition prf')
---     , prfConstraint ::
---         forall a. ((IsProof prf'
---                    , ProofRegister prf ~ ProofRegister prf'
---                    , ProofBlock prf ~ ProofBlock prf'
---                    , ProofInlinedResult prf ~ ProofInlinedResult prf') => a) -> a
---     } -> ProofTransformer m prf prf'
--- 
--- transformMemDomain ::
---   forall m prf prf'.
---   Applicative m =>
---   ProofTransformer m prf prf' ->
---   ProofMemoryDomain prf ->
---   m (ProofMemoryDomain prf')
--- transformMemDomain f (ProofMemoryDomain dom pol) = prfConstraint f $ ProofMemoryDomain
---   <$> (MapF.fromList <$> (traverse transMemCell (MapF.toList dom)))
---   <*> prfPredTrans f pol
---     where
---       transMemCell :: MapF.Pair (ProofMemCell prf) (Const (ProofPredicate prf))
---         -> m (MapF.Pair (ProofMemCell prf') (Const (ProofPredicate prf')))
---       transMemCell (MapF.Pair cell (Const p)) = MapF.Pair
---         <$> prfMemCellTrans f cell
---         <*> (Const <$> (prfPredTrans f p))
--- 
--- -- | Traverse the leafs of 'ProofApp' with the given 'ProofTransformer', leaving the
--- -- 'node' type unchanged, but changing the 'prf' type.
--- transformProofApp ::
---   Applicative m =>
---   ProofTransformer m prf prf' ->
---   ProofApp prf node utp ->
---   m ((ProofApp prf' node) utp)
--- transformProofApp f app = prfConstraint f $ case app of
---   ProofBlockSlice a1 a2 a3 a4 a5 -> ProofBlockSlice
---     <$> pure a1
---     <*> pure a2
---     <*> pure a3
---     <*> pure a4
---     <*> transformBlockSlice f a5
---   ProofInlinedCall pp res -> pure (ProofInlinedCall pp res)
---   ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
---     <$> pure a1
---     <*> pure a2
---     <*> pure a3
---     <*> pure md
---   ProofTriple a1 a2 a3 a4 -> ProofTriple
---     <$> pure a1
---     <*> pure a2
---     <*> pure a3
---     <*> pure a4
---     
---   ProofStatus a1 -> ProofStatus
---     <$> traverse (\(cex, cond) -> (,) <$> prfCounterExampleTrans f cex <*> prfConditionTrans f cond) a1
---   ProofDomain a1 a2 a3 a4 -> ProofDomain
---     <$> MM.traverseRegsWith (\_ (Const v) -> Const <$> prfPredTrans f v) a1
---     <*> transformMemDomain f a2
---     <*> transformMemDomain f a3
---     <*> prfContextTrans f a4
--- 
 
 -- | A 'ProofExpr' is an direct proof representation, where
 -- nodes hold completed sub-proofs.
@@ -491,15 +403,6 @@ traverseProofExpr ::
 traverseProofExpr f e =
   ProofExpr <$> (traverseProofApp (traverseProofExpr f) =<< (unApp <$> f e))
 
--- transformProofExpr ::
---   Monad m =>
---   ProofTransformer m prf prf' ->
---   ProofExpr prf tp ->
---   m (ProofExpr prf' tp)
--- transformProofExpr f (ProofExpr app) =
---   ProofExpr <$> (traverseProofApp (transformProofExpr f) =<< (transformProofApp f app))
---
-
 -- | Collect results from all sub-expressions
 collectProofExpr ::
   forall w sym arch tp.
@@ -513,36 +416,6 @@ collectProofExpr f e_outer = runIdentity $ CMW.execWriterT (traverseProofExpr go
     go e = do
       CMW.tell (f e)
       return e
-
--- -- | A domain expression is actually independent of the 'app' parameter, so we can
--- -- project it to any one.
--- appDomain ::
---   ProofExpr prf ProofDomainType ->
---   ProofApp prf app ProofDomainType
--- appDomain (ProofExpr (ProofDomain regs stack glob domCtx)) = ProofDomain regs stack glob domCtx
--- 
--- emptyDomain ::
---   forall prf m.
---   Monad m =>
---   IsProof prf =>
---   IsBoolLike prf m =>
---   ProofContext prf ->
---   m (ProofExpr prf ProofDomainType)
--- emptyDomain domCtx = do
---   regs <- MM.mkRegStateM (\_ -> Const <$> proofPredFalse @prf)
---   stack <- emptyMemDomain
---   globs <- emptyMemDomain
---   return $ ProofExpr $ ProofDomain regs stack globs domCtx
--- 
--- emptyMemDomain ::
---   forall prf m.
---   Monad m =>
---   IsBoolLike prf m =>
---   m (ProofMemoryDomain prf)
--- emptyMemDomain = do
---   falsePred <- proofPredFalse @prf
---   return $ ProofMemoryDomain MapF.empty falsePred
---
 
 type family SymScope sym :: DK.Type
 type instance SymScope (W4B.ExprBuilder t fs scope) = t
@@ -599,20 +472,6 @@ instance PEM.ExprMappable sym (BlockSliceTransition sym arch) where
        <*> PEM.mapExpr sym f a2
        <*> PEM.mapExpr sym f a3
 
--- | Traverse the leafs of a 'BlockSliceTransition' with the given 'ProofTransformer',
--- changing the 'prf' type. In particular, this is used to ground a counterexample.
--- transformBlockSlice ::
---   Applicative m =>
---   ProofTransformer m prf prf' ->
---   BlockSliceTransition prf ->
---   m (BlockSliceTransition prf')
--- transformBlockSlice f (BlockSliceTransition a1 a2 a3) =
---     BlockSliceTransition
---       <$> transformBlockSliceState f a1
---       <*> transformBlockSliceState f a2
---       <*> traverse (prfExitTrans f) a3
---
-
 -- | The machine state of two block slices: original and patched.
 data BlockSliceState sym arch where
   BlockSliceState ::
@@ -633,23 +492,6 @@ instance PEM.ExprMappable sym (BlockSliceState sym arch) where
        <$> PEM.mapExpr sym f cell
        <*> PEM.mapExpr sym f mop
 
--- transformBlockSliceState ::
---   forall m prf prf'.
---   Applicative m =>
---   ProofTransformer m prf prf' ->
---   BlockSliceState prf ->
---   m (BlockSliceState prf')
--- transformBlockSliceState f (BlockSliceState a1 a2) = prfConstraint f $
---     BlockSliceState
---       <$> (MapF.fromList <$> (traverse transMemCell (MapF.toList a1)))
---       <*> MM.traverseRegsWith (\_ v -> transformBlockSliceRegOp f v) a2
---   where
---     transMemCell :: MapF.Pair (ProofMemCell prf) (BlockSliceMemOp prf)
---       -> m (MapF.Pair (ProofMemCell prf') (BlockSliceMemOp prf'))
---     transMemCell (MapF.Pair cell mop) = MapF.Pair
---       <$> prfMemCellTrans f cell
---       <*> transformBlockSliceMemOp f mop
--- 
 -- | The original and patched values for a register.
 data BlockSliceRegOp sym tp where
   BlockSliceRegOp ::
@@ -667,17 +509,6 @@ instance PEM.ExprMappable sym (BlockSliceRegOp sym tp) where
     <*> f (slRegOpEquiv regOp)
 
 
--- transformBlockSliceRegOp ::
---   Applicative m =>
---   ProofTransformer m prf prf' ->
---   BlockSliceRegOp prf tp ->
---   m (BlockSliceRegOp prf' tp)
--- transformBlockSliceRegOp f (BlockSliceRegOp a1 a2 a3) =
---     BlockSliceRegOp
---       <$> traverse (prfValueTrans f) a1
---       <*> pure a2
---       <*> prfPredTrans f a3
--- 
 -- | The original and patched values for a memory location, where
 -- 'w' represents the number of bytes read or written.
 data BlockSliceMemOp sym w where
@@ -696,17 +527,7 @@ instance PEM.ExprMappable sym (BlockSliceMemOp sym w) where
     <*> f (slMemOpEquiv memOp)
     <*> f (slMemOpCond memOp)
 
--- transformBlockSliceMemOp ::
---   Applicative m =>
---   ProofTransformer m prf prf' ->
---   BlockSliceMemOp prf tp ->
---   m (BlockSliceMemOp prf' tp)
--- transformBlockSliceMemOp f (BlockSliceMemOp a1 a2 a3) =
---     BlockSliceMemOp
---       <$> traverse (prfBVTrans f) a1
---       <*> prfPredTrans f a2
---       <*> prfPredTrans f a3
--- 
+
 foldrMBlockStateLocs ::
   Monad m =>
   (forall tp. MM.ArchReg arch tp -> BlockSliceRegOp sym tp -> b -> m b) ->
