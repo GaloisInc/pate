@@ -156,11 +156,7 @@ groundInfoNat e =
   in (groundPtrTag info, integerToNat (groundVal info))
 
 -- TODO: this breaks the abstraction boundary for block ends
--- The main issue is that we want to leave this as a pure function.
--- We would like to abstract away the specific encoding of 'MacawBlockEndType', but
--- the only function from macaw for interpreting it is 'Macaw.Symbolic.blockEndCase'
--- Ideally we could break up 'MacawBlockEndType' into its components and define a pure function
--- in Macaw: 'GroundValue MacawBlockEndType -> MacawBlockEndCase'
+-- (see: https://github.com/GaloisInc/pate/issues/196)
 
 -- | Retrieve the concrete 'MS.MacawBlockEndCase' of
 -- a symbolic 'MS.MacawBlockEndType' with respect to the
