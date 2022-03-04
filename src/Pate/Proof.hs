@@ -437,7 +437,8 @@ instance OrdF (ProofNonce prf) where
 proofNonceValue :: ProofNonce sym tp -> Natural
 proofNonceValue (ProofNonce n) = fromIntegral (N.indexValue n)
 
--- | A proof expression, annotated with nonces.
+-- | A proof expression that encoding the tree structure of the proof by annotating
+-- each node with a unique nonce, and the nonce of its parent.
 data ProofNonceExpr sym arch tp where
   ProofNonceExpr ::
     { prfNonce :: ProofNonce sym tp
