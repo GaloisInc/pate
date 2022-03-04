@@ -20,7 +20,6 @@ import qualified Control.Lens as L
 import           Data.Map (Map)
 import qualified Data.Map as M
 import qualified Data.Time as TM
-import qualified Data.Kind as DK
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -33,7 +32,6 @@ import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
-import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -47,7 +45,6 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym

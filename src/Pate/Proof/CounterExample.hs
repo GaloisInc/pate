@@ -41,32 +41,19 @@ import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.Foldable as F
-import           Data.Functor.Const ( Const(..) )
 import           Data.Maybe (fromMaybe)
-import           Data.Proxy ( Proxy(..) )
-import           GHC.Stack ( HasCallStack )
-import           Numeric.Natural ( Natural )
 
-import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.Parameterized.Context as Ctx
+
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 
-import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.Types as CT
-import qualified Lang.Crucible.Utils.MuxTree as C
-
-import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
 
 import qualified What4.Interface as W4
-import qualified What4.Partial as W4P
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
-import qualified What4.Concrete as W4C
 
 import qualified Pate.Arch as PA
 import qualified Pate.Equivalence.Error as PEE
@@ -81,8 +68,6 @@ import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Ground as PG
 import qualified Pate.SimState as PS
-import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Solver as PSo
 import           What4.ExprHelpers
 import qualified What4.PathCondition as WPC
 

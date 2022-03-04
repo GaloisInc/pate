@@ -138,7 +138,6 @@ import qualified Pate.Panic as PP
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo

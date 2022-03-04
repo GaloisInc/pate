@@ -67,7 +67,6 @@ import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.MemPred as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Event as PE
-import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad

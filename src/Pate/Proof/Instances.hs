@@ -25,6 +25,8 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ConstraintKinds #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Proof.Instances
   ( SomeProofNonceExpr(..)
   , GroundBV(..)
@@ -74,25 +76,19 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
-import qualified Pate.ExprMappable as PEM
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Proof as PF
 import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.MemCell as PMC
-import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Verification.MemoryLog as PVM
 
 import qualified What4.Interface as W4
-import qualified What4.ExprHelpers as WEH
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
-import qualified What4.Partial as W4P
 
 data SomeProofNonceExpr (arch :: DK.Type) tp where
   SomeProofNonceExpr :: PA.ValidArch arch =>
