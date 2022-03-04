@@ -60,7 +60,7 @@ module Pate.Proof
   , type ProofStatusType
   , type SymScope
   -- leaves
-  , InequivalenceResultC(..)
+  , InequivalenceResultSym(..)
   , InequivalenceResult
   , withIneqResult
   , CondEquivalenceResult(..)
@@ -149,29 +149,32 @@ type ProofFunctionCallType = 'ProofFunctionCallType
 type ProofBlockSliceType = 'ProofBlockSliceType
 type ProofStatusType = 'ProofStatusType
 
-
-data InequivalenceResultC arch grnd where
-  InequivalenceResult :: PA.ValidArch arch =>
-    { ineqSlice :: BlockSliceTransition grnd arch
-    , ineqPre :: EquivalenceDomain grnd arch
-    , ineqPost :: EquivalenceDomain grnd arch
+-- | A (possibly symbolic) inequivalence result, representing a snapshot of
+-- an attempted equivalence proof.
+data InequivalenceResultSym arch sym where
+  InequivalenceResultSym :: PA.ValidArch arch =>
+    { ineqSlice :: BlockSliceTransition sym arch
+    , ineqPre :: EquivalenceDomain sym arch
+    , ineqPost :: EquivalenceDomain sym arch
     , ineqReason :: PEE.InequivalenceReason
-    } -> InequivalenceResultC arch grnd
+    } -> InequivalenceResultSym arch sym
 
-instance PEM.ExprMappable grnd (InequivalenceResultC arch grnd) where
-  mapExpr sym f (InequivalenceResult a1 a2 a3 a4) = InequivalenceResult
+instance PEM.ExprMappable sym (InequivalenceResultSym arch sym) where
+  mapExpr sym f (InequivalenceResultSym a1 a2 a3 a4) = InequivalenceResultSym
     <$> PEM.mapExpr sym f a1
     <*> PEM.mapExpr sym f a2
     <*> PEM.mapExpr sym f a3
     <*> pure a4
 
-type InequivalenceResult arch = PG.Grounded (InequivalenceResultC arch)
+-- | An 'InequivalenceResultSym' once it has been grounded to a particular
+-- model (representing the counter-example for an inequivalence proof)
+type InequivalenceResult arch = PG.Grounded (InequivalenceResultSym arch)
 
 withIneqResult ::
   InequivalenceResult arch ->
-  (forall grnd. PA.ValidArch arch => PG.IsGroundSym grnd => InequivalenceResultC arch grnd -> a) ->
+  (forall grnd. PA.ValidArch arch => PG.IsGroundSym grnd => InequivalenceResultSym arch grnd -> a) ->
   a
-withIneqResult ineq f = PG.withGroundSym ineq $ \ineq'@InequivalenceResult{} -> f ineq'
+withIneqResult ineq f = PG.withGroundSym ineq $ \ineq'@InequivalenceResultSym{} -> f ineq'
 
 data CondEquivalenceResult sym arch where
   CondEquivalenceResult :: PA.ValidArch arch =>
