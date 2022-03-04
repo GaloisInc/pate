@@ -134,7 +134,6 @@ import           Pate.Monad.Environment as PME
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
@@ -175,14 +174,14 @@ ifConfig checkCfg ifT ifF = (CMR.asks $ checkCfg . envConfig) >>= \case
   True -> ifT
   False -> ifF
 
-freshNonce :: EquivM sym arch (N.Nonce (PF.ProofScope (PFI.ProofSym sym arch)) tp)
+freshNonce :: EquivM sym arch (N.Nonce (PF.SymScope sym) tp)
 freshNonce = do
   gen <- CMR.asks envNonceGenerator
   liftIO $ N.freshNonce gen
 
 withProofNonce ::
   forall tp sym arch a.
-  (PF.ProofNonce (PFI.ProofSym sym arch) tp -> EquivM sym arch a) ->
+  (PF.ProofNonce sym tp -> EquivM sym arch a) ->
   EquivM sym arch a
 withProofNonce f = withValid $do
   nonce <- freshNonce
@@ -745,16 +744,3 @@ instance MF.MonadFail (EquivM_ sym arch) where
 
 manifestError :: MonadError e m => m a -> m (Either e a)
 manifestError act = catchError (Right <$> act) (pure . Left)
-
-----------------------------------------
--- Proof instances
-
-instance PF.IsBoolLike (PFI.ProofSym sym arch) (EquivM_ sym arch) where
-  proofPredAnd p1 p2 = withValid $ withSymIO $ \sym -> W4.andPred sym p1 p2
-  proofPredOr p1 p2 = withValid $ withSymIO $ \sym -> W4.orPred sym p1 p2
-  proofPredEq p1 p2 = withValid $ withSymIO $ \sym -> W4.isEq sym p1 p2
-  proofPredTrue = withValid $ withSym $ \sym -> return $ W4.truePred sym
-  proofPredFalse = withValid $ withSym $ \sym -> return $ W4.falsePred sym
-  proofPredAssertEqual p1 p2 = withValid $ case p1 == p2 of
-    True -> return ()
-    False -> throwHere $ PEE.IncompatibleDomainPolarities

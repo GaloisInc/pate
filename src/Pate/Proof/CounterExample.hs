@@ -1,5 +1,5 @@
 {-|
-Module           : Pate.CounterExample
+Module           : Pate.Proof.CounterExample
 Copyright        : (c) Galois, Inc 2020
 Maintainer       : Daniel Matichuk <dmatichuk@galois.com>
 
@@ -30,42 +30,28 @@ Presenting counter-examples to failed equivalence checks
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
-module Pate.Proof.Ground 
+module Pate.Proof.CounterExample 
   ( getInequivalenceResult
   , getCondEquivalenceBindings
   , getPathCondition
-  , groundMacawValue
-  , groundProofTransformer
-  , groundProofExpr
   ) where
 
+import           Control.Lens hiding ( op, pre )
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.Foldable as F
-import           Data.Functor.Const ( Const(..) )
 import           Data.Maybe (fromMaybe)
-import           Data.Proxy ( Proxy(..) )
-import           GHC.Stack ( HasCallStack )
-import           Numeric.Natural ( Natural )
 
-import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.Parameterized.Context as Ctx
+
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 
-import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.Types as CT
-import qualified Lang.Crucible.Utils.MuxTree as C
-
-import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
 
 import qualified What4.Interface as W4
-import qualified What4.Partial as W4P
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 
@@ -76,12 +62,12 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
+import qualified Pate.Monad.Environment as PME
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.Ground as PG
 import qualified Pate.SimState as PS
-import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Solver as PSo
 import           What4.ExprHelpers
 import qualified What4.PathCondition as WPC
 
@@ -93,24 +79,45 @@ import qualified What4.PathCondition as WPC
 -- were assumed equivalent, and any concrete locations that are not equivalent
 -- after the block slice transition.
 getInequivalenceResult ::
+  forall sym arch.
   PEE.InequivalenceReason ->
   -- | pre-domain
-  PF.ProofExpr (PFI.ProofSym sym arch) PF.ProofDomainType ->
+  PF.EquivalenceDomain sym arch ->
   -- | post-domain
-  PF.ProofExpr (PFI.ProofSym sym arch) PF.ProofDomainType ->
+  PF.EquivalenceDomain sym arch ->
   -- | the transition that was attempted to be proven equivalent
   -- in the given domains
-  PF.BlockSliceTransition (PFI.ProofSym sym arch) ->
+  PF.BlockSliceTransition sym arch ->
   -- | the model representing the counterexample from the solver
   SymGroundEvalFn sym ->
-  EquivM sym arch (PFI.InequivalenceResult arch)
+  EquivM sym arch (PF.InequivalenceResult arch)
 getInequivalenceResult defaultReason pre post slice fn = do
-  groundPre <- groundProofExpr fn pre
-  groundPost <- groundProofExpr fn post
-  gslice <- groundSlice fn slice
-  let reason = fromMaybe defaultReason (getInequivalenceReason groundPost (PF.slBlockPostState gslice))
-  return $ PFI.InequivalenceResult gslice groundPre groundPost reason
+  result <- ground fn $ PF.InequivalenceResultSym slice pre post defaultReason
+  PG.traverseWithGroundSym result $ \groundResult -> do
+    let
+      groundPost = PF.ineqPost groundResult
+      groundSlice = PF.ineqSlice groundResult
+      reason = fromMaybe defaultReason (getInequivalenceReason groundPost (PF.slBlockPostState groundSlice))
+    return $ groundResult { PF.ineqReason = reason }
 
+ground ::
+  PEM.ExprMappable sym (a sym) =>
+  SymGroundEvalFn sym ->
+  a sym ->
+  EquivM sym arch (PG.Grounded a)
+ground fn a =  withSym $ \sym -> do
+  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
+  IO.withRunInIO $ \f ->
+    PG.ground sym stackRegion (\e -> f (mkGroundInfo fn e)) a
+
+mkGroundInfo ::
+  SymGroundEvalFn sym ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch (PG.GroundInfo tp)
+mkGroundInfo fn e = do
+  ptrOpTags <- getPointerTags fn e
+  val <- execGroundFn fn e
+  return $ PG.GroundInfo ptrOpTags val
 
 data Bindings sym tp where
   Bindings :: MapF.MapF (W4.SymExpr sym) W4G.GroundValueWrapper -> Bindings sym tp
@@ -180,29 +187,35 @@ getGenPathCondition sym fn e = do
 -- values which disagree in the given counter-example
 getPathCondition ::
   forall sym arch.
-  (MM.RegisterInfo (MM.ArchReg arch)) =>
   PS.SimBundle sym arch ->
-  PF.BlockSliceState (PFI.ProofSym sym arch) ->
-  PFI.SymDomain sym arch ->
+  PF.BlockSliceState sym arch ->
+  PF.EquivalenceDomain sym arch ->
   SymGroundEvalFn sym ->
   EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
 getPathCondition bundle slice dom fn = withSym $ \sym -> do
-  groundDom <- groundProofExpr fn dom
   let
+    -- Only consider path conditions for registers in the equivalence domain.
+    -- Registers outside the equivalence domain necessarily have no effect
+    -- on the overall equivalence proof, and therefore we can ignore any
+    -- path conditions in their resulting values
+    regInDomain ::
+      MM.ArchReg arch tp -> EquivM sym arch Bool
+    regInDomain reg =
+      execGroundFn fn $ getConst $ PF.eqDomainRegisters dom ^. MM.boundValue reg
+
     getRegPath ::
       MM.ArchReg arch tp ->
-      PF.BlockSliceRegOp (PFI.ProofSym sym arch) tp ->
+      PF.BlockSliceRegOp sym tp ->
       PPa.PatchPairC (W4.Pred sym) ->
       EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
-    getRegPath reg regOp paths = do
-      case PFI.regInDomain groundDom reg of
-        True -> do
-          paths' <- withGroundEvalFn fn $ \fn' -> mapM (getGenPathCondition sym fn') (PF.slRegOpValues regOp)
-          traceBundle bundle ("getPathCondition.getRegPath for " ++ showF reg)
-          F.forM_ paths' $ \path' -> do
-            traceBundle bundle ("  " ++ show (W4.printSymExpr path'))
-          liftIO $ PPa.zipMPatchPairC paths paths' (W4.andPred sym)
-        _ -> return paths
+    getRegPath reg regOp paths = regInDomain reg >>= \case
+      True -> do
+        paths' <- withGroundEvalFn fn $ \fn' -> mapM (getGenPathCondition sym fn') (PF.slRegOpValues regOp)
+        traceBundle bundle ("getPathCondition.getRegPath for " ++ showF reg)
+        F.forM_ paths' $ \path' -> do
+          traceBundle bundle ("  " ++ show (W4.printSymExpr path'))
+        liftIO $ PPa.zipMPatchPairC paths paths' (W4.andPred sym)
+      _ -> return paths
 
     getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
     getMemPath st = do
@@ -211,107 +224,38 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
 
   let truePair = PPa.PatchPairC (W4.truePred sym) (W4.truePred sym)
   regPath <- PF.foldrMBlockStateLocs (\x1 x2 x3 -> getRegPath x1 x2 x3) (\_ _ r -> return r) truePair slice
-  
+
   memPath <- PPa.toPatchPairC <$> TF.traverseF (\x -> getMemPath x) (PS.simOut bundle)
   liftIO $ PPa.zipMPatchPairC regPath memPath (W4.andPred sym)
 
 
-groundProofTransformer ::
-  PA.ValidArch arch =>
-  PSo.ValidSym sym =>
-  SymGroundEvalFn sym ->
-  PF.ProofTransformer (EquivM_ sym arch) (PFI.ProofSym sym arch) (PFI.ProofGround arch)
-groundProofTransformer fn = PF.ProofTransformer
-  { PF.prfPredTrans = \e -> execGroundFn fn e
-  , PF.prfMemCellTrans = \mc -> groundMemCell fn mc
-  , PF.prfBVTrans = \(PFI.SymBV bv) -> groundBV fn bv
-  , PF.prfExitTrans = \e ->
-      PFI.GroundBlockExit <$> (groundBlockEndCase fn e) <*> (groundReturnPtr fn e)
-  , PF.prfValueTrans = \e -> groundMacawValue fn e
-  , PF.prfContextTrans = \_ -> return ()
-  , PF.prfCounterExampleTrans = return
-  , PF.prfConditionTrans = \_ -> return ()
-  , PF.prfConstraint = \a -> a
-  }
-
-groundSlice ::
-  (PA.ValidArch arch, PSo.ValidSym sym) =>
-  SymGroundEvalFn sym ->
-  PF.BlockSliceTransition (PFI.ProofSym sym arch) ->
-  EquivM_ sym arch (PF.BlockSliceTransition (PFI.ProofGround arch))
-groundSlice fn = PF.transformBlockSlice (groundProofTransformer fn)
-
-
-groundProofExpr ::
-  (PA.ValidArch arch, PSo.ValidSym sym) =>
-  SymGroundEvalFn sym ->
-  PF.ProofExpr (PFI.ProofSym sym arch) tp ->
-  EquivM_ sym arch (PF.ProofExpr (PFI.ProofGround arch) tp)
-groundProofExpr fn = PF.transformProofExpr (groundProofTransformer fn)
-
-
 isMemOpValid ::
   PA.ValidArch arch =>
-  PFI.GroundDomain arch ->
-  MapF.Pair (PFI.GroundMemCell arch) (PF.BlockSliceMemOp (PFI.ProofGround arch)) -> Bool
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
+  MapF.Pair (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) -> Bool
 isMemOpValid dom (MapF.Pair cell mop) =
-  (not (PFI.cellInDomain dom cell)) || (not (PF.slMemOpCond mop)) || PF.slMemOpEquiv mop
+  (not (PFI.cellInDomain dom cell)) || (not (PG.groundValue $ PF.slMemOpCond mop)) || (PG.groundValue $ PF.slMemOpEquiv mop)
 
 isRegValid ::
   PA.ValidArch arch =>
-  PFI.GroundDomain arch ->
-  MapF.Pair (MM.ArchReg arch) (PF.BlockSliceRegOp (PFI.ProofGround arch)) -> Bool
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
+  MapF.Pair (MM.ArchReg arch) (PF.BlockSliceRegOp grnd) -> Bool
 isRegValid dom (MapF.Pair r rop) =
-  (not (PFI.regInDomain dom r)) || PF.slRegOpEquiv rop
+  (not (PFI.regInDomain dom r)) || (PG.groundValue $ PF.slRegOpEquiv rop)
 
 getInequivalenceReason ::
   PA.ValidArch arch =>
-  PFI.GroundDomain arch ->
-  PF.BlockSliceState (PFI.ProofGround arch) ->
+  PG.IsGroundSym grnd =>
+  PF.EquivalenceDomain grnd arch ->
+  PF.BlockSliceState grnd arch ->
   Maybe PEE.InequivalenceReason
 getInequivalenceReason dom st =
   if | not $ all (isMemOpValid dom) (MapF.toList $ PF.slMemState st) -> Just PEE.InequivalentMemory
      | not $ all (isRegValid dom) (MapF.toList $ MM.regStateMap $ PF.slRegState st) -> Just PEE.InequivalentRegisters
      | otherwise -> Nothing
 
-
-groundMuxTree ::
-  SymGroundEvalFn sym ->
-  C.MuxTree sym a ->
-  EquivM sym arch a
-groundMuxTree fn mt =
-  withSym $ \sym ->
-  IO.withRunInIO $ \runInIO -> do
-    C.collapseMuxTree sym (\p a b -> do
-                              p' <- runInIO (execGroundFn fn p)
-                              return $ if p' then a else b) mt
-groundBlockEndCase ::
-  forall sym arch.
-  SymGroundEvalFn sym ->
-  CS.RegValue sym (MS.MacawBlockEndType arch) ->
-  EquivM sym arch MS.MacawBlockEndCase
-groundBlockEndCase fn blkend = withSym $ \sym -> do
-  blkend_tree <- liftIO $ MS.blockEndCase (Proxy @arch) sym blkend
-  groundMuxTree fn blkend_tree
-
-groundBV ::
-  HasCallStack =>
-  SymGroundEvalFn sym ->
-  CLM.LLVMPtr sym w ->
-  EquivM sym arch (PFI.GroundBV w)
-groundBV fn (CLM.LLVMPointer reg off) = withSym $ \sym -> do
-  W4.BaseBVRepr w <- return $ W4.exprType off
-  iReg <- liftIO $ W4.natToInteger sym reg
-  greg <- execGroundFn fn iReg
-  goff <- execGroundFn fn off
-  regionTags <- getPointerTags fn iReg
-  offTags <- getPointerTags fn off
-  let integerToNat :: Integer -> Natural
-      integerToNat i
-        | i >= 0 = fromIntegral i
-        | otherwise = fromIntegral (negate i)
-  let gbv = PFI.mkGroundBV w (regionTags <> offTags) (integerToNat greg) goff
-  return gbv
 
 -- | Classify whether or not the given expression depends
 -- on undefined pointers in the given model
@@ -353,54 +297,3 @@ getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
 
   e_outer' <- resolveConcreteLookups sym (\e1 e2 -> resolveEq e1 e2) e_outer
   go e_outer'
-
-groundLLVMPointer :: forall sym arch.
-  HasCallStack =>
-  SymGroundEvalFn sym ->
-  CLM.LLVMPtr sym (MM.ArchAddrWidth arch) ->
-  EquivM sym arch (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch))
-groundLLVMPointer fn ptr = PFI.groundBVAsPointer <$> groundBV fn ptr
-
-
-isStackCell ::
-  PMC.MemCell sym arch w ->
-  EquivM sym arch (W4.Pred sym)
-isStackCell cell = withSym $ \sym -> do
-  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
-  let CLM.LLVMPointer region _ = PMC.cellPtr cell
-  liftIO $ W4.natEq sym region stackRegion
-
-groundMemCell :: forall sym arch w.
-  SymGroundEvalFn sym ->
-  PMC.MemCell sym arch w ->
-  EquivM sym arch (PFI.GroundMemCell arch w)
-groundMemCell fn cell = do
-  gptr <- groundLLVMPointer fn $ PMC.cellPtr cell
-  isStack <- isStackCell cell
-  gIsStack <- execGroundFn fn isStack
-  return $ PFI.GroundMemCell gptr (PMC.cellWidth cell) gIsStack
-
-groundMacawValue ::
-  SymGroundEvalFn sym ->
-  PSR.MacawRegEntry sym tp ->
-  EquivM sym arch (PFI.GroundMacawValue tp)
-groundMacawValue fn e
-  | CLM.LLVMPointerRepr _ <- PSR.macawRegRepr e
-  , ptr <- PSR.macawRegValue e = do
-    PFI.GroundMacawValue <$> groundBV fn ptr
-  | CT.BoolRepr <- PSR.macawRegRepr e
-  , val <- PSR.macawRegValue e = PFI.GroundMacawValue <$>  execGroundFn fn val
-  | CT.StructRepr Ctx.Empty <- PSR.macawRegRepr e = PFI.GroundMacawValue <$> return ()
-  | otherwise = throwHere $ PEE.UnsupportedRegisterType (Some $ PSR.macawRegRepr e)
-
-groundReturnPtr ::
-  forall sym arch.
-  HasCallStack =>
-  SymGroundEvalFn sym ->
-  CS.RegValue sym (MS.MacawBlockEndType arch) ->
-  EquivM sym arch (Maybe (PFI.GroundLLVMPointer (MM.ArchAddrWidth arch)))
-groundReturnPtr fn blkend = case MS.blockEndReturn (Proxy @arch) blkend of
-  W4P.PE p e -> execGroundFn fn p >>= \case
-    True -> Just <$> groundLLVMPointer fn e
-    False -> return Nothing
-  W4P.Unassigned -> return Nothing

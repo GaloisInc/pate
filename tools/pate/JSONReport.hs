@@ -33,7 +33,7 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Verification.MemoryLog as PVM
 
 data SomeProofEvent arch where
-  SomeProofEvent :: PPa.PatchPair (PE.Blocks arch) -> PFI.SomeProofSym arch tp -> SomeProofEvent arch
+  SomeProofEvent :: PPa.PatchPair (PE.Blocks arch) -> PFI.SomeProofNonceExpr arch tp -> SomeProofEvent arch
 
 data ProofEventConsumer arch where
   ProofEventConsumer :: CCC.Chan (Maybe (SomeProofEvent arch)) -> CCA.Async () -> ProofEventConsumer arch
@@ -65,9 +65,9 @@ blockAddress (PE.Blocks w cb _) =
 
 toJSON :: SomeProofEvent arch -> Maybe JSON.Value
 toJSON (SomeProofEvent blks proofSym) = do
-  PFI.SomeProofSym _sym (PF.ProofNonceExpr _ _ app) <- return proofSym
+  PFI.SomeProofNonceExpr _sym (PF.ProofNonceExpr _ _ app) <- return proofSym
   case app of
-    PF.ProofInlinedCall _blks (Right (PVM.SomeWriteSummary _sym inlineResult)) -> do
+    PF.ProofInlinedCall _blks (Right inlineResult) -> do
       let w = inlineResult ^. PVM.pointerWidth
       let idx = PVM.indexWriteAddresses w (inlineResult ^. PVM.differingGlobalMemoryLocations)
       let node = InlineResultNode { inlineOriginalFunctionAddress = blockAddress (PPa.pOriginal blks)

@@ -63,6 +63,7 @@ module What4.ExprHelpers (
   , setProgramLoc
   , idxCacheEvalWriter
   , Tagged
+  , natToIntegerPure
   ) where
 
 import           GHC.TypeNats
@@ -107,6 +108,13 @@ import qualified What4.Symbol as WS
 
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
+
+
+-- FIXME: this is a workaround for the fact that 'natToInteger' from What4.Interface
+-- is in the IO monad, but doesn't need to be.
+natToIntegerPure ::
+  W4.IsExprBuilder sym => sym -> W4.SymNat sym -> W4.SymInteger sym
+natToIntegerPure _sym n = unsafeCoerce n
 
 iteM ::
   W4.IsExprBuilder sym =>
@@ -821,6 +829,152 @@ expandMuxEquality sym outer = do
         _ -> return e
   go outer
 
+-- | Simplification cases for 'simplifyBVOps'
+simplifyBVOpInner ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  -- | Recursive call to outer simplification function
+  (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) ->
+  W4B.App (W4B.Expr t) tp ->
+  Maybe (IO (W4.SymExpr sym tp))
+simplifyBVOpInner sym go app = case app of
+  W4B.BVConcat w u v -> do
+      W4B.BVSelect upper n bv <- W4B.asApp u
+      W4B.BVSelect lower n' bv' <- W4B.asApp v
+      Refl <- testEquality bv bv'
+      W4.BaseBVRepr bv_w <- return $ W4.exprType bv
+      Refl <- testEquality upper (W4.addNat lower n')
+      total <- return $ W4.addNat n n'
+      W4.LeqProof <- W4.testLeq (W4.addNat lower total) bv_w
+      return $ W4.bvSelect sym lower total bv >>= go
+    <|> do
+      u' <- W4.asBV u
+      0 <- return $ BVS.asUnsigned u'
+      W4.BaseBVRepr v_w <- return $ W4.exprType v
+      W4.LeqProof <- W4.testLeq (W4.incNat v_w) w
+      return $ W4.bvZext sym w v >>= go
+    <|> do
+      v' <- W4.asBV v
+      0 <- return $ BVS.asUnsigned v'
+      W4.BaseBVRepr u_w <- return $ W4.exprType u
+      W4.BaseBVRepr v_w <- return $ W4.exprType v
+      W4.LeqProof <- W4.testLeq (W4.incNat u_w) w
+      return $ do
+        shift <- W4.bvLit sym w (BVS.mkBV w (W4.intValue v_w))
+        bv <- W4.bvZext sym w u
+        W4.bvShl sym bv shift >>= go
+
+  --   ((Zext z a) << n) >> n) == a given n <= z
+  W4B.BVLshr _ bv shift -> do
+    W4B.BVShl _ bv' shift' <- W4B.asApp bv
+    Refl <- testEquality shift shift'
+    cshift <- W4.asBV shift
+    zlead <- return $ leadingZeros bv'
+    True <- return $ BVS.asUnsigned cshift <= zlead
+    return $ go bv'
+
+  W4B.BVZext w_outer bv -> do
+    W4B.BVZext _ bv' <- W4B.asApp bv
+    W4.BaseBVRepr bv_w <- return $ W4.exprType bv'
+    W4.LeqProof <- W4.testLeq (W4.incNat bv_w) w_outer
+    return $ W4.bvZext sym w_outer bv' >>= go
+
+  W4B.BVSext w bv -> do
+    True <- return $ 0 < leadingZeros bv
+    return $ W4.bvZext sym w bv >>= go
+
+  W4B.BVSelect idx n bv -> do
+      W4B.BVShl _ bv' shift <- W4B.asApp bv
+      cshift <- W4.asBV shift
+      True <- return $ BVS.asUnsigned cshift <= BVS.asUnsigned (BVS.maxUnsigned n)
+      return $ do
+          shift' <- W4.bvLit sym n (BVS.mkBV n (BVS.asUnsigned cshift))
+          bv'' <- W4.bvSelect sym idx n bv'
+          W4.bvShl sym bv'' shift' >>= go
+    <|> do
+     -- select 0 16 (bvXor (bvAnd 0xffff var)) --> select 0 16 var
+      Refl <- testEquality idx (W4.knownNat @0)
+      W4B.SemiRingSum s <- W4B.asApp bv
+      SR.SemiRingBVRepr SR.BVBitsRepr w_large <- return $ WSum.sumRepr s
+      W4.LeqProof <- W4.testLeq (W4.incNat n) w_large
+      one_small <- return $ BVS.zext w_large (SR.one (SR.SemiRingBVRepr SR.BVBitsRepr n))
+      (coeff, var) <- WSum.asWeightedVar s
+      True <- return $ one_small == coeff
+      return $ W4.bvSelect sym idx n var >>= go
+     -- push selection into bit operations
+    <|> do
+      W4B.SemiRingSum s <- W4B.asApp bv
+      SR.SemiRingBVRepr SR.BVBitsRepr w <- return $ WSum.sumRepr s
+      let
+        doAdd bv1 bv2 = W4.bvXorBits sym bv1 bv2
+
+        doMul coef bv' = do
+          coef_bv <- W4.bvLit sym w coef
+          coef_bv' <- W4.bvSelect sym idx n coef_bv
+          bv'' <- W4.bvSelect sym idx n bv' >>= go
+          W4.bvAndBits sym coef_bv' bv''
+
+        doConst c = W4.bvLit sym w c >>= W4.bvSelect sym idx n
+
+      return $ WSum.evalM doAdd doMul doConst s
+     -- push selection into sums
+    <|> do
+      W4B.SemiRingSum s <- W4B.asApp bv
+      SR.SemiRingBVRepr SR.BVArithRepr w <- return $ WSum.sumRepr s
+      let
+        doAdd bv1 bv2 = W4.bvAdd sym bv1 bv2
+
+        doMul coef bv' = do
+          coef_bv <- W4.bvLit sym w coef
+          bv'' <- W4.bvMul sym coef_bv bv' >>= go
+          W4.bvSelect sym idx n bv''
+
+        doConst c = W4.bvLit sym w c >>= W4.bvSelect sym idx n
+      return $ WSum.evalM doAdd doMul doConst s
+    <|> do
+      W4B.BVOrBits _ s <- W4B.asApp bv
+      (b:bs) <- return $ W4B.bvOrToList s
+      return $ do
+        let doOr bv1 bv2 = do
+              bv2' <- W4.bvSelect sym idx n bv2 >>= go
+              W4.bvOrBits sym bv1 bv2'
+        b' <- W4.bvSelect sym idx n b >>= go
+        foldM doOr b' bs
+    <|> do
+      W4B.BaseIte _ _ cond bv1 bv2 <- W4B.asApp bv
+      return $ do
+        bv1' <- W4.bvSelect sym idx n bv1 >>= go
+        bv2' <- W4.bvSelect sym idx n bv2 >>= go
+        cond' <- go cond
+        W4.baseTypeIte sym cond' bv1' bv2'
+  W4B.BaseEq _ lhs rhs -> do
+      W4.BaseBVRepr lhs_w <- return $ W4.exprType lhs
+      lhs_lz <- return $ leadingZeros lhs
+      rhs_lz <- return $ leadingZeros rhs
+      lz <- return $ min lhs_lz rhs_lz
+      True <- return $ 0 < lz
+      Some top <- W4.someNat ((W4.intValue lhs_w) - lz)
+      W4.LeqProof <- W4.isPosNat top
+      W4.LeqProof <- W4.testLeq top lhs_w
+      return $ do
+        lhs' <- W4.bvSelect sym (W4.knownNat @0) top lhs
+        rhs' <- W4.bvSelect sym (W4.knownNat @0) top rhs
+        W4.isEq sym lhs' rhs' >>= go
+    <|> do
+      W4.BaseBVRepr lhs_w <- return $ W4.exprType lhs
+      lhs_lz <- return $ leadingZeros lhs
+      True <- return $ 0 < lhs_lz
+      W4B.BVSext _ rhs' <- W4B.asApp rhs
+      W4.BaseBVRepr rhs_w <- return $ W4.exprType rhs'
+      diff <- return $ (W4.intValue lhs_w - W4.intValue rhs_w)
+      True <- return $ diff < lhs_lz
+    -- TODO: provable
+      W4.LeqProof <- W4.testLeq rhs_w lhs_w
+      return $ do
+        lhs' <- W4.bvSelect sym (W4.knownNat @0) rhs_w lhs
+        W4.isEq sym lhs' rhs' >>= go
+  _ -> Nothing
 
 -- | Deep simplification of bitvector operations by removing redundant
 -- shifts, pushing slices through arithmetic operations, and dropping
@@ -834,165 +988,26 @@ simplifyBVOps ::
 simplifyBVOps sym outer = do
   cache <- W4B.newIdxCache
   let
+    else_ :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
+    else_ e = case e of
+      W4B.AppExpr a0 -> do
+        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+        if (W4B.appExprApp a0) == a0' then return e
+        else W4B.sbMakeExpr sym a0' >>= go
+      W4B.NonceAppExpr a0 -> do
+        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+        if (W4B.nonceExprApp a0) == a0' then return e
+        else W4B.sbNonceExpr sym a0' >>= go
+      _ -> return e      
+    
     go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
     go e = W4B.idxCacheEval cache e $ do
       setProgramLoc sym e
       case e of
-        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
-          W4B.BVConcat _ u v
-            | Just (W4B.BVSelect upper n bv) <- W4B.asApp u
-            , Just (W4B.BVSelect lower n' bv') <- W4B.asApp v
-            , Just Refl <- testEquality bv bv'
-            , W4.BaseBVRepr bv_w <- W4.exprType bv
-            , Just Refl <- testEquality upper (W4.addNat lower n')
-            , total <- W4.addNat n n'
-            , Just W4.LeqProof <- W4.testLeq (W4.addNat lower total) bv_w
-            -> W4.bvSelect sym lower total bv >>= go
-          W4B.BVConcat w u v
-            | Just u' <- W4.asBV u
-            , 0 <- BVS.asUnsigned u'
-            , W4.BaseBVRepr v_w <- W4.exprType v
-            , Just W4.LeqProof <- W4.testLeq (W4.incNat v_w) w
-            -> W4.bvZext sym w v >>= go
-
-          W4B.BVConcat w u v
-            | Just v' <- W4.asBV v
-            , 0 <- BVS.asUnsigned v'
-            , W4.BaseBVRepr u_w <- W4.exprType u
-            , W4.BaseBVRepr v_w <- W4.exprType v
-            , Just W4.LeqProof <- W4.testLeq (W4.incNat u_w) w
-            -> do
-                shift <- W4.bvLit sym w (BVS.mkBV w (W4.intValue v_w))
-                bv <- W4.bvZext sym w u
-                W4.bvShl sym bv shift >>= go
-
-          --   ((Zext z a) << n) >> n) == a given n <= z
-          W4B.BVLshr _ bv shift
-            | Just (W4B.BVShl _ bv' shift') <- W4B.asApp bv
-            , Just Refl <- testEquality shift shift'
-            , Just cshift <- W4.asBV shift
-            , zlead <- leadingZeros bv'
-            , BVS.asUnsigned cshift <= zlead
-            -> go bv'
-
-          W4B.BVZext w_outer bv
-            | Just (W4B.BVZext _ bv') <- W4B.asApp bv
-            , W4.BaseBVRepr bv_w <- W4.exprType bv'
-            , Just W4.LeqProof <- W4.testLeq (W4.incNat bv_w) w_outer
-            -> W4.bvZext sym w_outer bv' >>= go
-
-          W4B.BVSext w bv
-            | 0 < leadingZeros bv
-            -> W4.bvZext sym w bv >>= go
-
-          W4B.BVSelect idx n bv
-            | Just (W4B.BVShl _ bv' shift) <- W4B.asApp bv
-            , Just cshift <- W4.asBV shift
-            , BVS.asUnsigned cshift <= BVS.asUnsigned (BVS.maxUnsigned n)
-            -> do
-                shift' <- W4.bvLit sym n (BVS.mkBV n (BVS.asUnsigned cshift))
-                bv'' <- W4.bvSelect sym idx n bv'
-                W4.bvShl sym bv'' shift' >>= go
-
-          -- select 0 16 (bvXor (bvAnd 0xffff var)) --> select 0 16 var
-          W4B.BVSelect idx n bv
-            | Just Refl <- testEquality idx (W4.knownNat @0)
-            , Just (W4B.SemiRingSum s) <- W4B.asApp bv
-            , SR.SemiRingBVRepr SR.BVBitsRepr w_large <- WSum.sumRepr s
-            , Just W4.LeqProof <- W4.testLeq (W4.incNat n) w_large
-            , one_small <- BVS.zext w_large (SR.one (SR.SemiRingBVRepr SR.BVBitsRepr n))
-            , Just (coeff, var) <- WSum.asWeightedVar s
-            , one_small == coeff
-            -> W4.bvSelect sym idx n var >>= go
-
-          W4B.BaseEq _ lhs rhs
-            | W4.BaseBVRepr lhs_w <- W4.exprType lhs
-            , lhs_lz <- leadingZeros lhs
-            , rhs_lz <- leadingZeros rhs
-            , lz <- min lhs_lz rhs_lz
-            , 0 < lz
-            , Just (Some top) <- W4.someNat ((W4.intValue lhs_w) - lz)
-            , Just W4.LeqProof <- W4.isPosNat top
-            , Just W4.LeqProof <- W4.testLeq top lhs_w
-            -> do
-                lhs' <- W4.bvSelect sym (W4.knownNat @0) top lhs
-                rhs' <- W4.bvSelect sym (W4.knownNat @0) top rhs
-                W4.isEq sym lhs' rhs' >>= go
-
-          W4B.BaseEq _ lhs rhs
-            | W4.BaseBVRepr lhs_w <- W4.exprType lhs
-            , lhs_lz <- leadingZeros lhs
-            , 0 < lhs_lz
-            , Just (W4B.BVSext _ rhs') <- W4B.asApp rhs
-            , W4.BaseBVRepr rhs_w <- W4.exprType rhs'
-            , diff <- (W4.intValue lhs_w - W4.intValue rhs_w)
-            , diff < lhs_lz
-            -- TODO: provable
-            , Just W4.LeqProof <- W4.testLeq rhs_w lhs_w
-            -> do
-                lhs' <- W4.bvSelect sym (W4.knownNat @0) rhs_w lhs
-                W4.isEq sym lhs' rhs' >>= go
-
-          -- push selection into bit operations
-          W4B.BVSelect idx n bv
-            | Just (W4B.SemiRingSum s) <- W4B.asApp bv
-            , SR.SemiRingBVRepr SR.BVBitsRepr w <- WSum.sumRepr s
-            ->
-              let
-                doAdd bv1 bv2 = W4.bvXorBits sym bv1 bv2
-
-                doMul coef bv' = do
-                  coef_bv <- W4.bvLit sym w coef
-                  coef_bv' <- W4.bvSelect sym idx n coef_bv
-                  bv'' <- W4.bvSelect sym idx n bv' >>= go
-                  W4.bvAndBits sym coef_bv' bv''
-
-                doConst c = W4.bvLit sym w c >>= W4.bvSelect sym idx n
-
-              in WSum.evalM doAdd doMul doConst s
-
-          -- push selection into sums
-          W4B.BVSelect idx n bv
-            | Just (W4B.SemiRingSum s) <- W4B.asApp bv
-            , SR.SemiRingBVRepr SR.BVArithRepr w <- WSum.sumRepr s
-            ->
-              let
-                doAdd bv1 bv2 = W4.bvAdd sym bv1 bv2
-
-                doMul coef bv' = do
-                  coef_bv <- W4.bvLit sym w coef
-                  bv'' <- W4.bvMul sym coef_bv bv' >>= go
-                  W4.bvSelect sym idx n bv''
-
-                doConst c = W4.bvLit sym w c >>= W4.bvSelect sym idx n
-
-              in WSum.evalM doAdd doMul doConst s
-          W4B.BVSelect idx n bv
-            | Just (W4B.BVOrBits _ s) <- W4B.asApp bv
-            , (b:bs) <- W4B.bvOrToList s
-            -> do
-                let doOr bv1 bv2 = do
-                      bv2' <- W4.bvSelect sym idx n bv2 >>= go
-                      W4.bvOrBits sym bv1 bv2'
-                b' <- W4.bvSelect sym idx n b >>= go
-                foldM doOr b' bs
-
-          W4B.BVSelect idx n bv
-            | Just (W4B.BaseIte _ _ cond bv1 bv2) <- W4B.asApp bv
-            -> do
-                bv1' <- W4.bvSelect sym idx n bv1 >>= go
-                bv2' <- W4.bvSelect sym idx n bv2 >>= go
-                cond' <- go cond
-                W4.baseTypeIte sym cond' bv1' bv2'
-          app -> do
-            a0' <- W4B.traverseApp go app
-            if app == a0' then return e
-            else W4B.sbMakeExpr sym a0' >>= go
-        W4B.NonceAppExpr a0 -> do
-          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-          if (W4B.nonceExprApp a0) == a0' then return e
-          else W4B.sbNonceExpr sym a0' >>= go
-        _ -> return e
+        W4B.AppExpr a0 -> case simplifyBVOpInner sym go (W4B.appExprApp a0) of
+          Just go' -> go'
+          Nothing -> else_ e
+        _ -> else_ e
   go outer
 
 -- | Simplify the given predicate by deciding which atoms are logically necessary

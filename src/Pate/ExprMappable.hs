@@ -12,7 +12,8 @@
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 module Pate.ExprMappable (
-  ExprMappable(..)
+    ExprMappable(..)
+  , SkipTransformation(..)
   ) where
 
 import qualified Data.IORef as IO
@@ -40,6 +41,25 @@ class ExprMappable sym f where
     (forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)) ->
     f ->
     IO f
+  foldMapExpr ::
+    WI.IsSymExprBuilder sym =>
+    sym ->
+    (forall tp. WI.SymExpr sym tp -> b -> IO (WI.SymExpr sym tp, b)) ->
+    f ->
+    b ->
+    IO (f, b)    
+  foldMapExpr sym f e b = do
+    ref <- IO.newIORef b
+    let
+      f' :: forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)
+      f' e' = do
+          b' <- IO.readIORef ref
+          (e'', b'') <- f e' b'
+          IO.writeIORef ref b''
+          return e''
+    e' <- mapExpr sym f' e
+    b' <- IO.readIORef ref
+    return (e', b')
   foldExpr ::
     WI.IsSymExprBuilder sym =>
     sym ->
@@ -47,17 +67,8 @@ class ExprMappable sym f where
     f ->
     b ->
     IO b    
-  foldExpr sym f e b = do
-    ref <- IO.newIORef b
-    let
-      f' :: forall tp. WI.SymExpr sym tp -> IO (WI.SymExpr sym tp)
-      f' e' = do
-          b' <- IO.readIORef ref
-          b'' <- f e' b'
-          IO.writeIORef ref b''
-          return e'
-    _ <- mapExpr sym f' e
-    IO.readIORef ref
+  foldExpr sym f e b = snd <$> foldMapExpr sym (\e' b' -> f e' b' >>= \b'' -> return (e', b'')) e b
+
 instance (ExprMappable sym a, ExprMappable sym b) => ExprMappable sym (a, b) where
   mapExpr sym f (a, b) = (,) <$> mapExpr sym f a <*> mapExpr sym f b
 
@@ -79,16 +90,19 @@ instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue
 instance ExprMappable sym f => ExprMappable sym (Par.Future f) where
   mapExpr sym f future = Par.forFuture future (mapExpr sym f)
   -- | Folding on a "future" requires joining it first
-  foldExpr sym f future b = do
+  foldMapExpr sym f future b = do
     result <- Par.joinFuture future
-    foldExpr sym f result b
+    (result', b') <- foldMapExpr sym f result b
+    return (Par.Immediate result', b')
 
 instance ExprMappable sym (f (a tp)) => ExprMappable sym (Par.ConstF f a tp) where
   mapExpr sym f (Par.ConstF a) = Par.ConstF <$> mapExpr sym f a
 
 instance ExprMappable sym f => ExprMappable sym ((Const f) tp)  where
   mapExpr sym f (Const e) = Const <$> mapExpr sym f e
-  foldExpr sym f (Const e) b = foldExpr sym f e b
+  foldMapExpr sym f (Const e) b = do
+    (e', b') <- foldMapExpr sym f e b
+    return $ (Const e', b')
 
 instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
   mapExpr _ _ = return
@@ -104,4 +118,14 @@ instance
 
 instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
   mapExpr _sym f e = f e
-  foldExpr _sym f e b = f e b
+  foldMapExpr _sym f e b = f e b
+
+
+-- | Wrap a type to give a trivial 'ExprMappable' instance (i.e. make 'mapExpr' a no-op).
+-- This is useful for carrying extra information out of functions which are otherwise
+-- expected to return only ExprMappable values.
+newtype SkipTransformation a = SkipTransformation { unSkip :: a }
+
+instance ExprMappable sym (SkipTransformation a) where
+  mapExpr _ _ = return
+  foldMapExpr _ _ f b = return (f, b)

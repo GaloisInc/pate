@@ -61,16 +61,16 @@ renderEquivalenceResult res =
                                        , TP.string "]"
                                        ]
 
-verificationStatusTag :: PPr.VerificationStatus ce -> String
+verificationStatusTag :: PPr.VerificationStatus sym arch -> String
 verificationStatusTag vs =
   case vs of
     PPr.Unverified -> "Unverified"
     PPr.VerificationSkipped -> "Skipped"
     PPr.VerificationSuccess -> "Verified"
-    PPr.VerificationFail _ -> "Failed"
+    PPr.VerificationFail{} -> "Failed"
 
 renderProofApp
-  :: PPr.ProofApp prf node tp
+  :: PPr.ProofApp sym arch node tp
   -> TP.UI TP.Element
 renderProofApp app =
   case app of
@@ -102,7 +102,7 @@ renderEvent st detailDiv evt =
                  , renderEquivalenceResult res
                  ]
     PE.ProofIntermediate (PPa.PatchPair ob@(PE.Blocks _ blkO _) pb@(PE.Blocks _ _blkP _))
-                         (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
+                         (PFI.SomeProofNonceExpr _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
       let origAddr = PB.blockMemAddr blkO
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)

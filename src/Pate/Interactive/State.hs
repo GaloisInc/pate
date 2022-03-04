@@ -59,21 +59,20 @@ data EquivalenceTest arch where
   EquivalenceTest :: !(PE.BlocksPair arch) -> TM.NominalDiffTime -> EquivalenceTest arch
 
 data Failure arch where
-  Failure :: !(PFI.InequivalenceResult arch) -> !(EquivalenceTest arch) -> Failure arch
+  Failure :: !(PPr.InequivalenceResult arch) -> !(EquivalenceTest arch) -> Failure arch
 
-data ProofTreeNode arch prf tp where
+data ProofTreeNode sym arch tp where
   ProofTreeNode :: !(PE.BlocksPair arch)
-                -> !(PPr.ProofNonceExpr prf tp)
+                -> !(PPr.ProofNonceExpr sym arch tp)
                 -> !TM.NominalDiffTime
-                -> ProofTreeNode arch prf tp
+                -> ProofTreeNode sym arch tp
 
 data ProofTree arch where
-  ProofTree :: ( prf ~ PFI.ProofSym sym arch
-               , WI.IsSymExprBuilder sym
+  ProofTree :: ( WI.IsSymExprBuilder sym
                )
             => PS.Sym sym
-            -> !(MapF.MapF (PPr.ProofNonce prf) (ProofTreeNode arch prf))
-            -> !(Map.Map Int (Some (ProofTreeNode arch prf)))
+            -> !(MapF.MapF (PPr.ProofNonce sym) (ProofTreeNode sym arch))
+            -> !(Map.Map Int (Some (ProofTreeNode sym arch)))
             -> ProofTree arch
 
 -- | Trace events that can be generated for debugging purposes
@@ -115,11 +114,11 @@ $(L.makeLenses 'State)
 
 addProofTreeNode
   :: PE.BlocksPair arch
-  -> PFI.SomeProofSym arch tp
+  -> PFI.SomeProofNonceExpr arch tp
   -> TM.NominalDiffTime
   -> Maybe (ProofTree arch)
   -> Maybe (ProofTree arch)
-addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PS.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
+addProofTreeNode blockPair (PFI.SomeProofNonceExpr oldSym@(PS.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
   case mpt of
     Nothing ->
       let !proofNode = ProofTreeNode blockPair expr tm

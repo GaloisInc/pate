@@ -601,7 +601,7 @@ inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
           putStrLn ("  " ++ show (fmap (BVS.ppHex ?ptrWidth) r))
 
         let prfRes = PF.ProofInlinedCall { PF.prfInlinedBlocks = pPair
-                                         , PF.prfInlinedResults = Right (PVM.SomeWriteSummary sym writeSummary)
+                                         , PF.prfInlinedResults = Right writeSummary
                                          }
         ((), lproof) <- PFO.lazyProofEvent pPair (return ((), prfRes))
         return (contPre, lproof)

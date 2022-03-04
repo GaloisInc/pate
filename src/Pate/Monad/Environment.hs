@@ -1,6 +1,8 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeFamilies #-}
+
 module Pate.Monad.Environment (
     EquivEnv(..)
   , envCtxL
@@ -43,7 +45,6 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
 import           Pate.SimState
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
@@ -79,8 +80,8 @@ data EquivEnv sym arch where
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
     , envCurrentFrame :: AssumptionFrame sym
     -- ^ the current assumption frame, accumulated as assumptions are added
-    , envNonceGenerator :: N.NonceGenerator IO (PF.ProofScope (PFI.ProofSym sym arch))
-    , envParentNonce :: Some (PF.ProofNonce (PFI.ProofSym sym arch))
+    , envNonceGenerator :: N.NonceGenerator IO (PF.SymScope sym)
+    , envParentNonce :: Some (PF.ProofNonce sym)
     -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
     , envParentBlocks :: [PPa.BlockPair arch]
@@ -98,7 +99,7 @@ data EquivEnv sym arch where
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
 
-type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PFI.ProofSymNonceApp sym arch PF.ProofBlockSliceType))]
+type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PF.ProofNonceApp sym arch PF.ProofBlockSliceType))]
 
 type ExitPairCache arch = BlockCache arch [PPa.PatchPair (PB.BlockTarget arch)]
 
