@@ -187,7 +187,6 @@ getGenPathCondition sym fn e = do
 -- values which disagree in the given counter-example
 getPathCondition ::
   forall sym arch.
-  (MM.RegisterInfo (MM.ArchReg arch)) =>
   PS.SimBundle sym arch ->
   PF.BlockSliceState sym arch ->
   PF.EquivalenceDomain sym arch ->
@@ -195,6 +194,10 @@ getPathCondition ::
   EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
 getPathCondition bundle slice dom fn = withSym $ \sym -> do
   let
+    -- Only consider path conditions for registers in the equivalence domain.
+    -- Registers outside the equivalence domain necessarily have no effect
+    -- on the overall equivalence proof, and therefore we can ignore any
+    -- path conditions in their resulting values
     regInDomain ::
       MM.ArchReg arch tp -> EquivM sym arch Bool
     regInDomain reg =
