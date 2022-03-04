@@ -506,12 +506,17 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
 -- | Simulate the given block pair, or retrieve a cached result from a previous
 -- simulation. Execute the given function in a context where the given 'SimBundle'
 -- is valid (i.e. its bound variables are marked free and its preconditions are assumed).
+-- In this resulting 'f' these free variables are then bound in the 'SimSpec', resulting
+-- in a closed "term".
+-- The resulting 'prf' is used for returning additional information (i.e. a proof node) that
+-- is not necessarily traversable according to 'PEM.ExprMappable', and therefore is not
+-- closed under the resulting 'SimSpec'.
 withSimBundle ::
   (HasCallStack, PEM.ExprMappable sym f) =>
   PPa.BlockPair arch ->
   (SimBundle sym arch -> EquivM sym arch (f, prf)) ->
   EquivM sym arch (SimSpec sym arch f, prf)
-withSimBundle pPair f = fmap unzipNoExprMap $ withEmptyAssumptionFrame $ withSym $ \sym -> do
+withSimBundle pPair f = fmap unzipSkipTransformation $ withEmptyAssumptionFrame $ withSym $ \sym -> do
   withFreshVars pPair $ \stO stP -> do
     let
       simInO_ = SimInput stO (PPa.pOriginal pPair)
@@ -530,7 +535,7 @@ withSimBundle pPair f = fmap unzipNoExprMap $ withEmptyAssumptionFrame $ withSym
         let bundle = SimBundle (PPa.PatchPair simInO_ simInP_) (PPa.PatchPair simOutO' simOutP')
         bundle' <- applyCurrentFrame bundle
         f bundle'
-      return (frameAssume asm, (r, PEM.NoExprMap prf))
+      return (frameAssume asm, (r, PEM.SkipTransformation prf))
 
 trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
 trivialGlobalMap _ _ reg off = pure (CLM.LLVMPointer reg off)
@@ -642,10 +647,10 @@ data BranchCase sym arch =
     , branchProofTriple :: PFO.LazyProof sym arch PF.ProofTripleType
     }
 
-unzipNoExprMap ::
-  SimSpec sym arch (a, PEM.NoExprMap b) ->
+unzipSkipTransformation ::
+  SimSpec sym arch (a, PEM.SkipTransformation b) ->
   (SimSpec sym arch a, b)
-unzipNoExprMap spec = (fmap fst spec, PEM.unNEM $ snd $ specBody spec)
+unzipSkipTransformation spec = (fmap fst spec, PEM.unSkip $ snd $ specBody spec)
 
 unzipProof ::
   SimSpec sym arch (f, PFO.LazyProof sym arch tp) ->

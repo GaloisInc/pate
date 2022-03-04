@@ -13,7 +13,7 @@
 {-# LANGUAGE NoMonoLocalBinds #-}
 module Pate.ExprMappable (
     ExprMappable(..)
-  , NoExprMap(..)
+  , SkipTransformation(..)
   ) where
 
 import qualified Data.IORef as IO
@@ -121,9 +121,11 @@ instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
   foldMapExpr _sym f e b = f e b
 
 
--- | Wrap a type to give a trivial 'ExprMappable' instance (i.e. make 'mapExpr' a no-op)
-newtype NoExprMap a = NoExprMap { unNEM :: a }
+-- | Wrap a type to give a trivial 'ExprMappable' instance (i.e. make 'mapExpr' a no-op).
+-- This is useful for carrying extra information out of functions which are otherwise
+-- expected to return only ExprMappable values.
+newtype SkipTransformation a = SkipTransformation { unSkip :: a }
 
-instance ExprMappable sym (NoExprMap a) where
+instance ExprMappable sym (SkipTransformation a) where
   mapExpr _ _ = return
   foldMapExpr _ _ f b = return (f, b)
