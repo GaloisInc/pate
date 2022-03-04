@@ -227,11 +227,7 @@ instance PEM.ExprMappable sym (VerificationStatus sym arch) where
       return $ VerificationFail ce' condeq'
     _ -> return s
 
--- | An abstract proof object, representing the overall structure of an equivalence proof.
--- The type parameter 'prf' abstracts this structure over the specific types used in the proof,
--- which may be symbolic or concrete (i.e. ground terms from a counterexample).
--- The two instantiations for this parameter are given in
--- 'Pate.Proof.Instances'.
+-- | A proof object, representing the overall structure of an equivalence proof.
 data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) where
   -- | Proof that the post-domain of a given triple is satisfied when the function
   -- corresponding to this 'slice' returns, assuming the pre-domain of the triple
@@ -355,7 +351,7 @@ instance PEM.ExprMappable sym (MemoryDomain sym arch) where
        <*> (Const <$> f p)
 
 -- | Traverse the nodes of a 'ProofApp', changing the
--- recursive 'node' type while leaving the leafs (i.e. the 'prf' type) unchanged.
+-- recursive 'node' type while leaving the leaves unchanged.
 traverseProofApp ::
   Applicative m =>
   (forall tp. node tp -> m (node' tp)) ->
@@ -385,7 +381,7 @@ traverseProofApp f = \case
   ProofStatus a1 -> ProofStatus <$> pure a1
 
 -- | Map over the nodes of a 'ProofApp', changing the
--- 'node' type while leaving the leafs (i.e. the 'prf' type) unchanged.
+-- 'node' type while leaving the leaves unchanged.
 mapProofApp ::
   (forall tp. node tp -> node' tp) ->
   ProofApp sym arch node utp ->
@@ -456,8 +452,6 @@ unNonceProof :: ProofNonceExpr sym arch tp -> ProofExpr sym arch tp
 unNonceProof prf = ProofExpr $ mapProofApp unNonceProof (prfNonceBody prf)
 
 -- | The semantics of executing two block slices: an original and a patched variant.
--- The type parameter 'prf' abstracts this over the specific types,
--- which may be symbolic or concrete (i.e. ground terms from a counterexample).
 data BlockSliceTransition sym arch where
   BlockSliceTransition ::
     { -- | The pre-states of the blocks prior to execution.
