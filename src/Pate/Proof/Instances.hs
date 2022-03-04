@@ -106,35 +106,6 @@ ppInequivalencePreRegs ::
 ppInequivalencePreRegs gineq = PF.withIneqResult gineq $ \ineq ->
   show $ ppRegs (PF.ineqPre ineq) (PF.slRegState $ PF.slBlockPreState (PF.ineqSlice ineq))
 
--- | Specializing 'ProofExpr' and a 'BlockSliceTransition' to symbolic values.
--- data ProofSym sym arch
-
--- type instance PF.ProofBlock (ProofSym sym arch) = PB.ConcreteBlock arch
--- type instance PF.ProofRegister (ProofSym sym arch) = MM.ArchReg arch
--- type instance PF.ProofMemCell (ProofSym sym arch) = PMC.MemCell sym arch
--- type instance PF.ProofBV (ProofSym sym arch) = SymBV sym
--- type instance PF.ProofPredicate (ProofSym sym arch) = W4.Pred sym
--- type instance PF.ProofCounterExample (ProofSym sym arch) = InequivalenceResult arch
--- type instance PF.ProofCondition (ProofSym sym arch) = CondEquivalenceResult sym arch
--- type instance PF.ProofMacawValue (ProofSym sym arch) = PSR.MacawRegEntry sym
--- type instance PF.ProofBlockExit (ProofSym sym arch) = CS.RegValue sym (MS.MacawBlockEndType arch)
--- type instance PF.ProofContext (ProofSym sym arch) = PPa.PatchPair (PS.SimState sym arch)
--- type instance PF.ProofScope (ProofSym (W4B.ExprBuilder t st fs) arch) = t
--- type instance PF.ProofInlinedResult (ProofSym sym arch) = PVM.SomeWriteSummary (MM.ArchAddrWidth arch)
--- 
--- type SymDomain sym arch = PF.ProofExpr (ProofSym sym arch) PF.ProofDomainType
-
--- Needed because LLVMPtr is defined as an alias
-
--- instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (PF.ProofExpr sym arch tp) where
---   mapExpr sym f (PF.ProofExpr app) = PF.ProofExpr <$> PEM.mapExpr sym f app
--- 
--- instance (PA.ValidArch arch, PSo.ValidSym sym) => PEM.ExprMappable sym (PF.ProofNonceExpr sym arch tp) where
---   mapExpr sym f (PF.ProofNonceExpr nonce parent app) = do
---     app' <- PEM.mapExpr sym f app
---     return $ PF.ProofNonceExpr nonce parent app'
---
-
 ppCell :: (PA.ValidArch arch, PSo.ValidSym sym) => PMC.MemCell sym arch w -> PP.Doc a
 ppCell cell =
   let CLM.LLVMPointer reg off = PMC.cellPtr cell
@@ -350,27 +321,6 @@ collapseProofMemoryDomain memdom = mapMaybe go $ MapF.toList (PF.memoryDomain me
         case W4.asConstantPred p of
           Just False -> Nothing
           _ -> Just (Some cell, p)
-
--- | Specializing 'ProofExpr' and 'BlockSliceTransition' to concrete values.
-
--- data ProofGround arch
-
--- type instance PF.ProofBlock (ProofGround arch) = PB.ConcreteBlock arch
--- type instance PF.ProofRegister (ProofGround arch) = MM.ArchReg arch
--- type instance PF.ProofMemCell (ProofGround arch) = GroundMemCell arch
--- type instance PF.ProofBV (ProofGround arch) = GroundBV
--- type instance PF.ProofCounterExample (ProofGround arch) = InequivalenceResult arch
--- type instance PF.ProofCondition (ProofGround arch) = ()
--- type instance PF.ProofPredicate (ProofGround arch) = Bool
--- type instance PF.ProofMacawValue (ProofGround arch) = GroundMacawValue
--- type instance PF.ProofBlockExit (ProofGround arch) = GroundBlockExit arch
--- -- no additional context needed for ground values
--- type instance PF.ProofContext (ProofGround arch) = ()
--- type instance PF.ProofInlinedResult (ProofGround arch) = PVM.SomeWriteSummary (MM.ArchAddrWidth arch)
--- 
--- instance PA.ValidArch arch => PF.IsProof (ProofGround arch)
-
-
 
 data GroundBV n where
   GroundBV :: MT.UndefPtrOpTags -> W4.NatRepr n -> BVS.BV n -> GroundBV n
