@@ -102,7 +102,7 @@ renderEvent st detailDiv evt =
                  , renderEquivalenceResult res
                  ]
     PE.ProofIntermediate (PPa.PatchPair ob@(PE.Blocks _ blkO _) pb@(PE.Blocks _ _blkP _))
-                         (PFI.SomeProofSym _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
+                         (PFI.SomeProofNonceExpr _ (PPr.ProofNonceExpr nonce (Some parentNonce) app)) duration -> do
       let origAddr = PB.blockMemAddr blkO
       blockLink <- TP.a # TP.set TP.text (show origAddr)
                         # TP.set TP.href ("#" ++ show origAddr)

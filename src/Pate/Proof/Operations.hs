@@ -328,7 +328,7 @@ lazyProofEvent ::
 lazyProofEvent ppair f = lazyProofFinal f $ \e -> do
   blocks <- PD.getBlocks ppair 
   vsym <- CMR.asks envValidSym
-  emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofSym vsym e))
+  emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofNonceExpr vsym e))
 
 lazyProofEvent_ ::
   PPa.BlockPair arch ->
@@ -382,7 +382,7 @@ forkProofEvent ::
 forkProofEvent ppair f = forkProofFinal f $ \e -> do
   blocks <- PD.getBlocks ppair 
   vsym <- CMR.asks envValidSym
-  emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofSym vsym e))
+  emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofNonceExpr vsym e))
 
 joinLazyProofApp :: LazyProofApp sym arch tp -> EquivM sym arch (PF.ProofNonceApp sym arch tp)
 joinLazyProofApp pa = PF.traverseProofApp (\x -> joinLazyProof x) pa

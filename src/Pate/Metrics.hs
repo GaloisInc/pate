@@ -71,7 +71,7 @@ summarize e m =
       m { originalBinaryMetrics = Just (loadedBinaryMetrics origElf)
         , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedElf)
         }
-    PE.ProofIntermediate _bp (PFI.SomeProofSym _sym nonceExpr) _tm ->
+    PE.ProofIntermediate _bp (PFI.SomeProofNonceExpr _sym nonceExpr) _tm ->
       case PPr.prfNonceBody nonceExpr of
         PPr.ProofTriple {} -> m { verifiedGoals = verifiedGoals m + 1 }
         _ -> m

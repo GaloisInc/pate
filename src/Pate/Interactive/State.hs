@@ -114,11 +114,11 @@ $(L.makeLenses 'State)
 
 addProofTreeNode
   :: PE.BlocksPair arch
-  -> PFI.SomeProofSym arch tp
+  -> PFI.SomeProofNonceExpr arch tp
   -> TM.NominalDiffTime
   -> Maybe (ProofTree arch)
   -> Maybe (ProofTree arch)
-addProofTreeNode blockPair (PFI.SomeProofSym oldSym@(PS.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
+addProofTreeNode blockPair (PFI.SomeProofNonceExpr oldSym@(PS.Sym symNonce0 _ _) expr@(PPr.ProofNonceExpr enonce _ _)) tm mpt =
   case mpt of
     Nothing ->
       let !proofNode = ProofTreeNode blockPair expr tm

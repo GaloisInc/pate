@@ -26,7 +26,7 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE ConstraintKinds #-}
 
 module Pate.Proof.Instances
-  ( SomeProofSym(..)
+  ( SomeProofNonceExpr(..)
   , GroundBV(..)
   , groundBV
   , mkGroundBV
@@ -94,12 +94,12 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Partial as W4P
 
-data SomeProofSym (arch :: DK.Type) tp where
-  SomeProofSym :: PA.ValidArch arch =>
-    PSo.Sym sym -> PF.ProofNonceExpr sym arch tp -> SomeProofSym arch tp
+data SomeProofNonceExpr (arch :: DK.Type) tp where
+  SomeProofNonceExpr :: PA.ValidArch arch =>
+    PSo.Sym sym -> PF.ProofNonceExpr sym arch tp -> SomeProofNonceExpr arch tp
 
-instance Show (SomeProofSym arch tp) where
-  show (SomeProofSym (PSo.Sym{}) e) = show (PP.pretty (PF.unNonceProof e))
+instance Show (SomeProofNonceExpr arch tp) where
+  show (SomeProofNonceExpr (PSo.Sym{}) e) = show (PP.pretty (PF.unNonceProof e))
 
 ppInequivalencePreRegs ::
   PF.InequivalenceResult arch -> String

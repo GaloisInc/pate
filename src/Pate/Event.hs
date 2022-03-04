@@ -62,10 +62,10 @@ data Event arch where
   ErrorRaised :: PEE.EquivalenceError arch -> Event arch
   Warning :: BlocksPair arch -> PEE.EquivalenceError arch -> Event arch
   -- | final top-level result
-  ProvenGoal :: BlocksPair arch ->  PFI.SomeProofSym arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
+  ProvenGoal :: BlocksPair arch ->  PFI.SomeProofNonceExpr arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
   -- | intermediate results
-  ProofIntermediate :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
-  ProofStarted :: BlocksPair arch -> PFI.SomeProofSym arch tp -> TM.NominalDiffTime -> Event arch
+  ProofIntermediate :: BlocksPair arch -> PFI.SomeProofNonceExpr arch tp -> TM.NominalDiffTime -> Event arch
+  ProofStarted :: BlocksPair arch -> PFI.SomeProofNonceExpr arch tp -> TM.NominalDiffTime -> Event arch
 
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
   DiscoverBlockPair :: BlocksPair arch -> PB.BlockTarget arch PB.Original -> PB.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch

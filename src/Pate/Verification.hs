@@ -485,7 +485,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
   vsym <- CMR.asks envValidSym
   blocks <- PD.getBlocks pPair
   ifConfig (not . PC.cfgEmitProofs) (return ()) $ do
-    emitEvent (PE.ProvenGoal blocks (PFI.SomeProofSym vsym proof))
+    emitEvent (PE.ProvenGoal blocks (PFI.SomeProofNonceExpr vsym proof))
   case PFO.proofResult (PF.unNonceProof proof) of
     PF.VerificationSuccess -> return PEq.Equivalent
     PF.VerificationFail _ cond -> case W4.asConstantPred (PF.condEqPred cond) of
