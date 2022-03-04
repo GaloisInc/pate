@@ -107,13 +107,13 @@ getInequivalenceResult ::
   SymGroundEvalFn sym ->
   EquivM sym arch (PF.InequivalenceResult arch)
 getInequivalenceResult defaultReason pre post slice fn = do
-  result <- ground fn $ PF.InequivalenceResult slice pre post defaultReason
-  TF.forF result $ \result' -> PG.withGroundSym result $ \groundResult -> do
+  result <- ground fn $ PF.InequivalenceResultSym slice pre post defaultReason
+  PG.traverseWithGroundSym result $ \groundResult -> do
     let
       groundPost = PF.ineqPost groundResult
       groundSlice = PF.ineqSlice groundResult
       reason = fromMaybe defaultReason (getInequivalenceReason groundPost (PF.slBlockPostState groundSlice))
-    return $ result' { PF.ineqReason = reason }
+    return $ groundResult { PF.ineqReason = reason }
 
 ground ::
   PEM.ExprMappable sym (a sym) =>

@@ -37,6 +37,7 @@ module Pate.Ground
   , GroundData
   , GroundInfo(..)
   , withGroundSym
+  , traverseWithGroundSym
   , ground
   , groundValue
   , groundPartial
@@ -53,7 +54,6 @@ import qualified Data.Kind as DK
 import qualified Data.BitVector.Sized as BV
 
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Symbolic as MS
@@ -100,17 +100,17 @@ withGroundSym ::
   a
 withGroundSym (Grounded v d@(GroundData{})) f = let ?grndData = d in f v
 
--- Functions that can be defined for an arbitrary 'sym' are safe transformations
--- for a grounded value, since they can't modify the inner expressions
-
-instance TF.FunctorF Grounded where
-  fmapF f (Grounded v d) = Grounded (f v) d
-
-instance TF.FoldableF Grounded where
-  foldMapF f (Grounded v _) = f v
-
-instance TF.TraversableF Grounded where
-  traverseF f (Grounded v d) = Grounded <$> f v <*> pure d
+-- | Traverse the given 'Grounded' by establishing 'IsGroundSym' for its 'sym' type
+-- parameter, which implicitly binds the grounding environment used by
+-- 'groundValue', 'groundInfo', etc.
+traverseWithGroundSym ::
+  Applicative m =>
+  Grounded a ->
+  (forall grnd. IsGroundSym grnd => a grnd -> m (b grnd)) ->
+  m (Grounded b)
+traverseWithGroundSym (Grounded v d@(GroundData{})) f =
+  let ?grndData = d
+  in Grounded <$> f v <*> pure d
 
 -- | Storage for the ground value of a term, including metadata.
 data GroundInfo (tp :: W4.BaseType) where
@@ -135,24 +135,30 @@ data GroundData sym where
 
 type HasGroundData sym = (?grndData :: GroundData sym)
 
-type IsGroundSym sym = (HasGroundData sym, PS.ValidSym sym)
+-- | We weaken the external constraint to only establish 'W4.IsExpr' in order
+-- to prevent functions executed in 'traverseWithGroundSym' from creating
+-- fresh terms (which would not have ground values in the environment)
+type IsGroundSym sym = (HasGroundData sym, W4.IsExpr (W4.SymExpr sym))
+
+withGroundData :: 
+  IsGroundSym grnd =>
+  (PS.ValidSym grnd => GroundData grnd -> a) ->
+  a
+withGroundData f = let grnd = ?grndData in case grnd of GroundData{} -> f grnd
 
 -- | Retrieve the ground information of a symbolic expression with respect to the
 -- grounding environment bound by 'IsGroundSym'
 groundInfo :: IsGroundSym sym => W4.SymExpr sym tp -> GroundInfo tp
-groundInfo e = 
-  let grnd = ?grndData
-  in case MapF.lookup e (grndInfoMap grnd) of
+groundInfo e = withGroundData $ \grnd ->
+  case MapF.lookup e (grndInfoMap grnd) of
     Just info -> info
     Nothing -> PP.panic PP.ProofConstruction "groundInfo" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
 
 -- | Retrieve the ground information of a symbolic natural with respect to the
 -- grounding environment bound by 'IsGroundSym'
 groundInfoNat :: IsGroundSym sym => W4.SymNat sym -> (MT.UndefPtrOpTags, Natural)
-groundInfoNat e =
-  let
-    grnd = ?grndData
-    info = groundInfo $ WEH.natToIntegerPure (grndSym grnd) e
+groundInfoNat e = withGroundData $ \grnd ->
+  let info = groundInfo $ WEH.natToIntegerPure (grndSym grnd) e
   in (groundPtrTag info, integerToNat (groundVal info))
 
 -- TODO: this breaks the abstraction boundary for block ends
@@ -168,7 +174,7 @@ groundMacawEndCase ::
   CS.RegValue sym (MS.MacawBlockEndType arch) ->
   MS.MacawBlockEndCase
 groundMacawEndCase _ (_ Ctx.:> CS.RV blend Ctx.:> _) =
-  (toEnum (fromIntegral (BV.asUnsigned (groundValue blend))))
+  toEnum $ fromIntegral $ BV.asUnsigned $ groundValue blend
 
 -- | Retrieve the concrete value of a symbolic expression with respect to the
 -- grounding environment bound by 'IsGroundSym'
@@ -194,6 +200,8 @@ groundNat e = snd $ groundInfoNat e
 isStackRegion :: IsGroundSym sym => W4.SymNat sym -> Bool
 isStackRegion e = grndStackRegion ?grndData == groundNat e
 
+-- | Clamp an integer to be a positive natural (reflecting the semantics of
+-- 'W4.integerToNat' for a concrete value).
 integerToNat :: Integer -> Natural
 integerToNat i
   | i >= 0 = fromIntegral i
