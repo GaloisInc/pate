@@ -128,15 +128,17 @@ inMemCellPred sym cell cells =
     _ -> go (WI.falsePred sym) (Map.toList cells)
   where
     go :: WI.Pred sym -> [(Some (MemCell sym arch), WI.Pred sym)] -> IO (WI.Pred sym)
-    go p ((Some cell', cond) : cells') = do
-      eqPtrs <- PMT.llvmPtrEq sym (cellPtr cell) (cellPtr cell')
-      case WI.asConstantPred eqPtrs of
-        Just True | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
-        Just False -> go p cells'
-        _ -> do
-          matches <- WI.andPred sym eqPtrs cond
-          p' <- WI.orPred sym p matches
-          go p' cells'
+    go p ((Some cell', cond) : cells') = case WI.testEquality (cellWidth cell) (cellWidth cell') of
+      Just WI.Refl -> do
+        eqPtrs <- PMT.llvmPtrEq sym (cellPtr cell) (cellPtr cell')
+        case WI.asConstantPred eqPtrs of
+          Just True | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
+          Just False -> go p cells'
+          _ -> do
+            matches <- WI.andPred sym eqPtrs cond
+            p' <- WI.orPred sym p matches
+            go p' cells'
+      Nothing -> go p cells'
     go p [] = return p
 
 setMemCellRegion ::

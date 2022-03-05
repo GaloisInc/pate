@@ -58,6 +58,7 @@ import           Data.Proxy
 import           GHC.Natural
 import           Numeric
 
+import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
@@ -78,6 +79,7 @@ import           Prettyprinter ( (<+>) )
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Proof as PF
 import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
@@ -227,9 +229,9 @@ instance forall sym arch.
   pretty prf = PP.vsep
     [ "Registers:"
     , PP.indent 4 $ prettyRegs
-    , "Stack Memory:" <+> ppPolarity (PF.memoryDomainPolarity $ PF.eqDomainStackMemory prf)
+    , "Stack Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PF.eqDomainStackMemory prf)
     , PP.indent 4 $ prettyMem (PF.eqDomainStackMemory prf)
-    , "Global Memory:" <+> ppPolarity (PF.memoryDomainPolarity $ PF.eqDomainGlobalMemory prf)
+    , "Global Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PF.eqDomainGlobalMemory prf)
     , PP.indent 4 $ prettyMem (PF.eqDomainGlobalMemory prf)
     ]
     where
@@ -240,7 +242,7 @@ instance forall sym arch.
         Just True -> PP.pretty (showF reg)
         _ -> PP.pretty (showF reg) <> PP.line <> "Conditional"
 
-      prettyMem m = PP.vsep (map ppMem (collapseProofMemoryDomain m))
+      prettyMem m = PP.vsep (map ppMem (PEM.toList m))
 
       ppMem :: (Some (PMC.MemCell sym arch), W4.Pred sym) -> PP.Doc a
       ppMem (Some cell, p) = case W4.asConstantPred p of
@@ -301,22 +303,6 @@ collapseRegState _ regState =
     go (Pair reg (Const p)) = case W4.asConstantPred p of
       Just False -> Nothing
       _ -> Just (Some reg, p)
-
-collapseProofMemoryDomain ::
-  forall sym arch.
-  PSo.ValidSym sym =>
-  PA.ValidArch arch =>
-  PF.MemoryDomain sym arch ->
-  [(Some (PMC.MemCell sym arch), W4.Pred sym)]
-collapseProofMemoryDomain memdom = mapMaybe go $ MapF.toList (PF.memoryDomain memdom)
-  where
-    go :: MapF.Pair (PMC.MemCell sym arch)
-                    (Const (W4.Pred sym))
-          -> Maybe (Some (PMC.MemCell sym arch), W4.Pred sym)
-    go (MapF.Pair cell (Const p)) =
-        case W4.asConstantPred p of
-          Just False -> Nothing
-          _ -> Just (Some cell, p)
 
 data GroundBV n where
   GroundBV :: MT.UndefPtrOpTags -> W4.NatRepr n -> BVS.BV n -> GroundBV n
@@ -653,12 +639,12 @@ eqGroundMemCells cell1 cell2 =
 cellInMemDomain ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.MemoryDomain grnd arch ->
+  PEM.MemoryDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
-cellInMemDomain dom cell = case PG.groundValue $ PF.memoryDomainPolarity dom of
-  True -> MapF.foldrWithKey (\cell' (Const p) p' -> p' || (eqGroundMemCells cell cell' && PG.groundValue p)) False (PF.memoryDomain dom)
-  False -> MapF.foldrWithKey (\cell' (Const p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PF.memoryDomain dom)
+cellInMemDomain dom cell = case PG.groundValue $ PEM.memDomainPolarity dom of
+  True -> Map.foldrWithKey (\(Some cell') p p' -> p' || (eqGroundMemCells cell cell' && PG.groundValue p)) False (PEM.memDomainPred dom)
+  False -> Map.foldrWithKey (\(Some cell') p p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.memDomainPred dom)
 
 
 cellInDomain ::

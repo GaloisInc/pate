@@ -38,6 +38,7 @@ import qualified What4.Interface as WI
 import qualified Pate.Arch as PAr
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Event as PE
 import qualified Pate.Ground as PG
 import qualified Pate.MemCell as PMC
@@ -225,9 +226,9 @@ renderProofMemoryDomain
   :: ( WI.IsSymExprBuilder sym
      )
   => WI.Pred sym
-  -> MapF.Pair (PMC.MemCell sym arch) (C.Const (WI.Pred sym))
+  -> (Some (PMC.MemCell sym arch), (WI.Pred sym))
   -> Maybe (TP.UI TP.Element)
-renderProofMemoryDomain polarity (MapF.Pair memCell (C.Const predicate))
+renderProofMemoryDomain polarity (Some memCell, predicate)
   | WI.asConstantPred polarity /= WI.asConstantPred predicate =
     Just $ TP.row [ TP.string (show (PN.natValue (PMC.cellWidth memCell)) ++ " bytes at ")
                   , TP.pre # TP.set TP.text (T.unpack (pp (CLM.ppPtr (PMC.cellPtr memCell))))
@@ -264,11 +265,11 @@ renderDomain (PPr.EquivalenceDomain regs stack mem) =
   TP.column [ TP.h4 #+ [TP.string "Registers"]
             , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (MapF.toList (MC.regStateMap regs)))
             , TP.h4 #+ [TP.string "Stack Memory"]
-            , text (ppPolarityDescription (PPr.memoryDomainPolarity stack))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.memoryDomainPolarity stack)) (MapF.toList (PPr.memoryDomain stack)))
+            , text (ppPolarityDescription (PEM.memDomainPolarity stack))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity stack)) (Map.toList (PEM.memDomainPred stack)))
             , TP.h4 #+ [TP.string "Other Memory"]
-            , text (ppPolarityDescription (PPr.memoryDomainPolarity mem))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PPr.memoryDomainPolarity mem)) (MapF.toList (PPr.memoryDomain mem)))
+            , text (ppPolarityDescription (PEM.memDomainPolarity mem))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity mem)) (Map.toList (PEM.memDomainPred mem)))
             ]
 
 -- | Render the pretty version of a register pair in a ground state

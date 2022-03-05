@@ -41,7 +41,7 @@ import           Data.Macaw.AArch32.Symbolic ()
 import qualified Language.ASL.Globals as ASL
 
 import qualified Pate.Arch as PA
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Panic as PP
 import qualified Pate.Verification.ExternalCall as PVE
@@ -128,8 +128,8 @@ handleSystemCall = PVE.ExternalDomain $ \sym -> do
                                , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R7")), WI.truePred sym)
                                ]
   return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.memPredTrue sym
-                         , PES.predMem = PEM.memPredTrue sym
+                         , PES.predStack = PEM.universal sym
+                         , PES.predMem = PEM.universal sym
                          }
 
 -- | The Linux calling convention uses r0-r3 for arguments
@@ -150,8 +150,8 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                                , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
                                ]
   return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.memPredTrue sym
-                         , PES.predMem = PEM.memPredTrue sym
+                         , PES.predStack = PEM.universal sym
+                         , PES.predMem = PEM.universal sym
                          }
 
 argumentMapping :: PVO.ArgumentMapping SA.AArch32
