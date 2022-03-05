@@ -15,6 +15,7 @@ module Pate.MemCell (
   , mergeMemCellPred
   , muxMemCellPred
   , inMemCellPred
+  , dropTrivialCells
   , readMemCell
   , writeMemCell
   ) where
@@ -75,6 +76,20 @@ instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
 -- | Each 'MemCell' is associated with the predicate that says whether or not the
 -- described memory is contained in the 'Pate.Equivalence.MemPred'.
 type MemCellPred sym arch = Map.Map (Some (MemCell sym arch)) (WI.Pred sym)
+
+dropTrivialCells ::
+  forall sym arch.
+  WI.IsExprBuilder sym =>
+  MemCellPred sym arch ->
+  MemCellPred sym arch
+dropTrivialCells cells = Map.mapMaybe dropFalse cells
+  where
+    dropFalse ::
+      WI.Pred sym ->
+      Maybe (WI.Pred sym)
+    dropFalse p = case WI.asConstantPred p of
+      Just False -> Nothing
+      _ -> Just p
 
 mergeMemCellPred ::
   WI.IsExprBuilder sym =>

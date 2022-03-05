@@ -182,7 +182,7 @@ foldMapMExprMap sym f m b = do
      IO (WI.SymExpr sym tp, (b, Bool))
     f' e (b', changed) = do
       (e', b'') <- f e b'
-      let changed' = changed || case WI.testEquality e e' of { Just WI.Refl -> True; _ -> False}
+      let changed' = changed || case WI.testEquality e e' of { Just WI.Refl -> False; _ -> True}
       return (e', (b'', changed'))
 
 instance (Ord k, Eq k, ExprMappable sym k, ExprMappable sym v) =>

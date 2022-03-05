@@ -72,19 +72,15 @@ traverseWithCellPar ::
   m (future (MemoryDomain sym arch))
 traverseWithCellPar memDom f = do
   let
-    dropFalse :: Some (PMC.MemCell sym arch) -> W4.Pred sym -> Maybe (W4.Pred sym)
-    dropFalse _ p = case W4.asConstantPred p of
-      Just False -> Nothing
-      _ -> Just p
-
     f' :: Some (PMC.MemCell sym arch) -> W4.Pred sym -> m (future (W4.Pred sym))
     f' (Some cell@(PMC.MemCell{})) p = f cell p
 
   future_preds <- M.traverseWithKey f' (memDomainPred memDom)
   PP.present $ do
     preds <- traverse PP.joinFuture future_preds
-    return $ MemoryDomain (M.mapMaybeWithKey dropFalse preds) (memDomainPolarity memDom)
- 
+    return $ MemoryDomain (PMC.dropTrivialCells preds) (memDomainPolarity memDom)
+
+      
 traverseWithCell ::
   forall sym arch m.
   Monad m =>
@@ -187,7 +183,7 @@ instance PEM.ExprMappable sym (MemoryDomain sym arch) where
   foldMapExpr sym f memDom b = do
     (locs, b') <- PEM.foldMapExpr sym f (fmap (PEM.ToExprMappable @sym) (memDomainPred memDom)) b
     (pol, b'') <- f (memDomainPolarity memDom) b'
-    return $ (MemoryDomain (fmap PEM.unEM locs) pol, b'')
+    return $ (MemoryDomain (PMC.dropTrivialCells $ fmap PEM.unEM locs) pol, b'')
   foldExpr sym f memDom b = do
     b' <- PEM.foldExpr sym f (fmap (PEM.ToExprMappable @sym) (memDomainPred memDom)) b
     f (memDomainPolarity memDom) b'
