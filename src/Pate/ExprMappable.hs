@@ -21,7 +21,6 @@ module Pate.ExprMappable (
 import qualified Data.IORef as IO
 import           Control.Monad ( foldM )
 
-import qualified Data.Map as Map
 import           Data.Functor.Const
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Context as Ctx
@@ -138,7 +137,9 @@ instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
   mapExpr _sym f e = f e
   foldMapExpr _sym f e b = f e b
 
-newtype ToExprMappable sym tp = ToExprMappable { unEM :: (WI.SymExpr sym tp) }
+-- | Wrap a 'WI.SymExpr' as an 'ExprMappable, which can't be defined directly
+-- as it is a type family
+newtype ToExprMappable sym tp = ToExprMappable { unEM :: WI.SymExpr sym tp }
 
 instance ExprMappable sym (ToExprMappable sym tp) where
   mapExpr _sym f (ToExprMappable e) = ToExprMappable <$> f e
@@ -155,40 +156,6 @@ instance ExprMappable sym a => ExprMappable sym [a] where
       (e', b') <- foldMapExpr sym f e b
       (l'', b'') <- foldMapExpr sym f l' b'
       return (e' : l'', b'')
-
-foldMapMExprMap ::
-  forall sym k v b.
-  ( Ord k
-  , Eq k
-  , ExprMappable sym k
-  , ExprMappable sym v
-  , WI.IsSymExprBuilder sym
-  ) =>
-  sym ->
-  (forall tp. WI.SymExpr sym tp -> b -> IO (WI.SymExpr sym tp, b)) ->
-  Map.Map k v ->
-  b ->
-  IO (Map.Map k v, b)
-foldMapMExprMap sym f m b = do
-  let (ks, vs) = unzip $ Map.toAscList m
-  (ks', (b', changed)) <- foldMapExpr sym f' ks (b, False)
-  (vs', b'') <- foldMapExpr sym f vs b'
-  let m' = if changed then Map.fromList (zip ks' vs') else Map.fromAscList (zip ks vs')
-  return $ (m', b'')
-  where
-    f' :: forall tp.
-     WI.SymExpr sym tp ->
-     (b, Bool) ->
-     IO (WI.SymExpr sym tp, (b, Bool))
-    f' e (b', changed) = do
-      (e', b'') <- f e b'
-      let changed' = changed || case WI.testEquality e e' of { Just WI.Refl -> False; _ -> True}
-      return (e', (b'', changed'))
-
-instance (Ord k, Eq k, ExprMappable sym k, ExprMappable sym v) =>
-  ExprMappable sym (Map.Map k v) where
-  foldMapExpr sym f m b = foldMapMExprMap sym f m b
-  foldExpr sym f m b = foldExpr sym f (Map.toList m) b
 
 -- | Wrap a type to give a trivial 'ExprMappable' instance (i.e. make 'mapExpr' a no-op).
 -- This is useful for carrying extra information out of functions which are otherwise

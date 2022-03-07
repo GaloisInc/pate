@@ -15,6 +15,9 @@ module Pate.Equivalence.MemoryDomain (
   , universal
   , empty
   , toList
+  , toAscList
+  , fromList
+  , fromAscList
   , cells
   , fromFootPrints
   , addFootPrints
@@ -22,7 +25,7 @@ module Pate.Equivalence.MemoryDomain (
   , mux
   ) where
 
-import           Control.Monad ( forM, join )
+import           Control.Monad ( forM, join, foldM )
 import qualified Data.Map as M
 import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Classes
@@ -95,19 +98,44 @@ toList ::
   [(Some (PMC.MemCell sym arch), W4.Pred sym)]
 toList memDom = M.toList (memDomainPred memDom)
 
+toAscList ::
+  MemoryDomain sym arch ->
+  [(Some (PMC.MemCell sym arch), W4.Pred sym)]
+toAscList memDom = M.toAscList (memDomainPred memDom)
+
 cells ::
   OrdF (W4.SymExpr sym) =>
   MemoryDomain sym arch ->
   Set (Some (PMC.MemCell sym arch))
 cells memDom = S.fromList $ map fst (toList memDom)
 
+-- | Build a 'MemoryDomain' from a list of 'PMC.MemCell' entries, with a corresponding
+-- predicate indicating whether or not they are in or out of the domain (subject to the
+-- given polarity).
+-- Duplicate entries are allowed, where the resulting predicate will be the disjunction
+-- of the overlapping predicates.
 fromList ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
+  W4.Pred sym ->
+  IO (MemoryDomain sym arch)
+fromList sym l pol = do
+  -- NOTE: We can't just use Data.Map.fromList here because it will discard duplicate
+  -- entries
+  let maps = map (\(cell, p) -> M.singleton cell p) l
+  merged <- foldM (PMC.mergeMemCellPred sym) M.empty maps
+  return $ MemoryDomain merged pol
+
+-- | Similar to 'fromList' but assumes the cells are in order and disjoint
+fromAscList ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
   W4.Pred sym ->
   MemoryDomain sym arch
-fromList l pol = MemoryDomain (M.fromList l) pol
+fromAscList l pol = MemoryDomain (M.fromAscList l) pol
 
 mux ::
   W4.IsExprBuilder sym =>
@@ -165,7 +193,7 @@ fromFootPrints sym foots polarity = do
     case W4.asConstantPred cond' of
       Just False -> return Nothing
       _ -> return $ Just (Some (PMC.MemCell ptr w end), cond')
-  return $ fromList locs polarity
+  fromList sym locs polarity
 
 addFootPrints ::
   forall sym arch.
@@ -181,9 +209,16 @@ addFootPrints sym foots memDom = do
 
 instance PEM.ExprMappable sym (MemoryDomain sym arch) where
   foldMapExpr sym f memDom b = do
-    (locs, b') <- PEM.foldMapExpr sym f (fmap (PEM.ToExprMappable @sym) (memDomainPred memDom)) b
-    (pol, b'') <- f (memDomainPolarity memDom) b'
-    return $ (MemoryDomain (PMC.dropTrivialCells $ fmap PEM.unEM locs) pol, b'')
+    let (ks, vs) = unzip $ M.toAscList (memDomainPred memDom)
+    (ks', b') <- PEM.foldMapExpr sym f ks b
+    (vs', b'') <- PEM.foldMapExpr sym f (map (PEM.ToExprMappable @sym) vs) b'
+    let vs'' = map PEM.unEM vs'
+    (pol', b''') <- f (memDomainPolarity memDom) b''
+    memDom' <- case ks == ks' of
+      True -> return $ fromAscList (zip ks vs'') pol'
+      False -> fromList sym (zip ks' vs'') pol'
+    return $ (memDom', b''')
+
   foldExpr sym f memDom b = do
-    b' <- PEM.foldExpr sym f (fmap (PEM.ToExprMappable @sym) (memDomainPred memDom)) b
+    b' <- PEM.foldExpr sym f (M.toList $ fmap (PEM.ToExprMappable @sym) (memDomainPred memDom)) b
     f (memDomainPolarity memDom) b'
