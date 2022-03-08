@@ -485,9 +485,9 @@ withOnlineSolver
 inlineCallee
   :: forall arch sym
    . (HasCallStack)
-  => StatePredSpec sym arch
+  => DomainSpec sym arch
   -> PPa.BlockPair arch
-  -> EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
+  -> EquivM sym arch (DomainSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --

@@ -18,6 +18,7 @@ import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
+import           Data.Functor.Const
 import qualified Data.Sequence as Seq
 import qualified What4.Interface as W4
 
@@ -35,6 +36,7 @@ import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
+import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 
@@ -44,10 +46,10 @@ validInitState ::
   SimState sym arch PB.Patched ->
   EquivM sym arch (AssumptionFrame sym)
 validInitState mpPair stO stP = do
-  fmap mconcat $ PRe.zipRegStates (simRegs stO) (simRegs stP) $ \r vO vP -> do
+  fmap PRt.collapse $ PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> do
     validO <- validRegister (fmap PPa.pOriginal mpPair) vO r
     validP <- validRegister (fmap PPa.pPatched mpPair) vP r
-    return $ validO <> validP
+    return $ Const $ validO <> validP
 
 validRegister ::
   forall bin sym arch tp.

@@ -42,7 +42,7 @@ import qualified Language.ASL.Globals as ASL
 
 import qualified Pate.Arch as PA
 import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Panic as PP
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
@@ -119,18 +119,19 @@ display reg =
 -- | The Linux syscall convention uses r0-r5 for registers, with r7 containing the system call number
 handleSystemCall :: PVE.ExternalDomain PVE.SystemCall SA.AArch32
 handleSystemCall = PVE.ExternalDomain $ \sym -> do
-  let regDomain = Map.fromList [ (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R5")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R7")), WI.truePred sym)
-                               ]
-  return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.universal sym
-                         , PES.predMem = PEM.universal sym
-                         }
+  let regDomain = PED.regDomainFromList sym $
+        [ (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R5")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R7")), WI.truePred sym)
+        ]
+  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
+                                 , PED.eqDomainStackMemory = PEM.universal sym
+                                 , PED.eqDomainGlobalMemory = PEM.universal sym
+                                 }
 
 -- | The Linux calling convention uses r0-r3 for arguments
 --
@@ -144,15 +145,16 @@ handleSystemCall = PVE.ExternalDomain $ \sym -> do
 -- FIXME: This does not account for floating point registers
 handleExternalCall :: PVE.ExternalDomain PVE.ExternalCall SA.AArch32
 handleExternalCall = PVE.ExternalDomain $ \sym -> do
-  let regDomain = Map.fromList [ (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")), WI.truePred sym)
-                               , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
-                               ]
-  return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.universal sym
-                         , PES.predMem = PEM.universal sym
-                         }
+  let regDomain = PED.regDomainFromList sym $
+        [ (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")), WI.truePred sym)
+        , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
+        ]
+  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
+                                 , PED.eqDomainStackMemory = PEM.universal sym
+                                 , PED.eqDomainGlobalMemory = PEM.universal sym
+                                 }
 
 argumentMapping :: PVO.ArgumentMapping SA.AArch32
 argumentMapping =

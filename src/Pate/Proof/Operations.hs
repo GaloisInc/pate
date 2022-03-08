@@ -17,10 +17,8 @@ Functions for creating and operating with equivalence proofs
 module Pate.Proof.Operations
   ( simBundleToSlice
   , noTransition
-  , emptyDomain
-  , statePredToDomain
-  , statePredToPreDomain
-  , statePredToPostDomain
+  , domainToProof
+  , domainSpecToProof
   , proofResult
     -- lazy proofs
   , LazyProof(..)
@@ -65,7 +63,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
@@ -76,6 +74,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Register as PR
+import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
@@ -96,8 +95,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
   preMem <- MapF.fromList <$> mapM (\x -> memCellToOp initState x) memReads
   postMem <- MapF.fromList <$> mapM (\x -> memCellToOp finState x) memWrites
 
-  preRegs <- PR.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) (\r vo vp -> getReg r vo vp)
-  postRegs <- PR.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) (\r vo vp -> getReg r vo vp)
+  preRegs <- PRt.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) (\r vo vp -> getReg r vo vp)
+  postRegs <- PRt.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) (\r vo vp -> getReg r vo vp)
   
   let
     preState = PF.BlockSliceState preMem preRegs
@@ -173,61 +172,16 @@ noTransition stIn blockEnd = do
     stOut = TF.fmapF (\st -> PS.SimOutput (PS.simInState st) blockEnd) stIn
     bundle = PS.SimBundle stIn stOut
   simBundleToSlice bundle
-  
 
--- these are shims that we can potentially eliminate by unifying
--- the corresponding types
+domainToProof ::
+  PED.EquivalenceDomain sym arch ->
+  EquivM sym arch (LazyProof sym arch PF.ProofDomainType)
+domainToProof eqDom = fmap asLazyProof $ proofNonceExpr $ return $ PF.ProofDomain eqDom
 
-statePredToDomain ::
-  PES.StatePred sym arch ->
-  EquivM sym arch (PF.EquivalenceDomain sym arch)
-statePredToDomain stPred = withSym $ \sym ->
-  PF.EquivalenceDomain
-    <$> (return $ predRegsToDomain sym $ PES.predRegs stPred)
-    <*> (flattenToStackRegion $ PES.predStack stPred)
-    <*> (return $ PES.predMem stPred)
-
-flattenToStackRegion ::
-  PEM.MemoryDomain sym arch ->
-  EquivM sym arch (PEM.MemoryDomain sym arch)
-flattenToStackRegion dom = do
-  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
-  let
-    dom' = map (\(Some cell, p) -> (Some $ PMC.setMemCellRegion stackRegion cell, p)) (Map.toList (PEM.memDomainPred dom))
-  return $ dom { PEM.memDomainPred = Map.fromList dom' }
-
-
-predRegsToDomain ::
-  forall arch sym.
-  PA.ValidArch arch =>
-  PSo.ValidSym sym =>
-  sym ->
-  Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
-  MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
-predRegsToDomain sym regs = MM.mkRegState go
-  where
-    go :: MM.ArchReg arch tp -> Const (W4.Pred sym) tp
-    go r = case Map.lookup (Some r) regs of
-      Just p -> Const p
-      Nothing -> Const (W4.falsePred sym)
-
-statePredToPreDomain ::
-  PES.StatePred sym arch ->
-  EquivM sym arch (PF.ProofNonceExpr sym arch PF.ProofDomainType)
-statePredToPreDomain stPred = proofNonceExpr $ do
-  PF.ProofDomain <$> statePredToDomain stPred
-
-statePredToPostDomain ::
-  PE.StatePredSpec sym arch ->
-  EquivM sym arch (PF.ProofNonceExpr sym arch PF.ProofDomainType)
-statePredToPostDomain stPredSpec = proofNonceExpr $ do
-  let
-    stPred = PS.specBody stPredSpec
-  PF.ProofDomain <$> statePredToDomain stPred
-
-emptyDomain :: EquivM sym arch (PF.ProofNonceExpr sym arch PF.ProofDomainType)
-emptyDomain = proofNonceExpr $ withSym $ \sym ->
-  PF.ProofDomain <$> statePredToDomain (PES.statePredFalse sym)
+domainSpecToProof ::
+  PE.DomainSpec sym arch ->
+  EquivM sym arch (LazyProof sym arch PF.ProofDomainType)
+domainSpecToProof eqDomSpec = domainToProof (PS.specBody eqDomSpec)
 
 proofNonceExpr ::
   EquivM sym arch (PF.ProofNonceApp sym arch tp) ->

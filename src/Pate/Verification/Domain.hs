@@ -5,18 +5,19 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE PolyKinds #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Verification.Domain (
-    allRegistersDomain
-  , guessEquivalenceDomain
+    guessEquivalenceDomain
   , equateInitialStates
   , universalDomain
   , universalDomainSpec
   ) where
 
+import           Control.Lens ( (.~), (&) )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
@@ -47,7 +48,7 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
@@ -56,8 +57,10 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
+import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSi
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PS
 import qualified Pate.Verification.Simplify as PVS
 import qualified Pate.Verification.Validity as PVV
 import qualified What4.ExprHelpers as WEH
@@ -201,28 +204,19 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     polarity = PEM.memDomainPolarity memPred
     memP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
-allRegistersDomain ::
-  forall sym arch.
-  EquivM sym arch (M.Map (Some (MM.ArchReg arch)) (W4.Pred sym))
-allRegistersDomain = withSym $ \sym -> do
-  return $
-    M.fromList $
-    map (\(MapF.Pair r (Const p)) -> (Some r, p)) $
-    MapF.toList $
-    MM.regStateMap $
-    MM.mkRegState (\_ -> Const (W4.truePred sym))
-
 equateRegisters ::
-  M.Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
+  PED.RegisterDomain sym arch ->
   SimBundle sym arch ->
   EquivM sym arch (PSi.AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
-  fmap (mconcat) $ PRe.zipRegStates (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
+  fmap PRt.collapse $ PRt.zipWithRegStatesM (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return mempty
-    _ -> case M.lookup (Some r) regRel of
-      Just cond | Just True <- W4.asConstantPred cond -> liftIO $ PSi.macawRegBinding sym vO vP
-      _ -> return mempty
+    _ -> do
+      let cond = getConst $ MM.getBoundValue r regRel
+      case W4.asConstantPred cond of
+        Just True -> fmap Const $ liftIO $ PSi.macawRegBinding sym vO vP
+        _ -> return $ Const mempty
   where
     inStO = PSi.simInState $ PSi.simInO bundle
     inStP = PSi.simInState $ PSi.simInP bundle
@@ -235,9 +229,8 @@ equateInitialMemory bundle =
     memStP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
 equateInitialStates :: SimBundle sym arch -> EquivM sym arch (PSi.AssumptionFrame sym)
-equateInitialStates bundle = do
-  regDomain <- allRegistersDomain
-  eqRegs <- equateRegisters regDomain bundle
+equateInitialStates bundle = withSym $ \sym -> do
+  eqRegs <- equateRegisters (PED.universalRegDomain sym) bundle
   eqMem <- equateInitialMemory bundle
   return $ eqRegs <> eqMem
 
@@ -263,8 +256,8 @@ guessEquivalenceDomain ::
   (HasCallStack) =>
   SimBundle sym arch ->
   W4.Pred sym ->
-  PES.StatePred sym arch ->
-  EquivM sym arch (PES.StatePred sym arch)
+  PED.EquivalenceDomain sym arch ->
+  EquivM sym arch (PED.EquivalenceDomain sym arch)
 guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   -- See Note [Names for Inputs]
   argNames <- lookupArgumentNames (PSi.simPair bundle)
@@ -272,13 +265,12 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   traceBundle bundle "Entering guessEquivalenceDomain"
   WEH.ExprFilter isBoundInGoal <- getIsBoundFilter' goal
   eqRel <- CMR.asks envBaseEquiv
-  result <- PRe.zipRegStatesPar (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> do
+  result <- PRt.zipWithRegStatesPar (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
       let
-        include = Par.present $ return $ Just (Some r, W4.truePred sym)
-        exclude :: EquivM sym arch (Par.Future (Maybe (Some (MM.ArchReg arch), W4B.Expr t W4.BaseBoolType)))
-        exclude = Par.present $ return Nothing
+        include = Par.present $ return $ Const $ W4.truePred sym
+        exclude = Par.present $ return $ Const $ W4.falsePred sym
       case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
         -- we have concrete values for the pre-IP and dedicated registers, so we don't need
         -- to include them in the pre-domain
@@ -306,10 +298,10 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
             withAssumption_ (return isFreshValid) $ do
               result <- isPredTruePar' heuristicTimeout goalIgnoresReg
               Par.forFuture result $ \case
-                True -> return Nothing
-                False -> return $ Just (Some r, W4.truePred sym)
+                True -> return $ Const $ W4.falsePred sym
+                False -> return $ Const $ W4.truePred sym
         _ -> exclude
-  regsDom <- (M.fromList . catMaybes) <$> Par.joinFuture @_ @Par.Future result
+  regsDom <- Par.joinFuture @_ @Par.Future result
   stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
     isStackCell cell = do
@@ -330,18 +322,18 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   let memP_to_memP' = MT.mkMemoryBinding memP memP'
   goal' <- liftIO $ WEH.applyExprBindings sym memP_to_memP' goal_regsEq
 
-  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predStack postcond_regsEq) (\c -> isStackCell c)
-  let stackEq = liftIO $ PEq.memPredPre sym (PEq.MemRegionEquality $ MT.memEqAtRegion sym stackRegion) inO inP (PEq.eqRelStack eqRel) stackDom
+  stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PED.eqDomainStackMemory postcond_regsEq) (\c -> isStackCell c)
+  let stackEq = liftIO $ PEq.memDomPre sym (PEq.MemRegionEquality $ MT.memEqAtRegion sym stackRegion) inO inP (PEq.eqRelStack eqRel) stackDom
   memDom <- withAssumption_ stackEq $ do
-    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PES.predMem postcond_regsEq) (\x -> isNotStackCell x)
+    guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PED.eqDomainGlobalMemory postcond_regsEq) (\x -> isNotStackCell x)
 
   blocks <- PD.getBlocks $ PSi.simPair bundle
 
   emitEvent (PE.ComputedPrecondition blocks)
-  return $ PES.StatePred
-    { PES.predRegs = regsDom
-    , PES.predStack = stackDom
-    , PES.predMem = memDom
+  return $ PED.EquivalenceDomain
+    { PED.eqDomainRegisters = regsDom
+    , PED.eqDomainStackMemory = stackDom
+    , PED.eqDomainGlobalMemory = memDom
     }
   where
     memP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
@@ -353,28 +345,31 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
 -- | Domain that includes entire state, except IP and SP registers
 universalDomain ::
   forall sym arch.
-  EquivM sym arch (PES.StatePred sym arch)
-universalDomain =  withSym $ \sym -> do
-  regDomain <- allRegistersDomain
-  let regDomain' =
-        M.delete (Some (MM.sp_reg @(MM.ArchReg arch))) $
-        M.delete (Some (MM.ip_reg @(MM.ArchReg arch))) regDomain
-  return $ PES.StatePred
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  PS.ValidSym sym =>
+  sym ->
+  PED.EquivalenceDomain sym arch
+universalDomain sym =
+  let
+    regDomain =
+      (PED.universalRegDomain sym)
+        & (MM.boundValue (MM.sp_reg @(MM.ArchReg arch))) .~ (Const $ W4.falsePred sym)
+        & (MM.boundValue (MM.ip_reg @(MM.ArchReg arch))) .~ (Const $ W4.falsePred sym)
+  in PED.EquivalenceDomain
     {
-      PES.predRegs = regDomain'
-    , PES.predStack = PEM.universal sym
-    , PES.predMem = PEM.universal sym
+      PED.eqDomainRegisters = regDomain
+    , PED.eqDomainStackMemory = PEM.universal sym
+    , PED.eqDomainGlobalMemory = PEM.universal sym
     }
 
 -- | Domain that includes entire state, except IP and SP registers
 universalDomainSpec ::
   HasCallStack =>
   PPa.BlockPair arch ->
-  EquivM sym arch (PEq.StatePredSpec sym arch)
-universalDomainSpec blocks = withFreshVars blocks $ \stO stP ->
+  EquivM sym arch (PEq.DomainSpec sym arch)
+universalDomainSpec blocks = withSym $ \sym -> withFreshVars blocks $ \stO stP ->
   withAssumptionFrame (PVV.validInitState Nothing stO stP) $
-  universalDomain
-
+  return $ universalDomain sym
 
 {- Note [Names for Inputs]
 
