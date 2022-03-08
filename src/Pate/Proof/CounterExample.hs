@@ -57,6 +57,7 @@ import qualified What4.Expr.GroundEval as W4G
 
 import qualified Pate.Arch as PA
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
@@ -82,9 +83,9 @@ getInequivalenceResult ::
   forall sym arch.
   PEE.InequivalenceReason ->
   -- | pre-domain
-  PF.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch ->
   -- | post-domain
-  PF.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch ->
   -- | the transition that was attempted to be proven equivalent
   -- in the given domains
   PF.BlockSliceTransition sym arch ->
@@ -189,7 +190,7 @@ getPathCondition ::
   forall sym arch.
   PS.SimBundle sym arch ->
   PF.BlockSliceState sym arch ->
-  PF.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch ->
   SymGroundEvalFn sym ->
   EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
 getPathCondition bundle slice dom fn = withSym $ \sym -> do
@@ -201,7 +202,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
     regInDomain ::
       MM.ArchReg arch tp -> EquivM sym arch Bool
     regInDomain reg =
-      execGroundFn fn $ getConst $ PF.eqDomainRegisters dom ^. MM.boundValue reg
+      execGroundFn fn $ getConst $ PED.eqDomainRegisters dom ^. MM.boundValue reg
 
     getRegPath ::
       MM.ArchReg arch tp ->
@@ -232,7 +233,7 @@ getPathCondition bundle slice dom fn = withSym $ \sym -> do
 isMemOpValid ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   MapF.Pair (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) -> Bool
 isMemOpValid dom (MapF.Pair cell mop) =
   (not (PFI.cellInDomain dom cell)) || (not (PG.groundValue $ PF.slMemOpCond mop)) || (PG.groundValue $ PF.slMemOpEquiv mop)
@@ -240,7 +241,7 @@ isMemOpValid dom (MapF.Pair cell mop) =
 isRegValid ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   MapF.Pair (MM.ArchReg arch) (PF.BlockSliceRegOp grnd) -> Bool
 isRegValid dom (MapF.Pair r rop) =
   (not (PFI.regInDomain dom r)) || (PG.groundValue $ PF.slRegOpEquiv rop)
@@ -248,7 +249,7 @@ isRegValid dom (MapF.Pair r rop) =
 getInequivalenceReason ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   PF.BlockSliceState grnd arch ->
   Maybe PEE.InequivalenceReason
 getInequivalenceReason dom st =

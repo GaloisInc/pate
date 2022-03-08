@@ -75,7 +75,7 @@ import qualified Pate.Discovery as PD
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
@@ -461,7 +461,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       inO = SimInput stO (PPa.pOriginal pPair)
       inP = SimInput stP (PPa.pPatched pPair)
     (_, genPrecond) <- liftIO $ bindSpec sym stO stP genPrecondSpec
-    preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond genPrecond
+    preImpliesGen <- liftIO $ impliesPredomain sym stackRegion inO inP eqRel precond genPrecond
     -- prove that the generated precondition is implied by the given precondition
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
     isPredTrue' goalTimeout preImpliesGen >>= \case
@@ -545,8 +545,8 @@ withPair pPair f = do
 provePostcondition ::
   HasCallStack =>
   PPa.BlockPair arch ->
-  StatePredSpec sym arch ->
-  EquivM sym arch (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
+  DomainSpec sym arch ->
+  EquivM sym arch (DomainSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition pPair postcondSpec = do
   traceBlockPair pPair "Entering provePostcondition"
   emitPreamble pPair
@@ -555,10 +555,10 @@ provePostcondition pPair postcondSpec = do
 
 catchSimBundle ::
   forall sym arch ret.
-  (HasCallStack, ret ~ (StatePredSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)) =>
+  (HasCallStack, ret ~ (DomainSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)) =>
   PPa.BlockPair arch ->
-  StatePredSpec sym arch ->
-  (SimBundle sym arch -> EquivM sym arch (PES.StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)  ) ->
+  DomainSpec sym arch ->
+  (SimBundle sym arch -> EquivM sym arch (PED.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)  ) ->
   EquivM sym arch ret
 catchSimBundle pPair postcondSpec f = do
   pblks <- CMR.asks envParentBlocks
@@ -613,13 +613,13 @@ catchSimBundle pPair postcondSpec f = do
 
 impliesPostcond ::
   PPa.BlockPair arch ->
-  StatePredSpec sym arch ->
-  StatePredSpec sym arch ->
+  DomainSpec sym arch ->
+  DomainSpec sym arch ->
   EquivM sym arch Bool
 impliesPostcond blocks stPredAsm stPredConcl = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   fmap specBody $ withFreshVars blocks $ \stO stP -> do
-    p <- liftIO $ impliesPostcondPred sym (PPa.PatchPair stO stP) stPredAsm stPredConcl
+    p <- liftIO $ impliesPostdomPred sym (PPa.PatchPair stO stP) stPredAsm stPredConcl
     b <- isPredTrue' heuristicTimeout p
     return $ (W4.truePred sym, b)
 
@@ -629,7 +629,7 @@ data BranchCase sym arch =
       -- from the 'branchPreStPred' but stored here to avoid re-computing it
       branchPrePred :: W4.Pred sym
       -- | the structured pre-domain for this branch
-    , branchPreDomain :: PES.StatePred sym arch
+    , branchPreDomain :: PED.EquivalenceDomain sym arch
       -- | target for the function call
     , branchBlocks :: PPa.BlockPair arch
       -- | the deferred proof that the pre-domain is sufficient to establish
@@ -656,16 +656,16 @@ trivialBlockSlice ::
   Bool  ->
   PVE.ExternalDomain callk arch ->
   PPa.PatchPair (SimInput sym arch) ->
-  StatePredSpec sym arch ->
-  EquivM sym arch (PES.StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
+  DomainSpec sym arch ->
+  EquivM sym arch (PED.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec = withSym $ \sym -> do
   blkEnd <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
   transition <- PFO.noTransition in_ blkEnd
   preUniv <- externalDomain sym
   prf <- PFO.lazyProofEvent_ pPair $ do
     triple <- PFO.lazyProofEvent_ pPair $ do
-      preDomain <-  PFO.asLazyProof <$> PFO.statePredToPreDomain preUniv
-      postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+      preDomain <- PFO.domainToProof preUniv
+      postDomain <- PFO.domainSpecToProof postcondSpec
       status <- PFO.lazyProofApp $ case isSkipped of
         True -> PF.ProofStatus PF.VerificationSkipped
         False -> PF.ProofStatus PF.Unverified
@@ -698,8 +698,8 @@ provePostcondition' ::
   forall sym arch.
   HasCallStack =>
   SimBundle sym arch ->
-  StatePredSpec sym arch ->
-  EquivM sym arch (PES.StatePred sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
+  DomainSpec sym arch ->
+  EquivM sym arch (PED.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ withSym $ \sym -> do
   traceBundle bundle "Entering provePostcondition"
   pairs <- PD.discoverPairs bundle
@@ -802,7 +802,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     -- it is taken if all other cases are false, which is checked by 'checkCasesTotal'
     returnByDefault = case precondReturn of
       Just (_, br) -> branchPreDomain br
-      Nothing -> PES.statePredFalse sym
+      Nothing -> PED.empty sym
 
   traceBundle bundle "Checking exits"
   -- an exit that was not classified
@@ -824,7 +824,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     funCallProofs = map (\(_, (br, prf)) -> (branchBlocks br, prf)) funCallProofCases
     allPreconds = catMaybes [precondReturn,precondUnknown] ++ funCallCases
 
-  precond' <- F.foldrM (\(p, br) stPred -> liftIO $ PES.muxStatePred sym p (branchPreDomain br) stPred)  returnByDefault funCallCases
+  precond' <- F.foldrM (\(p, br) stPred -> liftIO $ PED.mux sym p (branchPreDomain br) stPred)  returnByDefault funCallCases
 
   precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
     PVSi.simplifySubPreds precond'
@@ -833,8 +833,8 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   -- TODO: this needs to be reorganized to make the domain results actually lazy
   blockSlice <- PFO.simBundleToSlice bundle
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
-    preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain precond
-    postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+    preDomain <- PFO.domainToProof precond
+    postDomain <- PFO.domainSpecToProof postcondSpec
     status <- checkCasesTotal bundle preDomain allPreconds
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain status
   let
@@ -869,25 +869,25 @@ matchingExits bundle ecase = withSym $ \sym -> do
 proveLocalPostcondition ::
   HasCallStack =>
   SimBundle sym arch ->
-  StatePredSpec sym arch ->
+  DomainSpec sym arch ->
   EquivM sym arch (BranchCase sym arch)
 proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   traceBundle bundle "proveLocalPostcondition"
   eqRel <- CMR.asks envBaseEquiv
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
-  (_, postcondPred) <- liftIO $ getPostcondition sym bundle eqRel postcond
+  (_, postcondPred) <- liftIO $ getPostdomain sym bundle eqRel postcond
 
   traceBundle bundle "guessing equivalence domain"
   eqInputs <- withAssumption_ (return asm) $ do
     PVD.guessEquivalenceDomain bundle postcondPred postcond
-  traceBundle bundle ("Equivalence domain has: " ++ show (M.keys (PES.predRegs eqInputs)))
+  traceBundle bundle ("Equivalence domain has: " ++ show (PED.nontrivialRegs sym $ PED.eqDomainRegisters eqInputs))
 
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
 
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
-  eqInputsPred <- liftIO $ getPrecondition sym stackRegion bundle eqRel eqInputs
+  eqInputsPred <- liftIO $ getPredomain sym stackRegion bundle eqRel eqInputs
 
   notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- PD.getBlocks $ simPair bundle
@@ -896,8 +896,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
-    preDomain <- PFO.asLazyProof <$> PFO.statePredToPreDomain eqInputs
-    postDomain <- PFO.asLazyProof <$> PFO.statePredToPostDomain postcondSpec
+    preDomain <- PFO.domainToProof eqInputs
+    postDomain <- PFO.domainSpecToProof postcondSpec
     result <- PFO.forkProofEvent_ (simPair bundle) $ do
         traceBundle bundle "Starting forked thread in proveLocalPostcondition"
         status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
@@ -950,10 +950,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                     er <- checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
                       case satRes of
                         W4R.Sat fn -> do
-                          univDomain <- PVD.universalDomain
-                          preUnivDomain <- PFO.statePredToDomain univDomain
                           traceBundle bundle "proveLocalPostcondition->getInequivalenceResult"
-                          ir <- PFC.getInequivalenceResult PEE.InvalidPostState preUnivDomain postDomain' blockSlice fn
+                          ir <- PFC.getInequivalenceResult PEE.InvalidPostState (PVD.universalDomain sym) postDomain' blockSlice fn
                           traceBundle bundle "proveLocalPostcondition->getEquivalenceResult"
                           cr <- getCondEquivalenceResult bundle cond'' fn
                           traceBundle bundle ("conditionalEquivalenceResult: " ++ show (W4.printSymExpr (PF.condEqPred cr)))
@@ -1036,7 +1034,7 @@ computeEqCondition ::
   -- | block slice post-state
   PF.BlockSliceState sym arch ->
   -- | equivalence post-domain
-  PF.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
@@ -1083,7 +1081,7 @@ weakenEqCondition ::
   -- | block slice post-state
   PF.BlockSliceState sym arch ->
   -- | equivalence post-domain
-  PF.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
@@ -1150,23 +1148,23 @@ checkAndMinimizeEqCondition cond goal = withValid $ withSym $ \sym -> do
 -- equivalent
 topLevelPostRegisterDomain ::
   forall sym arch.
-  EquivM sym arch (M.Map (Some (MM.ArchReg arch)) (W4.Pred sym))
-topLevelPostRegisterDomain = return M.empty
+  EquivM sym arch (PED.RegisterDomain sym arch)
+topLevelPostRegisterDomain = withSym $ \sym -> return $ PED.emptyRegDomain sym
 
 -- | Default toplevel post-domain:
 --   global (non-stack) memory
 topLevelPostDomain ::
   HasCallStack =>
   PPa.BlockPair arch ->
-  EquivM sym arch (StatePredSpec sym arch)
+  EquivM sym arch (DomainSpec sym arch)
 topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> do
   regDomain <- topLevelPostRegisterDomain
   withAssumptionFrame (PVV.validInitState Nothing stO stP) $
-    return $ PES.StatePred
+    return $ PED.EquivalenceDomain
       {
-        PES.predRegs = regDomain
-      , PES.predStack = PEM.empty sym
-      , PES.predMem = PEM.universal sym
+        PED.eqDomainRegisters = regDomain
+      , PED.eqDomainStackMemory = PEM.empty sym
+      , PED.eqDomainGlobalMemory = PEM.universal sym
       }
 
 -- | Top-level equivalence check:
@@ -1183,14 +1181,14 @@ topLevelTriple fnPair =
   let pPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair in
   withPair pPair $
   withSym $ \sym -> do
-    regDomain <- PVD.allRegistersDomain
+    let regDomain = PED.universalRegDomain sym
     postcond <- topLevelPostDomain pPair
     precond <- withFreshVars pPair $ \stO stP -> do
       withAssumptionFrame (PVV.validInitState (Just pPair) stO stP) $
-        return $ PES.StatePred
-          { PES.predRegs = regDomain
-          , PES.predStack = PEM.universal sym
-          , PES.predMem = PEM.universal sym
+        return $ PED.EquivalenceDomain
+          { PED.eqDomainRegisters = regDomain
+          , PED.eqDomainStackMemory = PEM.universal sym
+          , PED.eqDomainGlobalMemory = PEM.universal sym
           }
     return $ PF.EquivTriple pPair precond postcond
 
@@ -1227,9 +1225,7 @@ checkCasesTotal bundle preDomain cases = withSym $ \sym -> do
           -- doesn't consider the post-state. At this point we aren't interested in the target
           -- post-domain because we're just making sure that the given cases cover all possible exits,
           -- without considering the equivalence of the state at those exit points.
-          noDomain <- PFO.statePredToDomain (PES.statePredFalse sym)
-
-          ir <- PFC.getInequivalenceResult PEE.InvalidCallPair preDomain' noDomain blockSlice fn
+          ir <- PFC.getInequivalenceResult PEE.InvalidCallPair preDomain' (PED.empty sym) blockSlice fn
           emit $ PE.BranchesIncomplete ir
           -- no conditional equivalence case
           return $ PF.VerificationFail ir (PF.emptyCondEqResult sym)

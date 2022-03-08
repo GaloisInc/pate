@@ -21,7 +21,7 @@ import           Control.Monad.IO.Class ( MonadIO )
 import           Data.Kind ( Type )
 import qualified What4.Interface as WI
 
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 
 data CallK = SystemCall | ExternalCall
 
@@ -40,4 +40,4 @@ type ExternalCall = 'ExternalCall
 -- apply precise summaries)
 data ExternalDomain :: CallK -> Type -> Type where
   ExternalDomain :: (forall sym m . (MonadIO m, WI.IsExprBuilder sym)
-                                 => (sym -> m (PES.StatePred sym arch))) -> ExternalDomain callk arch
+                                 => (sym -> m (PED.EquivalenceDomain sym arch))) -> ExternalDomain callk arch

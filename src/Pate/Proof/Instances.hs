@@ -80,6 +80,7 @@ import           Prettyprinter ( (<+>) )
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Proof as PF
 import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
@@ -225,17 +226,17 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
 
 instance forall sym arch.
   (PA.ValidArch arch, PSo.ValidSym sym) =>
-  PP.Pretty (PF.EquivalenceDomain sym arch) where
+  PP.Pretty (PED.EquivalenceDomain sym arch) where
   pretty prf = PP.vsep
     [ "Registers:"
     , PP.indent 4 $ prettyRegs
-    , "Stack Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PF.eqDomainStackMemory prf)
-    , PP.indent 4 $ prettyMem (PF.eqDomainStackMemory prf)
-    , "Global Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PF.eqDomainGlobalMemory prf)
-    , PP.indent 4 $ prettyMem (PF.eqDomainGlobalMemory prf)
+    , "Stack Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PED.eqDomainStackMemory prf)
+    , PP.indent 4 $ prettyMem (PED.eqDomainStackMemory prf)
+    , "Global Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PED.eqDomainGlobalMemory prf)
+    , PP.indent 4 $ prettyMem (PED.eqDomainGlobalMemory prf)
     ]
     where
-      prettyRegs = PP.vsep (map ppReg (collapseRegState (Proxy @sym) (PF.eqDomainRegisters prf)))
+      prettyRegs = PP.vsep (map ppReg (collapseRegState (Proxy @sym) (PED.eqDomainRegisters prf)))
 
       ppReg :: (Some (MM.ArchReg arch), W4.Pred sym) -> PP.Doc a
       ppReg (Some reg, p) = case W4.asConstantPred p of
@@ -436,9 +437,9 @@ ppBlockSliceTransition ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
   -- | pre-domain
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   -- | post-domain
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   PF.BlockSliceTransition grnd arch ->
   PP.Doc a
 ppBlockSliceTransition pre post bs = PP.vsep $
@@ -476,7 +477,7 @@ ppIPs st  =
 ppMemCellMap ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   MapF.MapF (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) ->
   PP.Doc a
 ppMemCellMap dom cells = let
@@ -487,7 +488,7 @@ ppRegs ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
   -- | domain that this register set was checked for equivalence under
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   MM.RegState (MM.ArchReg arch) (PF.BlockSliceRegOp grnd) ->
   PP.Doc a
 ppRegs dom regs = let
@@ -558,7 +559,7 @@ groundBlockEnd arch blkend =
 ppRegVal ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   MM.ArchReg arch tp ->
   PF.BlockSliceRegOp grnd tp ->
   Maybe (PP.Doc a)
@@ -585,16 +586,16 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
 regInDomain ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   MM.ArchReg arch tp ->
   Bool
-regInDomain dom r = PG.groundValue $ getConst $ PF.eqDomainRegisters dom ^. MM.boundValue r 
+regInDomain dom r = PG.groundValue $ getConst $ PED.eqDomainRegisters dom ^. MM.boundValue r 
 
 
 ppCellVal ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   PF.BlockSliceMemOp grnd tp ->
   Maybe (PP.Doc a)
@@ -650,12 +651,12 @@ cellInMemDomain dom cell = case PG.groundValue $ PEM.memDomainPolarity dom of
 cellInDomain ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PF.EquivalenceDomain grnd arch ->
+  PED.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
 cellInDomain dom cell = case isStackCell cell of
-  True -> cellInMemDomain (PF.eqDomainStackMemory dom) cell
-  False -> cellInMemDomain (PF.eqDomainGlobalMemory dom) cell
+  True -> cellInMemDomain (PED.eqDomainStackMemory dom) cell
+  False -> cellInMemDomain (PED.eqDomainGlobalMemory dom) cell
 
 ppExitCase :: MS.MacawBlockEndCase -> String
 ppExitCase ec = case ec of

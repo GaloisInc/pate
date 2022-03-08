@@ -28,6 +28,7 @@ import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
+import           Data.Functor.Const
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
@@ -74,7 +75,7 @@ import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Register as PR
+import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.SymbolTable as PSym
@@ -158,9 +159,10 @@ exactEquivalence ::
   EquivM sym arch (WI.Pred sym)
 exactEquivalence inO inP = withSym $ \sym -> do
   eqRel <- CMR.asks envBaseEquiv
-  regsEqs <- liftIO $ PR.zipRegStates (PSS.simInRegs inO) (PSS.simInRegs inP) (PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel))
+  regsEqs <- liftIO $ PRt.zipWithRegStatesM (PSS.simInRegs inO) (PSS.simInRegs inP) $ \r v1 v2 ->
+    Const <$> PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel) r v1 v2
 
-  regsEq <- liftIO $ WEH.allPreds sym regsEqs
+  regsEq <- liftIO $ WEH.allPreds sym (map snd $ PRt.assocs regsEqs)
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   isPredSat heuristicTimeout regsEq >>= \case
     True -> return ()
