@@ -113,8 +113,8 @@ fromList ::
   OrdF (W4.SymExpr sym) =>
   sym ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
+  -- | Polarity
   W4.Pred sym ->
-  -- ^ Polarity
   IO (MemoryDomain sym arch)
 fromList sym l pol = MemoryDomain <$> (PMC.predFromList sym l) <*> pure pol
 
@@ -169,8 +169,8 @@ fromFootPrints ::
   W4.IsSymExprBuilder sym =>
   sym ->
   Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)) ->
+  -- | Polarity
   W4.Pred sym ->
-  -- ^ Polarity
   IO (MemoryDomain sym arch)
 fromFootPrints sym foots polarity = do
   locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond end) -> do
