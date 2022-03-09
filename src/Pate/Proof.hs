@@ -108,9 +108,9 @@ import qualified What4.Interface as W4
 -- proof objects
 
 
--- | An triple representing the equivalence conditions for a block pair. Abstracted
--- over the initial machine state. This is analogous to a 'ProofExpr' of type
--- 'ProofTriple', but contains the 'PE.StatePred' type that the verifier uses.
+-- | An triple representing the equivalence conditions for a block pair.
+-- This is analogous to a 'ProofExpr' of type
+-- 'ProofTriple', but contains the 'PE.StatePredSpec' type that the verifier uses.
 -- This redundancy can potentially be eliminated at some point.
 data EquivTriple sym arch where
   EquivTriple ::
