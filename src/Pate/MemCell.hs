@@ -149,9 +149,13 @@ muxMemCellPred sym p (MemCellPred cellsT) (MemCellPred cellsF) = case WI.asConst
       cellsT
       cellsF
 
--- | True if this cell is logically equivalent to any cell in the given
--- collection. Note that this is still false if the given cell overlaps
--- two different entries.
+-- | Check if a 'MemCell' is in the given 'MemCellPred'. This is true
+-- if and only if:
+-- 1) The given cell is semantically equivalent to a cell in the 'MemCellPred'
+-- 2) The predicate associated with that cell in the 'MemCellPred' is true
+-- Notably, this does not consider all of the addresses covered by a 'MemCell'
+-- (i.e. the 'w' bytes starting from the base address). The exact cell must be
+-- present in the 'MemCellPred' for the result of this function to be true.
 inMemCellPred ::
   forall sym arch w.
   WI.IsExprBuilder sym =>
