@@ -104,6 +104,7 @@ import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
+import qualified Pate.Verification.PairGraph as PPG
 import           What4.ExprHelpers
 
 -- | Run code discovery using macaw
@@ -285,7 +286,10 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
   -- override so that they cover both statically linked and dynamically-linked
   -- function calls.
   liftIO $ do
-    (result, stats) <- runVerificationLoop env pPairs'
+    (result, stats) <-
+      case PC.cfgVerificationMethod vcfg of
+        PC.HoareTripleVerification   -> runVerificationLoop env pPairs'
+        PC.StrongestPostVerification -> PPG.runVerificationLoop env pPairs'
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)

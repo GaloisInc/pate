@@ -12,12 +12,14 @@ module Pate.Verification.PairGraph
   , chooseWorkItem
   , updateDomain
   , pairGraphComputeFixpoint
+  , runVerificationLoop
   ) where
 
 import           Control.Lens (view)
 import           Control.Monad (foldM)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
+import           Control.Monad.Except (runExceptT)
 import           Data.Maybe (fromMaybe)
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -43,6 +45,8 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Monad.Context as PMC
+import           Pate.Equivalence as PEq
+import qualified Pate.Equivalence.Statistics as PESt
 --import qualified Pate.Equivalence.StatePred as PES
 import           Pate.Monad
 --import qualified Pate.Monad.Context as PMC
@@ -52,7 +56,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Solver as PS
 
---import qualified Pate.Verification as PV
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
@@ -60,6 +63,24 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 
 newtype Gas = Gas Word32
 
+
+runVerificationLoop ::
+  forall sym arch.
+  PA.ValidArch arch =>
+  EquivEnv sym arch ->
+  -- | A list of block pairs to test for equivalence. They must be the entry points of a functions.
+  [PPa.FunPair arch] ->
+  IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
+runVerificationLoop env pPairs = do
+  result <- runExceptT (runEquivM env doVerify)
+  case result of
+    Left err -> withValidEnv env (error (show err))
+    Right r  -> return r
+
+ where
+   doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
+   doVerify =
+     do fail "TODO!"
 
 -- | Temporary constant value for the gas parameter.
 --   Should make this configurable.
@@ -152,7 +173,7 @@ pairGraphComputeFixpoint gr =
 
          traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
-         -- TOOD! check totality of bundle pairs
+         -- TODO! check totality of bundle pairs
          gr'' <- foldM (followExit asm bundle bPair d) gr' (zip [0 ..] exitPairs)
 
          -- recurse until fixpoint
@@ -195,6 +216,7 @@ triageBlockTarget asm bundle currBlock d gr (PPa.PatchPair blktO blktP) =
      traceBundle bundle ("  targetCall: " ++ show blkO)
      withAssumption_ (return asm) $
        withAssumption_ (PD.matchesBlockTarget bundle blktO blktP) $
+
        case (PB.targetReturn blktO, PB.targetReturn blktP) of
          (Just blkRetO, Just blkRetP) ->
            do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)

@@ -7,6 +7,7 @@ module Pate.Config (
   noPatchData,
   RunConfig(..),
   VerificationConfig(..),
+  VerificationMethod(..),
   defaultVerificationCfg
   ) where
 
@@ -101,7 +102,13 @@ data VerificationConfig =
     --
     -- This only captures the interaction with the solver during symbolic
     -- execution, and not the one-off queries issued by the rest of the verifier
+
+    , cfgVerificationMethod :: VerificationMethod
     }
+
+data VerificationMethod
+  = HoareTripleVerification
+  | StrongestPostVerification
 
 defaultVerificationCfg :: VerificationConfig
 defaultVerificationCfg =
@@ -115,6 +122,7 @@ defaultVerificationCfg =
                      , cfgGroundTimeout = PT.Seconds 5
                      , cfgMacawDir = Nothing
                      , cfgSolverInteractionFile = Nothing
+                     , cfgVerificationMethod = HoareTripleVerification
                      }
 
 data RunConfig arch =

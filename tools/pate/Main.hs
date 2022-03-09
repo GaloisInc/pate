@@ -154,6 +154,11 @@ main = do
             , PC.cfgGoalTimeout = goalTimeout opts
             , PC.cfgMacawDir = saveMacawCFGs opts
             , PC.cfgSolverInteractionFile = solverInteractionFile opts
+            , PC.cfgVerificationMethod =
+                if useStrongestPostconditions opts then
+                  PC.StrongestPostVerification
+                else
+                  PC.HoareTripleVerification
             }
         cfg = PC.RunConfig
             { PC.archProxy = proxy
@@ -209,6 +214,7 @@ data CLIOptions = CLIOptions
   , proofSummaryJSON :: Maybe FilePath
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
+  , useStrongestPostconditions :: Bool
   } deriving (Eq, Ord, Show)
 
 data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
@@ -588,3 +594,7 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.metavar "FILE"
         <> OA.help "A file to save debug logs to"
         ))
+    <*> OA.switch
+        (  OA.long "strongestpost"
+        <> OA.help "Switch to the strongest postcondition verification method"
+        )
