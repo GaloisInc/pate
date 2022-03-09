@@ -32,8 +32,7 @@ Representation and presentation of the equivalence proofs
 {-# LANGUAGE ImplicitParams #-}
 
 module Pate.Proof
-  ( EquivTripleBody(..)
-  , EquivTriple
+  ( EquivTriple(..)
   , VerificationStatus(..)
   , ProofApp(..)
   , traverseProofApp
@@ -109,32 +108,23 @@ import qualified What4.Interface as W4
 -- proof objects
 
 
--- | The body of an 'EquivTriple'.
-data EquivTripleBody sym arch where
-  EquivTripleBody ::
+-- | An triple representing the equivalence conditions for a block pair.
+-- This is analogous to a 'ProofExpr' of type
+-- 'ProofTriple', but contains the 'PE.StatePredSpec' type that the verifier uses.
+-- This redundancy can potentially be eliminated at some point.
+data EquivTriple sym arch where
+  EquivTriple ::
     {
       eqPair :: PPa.BlockPair arch
       -- ^ the entry points that yield equivalent states on the post-domain
       -- after execution, assuming initially equivalent states on the pre-domain
-    , eqPreDomain :: PES.StatePred sym arch
+    , eqPreDomain :: PE.StatePredSpec sym arch
       -- ^ the pre-domain: the state that was assumed initially equivalent
-      -- closed over the bound variables representing the initial state
+      -- abstracted over the bound variables representing the initial state
     , eqPostDomain :: PE.StatePredSpec sym arch
       -- ^ the post-domain: the state that was proven equivalent after execution
       -- abstracted over the bound variables representing the final state
-    } -> EquivTripleBody sym arch
-
-instance PEM.ExprMappable sym (EquivTripleBody sym arch) where
-  mapExpr sym f triple = do
-    eqPreDomain' <- PEM.mapExpr sym f (eqPreDomain triple)
-    eqPostDomain' <- PEM.mapExpr sym f (eqPostDomain triple)
-    return $ EquivTripleBody (eqPair triple) eqPreDomain' eqPostDomain'
-
--- | An triple representing the equivalence conditions for a block pair. Abstracted
--- over the initial machine state. This is analogous to a 'ProofExpr' of type
--- 'ProofTriple', but contains the 'PE.StatePred' type that the verifier uses.
--- This redundancy can potentially be eliminated at some point.
-type EquivTriple sym arch = PS.SimSpec sym arch (EquivTripleBody sym arch)
+    } -> EquivTriple sym arch
 
 data ProofNodeType where
     ProofTripleType :: ProofNodeType

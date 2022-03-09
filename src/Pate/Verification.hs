@@ -456,11 +456,10 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
-  void $ withSimSpec pPair triple $ \stO stP tripleBody -> do
+  void $ withSimSpec pPair (PF.eqPreDomain triple) $ \stO stP precond -> do
     let
       inO = SimInput stO (PPa.pOriginal pPair)
       inP = SimInput stP (PPa.pPatched pPair)
-      precond = PF.eqPreDomain tripleBody
     (_, genPrecond) <- liftIO $ bindSpec sym stO stP genPrecondSpec
     preImpliesGen <- liftIO $ impliesPrecondition sym stackRegion inO inP eqRel precond genPrecond
     -- prove that the generated precondition is implied by the given precondition
@@ -486,10 +485,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       _ -> return PEq.ConditionallyEquivalent
     _ -> return PEq.Inequivalent
   where
-    -- TODO: this breaks the model somewhat, since we're relying on these not containing
-    -- the bound terms
-    pPair = PF.eqPair $ specBody triple
-    postcondSpec = PF.eqPostDomain $ specBody triple
+    pPair = PF.eqPair triple
+    postcondSpec = PF.eqPostDomain triple
 
 --------------------------------------------------------
 -- Simulation
@@ -579,7 +576,7 @@ catchSimBundle pPair postcondSpec f = do
             traceBlockPair pPair ("Caught error: " ++ show err)
             errorResult
           Right r -> return r
-      let triple = fmap (\precond -> PF.EquivTripleBody pPair precond postcondSpec) precondSpec
+      let triple = PF.EquivTriple pPair precondSpec postcondSpec
       future <- PFO.asFutureNonceApp prf
       modifyBlockCache envProofCache pPair (++) [(triple, future)]
       return $ (precondSpec, prf)
@@ -594,11 +591,11 @@ catchSimBundle pPair postcondSpec f = do
       EquivM sym arch (Maybe ret)
     getCached (triple, futureProof) = do
       traceBlockPair pPair "Checking for cached result"
-      impliesPostcond pPair (PF.eqPostDomain $ specBody triple) postcondSpec >>= \case
+      impliesPostcond pPair (PF.eqPostDomain triple) postcondSpec >>= \case
         True -> do
           traceBlockPair pPair "Cache hit"
           prf' <- PFO.wrapFutureNonceApp futureProof
-          return $ Just (fmap PF.eqPreDomain triple, prf')
+          return $ Just (PF.eqPreDomain triple, prf')
         False -> do
           traceBlockPair pPair "Cache miss"
           return Nothing
@@ -1185,20 +1182,17 @@ topLevelTriple ::
 topLevelTriple fnPair =
   let pPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair in
   withPair pPair $
-  withFreshVars pPair $ \stO stP ->
   withSym $ \sym -> do
     regDomain <- PVD.allRegistersDomain
     postcond <- topLevelPostDomain pPair
-    let
-      precond = PES.StatePred
-        { PES.predRegs = regDomain
-        , PES.predStack = PEM.universal sym
-        , PES.predMem = PEM.universal sym
-        }
-    let triple = PF.EquivTripleBody pPair precond postcond
-    asm_frame <- PVV.validInitState (Just pPair) stO stP
-    asm <- liftIO $ getAssumedPred sym asm_frame
-    return (asm, triple)
+    precond <- withFreshVars pPair $ \stO stP -> do
+      withAssumptionFrame (PVV.validInitState (Just pPair) stO stP) $
+        return $ PES.StatePred
+          { PES.predRegs = regDomain
+          , PES.predStack = PEM.universal sym
+          , PES.predMem = PEM.universal sym
+          }
+    return $ PF.EquivTriple pPair precond postcond
 
 --------------------------------------------------------
 -- Totality check - ensure that the verified exit pairs cover all possible

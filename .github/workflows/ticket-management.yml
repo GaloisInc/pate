@@ -1,0 +1,21 @@
+# This action is inspired by GitHub's documentation on using Actions for project management.
+#
+# https://docs.github.com/en/actions/managing-issues-and-pull-requests/moving-assigned-issues-on-project-boards
+#
+# It should add newly created tickets to the project board
+name: Move new issues into Triage
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  automate-project-columns:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: alex-page/github-project-automation-plus@v0.8.1
+        with:
+          project: pate
+          column: Needs Triage
+          action: update
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
