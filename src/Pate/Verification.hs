@@ -680,20 +680,6 @@ trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec
     pPair :: PPa.BlockPair arch
     pPair = TF.fmapF simInBlock in_
 
--- | Returns 'True' if the equated function pair (specified by address) matches
--- the current call target
-matchEquatedAddress
-  :: PPa.BlockPair arch
-  -- ^ Addresses of the call targets in the original and patched binaries (in
-  -- the 'proveLocalPostcondition' loop)
-  -> (PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)
-  -- ^ Equated function pair
-  -> Bool
-matchEquatedAddress pPair (origAddr, patchedAddr) =
-  and [ origAddr == PB.concreteAddress (PPa.pOriginal pPair)
-      , patchedAddr == PB.concreteAddress (PPa.pPatched pPair)
-      ]
-
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -733,7 +719,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
 
             -- Now figure out how to handle the callee
             ctx <- view PME.envCtxL
-            let isEquatedCallSite = any (matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+            let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
             (funCallPre, funCallSlicePrf) <-
               if | isSyscall -> fmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do

@@ -86,6 +86,7 @@ library
                        Pate.Verification.MemoryLog,
                        Pate.Verification.Override,
                        Pate.Verification.Override.Library,
+                       Pate.Verification.PairGraph,
                        Pate.Verification.Simplify,
                        Pate.Verification.SimulatorHooks,
                        Pate.Verification.SymbolicExecution,
