@@ -15,9 +15,7 @@ module Pate.Equivalence.MemoryDomain (
   , universal
   , empty
   , toList
-  , toAscList
   , fromList
-  , fromAscList
   , cells
   , fromFootPrints
   , addFootPrints
@@ -45,8 +43,8 @@ import qualified Pate.Parallel as PP
 ---------------------------------------------
 -- Memory domain
 
--- | This wrapper around a 'PMC.MemCellPred', which describe ranges of memory
--- covered by this predicate.  Each entry in 'PMC.MemCellPred'
+-- | This wrapper around a 'PMC.MemCellPred' describes ranges of memory
+-- covered by this domain.  Each entry in 'PMC.MemCellPred'
 -- contains the predicate determining whether or not it is "in".
 --
 -- The interpretation of those predicates is subject to the 'memDomainPolarity'.
@@ -60,12 +58,12 @@ data MemoryDomain sym arch =
       -- specified by 'memDomainLocs'.  If false, then the predicate is true
       -- everywhere but these locations.
       --
-      -- Currently this is always concrete, but alternate strategies
-      -- for computing pre-domains may decide to use symbolic polarities,
-      -- and there is no fundamental reason to exclude this case.
+      -- Ideally this should always be always concrete, but it may be symbolic if the polarity
+      -- of the domain changes due to an "external" function call
+      -- (see https://github.com/GaloisInc/pate/issues/202)
       }
 
--- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain', preserving its polarity.
+-- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain', preserving its polarity. Predicates which are concretely false are dropped from in resulting internal 'PMC.MemCellPred' (this has no effect on the interpretation of the domain). Supports parallel traversal if the 'future' parameter is instantiated to 'Par.Future'.
 traverseWithCellPar ::
   forall sym arch m future.
   PP.IsFuture m future =>
@@ -98,10 +96,6 @@ toList ::
   [(Some (PMC.MemCell sym arch), W4.Pred sym)]
 toList memDom = M.toList (memDomainPred memDom)
 
-toAscList ::
-  MemoryDomain sym arch ->
-  [(Some (PMC.MemCell sym arch), W4.Pred sym)]
-toAscList memDom = M.toAscList (memDomainPred memDom)
 
 cells ::
   OrdF (W4.SymExpr sym) =>
@@ -120,6 +114,7 @@ fromList ::
   sym ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
   W4.Pred sym ->
+  -- ^ Polarity
   IO (MemoryDomain sym arch)
 fromList sym l pol = do
   -- NOTE: We can't just use Data.Map.fromList here because it will discard duplicate
@@ -127,15 +122,6 @@ fromList sym l pol = do
   let maps = map (\(cell, p) -> M.singleton cell p) l
   merged <- foldM (PMC.mergeMemCellPred sym) M.empty maps
   return $ MemoryDomain merged pol
-
--- | Similar to 'fromList' but assumes the cells are in order and disjoint
-fromAscList ::
-  W4.IsExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
-  W4.Pred sym ->
-  MemoryDomain sym arch
-fromAscList l pol = MemoryDomain (M.fromAscList l) pol
 
 mux ::
   W4.IsExprBuilder sym =>
@@ -167,21 +153,29 @@ containsCell sym memDom cell = do
   W4.isEq sym isInLocs (memDomainPolarity memDom)
 
 
--- | Trivial domain that covers all of memory
+-- | Domain that covers all of memory (empty 'PMC.MemCellPred' with negative polarity)
 universal :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
 universal sym = MemoryDomain M.empty (W4.falsePred sym)
 
--- | Trivial domain that covers no memory (the empty domain)
+-- | Domain that covers no memory (empty 'PMC.MemCellPred' with positive polarity)
 empty :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
 empty sym = MemoryDomain M.empty (W4.truePred sym)
 
-
+-- | Derive a 'MemoryDomain' from a set of 'MT.MemFootprint'.
+-- The semantics of this domain depend on the given polarity: for positive polarity
+-- the resulting domain includes all of the given footprints. For negative polarity,
+-- the resulting domain includes all of memory, except for the given footprints.
+-- TODO: This also filters the set of footprints according to the given polarity.
+-- For positive polarity, the footprints are filtered to only contain the reads,
+-- while negative polarity filters only the writes. This should be factored into
+-- a separate step (see https://github.com/GaloisInc/pate/issues/204)
 fromFootPrints ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   sym ->
   Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)) ->
   W4.Pred sym ->
+  -- ^ Polarity
   IO (MemoryDomain sym arch)
 fromFootPrints sym foots polarity = do
   locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond end) -> do
@@ -195,6 +189,12 @@ fromFootPrints sym foots polarity = do
       _ -> return $ Just (Some (PMC.MemCell ptr w end), cond')
   fromList sym locs polarity
 
+-- | Add footprints to an existing 'MemoryDomain'. The semantics of this addition
+-- depend on the polarity of the domain: for positive polarity the footprints
+-- are included in the resulting domain, for negative polarity the footprints
+-- are excluded.
+-- TODO: This filters the set of footprints according to the polarity of the
+-- domain (as in 'fromFootprints') (see https://github.com/GaloisInc/pate/issues/204)
 addFootPrints ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
@@ -215,7 +215,7 @@ instance PEM.ExprMappable sym (MemoryDomain sym arch) where
     let vs'' = map PEM.unEM vs'
     (pol', b''') <- f (memDomainPolarity memDom) b''
     memDom' <- case ks == ks' of
-      True -> return $ fromAscList (zip ks vs'') pol'
+      True -> return $ MemoryDomain (M.fromAscList (zip ks vs'')) pol'
       False -> fromList sym (zip ks' vs'') pol'
     return $ (memDom', b''')
 
