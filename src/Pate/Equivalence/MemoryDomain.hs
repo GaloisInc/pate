@@ -23,7 +23,7 @@ module Pate.Equivalence.MemoryDomain (
   , mux
   ) where
 
-import           Control.Monad ( forM, join, foldM )
+import           Control.Monad ( forM, join )
 import qualified Data.Map as M
 import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Classes
@@ -75,10 +75,10 @@ traverseWithCellPar memDom f = do
   let
     f' :: Some (PMC.MemCell sym arch) -> W4.Pred sym -> m (future (W4.Pred sym))
     f' (Some cell@(PMC.MemCell{})) p = f cell p
-
-  future_preds <- M.traverseWithKey f' (memDomainPred memDom)
+  let PMC.MemCellPred predMap = memDomainPred memDom
+  future_preds <- M.traverseWithKey f' predMap
   PP.present $ do
-    preds <- traverse PP.joinFuture future_preds
+    preds <- PMC.MemCellPred <$> traverse PP.joinFuture future_preds
     return $ MemoryDomain (PMC.dropTrivialCells preds) (memDomainPolarity memDom)
 
       
@@ -94,7 +94,7 @@ traverseWithCell memDom f = join $ traverseWithCellPar memDom (\cell p -> return
 toList ::
   MemoryDomain sym arch ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)]
-toList memDom = M.toList (memDomainPred memDom)
+toList memDom = PMC.predToList (memDomainPred memDom)
 
 
 cells ::
@@ -116,12 +116,7 @@ fromList ::
   W4.Pred sym ->
   -- ^ Polarity
   IO (MemoryDomain sym arch)
-fromList sym l pol = do
-  -- NOTE: We can't just use Data.Map.fromList here because it will discard duplicate
-  -- entries
-  let maps = map (\(cell, p) -> M.singleton cell p) l
-  merged <- foldM (PMC.mergeMemCellPred sym) M.empty maps
-  return $ MemoryDomain merged pol
+fromList sym l pol = MemoryDomain <$> (PMC.predFromList sym l) <*> pure pol
 
 mux ::
   W4.IsExprBuilder sym =>
@@ -155,11 +150,11 @@ containsCell sym memDom cell = do
 
 -- | Domain that covers all of memory (empty 'PMC.MemCellPred' with negative polarity)
 universal :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
-universal sym = MemoryDomain M.empty (W4.falsePred sym)
+universal sym = MemoryDomain (PMC.MemCellPred M.empty) (W4.falsePred sym)
 
 -- | Domain that covers no memory (empty 'PMC.MemCellPred' with positive polarity)
 empty :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
-empty sym = MemoryDomain M.empty (W4.truePred sym)
+empty sym = MemoryDomain (PMC.MemCellPred M.empty) (W4.truePred sym)
 
 -- | Derive a 'MemoryDomain' from a set of 'MT.MemFootprint'.
 -- The semantics of this domain depend on the given polarity: for positive polarity
@@ -209,16 +204,9 @@ addFootPrints sym foots memDom = do
 
 instance PEM.ExprMappable sym (MemoryDomain sym arch) where
   foldMapExpr sym f memDom b = do
-    let (ks, vs) = unzip $ M.toAscList (memDomainPred memDom)
-    (ks', b') <- PEM.foldMapExpr sym f ks b
-    (vs', b'') <- PEM.foldMapExpr sym f (map (PEM.ToExprMappable @sym) vs) b'
-    let vs'' = map PEM.unEM vs'
-    (pol', b''') <- f (memDomainPolarity memDom) b''
-    memDom' <- case ks == ks' of
-      True -> return $ MemoryDomain (M.fromAscList (zip ks vs'')) pol'
-      False -> fromList sym (zip ks' vs'') pol'
-    return $ (memDom', b''')
+    (memPred, b') <- PEM.foldMapExpr sym f (memDomainPred memDom) b
+    (pol', b'') <- f (memDomainPolarity memDom) b'
+    return $ (MemoryDomain memPred pol', b'')
 
-  foldExpr sym f memDom b = do
-    b' <- PEM.foldExpr sym f (M.toList $ fmap (PEM.ToExprMappable @sym) (memDomainPred memDom)) b
-    f (memDomainPolarity memDom) b'
+  foldExpr sym f memDom b =
+    PEM.foldExpr sym f (memDomainPred memDom) b >>= f (memDomainPolarity memDom)

@@ -193,8 +193,9 @@ flattenToStackRegion ::
 flattenToStackRegion dom = do
   stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
-    dom' = map (\(Some cell, p) -> (Some $ PMC.setMemCellRegion stackRegion cell, p)) (Map.toList (PEM.memDomainPred dom))
-  return $ dom { PEM.memDomainPred = Map.fromList dom' }
+    PMC.MemCellPred memPred = PEM.memDomainPred dom
+    dom' = map (\(Some cell, p) -> (Some $ PMC.setMemCellRegion stackRegion cell, p)) (Map.toList memPred)
+  return $ dom { PEM.memDomainPred = PMC.MemCellPred $ Map.fromList dom' }
 
 
 predRegsToDomain ::

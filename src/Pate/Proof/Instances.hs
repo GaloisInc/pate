@@ -643,8 +643,8 @@ cellInMemDomain ::
   PMC.MemCell grnd arch n ->
   Bool
 cellInMemDomain dom cell = case PG.groundValue $ PEM.memDomainPolarity dom of
-  True -> Map.foldrWithKey (\(Some cell') p p' -> p' || (eqGroundMemCells cell cell' && PG.groundValue p)) False (PEM.memDomainPred dom)
-  False -> Map.foldrWithKey (\(Some cell') p p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.memDomainPred dom)
+  True -> foldr (\(Some cell', p) p' -> p' || (eqGroundMemCells cell cell' && PG.groundValue p)) False (PEM.toList dom)
+  False -> foldr (\(Some cell', p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.toList dom)
 
 
 cellInDomain ::

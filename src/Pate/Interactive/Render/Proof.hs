@@ -266,10 +266,10 @@ renderDomain (PPr.EquivalenceDomain regs stack mem) =
             , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (MapF.toList (MC.regStateMap regs)))
             , TP.h4 #+ [TP.string "Stack Memory"]
             , text (ppPolarityDescription (PEM.memDomainPolarity stack))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity stack)) (Map.toList (PEM.memDomainPred stack)))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity stack)) (PEM.toList stack))
             , TP.h4 #+ [TP.string "Other Memory"]
             , text (ppPolarityDescription (PEM.memDomainPolarity mem))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity mem)) (Map.toList (PEM.memDomainPred mem)))
+            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity mem)) (PEM.toList mem))
             ]
 
 -- | Render the pretty version of a register pair in a ground state

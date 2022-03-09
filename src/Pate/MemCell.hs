@@ -7,19 +7,23 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Pate.MemCell (
     MemCell(..)
   , setMemCellRegion
-  , MemCellPred
+  , MemCellPred(..)
   , mergeMemCellPred
   , muxMemCellPred
   , inMemCellPred
   , dropTrivialCells
   , readMemCell
   , writeMemCell
+  , predFromList
+  , predToList
   ) where
 
+import           Control.Monad ( foldM )
 
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
@@ -74,15 +78,34 @@ instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
   compare stamp1 stamp2  = PC.toOrdering $ PC.compareF stamp1 stamp2
 
 -- | Each 'MemCell' is associated with the predicate that says whether or not the
--- described memory is contained in the 'Pate.Equivalence.MemPred'.
-type MemCellPred sym arch = Map.Map (Some (MemCell sym arch)) (WI.Pred sym)
+-- described memory is contained in the 'Pate.Equivalence.MemoryDomain'.
+newtype MemCellPred sym arch = MemCellPred (Map.Map (Some (MemCell sym arch)) (WI.Pred sym))
 
+predFromList ::
+  WI.IsExprBuilder sym =>
+  PC.OrdF (WI.SymExpr sym) =>
+  sym ->
+  [(Some (MemCell sym arch), WI.Pred sym)] ->
+  IO (MemCellPred sym arch)
+predFromList sym l = do
+  -- NOTE: We can't just use Data.Map.fromList here because it will discard duplicate
+  -- entries
+  let maps = map (\(cell, p) -> MemCellPred $ Map.singleton cell p) l
+  foldM (mergeMemCellPred sym) (MemCellPred Map.empty) maps
+
+predToList ::
+  MemCellPred sym arch ->
+  [(Some (MemCell sym arch), WI.Pred sym)]
+predToList (MemCellPred cells) = Map.toList cells
+
+-- | Drop entries from the map which are concretely false. Semantically this is
+-- a no-op as it has no effect on its interpretation.
 dropTrivialCells ::
   forall sym arch.
   WI.IsExprBuilder sym =>
   MemCellPred sym arch ->
   MemCellPred sym arch
-dropTrivialCells cells = Map.mapMaybe dropFalse cells
+dropTrivialCells (MemCellPred cells) = MemCellPred $ Map.mapMaybe dropFalse cells
   where
     dropFalse ::
       WI.Pred sym ->
@@ -98,7 +121,7 @@ mergeMemCellPred ::
   MemCellPred sym arch ->
   MemCellPred sym arch ->
   IO (MemCellPred sym arch)
-mergeMemCellPred sym cells1 cells2 = do
+mergeMemCellPred sym (MemCellPred cells1) (MemCellPred cells2) = fmap MemCellPred $ do
   MapM.mergeA
     MapM.preserveMissing
     MapM.preserveMissing
@@ -114,10 +137,10 @@ muxMemCellPred ::
   MemCellPred sym arch ->
   MemCellPred sym arch ->
   IO (MemCellPred sym arch)
-muxMemCellPred sym p cellsT cellsF = case WI.asConstantPred p of
-  Just True -> return cellsT
-  Just False -> return cellsF
-  _ -> do
+muxMemCellPred sym p (MemCellPred cellsT) (MemCellPred cellsF) = case WI.asConstantPred p of
+  Just True -> return $ MemCellPred cellsT
+  Just False -> return $ MemCellPred cellsF
+  _ -> fmap MemCellPred $ do
     notp <- WI.notPred sym p
     MapM.mergeA
       (MapM.traverseMissing (\_ pT -> WI.andPred sym pT p))
@@ -137,7 +160,7 @@ inMemCellPred ::
   MemCell sym arch w ->
   MemCellPred sym arch ->
   IO (WI.Pred sym)
-inMemCellPred sym cell cells =
+inMemCellPred sym cell (MemCellPred cells) =
   case Map.lookup (Some cell) cells of
     Just cond | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
     _ -> go (WI.falsePred sym) (Map.toList cells)
@@ -194,3 +217,18 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
+
+
+instance PEM.ExprMappable sym (MemCellPred sym arch) where
+  foldMapExpr sym f (MemCellPred memPred) b = do
+    let (ks, vs) = unzip $ Map.toAscList memPred
+    (ks', b') <- PEM.foldMapExpr sym f ks b
+    (vs', b'') <- PEM.foldMapExpr sym f (map (PEM.ToExprMappable @sym) vs) b'
+    let vs'' = map PEM.unEM vs'
+    memDom' <- case ks == ks' of
+      True -> return $ MemCellPred (Map.fromAscList (zip ks vs''))
+      False -> predFromList sym (zip ks' vs'')
+    return $ (memDom', b'')
+
+  foldExpr sym f (MemCellPred memPred) b =
+    PEM.foldExpr sym f (Map.toList $ fmap (PEM.ToExprMappable @sym) memPred) b
