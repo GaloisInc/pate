@@ -64,7 +64,7 @@ import qualified What4.Interface as W4
 import qualified Pate.Arch as PA
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
@@ -90,8 +90,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
     ecaseO = PS.simOutBlockEnd $ PS.simOutO $ bundle
     ecaseP = PS.simOutBlockEnd $ PS.simOutP $ bundle
   footprints <- getFootprints bundle
-  memReads <- PEM.memPredToList <$> (liftIO $ PEM.footPrintsToPred sym footprints (W4.truePred sym))
-  memWrites <- PEM.memPredToList <$> (liftIO $ PEM.footPrintsToPred sym footprints (W4.falsePred sym))
+  memReads <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.truePred sym))
+  memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
 
   preMem <- MapF.fromList <$> mapM (\x -> memCellToOp initState x) memReads
   postMem <- MapF.fromList <$> mapM (\x -> memCellToOp finState x) memWrites
@@ -184,17 +184,18 @@ statePredToDomain ::
 statePredToDomain stPred = withSym $ \sym ->
   PF.EquivalenceDomain
     <$> (return $ predRegsToDomain sym $ PES.predRegs stPred)
-    <*> (flattenToStackRegion $ memPredToDomain $ PES.predStack stPred)
-    <*> (return $ memPredToDomain $ PES.predMem stPred)
+    <*> (flattenToStackRegion $ PES.predStack stPred)
+    <*> (return $ PES.predMem stPred)
 
 flattenToStackRegion ::
-  PF.MemoryDomain sym arch ->
-  EquivM sym arch (PF.MemoryDomain sym arch)
+  PEM.MemoryDomain sym arch ->
+  EquivM sym arch (PEM.MemoryDomain sym arch)
 flattenToStackRegion dom = do
   stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
-    dom' = map (\(MapF.Pair cell p) -> MapF.Pair (PMC.setMemCellRegion stackRegion cell) p) (MapF.toList (PF.memoryDomain dom))
-  return $ dom { PF.memoryDomain = MapF.fromList dom' }
+    PMC.MemCellPred memPred = PEM.memDomainPred dom
+    dom' = map (\(Some cell, p) -> (Some $ PMC.setMemCellRegion stackRegion cell, p)) (Map.toList memPred)
+  return $ dom { PEM.memDomainPred = PMC.MemCellPred $ Map.fromList dom' }
 
 
 predRegsToDomain ::
@@ -210,21 +211,6 @@ predRegsToDomain sym regs = MM.mkRegState go
     go r = case Map.lookup (Some r) regs of
       Just p -> Const p
       Nothing -> Const (W4.falsePred sym)
-
--- TODO: flatten 'MemCells' to avoid rebuilding this map
-memPredToDomain ::
-  PSo.ValidSym sym =>
-  PEM.MemPred sym arch ->
-  PF.MemoryDomain sym arch
-memPredToDomain memPred =
-  PF.MemoryDomain
-    { PF.memoryDomain = MapF.fromList $ map go $ PEM.memPredToList memPred
-    , PF.memoryDomainPolarity = PEM.memPredPolarity memPred
-    }
-  where
-    go :: (Some (PMC.MemCell sym arch), W4.Pred sym) ->
-      MapF.Pair (PMC.MemCell sym arch) (Const (W4.Pred sym))
-    go (Some cell, p) = MapF.Pair cell (Const p)
 
 statePredToPreDomain ::
   PES.StatePred sym arch ->

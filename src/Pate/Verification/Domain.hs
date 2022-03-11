@@ -46,7 +46,7 @@ import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
@@ -163,23 +163,23 @@ guessMemoryDomain ::
   -- 'MT.MemTraceImpl'
   (MT.MemTraceState sym (MM.ArchAddrWidth arch), W4.Pred sym) ->
   -- | the target memory domain used to generate the postcondition
-  PEM.MemPred sym arch ->
+  PEM.MemoryDomain sym arch ->
   -- | filter for whether or not memory cells can possibly belong to
   -- the given domain
   (forall w. PMC.MemCell sym arch w -> EquivM sym arch (W4.Pred sym)) ->
-  EquivM sym arch (PEM.MemPred sym arch)
+  EquivM sym arch (PEM.MemoryDomain sym arch)
 guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym -> do
   foots <- getFootprints bundle
   cells <- do
-    localPred <- liftIO $ PEM.addFootPrintsToPred sym foots memPred
-    PEM.mapMemPred localPred $ \cell p -> do
+    localPred <- liftIO $ PEM.addFootPrints sym foots memPred
+    PEM.traverseWithCell localPred $ \cell p -> do
       isFiltered <- cellFilter cell
       pathCond <- liftIO $ W4.andPred sym p isFiltered
       PVS.simplifyPred pathCond
 
   -- we take the entire reads set of the block and then filter it according
   -- to the polarity of the postcondition predicate
-  result <- PEM.mapMemPredPar cells $ \cell p -> maybeEqualAt bundle cell p >>= \case
+  result <- PEM.traverseWithCellPar cells $ \cell p -> maybeEqualAt bundle cell p >>= \case
     True -> ifConfig (not . PC.cfgComputeEquivalenceFrames) (Par.present $ return polarity) $ do
       let repr = MM.BVMemRepr (PMC.cellWidth cell) (PMC.cellEndian cell)
       -- clobber the "patched" memory at exactly this cell
@@ -196,9 +196,9 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
           True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
           False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
     False -> Par.present $ liftIO $ W4.notPred sym polarity
-  Par.joinFuture (result :: Par.Future (PEM.MemPred sym arch))
+  Par.joinFuture (result :: Par.Future (PEM.MemoryDomain sym arch))
   where
-    polarity = PEM.memPredPolarity memPred
+    polarity = PEM.memDomainPolarity memPred
     memP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
 allRegistersDomain ::
@@ -362,8 +362,8 @@ universalDomain =  withSym $ \sym -> do
   return $ PES.StatePred
     {
       PES.predRegs = regDomain'
-    , PES.predStack = PEM.memPredTrue sym
-    , PES.predMem = PEM.memPredTrue sym
+    , PES.predStack = PEM.universal sym
+    , PES.predMem = PEM.universal sym
     }
 
 -- | Domain that includes entire state, except IP and SP registers

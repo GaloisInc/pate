@@ -56,7 +56,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Event as PE
 import qualified Pate.Monad.Context as PMC
@@ -194,8 +194,8 @@ handleSystemCall = PVE.ExternalDomain $ \sym -> do
                                , (Some (gpr 9), WI.truePred sym) -- FIXME: Only on PPC32
                                ]
   return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.memPredTrue sym
-                         , PES.predMem = PEM.memPredTrue sym
+                         , PES.predStack = PEM.universal sym
+                         , PES.predMem = PEM.universal sym
                          }
 
 -- | PowerPC passes arguments in r3-r10
@@ -213,8 +213,8 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
                                , (Some (gpr 10), WI.truePred sym)
                                ]
   return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.memPredTrue sym
-                         , PES.predMem = PEM.memPredTrue sym
+                         , PES.predStack = PEM.universal sym
+                         , PES.predMem = PEM.universal sym
                          }
 
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)

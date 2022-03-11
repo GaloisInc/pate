@@ -71,7 +71,7 @@ import qualified Pate.Register as PRe
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 
 data EquivalenceStatus =
@@ -252,21 +252,21 @@ impliesPostcondPred sym (PPa.PatchPair stO stP) stPredAsmSpec stPredConclSpec = 
   (precondConcl, stPredConcl) <- bindSpec sym stO stP stPredConclSpec
   regImp <- allPreds sym =<< mapM (getReg stPredAsm) (M.assocs (PES.predRegs stPredConcl))
   let
-    stackCells = S.toList $ PEM.memPredCells (PES.predStack stPredAsm) <> PEM.memPredCells (PES.predStack stPredConcl)
-    memCells = S.toList $ PEM.memPredCells (PES.predMem stPredAsm) <> PEM.memPredCells (PES.predMem stPredConcl)
+    stackCells = S.toList $ PEM.cells (PES.predStack stPredAsm) <> PEM.cells (PES.predStack stPredConcl)
+    memCells = S.toList $ PEM.cells (PES.predMem stPredAsm) <> PEM.cells (PES.predMem stPredConcl)
   stackImp <- allPreds sym =<< mapM (getMem (PES.predStack stPredAsm) (PES.predStack stPredConcl)) stackCells
   globalImp <- allPreds sym =<< mapM (getMem (PES.predMem stPredAsm) (PES.predMem stPredConcl)) memCells
   allImps <- allPreds sym [precondConcl, regImp, stackImp, globalImp]
   W4.impliesPred sym precondAsm allImps
   where
     getMem ::
-      PEM.MemPred sym arch ->
-      PEM.MemPred sym arch ->
+      PEM.MemoryDomain sym arch ->
+      PEM.MemoryDomain sym arch ->
       (Some (PMC.MemCell sym arch)) ->
       IO (W4.Pred sym)
     getMem memAsm memConcl (Some cell) = do
-     mAsm <- PEM.memPredAt sym memAsm cell
-     mConcl <- PEM.memPredAt sym memConcl cell
+     mAsm <- PEM.containsCell sym memAsm cell
+     mConcl <- PEM.containsCell sym memConcl cell
      W4.impliesPred sym mAsm mConcl
       
     getReg ::
@@ -309,10 +309,10 @@ weakenEquivRelation sym stPred eqRel =
             applyRegEquivRelation (eqRelRegs eqRel) r v1 v2
         Nothing -> return $ W4.truePred sym
     stackFn = MemEquivRelation $ \cell v1 v2 -> do
-      impM sym (PEM.memPredAt sym (PES.predStack stPred) cell) $
+      impM sym (PEM.containsCell sym (PES.predStack stPred) cell) $
         applyMemEquivRelation (eqRelStack eqRel) cell v1 v2
     memFn = MemEquivRelation $ \cell v1 v2 -> do
-      impM sym (PEM.memPredAt sym (PES.predMem stPred) cell) $
+      impM sym (PEM.containsCell sym (PES.predMem stPred) cell) $
         applyMemEquivRelation (eqRelMem eqRel) cell v1 v2
   in EquivRelation regsFn stackFn memFn
 
@@ -326,10 +326,10 @@ memPredPost ::
   SimOutput sym arch PBi.Original ->
   SimOutput sym arch PBi.Patched ->
   MemEquivRelation sym arch ->
-  PEM.MemPred sym arch ->
+  PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
 memPredPost sym outO outP memEq memPred = do
-  iteM sym (return $ (PEM.memPredPolarity memPred))
+  iteM sym (return $ (PEM.memDomainPolarity memPred))
     (positiveMemPred sym stO stP memEq memPred) negativePolarity
   where
     stO = simOutState outO
@@ -345,7 +345,7 @@ memPredPost sym outO outP memEq memPred = do
       W4.Pred sym ->
       IO (W4.Pred sym)
     resolveCell cell cond = do
-      impM sym (PEM.memPredAt sym memPred cell) $
+      impM sym (PEM.containsCell sym memPred cell) $
         resolveCellEquiv sym stO stP memEq cell cond
 
     -- | For the negative case, we need to consider the domain of the state itself -
@@ -355,7 +355,7 @@ memPredPost sym outO outP memEq memPred = do
       footO <- MT.traceFootprint sym memO
       footP <- MT.traceFootprint sym memP
       let foot = S.union footO footP
-      footCells <- PEM.memPredToList <$> PEM.footPrintsToPred sym foot (W4.falsePred sym)
+      footCells <- PEM.toList <$> PEM.fromFootPrints sym foot (W4.falsePred sym)
       foldr (\(Some cell, cond) -> andM sym (resolveCell cell cond)) (return $ W4.truePred sym) footCells
 
 positiveMemPred :: 
@@ -366,11 +366,11 @@ positiveMemPred ::
   SimState sym arch PBi.Original ->
   SimState sym arch PBi.Patched ->
   MemEquivRelation sym arch ->
-  PEM.MemPred sym arch ->
+  PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
 positiveMemPred sym stO stP memEq memPred = do
   let
-    memCells = PEM.memPredToList memPred
+    memCells = PEM.toList memPred
     resolveCellPos = resolveCellEquiv sym stO stP memEq
   foldr (\(Some cell, cond) -> andM sym (resolveCellPos cell cond)) (return $ W4.truePred sym) memCells
 
@@ -403,10 +403,10 @@ memPredPre ::
   SimInput sym arch PBi.Original ->
   SimInput sym arch PBi.Patched ->
   MemEquivRelation sym arch ->
-  PEM.MemPred sym arch ->
+  PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
 memPredPre sym memEqRegion inO inP memEq memPred  = do
-  iteM sym (return $ (PEM.memPredPolarity memPred))
+  iteM sym (return $ (PEM.memDomainPolarity memPred))
     (positiveMemPred sym stO stP memEq memPred) negativePolarity
   where
     stO = simInState inO
@@ -435,7 +435,7 @@ memPredPre sym memEqRegion inO inP memEq memPred  = do
     -- to the original trace with arbitrary modifications to excluded addresses
     negativePolarity :: IO (W4.Pred sym)
     negativePolarity = do
-      mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) (PEM.memPredToList memPred)
+      mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) (PEM.toList memPred)
       getRegionEquality memEqRegion mem' (MT.memState memP)
 
 newtype MemRegionEquality sym arch =

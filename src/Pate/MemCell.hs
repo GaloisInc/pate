@@ -7,29 +7,31 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Pate.MemCell (
     MemCell(..)
   , setMemCellRegion
-  , MemCells(..)
-  , mergeMemCellsMap
-  , muxMemCellsMap
-  , inMemCells
+  , MemCellPred(..)
+  , mergeMemCellPred
+  , muxMemCellPred
+  , inMemCellPred
+  , dropTrivialCells
   , readMemCell
   , writeMemCell
+  , predFromList
+  , predToList
   ) where
 
-import           Control.Monad ( foldM, forM )
-
+import           Control.Monad ( foldM )
 
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
 import qualified Data.Map.Merge.Strict as MapM
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.Classes as PC
-import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PNR
-import qualified Data.Parameterized.TraversableF as TF
 import           GHC.TypeLits ( type (<=) )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Backend (IsSymInterface)
@@ -75,121 +77,110 @@ instance PC.TestEquality (WI.SymExpr sym) => Eq (MemCell sym arch w) where
 instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
   compare stamp1 stamp2  = PC.toOrdering $ PC.compareF stamp1 stamp2
 
--- | This is a collection of 'MemCell' that all represent memory regions of the same size.
---
--- Each 'MemCell' is associated with the predicate that says whether or not the
--- described memory is contained in the 'Pate.Equivalence.MemPred'.
-newtype MemCells sym arch w = MemCells (Map.Map (MemCell sym arch w) (WI.Pred sym))
+-- | Each 'MemCell' is associated with the predicate that says whether or not the
+-- described memory is contained in the 'Pate.Equivalence.MemoryDomain'.
+newtype MemCellPred sym arch = MemCellPred (Map.Map (Some (MemCell sym arch)) (WI.Pred sym))
 
-mapCellPreds ::
-  (WI.Pred sym -> IO (WI.Pred sym)) ->
-  MemCells sym arch w ->
-  IO (MemCells sym arch w)
-mapCellPreds f (MemCells stamps) = MemCells <$> mapM f stamps
-
-mergeMemCells ::
+predFromList ::
   WI.IsExprBuilder sym =>
   PC.OrdF (WI.SymExpr sym) =>
   sym ->
-  MemCells sym arch w ->
-  MemCells sym arch w ->
-  IO (MemCells sym arch w)
-mergeMemCells sym (MemCells cells1) (MemCells cells2) = do
-  MemCells <$>
+  [(Some (MemCell sym arch), WI.Pred sym)] ->
+  IO (MemCellPred sym arch)
+predFromList sym l = do
+  -- NOTE: We can't just use Data.Map.fromList here because it will discard duplicate
+  -- entries
+  let maps = map (\(cell, p) -> MemCellPred $ Map.singleton cell p) l
+  foldM (mergeMemCellPred sym) (MemCellPred Map.empty) maps
+
+predToList ::
+  MemCellPred sym arch ->
+  [(Some (MemCell sym arch), WI.Pred sym)]
+predToList (MemCellPred cells) = Map.toList cells
+
+-- | Drop entries from the map which are concretely false. Semantically this is
+-- a no-op as it has no effect on its interpretation.
+dropTrivialCells ::
+  forall sym arch.
+  WI.IsExprBuilder sym =>
+  MemCellPred sym arch ->
+  MemCellPred sym arch
+dropTrivialCells (MemCellPred cells) = MemCellPred $ Map.mapMaybe dropFalse cells
+  where
+    dropFalse ::
+      WI.Pred sym ->
+      Maybe (WI.Pred sym)
+    dropFalse p = case WI.asConstantPred p of
+      Just False -> Nothing
+      _ -> Just p
+
+mergeMemCellPred ::
+  WI.IsExprBuilder sym =>
+  PC.OrdF (WI.SymExpr sym) =>
+  sym ->
+  MemCellPred sym arch ->
+  MemCellPred sym arch ->
+  IO (MemCellPred sym arch)
+mergeMemCellPred sym (MemCellPred cells1) (MemCellPred cells2) = fmap MemCellPred $ do
+  MapM.mergeA
+    MapM.preserveMissing
+    MapM.preserveMissing
+    (MapM.zipWithAMatched (\_ p1 p2 -> WI.orPred sym p1 p2))
+    cells1
+    cells2
+
+muxMemCellPred ::
+  WI.IsExprBuilder sym =>
+  PC.OrdF (WI.SymExpr sym) =>
+  sym ->
+  WI.Pred sym ->
+  MemCellPred sym arch ->
+  MemCellPred sym arch ->
+  IO (MemCellPred sym arch)
+muxMemCellPred sym p (MemCellPred cellsT) (MemCellPred cellsF) = case WI.asConstantPred p of
+  Just True -> return $ MemCellPred cellsT
+  Just False -> return $ MemCellPred cellsF
+  _ -> fmap MemCellPred $ do
+    notp <- WI.notPred sym p
     MapM.mergeA
-      MapM.preserveMissing
-      MapM.preserveMissing
-      (MapM.zipWithAMatched (\_ p1 p2 -> WI.orPred sym p1 p2))
-      cells1
-      cells2
+      (MapM.traverseMissing (\_ pT -> WI.andPred sym pT p))
+      (MapM.traverseMissing (\_ pF -> WI.andPred sym pF notp))
+      (MapM.zipWithAMatched (\_ p1 p2 -> WI.baseTypeIte sym p p1 p2))
+      cellsT
+      cellsF
 
-muxMemCells ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  WI.Pred sym ->
-  MemCells sym arch w ->
-  MemCells sym arch w ->
-  IO (MemCells sym arch w)
-muxMemCells sym p (MemCells cellsT) (MemCells cellsF) = case WI.asConstantPred p of
-  Just True -> return $ MemCells cellsT
-  Just False -> return $ MemCells cellsF
-  _ -> do
-    notp <- WI.notPred sym p
-    MemCells <$>
-      MapM.mergeA
-        (MapM.traverseMissing (\_ pT -> WI.andPred sym pT p))
-        (MapM.traverseMissing (\_ pF -> WI.andPred sym pF notp))
-        (MapM.zipWithAMatched (\_ p1 p2 -> WI.baseTypeIte sym p p1 p2))
-        cellsT
-        cellsF
-
--- | Mux two 'MemCells' maps, where entries that appear in only one map
--- are made conditional on the given predicate.
-muxMemCellsMap ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  PC.OrdF f =>
-  sym ->
-  WI.Pred sym ->
-  MapF.MapF f (MemCells sym arch) ->
-  MapF.MapF f (MemCells sym arch) ->
-  IO (MapF.MapF f (MemCells sym arch))
-muxMemCellsMap sym p cellsMapT cellsMapF = case WI.asConstantPred p of
-  Just True -> return cellsMapT
-  Just False -> return cellsMapF
-  _ -> do
-    notp <- WI.notPred sym p
-    MapF.mergeWithKeyM
-         (\_ cellsT cellsF -> Just <$> muxMemCells sym p cellsT cellsF)
-         (TF.traverseF (mapCellPreds (WI.andPred sym p)))
-         (TF.traverseF (mapCellPreds (WI.andPred sym notp)))
-         cellsMapT
-         cellsMapF
-
--- | Unconditionally merge two 'MemCells' maps.
-mergeMemCellsMap ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  PC.OrdF f =>
-  sym ->
-  MapF.MapF f (MemCells sym arch) ->
-  MapF.MapF f (MemCells sym arch) ->
-  IO (MapF.MapF f (MemCells sym arch))
-mergeMemCellsMap sym cellsMap1 cellsMap2 = do
-  MapF.mergeWithKeyM
-       (\_ cells1 cells2 -> Just <$> mergeMemCells sym cells1 cells2)
-       return
-       return
-       cellsMap1
-       cellsMap2
-
--- | True if this cell is logically equivalent to any cell in the given
--- collection. Note that this is still false if the given cell overlaps
--- two different entries.
-inMemCells ::
+-- | Check if a 'MemCell' is in the given 'MemCellPred'. This is true
+-- if and only if:
+-- 1) The given cell is semantically equivalent to a cell in the 'MemCellPred'
+-- 2) The predicate associated with that cell in the 'MemCellPred' is true
+-- Notably, this does not consider all of the addresses covered by a 'MemCell'
+-- (i.e. the 'w' bytes starting from the base address). The exact cell must be
+-- present in the 'MemCellPred' for the result of this function to be true.
+inMemCellPred ::
   forall sym arch w.
   WI.IsExprBuilder sym =>
   PC.OrdF (WI.SymExpr sym) =>
   sym ->
   MemCell sym arch w ->
-  MemCells sym arch w ->
+  MemCellPred sym arch ->
   IO (WI.Pred sym)
-inMemCells sym cell (MemCells cells) =
-  case Map.lookup cell cells of
+inMemCellPred sym cell (MemCellPred cells) =
+  case Map.lookup (Some cell) cells of
     Just cond | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
     _ -> go (WI.falsePred sym) (Map.toList cells)
   where
-    go :: WI.Pred sym -> [(MemCell sym arch w, WI.Pred sym)] -> IO (WI.Pred sym)
-    go p ((cell', cond) : cells') = do
-      eqPtrs <- PMT.llvmPtrEq sym (cellPtr cell) (cellPtr cell')
-      case WI.asConstantPred eqPtrs of
-        Just True | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
-        Just False -> go p cells'
-        _ -> do
-          matches <- WI.andPred sym eqPtrs cond
-          p' <- WI.orPred sym p matches
-          go p' cells'
+    go :: WI.Pred sym -> [(Some (MemCell sym arch), WI.Pred sym)] -> IO (WI.Pred sym)
+    go p ((Some cell', cond) : cells') = case WI.testEquality (cellWidth cell) (cellWidth cell') of
+      Just WI.Refl -> do
+        eqPtrs <- PMT.llvmPtrEq sym (cellPtr cell) (cellPtr cell')
+        case WI.asConstantPred eqPtrs of
+          Just True | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
+          Just False -> go p cells'
+          _ -> do
+            matches <- WI.andPred sym eqPtrs cond
+            p' <- WI.orPred sym p matches
+            go p' cells'
+      Nothing -> go p cells'
     go p [] = return p
 
 setMemCellRegion ::
@@ -231,12 +222,17 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
-instance (PC.OrdF (WI.SymExpr sym)) => PEM.ExprMappable sym (MemCells sym arch w) where
-  mapExpr sym f (MemCells cells) = do
-    maps <- forM (Map.toList cells) $ \(cell, p) -> do
-      cell' <- PEM.mapExpr sym f cell
-      p' <- f p
-      case WI.asConstantPred p' of
-        Just False -> return $ MemCells $ Map.empty
-        _ -> return $ MemCells $ Map.singleton cell' p'
-    foldM (mergeMemCells sym) (MemCells Map.empty) maps
+
+instance PEM.ExprMappable sym (MemCellPred sym arch) where
+  foldMapExpr sym f (MemCellPred memPred) b = do
+    let (ks, vs) = unzip $ Map.toAscList memPred
+    (ks', b') <- PEM.foldMapExpr sym f ks b
+    (vs', b'') <- PEM.foldMapExpr sym f (map (PEM.ToExprMappable @sym) vs) b'
+    let vs'' = map PEM.unEM vs'
+    memDom' <- case ks == ks' of
+      True -> return $ MemCellPred (Map.fromAscList (zip ks vs''))
+      False -> predFromList sym (zip ks' vs'')
+    return $ (memDom', b'')
+
+  foldExpr sym f (MemCellPred memPred) b =
+    PEM.foldExpr sym f (Map.toList $ fmap (PEM.ToExprMappable @sym) memPred) b

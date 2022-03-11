@@ -74,7 +74,7 @@ import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
@@ -1165,8 +1165,8 @@ topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> d
     return $ PES.StatePred
       {
         PES.predRegs = regDomain
-      , PES.predStack = PEM.memPredFalse sym
-      , PES.predMem = PEM.memPredTrue sym
+      , PES.predStack = PEM.empty sym
+      , PES.predMem = PEM.universal sym
       }
 
 -- | Top-level equivalence check:
@@ -1189,8 +1189,8 @@ topLevelTriple fnPair =
       withAssumptionFrame (PVV.validInitState (Just pPair) stO stP) $
         return $ PES.StatePred
           { PES.predRegs = regDomain
-          , PES.predStack = PEM.memPredTrue sym
-          , PES.predMem = PEM.memPredTrue sym
+          , PES.predStack = PEM.universal sym
+          , PES.predMem = PEM.universal sym
           }
     return $ PF.EquivTriple pPair precond postcond
 

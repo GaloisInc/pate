@@ -16,7 +16,7 @@ import qualified What4.Interface as WI
 
 import qualified Data.Macaw.CFG as MM
 
-import qualified Pate.Equivalence.MemPred as PEM
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.ExprMappable as PEM
 
 ---------------------------------------------
@@ -35,9 +35,9 @@ data StatePred sym arch =
     { predRegs :: M.Map (Some (MM.ArchReg arch)) (WI.Pred sym)
     -- ^ Predicates covering machine registers; if a machine register is missing from the map, the
     -- predicate is considered to be false
-    , predStack :: PEM.MemPred sym arch
+    , predStack :: PEM.MemoryDomain sym arch
     -- ^ The predicate over stack memory locations
-    , predMem :: PEM.MemPred sym arch
+    , predMem :: PEM.MemoryDomain sym arch
     -- ^ The predicate over other memory locations
     }
 
@@ -61,12 +61,12 @@ muxStatePred sym p predT predF = case WI.asConstantPred p of
       (M.zipWithAMatched (\_ p1 p2 -> WI.baseTypeIte sym p p1 p2))
       (predRegs predT)
       (predRegs predF)
-    stack <- PEM.muxMemPred sym p (predStack predT) (predStack predF)
-    mem <- PEM.muxMemPred sym p (predMem predT) (predMem predF)
+    stack <- PEM.mux sym p (predStack predT) (predStack predF)
+    mem <- PEM.mux sym p (predMem predT) (predMem predF)
     return $ StatePred regs stack mem
 
 statePredFalse :: WI.IsExprBuilder sym => sym -> StatePred sym arch
-statePredFalse sym = StatePred M.empty (PEM.memPredFalse sym) (PEM.memPredFalse sym)
+statePredFalse sym = StatePred M.empty (PEM.empty sym) (PEM.empty sym)
 
 instance PEM.ExprMappable sym (StatePred sym arch) where
   mapExpr sym f stPred = do

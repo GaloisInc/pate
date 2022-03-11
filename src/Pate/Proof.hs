@@ -35,7 +35,6 @@ module Pate.Proof
   ( EquivTriple(..)
   , VerificationStatus(..)
   , ProofApp(..)
-  , MemoryDomain(..)
   , traverseProofApp
   , mapProofApp
   , ProofNonce(..)
@@ -89,6 +88,7 @@ import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.StatePred as PES
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Ground as PG
@@ -302,9 +302,9 @@ data EquivalenceDomain sym arch where
     { -- | Each register is considered to be in this domain if the given predicate is true.
       eqDomainRegisters :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
       -- | The memory domain that is specific to stack variables.
-    , eqDomainStackMemory :: MemoryDomain sym arch
+    , eqDomainStackMemory :: PEM.MemoryDomain sym arch
       -- | The memory domain that is specific to non-stack (i.e. global) variables.
-    , eqDomainGlobalMemory :: MemoryDomain sym arch
+    , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
     }  -> EquivalenceDomain sym arch
 
 instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
@@ -312,33 +312,6 @@ instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
     <$> MM.traverseRegsWith (\_ (Const p) -> Const <$> f p) a1
     <*> PEM.mapExpr sym f a2
     <*> PEM.mapExpr sym f a3
-
--- | A memory domain for an equivalence problem.
-data MemoryDomain sym arch where
-  MemoryDomain ::
-    { -- | Associating each memory location (i.e. an address and a number of bytes) with
-      -- a predicate.
-      memoryDomain :: MapF.MapF (PMC.MemCell sym arch) (Const (W4.Pred sym))
-      -- | A predicate indicating if this domain is inclusive or exclusive.
-      -- * For positive polarity:
-      --   a location is in this domain if it is in the map, and its associated predicate
-      --   is true.
-      -- * For negative polarity:
-      --   a location is in this domain if it is not in the map,
-      --   or it is in the map and its associated predicate is false.
-    , memoryDomainPolarity :: W4.Pred sym
-    }  -> MemoryDomain sym arch
-
-
-instance PEM.ExprMappable sym (MemoryDomain sym arch) where
-  mapExpr sym f (MemoryDomain a1 a2) = 
-     MemoryDomain
-       <$> (MapF.fromList <$> (traverse transMemCell (MapF.toList a1)))
-       <*> f a2
-   where
-     transMemCell (MapF.Pair cell (Const p)) = MapF.Pair
-       <$> PEM.mapExpr sym f cell
-       <*> (Const <$> f p)
 
 -- | Traverse the nodes of a 'ProofApp', changing the
 -- recursive 'node' type while leaving the leaves unchanged.

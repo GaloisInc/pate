@@ -123,7 +123,7 @@ library
                        Pate.SimState,
                        Pate.Equivalence,
                        Pate.Equivalence.Error,
-                       Pate.Equivalence.MemPred,
+                       Pate.Equivalence.MemoryDomain,
                        Pate.Equivalence.StatePred,
                        Pate.Equivalence.Statistics,
                        Pate.Verbosity,
