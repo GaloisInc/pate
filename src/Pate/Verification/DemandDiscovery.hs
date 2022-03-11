@@ -256,7 +256,7 @@ decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bvAddr =
 -- incremental code discovery (only binding function handles and doing code
 -- discovery on demand).
 lookupFunction
-  :: forall sym arch bin mem binFmt solver scope st fs
+  :: forall p sym arch bin mem binFmt solver scope st fs
    . ( PA.ValidArch arch
      , LCB.IsSymInterface sym
      , PBi.KnownBinary bin
@@ -271,7 +271,7 @@ lookupFunction
   -> PMC.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
   -> MBL.LoadedBinary arch binFmt
-  -> DMS.LookupFunctionHandle sym arch
+  -> DMS.LookupFunctionHandle p sym arch
 lookupFunction bak argMap overrides symtab pfm archVals loadedBinary = DMS.LookupFunctionHandle $ \crucState _mem0 regs -> do
   let regsRepr = LCT.StructRepr (DMS.crucArchRegTypes (DMS.archFunctions archVals))
   let regsEntry = LCS.RegEntry regsRepr regs

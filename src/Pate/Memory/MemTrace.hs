@@ -79,7 +79,7 @@ import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
 import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthRepr, addrWidthNatRepr)
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
-                           , GlobalMap, MacawSimulatorState(..)
+                           , GlobalMap
                            , IsMemoryModel(..)
                            , SymArchConstraints
                            , evalMacawExprExtension
@@ -436,11 +436,11 @@ mkUndefinedPtrOps sym = do
 -- performing them.
 macawTraceExtensions ::
   (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
-  MacawArchEvalFn sym (MemTrace arch) arch ->
+  MacawArchEvalFn p sym (MemTrace arch) arch ->
   GlobalVar (MemTrace arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   UndefinedPtrOps sym ->
-  ExtensionImpl (MacawSimulatorState sym) sym (MacawExt arch)
+  ExtensionImpl p sym (MacawExt arch)
 macawTraceExtensions archStmtFn mvar globs undefptr =
   ExtensionImpl
     { extensionEval = \bak iTypes logFn cst g -> evalMacawExprExtensionTrace undefptr bak iTypes logFn cst g
@@ -600,15 +600,15 @@ memTraceIntrinsicTypes = id
   . MapF.insert (knownSymbol :: SymbolRepr "LLVM_pointer") IntrinsicMuxFn
   $ MapF.empty
 
-type MacawTraceEvalStmtFunc sym arch = MacawEvalStmtFunc (MacawStmtExtension arch) (MacawSimulatorState sym) sym (MacawExt arch)
+type MacawTraceEvalStmtFunc p sym arch = MacawEvalStmtFunc (MacawStmtExtension arch) p sym (MacawExt arch)
 
 execMacawStmtExtension ::
-  forall sym arch t st fs. (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
-  MacawArchEvalFn sym (MemTrace arch) arch ->
+  forall p sym arch t st fs. (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
+  MacawArchEvalFn p sym (MemTrace arch) arch ->
   UndefinedPtrOps sym ->
   GlobalVar (MemTrace arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
-  MacawTraceEvalStmtFunc sym arch
+  MacawTraceEvalStmtFunc p sym arch
 execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
   = case stmt of
     MacawReadMem addrWidth memRepr addr
