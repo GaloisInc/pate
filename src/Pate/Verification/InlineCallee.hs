@@ -231,12 +231,13 @@ populateRelocation bak _reloc =
 -- are different. The best approach is probably to compute a sound
 -- over-approximation of the available memory.
 allocateInitialState
-  :: forall arch sym bak w
+  :: forall arch sym bak w t st fs
    . ( LCB.IsSymBackend sym bak
      , w ~ DMC.ArchAddrWidth arch
      , PA.ValidArch arch
      , LCLM.HasPtrWidth w
      , LCLM.HasLLVMAnn sym
+     , sym ~ WE.ExprBuilder t st fs
      , ?memOpts :: LCLM.MemOptions
      )
   => bak
