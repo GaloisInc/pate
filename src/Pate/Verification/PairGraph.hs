@@ -1,9 +1,11 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Pate.Verification.PairGraph
@@ -17,16 +19,19 @@ module Pate.Verification.PairGraph
   ) where
 
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Lens (view)
-import           Control.Monad (foldM, when, forM_, unless)
+import           Control.Lens ( view, (^.), _1 )
+import           Control.Monad (foldM, when, forM, forM_, unless)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
 import           Control.Monad.Writer (tell, execWriterT)
 import           Control.Monad.Except (runExceptT)
+import           Numeric (showHex)
 
+import qualified Data.BitVector.Sized as BV
 import           Data.Maybe (fromMaybe)
 import           Data.Map (Map)
 import qualified Data.Map as Map
+import           Data.Proxy
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word (Word32)
@@ -34,6 +39,7 @@ import           Data.Word (Word32)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.Context as Ctx
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -43,10 +49,15 @@ import           What4.SatResult (SatResult(..))
 
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
+import qualified Lang.Crucible.LLVM.MemModel as CLM
+import qualified Lang.Crucible.Simulator.RegValue as LCS
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.Symbolic as MS
 
+import qualified Pate.Abort as PAb
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
 import qualified Pate.Discovery as PD
@@ -62,6 +73,7 @@ import qualified Pate.Equivalence.StatePred as PES
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 --import qualified Pate.Monad.Context as PMC
+import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Monad.Environment as PME
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
@@ -109,6 +121,8 @@ runVerificationLoop env pPairs = do
 initialGas :: Gas
 initialGas = Gas 5
 
+-- For now, the abstract domains we track are just exactly
+--  a "StatePredSpec", but we may change/add to this as we go
 type AbstractDomain sym arch = PE.StatePredSpec sym arch
 
 data PairGraph sym arch =
@@ -188,18 +202,127 @@ pairGraphComputeFixpoint gr =
       do -- do the symbolic simulation
          (asm, bundle) <- mkSimBundle bPair d
 
+         -- Compute exit pairs
          traceBundle bundle $ "Discovering exit pairs from " ++ (show bPair)
-
          -- TODO, manifest errors here?
          exitPairs <- PD.discoverPairs bundle
-
          traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
-         -- TODO! check totality of bundle pairs
+         -- Check the totality of the discovered pairs
+         tot <- checkTotality asm bundle d exitPairs
+         case tot of
+           CasesTotal ->
+             traceBundle bundle "Totality check succeeded."
+           TotalityCheckingError msg ->
+             traceBundle bundle ("Error while checking totality! " ++ msg)
+           TotalityCounterexample (oIP,oEnd) (pIP,pEnd) ->
+             traceBundle bundle $ unwords
+               ["Found extra exit while checking totality:"
+               , showHex oIP "", PPI.ppExitCase oEnd, showHex pIP "", PPI.ppExitCase pEnd
+               ]
+
+         -- Follow all the exit pairs we found
          gr'' <- foldM (followExit asm bundle bPair d) gr' (zip [0 ..] exitPairs)
 
          -- recurse until fixpoint
          pairGraphComputeFixpoint gr''
+
+
+
+data TotalityResult
+  = CasesTotal
+  | TotalityCheckingError String
+  | TotalityCounterexample (Integer,MS.MacawBlockEndCase) (Integer,MS.MacawBlockEndCase)
+
+-- TODO? should we try to share work with the followExit/widenPostcondition calls?
+checkTotality :: forall sym arch.
+  W4.Pred sym ->
+  SimBundle sym arch ->
+  AbstractDomain sym arch ->
+  [PPa.PatchPair (PB.BlockTarget arch)] ->
+  EquivM sym arch TotalityResult
+checkTotality asm bundle preD exits =
+  withSym $ \sym ->
+    do vcfg <- asks envConfig
+       eqRel <- asks envBaseEquiv
+       stackRegion <- asks (PMC.stackRegion . envCtx)
+
+       let solver = PCfg.cfgSolver vcfg
+       let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
+
+       precond <- liftIO $ do
+         eqInputs <- PE.getPrecondition sym stackRegion bundle eqRel (PS.specBody preD)
+         W4.andPred sym asm eqInputs
+
+       -- compute the condition that leads to each of the computed
+       -- exit pairs
+       cases <- forM exits $ \(PPa.PatchPair oBlkt pBlkt) ->
+                  PD.matchesBlockTarget bundle oBlkt pBlkt
+
+       isUnknown <- do
+         isJump <- matchingExits bundle MS.MacawBlockEndJump
+         isFail <- matchingExits bundle MS.MacawBlockEndFail
+         isBranch <- matchingExits bundle MS.MacawBlockEndBranch
+         liftIO (W4.orPred sym isJump =<< W4.orPred sym isFail isBranch)
+
+       isReturn <- do
+         bothReturn <- matchingExits bundle MS.MacawBlockEndReturn
+         abortO <- PAb.isAbortedStatePred (PPa.getPair @PBi.Original (simOut bundle))
+         returnP <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) MS.MacawBlockEndReturn
+         abortCase <- liftIO $ W4.andPred sym abortO returnP
+         liftIO $ W4.orPred sym bothReturn abortCase
+
+
+       let doPanic = panic Solver "checkTotality" ["Online solving not enabled"]
+
+       PS.withOnlineSolver solver saveInteraction sym $ \bak ->
+           do liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
+                W4.assume (W4.solverConn sp) precond
+                W4.assume (W4.solverConn sp) =<< W4.notPred sym isReturn
+                W4.assume (W4.solverConn sp) =<< W4.notPred sym isUnknown
+                forM_ cases $ \c ->
+                  W4.assume (W4.solverConn sp) =<< W4.notPred sym c
+                W4.checkAndGetModel sp "prove postcondition" >>= \case
+                  Unsat _ -> return CasesTotal
+                  Unknown -> return (TotalityCheckingError "UNKNOWN result when checking totality")
+                  Sat evalFn ->
+                    -- We found an execution that does not correspond to one of the
+                    -- executions listed in "exits"
+                    do let oRegs  = PS.simRegs (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
+                       let pRegs  = PS.simRegs (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
+                       let oIPReg = oRegs ^. MM.curIP
+                       let pIPReg = pRegs ^. MM.curIP
+                       let oBlockEnd = PS.simOutBlockEnd (PPa.pOriginal (PS.simOut bundle))
+                       let pBlockEnd = PS.simOutBlockEnd (PPa.pPatched  (PS.simOut bundle))
+
+                       -- Ugh, gross
+                       q1 <- W4.groundEval evalFn (LCS.unRV (oBlockEnd ^. _1))
+                       let oBlockEndCase :: MS.MacawBlockEndCase = toEnum . fromInteger . BV.asUnsigned $ q1
+                       q2 <- W4.groundEval evalFn @(W4.BaseBVType 3) (LCS.unRV (pBlockEnd ^. _1))
+                       let pBlockEndCase :: MS.MacawBlockEndCase = toEnum . fromInteger . BV.asUnsigned $ q2
+
+                       -- Also gross
+                       case PSR.macawRegRepr oIPReg of
+                         CLM.LLVMPointerRepr _w | CLM.LLVMPointer _ obv <- (PSR.macawRegValue oIPReg) ->
+                           case PSR.macawRegRepr pIPReg of
+                             CLM.LLVMPointerRepr _w | CLM.LLVMPointer _ pbv <- (PSR.macawRegValue pIPReg) ->
+                               do oIPVal <- BV.asUnsigned <$> W4.groundEval evalFn obv
+                                  pIPVal <- BV.asUnsigned <$> W4.groundEval evalFn pbv
+                                  return (TotalityCounterexample (oIPVal,oBlockEndCase) (pIPVal,pBlockEndCase))
+                             res -> return (TotalityCheckingError ("IP register had unexpected type: " ++ show res))
+                         res -> return (TotalityCheckingError ("IP register had unexpected type: " ++ show res))
+
+
+matchingExits ::
+  forall sym arch.
+  SimBundle sym arch ->
+  MS.MacawBlockEndCase ->
+  EquivM sym arch (W4.Pred sym)
+matchingExits bundle ecase = withSym $ \sym -> do
+  case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutO bundle) ecase
+  case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) ecase
+  liftIO $ W4.andPred sym case1 case2
+
 
 
 followExit ::
@@ -442,7 +565,7 @@ widenPostcondition bundle preD postD0 =
                    Sat evalFn ->
                      -- The current execution does not satisfy the postcondition, and we have
                      -- a counterexample.
-                     widenUsingCounterexample sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+                     widenUsingCounterexample sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD
 
         -- Re-enter the widening loop if we had to widen at this step.
         -- If this step completed, use the success continuation to
@@ -468,10 +591,8 @@ widenPostcondition bundle preD postD0 =
 
 widenUsingCounterexample ::
   ( sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
   , PA.ValidArch arch ) =>
   sym ->
-  W4.SolverProcess t solver ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
@@ -480,11 +601,11 @@ widenUsingCounterexample ::
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenUsingCounterexample sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+widenUsingCounterexample sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
   tryWidenings
-    [ widenRegisters sym sp evalFn bundle eqRel postCondAsm postCondStatePred postD
-    , widenStack sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD
-    , widenHeap sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+    [ widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD
+    , widenStack sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+    , widenHeap sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD
     , return $ WideningError "Could not find any values to widen!"
     ]
 
@@ -493,10 +614,8 @@ widenUsingCounterexample sym sp evalFn bundle eqRel postCondAsm postCondStatePre
 --  should we find some generalization?
 widenHeap ::
   ( sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
   , PA.ValidArch arch ) =>
   sym ->
-  W4.SolverProcess t solver ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
@@ -505,9 +624,9 @@ widenHeap ::
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenHeap sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+widenHeap sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
   do xs <- findUnequalHeapMemCells sym evalFn bundle eqRel preD
-     ys <- findUnequalHeapWrites sym evalFn bundle eqRel 
+     ys <- findUnequalHeapWrites sym evalFn bundle eqRel
      let zs = xs++ys
      if null zs then
        return NoWideningRequired
@@ -522,10 +641,8 @@ widenHeap sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
 
 widenStack ::
   ( sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
   , PA.ValidArch arch ) =>
   sym ->
-  W4.SolverProcess t solver ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
@@ -534,9 +651,9 @@ widenStack ::
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenStack sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+widenStack sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
   do xs <- findUnequalStackMemCells sym evalFn bundle eqRel preD
-     ys <- findUnequalStackWrites sym evalFn bundle eqRel 
+     ys <- findUnequalStackWrites sym evalFn bundle eqRel
      let zs = xs++ys
      if null zs then
        return NoWideningRequired
@@ -632,10 +749,8 @@ findUnequalStackMemCells sym evalFn bundle eqRel preD =
 
 widenRegisters ::
   ( sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
   , PA.ValidArch arch ) =>
   sym ->
-  W4.SolverProcess t solver ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
   EquivRelation sym arch ->
@@ -643,7 +758,7 @@ widenRegisters ::
   PES.StatePred sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenRegisters sym sp evalFn bundle eqRel postCondAsm postCondStatePred postD =
+widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
