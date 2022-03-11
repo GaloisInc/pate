@@ -4,6 +4,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
@@ -15,11 +16,14 @@ module Pate.Verification.PairGraph
   , runVerificationLoop
   ) where
 
+import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens (view)
-import           Control.Monad (foldM)
+import           Control.Monad (foldM, when, forM_, unless)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
+import           Control.Monad.Writer (tell, execWriterT)
 import           Control.Monad.Except (runExceptT)
+
 import           Data.Maybe (fromMaybe)
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -27,15 +31,20 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word (Word32)
 
+import           Data.Parameterized.Classes
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
 
---import qualified What4.Expr as W4
+import qualified What4.Expr as W4
 import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4
 import qualified What4.Protocol.SMTWriter as W4
 import           What4.SatResult (SatResult(..))
 
+import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
+
+import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
@@ -44,17 +53,21 @@ import qualified Pate.Discovery as PD
 --import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.MemCell as PMc
 import qualified Pate.Monad.Context as PMC
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Statistics as PESt
---import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.StatePred as PES
 import           Pate.Monad
+import qualified Pate.Memory.MemTrace as MT
 --import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Solver as PS
+import qualified Pate.SimulatorRegisters as PSR
 
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.Verification.Validity as PVV
@@ -80,7 +93,16 @@ runVerificationLoop env pPairs = do
  where
    doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
-     do fail "TODO!"
+     do pg0 <- initializePairGraph pPairs
+        _pg <- pairGraphComputeFixpoint pg0
+
+        -- TODO, something useful
+        let result = PEq.Equivalent
+
+        statVar <- asks envStatistics
+        stats <- liftIO $ MVar.readMVar statVar
+        return (result, stats)
+
 
 -- | Temporary constant value for the gas parameter.
 --   Should make this configurable.
@@ -287,16 +309,19 @@ handleJump bundle currBlock d gr pPair =
   do d' <- getTargetDomain pPair gr
      md <- widenPostcondition bundle d d'
      case md of
-       NoWideningRequired -> return gr
+       NoWideningRequired ->
+         do traceBundle bundle "Did not need to widen"
+            return gr
        WideningError msg ->
          do traceBundle bundle ("Error during widening: " ++ msg)
             return gr -- TODO? better error handling?
-       Widen d'' -> 
+       Widen _ d'' ->
          case updateDomain gr currBlock pPair d'' of
            Nothing ->
              do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show currBlock ++ " " ++ show pPair)
                 return gr -- TODO? better error handling?
            Just gr' ->
+             do traceBundle bundle "Successfully widened postcondition"
                 return gr'
 
 getTargetDomain ::
@@ -310,63 +335,358 @@ getTargetDomain pPair gr =
       -- initial state of the pair graph: choose the universal domain that equates as much as possible
       PVD.universalDomainSpec pPair
 
+data WidenLocs sym arch =
+  WidenLocs
+    (Set (Some (MM.ArchReg arch)))
+    (Set (Some (PMc.MemCell sym arch)))
+
+instance PA.ValidArch arch => Show (WidenLocs sym arch) where
+  show (WidenLocs regs cells) =
+    unlines [ unwords (map show (Set.toList regs))
+            , show (Set.size cells) ++ " memory locations"
+            ]
+
+instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym arch) where
+  (WidenLocs r1 m1) <> (WidenLocs r2 m2) = WidenLocs (r1 <> r2) (m1 <> m2)
+
+instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
+  mempty = WidenLocs mempty mempty
+
 data WidenResult sym arch
   = NoWideningRequired
   | WideningError String
-  | Widen (AbstractDomain sym arch)
+  | Widen (WidenLocs sym arch) (AbstractDomain sym arch)
 
-widenPostcondition ::
+-- | Try the given widening stratetigs s one at a time,
+--   until the first one that computes some nontrival
+--   widening, or returns an error.
+tryWidenings ::
+  [IO (WidenResult sym arch)] ->
+  IO (WidenResult sym arch)
+tryWidenings [] = return NoWideningRequired
+tryWidenings (x:xs) =
+  x >>= \case
+    NoWideningRequired -> tryWidenings xs
+    res -> return res
+
+widenPostcondition :: forall sym arch.
   PA.ValidArch arch =>
   SimBundle sym arch ->
   AbstractDomain sym arch {- ^ predomain -} ->
   AbstractDomain sym arch {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch)
-widenPostcondition bundle preD postD =
+widenPostcondition bundle preD postD0 =
   withSym $ \sym ->
     do vcfg <- asks envConfig
        asmFrame <- asks envCurrentFrame
        eqRel <- asks envBaseEquiv
        stackRegion <- asks (PMC.stackRegion . envCtx)
 
+       let solver = PCfg.cfgSolver vcfg
+       let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
+
        precond <- liftIO $ do
          asm <- PS.getAssumedPred sym asmFrame
          eqInputs <- PE.getPrecondition sym stackRegion bundle eqRel (PS.specBody preD)
          W4.andPred sym asm eqInputs
 
-       let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-       let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
-       (postCondAsm, postCondStatePred) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
+       -- traceBundle bundle "== widenPost: precondition =="
+       -- traceBundle bundle (show (W4.printSymExpr precond))
 
-       postcond <- liftIO $ do
-           eqPost <- PE.statePredPost sym
-                             (PPa.pOriginal (PS.simOut bundle))
-                             (PPa.pPatched  (PS.simOut bundle))
-                             eqRel
-                             postCondStatePred
-           W4.andPred sym postCondAsm eqPost
-
-       let solver = PCfg.cfgSolver vcfg
-       let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
        PS.withOnlineSolver solver saveInteraction sym $ \bak ->
+         do liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
+              W4.assume (W4.solverConn sp) precond
+            widenLoop sym bak eqRel postD0 Nothing
 
-         liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
-           let conn = W4.solverConn sp
-           -- check if we already satisfy the associated condition
-           W4.assume conn precond
-           W4.assume conn =<< W4.notPred sym postcond
-           W4.checkAndGetModel sp "prove postcondition" >>= \case
-             Unsat _ -> return NoWideningRequired
-             Unknown -> return (WideningError "UNKNOWN result evaluating postcondition")
-             Sat evalFn ->
-               -- The current execution does not satisfy the postcondition, and we have
-               -- a counterexample.
-               widenUsingCounterexample sp evalFn postCondStatePred
+ where
+   doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
 
-  where
-    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
+   widenLoop ::
+     ( bak ~ LCBO.OnlineBackend solver t st fs
+     , sym ~ W4.ExprBuilder t st fs
+     , W4.OnlineSolver solver
+     , LCB.IsSymBackend sym bak
+     , PA.ValidArch arch ) =>
+     sym ->
+     bak ->
+     EquivRelation sym arch ->
+     AbstractDomain sym arch ->
+     Maybe (WidenLocs sym arch) ->
+     EquivM sym arch (WidenResult sym arch)
+   widenLoop sym bak eqRel postD mlocs =
+     do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
+        let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+        (postCondAsm, postCondStatePred) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
 
-    widenUsingCounterexample sp evalFn postCondStatePred =
-      do return (WideningError "TODO! we gave up in the widening step")
+        postcond <- liftIO $ do
+            eqPost <- PE.statePredPost sym
+                              (PPa.pOriginal (PS.simOut bundle))
+                              (PPa.pPatched  (PS.simOut bundle))
+                              eqRel
+                              postCondStatePred
+            W4.andPred sym postCondAsm eqPost
+
+        --traceBundle bundle "== widenPost: postcondition =="
+        --traceBundle bundle (show (W4.printSymExpr postcond))
+
+        res <-
+          liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
+            W4.inNewFrame sp $
+              do let conn = W4.solverConn sp
+                 -- check if we already satisfy the associated condition
+
+                 W4.assume conn =<< W4.notPred sym postcond
+                 W4.checkAndGetModel sp "prove postcondition" >>= \case
+                   Unsat _ -> return NoWideningRequired
+                   Unknown -> return (WideningError "UNKNOWN result evaluating postcondition")
+                   Sat evalFn ->
+                     -- The current execution does not satisfy the postcondition, and we have
+                     -- a counterexample.
+                     widenUsingCounterexample sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+
+        -- Re-enter the widening loop if we had to widen at this step.
+        -- If this step completed, use the success continuation to
+        -- return the result.  Only in the first iteration will we
+        -- finally return a `NoWideningRequired`.  In other cases, we
+        -- had to widen at least once.
+        case res of
+          WideningError{} -> return res
+
+          NoWideningRequired ->
+            case mlocs of
+              Nothing   -> return NoWideningRequired
+              Just locs -> return (Widen locs postD)
+
+          Widen locs postD' ->
+            do traceBundle bundle "== Found a widening, returning into the loop =="
+               traceBundle bundle (show locs)
+               let newlocs = case mlocs of
+                               Nothing    -> Just locs
+                               Just locs' -> Just (locs <> locs')
+               widenLoop sym bak eqRel postD' newlocs
+
+
+widenUsingCounterexample ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.SolverProcess t solver ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  W4.Pred sym ->
+  PES.StatePred sym arch ->
+  AbstractDomain sym arch ->
+  AbstractDomain sym arch ->
+  IO (WidenResult sym arch)
+widenUsingCounterexample sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+  tryWidenings
+    [ widenRegisters sym sp evalFn bundle eqRel postCondAsm postCondStatePred postD
+    , widenStack sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+    , widenHeap sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+    , return $ WideningError "Could not find any values to widen!"
+    ]
+
+
+-- TODO, lots of code duplication between the stack and heap cases.
+--  should we find some generalization?
+widenHeap ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.SolverProcess t solver ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  W4.Pred sym ->
+  PES.StatePred sym arch ->
+  AbstractDomain sym arch ->
+  AbstractDomain sym arch ->
+  IO (WidenResult sym arch)
+widenHeap sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+  do xs <- findUnequalHeapMemCells sym evalFn bundle eqRel preD
+     ys <- findUnequalHeapWrites sym evalFn bundle eqRel 
+     let zs = xs++ys
+     if null zs then
+       return NoWideningRequired
+     else
+       do let newCells = Map.fromList [ (c, W4.truePred sym) | c <- zs ]
+          let heapDom = PEM.memDomainPred (PES.predMem (PS.specBody postD))
+          heapDom' <- PMc.mergeMemCellPred sym heapDom newCells
+          let md' = (PES.predMem (PS.specBody postD)){ PEM.memDomainPred = heapDom' }
+          let pred' = (PS.specBody postD){ PES.predMem = md' }
+          let postD' = postD{ PS.specBody = pred' }
+          return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
+
+widenStack ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.SolverProcess t solver ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  W4.Pred sym ->
+  PES.StatePred sym arch ->
+  AbstractDomain sym arch ->
+  AbstractDomain sym arch ->
+  IO (WidenResult sym arch)
+widenStack sym sp evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+  do xs <- findUnequalStackMemCells sym evalFn bundle eqRel preD
+     ys <- findUnequalStackWrites sym evalFn bundle eqRel 
+     let zs = xs++ys
+     if null zs then
+       return NoWideningRequired
+     else
+       do let newCells = Map.fromList [ (c, W4.truePred sym) | c <- zs ]
+          let stackDom = PEM.memDomainPred (PES.predStack (PS.specBody postD))
+          stackDom' <- PMc.mergeMemCellPred sym stackDom newCells
+          let md' = (PES.predStack (PS.specBody postD)){ PEM.memDomainPred = stackDom' }
+          let pred' = (PS.specBody postD){ PES.predStack = md' }
+          let postD' = postD{ PS.specBody = pred' }
+          return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
+
+
+findUnequalHeapWrites ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  IO [Some (PMc.MemCell sym arch)]
+findUnequalHeapWrites sym evalFn bundle eqRel =
+  do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
+     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+
+     footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutO bundle)
+     footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutP bundle)
+     let footprints = Set.union footO footP
+     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
+     execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
+       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelMem eqRel) cell cond
+          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          unless cellEq' (tell [Some cell])
+
+findUnequalStackWrites ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  IO [Some (PMc.MemCell sym arch)]
+findUnequalStackWrites sym evalFn bundle eqRel =
+  do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
+     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+
+     footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutO bundle)
+     footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutP bundle)
+     let footprints = Set.union footO footP
+     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
+     execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
+       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelStack eqRel) cell cond
+          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          unless cellEq' (tell [Some cell])
+
+findUnequalHeapMemCells ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  AbstractDomain sym arch ->
+  IO [Some (PMc.MemCell sym arch)]
+findUnequalHeapMemCells sym evalFn bundle eqRel preD =
+  do let prestateHeapCells = PEM.toList (PES.predMem (PS.specBody preD))
+     let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
+     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+
+     execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) ->
+       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelMem eqRel) cell cond
+          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          unless cellEq' (tell [Some cell])
+
+findUnequalStackMemCells ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  AbstractDomain sym arch ->
+  IO [Some (PMc.MemCell sym arch)]
+findUnequalStackMemCells sym evalFn bundle eqRel preD =
+  do let prestateStackCells = PEM.toList (PES.predStack (PS.specBody preD))
+     let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
+     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+
+     execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) ->
+       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelStack eqRel) cell cond
+          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          unless cellEq' (tell [Some cell])
+
+widenRegisters ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.SolverProcess t solver ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  EquivRelation sym arch ->
+  W4.Pred sym ->
+  PES.StatePred sym arch ->
+  AbstractDomain sym arch ->
+  IO (WidenResult sym arch)
+widenRegisters sym sp evalFn bundle eqRel postCondAsm postCondStatePred postD =
+  do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
+     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+
+     newRegs <- findUnequalRegs sym evalFn eqRel
+                   (PES.predRegs postCondStatePred)
+                   (PS.simRegs oPostState)
+                   (PS.simRegs pPostState)
+
+     if null newRegs then
+       return NoWideningRequired
+     else
+       -- TODO, widen less aggressively?
+       let regs' = foldl (\m r -> Map.delete r m)
+                     (PES.predRegs (PS.specBody postD))
+                     newRegs
+           pred' = (PS.specBody postD)
+                   { PES.predRegs = regs'
+                   }
+           locs = WidenLocs (Set.fromList newRegs) mempty
+        in return (Widen locs postD{ PS.specBody = pred' })
+
+
+findUnequalRegs ::
+  ( PA.ValidArch arch
+  , sym ~ W4.ExprBuilder t st fs ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  EquivRelation sym arch ->
+  Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
+  MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
+  MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
+  IO [Some (MM.ArchReg arch)]
+findUnequalRegs sym evalFn eqRel regPred oRegs pRegs =
+  execWriterT $ MM.traverseRegsWith_
+    (\regName oRegVal ->
+         do let pRegVal = MM.getBoundValue regName pRegs
+            let pRegEq  = fromMaybe (W4.falsePred sym) (Map.lookup (Some regName) regPred)
+            regEq <- liftIO (W4.groundEval evalFn pRegEq)
+            when regEq $
+              do isEqPred <- liftIO (applyRegEquivRelation (PE.eqRelRegs eqRel) regName oRegVal pRegVal)
+                 isEq <- liftIO (W4.groundEval evalFn isEqPred)
+                 when (not isEq) (tell [Some regName]))
+    oRegs
 
 
 mkSimBundle ::

@@ -348,8 +348,7 @@ universalDomain ::
 universalDomain sym =
   let
     regDomain =
-        (PER.update sym (\_ -> W4.falsePred sym)) (MM.sp_reg @(MM.ArchReg arch))
-      $ (PER.update sym (\_ -> W4.falsePred sym)) (MM.ip_reg @(MM.ArchReg arch))
+        (PER.update sym (\_ -> W4.falsePred sym)) (MM.ip_reg @(MM.ArchReg arch))
       $ (PER.universal sym)
   in PED.EquivalenceDomain
     {

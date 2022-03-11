@@ -43,6 +43,7 @@ module Pate.Equivalence
   , memDomPre
   , stateEquivalence
   , statePredPost
+  , resolveCellEquiv
   ) where
 
 import           Control.Lens hiding ( op, pre )
