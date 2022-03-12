@@ -631,7 +631,8 @@ widenHeap sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
      if null zs then
        return NoWideningRequired
      else
-       do let newCells = Map.fromList [ (c, W4.truePred sym) | c <- zs ]
+       do -- TODO, this could maybe be less aggressive
+          newCells <- PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
           let heapDom = PEM.memDomainPred (PES.predMem (PS.specBody postD))
           heapDom' <- PMc.mergeMemCellPred sym heapDom newCells
           let md' = (PES.predMem (PS.specBody postD)){ PEM.memDomainPred = heapDom' }
@@ -658,7 +659,8 @@ widenStack sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
      if null zs then
        return NoWideningRequired
      else
-       do let newCells = Map.fromList [ (c, W4.truePred sym) | c <- zs ]
+       do -- TODO, this could maybe be less aggressive
+          newCells <- PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
           let stackDom = PEM.memDomainPred (PES.predStack (PS.specBody postD))
           stackDom' <- PMc.mergeMemCellPred sym stackDom newCells
           let md' = (PES.predStack (PS.specBody postD)){ PEM.memDomainPred = stackDom' }
