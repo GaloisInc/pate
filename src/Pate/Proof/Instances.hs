@@ -39,8 +39,8 @@ module Pate.Proof.Instances
   , groundBlockEnd
   , GroundMacawValue(..)
   , groundMacawValue
-  , cellInDomain
-  , regInDomain
+  , cellInGroundDomain
+  , regInGroundDomain
   , ppLLVMPointer
   , ppInequivalencePreRegs
   , ppExitCase
@@ -80,6 +80,7 @@ import           Prettyprinter ( (<+>) )
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Proof as PF
 import qualified Pate.Ground as PG
@@ -236,7 +237,7 @@ instance forall sym arch.
     , PP.indent 4 $ prettyMem (PED.eqDomainGlobalMemory prf)
     ]
     where
-      prettyRegs = PP.vsep (map ppReg (collapseRegState (Proxy @sym) (PED.eqDomainRegisters prf)))
+      prettyRegs = PP.vsep (map ppReg (PER.toList (PED.eqDomainRegisters prf)))
 
       ppReg :: (Some (MM.ArchReg arch), W4.Pred sym) -> PP.Doc a
       ppReg (Some reg, p) = case W4.asConstantPred p of
@@ -288,22 +289,6 @@ instance PSo.ValidSym sym => PP.Pretty (PF.CondEquivalenceResult sym arch) where
        prettyBind (Pair e (W4G.GVW gv)) =
          W4.printSymExpr e <+> "-->" <+> prettyGV (W4.exprType e) gv
 
-
-collapseRegState ::
-  forall sym arch.
-  PSo.ValidSym sym =>
-  PA.ValidArch arch =>
-  Proxy sym ->
-  MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym)) ->
-  [(Some (MM.ArchReg arch), W4.Pred sym)]
-collapseRegState _ regState =
-  mapMaybe go $ MapF.toList $ MM.regStateMap regState
-  where
-    go :: Pair (MM.ArchReg arch) (Const (W4.Pred sym)) ->
-       Maybe (Some (MM.ArchReg arch), W4.Pred sym)
-    go (Pair reg (Const p)) = case W4.asConstantPred p of
-      Just False -> Nothing
-      _ -> Just (Some reg, p)
 
 data GroundBV n where
   GroundBV :: MT.UndefPtrOpTags -> W4.NatRepr n -> BVS.BV n -> GroundBV n
@@ -493,7 +478,7 @@ ppRegs ::
   PP.Doc a
 ppRegs dom regs = let
   rm = MapF.toList $ MM.regStateMap regs
-  docs' = map (\(Pair reg op) -> ppRegVal dom reg op) rm
+  docs' = map (\(Pair reg op) -> ppRegVal (PED.eqDomainRegisters dom) reg op) rm
   docs = catMaybes docs'
   diff = length docs' - length docs
   in (PP.vsep docs) <> PP.line <> (".. and" <+> PP.pretty diff <+> "zero-valued registers")
@@ -559,7 +544,7 @@ groundBlockEnd arch blkend =
 ppRegVal ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PED.EquivalenceDomain grnd arch ->
+  PER.RegisterDomain grnd arch ->
   MM.ArchReg arch tp ->
   PF.BlockSliceRegOp grnd tp ->
   Maybe (PP.Doc a)
@@ -575,7 +560,7 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
     vals = fmap groundMacawValue $ PF.slRegOpValues regOp
     ppSlotVal = PP.pretty (showF reg) <> ":" <+> ppVals <+> ppDom
 
-    ppDom = case regInDomain dom reg of
+    ppDom = case regInGroundDomain dom reg of
       True -> PP.emptyDoc
       False -> "| Excluded"
     
@@ -583,13 +568,15 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
       True -> PP.pretty $ PPa.pcOriginal vals
       False -> PPa.ppPatchPairC PP.pretty vals
 
-regInDomain ::
+regInGroundDomain ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
-  PED.EquivalenceDomain grnd arch ->
+  PER.RegisterDomain grnd arch ->
   MM.ArchReg arch tp ->
   Bool
-regInDomain dom r = PG.groundValue $ getConst $ PED.eqDomainRegisters dom ^. MM.boundValue r 
+regInGroundDomain dom r = case PER.registerInDomain' r dom of
+  Just p -> PG.groundValue p
+  Nothing -> False
 
 
 ppCellVal ::
@@ -606,7 +593,7 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
     vals = fmap groundBV $ PF.slMemOpValues memOp
     ppSlotVal = ppGroundCell cell <> ":" <+> ppVals <+> ppDom
 
-    ppDom = case cellInDomain dom cell of
+    ppDom = case cellInGroundDomain dom cell of
       True -> PP.emptyDoc
       False -> "| Excluded"
  
@@ -648,13 +635,13 @@ cellInMemDomain dom cell = case PG.groundValue $ PEM.memDomainPolarity dom of
   False -> foldr (\(Some cell', p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.toList dom)
 
 
-cellInDomain ::
+cellInGroundDomain ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
   PED.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
-cellInDomain dom cell = case isStackCell cell of
+cellInGroundDomain dom cell = case isStackCell cell of
   True -> cellInMemDomain (PED.eqDomainStackMemory dom) cell
   False -> cellInMemDomain (PED.eqDomainGlobalMemory dom) cell
 

@@ -48,6 +48,7 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
@@ -205,7 +206,7 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
     memP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
 equateRegisters ::
-  PED.RegisterDomain sym arch ->
+  PER.RegisterDomain sym arch ->
   SimBundle sym arch ->
   EquivM sym arch (PSi.AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
@@ -213,7 +214,7 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
   fmap PRt.collapse $ PRt.zipWithRegStatesM (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return mempty
     _ -> do
-      let cond = getConst $ MM.getBoundValue r regRel
+      let cond = PER.registerInDomain sym r regRel
       case W4.asConstantPred cond of
         Just True -> fmap Const $ liftIO $ PSi.macawRegBinding sym vO vP
         _ -> return $ Const mempty
@@ -230,7 +231,7 @@ equateInitialMemory bundle =
 
 equateInitialStates :: SimBundle sym arch -> EquivM sym arch (PSi.AssumptionFrame sym)
 equateInitialStates bundle = withSym $ \sym -> do
-  eqRegs <- equateRegisters (PED.universalRegDomain sym) bundle
+  eqRegs <- equateRegisters (PER.universal sym) bundle
   eqMem <- equateInitialMemory bundle
   return $ eqRegs <> eqMem
 
@@ -301,7 +302,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
                 True -> return $ Const $ W4.falsePred sym
                 False -> return $ Const $ W4.truePred sym
         _ -> exclude
-  regsDom <- Par.joinFuture @_ @Par.Future result
+  regsDom <- PER.fromRegState <$> Par.joinFuture @_ @Par.Future result
   stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
     isStackCell cell = do
@@ -352,9 +353,9 @@ universalDomain ::
 universalDomain sym =
   let
     regDomain =
-      (PED.universalRegDomain sym)
-        & (MM.boundValue (MM.sp_reg @(MM.ArchReg arch))) .~ (Const $ W4.falsePred sym)
-        & (MM.boundValue (MM.ip_reg @(MM.ArchReg arch))) .~ (Const $ W4.falsePred sym)
+        (PER.update sym (\_ -> W4.falsePred sym)) (MM.sp_reg @(MM.ArchReg arch))
+      $ (PER.update sym (\_ -> W4.falsePred sym)) (MM.ip_reg @(MM.ArchReg arch))
+      $ (PER.universal sym)
   in PED.EquivalenceDomain
     {
       PED.eqDomainRegisters = regDomain

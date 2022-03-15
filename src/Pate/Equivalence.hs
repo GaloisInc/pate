@@ -66,11 +66,11 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
-import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 
 data EquivalenceStatus =
@@ -265,7 +265,7 @@ impliesPostdomainPred ::
 impliesPostdomainPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
   (precondAsm, domAsm) <- bindSpec sym stO stP domAsmSpec
   (precondConcl, domConcl) <- bindSpec sym stO stP domConclSpec
-  regImp <- allPreds sym =<< mapM (getReg domAsm) (PRt.assocs (PED.eqDomainRegisters domConcl))
+  regImp <- allPreds sym =<< mapM (getReg (PED.eqDomainRegisters domAsm)) (PER.toList (PED.eqDomainRegisters domConcl))
   let
     stackCells = S.toList $ PEM.cells (PED.eqDomainStackMemory domAsm) <> PEM.cells (PED.eqDomainStackMemory domConcl)
     memCells = S.toList $ PEM.cells (PED.eqDomainGlobalMemory domAsm) <> PEM.cells (PED.eqDomainGlobalMemory domConcl)
@@ -285,11 +285,11 @@ impliesPostdomainPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
      W4.impliesPred sym mAsm mConcl
       
     getReg ::
-      PED.EquivalenceDomain sym arch ->
+      PER.RegisterDomain sym arch ->
       (Some (MM.ArchReg arch), W4.Pred sym) ->
       IO (W4.Pred sym)
     getReg domAsm (Some r, p) =
-      W4.impliesPred sym (PED.registerInDomain r domAsm) p
+      W4.impliesPred sym (PER.registerInDomain sym r domAsm) p
 
 -- | Compute a predicate which asserts equality on the post-state
 -- of the given 'SimBundle' with respect to the given 'PED.EquivalenceDomain'
@@ -327,7 +327,7 @@ weakenEquivRelation ::
 weakenEquivRelation sym eqDom eqRel =
   let
     regsFn = RegEquivRelation $ \r v1 v2 ->
-      impM sym (return $ PED.registerInDomain r eqDom) $
+      impM sym (return $ PER.registerInDomain sym r (PED.eqDomainRegisters eqDom)) $
         applyRegEquivRelation (eqRelRegs eqRel) r v1 v2
     stackFn = MemEquivRelation $ \cell v1 v2 -> do
       impM sym (PEM.containsCell sym (PED.eqDomainStackMemory eqDom) cell) $
@@ -479,7 +479,7 @@ regDomRel ::
   SimState sym arch PBi.Original ->
   SimState sym arch PBi.Patched ->
   RegEquivRelation sym arch ->
-  MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym)) ->
+  PER.RegisterDomain sym arch ->
   IO (W4.Pred sym)
 regDomRel sym stO stP regEquiv regDom  = do
   let
@@ -487,7 +487,7 @@ regDomRel sym stO stP regEquiv regDom  = do
     regsP = simRegs stP
     regRel r p =
       impM sym (return p) $ applyRegEquivRelation regEquiv r (regsO ^. MM.boundValue r) (regsP ^. MM.boundValue r)
-  foldr (\(Some r, p) -> andM sym (regRel r p)) (return $ W4.truePred sym) (PRt.assocs regDom)
+  foldr (\(Some r, p) -> andM sym (regRel r p)) (return $ W4.truePred sym) (PER.toList regDom)
 
 eqDomPre ::
   IsSymInterface sym =>

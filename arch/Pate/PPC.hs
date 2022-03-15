@@ -57,6 +57,7 @@ import qualified Pate.Binary as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.Monad.Context as PMC
@@ -185,7 +186,7 @@ gpr = PPC.PPC_GP . PPC.GPR
 handleSystemCall :: (1 <= SP.AddrWidth v, SP.KnownVariant v, MM.MemWidth (SP.AddrWidth v)) =>
   PVE.ExternalDomain PVE.SystemCall (PPC.AnyPPC v)
 handleSystemCall = PVE.ExternalDomain $ \sym -> do
-  let regDomain = PED.regDomainFromList sym $
+  let regDomain = PER.fromList $
         [ (Some (gpr 0), WI.truePred sym) -- syscall number
         , (Some (gpr 3), WI.truePred sym)
         , (Some (gpr 4), WI.truePred sym)
@@ -206,7 +207,7 @@ handleSystemCall = PVE.ExternalDomain $ \sym -> do
 handleExternalCall :: (1 <= SP.AddrWidth v, SP.KnownVariant v, MM.MemWidth (SP.AddrWidth v)) =>
   PVE.ExternalDomain PVE.ExternalCall (PPC.AnyPPC v)
 handleExternalCall = PVE.ExternalDomain $ \sym -> do
-  let regDomain = PED.regDomainFromList sym $
+  let regDomain = PER.fromList $
         [ (Some (gpr 3), WI.truePred sym)
         , (Some (gpr 4), WI.truePred sym)
         , (Some (gpr 5), WI.truePred sym)

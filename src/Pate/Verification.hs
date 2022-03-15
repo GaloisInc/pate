@@ -75,6 +75,7 @@ import qualified Pate.Discovery as PD
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
@@ -880,7 +881,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   traceBundle bundle "guessing equivalence domain"
   eqInputs <- withAssumption_ (return asm) $ do
     PVD.guessEquivalenceDomain bundle postcondPred postcond
-  traceBundle bundle ("Equivalence domain has: " ++ show (PED.nontrivialRegs sym $ PED.eqDomainRegisters eqInputs))
+  traceBundle bundle ("Equivalence domain has: " ++ show (PER.toList $ PED.eqDomainRegisters eqInputs))
 
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
@@ -1148,8 +1149,8 @@ checkAndMinimizeEqCondition cond goal = withValid $ withSym $ \sym -> do
 -- equivalent
 topLevelPostRegisterDomain ::
   forall sym arch.
-  EquivM sym arch (PED.RegisterDomain sym arch)
-topLevelPostRegisterDomain = withSym $ \sym -> return $ PED.emptyRegDomain sym
+  EquivM sym arch (PER.RegisterDomain sym arch)
+topLevelPostRegisterDomain = return $ PER.empty
 
 -- | Default toplevel post-domain:
 --   global (non-stack) memory
@@ -1181,7 +1182,7 @@ topLevelTriple fnPair =
   let pPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair in
   withPair pPair $
   withSym $ \sym -> do
-    let regDomain = PED.universalRegDomain sym
+    let regDomain = PER.universal sym
     postcond <- topLevelPostDomain pPair
     precond <- withFreshVars pPair $ \stO stP -> do
       withAssumptionFrame (PVV.validInitState (Just pPair) stO stP) $

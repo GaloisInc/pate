@@ -125,6 +125,7 @@ library
                        Pate.Equivalence,
                        Pate.Equivalence.Error,
                        Pate.Equivalence.MemoryDomain,
+                       Pate.Equivalence.RegisterDomain,
                        Pate.Equivalence.EquivalenceDomain,
                        Pate.Equivalence.Statistics,
                        Pate.Verbosity,
