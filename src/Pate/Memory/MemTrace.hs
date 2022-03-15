@@ -38,12 +38,12 @@ module Pate.Memory.MemTrace
 , getCond
 , MemTraceK
 , traceFootprint
+, getReadOps
 , UndefPtrOpTag
 , UndefPtrOpTags
 , UndefinedPtrOps(..)
 , MemOpCondition(..)
 , MemOp(..)
-, flatMemOps
 , memTraceIntrinsicTypes
 , initMemTrace
 , classifyExpr
@@ -57,13 +57,13 @@ module Pate.Memory.MemTrace
 ) where
 
 import Unsafe.Coerce
-import           Data.Foldable
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.))
 import           Control.Monad.State
 import qualified Data.BitVector.Sized as BV
-import           Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
+import           Data.Map (Map)
+import qualified Data.Map as Map
+import qualified Data.Map.Merge.Strict as Map
 import qualified Data.Vector as V
 import           Data.IORef
 import           Data.Set (Set)
@@ -102,6 +102,7 @@ import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..
 import Lang.Crucible.Simulator.RegMap (RegEntry(..))
 import Lang.Crucible.Simulator.RegValue (RegValue)
 import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
+import Lang.Crucible.Simulator.SymSequence
 import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
                             SymbolRepr, TypeRepr(BVRepr), knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
@@ -209,7 +210,7 @@ fromSymPtr ::
   IsSymExprBuilder sym =>
   sym ->
   SymPtr sym w ->
-  IO (LLVMPtr sym w )  
+  IO (LLVMPtr sym w )
 fromSymPtr sym sptr = do
   reg <- structField sym sptr Ctx.i1of2
   off <- structField sym sptr Ctx.i2of2
@@ -359,7 +360,7 @@ cachedPolyFun _sym (PolyFunMaker f) = do
       let classifier = mconcat (map (\(Some pf) -> polyFunClassify pf) (MapF.elems m))
       classifyExpr classifier e
   return (mker', classify)
-      
+
 
 withPtrWidth :: IsExprBuilder sym => LLVMPtr sym w -> (1 <= w => NatRepr w -> a) -> a
 withPtrWidth (LLVMPointer _blk bv) f | BaseBVRepr w <- exprType bv = f w
@@ -474,11 +475,6 @@ data MemOp sym ptrW where
     LLVMPtr sym (8*w) ->
     Endianness ->
     MemOp sym ptrW
-  MergeOps ::
-    Pred sym ->
-    MemTraceSeq sym ptrW ->
-    MemTraceSeq sym ptrW ->
-    MemOp sym ptrW
 
 instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
   Unconditional == Unconditional = True
@@ -500,14 +496,28 @@ instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
      , valR == valR'
      , Just Refl <- testEquality valO valO'
     = cond == cond' && dir == dir' && end == end'
-  MergeOps p opsT opsF == MergeOps p' opsT' opsF'
-    | Just Refl <- testEquality p p'
-    = opsT == opsT' && opsF == opsF'
+
   _ == _ = False
+
+instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
+  compare (MemOp (LLVMPointer reg1 off1) dir1 cond1 sz1 (LLVMPointer vr1 vo1) end1)
+          (MemOp (LLVMPointer reg2 off2) dir2 cond2 sz2 (LLVMPointer vr2 vo2) end2) =
+    case compareF sz1 sz2 of
+      LTF -> LT
+      GTF -> GT
+      EQF ->
+        (compare reg1 reg2) <>
+        (toOrdering $ compareF off1 off2) <>
+        compare dir1 dir2 <>
+        (compare cond1 cond2) <>
+        (compare vr1 vr2) <>
+        (toOrdering $ compareF vo1 vo2) <>
+        compare end1 end2
 
 data MemTraceImpl sym ptrW = MemTraceImpl
   { memSeq :: MemTraceSeq sym ptrW
-  -- ^ the sequence of memory operations in execution order
+  -- ^ The sequence of memory operations in reverse execution order;
+  --   later events appear closer to the front of the sequence.
   , memState :: MemTraceState sym ptrW
   -- ^ the logical contents of memory
   }
@@ -515,7 +525,7 @@ data MemTraceImpl sym ptrW = MemTraceImpl
 data MemTraceState sym ptrW = MemTraceState
   { memArr :: MemTraceArr sym ptrW }
 
-type MemTraceSeq sym ptrW = Seq (MemOp sym ptrW)
+type MemTraceSeq sym ptrW = SymSequence sym (MemOp sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
 
 type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
@@ -543,10 +553,12 @@ initMemTrace ::
   IO (MemTraceImpl sym ptrW)
 initMemTrace sym Addr32 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ MemTraceImpl mempty (MemTraceState arr)
+  sq <- nilSymSequence sym
+  return $ MemTraceImpl sq (MemTraceState arr)
 initMemTrace sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
-  return $ MemTraceImpl mempty (MemTraceState arr)
+  sq <- nilSymSequence sym
+  return $ MemTraceImpl sq (MemTraceState arr)
 
 
 mkMemoryBinding ::
@@ -562,33 +574,12 @@ mkMemoryBinding memSrc memTgt =
     MemTraceState memTgtArr = memTgt
   in MapF.singleton memSrcArr memTgtArr
 
-equalPrefixOf :: forall a. Eq a => Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
-equalPrefixOf s1 s2 = go s1 s2 Seq.empty
-  where
-    go :: Seq a -> Seq a -> Seq a -> (Seq a, (Seq a, Seq a))
-    go (l' Seq.:|> a) (r' Seq.:|> b) acc | a == b =
-      go l' r' (a Seq.<| acc)
-    go l r acc =
-      (acc, (l, r))
-
-muxTraces ::
-  sym ~ (ExprBuilder t st fs) =>
-  RegValue sym BoolType ->
-  MemTraceSeq sym ptrW ->
-  MemTraceSeq sym ptrW ->
-  IO (MemTraceSeq sym ptrW)
-muxTraces p t f =
-  let (pre, (t', f')) = equalPrefixOf t f
-  in case (t', f') of
-    (Seq.Empty, Seq.Empty) -> return pre
-    _ -> return $ pre Seq.:|> MergeOps p t' f'
-
 
 instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
   -- TODO: cover other cases with a TypeError
   type Intrinsic (ExprBuilder t st fs) "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl (ExprBuilder t st fs) ptrW
   muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
-    memSeq' <- muxTraces p (memSeq t) (memSeq f)
+    memSeq' <- muxSymSequence sym p (memSeq t) (memSeq f)
     memArr' <- baseTypeIte sym p (memArr $ memState t) (memArr $ memState f)
     return $ MemTraceImpl memSeq' (MemTraceState memArr')
 
@@ -829,7 +820,7 @@ ptrOp ::
 ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region' offset')) f =
   addrWidthsArePositive w $ readOnlyWithBak $ \bak -> do
     f bak region offset region' offset'
-        
+
 ptrPredOp ::
   IsSymBackend sym bak =>
   UndefinedPtrPredOp sym ->
@@ -1065,7 +1056,8 @@ writeMemState ::
   RegValue sym (MS.ToCrucibleType ty) ->
   IO (MemTraceState sym ptrW)
 writeMemState sym cond memSt ptr repr val = do
-  let mem = MemTraceImpl mempty memSt
+  sq <- nilSymSequence sym
+  let mem = MemTraceImpl sq memSt
   MemTraceImpl _ memSt' <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
@@ -1109,7 +1101,7 @@ writeMemBV sym mem_init ptr repr val = go 0 repr val mem_init
 
 ifCond ::
   IsSymInterface sym =>
-  sym ->  
+  sym ->
   MemOpCondition sym ->
   SymExpr sym tp ->
   SymExpr sym tp ->
@@ -1134,8 +1126,11 @@ doMemOpInternal sym dir cond ptrW = go where
     repr@(BVMemRepr byteWidth endianness)
       | LeqProof <- mulMono (knownNat @8) byteWidth
       -> addrWidthsArePositive ptrW $ do
-     
-      modify $ \mem -> mem { memSeq = (memSeq mem) Seq.:|> MemOp ptr dir cond byteWidth regVal endianness }
+
+      do mem <- get
+         seq' <- liftIO (consSymSequence sym (MemOp ptr dir cond byteWidth regVal endianness) (memSeq mem))
+         put mem{ memSeq = seq' }
+
       case dir of
         Read -> return ()
         Write -> do
@@ -1213,48 +1208,6 @@ oneSubEq w = unsafeCoerce (leqRefl w)
 --------------------------------------------------------
 -- Equivalence check
 
-andCond ::
-  IsExprBuilder sym =>
-  sym ->
-  MemOpCondition sym ->
-  MemOpCondition sym ->
-  IO (MemOpCondition sym)
-andCond sym cond1 cond2 = case (cond1, cond2) of
-  (Unconditional, _) -> return cond2
-  (_, Unconditional) -> return cond1
-  (Conditional cond1', Conditional cond2') ->
-    Conditional <$> andPred sym cond1' cond2'
-
-mconcatSeq :: Monoid a => Seq a -> a
-mconcatSeq = foldl' (<>) mempty
-
--- | Flatten a 'MemOp' into a sequence of atomic operations
-flatMemOp ::
-  IsExprBuilder sym =>
-  sym ->
-  MemOpCondition sym ->
-  MemOp sym ptrW ->
-  IO (Seq (MemOp sym ptrW))
-flatMemOp sym outer_cond mop = case mop of
-  MemOp ptr dir cond w val endianness -> do
-    cond' <- andCond sym outer_cond cond
-    let wop = MemOp ptr dir cond' w val endianness
-    return $ Seq.singleton wop
-  MergeOps cond seqT seqF -> do
-    cond' <- andCond sym outer_cond (Conditional cond)
-    seqT' <- mconcatSeq <$> traverse (flatMemOp sym cond') seqT
-    notcond <- notPred sym cond
-    notcond' <- andCond sym outer_cond (Conditional notcond)
-    seqF' <- mconcatSeq <$> traverse (flatMemOp sym notcond') seqF
-    return $ seqT' Seq.>< seqF'
-
--- | Collapse a 'MemTraceSeq' into a sequence of conditional write operations
-flatMemOps ::
-  IsExprBuilder sym =>
-  sym ->
-  MemTraceSeq sym ptrW ->
-  IO (Seq (MemOp sym ptrW))
-flatMemOps sym mem = mconcatSeq <$> traverse (flatMemOp sym Unconditional) mem
 
 -- | A wrapped value indicating that the given memory address has been modified
 -- by a given write sequence, with a given word size (in bytes)
@@ -1267,6 +1220,7 @@ data MemFootprint sym ptrW where
     MemOpCondition sym ->
     Endianness ->
     MemFootprint sym ptrW
+
 
 instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
   (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
@@ -1287,10 +1241,92 @@ instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
 
 
 memOpFootprint ::
+  IsExprBuilder sym =>
+  sym ->
   MemOp sym ptrW ->
-  MemFootprint sym ptrW
-memOpFootprint (MemOp ptr dir cond w _ end) = MemFootprint ptr w dir cond end
-memOpFootprint _ = error "Unexpected merge op"
+  (MemFootprint sym ptrW, Pred sym)
+memOpFootprint sym (MemOp ptr dir cond w _ end) =
+  (MemFootprint ptr w dir Unconditional end, getCond sym cond)
+
+unionFootprintMap ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  Map (MemFootprint sym ptrW) (Pred sym) ->
+  Map (MemFootprint sym ptrW) (Pred sym) ->
+  IO (Map (MemFootprint sym ptrW) (Pred sym))
+unionFootprintMap sym =
+  Map.mergeA
+    Map.preserveMissing
+    Map.preserveMissing
+    (Map.zipWithAMatched (\_k p1 p2 -> orPred sym p1 p2))
+
+muxFootprintMap ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  Pred sym ->
+  Map (MemFootprint sym ptrW) (Pred sym) ->
+  Map (MemFootprint sym ptrW) (Pred sym) ->
+  IO (Map (MemFootprint sym ptrW) (Pred sym))
+muxFootprintMap sym p =
+  Map.mergeA
+    (Map.traverseMissing (\_k x -> andPred sym x p))
+    (Map.traverseMissing (\_k y -> andPred sym y =<< notPred sym p))
+    (Map.zipWithAMatched (\_k x y -> itePred sym p x y))
+
+traceFootprintMap ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  MemTraceSeq sym ptrW ->
+  IO (Const (Map (MemFootprint sym ptrW) (Pred sym)) (MemOp sym ptrW))
+traceFootprintMap sym =
+  evalWithFreshCache $ \rec -> \case
+    SymSequenceNil -> return (Const mempty)
+    SymSequenceCons _ x xs ->
+      do let (fp,p) = memOpFootprint sym x
+         let m1 = Map.insert fp p mempty
+         Const m2 <- rec xs
+         Const <$> unionFootprintMap sym m1 m2
+    SymSequenceAppend _ xs ys ->
+      do Const m1 <- rec xs
+         Const m2 <- rec ys
+         Const <$> unionFootprintMap sym m1 m2
+    SymSequenceMerge _ p xs ys ->
+      do Const m1 <- rec xs
+         Const m2 <- rec ys
+         Const <$> muxFootprintMap sym p m1 m2
+
+
+-- | Get an unordered collection of all the read memory operations
+--   that occurred in this trace memory. Control-flow conditions are
+--   dropped while constructing this set, so the conditions included
+--   on these `MemOp` values may not be accurate.
+getReadOps ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  IO (Set (MemOp sym ptrW))
+getReadOps _sym mem =
+  getConst <$> evalWithFreshCache (\rec -> \case
+    SymSequenceNil -> return (Const mempty)
+    SymSequenceCons _ x xs ->
+      do Const s <- rec xs
+         case x of
+           MemOp _ptr Read _ _ _ _ -> return (Const (Set.insert x s))
+           _ -> return (Const s)
+    SymSequenceAppend _ xs ys ->
+      do Const s1 <- rec xs
+         Const s2 <- rec ys
+         return (Const (Set.union s1 s2))
+    SymSequenceMerge _ _p xs ys ->
+      do Const s1 <- rec xs
+         Const s2 <- rec ys
+         return (Const (Set.union s1 s2)))
+   (memSeq mem)
+
 
 traceFootprint ::
   IsExprBuilder sym =>
@@ -1299,8 +1335,14 @@ traceFootprint ::
   MemTraceImpl sym ptrW ->
   IO (Set (MemFootprint sym ptrW))
 traceFootprint sym mem = do
-  footprints <- (fmap memOpFootprint) <$> flatMemOps sym (memSeq mem)
-  return $ foldl' (\a b -> Set.insert b a) mempty footprints
+   do Const m <- traceFootprintMap sym (memSeq mem)
+      let xs = do (MemFootprint ptr w dir _ end, cond) <- Map.toList m
+                  case asConstantPred cond of
+                    Nothing    -> [MemFootprint ptr w dir (Conditional cond) end]
+                    Just True  -> [MemFootprint ptr w dir Unconditional end]
+                    Just False -> []
+      return $ Set.fromList xs
+
 
 llvmPtrEq ::
   IsExprBuilder sym =>
@@ -1362,7 +1404,7 @@ memEqExact ::
   sym ->
   MemTraceState sym ptrW ->
   MemTraceState sym ptrW ->
-  IO (Pred sym)  
+  IO (Pred sym)
 memEqExact sym mem1 mem2 = isEq sym (memArr mem1) (memArr mem2)
 
 instance PEM.ExprMappable sym (MemOpCondition sym) where
@@ -1377,15 +1419,10 @@ instance PEM.ExprMappable sym (MemOp sym w) where
       val' <- WEH.mapExprPtr sym f val
       cond' <- PEM.mapExpr sym f cond
       return $ MemOp ptr' dir cond' w val' endian
-    MergeOps p seq1 seq2 -> do
-      p' <- f p
-      seq1' <- traverse (PEM.mapExpr sym f) seq1
-      seq2' <- traverse (PEM.mapExpr sym f) seq2
-      return $ MergeOps p' seq1' seq2'
 
 instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do
-    memSeq' <- traverse (PEM.mapExpr sym f) $ memSeq mem
+    memSeq' <- traverseSymSequence sym (PEM.mapExpr sym f) $ memSeq mem
     memState' <- PEM.mapExpr sym f $ memState mem
     return $ MemTraceImpl memSeq' memState'
 

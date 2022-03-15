@@ -13,13 +13,11 @@ module Pate.Verification.Validity (
   , validConcreteReads
   ) where
 
-import           Control.Applicative ( liftA2 )
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
-import qualified Data.Sequence as Seq
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
@@ -98,18 +96,17 @@ validConcreteReads ::
   EquivM sym arch (AssumptionFrame sym)
 validConcreteReads stOut = withSym $ \sym -> do
   binCtx <- getBinCtx @bin
-  let
-    binmem = MBL.memoryImage $ PMC.binary binCtx
+  let binmem = MBL.memoryImage $ PMC.binary binCtx
+  readOps <- liftIO (MT.getReadOps sym (simOutMem stOut))
+  mconcat <$> liftIO (mapM (readConcrete sym binmem) (F.toList readOps))
 
-    go :: Seq.Seq (MT.MemOp sym (MM.ArchAddrWidth arch)) -> EquivM sym arch (AssumptionFrame sym)
-    go mops = do
-      flatops <- fmap F.toList $ liftIO $ MT.flatMemOps sym mops
-      fmap mconcat $ mapM (\x -> readConcrete x) flatops
-
-    readConcrete ::
-      MT.MemOp sym (MM.ArchAddrWidth arch) ->
-      EquivM sym arch (AssumptionFrame sym)
-    readConcrete (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz val end) = do
+ where
+   readConcrete ::
+     sym ->
+     MM.Memory (MM.ArchAddrWidth arch) ->
+     MT.MemOp sym (MM.ArchAddrWidth arch) ->
+     IO (AssumptionFrame sym)
+   readConcrete sym binmem (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz val end) = do
       case (W4.asNat reg, W4.asBV off, dir) of
         (Just 0, Just off', MT.Read) -> do
           let
@@ -126,8 +123,7 @@ validConcreteReads stOut = withSym $ \sym -> do
               return $ exprBinding bvval lit_val
             Nothing -> return $ mempty
         _ -> return $ mempty
-    readConcrete (MT.MergeOps _ seq1 seq2) = liftA2 (<>) (go seq1) (go seq2)
-  go (MT.memSeq $ simOutMem $ stOut)
+
 
 doStaticRead ::
   forall arch w .
