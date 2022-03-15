@@ -39,7 +39,7 @@ module Pate.Equivalence
   , getPostdomain
   , getPredomain
   , impliesPredomain
-  , impliesPostdomPred
+  , impliesPostdomainPred
   , memDomPre
   , stateEquivalence
   ) where
@@ -91,6 +91,30 @@ instance Semigroup EquivalenceStatus where
 
 instance Monoid EquivalenceStatus where
   mempty = Equivalent
+
+-- | An 'PED.EquivalenceDomain' that is closed under a symbolic machine state via
+-- 'SimSpec'.
+-- In general, a 'SimSpec' serves as a lambda abstraction over the variables representing
+-- the machine state in the subterms of any type (as defined by the term traversal
+-- in 'Pate.ExprMappable'). In essence, this represents a function from a 'SimState' to
+-- an 'PED.EquivalenceDomain' (applied via 'bindSpec').
+--
+-- The variables in a 'DomainSpec' are instantiated in two different contexts:
+--    1. When used as an *assumed* pre-domain, variables are instantiated to the initial *free*
+--       variables of the slice.
+--    2. When used as a *target* post-domain, variables are instantiated to terms representing
+--       the final values of the slice.
+-- For example: a domain could say @r1[r2_O != 0, r2_P > 2]@ (i.e. register @r1@ is in the domain if
+-- the value in @r2@ is nonzero in the original program and greater than two in the patched program).
+-- A slice contains two major components: a fully symbolic initial state (i.e. a 'SimInput') and
+-- a resulting final state (i.e. a 'SimOutput').
+-- Assume the slice under analysis simply assigns @1@ to @r2@ in both programs.
+--
+-- When instantiated as a pre-domain, we simply assign r2_O and r2_P to the free variables
+-- representing the initial state of the slice.
+-- When instantiated as a post-domain, we instantiate @r2_O@ and @r2_P@ to @1@, resulting in
+-- an 'PED.EquivalenceDomain' that looks like @r1[1 != 0, 1 > 2]@. Since this condition is false,
+-- @r1@ is excluded from the resulting instantiated domain.
 
 type DomainSpec sym arch = SimSpec sym arch (PED.EquivalenceDomain sym arch)
 
@@ -226,7 +250,7 @@ impliesPredomain sym stackRegion inO inP eqRel domAsm domConcl = do
   concl <- eqDomPre sym stackRegion inO inP eqRel domConcl
   W4.impliesPred sym asm concl
 
-impliesPostdomPred ::
+impliesPostdomainPred ::
   forall sym arch s st fs.
   sym ~ W4B.ExprBuilder s st fs =>
   PA.ValidArch arch =>
@@ -238,7 +262,7 @@ impliesPostdomPred ::
   -- | implies (i.e. weaker) post-condition
   DomainSpec sym arch ->
   IO (W4.Pred sym)  
-impliesPostdomPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
+impliesPostdomainPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
   (precondAsm, domAsm) <- bindSpec sym stO stP domAsmSpec
   (precondConcl, domConcl) <- bindSpec sym stO stP domConclSpec
   regImp <- allPreds sym =<< mapM (getReg domAsm) (PRt.assocs (PED.eqDomainRegisters domConcl))
@@ -265,10 +289,17 @@ impliesPostdomPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
       (Some (MM.ArchReg arch), W4.Pred sym) ->
       IO (W4.Pred sym)
     getReg domAsm (Some r, p) =
-      W4.impliesPred sym (PED.containsReg r domAsm) p
+      W4.impliesPred sym (PED.registerInDomain r domAsm) p
 
--- | Resolve a domain predicate and equivalence relation into a postcondition and associated
--- structured equivalence relation (for reporting counterexamples)
+-- | Compute a predicate which asserts equality on the post-state
+-- of the given 'SimBundle' with respect to the given 'PED.EquivalenceDomain'
+-- (i.e. assert that the resulting machine states are equal on every location
+-- covered by the domain).
+-- This predicate is intended to be proven, rather than assumed. See
+-- 'eqDomPre' for computing an assumed predicate from a pre-domain.
+-- 'EquivRelation' is intended to abstract away the exact equivalence relation
+-- used, however relations aside from exact equality are not well supported and
+-- this will likely be deprecated (see https://github.com/GaloisInc/pate/issues/213)
 getPostdomain ::
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
@@ -283,6 +314,7 @@ getPostdomain sym bundle eqRel stPred = do
 
 -- | Weaken an equivalence relation to be conditional on exactly this predicate.
 -- This is meant to be used for reporting only.
+-- To be deprecated: (see https://github.com/GaloisInc/pate/issues/213)
 weakenEquivRelation ::
   W4.IsExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
@@ -295,7 +327,7 @@ weakenEquivRelation ::
 weakenEquivRelation sym eqDom eqRel =
   let
     regsFn = RegEquivRelation $ \r v1 v2 ->
-      impM sym (return $ PED.containsReg r eqDom) $
+      impM sym (return $ PED.registerInDomain r eqDom) $
         applyRegEquivRelation (eqRelRegs eqRel) r v1 v2
     stackFn = MemEquivRelation $ \cell v1 v2 -> do
       impM sym (PEM.containsCell sym (PED.eqDomainStackMemory eqDom) cell) $
@@ -319,7 +351,7 @@ memDomPost ::
   IO (W4.Pred sym)
 memDomPost sym outO outP memEq memPred = do
   iteM sym (return $ (PEM.memDomainPolarity memPred))
-    (positiveMemDom sym stO stP memEq memPred) negativePolarity
+    (positiveMemCells sym stO stP memEq (PEM.memDomainPred memPred)) negativePolarity
   where
     stO = simOutState outO
     stP = simOutState outP
@@ -347,7 +379,11 @@ memDomPost sym outO outP memEq memPred = do
       footCells <- PEM.toList <$> PEM.fromFootPrints sym foot (W4.falsePred sym)
       foldr (\(Some cell, cond) -> andM sym (resolveCell cell cond)) (return $ W4.truePred sym) footCells
 
-positiveMemDom :: 
+-- | Compute a predicate that asserts that the two states are equivalent
+-- with respect to the given 'PEM.MemCellPred'.
+-- This is intended to be used for the 'PMC.MemCellPred' of a positive polarity 'PEM.MemoryDomain',
+-- as it simply asserts that the states are equal on each cell in the given 'PMC.MemCellPred'.
+positiveMemCells :: 
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
@@ -355,11 +391,11 @@ positiveMemDom ::
   SimState sym arch PBi.Original ->
   SimState sym arch PBi.Patched ->
   MemEquivRelation sym arch ->
-  PEM.MemoryDomain sym arch ->
+  PMC.MemCellPred sym arch ->
   IO (W4.Pred sym)
-positiveMemDom sym stO stP memEq memPred = do
+positiveMemCells sym stO stP memEq memPred = do
   let
-    memCells = PEM.toList memPred
+    memCells = PMC.predToList memPred
     resolveCellPos = resolveCellEquiv sym stO stP memEq
   foldr (\(Some cell, cond) -> andM sym (resolveCellPos cell cond)) (return $ W4.truePred sym) memCells
 
@@ -396,7 +432,7 @@ memDomPre ::
   IO (W4.Pred sym)
 memDomPre sym memEqRegion inO inP memEq memPred  = do
   iteM sym (return $ (PEM.memDomainPolarity memPred))
-    (positiveMemDom sym stO stP memEq memPred) negativePolarity
+    (positiveMemCells sym stO stP memEq (PEM.memDomainPred memPred)) negativePolarity
   where
     stO = simInState inO
     stP = simInState inP

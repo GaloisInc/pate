@@ -619,7 +619,7 @@ impliesPostcond ::
 impliesPostcond blocks stPredAsm stPredConcl = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   fmap specBody $ withFreshVars blocks $ \stO stP -> do
-    p <- liftIO $ impliesPostdomPred sym (PPa.PatchPair stO stP) stPredAsm stPredConcl
+    p <- liftIO $ impliesPostdomainPred sym (PPa.PatchPair stO stP) stPredAsm stPredConcl
     b <- isPredTrue' heuristicTimeout p
     return $ (W4.truePred sym, b)
 

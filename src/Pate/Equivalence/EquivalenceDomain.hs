@@ -10,7 +10,7 @@ module Pate.Equivalence.EquivalenceDomain (
   , RegisterDomain
   , mux
   , empty
-  , containsReg
+  , registerInDomain
   , universalRegDomain
   , emptyRegDomain
   , nontrivialRegs
@@ -105,12 +105,12 @@ mux sym p domT domF = case WI.asConstantPred p of
     mem <- PEM.mux sym p (eqDomainGlobalMemory domT) (eqDomainGlobalMemory domF)
     return $ EquivalenceDomain regs stack mem
 
-containsReg ::
+registerInDomain ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   MM.ArchReg arch tp ->
   EquivalenceDomain sym arch ->
   WI.Pred sym
-containsReg reg eqDom = getConst $ MM.getBoundValue reg (eqDomainRegisters eqDom)
+registerInDomain reg eqDom = getConst $ MM.getBoundValue reg (eqDomainRegisters eqDom)
 
 empty :: (MM.RegisterInfo (MM.ArchReg arch), PS.ValidSym sym) => sym -> EquivalenceDomain sym arch
 empty sym = EquivalenceDomain (emptyRegDomain sym) (PEM.empty sym) (PEM.empty sym)
