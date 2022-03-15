@@ -29,6 +29,7 @@ module Pate.Monad
   , withValidEnv
   , withSymIO
   , withSym
+  , withPair
   , archFuns
   , runInIO1
   , manifestError
@@ -78,6 +79,7 @@ module Pate.Monad
 
 import           GHC.Stack ( HasCallStack, callStack )
 
+import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
 import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
@@ -652,6 +654,16 @@ getFootprints bundle = withSym $ \sym -> do
   footO <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutO bundle)
   footP <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutP bundle)
   return $ S.union footO footP
+
+-- | Update 'envCurrentFunc' if the given pair
+withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
+withPair pPair f = do
+  env <- CMR.ask
+  let env' = env { envParentBlocks = pPair:envParentBlocks env }
+  case PB.concreteBlockEntry $ PPa.pOriginal pPair of
+    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
+    _ -> CMR.local (\_ -> env') f
+
 
 -- | Emit a trace event to the frontend
 --

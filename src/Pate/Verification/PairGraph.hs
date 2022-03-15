@@ -141,22 +141,23 @@ emptyPairGraph =
   , pairGraphWorklist = mempty
   }
 
-initializePairGraph ::
+initializePairGraph :: forall sym arch.
   [PPa.FunPair arch] ->
   EquivM sym arch (PairGraph sym arch)
 initializePairGraph = foldM initPair emptyPairGraph
   where
+    initPair :: PairGraph sym arch -> PPa.FunPair arch -> EquivM_ sym arch (PairGraph sym arch)
     initPair gr fnPair =
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
+         withPair bPair $ do
+           -- initial state of the pair graph: choose the universal domain that equates as much as possible
+           idom <- PVD.universalDomainSpec bPair
 
-         -- initial state of the pair graph: choose the universal domain that equates as much as possible
-         idom <- PVD.universalDomainSpec bPair
-
-         return
-           gr{ pairGraphDomains  = Map.insert bPair idom (pairGraphDomains gr)
-             , pairGraphWorklist = Set.insert bPair (pairGraphWorklist gr)
-             }
-
+           return
+             gr{ pairGraphDomains  = Map.insert bPair idom (pairGraphDomains gr)
+               , pairGraphWorklist = Set.insert bPair (pairGraphWorklist gr)
+               }
+ 
 chooseWorkItem ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
@@ -199,6 +200,8 @@ pairGraphComputeFixpoint gr =
   case chooseWorkItem gr of
     Nothing -> return gr
     Just (gr', bPair, d) ->
+      pairGraphComputeFixpoint =<<
+      (withPair bPair $
       do -- do the symbolic simulation
          (asm, bundle) <- mkSimBundle bPair d
 
@@ -222,11 +225,8 @@ pairGraphComputeFixpoint gr =
                ]
 
          -- Follow all the exit pairs we found
-         gr'' <- foldM (followExit asm bundle bPair d) gr' (zip [0 ..] exitPairs)
-
-         -- recurse until fixpoint
-         pairGraphComputeFixpoint gr''
-
+         foldM (followExit asm bundle bPair d) gr' (zip [0 ..] exitPairs)
+      )
 
 
 data TotalityResult

@@ -30,7 +30,7 @@ module Pate.Verification
 
 import qualified Control.Concurrent.Async as CCA
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Lens ( (&), (.~), view )
+import           Control.Lens ( view )
 import           Control.Monad ( void, unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -538,18 +538,6 @@ trivialGlobalMap = MS.GlobalMap $ \_ _ reg off -> pure (CLM.LLVMPointer reg off)
 --------------------------------------------------------
 -- Proving equivalence
 
--- | Update 'envCurrentFunc' if the given pair
-withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
-withPair pPair f = do
-  env <- CMR.ask
-  let env' = env { envParentBlocks = pPair:envParentBlocks env }
-  case PB.concreteBlockEntry $ PPa.pOriginal pPair of
-    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
-    _ -> CMR.local (\_ -> env') f
-
--- | Prove that the given equivalence domain holds when starting execution from the given
--- block pair. Returns a computed pre-domain that must be initially equivalent, in order
--- for the given post-domain to hold.
 provePostcondition ::
   HasCallStack =>
   PPa.BlockPair arch ->
