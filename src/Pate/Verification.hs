@@ -543,6 +543,9 @@ withPair pPair f = do
     PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
     _ -> CMR.local (\_ -> env') f
 
+-- | Prove that the given equivalence domain holds when starting execution from the given
+-- block pair. Returns a computed pre-domain that must be initially equivalent, in order
+-- for the given post-domain to hold.
 provePostcondition ::
   HasCallStack =>
   PPa.BlockPair arch ->

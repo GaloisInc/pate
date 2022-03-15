@@ -471,6 +471,9 @@ newtype MemRegionEquality sym arch =
         IO (W4.Pred sym)
     }
 
+-- | Compute a predicate that is true iff the two given states are equal
+-- (up to 'RegEquivRelation') on the given 'PER.RegisterDomain'.
+-- The 'RegEquivRelation' is currently always simple equality (see: https://github.com/GaloisInc/pate/issues/213)
 regDomRel ::
   forall sym arch.
   W4.IsExprBuilder sym =>
