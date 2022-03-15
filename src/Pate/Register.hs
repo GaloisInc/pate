@@ -8,11 +8,7 @@ module Pate.Register (
   , registerCase
   ) where
 
-import           Control.Lens ( (^.) )
-import           Control.Monad ( join )
-import           Data.Functor.Const ( Const(..) )
 import qualified Data.Parameterized.Classes as PC
-import qualified Data.Parameterized.Map as MapF
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -20,7 +16,6 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Parallel as PP
 
 -- | Helper for doing a case-analysis on registers
 data RegisterCase arch tp where

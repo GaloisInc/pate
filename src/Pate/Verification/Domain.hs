@@ -17,21 +17,16 @@ module Pate.Verification.Domain (
   , universalDomainSpec
   ) where
 
-import           Control.Lens ( (.~), (&) )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
-import qualified Data.Map as M
-import           Data.Maybe ( catMaybes )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Context as Ctx
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
 import           GHC.Stack ( HasCallStack )
 import qualified What4.BaseTypes as WT
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.Symbol as WS
 

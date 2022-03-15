@@ -15,7 +15,6 @@ module Pate.AArch32 (
 
 import           Control.Lens ( (^?), (^.) )
 import qualified Control.Lens as L
-import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
