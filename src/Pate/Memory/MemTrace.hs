@@ -9,6 +9,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
@@ -44,6 +45,7 @@ module Pate.Memory.MemTrace
 , UndefinedPtrOps(..)
 , MemOpCondition(..)
 , MemOp(..)
+, MacawSyscallModel(..)
 , memTraceIntrinsicTypes
 , initMemTrace
 , classifyExpr
@@ -58,7 +60,7 @@ module Pate.Memory.MemTrace
 
 import Unsafe.Coerce
 import           Control.Applicative
-import           Control.Lens ((%~), (&), (^.))
+import           Control.Lens ((%~), (&), (^.), (.~))
 import           Control.Monad.State
 import qualified Data.BitVector.Sized as BV
 import           Data.Map (Map)
@@ -93,18 +95,23 @@ import qualified Data.Parameterized.Map as MapF
 import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, IsSymBackend, HasSymInterface(..), assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
-import Lang.Crucible.FunctionHandle (HandleAllocator)
+import Lang.Crucible.FunctionHandle (HandleAllocator, mkHandle',insertHandleMap)
 import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer)
 import Lang.Crucible.Simulator.ExecutionTree
-         (CrucibleState, ExtensionImpl(..), actFrame, gpGlobals, stateSymInterface, stateTree, withBackend, stateContext)
+         ( CrucibleState, ExtensionImpl(..), actFrame, gpGlobals
+         , stateSymInterface, stateTree, withBackend, stateContext
+         , simHandleAllocator, functionBindings, FunctionBindings(..)
+         , FnState(..)
+         )
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
 import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..), IntrinsicTypes)
-import Lang.Crucible.Simulator.RegMap (RegEntry(..))
-import Lang.Crucible.Simulator.RegValue (RegValue)
+import Lang.Crucible.Simulator.OverrideSim (OverrideSim, mkOverride')
+import Lang.Crucible.Simulator.RegMap (RegEntry(..), FnVal)
+import Lang.Crucible.Simulator.RegValue (RegValue, FnVal(..))
 import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Simulator.SymSequence
-import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType,
-                            SymbolRepr, TypeRepr(BVRepr), knownSymbol)
+import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType, StructType,
+                            SymbolRepr, TypeRepr(..), knownSymbol)
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface
 
@@ -438,14 +445,15 @@ mkUndefinedPtrOps sym = do
 macawTraceExtensions ::
   (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn p sym (MemTrace arch) arch ->
+  MacawSyscallModel sym arch ->
   GlobalVar (MemTrace arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   UndefinedPtrOps sym ->
   ExtensionImpl p sym (MacawExt arch)
-macawTraceExtensions archStmtFn mvar globs undefptr =
+macawTraceExtensions archStmtFn syscallModel mvar globs undefptr =
   ExtensionImpl
     { extensionEval = \bak iTypes logFn cst g -> evalMacawExprExtensionTrace undefptr bak iTypes logFn cst g
-    , extensionExec = execMacawStmtExtension archStmtFn undefptr mvar globs
+    , extensionExec = execMacawStmtExtension archStmtFn undefptr syscallModel mvar globs
     }
 
 
@@ -597,10 +605,11 @@ execMacawStmtExtension ::
   forall p sym arch t st fs. (IsSymInterface sym, SymArchConstraints arch, sym ~ ExprBuilder t st fs) =>
   MacawArchEvalFn p sym (MemTrace arch) arch ->
   UndefinedPtrOps sym ->
+  MacawSyscallModel sym arch ->
   GlobalVar (MemTrace arch) ->
   GlobalMap sym (MemTrace arch) (ArchAddrWidth arch) ->
   MacawTraceEvalStmtFunc p sym arch
-execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
+execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar globs stmt
   = case stmt of
     MacawReadMem addrWidth memRepr addr
       -> liftToCrucibleState mvar $ \sym ->
@@ -627,8 +636,11 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
          off <- freshConstant sym (safeSymbol "macawFresh") (BaseBVRepr n)
          return $ LLVMPointer reg off
        _ -> error ( "MacawFreshSymbolic is unsupported in the trace memory model: " ++ show t)
-    MacawLookupFunctionHandle _typeReps _registers -> error "MacawLookupFunctionHandle is unsupported in the trace memory model"
-    MacawLookupSyscallHandle {} -> error "MacawLookupSyscallHandle is unsupported in the trace memory model"
+    MacawLookupFunctionHandle _typeReps _registers ->
+      error "MacawLookupFunctionHandle is unsupported in the trace memory model"
+
+    MacawLookupSyscallHandle argTys retTys _args ->
+      installMacawSyscallHandler argTys retTys syscallModel mvar
 
     MacawArchStmtExtension archStmt -> archStmtFn mvar globs archStmt
 
@@ -693,6 +705,38 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef mvar globs stmt
     PtrUExt w (RegEntry _ (LLVMPointer region offset)) -> readOnlyWithSym $ \sym -> do
       off' <- bvZext sym w offset
       pure (LLVMPointer region off')
+
+newtype MacawSyscallModel sym arch = MacawSyscallModel ()
+
+installMacawSyscallHandler ::
+  Assignment TypeRepr atps ->
+  Assignment TypeRepr rtps ->
+  MacawSyscallModel sym arch ->
+  GlobalVar (MemTrace arch) ->
+  CrucibleState p sym ext rtp blocks r ctx ->
+  IO (FnVal sym atps (StructType rtps), CrucibleState p sym ext rtp blocks r ctx)
+installMacawSyscallHandler atps rtps syscallModel mvar cst =
+  do let simCtx = cst^.stateContext
+     let halloc = simHandleAllocator simCtx
+     let nm = "MacawSyscall"
+     fnh <- mkHandle' halloc nm atps (StructRepr rtps)
+     let FnBindings fns = simCtx ^. functionBindings
+     let ovr  = mkOverride' nm (StructRepr rtps) (applySyscallModel atps rtps syscallModel mvar)
+     let fns' = FnBindings (insertHandleMap fnh (UseOverride ovr) fns)
+     return (HandleFnVal fnh, cst & stateContext . functionBindings .~ fns')
+
+applySyscallModel ::
+  Assignment TypeRepr atps ->
+  Assignment TypeRepr rtps ->
+  MacawSyscallModel sym arch ->
+  GlobalVar (MemTrace arch) ->
+  OverrideSim p sym ext r args (StructType rtps) (RegValue sym (StructType rtps))
+applySyscallModel atps rtps syscallModel mvar =
+  do fail $ unlines
+       [ "applySyscallModel: TODO"
+       , show atps
+       , show rtps
+       ]
 
 evalMacawExprExtensionTrace :: forall sym bak arch f tp p rtp blocks r ctx ext
                        .  IsSymBackend sym bak

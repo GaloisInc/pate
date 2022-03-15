@@ -204,7 +204,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
   let ?memOpts = CLM.laxPointerMemOptions
 
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
-  model <- CMT.lift (MT.mkMemTraceVar @arch ha)
+  mvar <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
   undefops <- liftIO $ MT.mkUndefinedPtrOps sym
 
@@ -238,7 +238,10 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
                 return (unpackedPairs upData)
 
   let
-    exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
+    -- TODO, something real here
+    syscallModel = MT.MacawSyscallModel ()
+
+    exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch) undefops
 
     ctxt = PMC.EquivalenceContext
       { PMC.handles = ha
@@ -258,7 +261,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envLLVMArchVals = llvmVals
       , envExtensions = exts
       , envPCRegion = pcRegion
-      , envMemTraceVar = model
+      , envMemTraceVar = mvar
       , envBlockEndVar = bvar
       , envLogger = logAction
       , envConfig = vcfg
