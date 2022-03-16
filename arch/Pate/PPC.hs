@@ -26,7 +26,6 @@ import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
-import qualified Data.Map.Strict as Map
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
@@ -43,6 +42,7 @@ import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.PPC as PPC
 import           Data.Macaw.PPC.PPCReg ()
 import           Data.Macaw.PPC.Symbolic ()
+import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MT
 import qualified Data.Word.Indexed as W
@@ -57,7 +57,8 @@ import qualified Pate.Binary as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.RegisterDomain as PER
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
@@ -182,40 +183,44 @@ display = PA.Normal <$> PC.showF
 gpr :: (1 <= SP.AddrWidth v) => Word8 -> PPC.PPCReg v (MT.BVType (SP.AddrWidth v))
 gpr = PPC.PPC_GP . PPC.GPR
 
-handleSystemCall :: (1 <= SP.AddrWidth v) => PVE.ExternalDomain PVE.SystemCall (PPC.AnyPPC v)
+handleSystemCall :: (1 <= SP.AddrWidth v, SP.KnownVariant v, MM.MemWidth (SP.AddrWidth v)) =>
+  PVE.ExternalDomain PVE.SystemCall (PPC.AnyPPC v)
 handleSystemCall = PVE.ExternalDomain $ \sym -> do
-  let regDomain = Map.fromList [ (Some (gpr 0), WI.truePred sym) -- syscall number
-                               , (Some (gpr 3), WI.truePred sym)
-                               , (Some (gpr 4), WI.truePred sym)
-                               , (Some (gpr 5), WI.truePred sym)
-                               , (Some (gpr 6), WI.truePred sym)
-                               , (Some (gpr 7), WI.truePred sym)
-                               , (Some (gpr 8), WI.truePred sym)
-                               , (Some (gpr 9), WI.truePred sym) -- FIXME: Only on PPC32
-                               ]
-  return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.universal sym
-                         , PES.predMem = PEM.universal sym
-                         }
+  let regDomain = PER.fromList $
+        [ (Some (gpr 0), WI.truePred sym) -- syscall number
+        , (Some (gpr 3), WI.truePred sym)
+        , (Some (gpr 4), WI.truePred sym)
+        , (Some (gpr 5), WI.truePred sym)
+        , (Some (gpr 6), WI.truePred sym)
+        , (Some (gpr 7), WI.truePred sym)
+        , (Some (gpr 8), WI.truePred sym)
+        , (Some (gpr 9), WI.truePred sym) -- FIXME: Only on PPC32
+        ]
+  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
+                                 , PED.eqDomainStackMemory = PEM.universal sym
+                                 , PED.eqDomainGlobalMemory = PEM.universal sym
+                                 }
 
 -- | PowerPC passes arguments in r3-r10
 --
 -- FIXME: This does not yet account for floating point registers
-handleExternalCall :: (1 <= SP.AddrWidth v) => PVE.ExternalDomain PVE.ExternalCall (PPC.AnyPPC v)
+handleExternalCall :: (1 <= SP.AddrWidth v, SP.KnownVariant v, MM.MemWidth (SP.AddrWidth v)) =>
+  PVE.ExternalDomain PVE.ExternalCall (PPC.AnyPPC v)
 handleExternalCall = PVE.ExternalDomain $ \sym -> do
-  let regDomain = Map.fromList [ (Some (gpr 3), WI.truePred sym)
-                               , (Some (gpr 4), WI.truePred sym)
-                               , (Some (gpr 5), WI.truePred sym)
-                               , (Some (gpr 6), WI.truePred sym)
-                               , (Some (gpr 7), WI.truePred sym)
-                               , (Some (gpr 8), WI.truePred sym)
-                               , (Some (gpr 9), WI.truePred sym)
-                               , (Some (gpr 10), WI.truePred sym)
-                               ]
-  return $ PES.StatePred { PES.predRegs = regDomain
-                         , PES.predStack = PEM.universal sym
-                         , PES.predMem = PEM.universal sym
-                         }
+  let regDomain = PER.fromList $
+        [ (Some (gpr 3), WI.truePred sym)
+        , (Some (gpr 4), WI.truePred sym)
+        , (Some (gpr 5), WI.truePred sym)
+        , (Some (gpr 6), WI.truePred sym)
+        , (Some (gpr 7), WI.truePred sym)
+        , (Some (gpr 8), WI.truePred sym)
+        , (Some (gpr 9), WI.truePred sym)
+        , (Some (gpr 10), WI.truePred sym)
+        ]
+  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
+                                 , PED.eqDomainStackMemory = PEM.universal sym
+                                 , PED.eqDomainGlobalMemory = PEM.universal sym
+                                 }
 
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined

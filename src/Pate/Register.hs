@@ -6,16 +6,9 @@
 module Pate.Register (
     RegisterCase(..)
   , registerCase
-  , zipRegStates
-  , zipRegStatesPar
-  , zipWithRegStatesM
   ) where
 
-import           Control.Lens ( (^.) )
-import           Control.Monad ( join )
-import           Data.Functor.Const ( Const(..) )
 import qualified Data.Parameterized.Classes as PC
-import qualified Data.Parameterized.Map as MapF
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -23,7 +16,6 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Parallel as PP
 
 -- | Helper for doing a case-analysis on registers
 data RegisterCase arch tp where
@@ -57,29 +49,3 @@ registerCase hdr repr r =
          True -> RegBV
          False -> RegGPtr
      | otherwise -> RegElse
-
-zipRegStatesPar :: PP.IsFuture m future
-                => MM.RegisterInfo r
-                => MM.RegState r f
-                -> MM.RegState r g
-                -> (forall u. r u -> f u -> g u -> m (future h))
-                -> m (future [h])
-zipRegStatesPar regs1 regs2 f = do
-  regs' <- MM.traverseRegsWith (\r v1 -> Const <$> f r v1 (regs2 ^. MM.boundValue r)) regs1
-  PP.promise $ mapM (\(MapF.Pair _ (Const v)) -> PP.joinFuture v) $ MapF.toList $ MM.regStateMap regs'
-
-zipRegStates :: Monad m
-             => MM.RegisterInfo r
-             => MM.RegState r f
-             -> MM.RegState r g
-             -> (forall u. r u -> f u -> g u -> m h)
-             -> m [h]
-zipRegStates regs1 regs2 f = join $ zipRegStatesPar regs1 regs2 (\r e1 e2 -> return $ f r e1 e2)
-
-zipWithRegStatesM :: Monad m
-                  => MM.RegisterInfo r
-                  => MM.RegState r f
-                  -> MM.RegState r g
-                  -> (forall u. r u -> f u -> g u -> m (h u))
-                  -> m (MM.RegState r h)
-zipWithRegStatesM regs1 regs2 f = MM.mkRegStateM (\r -> f r (regs1 ^. MM.boundValue r) (regs2 ^. MM.boundValue r))

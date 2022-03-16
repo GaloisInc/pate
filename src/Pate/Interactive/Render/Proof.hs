@@ -39,6 +39,8 @@ import qualified Pate.Arch as PAr
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.Ground as PG
 import qualified Pate.MemCell as PMC
@@ -213,9 +215,9 @@ renderProofRegisterDomain
      , MC.ArchConstraints arch
      )
   => Proxy sym
-  -> MapF.Pair (MC.ArchReg arch) (C.Const (WI.Pred sym))
+  -> (Some (MC.ArchReg arch), WI.Pred sym)
   -> Maybe (TP.UI TP.Element)
-renderProofRegisterDomain _ (MapF.Pair reg (C.Const predicate))
+renderProofRegisterDomain _ (Some reg, predicate)
   | Just False <- WI.asConstantPred predicate = Nothing
   | Just True <- WI.asConstantPred predicate = Just (TP.string (PC.showF reg))
   | otherwise = Just $ TP.row [ TP.string (PC.showF reg)
@@ -259,11 +261,11 @@ renderDomain
    . ( WI.IsSymExprBuilder sym
      , MC.ArchConstraints arch
      )
-  => PPr.EquivalenceDomain sym arch
+  => PED.EquivalenceDomain sym arch
   -> TP.UI TP.Element
-renderDomain (PPr.EquivalenceDomain regs stack mem) =
+renderDomain (PED.EquivalenceDomain regs stack mem) =
   TP.column [ TP.h4 #+ [TP.string "Registers"]
-            , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (MapF.toList (MC.regStateMap regs)))
+            , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (PER.toList regs))
             , TP.h4 #+ [TP.string "Stack Memory"]
             , text (ppPolarityDescription (PEM.memDomainPolarity stack))
             , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity stack)) (PEM.toList stack))
@@ -279,7 +281,7 @@ renderRegVal
   :: ( PAr.ValidArch arch
      , PG.IsGroundSym grnd
      )
-  => PPr.EquivalenceDomain grnd arch
+  => PED.EquivalenceDomain grnd arch
   -> MC.ArchReg arch tp
   -> PPr.BlockSliceRegOp grnd tp
   -> Maybe (PAr.RegisterDisplay (PP.Doc ()))
@@ -295,7 +297,7 @@ renderRegVal domain reg regOp =
     vals = fmap PFI.groundMacawValue $ PPr.slRegOpValues regOp
 
     ppDom =
-      case PFI.regInDomain domain reg of
+      case PFI.regInGroundDomain (PED.eqDomainRegisters domain) reg of
         True -> PP.emptyDoc
         False -> PP.pretty "| Excluded"
 
@@ -318,7 +320,7 @@ renderRegisterState
   :: ( PAr.ValidArch arch
      , PG.IsGroundSym grnd
      )
-  => PPr.EquivalenceDomain grnd arch
+  => PED.EquivalenceDomain grnd arch
   -> MC.RegState (MC.ArchReg arch) (PPr.BlockSliceRegOp grnd)
   -> TP.UI TP.Element
 renderRegisterState domain regs =
@@ -334,14 +336,14 @@ renderMemCellVal
   :: ( PAr.ValidArch arch
      , PG.IsGroundSym grnd
      )
-  => PPr.EquivalenceDomain grnd arch
+  => PED.EquivalenceDomain grnd arch
   -> PMC.MemCell grnd arch n
   -> PPr.BlockSliceMemOp grnd tp
   -> Maybe (PP.Doc a)
 renderMemCellVal domain cell memOp = do
   guard (PG.groundValue $ PPr.slMemOpCond memOp)
   let vals = fmap PFI.groundBV $ PPr.slMemOpValues memOp
-  let ppDom = case PFI.cellInDomain domain cell of
+  let ppDom = case PFI.cellInGroundDomain domain cell of
         True -> PP.emptyDoc
         False -> PP.pretty "| Excluded"
   let ppVals = case PG.groundValue $ PPr.slMemOpEquiv memOp of
@@ -353,7 +355,7 @@ renderMemoryState
   :: ( PAr.ValidArch arch
      , PG.IsGroundSym grnd
      )
-  => PPr.EquivalenceDomain grnd arch
+  => PED.EquivalenceDomain grnd arch
   -> MapF.MapF (PMC.MemCell grnd arch) (PPr.BlockSliceMemOp grnd)
   -> TP.UI TP.Element
 renderMemoryState domain cells =

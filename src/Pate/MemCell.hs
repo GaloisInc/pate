@@ -8,9 +8,11 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 module Pate.MemCell (
     MemCell(..)
+  , ppCell
   , setMemCellRegion
   , MemCellPred(..)
   , mergeMemCellPred
@@ -36,6 +38,8 @@ import           GHC.TypeLits ( type (<=) )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Backend (IsSymInterface)
 import qualified What4.Interface as WI
+
+import qualified Prettyprinter as PP
 
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
@@ -236,3 +240,8 @@ instance PEM.ExprMappable sym (MemCellPred sym arch) where
 
   foldExpr sym f (MemCellPred memPred) b =
     PEM.foldExpr sym f (Map.toList $ fmap (PEM.ToExprMappable @sym) memPred) b
+
+ppCell :: (WI.IsSymExprBuilder sym) => MemCell sym arch w -> PP.Doc a
+ppCell cell =
+  let CLM.LLVMPointer reg off = cellPtr cell
+  in WI.printSymNat reg <> "+" <> WI.printSymExpr off

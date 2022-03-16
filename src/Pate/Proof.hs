@@ -63,10 +63,8 @@ module Pate.Proof
   , withIneqResult
   , CondEquivalenceResult(..)
   , emptyCondEqResult
-  , EquivalenceDomain(..)
   ) where
 
-import           Control.Applicative
 import           Control.Monad.Identity
 import           Control.Monad.Writer.Strict as CMW
 import qualified Data.Kind as DK
@@ -88,12 +86,10 @@ import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
-import qualified Pate.SimState as PS
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.MemCell as PMC
@@ -118,10 +114,10 @@ data EquivTriple sym arch where
       eqPair :: PPa.BlockPair arch
       -- ^ the entry points that yield equivalent states on the post-domain
       -- after execution, assuming initially equivalent states on the pre-domain
-    , eqPreDomain :: PE.StatePredSpec sym arch
+    , eqPreDomain :: PE.DomainSpec sym arch
       -- ^ the pre-domain: the state that was assumed initially equivalent
       -- abstracted over the bound variables representing the initial state
-    , eqPostDomain :: PE.StatePredSpec sym arch
+    , eqPostDomain :: PE.DomainSpec sym arch
       -- ^ the post-domain: the state that was proven equivalent after execution
       -- abstracted over the bound variables representing the final state
     } -> EquivTriple sym arch
@@ -144,8 +140,8 @@ type ProofStatusType = 'ProofStatusType
 data InequivalenceResultSym arch sym where
   InequivalenceResultSym :: PA.ValidArch arch =>
     { ineqSlice :: BlockSliceTransition sym arch
-    , ineqPre :: EquivalenceDomain sym arch
-    , ineqPost :: EquivalenceDomain sym arch
+    , ineqPre :: PED.EquivalenceDomain sym arch
+    , ineqPost :: PED.EquivalenceDomain sym arch
     , ineqReason :: PEE.InequivalenceReason
     } -> InequivalenceResultSym arch sym
 
@@ -292,26 +288,8 @@ data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) 
   -- TODO: where does it make sense to manage the bound variables in domains?
   -- Since we're not consuming these at the moment it's not an issue, but this needs to
   -- be solved in order to unify 'StatePred', 'EquivalenceDomain' and 'ProofTriple' types
-  ProofDomain :: EquivalenceDomain sym arch -> ProofApp sym arch node ProofDomainType
+  ProofDomain :: PED.EquivalenceDomain sym arch -> ProofApp sym arch node ProofDomainType
   ProofStatus :: VerificationStatus sym arch -> ProofApp sym arch node ProofStatusType
-
--- | The domain of an equivalence problem: representing the state that is either
--- assumed (in a pre-domain) or proven (in a post-domain) to be equivalent.
-data EquivalenceDomain sym arch where
-  EquivalenceDomain ::
-    { -- | Each register is considered to be in this domain if the given predicate is true.
-      eqDomainRegisters :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym))
-      -- | The memory domain that is specific to stack variables.
-    , eqDomainStackMemory :: PEM.MemoryDomain sym arch
-      -- | The memory domain that is specific to non-stack (i.e. global) variables.
-    , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
-    }  -> EquivalenceDomain sym arch
-
-instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
-  mapExpr sym f (EquivalenceDomain a1 a2 a3) = EquivalenceDomain
-    <$> MM.traverseRegsWith (\_ (Const p) -> Const <$> f p) a1
-    <*> PEM.mapExpr sym f a2
-    <*> PEM.mapExpr sym f a3
 
 -- | Traverse the nodes of a 'ProofApp', changing the
 -- recursive 'node' type while leaving the leaves unchanged.
