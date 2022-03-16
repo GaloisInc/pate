@@ -67,11 +67,12 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
+import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.MemCell as PMc
 import qualified Pate.Monad.Context as PMC
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Statistics as PESt
-import qualified Pate.Equivalence.StatePred as PES
+import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 --import qualified Pate.Monad.Context as PMC
@@ -125,7 +126,7 @@ initialGas = Gas 5
 
 -- For now, the abstract domains we track are just exactly
 --  a "StatePredSpec", but we may change/add to this as we go
-type AbstractDomain sym arch = PE.StatePredSpec sym arch
+type AbstractDomain sym arch = PE.DomainSpec sym arch
 
 data PairGraph sym arch =
   PairGraph
@@ -287,7 +288,7 @@ checkTotality asm bundle preD exits =
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
        precond <- liftIO $ do
-         eqInputs <- PE.getPrecondition sym stackRegion bundle eqRel (PS.specBody preD)
+         eqInputs <- PE.getPredomain sym stackRegion bundle eqRel (PS.specBody preD)
          W4.andPred sym asm eqInputs
 
        -- compute the condition that leads to each of the computed
@@ -549,7 +550,7 @@ widenPostcondition bundle preD postD0 =
 
        precond <- liftIO $ do
          asm <- PS.getAssumedPred sym asmFrame
-         eqInputs <- PE.getPrecondition sym stackRegion bundle eqRel (PS.specBody preD)
+         eqInputs <- PE.getPredomain sym stackRegion bundle eqRel (PS.specBody preD)
          W4.andPred sym asm eqInputs
 
        -- traceBundle bundle "== widenPost: precondition =="
@@ -585,7 +586,7 @@ widenPostcondition bundle preD postD0 =
         (postCondAsm, postCondStatePred) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
 
         postcond <- liftIO $ do
-            eqPost <- PE.statePredPost sym
+            eqPost <- PE.eqDomPost sym
                               (PPa.pOriginal (PS.simOut bundle))
                               (PPa.pPatched  (PS.simOut bundle))
                               eqRel
@@ -640,7 +641,7 @@ widenUsingCounterexample ::
   SimBundle sym arch ->
   EquivRelation sym arch ->
   W4.Pred sym ->
-  PES.StatePred sym arch ->
+  PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
@@ -663,7 +664,7 @@ widenHeap ::
   SimBundle sym arch ->
   EquivRelation sym arch ->
   W4.Pred sym ->
-  PES.StatePred sym arch ->
+  PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
@@ -676,10 +677,10 @@ widenHeap sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
      else
        do -- TODO, this could maybe be less aggressive
           newCells <- PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
-          let heapDom = PEM.memDomainPred (PES.predMem (PS.specBody postD))
+          let heapDom = PEM.memDomainPred (PEE.eqDomainGlobalMemory (PS.specBody postD))
           heapDom' <- PMc.mergeMemCellPred sym heapDom newCells
-          let md' = (PES.predMem (PS.specBody postD)){ PEM.memDomainPred = heapDom' }
-          let pred' = (PS.specBody postD){ PES.predMem = md' }
+          let md' = (PEE.eqDomainGlobalMemory (PS.specBody postD)){ PEM.memDomainPred = heapDom' }
+          let pred' = (PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
           let postD' = postD{ PS.specBody = pred' }
           return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
 
@@ -691,7 +692,7 @@ widenStack ::
   SimBundle sym arch ->
   EquivRelation sym arch ->
   W4.Pred sym ->
-  PES.StatePred sym arch ->
+  PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
@@ -704,10 +705,10 @@ widenStack sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
      else
        do -- TODO, this could maybe be less aggressive
           newCells <- PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
-          let stackDom = PEM.memDomainPred (PES.predStack (PS.specBody postD))
+          let stackDom = PEM.memDomainPred (PEE.eqDomainStackMemory (PS.specBody postD))
           stackDom' <- PMc.mergeMemCellPred sym stackDom newCells
-          let md' = (PES.predStack (PS.specBody postD)){ PEM.memDomainPred = stackDom' }
-          let pred' = (PS.specBody postD){ PES.predStack = md' }
+          let md' = (PEE.eqDomainStackMemory (PS.specBody postD)){ PEM.memDomainPred = stackDom' }
+          let pred' = (PS.specBody postD){ PEE.eqDomainStackMemory = md' }
           let postD' = postD{ PS.specBody = pred' }
           return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
 
@@ -764,7 +765,7 @@ findUnequalHeapMemCells ::
   AbstractDomain sym arch ->
   IO [Some (PMc.MemCell sym arch)]
 findUnequalHeapMemCells sym evalFn bundle eqRel preD =
-  do let prestateHeapCells = PEM.toList (PES.predMem (PS.specBody preD))
+  do let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
@@ -783,7 +784,7 @@ findUnequalStackMemCells ::
   AbstractDomain sym arch ->
   IO [Some (PMc.MemCell sym arch)]
 findUnequalStackMemCells sym evalFn bundle eqRel preD =
-  do let prestateStackCells = PEM.toList (PES.predStack (PS.specBody preD))
+  do let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
@@ -800,7 +801,7 @@ widenRegisters ::
   SimBundle sym arch ->
   EquivRelation sym arch ->
   W4.Pred sym ->
-  PES.StatePred sym arch ->
+  PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
 widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD =
@@ -808,7 +809,7 @@ widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD =
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
      newRegs <- findUnequalRegs sym evalFn eqRel
-                   (PES.predRegs postCondStatePred)
+                   (PEE.eqDomainRegisters postCondStatePred)
                    (PS.simRegs oPostState)
                    (PS.simRegs pPostState)
 
@@ -816,11 +817,12 @@ widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD =
        return NoWideningRequired
      else
        -- TODO, widen less aggressively?
-       let regs' = foldl (\m r -> Map.delete r m)
-                     (PES.predRegs (PS.specBody postD))
+       let regs' = foldl
+                     (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
+                     (PEE.eqDomainRegisters (PS.specBody postD))
                      newRegs
            pred' = (PS.specBody postD)
-                   { PES.predRegs = regs'
+                   { PEE.eqDomainRegisters = regs'
                    }
            locs = WidenLocs (Set.fromList newRegs) mempty
         in return (Widen locs postD{ PS.specBody = pred' })
@@ -832,7 +834,7 @@ findUnequalRegs ::
   sym ->
   W4.GroundEvalFn t ->
   EquivRelation sym arch ->
-  Map (Some (MM.ArchReg arch)) (W4.Pred sym) ->
+  PER.RegisterDomain sym arch ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   IO [Some (MM.ArchReg arch)]
@@ -840,7 +842,7 @@ findUnequalRegs sym evalFn eqRel regPred oRegs pRegs =
   execWriterT $ MM.traverseRegsWith_
     (\regName oRegVal ->
          do let pRegVal = MM.getBoundValue regName pRegs
-            let pRegEq  = fromMaybe (W4.falsePred sym) (Map.lookup (Some regName) regPred)
+            let pRegEq  = PER.registerInDomain sym regName regPred
             regEq <- liftIO (W4.groundEval evalFn pRegEq)
             when regEq $
               do isEqPred <- liftIO (applyRegEquivRelation (PE.eqRelRegs eqRel) regName oRegVal pRegVal)

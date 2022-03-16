@@ -42,7 +42,7 @@ module Pate.Equivalence
   , impliesPostdomainPred
   , memDomPre
   , stateEquivalence
-  , statePredPost
+  , eqDomPost
   , resolveCellEquiv
   ) where
 
