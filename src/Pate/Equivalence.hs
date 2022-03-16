@@ -215,7 +215,14 @@ stateEquivalence hdr sym stackRegion =
         MT.llvmPtrEq sym vO vP
   in EquivRelation (registerEquivalence hdr sym) stackEq memEq
 
--- | Resolve a domain predicate and equivalence relation into a precondition
+-- | Resolve a domain predicate and equivalence relation into a precondition.
+-- This resulting predicate is a conjunction asserting that each location is
+-- initially equal in the given slice.
+-- This intended to be assumed true for the purposes of
+-- generating an equivalence problem.
+-- The 'EquivRelation' defines the relation that holds on each location in the initial
+-- machine state. Currently this is always exact equality, and can likely be
+-- deprecated (see: https://github.com/GaloisInc/pate/issues/213)
 getPredomain ::
   forall sym arch.
   IsSymInterface sym =>
@@ -312,7 +319,7 @@ getPostdomain sym bundle eqRel stPred = do
   post <- eqDomPost sym (simOutO bundle) (simOutP bundle) eqRel stPred
   return (weakenEquivRelation sym stPred eqRel, post)
 
--- | Weaken an equivalence relation to be conditional on exactly this predicate.
+-- | Weaken an equivalence relation to be conditional on exactly this domain.
 -- This is meant to be used for reporting only.
 -- To be deprecated: (see https://github.com/GaloisInc/pate/issues/213)
 weakenEquivRelation ::
