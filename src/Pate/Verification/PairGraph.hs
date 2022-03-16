@@ -26,6 +26,7 @@ import           Control.Monad.Reader (asks)
 import           Control.Monad.Writer (tell, execWriterT)
 import           Control.Monad.Except (runExceptT)
 import           Numeric (showHex)
+import           Prettyprinter
 
 import qualified Data.BitVector.Sized as BV
 import           Data.Maybe (fromMaybe)
@@ -39,7 +40,7 @@ import           Data.Word (Word32)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.Context as Ctx
+--import qualified Data.Parameterized.Context as Ctx
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -51,6 +52,7 @@ import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator.RegValue as LCS
+import           Lang.Crucible.Simulator.SymSequence
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -211,6 +213,8 @@ pairGraphComputeFixpoint gr =
          exitPairs <- PD.discoverPairs bundle
          traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
+         checkObservables asm bundle d
+
          -- Check the totality of the discovered pairs
          tot <- checkTotality asm bundle d exitPairs
          case tot of
@@ -227,6 +231,38 @@ pairGraphComputeFixpoint gr =
          -- Follow all the exit pairs we found
          foldM (followExit asm bundle bPair d) gr' (zip [0 ..] exitPairs)
       )
+
+
+checkObservables :: forall sym arch.
+  W4.Pred sym ->
+  SimBundle sym arch ->
+  AbstractDomain sym arch ->
+  EquivM sym arch ()
+checkObservables asm bundle preD =
+  withSym $ \sym ->
+    do let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
+       let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
+
+       oSeq <- liftIO (MT.observableEvents sym oMem)
+       pSeq <- liftIO (MT.observableEvents sym pMem)
+
+       traceBundle bundle $ unlines
+         [ "== original event trace =="
+         , show (prettySymSequence ppEvent oSeq)
+         ] 
+
+       traceBundle bundle $ unlines
+         [ "== patched event trace =="
+         , show (prettySymSequence ppEvent pSeq)
+         ]
+
+       -- TODO! actually check the equivalance of the observables
+
+
+-- TODO move into MemTrace and do it properly
+ppEvent :: LCB.IsSymInterface sym => MT.MemEvent sym ptrW -> Doc ann
+ppEvent (MT.MemOpEvent op)   = pretty "MemOp"
+ppEvent (MT.SyscallEvent ex) = pretty "SyscallEvent" <+> W4.printSymExpr ex
 
 
 data TotalityResult
@@ -365,6 +401,9 @@ triageBlockTarget asm bundle currBlock d gr (PPa.PatchPair blktO blktP) =
        case (PB.targetReturn blktO, PB.targetReturn blktP) of
          (Just blkRetO, Just blkRetP) ->
            do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
+
+              -- TODO, this isn't really correct.  Syscalls don't correspond to
+              -- "ArchTermStmt" in any meaningful way.
               isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
                  (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
                  (entryO, entryP) | entryO == entryP -> return False
@@ -524,6 +563,10 @@ widenPostcondition bundle preD postD0 =
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
 
+   -- TODO, we should probably have some way to bound the amout of times we can
+   --  recurse into the widening loop, or we really need to be very careful to
+   --  make sure that this kind of local widening will terminate in a reasonable
+   --  number of steps.
    widenLoop ::
      ( bak ~ LCBO.OnlineBackend solver t st fs
      , sym ~ W4.ExprBuilder t st fs

@@ -15,6 +15,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -40,11 +41,13 @@ module Pate.Memory.MemTrace
 , MemTraceK
 , traceFootprint
 , getReadOps
+, observableEvents
 , UndefPtrOpTag
 , UndefPtrOpTags
 , UndefinedPtrOps(..)
 , MemOpCondition(..)
 , MemOp(..)
+, MemEvent(..)
 , MacawSyscallModel(..)
 , memTraceIntrinsicTypes
 , initMemTrace
@@ -96,7 +99,7 @@ import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, IsSymBackend, HasSymInterface(..), assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator, mkHandle',insertHandleMap)
-import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer)
+import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, pattern LLVMPointerRepr)
 import Lang.Crucible.Simulator.ExecutionTree
          ( CrucibleState, ExtensionImpl(..), actFrame, gpGlobals
          , stateSymInterface, stateTree, withBackend, stateContext
@@ -105,13 +108,12 @@ import Lang.Crucible.Simulator.ExecutionTree
          )
 import Lang.Crucible.Simulator.GlobalState (insertGlobal, lookupGlobal)
 import Lang.Crucible.Simulator.Intrinsics (IntrinsicClass(..), IntrinsicMuxFn(..), IntrinsicTypes)
-import Lang.Crucible.Simulator.OverrideSim (OverrideSim, mkOverride')
-import Lang.Crucible.Simulator.RegMap (RegEntry(..), FnVal)
-import Lang.Crucible.Simulator.RegValue (RegValue, FnVal(..))
+import Lang.Crucible.Simulator.OverrideSim
+import Lang.Crucible.Simulator.RegMap (RegEntry(..), FnVal, RegMap(..))
+import Lang.Crucible.Simulator.RegValue (RegValue, FnVal(..), RegValue'(..) )
 import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Simulator.SymSequence
-import Lang.Crucible.Types ((::>), BoolType, BVType, EmptyCtx, IntrinsicType, SymbolicArrayType, StructType,
-                            SymbolRepr, TypeRepr(..), knownSymbol)
+import Lang.Crucible.Types
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface
 
@@ -522,6 +524,13 @@ instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
         (toOrdering $ compareF vo1 vo2) <>
         compare end1 end2
 
+data MemEvent sym ptrW where
+  MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
+  SyscallEvent :: forall sym ptrW w.
+    -- TODO, something more realistic
+    SymExpr sym (BaseBVType w) ->
+    MemEvent sym ptrW
+
 data MemTraceImpl sym ptrW = MemTraceImpl
   { memSeq :: MemTraceSeq sym ptrW
   -- ^ The sequence of memory operations in reverse execution order;
@@ -533,7 +542,7 @@ data MemTraceImpl sym ptrW = MemTraceImpl
 data MemTraceState sym ptrW = MemTraceState
   { memArr :: MemTraceArr sym ptrW }
 
-type MemTraceSeq sym ptrW = SymSequence sym (MemOp sym ptrW)
+type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
 type MemTraceArr sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
 
 type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
@@ -583,9 +592,9 @@ mkMemoryBinding memSrc memTgt =
   in MapF.singleton memSrcArr memTgtArr
 
 
-instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
+instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
   -- TODO: cover other cases with a TypeError
-  type Intrinsic (ExprBuilder t st fs) "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl (ExprBuilder t st fs) ptrW
+  type Intrinsic sym "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl sym ptrW
   muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
     memSeq' <- muxSymSequence sym p (memSeq t) (memSeq f)
     memArr' <- baseTypeIte sym p (memArr $ memState t) (memArr $ memState f)
@@ -593,7 +602,7 @@ instance IntrinsicClass (ExprBuilder t st fs) "memory_trace" where
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
-memTraceIntrinsicTypes :: IsSymInterface (ExprBuilder t st fs) => IntrinsicTypes (ExprBuilder t st fs)
+memTraceIntrinsicTypes :: IsSymInterface sym => IntrinsicTypes sym
 memTraceIntrinsicTypes = id
   . MapF.insert (knownSymbol :: SymbolRepr "memory_trace") IntrinsicMuxFn
   . MapF.insert (knownSymbol :: SymbolRepr "LLVM_pointer") IntrinsicMuxFn
@@ -709,6 +718,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
 newtype MacawSyscallModel sym arch = MacawSyscallModel ()
 
 installMacawSyscallHandler ::
+  IsSymInterface sym =>
   Assignment TypeRepr atps ->
   Assignment TypeRepr rtps ->
   MacawSyscallModel sym arch ->
@@ -721,22 +731,46 @@ installMacawSyscallHandler atps rtps syscallModel mvar cst =
      let nm = "MacawSyscall"
      fnh <- mkHandle' halloc nm atps (StructRepr rtps)
      let FnBindings fns = simCtx ^. functionBindings
-     let ovr  = mkOverride' nm (StructRepr rtps) (applySyscallModel atps rtps syscallModel mvar)
+     let ovr  = mkOverride' nm (StructRepr rtps) $
+                  do RegMap args <- getOverrideArgs
+                     applySyscallModel rtps args syscallModel mvar
      let fns' = FnBindings (insertHandleMap fnh (UseOverride ovr) fns)
      return (HandleFnVal fnh, cst & stateContext . functionBindings .~ fns')
 
 applySyscallModel ::
-  Assignment TypeRepr atps ->
+  IsSymInterface sym =>
   Assignment TypeRepr rtps ->
+  Assignment (RegEntry sym) atps ->
   MacawSyscallModel sym arch ->
   GlobalVar (MemTrace arch) ->
   OverrideSim p sym ext r args (StructType rtps) (RegValue sym (StructType rtps))
-applySyscallModel atps rtps syscallModel mvar =
+
+applySyscallModel
+  -- TODO, overspecialzed to ARM32
+  (Ctx.Empty :> LLVMPointerRepr w0 :>
+                LLVMPointerRepr w1)
+  (Ctx.Empty :> r0 :> r1 :> _r2 :> _r3 :> _r4 :> _r5 :> _r6 :> _r7)
+  _syscallModel
+  mvar
+   | Just Refl <- testEquality (regType r0) (LLVMPointerRepr w0)
+   , Just Refl <- testEquality (regType r1) (LLVMPointerRepr w1)
+   = do let (LLVMPointer blk off) = regValue r0
+        sym <- getSymInterface
+        do -- emit the syscall event
+           mem <- readGlobal mvar
+           seq' <- liftIO (consSymSequence sym (SyscallEvent off) (memSeq mem))
+           writeGlobal mvar mem{ memSeq = seq' }
+
+        -- return the registers r0 and r1 unchanged
+        return (Ctx.Empty :> RV (regValue r0) :> RV (regValue r1))
+
+applySyscallModel rtps args syscallModel mvar =
   do fail $ unlines
        [ "applySyscallModel: TODO"
-       , show atps
        , show rtps
        ]
+
+
 
 evalMacawExprExtensionTrace :: forall sym bak arch f tp p rtp blocks r ctx ext
                        .  IsSymBackend sym bak
@@ -1172,7 +1206,7 @@ doMemOpInternal sym dir cond ptrW = go where
       -> addrWidthsArePositive ptrW $ do
 
       do mem <- get
-         seq' <- liftIO (consSymSequence sym (MemOp ptr dir cond byteWidth regVal endianness) (memSeq mem))
+         seq' <- liftIO (consSymSequence sym (MemOpEvent (MemOp ptr dir cond byteWidth regVal endianness)) (memSeq mem))
          put mem{ memSeq = seq' }
 
       case dir of
@@ -1324,23 +1358,63 @@ traceFootprintMap ::
   OrdF (SymExpr sym) =>
   sym ->
   MemTraceSeq sym ptrW ->
-  IO (Const (Map (MemFootprint sym ptrW) (Pred sym)) (MemOp sym ptrW))
+  IO (Const (Map (MemFootprint sym ptrW) (Pred sym)) (MemEvent sym ptrW))
 traceFootprintMap sym =
   evalWithFreshCache $ \rec -> \case
     SymSequenceNil -> return (Const mempty)
-    SymSequenceCons _ x xs ->
+
+    SymSequenceCons _ (MemOpEvent x) xs ->
       do let (fp,p) = memOpFootprint sym x
          let m1 = Map.insert fp p mempty
          Const m2 <- rec xs
          Const <$> unionFootprintMap sym m1 m2
+    SymSequenceCons _ _ xs -> rec xs
+
     SymSequenceAppend _ xs ys ->
       do Const m1 <- rec xs
          Const m2 <- rec ys
          Const <$> unionFootprintMap sym m1 m2
+
     SymSequenceMerge _ p xs ys ->
       do Const m1 <- rec xs
          Const m2 <- rec ys
          Const <$> muxFootprintMap sym p m1 m2
+
+
+-- | Filter the memory event traces to leave just the observable
+--   events. For the moment, this simply discards all the
+--   @MemOp@ nodes and retains all the system call nodes.
+--
+--   We may make this more nuanced in the future by, e.g.,
+--   considering some memory operations observable (memory mapped I/O)
+--   or by considering some system calls nonobservable.
+observableEvents ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  IO (SymSequence sym (MemEvent sym ptrW))
+observableEvents sym mem = evalWithFreshCache f (memSeq mem)
+  where
+   -- filtering function
+   flt MemOpEvent{}   = False
+   flt SyscallEvent{} = True
+
+   f _rec SymSequenceNil = nilSymSequence sym
+
+   f rec (SymSequenceCons _ x xs)
+     | flt x     = consSymSequence sym x =<< rec xs
+     | otherwise = rec xs
+
+   f rec (SymSequenceAppend _ xs ys) =
+     do xs' <- rec xs
+        ys' <- rec ys
+        appendSymSequence sym xs' ys'
+
+   f rec (SymSequenceMerge _ p xs ys) =
+     do xs' <- rec xs
+        ys' <- rec ys
+        muxSymSequence sym p xs' ys'
 
 
 -- | Get an unordered collection of all the read memory operations
@@ -1359,7 +1433,7 @@ getReadOps _sym mem =
     SymSequenceCons _ x xs ->
       do Const s <- rec xs
          case x of
-           MemOp _ptr Read _ _ _ _ -> return (Const (Set.insert x s))
+           MemOpEvent op@(MemOp _ptr Read _ _ _ _) -> return (Const (Set.insert op s))
            _ -> return (Const s)
     SymSequenceAppend _ xs ys ->
       do Const s1 <- rec xs
@@ -1463,6 +1537,11 @@ instance PEM.ExprMappable sym (MemOp sym w) where
       val' <- WEH.mapExprPtr sym f val
       cond' <- PEM.mapExpr sym f cond
       return $ MemOp ptr' dir cond' w val' endian
+
+instance PEM.ExprMappable sym (MemEvent sym w) where
+  mapExpr sym f = \case
+    MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
+    SyscallEvent arg -> SyscallEvent <$> f arg
 
 instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do
