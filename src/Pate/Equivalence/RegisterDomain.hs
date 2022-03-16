@@ -6,6 +6,8 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE OverloadedStrings   #-}
 module Pate.Equivalence.RegisterDomain (
     RegisterDomain
   , mux
@@ -18,12 +20,14 @@ module Pate.Equivalence.RegisterDomain (
   , registerInDomain
   , registerInDomain'
   , traverseWithReg
+  , ppRegisterDomain
   ) where
 
 import           Control.Monad (  foldM )
 import           Data.Functor.Const
 import           Data.Maybe ( mapMaybe )
 import           Data.Parameterized.Some
+import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -32,6 +36,8 @@ import qualified Data.Map.Merge.Strict as Map
 import qualified What4.Interface as WI
 
 import qualified Data.Macaw.CFG as MM
+
+import qualified Prettyprinter as PP
 
 import qualified Pate.Solver as PS
 import qualified Pate.ExprMappable as PEM
@@ -182,3 +188,24 @@ registerInDomain sym reg dom = case registerInDomain' reg dom of
 instance PEM.ExprMappable sym (RegisterDomain sym arch) where
   mapExpr _sym f (RegisterDomain dom) = mkDomain <$> traverse f dom
   foldExpr _sym f (RegisterDomain dom) b = foldM (\b' p -> f p b') b (Map.elems dom)
+
+ppRegisterDomain ::
+  forall sym arch a.
+  ( MM.RegisterInfo (MM.ArchReg arch)
+  , WI.IsExprBuilder sym
+  , ShowF (MM.ArchReg arch)
+  ) =>
+  (WI.Pred sym -> PP.Doc a) ->
+  RegisterDomain sym arch ->
+  PP.Doc a
+ppRegisterDomain showCond dom = PP.vsep (map ppReg (toList dom))
+  where
+    ppReg :: (Some (MM.ArchReg arch), WI.Pred sym) -> PP.Doc a
+    ppReg (Some reg, p) = case WI.asConstantPred p of
+      Just True -> PP.pretty (showF reg)
+      _ -> PP.pretty (showF reg) <> PP.line <> (showCond p)
+
+instance
+  (MM.RegisterInfo (MM.ArchReg arch), WI.IsExprBuilder sym) =>
+  PP.Pretty (RegisterDomain sym arch) where
+  pretty = ppRegisterDomain WI.printSymExpr

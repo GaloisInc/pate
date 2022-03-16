@@ -106,10 +106,7 @@ ppInequivalencePreRegs ::
 ppInequivalencePreRegs gineq = PF.withIneqResult gineq $ \ineq ->
   show $ ppRegs (PF.ineqPre ineq) (PF.slRegState $ PF.slBlockPreState (PF.ineqSlice ineq))
 
-ppCell :: (PA.ValidArch arch, PSo.ValidSym sym) => PMC.MemCell sym arch w -> PP.Doc a
-ppCell cell =
-  let CLM.LLVMPointer reg off = PMC.cellPtr cell
-  in W4.printSymNat reg <> "+" <> PP.pretty (showF off)
+
 
 ppMaybe :: Maybe f -> (f ->  PP.Doc a) -> PP.Doc a
 ppMaybe (Just f) pp = pp f
@@ -230,27 +227,13 @@ instance forall sym arch.
   PP.Pretty (PED.EquivalenceDomain sym arch) where
   pretty prf = PP.vsep
     [ "Registers:"
-    , PP.indent 4 $ prettyRegs
+    , PP.indent 4 $ PER.ppRegisterDomain (\_ -> "Conditional") (PED.eqDomainRegisters prf)
     , "Stack Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PED.eqDomainStackMemory prf)
-    , PP.indent 4 $ prettyMem (PED.eqDomainStackMemory prf)
+    , PP.indent 4 $ PEM.ppMemoryDomainEntries (\_ -> "Conditional") (PED.eqDomainStackMemory prf)
     , "Global Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PED.eqDomainGlobalMemory prf)
-    , PP.indent 4 $ prettyMem (PED.eqDomainGlobalMemory prf)
+    , PP.indent 4 $ PEM.ppMemoryDomainEntries (\_ -> "Conditional") (PED.eqDomainGlobalMemory prf)
     ]
     where
-      prettyRegs = PP.vsep (map ppReg (PER.toList (PED.eqDomainRegisters prf)))
-
-      ppReg :: (Some (MM.ArchReg arch), W4.Pred sym) -> PP.Doc a
-      ppReg (Some reg, p) = case W4.asConstantPred p of
-        Just True -> PP.pretty (showF reg)
-        _ -> PP.pretty (showF reg) <> PP.line <> "Conditional"
-
-      prettyMem m = PP.vsep (map ppMem (PEM.toList m))
-
-      ppMem :: (Some (PMC.MemCell sym arch), W4.Pred sym) -> PP.Doc a
-      ppMem (Some cell, p) = case W4.asConstantPred p of
-        Just True -> ppCell cell
-        _ -> ppCell cell <> PP.line <> "Conditional"
-
       ppPolarity :: W4.Pred sym -> PP.Doc a
       ppPolarity p = case W4.asConstantPred p of
         Just True -> PP.parens "inclusive"

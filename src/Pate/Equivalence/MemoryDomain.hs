@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 module Pate.Equivalence.MemoryDomain (
     MemoryDomain(..)
@@ -21,6 +22,7 @@ module Pate.Equivalence.MemoryDomain (
   , addFootPrints
   , containsCell
   , mux
+  , ppMemoryDomainEntries
   ) where
 
 import           Control.Monad ( forM, join )
@@ -33,12 +35,14 @@ import qualified Data.Set as S
 import           GHC.TypeNats
 import qualified What4.Interface as W4
 
+import qualified Prettyprinter as PP
+
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Parallel as PP
+import qualified Pate.Parallel as Par
 
 ---------------------------------------------
 -- Memory domain
@@ -66,7 +70,7 @@ data MemoryDomain sym arch =
 -- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain', preserving its polarity. Predicates which are concretely false are dropped from in resulting internal 'PMC.MemCellPred' (this has no effect on the interpretation of the domain). Supports parallel traversal if the 'future' parameter is instantiated to 'Par.Future'.
 traverseWithCellPar ::
   forall sym arch m future.
-  PP.IsFuture m future =>
+  Par.IsFuture m future =>
   W4.IsExprBuilder sym =>
   MemoryDomain sym arch ->
   (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))) ->
@@ -77,8 +81,8 @@ traverseWithCellPar memDom f = do
     f' (Some cell@(PMC.MemCell{})) p = f cell p
   let PMC.MemCellPred predMap = memDomainPred memDom
   future_preds <- M.traverseWithKey f' predMap
-  PP.present $ do
-    preds <- PMC.MemCellPred <$> traverse PP.joinFuture future_preds
+  Par.present $ do
+    preds <- PMC.MemCellPred <$> traverse Par.joinFuture future_preds
     return $ MemoryDomain (PMC.dropTrivialCells preds) (memDomainPolarity memDom)
 
       
@@ -210,3 +214,22 @@ instance PEM.ExprMappable sym (MemoryDomain sym arch) where
 
   foldExpr sym f memDom b =
     PEM.foldExpr sym f (memDomainPred memDom) b >>= f (memDomainPolarity memDom)
+
+
+ppMemoryDomainEntries ::
+  forall sym arch a.
+  W4.IsSymExprBuilder sym =>
+  -- | Called when a cell is in the domain conditionally, with
+  -- a non-trivial condition
+  (W4.Pred sym -> PP.Doc a) ->
+  MemoryDomain sym arch ->
+  PP.Doc a
+ppMemoryDomainEntries showCond dom = PP.vsep (map ppMem $ toList dom)
+  where
+    ppMem :: (Some (PMC.MemCell sym arch), W4.Pred sym) -> PP.Doc a
+    ppMem (Some cell, p) = case W4.asConstantPred p of
+      Just True -> PMC.ppCell cell
+      _ -> PMC.ppCell cell <> PP.line <> (showCond p)
+
+instance W4.IsSymExprBuilder sym => PP.Pretty (MemoryDomain sym arch) where
+  pretty = ppMemoryDomainEntries W4.printSymExpr
