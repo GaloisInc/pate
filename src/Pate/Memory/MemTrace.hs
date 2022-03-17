@@ -715,6 +715,21 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
       off' <- bvZext sym w offset
       pure (LLVMPointer region off')
 
+-- | Currently this is only a dummy value, but the idea is that
+--   eventually this will specify the runtime behvior
+--   of system calls.  At a minimum, it should know how
+--   to transform the collection of intput registers into
+--   a collection of output registers and produce an
+--   observable event in the trace model (at whatever level of
+--   detail we deem appropriate). We should also
+--   have some approprate way to specify conservative
+--   assumptions about memory effects. The appropriate
+--   thing to do here may be architecture and platform
+--   dependent, which is why it is a parameter.
+--
+--   If we get more ambituous, the system call model may
+--   actually provide precise behavior modeling the action of
+--   the system call.
 newtype MacawSyscallModel sym arch = MacawSyscallModel ()
 
 installMacawSyscallHandler ::
@@ -746,7 +761,8 @@ applySyscallModel ::
   OverrideSim p sym ext r args (StructType rtps) (RegValue sym (StructType rtps))
 
 applySyscallModel
-  -- TODO, overspecialzed to ARM32
+  -- TODO, overspecialzed to ARM32, this should really be using the @MacawSyscallModel@,
+  -- when we figure out what those should look like.
   (Ctx.Empty :> LLVMPointerRepr w0 :>
                 LLVMPointerRepr w1)
   (Ctx.Empty :> r0 :> r1 :> _r2 :> _r3 :> _r4 :> _r5 :> _r6 :> _r7)
@@ -756,20 +772,17 @@ applySyscallModel
    , Just Refl <- testEquality (regType r1) (LLVMPointerRepr w1)
    = do let (LLVMPointer blk off) = regValue r0
         sym <- getSymInterface
-        do -- emit the syscall event
+        do -- emit a syscall event that just captures the offset value of the r0 register
            mem <- readGlobal mvar
            seq' <- liftIO (consSymSequence sym (SyscallEvent off) (memSeq mem))
            writeGlobal mvar mem{ memSeq = seq' }
 
-        -- return the registers r0 and r1 unchanged
+        -- return the registers r0 and r1 unchanged, assume we have no memory effects (!)
         return (Ctx.Empty :> RV (regValue r0) :> RV (regValue r1))
 
-applySyscallModel rtps args syscallModel mvar =
-  do fail $ unlines
-       [ "applySyscallModel: TODO"
-       , show rtps
-       ]
 
+applySyscallModel rtps args syscallModel mvar =
+  fail "applySyscallModel: TODO"
 
 
 evalMacawExprExtensionTrace :: forall sym bak arch f tp p rtp blocks r ctx ext
