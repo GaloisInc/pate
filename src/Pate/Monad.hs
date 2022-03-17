@@ -655,7 +655,7 @@ getFootprints bundle = withSym $ \sym -> do
   footP <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutP bundle)
   return $ S.union footO footP
 
--- | Update 'envCurrentFunc' if the given pair
+-- | Update 'envCurrentFunc' if the given pair is a function entry point
 withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
 withPair pPair f = do
   env <- CMR.ask

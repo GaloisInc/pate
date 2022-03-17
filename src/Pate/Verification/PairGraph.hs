@@ -96,7 +96,7 @@ runVerificationLoop ::
   forall sym arch.
   PA.ValidArch arch =>
   EquivEnv sym arch ->
-  -- | A list of block pairs to test for equivalence. They must be the entry points of a functions.
+  -- | A list of block pairs to test for equivalence. They must be the entry points of functions.
   [PPa.FunPair arch] ->
   IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
@@ -125,7 +125,7 @@ initialGas :: Gas
 initialGas = Gas 5
 
 -- For now, the abstract domains we track are just exactly
---  a "StatePredSpec", but we may change/add to this as we go
+--  a 'PE.DomainSpec', but we may change/add to this as we go
 type AbstractDomain sym arch = PE.DomainSpec sym arch
 
 data PairGraph sym arch =
