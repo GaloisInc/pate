@@ -109,6 +109,7 @@ data VerificationConfig =
 data VerificationMethod
   = HoareTripleVerification
   | StrongestPostVerification
+ deriving (Eq,Ord,Show)
 
 defaultVerificationCfg :: VerificationConfig
 defaultVerificationCfg =
