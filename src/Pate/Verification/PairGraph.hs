@@ -89,6 +89,14 @@ import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 
 
+-- | Gas is used to ensure that our fixpoint computation terminates
+--   in a reasonable amount of time.  Gas is expended each time
+--   we widen an abstract domain along a control flow path
+--   from some particular slice.  It is intended to only
+--   be used along loops or recursive cycles.  Right now,
+--   the amount of gas is set to a fairly small number (5)
+--   under the assumption that widening will stabalize
+--   either quickly or not at all.
 newtype Gas = Gas Word32
 
 
@@ -127,6 +135,7 @@ initialGas = Gas 5
 -- For now, the abstract domains we track are just exactly
 --  a 'PE.DomainSpec', but we may change/add to this as we go
 type AbstractDomain sym arch = PE.DomainSpec sym arch
+
 
 data PairGraph sym arch =
   PairGraph
