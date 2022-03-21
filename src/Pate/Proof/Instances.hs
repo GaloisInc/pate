@@ -58,7 +58,6 @@ import           Data.Proxy
 import           GHC.Natural
 import           Numeric
 
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
