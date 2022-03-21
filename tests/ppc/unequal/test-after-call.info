@@ -1,6 +1,0 @@
-PatchData { patchPairs = [ (0x10000170, 0x10000170)
-                         , (0x10000148, 0x10000148)
-                         ]
-          , ignorePointers = ([], [])
-          , equatedFunctions = []
-          }

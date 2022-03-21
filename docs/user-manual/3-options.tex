@@ -25,23 +25,22 @@ The full list of options supported by \TOOL{} is documented in this section.
 
 \subsection{Block Info Format}\label{sec:options:block-info}
 
-The \texttt{--blockinfo=FILE} argument enables users to provide extra information to the verifier to improve its results.  The file it requires has the following format:
+The \texttt{--blockinfo=FILE} argument enables users to provide extra information to the verifier to improve its results, or otherwise customize the approach the verifier takes to proving the safety of a patch.  The file is in the TOML format\footnote{\url{https://toml.io/en/v1.0.0}}, which is a key-value file much like JSON, but with support for comments.  Note that any of the top-level keys that are not required for a given binary may be elided.
 
 \begin{lstlisting}
-  PatchData { patchPairs = [(origEntryAddr, patchedEntryAddr)]
-            , ignoredPointers = ([(origDataAddr, origDataSize)]
-                               , [(patchedDataAddr, patchedDataSize)]
-                               )
-            , equatedFunctions = [(inlineOrigAddr, inlinePatchedAddr)]
-            }
+patch-pairs = [{ original-block-address = <ADDRESS>, patched-block-address = <ADDRESS> }, ...]
+ignore-original-allocations = [{ pointer-address = <ADDRESS>, blocks-size = <NATURAL> }, ... ]
+ignore-patched-allocations = [{ pointer-address = <ADDRESS>, blocks-size = <NATURAL> }, ... ]
+equated-functions = [{ original-function-address = <ADDRESS>, patched-function-address = <ADDRESS> }, ...]
 \end{lstlisting}
 
-where the values on the right-hand sides of the assignments are concrete values to be filled in.  Each field has the following meaning:
+Both addresses and block sizes can be specified in either decimal hexadecimal.  Each list can contain multiple records as needed.  The fields have the following meanings:
 
 \begin{description}[style=nextline]
-\item[\texttt{patchPairs}] A list of pairs of addresses. Each pair of addresses specifies function addresses in the original and patched binaries, respectively, that the user asserts to be equivalent. The first entry is used as the program entry point if the user has specified the \texttt{--ignoremain} option.  Otherwise, the analysis will start from the program entry points declared in the ELF header.
-\item[\texttt{ignoredPointers}] Together with the \texttt{equatedFunctions} field, this enables the inline callee functionality described in \cref{sec:inlining}. The elements of the pair are lists of memory regions whose contents should be ignored while verifying equivalence of two programs (specifically under the scope of a pair of equated functions). The first element of the pair are ignored memory regions for the original binary, while the second element are ignored memory regions for the patched binary. Precisely, each location specification is of the form \emph{(dataAddr, dataSize)}, where the \emph{dataAddr} is the address of a pointer that points to \emph{dataSize} bytes of memory. This is an important subtlety: it really refers to the address of a pointer, and the buffer referred to is the buffer at the address pointed to. This enables the inline callee feature to refer to dynamically allocated memory that does not have a fixed global memory location.
-\item[\texttt{equatedFunctions}] A list of pairs of function addresses that are intended to be equivalent for the purposes of the inline callee feature.
+\item[\texttt{patch-pairs}] A list of pairs of addresses. Each pair of addresses specifies function addresses in the original and patched binaries, respectively, that the user asserts to be equivalent. The first entry is used as the program entry point if the user has specified the \texttt{--ignoremain} option.  Otherwise, the analysis will start from the program entry points declared in the ELF header.
+\item[\texttt{ignore-original-allocations}] Together with the \texttt{equated-functions} field, this enables the inline callee functionality described in \cref{sec:inlining}. Each entry represents a memory region whose contents should be ignored while verifying equivalence of two programs (specifically under the scope of a pair of equated functions).  Precisely, the \emph{pointer-address} is the address of a pointer that points to \emph{blocks-size} bytes of memory. This is an important subtlety: it really refers to the address of a pointer, and the buffer referred to is the buffer at the address pointed to. This enables the inline callee feature to refer to dynamically allocated memory that does not have a fixed global memory location.
+\item[\texttt{ignore-patched-allocations}] This is the same as \texttt{ignore-original-allocations}, except that it specifies memory regions for the patched binary.
+\item[\texttt{equated-functions}] A list of (pairs of) function addresses that are intended to be equivalent for the purposes of the inline callee feature.
 \end{description}
 
 % \subsection{Logging Output}\label{sec:options:logging-output}
