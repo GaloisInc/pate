@@ -792,7 +792,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   -- we consider that to be equivalent to a return
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   isReturn <- do
-    bothReturn <- matchingExits bundle MS.MacawBlockEndReturn
+    bothReturn <- PD.matchingExits bundle MS.MacawBlockEndReturn
     abortO <- PAb.isAbortedStatePred (PPa.getPair @PBi.Original (simOut bundle))
     returnP <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) MS.MacawBlockEndReturn
     abortCase <- liftIO $ W4.andPred sym abortO returnP
@@ -811,9 +811,9 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   traceBundle bundle "Checking exits"
   -- an exit that was not classified
   isUnknown <- do
-    isJump <- matchingExits bundle MS.MacawBlockEndJump
-    isFail <- matchingExits bundle MS.MacawBlockEndFail
-    isBranch <- matchingExits bundle MS.MacawBlockEndBranch
+    isJump <- PD.matchingExits bundle MS.MacawBlockEndJump
+    isFail <- PD.matchingExits bundle MS.MacawBlockEndFail
+    isBranch <- PD.matchingExits bundle MS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
   traceBundle bundle "Checking unknown"
   precondUnknown <- withSatAssumption goalTimeout (return isUnknown) $ do
@@ -828,19 +828,39 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
     funCallProofs = map (\(_, (br, prf)) -> (branchBlocks br, prf)) funCallProofCases
     allPreconds = catMaybes [precondReturn,precondUnknown] ++ funCallCases
 
-  precond' <- F.foldrM (\(p, br) stPred -> liftIO $ PED.mux sym p (branchPreDomain br) stPred)  returnByDefault funCallCases
-
-  precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
-    PVSi.simplifySubPreds precond'
-
-  traceBundle bundle "Computing proof triple and ensuring that cases are total"
-  -- TODO: this needs to be reorganized to make the domain results actually lazy
   blockSlice <- PFO.simBundleToSlice bundle
-  triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
-    preDomain <- PFO.domainToProof precond
-    postDomain <- PFO.domainSpecToProof postcondSpec
-    status <- checkCasesTotal bundle preDomain allPreconds
-    return $ PF.ProofTriple (simPair bundle) preDomain postDomain status
+  postDomain <- PFO.domainSpecToProof postcondSpec
+
+  traceBundle bundle "Generating triple"
+  (precond, triple) <- case allPreconds of
+    -- In the case where no exits are found, but both programs call the same unknown function,
+    -- we treat this slice as an uninterpreted function call (propagating an external domain)
+    [] -> PD.isMatchingCall bundle >>= \case
+      True -> do
+        traceBundle bundle "No block exits found, treating slice as uninterpeted"
+        PA.SomeValidArch (PA.validArchFunctionDomain -> PVE.ExternalDomain externalDomain) <- CMR.asks envValidArch
+        preUniv <- externalDomain sym
+        PFO.lazyProofEvent (simPair bundle) $ do
+          preDomain <- PFO.domainToProof preUniv
+          status <- PFO.lazyProofApp $ PF.ProofStatus PF.Unverified
+          return $ (preUniv, PF.ProofTriple (simPair bundle) preDomain postDomain status)
+        -- at this point we have no recourse - no matching block exits have been found and we can't
+        -- prove that the slices call the same unknown function, and so this is undefined
+      False -> throwHere PEE.BlockEndClassificationFailure
+    -- Otherise, mux the preconditions of the branches to compute the final precondition
+    _ -> do
+      precond' <- F.foldrM (\(p, br) stPred -> liftIO $ PED.mux sym p (branchPreDomain br) stPred)  returnByDefault funCallCases
+
+      precond <- withAssumption_ (liftIO $ anyPred sym (map fst allPreconds)) $
+        PVSi.simplifySubPreds precond'
+
+      traceBundle bundle "Computing proof triple and ensuring that cases are total"
+      -- TODO: this needs to be reorganized to make the domain results actually lazy
+
+      PFO.lazyProofEvent (simPair bundle) $ do
+        preDomain <- PFO.domainToProof precond
+        status <- checkCasesTotal bundle preDomain allPreconds
+        return $ (precond, PF.ProofTriple (simPair bundle) preDomain postDomain status)
   let
     prf = PF.ProofBlockSlice
             { PF.prfBlockSliceTriple = triple
@@ -856,17 +876,6 @@ withNoFrameGuessing ::
 withNoFrameGuessing True f =
   CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = False} }) f
 withNoFrameGuessing False f = f
-
-
-matchingExits ::
-  forall sym arch.
-  SimBundle sym arch ->
-  MS.MacawBlockEndCase ->
-  EquivM sym arch (W4.Pred sym)
-matchingExits bundle ecase = withSym $ \sym -> do
-  case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutO bundle) ecase
-  case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) ecase
-  liftIO $ W4.andPred sym case1 case2
 
 
 -- | Prove a local postcondition (i.e. it must hold when the slice exits) for a pair of slices
