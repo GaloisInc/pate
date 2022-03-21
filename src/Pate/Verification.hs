@@ -966,7 +966,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
                           traceBundle bundle "proveLocalPostcondition->getInequivalenceResult"
                           ir <- PFC.getInequivalenceResult PEE.InvalidPostState (PVD.universalDomain sym) postDomain' blockSlice fn
                           traceBundle bundle "proveLocalPostcondition->getEquivalenceResult"
-                          cr <- getCondEquivalenceResult bundle cond'' fn
+                          cr' <- getCondEquivalenceResult bundle cond'' fn
+                          cr <- applyCurrentFrame cr'
                           traceBundle bundle ("conditionalEquivalenceResult: " ++ show (W4.printSymExpr (PF.condEqPred cr)))
                           return $ PF.VerificationFail ir cr
                         W4R.Unsat _ -> return $ status
