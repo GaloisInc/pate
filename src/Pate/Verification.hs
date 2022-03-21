@@ -30,7 +30,7 @@ module Pate.Verification
 
 import qualified Control.Concurrent.Async as CCA
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Lens ( (&), (.~), view )
+import           Control.Lens ( view )
 import           Control.Monad ( void, unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
@@ -104,6 +104,7 @@ import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
+import qualified Pate.Verification.PairGraph as PPG
 import           What4.ExprHelpers
 
 -- | Run code discovery using macaw
@@ -203,7 +204,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
   let ?memOpts = CLM.laxPointerMemOptions
 
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
-  model <- CMT.lift (MT.mkMemTraceVar @arch ha)
+  mvar <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
   undefops <- liftIO $ MT.mkUndefinedPtrOps sym
 
@@ -237,7 +238,10 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
                 return (unpackedPairs upData)
 
   let
-    exts = MT.macawTraceExtensions eval model (trivialGlobalMap @_ @arch) undefops
+    -- TODO, something real here
+    syscallModel = MT.MacawSyscallModel ()
+
+    exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch) undefops
 
     ctxt = PMC.EquivalenceContext
       { PMC.handles = ha
@@ -257,7 +261,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envLLVMArchVals = llvmVals
       , envExtensions = exts
       , envPCRegion = pcRegion
-      , envMemTraceVar = model
+      , envMemTraceVar = mvar
       , envBlockEndVar = bvar
       , envLogger = logAction
       , envConfig = vcfg
@@ -285,7 +289,10 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
   -- override so that they cover both statically linked and dynamically-linked
   -- function calls.
   liftIO $ do
-    (result, stats) <- runVerificationLoop env pPairs'
+    (result, stats) <-
+      case PC.cfgVerificationMethod vcfg of
+        PC.HoareTripleVerification   -> runVerificationLoop env pPairs'
+        PC.StrongestPostVerification -> PPG.runVerificationLoop env pPairs'
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
@@ -534,18 +541,6 @@ trivialGlobalMap = MS.GlobalMap $ \_ _ reg off -> pure (CLM.LLVMPointer reg off)
 --------------------------------------------------------
 -- Proving equivalence
 
--- | Update 'envCurrentFunc' if the given pair
-withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
-withPair pPair f = do
-  env <- CMR.ask
-  let env' = env { envParentBlocks = pPair:envParentBlocks env }
-  case PB.concreteBlockEntry $ PPa.pOriginal pPair of
-    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
-    _ -> CMR.local (\_ -> env') f
-
--- | Prove that the given equivalence domain holds when starting execution from the given
--- block pair. Returns a computed pre-domain that must be initially equivalent, in order
--- for the given post-domain to hold.
 provePostcondition ::
   HasCallStack =>
   PPa.BlockPair arch ->
@@ -680,20 +675,6 @@ trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec
     pPair :: PPa.BlockPair arch
     pPair = TF.fmapF simInBlock in_
 
--- | Returns 'True' if the equated function pair (specified by address) matches
--- the current call target
-matchEquatedAddress
-  :: PPa.BlockPair arch
-  -- ^ Addresses of the call targets in the original and patched binaries (in
-  -- the 'proveLocalPostcondition' loop)
-  -> (PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)
-  -- ^ Equated function pair
-  -> Bool
-matchEquatedAddress pPair (origAddr, patchedAddr) =
-  and [ origAddr == PB.concreteAddress (PPa.pOriginal pPair)
-      , patchedAddr == PB.concreteAddress (PPa.pPatched pPair)
-      ]
-
 -- | Prove that a postcondition holds for a function pair starting at
 -- this address. The return result is the computed pre-domain, tupled with a lazy
 -- proof result that, once evaluated, represents the proof tree that verifies
@@ -733,7 +714,7 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
 
             -- Now figure out how to handle the callee
             ctx <- view PME.envCtxL
-            let isEquatedCallSite = any (matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+            let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
             (funCallPre, funCallSlicePrf) <-
               if | isSyscall -> fmap unzipProof $ withFreshVars pPair $ \_stO _stP -> do

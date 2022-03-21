@@ -49,12 +49,13 @@ withOnlineSolver
   -- ^ The continuation where the online solver connection is active
   -> m a
 withOnlineSolver solver mif sym k = do
+  sym' <- liftIO $ WE.exprBuilderSplitConfig sym
   case solver of
-    CVC4 -> CBO.withCVC4OnlineBackend sym CBO.NoUnsatFeatures probFeatures
+    CVC4 -> CBO.withCVC4OnlineBackend sym' CBO.NoUnsatFeatures probFeatures
                   (\bak -> installSolverInteraction mif >> k bak)
-    Yices -> CBO.withYicesOnlineBackend sym CBO.NoUnsatFeatures probFeatures
+    Yices -> CBO.withYicesOnlineBackend sym' CBO.NoUnsatFeatures probFeatures
                   (\bak -> installSolverInteraction mif >> k bak)
-    Z3 -> CBO.withZ3OnlineBackend sym CBO.NoUnsatFeatures probFeatures
+    Z3 -> CBO.withZ3OnlineBackend sym' CBO.NoUnsatFeatures probFeatures
                   (\bak -> installSolverInteraction mif >> k bak)
 
   where
