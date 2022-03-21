@@ -16,6 +16,8 @@ module Pate.Discovery (
   getBlocks,
   getBlocks',
   matchesBlockTarget,
+  matchingExits,
+  isMatchingCall,
   concreteToLLVM
   ) where
 
@@ -139,6 +141,36 @@ discoverPairs bundle = do
       return joined
   where
     pPair = PSS.simPair bundle
+
+matchingExits ::
+  forall sym arch.
+  SimBundle sym arch ->
+  MS.MacawBlockEndCase ->
+  EquivM sym arch (WI.Pred sym)
+matchingExits bundle ecase = withSym $ \sym -> do
+  case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutO bundle) ecase
+  case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutP bundle) ecase
+  liftIO $ WI.andPred sym case1 case2
+
+-- | True when both the patched and original program necessarily end with
+-- a call to the same function, assuming exact initial equivalence.
+isMatchingCall ::
+  forall sym arch.
+  SimBundle sym arch ->
+  EquivM sym arch Bool
+isMatchingCall bundle = withSym $ \sym -> do
+  eqIPs <- liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue ipO) (PSR.macawRegValue ipP)
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  -- TODO: Why are some of the calls being classified as Arch exits?
+  isCall <- matchingExits bundle MS.MacawBlockEndCall
+  isArch <- matchingExits bundle MS.MacawBlockEndArch
+  isExpectedExit <- liftIO $ WI.orPred sym isArch isCall
+  goal <- liftIO $ WI.andPred sym eqIPs isExpectedExit
+  withAssumption_ (exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)) $
+    isPredTrue' goalTimeout goal
+  where
+    ipO = (PSS.simOutRegs $ PSS.simOutO bundle) ^. MC.curIP
+    ipP = (PSS.simOutRegs $ PSS.simOutP bundle) ^. MC.curIP
 
 -- | True for a pair of original and patched block targets that represent a valid pair of
 -- jumps
@@ -313,7 +345,6 @@ concreteValueAddress = \case
     _ -> []
   _ -> []
   -- TODO ^ is this complete?
-
 
 concreteJumpTargets ::
   forall sym bin arch ids.

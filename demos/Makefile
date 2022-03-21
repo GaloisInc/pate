@@ -57,11 +57,14 @@ challenge02-self: challenge02/challenge-02.original.exe challenge02/challenge-02
                                 --patched challenge02/challenge-02.original.exe
 
 .PHONY: challenge03
-challenge03: challenge03/challenge03.original.exe challenge03/challenge03.patched.exe
+challenge03: challenge03-variant/challenge03.orig.exe challenge03-variant/challenge03.patched.exe challenge03-variant/challenge03.info
 	cabal v2-run exe:pate -- \
-		                       --original challenge03/challenge03.original.exe \
-							   --patched challenge03/challenge03.patched.exe \
-							   --blockinfo challenge03/challenge03.info \
+		                       --original $(word 1,$^) \
+							   --patched $(word 2,$^) \
+							   --blockinfo $(word 3,$^) \
+							   --log-file challenge03.out \
+							   --verbosity Debug \
+							   --noproofs \
 							   --ignoremain
 
 .PHONY: abort
