@@ -53,12 +53,11 @@ module Pate.Proof.Instances
 import           Control.Lens hiding ( op, pre )
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.Kind as DK
-import           Data.Maybe
-import           Data.Proxy
-import           GHC.Natural
-import           Numeric
+import           Data.Maybe ( mapMaybe, catMaybes )
+import           Data.Proxy ( Proxy(..) )
+import           Numeric ( showHex )
+import           Numeric.Natural ( Natural )
 
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes

@@ -44,10 +44,6 @@ import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 
-import           Data.Functor.Const
-import           Data.Map ( Map )
-import qualified Data.Map as Map
-
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
@@ -59,7 +55,6 @@ import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
 
-import qualified Pate.Arch as PA
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -68,16 +63,13 @@ import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
-import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
-import qualified Pate.Register as PR
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Solver as PSo
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
