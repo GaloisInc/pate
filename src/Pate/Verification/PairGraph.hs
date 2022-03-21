@@ -19,7 +19,7 @@ module Pate.Verification.PairGraph
   ) where
 
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Lens ( view, (^.), _1 )
+import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, when, forM, forM_, unless)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
@@ -53,6 +53,7 @@ import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator.RegValue as LCS
 import           Lang.Crucible.Simulator.SymSequence
+import qualified Lang.Crucible.Utils.MuxTree as MT
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -341,22 +342,45 @@ checkTotality asm bundle preD exits =
                        let oBlockEnd = PS.simOutBlockEnd (PPa.pOriginal (PS.simOut bundle))
                        let pBlockEnd = PS.simOutBlockEnd (PPa.pPatched  (PS.simOut bundle))
 
-                       -- Ugh, gross
-                       q1 <- W4.groundEval evalFn (LCS.unRV (oBlockEnd ^. _1))
-                       let oBlockEndCase :: MS.MacawBlockEndCase = toEnum . fromInteger . BV.asUnsigned $ q1
-                       q2 <- W4.groundEval evalFn @(W4.BaseBVType 3) (LCS.unRV (pBlockEnd ^. _1))
-                       let pBlockEndCase :: MS.MacawBlockEndCase = toEnum . fromInteger . BV.asUnsigned $ q2
+                       oBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn oBlockEnd
+                       pBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn pBlockEnd
 
-                       -- Also gross
-                       case PSR.macawRegRepr oIPReg of
-                         CLM.LLVMPointerRepr _w | CLM.LLVMPointer _ obv <- (PSR.macawRegValue oIPReg) ->
-                           case PSR.macawRegRepr pIPReg of
-                             CLM.LLVMPointerRepr _w | CLM.LLVMPointer _ pbv <- (PSR.macawRegValue pIPReg) ->
-                               do oIPVal <- BV.asUnsigned <$> W4.groundEval evalFn obv
-                                  pIPVal <- BV.asUnsigned <$> W4.groundEval evalFn pbv
-                                  return (TotalityCounterexample (oIPVal,oBlockEndCase) (pIPVal,pBlockEndCase))
-                             res -> return (TotalityCheckingError ("IP register had unexpected type: " ++ show res))
-                         res -> return (TotalityCheckingError ("IP register had unexpected type: " ++ show res))
+                       oIPV <- groundIPValue sym evalFn oIPReg
+                       pIPV <- groundIPValue sym evalFn pIPReg
+
+                       case (oIPV, pIPV) of
+                         (Just oval, Just pval) ->
+                            return (TotalityCounterexample (oval,oBlockEndCase) (pval,pBlockEndCase))
+                         (Nothing, _) -> 
+                           return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr oIPReg)))
+                         (_, Nothing) -> 
+                           return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr pIPReg)))
+
+groundIPValue ::
+  (sym ~ W4.ExprBuilder t st fs, LCB.IsSymInterface sym) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  PSR.MacawRegEntry sym tp ->
+  IO (Maybe Integer)
+groundIPValue sym evalFn reg =
+  case PSR.macawRegRepr reg of
+    CLM.LLVMPointerRepr _w | CLM.LLVMPointer _ bv <- (PSR.macawRegValue reg)
+      -> Just . BV.asUnsigned <$> W4.groundEval evalFn bv
+    _ -> return Nothing
+
+groundBlockEndCase ::
+  (sym ~ W4.ExprBuilder t st fs, LCB.IsSymInterface sym) =>
+  sym ->
+  Proxy arch ->
+  W4.GroundEvalFn t ->
+  LCS.RegValue sym (MS.MacawBlockEndType arch) ->
+  IO MS.MacawBlockEndCase
+groundBlockEndCase sym prx evalFn v =
+  do mt <- MS.blockEndCase prx sym v
+     let ite p x y =
+           do b <- W4.groundEval evalFn p
+              if b then return x else return y
+     MT.collapseMuxTree sym ite mt
 
 
 matchingExits ::
@@ -368,7 +392,6 @@ matchingExits bundle ecase = withSym $ \sym -> do
   case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutO bundle) ecase
   case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) ecase
   liftIO $ W4.andPred sym case1 case2
-
 
 
 followExit ::
