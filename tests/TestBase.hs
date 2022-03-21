@@ -98,7 +98,7 @@ doTest ::
   FilePath ->
   IO ()
 doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
-  infoCfgExists <- doesFileExist (fp <.> "info")
+  infoCfgExists <- doesFileExist (fp <.> "toml")
   (logsRef :: IOR.IORef [String]) <- IOR.newIORef []
 
   let
@@ -110,7 +110,7 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
       logs <- IOR.readIORef logsRef
       T.assertFailure (msg ++ "\n" ++ (intercalate "\n" (reverse logs)))
 
-    infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PC.noPatchData
+    infoPath = if infoCfgExists then Left $ fp <.> "toml" else Right PC.noPatchData
     -- avoid frame computations for self-tests
     computeFrames = case mwb of
       Just _ -> False

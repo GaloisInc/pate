@@ -1,20 +1,28 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Pate.Config (
-  Hex(..),
-  BlockData,
-  FunctionAddr,
   PatchData(..),
+  BlockAlignment(..),
+  Address(..),
+  Allocation(..),
+  EquatedFunction(..),
   noPatchData,
+  parsePatchConfig,
   RunConfig(..),
   VerificationConfig(..),
   VerificationMethod(..),
   defaultVerificationCfg
   ) where
 
-import           Data.Word ( Word64 )
-
+import qualified Control.Monad.Except as CME
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as DTE
+import qualified Data.Text.Encoding.Error as DTEE
 import qualified Lumberjack as LJ
+import           Numeric.Natural ( Natural )
 import           Text.Printf ( PrintfArg, printf )
+import qualified Toml
+import           Toml ( (.=) )
 
 import qualified Pate.Arch as PA
 import qualified Pate.Event as PE
@@ -22,21 +30,59 @@ import qualified Pate.Hints as PH
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
 
-newtype Hex a = Hex a
+-- | A newtype wrapper for a number representing an address
+--
+-- This is primarily to provide nice rendering as a hex value when printed, but
+-- also as useful documentation. These are abstract user-provided addresses that
+-- still need to be mapped to macaw/crucible addresses before they are used.
+newtype Address = Address { addressAsWord :: Natural }
   deriving (Eq, Ord, Num, PrintfArg)
 
-instance (Num a, Show a, PrintfArg a) => Show (Hex a) where
-  show (Hex a) = printf "0x%x" a
+instance Show Address where
+  show (Address w) = printf "0x%x" w
 
-instance (Read a) => Read (Hex a) where
-  readsPrec i s = [ (Hex a, s') | (a, s') <- readsPrec i s ]
+-- | A pair of addresses that helps the verifier align two basic blocks that
+-- might otherwise seem unrelated
+data BlockAlignment =
+  BlockAlignment { originalBlockStart :: Address, patchedBlockStart :: Address }
+  deriving (Show)
 
-type BlockData = Hex Word64
-type FunctionAddr = Hex Word64
+blockAlignmentCodec :: Toml.TomlCodec BlockAlignment
+blockAlignmentCodec = BlockAlignment
+  <$> Toml.diwrap (Toml.natural "original-block-address") .= originalBlockStart
+  <*> Toml.diwrap (Toml.natural "patched-block-address") .= patchedBlockStart
+
+-- | A descriptor for an allocation for use with the "ignore pointers"
+-- functionality in the inline callee feature
+--
+-- Note that it is likely that we will want to extend this type with additional
+-- allocation types (e.g., ones where the memory address is known directly,
+-- rather than indirectly through the address of a pointer)
+data Allocation =
+  GlobalPointerAllocation { pointerAddress :: Address, blockSize :: Natural }
+  deriving (Show)
+
+allocationCodec :: Toml.TomlCodec Allocation
+allocationCodec = GlobalPointerAllocation
+  <$> Toml.diwrap (Toml.natural "pointer-address") .= pointerAddress
+  <*> Toml.natural "block-size" .= blockSize
+
+data EquatedFunction =
+  EquatedFunction { originalEquatedFunction :: Address, patchedEquatedFunction :: Address }
+  deriving (Show)
+
+equatedFunctionCodec :: Toml.TomlCodec EquatedFunction
+equatedFunctionCodec = EquatedFunction
+  <$> Toml.diwrap (Toml.natural "original-function-address") .= originalEquatedFunction
+  <*> Toml.diwrap (Toml.natural "patched-function-address") .= patchedEquatedFunction
 
 data PatchData =
-  PatchData { patchPairs :: [(BlockData, BlockData)]
-            , ignorePointers :: ([(BlockData,Hex Word64)],[(BlockData,Hex Word64)])
+  PatchData { patchPairs :: [BlockAlignment]
+            -- ^ Hints to align pairs of basic blocks in cases where they do not
+            -- align in a way discoverable by the verifier.
+            --
+            -- This is most commonly used to specify custom entry points
+            , ignoreOriginalAllocations :: [Allocation]
             -- ^ For the original and patched program, each may come with a list of
             --   "ignorable" pointers.  Each pair in the list consists of a location
             --   and a length.  The locations refer to positions in the global memory
@@ -46,8 +92,9 @@ data PatchData =
             --   do not result in equivalence failures. Note that this is an _indirect_
             --   notion of ignorability; the locations specified here are themselves
             --   are not ignored, but rather the memory to which they point.
+            , ignorePatchedAllocations :: [Allocation]
 
-            , equatedFunctions :: [(FunctionAddr, FunctionAddr)]
+            , equatedFunctions :: [EquatedFunction]
             -- ^ Pairs of functions (named by their address) that should be
             -- considered to be equivalent, even if they actually have different
             -- effects. This is intended to work with the 'ignorePointers'
@@ -62,11 +109,35 @@ data PatchData =
             -- See the documentation on the function replacement verification
             -- feature.
             }
-  deriving (Read, Show, Eq)
+  deriving (Show)
+
+patchDataCodec :: Toml.TomlCodec PatchData
+patchDataCodec = PatchData
+  <$> Toml.list blockAlignmentCodec "patch-pairs" .= patchPairs
+  <*> Toml.list allocationCodec "ignore-original-allocations" .= ignoreOriginalAllocations
+  <*> Toml.list allocationCodec "ignore-patched-allocations" .= ignorePatchedAllocations
+  <*> Toml.list equatedFunctionCodec "equated-functions" .= equatedFunctions
+
+data PatchDataParseError = UnicodeError DTEE.UnicodeException
+                         | TOMLError [Toml.TomlDecodeError]
+  deriving (Show)
+
+liftExcept :: (a -> e) -> Either a b -> CME.Except e b
+liftExcept injectExn e =
+  case e of
+    Left a -> CME.throwError (injectExn a)
+    Right b -> return b
+
+parsePatchConfig :: BS.ByteString -> Either PatchDataParseError PatchData
+parsePatchConfig bs = CME.runExcept $ do
+  txt <- liftExcept UnicodeError (DTE.decodeUtf8' bs)
+  liftExcept TOMLError (Toml.decode patchDataCodec txt)
+
 
 noPatchData :: PatchData
 noPatchData = PatchData { patchPairs = []
-                        , ignorePointers = ([],[])
+                        , ignoreOriginalAllocations = []
+                        , ignorePatchedAllocations = []
                         , equatedFunctions = []
                         }
 

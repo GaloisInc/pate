@@ -304,9 +304,9 @@ unpackBlockData ::
   PBi.KnownBinary bin =>
   PA.ValidArch arch =>
   PMC.BinaryContext arch bin ->
-  PC.BlockData ->
+  PC.Address ->
   CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
-unpackBlockData ctxt (PC.Hex w) =
+unpackBlockData ctxt (PC.Address w) =
   case PM.resolveAbsoluteAddress mem (fromIntegral w) of
     Just segAddr ->
       -- We don't include a symbol for this entry point because we don't really
@@ -319,7 +319,7 @@ unpackBlockData ctxt (PC.Hex w) =
     Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack caddr))
   where
     mem = MBL.memoryImage (PMC.binary ctxt)
-    caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord w))
+    caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
 
 data UnpackedPatchData arch =
   UnpackedPatchData { unpackedPairs :: [PPa.FunPair arch]
@@ -334,21 +334,21 @@ unpackPatchData ::
   PPa.PatchPair (PMC.BinaryContext arch) ->
   PC.PatchData ->
   CME.ExceptT (PEE.EquivalenceError arch) IO (UnpackedPatchData arch)
-unpackPatchData contexts (PC.PatchData pairs (oIgn,pIgn) eqFuncs) =
+unpackPatchData contexts pd =
    do pairs' <-
-         DT.forM pairs $ \(bd, bd') ->
+         DT.forM (PC.patchPairs pd) $ \(PC.BlockAlignment { PC.originalBlockStart = bd, PC.patchedBlockStart = bd' }) ->
             PPa.PatchPair
               <$> unpackBlockData (PPa.pOriginal contexts) bd
               <*> unpackBlockData (PPa.pPatched contexts) bd'
 
-      let f (PC.Hex w) = PAd.memAddrToAddr . MM.absoluteAddr . MM.memWord $ w
-      let g (PC.Hex loc, PC.Hex len) = (MM.memWord loc, toInteger len)
+      let f (PC.Address w) = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
+      let g (PC.GlobalPointerAllocation { PC.pointerAddress = PC.Address loc, PC.blockSize = len}) = (MM.memWord (fromIntegral loc), toInteger len)
 
-      let oIgn' = map g oIgn
-      let pIgn' = map g pIgn
+      let oIgn' = map g (PC.ignoreOriginalAllocations pd)
+      let pIgn' = map g (PC.ignorePatchedAllocations pd)
 
-      let eqFuncs' = [ (f o, f p)
-                     | (o, p) <- eqFuncs
+      let eqFuncs' = [ (f (PC.originalEquatedFunction eqf), f (PC.patchedEquatedFunction eqf))
+                     | eqf <- PC.equatedFunctions pd
                      ]
 
       return UnpackedPatchData { unpackedPairs = pairs'

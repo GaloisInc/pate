@@ -15,9 +15,9 @@ where
 
 import qualified Control.Monad.Except as CME
 
+import qualified Data.ByteString as BS
 import           Data.Proxy ( Proxy(..) )
 import qualified Lumberjack as LJ
-import           Text.Read ( readMaybe )
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
@@ -59,23 +59,27 @@ runSelfEquivConfig :: forall arch bin.
   IO PEq.EquivalenceStatus
 runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
-    Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
-      Nothing -> CME.throwError "Bad patch info file"
-      Just r -> return r
+    Left fp -> do
+      bytes <- CME.lift $ BS.readFile fp
+      case PC.parsePatchConfig bytes of
+        Left e -> CME.throwError ("Bad patch info file: " ++ show e)
+        Right r -> return r
     Right r -> return r
   let
-    swapPair :: forall a. (a, a) -> (a, a)
-    swapPair (a1, a2) = case wb of
-      PB.OriginalRepr -> (a1, a1)
-      PB.PatchedRepr -> (a2, a2)
+    swapPair (PC.BlockAlignment { PC.originalBlockStart = obs, PC.patchedBlockStart = pbs }) = case wb of
+      PB.OriginalRepr -> PC.BlockAlignment obs obs
+      PB.PatchedRepr -> PC.BlockAlignment pbs pbs
     path :: String = case wb of
       PB.OriginalRepr -> PC.origPath cfg
       PB.PatchedRepr -> PC.patchedPath cfg
     pairs' = map swapPair $ PC.patchPairs patchData
-    (oIgn, _pIgn) = PC.ignorePointers patchData
+    -- Note that we ignore the patched ignore list because this is a
+    -- self-comparison of the original binary for diagnostic purposes
+    oIgn = PC.ignoreOriginalAllocations patchData
     patchData' = PC.PatchData
       { PC.patchPairs = pairs'
-      , PC.ignorePointers = (oIgn, oIgn)
+      , PC.ignoreOriginalAllocations = oIgn
+      , PC.ignorePatchedAllocations = oIgn
       , PC.equatedFunctions = PC.equatedFunctions patchData
       }
   PA.SomeValidArch {} <- return $ PC.archProxy cfg
@@ -88,9 +92,11 @@ runEquivConfig :: forall arch.
   IO PEq.EquivalenceStatus
 runEquivConfig cfg = liftToEquivStatus $ do
   patchData <- case PC.infoPath cfg of
-    Left fp -> CME.lift (readMaybe <$> readFile fp) >>= \case
-      Nothing -> CME.throwError "Bad patch info file"
-      Just r -> return r
+    Left fp -> do
+      bytes <- CME.lift $ BS.readFile fp
+      case PC.parsePatchConfig bytes of
+        Left err -> CME.throwError ("Bad patch info file: " ++ show err)
+        Right r -> return r
     Right r -> return r
   PA.SomeValidArch {} <- return $ PC.archProxy cfg
   original <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.origPath cfg)

@@ -1,0 +1,3 @@
+patch-pairs = [ { original-block-address = 0x10000170, patched-block-address = 0x10000170 }
+              , { original-block-address = 0x10000148, patched-block-address = 0x10000148 }
+              ]
