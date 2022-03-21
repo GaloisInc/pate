@@ -307,13 +307,13 @@ checkTotality asm bundle preD exits =
                   PD.matchesBlockTarget bundle oBlkt pBlkt
 
        isUnknown <- do
-         isJump <- matchingExits bundle MS.MacawBlockEndJump
-         isFail <- matchingExits bundle MS.MacawBlockEndFail
-         isBranch <- matchingExits bundle MS.MacawBlockEndBranch
+         isJump <- PD.matchingExits bundle MS.MacawBlockEndJump
+         isFail <- PD.matchingExits bundle MS.MacawBlockEndFail
+         isBranch <- PD.matchingExits bundle MS.MacawBlockEndBranch
          liftIO (W4.orPred sym isJump =<< W4.orPred sym isFail isBranch)
 
        isReturn <- do
-         bothReturn <- matchingExits bundle MS.MacawBlockEndReturn
+         bothReturn <- PD.matchingExits bundle MS.MacawBlockEndReturn
          abortO <- PAb.isAbortedStatePred (PPa.getPair @PBi.Original (simOut bundle))
          returnP <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) MS.MacawBlockEndReturn
          abortCase <- liftIO $ W4.andPred sym abortO returnP
@@ -382,16 +382,6 @@ groundBlockEndCase sym prx evalFn v =
               if b then return x else return y
      MT.collapseMuxTree sym ite mt
 
-
-matchingExits ::
-  forall sym arch.
-  SimBundle sym arch ->
-  MS.MacawBlockEndCase ->
-  EquivM sym arch (W4.Pred sym)
-matchingExits bundle ecase = withSym $ \sym -> do
-  case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutO bundle) ecase
-  case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) ecase
-  liftIO $ W4.andPred sym case1 case2
 
 
 followExit ::
