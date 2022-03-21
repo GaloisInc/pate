@@ -12,7 +12,6 @@ import           Control.Monad ( guard )
 import qualified Data.Aeson as JSON
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
-import qualified Data.Functor.Const as C
 import qualified Data.HashMap.Strict as HMS
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.List as DL
