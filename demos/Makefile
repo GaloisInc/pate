@@ -63,6 +63,8 @@ challenge03: challenge03-variant/challenge03.orig.exe challenge03-variant/challe
 							   --patched $(word 2,$^) \
 							   --blockinfo $(word 3,$^) \
 							   --log-file challenge03.out \
+							   --verbosity Debug \
+							   --noproofs \
 							   --ignoremain
 
 .PHONY: abort
