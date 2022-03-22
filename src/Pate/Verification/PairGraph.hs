@@ -157,9 +157,9 @@ emptyPairGraph =
 initializePairGraph :: forall sym arch.
   [PPa.FunPair arch] ->
   EquivM sym arch (PairGraph sym arch)
-initializePairGraph = foldM initPair emptyPairGraph
+initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
   where
-    initPair :: PairGraph sym arch -> PPa.FunPair arch -> EquivM_ sym arch (PairGraph sym arch)
+    initPair :: PairGraph sym arch -> PPa.FunPair arch -> EquivM sym arch (PairGraph sym arch)
     initPair gr fnPair =
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
@@ -170,7 +170,7 @@ initializePairGraph = foldM initPair emptyPairGraph
              gr{ pairGraphDomains  = Map.insert bPair idom (pairGraphDomains gr)
                , pairGraphWorklist = Set.insert bPair (pairGraphWorklist gr)
                }
- 
+
 chooseWorkItem ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
@@ -213,7 +213,7 @@ pairGraphComputeFixpoint gr =
   case chooseWorkItem gr of
     Nothing -> return gr
     Just (gr', bPair, d) ->
-      pairGraphComputeFixpoint =<<
+      (\x -> pairGraphComputeFixpoint x) =<<
       (withPair bPair $
       do -- do the symbolic simulation
          (asm, bundle) <- mkSimBundle bPair d
@@ -240,7 +240,7 @@ pairGraphComputeFixpoint gr =
                ]
 
          -- Follow all the exit pairs we found
-         foldM (followExit asm bundle bPair d) gr' (zip [0 ..] exitPairs)
+         foldM (\x y -> followExit asm bundle bPair d x y) gr' (zip [0 ..] exitPairs)
       )
 
 
