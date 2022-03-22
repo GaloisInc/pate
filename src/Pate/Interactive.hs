@@ -14,7 +14,7 @@ module Pate.Interactive (
 import qualified Control.Concurrent as CC
 import           Control.Lens ( (^.), (%~), (&), (.~) )
 import qualified Control.Lens as L
-import           Control.Monad ( void )
+import           Control.Monad ( void, when )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Data.ByteString as BS
 import qualified Data.FileEmbed as DFE
@@ -83,12 +83,14 @@ consumeEvents chan r0 verb = do
   case mEvt of
     Nothing -> return ()
     Just evt -> do
-      case evt of
+      changed <- case evt of
         PE.LoadedBinaries oelf pelf -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & originalBinary .~ Just oelf
                                                           & patchedBinary .~ Just pelf, ())
-        PE.ElfLoaderWarnings {} ->
+          return True
+        PE.ElfLoaderWarnings {} -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
+          return True
         PE.CheckedEquivalence bpair@(PPa.PatchPair (PE.Blocks _ blk _) _) res duration -> do
           let
             addr = PB.concreteAddress blk
@@ -103,20 +105,28 @@ consumeEvents chan r0 verb = do
             PE.Inequivalent model ->
               IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & failure %~ Map.insert addr (Failure model et)
                                                               & recentEvents %~ addRecent recentEventCount evt, ())
-        PE.ProofIntermediate blockPair proofNode time ->
+          return True
+        PE.ProofIntermediate blockPair proofNode time -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> ( s & recentEvents %~ addRecent recentEventCount evt
                                                            & proofTree %~ addProofTreeNode blockPair proofNode time
                                                        , ()
                                                        )
-        PE.ProvenGoal {} ->
+          return True
+        PE.ProvenGoal {} -> do
           IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & recentEvents %~ addRecent recentEventCount evt, ())
-        _ -> return ()
+          return True
+        PE.AnalysisEnd {} -> return True
+        PE.FunctionsDiscoveredFromHints {} -> return True
+        PE.FunctionEntryInvalidHints {} -> return True
+        _ -> return False
 
-      -- Collect any metrics that we can from the event stream
-      IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & metrics %~ PM.summarize evt, ())
+      -- When an event requires updating the interface:
+      when changed $ do
+        -- Collect any metrics that we can from the event stream
+        IOR.atomicModifyIORef' (stateRef r0) $ \s -> (s & metrics %~ PM.summarize evt, ())
 
-      -- Notify the UI that we got a new result
-      stateChangeEmitter r0 ()
+        -- Notify the UI that we got a new result
+        stateChangeEmitter r0 ()
       consumeEvents chan r0 verb
 
 recentEventCount :: Int

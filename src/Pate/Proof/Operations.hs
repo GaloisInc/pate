@@ -13,6 +13,8 @@ Functions for creating and operating with equivalence proofs
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.Proof.Operations
   ( simBundleToSlice
@@ -42,7 +44,6 @@ module Pate.Proof.Operations
 
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
-import qualified Control.Monad.IO.Unlift as IO
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Map as MapF
@@ -194,7 +195,6 @@ data LazyProof sym arch tp where
       lazyProofNonce :: PF.ProofNonce sym tp
     , lazyProofParent :: Some (PF.ProofNonce sym)
     , lazyProofBody :: LazyProofBody sym arch tp
-    , lazyProofFinalize :: PF.ProofNonceExpr sym arch tp -> IO ()
     } -> LazyProof sym arch tp
 
 
@@ -224,9 +224,13 @@ mkLazyProof f fin = do
   parentNonce <- CMR.asks envParentNonce
   withProofNonce $ \nonce -> startTimer $ do
     (a, body) <- f
-    -- capture the monadic context here when evaluating the final action
-    IO.withRunInIO $ \runInIO ->
-      return $ (a, LazyProof nonce parentNonce body (\e -> runInIO $ fin e))  
+    let prf = LazyProof nonce parentNonce body
+    -- start a forked thread that joins the proof and emits a finalization action when
+    -- the proof is completed
+    (_ :: Par.Future ()) <- Par.promise $ do
+      joined <- joinLazyProof prf
+      fin joined
+    return $ (a, prf)
 
 -- | Create a lazy proof node by evaluating the given function immediately
 lazyProof ::
@@ -270,7 +274,7 @@ lazyProofEvent_ ppair f = snd <$> lazyProofEvent ppair (f >>= \a -> return ((), 
 asLazyProof ::
   PF.ProofNonceExpr sym arch tp -> LazyProof sym arch tp
 asLazyProof e =
-  LazyProof (PF.prfNonce e) (PF.prfParent e) (asLazyProofApp (PF.prfNonceBody e)) (\_ -> return ())
+  LazyProof (PF.prfNonce e) (PF.prfParent e) (asLazyProofApp (PF.prfNonceBody e))
 
 asLazyProofApp ::
   PF.ProofNonceApp sym arch tp -> LazyProofBody sym arch tp
@@ -323,7 +327,6 @@ joinLazyProof prf = withValid $ do
     LazyProofBodyApp app -> joinLazyProofApp app
     LazyProofBodyFuture future -> Par.joinFuture future
   let nonce_prf = PF.ProofNonceExpr (lazyProofNonce prf) (lazyProofParent prf) app
-  liftIO $ lazyProofFinalize prf nonce_prf
   return nonce_prf
 
 lazyProofAtom :: LazyProof sym arch tp -> EquivM sym arch (PF.ProofApp sym arch (PF.ProofNonceExpr sym arch) tp)
