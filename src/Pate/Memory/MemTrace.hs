@@ -59,6 +59,9 @@ module Pate.Memory.MemTrace
 , memEqOutsideRegion
 , memEqAtRegion
 , memEqExact
+, prettyMemOp
+, prettyMemEvent
+, prettyMemTraceSeq
 ) where
 
 import Unsafe.Coerce
@@ -74,6 +77,7 @@ import           Data.IORef
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           GHC.TypeNats (KnownNat, type Nat)
+import           Prettyprinter
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -99,7 +103,7 @@ import Data.Text (pack)
 import Lang.Crucible.Backend (IsSymInterface, IsSymBackend, HasSymInterface(..), assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator, mkHandle',insertHandleMap)
-import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, pattern LLVMPointerRepr)
+import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, pattern LLVMPointerRepr, ppPtr)
 import Lang.Crucible.Simulator.ExecutionTree
          ( CrucibleState, ExtensionImpl(..), actFrame, gpGlobals
          , stateSymInterface, stateTree, withBackend, stateContext
@@ -486,6 +490,16 @@ data MemOp sym ptrW where
     Endianness ->
     MemOp sym ptrW
 
+prettyMemOp :: IsExpr (SymExpr sym) => MemOp sym ptrW -> Doc ann
+prettyMemOp (MemOp ptr dir cond _sz val _end) =
+  viaShow dir <+>
+  ppPtr ptr <+>
+  (case dir of Read -> "->" ; Write -> "<-") <+>
+  ppPtr val <+>
+  case cond of
+    Unconditional -> mempty
+    Conditional p -> "when" <+> printSymExpr p
+
 instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
   Unconditional == Unconditional = True
   Conditional p == Conditional p' | Just Refl <- testEquality p p' = True
@@ -530,6 +544,13 @@ data MemEvent sym ptrW where
     -- TODO, something more realistic
     SymExpr sym (BaseBVType w) ->
     MemEvent sym ptrW
+
+prettyMemEvent :: IsExpr (SymExpr sym) => MemEvent sym ptrW -> Doc ann
+prettyMemEvent (MemOpEvent op) = prettyMemOp op
+prettyMemEvent (SyscallEvent v) = printSymExpr v
+
+prettyMemTraceSeq :: IsExpr (SymExpr sym) => MemTraceSeq sym ptrW -> Doc ann
+prettyMemTraceSeq = prettySymSequence prettyMemEvent
 
 data MemTraceImpl sym ptrW = MemTraceImpl
   { memSeq :: MemTraceSeq sym ptrW
