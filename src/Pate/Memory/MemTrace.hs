@@ -32,6 +32,7 @@ module Pate.Memory.MemTrace
 ( MemTraceImpl(..)
 , MemTraceState
 , MemTrace
+, MemTraceSeq
 , llvmPtrEq
 , readMemState
 , writeMemState
@@ -85,7 +86,7 @@ import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
-import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthRepr, addrWidthNatRepr)
+import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthRepr, addrWidthNatRepr, MemWord)
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap
@@ -99,7 +100,7 @@ import Data.Macaw.Symbolic.MemOps ( doGetGlobal )
 
 import Data.Parameterized.Context (pattern (:>), pattern Empty, Assignment)
 import qualified Data.Parameterized.Map as MapF
-import Data.Text (pack)
+import Data.Text (Text, pack)
 import Lang.Crucible.Backend (IsSymInterface, IsSymBackend, HasSymInterface(..), assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator, mkHandle',insertHandleMap)
@@ -118,6 +119,7 @@ import Lang.Crucible.Simulator.RegValue (RegValue, FnVal(..), RegValue'(..) )
 import Lang.Crucible.Simulator.SimError (SimErrorReason(..))
 import Lang.Crucible.Simulator.SymSequence
 import Lang.Crucible.Types
+import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface
 
@@ -541,13 +543,17 @@ instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
 data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
   SyscallEvent :: forall sym ptrW w.
-    -- TODO, something more realistic
-    SymExpr sym (BaseBVType w) ->
+    (1 <= w) =>
+    MuxTree sym (Maybe (MemWord ptrW, Text)) ->
+    SymExpr sym (BaseBVType w) -> -- TODO, something more realistic
     MemEvent sym ptrW
 
 prettyMemEvent :: IsExpr (SymExpr sym) => MemEvent sym ptrW -> Doc ann
 prettyMemEvent (MemOpEvent op) = prettyMemOp op
-prettyMemEvent (SyscallEvent v) = printSymExpr v
+prettyMemEvent (SyscallEvent i v) =
+  case viewMuxTree i of
+    [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
+    _ -> "Syscall" <+> printSymExpr v
 
 prettyMemTraceSeq :: IsExpr (SymExpr sym) => MemTraceSeq sym ptrW -> Doc ann
 prettyMemTraceSeq = prettySymSequence prettyMemEvent
@@ -558,6 +564,8 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   --   later events appear closer to the front of the sequence.
   , memState :: MemTraceState sym ptrW
   -- ^ the logical contents of memory
+  , memCurrentInstr :: MuxTree sym (Maybe (MemWord ptrW, Text))
+  -- ^ the most recent program instruction we encountered (address, dissassembly)
   }
 
 data MemTraceState sym ptrW = MemTraceState
@@ -592,11 +600,11 @@ initMemTrace ::
 initMemTrace sym Addr32 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arr)
+  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing)
 initMemTrace sym Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arr)
+  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing)
 
 
 mkMemoryBinding ::
@@ -617,9 +625,10 @@ instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
   -- TODO: cover other cases with a TypeError
   type Intrinsic sym "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl sym ptrW
   muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
-    memSeq' <- muxSymSequence sym p (memSeq t) (memSeq f)
-    memArr' <- baseTypeIte sym p (memArr $ memState t) (memArr $ memState f)
-    return $ MemTraceImpl memSeq' (MemTraceState memArr')
+    memSeq'   <- muxSymSequence sym p (memSeq t) (memSeq f)
+    memArr'   <- baseTypeIte sym p (memArr $ memState t) (memArr $ memState f)
+    memInstr' <- mergeMuxTree sym p (memCurrentInstr t) (memCurrentInstr f)
+    return $ MemTraceImpl memSeq' (MemTraceState memArr') memInstr'
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -675,7 +684,9 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
     MacawArchStmtExtension archStmt -> archStmtFn mvar globs archStmt
 
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
-    MacawInstructionStart{} -> \cst -> pure ((), cst)
+    MacawInstructionStart _baddr iaddr dis ->
+      liftToCrucibleState mvar $ \sym ->
+        modify (\mem -> mem{ memCurrentInstr = toMuxTree sym (Just (iaddr,dis)) })
 
     PtrEq w x y -> ptrOp w x y $ \bak reg off reg' off' -> do
       let sym = backendGetSym bak
@@ -795,7 +806,8 @@ applySyscallModel
         sym <- getSymInterface
         do -- emit a syscall event that just captures the offset value of the r0 register
            mem <- readGlobal mvar
-           seq' <- liftIO (consSymSequence sym (SyscallEvent off) (memSeq mem))
+           let i = memCurrentInstr mem
+           seq' <- liftIO (consSymSequence sym (SyscallEvent i off) (memSeq mem))
            writeGlobal mvar mem{ memSeq = seq' }
 
         -- return the registers r0 and r1 unchanged, assume we have no memory effects (!)
@@ -1169,8 +1181,8 @@ writeMemState ::
   IO (MemTraceState sym ptrW)
 writeMemState sym cond memSt ptr repr val = do
   sq <- nilSymSequence sym
-  let mem = MemTraceImpl sq memSt
-  MemTraceImpl _ memSt' <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
+  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing)
+  MemTraceImpl _ memSt' _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
 -- | Write to the memory array and set the dirty bits on
@@ -1446,29 +1458,37 @@ traceFootprint sym mem = do
 
 
 -- | Filter the memory event traces to leave just the observable
---   events. For the moment, this simply discards all the
---   @MemOp@ nodes and retains all the system call nodes.
---
---   We may make this more nuanced in the future by, e.g.,
---   considering some memory operations observable (memory mapped I/O)
---   or by considering some system calls nonobservable.
+--   events.  This currently includes all system call events,
+--   and includes memory operations that are deemed observable
+--   by the given filtering predicate.
 observableEvents ::
   IsExprBuilder sym =>
   OrdF (SymExpr sym) =>
   sym ->
+  (MemOp sym ptrW -> IO (Pred sym)) ->
   MemTraceImpl sym ptrW ->
   IO (SymSequence sym (MemEvent sym ptrW))
-observableEvents sym mem = evalWithFreshCache f (memSeq mem)
+observableEvents sym opIsObservable mem = evalWithFreshCache f (memSeq mem)
   where
-   -- filtering function
-   flt MemOpEvent{}   = False
-   flt SyscallEvent{} = True
+   filterEvent x xs =
+     case x of
+       -- always include system call events
+       SyscallEvent{} -> consSymSequence sym x xs
+
+       -- Include memory operations only if they acutally
+       -- happen (their condition is true) and if they are
+       -- deemed observable by the given filtering function.
+       MemOpEvent op@(MemOp ptr dir cond w val end) ->
+         do opObservable <- opIsObservable op
+            p <- andPred sym opObservable (getCond sym cond)
+            let x' = MemOpEvent (MemOp ptr dir Unconditional w val end)
+            iteM muxSymSequence sym p (consSymSequence sym x' xs) (return xs)
 
    f _rec SymSequenceNil = nilSymSequence sym
 
-   f rec (SymSequenceCons _ x xs)
-     | flt x     = consSymSequence sym x =<< rec xs
-     | otherwise = rec xs
+   f rec (SymSequenceCons _ x xs) =
+     do xs' <- rec xs
+        filterEvent x xs'
 
    f rec (SymSequenceAppend _ xs ys) =
      do xs' <- rec xs
@@ -1596,13 +1616,31 @@ instance PEM.ExprMappable sym (MemOp sym w) where
 instance PEM.ExprMappable sym (MemEvent sym w) where
   mapExpr sym f = \case
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
-    SyscallEvent arg -> SyscallEvent <$> f arg
+    SyscallEvent i arg -> SyscallEvent i <$> f arg -- TODO? rewrite the mux tree?
+
+instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
+  mapExpr sym f = evalWithFreshCache $ \rec -> \case
+    SymSequenceNil -> nilSymSequence sym
+    SymSequenceCons _ x xs ->
+      do x'  <- PEM.mapExpr sym f x
+         xs' <- rec xs
+         consSymSequence sym x' xs'
+    SymSequenceAppend _ xs ys ->
+     do xs' <- rec xs
+        ys' <- rec ys
+        appendSymSequence sym xs' ys'
+    SymSequenceMerge _ p xs ys ->
+     do p' <- f p
+        iteM muxSymSequence sym p' (rec xs) (rec ys)
 
 instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do
-    memSeq' <- traverseSymSequence sym (PEM.mapExpr sym f) $ memSeq mem
+    memSeq' <- PEM.mapExpr sym f (memSeq mem)
     memState' <- PEM.mapExpr sym f $ memState mem
-    return $ MemTraceImpl memSeq' memState'
+    let memInstr' =  memCurrentInstr mem -- TODO? rewrite the mux tree?
+                                         -- I expect it to basically never be interesting
+                                         -- to do this...
+    return $ MemTraceImpl memSeq' memState' memInstr'
 
 instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do
