@@ -212,8 +212,8 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
   pcRegion <- liftIO $ W4.natLit sym 0
 
   -- we arbitrarily assign disjoint regions for each area of memory
+  globalRegion <- liftIO $ W4.natLit sym 0
   stackRegion <- liftIO $ W4.natLit sym 1
-  globalRegion <- liftIO $ W4.natLit sym 2
 
   startedAt <- liftIO TM.getCurrentTime
   topNonce <- liftIO $ (PF.ProofNonce <$> N.freshNonce gen)
@@ -241,7 +241,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
     -- TODO, something real here
     syscallModel = MT.MacawSyscallModel ()
 
-    exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch) undefops
+    exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch globalRegion) undefops
 
     ctxt = PMC.EquivalenceContext
       { PMC.handles = ha
@@ -535,8 +535,10 @@ withSimBundle pPair f = fmap unzipSkipTransformation $ withEmptyAssumptionFrame 
         f bundle'
       return (frameAssume asm, (r, PEM.SkipTransformation prf))
 
-trivialGlobalMap :: MS.GlobalMap sym (MT.MemTrace arch) w
-trivialGlobalMap = MS.GlobalMap $ \_ _ reg off -> pure (CLM.LLVMPointer reg off)
+-- Map every global address pointer into the global memory region
+trivialGlobalMap :: W4.SymNat sym -> MS.GlobalMap sym (MT.MemTrace arch) w
+trivialGlobalMap globalRegion =
+  MS.GlobalMap $ \_ _ _segNum off -> pure (CLM.LLVMPointer globalRegion off)
 
 --------------------------------------------------------
 -- Proving equivalence

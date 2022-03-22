@@ -29,6 +29,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
+import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
@@ -97,26 +98,27 @@ validConcreteReads ::
 validConcreteReads stOut = withSym $ \sym -> do
   binCtx <- getBinCtx @bin
   let binmem = MBL.memoryImage $ PMC.binary binCtx
+  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   readOps <- liftIO (MT.getReadOps sym (simOutMem stOut))
-  mconcat <$> liftIO (mapM (readConcrete sym binmem) (F.toList readOps))
+  mconcat <$> liftIO (mapM (readConcrete sym stackRegion binmem) (F.toList readOps))
 
  where
    readConcrete ::
      sym ->
+     W4.SymNat sym ->
      MM.Memory (MM.ArchAddrWidth arch) ->
      MT.MemOp sym (MM.ArchAddrWidth arch) ->
      IO (AssumptionFrame sym)
-   readConcrete sym binmem (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz val end) = do
-      case (W4.asNat reg, W4.asBV off, dir) of
-        (Just 0, Just off', MT.Read) -> do
-          let
-            addr :: MM.MemAddr (MM.ArchAddrWidth arch) =
-              MM.absoluteAddr (MM.memWord (fromIntegral (BVS.asUnsigned off')))
+   readConcrete sym stackRegion binmem (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz (CLM.LLVMPointer _blkval bvval) end) = do
+      isStack <- W4.natEq sym stackRegion reg
+      case (W4.asConstantPred isStack, W4.asBV off, dir) of
+        (Just False, Just off', MT.Read) -> do
+          let mw :: MM.MemWord (MM.ArchAddrWidth arch)
+              mw = MM.memWord (fromIntegral (BVS.asUnsigned off'))
           W4.LeqProof <- return $ W4.leqMulPos (W4.knownNat @8) sz
           let bits = W4.natMultiply (W4.knownNat @8) sz
-          case doStaticRead @arch binmem addr bits end of
+          case doStaticRead @arch binmem mw bits end of
             Just bv -> liftIO $ do
-              let CLM.LLVMPointer _ bvval = val
               lit_val <- W4.bvLit sym bits bv
               -- FIXME: update when memory model has regions
               -- unclear what to assert about the region
@@ -127,13 +129,15 @@ validConcreteReads stOut = withSym $ \sym -> do
 
 doStaticRead ::
   forall arch w .
+  PA.ValidArch arch =>
   MM.Memory (MM.ArchAddrWidth arch) ->
-  MM.MemAddr (MM.ArchAddrWidth arch) ->
+  MM.MemWord (MM.ArchAddrWidth arch) ->
   W4.NatRepr w ->
   MM.Endianness ->
   Maybe (BVS.BV w)
-doStaticRead mem addr w end = case MM.asSegmentOff mem addr of
+doStaticRead mem mw w end = case PM.resolveAbsoluteAddress mem mw of
   Just segoff | MMP.isReadonly $ MM.segmentFlags $ MM.segoffSegment segoff ->
+    let addr = MM.segoffAddr segoff in
     fmap (BVS.mkBV w) $
     case (W4.intValue w, end) of
       (8, _) -> liftErr $ MM.readWord8 mem addr
