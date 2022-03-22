@@ -32,8 +32,7 @@ Representation and presentation of the equivalence proofs
 {-# LANGUAGE ImplicitParams #-}
 
 module Pate.Proof
-  ( EquivTriple(..)
-  , VerificationStatus(..)
+  ( VerificationStatus(..)
   , ProofApp(..)
   , traverseProofApp
   , mapProofApp
@@ -84,7 +83,6 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
-import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
@@ -103,24 +101,6 @@ import qualified What4.Interface as W4
 ---------------------------------------------
 -- proof objects
 
-
--- | An triple representing the equivalence conditions for a block pair.
--- This is analogous to a 'ProofExpr' of type
--- 'ProofTriple', but contains the 'PE.StatePredSpec' type that the verifier uses.
--- This redundancy can potentially be eliminated at some point.
-data EquivTriple sym arch where
-  EquivTriple ::
-    {
-      eqPair :: PPa.BlockPair arch
-      -- ^ the entry points that yield equivalent states on the post-domain
-      -- after execution, assuming initially equivalent states on the pre-domain
-    , eqPreDomain :: PE.DomainSpec sym arch
-      -- ^ the pre-domain: the state that was assumed initially equivalent
-      -- abstracted over the bound variables representing the initial state
-    , eqPostDomain :: PE.DomainSpec sym arch
-      -- ^ the post-domain: the state that was proven equivalent after execution
-      -- abstracted over the bound variables representing the final state
-    } -> EquivTriple sym arch
 
 data ProofNodeType where
     ProofTripleType :: ProofNodeType

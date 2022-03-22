@@ -66,6 +66,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Discovery.ParsedFunctions as PDP
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
@@ -280,9 +281,9 @@ getSubBlocks ::
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
-     mtgt <- liftIO $ PMC.parsedBlocksContaining b pfm
+     mtgt <- liftIO $ PDP.parsedBlocksContaining b pfm
      tgts <- case mtgt of
-       Just (PMC.ParsedBlocks pbs) ->
+       Just (PDP.ParsedBlocks pbs) ->
          concat <$> mapM (\x -> concreteValidJumpTargets b pbs x) pbs
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ (\x -> validateBlockTarget x) tgts
@@ -490,14 +491,15 @@ runDiscovery ::
   Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch)) ->
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
+  PC.PatchData ->
   CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
-runDiscovery mCFGDir repr extraSyms elf hints = do
+runDiscovery mCFGDir repr extraSyms elf hints pd = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
   addrSyms <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
   let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
-  pfm <- liftIO $ PMC.newParsedFunctionMap mem addrSyms archInfo mCFGDir
+  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
   let startEntry = DLN.head entries
@@ -538,7 +540,7 @@ getBlocks' ctx pPair = do
   bs1 <- liftIO $ lookupBlocks' ctxO blkO
   bs2 <- liftIO $ lookupBlocks' ctxP blkP
   case (bs1, bs2) of
-    (Right (PMC.ParsedBlocks opbs), Right (PMC.ParsedBlocks ppbs)) -> do
+    (Right (PDP.ParsedBlocks opbs), Right (PDP.ParsedBlocks ppbs)) -> do
       let oBlocks = PE.Blocks PC.knownRepr blkO opbs
       let pBlocks = PE.Blocks PC.knownRepr blkP ppbs
       return $! PPa.PatchPair oBlocks pBlocks
@@ -556,9 +558,9 @@ getBlocks ::
   PPa.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
-  PMC.ParsedBlocks opbs <- lookupBlocks blkO
+  PDP.ParsedBlocks opbs <- lookupBlocks blkO
   let oBlocks = PE.Blocks PC.knownRepr blkO opbs
-  PMC.ParsedBlocks ppbs <- lookupBlocks blkP
+  PDP.ParsedBlocks ppbs <- lookupBlocks blkP
   let pBlocks = PE.Blocks PC.knownRepr blkP ppbs
   return $ PPa.PatchPair oBlocks pBlocks
   where
@@ -569,9 +571,9 @@ lookupBlocks'
   :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, PB.KnownBinary bin)
   => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
-  -> IO (Either (PEE.InnerEquivalenceError arch) (PMC.ParsedBlocks arch))
+  -> IO (Either (PEE.InnerEquivalenceError arch) (PDP.ParsedBlocks arch))
 lookupBlocks' binCtx b = do
-  mfn <- PMC.parsedBlocksContaining b (PMC.parsedFunctionMap binCtx)
+  mfn <- PDP.parsedBlocksContaining b (PMC.parsedFunctionMap binCtx)
   case mfn of
     Just pbs -> return (Right pbs)
     Nothing  -> return (Left (PEE.UnknownFunctionEntry (PB.concreteAddress b)))
@@ -581,7 +583,7 @@ lookupBlocks ::
   HasCallStack =>
   PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
-  EquivM sym arch (PMC.ParsedBlocks arch)
+  EquivM sym arch (PDP.ParsedBlocks arch)
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
   ebs <- liftIO $ lookupBlocks' binCtx b

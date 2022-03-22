@@ -57,7 +57,7 @@ challenge02-self: challenge02/challenge-02.original.exe challenge02/challenge-02
                                 --patched challenge02/challenge-02.original.exe
 
 .PHONY: challenge03
-challenge03: challenge03-variant/challenge03.orig.exe challenge03-variant/challenge03.patched.exe challenge03-variant/challenge03.info
+challenge03: challenge03-variant/challenge03.orig.exe challenge03-variant/challenge03.patched.exe challenge03-variant/challenge03.toml
 	cabal v2-run exe:pate -- \
 		                       --original $(word 1,$^) \
 							   --patched $(word 2,$^) \

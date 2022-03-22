@@ -39,10 +39,11 @@ import qualified Lang.Crucible.Backend.Simple as CB
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 
-import qualified Pate.Binary as PBi
 import qualified Pate.Address as PA
+import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
+import qualified Pate.Discovery.ParsedFunctions as PDP
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as PMT
@@ -231,7 +232,7 @@ simulate ::
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch bin)
 simulate simInput = withBinary @bin $ do
   CC.SomeCFG cfg <- do
-    PMC.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)
+    PDP.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)
 
     let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
 

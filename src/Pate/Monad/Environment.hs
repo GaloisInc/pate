@@ -45,6 +45,7 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
+import qualified Pate.Proof.EquivTriple as PPE
 import           Pate.SimState
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
@@ -72,7 +73,7 @@ data EquivEnv sym arch where
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode
     , envBaseEquiv :: EquivRelation sym arch
-    , envGoalTriples :: [PF.EquivTriple sym arch]
+    , envGoalTriples :: [PPE.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof
@@ -99,7 +100,7 @@ data EquivEnv sym arch where
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
 
-type ProofCache sym arch = BlockCache arch [(PF.EquivTriple sym arch, Par.Future (PF.ProofNonceApp sym arch PF.ProofBlockSliceType))]
+type ProofCache sym arch = BlockCache arch [(PPE.EquivTriple sym arch, Par.Future (PF.ProofNonceApp sym arch PF.ProofBlockSliceType))]
 
 type ExitPairCache arch = BlockCache arch [PPa.PatchPair (PB.BlockTarget arch)]
 
