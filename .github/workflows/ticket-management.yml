@@ -18,4 +18,5 @@ jobs:
           project: pate
           column: Needs Triage
           action: update
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          # Uses lcasburn's personal access token for modifying issues
+          repo-token: ${{ secrets.MY_GHPROJECT_TOKEN }}
