@@ -90,6 +90,7 @@ import qualified Pate.Monad.Environment as PME
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
+import qualified Pate.Proof.EquivTriple as PPE
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Proof.CounterExample as PFC
 import qualified Pate.Proof.Operations as PFO
@@ -130,14 +131,15 @@ runDiscovery
   -> PA.SomeValidArch arch
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PH.Hinted (PLE.LoadedELF arch)
+  -> PC.PatchData
   -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
-runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' = do
+runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' pd = do
   binCtxO <- discoverCheckingHints PBi.OriginalRepr (PA.validArchOrigExtraSymbols archData) elf
   binCtxP <- discoverCheckingHints PBi.PatchedRepr (PA.validArchPatchedExtraSymbols archData) elf'
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf) (PH.hinted elf'))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discoverAsync mdir repr extra e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr extra e h)))
+    discoverAsync mdir repr extra e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr extra e h pd)))
     discoverCheckingHints repr extra e = do
       if | PH.hints e == mempty -> do
              unhintedAnalysis <- discoverAsync mCFGDir repr extra (PH.hinted e) mempty
@@ -195,7 +197,7 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
     (Just vs1, Just vs2) -> pure (vs1, vs2)
     _ -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
   ha <- liftIO CFH.newHandleAllocator
-  contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf'
+  contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf' pd
 
   adapter <- liftIO $ PS.solverAdapter sym (PC.cfgSolver vcfg)
 
@@ -409,7 +411,8 @@ runVerificationLoop env pPairs = do
       return (result, stats)
 
     go ::
-      PF.EquivTriple sym arch -> EquivM sym arch PEq.EquivalenceStatus
+
+      PPE.EquivTriple sym arch -> EquivM sym arch PEq.EquivalenceStatus
     go triple = do
       result <- manifestError $ checkEquivalence triple
       emitResult result
@@ -436,7 +439,7 @@ emitResult (Right _) = return ()
 -- the generated proof contains an inequivalence counterexample.
 checkEquivalence ::
   HasCallStack =>
-  PF.EquivTriple sym arch ->
+  PPE.EquivTriple sym arch ->
   EquivM sym arch PEq.EquivalenceStatus
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
@@ -464,7 +467,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
         CMR.local (\env -> env { envConfig = (envConfig env){PC.cfgComputeEquivalenceFrames = True} }) $
           doProof
 
-  void $ withSimSpec pPair (PF.eqPreDomain triple) $ \stO stP precond -> do
+  void $ withSimSpec pPair (PPE.eqPreDomain triple) $ \stO stP precond -> do
     let
       inO = SimInput stO (PPa.pOriginal pPair)
       inP = SimInput stP (PPa.pPatched pPair)
@@ -493,8 +496,8 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       _ -> return PEq.ConditionallyEquivalent
     _ -> return PEq.Inequivalent
   where
-    pPair = PF.eqPair triple
-    postcondSpec = PF.eqPostDomain triple
+    pPair = PPE.eqPair triple
+    postcondSpec = PPE.eqPostDomain triple
 
 --------------------------------------------------------
 -- Simulation
@@ -577,7 +580,7 @@ catchSimBundle pPair postcondSpec f = do
             traceBlockPair pPair ("Caught error: " ++ show err)
             errorResult
           Right r -> return r
-      let triple = PF.EquivTriple pPair precondSpec postcondSpec
+      let triple = PPE.EquivTriple pPair precondSpec postcondSpec
       future <- PFO.asFutureNonceApp prf
       modifyBlockCache envProofCache pPair (++) [(triple, future)]
       return $ (precondSpec, prf)
@@ -588,15 +591,15 @@ catchSimBundle pPair postcondSpec f = do
     firstCached [] = return Nothing
 
     getCached ::
-      (PF.EquivTriple sym arch, Par.Future (PF.ProofNonceApp sym arch PF.ProofBlockSliceType)) ->
+      (PPE.EquivTriple sym arch, Par.Future (PF.ProofNonceApp sym arch PF.ProofBlockSliceType)) ->
       EquivM sym arch (Maybe ret)
     getCached (triple, futureProof) = do
       traceBlockPair pPair "Checking for cached result"
-      impliesPostcond pPair (PF.eqPostDomain triple) postcondSpec >>= \case
+      impliesPostcond pPair (PPE.eqPostDomain triple) postcondSpec >>= \case
         True -> do
           traceBlockPair pPair "Cache hit"
           prf' <- PFO.wrapFutureNonceApp futureProof
-          return $ Just (PF.eqPreDomain triple, prf')
+          return $ Just (PPE.eqPreDomain triple, prf')
         False -> do
           traceBlockPair pPair "Cache miss"
           return Nothing
@@ -1173,7 +1176,7 @@ topLevelPostDomain pPair = withFreshVars pPair $ \stO stP -> withSym $ \sym -> d
 topLevelTriple ::
   HasCallStack =>
   PPa.FunPair arch ->
-  EquivM sym arch (PF.EquivTriple sym arch)
+  EquivM sym arch (PPE.EquivTriple sym arch)
 topLevelTriple fnPair =
   let pPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair in
   withPair pPair $
@@ -1187,7 +1190,7 @@ topLevelTriple fnPair =
           , PED.eqDomainStackMemory = PEM.universal sym
           , PED.eqDomainGlobalMemory = PEM.universal sym
           }
-    return $ PF.EquivTriple pPair precond postcond
+    return $ PPE.EquivTriple pPair precond postcond
 
 --------------------------------------------------------
 -- Totality check - ensure that the verified exit pairs cover all possible

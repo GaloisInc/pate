@@ -10,6 +10,7 @@ module Pate.Loader
     runEquivVerification
   , runSelfEquivConfig
   , runEquivConfig
+  , RunConfig(..)
   )
 where
 
@@ -27,6 +28,19 @@ import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification as PV
+
+
+data RunConfig arch =
+  RunConfig
+    { archProxy :: PA.SomeValidArch arch
+    , infoPath :: Either FilePath PC.PatchData
+    , origPath :: FilePath
+    , patchedPath :: FilePath
+    , logger :: LJ.LogAction IO (PE.Event arch)
+    , verificationCfg :: PC.VerificationConfig
+    , origHints :: PH.VerificationHints
+    , patchedHints :: PH.VerificationHints
+    }
 
 runEquivVerification ::
   PA.SomeValidArch arch ->
@@ -54,11 +68,11 @@ liftToEquivStatus f = do
 -- either the original or patched binary can be
 -- proven self-equivalent
 runSelfEquivConfig :: forall arch bin.
-  PC.RunConfig arch ->
+  RunConfig arch ->
   PB.WhichBinaryRepr bin ->
   IO PEq.EquivalenceStatus
 runSelfEquivConfig cfg wb = liftToEquivStatus $ do
-  patchData <- case PC.infoPath cfg of
+  patchData <- case infoPath cfg of
     Left fp -> do
       bytes <- CME.lift $ BS.readFile fp
       case PC.parsePatchConfig bytes of
@@ -70,8 +84,8 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
       PB.OriginalRepr -> PC.BlockAlignment obs obs
       PB.PatchedRepr -> PC.BlockAlignment pbs pbs
     path :: String = case wb of
-      PB.OriginalRepr -> PC.origPath cfg
-      PB.PatchedRepr -> PC.patchedPath cfg
+      PB.OriginalRepr -> origPath cfg
+      PB.PatchedRepr -> patchedPath cfg
     pairs' = map swapPair $ PC.patchPairs patchData
     -- Note that we ignore the patched ignore list because this is a
     -- self-comparison of the original binary for diagnostic purposes
@@ -81,26 +95,28 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
       , PC.ignoreOriginalAllocations = oIgn
       , PC.ignorePatchedAllocations = oIgn
       , PC.equatedFunctions = PC.equatedFunctions patchData
+      , PC.ignoreOriginalFunctions = PC.ignoreOriginalFunctions patchData
+      , PC.ignorePatchedFunctions = PC.ignoreOriginalFunctions patchData
       }
-  PA.SomeValidArch {} <- return $ PC.archProxy cfg
+  PA.SomeValidArch {} <- return $ archProxy cfg
   bin <- CME.lift $ PLE.loadELF @arch Proxy $ path
-  let hintedBin = PH.Hinted (PC.origHints cfg) bin
-  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData' (PC.verificationCfg cfg) hintedBin hintedBin
+  let hintedBin = PH.Hinted (origHints cfg) bin
+  CME.lift $ runEquivVerification (archProxy cfg) (logger cfg) patchData' (verificationCfg cfg) hintedBin hintedBin
 
 runEquivConfig :: forall arch.
-  PC.RunConfig arch ->
+  RunConfig arch ->
   IO PEq.EquivalenceStatus
 runEquivConfig cfg = liftToEquivStatus $ do
-  patchData <- case PC.infoPath cfg of
+  patchData <- case infoPath cfg of
     Left fp -> do
       bytes <- CME.lift $ BS.readFile fp
       case PC.parsePatchConfig bytes of
         Left err -> CME.throwError ("Bad patch info file: " ++ show err)
         Right r -> return r
     Right r -> return r
-  PA.SomeValidArch {} <- return $ PC.archProxy cfg
-  original <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.origPath cfg)
-  patched <- CME.lift $ PLE.loadELF @arch Proxy $ (PC.patchedPath cfg)
-  let hintedOrig = PH.Hinted (PC.origHints cfg) original
-  let hintedPatched = PH.Hinted (PC.patchedHints cfg) patched
-  CME.lift $ runEquivVerification (PC.archProxy cfg) (PC.logger cfg) patchData (PC.verificationCfg cfg) hintedOrig hintedPatched
+  PA.SomeValidArch {} <- return $ archProxy cfg
+  original <- CME.lift $ PLE.loadELF @arch Proxy $ (origPath cfg)
+  patched <- CME.lift $ PLE.loadELF @arch Proxy $ (patchedPath cfg)
+  let hintedOrig = PH.Hinted (origHints cfg) original
+  let hintedPatched = PH.Hinted (patchedHints cfg) patched
+  CME.lift $ runEquivVerification (archProxy cfg) (logger cfg) patchData (verificationCfg cfg) hintedOrig hintedPatched

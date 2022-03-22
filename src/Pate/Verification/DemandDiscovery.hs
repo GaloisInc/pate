@@ -54,8 +54,8 @@ import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
+import qualified Pate.Discovery.ParsedFunctions as PDP
 import qualified Pate.Memory as PM
-import qualified Pate.Monad.Context as PMC
 import qualified Pate.Panic as PP
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Concretize as PVC
@@ -202,7 +202,7 @@ decodeAndCallFunction
      , PBi.KnownBinary bin
      , HasCallStack
      )
-  => PMC.ParsedFunctionMap arch bin
+  => PDP.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
   -> MBL.LoadedBinary arch binFmt
   -> LCS.SimState p sym (DMS.MacawExt arch) r f a
@@ -228,7 +228,7 @@ decodeAndCallFunction pfm archVals loadedBinary crucState regsRepr bvAddr =
       -- binary. We need to also take in a symbol table to let us identify
       -- external calls (or calls to named functions) that we might have
       -- overrides for.
-      mdfi <- PMC.parsedFunctionContaining blk pfm
+      mdfi <- PDP.parsedFunctionContaining blk pfm
       case mdfi of
         -- FIXME: This probably shouldn't be a panic - rather an exception, or perhaps an uninterpreted effect
         Nothing -> PP.panic PP.InlineCallee "lookupFunction" ["Unable to find mapping for address " ++ show bvAddr]
@@ -268,7 +268,7 @@ lookupFunction
   -> PVO.ArgumentMapping arch
   -> Map.Map PSym.Symbol (PVO.SomeOverride arch sym)
   -> PSym.SymbolTable arch
-  -> PMC.ParsedFunctionMap arch bin
+  -> PDP.ParsedFunctionMap arch bin
   -> DMS.GenArchVals mem arch
   -> MBL.LoadedBinary arch binFmt
   -> DMS.LookupFunctionHandle p sym arch

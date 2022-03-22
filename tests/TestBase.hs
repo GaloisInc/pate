@@ -115,16 +115,16 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
     computeFrames = case mwb of
       Just _ -> False
       Nothing -> True
-    rcfg = PC.RunConfig
-      { PC.archProxy = proxy
-      , PC.infoPath = infoPath
-      , PC.origPath = fp <.> "original" <.> "exe"
-      , PC.patchedPath = fp <.> "patched" <.> "exe"
-      , PC.origHints = mempty
-      , PC.patchedHints = mempty
-      , PC.verificationCfg =
+    rcfg = PL.RunConfig
+      { PL.archProxy = proxy
+      , PL.infoPath = infoPath
+      , PL.origPath = fp <.> "original" <.> "exe"
+      , PL.patchedPath = fp <.> "patched" <.> "exe"
+      , PL.origHints = mempty
+      , PL.patchedHints = mempty
+      , PL.verificationCfg =
           PC.defaultVerificationCfg { PC.cfgComputeEquivalenceFrames = computeFrames }
-      , PC.logger =
+      , PL.logger =
           LJ.LogAction $ \e -> case e of
             PE.AnalysisStart pPair -> do
               addLogMsg $ concat $

@@ -1,5 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Pate.Config (
   PatchData(..),
   BlockAlignment(..),
@@ -8,25 +9,22 @@ module Pate.Config (
   EquatedFunction(..),
   noPatchData,
   parsePatchConfig,
-  RunConfig(..),
   VerificationConfig(..),
   VerificationMethod(..),
   defaultVerificationCfg
   ) where
 
 import qualified Control.Monad.Except as CME
+import qualified Control.Monad.State as CMS
 import qualified Data.ByteString as BS
+import qualified Data.HashMap.Strict as DHS
 import qualified Data.Text.Encoding as DTE
 import qualified Data.Text.Encoding.Error as DTEE
-import qualified Lumberjack as LJ
 import           Numeric.Natural ( Natural )
 import           Text.Printf ( PrintfArg, printf )
 import qualified Toml
 import           Toml ( (.=) )
 
-import qualified Pate.Arch as PA
-import qualified Pate.Event as PE
-import qualified Pate.Hints as PH
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
 
@@ -108,8 +106,40 @@ data PatchData =
             --
             -- See the documentation on the function replacement verification
             -- feature.
+            , ignoreOriginalFunctions :: [Address]
+            -- ^ A list of addresses of function calls to ignore from the
+            -- original binary. If the verifier sees a call to a function in
+            -- this list in the original binary, it will treat the call as a
+            -- no-op.
+            , ignorePatchedFunctions :: [Address]
+            -- ^ The same as 'ignoreOriginalFunctions', but for the patched binary
+            --
+            -- Note that while the original and patched functions are specified
+            -- separately, it is probably important that the lists semantically
+            -- align
             }
   deriving (Show)
+
+_Address :: Toml.TomlBiMap Address Toml.AnyValue
+_Address = Toml._Coerce Toml._Natural
+
+-- | This is just like the 'Toml.arrayOf' combinator, except it allows the key
+-- to be elided without throwing an error. If the provided key is elided, the
+-- list will be parsed as empty.
+optionalArrayOf :: forall a . Toml.TomlBiMap a Toml.AnyValue -> Toml.Key -> Toml.TomlCodec [a]
+optionalArrayOf codec key = Toml.Codec input output
+  where
+    arrCodec = Toml._Array codec
+
+    input :: Toml.TomlEnv [a]
+    input = \toml -> case DHS.lookup key (Toml.tomlPairs toml) of
+      Nothing -> pure []
+      Just anyVal -> Toml.whenLeftBiMapError key (Toml.backward arrCodec anyVal) pure
+
+    output :: [a] -> Toml.TomlState [a]
+    output a = do
+      anyVal <- Toml.eitherToTomlState (Toml.forward arrCodec a)
+      a <$ CMS.modify (Toml.insertKeyAnyVal key anyVal)
 
 patchDataCodec :: Toml.TomlCodec PatchData
 patchDataCodec = PatchData
@@ -117,6 +147,8 @@ patchDataCodec = PatchData
   <*> Toml.list allocationCodec "ignore-original-allocations" .= ignoreOriginalAllocations
   <*> Toml.list allocationCodec "ignore-patched-allocations" .= ignorePatchedAllocations
   <*> Toml.list equatedFunctionCodec "equated-functions" .= equatedFunctions
+  <*> optionalArrayOf _Address "ignore-original-functions" .= ignoreOriginalFunctions
+  <*> optionalArrayOf _Address "ignore-patched-functions" .= ignorePatchedFunctions
 
 data PatchDataParseError = UnicodeError DTEE.UnicodeException
                          | TOMLError [Toml.TomlDecodeError]
@@ -139,6 +171,8 @@ noPatchData = PatchData { patchPairs = []
                         , ignoreOriginalAllocations = []
                         , ignorePatchedAllocations = []
                         , equatedFunctions = []
+                        , ignoreOriginalFunctions = []
+                        , ignorePatchedFunctions = []
                         }
 
 ----------------------------------
@@ -196,15 +230,3 @@ defaultVerificationCfg =
                      , cfgSolverInteractionFile = Nothing
                      , cfgVerificationMethod = HoareTripleVerification
                      }
-
-data RunConfig arch =
-  RunConfig
-    { archProxy :: PA.SomeValidArch arch
-    , infoPath :: Either FilePath PatchData
-    , origPath :: FilePath
-    , patchedPath :: FilePath
-    , logger :: LJ.LogAction IO (PE.Event arch)
-    , verificationCfg :: VerificationConfig
-    , origHints :: PH.VerificationHints
-    , patchedHints :: PH.VerificationHints
-    }

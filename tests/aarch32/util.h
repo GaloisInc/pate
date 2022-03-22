@@ -1,3 +1,3 @@
 #define EXIT() \
-  asm("li 0,1\n"              \
-      "sc")
+  asm("mov     %r7, $1");  \
+  asm("svc #0")

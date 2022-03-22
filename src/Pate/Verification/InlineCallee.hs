@@ -61,6 +61,8 @@ import qualified What4.Symbol as WS
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
+import qualified Pate.Config as PCfg
+import qualified Pate.Discovery.ParsedFunctions as PDP
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
@@ -71,7 +73,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Operations as PFO
 import qualified Pate.Solver as PS
-import qualified Pate.Config as PCfg
 import qualified Pate.Verification.DemandDiscovery as PVD
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.Verification.Override.Library as PVOL
@@ -425,7 +426,7 @@ functionFor
   -> EquivM sym arch (Some (DMD.DiscoveryFunInfo arch))
 functionFor pb = do
   ctx <- getBinCtx
-  mdfi <- liftIO $ PMC.parsedFunctionContaining pb (PMC.parsedFunctionMap ctx)
+  mdfi <- liftIO $ PDP.parsedFunctionContaining pb (PMC.parsedFunctionMap ctx)
   case mdfi of
     Just sdfi -> return sdfi
     Nothing ->

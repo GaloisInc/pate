@@ -32,6 +32,8 @@ patch-pairs = [{ original-block-address = <ADDRESS>, patched-block-address = <AD
 ignore-original-allocations = [{ pointer-address = <ADDRESS>, blocks-size = <NATURAL> }, ... ]
 ignore-patched-allocations = [{ pointer-address = <ADDRESS>, blocks-size = <NATURAL> }, ... ]
 equated-functions = [{ original-function-address = <ADDRESS>, patched-function-address = <ADDRESS> }, ...]
+ignore-original-functions = [ <ADDRESS>, ... ]
+ignore-patched-functions = [ <ADDRESS>, ... ]
 \end{lstlisting}
 
 Both addresses and block sizes can be specified in either decimal hexadecimal.  Each list can contain multiple records as needed.  The fields have the following meanings:
@@ -41,7 +43,11 @@ Both addresses and block sizes can be specified in either decimal hexadecimal.  
 \item[\texttt{ignore-original-allocations}] Together with the \texttt{equated-functions} field, this enables the inline callee functionality described in \cref{sec:inlining}. Each entry represents a memory region whose contents should be ignored while verifying equivalence of two programs (specifically under the scope of a pair of equated functions).  Precisely, the \emph{pointer-address} is the address of a pointer that points to \emph{blocks-size} bytes of memory. This is an important subtlety: it really refers to the address of a pointer, and the buffer referred to is the buffer at the address pointed to. This enables the inline callee feature to refer to dynamically allocated memory that does not have a fixed global memory location.
 \item[\texttt{ignore-patched-allocations}] This is the same as \texttt{ignore-original-allocations}, except that it specifies memory regions for the patched binary.
 \item[\texttt{equated-functions}] A list of (pairs of) function addresses that are intended to be equivalent for the purposes of the inline callee feature.
+\item[\texttt{ignore-original-functions}] A list of addresses of functions to ignore in the original binary (see Ignored Functions below)
+\item[\texttt{ignore-patched-functions}] A list of addresses of functions to ignore in the patched binary (see Ignored Functions below)
 \end{description}
+
+\paragraph{Ignored Functions} The verifier supports ``ignoring'' functions by eliding them from the analysis. This is unsound, but useful for exploring the effects of patches in large binaries. Users specify the addresses of functions to ignore in the relevant lists. Operationally, functions are ignored by treating calls to the named functions as no-ops (thus ignoring their effects and the effects of their callees). Note that the two lists are separate, but that they almost certainly must semantically align (i.e., if a function is ignored in the original binary, it must be ignored in the patched binary). The two lists are separate to support minor code address differences.
 
 % \subsection{Logging Output}\label{sec:options:logging-output}
 

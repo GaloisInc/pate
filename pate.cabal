@@ -58,6 +58,7 @@ common shared
                        macaw-loader,
                        unliftio-core >= 0.2 && < 0.3,
                        unliftio >= 0.2 && < 0.3,
+                       unordered-containers,
                        text >= 1 && < 1.3,
                        tomland >= 1.3 && < 1.4,
                        transformers,
@@ -78,6 +79,7 @@ library
                        Pate.Config,
                        Pate.Discovery,
                        Pate.Discovery.PLT,
+                       Pate.Discovery.ParsedFunctions
                        Pate.Verification,
                        Pate.Verification.Concretize,
                        Pate.Verification.DemandDiscovery,
@@ -114,6 +116,7 @@ library
                        Pate.Proof.Instances,
                        Pate.Proof.Operations,
                        Pate.Proof.CounterExample,
+                       Pate.Proof.EquivTriple,
                        Pate.Register,
                        Pate.Register.Traversal,
                        Pate.Solver,

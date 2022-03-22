@@ -156,15 +156,15 @@ main = do
             , PC.cfgSolverInteractionFile = solverInteractionFile opts
             , PC.cfgVerificationMethod = verificationMethod opts
             }
-        cfg = PC.RunConfig
-            { PC.archProxy = proxy
-            , PC.infoPath = infoPath
-            , PC.origPath = originalBinary opts
-            , PC.patchedPath = patchedBinary opts
-            , PC.logger = logger'
-            , PC.verificationCfg = verificationCfg
-            , PC.origHints = origHints
-            , PC.patchedHints = patchedHints
+        cfg = PL.RunConfig
+            { PL.archProxy = proxy
+            , PL.infoPath = infoPath
+            , PL.origPath = originalBinary opts
+            , PL.patchedPath = patchedBinary opts
+            , PL.logger = logger'
+            , PL.verificationCfg = verificationCfg
+            , PL.origHints = origHints
+            , PL.patchedHints = patchedHints
             }
 
 
