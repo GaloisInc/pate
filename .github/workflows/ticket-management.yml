@@ -13,10 +13,16 @@ jobs:
   automate-project-columns:
     runs-on: ubuntu-latest
     steps:
-      - uses: alex-page/github-project-automation-plus@v0.8.1
+      - name: Assign NEW issues to project
+        uses: alex-page/github-project-automation-plus@v0.8.1
+        if: github.event.action == 'opened'
         with:
           project: pate
           column: Needs Triage
           action: update
           # Uses lcasburn's personal access token for modifying issues
           repo-token: ${{ secrets.MY_GHPROJECT_TOKEN }}
+        # Previous workflow is failing with "Parameter token or opts.auth is required", emit the event to understand why
+      - name: Emit debugging information
+        if: ${{ failure() }}
+        run: echo ${{ github.event }}
