@@ -13,8 +13,10 @@ module TestBase
 import           System.Directory
 import           System.FilePath
 import           System.FilePath.Glob (namesMatching)
+import qualified Data.IORef as IOR
 
 import           Data.Maybe
+import           Data.List ( intercalate )
 import qualified Lumberjack as LJ
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -97,7 +99,17 @@ doTest ::
   IO ()
 doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
   infoCfgExists <- doesFileExist (fp <.> "info")
+  (logsRef :: IOR.IORef [String]) <- IOR.newIORef []
+
   let
+    addLogMsg :: String -> IO ()
+    addLogMsg msg = IOR.atomicModifyIORef' logsRef $ \logs -> (msg : logs, ())
+
+    failTest :: String -> IO ()
+    failTest msg = do
+      logs <- IOR.readIORef logsRef
+      T.assertFailure (msg ++ "\n" ++ (intercalate "\n" (reverse logs)))
+
     infoPath = if infoCfgExists then Left $ fp <.> "info" else Right PC.noPatchData
     -- avoid frame computations for self-tests
     computeFrames = case mwb of
@@ -115,7 +127,7 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
       , PC.logger =
           LJ.LogAction $ \e -> case e of
             PE.AnalysisStart pPair -> do
-              putStrLn $ concat $
+              addLogMsg $ concat $
                 [ "Checking equivalence of "
                 , PB.ppBlock (PPa.pOriginal pPair)
                 , " and "
@@ -124,19 +136,19 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
                 , ": "
                 ]
             PE.CheckedEquivalence _ PE.Equivalent time -> do
-              putStrLn $ "Successful equivalence check: " ++ show time
+              addLogMsg $ "Successful equivalence check: " ++ show time
             PE.CheckedEquivalence _ _ time -> do
-              putStrLn $ "Failed equivalence check: " ++ show time
+              addLogMsg $ "Failed equivalence check: " ++ show time
             PE.CheckedBranchCompleteness _ PE.BranchesComplete time -> do
-              putStrLn $ "Branch completeness check: " ++ show time
+              addLogMsg $ "Branch completeness check: " ++ show time
             PE.ComputedPrecondition _ time -> do
-              putStrLn $ "Precondition propagation: " ++ show time
+              addLogMsg $ "Precondition propagation: " ++ show time
             PE.ProofIntermediate _ _ time -> do
-              putStrLn $ "Intermediate Proof result: " ++ show time
+              addLogMsg $ "Intermediate Proof result: " ++ show time
             PE.ProvenGoal _ goal time -> do
-              putStrLn $ "Toplevel Proof result: " ++ show time ++ "\n" ++ show goal
+              addLogMsg $ "Toplevel Proof result: " ++ show time ++ "\n" ++ show goal
             PE.Warning _ err -> do
-              putStrLn $ "WARNING: " ++ show err
+              addLogMsg $ "WARNING: " ++ show err
             PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
             _ -> return ()
       }
@@ -144,15 +156,15 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg
   case result of
-    PEq.Errored err -> T.assertFailure (show err)
+    PEq.Errored err -> failTest (show err)
     PEq.Equivalent -> case sv of
       ShouldVerify -> return ()
-      _ -> T.assertFailure "Unexpectedly proved equivalence."
+      _ -> failTest "Unexpectedly proved equivalence."
     PEq.Inequivalent -> case sv of
-      ShouldVerify -> T.assertFailure "Failed to prove equivalence."
+      ShouldVerify -> failTest "Failed to prove equivalence."
       ShouldNotVerify -> return ()
-      ShouldConditionallyVerify -> T.assertFailure "Failed to prove conditional equivalence."    
+      ShouldConditionallyVerify -> failTest "Failed to prove conditional equivalence."
     PEq.ConditionallyEquivalent -> case sv of
-      ShouldVerify -> T.assertFailure "Failed to prove equivalence."
-      ShouldNotVerify -> T.assertFailure "Unexpectedly proved conditional equivalence."
+      ShouldVerify -> failTest "Failed to prove equivalence."
+      ShouldNotVerify -> failTest "Unexpectedly proved conditional equivalence."
       ShouldConditionallyVerify -> return ()
