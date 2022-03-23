@@ -40,7 +40,6 @@ import           Control.Lens hiding ( op, pre )
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
-import qualified Data.Foldable as F
 import           Data.Maybe (fromMaybe)
 
 
@@ -54,10 +53,12 @@ import qualified Data.Macaw.CFG as MM
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
+import qualified What4.SatResult as W4R
 
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PB
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.RegisterDomain as PER
+import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
@@ -65,13 +66,13 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
-import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Ground as PG
 import qualified Pate.SimState as PS
-import           What4.ExprHelpers
+import           What4.ExprHelpers as WEH
 import qualified What4.PathCondition as WPC
+import qualified Pate.Config as PC
 
 -- | Generate a structured counterexample for an equivalence
 -- check from an SMT model.
@@ -169,67 +170,110 @@ getCondEquivalenceBindings eqCond fn = withValid $ do
   return binds
 
 getGenPathCondition ::
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  SymGroundEvalFn sym ->
+  f ->
+  EquivM sym arch (W4.Pred sym)
+getGenPathCondition fn f = withSym $ \sym -> do
+  isSatIO <- getSatIO
+  withGroundEvalFn fn $ \fn' -> do
+    let
+      getEq :: W4.SymExpr sym tp' -> W4.SymExpr sym tp' -> IO (Maybe Bool)
+      getEq e1 e2 = Just <$> do
+        p <- W4.isEq sym e1 e2
+        W4G.groundEval fn' p
+
+      -- choice simplifications that make path conditions more manageable
+      simplifyExpr :: W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
+      simplifyExpr e = WEH.simplifyBVOps sym e >>= WEH.resolveConcreteLookups sym getEq
+
+    f' <- PEM.mapExpr sym simplifyExpr f
+    getGenPathConditionIO sym fn' isSatIO f'
+
+getGenPathConditionIO ::
   forall sym  t st fs f.
   sym ~ W4B.ExprBuilder t st fs =>
   PEM.ExprMappable sym f =>
   sym ->
   W4G.GroundEvalFn t ->
+  (W4.Pred sym -> IO (Maybe Bool)) ->
   f ->
   IO (W4.Pred sym)
-getGenPathCondition sym fn e = do
+getGenPathConditionIO sym fn isSat e = do
   let
     f :: forall tp'. W4.SymExpr sym tp' -> W4.Pred sym -> IO (W4.Pred sym)
     f e' cond = do
-      cond' <- WPC.getPathCondition sym fn e'
+      cond' <- WPC.getPathCondition sym fn isSat e'
       W4.andPred sym cond cond'
   
   PEM.foldExpr sym f e (W4.truePred sym)
 
--- | Compute a domain that represents the path condition for
+
+-- | Compute a 'PE.RegisterCondition' that represents the path condition for
+-- registers which disagree in the given counter-example.
+-- If all registers agree, then the resulting predicate is True.
+getRegPathCondition ::
+  forall sym arch.
+  -- | The target condition
+  PE.RegisterCondition sym arch ->
+  SymGroundEvalFn sym ->
+  EquivM sym arch (W4.Pred sym)
+getRegPathCondition regCond fn = withSym $ \sym ->
+  TF.foldrMF (\x y -> getRegPath x y) (W4.truePred sym) (PE.regCondPreds regCond)
+  where
+    getRegPath ::
+      Const (W4.Pred sym) tp ->
+      W4.Pred sym ->
+      EquivM_ sym arch (W4.Pred sym)
+    getRegPath (Const regCond_pred) pathCond = withSym $ \sym -> execGroundFn fn regCond_pred >>= \case
+      -- if the post-equivalence is satisfied for this entry, then we don't need
+      -- to look at the path condition for these values
+      True -> return pathCond
+      -- for an entry that disagrees in the model, we extract the problematic path condition
+      False -> do
+        regPath' <- getGenPathCondition fn regCond_pred
+        liftIO $ W4.andPred sym pathCond regPath'
+
+-- | Return a (cached) function for deciding predicate satisfiability based on the current
+-- assumption state
+getSatIO ::
+  forall sym arch.
+  EquivM sym arch (W4.Pred sym -> IO (Maybe Bool))
+getSatIO = withValid $ do
+  cache <- W4B.newIdxCache
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  let
+    isSat :: W4.Pred sym -> EquivM sym arch (Maybe Bool)
+    isSat p' = case W4.asConstantPred p' of
+      Just b -> return $ Just b
+      Nothing -> fmap getConst $ W4B.idxCacheEval cache p' $ fmap Const $ do
+        r <- checkSatisfiableWithModel heuristicTimeout "getPathCondition" p' $ \res -> case res of
+          W4R.Unsat _ -> return $ Just False
+          W4R.Sat _ -> return $ Just True
+          W4R.Unknown -> return Nothing
+        case r of
+          Left _ -> return Nothing
+          Right a -> return a
+
+  IO.withRunInIO $ \runInIO -> return (\p -> runInIO (isSat p))
+
+-- | Compute a 'PE.StateCondition' that represents the path condition for
 -- values which disagree in the given counter-example
 getPathCondition ::
   forall sym arch.
-  PS.SimBundle sym arch ->
-  PF.BlockSliceState sym arch ->
-  PED.EquivalenceDomain sym arch ->
+  PE.StateCondition sym arch ->
+  PS.SimOutput sym arch PB.Original ->
+  PS.SimOutput sym arch PB.Patched ->
   SymGroundEvalFn sym ->
-  EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
-getPathCondition bundle slice dom fn = withSym $ \sym -> do
-  let
-    -- Only consider path conditions for registers in the equivalence domain.
-    -- Registers outside the equivalence domain necessarily have no effect
-    -- on the overall equivalence proof, and therefore we can ignore any
-    -- path conditions in their resulting values
-    regInDomain ::
-      MM.ArchReg arch tp -> EquivM sym arch Bool
-    regInDomain reg =
-      execGroundFn fn $ PER.registerInDomain sym reg $ PED.eqDomainRegisters dom 
-
-    getRegPath ::
-      MM.ArchReg arch tp ->
-      PF.BlockSliceRegOp sym tp ->
-      PPa.PatchPairC (W4.Pred sym) ->
-      EquivM sym arch (PPa.PatchPairC (W4.Pred sym))
-    getRegPath reg regOp paths = regInDomain reg >>= \case
-      True -> do
-        paths' <- withGroundEvalFn fn $ \fn' -> mapM (getGenPathCondition sym fn') (PF.slRegOpValues regOp)
-        traceBundle bundle ("getPathCondition.getRegPath for " ++ showF reg)
-        F.forM_ paths' $ \path' -> do
-          traceBundle bundle ("  " ++ show (W4.printSymExpr path'))
-        liftIO $ PPa.zipMPatchPairC paths paths' (W4.andPred sym)
-      _ -> return paths
-
-    getMemPath :: forall bin. PS.SimOutput sym arch bin -> EquivM sym arch (Const (W4.Pred sym) bin)
-    getMemPath st = do
-      let mem = MT.memState $ PS.simOutMem st
-      Const <$> (withGroundEvalFn fn $ \fn' -> getGenPathCondition sym fn' mem)
-
-  let truePair = PPa.PatchPairC (W4.truePred sym) (W4.truePred sym)
-  regPath <- PF.foldrMBlockStateLocs (\x1 x2 x3 -> getRegPath x1 x2 x3) (\_ _ r -> return r) truePair slice
-
-  memPath <- PPa.toPatchPairC <$> TF.traverseF (\x -> getMemPath x) (PS.simOut bundle)
-  liftIO $ PPa.zipMPatchPairC regPath memPath (W4.andPred sym)
-
+  EquivM sym arch (W4.Pred sym)
+getPathCondition stCond outO outP fn = withSym $ \sym -> do
+  regCond <- getRegPathCondition (PE.stRegCond stCond) fn
+  withAssumption_ (return regCond) $ do
+    memOCond <- getGenPathCondition fn (PS.simOutMem outO)
+    withAssumption_ (return memOCond) $ do
+      memPCond <- getGenPathCondition fn (PS.simOutMem outP)
+      liftIO $ W4.andPred sym regCond memOCond >>= W4.andPred sym memPCond
 
 isMemOpValid ::
   PA.ValidArch arch =>
