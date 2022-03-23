@@ -26,6 +26,7 @@ jobs:
         # Previous workflow is failing with "Parameter token or opts.auth is required", emit the event to understand why
         # Github actions do
       - name: Emit debugging information
+        if: ${{ failure() }}
         run: |
           echo ${{ github.action }}
           echo ${{ github.event_name }}
