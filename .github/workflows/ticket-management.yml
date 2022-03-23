@@ -15,22 +15,16 @@ jobs:
     steps:
       - name: Assign NEW issues to project
         uses: alex-page/github-project-automation-plus@v0.8.1
-        #if: github.event.action == 'opened'
         with:
           project: pate
           column: Needs Triage
           action: update
           # Uses lcasburn's personal access token for modifying issues
-          # Allows org access to our specific project
-          repo-token: ${{ secrets.MY_ORGPROJECT_TOKEN }}
-        # Previous workflow is failing with "Parameter token or opts.auth is required", emit the event to understand why
-        # Github actions do
+          repo-token: ${{ secrets.MY_GHPROJECT_TOKEN }}
       - name: Emit debugging information
         if: ${{ failure() }}
         run: |
-          echo ${{ github.action }}
           echo ${{ github.event_name }}
-          echo ${{ github.ref_type }}
-          echo ${{ github.ref }}
           echo ${{ github.event.action }}
+
 
