@@ -20,6 +20,7 @@ jobs:
       LANGUAGE: en_US:en
       LC_ALL: en_US.UTF-8
       TZ: America/Los_Angeles
+      CACHE_VERSION: 1
 
     strategy:
       fail-fast: false
@@ -32,12 +33,6 @@ jobs:
     name: GHC ${{ matrix.ghc }} on ${{ matrix.os }} pate-${{ matrix.arch }}
 
     steps:
-    - uses: haskell/actions/setup@v1
-      id: setup-haskell-cabal
-      name: Setup Haskell
-      with:
-        ghc-version: ${{ matrix.ghc }}
-        cabal-version: ${{ matrix.cabal }}
 
     - uses: actions/checkout@v2
       with:
@@ -47,11 +42,21 @@ jobs:
       name: Cache cabal store
       with:
         path: |
-          ${{ steps.setup-haskell.outputs.cabal-store }}
+          ~/.cabal/store
+          ~/.cabal/packages
+          ~/.ghcup
           dist-newstyle
-        key: cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles(format('cabal.GHC-{0}.config', matrix.ghc)) }}-${{ github.sha }}
+        key: ${{ env.CACHE_VERSION }}-cabal-${{ runner.os }}-${{ matrix.ghc }}
         restore-keys: |
-          cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles(format('cabal.GHC-{0}.config', matrix.ghc)) }}-
+          ${{ env.CACHE_VERSION }}-cabal-${{ runner.os }}-${{ matrix.ghc }}
+
+    - uses: haskell/actions/setup@v1
+      id: setup-haskell-cabal
+      name: Setup Haskell
+      with:
+        ghc-version: ${{ matrix.ghc }}
+        cabal-version: ${{ matrix.cabal }}
+
 
     - name: System Dependencies
       run: |
@@ -63,13 +68,21 @@ jobs:
         sudo locale-gen en_US.UTF-8
         sudo pip3 install toml
 
-    - name: Build
+    - name: Build dependencies
       run: |
-        cp cabal.project.dist cabal.project
+        git config --global url."https://github.com/".insteadOf "git@github.com:"
+        git config --global url."https://".insteadOf "git://"
+        curl -sL https://github.com/RyanGlScott/submods-to-source-repos/releases/download/0.0.0.20211210/submods-to-source-repos-0.0.0.20211210.xz > submods-to-source-repos.xz
+        echo 'f339f4bbe43af96df7e8ce115377e56f4861bab5c8f66d3129492cbe7695bbac  submods-to-source-repos.xz' | sha256sum -c -
+        xz -d < submods-to-source-repos.xz > submods-to-source-repos
+        rm -f submods-to-source-repos.xz
+        chmod a+x submods-to-source-repos
+        ./submods-to-source-repos cabal.project.dist > cabal.project
+        cat cabal.project
         cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base
         cabal build pkg:pate --only-dependencies
 
-    - name: Build
+    - name: Build pate
       run: |
         cabal build pkg:pate
 
