@@ -298,7 +298,8 @@ checkTotality asm bundle preD exits =
 
        precond <- liftIO $ do
          eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
-         W4.andPred sym asm eqInputs
+         eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
+         W4.andPred sym asm eqInputsPred
 
        -- compute the condition that leads to each of the computed
        -- exit pairs
@@ -572,7 +573,8 @@ widenPostcondition bundle preD postD0 =
        precond <- liftIO $ do
          asm <- PS.getAssumedPred sym asmFrame
          eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
-         W4.andPred sym asm eqInputs
+         eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
+         W4.andPred sym asm eqInputsPred
 
        -- traceBundle bundle "== widenPost: precondition =="
        -- traceBundle bundle (show (W4.printSymExpr precond))
@@ -612,7 +614,8 @@ widenPostcondition bundle preD postD0 =
                               (PPa.pPatched  (PS.simOut bundle))
                               eqCtx
                               postCondStatePred
-            W4.andPred sym postCondAsm eqPost
+            eqPostPred <- PE.postCondPredicate sym eqPost
+            W4.andPred sym postCondAsm eqPostPred
 
         --traceBundle bundle "== widenPost: postcondition =="
         --traceBundle bundle (show (W4.printSymExpr postcond))

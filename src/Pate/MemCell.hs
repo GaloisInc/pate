@@ -15,10 +15,11 @@ module Pate.MemCell (
   , ppCell
   , setMemCellRegion
   , MemCellPred(..)
+  , traverseWithCell
   , mergeMemCellPred
   , muxMemCellPred
   , inMemCellPred
-  , dropTrivialCells
+  , dropFalseCells
   , readMemCell
   , writeMemCell
   , predFromList
@@ -85,6 +86,16 @@ instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
 -- described memory is contained in the 'Pate.Equivalence.MemoryDomain'.
 newtype MemCellPred sym arch = MemCellPred (Map.Map (Some (MemCell sym arch)) (WI.Pred sym))
 
+traverseWithCell ::
+  forall sym arch m.
+  Monad m =>
+  WI.IsExprBuilder sym =>
+  MemCellPred sym arch ->
+  (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (WI.Pred sym)) ->
+  m (MemCellPred sym arch)
+traverseWithCell (MemCellPred memPred) f =
+  MemCellPred <$> Map.traverseWithKey (\(Some cell@MemCell{}) p -> f cell p) memPred
+
 predFromList ::
   WI.IsExprBuilder sym =>
   PC.OrdF (WI.SymExpr sym) =>
@@ -102,14 +113,13 @@ predToList ::
   [(Some (MemCell sym arch), WI.Pred sym)]
 predToList (MemCellPred cells) = Map.toList cells
 
--- | Drop entries from the map which are concretely false. Semantically this is
--- a no-op as it has no effect on its interpretation.
-dropTrivialCells ::
+-- | Drop entries from the map which are concretely false.
+dropFalseCells ::
   forall sym arch.
   WI.IsExprBuilder sym =>
   MemCellPred sym arch ->
   MemCellPred sym arch
-dropTrivialCells (MemCellPred cells) = MemCellPred $ Map.mapMaybe dropFalse cells
+dropFalseCells (MemCellPred cells) = MemCellPred $ Map.mapMaybe dropFalse cells
   where
     dropFalse ::
       WI.Pred sym ->
