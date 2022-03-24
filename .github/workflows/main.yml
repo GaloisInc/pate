@@ -20,7 +20,7 @@ jobs:
       LANGUAGE: en_US:en
       LC_ALL: en_US.UTF-8
       TZ: America/Los_Angeles
-      CACHE_VERSION: 1
+      CACHE_VERSION: 2
 
     strategy:
       fail-fast: false
@@ -38,6 +38,29 @@ jobs:
       with:
         submodules: 'true'
 
+    # This is necessary to support caching with cabal. If we build directly from
+    # submodules, cabal will not use the cache for them due to mtime
+    # differences.  Instead, we convert our submodules into cabal's "source
+    # repositories", which are actually built into the cabal store
+    # instead. While that shouldn't make a difference, packages in the store are
+    # only rebuilt based on hashes and not mtimes, which means that they are
+    # actually reused from the cache.
+    - name: Convert Submodules to Source Repos
+      run: |
+        git config --global url."https://github.com/".insteadOf "git@github.com:"
+        git config --global url."https://".insteadOf "git://"
+        curl -sL https://github.com/RyanGlScott/submods-to-source-repos/releases/download/0.0.0.20211210/submods-to-source-repos-0.0.0.20211210.xz > submods-to-source-repos.xz
+        echo 'f339f4bbe43af96df7e8ce115377e56f4861bab5c8f66d3129492cbe7695bbac  submods-to-source-repos.xz' | sha256sum -c -
+        xz -d < submods-to-source-repos.xz > submods-to-source-repos
+        rm -f submods-to-source-repos.xz
+        chmod a+x submods-to-source-repos
+        ./submods-to-source-repos cabal.project.dist > cabal.project
+        echo "Constructed cabal.project:"
+        cat cabal.project
+
+    - name: Installing the freeze file
+      run: mv cabal.GHC-${{ matrix.ghc }}.freeze cabal.project.freeze
+
     - uses: actions/cache@v2
       name: Cache cabal store
       with:
@@ -46,9 +69,12 @@ jobs:
           ~/.cabal/packages
           ~/.ghcup
           dist-newstyle
-        key: ${{ env.CACHE_VERSION }}-cabal-${{ runner.os }}-${{ matrix.ghc }}
+        # Our key is the freeze file and also the (constructed)
+        # cabal.project. This captures the normal package dependencies *and* the
+        # submodule hashes (without capturing anything undesirable)
+        key: ${{ env.CACHE_VERSION }}-pate-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('cabal.project.freeze', 'cabal.project') }}
         restore-keys: |
-          ${{ env.CACHE_VERSION }}-cabal-${{ runner.os }}-${{ matrix.ghc }}
+          ${{ env.CACHE_VERSION }}-pate-${{ runner.os }}-${{ matrix.ghc }}-
 
     - uses: haskell/actions/setup@v1
       id: setup-haskell-cabal
@@ -68,22 +94,10 @@ jobs:
         sudo locale-gen en_US.UTF-8
         sudo pip3 install toml
 
-    - name: Build dependencies
-      run: |
-        git config --global url."https://github.com/".insteadOf "git@github.com:"
-        git config --global url."https://".insteadOf "git://"
-        curl -sL https://github.com/RyanGlScott/submods-to-source-repos/releases/download/0.0.0.20211210/submods-to-source-repos-0.0.0.20211210.xz > submods-to-source-repos.xz
-        echo 'f339f4bbe43af96df7e8ce115377e56f4861bab5c8f66d3129492cbe7695bbac  submods-to-source-repos.xz' | sha256sum -c -
-        xz -d < submods-to-source-repos.xz > submods-to-source-repos
-        rm -f submods-to-source-repos.xz
-        chmod a+x submods-to-source-repos
-        ./submods-to-source-repos cabal.project.dist > cabal.project
-        cat cabal.project
-        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base
-        cabal build pkg:pate --only-dependencies
-
     - name: Build pate
       run: |
+        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base
+        cabal build pkg:pate --only-dependencies
         cabal build pkg:pate
 
     - name: Install Solvers
