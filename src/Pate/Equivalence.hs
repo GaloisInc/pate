@@ -31,9 +31,6 @@ Definitions for equality over crucible input and output states.
 
 module Pate.Equivalence
   ( DomainSpec
-  , EquivRelation(..)
-  , MemEquivRelation(..)
-  , RegEquivRelation(..)
   , EquivalenceStatus(..)
   , MemRegionEquality(..)
   , getPostdomain
@@ -41,9 +38,12 @@ module Pate.Equivalence
   , impliesPredomain
   , impliesPostdomainPred
   , memDomPre
-  , stateEquivalence
   , eqDomPost
   , resolveCellEquiv
+  , resolveCellEquivMem
+  , resolveCellEquivStack
+  , registerValuesEqual
+  , EquivContext(..)
   ) where
 
 import           Control.Lens hiding ( op, pre )
@@ -123,37 +123,16 @@ type DomainSpec sym arch = SimSpec sym arch (PED.EquivalenceDomain sym arch)
 
 
 ---------------------------------------
--- Equivalence relations
 
--- The state predicates define equality, meant to be guarded by a 'PES.StatePred' which
--- defines the domain that the equality holds over
-
--- | Check if two memory cells are equivalent in the original and patched
--- program states.  The comparisons are done as bitvectors.  The 'CLM.LLVMPtr'
--- is a single bitvector of the necessary width (i.e., it can be larger than
--- pointer sized).
---
--- Note that this works at the level of bytes.
-newtype MemEquivRelation sym arch =
-  MemEquivRelation { applyMemEquivRelation :: (forall w. PMC.MemCell sym arch w -> CLM.LLVMPtr sym (8 W4.* w) -> CLM.LLVMPtr sym (8 W4.* w) -> IO (W4.Pred sym)) }
-
--- | Check if two register values are the equivalent in the original and patched
--- program states.
-newtype RegEquivRelation sym arch =
-  RegEquivRelation { applyRegEquivRelation :: (forall tp. MM.ArchReg arch tp -> PSR.MacawRegEntry sym tp -> PSR.MacawRegEntry sym tp -> IO (W4.Pred sym)) }
-
--- | The equivalence relation specifies how (symbolic) values in the original
--- program must relate to (symbolic) values in the patched program.
---
--- The 'EquivalenceRelation' must be paired with a 'PES.StatePred' to be useful; the
--- 'PES.StatePred' tells the verifier which pieces of program state (registers and
--- memory locations) must be equivalent under the 'EquivRelation'.
-data EquivRelation sym arch =
-  EquivRelation
-    { eqRelRegs :: RegEquivRelation sym arch
-    , eqRelStack :: MemEquivRelation sym arch
-    , eqRelMem :: MemEquivRelation sym arch
-    }
+-- | A flag for whether or not a given memory equality test should be inclusive or
+-- exclusive to a specific region of memory. Currently this region is simply the stack region,
+-- and represents whether or not an equality test should be considering *only* the stack, or
+-- considering global (i.e. non-stack) memory.
+data MemRegionEquality sym arch =
+    -- | Memory is equal at all addresses in the region represented by the given Nat
+    MemEqAtRegion (W4.SymNat sym)
+    -- | Memory is equal at all addresses outside the region represented by the given Nat
+  | MemEqOutsideRegion (W4.SymNat sym)
 
 equalValuesIO ::
   HasCallStack =>
@@ -171,16 +150,18 @@ equalValuesIO sym entry1 entry2 = case (PSR.macawRegRepr entry1, PSR.macawRegRep
   (CT.StructRepr Ctx.Empty, CT.StructRepr Ctx.Empty) -> return (W4.truePred sym)
   (tp1, tp2) -> error ("equalValues: unsupported types: " ++ show (tp1, tp2))
 
--- | Base register equivalence relation. Equates all registers, except the instruction pointer.
--- Explicitly ignores the region of the stack pointer register, as this is checked elsewhere.
-registerEquivalence ::
-  forall sym arch.
+
+registerValuesEqual' ::
+  forall sym arch tp.
   PA.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
   PA.HasDedicatedRegister arch ->
   sym ->
-  RegEquivRelation sym arch
-registerEquivalence hdr sym = RegEquivRelation $ \r vO vP -> do
+  MM.ArchReg arch tp ->
+  PSR.MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp -> 
+  IO (W4.Pred sym)  
+registerValuesEqual' hdr sym r vO vP =
   case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return $ W4.truePred sym
     PRe.RegSP -> do
@@ -188,75 +169,61 @@ registerEquivalence hdr sym = RegEquivRelation $ \r vO vP -> do
         CLM.LLVMPointer _ offO = PSR.macawRegValue vO
         CLM.LLVMPointer _ offP = PSR.macawRegValue vP
       W4.isEq sym offO offP
-    _ -> equalValuesIO sym vO vP
+    _ -> equalValuesIO sym vO vP  
 
--- | Base state equivalence relation. Requires pointer equality at all memory cells, where
--- stack equality on non-stack cells is trivially true, and memory equality on stack
--- cells is trivially true.
-stateEquivalence ::
-  forall sym arch.
+-- | This simply bundles up the necessary state elements necessary to resolve equality.
+data EquivContext sym arch where
+  EquivContext ::
+    { eqCtxHDR :: PA.HasDedicatedRegister arch
+    , eqCtxStackRegion :: W4.SymNat sym
+    } -> EquivContext sym arch
+
+-- | Equates 'MacawRegEntry' values with respect to a given register.
+-- Always returns 'True' if given the instruction pointer.
+-- Explicitly ignores the region of the stack pointer register, as this is checked elsewhere.
+registerValuesEqual ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
-  PA.HasDedicatedRegister arch ->
   sym ->
-  -- | stack memory region
-  W4.SymNat sym ->
-  EquivRelation sym arch
-stateEquivalence hdr sym stackRegion =
-  let
-    isStackCell cell = do
-      let CLM.LLVMPointer region _ = PMC.cellPtr cell
-      W4.natEq sym region stackRegion
+  EquivContext sym arch ->
+  MM.ArchReg arch tp ->
+  PSR.MacawRegEntry sym tp ->
+  PSR.MacawRegEntry sym tp ->
+  IO (W4.Pred sym)
+registerValuesEqual sym (EquivContext hdr _) r vO vP = registerValuesEqual' hdr sym r vO vP
 
-    memEq = MemEquivRelation $ \cell vO vP -> do
-      impM sym (isStackCell cell >>= W4.notPred sym) $
-        MT.llvmPtrEq sym vO vP
-
-    stackEq = MemEquivRelation $ \cell vO vP -> do
-      impM sym (isStackCell cell) $
-        MT.llvmPtrEq sym vO vP
-  in EquivRelation (registerEquivalence hdr sym) stackEq memEq
-
--- | Resolve a domain predicate and equivalence relation into a precondition.
+-- | Resolve a domain predicate into a precondition.
 -- This resulting predicate is a conjunction asserting that each location is
 -- initially equal in the given slice.
 -- This intended to be assumed true for the purposes of
 -- generating an equivalence problem.
--- The 'EquivRelation' defines the relation that holds on each location in the initial
--- machine state. Currently this is always exact equality, and can likely be
--- deprecated (see: https://github.com/GaloisInc/pate/issues/213)
 getPredomain ::
   forall sym arch.
   IsSymInterface sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
-  -- | stack memory region
-  W4.SymNat sym ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)
-getPredomain sym stackRegion bundle eqRel eqDom = do
-  eqDomPre sym stackRegion (simInO bundle) (simInP bundle) eqRel eqDom
+getPredomain sym bundle eqCtx eqDom =
+  eqDomPre sym (simInO bundle) (simInP bundle) eqCtx eqDom
 
--- | True if the first precondition implies the second under the given
--- equivalence relation
+-- | True if the first precondition implies the second
 impliesPredomain ::
   forall sym arch.
   IsSymInterface sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
-  -- | stack memory region
-  W4.SymNat sym ->
   SimInput sym arch PBi.Original ->
   SimInput sym arch PBi.Patched ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)  
-impliesPredomain sym stackRegion inO inP eqRel domAsm domConcl = do
-  asm <- eqDomPre sym stackRegion inO inP eqRel domAsm
-  concl <- eqDomPre sym stackRegion inO inP eqRel domConcl
+impliesPredomain sym inO inP eqCtx domAsm domConcl = do
+  asm <- eqDomPre sym inO inP eqCtx domAsm
+  concl <- eqDomPre sym inO inP eqCtx domConcl
   W4.impliesPred sym asm concl
 
 impliesPostdomainPred ::
@@ -306,61 +273,32 @@ impliesPostdomainPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
 -- covered by the domain).
 -- This predicate is intended to be proven, rather than assumed. See
 -- 'eqDomPre' for computing an assumed predicate from a pre-domain.
--- 'EquivRelation' is intended to abstract away the exact equivalence relation
--- used, however relations aside from exact equality are not well supported and
--- this will likely be deprecated (see https://github.com/GaloisInc/pate/issues/213)
 getPostdomain ::
   W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
-  IO (EquivRelation sym arch, W4.Pred sym)
-getPostdomain sym bundle eqRel stPred = do
-  post <- eqDomPost sym (simOutO bundle) (simOutP bundle) eqRel stPred
-  return (weakenEquivRelation sym stPred eqRel, post)
-
--- | Weaken an equivalence relation to be conditional on exactly this domain.
--- This is meant to be used for reporting only.
--- To be deprecated: (see https://github.com/GaloisInc/pate/issues/213)
-weakenEquivRelation ::
-  W4.IsExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
-  OrdF (W4.SymExpr sym) =>
-  OrdF (MM.ArchReg arch) =>
-  sym ->
-  PED.EquivalenceDomain sym arch ->
-  EquivRelation sym arch ->
-  EquivRelation sym arch
-weakenEquivRelation sym eqDom eqRel =
-  let
-    regsFn = RegEquivRelation $ \r v1 v2 ->
-      impM sym (return $ PER.registerInDomain sym r (PED.eqDomainRegisters eqDom)) $
-        applyRegEquivRelation (eqRelRegs eqRel) r v1 v2
-    stackFn = MemEquivRelation $ \cell v1 v2 -> do
-      impM sym (PEM.containsCell sym (PED.eqDomainStackMemory eqDom) cell) $
-        applyMemEquivRelation (eqRelStack eqRel) cell v1 v2
-    memFn = MemEquivRelation $ \cell v1 v2 -> do
-      impM sym (PEM.containsCell sym (PED.eqDomainGlobalMemory eqDom) cell) $
-        applyMemEquivRelation (eqRelMem eqRel) cell v1 v2
-  in EquivRelation regsFn stackFn memFn
+  IO (W4.Pred sym)
+getPostdomain sym bundle eqCtx stPred =
+  eqDomPost sym (simOutO bundle) (simOutP bundle) eqCtx stPred
 
 -- | Compute a predicate that is true iff the output states are equal according to
--- the given 'MemEquivRelation' at the locations defined by the given 'PEM.MemPred'
+-- the given 'MemRegionEquality' at the locations defined by the given 'PEM.MemPred'
 memDomPost ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
+  MemRegionEquality sym arch ->
   SimOutput sym arch PBi.Original ->
   SimOutput sym arch PBi.Patched ->
-  MemEquivRelation sym arch ->
   PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
-memDomPost sym outO outP memEq memPred = do
+memDomPost sym memEqRegion outO outP memPred = do
   iteM sym (return $ (PEM.memDomainPolarity memPred))
-    (positiveMemCells sym stO stP memEq (PEM.memDomainPred memPred)) negativePolarity
+    (positiveMemCells sym memEqRegion stO stP (PEM.memDomainPred memPred)) negativePolarity
   where
     stO = simOutState outO
     stP = simOutState outP
@@ -376,7 +314,7 @@ memDomPost sym outO outP memEq memPred = do
       IO (W4.Pred sym)
     resolveCell cell cond = do
       impM sym (PEM.containsCell sym memPred cell) $
-        resolveCellEquiv sym stO stP memEq cell cond
+        resolveCellEquiv sym memEqRegion stO stP cell cond
 
     -- | For the negative case, we need to consider the domain of the state itself -
     -- we assure that all writes are equivalent when they have not been excluded
@@ -397,36 +335,81 @@ positiveMemCells ::
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  MemRegionEquality sym arch ->
   SimState sym arch PBi.Original ->
   SimState sym arch PBi.Patched ->
-  MemEquivRelation sym arch ->
   PMC.MemCellPred sym arch ->
   IO (W4.Pred sym)
-positiveMemCells sym stO stP memEq memPred = do
+positiveMemCells sym memEqRegion stO stP memPred = do
   let
     memCells = PMC.predToList memPred
-    resolveCellPos = resolveCellEquiv sym stO stP memEq
+    resolveCellPos = resolveCellEquiv sym memEqRegion stO stP
   foldr (\(Some cell, cond) -> andM sym (resolveCellPos cell cond)) (return $ W4.truePred sym) memCells
 
+-- | Compute a predicate that is true if the area of memory covered by the
+-- given 'PMC.MemCell' is equivalent on the two given states.
+-- The predicate is conditional on the region of the cell agreeing with
+-- the given 'MemRegionEquality':
+-- * for 'MemEqAtRegion' the given region must match the cell
+--    (i.e. for cells outside the region the resulting predicate is always true).
+-- * for 'MemEqOutsideRegion' the given region must *not* match the cell
+--    (i.e. for cells in the region the resulting predicate is always true)
 resolveCellEquiv ::
   forall sym arch w.
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  MemRegionEquality sym arch ->
   SimState sym arch PBi.Original ->
   SimState sym arch PBi.Patched ->
-  MemEquivRelation sym arch ->
   PMC.MemCell sym arch w ->
-  W4.Pred sym ->
+  W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
-resolveCellEquiv sym stO stP eqRel cell cond = do
+resolveCellEquiv sym memEqRegion stO stP cell cond = do
   val1 <- PMC.readMemCell sym (MT.memState $ simMem stO) cell
   val2 <- PMC.readMemCell sym (MT.memState $ simMem stP) cell
-  impM sym (return cond) $ applyMemEquivRelation eqRel cell val1 val2
+  let CLM.LLVMPointer cellRegion _ = PMC.cellPtr cell
+  isInRegionScope <- case memEqRegion of
+    MemEqAtRegion atRegion -> W4.natEq sym cellRegion atRegion
+    MemEqOutsideRegion outRegion -> W4.notPred sym =<< W4.natEq sym cellRegion outRegion
+  impM sym (W4.andPred sym cond isInRegionScope) $ MT.llvmPtrEq sym val1 val2
 
+-- | Compute a predicate that is true if the area of memory covered by the
+-- given 'PMC.MemCell' is equivalent on the two given states.
+-- Trivially true when the given 'PMC.MemCell' covers the stack region.
+resolveCellEquivMem ::
+  forall sym arch w.
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  EquivContext sym arch ->
+  SimState sym arch PBi.Original ->
+  SimState sym arch PBi.Patched ->
+  PMC.MemCell sym arch w ->
+  W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
+  IO (W4.Pred sym)
+resolveCellEquivMem sym (EquivContext _ stackRegion) stO stP cell cond =
+  resolveCellEquiv sym (MemEqOutsideRegion stackRegion) stO stP cell cond
 
--- | Compute a precondition that is sufficiently strong to imply the given
--- equivalence relation on the given domain for the given input state
+-- | Compute a predicate that is true if the area of memory covered by the
+-- given 'PMC.MemCell' is equivalent on the two given states.
+-- Trivially true when the given 'PMC.MemCell' is outside the stack region.
+resolveCellEquivStack ::
+  forall sym arch w.
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  EquivContext sym arch ->
+  SimState sym arch PBi.Original ->
+  SimState sym arch PBi.Patched ->
+  PMC.MemCell sym arch w ->
+  W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
+  IO (W4.Pred sym)
+resolveCellEquivStack sym (EquivContext _ stackRegion) stO stP cell cond =
+  resolveCellEquiv sym (MemEqAtRegion stackRegion) stO stP cell cond
+
+-- | Compute a precondition that is sufficiently strong to imply equality
+-- on the given domain for the given input state
 -- This predicate is meant to be *assumed* true.
 memDomPre ::
   forall sym arch.
@@ -436,12 +419,11 @@ memDomPre ::
   MemRegionEquality sym arch ->
   SimInput sym arch PBi.Original ->
   SimInput sym arch PBi.Patched ->
-  MemEquivRelation sym arch ->
   PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
-memDomPre sym memEqRegion inO inP memEq memPred  = do
+memDomPre sym memEqRegion inO inP memPred  = do
   iteM sym (return $ (PEM.memDomainPolarity memPred))
-    (positiveMemCells sym stO stP memEq (PEM.memDomainPred memPred)) negativePolarity
+    (positiveMemCells sym memEqRegion stO stP (PEM.memDomainPred memPred)) negativePolarity
   where
     stO = simInState inO
     stP = simInState inP
@@ -470,75 +452,79 @@ memDomPre sym memEqRegion inO inP memEq memPred  = do
     negativePolarity :: IO (W4.Pred sym)
     negativePolarity = do
       mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) (PEM.toList memPred)
-      getRegionEquality memEqRegion mem' (MT.memState memP)
+      getRegionEquality sym memEqRegion mem' (MT.memState memP)
 
-newtype MemRegionEquality sym arch =
-  MemRegionEquality
-    { getRegionEquality ::
-        MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
-        MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
-        IO (W4.Pred sym)
-    }
-
--- | Compute a predicate that is true iff the two given states are equal
--- (up to 'RegEquivRelation') on the given 'PER.RegisterDomain'.
--- The 'RegEquivRelation' is currently always simple equality (see: https://github.com/GaloisInc/pate/issues/213)
-regDomRel ::
+-- | Compute a predicate that is true if the two memory states are exactly equal with respect to the given
+-- type of region equality
+getRegionEquality ::
   forall sym arch.
   W4.IsExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ->
+  MemRegionEquality sym arch ->
+  MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
+  MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
+  IO (W4.Pred sym)
+getRegionEquality sym memEq memO memP = case memEq of
+  MemEqAtRegion stackRegion -> MT.memEqAtRegion sym stackRegion memO memP
+  MemEqOutsideRegion stackRegion -> MT.memEqOutsideRegion sym stackRegion memO memP
+
+-- | Compute a predicate that is true iff the two given states are equal with respect to
+-- the given 'PER.RegisterDomain'.
+regDomRel ::
+  forall sym arch.
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  PA.HasDedicatedRegister arch ->
   sym ->
   SimState sym arch PBi.Original ->
   SimState sym arch PBi.Patched ->
-  RegEquivRelation sym arch ->
   PER.RegisterDomain sym arch ->
   IO (W4.Pred sym)
-regDomRel sym stO stP regEquiv regDom  = do
-  let
-    regsO = simRegs stO
-    regsP = simRegs stP
-    regRel r p =
-      impM sym (return p) $ applyRegEquivRelation regEquiv r (regsO ^. MM.boundValue r) (regsP ^. MM.boundValue r)
+regDomRel hdr sym stO stP regDom  = do
+  let regRel r p = do
+        let vO = (simRegs stO) ^. MM.boundValue r
+        let vP = (simRegs stP) ^. MM.boundValue r
+        impM sym (return p) $ registerValuesEqual' hdr sym r vO vP
   foldr (\(Some r, p) -> andM sym (regRel r p)) (return $ W4.truePred sym) (PER.toList regDom)
 
 eqDomPre ::
   IsSymInterface sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
-  -- | stack memory region
-  W4.SymNat sym ->
   SimInput sym arch PBi.Original ->
   SimInput sym arch PBi.Patched ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)
-eqDomPre sym stackRegion inO inP eqRel eqDom  = do
+eqDomPre sym inO inP (EquivContext hdr stackRegion) eqDom  = do
   let
     stO = simInState inO
     stP = simInState inP
     
-    regsEq = regDomRel sym stO stP (eqRelRegs eqRel) (PED.eqDomainRegisters eqDom)
+    regsEq = regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
     stacksEq =
-      memDomPre sym (MemRegionEquality $ MT.memEqAtRegion sym stackRegion) inO inP (eqRelStack eqRel) (PED.eqDomainStackMemory eqDom)
+      memDomPre sym (MemEqAtRegion stackRegion) inO inP (PED.eqDomainStackMemory eqDom)
     memEq =
-      memDomPre sym (MemRegionEquality $ MT.memEqOutsideRegion sym stackRegion) inO inP (eqRelMem eqRel) (PED.eqDomainGlobalMemory eqDom)
+      memDomPre sym (MemEqOutsideRegion stackRegion) inO inP (PED.eqDomainGlobalMemory eqDom)
   andM sym regsEq (andM sym stacksEq memEq)
 
 eqDomPost ::
   W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
   SimOutput sym arch PBi.Original ->
   SimOutput sym arch PBi.Patched ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)
-eqDomPost sym outO outP eqRel stPred  = do
+eqDomPost sym outO outP (EquivContext hdr stackRegion) stPred = do
   let
     stO = simOutState outO
     stP = simOutState outP
     
-    regsEq = regDomRel sym stO stP (eqRelRegs eqRel) (PED.eqDomainRegisters stPred)
-    stacksEq = memDomPost sym outO outP (eqRelStack eqRel) (PED.eqDomainStackMemory stPred)
-    memEq = memDomPost sym outO outP (eqRelMem eqRel) (PED.eqDomainGlobalMemory stPred)
+    regsEq = regDomRel hdr sym stO stP (PED.eqDomainRegisters stPred)
+    stacksEq = memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory stPred)
+    memEq = memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory stPred)
   andM sym regsEq (andM sym stacksEq memEq)
+
+

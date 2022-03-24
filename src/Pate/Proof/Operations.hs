@@ -104,9 +104,9 @@ simBundleToSlice bundle = withSym $ \sym -> do
       PSR.MacawRegEntry sym tp ->
       PSR.MacawRegEntry sym tp ->
       EquivM sym arch (PF.BlockSliceRegOp sym tp)
-    getReg reg valO valP = do
-      eqRel <- CMR.asks envBaseEquiv
-      isEquiv <- liftIO $ PE.applyRegEquivRelation (PE.eqRelRegs eqRel) reg valO valP
+    getReg reg valO valP = withSym $ \sym -> do
+      eqCtx <- equivalenceContext
+      isEquiv <- liftIO $ PE.registerValuesEqual sym eqCtx reg valO valP
       return $ PF.BlockSliceRegOp
         (PPa.PatchPairC valO valP)
         (PSR.macawRegRepr valO)
@@ -119,10 +119,7 @@ simBundleToSlice bundle = withSym $ \sym -> do
     memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
       valO <- liftIO $ PMC.readMemCell sym (MT.memState $ PS.simMem stO) cell
       valP <- liftIO $ PMC.readMemCell sym (MT.memState $ PS.simMem stP) cell
-      eqRel <- CMR.asks envBaseEquiv      
-      isValidStack <- liftIO $ PE.applyMemEquivRelation (PE.eqRelStack eqRel) cell valO valP
-      isValidGlobalMem <- liftIO $ PE.applyMemEquivRelation (PE.eqRelMem eqRel) cell valO valP
-      isEquiv <- liftIO $ W4.andPred sym isValidStack isValidGlobalMem
+      isEquiv <- liftIO $ MT.llvmPtrEq sym valO valP
       return $ MapF.Pair cell $ PF.BlockSliceMemOp
         { PF.slMemOpValues = PPa.PatchPairC valO valP
         , PF.slMemOpEquiv = isEquiv

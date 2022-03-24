@@ -191,9 +191,9 @@ exactEquivalence ::
   PSS.SimInput sym arch PB.Patched ->
   EquivM sym arch (WI.Pred sym)
 exactEquivalence inO inP = withSym $ \sym -> do
-  eqRel <- CMR.asks envBaseEquiv
+  eqCtx <- equivalenceContext
   regsEqs <- liftIO $ PRt.zipWithRegStatesM (PSS.simInRegs inO) (PSS.simInRegs inP) $ \r v1 v2 ->
-    Const <$> PEq.applyRegEquivRelation (PEq.eqRelRegs eqRel) r v1 v2
+    Const <$> PEq.registerValuesEqual sym eqCtx r v1 v2
 
   regsEq <- liftIO $ WEH.allPreds sym (map snd $ PRt.assocs regsEqs)
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)

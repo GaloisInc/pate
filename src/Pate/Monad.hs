@@ -74,6 +74,8 @@ module Pate.Monad
   , lookupBlockCache
   , modifyBlockCache
   , freshBlockCache
+  -- equivalence
+  , equivalenceContext
   )
   where
 
@@ -126,6 +128,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
@@ -756,3 +759,12 @@ instance MF.MonadFail (EquivM_ sym arch) where
 
 manifestError :: MonadError e m => m a -> m (Either e a)
 manifestError act = catchError (Right <$> act) (pure . Left)
+
+----------------------------------------
+
+equivalenceContext ::
+  EquivM sym arch (PEq.EquivContext sym arch)
+equivalenceContext = do
+  PA.SomeValidArch d <- CMR.asks envValidArch
+  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
+  return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion

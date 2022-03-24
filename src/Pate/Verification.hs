@@ -187,7 +187,7 @@ doVerifyPairs ::
   N.NonceGenerator IO scope ->
   sym ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen sym = do
+doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
                                 , MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch) Nothing) of
@@ -264,7 +264,6 @@ doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr
       , envBlockEndVar = bvar
       , envLogger = logAction
       , envConfig = vcfg
-      , envBaseEquiv = stateEquivalence hdr sym stackRegion
       , envFailureMode = PME.ThrowOnAnyFailure
       , envGoalTriples = [] -- populated in runVerificationLoop
       , envValidSym = PS.Sym symNonce sym adapter
@@ -440,8 +439,7 @@ checkEquivalence ::
   EquivM sym arch PEq.EquivalenceStatus
 checkEquivalence triple = startTimer $ withSym $ \sym -> do
   withValid @() $ liftIO $ W4B.startCaching sym
-  eqRel <- CMR.asks envBaseEquiv
-  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
+  eqCtx <- equivalenceContext
   -- first try proving equivalence by assuming that exact equality
   -- is the only condition we are propagating backwards, so we
   -- don't do any work to try to intelligently narrow this down
@@ -469,7 +467,7 @@ checkEquivalence triple = startTimer $ withSym $ \sym -> do
       inO = SimInput stO (PPa.pOriginal pPair)
       inP = SimInput stP (PPa.pPatched pPair)
     (_, genPrecond) <- liftIO $ bindSpec sym stO stP genPrecondSpec
-    preImpliesGen <- liftIO $ impliesPredomain sym stackRegion inO inP eqRel precond genPrecond
+    preImpliesGen <- liftIO $ impliesPredomain sym inO inP eqCtx precond genPrecond
     -- prove that the generated precondition is implied by the given precondition
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
     isPredTrue' goalTimeout preImpliesGen >>= \case
@@ -869,9 +867,9 @@ proveLocalPostcondition ::
   EquivM sym arch (BranchCase sym arch)
 proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   traceBundle bundle "proveLocalPostcondition"
-  eqRel <- CMR.asks envBaseEquiv
+  eqCtx <- equivalenceContext
   (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
-  (_, postcondPred) <- liftIO $ getPostdomain sym bundle eqRel postcond
+  postcondPred <- liftIO $ getPostdomain sym bundle eqCtx postcond
 
   traceBundle bundle "guessing equivalence domain"
   eqInputs <- withAssumption_ (return asm) $ do
@@ -882,8 +880,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
 
-  stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
-  eqInputsPred <- liftIO $ getPredomain sym stackRegion bundle eqRel eqInputs
+  eqInputsPred <- liftIO $ getPredomain sym bundle eqCtx eqInputs
 
   notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- PD.getBlocks $ simPair bundle
