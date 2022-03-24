@@ -37,7 +37,6 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
-import           Pate.Equivalence
 import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
@@ -72,7 +71,6 @@ data EquivEnv sym arch where
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode
-    , envBaseEquiv :: EquivRelation sym arch
     , envGoalTriples :: [PPE.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym

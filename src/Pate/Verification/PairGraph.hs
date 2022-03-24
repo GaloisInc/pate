@@ -291,14 +291,13 @@ checkTotality :: forall sym arch.
 checkTotality asm bundle preD exits =
   withSym $ \sym ->
     do vcfg <- asks envConfig
-       eqRel <- asks envBaseEquiv
-       stackRegion <- asks (PMC.stackRegion . envCtx)
+       eqCtx <- equivalenceContext
 
        let solver = PCfg.cfgSolver vcfg
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
        precond <- liftIO $ do
-         eqInputs <- PE.getPredomain sym stackRegion bundle eqRel (PS.specBody preD)
+         eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
          W4.andPred sym asm eqInputs
 
        -- compute the condition that leads to each of the computed
@@ -564,7 +563,7 @@ widenPostcondition bundle preD postD0 =
   withSym $ \sym ->
     do vcfg <- asks envConfig
        asmFrame <- asks envCurrentFrame
-       eqRel <- asks envBaseEquiv
+       eqCtx <- equivalenceContext
        stackRegion <- asks (PMC.stackRegion . envCtx)
 
        let solver = PCfg.cfgSolver vcfg
@@ -572,7 +571,7 @@ widenPostcondition bundle preD postD0 =
 
        precond <- liftIO $ do
          asm <- PS.getAssumedPred sym asmFrame
-         eqInputs <- PE.getPredomain sym stackRegion bundle eqRel (PS.specBody preD)
+         eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
          W4.andPred sym asm eqInputs
 
        -- traceBundle bundle "== widenPost: precondition =="
@@ -581,7 +580,7 @@ widenPostcondition bundle preD postD0 =
        PS.withOnlineSolver solver saveInteraction sym $ \bak ->
          do liftIO $ LCBO.withSolverProcess bak doPanic $ \sp -> do
               W4.assume (W4.solverConn sp) precond
-            widenLoop sym bak eqRel postD0 Nothing
+            widenLoop sym bak eqCtx postD0 Nothing
 
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
@@ -598,11 +597,11 @@ widenPostcondition bundle preD postD0 =
      , PA.ValidArch arch ) =>
      sym ->
      bak ->
-     EquivRelation sym arch ->
+     EquivContext sym arch ->
      AbstractDomain sym arch ->
      Maybe (WidenLocs sym arch) ->
      EquivM sym arch (WidenResult sym arch)
-   widenLoop sym bak eqRel postD mlocs =
+   widenLoop sym bak eqCtx postD mlocs =
      do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
         let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
         (postCondAsm, postCondStatePred) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
@@ -611,7 +610,7 @@ widenPostcondition bundle preD postD0 =
             eqPost <- PE.eqDomPost sym
                               (PPa.pOriginal (PS.simOut bundle))
                               (PPa.pPatched  (PS.simOut bundle))
-                              eqRel
+                              eqCtx
                               postCondStatePred
             W4.andPred sym postCondAsm eqPost
 
@@ -631,7 +630,7 @@ widenPostcondition bundle preD postD0 =
                    Sat evalFn ->
                      -- The current execution does not satisfy the postcondition, and we have
                      -- a counterexample.
-                     widenUsingCounterexample sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+                     widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD
 
         -- Re-enter the widening loop if we had to widen at this step.
         -- If this step completed, use the success continuation to
@@ -652,7 +651,7 @@ widenPostcondition bundle preD postD0 =
                let newlocs = case mlocs of
                                Nothing    -> Just locs
                                Just locs' -> Just (locs <> locs')
-               widenLoop sym bak eqRel postD' newlocs
+               widenLoop sym bak eqCtx postD' newlocs
 
 
 widenUsingCounterexample ::
@@ -661,17 +660,17 @@ widenUsingCounterexample ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenUsingCounterexample sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
+widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD =
   tryWidenings
-    [ widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD
-    , widenStack sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD
-    , widenHeap sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD
+    [ widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
+    , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD
+    , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD
     , return $ WideningError "Could not find any values to widen!"
     ]
 
@@ -684,15 +683,15 @@ widenHeap ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenHeap sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
-  do xs <- findUnequalHeapMemCells sym evalFn bundle eqRel preD
-     ys <- findUnequalHeapWrites sym evalFn bundle eqRel
+widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD =
+  do xs <- findUnequalHeapMemCells sym evalFn bundle eqCtx preD
+     ys <- findUnequalHeapWrites sym evalFn bundle eqCtx
      let zs = xs++ys
      if null zs then
        return NoWideningRequired
@@ -712,15 +711,15 @@ widenStack ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenStack sym evalFn bundle eqRel postCondAsm postCondStatePred preD postD =
-  do xs <- findUnequalStackMemCells sym evalFn bundle eqRel preD
-     ys <- findUnequalStackWrites sym evalFn bundle eqRel
+widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD =
+  do xs <- findUnequalStackMemCells sym evalFn bundle eqCtx preD
+     ys <- findUnequalStackWrites sym evalFn bundle eqCtx
      let zs = xs++ys
      if null zs then
        return NoWideningRequired
@@ -741,9 +740,9 @@ findUnequalHeapWrites ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   IO [Some (PMc.MemCell sym arch)]
-findUnequalHeapWrites sym evalFn bundle eqRel =
+findUnequalHeapWrites sym evalFn bundle eqCtx =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
@@ -752,7 +751,7 @@ findUnequalHeapWrites sym evalFn bundle eqRel =
      let footprints = Set.union footO footP
      memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
      execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelMem eqRel) cell cond
+       do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
@@ -762,9 +761,9 @@ findUnequalStackWrites ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   IO [Some (PMc.MemCell sym arch)]
-findUnequalStackWrites sym evalFn bundle eqRel =
+findUnequalStackWrites sym evalFn bundle eqCtx =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
@@ -773,7 +772,7 @@ findUnequalStackWrites sym evalFn bundle eqRel =
      let footprints = Set.union footO footP
      memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
      execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelStack eqRel) cell cond
+       do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
@@ -783,16 +782,16 @@ findUnequalHeapMemCells ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   AbstractDomain sym arch ->
   IO [Some (PMc.MemCell sym arch)]
-findUnequalHeapMemCells sym evalFn bundle eqRel preD =
+findUnequalHeapMemCells sym evalFn bundle eqCtx preD =
   do let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
      execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelMem eqRel) cell cond
+       do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
@@ -802,16 +801,16 @@ findUnequalStackMemCells ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   AbstractDomain sym arch ->
   IO [Some (PMc.MemCell sym arch)]
-findUnequalStackMemCells sym evalFn bundle eqRel preD =
+findUnequalStackMemCells sym evalFn bundle eqCtx preD =
   do let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
      execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquiv sym oPostState pPostState (PE.eqRelStack eqRel) cell cond
+       do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
@@ -821,16 +820,16 @@ widenRegisters ::
   sym ->
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   IO (WidenResult sym arch)
-widenRegisters sym evalFn bundle eqRel postCondAsm postCondStatePred postD =
+widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
-     newRegs <- findUnequalRegs sym evalFn eqRel
+     newRegs <- findUnequalRegs sym evalFn eqCtx
                    (PEE.eqDomainRegisters postCondStatePred)
                    (PS.simRegs oPostState)
                    (PS.simRegs pPostState)
@@ -855,19 +854,19 @@ findUnequalRegs ::
   , sym ~ W4.ExprBuilder t st fs ) =>
   sym ->
   W4.GroundEvalFn t ->
-  EquivRelation sym arch ->
+  EquivContext sym arch ->
   PER.RegisterDomain sym arch ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   IO [Some (MM.ArchReg arch)]
-findUnequalRegs sym evalFn eqRel regPred oRegs pRegs =
+findUnequalRegs sym evalFn eqCtx regPred oRegs pRegs =
   execWriterT $ MM.traverseRegsWith_
     (\regName oRegVal ->
          do let pRegVal = MM.getBoundValue regName pRegs
             let pRegEq  = PER.registerInDomain sym regName regPred
             regEq <- liftIO (W4.groundEval evalFn pRegEq)
             when regEq $
-              do isEqPred <- liftIO (applyRegEquivRelation (PE.eqRelRegs eqRel) regName oRegVal pRegVal)
+              do isEqPred <- liftIO (applyRegEquiv sym eqCtx regName oRegVal pRegVal)
                  isEq <- liftIO (W4.groundEval evalFn isEqPred)
                  when (not isEq) (tell [Some regName]))
     oRegs

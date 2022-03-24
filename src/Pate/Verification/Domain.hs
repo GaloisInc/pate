@@ -260,7 +260,6 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
   traceBundle bundle "Entering guessEquivalenceDomain"
   WEH.ExprFilter isBoundInGoal <- getIsBoundFilter' goal
-  eqRel <- CMR.asks envBaseEquiv
   result <- PRt.zipWithRegStatesPar (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> do
       isInO <- liftFilterMacaw isBoundInGoal vO
       isInP <- liftFilterMacaw isBoundInGoal vP
@@ -319,7 +318,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   goal' <- liftIO $ WEH.applyExprBindings sym memP_to_memP' goal_regsEq
 
   stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PED.eqDomainStackMemory postcond_regsEq) (\c -> isStackCell c)
-  let stackEq = liftIO $ PEq.memDomPre sym (PEq.MemRegionEquality $ MT.memEqAtRegion sym stackRegion) inO inP (PEq.eqRelStack eqRel) stackDom
+  let stackEq = liftIO $ PEq.memDomPre sym (PEq.MemEqAtRegion stackRegion) inO inP stackDom
   memDom <- withAssumption_ stackEq $ do
     guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PED.eqDomainGlobalMemory postcond_regsEq) (\x -> isNotStackCell x)
 
