@@ -866,7 +866,7 @@ findUnequalRegs sym evalFn eqCtx regPred oRegs pRegs =
             let pRegEq  = PER.registerInDomain sym regName regPred
             regEq <- liftIO (W4.groundEval evalFn pRegEq)
             when regEq $
-              do isEqPred <- liftIO (applyRegEquiv sym eqCtx regName oRegVal pRegVal)
+              do isEqPred <- liftIO (registerValuesEqual sym eqCtx regName oRegVal pRegVal)
                  isEq <- liftIO (W4.groundEval evalFn isEqPred)
                  when (not isEq) (tell [Some regName]))
     oRegs

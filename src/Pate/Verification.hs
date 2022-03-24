@@ -190,7 +190,7 @@ doVerifyPairs ::
   N.NonceGenerator IO scope ->
   sym ->
   CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
-doVerifyPairs validArch@(PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr)) logAction elf elf' vcfg pd gen sym = do
+doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
                                 , MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch) Nothing) of

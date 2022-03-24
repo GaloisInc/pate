@@ -193,7 +193,7 @@ exactEquivalence ::
 exactEquivalence inO inP = withSym $ \sym -> do
   eqCtx <- equivalenceContext
   regsEqs <- liftIO $ PRt.zipWithRegStatesM (PSS.simInRegs inO) (PSS.simInRegs inP) $ \r v1 v2 ->
-    Const <$> PEq.applyRegEquiv sym eqCtx r v1 v2
+    Const <$> PEq.registerValuesEqual sym eqCtx r v1 v2
 
   regsEq <- liftIO $ WEH.allPreds sym (map snd $ PRt.assocs regsEqs)
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)

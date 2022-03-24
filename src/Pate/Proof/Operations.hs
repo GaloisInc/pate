@@ -106,7 +106,7 @@ simBundleToSlice bundle = withSym $ \sym -> do
       EquivM sym arch (PF.BlockSliceRegOp sym tp)
     getReg reg valO valP = withSym $ \sym -> do
       eqCtx <- equivalenceContext
-      isEquiv <- liftIO $ PE.applyRegEquiv sym eqCtx reg valO valP
+      isEquiv <- liftIO $ PE.registerValuesEqual sym eqCtx reg valO valP
       return $ PF.BlockSliceRegOp
         (PPa.PatchPairC valO valP)
         (PSR.macawRegRepr valO)
