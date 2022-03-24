@@ -28,7 +28,6 @@ module Pate.Verification
   ( verifyPairs
   ) where
 
-import qualified Control.Concurrent.Async as CCA
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view )
 import           Control.Monad ( void, unless )
@@ -139,16 +138,14 @@ runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' pd = do
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf) (PH.hinted elf'))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discoverAsync mdir repr extra e h = liftIO (CCA.async (CME.runExceptT (PD.runDiscovery mdir repr extra e h pd)))
+    discover mdir repr extra e h = PD.runDiscovery mdir repr extra e h pd
+
     discoverCheckingHints repr extra e = do
       if | PH.hints e == mempty -> do
-             unhintedAnalysis <- discoverAsync mCFGDir repr extra (PH.hinted e) mempty
-             (_, oCtxUnhinted) <- CME.liftEither =<< liftIO (CCA.wait unhintedAnalysis)
+             (_, oCtxUnhinted) <- discover mCFGDir repr extra (PH.hinted e) mempty
              return oCtxUnhinted
          | otherwise -> do
-             hintedAnalysis <- discoverAsync mCFGDir repr extra (PH.hinted e) (PH.hints e)
-             (hintErrors, oCtxHinted) <- CME.liftEither =<< liftIO (CCA.wait hintedAnalysis)
-
+             (hintErrors, oCtxHinted) <- discover mCFGDir repr extra (PH.hinted e) (PH.hints e)
              unless (null hintErrors) $ do
                let invalidSet = S.fromList hintErrors
                let invalidEntries = [ (name, addr)
