@@ -296,7 +296,7 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
                 True -> return $ Const $ W4.falsePred sym
                 False -> return $ Const $ W4.truePred sym
         _ -> exclude
-  regsDom <- (PER.dropFalseRegisters . PER.fromRegState) <$> Par.joinFuture @_ @Par.Future result
+  regsDom <- PER.fromRegState <$> Par.joinFuture @_ @Par.Future result
   stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
   let
     isStackCell cell = do

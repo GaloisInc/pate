@@ -58,6 +58,7 @@ import           Control.Monad ( foldM )
 import           Control.Monad.IO.Class ( liftIO )
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as S
 import           GHC.Stack ( HasCallStack )
@@ -75,6 +76,7 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
+import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
@@ -563,7 +565,7 @@ getRegionEquality sym memEq memO memP = case memEq of
   MemEqOutsideRegion stackRegion -> MT.memEqOutsideRegion sym stackRegion memO memP
 
 newtype RegisterCondition sym arch =
-  RegisterCondition { regCondDom :: PER.RegisterDomain sym arch }
+  RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym)) }
 
 -- | Compute a predicate that is true iff the two given states are equal with respect to
 -- the given 'PER.RegisterDomain'.
@@ -577,12 +579,11 @@ regDomRel ::
   SimState sym arch PBi.Patched ->
   PER.RegisterDomain sym arch ->
   IO (RegisterCondition sym arch)
-regDomRel hdr sym stO stP regDom  = do
-  let regRel r p = do
-        let vO = (simRegs stO) ^. MM.boundValue r
-        let vP = (simRegs stP) ^. MM.boundValue r
-        impM sym (return p) $ registerValuesEqual' hdr sym r vO vP
-  RegisterCondition <$> PER.traverseWithReg regDom regRel
+regDomRel hdr sym stO stP regDom  = RegisterCondition <$> do
+  PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> Const <$> do
+    let p = PER.registerInDomain sym r regDom
+    impM sym (return p) $ registerValuesEqual' hdr sym r vO vP
+
 
 regCondToPred ::
   W4.IsSymExprBuilder sym =>
@@ -590,8 +591,8 @@ regCondToPred ::
   RegisterCondition sym arch ->
   IO (W4.Pred sym)
 regCondToPred sym regCond = do
-  let preds = map snd $ PER.toList $ regCondDom regCond
-  foldM (W4.andPred sym) (W4.truePred sym) preds
+  let preds = MM.regStateMap (regCondPreds regCond)
+  MapF.foldrMWithKey (\_ (Const p) p' -> W4.andPred sym p p') (W4.truePred sym) preds
 
 -- | A structured pre or post condition
 data StateCondition sym arch = StateCondition

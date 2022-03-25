@@ -21,7 +21,6 @@ module Pate.Equivalence.RegisterDomain (
   , registerInDomain'
   , traverseWithReg
   , ppRegisterDomain
-  , dropFalseRegisters
   ) where
 
 import           Control.Monad (  foldM )
@@ -87,7 +86,7 @@ mkDomain ::
   WI.IsExprBuilder sym =>
   Map (Some (MM.ArchReg arch)) (WI.Pred sym) ->
   RegisterDomain sym arch
-mkDomain dom = RegisterDomain dom -- dropTriviallyFalse $ RegisterDomain dom
+mkDomain dom = dropFalseRegisters $ RegisterDomain dom
 
 -- | Drop entries with false conditions.
 dropFalseRegisters ::
