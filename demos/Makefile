@@ -65,6 +65,7 @@ challenge03: challenge03-variant/challenge03.orig.exe challenge03-variant/challe
 							   --log-file challenge03.out \
 							   --verbosity Debug \
 							   --noproofs \
+                 --proof-summary-json=challenge03-result.json \
 							   --ignoremain
 
 .PHONY: abort
