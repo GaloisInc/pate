@@ -84,3 +84,7 @@ The pate tool is written in Haskell and requires the GHC compiler (version 8.6-8
   cabal build pkg:pate
 
 The verifier requires an SMT solver to be available in ``PATH``. The default is ``yices``, but ``z3`` and ``cvc4`` are also supported.
+
+Acknowledgements
+============
+This material is based upon work supported by the Defense Advanced Research Projects Agency (DARPA) and Naval Information Warfare Center Pacific (NIWC Pacific) under Contract Number N66001-20-C-4027. Any opinions, findings and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the DARPA & NIWC Pacific.
