@@ -195,7 +195,7 @@ guessMemoryDomain bundle goal (memP', goal') memPred cellFilter = withSym $ \sym
           True -> liftIO $ W4.baseTypeIte sym polarity (W4.falsePred sym) p
           False -> liftIO $ W4.baseTypeIte sym polarity p (W4.falsePred sym)
     False -> Par.present $ liftIO $ W4.notPred sym polarity
-  Par.joinFuture (result :: Par.Future (PEM.MemoryDomain sym arch))
+  PEM.dropFalseCells <$> Par.joinFuture (result :: Par.Future (PEM.MemoryDomain sym arch))
   where
     polarity = PEM.memDomainPolarity memPred
     memP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
@@ -318,7 +318,9 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   goal' <- liftIO $ WEH.applyExprBindings sym memP_to_memP' goal_regsEq
 
   stackDom <- guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PED.eqDomainStackMemory postcond_regsEq) (\c -> isStackCell c)
-  let stackEq = liftIO $ PEq.memDomPre sym (PEq.MemEqAtRegion stackRegion) inO inP stackDom
+  let stackEq = liftIO $ do
+        memPrecond <- PEq.memDomPre sym (PEq.MemEqAtRegion stackRegion) inO inP stackDom
+        PEq.memPreCondToPred sym inO inP memPrecond
   memDom <- withAssumption_ stackEq $ do
     guessMemoryDomain bundle_regsEq goal_regsEq (memP', goal') (PED.eqDomainGlobalMemory postcond_regsEq) (\x -> isNotStackCell x)
 

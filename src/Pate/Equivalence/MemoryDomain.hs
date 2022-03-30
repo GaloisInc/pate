@@ -23,6 +23,7 @@ module Pate.Equivalence.MemoryDomain (
   , containsCell
   , mux
   , ppMemoryDomainEntries
+  , dropFalseCells
   ) where
 
 import           Control.Monad ( forM, join )
@@ -83,7 +84,7 @@ traverseWithCellPar memDom f = do
   future_preds <- M.traverseWithKey f' predMap
   Par.present $ do
     preds <- PMC.MemCellPred <$> traverse Par.joinFuture future_preds
-    return $ MemoryDomain (PMC.dropTrivialCells preds) (memDomainPolarity memDom)
+    return $ MemoryDomain preds (memDomainPolarity memDom)
 
       
 traverseWithCell ::
@@ -94,6 +95,12 @@ traverseWithCell ::
   (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) -> m (MemoryDomain sym arch)
 traverseWithCell memDom f = join $ traverseWithCellPar memDom (\cell p -> return $ f cell p)
 
+-- | Drop cells in the inner 'PMC.MemCellPred' that are concretely false
+dropFalseCells ::
+  W4.IsExprBuilder sym =>
+  MemoryDomain sym arch ->
+  MemoryDomain sym arch
+dropFalseCells dom = dom { memDomainPred = PMC.dropFalseCells (memDomainPred dom) }
 
 toList ::
   MemoryDomain sym arch ->

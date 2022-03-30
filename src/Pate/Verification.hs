@@ -865,22 +865,24 @@ proveLocalPostcondition ::
   SimBundle sym arch ->
   DomainSpec sym arch ->
   EquivM sym arch (BranchCase sym arch)
-proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
+proveLocalPostcondition bundle postDomSpec = withSym $ \sym -> do
   traceBundle bundle "proveLocalPostcondition"
   eqCtx <- equivalenceContext
-  (asm, postcond) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postcondSpec
-  postcondPred <- liftIO $ getPostdomain sym bundle eqCtx postcond
-
+  (asm, postDom) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postDomSpec
+  postcond <- liftIO $ getPostdomain sym bundle eqCtx postDom
+  postcondPred <- liftIO $ postCondPredicate sym postcond
+  
   traceBundle bundle "guessing equivalence domain"
-  eqInputs <- withAssumption_ (return asm) $ do
-    PVD.guessEquivalenceDomain bundle postcondPred postcond
-  traceBundle bundle ("Equivalence domain has: " ++ show (PER.toList $ PED.eqDomainRegisters eqInputs))
+  eqInputsDom <- withAssumption_ (return asm) $ do
+    PVD.guessEquivalenceDomain bundle postcondPred postDom
+  traceBundle bundle ("Equivalence domain has: " ++ show (PER.toList $ PED.eqDomainRegisters eqInputsDom))
 
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
   let sliceState = PF.slBlockPostState blockSlice
 
-  eqInputsPred <- liftIO $ getPredomain sym bundle eqCtx eqInputs
+  eqInputsCond <- liftIO $ getPredomain sym bundle eqCtx eqInputsDom
+  eqInputsPred <- liftIO $ preCondPredicate sym (simInO bundle) (simInP bundle) eqInputsCond
 
   notChecks <- liftIO $ W4.notPred sym postcondPred
   blocks <- PD.getBlocks $ simPair bundle
@@ -889,8 +891,8 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
 
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   triple <- PFO.lazyProofEvent_ (simPair bundle) $ do
-    preDomain <- PFO.domainToProof eqInputs
-    postDomain <- PFO.domainSpecToProof postcondSpec
+    preDomain <- PFO.domainToProof eqInputsDom
+    postDomain <- PFO.domainSpecToProof postDomSpec
     result <- PFO.forkProofEvent_ (simPair bundle) $ do
         traceBundle bundle "Starting forked thread in proveLocalPostcondition"
         status <- withAssumption_ (liftIO $ allPreds sym [eqInputsPred, asm]) $ startTimer $ do
@@ -962,7 +964,7 @@ proveLocalPostcondition bundle postcondSpec = withSym $ \sym -> do
         traceBundle bundle "Generating a status node"
         return $ PF.ProofStatus status'
     return $ PF.ProofTriple (simPair bundle) preDomain postDomain result
-  return $ BranchCase eqInputsPred eqInputs (simPair bundle) triple
+  return $ BranchCase eqInputsPred eqInputsDom (simPair bundle) triple
 
 -- | Summarize the conditional equivalence result, including any bindings it induces to
 -- state variables and how it relates to the abort condition on the original program
