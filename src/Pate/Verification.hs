@@ -105,7 +105,7 @@ import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.PairGraph as PPG
-import           What4.ExprHelpers
+import           What4.ExprHelpers as WEH
 
 -- | Run code discovery using macaw
 --
@@ -879,7 +879,6 @@ proveLocalPostcondition bundle postDomSpec = withSym $ \sym -> do
 
   -- TODO: avoid re-computing this
   blockSlice <- PFO.simBundleToSlice bundle
-  let sliceState = PF.slBlockPostState blockSlice
 
   eqInputsCond <- liftIO $ getPredomain sym bundle eqCtx eqInputsDom
   eqInputsPred <- liftIO $ preCondPredicate sym (simInO bundle) (simInP bundle) eqInputsCond
@@ -936,11 +935,12 @@ proveLocalPostcondition bundle postDomSpec = withSym $ \sym -> do
                     traceBundle bundle "Minimizing condition"
                     PF.ProofDomain postDomain' <- PFO.lazyProofAtom postDomain
                     traceBundle bundle "  computeEqCondition"
-                    cond <- computeEqCondition bundle sliceState postDomain' notGoal
+                    cond <- computeEqCondition bundle postcond notGoal
                     traceBundle bundle "  weakenEqCondition"
-                    cond' <- weakenEqCondition bundle cond sliceState postDomain' goal
+                    cond' <- weakenEqCondition bundle cond postcond goal
                     traceBundle bundle "  checkAndMinimizeEqCondition"
-                    cond'' <- checkAndMinimizeEqCondition cond' goal
+                    cond'' <- checkAndMinimizeEqCondition bundle cond' goal
+                    traceBundle bundle $ "  weakenEqCondition: " ++ show (W4.printSymExpr cond'')
                     traceBundle bundle "Checking for conditional equivalence"
                     er <- checkSatisfiableWithModel goalTimeout "check" notGoal $ \satRes ->
                       case satRes of
@@ -983,7 +983,7 @@ getCondEquivalenceResult bundle eqCond fn = do
 
 
 computeEqConditionGas :: Int
-computeEqConditionGas = 20
+computeEqConditionGas = 200
 
 -- | Incrementally build an equivalence condition by negating path conditions which
 -- induce inequality on the block slices.
@@ -1027,20 +1027,21 @@ computeEqConditionGas = 20
 computeEqCondition ::
   forall sym arch.
   SimBundle sym arch ->
-  -- | block slice post-state
-  PF.BlockSliceState sym arch ->
-  -- | equivalence post-domain
-  PED.EquivalenceDomain sym arch ->
+  -- | structured target equivalence predicate
+  PEq.StateCondition sym arch ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
-computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
+computeEqCondition bundle stCond notChecks = withSym $ \sym -> do
   cond <- go (W4.truePred sym) computeEqConditionGas
   PVSi.simplifyPred cond
   where
     go :: W4.Pred sym -> Int -> EquivM sym arch (W4.Pred sym)
-    go pathCond 0 = return pathCond
+    go pathCond 0 = do
+      traceBundle bundle $ "computeEqCondition: ERROR ran out of gas:" ++ show (W4.printSymExpr pathCond)
+      return pathCond
     go pathCond gas = withSym $ \sym -> do
+      traceBundle bundle ("computeEqCondition: gas: " ++ show gas)
       -- can we satisfy equivalence, assuming that none of the given path conditions are taken?
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
       eresult <- checkSatisfiableWithModel goalTimeout "check" notChecks $ \satRes -> case satRes of
@@ -1049,8 +1050,7 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
           W4R.Unknown -> return Nothing
           -- counter-example, compute another path condition and continue
           W4R.Sat fn -> Just <$> do
-            pathCond' <- PFC.getPathCondition bundle sliceState postDomain fn
-            p <- flattenCondPair pathCond'
+            p <- PFC.getPathCondition stCond (simOutO bundle) (simOutP bundle) fn
             traceBundle bundle ("Computing a new path condition:\n" ++ show (W4.printSymExpr p))
             return p
       case either (const Nothing) id eresult of
@@ -1060,9 +1060,13 @@ computeEqCondition bundle sliceState postDomain notChecks = withSym $ \sym -> do
         Just unequalPathCond -> do
           notThis <- liftIO $ W4.notPred sym unequalPathCond
           pathCond' <- liftIO $ W4.andPred sym notThis pathCond
-          -- assume this path is not taken and continue
-          withAssumption_ (return notThis) $
-            go pathCond' (gas - 1)
+          isPredSat goalTimeout notThis >>= \case
+            -- assume this path is not taken and continue
+            True -> withAssumption_ (return notThis) $ go pathCond' (gas - 1)
+            False -> do
+              traceBundle bundle ("computeEqCondition: ERROR: path condition is false!")
+              return pathCond
+
 
 -- | Weaken a given equality condition with alternative paths which also
 -- induce equality.
@@ -1074,19 +1078,15 @@ weakenEqCondition ::
   SimBundle sym arch ->
   -- | path conditions that (should) induce equivalence
   W4.Pred sym ->
-  -- | block slice post-state
-  PF.BlockSliceState sym arch ->
-  -- | equivalence post-domain
-  PED.EquivalenceDomain sym arch ->
+  -- | structured target equivalence predicate
+  PEq.StateCondition sym arch ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
-weakenEqCondition bundle pathCond_outer sliceState postDomain goal = withSym $ \sym -> do
-  notPathCond_outer <- liftIO $ W4.notPred sym pathCond_outer
-  go notPathCond_outer pathCond_outer
-  where
+weakenEqCondition bundle pathCond_outer stCond goal = withSym $ \sym -> do
+  let
     go :: W4.Pred sym -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
-    go notPathCond pathCond = withSym $ \sym -> do
+    go notPathCond pathCond = do
       heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
       -- we use the heuristic timeout here because we're refining the equivalence condition
       -- and failure simply means we fail to refine it further
@@ -1097,8 +1097,7 @@ weakenEqCondition bundle pathCond_outer sliceState postDomain goal = withSym $ \
           W4R.Unknown -> return Nothing
           -- counter-example, compute another path condition and continue
           W4R.Sat fn -> Just <$> do
-            pathCond' <- PFC.getPathCondition bundle sliceState postDomain fn
-            flattenCondPair pathCond'
+            PFC.getPathCondition stCond (simOutO bundle) (simOutP bundle) fn
         return (either (const Nothing) id eres)
       case result of
         Nothing -> return pathCond
@@ -1110,9 +1109,8 @@ weakenEqCondition bundle pathCond_outer sliceState postDomain goal = withSym $ \
             False -> return pathCond
           notPathCond' <- liftIO $ W4.andPred sym notPathCond =<< W4.notPred sym unequalPathCond
           go notPathCond' pathCond'
-
-flattenCondPair :: PPa.PatchPairC (W4.Pred sym) -> EquivM sym arch (W4.Pred sym)
-flattenCondPair (PPa.PatchPairC p1 p2) = withSym $ \sym -> liftIO $ W4.andPred sym p1 p2
+  notPathCond_outer <- liftIO $ W4.notPred sym pathCond_outer
+  go notPathCond_outer pathCond_outer
 
 -- | Given a pair of path conditions, minimize the predicates and
 -- verify that they imply equivalence of the block slice.
@@ -1122,12 +1120,13 @@ flattenCondPair (PPa.PatchPairC p1 p2) = withSym $ \sym -> liftIO $ W4.andPred s
 -- The resulting predicate is simplified under the current set of assumptions.
 checkAndMinimizeEqCondition ::
   forall sym arch.
+  SimBundle sym arch ->
   -- | path condition that is assumed to imply equivalence
   W4.Pred sym ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
-checkAndMinimizeEqCondition cond goal = withValid $ withSym $ \sym -> do
+checkAndMinimizeEqCondition bundle cond goal = withValid $ withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- this check is not strictly necessary, as the incremental checks should guarantee it
   -- for the moment it's a sanity check on this process as well as the final simplifications
@@ -1135,7 +1134,16 @@ checkAndMinimizeEqCondition cond goal = withValid $ withSym $ \sym -> do
     isPredTrue' goalTimeout goal
   case result of
     Just (p, True) -> return p
-    _ -> return $ W4.falsePred sym
+    Just (p, False) -> do
+      -- the goal equivalence is not implied by the path condition
+      traceBundle bundle "checkAndMinimizeEqCondition: ERROR: check not satisfied"
+      traceBundle bundle ("pre-simplified:" ++ show (W4.printSymExpr cond))
+      traceBundle bundle ("post-simplified:" ++ show (W4.printSymExpr p))
+      return $ W4.falsePred sym
+    Nothing -> do
+      -- the computed path condition is not satisfiable
+      traceBundle bundle "checkAndMinimizeEqCondition: ERROR: path condition not satisfiable"
+      return $ W4.falsePred sym
 
 --------------------------------------------------------
 -- Toplevel preconditions and postconditions

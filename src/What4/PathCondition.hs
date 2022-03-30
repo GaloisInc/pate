@@ -63,30 +63,37 @@ getPathCondition ::
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4G.GroundEvalFn t ->
+  -- | decision procedure for the satisfiability of a predicate, used
+  -- to prune redundant path conditions
+  (W4.Pred sym -> IO (Maybe Bool)) ->
   W4B.Expr t tp -> 
   IO (W4.Pred sym)
-getPathCondition sym fn expr = snd <$> runPathM sym fn (withPathCond expr)
+getPathCondition sym fn dec expr = snd <$> runPathM sym fn dec (withPathCond expr)
 
 resolveStaticMuxes ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4G.GroundEvalFn t ->
+  -- | decision procedure for the satisfiability of a predicate, used
+  -- to prune redundant path conditions
+  (W4.Pred sym -> IO (Maybe Bool)) ->
   W4B.Expr t tp -> 
   IO (W4B.Expr t tp)
-resolveStaticMuxes sym fn expr = fst <$> runPathM sym fn (withPathCond expr)
+resolveStaticMuxes sym fn dec expr = fst <$> runPathM sym fn dec (withPathCond expr)
 
 runPathM ::
   forall sym t solver fs a.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4G.GroundEvalFn t ->
+  (W4.Pred sym -> IO (Maybe Bool)) ->
   PathM sym a ->
   IO (a, W4.Pred sym)
-runPathM sym fn f = do
+runPathM sym fn dec f = do
   cache <- W4B.newIdxCache
   let
-    env = PathMEnv sym fn (W4.truePred sym) cache
+    env = PathMEnv sym fn dec (W4.truePred sym) cache
     PathM f' = do
       a <- f
       p <- getFullPath
@@ -101,6 +108,7 @@ data PathMEnv sym where
     sym ~ (W4B.ExprBuilder t solver fs) => 
     { _sym :: W4B.ExprBuilder t solver fs
     , _fn :: W4G.GroundEvalFn t
+    , _isSat :: W4.Pred sym -> IO (Maybe Bool)
     , pathAsms ::  W4.Pred sym
     , _pathCondCache :: W4B.IdxCache t (ExprAsms sym)
     } ->
@@ -152,7 +160,7 @@ watchPath f = evalPath f >>= \case
 
 withSym :: (W4.IsExprBuilder sym => sym -> PathM sym a) -> PathM sym a
 withSym f = do
-  PathMEnv sym _ _ _ <- CMR.ask
+  PathMEnv sym _ _ _ _ <- CMR.ask
   f sym
 
 withValid :: forall a sym. (forall t solver fs. sym ~ (W4B.ExprBuilder t solver fs) => PathM sym a) -> PathM sym a
@@ -182,11 +190,20 @@ addAsm ::
   BM.Polarity ->
   PathM sym ()
 addAsm p pol = withSym $ \sym -> do
-  p' <- applyPolarity pol p 
-  PathCondition path <- CMS.get
-  path' <- liftIO $ W4.andPred sym path p'
-  CMS.put (PathCondition path')
-  dropInconsistent
+  fp <- getFullPath
+  not_p <- applyPolarity (BM.negatePolarity pol) p
+  path_and_not_p <- liftIO $ W4.andPred sym fp not_p
+  isSat path_and_not_p >>= \case
+    -- this assumption is provable, and therefore we don't need to add it
+    -- to the path condition
+    Just False -> return ()
+    _ -> do
+      p' <- applyPolarity pol p
+      PathCondition path <- CMS.get
+      path' <- liftIO $ W4.andPred sym path p'
+      CMS.put (PathCondition path')
+      dropInconsistent
+
 
 
 applyPolarity ::
@@ -200,8 +217,15 @@ groundEval ::
   W4.SymExpr sym tp ->
   PathM sym (W4G.GroundValue tp)
 groundEval e = do
-  PathMEnv _ fn _ _ <- CMR.ask
+  PathMEnv _ fn _ _ _ <- CMR.ask
   liftIO (W4G.groundEval fn e)
+
+isSat ::
+  W4.Pred sym ->
+  PathM sym (Maybe Bool)
+isSat p = do
+  PathMEnv _ _ f _ _ <- CMR.ask
+  liftIO (f p)
 
 forMuxes ::
   forall sym tp a.
@@ -395,7 +419,7 @@ withPathCond ::
   W4.SymExpr sym tp ->
   PathM sym (W4.SymExpr sym tp)
 withPathCond e_outer = withValid $ do
-  PathMEnv sym _ _ cache <- CMR.ask
+  PathMEnv sym _ _ _ cache <- CMR.ask
   let
     watch :: forall tp'.
       PathM sym (W4.SymExpr sym tp') ->
