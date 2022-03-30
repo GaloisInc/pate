@@ -446,7 +446,7 @@ resolveCellEquivStack sym (EquivContext _ stackRegion) stO stP cell cond =
 -- Note in the case of a negative polarity precondition, this isn't quite true,
 -- since there is not a pointwise assertion for equality. Instead the predicate
 -- is simply the condition under which that cell should be excluded from the
--- assumed initial equality.
+-- assumed initial equality ( see 'memDomPre' and 'memPreCondToPred' )
 data MemoryCondition sym arch = MemoryCondition
   { memCondDomain :: PEM.MemoryDomain sym arch
     -- | the region equality used to derive the predicates in the domain
@@ -473,7 +473,7 @@ muxMemCond sym p fT fF = case W4.asConstantPred p of
     else PP.panic PP.Verifier "muxMemCond" ["Incompatible memory region conditions"]
 
 
--- | Flatten a structured 'MemoryCondition' representing a memory post-condition into
+-- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
 -- We require the pre-states in order to construct the initial equality assumption
 -- for an exclusive (i.e. negative polarity) condition.
@@ -564,11 +564,18 @@ getRegionEquality sym memEq memO memP = case memEq of
   MemEqAtRegion stackRegion -> MT.memEqAtRegion sym stackRegion memO memP
   MemEqOutsideRegion stackRegion -> MT.memEqOutsideRegion sym stackRegion memO memP
 
+-- | A mapping from registers to a predicate representing an equality condition for
+-- that specific register.
+-- The conjunction of these predicates represents the assumption (as a precondition)
+-- or assertion (as a postcondition) that all of the registers are equal with respect
+-- to some equivalence domain.
 newtype RegisterCondition sym arch =
   RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym)) }
 
--- | Compute a predicate that is true iff the two given states are equal with respect to
--- the given 'PER.RegisterDomain'.
+-- | Compute a structured 'RegisterCondition'
+-- where the predicate associated with each register
+-- is true iff the register is equal in two given states (conditional on
+-- the register being present in the given 'PER.RegisterDomain')
 regDomRel ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
