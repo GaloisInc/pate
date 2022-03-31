@@ -19,8 +19,8 @@ jobs:
           project: pate
           column: Needs Triage
           action: update
-          # Uses lcasburn's personal access token for modifying issues
-          repo-token: ${{ secrets.MY_GHPROJECT_TOKEN }}
+          # Use IT generated access token for modifying issues
+          repo-token: ${{ secrets.IT_GENERATED_TOKEN }}
       - name: Emit debugging information
         if: ${{ failure() }}
         run: |
