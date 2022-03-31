@@ -20,7 +20,7 @@ jobs:
           column: Needs Triage
           action: update
           # Use IT generated access token for modifying issues
-          repo-token: ${{ secrets.IT_GENERATED_TOKEN }}
+          repo-token: ${{ secrets.PATE_TEST }}
       - name: Emit debugging information
         if: ${{ failure() }}
         run: |
