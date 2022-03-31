@@ -16,7 +16,7 @@ First, build the Docker image with the command::
 
 Next, run the verifier on an example from the test suite::
 
-  docker run -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe --interactive
+  docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe --interactive
 
 Visit http://localhost:5000 to view the interactive proof explorer.
 
@@ -45,7 +45,100 @@ The verifier accepts the following command line arguments::
   --probabilistic-hints ARG
                            Parse a JSON file containing probabilistic function name/address hints
   --csv-function-hints ARG Parse a CSV file containing function name/address hints
-  --dwarf-hints            Extract hints from the unpatched DWARF binary
+  --no-dwarf-hints         Disable extraction of hints from the unpatched DWARF binary
+  --save-macaw-cfgs DIR    Save macaw CFGs to the provided directory
+  --solver-interaction-file FILE
+                           Save interactions with the SMT solver during symbolic
+                           execution to this file
+  --proof-summary-json FILE
+                           A file to save interesting proof results to in JSON
+                           format
+  --log-file FILE          A file to save debug logs to
+
+Extended Examples
+-----------------
+
+The quick start section described a command to run the verifier on a test case using the Docker container.  This section will cover some useful commands for other scenarios.
+
+Docker Usage
+^^^^^^^^^^^^
+
+If you have a ``tar`` file of a Docker image of the verifier, you can install it using the command::
+
+  docker load -i /path/to/pate.tar
+
+To run the verifier via Docker after this::
+
+  docker run --rm -it pate --help
+
+To make use of the verifier with Docker, it is useful to map a directory on your local filesystem into the Docker container to be able to save output files. Assuming that your original and patched binaries are ``original.exe`` and ``patched.exe``, respectively::
+
+  mkdir VerifierData
+  cp original.exe patched.exe VerifierData/
+  docker run --rm -it -v `pwd`/VerifierData`:/VerifierData pate \
+             --original /VerifierData/original.exe \
+             --patched /VerifierData/patched.exe \
+             --proof-summary-json /VerifierData/report.json \
+             --log-file /VerifierData/pate.log \
+             --save-macaw-cfgs /VerifierData/cfgs
+
+This command will run the verifier on the two binaries and produce three outputs:
+
+1. A JSON report summarizing the verifier's findings (``report.json``)
+2. A log file with very detailed output explaining what the verifier examined and concluded (``pate.log``)
+3. Dumped Control Flow Graphs (CFGs) for all functions that the verifier discovered and analyzed (one file per CFG under ``cfgs``)
+
+Controlling the Verifier Entry Point
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default, the verifier starts verifying from the formal program entry point. This is often not very useful (and can be problematic for complex binaries with a large ``_start`` that causes problem for our code discovery).  Additionally, for changes with a known (or at least expected) scope of impact, analyzing just the affected functions is significantly faster.  Customizing the analysis entry point has two steps: 1) passing the ``--ignoremain --blockinfo <config>`` options, 2) providing the configuration file.  Configuration files are in the TOML format. For example, with a configuration file called ``config.toml`` with the following contents::
+
+  patch-pairs = [ { original-block-address = <OriginalEntryPoint>, patched-block-address = <PatchedEntryPoint> }
+                ]
+
+one would invoke the verifier with the command::
+
+  mkdir VerifierData
+  cp original.exe patched.exe config.toml VerifierData/
+  docker run --rm -it -v `pwd`/VerifierData`:/VerifierData pate \
+             --original /VerifierData/original.exe \
+             --patched /VerifierData/patched.exe \
+             --proof-summary-json /VerifierData/report.json \
+             --log-file /VerifierData/pate.log \
+             --save-macaw-cfgs /VerifierData/cfgs \
+             --ignoremain --blockinfo /VerifierData/config.toml
+
+Treating Functions As No-Ops
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+While it is unsound, it is sometimes useful to treat a function call as a no-op. For example, ignoring large functions that have not changed and are unlikely to have an effect on correctness (e.g., large cryptographic functions from trusted libraries) can significantly improve performance.  To use this feature, pass a configuration file to the verifier using the ``--blockinfo`` option, ensuring that the configuration file includes the following directives::
+
+  ignore-original-functions = [ <ADDRESS>, ... ]
+  ignore-patched-functions = [ <ADDRESS>, ... ]
+
+where each of the lists is a list of addresses of functions to ignore. While the two lists are specified separately, they should almost certainly be "aligned" between the two binaries (i.e., ignoring a function in the original binary probably means that the corresponding function in the patched binary also needs to be ignored).
+
+Adding DWARF Metadata to a Binary
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The verifier benefits from DWARF metadata in two ways:
+
+1. It improves code discovery by identifying function entry points that the verifier could otherwise miss
+2. It improves some diagnostics where references to machine state can be rendered as references to named program constructs, with names provided by DWARF
+
+To inject DWARF metadata into binaries without it (e.g., stripped binaries), we recommend using the `dwarf-writer <https://github.com/immunant/dwarf-writer>`_ tool.  As an example of using ``dwarf-writer`` through its Docker image assuming the existence of a target (``target-binary.exe``) and metadata in the Anvill JSON format (``target-binary.exe.json``)::
+
+  docker load -i dwarf-writer-docker.tar
+  mkdir DwarfWriterData
+  cp target-binary.exe target-binary.exe.json DwarfWriterData/
+  docker run --rm -it -v `pwd`/DwarfWriterData:/DwarfWriterData dwarf-writer \
+            --anvill /DwarfWriterData/target-binary.exe.json \
+            /DwarfWriterData/target-binary.exe \
+            /DwarfWriterData/target-binary-dwarf.exe
+
+This will produce a version of the binary annotated with DWARF metadata in ``DwarfWriterData/target-binary-dwarf.exe``.
+
+If you have the ``llvm-dwarfdump`` tool, you can use it to inspect the generated DWARF metadata.  The ``pate`` verifier will automatically take advantage of DWARF metadata hints unless it is directed to ignore them.
 
 Design
 ======
