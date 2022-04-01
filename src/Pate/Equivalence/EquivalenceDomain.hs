@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE PolyKinds #-}
@@ -9,9 +10,12 @@ module Pate.Equivalence.EquivalenceDomain (
     EquivalenceDomain(..)
   , mux
   , empty
+  , ppEquivalenceDomain
   ) where
 
 import qualified What4.Interface as WI
+import qualified Prettyprinter as PP
+import           Data.Parameterized.Classes
 
 import qualified Data.Macaw.CFG as MM
 
@@ -34,6 +38,28 @@ data EquivalenceDomain sym arch where
       -- | The memory domain that is specific to non-stack (i.e. global) variables.
     , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
     }  -> EquivalenceDomain sym arch
+
+ppEquivalenceDomain ::
+  forall sym arch a.
+  ( MM.RegisterInfo (MM.ArchReg arch)
+  , WI.IsSymExprBuilder sym
+  , ShowF (MM.ArchReg arch)
+  ) =>
+  -- | Called when a cell is in the domain conditionally, with
+  -- a non-trivial condition
+  (WI.Pred sym -> PP.Doc a) ->
+  EquivalenceDomain sym arch ->
+  PP.Doc a
+ppEquivalenceDomain showCond dom =
+  PP.vsep
+  [ "== Registers =="
+  , PER.ppRegisterDomain showCond (eqDomainRegisters dom)
+  , "== Stack =="
+  , PEM.ppMemoryDomainEntries showCond (eqDomainStackMemory dom)
+  , "== Globals =="
+  , PEM.ppMemoryDomainEntries showCond (eqDomainGlobalMemory dom)
+  ]
+
 
 mux ::
   MM.RegisterInfo (MM.ArchReg arch) =>

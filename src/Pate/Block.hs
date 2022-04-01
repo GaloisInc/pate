@@ -12,6 +12,7 @@ module Pate.Block (
   , blockMemAddr
   , mkConcreteBlock
   , mkConcreteBlock'
+  , asFunctionEntry
 
   -- * Function entry data
   , FunctionEntry(..)
@@ -70,6 +71,13 @@ equivBlocks blkO blkP =
 
 blockMemAddr :: ConcreteBlock arch bin -> MM.MemAddr (MM.ArchAddrWidth arch)
 blockMemAddr b = PA.addrToMemAddr (concreteAddress b)
+
+asFunctionEntry :: ConcreteBlock arch bin -> Maybe (FunctionEntry arch bin)
+asFunctionEntry blk
+  | concreteAddress blk == (functionAddress (blockFunctionEntry blk))
+  = Just (blockFunctionEntry blk)
+
+  | otherwise = Nothing
 
 mkConcreteBlock ::
   ConcreteBlock arch bin ->
