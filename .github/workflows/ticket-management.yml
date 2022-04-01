@@ -17,7 +17,7 @@ jobs:
         uses: alex-page/github-project-automation-plus@v0.8.1
         with:
           project: pate
-          column: 'Needs Triage'
+          column: 'Needs triage'
           action: update
           # Use IT generated access token for modifying issues
           repo-token: ${{ secrets.PATE_TEST }}
