@@ -169,6 +169,7 @@ verifyPairs ::
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
+  liftIO $ WE.startCaching sym
   doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
 -- | Verify equality of the given binaries.
