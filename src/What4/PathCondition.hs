@@ -178,7 +178,7 @@ getFullPath = withSym $ \sym -> do
 dropInconsistent :: PathM sym ()
 dropInconsistent = withValid $ do
   p <- getFullPath
-  case W4.asConstantPred p of
+  isSat p >>= \case
     Just False -> mzero
     _ -> return ()
 
@@ -225,7 +225,9 @@ isSat ::
   PathM sym (Maybe Bool)
 isSat p = do
   PathMEnv _ _ f _ _ <- CMR.ask
-  liftIO (f p)
+  groundEval p >>= \case
+    True -> return $ Just True
+    False -> liftIO (f p)
 
 forMuxes ::
   forall sym tp a.
