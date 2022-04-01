@@ -179,14 +179,12 @@ getGenPathCondition fn f = withSym $ \sym -> do
   isSatIO <- getSatIO
   withGroundEvalFn fn $ \fn' -> do
     let
-      getEq :: W4.SymExpr sym tp' -> W4.SymExpr sym tp' -> IO (Maybe Bool)
-      getEq e1 e2 = Just <$> do
-        p <- W4.isEq sym e1 e2
-        W4G.groundEval fn' p
-
-      -- choice simplifications that make path conditions more manageable
       simplifyExpr :: W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
-      simplifyExpr e = WEH.simplifyBVOps sym e >>= WEH.resolveConcreteLookups sym getEq
+      simplifyExpr e =
+        -- simplifying the bitvector operations removes redundant
+        -- muxes introduced by the ARM semantics specifically, which obfuscate
+        -- the control flow of block slices.
+        WEH.simplifyBVOps sym e
 
     f' <- PEM.mapExpr sym simplifyExpr f
     getGenPathConditionIO sym fn' isSatIO f'
@@ -210,8 +208,9 @@ getGenPathConditionIO sym fn isSat e = do
   PEM.foldExpr sym f e (W4.truePred sym)
 
 
--- | Compute a 'PE.RegisterCondition' that represents the path condition for
--- registers which disagree in the given counter-example.
+-- | Compute a predicate that represents the path condition for
+-- registera which disagree in the given counter-example (i.e. the model
+-- represented by a 'SymGroundEvalFn').
 -- If all registers agree, then the resulting predicate is True.
 getRegPathCondition ::
   forall sym arch.
@@ -235,8 +234,9 @@ getRegPathCondition regCond fn = withSym $ \sym ->
         regPath' <- getGenPathCondition fn regCond_pred
         liftIO $ W4.andPred sym pathCond regPath'
 
--- | Return a (cached) function for deciding predicate satisfiability based on the current
--- assumption state
+-- | Return a function for deciding predicate satisfiability based on the current
+-- assumption state. The function caches the result on each predicate, and therefore is
+-- only valid under the current set of assumptions (i.e. the 'envCurrentFrame').
 getSatIO ::
   forall sym arch.
   EquivM sym arch (W4.Pred sym -> IO (Maybe Bool))
@@ -258,8 +258,12 @@ getSatIO = withValid $ do
 
   IO.withRunInIO $ \runInIO -> return (\p -> runInIO (isSat p))
 
--- | Compute a 'PE.StateCondition' that represents the path condition for
--- values which disagree in the given counter-example
+-- | Compute a predicate that represents the path condition for
+-- values which disagree in the given counter-example (i.e. the model represented by
+-- the 'SymGroundEvalFn).
+-- This procedure attempts to produce a "minimal" predicate with respect
+-- to the current set of assumptions (i.e. excluding paths which are infeasible, and
+-- excluding conditions which are necessarily true).
 getPathCondition ::
   forall sym arch.
   PE.StateCondition sym arch ->
