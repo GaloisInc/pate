@@ -99,6 +99,7 @@ import qualified Data.Time as TM
 import           Data.Typeable
 
 import           Data.Parameterized.Classes
+import           Data.Parameterized.TraversableF
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
@@ -663,10 +664,8 @@ withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
 withPair pPair f = do
   env <- CMR.ask
   let env' = env { envParentBlocks = pPair:envParentBlocks env }
-  case PB.concreteBlockEntry $ PPa.pOriginal pPair of
-    PB.BlockEntryInitFunction -> CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ pPair) f
-    _ -> CMR.local (\_ -> env') f
-
+  let entryPair = fmapF (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
+  CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ entryPair) f
 
 -- | Emit a trace event to the frontend
 --
