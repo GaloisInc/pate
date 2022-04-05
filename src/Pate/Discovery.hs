@@ -31,6 +31,7 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
+import qualified Data.List as DL
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
@@ -101,7 +102,7 @@ discoverPairs bundle = do
       blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
 
       let
-        allCalls = [ (blkO, blkP)
+        allCalls = DL.nub $ [ (blkO, blkP)
                    | blkO <- blksO
                    , blkP <- blksP
                    , compatibleTargets blkO blkP]
@@ -234,7 +235,18 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
     eqRetP <- liftPartialRel sym (MT.llvmPtrEq sym) retP targetRetP
     WI.andPred sym eqRetO eqRetP
 
-  liftIO $ WI.andPred sym eqCall eqRet
+  -- check that the block exit accoring to macaw matches the expected
+  -- target
+  validExit <- case PB.concreteBlockEntry (PB.targetCall blktO) of
+    PB.BlockEntryInitFunction -> matchingExits bundle MS.MacawBlockEndCall
+    PB.BlockEntryJump -> do
+      isJump <- matchingExits bundle MS.MacawBlockEndJump
+      isBranch <- matchingExits bundle MS.MacawBlockEndBranch
+      liftIO $ WI.orPred sym isJump isBranch
+    PB.BlockEntryPreArch -> matchingExits bundle MS.MacawBlockEndArch
+    _ -> return $ WI.falsePred sym
+
+  liftIO $ WI.andPred sym eqCall eqRet >>= WI.andPred sym validExit
   where
     regsO = PSS.simOutRegs $ PSS.simOutO bundle
     regsP = PSS.simOutRegs $ PSS.simOutP bundle
@@ -284,32 +296,10 @@ getSubBlocks b = withBinary @bin $
      mtgt <- liftIO $ PDP.parsedBlocksContaining b pfm
      tgts <- case mtgt of
        Just (PDP.ParsedBlocks pbs) ->
-         concat <$> mapM (\x -> concreteValidJumpTargets b pbs x) pbs
+         concat <$> mapM (\x -> concreteJumpTargets b x) pbs
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ (\x -> validateBlockTarget x) tgts
      return tgts
-
-
-concreteValidJumpTargets ::
-  PA.ValidArch arch =>
-  PB.KnownBinary bin =>
-  PB.ConcreteBlock arch bin ->
-  [MD.ParsedBlock arch ids] ->
-  MD.ParsedBlock arch ids ->
-  EquivM sym arch [PB.BlockTarget arch bin]
-concreteValidJumpTargets from allPbs pb = do
-  targets <- concreteJumpTargets from pb
-  let
-      thisAddr = PA.segOffToAddr (MD.pblockAddr pb)
-      addrs = map (PA.segOffToAddr . MD.pblockAddr) allPbs
-
-      isTargetExternal btgt = not ((PB.concreteAddress (PB.targetCall btgt)) `elem` addrs)
-      isTargetBackJump btgt = (PB.concreteAddress (PB.targetCall btgt)) < thisAddr
-      isTargetArch btgt = PB.concreteBlockEntry (PB.targetCall btgt) == PB.BlockEntryPostArch
-
-      isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
-
-  return $ filter isTargetValid targets
 
 validateBlockTarget ::
   HasCallStack =>
