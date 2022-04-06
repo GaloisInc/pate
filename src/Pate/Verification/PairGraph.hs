@@ -185,8 +185,8 @@ data PairGraph sym arch =
 --   computed counterexamples may actually not be realizable.
 data TotalityCounterexample ptrW =
   TotalityCounterexample
-    (Integer, MS.MacawBlockEndCase, Maybe (MM.MemWord ptrW, Text))
-    (Integer, MS.MacawBlockEndCase, Maybe (MM.MemWord ptrW, Text))
+    (Integer, MS.MacawBlockEndCase, Maybe (MM.MemSegmentOff ptrW, Text))
+    (Integer, MS.MacawBlockEndCase, Maybe (MM.MemSegmentOff ptrW, Text))
 
 
 -- | An observable counterexample consists of a sequence of observable events

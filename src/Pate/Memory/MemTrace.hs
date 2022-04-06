@@ -86,7 +86,10 @@ import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Types as MT
 import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
-import Data.Macaw.Memory (AddrWidthRepr(..), Endianness(..), MemWidth, addrWidthClass, addrWidthRepr, addrWidthNatRepr, MemWord)
+import Data.Macaw.Memory
+           (AddrWidthRepr(..), Endianness(..), MemWidth
+           , addrWidthClass, addrWidthRepr, addrWidthNatRepr
+           , incSegmentOff, memWordToUnsigned, MemSegmentOff )
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap
@@ -124,6 +127,7 @@ import What4.Expr.Builder (ExprBuilder)
 import What4.Interface
 
 
+import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
 import qualified What4.ExprHelpers as WEH
 
@@ -544,18 +548,20 @@ data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
   SyscallEvent :: forall sym ptrW w.
     (1 <= w) =>
-    MuxTree sym (Maybe (MemWord ptrW, Text)) ->
-    SymExpr sym (BaseBVType w) -> -- TODO, something more realistic
+    MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
+      {- ^ location and dissassembly of the instruction generating this system call -} ->
+    SymExpr sym (BaseBVType w)
+      {- ^ The value of R0 when this system call occurred -} -> 
     MemEvent sym ptrW
 
-prettyMemEvent :: IsExpr (SymExpr sym) => MemEvent sym ptrW -> Doc ann
+prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
 prettyMemEvent (MemOpEvent op) = prettyMemOp op
 prettyMemEvent (SyscallEvent i v) =
   case viewMuxTree i of
     [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
     _ -> "Syscall" <+> printSymExpr v
 
-prettyMemTraceSeq :: IsExpr (SymExpr sym) => MemTraceSeq sym ptrW -> Doc ann
+prettyMemTraceSeq :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemTraceSeq sym ptrW -> Doc ann
 prettyMemTraceSeq = prettySymSequence prettyMemEvent
 
 data MemTraceImpl sym ptrW = MemTraceImpl
@@ -564,7 +570,7 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   --   later events appear closer to the front of the sequence.
   , memState :: MemTraceState sym ptrW
   -- ^ the logical contents of memory
-  , memCurrentInstr :: MuxTree sym (Maybe (MemWord ptrW, Text))
+  , memCurrentInstr :: MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
   -- ^ the most recent program instruction we encountered (address, dissassembly)
   }
 
@@ -684,9 +690,17 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
     MacawArchStmtExtension archStmt -> archStmtFn mvar globs archStmt
 
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
-    MacawInstructionStart _baddr iaddr dis ->
-      liftToCrucibleState mvar $ \sym ->
-        modify (\mem -> mem{ memCurrentInstr = toMuxTree sym (Just (iaddr,dis)) })
+    MacawInstructionStart baddr iaddr dis ->
+      case incSegmentOff baddr (memWordToUnsigned iaddr) of
+        Just off -> 
+          liftToCrucibleState mvar $ \sym ->
+            modify (\mem -> mem{ memCurrentInstr = toMuxTree sym (Just (off,dis)) })
+        Nothing ->
+          panic Verifier "execMacawExteions: MacawInstructionStart"
+                    [ "MemorySegmentOff out of range"
+                    , show baddr
+                    , show iaddr
+                    ]
 
     PtrEq w x y -> ptrOp w x y $ \bak reg off reg' off' -> do
       let sym = backendGetSym bak
