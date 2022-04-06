@@ -94,15 +94,17 @@ makeFreshAbstractDomain (ReturnNode fPair) =
 --   consider first locations that differ in the prestate, then locations that
 --   were written during the execution of the block.  In theory, this should be
 --   enough to account for all the sources of differences we have to consider.
+--   Probably, the order in which we consider these effects doesn't matter much,
+--   except perhaps if the widening process is aborted early (we run out of gas).
 --
 --   If, for some reason, we cannot find appropraite locations to widen, we
 --   widen as much as we can, and report an error.
 widenAlongEdge ::
   SimBundle sym arch {- ^ results of symbolic execution for this block -} ->
-  GraphNode arch {- ^ current graph node -} ->
-  AbstractDomain sym arch {- ^ current abstract domain -} ->
+  GraphNode arch {- ^ source node -} ->
+  AbstractDomain sym arch {- ^ source abstract domain -} ->
   PairGraph sym arch {- ^ pair graph to update -} ->
-  GraphNode arch {- ^ next graph node -} ->
+  GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
 widenAlongEdge bundle from d gr to =
 
@@ -119,7 +121,7 @@ widenAlongEdge bundle from d gr to =
           NoWideningRequired ->
             return (freshDomain gr to d')
           WideningError msg _ d'' ->
-            do -- TODO? better error handling?
+            do -- TODO! better error handling
                traceBundle bundle ("Error during widening: " ++ msg)
                return (freshDomain gr to d'') 
           Widen _ d'' ->
@@ -133,7 +135,7 @@ widenAlongEdge bundle from d gr to =
             do traceBundle bundle "Did not need to widen"
                return gr
           WideningError msg _ d'' ->
-            do -- TODO? better error handling?
+            do -- TODO! better error handling
                traceBundle bundle ("Error during widening: " ++ msg)
                case updateDomain gr from to d'' of
                  Nothing ->
@@ -168,6 +170,10 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym 
 instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
   mempty = WidenLocs mempty mempty
 
+-- Result of attempting to widen.  Errors can occur for a couple of reasons:
+-- UNKNOWN results from solvers; running out of gas in the widening loop,
+-- or being unable to decide how to peform a widening step when a
+-- counterexample is found.
 data WidenResult sym arch
   = NoWideningRequired
   | WideningError String (WidenLocs sym arch) (AbstractDomain sym arch)
@@ -213,17 +219,23 @@ widenPostcondition bundle preD postD0 =
 
        PS.withOnlineSolver solver saveInteraction sym $ \bak ->
          do liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
-              do W4.push sp
+              do -- NB, this `push` is here to avoid
+                 -- https://github.com/GaloisInc/what4/issues/196
+                 W4.push sp
                  W4.assume (W4.solverConn sp) precond
             widenLoop sym bak initialGas eqCtx postD0 Nothing
 
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
 
-   -- TODO, we should probably have some way to bound the amout of times we can
-   --  recurse into the widening loop, or we really need to be very careful to
-   --  make sure that this kind of local widening will terminate in a reasonable
-   --  number of steps.
+   -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
+   -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
+   --
+   -- The basic strategy here is to ask the solver to prove that the current post-condition
+   -- abstract domain is sufficent to describe the post state when we assume the pre-condition
+   -- abstract domain.  If it can do so, we are done. If not, then we have a counterexample
+   -- in hand that we can use to decide how to widen the current post-domain and try again.
+   -- `widenUsingCounterexample` uses a fixed list of heuristics to decide how to do the widening.
    widenLoop ::
      ( bak ~ LCBO.OnlineBackend solver t st fs
      , sym ~ W4.ExprBuilder t st fs
@@ -235,7 +247,9 @@ widenPostcondition bundle preD postD0 =
      Gas ->
      EquivContext sym arch ->
      AbstractDomain sym arch ->
-     Maybe (WidenLocs sym arch) ->
+     Maybe (WidenLocs sym arch)
+     {- ^ A summary of any widenings that were done in previous iterations.
+          If @Nothing@, than no previous widenings have been performed. -} ->
      EquivM sym arch (WidenResult sym arch)
    widenLoop _sym _bak (Gas i) _eqCtx postD mlocs | i <= 0 =
      do let msg = "Ran out of gas performing local widenings"
@@ -275,11 +289,14 @@ widenPostcondition bundle preD postD0 =
                    widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD
 
         -- Re-enter the widening loop if we had to widen at this step.
-        -- If this step completed, use the success continuation to
-        -- return the result.  Only in the first iteration will we
-        -- finally return a `NoWideningRequired`.  In other cases, we
-        -- had to widen at least once.
+        --
+        -- If we did not have to widen in this iteration, and no widening
+        -- was done in previous iterations (i.e., this is the first iteration)
+        -- return `NoWideningRequired`.  Otherwise return the new abstract domain
+        -- and a summary of the widenings we did.
         case res of
+
+          -- Some kind of error occured while widening.
           WideningError msg locs _postD' ->
             do traceBundle bundle "== Widening error! =="
                traceBundle bundle msg
@@ -293,18 +310,22 @@ widenPostcondition bundle preD postD0 =
 -}
                return res
 
+          -- In this iteration, no additional widening was done, and we can exit the loop.
+          -- The ultimate result we return depends on if we did any widening steps in
+          -- previous iterations.
           NoWideningRequired ->
             case mlocs of
               Nothing   -> return NoWideningRequired
               Just locs -> return (Widen locs postD)
 
+          -- We had to do some widening in this iteration, so reenter the loop.
           Widen locs postD' ->
             do traceBundle bundle "== Found a widening, returning into the loop =="
                traceBundle bundle (show locs)
                let newlocs = case mlocs of
-                               Nothing    -> Just locs
-                               Just locs' -> Just (locs <> locs')
-               widenLoop sym bak (Gas (i-1)) eqCtx postD' newlocs
+                               Nothing    -> locs
+                               Just locs' -> locs <> locs'
+               widenLoop sym bak (Gas (i-1)) eqCtx postD' (Just newlocs)
 
 
 widenUsingCounterexample ::
@@ -390,6 +411,8 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD =
           return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
 
 
+-- TODO, may be worth using Seq instead of lists to avoid the quadratic time
+-- behavior of `WriterT` with lists
 findUnequalHeapWrites ::
   ( sym ~ W4.ExprBuilder t st fs
   , PA.ValidArch arch ) =>
@@ -411,6 +434,8 @@ findUnequalHeapWrites sym evalFn bundle eqCtx =
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
+-- TODO, may be worth using Seq instead of lists to avoid the quadratic time
+-- behavior of `WriterT` with lists
 findUnequalStackWrites ::
   ( sym ~ W4.ExprBuilder t st fs
   , PA.ValidArch arch ) =>
@@ -432,6 +457,8 @@ findUnequalStackWrites sym evalFn bundle eqCtx =
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
+-- TODO, may be worth using Seq instead of lists to avoid the quadratic time
+-- behavior of `WriterT` with lists
 findUnequalHeapMemCells ::
   ( sym ~ W4.ExprBuilder t st fs
   , PA.ValidArch arch ) =>
@@ -451,6 +478,8 @@ findUnequalHeapMemCells sym evalFn bundle eqCtx preD =
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
           unless cellEq' (tell [Some cell])
 
+-- TODO, may be worth using Seq instead of lists to avoid the quadratic time
+-- behavior of `WriterT` with lists
 findUnequalStackMemCells ::
   ( sym ~ W4.ExprBuilder t st fs
   , PA.ValidArch arch ) =>
@@ -506,6 +535,8 @@ widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD =
         in return (Widen locs postD{ PS.specBody = pred' })
 
 
+-- TODO, may be worth using Seq instead of lists to avoid the quadratic time
+-- behavior of `WriterT` with lists
 findUnequalRegs ::
   ( PA.ValidArch arch
   , sym ~ W4.ExprBuilder t st fs ) =>

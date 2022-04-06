@@ -169,7 +169,11 @@ verifyPairs ::
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
+
+  -- NB, hash-consing is not strictly necessary, but I conjecture that it may be
+  -- helpful for the kinds of problems we are facing.
   liftIO $ WE.startCaching sym
+
   doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
 -- | Verify equality of the given binaries.

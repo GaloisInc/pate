@@ -153,6 +153,8 @@ data PairGraph sym arch =
 
     -- TODO, I'm not entirely sure I love this idea of tracking error conditions in this
     -- data structure like this.  It works for now, but maybe is worth thinking about some more.
+    -- Because of the monotonicity of the system, results can be reported as soon as they are
+    -- discovered, so perhaps they should be streamed directly to output somehow.
 
     -- TODO, maybe this is the right place to include conditional equivalence conditions?
 
@@ -164,7 +166,8 @@ data PairGraph sym arch =
     -- | If we find a counterexample to the exit totality check, record it here.  This occurs when
     --   the programs have sufficiently-different control flow that they cannot be synchronized, or
     --   when the analysis encounters some control-flow construct it doesn't know how to handle.
-    --   Once we find a desynchronization error, we do not look for additional ones.
+    --   Once we find a desynchronization error for a particular block, we do not look for additional
+    --   involving that same block.
   , pairGraphDesyncReports :: !(Map (PPa.BlockPair arch) (TotalityCounterexample (MM.ArchAddrWidth arch)))
 
     -- | Keep track of the target nodes whenever we run out of gas while trying to reach fixpoint.

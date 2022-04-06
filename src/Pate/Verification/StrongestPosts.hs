@@ -187,7 +187,8 @@ pairGraphComputeFixpoint gr =
 --   a single program "slice". First we check for equivalence of observables,
 --   then we check the totality of the computed exits, then we update any
 --   function return nodes, and finally we follow all the exit nodes
---   that were computed via "discoverPairs."
+--   that were computed via "discoverPairs." (The specific order in which
+--   we perform these steps should not be very important).
 --
 --   When we visit a "ReturnNode", we need to propagate abstract domain
 --   information directly to the return points of of the call sites of
@@ -294,6 +295,7 @@ checkObservables bPair asm bundle preD gr =
              do traceBundle bundle "Observables agree"
                 return gr
            ObservableCheckError msg ->
+                -- TODO! track these errors better
              do traceBundle bundle ("Error checking observables: " ++ msg)
                 return gr
            ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
@@ -497,6 +499,7 @@ checkTotality bPair asm bundle preD exits gr =
              do traceBundle bundle "Totality check succeeded."
                 return gr
            TotalityCheckingError msg ->
+                -- TODO! track these errors better
              do traceBundle bundle ("Error while checking totality! " ++ msg)
                 return gr
            TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
@@ -779,6 +782,8 @@ findPLTSymbol blkO blkP =
      let oAddr = PAd.addrToMemAddr (PB.concreteAddress blkO)
      let pAddr = PAd.addrToMemAddr (PB.concreteAddress blkP)
 
+     -- TODO! TR is concerned that this may not work correctly for
+     -- position independent code.
      case (MM.asAbsoluteAddr oAddr, MM.asAbsoluteAddr pAddr) of
        (Just oMw, Just pMw) -> do
          -- TODO, this is a stupid way to do this.  We should
