@@ -85,14 +85,14 @@ makeFreshAbstractDomain (ReturnNode fPair) =
 --   and proving that the poststate of symbolic execution satisfies
 --   the abstract domain of the target node, assuming the abstract domain of
 --   the source node.  If this is not the case, we use the resulting counterexample
---   to determing what additional locations need to be added to the target
+--   to determine what additional locations need to be added to the target
 --   abstract domain. We perform these widening steps in a loop until
 --   the process converges or we run out of gas.
 --
 --   When widening, we first consider register values to widen, then we look at
 --   stack, and finally global memory for locations. When widening memory, we
 --   consider first locations that differ in the prestate, then locations that
---   were written during the execution of the block.  In theory, this should
+--   were written during the execution of the block.  In theory, this should be
 --   enough to account for all the sources of differences we have to consider.
 --
 --   If, for some reason, we cannot find appropraite locations to widen, we
@@ -173,7 +173,7 @@ data WidenResult sym arch
   | WideningError String (WidenLocs sym arch) (AbstractDomain sym arch)
   | Widen (WidenLocs sym arch) (AbstractDomain sym arch)
 
--- | Try the given widening stratetigs s one at a time,
+-- | Try the given widening strategies one at a time,
 --   until the first one that computes some nontrival
 --   widening, or returns an error.
 tryWidenings ::

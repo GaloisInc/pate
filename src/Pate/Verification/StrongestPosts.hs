@@ -159,7 +159,7 @@ reportAnalysisErrors gr =
 
    reportDesync (pPair, TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) =
      liftIO $ putStrLn $ show $ vcat $
-       [ pretty pPair <+> pretty "program control flow desyncronized"
+       [ pretty pPair <+> pretty "program control flow desynchronized"
        , pretty ("  Original: 0x" ++ showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr)
        , pretty ("  Patched:  0x" ++ showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr)
        ]

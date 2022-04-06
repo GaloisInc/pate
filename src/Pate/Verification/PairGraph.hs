@@ -112,7 +112,7 @@ instance PA.ValidArch arch => Pretty (GraphNode arch) where
 --   runs of the two programs.
 --
 --   As we compute the fixpoint we note cases where we discover a
---   location where we cannot keep the control-flow syncrhronized, or
+--   location where we cannot keep the control-flow synchronized, or
 --   where we discover some observable difference in the program
 --   behavior. These "program desyncrhonization" and "observable
 --   difference" occurences are ultimately the information we want to
@@ -141,7 +141,7 @@ data PairGraph sym arch =
     --   be revisited, and here we record all such nodes that must be examinied.
     --
     --   For now, this is just a set and we examine nodes in whatever order is defined
-    --   by their Ord instance. It may make sense at some point to use a more sophistocated
+    --   by their 'Ord' instance. It may make sense at some point to use a more sophisticated
     --   mechanism to determine the order in which to visit nodes.
   , pairGraphWorklist :: !(Set (GraphNode arch))
 
@@ -162,9 +162,9 @@ data PairGraph sym arch =
   , pairGraphObservableReports :: !(Map (PPa.BlockPair arch) (ObservableCounterexample sym (MM.ArchAddrWidth arch)))
 
     -- | If we find a counterexample to the exit totality check, record it here.  This occurs when
-    --   the programs have sufficently-different control flow that they cannot be syncrhonized, or
+    --   the programs have sufficiently-different control flow that they cannot be synchronized, or
     --   when the analysis encounters some control-flow construct it doesn't know how to handle.
-    --   Once we find a desyncrhonization error, we do not look for additional ones.
+    --   Once we find a desynchronization error, we do not look for additional ones.
   , pairGraphDesyncReports :: !(Map (PPa.BlockPair arch) (TotalityCounterexample (MM.ArchAddrWidth arch)))
 
     -- | Keep track of the target nodes whenever we run out of gas while trying to reach fixpoint.
@@ -173,8 +173,8 @@ data PairGraph sym arch =
   }
 
 -- | A totality counterexample represents a potential control-flow situation that represents
---   desyncronization of the original and patched program. The first tuple represents
---   the control-flow of the orignial program, and the second tuple represents the patched
+--   desynchronization of the original and patched program. The first tuple represents
+--   the control-flow of the original program, and the second tuple represents the patched
 --   program.  Each tuple contains the target address of the control-flow instruction,
 --   the type of control-flow it represents, and the address and dissassembly of the
 --   instruction causing the control flow. The final node is a Maybe because we cannot
