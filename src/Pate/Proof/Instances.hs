@@ -51,6 +51,7 @@ module Pate.Proof.Instances
   where
 
 import           Control.Lens hiding ( op, pre )
+import           Data.List ( nubBy )
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.Kind as DK
 import           Data.Maybe ( mapMaybe, catMaybes )
@@ -448,8 +449,21 @@ ppMemCellMap ::
   MapF.MapF (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) ->
   PP.Doc a
 ppMemCellMap dom cells = let
-  ppCells = mapMaybe (\(Pair cell v) -> ppCellVal dom cell v) $ MapF.toList cells
+  eqEntries (Pair cell1 _) (Pair cell2 _) = eqGroundCells cell1 cell2
+  ppCells = mapMaybe (\(Pair cell v) -> ppCellVal dom cell v) $ nubBy eqEntries $ MapF.toList cells
   in PP.vsep ppCells
+
+-- | True if the two cells represent the same value when grounded
+eqGroundCells ::
+  PA.ValidArch arch =>
+  PG.IsGroundSym grnd =>
+  PMC.MemCell grnd arch tp1 ->
+  PMC.MemCell grnd arch tp2 ->
+  Bool
+eqGroundCells cell1 cell2 = case testEquality (PMC.cellWidth cell1) (PMC.cellWidth cell2) of
+  Just Refl | PMC.cellEndian cell1 == PMC.cellEndian cell2 ->
+    groundBV (PMC.cellPtr cell1) == groundBV (PMC.cellPtr cell2)
+  _ -> False
 
 ppRegs ::
   PA.ValidArch arch =>

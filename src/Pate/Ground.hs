@@ -69,6 +69,8 @@ import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
 import qualified What4.ExprHelpers as WEH
 
+import qualified SemMC.Util as SU
+
 import qualified Pate.Panic as PP
 
 -- | This module allows a model from What4 to be captured with respect to
@@ -148,9 +150,10 @@ withGroundData f = let grnd = ?grndData in case grnd of GroundData{} -> f grnd
 
 -- | Retrieve the ground information of a symbolic expression with respect to the
 -- grounding environment bound by 'IsGroundSym'
-groundInfo :: IsGroundSym sym => W4.SymExpr sym tp -> GroundInfo tp
-groundInfo e = withGroundData $ \grnd ->
-  case MapF.lookup e (grndInfoMap grnd) of
+groundInfo :: forall sym tp. IsGroundSym sym => W4.SymExpr sym tp -> GroundInfo tp
+groundInfo e = withGroundData $ \grnd -> case SU.exprToGroundVal @sym (W4.exprType e) e of
+  Just gv ->  GroundInfo mempty gv
+  Nothing -> case MapF.lookup e (grndInfoMap grnd) of
     Just info -> info
     Nothing -> PP.panic PP.ProofConstruction "groundInfo" ["Unexpected symbolic value:", show $ W4.printSymExpr e]
 
@@ -232,9 +235,11 @@ ground sym stackRegion mkinfo a = do
       }
   let
     f' :: forall tp. W4.SymExpr sym tp -> GroundData sym -> IO (GroundData sym)
-    f' e gdata = do
-      upd <- MapF.updatedValue <$> MapF.updateAtKey e (Just <$> mkinfo e) (\_ -> return $ MapF.Keep) (grndInfoMap gdata)
-      return $ gdata { grndInfoMap = upd }
+    f' e gdata = case SU.exprToGroundVal @sym (W4.exprType e) e of
+      Just _ -> return gdata
+      Nothing -> do
+        upd <- MapF.updatedValue <$> MapF.updateAtKey e (Just <$> mkinfo e) (\_ -> return $ MapF.Keep) (grndInfoMap gdata)
+        return $ gdata { grndInfoMap = upd }
   gdata <- PEM.foldExpr sym f' a initGround
   return $ Grounded a gdata
 
