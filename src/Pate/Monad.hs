@@ -44,7 +44,7 @@ module Pate.Monad
   , traceBundle
   , traceBlockPair
   , lookupArgumentNames
-  , SymGroundEvalFn
+  , SymGroundEvalFn(..)
   , execGroundFn
   , withGroundEvalFn
   , getFootprints

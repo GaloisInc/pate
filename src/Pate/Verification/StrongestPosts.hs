@@ -228,9 +228,7 @@ visitNode (ReturnNode fPair) d gr0 =
  where
    -- Here, we're using a bit of a trick to propagate abstract domain information to call sites.
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
-   -- using the ordinary widening machinery. However, it seems like there might be a bug in this
-   -- procedure, as we are currently get a lot of widening errors that seem due to the propagation
-   -- along return vectors.
+   -- using the ordinary widening machinery.
 
    processReturn gr ret = withPair ret $
      do (asm, bundle) <- returnSiteBundle d ret
@@ -246,8 +244,6 @@ visitNode (ReturnNode fPair) d gr0 =
 --   immediately returns the prestate as the poststate.
 --   This is used to compute widenings that propagate abstract domain
 --   information from function return nodes to the actual return sites.
---
---   TODO, I'm not convinced this is working correctly.
 returnSiteBundle :: forall sym arch.
   AbstractDomain sym arch ->
   PPa.BlockPair arch {- ^ block pair being returned to -} ->

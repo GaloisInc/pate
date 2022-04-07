@@ -17,8 +17,11 @@ module Pate.Verification.Widening
 
 import           Control.Monad (when, forM_, unless)
 import           Control.Monad.IO.Class
+import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Reader (asks)
 import           Control.Monad.Writer (tell, execWriterT)
+
+import           Prettyprinter
 
 import           Data.Maybe (fromMaybe)
 import qualified Data.Map as Map
@@ -51,6 +54,11 @@ import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.MemCell as PMc
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.EquivalenceDomain as PEE
+import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Proof.Operations as PP
+import qualified Pate.Proof.CounterExample as PP
+import qualified Pate.Proof.Instances ()
+
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 
@@ -182,9 +190,9 @@ data WidenResult sym arch
 -- | Try the given widening strategies one at a time,
 --   until the first one that computes some nontrival
 --   widening, or returns an error.
-tryWidenings ::
-  [IO (WidenResult sym arch)] ->
-  IO (WidenResult sym arch)
+tryWidenings :: Monad m =>
+  [m (WidenResult sym arch)] ->
+  m (WidenResult sym arch)
 tryWidenings [] = return NoWideningRequired
 tryWidenings (x:xs) =
   x >>= \case
@@ -266,27 +274,26 @@ widenPostcondition bundle preD postD0 =
                               eqCtx
                               postCondStatePred
         eqPostPred <- liftIO (PE.postCondPredicate sym eqPost)
-        postcond <- liftIO $ W4.andPred sym postCondAsm eqPostPred
 
---        traceBundle bundle "== widenPost: postcondition asm =="
---        traceBundle bundle (show (W4.printSymExpr postCondAsm))
-
---        traceBundle bundle "== widenPost: postcondition eqPost =="
---        traceBundle bundle (show (W4.printSymExpr eqPost))
-
-        res <-
+        res <- IO.withRunInIO $ \inIO ->
           liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
             W4.inNewFrame sp $
             do let conn = W4.solverConn sp
-               -- check if we already satisfy the associated condition
-               W4.assume conn =<< W4.notPred sym postcond
+
+               -- Assume the validity conditions coming outof the postdomain spec.
+               -- TODO? Should we do this, or are these conditions irrelevant?
+               W4.assume conn postCondAsm
+
+               -- check if we already satisfy the equality condition
+               W4.assume conn =<< W4.notPred sym eqPostPred
+
                W4.checkAndGetModel sp "prove postcondition" >>= \case
                  Unsat _ -> return NoWideningRequired
                  Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD)
                  Sat evalFn ->
                    -- The current execution does not satisfy the postcondition, and we have
                    -- a counterexample.
-                   widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD
+                   inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -340,15 +347,19 @@ widenUsingCounterexample ::
   AbstractDomain sym arch ->
   Maybe (WidenLocs sym arch) ->
   AbstractDomain sym arch ->
-  IO (WidenResult sym arch)
+  EquivM sym arch (WidenResult sym arch)
 widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD =
   tryWidenings
-    [ widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
-    , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD
-    , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD
-    , return $ WideningError "Could not find any values to widen!" (fromMaybe mempty mlocs) postD
+    [ liftIO (widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD)
+    , liftIO (widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD)
+    , liftIO (widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD)
+    , do slice <- PP.simBundleToSlice bundle
+         ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
+         let msg = unlines [ "Could not find any values to widen!"
+                           , show (pretty ineqRes)
+                           ]
+         return $ WideningError msg (fromMaybe mempty mlocs) postD
     ]
-
 
 -- TODO, lots of code duplication between the stack and heap cases.
 --  should we find some generalization?
