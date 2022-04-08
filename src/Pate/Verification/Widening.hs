@@ -24,7 +24,6 @@ import           Control.Monad.Writer (tell, execWriterT)
 import           Prettyprinter
 
 import           Data.Maybe (fromMaybe)
-import qualified Data.Map as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -116,7 +115,7 @@ widenAlongEdge ::
   EquivM sym arch (PairGraph sym arch)
 widenAlongEdge bundle from d gr to =
 
-  case Map.lookup to (pairGraphDomains gr) of
+  case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
      do traceBundle bundle ("First jump to " ++ show to)
@@ -146,18 +145,16 @@ widenAlongEdge bundle from d gr to =
             do -- TODO! better error handling
                traceBundle bundle ("Error during widening: " ++ msg)
                case updateDomain gr from to d'' of
-                 Nothing ->
+                 Left gr' ->
                    do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                      return gr{ pairGraphGasExhausted = Set.insert to (pairGraphGasExhausted gr) }
-                 Just gr' -> return gr'
+                      return gr'
+                 Right gr' -> return gr'
           Widen _ d'' ->
             case updateDomain gr from to d'' of
-              Nothing ->
+              Left gr' ->
                 do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                   return gr{ pairGraphGasExhausted = Set.insert to (pairGraphGasExhausted gr) }
-              Just gr' ->
-                do traceBundle bundle "Successfully widened postcondition"
                    return gr'
+              Right gr' -> return gr'
 
 
 -- | Information about what locations were widened

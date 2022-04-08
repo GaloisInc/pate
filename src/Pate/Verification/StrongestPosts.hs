@@ -27,7 +27,6 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 import           Data.Proxy
 
 import           Data.Parameterized.Classes
@@ -135,38 +134,6 @@ runVerificationLoop env pPairs = do
         stats <- liftIO $ MVar.readMVar statVar
 
         return (result, stats)
-
--- | TODO, Right now, this just prints error reports to stdout.
---   We should decide how and to what extent this should connect
---   to the `emitEvent` infrastructure.
-reportAnalysisErrors ::
-  PairGraph sym arch ->
-  EquivM sym arch ()
-reportAnalysisErrors gr =
-  do mapM_ reportObservables (Map.toList (pairGraphObservableReports gr))
-     mapM_ reportDesync (Map.toList (pairGraphDesyncReports gr))
-     mapM_ reportGasExhausted (Set.toList (pairGraphGasExhausted gr))
-
- where
-   reportObservables (pPair, ObservableCounterexample oEvs pEvs) =
-     liftIO $ putStrLn $ show $ vcat $
-         [ pretty pPair <+> pretty "observable sequences disagree"
-         , pretty "Original sequence:"
-         ] ++
-         [ indent 2 (MT.prettyMemEvent ev) | ev <- oEvs ] ++
-         [ pretty "Patched sequence:" ] ++
-         [ indent 2 (MT.prettyMemEvent ev) | ev <- pEvs ]
-
-   reportDesync (pPair, TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) =
-     liftIO $ putStrLn $ show $ vcat $
-       [ pretty pPair <+> pretty "program control flow desynchronized"
-       , pretty ("  Original: 0x" ++ showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr)
-       , pretty ("  Patched:  0x" ++ showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr)
-       ]
-
-   reportGasExhausted pPair =
-     liftIO $ putStrLn $ show $ vcat $
-       [ pretty pPair <+> pretty "analysis failed to converge" ]
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -281,26 +248,25 @@ checkObservables :: forall sym arch.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 checkObservables bPair asm bundle preD gr =
-  case Map.lookup bPair (pairGraphObservableReports gr) of
-    -- we have already found observable event differences at this location, so skip the check
-    Just _ -> return gr
-    Nothing ->
-      do res <- doCheckObservables asm bundle preD
-         case res of
-           ObservableCheckEq ->
-             do traceBundle bundle "Observables agree"
-                return gr
-           ObservableCheckError msg ->
-                -- TODO! track these errors better
-             do traceBundle bundle ("Error checking observables: " ++ msg)
-                return gr
-           ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
-             do traceBundle bundle ("Obserables disagree!")
-                traceBundle bundle ("== Original sequence ==")
-                traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
-                traceBundle bundle ("== Patched sequence ==")
-                traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
-                return gr{ pairGraphObservableReports = Map.insert bPair cex (pairGraphObservableReports gr) }
+  considerObservableEvent gr bPair $
+    do res <- doCheckObservables asm bundle preD
+       case res of
+         ObservableCheckEq ->
+           do traceBundle bundle "Observables agree"
+              return Nothing
+         ObservableCheckError msg ->
+              -- TODO! track these errors better
+           do traceBundle bundle ("Error checking observables: " ++ msg)
+              return Nothing
+         ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
+           do traceBundle bundle ("Obserables disagree!")
+              traceBundle bundle ("== Original sequence ==")
+              traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
+              traceBundle bundle ("== Patched sequence ==")
+              traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
+
+              return (Just cex)
+
 
 doCheckObservables :: forall sym arch.
   W4.Pred sym ->
@@ -485,27 +451,23 @@ checkTotality :: forall sym arch.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 checkTotality bPair asm bundle preD exits gr =
-  case Map.lookup bPair (pairGraphDesyncReports gr) of
-    -- we have already reported a program desync report for this location
-    Just _ -> return gr
-    Nothing ->
-      do tot <- doCheckTotality asm bundle preD exits
-         case tot of
-           CasesTotal ->
-             do traceBundle bundle "Totality check succeeded."
-                return gr
-           TotalityCheckingError msg ->
-                -- TODO! track these errors better
-             do traceBundle bundle ("Error while checking totality! " ++ msg)
-                return gr
-           TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
-             do traceBundle bundle $ unlines
-                  ["Found extra exit while checking totality:"
-                  , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
-                  , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
-                  ]
-                return gr{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
-
+  considerDesyncEvent gr bPair $
+    do tot <- doCheckTotality asm bundle preD exits
+       case tot of
+         CasesTotal ->
+           do traceBundle bundle "Totality check succeeded."
+              return Nothing
+         TotalityCheckingError msg ->
+              -- TODO! track these errors better
+           do traceBundle bundle ("Error while checking totality! " ++ msg)
+              return Nothing
+         TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
+           do traceBundle bundle $ unlines
+                ["Found extra exit while checking totality:"
+                , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
+                , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
+                ]
+              return (Just cex)
 
 data TotalityResult ptrW
   = CasesTotal
