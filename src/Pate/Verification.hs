@@ -104,7 +104,7 @@ import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.Simplify as PVSi
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Validity as PVV
-import qualified Pate.Verification.PairGraph as PPG
+import qualified Pate.Verification.StrongestPosts as PSP
 import           What4.ExprHelpers as WEH
 
 -- | Run code discovery using macaw
@@ -169,6 +169,11 @@ verifyPairs ::
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
+
+  -- NB, hash-consing is not strictly necessary, but I conjecture that it may be
+  -- helpful for the kinds of problems we are facing.
+  liftIO $ WE.startCaching sym
+
   doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
 -- | Verify equality of the given binaries.
@@ -290,7 +295,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     (result, stats) <-
       case PC.cfgVerificationMethod vcfg of
         PC.HoareTripleVerification   -> runVerificationLoop env pPairs'
-        PC.StrongestPostVerification -> PPG.runVerificationLoop env pPairs'
+        PC.StrongestPostVerification -> PSP.runVerificationLoop env pPairs'
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)

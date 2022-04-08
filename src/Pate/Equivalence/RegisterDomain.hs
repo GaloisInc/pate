@@ -197,12 +197,12 @@ ppRegisterDomain ::
   (WI.Pred sym -> PP.Doc a) ->
   RegisterDomain sym arch ->
   PP.Doc a
-ppRegisterDomain showCond dom = PP.vsep (map ppReg (toList dom))
-  where
-    ppReg :: (Some (MM.ArchReg arch), WI.Pred sym) -> PP.Doc a
-    ppReg (Some reg, p) = case WI.asConstantPred p of
-      Just True -> PP.pretty (showF reg)
-      _ -> PP.pretty (showF reg) <> PP.line <> (showCond p)
+ppRegisterDomain showCond dom =
+  PP.vsep
+   [ PP.pretty (showF reg) <> PP.line <> (PP.indent 2 (showCond p))
+   | (Some reg, p) <- toList dom
+   , WI.asConstantPred p /= Just True
+   ]
 
 instance
   (MM.RegisterInfo (MM.ArchReg arch), WI.IsExprBuilder sym) =>
