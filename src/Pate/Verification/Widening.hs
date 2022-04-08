@@ -26,6 +26,7 @@ import           Prettyprinter
 import           Data.Maybe (fromMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Text as Text
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
@@ -128,9 +129,9 @@ widenAlongEdge bundle from d gr to =
           NoWideningRequired ->
             return (freshDomain gr to d')
           WideningError msg _ d'' ->
-            do -- TODO! better error handling
-               traceBundle bundle ("Error during widening: " ++ msg)
-               return (freshDomain gr to d'') 
+            do let msg' = ("Error during widening: " ++ msg)
+               traceBundle bundle msg'
+               return $ recordMiscAnalysisError (freshDomain gr to d'') to (Text.pack msg')
           Widen _ d'' ->
             return (freshDomain gr to d'')
 
@@ -141,14 +142,16 @@ widenAlongEdge bundle from d gr to =
           NoWideningRequired ->
             do traceBundle bundle "Did not need to widen"
                return gr
+
           WideningError msg _ d'' ->
-            do -- TODO! better error handling
-               traceBundle bundle ("Error during widening: " ++ msg)
+            do let msg' = ("Error during widening: " ++ msg)
+               traceBundle bundle msg'
                case updateDomain gr from to d'' of
                  Left gr' ->
                    do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                      return gr'
-                 Right gr' -> return gr'
+                      return $ recordMiscAnalysisError gr' to (Text.pack msg')
+                 Right gr' -> return $ recordMiscAnalysisError gr' to (Text.pack msg')
+
           Widen _ d'' ->
             case updateDomain gr from to d'' of
               Left gr' ->
@@ -228,7 +231,7 @@ widenPostcondition bundle preD postD0 =
                  -- https://github.com/GaloisInc/what4/issues/196
                  W4.push sp
                  W4.assume (W4.solverConn sp) precond
-            widenLoop sym bak initialGas eqCtx postD0 Nothing
+            widenLoop sym bak (Gas 100) eqCtx postD0 Nothing
 
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
@@ -256,9 +259,6 @@ widenPostcondition bundle preD postD0 =
      {- ^ A summary of any widenings that were done in previous iterations.
           If @Nothing@, than no previous widenings have been performed. -} ->
      EquivM sym arch (WidenResult sym arch)
-   widenLoop _sym _bak (Gas i) _eqCtx postD mlocs | i <= 0 =
-     do let msg = "Ran out of gas performing local widenings"
-        return (WideningError msg (fromMaybe mempty mlocs) postD)
 
    widenLoop sym bak (Gas i) eqCtx postD mlocs =
      do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
@@ -288,9 +288,18 @@ widenPostcondition bundle preD postD0 =
                  Unsat _ -> return NoWideningRequired
                  Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD)
                  Sat evalFn ->
-                   -- The current execution does not satisfy the postcondition, and we have
-                   -- a counterexample.
-                   inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD)
+                   if i <= 0 then inIO $
+                     -- we ran out of gas
+                     do slice <- PP.simBundleToSlice bundle
+                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
+                        let msg = unlines [ "Ran out of gas performing local widenings"
+                                          , show (pretty ineqRes)
+                                          ]
+                        return $ WideningError msg (fromMaybe mempty mlocs) postD
+                   else
+                     -- The current execution does not satisfy the postcondition, and we have
+                     -- a counterexample.
+                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -347,9 +356,14 @@ widenUsingCounterexample ::
   EquivM sym arch (WidenResult sym arch)
 widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD =
   tryWidenings
-    [ liftIO (widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD)
-    , liftIO (widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD)
-    , liftIO (widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD)
+    [ widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
+
+    , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
+    , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
+
+    , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
+    , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
+
     , do slice <- PP.simBundleToSlice bundle
          ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
          let msg = unlines [ "Could not find any values to widen!"
@@ -357,6 +371,8 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
                            ]
          return $ WideningError msg (fromMaybe mempty mlocs) postD
     ]
+
+data MemCellSource = LocalChunkWrite | PreDomainCell
 
 -- TODO, lots of code duplication between the stack and heap cases.
 --  should we find some generalization?
@@ -371,19 +387,20 @@ widenHeap ::
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
-  IO (WidenResult sym arch)
+  MemCellSource -> 
+  EquivM sym arch (WidenResult sym arch)
 -- TODO? should we be using postCondAsm and postConstStatePred?
-widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD =
-  do xs <- findUnequalHeapMemCells sym evalFn bundle eqCtx preD
-     ys <- findUnequalHeapWrites sym evalFn bundle eqCtx
-     let zs = xs++ys
+widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
+  do zs <- case memCellSource of
+             LocalChunkWrite -> findUnequalHeapWrites sym evalFn bundle eqCtx
+             PreDomainCell   -> findUnequalHeapMemCells sym evalFn bundle eqCtx preD
      if null zs then
        return NoWideningRequired
      else
        do -- TODO, this could maybe be less aggressive
-          newCells <- PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
+          newCells <- liftIO $ PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
           let heapDom = PEM.memDomainPred (PEE.eqDomainGlobalMemory (PS.specBody postD))
-          heapDom' <- PMc.mergeMemCellPred sym heapDom newCells
+          heapDom' <- liftIO $ PMc.mergeMemCellPred sym heapDom newCells
           let md' = (PEE.eqDomainGlobalMemory (PS.specBody postD)){ PEM.memDomainPred = heapDom' }
           let pred' = (PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
           let postD' = postD{ PS.specBody = pred' }
@@ -400,19 +417,20 @@ widenStack ::
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
-  IO (WidenResult sym arch)
+  MemCellSource -> 
+  EquivM sym arch (WidenResult sym arch)
 -- TODO? should we be using postCondAsm and postConstStatePred?
-widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD =
-  do xs <- findUnequalStackMemCells sym evalFn bundle eqCtx preD
-     ys <- findUnequalStackWrites sym evalFn bundle eqCtx
-     let zs = xs++ys
+widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
+  do zs <- case memCellSource of
+             LocalChunkWrite -> findUnequalStackWrites sym evalFn bundle eqCtx
+             PreDomainCell   -> findUnequalStackMemCells sym evalFn bundle eqCtx preD
      if null zs then
        return NoWideningRequired
      else
        do -- TODO, this could maybe be less aggressive
-          newCells <- PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
+          newCells <- liftIO $ PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
           let stackDom = PEM.memDomainPred (PEE.eqDomainStackMemory (PS.specBody postD))
-          stackDom' <- PMc.mergeMemCellPred sym stackDom newCells
+          stackDom' <- liftIO $ PMc.mergeMemCellPred sym stackDom newCells
           let md' = (PEE.eqDomainStackMemory (PS.specBody postD)){ PEM.memDomainPred = stackDom' }
           let pred' = (PS.specBody postD){ PEE.eqDomainStackMemory = md' }
           let postD' = postD{ PS.specBody = pred' }
@@ -428,7 +446,7 @@ findUnequalHeapWrites ::
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
   EquivContext sym arch ->
-  IO [Some (PMc.MemCell sym arch)]
+  EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalHeapWrites sym evalFn bundle eqCtx =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
@@ -451,7 +469,7 @@ findUnequalStackWrites ::
   W4.GroundEvalFn t ->
   SimBundle sym arch ->
   EquivContext sym arch ->
-  IO [Some (PMc.MemCell sym arch)]
+  EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalStackWrites sym evalFn bundle eqCtx =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
@@ -475,7 +493,7 @@ findUnequalHeapMemCells ::
   SimBundle sym arch ->
   EquivContext sym arch ->
   AbstractDomain sym arch ->
-  IO [Some (PMc.MemCell sym arch)]
+  EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalHeapMemCells sym evalFn bundle eqCtx preD =
   do let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
@@ -496,7 +514,7 @@ findUnequalStackMemCells ::
   SimBundle sym arch ->
   EquivContext sym arch ->
   AbstractDomain sym arch ->
-  IO [Some (PMc.MemCell sym arch)]
+  EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalStackMemCells sym evalFn bundle eqCtx preD =
   do let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
@@ -517,8 +535,7 @@ widenRegisters ::
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
-  IO (WidenResult sym arch)
--- TODO, should we be using the postCondAsm?
+  EquivM sym arch (WidenResult sym arch)
 widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD =
   do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
@@ -554,7 +571,7 @@ findUnequalRegs ::
   PER.RegisterDomain sym arch ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
-  IO [Some (MM.ArchReg arch)]
+  EquivM sym arch [Some (MM.ArchReg arch)]
 findUnequalRegs sym evalFn eqCtx regPred oRegs pRegs =
   execWriterT $ MM.traverseRegsWith_
     (\regName oRegVal ->

@@ -26,6 +26,7 @@ module Pate.Verification.PairGraph
   , getCurrentDomain
   , considerObservableEvent
   , considerDesyncEvent
+  , recordMiscAnalysisError
   , reportAnalysisErrors
   , TotalityCounterexample(..)
   , ObservableCounterexample(..)
@@ -182,6 +183,11 @@ data PairGraph sym arch =
     -- | Keep track of the target nodes whenever we run out of gas while trying to reach fixpoint.
     --   This can be used to report to the user instances where the analysis may be incomplete.
   , pairGraphGasExhausted :: !(Set (GraphNode arch))
+
+    -- | Other sorts of analysis errors not captured by the previous categories. These generally
+    --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
+    --   that may impact the soundness of the analysis.
+  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) (Set Text))
   }
 
 -- | A totality counterexample represents a potential control-flow situation that represents
@@ -224,6 +230,7 @@ emptyPairGraph =
   , pairGraphObservableReports = mempty
   , pairGraphDesyncReports = mempty
   , pairGraphGasExhausted = mempty
+  , pairGraphMiscAnalysisErrors = mempty
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -248,17 +255,17 @@ getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
 considerObservableEvent :: Monad m =>
   PairGraph sym arch ->
   PPa.BlockPair arch ->
-  (m (Maybe (ObservableCounterexample sym (MM.ArchAddrWidth arch)))) ->
+  (m (Maybe (ObservableCounterexample sym (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
   m (PairGraph sym arch)
 considerObservableEvent gr bPair action =
   case Map.lookup bPair (pairGraphObservableReports gr) of
     -- we have already found observable event differences at this location, so skip the check
     Just _ -> return gr
     Nothing ->
-      do mcex <- action
+      do (mcex, gr') <- action
          case mcex of
-           Nothing -> return gr
-           Just cex -> return gr{ pairGraphObservableReports = Map.insert bPair cex (pairGraphObservableReports gr) }
+           Nothing  -> return gr'
+           Just cex -> return gr'{ pairGraphObservableReports = Map.insert bPair cex (pairGraphObservableReports gr) }
 
 -- | If a program desync has not already be found
 --   for this block pair, run the given action to check if there
@@ -266,17 +273,31 @@ considerObservableEvent gr bPair action =
 considerDesyncEvent :: Monad m =>
   PairGraph sym arch ->
   PPa.BlockPair arch ->
-  (m (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)))) ->
+  (m (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
   m (PairGraph sym arch)
 considerDesyncEvent gr bPair action =
   case Map.lookup bPair (pairGraphDesyncReports gr) of
     -- we have already found observable event differences at this location, so skip the check
     Just _ -> return gr
     Nothing ->
-      do mcex <- action
+      do (mcex, gr') <- action
          case mcex of
-           Nothing -> return gr
-           Just cex -> return gr{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
+           Nothing  -> return gr'
+           Just cex -> return gr'{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
+
+-- | Record an error that occured during analysis that doesn't fall into one of the
+--   other, more structured, types of errors.
+recordMiscAnalysisError ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Text ->
+  PairGraph sym arch
+recordMiscAnalysisError gr nd msg =
+  let m = Map.alter f nd (pairGraphMiscAnalysisErrors gr)
+      f Nothing  = Just (Set.singleton msg)
+      f (Just s) = Just (Set.insert msg s)
+   in gr{ pairGraphMiscAnalysisErrors = m }
+
 
 -- | TODO, Right now, this just prints error reports to stdout.
 --   We should decide how and to what extent this should connect
@@ -286,7 +307,7 @@ reportAnalysisErrors gr =
   do mapM_ reportObservables (Map.toList (pairGraphObservableReports gr))
      mapM_ reportDesync (Map.toList (pairGraphDesyncReports gr))
      mapM_ reportGasExhausted (Set.toList (pairGraphGasExhausted gr))
-
+     mapM_ reportMiscError (Map.toList (pairGraphMiscAnalysisErrors gr))
  where
    reportObservables (pPair, ObservableCounterexample oEvs pEvs) =
      liftIO $ putStrLn $ show $ vcat $
@@ -307,6 +328,11 @@ reportAnalysisErrors gr =
    reportGasExhausted pPair =
      liftIO $ putStrLn $ show $ vcat $
        [ pretty pPair <+> pretty "analysis failed to converge" ]
+
+   reportMiscError (pPair, msgs) =
+     liftIO $ putStrLn $ show $ vcat $
+       [ pretty pPair <+> pretty "additional analysis errors" ] ++
+       [ indent 2 (pretty "*" <+> pretty msg) | msg <- Set.toList msgs ]
 
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those

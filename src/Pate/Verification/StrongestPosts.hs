@@ -28,6 +28,7 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
 import           Data.Proxy
+import qualified Data.Text as Text
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
@@ -253,20 +254,18 @@ checkObservables bPair asm bundle preD gr =
        case res of
          ObservableCheckEq ->
            do traceBundle bundle "Observables agree"
-              return Nothing
+              return (Nothing, gr)
          ObservableCheckError msg ->
-              -- TODO! track these errors better
-           do traceBundle bundle ("Error checking observables: " ++ msg)
-              return Nothing
+           do let msg' = ("Error checking observables: " ++ msg)
+              traceBundle bundle msg'
+              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) (Text.pack msg'))
          ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
            do traceBundle bundle ("Obserables disagree!")
               traceBundle bundle ("== Original sequence ==")
               traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
               traceBundle bundle ("== Patched sequence ==")
               traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
-
-              return (Just cex)
-
+              return (Just cex, gr)
 
 doCheckObservables :: forall sym arch.
   W4.Pred sym ->
@@ -456,18 +455,18 @@ checkTotality bPair asm bundle preD exits gr =
        case tot of
          CasesTotal ->
            do traceBundle bundle "Totality check succeeded."
-              return Nothing
+              return (Nothing, gr)
          TotalityCheckingError msg ->
-              -- TODO! track these errors better
-           do traceBundle bundle ("Error while checking totality! " ++ msg)
-              return Nothing
+           do let msg' = ("Error while checking totality! " ++ msg)
+              traceBundle bundle msg'
+              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) (Text.pack msg'))
          TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
            do traceBundle bundle $ unlines
                 ["Found extra exit while checking totality:"
                 , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
                 , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
                 ]
-              return (Just cex)
+              return (Just cex, gr)
 
 data TotalityResult ptrW
   = CasesTotal
@@ -650,11 +649,9 @@ followExit asm bundle currBlock d gr (idx, pPair) =
      res <- manifestError (triageBlockTarget asm bundle currBlock d gr pPair)
      case res of
        Left err ->
-         do -- TODO! make a more permanant record of errors
-            traceBlockPair currBlock ("Caught error: " ++ show err)
-            return gr
+         do traceBlockPair currBlock ("Caught error: " ++ show err)
+            return (recordMiscAnalysisError gr (GraphNode currBlock) (Text.pack (show err)))
        Right gr' -> return gr'
-
 
 -- Update the return summary node for the current function if this
 --  sim bundle might return.
