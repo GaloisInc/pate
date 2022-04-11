@@ -72,7 +72,8 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Pate.Abort,
+  exposed-modules:     Data.Macaw.CFGSlice,
+                       Pate.Abort,
                        Pate.Address,
                        Pate.Arch,
                        Pate.Binary,

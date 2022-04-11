@@ -58,6 +58,7 @@ import qualified What4.SatResult as W4R
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
@@ -663,7 +664,7 @@ trivialBlockSlice ::
   DomainSpec sym arch ->
   EquivM sym arch (PED.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 trivialBlockSlice isSkipped (PVE.ExternalDomain externalDomain) in_ postcondSpec = withSym $ \sym -> do
-  blkEnd <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
+  blkEnd <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym
   transition <- PFO.noTransition in_ blkEnd
   preUniv <- externalDomain sym
   prf <- PFO.lazyProofEvent_ pPair $ do
@@ -778,9 +779,9 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   -- we consider that to be equivalent to a return
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   isReturn <- do
-    bothReturn <- PD.matchingExits bundle MS.MacawBlockEndReturn
+    bothReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
     abortO <- PAb.isAbortedStatePred (PPa.getPair @PBi.Original (simOut bundle))
-    returnP <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) MS.MacawBlockEndReturn
+    returnP <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (simOutBlockEnd $ simOutP bundle) MCS.MacawBlockEndReturn
     abortCase <- liftIO $ W4.andPred sym abortO returnP
     liftIO $ W4.orPred sym bothReturn abortCase
 
@@ -797,9 +798,9 @@ provePostcondition' bundle postcondSpec = PFO.lazyProofEvent (simPair bundle) $ 
   traceBundle bundle "Checking exits"
   -- an exit that was not classified
   isUnknown <- do
-    isJump <- PD.matchingExits bundle MS.MacawBlockEndJump
-    isFail <- PD.matchingExits bundle MS.MacawBlockEndFail
-    isBranch <- PD.matchingExits bundle MS.MacawBlockEndBranch
+    isJump <- PD.matchingExits bundle MCS.MacawBlockEndJump
+    isFail <- PD.matchingExits bundle MCS.MacawBlockEndFail
+    isBranch <- PD.matchingExits bundle MCS.MacawBlockEndBranch
     liftIO $ anyPred sym [isJump, isFail, isBranch]
   traceBundle bundle "Checking unknown"
   precondUnknown <- withSatAssumption goalTimeout (return isUnknown) $ do

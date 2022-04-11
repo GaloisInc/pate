@@ -4,6 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.AArch32 (
     SA.AArch32
@@ -25,6 +26,7 @@ import qualified What4.Interface as WI
 
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Architecture.Info as MAI
 import qualified Data.Macaw.AArch32.Symbolic as DMAS
 import           Data.Macaw.BinaryLoader.AArch32 ()
@@ -178,6 +180,10 @@ argumentMapping =
                             _ -> PP.panic PP.AArch32 "argumentMapping" ["Unsupported return value type: " ++ show retRepr]
                       }
 
+instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
+  archTermCase = \case
+    MAA.ReturnIf{} -> MCS.MacawBlockEndReturn
+    MAA.ReturnIfNot{} -> MCS.MacawBlockEndReturn
 
 {- Note [Thumb Code Discovery Hacks]
 

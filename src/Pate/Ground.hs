@@ -56,7 +56,7 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Context as Ctx
 
-import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Lang.Crucible.Simulator as CS
 
@@ -174,8 +174,8 @@ groundMacawEndCase ::
   forall sym arch.
   IsGroundSym sym =>
   Proxy arch ->
-  CS.RegValue sym (MS.MacawBlockEndType arch) ->
-  MS.MacawBlockEndCase
+  CS.RegValue sym (MCS.MacawBlockEndType arch) ->
+  MCS.MacawBlockEndCase
 groundMacawEndCase _ (_ Ctx.:> CS.RV blend Ctx.:> _) =
   toEnum $ fromIntegral $ BV.asUnsigned $ groundValue blend
 

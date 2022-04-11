@@ -75,6 +75,7 @@ import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Map as MapF
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified Lang.Crucible.Types as CT
@@ -381,7 +382,7 @@ data BlockSliceTransition sym arch where
       -- | The post-states of the blocks after execution.
     , slBlockPostState :: BlockSliceState sym arch
       -- | The exit condition of the blocks (i.e. return, function call, etc)
-    , slBlockExitCase :: PPa.PatchPairC (CS.RegValue sym (MS.MacawBlockEndType arch))
+    , slBlockExitCase :: PPa.PatchPairC (CS.RegValue sym (MCS.MacawBlockEndType arch))
     } -> BlockSliceTransition sym arch
 
 instance PEM.ExprMappable sym (BlockSliceTransition sym arch) where

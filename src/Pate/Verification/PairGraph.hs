@@ -42,6 +42,7 @@ import           Data.Word (Word32)
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified Pate.Arch as PA
