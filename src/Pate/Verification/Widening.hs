@@ -166,11 +166,13 @@ data WidenLocs sym arch =
     (Set (Some (MM.ArchReg arch)))
     (Set (Some (PMc.MemCell sym arch)))
 
-instance PA.ValidArch arch => Show (WidenLocs sym arch) where
+instance (W4.IsSymExprBuilder sym, PA.ValidArch arch) => Show (WidenLocs sym arch) where
   show (WidenLocs regs cells) =
-    unlines [ unwords (map show (Set.toList regs))
-            , show (Set.size cells) ++ " memory locations"
-            ]
+    unlines $
+      [ unwords (map show (Set.toList regs)) ] ++
+      [ show (PMc.ppCell c)
+      | Some c <- Set.toList cells
+      ]
 
 instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym arch) where
   (WidenLocs r1 m1) <> (WidenLocs r2 m2) = WidenLocs (r1 <> r2) (m1 <> m2)
@@ -215,13 +217,12 @@ widenPostcondition bundle preD postD0 =
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
        precond <- liftIO $ do
-         asm <- PS.getAssumedPred sym asmFrame
+         asm1 <- PS.getAssumedPred sym asmFrame
+         let asm2 = PS.specAsm preD
+         asm <- W4.andPred sym asm1 asm2
          eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
          eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
          W4.andPred sym asm eqInputsPred
-
-       --traceBundle bundle "== widenPost: precondition =="
-       --traceBundle bundle (show (W4.printSymExpr precond))
 
        traceBundle bundle "Entering widening loop"
 
@@ -391,7 +392,8 @@ widenHeap ::
   EquivM sym arch (WidenResult sym arch)
 -- TODO? should we be using postCondAsm and postConstStatePred?
 widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
-  do zs <- case memCellSource of
+  do zs <- filterCells sym evalFn (PEE.eqDomainGlobalMemory (PS.specBody postD)) =<<
+            case memCellSource of
              LocalChunkWrite -> findUnequalHeapWrites sym evalFn bundle eqCtx
              PreDomainCell   -> findUnequalHeapMemCells sym evalFn bundle eqCtx preD
      if null zs then
@@ -405,6 +407,29 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
           let pred' = (PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
           let postD' = postD{ PS.specBody = pred' }
           return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
+
+
+-- | Only return those cells not already excluded by the postdomain
+filterCells ::
+  ( sym ~ W4.ExprBuilder t st fs
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  PEM.MemoryDomain sym arch ->
+  [Some (PMc.MemCell sym arch)] ->
+  EquivM sym arch [Some (PMc.MemCell sym arch)]
+filterCells sym evalFn memDom = loop
+
+  where
+    filterCell (Some c) =
+      W4.groundEval evalFn =<< PEM.containsCell sym memDom c
+
+    loop [] = return[]
+    loop (x:xs) =
+      do b <- liftIO (filterCell x)
+         xs' <- loop xs
+         if b then return (x:xs') else return xs'
+
 
 widenStack ::
   ( sym ~ W4.ExprBuilder t st fs
@@ -421,7 +446,8 @@ widenStack ::
   EquivM sym arch (WidenResult sym arch)
 -- TODO? should we be using postCondAsm and postConstStatePred?
 widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
-  do zs <- case memCellSource of
+  do zs <- filterCells sym evalFn (PEE.eqDomainStackMemory (PS.specBody postD)) =<<
+            case memCellSource of
              LocalChunkWrite -> findUnequalStackWrites sym evalFn bundle eqCtx
              PreDomainCell   -> findUnequalStackMemCells sym evalFn bundle eqCtx preD
      if null zs then

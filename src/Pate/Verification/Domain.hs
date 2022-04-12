@@ -13,6 +13,7 @@
 module Pate.Verification.Domain (
     guessEquivalenceDomain
   , equateInitialStates
+  , equateRegisters
   , universalDomain
   , universalDomainSpec
   ) where

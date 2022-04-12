@@ -30,6 +30,7 @@ module Pate.Verification.PairGraph
   , reportAnalysisErrors
   , TotalityCounterexample(..)
   , ObservableCounterexample(..)
+  , ppProgramDomains
   ) where
 
 import           Numeric (showHex)
@@ -38,6 +39,7 @@ import           Prettyprinter
 import           Control.Monad (foldM)
 import           Control.Monad.IO.Class
 
+import           Data.Parameterized.Classes
 import           Data.Maybe (fromMaybe)
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -56,12 +58,13 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence as PE
-import           Pate.Equivalence as PEq
+import qualified Pate.Equivalence.EquivalenceDomain as PE
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
+import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
 
@@ -189,6 +192,24 @@ data PairGraph sym arch =
     --   that may impact the soundness of the analysis.
   , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) (Set Text))
   }
+
+ppProgramDomains ::
+  forall sym arch a.
+  ( PA.ValidArch arch
+  , W4.IsSymExprBuilder sym
+  , ShowF (MM.ArchReg arch)
+  ) =>
+  (W4.Pred sym -> Doc a) ->
+  PairGraph sym arch ->
+  Doc a
+ppProgramDomains ppPred gr =
+  vcat
+  [ vcat [ pretty pPair
+         , indent 4 (PE.ppEquivalenceDomain ppPred (PS.specBody ad))
+         ]
+  | (pPair, ad) <- Map.toList (pairGraphDomains gr)
+  ]
+
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -456,11 +477,11 @@ freshDomain gr pTo d =
 --   error reports to determine an overall verdict for the programs.
 pairGraphComputeVerdict ::
   PairGraph sym arch ->
-  EquivM sym arch PEq.EquivalenceStatus
+  EquivM sym arch PE.EquivalenceStatus
 pairGraphComputeVerdict gr =
   if Map.null (pairGraphObservableReports gr) &&
      Map.null (pairGraphDesyncReports gr) &&
      Set.null (pairGraphGasExhausted gr) then
-    return PEq.Equivalent
+    return PE.Equivalent
   else
-    return PEq.Inequivalent
+    return PE.Inequivalent
