@@ -68,10 +68,12 @@ isTerminalBlock :: MCS.HasArchEndCase arch => MD.ParsedBlock arch ids -> Bool
 isTerminalBlock pb =
   let MCS.MacawBlockEnd c _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
   in case c of
+    MCS.MacawBlockEndJump -> False
     MCS.MacawBlockEndCall -> True
-    MCS.MacawBlockEndArch -> True
+    MCS.MacawBlockEndReturn -> False
+    MCS.MacawBlockEndBranch -> False
     MCS.MacawBlockEndFail -> True
-    _ -> False
+    MCS.MacawBlockEndArch -> True
 
 -- | Construct an initial 'CS.SimContext' for Crucible
 --
