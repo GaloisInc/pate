@@ -246,7 +246,8 @@ simulate simInput = withBinary @bin $ do
     ha <- CMR.asks (PMC.handles . envCtx)
     be <- CMR.asks envBlockEndVar
     let posFn = W4L.OtherPos . fromString . show
-    liftIO $ MCS.mkBlockSliceCFG fns ha posFn pb nonTerminal terminal killEdges (Just be)
+    let sliceFns = MCS.blockEndSliceFns fns be
+    liftIO $ MS.mkBlockSliceCFG fns sliceFns ha posFn pb nonTerminal terminal killEdges
   let preRegs = PS.simInRegs simInput
   preRegsAsn <- regStateToAsn preRegs
   archRepr <- archStructRepr
