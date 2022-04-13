@@ -7,6 +7,7 @@ module Pate.Config (
   Address(..),
   Allocation(..),
   EquatedFunction(..),
+  MemRegion(..),
   noPatchData,
   parsePatchConfig,
   VerificationConfig(..),
@@ -38,6 +39,19 @@ newtype Address = Address { addressAsWord :: Natural }
 
 instance Show Address where
   show (Address w) = printf "0x%x" w
+
+
+-- | A region of memory, specified as a start address and a length (in bytes).
+data MemRegion =
+  MemRegion{ memRegionStart :: Address, memRegionLength :: Natural }
+
+instance Show MemRegion where
+  show (MemRegion (Address start) len) = printf "start: 0x%x length: %d" start len
+
+memRegionCodec :: Toml.TomlCodec MemRegion
+memRegionCodec = MemRegion
+  <$> Toml.diwrap (Toml.natural "start-address") .= memRegionStart
+  <*> Toml.diwrap (Toml.natural "length") .= memRegionLength
 
 -- | A pair of addresses that helps the verifier align two basic blocks that
 -- might otherwise seem unrelated
@@ -117,6 +131,12 @@ data PatchData =
             -- Note that while the original and patched functions are specified
             -- separately, it is probably important that the lists semantically
             -- align
+
+            , observableMemory :: [MemRegion]
+            -- ^ Address ranges in the memory space of each process that should be
+            --   considered observable. This can be used to specify memory-mapped
+            --   I/O regions, or simply to place a focus on regions of memory
+            --   that are considered of inteterest to the user.
             }
   deriving (Show)
 
@@ -149,6 +169,7 @@ patchDataCodec = PatchData
   <*> Toml.list equatedFunctionCodec "equated-functions" .= equatedFunctions
   <*> optionalArrayOf _Address "ignore-original-functions" .= ignoreOriginalFunctions
   <*> optionalArrayOf _Address "ignore-patched-functions" .= ignorePatchedFunctions
+  <*> Toml.list memRegionCodec "observable-memory" .= observableMemory
 
 data PatchDataParseError = UnicodeError DTEE.UnicodeException
                          | TOMLError [Toml.TomlDecodeError]
@@ -173,6 +194,7 @@ noPatchData = PatchData { patchPairs = []
                         , equatedFunctions = []
                         , ignoreOriginalFunctions = []
                         , ignorePatchedFunctions = []
+                        , observableMemory = []
                         }
 
 ----------------------------------

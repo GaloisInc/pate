@@ -60,6 +60,7 @@ module Pate.Memory.MemTrace
 , memEqOutsideRegion
 , memEqAtRegion
 , memEqExact
+, memOpOverlapsRegion
 , prettyMemOp
 , prettyMemEvent
 , prettyMemTraceSeq
@@ -73,6 +74,7 @@ import qualified Data.BitVector.Sized as BV
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
+import           Data.Proxy (Proxy(..))
 import qualified Data.Vector as V
 import           Data.IORef
 import           Data.Set (Set)
@@ -89,7 +91,8 @@ import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
 import Data.Macaw.Memory
            (AddrWidthRepr(..), Endianness(..), MemWidth
            , addrWidthClass, addrWidthRepr, addrWidthNatRepr
-           , incSegmentOff, memWordToUnsigned, MemSegmentOff )
+           , incSegmentOff, memWordToUnsigned, MemSegmentOff
+           , MemWord, memWordToUnsigned )
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap
@@ -506,6 +509,36 @@ prettyMemOp (MemOp ptr dir cond _sz val _end) =
     Unconditional -> mempty
     Conditional p -> "when" <+> printSymExpr p
 
+-- | Test if a memory operation overlaps with a concretrely-defined
+--   region of memory, given as a starting address and a length.
+--   For this test, we ignore the pointer region of the memory operation.
+memOpOverlapsRegion :: forall sym ptrW.
+  (MemWidth ptrW, IsExprBuilder sym) =>
+  sym ->
+  MemOp sym ptrW {- ^ operation to test -} ->
+  MemWord ptrW {- ^ starting address of the region -} ->
+  Integer {- ^ length of the region -} ->
+  IO (Pred sym)
+memOpOverlapsRegion sym (MemOp (LLVMPointer _blk off) _dir _cond w _val _end) addr len =
+  -- NB, the algorithm for computing if two intervals (given by a start address and a length)
+  -- overlap is not totally obvious. This is taken from the What4 abstract domain definitions,
+  -- which have been carefully tested and verified. The cryptol for the definition  is:
+  --   overlap : {n} (fin n) => Dom n -> Dom n -> Bit
+  --   overlap a b = diff <= b.sz \/ carry diff a.sz
+  --     where diff = a.lo - b.lo
+
+  do let aw = addrWidthNatRepr (addrWidthRepr (Proxy @ptrW))
+     addr' <- bvLit sym aw (BV.mkBV aw (memWordToUnsigned addr))
+     len'  <- bvLit sym aw (BV.mkBV aw len)
+     oplen <- bvLit sym aw (BV.mkBV aw (intValue w))
+
+     -- Here the two intervals are given by (off, oplen) and (addr', len')
+
+     diff <- bvSub sym off addr'
+     x1 <- bvUle sym diff len'
+     (x2, _) <- addUnsignedOF sym diff oplen
+     orPred sym x1 x2
+
 instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
   Unconditional == Unconditional = True
   Conditional p == Conditional p' | Just Refl <- testEquality p p' = True
@@ -551,7 +584,7 @@ data MemEvent sym ptrW where
     MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
       {- ^ location and dissassembly of the instruction generating this system call -} ->
     SymExpr sym (BaseBVType w)
-      {- ^ The value of R0 when this system call occurred -} -> 
+      {- ^ The value of R0 when this system call occurred -} ->
     MemEvent sym ptrW
 
 prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
@@ -692,7 +725,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
     MacawInstructionStart baddr iaddr dis ->
       case incSegmentOff baddr (memWordToUnsigned iaddr) of
-        Just off -> 
+        Just off ->
           liftToCrucibleState mvar $ \sym ->
             modify (\mem -> mem{ memCurrentInstr = toMuxTree sym (Just (off,dis)) })
         Nothing ->

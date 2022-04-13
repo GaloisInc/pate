@@ -297,14 +297,29 @@ doCheckObservables asm bundle preD =
        let solver = PCfg.cfgSolver vcfg
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
+       -- Grab the specified areas of observable memory
+       obsMem <- asks (PMC.observableMemory . envCtx)
+
+       -- test if the memory operation overlaps with one of the observable regions
+       let filterObservableMemOps op@(MT.MemOp (CLM.LLVMPointer blk _off) _dir _cond _w _val _end) =
+              do notStk <- W4.notPred sym =<< W4.natEq sym blk stackRegion
+                 inRng <- sequence
+                           [ MT.memOpOverlapsRegion sym op addr len
+                           | (addr, len) <- obsMem
+                           ]
+                 inRng' <- foldM (W4.orPred sym) (W4.falsePred sym) inRng
+                 W4.andPred sym notStk inRng'
+
        -- This filtering function selects out the memory operations that are writes to
        -- to non-stack regions to treat them as observable.
+{-
        let filterHeapWrites (MT.MemOp (CLM.LLVMPointer blk _off) MT.Write _cond _w _val _end) =
              W4.notPred sym =<< W4.natEq sym blk stackRegion
            filterHeapWrites _ = return (W4.falsePred sym)
+-}
 
-       oSeq <- liftIO (MT.observableEvents sym filterHeapWrites oMem)
-       pSeq <- liftIO (MT.observableEvents sym filterHeapWrites pMem)
+       oSeq <- liftIO (MT.observableEvents sym filterObservableMemOps oMem)
+       pSeq <- liftIO (MT.observableEvents sym filterObservableMemOps pMem)
 
 {-
        traceBundle bundle $ unlines
