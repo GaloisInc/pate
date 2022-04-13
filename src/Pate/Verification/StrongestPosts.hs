@@ -125,13 +125,15 @@ runVerificationLoop env pPairs = do
         -- To the main work of computing the dataflow fixpoint
         pg <- pairGraphComputeFixpoint pg0
 
-        liftIO $ putStrLn "==== Whole program state ===="
-        liftIO $ print (ppProgramDomains W4.printSymExpr pg)
+        -- liftIO $ putStrLn "==== Whole program state ===="
+        -- liftIO $ print (ppProgramDomains W4.printSymExpr pg)
 
         -- Report a summary of any errors we found during analysis
         reportAnalysisErrors pg
 
         result <- pairGraphComputeVerdict pg
+
+        liftIO $ putStrLn $ unwords ["Overall verification verdict:", show result]
 
         -- TODO, does reporting these kind of statistics make sense for this verification method?
         -- Currently, we only really do this to make the types fit at the call site.
