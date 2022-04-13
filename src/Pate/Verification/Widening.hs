@@ -388,14 +388,15 @@ widenHeap ::
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
-  MemCellSource -> 
+  MemCellSource ->
   EquivM sym arch (WidenResult sym arch)
 -- TODO? should we be using postCondAsm and postConstStatePred?
 widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
-  do zs <- filterCells sym evalFn (PEE.eqDomainGlobalMemory (PS.specBody postD)) =<<
-            case memCellSource of
+  do xs <- case memCellSource of
              LocalChunkWrite -> findUnequalHeapWrites sym evalFn bundle eqCtx
              PreDomainCell   -> findUnequalHeapMemCells sym evalFn bundle eqCtx preD
+     zs <- filterCells sym evalFn (PEE.eqDomainGlobalMemory (PS.specBody postD)) xs
+
      if null zs then
        return NoWideningRequired
      else
@@ -442,14 +443,14 @@ widenStack ::
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
   AbstractDomain sym arch ->
-  MemCellSource -> 
+  MemCellSource ->
   EquivM sym arch (WidenResult sym arch)
 -- TODO? should we be using postCondAsm and postConstStatePred?
 widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
-  do zs <- filterCells sym evalFn (PEE.eqDomainStackMemory (PS.specBody postD)) =<<
-            case memCellSource of
+  do xs <- case memCellSource of
              LocalChunkWrite -> findUnequalStackWrites sym evalFn bundle eqCtx
              PreDomainCell   -> findUnequalStackMemCells sym evalFn bundle eqCtx preD
+     zs <- filterCells sym evalFn (PEE.eqDomainStackMemory (PS.specBody postD)) xs
      if null zs then
        return NoWideningRequired
      else
