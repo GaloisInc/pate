@@ -14,22 +14,17 @@ module Pate.Verification.Validity (
 
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
-import qualified Data.BitVector.Sized as BVS
-import qualified Data.Foldable as F
+
 import           Data.Functor.Const
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.BinaryLoader as MBL
-import qualified Data.Macaw.Memory.Permissions as MMP
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
-import qualified Pate.Memory as PM
-import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
@@ -84,4 +79,3 @@ validRegister mblockStart entry r = withSym $ \sym -> do
       let binRepr = W4.knownRepr :: PB.WhichBinaryRepr bin
       liftIO $ PA.dedicatedRegisterValidity hdr sym ctx binRepr entry dr
     _ -> return $ mempty
-
