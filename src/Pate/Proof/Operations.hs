@@ -117,8 +117,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp sym))
     memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
-      valO <- liftIO $ PMC.readMemCell sym (MT.memState $ PS.simMem stO) cell
-      valP <- liftIO $ PMC.readMemCell sym (MT.memState $ PS.simMem stP) cell
+      valO <- liftIO $ PMC.readMemCell sym (PS.simMem stO) cell
+      valP <- liftIO $ PMC.readMemCell sym (PS.simMem stP) cell
       isEquiv <- liftIO $ MT.llvmPtrEq sym valO valP
       return $ MapF.Pair cell $ PF.BlockSliceMemOp
         { PF.slMemOpValues = PPa.PatchPairC valO valP

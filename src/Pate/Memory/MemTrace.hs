@@ -76,6 +76,7 @@ import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
 import           Data.Proxy (Proxy(..))
 import qualified Data.Vector as V
+import           Data.Proxy
 import           Data.IORef
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -92,7 +93,9 @@ import Data.Macaw.Memory
            (AddrWidthRepr(..), Endianness(..), MemWidth
            , addrWidthClass, addrWidthRepr, addrWidthNatRepr
            , incSegmentOff, memWordToUnsigned, MemSegmentOff
-           , MemWord, memWordToUnsigned )
+           , MemWord, memWordToUnsigned
+           , Memory, emptyMemory
+           )
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap
@@ -605,6 +608,10 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ the logical contents of memory
   , memCurrentInstr :: MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
   -- ^ the most recent program instruction we encountered (address, dissassembly)
+  , memBaseMemory :: Memory ptrW
+  -- ^ The "base" memory loaded with the binary. We use this to directly service concrete
+  --   reads from read-only memory. INVARIANT: we only mux together memories that were
+  --   derived from the same initial memory, so we can assume the base memories are identical.
   }
 
 data MemTraceState sym ptrW = MemTraceState
@@ -634,16 +641,17 @@ initMemTrace ::
   forall sym ptrW.
   IsSymExprBuilder sym =>
   sym ->
+  Memory ptrW ->
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
-initMemTrace sym Addr32 = do
+initMemTrace sym baseMem Addr32 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing)
-initMemTrace sym Addr64 = do
+  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing) baseMem
+initMemTrace sym baseMem Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing)
+  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing) baseMem
 
 
 mkMemoryBinding ::
@@ -667,7 +675,10 @@ instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
     memSeq'   <- muxSymSequence sym p (memSeq t) (memSeq f)
     memArr'   <- baseTypeIte sym p (memArr $ memState t) (memArr $ memState f)
     memInstr' <- mergeMuxTree sym p (memCurrentInstr t) (memCurrentInstr f)
-    return $ MemTraceImpl memSeq' (MemTraceState memArr') memInstr'
+
+    -- NB, we assume that the "base" memories are always the same, so we can arbitrarily choose
+    -- one to use.
+    return $ MemTraceImpl memSeq' (MemTraceState memArr') memInstr' (memBaseMemory t)
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -1053,7 +1064,7 @@ doReadMem ::
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doReadMem sym ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
-  val <- liftIO $ readMemState sym (memState mem) ptr memRepr
+  val <- liftIO $ readMemState sym (memState mem) (memBaseMemory mem) ptr memRepr
   doMemOpInternal sym Read Unconditional ptrW ptr val memRepr
   pure val
 
@@ -1068,7 +1079,7 @@ doCondReadMem ::
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doCondReadMem sym cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
-  val <- liftIO $ readMemState sym (memState mem) ptr memRepr
+  val <- liftIO $ readMemState sym (memState mem) (memBaseMemory mem) ptr memRepr
   doMemOpInternal sym Read (Conditional cond) ptrW ptr val memRepr
   liftIO $ iteDeep sym cond val def memRepr
 
@@ -1182,10 +1193,11 @@ readMemState :: forall sym ptrW ty.
   IsExprBuilder sym =>
   sym ->
   MemTraceState sym ptrW ->
+  Memory ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
   IO (RegValue sym (MS.ToCrucibleType ty))
-readMemState sym mem ptr repr = go 0 repr
+readMemState sym mem baseMem ptr repr = go 0 repr
   where
   go :: Integer -> MemRepr ty' -> IO (RegValue sym (MS.ToCrucibleType ty'))
   go n (BVMemRepr byteWidth endianness) =
@@ -1228,8 +1240,8 @@ writeMemState ::
   IO (MemTraceState sym ptrW)
 writeMemState sym cond memSt ptr repr val = do
   sq <- nilSymSequence sym
-  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing)
-  MemTraceImpl _ memSt' _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
+  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing) (emptyMemory (addrWidthRepr Proxy))
+  MemTraceImpl _ memSt' _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
 -- | Write to the memory array and set the dirty bits on
@@ -1687,7 +1699,7 @@ instance PEM.ExprMappable sym (MemTraceImpl sym w) where
     let memInstr' =  memCurrentInstr mem -- TODO? rewrite the mux tree?
                                          -- I expect it to basically never be interesting
                                          -- to do this...
-    return $ MemTraceImpl memSeq' memState' memInstr'
+    return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem)
 
 instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do

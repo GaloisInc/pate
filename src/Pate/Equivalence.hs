@@ -398,8 +398,8 @@ resolveCellEquiv ::
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
 resolveCellEquiv sym memEqRegion stO stP cell cond = do
-  val1 <- PMC.readMemCell sym (MT.memState $ simMem stO) cell
-  val2 <- PMC.readMemCell sym (MT.memState $ simMem stP) cell
+  val1 <- PMC.readMemCell sym (simMem stO) cell
+  val2 <- PMC.readMemCell sym (simMem stP) cell
   let CLM.LLVMPointer cellRegion _ = PMC.cellPtr cell
   isInRegionScope <- case memEqRegion of
     MemEqAtRegion atRegion -> W4.natEq sym cellRegion atRegion
@@ -509,7 +509,7 @@ memPreCondToPred sym inO inP memCond  = do
       case W4.asConstantPred cond of
         Just False -> return mem
         _ -> do
-          fresh <- PMC.readMemCell sym (MT.memState memP) cell
+          fresh <- PMC.readMemCell sym memP cell
           --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
           --val <- W4.baseTypeIte sym cond fresh original
           PMC.writeMemCell sym cond mem cell fresh

@@ -209,12 +209,12 @@ readMemCell ::
   WI.IsSymExprBuilder sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PMT.MemTraceState sym (MC.ArchAddrWidth arch) ->
+  PMT.MemTraceImpl sym (MC.ArchAddrWidth arch) ->
   MemCell sym arch w ->
   IO (CLM.LLVMPtr sym (8 WI.* w))
 readMemCell sym mem cell@(MemCell{}) = do
   let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-  PMT.readMemState sym mem (cellPtr cell) repr
+  PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) (cellPtr cell) repr
 
 -- FIXME: this currently drops the region due to weaknesses in the memory model
 writeMemCell ::

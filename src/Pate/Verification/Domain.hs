@@ -101,8 +101,8 @@ maybeEqualAt bundle cell@(PMC.MemCell{}) cond = withSym $ \sym -> do
   withAssumption_ (return cond) $
     isPredSat goalTimeout ptrsEq
   where
-    memO = MT.memState $ PSi.simInMem $ PSi.simInO bundle
-    memP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
+    memO = PSi.simInMem $ PSi.simInO bundle
+    memP = PSi.simInMem $ PSi.simInP bundle
 
 
 bindMacawReg ::
@@ -314,7 +314,10 @@ guessEquivalenceDomain bundle goal postcond = startTimer $ withSym $ \sym -> do
   (_, goal_regsEq) <- applyAssumptionFrame eqRegsFrame goal
   (_, postcond_regsEq) <- applyAssumptionFrame eqRegsFrame postcond
 
-  memP' <- MT.memState <$> (liftIO $ MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch))))
+
+  memP' <- MT.memState <$> (liftIO $ MT.initMemTrace sym
+                                        (MM.emptyMemory (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch))))
+                                        (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch))))
   let memP_to_memP' = MT.mkMemoryBinding memP memP'
   goal' <- liftIO $ WEH.applyExprBindings sym memP_to_memP' goal_regsEq
 
