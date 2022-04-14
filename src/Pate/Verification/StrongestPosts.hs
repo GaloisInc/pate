@@ -899,10 +899,8 @@ mkSimBundle pPair d =
           traceBlockPair pPair "Simulating patched blocks"
           (asmP, simOutP_) <- PVSy.simulate simInP
           traceBlockPair pPair "Finished simulating blocks"
-          (_, simOutO') <- withAssumptionFrame (PVV.validConcreteReads simOutO_) $ return simOutO_
-          (_, simOutP') <- withAssumptionFrame (PVV.validConcreteReads simOutP_) $ return simOutP_
 
-          let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO' simOutP')
+          let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
           withAssumption_ (liftIO $ W4.andPred sym asmO asmP) $
             withAssumptionFrame_ (PVD.equateRegisters rd bnd) $
               applyCurrentFrame bnd

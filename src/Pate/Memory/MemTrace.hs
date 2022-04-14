@@ -41,7 +41,6 @@ module Pate.Memory.MemTrace
 , getCond
 , MemTraceK
 , traceFootprint
-, getReadOps
 , observableEvents
 , UndefPtrOpTag
 , UndefPtrOpTags
@@ -74,7 +73,6 @@ import qualified Data.BitVector.Sized as BV
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
-import           Data.Proxy (Proxy(..))
 import qualified Data.Vector as V
 import           Data.Proxy
 import           Data.IORef
@@ -93,9 +91,12 @@ import Data.Macaw.Memory
            (AddrWidthRepr(..), Endianness(..), MemWidth
            , addrWidthClass, addrWidthRepr, addrWidthNatRepr
            , incSegmentOff, memWordToUnsigned, MemSegmentOff
-           , MemWord, memWordToUnsigned
-           , Memory, emptyMemory
+           , MemWord, memWordToUnsigned, segmentFlags
+           , Memory, emptyMemory, memWord, segoffSegment
+           , segoffAddr, readWord8, readWord16be, readWord16le
+           , readWord32le, readWord32be, readWord64le, readWord64be
            )
+import qualified Data.Macaw.Memory.Permissions as MMP
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap
@@ -136,6 +137,7 @@ import What4.Interface
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
 import qualified What4.ExprHelpers as WEH
+import qualified Pate.Memory as PM
 
 ------
 -- * Undefined pointers
@@ -1189,7 +1191,7 @@ chunkBV sym endianness w bv
 
 -- | Read a packed value from the underlying array (without adding to the read trace)
 readMemState :: forall sym ptrW ty.
-  1 <= ptrW =>
+  MemWidth ptrW =>
   IsExprBuilder sym =>
   sym ->
   MemTraceState sym ptrW ->
@@ -1203,12 +1205,17 @@ readMemState sym mem baseMem ptr repr = go 0 repr
   go n (BVMemRepr byteWidth endianness) =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl
-        | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
-          (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
-          regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
-          content <- arrayLookup sym regArray (Ctx.singleton off)
-          blk0 <- natLit sym 0
-          return $ LLVMPointer blk0 content
+        | Refl <- zeroSubEq byteWidth (knownNat @1) ->
+          do (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
+             blk0 <- natLit sym 0
+             ro <- asConcreteReadOnly sym reg off byteWidth endianness baseMem
+             content <-
+               case ro of
+                 Just val -> return val
+                 Nothing ->
+                   do regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+                      arrayLookup sym regArray (Ctx.singleton off)
+             return $ LLVMPointer blk0 content
       Right LeqProof
         | byteWidth' <- decNat byteWidth
         , tailRepr <- BVMemRepr byteWidth' endianness
@@ -1225,6 +1232,59 @@ readMemState sym mem baseMem ptr repr = go 0 repr
 
   go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
       go (n + memReprByteSize recRepr * fromIntegral i) recRepr
+
+asConcreteReadOnly :: forall sym w ptrW.
+  MemWidth ptrW =>
+  1 <= w =>
+  IsExprBuilder sym =>
+  sym ->
+  SymInteger sym ->
+  SymBV sym ptrW ->
+  NatRepr w ->
+  Endianness ->
+  Memory ptrW ->
+  IO (Maybe (SymBV sym (8*w)))
+asConcreteReadOnly sym blk off sz end baseMem =
+  case (asInteger blk, asBV off) of
+    -- NB, only looking for reads at region 0
+    (Just 0, Just off') ->
+      do let mw :: MemWord ptrW
+             mw = memWord (fromIntegral (BV.asUnsigned off'))
+         LeqProof <- return $ leqMulPos (knownNat @8) sz
+         let bits = natMultiply (knownNat @8) sz
+         case doStaticRead baseMem mw bits end of
+           Just bv -> Just <$> bvLit sym bits bv
+           Nothing -> return Nothing
+    _ -> return Nothing
+
+doStaticRead ::
+  forall w ptrW.
+  MemWidth ptrW =>
+  Memory ptrW ->
+  MemWord ptrW ->
+  NatRepr w ->
+  Endianness ->
+  Maybe (BV.BV w)
+doStaticRead mem mw w end =
+  case PM.resolveAbsoluteAddress mem mw of
+    Just segoff | MMP.isReadonly $ segmentFlags $ segoffSegment segoff ->
+      let addr = segoffAddr segoff in
+      fmap (BV.mkBV w) $
+      case (intValue w, end) of
+        (8, _) -> liftErr $readWord8 mem addr
+        (16, BigEndian) -> liftErr $ readWord16be mem addr
+        (16, LittleEndian) -> liftErr $ readWord16le mem addr
+        (32, BigEndian) -> liftErr $ readWord32be mem addr
+        (32, LittleEndian) -> liftErr $ readWord32le mem addr
+        (64, BigEndian) -> liftErr $ readWord64be mem addr
+        (64, LittleEndian) -> liftErr $ readWord64le mem addr
+        _ -> Nothing
+    _ -> Nothing
+  where
+    liftErr :: Integral a => Either e a -> Maybe Integer
+    liftErr (Left _) = Nothing
+    liftErr (Right a) = Just (fromIntegral a)
+
 
 -- | Compute the updated memory state resulting from writing a value to the given address, without
 -- accumulating any trace information.
@@ -1559,42 +1619,6 @@ observableEvents sym opIsObservable mem = evalWithFreshCache f (memSeq mem)
         ys' <- rec ys
         muxSymSequence sym p xs' ys'
 
-
--- | Get an unordered collection of all the read memory operations
---   that occurred in this trace memory. Control-flow conditions are
---   dropped while constructing this set, so the conditions included
---   on these `MemOp` values may not be accurate.
---
---   Note: We could modify this so that it correctly incorporates
---   merge conditions, but doing so is a bit tricky, and the only
---   current use site (validConcreteReads) ignores the conditions
---   anyway.  I would have preferred to migrate validConcreteReads
---   into this module, but that is difficult because it creates
---   a module import cycle, and I wasn't prepared to relocate
---   things enough to fix it.
-getReadOps ::
-  IsExprBuilder sym =>
-  OrdF (SymExpr sym) =>
-  sym ->
-  MemTraceImpl sym ptrW ->
-  IO (Set (MemOp sym ptrW))
-getReadOps _sym mem =
-  getConst <$> evalWithFreshCache (\rec -> \case
-    SymSequenceNil -> return (Const mempty)
-    SymSequenceCons _ x xs ->
-      do Const s <- rec xs
-         case x of
-           MemOpEvent op@(MemOp _ptr Read _ _ _ _) -> return (Const (Set.insert op s))
-           _ -> return (Const s)
-    SymSequenceAppend _ xs ys ->
-      do Const s1 <- rec xs
-         Const s2 <- rec ys
-         return (Const (Set.union s1 s2))
-    SymSequenceMerge _ _p xs ys ->
-      do Const s1 <- rec xs
-         Const s2 <- rec ys
-         return (Const (Set.union s1 s2)))
-   (memSeq mem)
 
 llvmPtrEq ::
   IsExprBuilder sym =>

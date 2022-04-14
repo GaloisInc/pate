@@ -536,11 +536,9 @@ withSimBundle pPair f = fmap unzipSkipTransformation $ withEmptyAssumptionFrame 
       traceBlockPair pPair "Simulating patched blocks"
       (asmP, simOutP_) <- PVSy.simulate simInP_
       traceBlockPair pPair "Finished simulating blocks"
-      (_, simOutO') <- withAssumptionFrame (PVV.validConcreteReads simOutO_) $ return simOutO_
-      (_, simOutP') <- withAssumptionFrame (PVV.validConcreteReads simOutP_) $ return simOutP_
 
       (asm,(r, prf)) <- withAssumption (liftIO $ allPreds sym [asmO, asmP]) $ do
-        let bundle = SimBundle (PPa.PatchPair simInO_ simInP_) (PPa.PatchPair simOutO' simOutP')
+        let bundle = SimBundle (PPa.PatchPair simInO_ simInP_) (PPa.PatchPair simOutO_ simOutP_)
         bundle' <- applyCurrentFrame bundle
         f bundle'
       return (frameAssume asm, (r, PEM.SkipTransformation prf))

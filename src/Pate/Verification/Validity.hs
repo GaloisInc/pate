@@ -10,7 +10,6 @@
 module Pate.Verification.Validity (
     validInitState
   , validRegister
-  , validConcreteReads
   ) where
 
 import qualified Control.Monad.Reader as CMR
@@ -86,70 +85,3 @@ validRegister mblockStart entry r = withSym $ \sym -> do
       liftIO $ PA.dedicatedRegisterValidity hdr sym ctx binRepr entry dr
     _ -> return $ mempty
 
--- | Reads from immutable data have known results.
--- We collect all the reads that occurred during the trace, and then
--- assert that those values are necessarily equivalent to the concrete
--- value from the binary
-validConcreteReads ::
-  forall bin sym arch.
-  PB.KnownBinary bin =>
-  SimOutput sym arch bin ->
-  EquivM sym arch (AssumptionFrame sym)
-validConcreteReads stOut = withSym $ \sym -> do
-  binCtx <- getBinCtx @bin
-  let binmem = MBL.memoryImage $ PMC.binary binCtx
-  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
-  readOps <- liftIO (MT.getReadOps sym (simOutMem stOut))
-  mconcat <$> liftIO (mapM (readConcrete sym stackRegion binmem) (F.toList readOps))
-
- where
-   readConcrete ::
-     sym ->
-     W4.SymNat sym ->
-     MM.Memory (MM.ArchAddrWidth arch) ->
-     MT.MemOp sym (MM.ArchAddrWidth arch) ->
-     IO (AssumptionFrame sym)
-   readConcrete sym stackRegion binmem (MT.MemOp (CLM.LLVMPointer reg off) dir _ sz (CLM.LLVMPointer _blkval bvval) end) = do
-      isStack <- W4.natEq sym stackRegion reg
-      case (W4.asConstantPred isStack, W4.asBV off, dir) of
-        (Just False, Just off', MT.Read) -> do
-          let mw :: MM.MemWord (MM.ArchAddrWidth arch)
-              mw = MM.memWord (fromIntegral (BVS.asUnsigned off'))
-          W4.LeqProof <- return $ W4.leqMulPos (W4.knownNat @8) sz
-          let bits = W4.natMultiply (W4.knownNat @8) sz
-          case doStaticRead @arch binmem mw bits end of
-            Just bv -> liftIO $ do
-              lit_val <- W4.bvLit sym bits bv
-              -- FIXME: update when memory model has regions
-              -- unclear what to assert about the region
-              return $ exprBinding bvval lit_val
-            Nothing -> return $ mempty
-        _ -> return $ mempty
-
-
-doStaticRead ::
-  forall arch w .
-  PA.ValidArch arch =>
-  MM.Memory (MM.ArchAddrWidth arch) ->
-  MM.MemWord (MM.ArchAddrWidth arch) ->
-  W4.NatRepr w ->
-  MM.Endianness ->
-  Maybe (BVS.BV w)
-doStaticRead mem mw w end = case PM.resolveAbsoluteAddress mem mw of
-  Just segoff | MMP.isReadonly $ MM.segmentFlags $ MM.segoffSegment segoff ->
-    let addr = MM.segoffAddr segoff in
-    fmap (BVS.mkBV w) $
-    case (W4.intValue w, end) of
-      (8, _) -> liftErr $ MM.readWord8 mem addr
-      (16, MM.BigEndian) -> liftErr $ MM.readWord16be mem addr
-      (16, MM.LittleEndian) -> liftErr $ MM.readWord16le mem addr
-      (32, MM.BigEndian) -> liftErr $ MM.readWord32be mem addr
-      (32, MM.LittleEndian) -> liftErr $ MM.readWord32le mem addr
-      (64, MM.BigEndian) -> liftErr $ MM.readWord64be mem addr
-      (64, MM.LittleEndian) -> liftErr $ MM.readWord64le mem addr
-      _ -> Nothing
-  _ -> Nothing
-  where
-    liftErr :: Integral a => Either e a -> Maybe Integer
-    liftErr (Left _) = Nothing
-    liftErr (Right a) = Just (fromIntegral a)
