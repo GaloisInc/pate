@@ -411,7 +411,7 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
 
 
 -- | Only return those cells not already excluded by the postdomain
-filterCells ::
+filterCells :: forall sym t st fs arch.
   ( sym ~ W4.ExprBuilder t st fs
   , PA.ValidArch arch ) =>
   sym ->
@@ -420,10 +420,11 @@ filterCells ::
   [Some (PMc.MemCell sym arch)] ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 filterCells sym evalFn memDom = loop
-
   where
     filterCell (Some c) =
       W4.groundEval evalFn =<< PEM.containsCell sym memDom c
+
+    loop :: [Some (PMc.MemCell sym arch)] -> EquivM_ sym arch [Some (PMc.MemCell sym arch)]
 
     loop [] = return[]
     loop (x:xs) =
