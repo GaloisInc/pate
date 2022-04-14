@@ -419,7 +419,7 @@ filterCells :: forall sym t st fs arch.
   PEM.MemoryDomain sym arch ->
   [Some (PMc.MemCell sym arch)] ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-filterCells sym evalFn memDom = loop
+filterCells sym evalFn memDom = \xs -> loop xs
   where
     filterCell (Some c) =
       W4.groundEval evalFn =<< PEM.containsCell sym memDom c
