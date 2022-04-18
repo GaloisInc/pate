@@ -270,7 +270,7 @@ getCurrentDomain ::
   Maybe (AbstractDomain sym arch)
 getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
 
--- | If an observable counterexample has not already be found
+-- | If an observable counterexample has not already been found
 --   for this block pair, run the given action to check if there
 --   currently is one.
 considerObservableEvent :: Monad m =>
