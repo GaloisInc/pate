@@ -15,7 +15,7 @@ module Pate.Verification.Widening
   , WidenLocs(..)
   ) where
 
-import           Control.Monad (when, forM_, unless)
+import           Control.Monad (when, forM_, unless, filterM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Reader (asks)
@@ -201,6 +201,16 @@ tryWidenings (x:xs) =
     NoWideningRequired -> tryWidenings xs
     res -> return res
 
+
+-- | This gives a fixed amount of gas for traversing the
+--   widening loop. Setting this value too low seems to
+--   cause widening failures even for fairly reasonable
+--   cases, so this is larger than the amount of gas
+--   provided for the overall pair graph updates.
+localWideningGas :: Gas
+localWideningGas = Gas 100
+
+
 widenPostcondition :: forall sym arch.
   PA.ValidArch arch =>
   SimBundle sym arch ->
@@ -232,7 +242,7 @@ widenPostcondition bundle preD postD0 =
                  -- https://github.com/GaloisInc/what4/issues/196
                  W4.push sp
                  W4.assume (W4.solverConn sp) precond
-            widenLoop sym bak (Gas 100) eqCtx postD0 Nothing
+            widenLoop sym bak localWideningGas eqCtx postD0 Nothing
 
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
@@ -359,14 +369,18 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
   tryWidenings
     [ widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
 
+      -- We first attempt to widen using writes that occured in the current CFAR/slice
+      -- as these are most likely to be relevant.
     , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
     , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
 
+      -- After that, we check for widenings relating to the precondition, i.e., frame conditions.
     , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
     , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
 
     , do slice <- PP.simBundleToSlice bundle
-         ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
+         ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
+                         (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
          let msg = unlines [ "Could not find any values to widen!"
                            , show (pretty ineqRes)
                            ]
@@ -419,19 +433,10 @@ filterCells :: forall sym t st fs arch.
   PEM.MemoryDomain sym arch ->
   [Some (PMc.MemCell sym arch)] ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-filterCells sym evalFn memDom = \xs -> loop xs
+filterCells sym evalFn memDom xs = filterM filterCell xs
   where
     filterCell (Some c) =
-      W4.groundEval evalFn =<< PEM.containsCell sym memDom c
-
-    loop :: [Some (PMc.MemCell sym arch)] -> EquivM_ sym arch [Some (PMc.MemCell sym arch)]
-
-    loop [] = return[]
-    loop (x:xs) =
-      do b <- liftIO (filterCell x)
-         xs' <- loop xs
-         if b then return (x:xs') else return xs'
-
+      liftIO (W4.groundEval evalFn =<< PEM.containsCell sym memDom c)
 
 widenStack ::
   ( sym ~ W4.ExprBuilder t st fs

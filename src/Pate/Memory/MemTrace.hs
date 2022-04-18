@@ -1233,16 +1233,24 @@ readMemState sym mem baseMem ptr repr = go 0 repr
   go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
       go (n + memReprByteSize recRepr * fromIntegral i) recRepr
 
+-- | Attempt to service a read from a concrete pointer into a
+--   read-only region of memory. If the pointer is not syntactically
+--   concrete, or does not point into a read-only region, this will
+--   return Nothing.
+--
+--   This will only attempt to service reads that are 1, 2, 4, or 8
+--   bytes long. Only concrete pointers into region 0 will be
+--   serviced.
 asConcreteReadOnly :: forall sym w ptrW.
   MemWidth ptrW =>
   1 <= w =>
   IsExprBuilder sym =>
   sym ->
-  SymInteger sym ->
-  SymBV sym ptrW ->
-  NatRepr w ->
-  Endianness ->
-  Memory ptrW ->
+  SymInteger sym {- ^ pointer region number -}->
+  SymBV sym ptrW {- ^ pointer offset value -} ->
+  NatRepr w      {- ^ number of bytes to read -} ->
+  Endianness     {- ^ byte order of the read -} ->
+  Memory ptrW    {- ^ memory image to read from -} ->
   IO (Maybe (SymBV sym (8*w)))
 asConcreteReadOnly sym blk off sz end baseMem =
   case (asInteger blk, asBV off) of
