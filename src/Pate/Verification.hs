@@ -256,6 +256,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
       , PMC.originalIgnorePtrs = unpackedOrigIgnore upData
       , PMC.patchedIgnorePtrs = unpackedPatchIgnore upData
       , PMC.equatedFunctions = unpackedEquatedFuncs upData
+      , PMC.observableMemory = unpackedObservableMemory upData
       }
     env = EquivEnv
       { envWhichBinary = Nothing
@@ -329,9 +330,10 @@ data UnpackedPatchData arch =
                     , unpackedOrigIgnore :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     , unpackedPatchIgnore :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     , unpackedEquatedFuncs :: [(PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)]
+                    , unpackedObservableMemory :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     }
 
-unpackPatchData ::
+unpackPatchData :: forall arch.
   HasCallStack =>
   PA.ValidArch arch =>
   PPa.PatchPair (PMC.BinaryContext arch) ->
@@ -354,10 +356,15 @@ unpackPatchData contexts pd =
                      | eqf <- PC.equatedFunctions pd
                      ]
 
+      let obsMem' =  [ ( MM.memWord (fromIntegral addr), toInteger len )
+                     | PC.MemRegion (PC.Address addr) len <- PC.observableMemory pd
+                     ]
+
       return UnpackedPatchData { unpackedPairs = pairs'
                                , unpackedOrigIgnore = oIgn'
                                , unpackedPatchIgnore = pIgn'
                                , unpackedEquatedFuncs = eqFuncs'
+                               , unpackedObservableMemory = obsMem'
                                }
 
 ---------------------------------------------
@@ -529,11 +536,9 @@ withSimBundle pPair f = fmap unzipSkipTransformation $ withEmptyAssumptionFrame 
       traceBlockPair pPair "Simulating patched blocks"
       (asmP, simOutP_) <- PVSy.simulate simInP_
       traceBlockPair pPair "Finished simulating blocks"
-      (_, simOutO') <- withAssumptionFrame (PVV.validConcreteReads simOutO_) $ return simOutO_
-      (_, simOutP') <- withAssumptionFrame (PVV.validConcreteReads simOutP_) $ return simOutP_
 
       (asm,(r, prf)) <- withAssumption (liftIO $ allPreds sym [asmO, asmP]) $ do
-        let bundle = SimBundle (PPa.PatchPair simInO_ simInP_) (PPa.PatchPair simOutO' simOutP')
+        let bundle = SimBundle (PPa.PatchPair simInO_ simInP_) (PPa.PatchPair simOutO_ simOutP_)
         bundle' <- applyCurrentFrame bundle
         f bundle'
       return (frameAssume asm, (r, PEM.SkipTransformation prf))

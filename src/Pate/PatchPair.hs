@@ -20,6 +20,7 @@ module Pate.PatchPair (
   , ppPatchPairCEq
   , ppPatchPairEq
   , ppPatchPairC
+  , ppPatchPair
   , getPair
   , getPair'
   , matchEquatedAddress
