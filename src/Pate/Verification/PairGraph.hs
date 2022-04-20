@@ -65,9 +65,12 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
+
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
+import qualified Pate.Verification.AbstractDomain as PAD
+import           Pate.Verification.AbstractDomain ( AbstractDomain )
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -83,10 +86,6 @@ newtype Gas = Gas Word32
 --   Should make this configurable.
 initialGas :: Gas
 initialGas = Gas 5
-
--- | For now, the abstract domains we track are just exactly
---   a 'PE.DomainSpec', but we may change/add to this as we go.
-type AbstractDomain sym arch = PE.DomainSpec sym arch
 
 -- | The PairGraph is the main datastructure tracking all the
 --   information we compute when analysing a program. The analysis we
