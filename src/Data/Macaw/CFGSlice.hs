@@ -92,6 +92,9 @@ data MacawBlockEnd arch = MacawBlockEnd MacawBlockEndCase !(Maybe (M.ArchSegment
 -- and the return address is a 'MM.LLVMPointerType'.
 type MacawBlockEndType arch = C.StructType (Ctx.EmptyCtx Ctx.::> C.BVType 8 Ctx.::> C.MaybeType (MM.LLVMPointerType (M.ArchAddrWidth arch)))
 
+-- | Construct a crucible expression that is equivalent to a 'MacawBlockEnd'
+-- TODO: it probably makes sense to instead define this as an intrinsic, rather
+-- than relying on encoding/decoding
 blockEndAtom :: forall arch ids s
               . MS.MacawSymbolicArchFunctions arch
              -> MacawBlockEnd arch
@@ -110,6 +113,10 @@ blockEndAtom archFns (MacawBlockEnd blendK mret) = MSB.crucGenArchConstraints ar
     let repr = Ctx.empty Ctx.:> C.BVRepr knownNat Ctx.:> C.MaybeRepr ptrRepr
     MSB.appAtom $ C.MkStruct repr (Ctx.empty Ctx.:> blendK' Ctx.:> mret')
 
+-- | Classify the given 'M.ParsedTermStmt' as a 'MacawBlockEnd' according
+-- to 'termStmtToBlockEnd' and write it out to the given global variable.
+-- After symbolic execution, this global then represents how the block
+-- orignally "exited" before the CFG slicing.
 assignBlockEnd :: HasArchEndCase arch =>
                   MSB.MacawSymbolicArchFunctions arch
                -> CR.GlobalVar (MacawBlockEndType arch)
