@@ -20,7 +20,7 @@ jobs:
       LANGUAGE: en_US:en
       LC_ALL: en_US.UTF-8
       TZ: America/Los_Angeles
-      CACHE_VERSION: 2
+      CACHE_VERSION: 3
 
     strategy:
       fail-fast: false
