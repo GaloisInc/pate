@@ -27,8 +27,8 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 import           Data.Proxy
+import qualified Data.Text as Text
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
@@ -59,9 +59,9 @@ import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.EquivalenceDomain as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Monad.Context as PMC
-import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Statistics as PESt
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
@@ -75,6 +75,7 @@ import qualified Pate.SimulatorRegisters as PSR
 
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
+import qualified Pate.Verification.Domain as PVD
 
 import           Pate.Verification.PairGraph
 import           Pate.Verification.Widening
@@ -110,7 +111,7 @@ runVerificationLoop ::
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the entry points of functions.
   [PPa.FunPair arch] ->
-  IO (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
+  IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
   result <- runExceptT (runEquivM env doVerify)
   case result of
@@ -118,17 +119,22 @@ runVerificationLoop env pPairs = do
     Right r  -> return r
 
  where
-   doVerify :: EquivM sym arch (PEq.EquivalenceStatus, PESt.EquivalenceStatistics)
+   doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
      do pg0 <- initializePairGraph pPairs
 
         -- To the main work of computing the dataflow fixpoint
         pg <- pairGraphComputeFixpoint pg0
 
+        -- liftIO $ putStrLn "==== Whole program state ===="
+        -- liftIO $ print (ppProgramDomains W4.printSymExpr pg)
+
         -- Report a summary of any errors we found during analysis
         reportAnalysisErrors pg
 
         result <- pairGraphComputeVerdict pg
+
+        liftIO $ putStrLn $ unwords ["Overall verification verdict:", show result]
 
         -- TODO, does reporting these kind of statistics make sense for this verification method?
         -- Currently, we only really do this to make the types fit at the call site.
@@ -136,38 +142,6 @@ runVerificationLoop env pPairs = do
         stats <- liftIO $ MVar.readMVar statVar
 
         return (result, stats)
-
--- | TODO, Right now, this just prints error reports to stdout.
---   We should decide how and to what extent this should connect
---   to the `emitEvent` infrastructure.
-reportAnalysisErrors ::
-  PairGraph sym arch ->
-  EquivM sym arch ()
-reportAnalysisErrors gr =
-  do mapM_ reportObservables (Map.toList (pairGraphObservableReports gr))
-     mapM_ reportDesync (Map.toList (pairGraphDesyncReports gr))
-     mapM_ reportGasExhausted (Set.toList (pairGraphGasExhausted gr))
-
- where
-   reportObservables (pPair, ObservableCounterexample oEvs pEvs) =
-     liftIO $ putStrLn $ show $ vcat $
-         [ pretty pPair <+> pretty "observable sequences disagree"
-         , pretty "Original sequence:"
-         ] ++
-         [ indent 2 (MT.prettyMemEvent ev) | ev <- oEvs ] ++
-         [ pretty "Patched sequence:" ] ++
-         [ indent 2 (MT.prettyMemEvent ev) | ev <- pEvs ]
-
-   reportDesync (pPair, TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) =
-     liftIO $ putStrLn $ show $ vcat $
-       [ pretty pPair <+> pretty "program control flow desynchronized"
-       , pretty ("  Original: 0x" ++ showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr)
-       , pretty ("  Patched:  0x" ++ showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr)
-       ]
-
-   reportGasExhausted pPair =
-     liftIO $ putStrLn $ show $ vcat $
-       [ pretty pPair <+> pretty "analysis failed to converge" ]
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -195,7 +169,7 @@ pairGraphComputeFixpoint gr =
 --   information directly to the return points of of the call sites of
 --   the given function, which are recorded in the pair graph
 --   "return vectors."
-visitNode ::
+visitNode :: forall sym arch.
   GraphNode arch ->
   AbstractDomain sym arch ->
   PairGraph sym arch ->
@@ -204,6 +178,14 @@ visitNode ::
 visitNode (GraphNode bPair) d gr0 = withPair bPair $
   do -- do the symbolic simulation
      (asm, bundle) <- mkSimBundle bPair d
+
+{-     traceBundle bundle $ unlines
+       [ "== SP result =="
+       , show (MM.getBoundValue (MM.sp_reg @(MM.ArchReg arch))
+            (PS.simRegs (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))))
+       , show (MM.getBoundValue (MM.sp_reg @(MM.ArchReg arch))
+            (PS.simRegs (PS.simOutState (PPa.pPatched (PS.simOut bundle)))))
+       ] -}
 
      -- Compute exit pairs
      traceBundle bundle $ "Discovering exit pairs from " ++ (show bPair)
@@ -282,26 +264,23 @@ checkObservables :: forall sym arch.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 checkObservables bPair asm bundle preD gr =
-  case Map.lookup bPair (pairGraphObservableReports gr) of
-    -- we have already found observable event differences at this location, so skip the check
-    Just _ -> return gr
-    Nothing ->
-      do res <- doCheckObservables asm bundle preD
-         case res of
-           ObservableCheckEq ->
-             do traceBundle bundle "Observables agree"
-                return gr
-           ObservableCheckError msg ->
-                -- TODO! track these errors better
-             do traceBundle bundle ("Error checking observables: " ++ msg)
-                return gr
-           ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
-             do traceBundle bundle ("Obserables disagree!")
-                traceBundle bundle ("== Original sequence ==")
-                traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
-                traceBundle bundle ("== Patched sequence ==")
-                traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
-                return gr{ pairGraphObservableReports = Map.insert bPair cex (pairGraphObservableReports gr) }
+  considerObservableEvent gr bPair $
+    do res <- doCheckObservables asm bundle preD
+       case res of
+         ObservableCheckEq ->
+           do traceBundle bundle "Observables agree"
+              return (Nothing, gr)
+         ObservableCheckError msg ->
+           do let msg' = ("Error checking observables: " ++ msg)
+              traceBundle bundle msg'
+              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) (Text.pack msg'))
+         ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
+           do traceBundle bundle ("Obserables disagree!")
+              traceBundle bundle ("== Original sequence ==")
+              traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
+              traceBundle bundle ("== Patched sequence ==")
+              traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
+              return (Just cex, gr)
 
 doCheckObservables :: forall sym arch.
   W4.Pred sym ->
@@ -321,14 +300,29 @@ doCheckObservables asm bundle preD =
        let solver = PCfg.cfgSolver vcfg
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
+       -- Grab the specified areas of observable memory
+       obsMem <- asks (PMC.observableMemory . envCtx)
+
+       -- test if the memory operation overlaps with one of the observable regions
+       let filterObservableMemOps op@(MT.MemOp (CLM.LLVMPointer blk _off) _dir _cond _w _val _end) =
+              do notStk <- W4.notPred sym =<< W4.natEq sym blk stackRegion
+                 inRng <- sequence
+                           [ MT.memOpOverlapsRegion sym op addr len
+                           | (addr, len) <- obsMem
+                           ]
+                 inRng' <- foldM (W4.orPred sym) (W4.falsePred sym) inRng
+                 W4.andPred sym notStk inRng'
+
        -- This filtering function selects out the memory operations that are writes to
        -- to non-stack regions to treat them as observable.
+{-
        let filterHeapWrites (MT.MemOp (CLM.LLVMPointer blk _off) MT.Write _cond _w _val _end) =
              W4.notPred sym =<< W4.natEq sym blk stackRegion
            filterHeapWrites _ = return (W4.falsePred sym)
+-}
 
-       oSeq <- liftIO (MT.observableEvents sym filterHeapWrites oMem)
-       pSeq <- liftIO (MT.observableEvents sym filterHeapWrites pMem)
+       oSeq <- liftIO (MT.observableEvents sym filterObservableMemOps oMem)
+       pSeq <- liftIO (MT.observableEvents sym filterObservableMemOps pMem)
 
 {-
        traceBundle bundle $ unlines
@@ -486,27 +480,23 @@ checkTotality :: forall sym arch.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 checkTotality bPair asm bundle preD exits gr =
-  case Map.lookup bPair (pairGraphDesyncReports gr) of
-    -- we have already reported a program desync report for this location
-    Just _ -> return gr
-    Nothing ->
-      do tot <- doCheckTotality asm bundle preD exits
-         case tot of
-           CasesTotal ->
-             do traceBundle bundle "Totality check succeeded."
-                return gr
-           TotalityCheckingError msg ->
-                -- TODO! track these errors better
-             do traceBundle bundle ("Error while checking totality! " ++ msg)
-                return gr
-           TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
-             do traceBundle bundle $ unlines
-                  ["Found extra exit while checking totality:"
-                  , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
-                  , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
-                  ]
-                return gr{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
-
+  considerDesyncEvent gr bPair $
+    do tot <- doCheckTotality asm bundle preD exits
+       case tot of
+         CasesTotal ->
+           do traceBundle bundle "Totality check succeeded."
+              return (Nothing, gr)
+         TotalityCheckingError msg ->
+           do let msg' = ("Error while checking totality! " ++ msg)
+              traceBundle bundle msg'
+              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) (Text.pack msg'))
+         TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
+           do traceBundle bundle $ unlines
+                ["Found extra exit while checking totality:"
+                , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
+                , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
+                ]
+              return (Just cex, gr)
 
 data TotalityResult ptrW
   = CasesTotal
@@ -539,13 +529,6 @@ doCheckTotality asm bundle preD exits =
        cases <- forM exits $ \(PPa.PatchPair oBlkt pBlkt) ->
                   PD.matchesBlockTarget bundle oBlkt pBlkt
 
-       -- TODO, are these clasuses for "unknown" branches correct?
-       isUnknown <- do
-         isJump <- PD.matchingExits bundle MCS.MacawBlockEndJump
-         isFail <- PD.matchingExits bundle MCS.MacawBlockEndFail
-         isBranch <- PD.matchingExits bundle MCS.MacawBlockEndBranch
-         liftIO (W4.orPred sym isJump =<< W4.orPred sym isFail isBranch)
-
        -- TODO, I really don't understand this abort case stuff, but it was copied
        -- from the triple verifier.
        isReturn <- do
@@ -562,7 +545,6 @@ doCheckTotality asm bundle preD exits =
              W4.inNewFrame sp $
              do W4.assume (W4.solverConn sp) precond
                 W4.assume (W4.solverConn sp) =<< W4.notPred sym isReturn
-                W4.assume (W4.solverConn sp) =<< W4.notPred sym isUnknown
                 forM_ cases $ \c ->
                   W4.assume (W4.solverConn sp) =<< W4.notPred sym c
 
@@ -689,11 +671,9 @@ followExit asm bundle currBlock d gr (idx, pPair) =
      res <- manifestError (triageBlockTarget asm bundle currBlock d gr pPair)
      case res of
        Left err ->
-         do -- TODO! make a more permanant record of errors
-            traceBlockPair currBlock ("Caught error: " ++ show err)
-            return gr
+         do traceBlockPair currBlock ("Caught error: " ++ show err)
+            return (recordMiscAnalysisError gr (GraphNode currBlock) (Text.pack (show err)))
        Right gr' -> return gr'
-
 
 -- Update the return summary node for the current function if this
 --  sim bundle might return.
@@ -758,12 +738,17 @@ triageBlockTarget asm bundle currBlock d gr (PPa.PatchPair blktO blktP) =
                  | Just pltSymbol <- isPLT -> handlePLTStub bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
                  | otherwise -> handleOrdinaryFunCall bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
-         (Nothing, Nothing) ->
+         (Nothing, Nothing) -> withSym $ \sym ->
            do traceBundle bundle "No return target identified"
-              handleJump bundle currBlock d gr pPair
+              p <- do j <- PD.matchingExits bundle MS.MacawBlockEndJump
+                      b <- PD.matchingExits bundle MS.MacawBlockEndBranch
+                      liftIO $ W4.orPred sym j b
+              withAssumption_ (pure p) $
+                handleJump bundle currBlock d gr pPair
 
          _ -> do traceBundle bundle "BlockExitMismatch"
                  throwHere $ PEE.BlockExitMismatch
+
 
 -- | See if the given jump targets correspond to a PLT stub for
 --   the same symbol, and return it if so.
@@ -840,7 +825,8 @@ handleOrdinaryFunCall bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
        do let gr' = addReturnVector gr (PPa.PatchPair oFun pFun) pRetPair
-          handleJump bundle currBlock d gr' pPair
+          withAssumption_ (PD.matchingExits bundle MS.MacawBlockEndCall) $
+            handleJump bundle currBlock d gr' pPair
      _ -> panic Verifier "handleOrdinaryFunCall"
               [ "Ordinary function call jumped to a location that is not a function start!"
               , show currBlock
@@ -906,14 +892,16 @@ mkSimBundle pPair d =
      let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair)
      let simInP    = PS.SimInput pVarState (PPa.pPatched pPair)
 
+     let rd = PE.eqDomainRegisters (PS.specBody d)
+
      withAssumptionFrame (PVV.validInitState (Just pPair) oVarState pVarState) $
        do traceBlockPair pPair "Simulating original blocks"
           (asmO, simOutO_) <- PVSy.simulate simInO
           traceBlockPair pPair "Simulating patched blocks"
           (asmP, simOutP_) <- PVSy.simulate simInP
           traceBlockPair pPair "Finished simulating blocks"
-          (_, simOutO') <- withAssumptionFrame (PVV.validConcreteReads simOutO_) $ return simOutO_
-          (_, simOutP') <- withAssumptionFrame (PVV.validConcreteReads simOutP_) $ return simOutP_
 
+          let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
           withAssumption_ (liftIO $ W4.andPred sym asmO asmP) $
-            applyCurrentFrame (SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO' simOutP'))
+            withAssumptionFrame_ (PVD.equateRegisters rd bnd) $
+              applyCurrentFrame bnd

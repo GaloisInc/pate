@@ -41,7 +41,6 @@ module Pate.Memory.MemTrace
 , getCond
 , MemTraceK
 , traceFootprint
-, getReadOps
 , observableEvents
 , UndefPtrOpTag
 , UndefPtrOpTags
@@ -60,6 +59,7 @@ module Pate.Memory.MemTrace
 , memEqOutsideRegion
 , memEqAtRegion
 , memEqExact
+, memOpOverlapsRegion
 , prettyMemOp
 , prettyMemEvent
 , prettyMemTraceSeq
@@ -74,6 +74,7 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
 import qualified Data.Vector as V
+import           Data.Proxy
 import           Data.IORef
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -89,7 +90,13 @@ import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
 import Data.Macaw.Memory
            (AddrWidthRepr(..), Endianness(..), MemWidth
            , addrWidthClass, addrWidthRepr, addrWidthNatRepr
-           , incSegmentOff, memWordToUnsigned, MemSegmentOff )
+           , incSegmentOff, memWordToUnsigned, MemSegmentOff
+           , MemWord, memWordToUnsigned, segmentFlags
+           , Memory, emptyMemory, memWord, segoffSegment
+           , segoffAddr, readWord8, readWord16be, readWord16le
+           , readWord32le, readWord32be, readWord64le, readWord64be
+           )
+import qualified Data.Macaw.Memory.Permissions as MMP
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
 import Data.Macaw.Symbolic ( MacawStmtExtension(..), MacawExprExtension(..), MacawExt
                            , GlobalMap
@@ -130,6 +137,7 @@ import What4.Interface
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
 import qualified What4.ExprHelpers as WEH
+import qualified Pate.Memory as PM
 
 ------
 -- * Undefined pointers
@@ -506,6 +514,36 @@ prettyMemOp (MemOp ptr dir cond _sz val _end) =
     Unconditional -> mempty
     Conditional p -> "when" <+> printSymExpr p
 
+-- | Test if a memory operation overlaps with a concretrely-defined
+--   region of memory, given as a starting address and a length.
+--   For this test, we ignore the pointer region of the memory operation.
+memOpOverlapsRegion :: forall sym ptrW.
+  (MemWidth ptrW, IsExprBuilder sym) =>
+  sym ->
+  MemOp sym ptrW {- ^ operation to test -} ->
+  MemWord ptrW {- ^ starting address of the region -} ->
+  Integer {- ^ length of the region -} ->
+  IO (Pred sym)
+memOpOverlapsRegion sym (MemOp (LLVMPointer _blk off) _dir _cond w _val _end) addr len =
+  -- NB, the algorithm for computing if two intervals (given by a start address and a length)
+  -- overlap is not totally obvious. This is taken from the What4 abstract domain definitions,
+  -- which have been carefully tested and verified. The cryptol for the definition  is:
+  --   overlap : {n} (fin n) => Dom n -> Dom n -> Bit
+  --   overlap a b = diff <= b.sz \/ carry diff a.sz
+  --     where diff = a.lo - b.lo
+
+  do let aw = addrWidthNatRepr (addrWidthRepr (Proxy @ptrW))
+     addr' <- bvLit sym aw (BV.mkBV aw (memWordToUnsigned addr))
+     len'  <- bvLit sym aw (BV.mkBV aw len)
+     oplen <- bvLit sym aw (BV.mkBV aw (intValue w))
+
+     -- Here the two intervals are given by (off, oplen) and (addr', len')
+
+     diff <- bvSub sym off addr'
+     x1 <- bvUle sym diff len'
+     (x2, _) <- addUnsignedOF sym diff oplen
+     orPred sym x1 x2
+
 instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
   Unconditional == Unconditional = True
   Conditional p == Conditional p' | Just Refl <- testEquality p p' = True
@@ -551,7 +589,7 @@ data MemEvent sym ptrW where
     MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
       {- ^ location and dissassembly of the instruction generating this system call -} ->
     SymExpr sym (BaseBVType w)
-      {- ^ The value of R0 when this system call occurred -} -> 
+      {- ^ The value of R0 when this system call occurred -} ->
     MemEvent sym ptrW
 
 prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
@@ -572,6 +610,10 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ the logical contents of memory
   , memCurrentInstr :: MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
   -- ^ the most recent program instruction we encountered (address, dissassembly)
+  , memBaseMemory :: Memory ptrW
+  -- ^ The "base" memory loaded with the binary. We use this to directly service concrete
+  --   reads from read-only memory. INVARIANT: we only mux together memories that were
+  --   derived from the same initial memory, so we can assume the base memories are identical.
   }
 
 data MemTraceState sym ptrW = MemTraceState
@@ -601,16 +643,17 @@ initMemTrace ::
   forall sym ptrW.
   IsSymExprBuilder sym =>
   sym ->
+  Memory ptrW ->
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
-initMemTrace sym Addr32 = do
+initMemTrace sym baseMem Addr32 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing)
-initMemTrace sym Addr64 = do
+  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing) baseMem
+initMemTrace sym baseMem Addr64 = do
   arr <- ioFreshConstant sym "InitMem" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing)
+  return $ MemTraceImpl sq (MemTraceState arr) (toMuxTree sym Nothing) baseMem
 
 
 mkMemoryBinding ::
@@ -634,7 +677,10 @@ instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
     memSeq'   <- muxSymSequence sym p (memSeq t) (memSeq f)
     memArr'   <- baseTypeIte sym p (memArr $ memState t) (memArr $ memState f)
     memInstr' <- mergeMuxTree sym p (memCurrentInstr t) (memCurrentInstr f)
-    return $ MemTraceImpl memSeq' (MemTraceState memArr') memInstr'
+
+    -- NB, we assume that the "base" memories are always the same, so we can arbitrarily choose
+    -- one to use.
+    return $ MemTraceImpl memSeq' (MemTraceState memArr') memInstr' (memBaseMemory t)
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -692,7 +738,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
     MacawArchStateUpdate{} -> \cst -> pure ((), cst)
     MacawInstructionStart baddr iaddr dis ->
       case incSegmentOff baddr (memWordToUnsigned iaddr) of
-        Just off -> 
+        Just off ->
           liftToCrucibleState mvar $ \sym ->
             modify (\mem -> mem{ memCurrentInstr = toMuxTree sym (Just (off,dis)) })
         Nothing ->
@@ -1020,7 +1066,7 @@ doReadMem ::
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doReadMem sym ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
-  val <- liftIO $ readMemState sym (memState mem) ptr memRepr
+  val <- liftIO $ readMemState sym (memState mem) (memBaseMemory mem) ptr memRepr
   doMemOpInternal sym Read Unconditional ptrW ptr val memRepr
   pure val
 
@@ -1035,7 +1081,7 @@ doCondReadMem ::
   StateT (MemTraceImpl sym ptrW) IO (RegValue sym (MS.ToCrucibleType ty))
 doCondReadMem sym cond def ptrW ptr memRepr = addrWidthClass ptrW $ do
   mem <- get
-  val <- liftIO $ readMemState sym (memState mem) ptr memRepr
+  val <- liftIO $ readMemState sym (memState mem) (memBaseMemory mem) ptr memRepr
   doMemOpInternal sym Read (Conditional cond) ptrW ptr val memRepr
   liftIO $ iteDeep sym cond val def memRepr
 
@@ -1145,25 +1191,31 @@ chunkBV sym endianness w bv
 
 -- | Read a packed value from the underlying array (without adding to the read trace)
 readMemState :: forall sym ptrW ty.
-  1 <= ptrW =>
+  MemWidth ptrW =>
   IsExprBuilder sym =>
   sym ->
   MemTraceState sym ptrW ->
+  Memory ptrW ->
   LLVMPtr sym ptrW ->
   MemRepr ty ->
   IO (RegValue sym (MS.ToCrucibleType ty))
-readMemState sym mem ptr repr = go 0 repr
+readMemState sym mem baseMem ptr repr = go 0 repr
   where
   go :: Integer -> MemRepr ty' -> IO (RegValue sym (MS.ToCrucibleType ty'))
   go n (BVMemRepr byteWidth endianness) =
     case isZeroOrGT1 (decNat byteWidth) of
       Left Refl
-        | Refl <- zeroSubEq byteWidth (knownNat @1) -> do
-          (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
-          regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
-          content <- arrayLookup sym regArray (Ctx.singleton off)
-          blk0 <- natLit sym 0
-          return $ LLVMPointer blk0 content
+        | Refl <- zeroSubEq byteWidth (knownNat @1) ->
+          do (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
+             blk0 <- natLit sym 0
+             ro <- asConcreteReadOnly sym reg off byteWidth endianness baseMem
+             content <-
+               case ro of
+                 Just val -> return val
+                 Nothing ->
+                   do regArray <- arrayLookup sym (memArr mem) (Ctx.singleton reg)
+                      arrayLookup sym regArray (Ctx.singleton off)
+             return $ LLVMPointer blk0 content
       Right LeqProof
         | byteWidth' <- decNat byteWidth
         , tailRepr <- BVMemRepr byteWidth' endianness
@@ -1181,6 +1233,67 @@ readMemState sym mem ptr repr = go 0 repr
   go n (PackedVecMemRepr countRepr recRepr) = V.generateM (fromInteger (intValue countRepr)) $ \i ->
       go (n + memReprByteSize recRepr * fromIntegral i) recRepr
 
+-- | Attempt to service a read from a concrete pointer into a
+--   read-only region of memory. If the pointer is not syntactically
+--   concrete, or does not point into a read-only region, this will
+--   return Nothing.
+--
+--   This will only attempt to service reads that are 1, 2, 4, or 8
+--   bytes long. Only concrete pointers into region 0 will be
+--   serviced.
+asConcreteReadOnly :: forall sym w ptrW.
+  MemWidth ptrW =>
+  1 <= w =>
+  IsExprBuilder sym =>
+  sym ->
+  SymInteger sym {- ^ pointer region number -}->
+  SymBV sym ptrW {- ^ pointer offset value -} ->
+  NatRepr w      {- ^ number of bytes to read -} ->
+  Endianness     {- ^ byte order of the read -} ->
+  Memory ptrW    {- ^ memory image to read from -} ->
+  IO (Maybe (SymBV sym (8*w)))
+asConcreteReadOnly sym blk off sz end baseMem =
+  case (asInteger blk, asBV off) of
+    -- NB, only looking for reads at region 0
+    (Just 0, Just off') ->
+      do let mw :: MemWord ptrW
+             mw = memWord (fromIntegral (BV.asUnsigned off'))
+         LeqProof <- return $ leqMulPos (knownNat @8) sz
+         let bits = natMultiply (knownNat @8) sz
+         case doStaticRead baseMem mw bits end of
+           Just bv -> Just <$> bvLit sym bits bv
+           Nothing -> return Nothing
+    _ -> return Nothing
+
+doStaticRead ::
+  forall w ptrW.
+  MemWidth ptrW =>
+  Memory ptrW ->
+  MemWord ptrW ->
+  NatRepr w ->
+  Endianness ->
+  Maybe (BV.BV w)
+doStaticRead mem mw w end =
+  case PM.resolveAbsoluteAddress mem mw of
+    Just segoff | MMP.isReadonly $ segmentFlags $ segoffSegment segoff ->
+      let addr = segoffAddr segoff in
+      fmap (BV.mkBV w) $
+      case (intValue w, end) of
+        (8, _) -> liftErr $readWord8 mem addr
+        (16, BigEndian) -> liftErr $ readWord16be mem addr
+        (16, LittleEndian) -> liftErr $ readWord16le mem addr
+        (32, BigEndian) -> liftErr $ readWord32be mem addr
+        (32, LittleEndian) -> liftErr $ readWord32le mem addr
+        (64, BigEndian) -> liftErr $ readWord64be mem addr
+        (64, LittleEndian) -> liftErr $ readWord64le mem addr
+        _ -> Nothing
+    _ -> Nothing
+  where
+    liftErr :: Integral a => Either e a -> Maybe Integer
+    liftErr (Left _) = Nothing
+    liftErr (Right a) = Just (fromIntegral a)
+
+
 -- | Compute the updated memory state resulting from writing a value to the given address, without
 -- accumulating any trace information.
 writeMemState ::
@@ -1195,8 +1308,8 @@ writeMemState ::
   IO (MemTraceState sym ptrW)
 writeMemState sym cond memSt ptr repr val = do
   sq <- nilSymSequence sym
-  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing)
-  MemTraceImpl _ memSt' _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
+  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing) (emptyMemory (addrWidthRepr Proxy))
+  MemTraceImpl _ memSt' _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
 -- | Write to the memory array and set the dirty bits on
@@ -1515,42 +1628,6 @@ observableEvents sym opIsObservable mem = evalWithFreshCache f (memSeq mem)
         muxSymSequence sym p xs' ys'
 
 
--- | Get an unordered collection of all the read memory operations
---   that occurred in this trace memory. Control-flow conditions are
---   dropped while constructing this set, so the conditions included
---   on these `MemOp` values may not be accurate.
---
---   Note: We could modify this so that it correctly incorporates
---   merge conditions, but doing so is a bit tricky, and the only
---   current use site (validConcreteReads) ignores the conditions
---   anyway.  I would have preferred to migrate validConcreteReads
---   into this module, but that is difficult because it creates
---   a module import cycle, and I wasn't prepared to relocate
---   things enough to fix it.
-getReadOps ::
-  IsExprBuilder sym =>
-  OrdF (SymExpr sym) =>
-  sym ->
-  MemTraceImpl sym ptrW ->
-  IO (Set (MemOp sym ptrW))
-getReadOps _sym mem =
-  getConst <$> evalWithFreshCache (\rec -> \case
-    SymSequenceNil -> return (Const mempty)
-    SymSequenceCons _ x xs ->
-      do Const s <- rec xs
-         case x of
-           MemOpEvent op@(MemOp _ptr Read _ _ _ _) -> return (Const (Set.insert op s))
-           _ -> return (Const s)
-    SymSequenceAppend _ xs ys ->
-      do Const s1 <- rec xs
-         Const s2 <- rec ys
-         return (Const (Set.union s1 s2))
-    SymSequenceMerge _ _p xs ys ->
-      do Const s1 <- rec xs
-         Const s2 <- rec ys
-         return (Const (Set.union s1 s2)))
-   (memSeq mem)
-
 llvmPtrEq ::
   IsExprBuilder sym =>
   sym ->
@@ -1654,7 +1731,7 @@ instance PEM.ExprMappable sym (MemTraceImpl sym w) where
     let memInstr' =  memCurrentInstr mem -- TODO? rewrite the mux tree?
                                          -- I expect it to basically never be interesting
                                          -- to do this...
-    return $ MemTraceImpl memSeq' memState' memInstr'
+    return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem)
 
 instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do

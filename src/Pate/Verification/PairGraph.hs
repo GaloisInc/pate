@@ -13,7 +13,7 @@
 module Pate.Verification.PairGraph
   ( Gas(..)
   , initialGas
-  , PairGraph(..)
+  , PairGraph
   , GraphNode(..)
   , AbstractDomain
   , initializePairGraph
@@ -23,14 +23,23 @@ module Pate.Verification.PairGraph
   , getReturnVectors
   , freshDomain
   , pairGraphComputeVerdict
+  , getCurrentDomain
+  , considerObservableEvent
+  , considerDesyncEvent
+  , recordMiscAnalysisError
+  , reportAnalysisErrors
   , TotalityCounterexample(..)
   , ObservableCounterexample(..)
+  , ppProgramDomains
   ) where
 
+import           Numeric (showHex)
 import           Prettyprinter
 
 import           Control.Monad (foldM)
+import           Control.Monad.IO.Class
 
+import           Data.Parameterized.Classes
 import           Data.Maybe (fromMaybe)
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -41,6 +50,8 @@ import           Data.Word (Word32)
 
 import qualified Data.Parameterized.TraversableF as TF
 
+import qualified What4.Interface as W4
+
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Symbolic as MS
@@ -48,11 +59,13 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence as PE
-import           Pate.Equivalence as PEq
+import qualified Pate.Equivalence.EquivalenceDomain as PE
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Proof.Instances as PPI
+import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
 
@@ -174,7 +187,30 @@ data PairGraph sym arch =
     -- | Keep track of the target nodes whenever we run out of gas while trying to reach fixpoint.
     --   This can be used to report to the user instances where the analysis may be incomplete.
   , pairGraphGasExhausted :: !(Set (GraphNode arch))
+
+    -- | Other sorts of analysis errors not captured by the previous categories. These generally
+    --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
+    --   that may impact the soundness of the analysis.
+  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) (Set Text))
   }
+
+ppProgramDomains ::
+  forall sym arch a.
+  ( PA.ValidArch arch
+  , W4.IsSymExprBuilder sym
+  , ShowF (MM.ArchReg arch)
+  ) =>
+  (W4.Pred sym -> Doc a) ->
+  PairGraph sym arch ->
+  Doc a
+ppProgramDomains ppPred gr =
+  vcat
+  [ vcat [ pretty pPair
+         , indent 4 (PE.ppEquivalenceDomain ppPred (PS.specBody ad))
+         ]
+  | (pPair, ad) <- Map.toList (pairGraphDomains gr)
+  ]
+
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -216,6 +252,7 @@ emptyPairGraph =
   , pairGraphObservableReports = mempty
   , pairGraphDesyncReports = mempty
   , pairGraphGasExhausted = mempty
+  , pairGraphMiscAnalysisErrors = mempty
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -226,6 +263,98 @@ getReturnVectors ::
   Set (PPa.BlockPair arch)
 getReturnVectors gr fPair =
   fromMaybe mempty (Map.lookup fPair (pairGraphReturnVectors gr))
+
+-- | Look up the current abstract domain for the given graph node.
+getCurrentDomain ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Maybe (AbstractDomain sym arch)
+getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
+
+-- | If an observable counterexample has not already been found
+--   for this block pair, run the given action to check if there
+--   currently is one.
+considerObservableEvent :: Monad m =>
+  PairGraph sym arch ->
+  PPa.BlockPair arch ->
+  (m (Maybe (ObservableCounterexample sym (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
+  m (PairGraph sym arch)
+considerObservableEvent gr bPair action =
+  case Map.lookup bPair (pairGraphObservableReports gr) of
+    -- we have already found observable event differences at this location, so skip the check
+    Just _ -> return gr
+    Nothing ->
+      do (mcex, gr') <- action
+         case mcex of
+           Nothing  -> return gr'
+           Just cex -> return gr'{ pairGraphObservableReports = Map.insert bPair cex (pairGraphObservableReports gr) }
+
+-- | If a program desync has not already be found
+--   for this block pair, run the given action to check if there
+--   currently is one.
+considerDesyncEvent :: Monad m =>
+  PairGraph sym arch ->
+  PPa.BlockPair arch ->
+  (m (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
+  m (PairGraph sym arch)
+considerDesyncEvent gr bPair action =
+  case Map.lookup bPair (pairGraphDesyncReports gr) of
+    -- we have already found observable event differences at this location, so skip the check
+    Just _ -> return gr
+    Nothing ->
+      do (mcex, gr') <- action
+         case mcex of
+           Nothing  -> return gr'
+           Just cex -> return gr'{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
+
+-- | Record an error that occured during analysis that doesn't fall into one of the
+--   other, more structured, types of errors.
+recordMiscAnalysisError ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Text ->
+  PairGraph sym arch
+recordMiscAnalysisError gr nd msg =
+  let m = Map.alter f nd (pairGraphMiscAnalysisErrors gr)
+      f Nothing  = Just (Set.singleton msg)
+      f (Just s) = Just (Set.insert msg s)
+   in gr{ pairGraphMiscAnalysisErrors = m }
+
+
+-- | TODO, Right now, this just prints error reports to stdout.
+--   We should decide how and to what extent this should connect
+--   to the `emitEvent` infrastructure.
+reportAnalysisErrors :: (PA.ValidArch arch, W4.IsExprBuilder sym, MonadIO m) => PairGraph sym arch -> m ()
+reportAnalysisErrors gr =
+  do mapM_ reportObservables (Map.toList (pairGraphObservableReports gr))
+     mapM_ reportDesync (Map.toList (pairGraphDesyncReports gr))
+     mapM_ reportGasExhausted (Set.toList (pairGraphGasExhausted gr))
+     mapM_ reportMiscError (Map.toList (pairGraphMiscAnalysisErrors gr))
+ where
+   reportObservables (pPair, ObservableCounterexample oEvs pEvs) =
+     liftIO $ putStrLn $ show $ vcat $
+         [ pretty pPair <+> pretty "observable sequences disagree"
+         , pretty "Original sequence:"
+         ] ++
+         [ indent 2 (MT.prettyMemEvent ev) | ev <- oEvs ] ++
+         [ pretty "Patched sequence:" ] ++
+         [ indent 2 (MT.prettyMemEvent ev) | ev <- pEvs ]
+
+   reportDesync (pPair, TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) =
+     liftIO $ putStrLn $ show $ vcat $
+       [ pretty pPair <+> pretty "program control flow desynchronized"
+       , pretty ("  Original: 0x" ++ showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr)
+       , pretty ("  Patched:  0x" ++ showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr)
+       ]
+
+   reportGasExhausted pPair =
+     liftIO $ putStrLn $ show $ vcat $
+       [ pretty pPair <+> pretty "analysis failed to converge" ]
+
+   reportMiscError (pPair, msgs) =
+     liftIO $ putStrLn $ show $ vcat $
+       [ pretty pPair <+> pretty "additional analysis errors" ] ++
+       [ indent 2 (pretty "*" <+> pretty msg) | msg <- Set.toList msgs ]
 
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those
@@ -263,26 +392,27 @@ chooseWorkItem gr =
 
 -- | Update the abstract domain for the target graph node,
 --   decreasing the gas parameter as necessary.
---   This function will return Nothing instead if the edge
---   represented by the input graph nodes has exhausted
---   its gas parameter.
---
---    TODO, probably better to update the domain and just refuse
---    to add it back to the worklist instead.
+--   If we have run out of Gas, return a `Left` value.
+--   The domain will be updated, but the graph node will
+--   not be added back to the work list.
+--   Return a `Right` value if the update succeeded.
 updateDomain ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ point pair we are jumping from -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
   AbstractDomain sym arch {- ^ new domain value to insert -} ->
-  Maybe (PairGraph sym arch)
+  Either (PairGraph sym arch) (PairGraph sym arch)
 updateDomain gr pFrom pTo d
-  | g > 0 = Just gr
+  | g > 0 = Right gr
             { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
             , pairGraphGas      = Map.insert (pFrom,pTo) (Gas (g-1)) (pairGraphGas gr)
             , pairGraphWorklist = Set.insert pTo (pairGraphWorklist gr)
             }
 
-  | otherwise = Nothing
+  | otherwise =
+            Left gr
+            { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
+            }
 
   where
      -- Lookup the amount of remaining gas.  Initialize to a fresh value
@@ -348,11 +478,11 @@ freshDomain gr pTo d =
 --   error reports to determine an overall verdict for the programs.
 pairGraphComputeVerdict ::
   PairGraph sym arch ->
-  EquivM sym arch PEq.EquivalenceStatus
+  EquivM sym arch PE.EquivalenceStatus
 pairGraphComputeVerdict gr =
   if Map.null (pairGraphObservableReports gr) &&
      Map.null (pairGraphDesyncReports gr) &&
      Set.null (pairGraphGasExhausted gr) then
-    return PEq.Equivalent
+    return PE.Equivalent
   else
-    return PEq.Inequivalent
+    return PE.Inequivalent

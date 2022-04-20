@@ -112,7 +112,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
-
+import qualified Data.Macaw.BinaryLoader as MBL
 
 import qualified What4.Config as WC
 import qualified What4.Expr as WE
@@ -365,10 +365,13 @@ lookupArgumentNames pp = do
 
 freshSimVars ::
   forall sym (bin :: PBi.WhichBinary) arch.
+  PBi.KnownBinary bin =>
   PPa.BlockPair arch ->
   EquivM sym arch (SimVars sym arch bin)
 freshSimVars blocks = do
-  mem <- withSymIO $ \sym -> MT.initMemTrace sym (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+  binCtx <- getBinCtx @bin
+  let baseMem = MBL.memoryImage $ PMC.binary binCtx
+  mem <- withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   argNames <- lookupArgumentNames blocks
   regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
   return $ SimVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))

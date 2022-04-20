@@ -67,6 +67,7 @@ data EquivalenceContext sym arch where
     , originalIgnorePtrs :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
     , patchedIgnorePtrs :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
     , equatedFunctions :: [(PA.ConcreteAddress arch, PA.ConcreteAddress arch)]
+    , observableMemory :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
     } -> EquivalenceContext sym arch
 
 $(L.makeLenses ''EquivalenceContext)
