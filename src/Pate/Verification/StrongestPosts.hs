@@ -740,8 +740,8 @@ triageBlockTarget asm bundle currBlock d gr (PPa.PatchPair blktO blktP) =
 
          (Nothing, Nothing) -> withSym $ \sym ->
            do traceBundle bundle "No return target identified"
-              p <- do j <- PD.matchingExits bundle MS.MacawBlockEndJump
-                      b <- PD.matchingExits bundle MS.MacawBlockEndBranch
+              p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
+                      b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
                       liftIO $ W4.orPred sym j b
               withAssumption_ (pure p) $
                 handleJump bundle currBlock d gr pPair
@@ -825,7 +825,7 @@ handleOrdinaryFunCall bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
        do let gr' = addReturnVector gr (PPa.PatchPair oFun pFun) pRetPair
-          withAssumption_ (PD.matchingExits bundle MS.MacawBlockEndCall) $
+          withAssumption_ (PD.matchingExits bundle MCS.MacawBlockEndCall) $
             handleJump bundle currBlock d gr' pPair
      _ -> panic Verifier "handleOrdinaryFunCall"
               [ "Ordinary function call jumped to a location that is not a function start!"
