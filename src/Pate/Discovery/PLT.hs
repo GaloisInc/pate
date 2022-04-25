@@ -60,7 +60,11 @@ pltStubSymbols _ _ elfHeaderInfo = Map.fromList $ fromMaybe [] $ do
     Left _dynErr -> Nothing
     Right vm -> return vm
 
-  let revNameRelaMap = F.foldl' (pltStubAddress dynSec vam vreqm getRelSymIdx) [] rels
+  vdefm <- case EEP.dynVersionDefMap dynSec vam of
+    Left _dynErr -> Nothing
+    Right vm -> return vm
+
+  let revNameRelaMap = F.foldl' (pltStubAddress dynSec vam vdefm vreqm getRelSymIdx) [] rels
   let nameRelaMap = zip [0..] (reverse revNameRelaMap)
   pltGotSec <- listToMaybe (EE.findSectionByName (BSC.pack ".plt.got") elf)
            <|> listToMaybe (EE.findSectionByName (BSC.pack ".plt") elf)
@@ -76,8 +80,8 @@ pltStubSymbols _ _ elfHeaderInfo = Map.fromList $ fromMaybe [] $ do
     phdrs = EE.headerPhdrs elfHeaderInfo
     elfBytes = EE.headerFileContents elfHeaderInfo
 
-    pltStubAddress dynSec vam vreqm getRelSymIdx accum rel
-      | Right (symtabEntry, _versionedVal) <- EEP.dynSymEntry dynSec vam vreqm (getRelSymIdx rel) =
+    pltStubAddress dynSec vam vdefm vreqm getRelSymIdx accum rel
+      | Right (symtabEntry, _versionedVal) <- EEP.dynSymEntry dynSec vam vdefm vreqm (getRelSymIdx rel) =
           EE.steName symtabEntry : accum
       | otherwise = accum
 
