@@ -53,6 +53,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified Pate.Arch as PA
@@ -224,8 +225,8 @@ ppProgramDomains ppPred gr =
 --   computed counterexamples may actually not be realizable.
 data TotalityCounterexample ptrW =
   TotalityCounterexample
-    (Integer, MS.MacawBlockEndCase, Maybe (MM.MemSegmentOff ptrW, Text))
-    (Integer, MS.MacawBlockEndCase, Maybe (MM.MemSegmentOff ptrW, Text))
+    (Integer, MCS.MacawBlockEndCase, Maybe (MM.MemSegmentOff ptrW, Text))
+    (Integer, MCS.MacawBlockEndCase, Maybe (MM.MemSegmentOff ptrW, Text))
 
 
 -- | An observable counterexample consists of a sequence of observable events

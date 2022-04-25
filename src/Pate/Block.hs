@@ -27,11 +27,13 @@ module Pate.Block (
 
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
 import qualified Prettyprinter as PP
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PB
+
 
 -- | The way this block is entered dictates the initial equivalence relation we can assume
 data BlockEntryKind arch =
@@ -143,10 +145,12 @@ data BlockTarget arch bin =
   BlockTarget
     { targetCall :: ConcreteBlock arch bin
     , targetReturn :: Maybe (ConcreteBlock arch bin)
+    -- | The expected block exit case when this target is taken
+    , targetEndCase :: MCS.MacawBlockEndCase
     }
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
-  show (BlockTarget a b) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
+  show (BlockTarget a b _) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
 
 
 data FunctionEntry arch (bin :: PB.WhichBinary) =

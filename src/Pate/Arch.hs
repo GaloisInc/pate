@@ -30,6 +30,7 @@ import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Types as LCT
 
@@ -97,6 +98,7 @@ class
   , MS.GenArchInfo PMT.MemTraceK arch
   , MC.ArchConstraints arch
   , 16 <= MC.ArchAddrWidth arch
+  , MCS.HasArchEndCase arch
   ) => ValidArch arch where
   -- | Registers which are used for "raw" bitvectors (i.e. they are not
   -- used for pointers). These are assumed to always have region 0.

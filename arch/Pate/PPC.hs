@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE LambdaCase #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -44,6 +45,7 @@ import           Data.Macaw.PPC.PPCReg ()
 import           Data.Macaw.PPC.Symbolic ()
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Types as MT
 import qualified Data.Word.Indexed as W
 import qualified Dismantle.PPC as PPC
@@ -224,3 +226,8 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
+
+instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
+  archTermCase = \case
+    PPC.PPCSyscall -> MCS.MacawBlockEndCall
+    _ -> MCS.MacawBlockEndArch

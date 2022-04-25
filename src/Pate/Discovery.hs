@@ -49,6 +49,7 @@ import           GHC.Stack ( HasCallStack, callStack )
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.BinaryLoader.ELF as MBLE
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -146,11 +147,11 @@ discoverPairs bundle = do
 matchingExits ::
   forall sym arch.
   SimBundle sym arch ->
-  MS.MacawBlockEndCase ->
+  MCS.MacawBlockEndCase ->
   EquivM sym arch (WI.Pred sym)
 matchingExits bundle ecase = withSym $ \sym -> do
-  case1 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutO bundle) ecase
-  case2 <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutP bundle) ecase
+  case1 <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutO bundle) ecase
+  case2 <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutP bundle) ecase
   liftIO $ WI.andPred sym case1 case2
 
 -- | True when both the patched and original program necessarily end with
@@ -163,8 +164,8 @@ isMatchingCall bundle = withSym $ \sym -> do
   eqIPs <- liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue ipO) (PSR.macawRegValue ipP)
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- TODO: Why are some of the calls being classified as Arch exits?
-  isCall <- matchingExits bundle MS.MacawBlockEndCall
-  isArch <- matchingExits bundle MS.MacawBlockEndArch
+  isCall <- matchingExits bundle MCS.MacawBlockEndCall
+  isArch <- matchingExits bundle MCS.MacawBlockEndArch
   isExpectedExit <- liftIO $ WI.orPred sym isArch isCall
   goal <- liftIO $ WI.andPred sym eqIPs isExpectedExit
   withAssumption_ (exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)) $
@@ -179,7 +180,7 @@ compatibleTargets ::
   PB.BlockTarget arch PB.Original ->
   PB.BlockTarget arch PB.Patched ->
   Bool
-compatibleTargets blkt1 blkt2 =
+compatibleTargets blkt1 blkt2 = (PB.targetEndCase blkt1 == PB.targetEndCase blkt2) &&
   PB.concreteBlockEntry (PB.targetCall blkt1) == PB.concreteBlockEntry (PB.targetCall blkt2) &&
   case (PB.targetReturn blkt1, PB.targetReturn blkt2) of
     (Just blk1, Just blk2) -> PB.concreteBlockEntry blk1 == PB.concreteBlockEntry blk2
@@ -234,7 +235,10 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
     eqRetP <- liftPartialRel sym (MT.llvmPtrEq sym) retP targetRetP
     WI.andPred sym eqRetO eqRetP
 
-  liftIO $ WI.andPred sym eqCall eqRet
+  -- check that the exit condition is as expected
+  eqCase <- matchingExits bundle $ PB.targetEndCase blktO
+
+  liftIO $ WI.andPred sym eqCall eqRet >>= WI.andPred sym eqCase
   where
     regsO = PSS.simOutRegs $ PSS.simOutO bundle
     regsP = PSS.simOutRegs $ PSS.simOutP bundle
@@ -242,8 +246,8 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
     ipO = regsO ^. MC.curIP
     ipP = regsP ^. MC.curIP
 
-    retO = MS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutO bundle
-    retP = MS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutP bundle
+    retO = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutO bundle
+    retP = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutP bundle
 
 liftPartialRel ::
   CB.IsSymInterface sym =>
@@ -284,32 +288,10 @@ getSubBlocks b = withBinary @bin $
      mtgt <- liftIO $ PDP.parsedBlocksContaining b pfm
      tgts <- case mtgt of
        Just (PDP.ParsedBlocks pbs) ->
-         concat <$> mapM (\x -> concreteValidJumpTargets b pbs x) pbs
+         concat <$> mapM (\x -> concreteJumpTargets b x) pbs
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ (\x -> validateBlockTarget x) tgts
      return tgts
-
-
-concreteValidJumpTargets ::
-  PA.ValidArch arch =>
-  PB.KnownBinary bin =>
-  PB.ConcreteBlock arch bin ->
-  [MD.ParsedBlock arch ids] ->
-  MD.ParsedBlock arch ids ->
-  EquivM sym arch [PB.BlockTarget arch bin]
-concreteValidJumpTargets from allPbs pb = do
-  targets <- concreteJumpTargets from pb
-  let
-      thisAddr = PA.segOffToAddr (MD.pblockAddr pb)
-      addrs = map (PA.segOffToAddr . MD.pblockAddr) allPbs
-
-      isTargetExternal btgt = not ((PB.concreteAddress (PB.targetCall btgt)) `elem` addrs)
-      isTargetBackJump btgt = (PB.concreteAddress (PB.targetCall btgt)) < thisAddr
-      isTargetArch btgt = PB.concreteBlockEntry (PB.targetCall btgt) == PB.BlockEntryPostArch
-
-      isTargetValid btgt = isTargetArch btgt || isTargetExternal btgt || isTargetBackJump btgt
-
-  return $ filter isTargetValid targets
 
 validateBlockTarget ::
   HasCallStack =>
@@ -375,7 +357,8 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
 
   MD.ParsedArchTermStmt _ st ret -> do
     let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
-    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk
+    let MCS.MacawBlockEnd end_case _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
+    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk end_case
            | next <- (concreteNextIPs st)
            ]
 
@@ -387,13 +370,15 @@ jumpTarget ::
     PB.ConcreteBlock arch bin ->
     MC.ArchSegmentOff arch ->
     PB.BlockTarget arch bin
-jumpTarget from to = PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing
+jumpTarget from to =
+  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
 
 jumpTarget' ::
     PB.ConcreteBlock arch bin ->
     PA.ConcreteAddress arch ->
     PB.BlockTarget arch bin
-jumpTarget' from to = PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing
+jumpTarget' from to =
+  PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
 
 callTargets ::
     forall bin arch sym .
@@ -415,7 +400,7 @@ callTargets from next_ips ret = do
                                , PB.functionBinRepr = PC.knownRepr
                                }
      let pb = PB.functionEntryToConcreteBlock fe
-     return (PB.BlockTarget pb ret_blk)
+     return (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map

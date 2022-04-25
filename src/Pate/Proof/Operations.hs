@@ -50,7 +50,7 @@ import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Lang.Crucible.Simulator as CS
 
@@ -155,7 +155,7 @@ proofResult e = foldr merge PF.VerificationSuccess statuses
 
 noTransition ::
   PPa.PatchPair (PS.SimInput sym arch) ->
-  CS.RegValue sym (MS.MacawBlockEndType arch) ->
+  CS.RegValue sym (MCS.MacawBlockEndType arch) ->
   EquivM sym arch (PF.BlockSliceTransition sym arch)
 noTransition stIn blockEnd = do
   let

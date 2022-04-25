@@ -49,6 +49,7 @@ import qualified Lang.Crucible.Utils.MuxTree as MT
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Pate.Abort as PAb
 import qualified Pate.Arch as PA
@@ -239,7 +240,7 @@ returnSiteBundle preD pPair =
      let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair)
      let simInP    = PS.SimInput pVarState (PPa.pPatched pPair)
 
-     blockEndVal <- liftIO (MS.initBlockEnd (Proxy @arch) sym)
+     blockEndVal <- liftIO (MCS.initBlockEnd (Proxy @arch) sym)
 
      let simOutO   = PS.SimOutput oVarState blockEndVal
      let simOutP   = PS.SimOutput pVarState blockEndVal
@@ -531,9 +532,9 @@ doCheckTotality asm bundle preD exits =
        -- TODO, I really don't understand this abort case stuff, but it was copied
        -- from the triple verifier.
        isReturn <- do
-         bothReturn <- PD.matchingExits bundle MS.MacawBlockEndReturn
+         bothReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
          abortO <- PAb.isAbortedStatePred (PPa.getPair @PBi.Original (simOut bundle))
-         returnP <- liftIO $ MS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) MS.MacawBlockEndReturn
+         returnP <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) MCS.MacawBlockEndReturn
          abortCase <- liftIO $ W4.andPred sym abortO returnP
          liftIO $ W4.orPred sym bothReturn abortCase
 
@@ -603,10 +604,10 @@ groundBlockEndCase ::
   sym ->
   Proxy arch ->
   W4.GroundEvalFn t ->
-  LCS.RegValue sym (MS.MacawBlockEndType arch) ->
-  IO MS.MacawBlockEndCase
+  LCS.RegValue sym (MCS.MacawBlockEndType arch) ->
+  IO MCS.MacawBlockEndCase
 groundBlockEndCase sym prx evalFn v =
-  do mt <- MS.blockEndCase prx sym v
+  do mt <- MCS.blockEndCase prx sym v
      groundMuxTree sym evalFn mt
 
 groundObservableSequence ::
@@ -687,7 +688,7 @@ updateReturnNode bPair asm bundle preD gr =
     withEmptyAssumptionFrame $
     withAssumption_ (return asm) $
     do -- TODO? use withSatAssumption here, or something similar using an online solver?
-       isReturn <- PD.matchingExits bundle MS.MacawBlockEndReturn
+       isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
        case W4.asConstantPred isReturn of
          Just False -> return gr
          _ -> withAssumption_ (pure isReturn) $
@@ -739,8 +740,8 @@ triageBlockTarget asm bundle currBlock d gr (PPa.PatchPair blktO blktP) =
 
          (Nothing, Nothing) -> withSym $ \sym ->
            do traceBundle bundle "No return target identified"
-              p <- do j <- PD.matchingExits bundle MS.MacawBlockEndJump
-                      b <- PD.matchingExits bundle MS.MacawBlockEndBranch
+              p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
+                      b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
                       liftIO $ W4.orPred sym j b
               withAssumption_ (pure p) $
                 handleJump bundle currBlock d gr pPair
@@ -824,7 +825,7 @@ handleOrdinaryFunCall bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
        do let gr' = addReturnVector gr (PPa.PatchPair oFun pFun) pRetPair
-          withAssumption_ (PD.matchingExits bundle MS.MacawBlockEndCall) $
+          withAssumption_ (PD.matchingExits bundle MCS.MacawBlockEndCall) $
             handleJump bundle currBlock d gr' pPair
      _ -> panic Verifier "handleOrdinaryFunCall"
               [ "Ordinary function call jumped to a location that is not a function start!"

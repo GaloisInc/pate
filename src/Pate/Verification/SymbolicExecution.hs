@@ -29,6 +29,7 @@ import qualified What4.Interface as W4
 import qualified What4.ProgramLoc as W4L
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Discovery.State as MD
 import qualified Data.Macaw.Symbolic as MS
@@ -63,17 +64,16 @@ archStructRepr = do
 -- Note that we consider any error blocks as terminal. We also consider any arch
 -- term statement as terminal; those are usually some kind of
 -- architecture-specific trap instruction.
-isTerminalBlock :: MD.ParsedBlock arch ids -> Bool
-isTerminalBlock pb = case MD.pblockTermStmt pb of
-  MD.ParsedCall{} -> True
-  MD.PLTStub{} -> True
-  MD.ParsedJump{} -> False
-  MD.ParsedBranch{} -> False
-  MD.ParsedLookupTable{} -> False
-  MD.ParsedReturn{} -> False
-  MD.ParsedArchTermStmt{} -> True -- TODO: think harder about this
-  MD.ParsedTranslateError{} -> True
-  MD.ClassifyFailure{} -> True
+isTerminalBlock :: MCS.HasArchEndCase arch => MD.ParsedBlock arch ids -> Bool
+isTerminalBlock pb =
+  let MCS.MacawBlockEnd c _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
+  in case c of
+    MCS.MacawBlockEndJump -> False
+    MCS.MacawBlockEndCall -> True
+    MCS.MacawBlockEndReturn -> False
+    MCS.MacawBlockEndBranch -> False
+    MCS.MacawBlockEndFail -> True
+    MCS.MacawBlockEndArch -> True
 
 -- | Construct an initial 'CS.SimContext' for Crucible
 --
@@ -130,7 +130,7 @@ getGlobals ::
   EquivM sym arch (CS.SymGlobalState sym)
 getGlobals simInput = withValid $ withSym $ \sym -> do
   env <- CMR.ask
-  blkend <- liftIO $ MS.initBlockEnd (Proxy @arch) sym
+  blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym
   return $
       CGS.insertGlobal (envMemTraceVar env) (PS.simInMem simInput)
     $ CGS.insertGlobal (envBlockEndVar env) blkend
@@ -173,7 +173,7 @@ getGPValueAndTrace ::
     ( W4.Pred sym
     , MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
     , PMT.MemTraceImpl sym (MM.ArchAddrWidth arch)
-    , CS.RegValue sym (MS.MacawBlockEndType arch)
+    , CS.RegValue sym (MCS.MacawBlockEndType arch)
     )
 getGPValueAndTrace (CS.FinishedResult _ pres) = withSym $ \sym -> do
   mem <- CMR.asks envMemTraceVar
@@ -246,7 +246,8 @@ simulate simInput = withBinary @bin $ do
     ha <- CMR.asks (PMC.handles . envCtx)
     be <- CMR.asks envBlockEndVar
     let posFn = W4L.OtherPos . fromString . show
-    liftIO $ MS.mkBlockSliceCFG fns ha posFn pb nonTerminal terminal killEdges (Just be)
+    let sliceFns = MCS.blockEndSliceFns fns be
+    liftIO $ MS.mkBlockSliceCFG fns sliceFns ha posFn pb nonTerminal terminal killEdges
   let preRegs = PS.simInRegs simInput
   preRegsAsn <- regStateToAsn preRegs
   archRepr <- archStructRepr

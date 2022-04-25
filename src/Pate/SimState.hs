@@ -75,6 +75,7 @@ import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
@@ -120,7 +121,7 @@ simInRegs = simRegs . simInState
 data SimOutput sym arch bin = SimOutput
   {
     simOutState :: SimState sym arch bin
-  , simOutBlockEnd :: CS.RegValue sym (MS.MacawBlockEndType arch)
+  , simOutBlockEnd :: CS.RegValue sym (MCS.MacawBlockEndType arch)
   }
 
 simOutMem ::

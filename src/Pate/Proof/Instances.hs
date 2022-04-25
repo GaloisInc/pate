@@ -72,6 +72,7 @@ import qualified Lang.Crucible.Simulator.RegValue as CS
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Symbolic as MS
 
 import qualified Prettyprinter as PP
@@ -389,7 +390,7 @@ instance PP.Pretty (GroundMacawValue tp) where
 
 data GroundBlockExit arch where
   GroundBlockExit ::
-    { grndBlockCase :: MS.MacawBlockEndCase
+    { grndBlockCase :: MCS.MacawBlockEndCase
     , grndBlockReturn :: Maybe (GroundLLVMPointer (MM.ArchAddrWidth arch))
     } -> GroundBlockExit arch
   deriving Eq
@@ -529,12 +530,12 @@ groundBlockEnd ::
   forall grnd arch.
   PG.IsGroundSym grnd =>
   Proxy arch ->
-  CS.RegValue grnd (MS.MacawBlockEndType arch) ->
+  CS.RegValue grnd (MCS.MacawBlockEndType arch) ->
   GroundBlockExit arch
 groundBlockEnd arch blkend =
   GroundBlockExit
     (PG.groundMacawEndCase arch blkend)
-    (fmap groundLLVMPointer $ PG.groundPartial (MS.blockEndReturn arch blkend))
+    (fmap groundLLVMPointer $ PG.groundPartial (MCS.blockEndReturn arch blkend))
 
   
 ppRegVal ::
@@ -641,11 +642,11 @@ cellInGroundDomain dom cell = case isStackCell cell of
   True -> cellInMemDomain (PED.eqDomainStackMemory dom) cell
   False -> cellInMemDomain (PED.eqDomainGlobalMemory dom) cell
 
-ppExitCase :: MS.MacawBlockEndCase -> String
+ppExitCase :: MCS.MacawBlockEndCase -> String
 ppExitCase ec = case ec of
-  MS.MacawBlockEndJump -> "arbitrary jump"
-  MS.MacawBlockEndCall -> "function call"
-  MS.MacawBlockEndReturn -> "function return"
-  MS.MacawBlockEndBranch -> "branch"
-  MS.MacawBlockEndArch -> "syscall"
-  MS.MacawBlockEndFail -> "analysis failure"
+  MCS.MacawBlockEndJump -> "arbitrary jump"
+  MCS.MacawBlockEndCall -> "function call"
+  MCS.MacawBlockEndReturn -> "function return"
+  MCS.MacawBlockEndBranch -> "branch"
+  MCS.MacawBlockEndArch -> "arch-specific"
+  MCS.MacawBlockEndFail -> "analysis failure"
