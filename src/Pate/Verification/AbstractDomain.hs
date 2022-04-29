@@ -74,7 +74,8 @@ data AbstractDomainBody sym arch where
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomainBody sym arch
 
-
+-- | Defining the known range for a given location. Currently this is either a constant
+-- value or an unconstrained value.
 data AbsRange (tp :: W4.BaseType) where
   AbsIntConstant :: Integer -> AbsRange W4.BaseIntegerType
   AbsBVConstant :: 1 W4.<= w => W4.NatRepr w -> BV.BV w -> AbsRange (W4.BaseBVType w)
@@ -103,11 +104,15 @@ instance Eq (AbsRange tp) where
     Just Refl -> True
     Nothing -> False
 
--- | Combine abstract ranges. Currently ranges only specify equality, and so when combining
--- they either agree on the same value, or they collapse to an unconstrained value
+-- | Find an 'AbsRange' that represents the intersection of two ranges.
+-- In the case where the ranges don't intersect (e.g. they represent two different
+-- constant values), the resulting range is unconstrained.
 combineAbsRanges :: AbsRange tp -> AbsRange tp -> AbsRange tp
 combineAbsRanges r1 r2 = if r1 == r2 then r1 else AbsUnconstrained (absRangeRepr r1)
 
+-- | An abstract value keyed on the macaw type, which defines an independent
+-- 'AbsRange' for each component base expression (i.e. for a pointer there is a separate
+-- range for the region and offset).
 data MacawAbstractValue sym (tp :: MT.Type) where
   MacawAbstractValue ::
       { macawAbsVal :: Ctx.Assignment AbsRange (PSR.CrucBaseTypes (MS.ToCrucibleType tp))
@@ -115,9 +120,12 @@ data MacawAbstractValue sym (tp :: MT.Type) where
       -> MacawAbstractValue sym tp
   deriving Eq
 
+-- | An abstract value for a pointer, with a separate 'AbsRange' for the region and offset.
 data MemAbstractValue sym w where
   MemAbstractValue :: (MacawAbstractValue sym (MT.BVType (8 W4.* w))) -> MemAbstractValue sym w
 
+
+-- | Mapping from locations to abstract values.
 data AbstractDomainVals sym arch (bin :: PB.WhichBinary) where
   AbstractDomainVals ::
     { absRegVals :: MM.RegState (MM.ArchReg arch) (MacawAbstractValue sym)
@@ -128,7 +136,8 @@ data AbstractDomainVals sym arch (bin :: PB.WhichBinary) where
   -- | A "top" domain contains no information and is trivially satisfied
   AbstractDomainValsTop :: AbstractDomainVals sym arch bin  
   
-
+-- | Intersect the 'AbsRange' entries for each of the components of
+-- the given abstract values using 'combineAbsRanges'. 
 combineAbsVals ::
   MacawAbstractValue sym tp ->
   MacawAbstractValue sym tp ->
@@ -136,11 +145,13 @@ combineAbsVals ::
 combineAbsVals abs1 abs2 = MacawAbstractValue $
   Ctx.zipWith combineAbsRanges (macawAbsVal abs1) (macawAbsVal abs2)
 
+-- | True if the given abstract value contains no constraints.
 isUnconstrained ::
   MacawAbstractValue sym tp -> Bool
 isUnconstrained absv = TFC.foldrFC (\v b -> b && case v of { AbsUnconstrained{} -> True; _ -> False} ) True (macawAbsVal absv)
 
-
+-- | Traverse the component expressions of the given 'PSR.MacawRegEntry' and construct
+-- a 'MacawAbstractValue' by computing an 'AbsRange' for each component using the given function.
 getAbsVal ::
   Monad m =>
   IO.MonadIO m =>
@@ -174,7 +185,10 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (RelaxLocs sym arc
   mempty = RelaxLocs mempty mempty
 
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
--- information that we can establish for the registers, memory reads and memory writes
+-- information that we can establish for the registers, memory reads and memory writes.
+-- The input 'AbstractDomainVals' represents a domain that was previously computed over
+-- the same slice, and is being further constrained (i.e. after the assumed pre-domain
+-- has been weakened).
 getAbsDomainVals ::
   forall sym arch bin m.
   Monad m =>
@@ -216,7 +230,7 @@ getAbsDomainVals sym prev f stOut = case prev of
 
     relaxMemVal ::
       PMC.MemCell sym arch w ->
-      MemAbstractValue sym w ->
+      MemAbstractValue sym w {- ^ previous abstract value -} ->
       CMW.WriterT (RelaxLocs sym arch) m (Maybe (MemAbstractValue sym w))
     relaxMemVal cell (MemAbstractValue absValPrev) = do
       MemAbstractValue absValNew <- CMW.lift $ getMemAbsVal cell
