@@ -10,6 +10,8 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Pate.Verification.AbstractDomain
   ( AbstractDomain
@@ -56,6 +58,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register.Traversal as PRt
+import qualified Pate.ExprMappable as PEM
 
 -- | Defining abstract domains which propagate forwards during strongest
 -- postcondition analysis.
@@ -225,7 +228,7 @@ getAbsDomainVals sym prev f stOut = case prev of
       PMC.MemCell sym arch w ->
       m (MemAbstractValue sym w)
     getMemAbsVal cell = do
-      val <- IO.liftIO $ PMC.readMemCell sym (MT.memState $ PS.simOutMem stOut) cell
+      val <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
       MemAbstractValue <$> getAbsVal sym f (PSR.ptrToEntry val)
 
     relaxMemVal ::
@@ -314,8 +317,17 @@ applyAbsDomainVals sym stIn vals = do
       PS.AssumptionFrame sym ->
       IO (PS.AssumptionFrame sym)
     getCell cell (MemAbstractValue absVal) frame = do
-      val <- IO.liftIO $ PMC.readMemCell sym (MT.memState $ PS.simInMem stIn) cell
+      val <- IO.liftIO $ PMC.readMemCell sym (PS.simInMem stIn) cell
       frame' <- applyAbsDomainVal sym (PSR.ptrToEntry val) absVal
       return $ frame <> frame'
 
     
+instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
+  mapExpr sym f vals = case vals of
+    AbstractDomainVals regVals memVals -> do
+      memVals' <- forM (MapF.toAscList memVals) $ \(MapF.Pair cell v) -> do
+        cell' <- PEM.mapExpr sym f cell
+        return $ MapF.Pair cell' v
+      return $ AbstractDomainVals regVals (MapF.fromList memVals')
+    AbstractDomainValsBottom -> return AbstractDomainValsBottom
+    AbstractDomainValsTop -> return AbstractDomainValsTop
