@@ -352,15 +352,16 @@ applyExprBindings' ::
 applyExprBindings' sym cache binds = rewriteSubExprs' sym cache (\e' -> MapF.lookup e' binds)
 
 mapExprPtr ::
-  forall sym w.
-  (W4.IsExprBuilder sym) =>
+  forall sym m w.
+  W4.IsExprBuilder sym =>
+  IO.MonadIO m =>
   sym ->
-  (forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)) ->
+  (forall tp. W4.SymExpr sym tp -> m (W4.SymExpr sym tp)) ->
   CLM.LLVMPtr sym w ->
-  IO (CLM.LLVMPtr sym w)  
+  m (CLM.LLVMPtr sym w)
 mapExprPtr sym f (CLM.LLVMPointer reg off) = do
-  regInt <- W4.natToInteger sym reg
-  reg' <- W4.integerToNat sym =<< f regInt
+  regInt <- (IO.liftIO $ W4.natToInteger sym reg) >>= f
+  reg' <- IO.liftIO $ W4.integerToNat sym regInt
   off' <- f off
   return $ CLM.LLVMPointer reg' off'
 

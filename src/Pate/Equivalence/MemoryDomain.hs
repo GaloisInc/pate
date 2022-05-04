@@ -214,14 +214,10 @@ addFootPrints sym foots memDom = do
   return $ memDom { memDomainPred = memLocs' }
 
 instance PEM.ExprMappable sym (MemoryDomain sym arch) where
-  foldMapExpr sym f memDom b = do
-    (memPred, b') <- PEM.foldMapExpr sym f (memDomainPred memDom) b
-    (pol', b'') <- f (memDomainPolarity memDom) b'
-    return $ (MemoryDomain memPred pol', b'')
-
-  foldExpr sym f memDom b =
-    PEM.foldExpr sym f (memDomainPred memDom) b >>= f (memDomainPolarity memDom)
-
+  mapExpr sym f memDom = do
+    memPred <- PEM.mapExpr sym f (memDomainPred memDom)
+    pol' <- f (memDomainPolarity memDom)
+    return $ MemoryDomain memPred pol'
 
 ppMemoryDomainEntries ::
   forall sym arch a.

@@ -27,6 +27,7 @@ module Pate.MemCell (
   ) where
 
 import           Control.Monad ( foldM )
+import qualified Control.Monad.IO.Class as IO
 
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
@@ -236,20 +237,15 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
-
 instance PEM.ExprMappable sym (MemCellPred sym arch) where
-  foldMapExpr sym f (MemCellPred memPred) b = do
+  mapExpr sym f (MemCellPred memPred) = do
     let (ks, vs) = unzip $ Map.toAscList memPred
-    (ks', b') <- PEM.foldMapExpr sym f ks b
-    (vs', b'') <- PEM.foldMapExpr sym f (map (PEM.ToExprMappable @sym) vs) b'
+    ks' <- PEM.mapExpr sym f ks
+    vs' <- PEM.mapExpr sym f (map (PEM.ToExprMappable @sym) vs)
     let vs'' = map PEM.unEM vs'
-    memDom' <- case ks == ks' of
+    case ks == ks' of
       True -> return $ MemCellPred (Map.fromAscList (zip ks vs''))
-      False -> predFromList sym (zip ks' vs'')
-    return $ (memDom', b'')
-
-  foldExpr sym f (MemCellPred memPred) b =
-    PEM.foldExpr sym f (Map.toList $ fmap (PEM.ToExprMappable @sym) memPred) b
+      False -> IO.liftIO $ predFromList sym (zip ks' vs'')
 
 ppCell :: (WI.IsSymExprBuilder sym) => MemCell sym arch w -> PP.Doc a
 ppCell cell =

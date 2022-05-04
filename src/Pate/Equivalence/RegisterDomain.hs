@@ -186,7 +186,6 @@ registerInDomain sym reg dom = case registerInDomain' reg dom of
 
 instance PEM.ExprMappable sym (RegisterDomain sym arch) where
   mapExpr _sym f (RegisterDomain dom) = mkDomain <$> traverse f dom
-  foldExpr _sym f (RegisterDomain dom) b = foldM (\b' p -> f p b') b (Map.elems dom)
 
 ppRegisterDomain ::
   forall sym arch a.
