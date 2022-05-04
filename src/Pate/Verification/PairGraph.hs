@@ -182,7 +182,7 @@ ppProgramDomains ::
 ppProgramDomains ppPred gr =
   vcat
   [ vcat [ pretty pPair
-         , indent 4 (PE.ppEquivalenceDomain ppPred (PS.specBody ad))
+         , indent 4 (PAD.ppAbstractDomain ppPred (PS.specBody ad))
          ]
   | (pPair, ad) <- Map.toList (pairGraphDomains gr)
   ]
@@ -308,7 +308,8 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
-           idom <- PVD.universalDomainSpec bPair
+           iEqDom <- PVD.universalDomainSpec bPair
+           let idom = fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.AbstractDomainValsTop PAD.AbstractDomainValsTop)) iEqDom
            return (freshDomain gr (GraphNode bPair) idom)
 
 -- | Given a pair graph, chose the next node in the graph to visit

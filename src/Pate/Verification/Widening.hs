@@ -71,6 +71,8 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
+import qualified Pate.Verification.AbstractDomain as PAD
+import           Pate.Verification.AbstractDomain ( AbstractDomain )
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -79,12 +81,15 @@ import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 makeFreshAbstractDomain ::
   GraphNode arch ->
   EquivM sym arch (AbstractDomain sym arch)
-makeFreshAbstractDomain (GraphNode pPair) = PVD.universalDomainSpec pPair
-makeFreshAbstractDomain (ReturnNode fPair) =
+makeFreshAbstractDomain (GraphNode pPair) = do
+  iEqSpec <- PVD.universalDomainSpec pPair
+  return $ fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.AbstractDomainValsBottom PAD.AbstractDomainValsBottom)) iEqSpec
+makeFreshAbstractDomain (ReturnNode fPair) = do
   -- TODO, this isn't really right, but seems pretty harmless.  The
   -- only thing the concrete block value is used for is to assign more
   -- human-readable names to arguments if we have debug information.
-  PVD.universalDomainSpec (TF.fmapF PB.functionEntryToConcreteBlock fPair)
+  iEqSpec <- PVD.universalDomainSpec (TF.fmapF PB.functionEntryToConcreteBlock fPair)
+  return $ fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.AbstractDomainValsBottom PAD.AbstractDomainValsBottom)) iEqSpec
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -231,9 +236,8 @@ widenPostcondition bundle preD postD0 =
          asm1 <- PS.getAssumedPred sym asmFrame
          let asm2 = PS.specAsm preD
          asm <- W4.andPred sym asm1 asm2
-         eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
-         eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
-         W4.andPred sym asm eqInputsPred
+         absDomPred <- PAD.absDomainToPrecond sym eqCtx bundle (PS.specBody preD)
+         W4.andPred sym asm absDomPred
 
        traceBundle bundle "Entering widening loop"
 
@@ -275,14 +279,14 @@ widenPostcondition bundle preD postD0 =
    widenLoop sym bak (Gas i) eqCtx postD mlocs =
      do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
         let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
-        (postCondAsm, postCondStatePred) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
+        (postCondAsm, postDomBody) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
 
         eqPost <- liftIO $ PE.eqDomPost sym
                               (PPa.pOriginal (PS.simOut bundle))
                               (PPa.pPatched  (PS.simOut bundle))
                               eqCtx
                               (PS.specBody preD)
-                              postCondStatePred
+                              (PAD.absDomEq postDomBody)
         eqPostPred <- liftIO (PE.postCondPredicate sym eqPost)
 
         res <- IO.withRunInIO $ \inIO ->
@@ -304,7 +308,7 @@ widenPostcondition bundle preD postD0 =
                    if i <= 0 then inIO $
                      -- we ran out of gas
                      do slice <- PP.simBundleToSlice bundle
-                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
+                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ PS.specBody preD) (PAD.absDomEq $ PS.specBody postD) slice (SymGroundEvalFn evalFn)
                         let msg = unlines [ "Ran out of gas performing local widenings"
                                           , show (pretty ineqRes)
                                           ]
@@ -312,7 +316,7 @@ widenPostcondition bundle preD postD0 =
                    else
                      -- The current execution does not satisfy the postcondition, and we have
                      -- a counterexample.
-                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD)
+                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD mlocs postD)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -382,7 +386,7 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
 
     , do slice <- PP.simBundleToSlice bundle
          ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
-                         (PS.specBody preD) (PS.specBody postD) slice (SymGroundEvalFn evalFn)
+                         (PAD.absDomEq $ PS.specBody preD) (PAD.absDomEq $ PS.specBody postD) slice (SymGroundEvalFn evalFn)
          let msg = unlines [ "Could not find any values to widen!"
                            , show (pretty ineqRes)
                            ]
@@ -411,18 +415,18 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
   do xs <- case memCellSource of
              LocalChunkWrite -> findUnequalHeapWrites sym evalFn bundle eqCtx
              PreDomainCell   -> findUnequalHeapMemCells sym evalFn bundle eqCtx preD
-     zs <- filterCells sym evalFn (PEE.eqDomainGlobalMemory (PS.specBody postD)) xs
+     zs <- filterCells sym evalFn (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD)) xs
 
      if null zs then
        return NoWideningRequired
      else
        do -- TODO, this could maybe be less aggressive
           newCells <- liftIO $ PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
-          let heapDom = PEM.memDomainPred (PEE.eqDomainGlobalMemory (PS.specBody postD))
+          let heapDom = PEM.memDomainPred (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD))
           heapDom' <- liftIO $ PMc.mergeMemCellPred sym heapDom newCells
-          let md' = (PEE.eqDomainGlobalMemory (PS.specBody postD)){ PEM.memDomainPred = heapDom' }
-          let pred' = (PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
-          let postD' = postD{ PS.specBody = pred' }
+          let md' = (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD)){ PEM.memDomainPred = heapDom' }
+          let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
+          let postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
           return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
 
 
@@ -458,17 +462,17 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD me
   do xs <- case memCellSource of
              LocalChunkWrite -> findUnequalStackWrites sym evalFn bundle eqCtx
              PreDomainCell   -> findUnequalStackMemCells sym evalFn bundle eqCtx preD
-     zs <- filterCells sym evalFn (PEE.eqDomainStackMemory (PS.specBody postD)) xs
+     zs <- filterCells sym evalFn (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD)) xs
      if null zs then
        return NoWideningRequired
      else
        do -- TODO, this could maybe be less aggressive
           newCells <- liftIO $ PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
-          let stackDom = PEM.memDomainPred (PEE.eqDomainStackMemory (PS.specBody postD))
+          let stackDom = PEM.memDomainPred (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD))
           stackDom' <- liftIO $ PMc.mergeMemCellPred sym stackDom newCells
-          let md' = (PEE.eqDomainStackMemory (PS.specBody postD)){ PEM.memDomainPred = stackDom' }
-          let pred' = (PS.specBody postD){ PEE.eqDomainStackMemory = md' }
-          let postD' = postD{ PS.specBody = pred' }
+          let md' = (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD)){ PEM.memDomainPred = stackDom' }
+          let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainStackMemory = md' }
+          let postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
           return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
 
 
@@ -530,7 +534,7 @@ findUnequalHeapMemCells ::
   AbstractDomain sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalHeapMemCells sym evalFn bundle eqCtx preD =
-  do let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PS.specBody preD))
+  do let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
@@ -551,7 +555,7 @@ findUnequalStackMemCells ::
   AbstractDomain sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalStackMemCells sym evalFn bundle eqCtx preD =
-  do let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PS.specBody preD))
+  do let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody preD))
      let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
      let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
 
@@ -586,13 +590,14 @@ widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD =
        -- TODO, widen less aggressively using the path condition or something?
        let regs' = foldl
                      (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
-                     (PEE.eqDomainRegisters (PS.specBody postD))
+                     (PEE.eqDomainRegisters (PAD.absDomEq $ PS.specBody postD))
                      newRegs
-           pred' = (PS.specBody postD)
+           pred' = (PAD.absDomEq $ PS.specBody postD)
                    { PEE.eqDomainRegisters = regs'
                    }
+           postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
            locs = WidenLocs (Set.fromList newRegs) mempty
-        in return (Widen locs postD{ PS.specBody = pred' })
+        in return (Widen locs postD')
 
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time

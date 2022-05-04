@@ -80,6 +80,8 @@ import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.Widening
+import qualified Pate.Verification.AbstractDomain as PAD
+import           Pate.Verification.AbstractDomain ( AbstractDomain )
 
 -- Overall module notes/thoughts
 --
@@ -338,11 +340,7 @@ doCheckObservables asm bundle preD =
 -}
 
        precond <- liftIO $ do
-         eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
-         eqPred   <- PE.preCondPredicate sym
-                        (PPa.pOriginal (PS.simIn bundle))
-                        (PPa.pPatched  (PS.simIn bundle))
-                        eqInputs
+         eqPred <- PAD.absDomainToPrecond sym eqCtx bundle (PS.specBody preD)
          W4.andPred sym asm eqPred
 
        let doPanic = panic Solver "checkObservables" ["Online solving not enabled"]
@@ -521,8 +519,7 @@ doCheckTotality asm bundle preD exits =
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
        precond <- liftIO $ do
-         eqInputs <- PE.getPredomain sym bundle eqCtx (PS.specBody preD)
-         eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
+         eqInputsPred <- PAD.absDomainToPrecond sym eqCtx bundle (PS.specBody preD)
          W4.andPred sym asm eqInputsPred
 
        -- compute the condition that leads to each of the computed
@@ -893,7 +890,7 @@ mkSimBundle pPair d =
      let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair)
      let simInP    = PS.SimInput pVarState (PPa.pPatched pPair)
 
-     let rd = PE.eqDomainRegisters (PS.specBody d)
+     let rd = PE.eqDomainRegisters (PAD.absDomEq $ PS.specBody d)
 
      withAssumptionFrame (PVV.validInitState (Just pPair) oVarState pVarState) $
        do traceBlockPair pPair "Simulating original blocks"
