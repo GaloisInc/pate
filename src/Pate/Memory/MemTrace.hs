@@ -69,6 +69,7 @@ import Unsafe.Coerce
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.), (.~))
 import           Control.Monad.State
+import qualified Control.Monad.IO.Class as IO
 import qualified Data.BitVector.Sized as BV
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -1711,18 +1712,24 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
 
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
   mapExpr sym f = evalWithFreshCache $ \rec -> \case
-    SymSequenceNil -> nilSymSequence sym
+    SymSequenceNil -> IO.liftIO $ nilSymSequence sym
     SymSequenceCons _ x xs ->
       do x'  <- PEM.mapExpr sym f x
          xs' <- rec xs
-         consSymSequence sym x' xs'
+         IO.liftIO $ consSymSequence sym x' xs'
     SymSequenceAppend _ xs ys ->
      do xs' <- rec xs
         ys' <- rec ys
-        appendSymSequence sym xs' ys'
+        IO.liftIO $ appendSymSequence sym xs' ys'
     SymSequenceMerge _ p xs ys ->
      do p' <- f p
-        iteM muxSymSequence sym p' (rec xs) (rec ys)
+        case asConstantPred p' of
+          Just True -> rec xs
+          Just False -> rec ys
+          Nothing -> do
+            xs' <- rec xs
+            ys' <- rec ys
+            IO.liftIO $ muxSymSequence sym p' xs' ys'
 
 instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do
@@ -1737,7 +1744,6 @@ instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do
     memArr' <- f $ memArr memSt
     return $ MemTraceState memArr'
-  foldExpr _sym f memSt b = f (memArr memSt) b
 
 instance PEM.ExprMappable sym (MemFootprint sym arch) where
   mapExpr sym f (MemFootprint ptr w dir cond end) = do

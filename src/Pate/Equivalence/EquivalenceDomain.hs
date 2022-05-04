@@ -87,8 +87,3 @@ instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
     stack <- PEM.mapExpr sym f (eqDomainStackMemory dom)
     mem <- PEM.mapExpr sym f (eqDomainGlobalMemory dom)
     return $ EquivalenceDomain regs stack mem
-
-  foldExpr sym f dom b =
-        PEM.foldExpr sym f (eqDomainRegisters dom) b
-    >>= PEM.foldExpr sym f (eqDomainStackMemory dom)
-    >>= PEM.foldExpr sym f (eqDomainGlobalMemory dom)
