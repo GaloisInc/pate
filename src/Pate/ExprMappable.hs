@@ -91,6 +91,11 @@ instance ExprMappable sym f => ExprMappable sym ((Const f) tp)  where
 instance (forall tp. ExprMappable sym (f tp)) => ExprMappable sym (Some f) where
   mapExpr sym f (Some v) = Some <$> mapExpr sym f v
 
+instance ExprMappable sym a => ExprMappable sym (Maybe a) where
+  mapExpr sym f ma = case ma of
+    Just a -> Just <$> mapExpr sym f a
+    Nothing -> return Nothing
+
 instance ExprMappable sym (Ctx.Assignment f Ctx.EmptyCtx) where
   mapExpr _ _ = return
 

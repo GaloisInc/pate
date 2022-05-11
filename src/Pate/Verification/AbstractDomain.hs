@@ -19,9 +19,13 @@ module Pate.Verification.AbstractDomain
   , AbstractDomainBody(..)
   , AbsRange(..)
   , AbstractDomainVals(..)
-  , getAbsDomainVals
+  , RelaxLocs(..)
+  , groundToAbsRange
+  , widenAbsDomainVals
+  , initAbsDomainVals
   , absDomainValsToPred
   , absDomainToPrecond
+  , absDomainToPostCond
   , ppAbstractDomain
   ) where
 
@@ -43,6 +47,7 @@ import qualified Data.Parameterized.TraversableFC as TFC
 import qualified What4.Utils.AbstractDomains as WAbs
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
+import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Symbol as W4S
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -80,7 +85,7 @@ data AbstractDomainBody sym arch where
   AbstractDomainBody ::
     { absDomEq :: PED.EquivalenceDomain sym arch
       -- ^ specifies which locations are equal between the original vs. patched programs
-    , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
+    , absDomVals :: Maybe (PPa.PatchPair (AbstractDomainVals sym arch))
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomainBody sym arch
 
@@ -93,6 +98,14 @@ data AbsRange (tp :: W4.BaseType) where
   AbsBVConstant :: 1 W4.<= w => W4.NatRepr w -> BV.BV w -> AbsRange (W4.BaseBVType w)
   AbsBoolConstant :: Bool -> AbsRange W4.BaseBoolType
   AbsUnconstrained :: W4.BaseTypeRepr tp -> AbsRange tp
+
+groundToAbsRange :: W4.BaseTypeRepr tp -> W4G.GroundValue tp -> AbsRange tp
+groundToAbsRange repr v = case repr of
+  W4.BaseIntegerRepr -> AbsIntConstant v
+  W4.BaseBVRepr w -> AbsBVConstant w v
+  W4.BaseBoolRepr -> AbsBoolConstant v
+  _ -> AbsUnconstrained repr
+
 
 absRangeRepr :: AbsRange tp -> W4.BaseTypeRepr tp
 absRangeRepr r = case r of
@@ -143,9 +156,9 @@ data AbstractDomainVals sym arch (bin :: PB.WhichBinary) where
     { absRegVals :: MM.RegState (MM.ArchReg arch) (MacawAbstractValue sym)
     , absMemVals :: MapF.MapF (PMC.MemCell sym arch) (MemAbstractValue sym)
     } -> AbstractDomainVals sym arch bin
-  -- | A "bottom" domain is maximally constrained and can never be satisfied
-  AbstractDomainValsBottom :: AbstractDomainVals sym arch bin
   -- | A "top" domain contains no information and is trivially satisfied
+  -- TODO: this can be defined as an empty map, it's just slightly annoying
+  -- to get the register types
   AbstractDomainValsTop :: AbstractDomainVals sym arch bin  
   
 -- | Intersect the 'AbsRange' entries for each of the components of
@@ -198,10 +211,34 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (RelaxLocs sym arc
 
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
--- The input 'AbstractDomainVals' represents a domain that was previously computed over
--- the same slice, and is being further constrained (i.e. after the assumed pre-domain
--- has been weakened).
-getAbsDomainVals ::
+initAbsDomainVals ::
+  forall sym arch bin m.
+  Monad m =>
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  sym ->
+  (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
+  PS.SimOutput sym arch bin ->
+  m (AbstractDomainVals sym arch bin)
+initAbsDomainVals sym f stOut = do
+  foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
+  let cells = map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots
+  memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
+    absVal <- getMemAbsVal cell
+    return (MapF.Pair cell absVal)
+  regVals <- MM.traverseRegsWith (\_ v -> getAbsVal sym f v) (PS.simOutRegs stOut)
+  return (AbstractDomainVals regVals memVals)
+  where
+    getMemAbsVal ::
+      PMC.MemCell sym arch w ->
+      m (MemAbstractValue sym w)
+    getMemAbsVal cell = do
+      val <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
+      MemAbstractValue <$> getAbsVal sym f (PSR.ptrToEntry val)
+
+
+widenAbsDomainVals' ::
   forall sym arch bin m.
   Monad m =>
   IO.MonadIO m =>
@@ -212,19 +249,8 @@ getAbsDomainVals ::
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimOutput sym arch bin ->
   m (AbstractDomainVals sym arch bin, RelaxLocs sym arch)
-getAbsDomainVals sym prev f stOut = case prev of
+widenAbsDomainVals' sym prev f stOut = case prev of
   AbstractDomainValsTop -> return (AbstractDomainValsTop, mempty)
-  -- for a "bottom" domain we look at the simulator output to find any writes in order
-  -- to construct a less constrained domain
-  AbstractDomainValsBottom -> do
-    foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
-    let cells = map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots
-    memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
-      absVal <- getMemAbsVal cell
-      return (MapF.Pair cell absVal)
-    regVals <- MM.traverseRegsWith (\_ v ->  getAbsVal sym f v) (PS.simOutRegs stOut)
-    let locs = RelaxLocs (S.fromList $ MM.archRegs) (S.fromList $ MapF.keys memVals)
-    return (AbstractDomainVals regVals memVals, locs)
   -- if we have a previous domain, we need to check that the new values agree with
   -- the previous ones, and drop/merge any overlapping domains
   AbstractDomainVals{} -> CMW.runWriterT $ do
@@ -262,6 +288,26 @@ getAbsDomainVals sym prev f stOut = case prev of
       let absValCombined = combineAbsVals absValNew absValPrev
       unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs (S.singleton (Some reg)) mempty)
       return absValCombined
+
+widenAbsDomainVals ::
+  forall sym arch m.
+  Monad m =>
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  sym ->
+  AbstractDomainBody sym arch {- ^ existing abstract domain that this is augmenting -} ->
+  (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
+  PS.SimBundle sym arch ->
+  m (AbstractDomainBody sym arch, Maybe (RelaxLocs sym arch))
+widenAbsDomainVals sym prev f bundle = case absDomVals prev of
+  Just (PPa.PatchPair absValsO absValsP) -> do
+    (absValsO', locsO) <- widenAbsDomainVals' sym absValsO f (PS.simOutO bundle)
+    (absValsP', locsP) <- widenAbsDomainVals' sym absValsP f (PS.simOutP bundle)
+    return $ (prev { absDomVals = Just (PPa.PatchPair absValsO' absValsP') }, Just $ locsO <> locsP)
+  -- this is an error
+  Nothing -> return (prev, Nothing)
+
 
 applyAbsRange ::
   W4.IsSymExprBuilder sym =>
@@ -311,12 +357,12 @@ absDomainValsToAsm ::
   MapF.OrdF (W4.SymExpr sym) =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PS.SimInput sym arch bin ->
+  PS.SimState sym arch bin ->
   AbstractDomainVals sym arch bin ->
   IO (PS.AssumptionFrame sym)
-absDomainValsToAsm sym stIn vals = do
+absDomainValsToAsm sym st vals = do
   memFrame <- MapF.foldrMWithKey getCell mempty (absMemVals vals)
-  regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simInRegs stIn) (absRegVals vals) $ \_ val absVal ->
+  regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
     Const <$> absDomainValToAsm sym val absVal
   return $ memFrame <> regFrame
   where
@@ -326,7 +372,7 @@ absDomainValsToAsm sym stIn vals = do
       PS.AssumptionFrame sym ->
       IO (PS.AssumptionFrame sym)
     getCell cell (MemAbstractValue absVal) frame = do
-      val <- IO.liftIO $ PMC.readMemCell sym (PS.simInMem stIn) cell
+      val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
       frame' <- absDomainValToAsm sym (PSR.ptrToEntry val) absVal
       return $ frame <> frame'
 
@@ -339,11 +385,11 @@ absDomainValsToPred ::
   MapF.OrdF (W4.SymExpr sym) =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PS.SimInput sym arch bin ->
+  PS.SimState sym arch bin ->
   AbstractDomainVals sym arch bin ->
   IO (W4.Pred sym)
-absDomainValsToPred sym stIn vals = do
-  asm <- absDomainValsToAsm sym stIn vals
+absDomainValsToPred sym st vals = do
+  asm <- absDomainValsToAsm sym st vals
   PS.getAssumedPred sym asm
 
 absDomainToPrecond ::
@@ -357,9 +403,37 @@ absDomainToPrecond ::
 absDomainToPrecond sym eqCtx bundle d = do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
   eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
-  valsO <- absDomainValsToPred sym (PS.simInO bundle) (PPa.pOriginal $ absDomVals d)
-  valsP <- absDomainValsToPred sym (PS.simInP bundle) (PPa.pPatched $ absDomVals d)
-  W4.andPred sym valsO valsP >>= W4.andPred sym eqInputsPred
+  valsPred <- case absDomVals d of
+    Just (PPa.PatchPair valsO valsP) -> do
+      predO <- absDomainValsToPred sym (PS.simInState $ PS.simInO bundle) valsO
+      predP <- absDomainValsToPred sym (PS.simInState $ PS.simInP bundle) valsP
+      W4.andPred sym predO predP
+    -- TODO: this is actually likely an error, since we shouldn't
+    -- be encountering an explicit bottom normally
+    Nothing -> return $ W4.falsePred sym
+  W4.andPred sym eqInputsPred valsPred
+
+absDomainToPostCond ::
+  IsSymInterface sym =>
+  PA.ValidArch arch =>
+  sym ->
+  PE.EquivContext sym arch ->
+  PS.SimBundle sym arch ->
+  AbstractDomainBody sym arch {- ^ pre-domain for this slice -} ->
+  AbstractDomainBody sym arch {- ^ target post-domain -} ->
+  IO (W4.Pred sym)
+absDomainToPostCond sym eqCtx bundle preDom d = do
+  eqOutputs <- PE.getPostdomain sym bundle eqCtx (absDomEq preDom) (absDomEq d)
+  eqOutputsPred <- PE.postCondPredicate sym eqOutputs
+  valsPred <- case absDomVals d of
+    Just (PPa.PatchPair valsO valsP) -> do
+      predO <- absDomainValsToPred sym (PS.simOutState $ PS.simOutO bundle) valsO
+      predP <- absDomainValsToPred sym (PS.simOutState $ PS.simOutP bundle) valsP
+      W4.andPred sym predO predP
+    -- TODO: this is actually likely an error, since we shouldn't
+    -- be encountering an explicit bottom normally
+    Nothing -> return $ W4.falsePred sym
+  W4.andPred sym eqOutputsPred valsPred
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
   mapExpr sym f vals = case vals of
@@ -368,9 +442,7 @@ instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
         cell' <- PEM.mapExpr sym f cell
         return $ MapF.Pair cell' v
       return $ AbstractDomainVals regVals (MapF.fromList memVals')
-    AbstractDomainValsBottom -> return AbstractDomainValsBottom
     AbstractDomainValsTop -> return AbstractDomainValsTop
-
 
 instance PEM.ExprMappable sym (AbstractDomainBody sym arch) where
   mapExpr sym f d = do
@@ -393,11 +465,15 @@ ppAbstractDomain ::
   AbstractDomainBody sym arch ->
   PP.Doc a
 ppAbstractDomain ppPred d =
-  PP.vsep
+  PP.vsep $
   [ "== Equivalence Domain =="
   , PED.ppEquivalenceDomain ppPred (absDomEq d)
-  , "== Original Value Constraints =="
-  , ppAbstractDomainVals $ PPa.pOriginal (absDomVals d)
-  , "== Patched Value Constraints =="
-  , ppAbstractDomainVals $ PPa.pPatched (absDomVals d)
-  ]
+  ] ++
+    case absDomVals d of
+      Just (PPa.PatchPair valsO valsP) ->
+        [ "== Original Value Constraints =="
+        , ppAbstractDomainVals valsO
+        , "== Patched Value Constraints =="
+        , ppAbstractDomainVals valsP
+        ]
+      Nothing -> []

@@ -83,13 +83,13 @@ makeFreshAbstractDomain ::
   EquivM sym arch (AbstractDomain sym arch)
 makeFreshAbstractDomain (GraphNode pPair) = do
   iEqSpec <- PVD.universalDomainSpec pPair
-  return $ fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.AbstractDomainValsBottom PAD.AbstractDomainValsBottom)) iEqSpec
+  return $ fmap (\x -> PAD.AbstractDomainBody x Nothing) iEqSpec
 makeFreshAbstractDomain (ReturnNode fPair) = do
   -- TODO, this isn't really right, but seems pretty harmless.  The
   -- only thing the concrete block value is used for is to assign more
   -- human-readable names to arguments if we have debug information.
   iEqSpec <- PVD.universalDomainSpec (TF.fmapF PB.functionEntryToConcreteBlock fPair)
-  return $ fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.AbstractDomainValsBottom PAD.AbstractDomainValsBottom)) iEqSpec
+  return $ fmap (\x -> PAD.AbstractDomainBody x Nothing) iEqSpec
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -252,6 +252,8 @@ widenPostcondition bundle preD postD0 =
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
 
+
+
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
    --
@@ -281,14 +283,6 @@ widenPostcondition bundle preD postD0 =
         let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
         (postCondAsm, postDomBody) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
 
-        eqPost <- liftIO $ PE.eqDomPost sym
-                              (PPa.pOriginal (PS.simOut bundle))
-                              (PPa.pPatched  (PS.simOut bundle))
-                              eqCtx
-                              (PS.specBody preD)
-                              (PAD.absDomEq postDomBody)
-        eqPostPred <- liftIO (PE.postCondPredicate sym eqPost)
-
         res <- IO.withRunInIO $ \inIO ->
           liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
             W4.inNewFrame sp $
@@ -297,6 +291,9 @@ widenPostcondition bundle preD postD0 =
                -- Assume the validity conditions coming outof the postdomain spec.
                -- TODO? Should we do this, or are these conditions irrelevant?
                W4.assume conn postCondAsm
+
+               postDomBody' <- getInitalAbsDomainVals sym sp bundle postDomBody
+               eqPostPred <- PAD.absDomainToPostCond sym eqCtx bundle postDomBody'
 
                -- check if we already satisfy the equality condition
                W4.assume conn =<< W4.notPred sym eqPostPred
@@ -357,6 +354,35 @@ widenPostcondition bundle preD postD0 =
                                Just locs' -> locs <> locs'
                widenLoop sym bak (Gas (i-1)) eqCtx postD' (Just newlocs)
 
+-- | Refine a given 'AbstractDomainBody' to contain concrete values for some
+-- model.
+getInitalAbsDomainVals ::
+  forall sym t solver st fs arch sp.
+  ( sp ~ W4.SolverProcess t solver
+  , sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , PA.ValidArch arch ) =>
+  sym ->
+  sp ->
+  SimBundle sym arch ->
+  PAD.AbstractDomainBody sym arch ->
+  IO (PAD.AbstractDomainBody sym arch)
+getInitalAbsDomainVals sym sp bundle absDom = case PAD.absDomVals absDom of
+  Just _ -> return absDom
+  Nothing -> do
+    W4.checkAndGetModel sp "getInitalAbsDomainVals" >>= \case
+      -- TODO: throw an error here?
+      Unsat _ -> return absDom
+      Unknown -> return absDom
+      Sat evalFn -> do
+        let
+          getRange :: forall tp. W4.SymExpr sym tp -> IO (PAD.AbsRange tp)
+          getRange e = do
+            g <- W4.groundEval evalFn e
+            return $ PAD.groundToAbsRange (W4.exprType e) g
+        initO <- PAD.initAbsDomainVals sym getRange (PS.simOutO bundle)
+        initP <- PAD.initAbsDomainVals sym getRange (PS.simOutP bundle)
+        return $ absDom { PAD.absDomVals = Just (PPa.PatchPair initO initP) }
 
 widenUsingCounterexample ::
   ( sym ~ W4.ExprBuilder t st fs
@@ -373,7 +399,10 @@ widenUsingCounterexample ::
   EquivM sym arch (WidenResult sym arch)
 widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD =
   tryWidenings
-    [ widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
+    [ -- First check for any disagreement in the constant values
+      widenValues sym evalFn bundle postD
+
+    , widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
 
       -- We first attempt to widen using writes that occured in the current CFAR/slice
       -- as these are most likely to be relevant.
@@ -383,6 +412,7 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
       -- After that, we check for widenings relating to the precondition, i.e., frame conditions.
     , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
     , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
+
 
     , do slice <- PP.simBundleToSlice bundle
          ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
@@ -394,6 +424,30 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
     ]
 
 data MemCellSource = LocalChunkWrite | PreDomainCell
+
+widenValues ::
+  forall sym t st fs arch.
+  ( sym ~ W4.ExprBuilder t st fs
+  , PA.ValidArch arch ) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  SimBundle sym arch ->
+  AbstractDomain sym arch ->
+  EquivM sym arch (WidenResult sym arch)
+widenValues sym evalFn bundle postD = do
+  (postD', mlocs) <- PAD.widenAbsDomainVals sym (PS.specBody postD) getRange bundle
+  case mlocs of
+    Just (PAD.RelaxLocs regLocs memLocs) ->
+      if regLocs == mempty && memLocs == mempty then
+        return NoWideningRequired
+      else
+        return $ Widen (WidenLocs regLocs memLocs) (postD { PS.specBody = postD' })
+    Nothing -> return $ WideningError "widenValues" mempty postD
+  where
+     getRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
+     getRange e = liftIO $ do
+       g <- W4.groundEval evalFn e
+       return $ PAD.groundToAbsRange (W4.exprType e) g
 
 -- TODO, lots of code duplication between the stack and heap cases.
 --  should we find some generalization?

@@ -309,7 +309,7 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
            iEqDom <- PVD.universalDomainSpec bPair
-           let idom = fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.AbstractDomainValsTop PAD.AbstractDomainValsTop)) iEqDom
+           let idom = fmap (\x -> PAD.AbstractDomainBody x (Just $ PPa.PatchPair PAD.AbstractDomainValsTop PAD.AbstractDomainValsTop)) iEqDom
            return (freshDomain gr (GraphNode bPair) idom)
 
 -- | Given a pair graph, chose the next node in the graph to visit
