@@ -294,6 +294,8 @@ widenPostcondition bundle preD postD0 =
                W4.assume conn postCondAsm
 
                postDomBody' <- getInitalAbsDomainVals bak bundle postDomBody
+               -- TODO: variable handling is a bit ad-hoc
+               let postD' = postD { PS.specBody = postDomBody' }
                eqPostPred <- PAD.absDomainToPostCond sym eqCtx bundle postDomBody'
 
                -- check if we already satisfy the equality condition
@@ -301,20 +303,20 @@ widenPostcondition bundle preD postD0 =
 
                W4.checkAndGetModel sp "prove postcondition" >>= \case
                  Unsat _ -> return NoWideningRequired
-                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD)
+                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD')
                  Sat evalFn ->
                    if i <= 0 then inIO $
                      -- we ran out of gas
                      do slice <- PP.simBundleToSlice bundle
-                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ PS.specBody preD) (PAD.absDomEq $ PS.specBody postD) slice (SymGroundEvalFn evalFn)
+                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ PS.specBody preD) (PAD.absDomEq $ PS.specBody postD') slice (SymGroundEvalFn evalFn)
                         let msg = unlines [ "Ran out of gas performing local widenings"
                                           , show (pretty ineqRes)
                                           ]
-                        return $ WideningError msg (fromMaybe mempty mlocs) postD
+                        return $ WideningError msg (fromMaybe mempty mlocs) postD'
                    else
                      -- The current execution does not satisfy the postcondition, and we have
                      -- a counterexample.
-                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD mlocs postD)
+                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD mlocs postD')
 
         -- Re-enter the widening loop if we had to widen at this step.
         --

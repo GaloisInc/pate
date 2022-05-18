@@ -374,11 +374,13 @@ absDomainValsToAsm ::
   PS.SimState sym arch bin ->
   AbstractDomainVals sym arch bin ->
   IO (PS.AssumptionFrame sym)
-absDomainValsToAsm sym st vals = do
-  memFrame <- MapF.foldrMWithKey getCell mempty (absMemVals vals)
-  regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
-    Const <$> absDomainValToAsm sym val absVal
-  return $ memFrame <> regFrame
+absDomainValsToAsm sym st vals = case vals of
+  AbstractDomainValsTop -> return $ mempty
+  AbstractDomainVals{} -> do
+    memFrame <- MapF.foldrMWithKey getCell mempty (absMemVals vals)
+    regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
+      Const <$> absDomainValToAsm sym val absVal
+    return $ memFrame <> regFrame
   where
     getCell ::
       PMC.MemCell sym arch w ->
