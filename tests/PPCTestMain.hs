@@ -18,10 +18,7 @@ main = do
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
             [
-            -- see: https://github.com/GaloisInc/pate/issues/10
-              "test-direct-calls"
-            -- see: https://github.com/GaloisInc/pate/issues/17
-            , "test-int-ref-ref"
+              "const-args"
             ]
         , testExpectSelfEquivalenceFailure = []
         }
