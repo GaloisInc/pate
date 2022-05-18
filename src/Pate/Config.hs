@@ -8,7 +8,6 @@ module Pate.Config (
   Allocation(..),
   EquatedFunction(..),
   MemRegion(..),
-  noPatchData,
   parsePatchConfig,
   VerificationConfig(..),
   VerificationMethod(..),
@@ -140,6 +139,13 @@ data PatchData =
             }
   deriving (Show)
 
+instance Semigroup PatchData where
+  (PatchData a b c d e f g) <> (PatchData a' b' c' d' e' f' g')
+   = (PatchData (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g'))
+
+instance Monoid PatchData where
+  mempty = PatchData [] [] [] [] [] [] []
+
 _Address :: Toml.TomlBiMap Address Toml.AnyValue
 _Address = Toml._Coerce Toml._Natural
 
@@ -185,17 +191,6 @@ parsePatchConfig :: BS.ByteString -> Either PatchDataParseError PatchData
 parsePatchConfig bs = CME.runExcept $ do
   txt <- liftExcept UnicodeError (DTE.decodeUtf8' bs)
   liftExcept TOMLError (Toml.decode patchDataCodec txt)
-
-
-noPatchData :: PatchData
-noPatchData = PatchData { patchPairs = []
-                        , ignoreOriginalAllocations = []
-                        , ignorePatchedAllocations = []
-                        , equatedFunctions = []
-                        , ignoreOriginalFunctions = []
-                        , ignorePatchedFunctions = []
-                        , observableMemory = []
-                        }
 
 ----------------------------------
 -- Verification configuration

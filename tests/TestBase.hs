@@ -13,10 +13,12 @@ module TestBase
 import           System.Directory
 import           System.FilePath
 import           System.FilePath.Glob (namesMatching)
+
 import qualified Data.IORef as IOR
 
 import           Data.Maybe
 import           Data.List ( intercalate )
+import           Numeric (readHex)
 import qualified Lumberjack as LJ
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -64,11 +66,15 @@ expectSelfEquivalenceFailure cfg fp = baseName `elem` (testExpectSelfEquivalence
   where
      (_, baseName) = splitFileName fp
 
-expectEquivalenceFailure :: TestConfig -> FilePath -> Bool
-expectEquivalenceFailure cfg fp =
+expectEquivalenceFailure :: TestConfig -> ShouldVerify -> FilePath -> Bool
+expectEquivalenceFailure cfg sv fp =
   expectSelfEquivalenceFailure cfg fp || baseName `elem` (testExpectEquivalenceFailure cfg)
   where
-     (_, baseName) = splitFileName fp
+     (_, baseName') = splitFileName fp
+     baseName = case sv of
+       ShouldVerify -> baseName'
+       ShouldNotVerify -> "unequal/" ++ baseName'
+       ShouldConditionallyVerify -> "conditional/" ++ baseName'
 
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
@@ -88,7 +94,27 @@ mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
   wrap $ T.testCase "equivalence" $ doTest Nothing sv proxy fp
   where
     wrap :: T.TestTree -> T.TestTree
-    wrap t = if (expectEquivalenceFailure cfg fp) then T.expectFail t else t
+    wrap t = if (expectEquivalenceFailure cfg sv fp) then T.expectFail t else t
+
+defaultOutputAddress :: PC.Address
+defaultOutputAddress = case readHex "3f000" of
+  [(w, "")] -> PC.Address w
+  _ -> error "impossible"
+
+-- We assume that all of the tests have be compiled with a linker script that
+-- defines this section *after* the default data section as the output memory section
+defaultOutputRegion :: PC.MemRegion
+defaultOutputRegion = PC.MemRegion
+  { PC.memRegionStart = defaultOutputAddress
+  -- NB: in general we could read the actual section from the ELF, but we
+  -- assume the linker script has placed only read-only memory after this
+  -- section
+  , PC.memRegionLength = 4000
+  }
+
+defaultPatchData :: PC.PatchData
+defaultPatchData =
+  mempty { PC.observableMemory = [defaultOutputRegion] }
 
 doTest ::
   forall arch bin.
@@ -110,46 +136,34 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
       logs <- IOR.readIORef logsRef
       T.assertFailure (msg ++ "\n" ++ (intercalate "\n" (reverse logs)))
 
-    infoPath = if infoCfgExists then Left $ fp <.> "toml" else Right PC.noPatchData
+    infoPath = if infoCfgExists then Just $ fp <.> "toml" else Nothing
     -- avoid frame computations for self-tests
     computeFrames = case mwb of
       Just _ -> False
       Nothing -> True
     rcfg = PL.RunConfig
       { PL.archProxy = proxy
-      , PL.infoPath = infoPath
+      , PL.patchInfoPath = infoPath
+      , PL.patchData = defaultPatchData
       , PL.origPath = fp <.> "original" <.> "exe"
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.origHints = mempty
       , PL.patchedHints = mempty
       , PL.verificationCfg =
-          PC.defaultVerificationCfg { PC.cfgComputeEquivalenceFrames = computeFrames }
+          PC.defaultVerificationCfg
+            { PC.cfgComputeEquivalenceFrames = computeFrames
+            , PC.cfgVerificationMethod = PC.StrongestPostVerification
+            }
       , PL.logger =
           LJ.LogAction $ \e -> case e of
-            PE.AnalysisStart pPair -> do
-              addLogMsg $ concat $
-                [ "Checking equivalence of "
-                , PB.ppBlock (PPa.pOriginal pPair)
-                , " and "
-                , PB.ppBlock (PPa.pPatched pPair)
-                , " (" ++ PB.ppBlockEntry (PB.concreteBlockEntry (PPa.pOriginal pPair)) ++ ") "
-                , ": "
-                ]
-            PE.CheckedEquivalence _ PE.Equivalent time -> do
-              addLogMsg $ "Successful equivalence check: " ++ show time
-            PE.CheckedEquivalence _ _ time -> do
-              addLogMsg $ "Failed equivalence check: " ++ show time
-            PE.CheckedBranchCompleteness _ PE.BranchesComplete time -> do
-              addLogMsg $ "Branch completeness check: " ++ show time
-            PE.ComputedPrecondition _ time -> do
-              addLogMsg $ "Precondition propagation: " ++ show time
-            PE.ProofIntermediate _ _ time -> do
-              addLogMsg $ "Intermediate Proof result: " ++ show time
-            PE.ProvenGoal _ goal time -> do
-              addLogMsg $ "Toplevel Proof result: " ++ show time ++ "\n" ++ show goal
             PE.Warning _ err -> do
               addLogMsg $ "WARNING: " ++ show err
             PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
+            PE.ProofTraceEvent _ oAddr pAddr msg _ -> do
+              let addr = case oAddr == pAddr of
+                    True -> show oAddr
+                    False -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
+              addLogMsg $ addr ++ ":" ++ show msg
             _ -> return ()
       }
   result <- case mwb of

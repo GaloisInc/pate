@@ -80,6 +80,8 @@ import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.Widening
 
+import           Debug.Trace
+
 -- Overall module notes/thoughts
 --
 -- Currently, we are making rather limited use
@@ -304,7 +306,7 @@ doCheckObservables asm bundle preD =
        obsMem <- asks (PMC.observableMemory . envCtx)
 
        -- test if the memory operation overlaps with one of the observable regions
-       let filterObservableMemOps op@(MT.MemOp (CLM.LLVMPointer blk _off) _dir _cond _w _val _end) =
+       let filterObservableMemOps op@(MT.MemOp (CLM.LLVMPointer blk off) _dir _cond _w _val _end) =
               do notStk <- W4.notPred sym =<< W4.natEq sym blk stackRegion
                  inRng <- sequence
                            [ MT.memOpOverlapsRegion sym op addr len
