@@ -21,6 +21,7 @@ module Pate.Verification.AbstractDomain
   , AbstractDomainVals(..)
   , RelaxLocs(..)
   , groundToAbsRange
+  , extractAbsRange
   , widenAbsDomainVals
   , initAbsDomainVals
   , absDomainValsToPred
@@ -49,6 +50,7 @@ import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Symbol as W4S
+import qualified What4.Concrete as W4C
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
@@ -237,6 +239,18 @@ initAbsDomainVals sym f stOut = do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
       MemAbstractValue <$> getAbsVal sym f (PSR.ptrToEntry val)
 
+-- | Convert the abstract domain from an expression into an equivalent 'AbsRange'
+-- TODO: Currently this only extracts concrete values
+extractAbsRange ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  W4.SymExpr sym tp ->
+  AbsRange tp
+extractAbsRange _sym e = case W4.asConcrete e of
+  Just (W4C.ConcreteInteger i) -> AbsIntConstant i
+  Just (W4C.ConcreteBV w bv) -> AbsBVConstant w bv
+  Just (W4C.ConcreteBool b) -> AbsBoolConstant b
+  _ -> AbsUnconstrained (W4.exprType e)
 
 widenAbsDomainVals' ::
   forall sym arch bin m.

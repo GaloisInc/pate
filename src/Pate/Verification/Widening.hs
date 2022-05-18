@@ -68,6 +68,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.Solver as PS
 import qualified Pate.SimulatorRegisters as PSR
 
+import qualified Pate.Verification.Concretize as PVC
 import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
@@ -292,7 +293,7 @@ widenPostcondition bundle preD postD0 =
                -- TODO? Should we do this, or are these conditions irrelevant?
                W4.assume conn postCondAsm
 
-               postDomBody' <- getInitalAbsDomainVals sym sp bundle postDomBody
+               postDomBody' <- getInitalAbsDomainVals bak bundle postDomBody
                eqPostPred <- PAD.absDomainToPostCond sym eqCtx bundle postDomBody'
 
                -- check if we already satisfy the equality condition
@@ -354,35 +355,31 @@ widenPostcondition bundle preD postD0 =
                                Just locs' -> locs <> locs'
                widenLoop sym bak (Gas (i-1)) eqCtx postD' (Just newlocs)
 
--- | Refine a given 'AbstractDomainBody' to contain concrete values for some
--- model.
+-- | Refine a given 'AbstractDomainBody' to contain concrete values for the
+-- output of symbolic execution, where possible.
+-- Uses the default concretization strategies from 'Pate.Verification.Concretize'
 getInitalAbsDomainVals ::
-  forall sym t solver st fs arch sp.
-  ( sp ~ W4.SolverProcess t solver
+  forall sym t solver st fs arch.
+  ( LCB.IsSymInterface sym
   , sym ~ W4.ExprBuilder t st fs
   , W4.OnlineSolver solver
   , PA.ValidArch arch ) =>
-  sym ->
-  sp ->
+  LCBO.OnlineBackend solver t st fs ->
   SimBundle sym arch ->
   PAD.AbstractDomainBody sym arch ->
   IO (PAD.AbstractDomainBody sym arch)
-getInitalAbsDomainVals sym sp bundle absDom = case PAD.absDomVals absDom of
+getInitalAbsDomainVals bak bundle absDom = case PAD.absDomVals absDom of
   Just _ -> return absDom
   Nothing -> do
-    W4.checkAndGetModel sp "getInitalAbsDomainVals" >>= \case
-      -- TODO: throw an error here?
-      Unsat _ -> return absDom
-      Unknown -> return absDom
-      Sat evalFn -> do
-        let
-          getRange :: forall tp. W4.SymExpr sym tp -> IO (PAD.AbsRange tp)
-          getRange e = do
-            g <- W4.groundEval evalFn e
-            return $ PAD.groundToAbsRange (W4.exprType e) g
-        initO <- PAD.initAbsDomainVals sym getRange (PS.simOutO bundle)
-        initP <- PAD.initAbsDomainVals sym getRange (PS.simOutP bundle)
-        return $ absDom { PAD.absDomVals = Just (PPa.PatchPair initO initP) }
+    let
+      sym = LCB.backendGetSym bak
+      getConcreteRange :: forall tp. W4.SymExpr sym tp -> IO (PAD.AbsRange tp)
+      getConcreteRange e = do
+        e' <- PVC.resolveSingletonSymbolicAsDefault bak e
+        return $ PAD.extractAbsRange sym e'
+    initO <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutO bundle)
+    initP <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutP bundle)
+    return $ absDom { PAD.absDomVals = Just (PPa.PatchPair initO initP) }
 
 widenUsingCounterexample ::
   ( sym ~ W4.ExprBuilder t st fs

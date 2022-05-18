@@ -6,7 +6,9 @@ module Pate.Verification.Concretize (
     Concretize
   , concreteBV
   , concreteInteger
+  , concreteBool
   , resolveSingletonSymbolicAs
+  , resolveSingletonSymbolicAsDefault
   , resolveSingletonPointer
   ) where
 
@@ -47,6 +49,14 @@ concreteInteger = Concretize WT.BaseIntegerRepr WI.asInteger toBlocking injectSy
   where
     toBlocking sym symVal gv = WI.notPred sym =<< WI.intEq sym symVal =<< WI.intLit sym gv
     injectSymbolic = WI.intLit
+
+
+concreteBool :: (LCB.IsSymInterface sym) => Concretize sym WI.BaseBoolType
+concreteBool = Concretize WT.BaseBoolRepr WI.asConstantPred toBlocking injectSymbolic
+  where
+    toBlocking sym symVal gv = WI.notPred sym =<< WI.eqPred sym symVal =<< injectSymbolic sym gv
+    injectSymbolic sym True = return $ WI.truePred sym 
+    injectSymbolic sym False = return $ WI.falsePred sym
 
 -- | Attempt to resolve the given 'WI.SymExpr' to a concrete value using the SMT solver
 --
@@ -92,6 +102,27 @@ resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic)
                 WSat.Unsat {} -> injectSymbolic sym concVal -- There is a single concrete result
   where
     onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
+
+
+-- | Attempt to resolve the given 'WI.SymExpr' to a concrete value using the SMT solver
+-- Defers to 'resolveSingletonSymbolicAs' with default concretization strategies
+resolveSingletonSymbolicAsDefault
+  :: ( LCB.IsSymInterface sym
+     , sym ~ WE.ExprBuilder scope st fs
+     , WPO.OnlineSolver solver
+     , HasCallStack
+     )
+  => LCBO.OnlineBackend solver scope st fs
+  -- ^ The symbolic backend
+  -> WI.SymExpr sym tp
+  -- ^ The symbolic term to concretize
+  -> IO (WI.SymExpr sym tp)
+resolveSingletonSymbolicAsDefault bak val = case WI.exprType val of
+  WI.BaseBoolRepr -> resolveSingletonSymbolicAs concreteBool bak val
+  WI.BaseIntegerRepr -> resolveSingletonSymbolicAs concreteInteger bak val
+  WI.BaseBVRepr w -> resolveSingletonSymbolicAs (concreteBV w) bak val
+  _ -> return val -- unsupported type, therefore failure
+
 
 -- | Resolve an 'LCLM.LLVMPtr' to concrete, if possible
 --
