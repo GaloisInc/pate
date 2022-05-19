@@ -24,8 +24,6 @@ main = do
               -- see: https://github.com/GaloisInc/pate/issues/128
             , "reorder-call"
             , "args-equal"
-            , "unequal/nested-conditions"
-            , "unequal/ignore-globals"
             ]
         , testExpectSelfEquivalenceFailure =
             [
@@ -35,5 +33,6 @@ main = do
             , "reorder-call"
             , "args-equal"
             ]
+        , testOutputAddress = read "1003f000"
         }
   runTests cfg32

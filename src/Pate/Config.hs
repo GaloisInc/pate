@@ -24,6 +24,7 @@ import           Numeric.Natural ( Natural )
 import           Text.Printf ( PrintfArg, printf )
 import qualified Toml
 import           Toml ( (.=) )
+import           Numeric (readHex)
 
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
@@ -39,6 +40,10 @@ newtype Address = Address { addressAsWord :: Natural }
 instance Show Address where
   show (Address w) = printf "0x%x" w
 
+instance Read Address where
+  readsPrec _ s = do
+    (n, s') <- readHex s
+    return $ (Address n, s')
 
 -- | A region of memory, specified as a start address and a length (in bytes).
 data MemRegion =

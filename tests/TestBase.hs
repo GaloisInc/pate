@@ -18,7 +18,6 @@ import qualified Data.IORef as IOR
 
 import           Data.Maybe
 import           Data.List ( intercalate )
-import           Numeric (readHex)
 import qualified Lumberjack as LJ
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -39,6 +38,7 @@ data TestConfig where
     -- ^ tests which are failing now but eventually should succeed
     , testExpectSelfEquivalenceFailure :: [String]
     -- ^ tests which fail to prove self-equivalence
+    , testOutputAddress :: PC.Address
     } -> TestConfig
 
 runTests :: TestConfig -> IO ()
@@ -77,8 +77,8 @@ expectEquivalenceFailure cfg sv fp =
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg@(TestConfig { testArchProxy = proxy}) fp =
   T.testGroup fp $
-    [ wrap $ T.testCase "original-self" $ doTest (Just PBi.OriginalRepr) ShouldVerify proxy fp
-    , wrap $ T.testCase "patched-self" $ doTest (Just PBi.PatchedRepr) ShouldVerify proxy fp
+    [ wrap $ T.testCase "original-self" $ doTest (Just PBi.OriginalRepr) cfg ShouldVerify proxy fp
+    , wrap $ T.testCase "patched-self" $ doTest (Just PBi.PatchedRepr) cfg ShouldVerify proxy fp
     , mkEquivTest cfg ShouldVerify fp
     ]
   where
@@ -89,39 +89,36 @@ data ShouldVerify = ShouldVerify | ShouldNotVerify | ShouldConditionallyVerify
 
 mkEquivTest :: TestConfig -> ShouldVerify -> FilePath -> T.TestTree
 mkEquivTest cfg@(TestConfig { testArchProxy = proxy}) sv fp =
-  wrap $ T.testCase "equivalence" $ doTest Nothing sv proxy fp
+  wrap $ T.testCase "equivalence" $ doTest Nothing cfg sv proxy fp
   where
     wrap :: T.TestTree -> T.TestTree
     wrap t = if (expectEquivalenceFailure cfg sv fp) then T.expectFail t else t
 
-defaultOutputAddress :: PC.Address
-defaultOutputAddress = case readHex "3f000" of
-  [(w, "")] -> PC.Address w
-  _ -> error "impossible"
 
 -- We assume that all of the tests have be compiled with a linker script that
 -- defines this section *after* the default data section as the output memory section
-defaultOutputRegion :: PC.MemRegion
-defaultOutputRegion = PC.MemRegion
-  { PC.memRegionStart = defaultOutputAddress
+defaultOutputRegion :: TestConfig -> PC.MemRegion
+defaultOutputRegion cfg  = PC.MemRegion
+  { PC.memRegionStart = testOutputAddress cfg
   -- NB: in general we could read the actual section from the ELF, but we
   -- assume the linker script has placed only read-only memory after this
   -- section
   , PC.memRegionLength = 4000
   }
 
-defaultPatchData :: PC.PatchData
-defaultPatchData =
-  mempty { PC.observableMemory = [defaultOutputRegion] }
+defaultPatchData :: TestConfig -> PC.PatchData
+defaultPatchData cfg =
+  mempty { PC.observableMemory = [defaultOutputRegion cfg] }
 
 doTest ::
   forall arch bin.
   Maybe (PBi.WhichBinaryRepr bin) ->
+  TestConfig ->
   ShouldVerify ->
   PA.SomeValidArch arch ->
   FilePath ->
   IO ()
-doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
+doTest mwb cfg sv proxy@(PA.SomeValidArch {}) fp = do
   infoCfgExists <- doesFileExist (fp <.> "toml")
   (logsRef :: IOR.IORef [String]) <- IOR.newIORef []
 
@@ -142,7 +139,7 @@ doTest mwb sv proxy@(PA.SomeValidArch {}) fp = do
     rcfg = PL.RunConfig
       { PL.archProxy = proxy
       , PL.patchInfoPath = infoPath
-      , PL.patchData = defaultPatchData
+      , PL.patchData = defaultPatchData cfg
       , PL.origPath = fp <.> "original" <.> "exe"
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.origHints = mempty

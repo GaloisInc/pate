@@ -21,5 +21,6 @@ main = do
               "const-args"
             ]
         , testExpectSelfEquivalenceFailure = []
+        , testOutputAddress = read "0003f000"
         }
   runTests cfg64
