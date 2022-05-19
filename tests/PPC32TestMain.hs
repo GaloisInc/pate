@@ -19,7 +19,21 @@ main = do
         , testExpectEquivalenceFailure =
             [
               "const-args"
+
+              -- failing due to macaw analysis failures:
+              -- see: https://github.com/GaloisInc/pate/issues/128
+            , "reorder-call"
+            , "args-equal"
+            , "unequal/nested-conditions"
+            , "unequal/ignore-globals"
             ]
-        , testExpectSelfEquivalenceFailure = []
+        , testExpectSelfEquivalenceFailure =
+            [
+              -- failing due to macaw analysis failures:
+              -- see: https://github.com/GaloisInc/pate/issues/128
+              "const-args"
+            , "reorder-call"
+            , "args-equal"
+            ]
         }
   runTests cfg32

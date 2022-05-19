@@ -68,7 +68,7 @@ expectSelfEquivalenceFailure cfg fp = baseName `elem` (testExpectSelfEquivalence
 
 expectEquivalenceFailure :: TestConfig -> ShouldVerify -> FilePath -> Bool
 expectEquivalenceFailure cfg sv fp =
-  expectSelfEquivalenceFailure cfg fp || baseName `elem` (testExpectEquivalenceFailure cfg)
+  baseName `elem` (testExpectEquivalenceFailure cfg)
   where
      (_, baseName') = splitFileName fp
      baseName = case sv of
