@@ -5,19 +5,25 @@ OD=powerpc-linux-gnu-objdump
 
 all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(addprefix ./build/,$(notdir $(patsubst %c,%i,$(wildcard ../src/*.c))))
 
-./build/%.i: ../src/%.c
+./build:
+	mkdir -p $@
+
+./unequal:
+	mkdir -p $@
+
+./build/%.i: ../src/%.c | ./build
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
 
 %.exe: ./build/%.s ../src/link.ld
 	$(CC) -fno-stack-protector -nostdlib ../src/link.ld $< -o $@
 
-./unequal/%.original.exe: %.original.exe
+./unequal/%.original.exe: %.original.exe | ./unequal
 	cp $(basename $(basename $<)).original.exe ./unequal/
 
-./unequal/%.patched.exe: %.patched-bad.exe ./unequal/%.original.exe
+./unequal/%.patched.exe: %.patched-bad.exe ./unequal/%.original.exe | ./unequal
 	mv $< $@
 
-./build/%.s: ../src/%.c
+./build/%.s: ../src/%.c | ./build
 	$(CC) -fno-stack-protector -S -c $< -o $@
 
 %.test: %.original.exe %.patched.exe ./unequal/%.patched.exe
