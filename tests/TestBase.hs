@@ -26,12 +26,10 @@ import qualified Test.Tasty.ExpectedFailure as T
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
-import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Loader as PL
-import qualified Pate.PatchPair as PPa
 
 data TestConfig where
   TestConfig ::
