@@ -67,7 +67,6 @@ import qualified Pate.Solver as PS
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Partial as W4P
-import qualified What4.ExprHelpers as WEH
 
 import qualified SemMC.Util as SU
 
@@ -160,8 +159,8 @@ groundInfo e = withGroundData $ \grnd -> case SU.exprToGroundVal @sym (W4.exprTy
 -- | Retrieve the ground information of a symbolic natural with respect to the
 -- grounding environment bound by 'IsGroundSym'
 groundInfoNat :: IsGroundSym sym => W4.SymNat sym -> (MT.UndefPtrOpTags, Natural)
-groundInfoNat e = withGroundData $ \grnd ->
-  let info = groundInfo $ WEH.natToIntegerPure (grndSym grnd) e
+groundInfoNat e = withGroundData $ \_grnd ->
+  let info = groundInfo $ W4.natToIntegerPure e
   in (groundPtrTag info, integerToNat (groundVal info))
 
 -- TODO: this breaks the abstraction boundary for block ends
