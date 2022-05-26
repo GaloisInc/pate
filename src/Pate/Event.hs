@@ -21,6 +21,7 @@ import qualified GHC.Stack as GS
 import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
+import qualified Pate.Arch as PArch
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
@@ -30,9 +31,12 @@ import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Verification.PairGraph.Node as PVPN
+import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
@@ -94,3 +98,15 @@ data Event arch where
   --
   -- This has to save enough constraints to allow us to traverse the term
   ProofTraceFormulaEvent :: (sym ~ WE.ExprBuilder t st fs) => GS.CallStack -> PA.ConcreteAddress arch -> PA.ConcreteAddress arch -> sym -> WI.SymExpr sym tp -> TM.NominalDiffTime -> Event arch
+
+
+  -- | The strongest postcondition verifier has completed with the given status
+  StrongestPostOverallResult :: PE.EquivalenceStatus -> TM.NominalDiffTime -> Event arch
+  -- | The strongest postcondition verifier discovered an observable difference in behavior (reported as a counterexample)
+  StrongestPostObservable :: (WI.IsExprBuilder sym) => PPa.BlockPair arch -> PVSC.ObservableCounterexample sym (DMC.ArchAddrWidth arch) -> Event arch
+  -- | The strongest postcondition verifier has discovered a desynchronization in the control flow of the programs
+  StrongestPostDesync :: PPa.BlockPair arch -> PVSC.TotalityCounterexample (DMC.ArchAddrWidth arch) -> Event arch
+  -- | The strongest postcondition analysis ran out of gas when analyzing the given pair
+  GasExhausted :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> Event arch
+  -- | Other errors that can occur inside of the strongest postcondition verifier
+  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> T.Text -> Event arch

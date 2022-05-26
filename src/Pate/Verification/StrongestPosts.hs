@@ -48,12 +48,11 @@ import           Lang.Crucible.Simulator.SymSequence
 import qualified Lang.Crucible.Utils.MuxTree as MT
 
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Pate.Abort as PAb
-import qualified Pate.Arch as PA
 import qualified Pate.Address as PAd
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
@@ -61,23 +60,25 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PE
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Monad.Context as PMC
 import qualified Pate.Equivalence.Statistics as PESt
-import           Pate.Monad
+import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Proof.Instances as PPI
+import           Pate.Monad
+import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
-import qualified Pate.Solver as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PS
 
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Domain as PVD
 
 import           Pate.Verification.PairGraph
+import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.Widening
 
 -- Overall module notes/thoughts
@@ -130,11 +131,11 @@ runVerificationLoop env pPairs = do
         -- liftIO $ print (ppProgramDomains W4.printSymExpr pg)
 
         -- Report a summary of any errors we found during analysis
-        reportAnalysisErrors pg
+        reportAnalysisErrors (envLogger env) pg
 
         result <- pairGraphComputeVerdict pg
 
-        liftIO $ putStrLn $ unwords ["Overall verification verdict:", show result]
+        emitEvent (PE.StrongestPostOverallResult result)
 
         -- TODO, does reporting these kind of statistics make sense for this verification method?
         -- Currently, we only really do this to make the types fit at the call site.

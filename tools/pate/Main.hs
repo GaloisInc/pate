@@ -60,10 +60,13 @@ import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Loader as PL
+import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
+import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
 import qualified Pate.AArch32 as AArch32
 import qualified Pate.PPC as PPC
@@ -381,6 +384,26 @@ terminalFormatEvent evt =
       layout (PP.pretty origAddr <> ": " <> PP.pretty msg <> PP.line)
     PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
       layout (PP.pretty origAddr <> ": " <> WI.printSymExpr expr <> PP.line)
+    PE.StrongestPostOverallResult status _ ->
+      layoutLn ("Overall strongest postcondition verification result: " <> PP.viaShow status)
+    PE.GasExhausted pPair ->
+      layoutLn (PP.pretty pPair PP.<+> "analysis failed to converge (i.e., ran out of gas)")
+    PE.StrongestPostMiscError pPair msg ->
+      layoutLn ("Error at " <> PP.pretty pPair <> ":" PP.<+> PP.pretty msg)
+    PE.StrongestPostObservable pPair (PVSC.ObservableCounterexample oEvs pEvs) ->
+      layout ( PP.vcat (concat [ [ PP.pretty pPair PP.<+> "observable sequences disagree"
+                                 , "Original sequence:"
+                                 ]
+                               , [ PP.indent 2 (PMT.prettyMemEvent ev) | ev <- oEvs ]
+                               , [ "Patched sequence:" ]
+                               , [ PP.indent 2 (PMT.prettyMemEvent ev) | ev <- pEvs ]
+                               ]
+                       ) <> PP.line)
+    PE.StrongestPostDesync pPair (PVSC.TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) ->
+      layout ( PP.vcat [ PP.pretty pPair PP.<+> "program control flow desynchronized"
+                       , "  Original: 0x" <> PP.pretty (showHex oIP "") PP.<+> PP.pretty (PPI.ppExitCase oEnd) PP.<+> PP.viaShow oInstr
+                       , "  Patched : 0x" <> PP.pretty (showHex pIP "") PP.<+> PP.pretty (PPI.ppExitCase pEnd) PP.<+> PP.viaShow pInstr
+                       ] <> PP.line)
     -- FIXME: handle other events
     _ -> layout ""
 
