@@ -91,3 +91,8 @@ summarize e m =
     PE.HintErrorsDWARF {} -> m
     PE.ProofTraceEvent {} -> m
     PE.ProofTraceFormulaEvent {} -> m
+    PE.StrongestPostDesync {} -> m
+    PE.StrongestPostObservable {} -> m
+    PE.StrongestPostMiscError {} -> m
+    PE.StrongestPostOverallResult {} -> m
+    PE.GasExhausted {} -> m

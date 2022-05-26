@@ -70,6 +70,7 @@ import qualified Pate.SimulatorRegisters as PSR
 
 import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
+import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
