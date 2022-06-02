@@ -14,7 +14,8 @@ import qualified Data.Macaw.CFG as MM
 newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arch))
   deriving (Eq, Ord)
 
-deriving instance Show (ConcreteAddress arch)
+instance Show (ConcreteAddress arch) where
+  show (ConcreteAddress addr) = show addr
 
 instance PP.Pretty (ConcreteAddress arch) where
   pretty (ConcreteAddress addr) = PP.pretty addr

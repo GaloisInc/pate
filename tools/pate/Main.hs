@@ -143,9 +143,6 @@ main = do
       (origHints, patchedHints) <- parseHints logger' opts
       LJ.writeLog logger' (PE.ElfLoaderWarnings elfErrs)
       let
-        infoPath = case blockInfo opts of
-          Just path -> Left path
-          Nothing -> Right PC.noPatchData
         verificationCfg =
           PC.defaultVerificationCfg
             { PC.cfgPairMain = not $ noPairMain opts
@@ -161,7 +158,8 @@ main = do
             }
         cfg = PL.RunConfig
             { PL.archProxy = proxy
-            , PL.infoPath = infoPath
+            , PL.patchInfoPath = blockInfo opts
+            , PL.patchData = mempty
             , PL.origPath = originalBinary opts
             , PL.patchedPath = patchedBinary opts
             , PL.logger = logger'

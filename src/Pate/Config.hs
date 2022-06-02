@@ -8,7 +8,6 @@ module Pate.Config (
   Allocation(..),
   EquatedFunction(..),
   MemRegion(..),
-  noPatchData,
   parsePatchConfig,
   VerificationConfig(..),
   VerificationMethod(..),
@@ -25,6 +24,7 @@ import           Numeric.Natural ( Natural )
 import           Text.Printf ( PrintfArg, printf )
 import qualified Toml
 import           Toml ( (.=) )
+import           Numeric (readHex)
 
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
@@ -40,6 +40,10 @@ newtype Address = Address { addressAsWord :: Natural }
 instance Show Address where
   show (Address w) = printf "0x%x" w
 
+instance Read Address where
+  readsPrec _ s = do
+    (n, s') <- readHex s
+    return $ (Address n, s')
 
 -- | A region of memory, specified as a start address and a length (in bytes).
 data MemRegion =
@@ -140,6 +144,13 @@ data PatchData =
             }
   deriving (Show)
 
+instance Semigroup PatchData where
+  (PatchData a b c d e f g) <> (PatchData a' b' c' d' e' f' g')
+   = (PatchData (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g'))
+
+instance Monoid PatchData where
+  mempty = PatchData [] [] [] [] [] [] []
+
 _Address :: Toml.TomlBiMap Address Toml.AnyValue
 _Address = Toml._Coerce Toml._Natural
 
@@ -185,17 +196,6 @@ parsePatchConfig :: BS.ByteString -> Either PatchDataParseError PatchData
 parsePatchConfig bs = CME.runExcept $ do
   txt <- liftExcept UnicodeError (DTE.decodeUtf8' bs)
   liftExcept TOMLError (Toml.decode patchDataCodec txt)
-
-
-noPatchData :: PatchData
-noPatchData = PatchData { patchPairs = []
-                        , ignoreOriginalAllocations = []
-                        , ignorePatchedAllocations = []
-                        , equatedFunctions = []
-                        , ignoreOriginalFunctions = []
-                        , ignorePatchedFunctions = []
-                        , observableMemory = []
-                        }
 
 ----------------------------------
 -- Verification configuration

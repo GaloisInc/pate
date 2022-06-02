@@ -18,11 +18,12 @@ main = do
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
             [
-            -- see: https://github.com/GaloisInc/pate/issues/10
-              "test-direct-calls"
-            -- see: https://github.com/GaloisInc/pate/issues/17
-            , "test-int-ref-ref"
+              "const-args"
             ]
         , testExpectSelfEquivalenceFailure = []
+        -- TODO: we should define a section name here and read its address
+        -- from the ELF
+        -- see: https://github.com/GaloisInc/pate/issues/294
+        , testOutputAddress = read "0003f000"
         }
   runTests cfg64

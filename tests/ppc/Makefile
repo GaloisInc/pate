@@ -3,24 +3,38 @@
 CC=powerpc64-linux-gnu-gcc
 OD=powerpc64-linux-gnu-objdump
 
-all: $(patsubst %c,%exe,$(wildcard *.c)) $(patsubst %c,%i,$(wildcard *.c))
+all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(addprefix ./build/,$(notdir $(patsubst %c,%i,$(wildcard ../src/*.c))))
 
-%.i: %.c
+./unequal:
+	mkdir -p $@
+
+./build/%.i: ../src/%.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
 
-%.exe: %.s
-	$(CC) -fno-stack-protector -nostdlib $< -o $@
+%.exe: ./build/%.s ./build/link.ld
+	$(CC) -fno-stack-protector -nostdlib ./build/link.ld $< -o $@
 
-%.s: %.c
+./unequal/%.original.exe: %.original.exe | ./unequal
+	cp $(basename $(basename $<)).original.exe ./unequal/
+
+./unequal/%.patched.exe: %.patched-bad.exe ./unequal/%.original.exe | ./unequal
+	mv $< $@
+
+./build/%.s: ../src/%.c
 	$(CC) -fno-stack-protector -S -c $< -o $@
 
-%.test: %.original.exe %.patched.exe
-	$(OD) -d $(basename $@).original.exe > $(basename $@).original.dump
-	$(OD) -d $(basename $@).patched.exe > $(basename $@).patched.dump
-	diff $(basename $@).original.dump $(basename $@).patched.dump
+%.test: %.original.exe %.patched.exe ./unequal/%.patched.exe
+	$(OD) -d $(basename $@).original.exe > ./dumps/$(basename $@).original.dump
+	$(OD) -d $(basename $@).patched.exe > ./dumps/$(basename $@).patched.dump
+	$(OD) -d ./unequal/$(basename $@).patched.exe > ./dumps/$(basename $@).patched-bad.dump
+	diff ./dumps/$(basename $@).original.dump ./dumps/$(basename $@).patched.dump || true
+	diff ./dumps/$(basename $@).original.dump ./dumps/$(basename $@).patched-bad.dump || true
 
-
-.PRECIOUS: %.s
+.PRECIOUS: ./build/%.s ./build/%.i %.exe ./unequal/%.original.exe ./unequal/%.patched.exe
 
 clean:
-	rm *.s *.exe
+	-rm ./build/*.s ./build/*.i
+
+realclean: clean
+	-rm *.exe
+	-rm ./unequal/*.exe
