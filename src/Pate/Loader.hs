@@ -109,7 +109,7 @@ runEquivConfig :: forall arch.
   RunConfig arch ->
   IO PEq.EquivalenceStatus
 runEquivConfig cfg = liftToEquivStatus $ do
-  patchData <- case patchInfoPath cfg of
+  pdata <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- CME.lift $ BS.readFile fp
       case PC.parsePatchConfig bytes of
@@ -121,4 +121,4 @@ runEquivConfig cfg = liftToEquivStatus $ do
   patched <- CME.lift $ PLE.loadELF @arch Proxy $ (patchedPath cfg)
   let hintedOrig = PH.Hinted (origHints cfg) original
   let hintedPatched = PH.Hinted (patchedHints cfg) patched
-  CME.lift $ runEquivVerification (archProxy cfg) (logger cfg) patchData (verificationCfg cfg) hintedOrig hintedPatched
+  CME.lift $ runEquivVerification (archProxy cfg) (logger cfg) pdata (verificationCfg cfg) hintedOrig hintedPatched

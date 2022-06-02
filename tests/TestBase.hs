@@ -103,6 +103,7 @@ defaultOutputRegion cfg  = PC.MemRegion
   -- NB: in general we could read the actual section from the ELF, but we
   -- assume the linker script has placed only read-only memory after this
   -- section
+  -- see: https://github.com/GaloisInc/pate/issues/294
   , PC.memRegionLength = 4000
   }
 

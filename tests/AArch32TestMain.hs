@@ -21,6 +21,9 @@ main = do
               "const-args"
             ]
         , testExpectSelfEquivalenceFailure = [ ]
+        -- TODO: we should define a section name here and read its address
+        -- from the ELF
+        -- see: https://github.com/GaloisInc/pate/issues/294
         , testOutputAddress = read "0003f000"
         }
   runTests cfg
