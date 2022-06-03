@@ -18,7 +18,6 @@ main = do
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
             [
-              "const-args"
             ]
         , testExpectSelfEquivalenceFailure =
             [
