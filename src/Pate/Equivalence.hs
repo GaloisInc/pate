@@ -357,11 +357,18 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
       footO <- MT.traceFootprint sym memO
       footP <- MT.traceFootprint sym memP
       let foot = S.union footO footP
-      baseDom <- PEM.asNegative sym domPre
+      -- in the case where the pre-domain is positive polarity, this operation is a bit
+      -- nonsensical, since there's no way we can now prove equality over
+      -- a negative domain
+
+      -- since domain polarities are going to be deprecated (see: https://github.com/GaloisInc/pate/issues/297) we can just explicitly set the polarity to be 'false'
+      -- to ensure that 'PEM.addFootPrints' collects the write operations
+      -- from the footprints
+      let domPre' = domPre { PEM.memDomainPolarity = W4.falsePred sym }
 
       -- this implicitly filters the footprints for writes, since we're giving
       -- it a negative domain
-      footCells <- PEM.addFootPrints sym foot baseDom
+      footCells <- PEM.addFootPrints sym foot domPre'
       MemoryCondition <$> PEM.traverseWithCell footCells resolveCell <*> pure memEqRegion
 
 

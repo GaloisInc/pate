@@ -24,7 +24,6 @@ module Pate.Equivalence.MemoryDomain (
   , mux
   , ppMemoryDomainEntries
   , dropFalseCells
-  , asNegative
   ) where
 
 import           Control.Monad ( forM, join )
@@ -145,18 +144,6 @@ mux sym p predT predF = case W4.asConstantPred p of
     pol <- W4.baseTypeIte sym p (memDomainPolarity predT) (memDomainPolarity predF)
     locs <- PMC.muxMemCellPred sym p (memDomainPred predT) (memDomainPred predF)
     return $ MemoryDomain locs pol
-
--- | Convert a domain into a negative polarity domain.
--- If it is already a negative domain, this is a no-op. Otherwise
--- the result is the universal domain.
-asNegative ::
-  W4.IsExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  sym ->
-  MemoryDomain sym arch ->
-  IO (MemoryDomain sym arch)
-asNegative sym dom = mux sym (memDomainPolarity dom) (universal sym) dom
-
 
 -- | True if the given 'PMC.MemCell' is in the given 'MemoryDomain', according to
 -- its polarity.
