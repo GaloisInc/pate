@@ -24,6 +24,7 @@ main = do
               -- see: https://github.com/GaloisInc/pate/issues/128
             , "reorder-call"
             , "args-equal"
+            , "reestablish-equality"
             ]
         , testExpectSelfEquivalenceFailure =
             [
@@ -32,6 +33,7 @@ main = do
               "const-args"
             , "reorder-call"
             , "args-equal"
+            , "reestablish-equality"
             ]
         -- TODO: we should define a section name here and read its address
         -- from the ELF
