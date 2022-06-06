@@ -880,7 +880,7 @@ proveLocalPostcondition bundle postDomSpec = withSym $ \sym -> do
   traceBundle bundle "proveLocalPostcondition"
   eqCtx <- equivalenceContext
   (asm, postDom) <- liftIO $ bindSpec sym (simOutState $ simOutO bundle) (simOutState $ simOutP bundle) postDomSpec
-  postcond <- liftIO $ getPostdomain sym bundle eqCtx postDom
+  postcond <- liftIO $ getPostdomain sym bundle eqCtx (PED.empty sym) postDom
   postcondPred <- liftIO $ postCondPredicate sym postcond
   
   traceBundle bundle "guessing equivalence domain"

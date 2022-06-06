@@ -281,6 +281,7 @@ widenPostcondition bundle preD postD0 =
                               (PPa.pOriginal (PS.simOut bundle))
                               (PPa.pPatched  (PS.simOut bundle))
                               eqCtx
+                              (PS.specBody preD)
                               postCondStatePred
         eqPostPred <- liftIO (PE.postCondPredicate sym eqPost)
 

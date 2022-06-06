@@ -298,10 +298,11 @@ getPostdomain ::
   sym ->
   SimBundle sym arch ->
   EquivContext sym arch ->
-  PED.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
+  PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StateCondition sym arch)
-getPostdomain sym bundle eqCtx stPred =
-  eqDomPost sym (simOutO bundle) (simOutP bundle) eqCtx stPred
+getPostdomain sym bundle eqCtx domPre domPost =
+  eqDomPost sym (simOutO bundle) (simOutP bundle) eqCtx domPre domPost
 
 -- | Flatten a structured 'MemoryCondition' representing a memory post-condition into
 -- a single predicate.
@@ -326,11 +327,12 @@ memDomPost ::
   MemRegionEquality sym arch ->
   SimOutput sym arch PBi.Original ->
   SimOutput sym arch PBi.Patched ->
-  PEM.MemoryDomain sym arch ->
+  PEM.MemoryDomain sym arch {- ^ pre-domain for this slice -} ->
+  PEM.MemoryDomain sym arch {- ^ target post-domain -} ->
   IO (MemoryCondition sym arch)
-memDomPost sym memEqRegion outO outP memPred = do
-  muxMemCond sym (PEM.memDomainPolarity memPred)
-    (positiveMemCells sym memEqRegion stO stP (PEM.memDomainPred memPred)) negativePolarity
+memDomPost sym memEqRegion outO outP domPre domPost = do
+  muxMemCond sym (PEM.memDomainPolarity domPost)
+    (positiveMemCells sym memEqRegion stO stP (PEM.memDomainPred domPost)) negativePolarity
   where
     stO = simOutState outO
     stP = simOutState outP
@@ -345,7 +347,7 @@ memDomPost sym memEqRegion outO outP memPred = do
       W4.Pred sym ->
       IO (W4.Pred sym)
     resolveCell cell cond = do
-      impM sym (PEM.containsCell sym memPred cell) $
+      impM sym (PEM.containsCell sym domPost cell) $
         resolveCellEquiv sym memEqRegion stO stP cell cond
 
     -- | For the negative case, we need to consider the domain of the state itself -
@@ -355,7 +357,11 @@ memDomPost sym memEqRegion outO outP memPred = do
       footO <- MT.traceFootprint sym memO
       footP <- MT.traceFootprint sym memP
       let foot = S.union footO footP
-      footCells <- PEM.fromFootPrints sym foot (W4.falsePred sym)
+      baseDom <- PEM.asNegative sym domPre
+
+      -- this implicitly filters the footprints for writes, since we're giving
+      -- it a negative domain
+      footCells <- PEM.addFootPrints sym foot baseDom
       MemoryCondition <$> PEM.traverseWithCell footCells resolveCell <*> pure memEqRegion
 
 
@@ -636,16 +642,17 @@ eqDomPost ::
   SimOutput sym arch PBi.Original ->
   SimOutput sym arch PBi.Patched ->
   EquivContext sym arch ->
-  PED.EquivalenceDomain sym arch ->
+  PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
+  PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StateCondition sym arch)
-eqDomPost sym outO outP (EquivContext hdr stackRegion) stPred = do
+eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
   let
     stO = simOutState outO
     stP = simOutState outP
     
-  regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters stPred)
-  stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory stPred)
-  memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory stPred)
+  regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
+  stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
+  memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
   return $ StateCondition regsEq stacksEq memEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
