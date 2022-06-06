@@ -318,7 +318,12 @@ memPostCondToPred sym memCond = do
   foldM (W4.andPred sym) (W4.truePred sym) preds
 
 -- | Compute a structured 'MemoryCondition' that is true iff the output states are equal according to
--- the given 'MemRegionEquality' at the locations defined by the given 'PEM.MemPred'
+-- the given 'MemRegionEquality' at the locations defined by the given 'PEM.MemoryDomain'
+-- post-domain.
+-- Additionally takes a 'PEM.MemoryDomain' representing the assumed pre-domain, in order
+-- to check for equality on any locations which were initially assumed to be unequal.
+-- For the post-equality condition to hold, these locations must therefore either be
+-- made equal by the slice, or excluded in the given post-domain.
 memDomPost ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
