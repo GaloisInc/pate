@@ -20,6 +20,7 @@ module Pate.Verification.AbstractDomain
   , AbsRange(..)
   , AbstractDomainVals(..)
   , RelaxLocs(..)
+  , emptyDomainVals
   , groundToAbsRange
   , extractAbsRange
   , widenAbsDomainVals
@@ -44,6 +45,7 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Parameterized.List as PL
 
 import qualified What4.Utils.AbstractDomains as WAbs
 import qualified What4.Interface as W4
@@ -158,11 +160,13 @@ data AbstractDomainVals sym arch (bin :: PB.WhichBinary) where
     { absRegVals :: MM.RegState (MM.ArchReg arch) (MacawAbstractValue sym)
     , absMemVals :: MapF.MapF (PMC.MemCell sym arch) (MemAbstractValue sym)
     } -> AbstractDomainVals sym arch bin
-  -- | A "top" domain contains no information and is trivially satisfied
-  -- TODO: this can be defined as an empty map, it's just slightly annoying
-  -- to get the register types
-  AbstractDomainValsTop :: AbstractDomainVals sym arch bin  
-  
+
+emptyDomainVals :: PA.ValidArch arch => AbstractDomainVals sym arch bin
+emptyDomainVals = AbstractDomainVals
+  { absRegVals = MM.mkRegState (\r -> noAbsVal (MT.typeRepr r))
+  , absMemVals = MapF.empty
+  }
+
 -- | Intersect the 'AbsRange' entries for each of the components of
 -- the given abstract values using 'combineAbsRanges'. 
 combineAbsVals ::
@@ -176,6 +180,16 @@ combineAbsVals abs1 abs2 = MacawAbstractValue $
 isUnconstrained ::
   MacawAbstractValue sym tp -> Bool
 isUnconstrained absv = TFC.foldrFC (\v b -> b && case v of { AbsUnconstrained{} -> True; _ -> False} ) True (macawAbsVal absv)
+
+noAbsVal :: MT.TypeRepr tp -> MacawAbstractValue sym tp
+noAbsVal repr = case repr of
+  MT.BVTypeRepr n ->
+    MacawAbstractValue (Ctx.Empty
+                        Ctx.:> AbsUnconstrained W4.BaseIntegerRepr
+                        Ctx.:> AbsUnconstrained (W4.BaseBVRepr n))
+  MT.BoolTypeRepr -> MacawAbstractValue (Ctx.Empty Ctx.:> AbsUnconstrained W4.BaseBoolRepr)
+  MT.TupleTypeRepr PL.Nil -> MacawAbstractValue Ctx.Empty
+  _ -> error "noAbsVal: unexpected type for abstract domain"
 
 -- | Traverse the component expressions of the given 'PSR.MacawRegEntry' and construct
 -- a 'MacawAbstractValue' by computing an 'AbsRange' for each component using the given function.
@@ -229,17 +243,13 @@ initAbsDomainVals sym f stOut preVals = do
   -- NOTE: We need to include any cells from the pre-domain to ensure that we
   -- propagate forward any value constraints for memory that is not accessed in this
   -- slice
-  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
+  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ (MapF.keys $ absMemVals preVals)
   memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
     absVal <- getMemAbsVal cell
     return (MapF.Pair cell absVal)
   regVals <- MM.traverseRegsWith (\_ v -> getAbsVal sym f v) (PS.simOutRegs stOut)
   return (AbstractDomainVals regVals memVals)
   where
-    prevCells :: [Some (PMC.MemCell sym arch)]
-    prevCells = case preVals of
-      AbstractDomainVals _ m -> MapF.keys m
-      AbstractDomainValsTop -> []
     getMemAbsVal ::
       PMC.MemCell sym arch w ->
       m (MemAbstractValue sym w)
@@ -271,14 +281,10 @@ widenAbsDomainVals' ::
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimOutput sym arch bin ->
   m (AbstractDomainVals sym arch bin, RelaxLocs sym arch)
-widenAbsDomainVals' sym prev f stOut = case prev of
-  AbstractDomainValsTop -> return (AbstractDomainValsTop, mempty)
-  -- if we have a previous domain, we need to check that the new values agree with
-  -- the previous ones, and drop/merge any overlapping domains
-  AbstractDomainVals{} -> CMW.runWriterT $ do
-    memVals <- MapF.traverseMaybeWithKey relaxMemVal (absMemVals prev)
-    regVals <- PRt.zipWithRegStatesM (absRegVals prev) (PS.simOutRegs stOut) relaxRegVal
-    return $ AbstractDomainVals regVals memVals
+widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
+  memVals <- MapF.traverseMaybeWithKey relaxMemVal (absMemVals prev)
+  regVals <- PRt.zipWithRegStatesM (absRegVals prev) (PS.simOutRegs stOut) relaxRegVal
+  return $ AbstractDomainVals regVals memVals
 
   where
     getMemAbsVal ::
@@ -384,13 +390,11 @@ absDomainValsToAsm ::
   PS.SimState sym arch bin ->
   AbstractDomainVals sym arch bin ->
   IO (PS.AssumptionFrame sym)
-absDomainValsToAsm sym st vals = case vals of
-  AbstractDomainValsTop -> return $ mempty
-  AbstractDomainVals{} -> do
-    memFrame <- MapF.foldrMWithKey getCell mempty (absMemVals vals)
-    regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
-      Const <$> absDomainValToAsm sym val absVal
-    return $ memFrame <> regFrame
+absDomainValsToAsm sym st vals = do
+  memFrame <- MapF.foldrMWithKey getCell mempty (absMemVals vals)
+  regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
+    Const <$> absDomainValToAsm sym val absVal
+  return $ memFrame <> regFrame
   where
     getCell ::
       PMC.MemCell sym arch w ->
@@ -456,13 +460,11 @@ absDomainToPostCond sym eqCtx bundle preDom d = do
   W4.andPred sym eqOutputsPred valsPred
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
-  mapExpr sym f vals = case vals of
-    AbstractDomainVals regVals memVals -> do
-      memVals' <- forM (MapF.toAscList memVals) $ \(MapF.Pair cell v) -> do
-        cell' <- PEM.mapExpr sym f cell
-        return $ MapF.Pair cell' v
-      return $ AbstractDomainVals regVals (MapF.fromList memVals')
-    AbstractDomainValsTop -> return AbstractDomainValsTop
+  mapExpr sym f (AbstractDomainVals regVals memVals) = do
+    memVals' <- forM (MapF.toAscList memVals) $ \(MapF.Pair cell v) -> do
+      cell' <- PEM.mapExpr sym f cell
+      return $ MapF.Pair cell' v
+    return $ AbstractDomainVals regVals (MapF.fromList memVals')
 
 instance PEM.ExprMappable sym (AbstractDomainBody sym arch) where
   mapExpr sym f d = do
