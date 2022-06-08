@@ -87,7 +87,7 @@ data AbstractDomainBody sym arch where
   AbstractDomainBody ::
     { absDomEq :: PED.EquivalenceDomain sym arch
       -- ^ specifies which locations are equal between the original vs. patched programs
-    , absDomVals :: Maybe (PPa.PatchPair (AbstractDomainVals sym arch))
+    , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomainBody sym arch
 
@@ -222,16 +222,21 @@ initAbsDomainVals ::
   sym ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimOutput sym arch bin ->
+  AbstractDomainVals sym arch bin {- ^ values from pre-domain -} ->
   m (AbstractDomainVals sym arch bin)
-initAbsDomainVals sym f stOut = do
+initAbsDomainVals sym f stOut preVals = do
   foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
-  let cells = map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots
+  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
   memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
     absVal <- getMemAbsVal cell
     return (MapF.Pair cell absVal)
   regVals <- MM.traverseRegsWith (\_ v -> getAbsVal sym f v) (PS.simOutRegs stOut)
   return (AbstractDomainVals regVals memVals)
   where
+    prevCells :: [Some (PMC.MemCell sym arch)]
+    prevCells = case preVals of
+      AbstractDomainVals _ m -> MapF.keys m
+      AbstractDomainValsTop -> []
     getMemAbsVal ::
       PMC.MemCell sym arch w ->
       m (MemAbstractValue sym w)
@@ -284,24 +289,28 @@ widenAbsDomainVals' sym prev f stOut = case prev of
       PMC.MemCell sym arch w ->
       MemAbstractValue sym w {- ^ previous abstract value -} ->
       CMW.WriterT (RelaxLocs sym arch) m (Maybe (MemAbstractValue sym w))
-    relaxMemVal cell (MemAbstractValue absValPrev) = do
-      MemAbstractValue absValNew <- CMW.lift $ getMemAbsVal cell
-      let absValCombined = combineAbsVals absValNew absValPrev
-      unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs mempty (S.singleton (Some cell)))
-      case isUnconstrained absValCombined of
-        True -> return Nothing
-        False -> return $ Just $ MemAbstractValue absValCombined
+    relaxMemVal cell (MemAbstractValue absValPrev) = case isUnconstrained absValPrev of
+      True -> return Nothing
+      False -> do
+        MemAbstractValue absValNew <- CMW.lift $ getMemAbsVal cell
+        let absValCombined = combineAbsVals absValNew absValPrev
+        unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs mempty (S.singleton (Some cell)))
+        case isUnconstrained absValCombined of
+          True -> return Nothing
+          False -> return $ Just $ MemAbstractValue absValCombined
         
     relaxRegVal ::
       MM.ArchReg arch tp ->
       MacawAbstractValue sym tp {- ^ previous abstract value -} ->
       PSR.MacawRegEntry sym tp ->
       CMW.WriterT (RelaxLocs sym arch) m (MacawAbstractValue sym tp)
-    relaxRegVal reg absValPrev v = do
-      absValNew <- CMW.lift $ getAbsVal sym f v
-      let absValCombined = combineAbsVals absValNew absValPrev
-      unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs (S.singleton (Some reg)) mempty)
-      return absValCombined
+    relaxRegVal reg absValPrev v = case isUnconstrained absValPrev of
+      True -> return absValPrev
+      False -> do
+        absValNew <- CMW.lift $ getAbsVal sym f v
+        let absValCombined = combineAbsVals absValNew absValPrev
+        unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs (S.singleton (Some reg)) mempty)
+        return absValCombined
 
 widenAbsDomainVals ::
   forall sym arch m.
@@ -314,13 +323,11 @@ widenAbsDomainVals ::
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimBundle sym arch ->
   m (AbstractDomainBody sym arch, Maybe (RelaxLocs sym arch))
-widenAbsDomainVals sym prev f bundle = case absDomVals prev of
-  Just (PPa.PatchPair absValsO absValsP) -> do
-    (absValsO', locsO) <- widenAbsDomainVals' sym absValsO f (PS.simOutO bundle)
-    (absValsP', locsP) <- widenAbsDomainVals' sym absValsP f (PS.simOutP bundle)
-    return $ (prev { absDomVals = Just (PPa.PatchPair absValsO' absValsP') }, Just $ locsO <> locsP)
-  -- this is an error
-  Nothing -> return (prev, Nothing)
+widenAbsDomainVals sym prev f bundle = do
+  let (PPa.PatchPair absValsO absValsP) = absDomVals prev
+  (absValsO', locsO) <- widenAbsDomainVals' sym absValsO f (PS.simOutO bundle)
+  (absValsP', locsP) <- widenAbsDomainVals' sym absValsP f (PS.simOutP bundle)
+  return $ (prev { absDomVals = PPa.PatchPair absValsO' absValsP' }, Just $ locsO <> locsP)
 
 
 applyAbsRange ::
@@ -419,14 +426,11 @@ absDomainToPrecond ::
 absDomainToPrecond sym eqCtx bundle d = do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
   eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
-  valsPred <- case absDomVals d of
-    Just (PPa.PatchPair valsO valsP) -> do
-      predO <- absDomainValsToPred sym (PS.simInState $ PS.simInO bundle) valsO
-      predP <- absDomainValsToPred sym (PS.simInState $ PS.simInP bundle) valsP
-      W4.andPred sym predO predP
-    -- TODO: this is actually likely an error, since we shouldn't
-    -- be encountering an explicit bottom normally
-    Nothing -> return $ W4.falsePred sym
+  valsPred <- do
+    let PPa.PatchPair valsO valsP = absDomVals d
+    predO <- absDomainValsToPred sym (PS.simInState $ PS.simInO bundle) valsO
+    predP <- absDomainValsToPred sym (PS.simInState $ PS.simInP bundle) valsP
+    W4.andPred sym predO predP
   W4.andPred sym eqInputsPred valsPred
 
 absDomainToPostCond ::
@@ -441,14 +445,11 @@ absDomainToPostCond ::
 absDomainToPostCond sym eqCtx bundle preDom d = do
   eqOutputs <- PE.getPostdomain sym bundle eqCtx (absDomEq preDom) (absDomEq d)
   eqOutputsPred <- PE.postCondPredicate sym eqOutputs
-  valsPred <- case absDomVals d of
-    Just (PPa.PatchPair valsO valsP) -> do
-      predO <- absDomainValsToPred sym (PS.simOutState $ PS.simOutO bundle) valsO
-      predP <- absDomainValsToPred sym (PS.simOutState $ PS.simOutP bundle) valsP
-      W4.andPred sym predO predP
-    -- TODO: this is actually likely an error, since we shouldn't
-    -- be encountering an explicit bottom normally
-    Nothing -> return $ W4.falsePred sym
+  valsPred <- do
+    let PPa.PatchPair valsO valsP = absDomVals d
+    predO <- absDomainValsToPred sym (PS.simOutState $ PS.simOutO bundle) valsO
+    predP <- absDomainValsToPred sym (PS.simOutState $ PS.simOutP bundle) valsP
+    W4.andPred sym predO predP
   W4.andPred sym eqOutputsPred valsPred
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
@@ -484,12 +485,8 @@ ppAbstractDomain ppPred d =
   PP.vsep $
   [ "== Equivalence Domain =="
   , PED.ppEquivalenceDomain ppPred (absDomEq d)
-  ] ++
-    case absDomVals d of
-      Just (PPa.PatchPair valsO valsP) ->
-        [ "== Original Value Constraints =="
-        , ppAbstractDomainVals valsO
-        , "== Patched Value Constraints =="
-        , ppAbstractDomainVals valsP
-        ]
-      Nothing -> []
+  , "== Original Value Constraints =="
+  , ppAbstractDomainVals (PPa.pOriginal $ absDomVals d)
+  , "== Patched Value Constraints =="
+  , ppAbstractDomainVals (PPa.pPatched $ absDomVals d)
+  ]

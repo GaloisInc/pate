@@ -48,7 +48,6 @@ import qualified Data.Macaw.CFG as MM
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
-import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.MemCell as PMc
@@ -80,17 +79,30 @@ import           Pate.Verification.AbstractDomain ( AbstractDomain )
 --   have (i.e., all values are equal) as it will only ever be
 --   weakend via widening.
 makeFreshAbstractDomain ::
+  forall sym t solver st fs arch.
+  ( LCB.IsSymInterface sym
+  , sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , PA.ValidArch arch ) =>
+  LCBO.OnlineBackend solver t st fs ->
+  SimBundle sym arch ->
+  PAD.AbstractDomainBody sym arch {- ^ incoming pre-domain -} ->
   GraphNode arch ->
   EquivM sym arch (AbstractDomain sym arch)
-makeFreshAbstractDomain (GraphNode pPair) = do
+makeFreshAbstractDomain bak bundle preDom (GraphNode pPair) = do
   iEqSpec <- PVD.universalDomainSpec pPair
-  return $ fmap (\x -> PAD.AbstractDomainBody x Nothing) iEqSpec
-makeFreshAbstractDomain (ReturnNode fPair) = do
+  vals <- liftIO $ getInitalAbsDomainVals bak bundle preDom
+  return $ fmap (\x -> PAD.AbstractDomainBody x vals) iEqSpec
+makeFreshAbstractDomain _bak _bundle preDom (ReturnNode fPair) = do
   -- TODO, this isn't really right, but seems pretty harmless.  The
   -- only thing the concrete block value is used for is to assign more
   -- human-readable names to arguments if we have debug information.
   iEqSpec <- PVD.universalDomainSpec (TF.fmapF PB.functionEntryToConcreteBlock fPair)
-  return $ fmap (\x -> PAD.AbstractDomainBody x Nothing) iEqSpec
+  -- as a small optimization, we know that the return nodes leave the values
+  -- unmodified, and therefore any previously-established value constraints
+  -- will still hold
+  let vals = PAD.absDomVals preDom
+  return $ fmap (\x -> PAD.AbstractDomainBody x vals) iEqSpec
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -121,17 +133,18 @@ widenAlongEdge ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge bundle from d gr to =
+widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> do
 
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
      do traceBundle bundle ("First jump to " ++ show to)
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
-        d' <- makeFreshAbstractDomain to
+
+        d' <- makeFreshAbstractDomain bak bundle (PS.specBody d) to
 
         -- compute an initial widening, if necessary
-        md <- widenPostcondition bundle d d'
+        md <- widenPostcondition bak bundle d d'
         case md of
           NoWideningRequired ->
             return (freshDomain gr to d')
@@ -144,7 +157,7 @@ widenAlongEdge bundle from d gr to =
 
     -- have visited this location at least once before
     Just d' ->
-     do md <- widenPostcondition bundle d d'
+     do md <- widenPostcondition bak bundle d d'
         case md of
           NoWideningRequired ->
             do traceBundle bundle "Did not need to widen"
@@ -218,37 +231,57 @@ localWideningGas :: Gas
 localWideningGas = Gas 100
 
 
-widenPostcondition :: forall sym arch.
-  PA.ValidArch arch =>
+--TODO: this is a bit of a cludge - we should standardize how EquivM interacts
+-- with the online solver process
+withPredomain ::
+  forall sym arch a.
+  SimBundle sym arch ->
+  AbstractDomain sym arch ->
+  (forall scope st fs solver.
+       W4.OnlineSolver solver =>
+       (sym ~ W4.ExprBuilder scope st fs) =>
+       LCBO.OnlineBackend solver scope st fs ->
+       EquivM sym arch a) ->
+  EquivM sym arch a
+withPredomain bundle preD f = withSym $ \sym -> do
+  vcfg <- asks envConfig
+  asmFrame <- asks envCurrentFrame
+  eqCtx <- equivalenceContext
+
+  precond <- liftIO $ do
+    asm1 <- PS.getAssumedPred sym asmFrame
+    let asm2 = PS.specAsm preD
+    asm <- W4.andPred sym asm1 asm2
+    absDomPred <- PAD.absDomainToPrecond sym eqCtx bundle (PS.specBody preD)
+    W4.andPred sym asm absDomPred
+
+  let solver = PCfg.cfgSolver vcfg
+  let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
+
+  PS.withOnlineSolver solver saveInteraction sym $ \bak ->
+    do IO.withRunInIO $ \inIO -> LCBO.withSolverProcess bak doPanic $ \sp ->
+         do W4.inNewFrame sp $ do
+              W4.assume (W4.solverConn sp) precond
+              inIO (f bak)
+ where
+   doPanic = panic Solver "withPredomain" ["Online solving not enabled"]
+
+widenPostcondition :: forall sym arch solver t st fs bak.
+  ( bak ~ LCBO.OnlineBackend solver t st fs
+  , sym ~ W4.ExprBuilder t st fs
+  , W4.OnlineSolver solver
+  , LCB.IsSymBackend sym bak
+  ) =>
+  bak ->
   SimBundle sym arch ->
   AbstractDomain sym arch {- ^ predomain -} ->
   AbstractDomain sym arch {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch)
-widenPostcondition bundle preD postD0 =
-  withSym $ \sym ->
-    do vcfg <- asks envConfig
-       asmFrame <- asks envCurrentFrame
-       eqCtx <- equivalenceContext
-
-       let solver = PCfg.cfgSolver vcfg
-       let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
-
-       precond <- liftIO $ do
-         asm1 <- PS.getAssumedPred sym asmFrame
-         let asm2 = PS.specAsm preD
-         asm <- W4.andPred sym asm1 asm2
-         absDomPred <- PAD.absDomainToPrecond sym eqCtx bundle (PS.specBody preD)
-         W4.andPred sym asm absDomPred
-
-       traceBundle bundle "Entering widening loop"
-
-       PS.withOnlineSolver solver saveInteraction sym $ \bak ->
-         do liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
-              do -- NB, this `push` is here to avoid
-                 -- https://github.com/GaloisInc/what4/issues/196
-                 W4.push sp
-                 W4.assume (W4.solverConn sp) precond
-            widenLoop sym bak localWideningGas eqCtx postD0 Nothing
+widenPostcondition bak bundle preD postD0 =
+  withSym $ \sym -> do
+    eqCtx <- equivalenceContext
+    traceBundle bundle "Entering widening loop"
+    widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
    doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
@@ -270,7 +303,6 @@ widenPostcondition bundle preD postD0 =
      , LCB.IsSymBackend sym bak
      , PA.ValidArch arch ) =>
      sym ->
-     bak ->
      Gas ->
      EquivContext sym arch ->
      AbstractDomain sym arch ->
@@ -279,11 +311,11 @@ widenPostcondition bundle preD postD0 =
           If @Nothing@, than no previous widenings have been performed. -} ->
      EquivM sym arch (WidenResult sym arch)
 
-   widenLoop sym bak (Gas i) eqCtx postD mlocs =
+   widenLoop sym (Gas i) eqCtx postD mlocs =
      do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
         let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
         (postCondAsm, postDomBody) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
-
+        eqPostPred <- liftIO $ PAD.absDomainToPostCond sym eqCtx bundle (PS.specBody preD) postDomBody
         res <- IO.withRunInIO $ \inIO ->
           liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
             W4.inNewFrame sp $
@@ -292,31 +324,25 @@ widenPostcondition bundle preD postD0 =
                -- Assume the validity conditions coming outof the postdomain spec.
                -- TODO? Should we do this, or are these conditions irrelevant?
                W4.assume conn postCondAsm
-
-               postDomBody' <- getInitalAbsDomainVals bak bundle postDomBody
-               -- TODO: variable handling is a bit ad-hoc
-               let postD' = postD { PS.specBody = postDomBody' }
-               eqPostPred <- PAD.absDomainToPostCond sym eqCtx bundle postDomBody'
-
                -- check if we already satisfy the equality condition
                W4.assume conn =<< W4.notPred sym eqPostPred
 
                W4.checkAndGetModel sp "prove postcondition" >>= \case
                  Unsat _ -> return NoWideningRequired
-                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD')
+                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD)
                  Sat evalFn ->
                    if i <= 0 then inIO $
                      -- we ran out of gas
                      do slice <- PP.simBundleToSlice bundle
-                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ PS.specBody preD) (PAD.absDomEq $ PS.specBody postD') slice (SymGroundEvalFn evalFn)
+                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ PS.specBody preD) (PAD.absDomEq $ PS.specBody postD) slice (SymGroundEvalFn evalFn)
                         let msg = unlines [ "Ran out of gas performing local widenings"
                                           , show (pretty ineqRes)
                                           ]
-                        return $ WideningError msg (fromMaybe mempty mlocs) postD'
+                        return $ WideningError msg (fromMaybe mempty mlocs) postD
                    else
                      -- The current execution does not satisfy the postcondition, and we have
                      -- a counterexample.
-                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD mlocs postD')
+                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD mlocs postD)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -355,7 +381,7 @@ widenPostcondition bundle preD postD0 =
                let newlocs = case mlocs of
                                Nothing    -> locs
                                Just locs' -> locs <> locs'
-               widenLoop sym bak (Gas (i-1)) eqCtx postD' (Just newlocs)
+               widenLoop sym (Gas (i-1)) eqCtx postD' (Just newlocs)
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the
 -- output of symbolic execution, where possible.
@@ -368,20 +394,20 @@ getInitalAbsDomainVals ::
   , PA.ValidArch arch ) =>
   LCBO.OnlineBackend solver t st fs ->
   SimBundle sym arch ->
-  PAD.AbstractDomainBody sym arch ->
-  IO (PAD.AbstractDomainBody sym arch)
-getInitalAbsDomainVals bak bundle absDom = case PAD.absDomVals absDom of
-  Just _ -> return absDom
-  Nothing -> do
-    let
-      sym = LCB.backendGetSym bak
-      getConcreteRange :: forall tp. W4.SymExpr sym tp -> IO (PAD.AbsRange tp)
-      getConcreteRange e = do
-        e' <- PVC.resolveSingletonSymbolicAsDefault bak e
-        return $ PAD.extractAbsRange sym e'
-    initO <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutO bundle)
-    initP <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutP bundle)
-    return $ absDom { PAD.absDomVals = Just (PPa.PatchPair initO initP) }
+  PAD.AbstractDomainBody sym arch {- ^ incoming pre-domain -} ->
+  IO (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
+getInitalAbsDomainVals bak bundle preDom = do
+  let
+    sym = LCB.backendGetSym bak
+    getConcreteRange :: forall tp. W4.SymExpr sym tp -> IO (PAD.AbsRange tp)
+    getConcreteRange e = do
+      e' <- PVC.resolveSingletonSymbolicAsDefault bak e
+      return $ PAD.extractAbsRange sym e'
+
+  let PPa.PatchPair preO preP = PAD.absDomVals preDom
+  initO <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutO bundle) preO
+  initP <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutP bundle) preP
+  return $ PPa.PatchPair initO initP
 
 widenUsingCounterexample ::
   ( sym ~ W4.ExprBuilder t st fs
