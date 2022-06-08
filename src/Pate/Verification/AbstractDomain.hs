@@ -226,6 +226,9 @@ initAbsDomainVals ::
   m (AbstractDomainVals sym arch bin)
 initAbsDomainVals sym f stOut preVals = do
   foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
+  -- NOTE: We need to include any cells from the pre-domain to ensure that we
+  -- propagate forward any value constraints for memory that is not accessed in this
+  -- slice
   let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
   memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
     absVal <- getMemAbsVal cell

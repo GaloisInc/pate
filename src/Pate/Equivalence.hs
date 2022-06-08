@@ -369,6 +369,10 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
       -- since domain polarities are going to be deprecated (see: https://github.com/GaloisInc/pate/issues/297) we can just explicitly set the polarity to be 'false'
       -- to ensure that 'PEM.addFootPrints' collects the write operations
       -- from the footprints
+
+      -- NOTE: We need to include cells from the pre-domain to ensure that we
+      -- propagate forward any cells that we have relaxed the equality constraint on,
+      -- but are not written to in this slice.
       let domPre' = domPre { PEM.memDomainPolarity = W4.falsePred sym }
 
       -- this implicitly filters the footprints for writes, since we're giving
