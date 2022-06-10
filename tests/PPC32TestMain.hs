@@ -19,21 +19,9 @@ main = do
         , testExpectEquivalenceFailure =
             [
               "const-args"
-
-              -- failing due to macaw analysis failures:
-              -- see: https://github.com/GaloisInc/pate/issues/128
-            , "reorder-call"
-            , "args-equal"
-            , "reestablish-equality"
             ]
         , testExpectSelfEquivalenceFailure =
             [
-              -- failing due to macaw analysis failures:
-              -- see: https://github.com/GaloisInc/pate/issues/128
-              "const-args"
-            , "reorder-call"
-            , "args-equal"
-            , "reestablish-equality"
             ]
         -- TODO: we should define a section name here and read its address
         -- from the ELF
