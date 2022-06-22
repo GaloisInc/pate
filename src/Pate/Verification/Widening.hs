@@ -72,7 +72,7 @@ import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import qualified Pate.Verification.AbstractDomain as PAD
-import           Pate.Verification.AbstractDomain ( AbstractDomain )
+import           Pate.Verification.AbstractDomain ( AbstractDomain, WidenLocs(..) )
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -152,7 +152,7 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> do
             do let msg' = ("Error during widening: " ++ msg)
                traceBundle bundle msg'
                return $ recordMiscAnalysisError (freshDomain gr to d'') to (Text.pack msg')
-          Widen _ d'' ->
+          Widen _ _ d'' ->
             return (freshDomain gr to d'')
 
     -- have visited this location at least once before
@@ -172,7 +172,7 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> do
                       return $ recordMiscAnalysisError gr' to (Text.pack msg')
                  Right gr' -> return $ recordMiscAnalysisError gr' to (Text.pack msg')
 
-          Widen _ d'' ->
+          Widen _ _ d'' ->
             case updateDomain gr from to d'' of
               Left gr' ->
                 do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
@@ -180,25 +180,10 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> do
               Right gr' -> return gr'
 
 
--- | Information about what locations were widened
-data WidenLocs sym arch =
-  WidenLocs
-    (Set (Some (MM.ArchReg arch)))
-    (Set (Some (PMc.MemCell sym arch)))
-
-instance (W4.IsSymExprBuilder sym, PA.ValidArch arch) => Show (WidenLocs sym arch) where
-  show (WidenLocs regs cells) =
-    unlines $
-      [ unwords (map show (Set.toList regs)) ] ++
-      [ show (PMc.ppCell c)
-      | Some c <- Set.toList cells
-      ]
-
-instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym arch) where
-  (WidenLocs r1 m1) <> (WidenLocs r2 m2) = WidenLocs (r1 <> r2) (m1 <> m2)
-
-instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
-  mempty = WidenLocs mempty mempty
+-- | Classifying what kind of widening has occurred
+data WidenKind =
+    WidenValue -- ^ constant values disagree in the value domain
+  | WidenEquality -- ^ values disagree between the original and patched binaries
 
 -- Result of attempting to widen.  Errors can occur for a couple of reasons:
 -- UNKNOWN results from solvers; running out of gas in the widening loop,
@@ -207,7 +192,7 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arc
 data WidenResult sym arch
   = NoWideningRequired
   | WideningError String (WidenLocs sym arch) (AbstractDomain sym arch)
-  | Widen (WidenLocs sym arch) (AbstractDomain sym arch)
+  | Widen WidenKind (WidenLocs sym arch) (AbstractDomain sym arch)
 
 -- | Try the given widening strategies one at a time,
 --   until the first one that computes some nontrival
@@ -306,15 +291,23 @@ widenPostcondition bak bundle preD postD0 =
      Gas ->
      EquivContext sym arch ->
      AbstractDomain sym arch ->
-     Maybe (WidenLocs sym arch)
+     Maybe (WidenResult sym arch)
      {- ^ A summary of any widenings that were done in previous iterations.
           If @Nothing@, than no previous widenings have been performed. -} ->
      EquivM sym arch (WidenResult sym arch)
 
-   widenLoop sym (Gas i) eqCtx postD mlocs =
+   widenLoop sym (Gas i) eqCtx postD mPrevRes =
      do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
         let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+        let prevLocs = case mPrevRes of
+              Just (Widen _ locs _) -> locs
+              _ -> mempty
         (postCondAsm, postDomBody) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
+        -- TODO: It is likely useful to separate checking the equality and value domains, rather
+        -- than checking them simultaneously here. The plan is to change this check to instead
+        -- iterate over the domain and check each location individually
+        -- (see: https://github.com/GaloisInc/pate/issues/287), so we should revisit how to separate
+        -- these checks at that point.
         eqPostPred <- liftIO $ PAD.absDomainToPostCond sym eqCtx bundle (PS.specBody preD) postDomBody
         res <- IO.withRunInIO $ \inIO ->
           liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
@@ -329,8 +322,8 @@ widenPostcondition bak bundle preD postD0 =
 
                W4.checkAndGetModel sp "prove postcondition" >>= \case
                  Unsat _ -> return NoWideningRequired
-                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" (fromMaybe mempty mlocs) postD)
-                 Sat evalFn ->
+                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
+                 Sat evalFn -> 
                    if i <= 0 then inIO $
                      -- we ran out of gas
                      do slice <- PP.simBundleToSlice bundle
@@ -338,11 +331,11 @@ widenPostcondition bak bundle preD postD0 =
                         let msg = unlines [ "Ran out of gas performing local widenings"
                                           , show (pretty ineqRes)
                                           ]
-                        return $ WideningError msg (fromMaybe mempty mlocs) postD
+                        return $ WideningError msg prevLocs postD
                    else
                      -- The current execution does not satisfy the postcondition, and we have
                      -- a counterexample.
-                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD mlocs postD)
+                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm (PAD.absDomEq postDomBody) preD prevLocs postD)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -370,18 +363,16 @@ widenPostcondition bak bundle preD postD0 =
           -- The ultimate result we return depends on if we did any widening steps in
           -- previous iterations.
           NoWideningRequired ->
-            case mlocs of
+            case mPrevRes of
               Nothing   -> return NoWideningRequired
-              Just locs -> return (Widen locs postD)
+              Just prevRes -> return prevRes
 
           -- We had to do some widening in this iteration, so reenter the loop.
-          Widen locs postD' ->
+          Widen widenK locs postD' ->
             do traceBundle bundle "== Found a widening, returning into the loop =="
                traceBundle bundle (show locs)
-               let newlocs = case mlocs of
-                               Nothing    -> locs
-                               Just locs' -> locs <> locs'
-               widenLoop sym (Gas (i-1)) eqCtx postD' (Just newlocs)
+               let newlocs = locs <> prevLocs
+               widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the
 -- output of symbolic execution, where possible.
@@ -419,10 +410,10 @@ widenUsingCounterexample ::
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch ->
-  Maybe (WidenLocs sym arch) ->
+  WidenLocs sym arch {- ^ previous widening -}   ->
   AbstractDomain sym arch ->
   EquivM sym arch (WidenResult sym arch)
-widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD mlocs postD =
+widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD prevLocs postD =
   tryWidenings
     [ -- First check for any disagreement in the constant values
       widenValues sym evalFn bundle postD
@@ -445,7 +436,7 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
          let msg = unlines [ "Could not find any values to widen!"
                            , show (pretty ineqRes)
                            ]
-         return $ WideningError msg (fromMaybe mempty mlocs) postD
+         return $ WideningError msg prevLocs postD
     ]
 
 data MemCellSource = LocalChunkWrite | PreDomainCell
@@ -462,11 +453,11 @@ widenValues ::
 widenValues sym evalFn bundle postD = do
   (postD', mlocs) <- PAD.widenAbsDomainVals sym (PS.specBody postD) getRange bundle
   case mlocs of
-    Just (PAD.RelaxLocs regLocs memLocs) ->
+    Just (WidenLocs regLocs memLocs) ->
       if regLocs == mempty && memLocs == mempty then
         return NoWideningRequired
       else
-        return $ Widen (WidenLocs regLocs memLocs) (postD { PS.specBody = postD' })
+        return $ Widen WidenValue (WidenLocs regLocs memLocs) (postD { PS.specBody = postD' })
     Nothing -> return $ WideningError "widenValues" mempty postD
   where
      getRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
@@ -506,7 +497,7 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
           let md' = (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD)){ PEM.memDomainPred = heapDom' }
           let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
           let postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
-          return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
+          return (Widen WidenEquality (WidenLocs mempty (Set.fromList zs)) postD')
 
 
 -- | Only return those cells not already excluded by the postdomain
@@ -552,7 +543,7 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD me
           let md' = (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD)){ PEM.memDomainPred = stackDom' }
           let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainStackMemory = md' }
           let postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
-          return (Widen (WidenLocs mempty (Set.fromList zs)) postD')
+          return (Widen WidenEquality (WidenLocs mempty (Set.fromList zs)) postD')
 
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
@@ -676,7 +667,7 @@ widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD =
                    }
            postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
            locs = WidenLocs (Set.fromList newRegs) mempty
-        in return (Widen locs postD')
+        in return (Widen WidenEquality locs postD')
 
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time

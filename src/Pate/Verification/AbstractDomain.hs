@@ -19,7 +19,7 @@ module Pate.Verification.AbstractDomain
   , AbstractDomainBody(..)
   , AbsRange(..)
   , AbstractDomainVals(..)
-  , RelaxLocs(..)
+  , WidenLocs(..)
   , emptyDomainVals
   , groundToAbsRange
   , extractAbsRange
@@ -39,6 +39,7 @@ import qualified Control.Monad.Writer as CMW
 
 import           Data.Functor.Const
 import qualified Data.Set as S
+import           Data.Set ( Set )
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
@@ -213,17 +214,25 @@ getAbsVal sym f e = case PSR.macawRegRepr e of
   CT.StructRepr Ctx.Empty -> return $ MacawAbstractValue Ctx.Empty
   _ -> error "getAbsVal: unexpected type for abstract domain"
 
--- FIXME: clagged from Widening module
-data RelaxLocs sym arch =
-  RelaxLocs
-    (S.Set (Some (MM.ArchReg arch)))
-    (S.Set (Some (PMC.MemCell sym arch)))
+-- | Information about what locations were widened
+data WidenLocs sym arch =
+  WidenLocs
+    (Set (Some (MM.ArchReg arch)))
+    (Set (Some (PMC.MemCell sym arch)))
 
-instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (RelaxLocs sym arch) where
-  (RelaxLocs r1 m1) <> (RelaxLocs r2 m2) = RelaxLocs (r1 <> r2) (m1 <> m2)
+instance (W4.IsSymExprBuilder sym, PA.ValidArch arch) => Show (WidenLocs sym arch) where
+  show (WidenLocs regs cells) =
+    unlines $
+      [ unwords (map show (S.toList regs)) ] ++
+      [ show (PMC.ppCell c)
+      | Some c <- S.toList cells
+      ]
 
-instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (RelaxLocs sym arch) where
-  mempty = RelaxLocs mempty mempty
+instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym arch) where
+  (WidenLocs r1 m1) <> (WidenLocs r2 m2) = WidenLocs (r1 <> r2) (m1 <> m2)
+
+instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
+  mempty = WidenLocs mempty mempty
 
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
@@ -280,7 +289,7 @@ widenAbsDomainVals' ::
   AbstractDomainVals sym arch bin {- ^ existing abstract domain that this is augmenting -} ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimOutput sym arch bin ->
-  m (AbstractDomainVals sym arch bin, RelaxLocs sym arch)
+  m (AbstractDomainVals sym arch bin, WidenLocs sym arch)
 widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
   memVals <- MapF.traverseMaybeWithKey relaxMemVal (absMemVals prev)
   regVals <- PRt.zipWithRegStatesM (absRegVals prev) (PS.simOutRegs stOut) relaxRegVal
@@ -297,13 +306,13 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
     relaxMemVal ::
       PMC.MemCell sym arch w ->
       MemAbstractValue sym w {- ^ previous abstract value -} ->
-      CMW.WriterT (RelaxLocs sym arch) m (Maybe (MemAbstractValue sym w))
+      CMW.WriterT (WidenLocs sym arch) m (Maybe (MemAbstractValue sym w))
     relaxMemVal cell (MemAbstractValue absValPrev) = case isUnconstrained absValPrev of
       True -> return Nothing
       False -> do
         MemAbstractValue absValNew <- CMW.lift $ getMemAbsVal cell
         let absValCombined = combineAbsVals absValNew absValPrev
-        unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs mempty (S.singleton (Some cell)))
+        unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs mempty (S.singleton (Some cell)))
         case isUnconstrained absValCombined of
           True -> return Nothing
           False -> return $ Just $ MemAbstractValue absValCombined
@@ -312,13 +321,13 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
       MM.ArchReg arch tp ->
       MacawAbstractValue sym tp {- ^ previous abstract value -} ->
       PSR.MacawRegEntry sym tp ->
-      CMW.WriterT (RelaxLocs sym arch) m (MacawAbstractValue sym tp)
+      CMW.WriterT (WidenLocs sym arch) m (MacawAbstractValue sym tp)
     relaxRegVal reg absValPrev v = case isUnconstrained absValPrev of
       True -> return absValPrev
       False -> do
         absValNew <- CMW.lift $ getAbsVal sym f v
         let absValCombined = combineAbsVals absValNew absValPrev
-        unless (absValCombined == absValPrev) $ CMW.tell (RelaxLocs (S.singleton (Some reg)) mempty)
+        unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs (S.singleton (Some reg)) mempty)
         return absValCombined
 
 widenAbsDomainVals ::
@@ -331,7 +340,7 @@ widenAbsDomainVals ::
   AbstractDomainBody sym arch {- ^ existing abstract domain that this is augmenting -} ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimBundle sym arch ->
-  m (AbstractDomainBody sym arch, Maybe (RelaxLocs sym arch))
+  m (AbstractDomainBody sym arch, Maybe (WidenLocs sym arch))
 widenAbsDomainVals sym prev f bundle = do
   let (PPa.PatchPair absValsO absValsP) = absDomVals prev
   (absValsO', locsO) <- widenAbsDomainVals' sym absValsO f (PS.simOutO bundle)
