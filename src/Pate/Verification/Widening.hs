@@ -23,12 +23,10 @@ import           Control.Monad.Writer (tell, execWriterT)
 
 import           Prettyprinter
 
-import           Data.Maybe (fromMaybe)
-import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 
-import           Data.Parameterized.Classes
+import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
@@ -72,7 +70,7 @@ import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import qualified Pate.Verification.AbstractDomain as PAD
-import           Pate.Verification.AbstractDomain ( AbstractDomain, WidenLocs(..) )
+import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
