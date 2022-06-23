@@ -10,7 +10,6 @@ module Pate.Config (
   MemRegion(..),
   parsePatchConfig,
   VerificationConfig(..),
-  VerificationMethod(..),
   defaultVerificationCfg
   ) where
 
@@ -205,13 +204,6 @@ data VerificationConfig =
     -- ^ start by pairing the entry points of the binaries
     , cfgDiscoverFuns :: Bool
     -- ^ discover additional functions pairs during analysis
-    , cfgComputeEquivalenceFrames :: Bool
-    -- ^ compute fine-grained equivalence frames using heuristics
-    -- if false, pre-domains will simply be computed as any possible
-    -- relevant state. A failed result in this mode will fallback
-    -- to attempting to use fine-grained domains.
-    , cfgEmitProofs :: Bool
-    -- ^ emit a structured spine of the equivalence proofs
     , cfgSolver :: PS.Solver
     -- ^ The SMT solver to use to discharge proof goals
     , cfgHeuristicTimeout :: PT.Timeout
@@ -230,25 +222,16 @@ data VerificationConfig =
     -- This only captures the interaction with the solver during symbolic
     -- execution, and not the one-off queries issued by the rest of the verifier
 
-    , cfgVerificationMethod :: VerificationMethod
     }
-
-data VerificationMethod
-  = HoareTripleVerification
-  | StrongestPostVerification
- deriving (Eq,Ord,Show)
 
 defaultVerificationCfg :: VerificationConfig
 defaultVerificationCfg =
   VerificationConfig { cfgPairMain = True
                      , cfgDiscoverFuns = True
-                     , cfgComputeEquivalenceFrames = True
-                     , cfgEmitProofs = True
                      , cfgSolver = PS.Yices
                      , cfgHeuristicTimeout = PT.Seconds 10
                      , cfgGoalTimeout = PT.Minutes 5
                      , cfgGroundTimeout = PT.Seconds 5
                      , cfgMacawDir = Nothing
                      , cfgSolverInteractionFile = Nothing
-                     , cfgVerificationMethod = HoareTripleVerification
                      }
