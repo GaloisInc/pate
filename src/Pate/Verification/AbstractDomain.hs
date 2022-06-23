@@ -190,7 +190,7 @@ noAbsVal repr = case repr of
                         Ctx.:> AbsUnconstrained (W4.BaseBVRepr n))
   MT.BoolTypeRepr -> MacawAbstractValue (Ctx.Empty Ctx.:> AbsUnconstrained W4.BaseBoolRepr)
   MT.TupleTypeRepr PL.Nil -> MacawAbstractValue Ctx.Empty
-  _ -> error "noAbsVal: unexpected type for abstract domain"
+  _ -> panic Solver "noAbsVal" ["Unexpected type for abstract domain"]
 
 -- | Traverse the component expressions of the given 'PSR.MacawRegEntry' and construct
 -- a 'MacawAbstractValue' by computing an 'AbsRange' for each component using the given function.
@@ -212,7 +212,7 @@ getAbsVal sym f e = case PSR.macawRegRepr e of
     bAbs <- f (PSR.macawRegValue e)
     return $ MacawAbstractValue (Ctx.Empty Ctx.:> bAbs)
   CT.StructRepr Ctx.Empty -> return $ MacawAbstractValue Ctx.Empty
-  _ -> error "getAbsVal: unexpected type for abstract domain"
+  _ -> panic Solver "getAbsVal" ["Unexpected type for abstract domain"]
 
 -- | Information about what locations were widened
 data WidenLocs sym arch =
@@ -384,7 +384,7 @@ absDomainValToAsm sym e (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
     (Ctx.Empty Ctx.:> bAbs) <- return $ absVal
     applyAbsRange sym b bAbs
   CT.StructRepr Ctx.Empty -> return mempty
-  _ -> error "applyAbsDomainVal: unexpected type for abstract domain"
+  _ -> panic Solver "applyAbsDomainVal" ["Unexpected type for abstract domain"]
 
 
 -- | Construct an 'PS.AssumptionFrame' asserting
