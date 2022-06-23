@@ -21,28 +21,16 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
 import           Data.Parameterized.Classes()
-import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.Text as T
-import           GHC.Stack ( HasCallStack )
-import qualified What4.BaseTypes as WT
+import GHC.Stack ( HasCallStack )
 import qualified What4.Interface as W4
-import qualified What4.Symbol as WS
 
 import qualified Data.Macaw.CFG as MM
-import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Types as CT
-
 
 import qualified Pate.Arch as PA
-import qualified Pate.Binary as PB
-import qualified Pate.Block as PB
-import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
-import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
-import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.PatchPair as PPa
