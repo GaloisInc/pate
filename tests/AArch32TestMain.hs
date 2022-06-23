@@ -18,7 +18,6 @@ main = do
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
             [
-              "const-args"
             ]
         , testExpectSelfEquivalenceFailure = [ ]
         -- TODO: we should define a section name here and read its address

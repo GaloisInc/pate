@@ -57,7 +57,6 @@ import qualified Data.Macaw.CFG as MM
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence as PE
-import qualified Pate.Equivalence.EquivalenceDomain as PE
 import qualified Pate.Event as Event
 import           Pate.Monad
 import           Pate.Panic
@@ -65,9 +64,12 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
+
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
+import qualified Pate.Verification.AbstractDomain as PAD
+import           Pate.Verification.AbstractDomain ( AbstractDomain )
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -83,10 +85,6 @@ newtype Gas = Gas Word32
 --   Should make this configurable.
 initialGas :: Gas
 initialGas = Gas 5
-
--- | For now, the abstract domains we track are just exactly
---   a 'PE.DomainSpec', but we may change/add to this as we go.
-type AbstractDomain sym arch = PE.DomainSpec sym arch
 
 -- | The PairGraph is the main datastructure tracking all the
 --   information we compute when analysing a program. The analysis we
@@ -183,7 +181,7 @@ ppProgramDomains ::
 ppProgramDomains ppPred gr =
   vcat
   [ vcat [ pretty pPair
-         , indent 4 (PE.ppEquivalenceDomain ppPred (PS.specBody ad))
+         , indent 4 (PAD.ppAbstractDomain ppPred (PS.specBody ad))
          ]
   | (pPair, ad) <- Map.toList (pairGraphDomains gr)
   ]
@@ -309,7 +307,9 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
-           idom <- PVD.universalDomainSpec bPair
+           iEqDom <- PVD.universalDomainSpec bPair
+           
+           let idom = fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)) iEqDom
            return (freshDomain gr (GraphNode bPair) idom)
 
 -- | Given a pair graph, chose the next node in the graph to visit
