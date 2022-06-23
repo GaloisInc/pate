@@ -48,15 +48,11 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
 
-import qualified What4.Utils.AbstractDomains as WAbs
 import qualified What4.Interface as W4
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
-import qualified What4.Symbol as W4S
 import qualified What4.Concrete as W4C
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Types as CT
 import           Lang.Crucible.Backend (IsSymInterface)
 
@@ -76,6 +72,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.ExprMappable as PEM
+import           Pate.Panic
 
 -- | Defining abstract domains which propagate forwards during strongest
 -- postcondition analysis.
