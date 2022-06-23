@@ -214,8 +214,15 @@ localWideningGas :: Gas
 localWideningGas = Gas 100
 
 
---TODO: this is a bit of a cludge - we should standardize how EquivM interacts
--- with the online solver process
+
+-- | Run a continuation in a fresh solver assumption frame, where the
+-- given abstract domain is assumed to hold on the pre-state of the given
+-- bundle.
+-- Additionally, the 'AssumptionFrame' from the 'EquivM' environment is
+-- collapsed into a predicate and assumed in this fresh solver frame.
+--
+-- TODO: this is a bit of a cludge - we should standardize how EquivM interacts
+-- with the online solver process. 
 withPredomain ::
   forall sym arch a.
   SimBundle sym arch ->

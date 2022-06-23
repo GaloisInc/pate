@@ -397,17 +397,17 @@ absDomainValsToAsm ::
   AbstractDomainVals sym arch bin ->
   IO (PS.AssumptionFrame sym)
 absDomainValsToAsm sym st vals = do
-  memFrame <- MapF.foldrMWithKey getCell mempty (absMemVals vals)
+  memFrame <- MapF.foldrMWithKey accumulateCell mempty (absMemVals vals)
   regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
     Const <$> absDomainValToAsm sym val absVal
   return $ memFrame <> regFrame
   where
-    getCell ::
+    accumulateCell ::
       PMC.MemCell sym arch w ->
       MemAbstractValue sym w ->
       PS.AssumptionFrame sym ->
       IO (PS.AssumptionFrame sym)
-    getCell cell (MemAbstractValue absVal) frame = do
+    accumulateCell cell (MemAbstractValue absVal) frame = do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
       frame' <- absDomainValToAsm sym (PSR.ptrToEntry val) absVal
       return $ frame <> frame'
@@ -428,6 +428,13 @@ absDomainValsToPred sym st vals = do
   asm <- absDomainValsToAsm sym st vals
   PS.getAssumedPred sym asm
 
+-- | Construct a 'W4.Pred' asserting that the given
+-- abstract domain holds in the pre-state of the given
+-- bundle: i.e. the initial original and patched states are  equal
+-- up to the equivalence domain, and known constraints on
+-- values are initially satisfied.
+-- This is intended to be assumed to initially hold when verifying the given
+-- 'PS.SimBundle'
 absDomainToPrecond ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
@@ -446,6 +453,13 @@ absDomainToPrecond sym eqCtx bundle d = do
     W4.andPred sym predO predP
   W4.andPred sym eqInputsPred valsPred
 
+-- | Construct a 'W4.Pred' asserting that the given
+-- abstract domain holds in the post-state of the given
+-- bundle: i.e. the resulting original and patched states are  equal
+-- up to the equivalence domain, and known constraints on
+-- values are satisfied.
+-- This is intended to be proven to finally hold when verifying the given
+-- 'PS.SimBundle'
 absDomainToPostCond ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
