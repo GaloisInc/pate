@@ -147,14 +147,11 @@ main = do
           PC.defaultVerificationCfg
             { PC.cfgPairMain = not $ noPairMain opts
             , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
-            , PC.cfgComputeEquivalenceFrames = not $ trySimpleFrames opts
-            , PC.cfgEmitProofs = not $ noProofs opts
             , PC.cfgSolver = solver opts
             , PC.cfgHeuristicTimeout = heuristicTimeout opts
             , PC.cfgGoalTimeout = goalTimeout opts
             , PC.cfgMacawDir = saveMacawCFGs opts
             , PC.cfgSolverInteractionFile = solverInteractionFile opts
-            , PC.cfgVerificationMethod = verificationMethod opts
             }
         cfg = PL.RunConfig
             { PL.archProxy = proxy
@@ -193,8 +190,6 @@ data CLIOptions = CLIOptions
   , interactiveConfig :: Maybe InteractiveConfig
   , noPairMain :: Bool
   , noDiscoverFuns :: Bool
-  , noProofs :: Bool
-  , trySimpleFrames :: Bool
   , solver :: PS.Solver
   , goalTimeout :: PTi.Timeout
   , heuristicTimeout :: PTi.Timeout
@@ -211,7 +206,6 @@ data CLIOptions = CLIOptions
   , proofSummaryJSON :: Maybe FilePath
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
-  , verificationMethod :: PC.VerificationMethod
   } deriving (Eq, Ord, Show)
 
 data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
@@ -535,14 +529,6 @@ cliOptions = OA.info (OA.helper <*> parser)
       <> OA.short 'd'
       <> OA.help "Don't dynamically discover function pairs based on calls."
       ))
-    <*> (OA.switch
-      (  OA.long "noproofs"
-      <> OA.help "Don't print structured proofs after checking."
-      ))
-    <*> (OA.switch
-      (  OA.long "try-simple-frames"
-      <> OA.help "Attempt simple frame propagation first, falling back to heuristic analysis upon failure."
-      ))
     <*> OA.option OA.auto (OA.long "solver"
                     <> OA.help "The SMT solver to use to solve verification conditions. One of CVC4, Yices, or Z3"
                     <> OA.value PS.Yices
@@ -611,7 +597,3 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.metavar "FILE"
         <> OA.help "A file to save debug logs to"
         ))
-    <*> OA.flag PC.HoareTripleVerification PC.StrongestPostVerification
-        (  OA.long "strongestpost"
-        <> OA.help "Switch to the strongest postcondition verification method"
-        )

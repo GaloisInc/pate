@@ -133,10 +133,6 @@ doTest mwb cfg sv proxy@(PA.SomeValidArch {}) fp = do
       T.assertFailure (msg ++ "\n" ++ (intercalate "\n" (reverse logs)))
 
     infoPath = if infoCfgExists then Just $ fp <.> "toml" else Nothing
-    -- avoid frame computations for self-tests
-    computeFrames = case mwb of
-      Just _ -> False
-      Nothing -> True
     rcfg = PL.RunConfig
       { PL.archProxy = proxy
       , PL.patchInfoPath = infoPath
@@ -145,11 +141,7 @@ doTest mwb cfg sv proxy@(PA.SomeValidArch {}) fp = do
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.origHints = mempty
       , PL.patchedHints = mempty
-      , PL.verificationCfg =
-          PC.defaultVerificationCfg
-            { PC.cfgComputeEquivalenceFrames = computeFrames
-            , PC.cfgVerificationMethod = PC.StrongestPostVerification
-            }
+      , PL.verificationCfg = PC.defaultVerificationCfg
       , PL.logger =
           LJ.LogAction $ \e -> case e of
             PE.Warning _ err -> do
