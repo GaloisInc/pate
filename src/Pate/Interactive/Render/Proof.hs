@@ -226,15 +226,12 @@ renderProofRegisterDomain _ (Some reg, predicate)
 renderProofMemoryDomain
   :: ( WI.IsSymExprBuilder sym
      )
-  => WI.Pred sym
-  -> (Some (PMC.MemCell sym arch), (WI.Pred sym))
-  -> Maybe (TP.UI TP.Element)
-renderProofMemoryDomain polarity (Some memCell, predicate)
-  | WI.asConstantPred polarity /= WI.asConstantPred predicate =
-    Just $ TP.row [ TP.string (show (PN.natValue (PMC.cellWidth memCell)) ++ " bytes at ")
-                  , TP.pre # TP.set TP.text (T.unpack (pp (CLM.ppPtr (PMC.cellPtr memCell))))
-                  ]
-  | otherwise = Nothing
+  => (Some (PMC.MemCell sym arch), (WI.Pred sym))
+  -> TP.UI TP.Element
+renderProofMemoryDomain (Some memCell, _predicate) =
+  TP.row [ TP.string (show (PN.natValue (PMC.cellWidth memCell)) ++ " bytes at ")
+         , TP.pre # TP.set TP.text (T.unpack (pp (CLM.ppPtr (PMC.cellPtr memCell))))
+         ]
 
 renderDomainExpr
   :: ( WI.IsSymExprBuilder sym
@@ -243,14 +240,6 @@ renderDomainExpr
   => PPr.ProofNonceExpr sym arch PPr.ProofDomainType
   -> TP.UI TP.Element
 renderDomainExpr (PPr.ProofNonceExpr _ _ (PPr.ProofDomain dom)) = renderDomain dom
-
-ppPolarityDescription :: WI.IsExpr e => e WI.BaseBoolType -> PP.Doc ann
-ppPolarityDescription predicate
-  | Just True <- WI.asConstantPred predicate =
-      PP.pretty "These locations are in the domain of this slice"
-  | Just False <- WI.asConstantPred predicate =
-      PP.pretty "All locations other than these are in the domain of this slice"
-  | otherwise = PP.pretty "Symbolic polarity"
 
 text :: PP.Doc ann -> TP.UI TP.Element
 text = TP.string . T.unpack . pp
@@ -266,11 +255,9 @@ renderDomain (PED.EquivalenceDomain regs stack mem) =
   TP.column [ TP.h4 #+ [TP.string "Registers"]
             , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (PER.toList regs))
             , TP.h4 #+ [TP.string "Stack Memory"]
-            , text (ppPolarityDescription (PEM.memDomainPolarity stack))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity stack)) (PEM.toList stack))
+            , TP.column (map renderProofMemoryDomain (PEM.toList stack))
             , TP.h4 #+ [TP.string "Other Memory"]
-            , text (ppPolarityDescription (PEM.memDomainPolarity mem))
-            , TP.column (mapMaybe (renderProofMemoryDomain (PEM.memDomainPolarity mem)) (PEM.toList mem))
+            , TP.column (map renderProofMemoryDomain (PEM.toList mem))
             ]
 
 -- | Render the pretty version of a register pair in a ground state

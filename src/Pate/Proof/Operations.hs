@@ -44,6 +44,7 @@ module Pate.Proof.Operations
 
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.IO.Class ( liftIO )
+import qualified Data.Set as S
 
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Parameterized.Map as MapF
@@ -82,8 +83,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
     ecaseO = PS.simOutBlockEnd $ PS.simOutO $ bundle
     ecaseP = PS.simOutBlockEnd $ PS.simOutP $ bundle
   footprints <- getFootprints bundle
-  memReads <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.truePred sym))
-  memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
+  memReads <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Read) footprints))
+  memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Write) footprints))
 
   preMem <- MapF.fromList <$> mapM (\x -> memCellToOp initState x) memReads
   postMem <- MapF.fromList <$> mapM (\x -> memCellToOp finState x) memWrites

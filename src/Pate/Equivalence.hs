@@ -84,8 +84,6 @@ import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 
-import qualified Pate.Panic as PP
-
 data EquivalenceStatus =
     Equivalent
   | Inequivalent
@@ -336,8 +334,11 @@ memDomPost ::
   PEM.MemoryDomain sym arch {- ^ target post-domain -} ->
   IO (MemoryCondition sym arch)
 memDomPost sym memEqRegion outO outP domPre domPost = do
-  muxMemCond sym (PEM.memDomainPolarity domPost)
-    (positiveMemCells sym memEqRegion stO stP (PEM.memDomainPred domPost)) negativePolarity
+  footO <- MT.traceFootprint sym memO
+  footP <- MT.traceFootprint sym memP
+  let foot = S.union footO footP
+  footCells <- PEM.excludeFootPrints sym (S.filter (MT.isDir MT.Write) foot) domPre
+  MemoryCondition <$> PEM.traverseWithCell footCells resolveCell <*> pure memEqRegion
   where
     stO = simOutState outO
     stP = simOutState outP
@@ -346,7 +347,9 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
     memP = simOutMem outP
 
     -- | Cell equivalence that is conditional on whether or not this
-    -- cell is in the domain of the given predicate
+    -- cell is in the target post-domain. If it is, then we read the
+    -- contents of memory at the cell in the original and patched post-states
+    -- and assert that the resulting values are equal.
     resolveCell ::
       PMC.MemCell sym arch w ->
       W4.Pred sym ->
@@ -355,50 +358,6 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
       impM sym (PEM.containsCell sym domPost cell) $
         resolveCellEquiv sym memEqRegion stO stP cell cond
 
-    -- | For the negative case, we need to consider the domain of the state itself -
-    -- we assure that all writes are equivalent when they have not been excluded
-    negativePolarity :: IO (MemoryCondition sym arch)
-    negativePolarity = do
-      footO <- MT.traceFootprint sym memO
-      footP <- MT.traceFootprint sym memP
-      let foot = S.union footO footP
-      -- in the case where the pre-domain is positive polarity, this operation is a bit
-      -- nonsensical, since there's no way we can now prove equality over
-      -- a negative domain
-
-      -- since domain polarities are going to be deprecated (see: https://github.com/GaloisInc/pate/issues/297) we can just explicitly set the polarity to be 'false'
-      -- to ensure that 'PEM.addFootPrints' collects the write operations
-      -- from the footprints
-
-      -- NOTE: We need to include cells from the pre-domain to ensure that we
-      -- propagate forward any cells that we have relaxed the equality constraint on,
-      -- but are not written to in this slice.
-      let domPre' = domPre { PEM.memDomainPolarity = W4.falsePred sym }
-
-      -- this implicitly filters the footprints for writes, since we're giving
-      -- it a negative domain
-      footCells <- PEM.addFootPrints sym foot domPre'
-      MemoryCondition <$> PEM.traverseWithCell footCells resolveCell <*> pure memEqRegion
-
-
--- | Compute a predicate that asserts that the two states are equivalent
--- with respect to the given 'PEM.MemCellPred'.
--- This is intended to be used for the 'PMC.MemCellPred' of a positive polarity 'PEM.MemoryDomain',
--- as it simply asserts that the states are equal on each cell in the given 'PMC.MemCellPred'.
-positiveMemCells :: 
-  forall sym arch.
-  W4.IsSymExprBuilder sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
-  sym ->
-  MemRegionEquality sym arch ->
-  SimState sym arch PBi.Original ->
-  SimState sym arch PBi.Patched ->
-  PMC.MemCellPred sym arch ->
-  IO (MemoryCondition sym arch)
-positiveMemCells sym memEqRegion stO stP memPred = do
-  let resolveCellPos = resolveCellEquiv sym memEqRegion stO stP
-  memPred' <- PMC.traverseWithCell memPred resolveCellPos
-  return $ MemoryCondition (PEM.MemoryDomain memPred' (W4.truePred sym)) memEqRegion
 
 -- | Compute a predicate that is true if the area of memory covered by the
 -- given 'PMC.MemCell' is equivalent on the two given states.
@@ -465,40 +424,22 @@ resolveCellEquivStack sym (EquivContext _ stackRegion) stO stP cell cond =
 
 -- | Structurally equivalent to a 'PEM.MemoryDomain', however the predicates
 -- relate to equality on the given cells.
--- Note in the case of a negative polarity precondition, this isn't quite true,
+-- Note in the case of a precondition, this isn't quite true,
 -- since there is not a pointwise assertion for equality. Instead the predicate
 -- is simply the condition under which that cell should be excluded from the
 -- assumed initial equality ( see 'memDomPre' and 'memPreCondToPred' )
 data MemoryCondition sym arch = MemoryCondition
   { memCondDomain :: PEM.MemoryDomain sym arch
     -- | the region equality used to derive the predicates in the domain
-    -- this is only needed to derive the final predicate when this condition represents an
-    -- exclusive (i.e. negative polarity) precondition
+    -- this is needed to derive the final predicate
   , memCondRegEq :: MemRegionEquality sym arch
   }
 
-muxMemCond ::
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  W4.Pred sym ->
-  IO (MemoryCondition sym arch) ->
-  IO (MemoryCondition sym arch) ->
-  IO (MemoryCondition sym arch)
-muxMemCond sym p fT fF = case W4.asConstantPred p of
-  Just True -> fT
-  Just False -> fF
-  _ -> do
-    MemoryCondition condT memEqT <- fT
-    MemoryCondition condF memEqF <- fF
-    if memEqT == memEqF then
-      MemoryCondition <$> PEM.mux sym p condT condF <*> pure memEqT
-    else PP.panic PP.Verifier "muxMemCond" ["Incompatible memory region conditions"]
-
-
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
--- We require the pre-states in order to construct the initial equality assumption
--- for an exclusive (i.e. negative polarity) condition.
+-- We require the pre-states in order to construct the initial equality assumption.
+-- Specifically we assume that the patched trace is equivalent
+-- to the original trace with arbitrary modifications to excluded addresses
 memPreCondToPred ::
   forall sym arch.
   IsSymInterface sym =>
@@ -509,16 +450,13 @@ memPreCondToPred ::
   MemoryCondition sym arch ->
   IO (W4.Pred sym)
 memPreCondToPred sym inO inP memCond  = do
-  iteM sym (return $ PEM.memDomainPolarity $ memCondDomain memCond)
-    positivePolarity negativePolarity
+  let cells = PEM.toList $ memCondDomain memCond
+  let memEqRegion = memCondRegEq memCond
+  mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) cells
+  getRegionEquality sym memEqRegion mem' (MT.memState memP)
   where  
     memO = simInMem inO
     memP = simInMem inP
-
-    positivePolarity :: IO (W4.Pred sym)
-    positivePolarity = do
-      let preds = map snd $ PEM.toList $ memCondDomain memCond
-      foldM (W4.andPred sym) (W4.truePred sym) preds
 
     -- | Conditionally write a fresh value to the given memory location
     -- FIXME: update for when memory model supports regions
@@ -536,41 +474,21 @@ memPreCondToPred sym inO inP memCond  = do
           --val <- W4.baseTypeIte sym cond fresh original
           PMC.writeMemCell sym cond mem cell fresh
 
-    -- | For the negative case, we assume that the patched trace is equivalent
-    -- to the original trace with arbitrary modifications to excluded addresses
-    negativePolarity :: IO (W4.Pred sym)
-    negativePolarity = do
-      let cells = PEM.toList $ memCondDomain memCond
-      let memEqRegion = memCondRegEq memCond
-      mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) cells
-      getRegionEquality sym memEqRegion mem' (MT.memState memP)
-
 -- | Compute a precondition that is sufficiently strong to imply equality
--- on the given domain for the given input state
+-- on the given domain
 -- This predicate is meant to be *assumed* true.
+-- Note that since there is not a pointwise assertion for equality, the
+-- resulting condition is simply the condition under which that cell should be excluded from the
+-- assumed initial equality
 memDomPre ::
   forall sym arch.
   IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   MemRegionEquality sym arch ->
-  SimInput sym arch PBi.Original ->
-  SimInput sym arch PBi.Patched ->
   PEM.MemoryDomain sym arch ->
   IO (MemoryCondition sym arch)
-memDomPre sym memEqRegion inO inP memPred  = do
-  muxMemCond sym (PEM.memDomainPolarity memPred)
-    (positiveMemCells sym memEqRegion stO stP (PEM.memDomainPred memPred)) negativePolarity
-  where
-    stO = simInState inO
-    stP = simInState inP
-
-    -- | For the negative case, we simply collect the locations in the domain with their existing
-    -- conditions
-    negativePolarity :: IO (MemoryCondition sym arch)
-    negativePolarity =
-      return $ MemoryCondition (memPred { PEM.memDomainPolarity = W4.falsePred sym }) memEqRegion
-    
+memDomPre _sym memEqRegion memPred = return $ MemoryCondition memPred memEqRegion
 
 -- | Compute a predicate that is true if the two memory states are exactly equal with respect to the given
 -- type of region equality
@@ -646,9 +564,9 @@ eqDomPre sym inO inP (EquivContext hdr stackRegion) eqDom  = do
     
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
   stacksEq <-
-    memDomPre sym (MemEqAtRegion stackRegion) inO inP (PED.eqDomainStackMemory eqDom)
+    memDomPre sym (MemEqAtRegion stackRegion) (PED.eqDomainStackMemory eqDom)
   memEq <-
-    memDomPre sym (MemEqOutsideRegion stackRegion) inO inP (PED.eqDomainGlobalMemory eqDom)
+    memDomPre sym (MemEqOutsideRegion stackRegion) (PED.eqDomainGlobalMemory eqDom)
   return $ StateCondition regsEq stacksEq memEq
 
 eqDomPost ::
