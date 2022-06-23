@@ -23,7 +23,6 @@ module Pate.Equivalence.RegisterDomain (
   , ppRegisterDomain
   ) where
 
-import           Control.Monad (  foldM )
 import           Data.Functor.Const
 import           Data.Maybe ( mapMaybe )
 import           Data.Parameterized.Some

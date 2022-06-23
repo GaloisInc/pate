@@ -35,7 +35,6 @@ module Data.Macaw.CFGSlice
 
 import           Control.Monad
 
-import qualified Data.Foldable as F
 import           Data.Proxy
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Kind as Kind

@@ -81,7 +81,6 @@ import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
-import           Pate.Verification.AbstractDomain ( AbstractDomain )
 
 -- Overall module notes/thoughts
 --

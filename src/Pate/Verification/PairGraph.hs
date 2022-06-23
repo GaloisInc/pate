@@ -57,7 +57,6 @@ import qualified Data.Macaw.CFG as MM
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence as PE
-import qualified Pate.Equivalence.EquivalenceDomain as PE
 import qualified Pate.Event as Event
 import           Pate.Monad
 import           Pate.Panic
