@@ -199,7 +199,7 @@ getAbsVal ::
   (forall tp'. W4.SymExpr sym tp' -> m (AbsRange tp')) ->
   PSR.MacawRegEntry sym tp ->
   m (MacawAbstractValue sym tp)
-getAbsVal sym f e = case PSR.macawRegRepr e of
+getAbsVal _sym f e = case PSR.macawRegRepr e of
   CLM.LLVMPointerRepr{} -> do
     CLM.LLVMPointer region offset <- return $ PSR.macawRegValue e
     regAbs <- f (W4.natToIntegerPure region)
