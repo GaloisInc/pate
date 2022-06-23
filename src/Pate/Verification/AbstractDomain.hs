@@ -202,7 +202,7 @@ getAbsVal ::
 getAbsVal sym f e = case PSR.macawRegRepr e of
   CLM.LLVMPointerRepr{} -> do
     CLM.LLVMPointer region offset <- return $ PSR.macawRegValue e
-    regAbs <- (IO.liftIO $ W4.natToInteger sym region) >>= f
+    regAbs <- f (W4.natToIntegerPure region)
     offsetAbs <- f offset
     return $ MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs)
   CT.BoolRepr -> do
@@ -372,7 +372,7 @@ absDomainValToAsm sym e (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
   CLM.LLVMPointerRepr{} -> do
     CLM.LLVMPointer region offset <- return $ PSR.macawRegValue e
     (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs) <- return $ absVal
-    regionInt <- W4.natToInteger sym region
+    let regionInt = W4.natToIntegerPure region
     regFrame <- applyAbsRange sym regionInt regAbs
     offFrame <- applyAbsRange sym offset offsetAbs
     return $ regFrame <> offFrame
