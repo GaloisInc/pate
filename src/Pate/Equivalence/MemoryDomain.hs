@@ -10,18 +10,18 @@
 {-# LANGUAGE OverloadedStrings   #-}
 
 module Pate.Equivalence.MemoryDomain (
-    MemoryDomain(..)
+    MemoryDomain
   , traverseWithCellPar
   , traverseWithCell
   , universal
-  , empty
   , toList
   , fromList
   , cells
   , fromFootPrints
-  , addFootPrints
-  , containsCell
+  , excludeFootPrints
+  , mayContainCell
   , mux
+  , intersect
   , ppMemoryDomainEntries
   , dropFalseCells
   ) where
@@ -49,26 +49,16 @@ import qualified Pate.Parallel as Par
 -- Memory domain
 
 -- | This wrapper around a 'PMC.MemCellPred' describes ranges of memory
--- covered by this domain.  Each entry in 'PMC.MemCellPred'
--- contains the predicate determining whether or not it is "in".
---
--- The interpretation of those predicates is subject to the 'memDomainPolarity'.
+-- covered by this domain. A memory domain is defined exclusively -
+-- all addresses are considered to be "in" the domain unless they are
+-- covered by the given 'PMC.MemCellPred'.
 data MemoryDomain sym arch =
     MemoryDomain
       { memDomainPred :: PMC.MemCellPred sym arch
-      -- ^ The locations covered by this 'MemoryDomain' (whether they are "in" or not
-      -- is subject to the polarity)
-      , memDomainPolarity :: W4.Pred sym
-      -- ^ If true, then the predicate is true at exactly the locations
-      -- specified by 'memDomainLocs'.  If false, then the predicate is true
-      -- everywhere but these locations.
-      --
-      -- Ideally this should always be always concrete, but it may be symbolic if the polarity
-      -- of the domain changes due to an "external" function call
-      -- (see https://github.com/GaloisInc/pate/issues/202)
+      -- ^ The locations excluded by this 'MemoryDomain' 
       }
 
--- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain', preserving its polarity. Predicates which are concretely false are dropped from in resulting internal 'PMC.MemCellPred' (this has no effect on the interpretation of the domain). Supports parallel traversal if the 'future' parameter is instantiated to 'Par.Future'.
+-- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain'. Predicates which are concretely false are dropped from in resulting internal 'PMC.MemCellPred' (this has no effect on the interpretation of the domain). Supports parallel traversal if the 'future' parameter is instantiated to 'Par.Future'.
 traverseWithCellPar ::
   forall sym arch m future.
   Par.IsFuture m future =>
@@ -84,7 +74,7 @@ traverseWithCellPar memDom f = do
   future_preds <- M.traverseWithKey f' predMap
   Par.present $ do
     preds <- PMC.MemCellPred <$> traverse Par.joinFuture future_preds
-    return $ MemoryDomain preds (memDomainPolarity memDom)
+    return $ MemoryDomain preds
 
       
 traverseWithCell ::
@@ -115,19 +105,16 @@ cells ::
 cells memDom = S.fromList $ map fst (toList memDom)
 
 -- | Build a 'MemoryDomain' from a list of 'PMC.MemCell' entries, with a corresponding
--- predicate indicating whether or not they are in or out of the domain (subject to the
--- given polarity).
+-- predicate indicating that is true if the cell is excluded from the domain.
 -- Duplicate entries are allowed, where the resulting predicate will be the disjunction
--- of the overlapping predicates.
+-- of the clashing entries.
 fromList ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
-  -- | Polarity
-  W4.Pred sym ->
   IO (MemoryDomain sym arch)
-fromList sym l pol = MemoryDomain <$> (PMC.predFromList sym l) <*> pure pol
+fromList sym l = MemoryDomain <$> (PMC.predFromList sym l)
 
 mux ::
   W4.IsExprBuilder sym =>
@@ -140,84 +127,84 @@ mux ::
 mux sym p predT predF = case W4.asConstantPred p of
   Just True -> return predT
   Just False -> return predF
-  _ -> do
-    pol <- W4.baseTypeIte sym p (memDomainPolarity predT) (memDomainPolarity predF)
-    locs <- PMC.muxMemCellPred sym p (memDomainPred predT) (memDomainPred predF)
-    return $ MemoryDomain locs pol
+  _ -> MemoryDomain <$> PMC.muxMemCellPred sym p (memDomainPred predT) (memDomainPred predF)
 
--- | True if the given 'PMC.MemCell' is in the given 'MemoryDomain', according to
--- its polarity.
-containsCell ::
+-- | Intersect two domains, where a cell is excluded in the resulting domain if it
+-- is excluded in either of the source domains
+intersect ::
+  W4.IsExprBuilder sym =>
+  OrdF (W4.SymExpr sym) =>
+  sym ->
+  MemoryDomain sym arch ->
+  MemoryDomain sym arch ->
+  IO (MemoryDomain sym arch)
+intersect sym predT predF =
+  MemoryDomain <$> PMC.mergeMemCellPred sym (memDomainPred predT) (memDomainPred predF)
+
+
+-- | True if the given 'PMC.MemCell' is not excluded by the given 'MemoryDomain'.
+-- Notably this does not consider the memory region covered by the given cell.
+-- A cell must be exactly excluded (i.e. present in the underlying 'PMC.MemCellPred')
+-- for this predicate to be true - it is not sufficient for a cell to be subsumed by an entry.
+--
+-- A more precise model could instead consider the memory region
+-- covered by the excluded cells. This would correctly identify
+-- edge cases where a cell can be considered excluded by the domain
+-- if it subsumed by one or more entries. This reasoning would be
+-- very expensive and likely not useful in most cases.
+--
+-- The tradeoff is that this may conservatively
+-- decide a cell is included when it could be proven to be excluded
+-- with more precise semantics.
+-- This is therefore sound to use when proving equality on a domain,
+-- but unsound if used to assume initial equality.
+mayContainCell ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
   MemoryDomain sym arch ->
   PMC.MemCell sym arch w ->
   IO (W4.Pred sym)
-containsCell sym memDom cell = do
+mayContainCell sym memDom cell = do
   isInLocs <- PMC.inMemCellPred sym cell (memDomainPred memDom)
-  W4.isEq sym isInLocs (memDomainPolarity memDom)
+  W4.notPred sym isInLocs
 
 
--- | Domain that covers all of memory (empty 'PMC.MemCellPred' with negative polarity)
+-- | Domain that covers all of memory (i.e. no cells are excluded)
 universal :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
-universal sym = MemoryDomain (PMC.MemCellPred M.empty) (W4.falsePred sym)
-
--- | Domain that covers no memory (empty 'PMC.MemCellPred' with positive polarity)
-empty :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
-empty sym = MemoryDomain (PMC.MemCellPred M.empty) (W4.truePred sym)
+universal _sym = MemoryDomain (PMC.MemCellPred M.empty)
 
 -- | Derive a 'MemoryDomain' from a set of 'MT.MemFootprint'.
--- The semantics of this domain depend on the given polarity: for positive polarity
--- the resulting domain includes all of the given footprints. For negative polarity,
--- the resulting domain includes all of memory, except for the given footprints.
--- TODO: This also filters the set of footprints according to the given polarity.
--- For positive polarity, the footprints are filtered to only contain the reads,
--- while negative polarity filters only the writes. This should be factored into
--- a separate step (see https://github.com/GaloisInc/pate/issues/204)
+-- The resulting domain includes all of memory, except for the given footprints.
 fromFootPrints ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   sym ->
   Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)) ->
-  -- | Polarity
-  W4.Pred sym ->
   IO (MemoryDomain sym arch)
-fromFootPrints sym foots polarity = do
-  locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w dir cond end) -> do
-    dirPolarity <- case dir of
-      MT.Read -> return $ W4.truePred sym
-      MT.Write -> return $ W4.falsePred sym
-    polarityMatches <- W4.isEq sym polarity dirPolarity
-    cond' <- W4.andPred sym polarityMatches (MT.getCond sym cond)
+fromFootPrints sym foots = do
+  locs <- fmap catMaybes $ forM (S.toList foots) $ \(MT.MemFootprint ptr w _dir cond end) -> do
+    let cond' = MT.getCond sym cond
     case W4.asConstantPred cond' of
       Just False -> return Nothing
       _ -> return $ Just (Some (PMC.MemCell ptr w end), cond')
-  fromList sym locs polarity
+  fromList sym locs
 
--- | Add footprints to an existing 'MemoryDomain'. The semantics of this addition
--- depend on the polarity of the domain: for positive polarity the footprints
--- are included in the resulting domain, for negative polarity the footprints
--- are excluded.
--- TODO: This filters the set of footprints according to the polarity of the
--- domain (as in 'fromFootprints') (see https://github.com/GaloisInc/pate/issues/204)
-addFootPrints ::
+-- | Exclude footprints from an existing 'MemoryDomain'.
+excludeFootPrints ::
   forall sym arch.
   W4.IsSymExprBuilder sym =>
   sym ->
   Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)) ->
   MemoryDomain sym arch ->
   IO (MemoryDomain sym arch)
-addFootPrints sym foots memDom = do
-  memDom' <- fromFootPrints sym foots (memDomainPolarity memDom)
+excludeFootPrints sym foots memDom = do
+  memDom' <- fromFootPrints sym foots
   memLocs' <- PMC.mergeMemCellPred sym (memDomainPred memDom) (memDomainPred memDom')
   return $ memDom { memDomainPred = memLocs' }
 
 instance PEM.ExprMappable sym (MemoryDomain sym arch) where
-  mapExpr sym f memDom = do
-    memPred <- PEM.mapExpr sym f (memDomainPred memDom)
-    pol' <- f (memDomainPolarity memDom)
-    return $ MemoryDomain memPred pol'
+  mapExpr sym f memDom = MemoryDomain <$>  PEM.mapExpr sym f (memDomainPred memDom)
 
 ppMemoryDomainEntries ::
   forall sym arch a.

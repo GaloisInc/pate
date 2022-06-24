@@ -38,6 +38,7 @@ module Pate.Memory.MemTrace
 , writeMemState
 , MemFootprint(..)
 , MemOpDirection(..)
+, isDir
 , getCond
 , MemTraceK
 , traceFootprint
@@ -1491,6 +1492,9 @@ instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
     compare cond1 cond2 <>
     compare end1 end2
 
+
+isDir :: MemOpDirection -> MemFootprint sym ptrW -> Bool
+isDir dir (MemFootprint _ _ dir' _ _) = dir == dir'
 
 memOpFootprint ::
   IsExprBuilder sym =>

@@ -229,17 +229,11 @@ instance forall sym arch.
   pretty prf = PP.vsep
     [ "Registers:"
     , PP.indent 4 $ PER.ppRegisterDomain (\_ -> "Conditional") (PED.eqDomainRegisters prf)
-    , "Stack Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PED.eqDomainStackMemory prf)
+    , "Stack Memory:"
     , PP.indent 4 $ PEM.ppMemoryDomainEntries (\_ -> "Conditional") (PED.eqDomainStackMemory prf)
-    , "Global Memory:" <+> ppPolarity (PEM.memDomainPolarity $ PED.eqDomainGlobalMemory prf)
+    , "Global Memory:"
     , PP.indent 4 $ PEM.ppMemoryDomainEntries (\_ -> "Conditional") (PED.eqDomainGlobalMemory prf)
     ]
-    where
-      ppPolarity :: W4.Pred sym -> PP.Doc a
-      ppPolarity p = case W4.asConstantPred p of
-        Just True -> PP.parens "inclusive"
-        Just False -> PP.parens "exclusive"
-        _ -> PP.parens "symbolic polarity"
 
 
 instance forall sym arch.
@@ -627,9 +621,7 @@ cellInMemDomain ::
   PEM.MemoryDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
-cellInMemDomain dom cell = case PG.groundValue $ PEM.memDomainPolarity dom of
-  True -> foldr (\(Some cell', p) p' -> p' || (eqGroundMemCells cell cell' && PG.groundValue p)) False (PEM.toList dom)
-  False -> foldr (\(Some cell', p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.toList dom)
+cellInMemDomain dom cell = foldr (\(Some cell', p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.toList dom)
 
 
 cellInGroundDomain ::

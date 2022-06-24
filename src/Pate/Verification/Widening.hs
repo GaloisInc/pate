@@ -496,11 +496,10 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
        return NoWideningRequired
      else
        do -- TODO, this could maybe be less aggressive
-          newCells <- liftIO $ PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
-          let heapDom = PEM.memDomainPred (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD))
-          heapDom' <- liftIO $ PMc.mergeMemCellPred sym heapDom newCells
-          let md' = (PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD)){ PEM.memDomainPred = heapDom' }
-          let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainGlobalMemory = md' }
+          newCells <- liftIO $ PEM.fromList sym [ (c, W4.truePred sym) | c <- zs ]
+          let heapDom = PEE.eqDomainGlobalMemory (PAD.absDomEq $ PS.specBody postD)
+          heapDom' <- liftIO $ PEM.intersect sym heapDom newCells
+          let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainGlobalMemory = heapDom' }
           let postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
           return (Widen WidenEquality (WidenLocs mempty (Set.fromList zs)) postD')
 
@@ -517,7 +516,7 @@ filterCells :: forall sym t st fs arch.
 filterCells sym evalFn memDom xs = filterM filterCell xs
   where
     filterCell (Some c) =
-      liftIO (W4.groundEval evalFn =<< PEM.containsCell sym memDom c)
+      liftIO (W4.groundEval evalFn =<< PEM.mayContainCell sym memDom c)
 
 widenStack ::
   ( sym ~ W4.ExprBuilder t st fs
@@ -542,11 +541,10 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD me
        return NoWideningRequired
      else
        do -- TODO, this could maybe be less aggressive
-          newCells <- liftIO $ PMc.predFromList sym [ (c, W4.truePred sym) | c <- zs ]
-          let stackDom = PEM.memDomainPred (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD))
-          stackDom' <- liftIO $ PMc.mergeMemCellPred sym stackDom newCells
-          let md' = (PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD)){ PEM.memDomainPred = stackDom' }
-          let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainStackMemory = md' }
+          newCells <- liftIO $ PEM.fromList sym [ (c, W4.truePred sym) | c <- zs ]
+          let stackDom = PEE.eqDomainStackMemory (PAD.absDomEq $ PS.specBody postD)
+          stackDom' <- liftIO $ PEM.intersect sym stackDom newCells
+          let pred' = (PAD.absDomEq $ PS.specBody postD){ PEE.eqDomainStackMemory = stackDom' }
           let postD' = fmap (\x -> x { PAD.absDomEq = pred' }) postD
           return (Widen WidenEquality (WidenLocs mempty (Set.fromList zs)) postD')
 
@@ -568,7 +566,7 @@ findUnequalHeapWrites sym evalFn bundle eqCtx =
      footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutO bundle)
      footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutP bundle)
      let footprints = Set.union footO footP
-     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
+     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
      execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
        do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq
@@ -591,7 +589,7 @@ findUnequalStackWrites sym evalFn bundle eqCtx =
      footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutO bundle)
      footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutP bundle)
      let footprints = Set.union footO footP
-     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym footprints (W4.falsePred sym))
+     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
      execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
        do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
           cellEq' <- liftIO $ W4.groundEval evalFn cellEq

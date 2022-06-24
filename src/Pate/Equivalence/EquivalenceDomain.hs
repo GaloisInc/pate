@@ -9,7 +9,6 @@
 module Pate.Equivalence.EquivalenceDomain (
     EquivalenceDomain(..)
   , mux
-  , empty
   , ppEquivalenceDomain
   ) where
 
@@ -78,8 +77,6 @@ mux sym p domT domF = case WI.asConstantPred p of
     mem <- PEM.mux sym p (eqDomainGlobalMemory domT) (eqDomainGlobalMemory domF)
     return $ EquivalenceDomain regs stack mem
 
-empty :: (MM.RegisterInfo (MM.ArchReg arch), PS.ValidSym sym) => sym -> EquivalenceDomain sym arch
-empty sym = EquivalenceDomain PER.empty (PEM.empty sym) (PEM.empty sym)
 
 instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
   mapExpr sym f dom = do
