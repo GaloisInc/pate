@@ -19,7 +19,7 @@ module Pate.Equivalence.MemoryDomain (
   , cells
   , fromFootPrints
   , excludeFootPrints
-  , containsCell
+  , mayContainCell
   , mux
   , intersect
   , ppMemoryDomainEntries
@@ -51,14 +51,7 @@ import qualified Pate.Parallel as Par
 -- | This wrapper around a 'PMC.MemCellPred' describes ranges of memory
 -- covered by this domain. A memory domain is defined exclusively -
 -- all addresses are considered to be "in" the domain unless they are
--- present in the given 'PMC.MemCellPred'.
--- Notably this does not consider the memory region covered by a
--- given 'PMC.MemCell'. A cell must be exactly included in the
--- underlying 'PMC.MemCellPred' to be excluded by the domain -
--- it is not sufficient for a cell to be subsumed by an entry.
---
--- This is sound, less precise, and significantly easier to
--- prove membership.
+-- covered by the given 'PMC.MemCellPred'.
 data MemoryDomain sym arch =
     MemoryDomain
       { memDomainPred :: PMC.MemCellPred sym arch
@@ -149,15 +142,30 @@ intersect sym predT predF =
   MemoryDomain <$> PMC.mergeMemCellPred sym (memDomainPred predT) (memDomainPred predF)
 
 
--- | True if the given 'PMC.MemCell' is not excluded by the given 'MemoryDomain'
-containsCell ::
+-- | True if the given 'PMC.MemCell' is not excluded by the given 'MemoryDomain'.
+-- Notably this does not consider the memory region covered by the given cell.
+-- A cell must be exactly excluded (i.e. present in the underlying 'PMC.MemCellPred')
+-- for this predicate to be true - it is not sufficient for a cell to be subsumed by an entry.
+--
+-- A more precise model could instead consider the memory region
+-- covered by the excluded cells. This would correctly identify
+-- edge cases where a cell can be considered excluded by the domain
+-- if it subsumed by one or more entries. This reasoning would be
+-- very expensive and likely not useful in most cases.
+--
+-- The tradeoff is that this may conservatively
+-- decide a cell is included when it could be proven to be excluded
+-- with more precise semantics.
+-- This is therefore sound to use when proving equality on a domain,
+-- but unsound if used to assume initial equality.
+mayContainCell ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
   MemoryDomain sym arch ->
   PMC.MemCell sym arch w ->
   IO (W4.Pred sym)
-containsCell sym memDom cell = do
+mayContainCell sym memDom cell = do
   isInLocs <- PMC.inMemCellPred sym cell (memDomainPred memDom)
   W4.notPred sym isInLocs
 

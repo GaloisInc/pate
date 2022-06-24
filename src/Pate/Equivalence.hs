@@ -271,8 +271,8 @@ impliesPostdomainPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
       (Some (PMC.MemCell sym arch)) ->
       IO (W4.Pred sym)
     getMem memAsm memConcl (Some cell) = do
-     mAsm <- PEM.containsCell sym memAsm cell
-     mConcl <- PEM.containsCell sym memConcl cell
+     mAsm <- PEM.mayContainCell sym memAsm cell
+     mConcl <- PEM.mayContainCell sym memConcl cell
      W4.impliesPred sym mAsm mConcl
       
     getReg ::
@@ -355,7 +355,7 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
       W4.Pred sym ->
       IO (W4.Pred sym)
     resolveCell cell cond = do
-      impM sym (PEM.containsCell sym domPost cell) $
+      impM sym (PEM.mayContainCell sym domPost cell) $
         resolveCellEquiv sym memEqRegion stO stP cell cond
 
 

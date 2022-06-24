@@ -516,7 +516,7 @@ filterCells :: forall sym t st fs arch.
 filterCells sym evalFn memDom xs = filterM filterCell xs
   where
     filterCell (Some c) =
-      liftIO (W4.groundEval evalFn =<< PEM.containsCell sym memDom c)
+      liftIO (W4.groundEval evalFn =<< PEM.mayContainCell sym memDom c)
 
 widenStack ::
   ( sym ~ W4.ExprBuilder t st fs
