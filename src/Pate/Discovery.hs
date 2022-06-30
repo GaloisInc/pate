@@ -15,6 +15,8 @@ module Pate.Discovery (
   lookupBlocks,
   getBlocks,
   getBlocks',
+  getAbsDomain,
+  getStackOffset,
   matchesBlockTarget,
   matchingExits,
   isMatchingCall,
@@ -31,6 +33,7 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
+import           Data.Int
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
@@ -46,6 +49,7 @@ import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 import           GHC.Stack ( HasCallStack, callStack )
 
+import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.BinaryLoader.ELF as MBLE
 import qualified Data.Macaw.CFG as MC
@@ -291,6 +295,35 @@ getSubBlocks b = withBinary @bin $
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ (\x -> validateBlockTarget x) tgts
      return tgts
+
+-- | Find the abstract domain for a given starting point
+getAbsDomain ::
+  forall sym arch bin.
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (MAS.AbsBlockState (MC.ArchReg arch))
+getAbsDomain b = withBinary @bin $ do
+  let addr = PB.concreteAddress b
+  pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
+  mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
+  case mtgt of
+    Just (Some pb) -> return $ MD.blockAbstractState pb
+    Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
+
+getStackOffset ::
+  forall sym arch bin.
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch Int64
+getStackOffset b = do
+  absSt <- getAbsDomain b
+  let
+    regs = absSt ^. MAS.absRegState
+    sp = regs ^. (MC.boundValue MC.sp_reg)
+  case sp of
+    MAS.StackOffsetAbsVal _ i -> return i
+    _ -> throwHere $ PEE.UnexpectedStackValue (PB.concreteAddress b)
+
 
 validateBlockTarget ::
   HasCallStack =>
