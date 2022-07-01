@@ -8,7 +8,6 @@ module Pate.Monad.Environment (
   , envCtxL
   , BlockCache(..)
   , freshBlockCache
-  , ProofCache
   , ExitPairCache
   , VerificationFailureMode(..)
   ) where
@@ -45,7 +44,6 @@ import qualified Pate.Monad.Context as PMC
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import qualified Pate.Proof.EquivTriple as PPE
 import           Pate.SimState
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
@@ -72,7 +70,6 @@ data EquivEnv sym arch where
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envConfig :: PC.VerificationConfig
     , envFailureMode :: VerificationFailureMode
-    , envGoalTriples :: [PPE.EquivTriple sym arch]
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof
@@ -86,8 +83,6 @@ data EquivEnv sym arch where
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
     , envParentBlocks :: [PPa.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel
-    , envProofCache :: ProofCache sym arch
-    -- ^ cache for intermediate proof results
     , envExitPairsCache :: ExitPairCache arch
     -- ^ cache for intermediate proof results
     , envStatistics :: MVar.MVar PES.EquivalenceStatistics
@@ -98,8 +93,6 @@ data EquivEnv sym arch where
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
-
-type ProofCache sym arch = BlockCache arch [(PPE.EquivTriple sym arch, Par.Future (PF.ProofNonceApp sym arch PF.ProofBlockSliceType))]
 
 type ExitPairCache arch = BlockCache arch [PPa.PatchPair (PB.BlockTarget arch)]
 

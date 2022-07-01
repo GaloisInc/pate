@@ -15,8 +15,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pate.Verification.AbstractDomain
-  ( AbstractDomain
-  , AbstractDomainBody(..)
+  ( AbstractDomain(..)
+  , AbstractDomainSpec
   , AbsRange(..)
   , AbstractDomainVals(..)
   , WidenLocs(..)
@@ -80,18 +80,44 @@ import           Pate.Panic
 -- indicating which memory locations are equivalent between the original and patched programs)
 -- Additional information constraining viable values is also stored independently for each
 -- program in 'AbstractDomainVals'
-
-type AbstractDomain sym arch = PS.SimSpec sym arch (AbstractDomainBody sym arch)
-
-data AbstractDomainBody sym arch where
-  AbstractDomainBody ::
+-- TODO: propagate scope to inner types
+data AbstractDomain sym arch (v :: PS.VarScope) where
+  AbstractDomain ::
     { absDomEq :: PED.EquivalenceDomain sym arch
       -- ^ specifies which locations are equal between the original vs. patched programs
     , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
       -- ^ specifies independent constraints on the values for the original and patched programs
-    } -> AbstractDomainBody sym arch
+    } -> AbstractDomain sym arch v
 
 
+-- | An 'AbstractDomain' that is closed under a symbolic machine state via
+-- 'SimSpec'.
+-- In general, a 'SimSpec' serves as a lambda abstraction over the variables representing
+-- the machine state in the subterms of any type (as defined by the term traversal
+-- in 'Pate.ExprMappable'). In essence, this represents a function from a 'SimState' to
+-- an 'PED.EquivalenceDomain' (applied via 'bindSpec').
+--
+-- The variables in a 'AbstractDomain' are instantiated in two different contexts:
+--    1. When used as an *assumed* pre-domain, variables are instantiated to the initial *free*
+--       variables of the slice.
+--    2. When used as a *target* post-domain, variables are instantiated to terms representing
+--       the final values of the slice.
+-- For example: a domain could say @r1[r2_O != 0, r2_P > 2]@ (i.e. register @r1@ is in the domain if
+-- the value in @r2@ is nonzero in the original program and greater than two in the patched program).
+-- A slice contains two major components: a fully symbolic initial state (i.e. a 'SimInput') and
+-- a resulting final state (i.e. a 'SimOutput').
+-- Assume the slice under analysis simply assigns @1@ to @r2@ in both programs.
+--
+-- When instantiated as a pre-domain, we simply assign r2_O and r2_P to the free variables
+-- representing the initial state of the slice.
+-- When instantiated as a post-domain, we instantiate @r2_O@ and @r2_P@ to @1@, resulting in
+-- an 'PED.EquivalenceDomain' that looks like @r1[1 != 0, 1 > 2]@. Since this condition is false,
+-- @r1@ is excluded from the resulting instantiated domain.
+
+type AbstractDomainSpec sym arch = PS.SimSpec sym arch (AbstractDomain sym arch)
+
+instance PS.Scoped (AbstractDomain sym arch) where
+  unsafeCoerceScope (AbstractDomain a b) = AbstractDomain a b
 
 -- | Defining the known range for a given location. Currently this is either a constant
 -- value or an unconstrained value.
@@ -212,6 +238,7 @@ getAbsVal _sym f e = case PSR.macawRegRepr e of
   _ -> panic Solver "getAbsVal" ["Unexpected type for abstract domain"]
 
 -- | Information about what locations were widened
+-- TOOD: add scope
 data WidenLocs sym arch =
   WidenLocs
     (Set (Some (MM.ArchReg arch)))
@@ -234,14 +261,14 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arc
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
 initAbsDomainVals ::
-  forall sym arch bin m.
+  forall sym arch bin v m.
   Monad m =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
-  PS.SimOutput sym arch bin ->
+  PS.SimOutput sym arch v bin ->
   AbstractDomainVals sym arch bin {- ^ values from pre-domain -} ->
   m (AbstractDomainVals sym arch bin)
 initAbsDomainVals sym f stOut preVals = do
@@ -277,7 +304,7 @@ extractAbsRange _sym e = case W4.asConcrete e of
   _ -> AbsUnconstrained (W4.exprType e)
 
 widenAbsDomainVals' ::
-  forall sym arch bin m.
+  forall sym arch bin v m.
   Monad m =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
@@ -285,7 +312,7 @@ widenAbsDomainVals' ::
   sym ->
   AbstractDomainVals sym arch bin {- ^ existing abstract domain that this is augmenting -} ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
-  PS.SimOutput sym arch bin ->
+  PS.SimOutput sym arch v bin ->
   m (AbstractDomainVals sym arch bin, WidenLocs sym arch)
 widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
   memVals <- MapF.traverseMaybeWithKey relaxMemVal (absMemVals prev)
@@ -328,16 +355,16 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
         return absValCombined
 
 widenAbsDomainVals ::
-  forall sym arch m.
+  forall sym arch v m.
   Monad m =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
-  AbstractDomainBody sym arch {- ^ existing abstract domain that this is augmenting -} ->
+  AbstractDomain sym arch v {- ^ existing abstract domain that this is augmenting -} ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
-  PS.SimBundle sym arch ->
-  m (AbstractDomainBody sym arch, Maybe (WidenLocs sym arch))
+  PS.SimBundle sym arch v ->
+  m (AbstractDomain sym arch v, Maybe (WidenLocs sym arch))
 widenAbsDomainVals sym prev f bundle = do
   let (PPa.PatchPair absValsO absValsP) = absDomVals prev
   (absValsO', locsO) <- widenAbsDomainVals' sym absValsO f (PS.simOutO bundle)
@@ -388,12 +415,12 @@ absDomainValToAsm sym e (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
 -- that the values in the given initial state
 -- ('PS.SimInput') are necessarily in the given abstract domain
 absDomainValsToAsm ::
-  forall sym arch bin.
+  forall sym arch v bin.
   W4.IsSymExprBuilder sym =>
   MapF.OrdF (W4.SymExpr sym) =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PS.SimState sym arch bin ->
+  PS.SimState sym arch v bin ->
   AbstractDomainVals sym arch bin ->
   IO (PS.AssumptionFrame sym)
 absDomainValsToAsm sym st vals = do
@@ -416,12 +443,12 @@ absDomainValsToAsm sym st vals = do
 -- that the values in the given initial state
 -- ('PS.SimInput') are necessarily in the given abstract domain
 absDomainValsToPred ::
-  forall sym arch bin.
+  forall sym arch v bin.
   W4.IsSymExprBuilder sym =>
   MapF.OrdF (W4.SymExpr sym) =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
-  PS.SimState sym arch bin ->
+  PS.SimState sym arch v bin ->
   AbstractDomainVals sym arch bin ->
   IO (W4.Pred sym)
 absDomainValsToPred sym st vals = do
@@ -440,8 +467,8 @@ absDomainToPrecond ::
   PA.ValidArch arch =>
   sym ->
   PE.EquivContext sym arch ->
-  PS.SimBundle sym arch ->
-  AbstractDomainBody sym arch ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
   IO (W4.Pred sym)
 absDomainToPrecond sym eqCtx bundle d = do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
@@ -465,9 +492,9 @@ absDomainToPostCond ::
   PA.ValidArch arch =>
   sym ->
   PE.EquivContext sym arch ->
-  PS.SimBundle sym arch ->
-  AbstractDomainBody sym arch {- ^ pre-domain for this slice -} ->
-  AbstractDomainBody sym arch {- ^ target post-domain -} ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ pre-domain for this slice -} ->
+  AbstractDomain sym arch v {- ^ target post-domain -} ->
   IO (W4.Pred sym)
 absDomainToPostCond sym eqCtx bundle preDom d = do
   eqOutputs <- PE.getPostdomain sym bundle eqCtx (absDomEq preDom) (absDomEq d)
@@ -486,11 +513,11 @@ instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
       return $ MapF.Pair cell' v
     return $ AbstractDomainVals regVals (MapF.fromList memVals')
 
-instance PEM.ExprMappable sym (AbstractDomainBody sym arch) where
+instance PEM.ExprMappable sym (AbstractDomain sym arch v) where
   mapExpr sym f d = do
     domEq <- PEM.mapExpr sym f (absDomEq d)
     vals <- PEM.mapExpr sym f (absDomVals d)
-    return $ AbstractDomainBody domEq vals
+    return $ AbstractDomain domEq vals
 
 ppAbstractDomainVals ::
   AbstractDomainVals sym arch bin ->
@@ -498,13 +525,13 @@ ppAbstractDomainVals ::
 ppAbstractDomainVals _d = "<TODO>"
 
 ppAbstractDomain ::
-  forall sym arch a.
+  forall sym arch v a.
   ( PA.ValidArch arch
   , W4.IsSymExprBuilder sym
   , ShowF (MM.ArchReg arch)
   ) =>
   (W4.Pred sym -> PP.Doc a) ->
-  AbstractDomainBody sym arch ->
+  AbstractDomain sym arch v ->
   PP.Doc a
 ppAbstractDomain ppPred d =
   PP.vsep $

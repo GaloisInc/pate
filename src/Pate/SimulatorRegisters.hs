@@ -11,7 +11,6 @@
 
 module Pate.SimulatorRegisters (
   CrucBaseTypes,
-  MacawRegVar(..),
   MacawRegEntry(..),
   macawRegEntry,
   ptrToEntry
@@ -65,13 +64,6 @@ instance WI.IsSymExprBuilder sym => Eq (MacawRegEntry sym tp) where
     CT.BoolRepr | Just PC.Refl <- WI.testEquality v1 v2 -> True
     CT.StructRepr Ctx.Empty -> True
     _ -> error "MacawRegEntry: unexpected type for equality comparison"
-
-data MacawRegVar sym (tp :: MT.Type) where
-  MacawRegVar ::
-    { macawVarEntry :: MacawRegEntry sym tp
-    , macawVarBVs :: Ctx.Assignment (WI.SymExpr sym) (CrucBaseTypes (MS.ToCrucibleType tp))
-    } ->
-    MacawRegVar sym tp
 
 instance (WI.IsExpr (WI.SymExpr sym), PC.ShowF (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of

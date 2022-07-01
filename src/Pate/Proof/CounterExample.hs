@@ -265,10 +265,10 @@ getSatIO = withValid $ do
 -- to the current set of assumptions (i.e. excluding paths which are infeasible, and
 -- excluding conditions which are necessarily true).
 getPathCondition ::
-  forall sym arch.
+  forall sym arch v.
   PE.StateCondition sym arch ->
-  PS.SimOutput sym arch PB.Original ->
-  PS.SimOutput sym arch PB.Patched ->
+  PS.SimOutput sym arch v PB.Original ->
+  PS.SimOutput sym arch v PB.Patched ->
   SymGroundEvalFn sym ->
   EquivM sym arch (W4.Pred sym)
 getPathCondition stCond outO outP fn = withSym $ \sym -> do

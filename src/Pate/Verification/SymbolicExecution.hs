@@ -125,8 +125,8 @@ structToRegState e = do
 -- operations and the special global that is used to determine how a branch
 -- exits (e.g., due to a call or loop backedge).
 getGlobals ::
-  forall sym arch bin.
-  PS.SimInput sym arch bin ->
+  forall sym arch v bin.
+  PS.SimInput sym arch v bin ->
   EquivM sym arch (CS.SymGlobalState sym)
 getGlobals simInput = withValid $ withSym $ \sym -> do
   env <- CMR.ask
@@ -226,10 +226,10 @@ ppAbortedResult (CS.AbortedBranch loc _ t f) =
 -- 1. The assumption required for the symbolic execution to be total
 -- 2. The captured post-state
 simulate ::
-  forall sym arch bin.
+  forall sym arch v bin.
   (HasCallStack, PBi.KnownBinary bin) =>
-  PS.SimInput sym arch bin ->
-  EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch bin)
+  PS.SimInput sym arch v bin ->
+  EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch v bin)
 simulate simInput = withBinary @bin $ do
   CC.SomeCFG cfg <- do
     PDP.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)

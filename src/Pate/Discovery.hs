@@ -90,8 +90,8 @@ import qualified What4.ExprHelpers as WEH
 
 -- | Compute all possible valid exit pairs from the given slice.
 discoverPairs ::
-  forall sym arch.
-  SimBundle sym arch ->
+  forall sym arch v.
+  SimBundle sym arch v ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
 discoverPairs bundle = do
   lookupBlockCache envExitPairsCache pPair >>= \case
@@ -145,8 +145,8 @@ discoverPairs bundle = do
     pPair = PSS.simPair bundle
 
 matchingExits ::
-  forall sym arch.
-  SimBundle sym arch ->
+  forall sym arch v.
+  SimBundle sym arch v ->
   MCS.MacawBlockEndCase ->
   EquivM sym arch (WI.Pred sym)
 matchingExits bundle ecase = withSym $ \sym -> do
@@ -157,8 +157,8 @@ matchingExits bundle ecase = withSym $ \sym -> do
 -- | True when both the patched and original program necessarily end with
 -- a call to the same function, assuming exact initial equivalence.
 isMatchingCall ::
-  forall sym arch.
-  SimBundle sym arch ->
+  forall sym arch v.
+  SimBundle sym arch v ->
   EquivM sym arch Bool
 isMatchingCall bundle = withSym $ \sym -> do
   eqIPs <- liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue ipO) (PSR.macawRegValue ipP)
@@ -188,8 +188,8 @@ compatibleTargets blkt1 blkt2 = (PB.targetEndCase blkt1 == PB.targetEndCase blkt
     _ -> False
 
 exactEquivalence ::
-  PSS.SimInput sym arch PB.Original ->
-  PSS.SimInput sym arch PB.Patched ->
+  PSS.SimInput sym arch v PB.Original ->
+  PSS.SimInput sym arch v PB.Patched ->
   EquivM sym arch (WI.Pred sym)
 exactEquivalence inO inP = withSym $ \sym -> do
   eqCtx <- equivalenceContext
@@ -211,8 +211,8 @@ exactEquivalence inO inP = withSym $ \sym -> do
   liftIO $ WI.andPred sym regsEq memEq
 
 matchesBlockTarget ::
-  forall sym arch.
-  SimBundle sym arch ->
+  forall sym arch v.
+  SimBundle sym arch v ->
   PB.BlockTarget arch PB.Original ->
   PB.BlockTarget arch PB.Patched ->
   EquivM sym arch (WI.Pred sym)

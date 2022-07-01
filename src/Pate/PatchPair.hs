@@ -8,6 +8,7 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeApplications #-}
 module Pate.PatchPair (
     PatchPair(..)
   , BlockPair
@@ -21,7 +22,9 @@ module Pate.PatchPair (
   , ppPatchPairEq
   , ppPatchPairC
   , ppPatchPair
-  , getPair
+  , get
+  , forBins
+  , forBinsC
   , getPair'
   , matchEquatedAddress
   ) where
@@ -46,8 +49,14 @@ getPair' :: PB.WhichBinaryRepr bin -> PatchPair tp -> tp bin
 getPair' PB.OriginalRepr pPair = pOriginal pPair
 getPair' PB.PatchedRepr pPair = pPatched pPair
 
-getPair :: PB.KnownBinary bin => PatchPair tp -> tp bin
-getPair = getPair' knownRepr
+get :: forall bin tp. PB.KnownBinary bin => PatchPair tp -> tp bin
+get = getPair' knownRepr
+
+forBins :: Applicative m => (forall bin. PB.KnownBinary bin => m (f bin)) -> m (PatchPair f)
+forBins f = PatchPair <$> f @PB.Original <*> f @PB.Patched
+
+forBinsC :: Applicative m => (forall bin. (forall tp. PatchPair tp -> tp bin) -> m f) -> m (f, f)
+forBinsC f = (,) <$> f (get @PB.Original) <*> f (get @PB.Original)
 
 class PatchPairEq tp where
   ppEq :: tp PB.Original -> tp PB.Patched -> Bool

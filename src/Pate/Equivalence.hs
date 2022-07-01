@@ -30,13 +30,11 @@ Definitions for equality over crucible input and output states.
 {-# LANGUAGE NoMonoLocalBinds #-}
 
 module Pate.Equivalence
-  ( DomainSpec
-  , EquivalenceStatus(..)
+  ( EquivalenceStatus(..)
   , MemRegionEquality(..)
   , getPostdomain
   , getPredomain
   , impliesPredomain
-  , impliesPostdomainPred
   , memDomPre
   , eqDomPost
   , resolveCellEquiv
@@ -102,32 +100,6 @@ instance Semigroup EquivalenceStatus where
 
 instance Monoid EquivalenceStatus where
   mempty = Equivalent
-
--- | An 'PED.EquivalenceDomain' that is closed under a symbolic machine state via
--- 'SimSpec'.
--- In general, a 'SimSpec' serves as a lambda abstraction over the variables representing
--- the machine state in the subterms of any type (as defined by the term traversal
--- in 'Pate.ExprMappable'). In essence, this represents a function from a 'SimState' to
--- an 'PED.EquivalenceDomain' (applied via 'bindSpec').
---
--- The variables in a 'DomainSpec' are instantiated in two different contexts:
---    1. When used as an *assumed* pre-domain, variables are instantiated to the initial *free*
---       variables of the slice.
---    2. When used as a *target* post-domain, variables are instantiated to terms representing
---       the final values of the slice.
--- For example: a domain could say @r1[r2_O != 0, r2_P > 2]@ (i.e. register @r1@ is in the domain if
--- the value in @r2@ is nonzero in the original program and greater than two in the patched program).
--- A slice contains two major components: a fully symbolic initial state (i.e. a 'SimInput') and
--- a resulting final state (i.e. a 'SimOutput').
--- Assume the slice under analysis simply assigns @1@ to @r2@ in both programs.
---
--- When instantiated as a pre-domain, we simply assign r2_O and r2_P to the free variables
--- representing the initial state of the slice.
--- When instantiated as a post-domain, we instantiate @r2_O@ and @r2_P@ to @1@, resulting in
--- an 'PED.EquivalenceDomain' that looks like @r1[1 != 0, 1 > 2]@. Since this condition is false,
--- @r1@ is excluded from the resulting instantiated domain.
-
-type DomainSpec sym arch = SimSpec sym arch (PED.EquivalenceDomain sym arch)
 
 
 
@@ -213,11 +185,11 @@ registerValuesEqual sym (EquivContext hdr _) r vO vP = registerValuesEqual' hdr 
 -- This intended to be assumed true for the purposes of
 -- generating an equivalence problem.
 getPredomain ::
-  forall sym arch.
+  forall sym arch v.
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimBundle sym arch ->
+  SimBundle sym arch v ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StateCondition sym arch)
@@ -226,12 +198,12 @@ getPredomain sym bundle eqCtx eqDom =
 
 -- | True if the first precondition implies the second
 impliesPredomain ::
-  forall sym arch.
+  forall sym arch v.
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimInput sym arch PBi.Original ->
-  SimInput sym arch PBi.Patched ->
+  SimInput sym arch v PBi.Original ->
+  SimInput sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   PED.EquivalenceDomain sym arch ->
@@ -240,47 +212,6 @@ impliesPredomain sym inO inP eqCtx domAsm domConcl = do
   asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondPredicate sym inO inP
   concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondPredicate sym inO inP
   W4.impliesPred sym asm concl
-
-impliesPostdomainPred ::
-  forall sym arch s st fs.
-  sym ~ W4B.ExprBuilder s st fs =>
-  PA.ValidArch arch =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
-  sym ->
-  PPa.PatchPair (SimState sym arch) ->
-  -- | assumed (i.e. stronger) post-condition
-  DomainSpec sym arch ->
-  -- | implies (i.e. weaker) post-condition
-  DomainSpec sym arch ->
-  IO (W4.Pred sym)  
-impliesPostdomainPred sym (PPa.PatchPair stO stP) domAsmSpec domConclSpec = do
-  (precondAsm, domAsm) <- bindSpec sym stO stP domAsmSpec
-  (precondConcl, domConcl) <- bindSpec sym stO stP domConclSpec
-  regImp <- allPreds sym =<< mapM (getReg (PED.eqDomainRegisters domAsm)) (PER.toList (PED.eqDomainRegisters domConcl))
-  let
-    stackCells = S.toList $ PEM.cells (PED.eqDomainStackMemory domAsm) <> PEM.cells (PED.eqDomainStackMemory domConcl)
-    memCells = S.toList $ PEM.cells (PED.eqDomainGlobalMemory domAsm) <> PEM.cells (PED.eqDomainGlobalMemory domConcl)
-  stackImp <- allPreds sym =<< mapM (getMem (PED.eqDomainStackMemory domAsm) (PED.eqDomainStackMemory domConcl)) stackCells
-  globalImp <- allPreds sym =<< mapM (getMem (PED.eqDomainGlobalMemory domAsm) (PED.eqDomainGlobalMemory domConcl)) memCells
-  allImps <- allPreds sym [precondConcl, regImp, stackImp, globalImp]
-  W4.impliesPred sym precondAsm allImps
-  where
-    getMem ::
-      PEM.MemoryDomain sym arch ->
-      PEM.MemoryDomain sym arch ->
-      (Some (PMC.MemCell sym arch)) ->
-      IO (W4.Pred sym)
-    getMem memAsm memConcl (Some cell) = do
-     mAsm <- PEM.mayContainCell sym memAsm cell
-     mConcl <- PEM.mayContainCell sym memConcl cell
-     W4.impliesPred sym mAsm mConcl
-      
-    getReg ::
-      PER.RegisterDomain sym arch ->
-      (Some (MM.ArchReg arch), W4.Pred sym) ->
-      IO (W4.Pred sym)
-    getReg domAsm (Some r, p) =
-      W4.impliesPred sym (PER.registerInDomain sym r domAsm) p
 
 -- | Resolve a domain predicate into a structured precondition.
 -- This resulting condition is asserting equality on the post-state
@@ -294,7 +225,7 @@ getPostdomain ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
-  SimBundle sym arch ->
+  SimBundle sym arch v ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
@@ -323,13 +254,13 @@ memPostCondToPred sym memCond = do
 -- For the post-equality condition to hold, these locations must therefore either be
 -- made equal by the slice, or excluded in the given post-domain.
 memDomPost ::
-  forall sym arch.
+  forall sym arch v.
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
   MemRegionEquality sym arch ->
-  SimOutput sym arch PBi.Original ->
-  SimOutput sym arch PBi.Patched ->
+  SimOutput sym arch v PBi.Original ->
+  SimOutput sym arch v PBi.Patched ->
   PEM.MemoryDomain sym arch {- ^ pre-domain for this slice -} ->
   PEM.MemoryDomain sym arch {- ^ target post-domain -} ->
   IO (MemoryCondition sym arch)
@@ -368,13 +299,13 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
 -- * for 'MemEqOutsideRegion' the given region must *not* match the cell
 --    (i.e. for cells in the region the resulting predicate is always true)
 resolveCellEquiv ::
-  forall sym arch w.
+  forall sym arch v w.
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   MemRegionEquality sym arch ->
-  SimState sym arch PBi.Original ->
-  SimState sym arch PBi.Patched ->
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
@@ -391,13 +322,13 @@ resolveCellEquiv sym memEqRegion stO stP cell cond = do
 -- given 'PMC.MemCell' is equivalent on the two given states.
 -- Trivially true when the given 'PMC.MemCell' covers the stack region.
 resolveCellEquivMem ::
-  forall sym arch w.
+  forall sym arch v w.
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   EquivContext sym arch ->
-  SimState sym arch PBi.Original ->
-  SimState sym arch PBi.Patched ->
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
@@ -408,13 +339,13 @@ resolveCellEquivMem sym (EquivContext _ stackRegion) stO stP cell cond =
 -- given 'PMC.MemCell' is equivalent on the two given states.
 -- Trivially true when the given 'PMC.MemCell' is outside the stack region.
 resolveCellEquivStack ::
-  forall sym arch w.
+  forall sym arch v w.
   W4.IsSymExprBuilder sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   EquivContext sym arch ->
-  SimState sym arch PBi.Original ->
-  SimState sym arch PBi.Patched ->
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
@@ -441,12 +372,12 @@ data MemoryCondition sym arch = MemoryCondition
 -- Specifically we assume that the patched trace is equivalent
 -- to the original trace with arbitrary modifications to excluded addresses
 memPreCondToPred ::
-  forall sym arch.
+  forall sym arch v.
   IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
-  SimInput sym arch PBi.Original ->
-  SimInput sym arch PBi.Patched ->
+  SimInput sym arch v PBi.Original ->
+  SimInput sym arch v PBi.Patched ->
   MemoryCondition sym arch ->
   IO (W4.Pred sym)
 memPreCondToPred sym inO inP memCond  = do
@@ -517,13 +448,13 @@ newtype RegisterCondition sym arch =
 -- is true iff the register is equal in two given states (conditional on
 -- the register being present in the given 'PER.RegisterDomain')
 regDomRel ::
-  forall sym arch.
+  forall sym arch v.
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   PA.HasDedicatedRegister arch ->
   sym ->
-  SimState sym arch PBi.Original ->
-  SimState sym arch PBi.Patched ->
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PER.RegisterDomain sym arch ->
   IO (RegisterCondition sym arch)
 regDomRel hdr sym stO stP regDom  = RegisterCondition <$> do
@@ -552,8 +483,8 @@ eqDomPre ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimInput sym arch PBi.Original ->
-  SimInput sym arch PBi.Patched ->
+  SimInput sym arch v PBi.Original ->
+  SimInput sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StateCondition sym arch)
@@ -573,8 +504,8 @@ eqDomPost ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
-  SimOutput sym arch PBi.Original ->
-  SimOutput sym arch PBi.Patched ->
+  SimOutput sym arch v PBi.Original ->
+  SimOutput sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
@@ -595,8 +526,8 @@ preCondPredicate ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimInput sym arch PBi.Original ->
-  SimInput sym arch PBi.Patched ->
+  SimInput sym arch v PBi.Original ->
+  SimInput sym arch v PBi.Patched ->
   StateCondition sym arch ->
   IO (W4.Pred sym)
 preCondPredicate sym inO inP stCond = do

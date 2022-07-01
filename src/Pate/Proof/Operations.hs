@@ -20,7 +20,6 @@ module Pate.Proof.Operations
   ( simBundleToSlice
   , noTransition
   , domainToProof
-  , domainSpecToProof
   , proofResult
     -- lazy proofs
   , LazyProof(..)
@@ -76,7 +75,7 @@ import qualified Pate.SimulatorRegisters as PSR
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
 simBundleToSlice ::
-  PS.SimBundle sym arch ->
+  PS.SimBundle sym arch v ->
   EquivM sym arch (PF.BlockSliceTransition sym arch)
 simBundleToSlice bundle = withSym $ \sym -> do
   let
@@ -114,7 +113,7 @@ simBundleToSlice bundle = withSym $ \sym -> do
         isEquiv
     
     memCellToOp ::
-      PPa.PatchPair (PS.SimState sym arch) ->
+      PPa.PatchPair (PS.SimState sym arch v) ->
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp sym))
     memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
@@ -155,7 +154,7 @@ proofResult e = foldr merge PF.VerificationSuccess statuses
     go _ = []
 
 noTransition ::
-  PPa.PatchPair (PS.SimInput sym arch) ->
+  PPa.PatchPair (PS.SimInput sym arch v) ->
   CS.RegValue sym (MCS.MacawBlockEndType arch) ->
   EquivM sym arch (PF.BlockSliceTransition sym arch)
 noTransition stIn blockEnd = do
@@ -168,11 +167,6 @@ domainToProof ::
   PED.EquivalenceDomain sym arch ->
   EquivM sym arch (LazyProof sym arch PF.ProofDomainType)
 domainToProof eqDom = fmap asLazyProof $ proofNonceExpr $ return $ PF.ProofDomain eqDom
-
-domainSpecToProof ::
-  PE.DomainSpec sym arch ->
-  EquivM sym arch (LazyProof sym arch PF.ProofDomainType)
-domainSpecToProof eqDomSpec = domainToProof (PS.specBody eqDomSpec)
 
 proofNonceExpr ::
   EquivM sym arch (PF.ProofNonceApp sym arch tp) ->
