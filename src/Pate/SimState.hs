@@ -53,7 +53,9 @@ module Pate.SimState
   , simOutO
   , simOutP
   -- variable binding
+  , SimBoundVars(..)
   , SimVars(..)
+  , boundVarsAsFree
   , bindSpec
   -- assumption frames
   , AssumptionFrame(..)
@@ -288,17 +290,17 @@ class Scoped f where
 data SimSpec sym arch (f :: VarScope -> DK.Type) where
   SimSpec :: forall sym arch f v.
     {
-      specVars :: PPa.PatchPair (SimVars sym arch v)
+      specVars :: PPa.PatchPair (SimBoundVars sym arch v)
     , specAsm :: W4.Pred sym
     , specBody :: f v
     } -> SimSpec sym arch f
 
--- | Project out the variables with an arbitrary scope
+-- | Project out the bound variables with an arbitrary scope
 viewSpecVars ::
   SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> a) ->
+  (forall v. PPa.PatchPair (SimBoundVars sym arch v) -> a) ->
   a
-viewSpecVars (SimSpec vars _ _) f = f vars 
+viewSpecVars (SimSpec vars _ _) f = f vars
 
 -- | Project out the body with an arbitrary scope
 viewSpecBody ::
@@ -311,14 +313,14 @@ viewSpec ::
   SimSpec sym arch f ->
   (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> a) ->
   a
-viewSpec (SimSpec vars _ body) f = f vars body
+viewSpec (SimSpec vars _ body) f = f (TF.fmapF boundVarsAsFree vars) body
 
 forSpec ::
   Applicative m =>
   SimSpec sym arch f ->
   (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> m (g v)) ->
   m (SimSpec sym arch g)
-forSpec (SimSpec vars asm body) f = SimSpec <$> pure vars <*> pure asm <*> f vars body
+forSpec (SimSpec vars asm body) f = SimSpec <$> pure vars <*> pure asm <*> f (TF.fmapF boundVarsAsFree vars) body
 
 -- | Unsafely coerce the body of a spec to have any scope.
 -- After this is used, the variables in the resulting 'f' should
@@ -357,13 +359,27 @@ simPair bundle = TF.fmapF simInBlock (simIn bundle)
 ---------------------------------------
 -- Variable binding
 
+-- | "Free" bound variables representing the formal variables for some
+-- expression-containing value.
+-- TODO: Ideally the structure of this could be hidden, since 'SimSpec'
+-- should fully abstract its internal representation of the bound variables.
+data SimBoundVars sym arch v bin = SimBoundVars
+  {
+    simBoundVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
+  , simBoundVarState :: SimState sym arch v bin
+  }
 
+-- | A value assignment for the bound variables of a 'SimSpec'. These may
+-- contain arbitrary What4 expressions (e.g. the result of symbolic execution).
 data SimVars sym arch v bin = SimVars
   {
     simVarState :: SimState sym arch v bin
   }
 
-data MacawVarBind sym tp = MacawVarBind (PSR.MacawRegEntry sym tp) (PSR.MacawRegEntry sym tp)
+boundVarsAsFree :: SimBoundVars sym arch v bin -> SimVars sym arch v bin
+boundVarsAsFree bv = SimVars (simBoundVarState bv)
+
+-- data MacawVarBind sym tp = MacawVarBind (PSR.MacawRegEntry sym tp) (PSR.MacawRegEntry sym tp)
 
 mkVarBinds ::
   forall sym arch v bin.
@@ -372,32 +388,30 @@ mkVarBinds ::
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
-  SimVars sym arch v bin ->
+  SimBoundVars sym arch v bin ->
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   IO (ExprBindings sym)
 mkVarBinds sym simVars mem regs = do
   let
-    memVar = MT.memState $ simMem $ simVarState simVars
-    regVars = simRegs $ simVarState simVars
+    memVar = MT.memState $ simMem $ simBoundVarState simVars
+    regVars = simBoundVarRegs simVars
     regBinds =
       MapF.toList $
       MM.regStateMap $
-      MM.zipWithRegState MacawVarBind regVars regs
-  regVarBinds <- fmap concat $ forM regBinds $ \(MapF.Pair _r (MacawVarBind var val)) ->
-     case PSR.macawRegRepr val of
-       CLM.LLVMPointerRepr{} -> do
-         CLM.LLVMPointer regionVar offVar <- return $ PSR.macawRegValue var
-         CLM.LLVMPointer regionVal offVal <- return $ PSR.macawRegValue val
-         regionVarI <- W4.natToInteger sym regionVar
-         regionValI <- W4.natToInteger sym regionVal
-         return $ [Pair regionVarI regionValI, Pair offVar offVal]
-       CT.BoolRepr -> do
-         boolVar <- return $ PSR.macawRegValue var
-         boolVal <- return $ PSR.macawRegValue val
-         return [Pair boolVar boolVal]
-       CT.StructRepr Ctx.Empty -> return []
-       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
+      MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
+  regVarBinds <- fmap concat $ forM regBinds $ \(MapF.Pair _ (PSR.MacawRegVar val vars)) -> do
+    case PSR.macawRegRepr val of
+      CLM.LLVMPointerRepr{} -> do
+        CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
+        (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
+        iRegion <- W4.natToInteger sym region
+        return $ [Pair regVar iRegion, Pair offVar off]
+      CT.BoolRepr -> do
+        Ctx.Empty Ctx.:> var <- return vars
+        return [Pair var (PSR.macawRegValue val)]
+      CT.StructRepr Ctx.Empty -> return []
+      repr -> error ("mkVarBinds: unsupported type " ++ show repr)
   mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
 
 bindSpec ::

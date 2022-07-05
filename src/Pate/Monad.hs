@@ -313,7 +313,7 @@ unconstrainedRegister ::
   (HasCallStack, MM.MemWidth (MM.ArchAddrWidth arch)) =>
   [T.Text] ->
   MM.ArchReg arch tp ->
-  EquivM sym arch (PSR.MacawRegEntry sym tp)
+  EquivM sym arch (PSR.MacawRegVar sym tp)
 unconstrainedRegister argNames reg = do
   let repr = MM.typeRepr reg
   case repr of
@@ -323,18 +323,18 @@ unconstrainedRegister argNames reg = do
           let name = maybe (showF reg) T.unpack margName
           ptr@(CLM.LLVMPointer region off) <- freshPtr sym name n
           iRegion <- W4.natToInteger sym region
-          return $ PSR.MacawRegEntry (MS.typeToCrucible repr) ptr
+          return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
       | otherwise -> withSymIO $ \sym -> do
           -- For bitvector types that are not pointer width, fix their region number to 0 since they cannot be pointers
           bits <- W4.freshConstant sym (WS.safeSymbol (showF reg)) (W4.BaseBVRepr n)
           ptr <- CLM.llvmPointer_bv sym bits
           zero <- W4.intLit sym 0
-          return $ PSR.MacawRegEntry (MS.typeToCrucible repr) ptr
+          return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> zero Ctx.:> bits)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
       var <- W4.freshConstant sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
-      return $ PSR.MacawRegEntry (MS.typeToCrucible repr) var
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) var) (Ctx.empty Ctx.:> var)
     MM.TupleTypeRepr PL.Nil -> do
-      return $ PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty
+      return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
     _ -> throwHere $ PEE.UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 withSimSpec ::
@@ -371,14 +371,14 @@ freshSimVars ::
   forall sym (bin :: PBi.WhichBinary) arch v.
   PBi.KnownBinary bin =>
   PPa.BlockPair arch ->
-  EquivM sym arch (SimVars sym arch v bin)
+  EquivM sym arch (SimBoundVars sym arch v bin)
 freshSimVars blocks = do
   binCtx <- getBinCtx @bin
   let baseMem = MBL.memoryImage $ PMC.binary binCtx
   mem <- withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   argNames <- lookupArgumentNames blocks
   regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
-  return $ SimVars (SimState mem regs)
+  return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
 withFreshVars ::
@@ -389,7 +389,7 @@ withFreshVars ::
 withFreshVars blocks f = do
   varsO <- freshSimVars @_ @PBi.Original blocks
   varsP <- freshSimVars @_ @PBi.Patched blocks
-  (asm, result) <- f (PPa.PatchPair varsO varsP)
+  (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
   return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.

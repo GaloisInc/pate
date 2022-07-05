@@ -15,6 +15,7 @@ module Pate.Verification.PairGraph
   , initialGas
   , PairGraph
   , AbstractDomain
+  , initialDomain
   , initialDomainSpec
   , initializePairGraph
   , chooseWorkItem
@@ -297,13 +298,27 @@ reportAnalysisErrors logAction gr =
        LJ.writeLog logAction (Event.StrongestPostMiscError pPair msg)
 
 
-initialDomainSpec ::
-  PPa.BlockPair arch ->
-  EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec blocks = withSym $ \sym -> withFreshVars blocks $ \vars ->
-    withAssumptionFrame (PVV.validInitState Nothing (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)) $ do
-    return $ PAD.AbstractDomain (PVD.universalDomain sym) (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)
+initialDomain :: EquivM sym arch (PAD.AbstractDomain sym arch v)
+initialDomain = withSym $ \sym -> return $ PAD.AbstractDomain (PVD.universalDomain sym) (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)
 
+initialDomainSpec ::
+  forall sym arch.
+  GraphNode arch ->
+  EquivM sym arch (PAD.AbstractDomainSpec sym arch)
+initialDomainSpec node = withFreshVars blocks $ \vars ->
+    withAssumptionFrame (PVV.validInitState mBlocks (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)) $ initialDomain
+  where
+    -- We don't want to pass a 'PPa.BlockPair' to 'PVV.validInitState' for a return edge,
+    -- as this creates unwanted assertions about the final value of the instruction pointer.
+    mBlocks :: Maybe (PPa.BlockPair arch)
+    mBlocks = case node of
+      GraphNode b -> Just b
+      ReturnNode{} -> Nothing
+
+    blocks :: PPa.BlockPair arch
+    blocks = case node of
+      GraphNode b -> b
+      ReturnNode fPair -> TF.fmapF PB.functionEntryToConcreteBlock fPair
 
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those
@@ -318,7 +333,7 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
-           idom <- initialDomainSpec bPair
+           idom <- initialDomainSpec (GraphNode bPair)
            return (freshDomain gr (GraphNode bPair) idom)
 
 -- | Given a pair graph, chose the next node in the graph to visit

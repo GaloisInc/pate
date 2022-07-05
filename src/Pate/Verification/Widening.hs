@@ -85,25 +85,23 @@ makeFreshAbstractDomain ::
   LCBO.OnlineBackend solver t st fs ->
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
-  GraphNode arch ->
+  GraphNode arch {- ^ source node -} ->
+  GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-makeFreshAbstractDomain bak bundle preDom (GraphNode pPair) = do
-  initSpec <- initialDomainSpec pPair
-  PS.forSpec initSpec $ \_vars init  -> do
-    -- TODO: this does not properly propagate scopes, but works here
-    -- because 'AbstractDomainVals' doesn't have a scope parameter
-    vals <- liftIO $ getInitalAbsDomainVals bak bundle preDom
-    return $ init { PAD.absDomVals = vals }
-makeFreshAbstractDomain _bak _bundle preDom (ReturnNode fPair) = do
-  -- TODO, this isn't really right, but seems pretty harmless.  The
-  -- only thing the concrete block value is used for is to assign more
-  -- human-readable names to arguments if we have debug information.
-  initSpec <- initialDomainSpec (TF.fmapF PB.functionEntryToConcreteBlock fPair)
-  -- as a small optimization, we know that the return nodes leave the values
-  -- unmodified, and therefore any previously-established value constraints
-  -- will still hold
-  -- TODO: we still need to rephrase these in terms of the outgoing scope
-  PS.forSpec initSpec $ \_vars init -> return $ init { PAD.absDomVals = PAD.absDomVals preDom }
+makeFreshAbstractDomain bak bundle preDom from to = withSym $ \sym -> do
+  dom <- case from of
+    GraphNode{} -> do
+      initDom <- initialDomain
+      vals <- liftIO $ getInitalAbsDomainVals bak bundle preDom
+      return $ initDom { PAD.absDomVals = vals }
+    ReturnNode{} -> do
+      initDom <- initialDomain
+      -- as a small optimization, we know that the return nodes leave the values
+      -- unmodified, and therefore any previously-established value constraints
+      -- will still hold
+      return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
+  postSpec <- initialDomainSpec to
+  abstractOverVars bundle from to postSpec dom
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -142,7 +140,7 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
      do traceBundle bundle ("First jump to " ++ show to)
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
 
-        postSpec <- makeFreshAbstractDomain bak bundle d to
+        postSpec <- makeFreshAbstractDomain bak bundle d from to
         (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
         withAssumption_ (return asm) $ do
           md <- widenPostcondition bak bundle d d'

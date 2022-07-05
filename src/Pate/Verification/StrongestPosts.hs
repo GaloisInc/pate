@@ -251,6 +251,8 @@ returnSiteBundle vars preD pPair =
      let simOutP   = PS.SimOutput pVarState blockEndVal
 
      -- TODO? Not clear how much this rewrite step is going to do for us.  Perhaps just skip it?
+     -- TODO: this assumption is redundant, since the state validity is assumed
+     -- as part of the initial domain
      withAssumptionFrame (PVV.validInitState (Just pPair) oVarState pVarState) $
        applyCurrentFrame
          (SimBundle (PPa.PatchPair simInO simInP)
@@ -895,6 +897,8 @@ mkSimBundle pPair vars d =
 
      let rd = PE.eqDomainRegisters (PAD.absDomEq d)
 
+     -- TODO: this assumption is redundant, since the state validity is assumed
+     -- as part of the initial domain
      withAssumptionFrame (PVV.validInitState (Just pPair) oVarState pVarState) $
        do traceBlockPair pPair "Simulating original blocks"
           (asmO, simOutO_) <- PVSy.simulate simInO
