@@ -123,7 +123,6 @@ library
                        Pate.Proof.Instances,
                        Pate.Proof.Operations,
                        Pate.Proof.CounterExample,
-                       Pate.Proof.EquivTriple,
                        Pate.Register,
                        Pate.Register.Traversal,
                        Pate.Solver,
