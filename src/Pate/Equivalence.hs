@@ -60,7 +60,6 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as S
 import           GHC.Stack ( HasCallStack )
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
@@ -72,7 +71,6 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState

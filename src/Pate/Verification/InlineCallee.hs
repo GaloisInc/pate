@@ -63,7 +63,6 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
 import qualified Pate.Discovery.ParsedFunctions as PDP
-import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import           Pate.Monad

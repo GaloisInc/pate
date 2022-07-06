@@ -379,8 +379,6 @@ data SimVars sym arch v bin = SimVars
 boundVarsAsFree :: SimBoundVars sym arch v bin -> SimVars sym arch v bin
 boundVarsAsFree bv = SimVars (simBoundVarState bv)
 
--- data MacawVarBind sym tp = MacawVarBind (PSR.MacawRegEntry sym tp) (PSR.MacawRegEntry sym tp)
-
 mkVarBinds ::
   forall sym arch v bin.
   HasCallStack =>

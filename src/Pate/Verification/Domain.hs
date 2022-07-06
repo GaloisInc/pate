@@ -20,25 +20,21 @@ import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
 import           Data.Parameterized.Classes()
-import GHC.Stack ( HasCallStack )
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
-import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSi
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PS
-import qualified Pate.Verification.Validity as PVV
 
 equateRegisters ::
   PER.RegisterDomain sym arch ->

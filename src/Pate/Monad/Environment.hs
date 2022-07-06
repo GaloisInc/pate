@@ -41,7 +41,6 @@ import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
-import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import           Pate.SimState
