@@ -58,6 +58,7 @@ module Pate.Monad
   , withSimSpec
   , withFreshVars
   -- assumption management
+  , currentAsm
   , withAssumption_
   , withAssumption
   , withSatAssumption
@@ -380,6 +381,10 @@ freshSimVars blocks = do
   regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
   return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
+currentAsm :: EquivM sym arch (AssumptionSet sym v)
+currentAsm = do
+  Some frame <- CMR.asks envCurrentFrame
+  return $ unsafeCoerceScope frame
 
 withFreshVars ::
   Scoped f =>
@@ -402,8 +407,8 @@ withAssumption' ::
   EquivM sym arch (W4.Pred sym, f)
 withAssumption' asmf f = withSym $ \sym -> do
   asm <- asmf
-  frame <- CMR.asks envCurrentFrame
-  (asm', a) <- CMR.local (\env -> env { envCurrentFrame = frameAssume asm <> frame }) $ f
+  frame <- currentAsm
+  (asm', a) <- CMR.local (\env -> env { envCurrentFrame = Some (frameAssume asm <> frame) }) $ f
   asm'' <- liftIO $ W4.andPred sym asm asm'
   return (asm'', a)
 
@@ -420,15 +425,15 @@ withAssumption asmf f =
 -- value according to any explicit bindings. The returned predicate is the conjunction of
 -- the given assumption frame and the frame produced by the function.
 withAssumptionFrame' ::
-  forall sym arch f.
+  forall sym arch v f.
   PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
-  EquivM sym arch (AssumptionFrame sym, f) ->
+  EquivM sym arch (AssumptionSet sym v) ->
+  EquivM sym arch (AssumptionSet sym v, f) ->
   EquivM sym arch (W4.Pred sym, f)
 withAssumptionFrame' asmf f = withSym $ \sym -> do
   asmFrame <- asmf
-  envFrame <- CMR.asks envCurrentFrame
-  CMR.local (\env -> env { envCurrentFrame = asmFrame <> envFrame }) $ do
+  envFrame <- currentAsm
+  CMR.local (\env -> env { envCurrentFrame = Some (asmFrame <> envFrame) }) $ do
     withAssumption' (liftIO $ getAssumedPred sym (asmFrame <> envFrame)) $ do
       (frame', a) <- f
       applyAssumptionFrame (asmFrame <> frame') a
@@ -437,19 +442,19 @@ withEmptyAssumptionFrame ::
   EquivM sym arch f ->
   EquivM sym arch f
 withEmptyAssumptionFrame f =
-  CMR.local (\env -> env { envCurrentFrame = mempty }) $ f
+  CMR.local (\env -> env { envCurrentFrame = Some mempty }) $ f
 
 applyCurrentFrame ::
   forall sym arch f.
   PEM.ExprMappable sym f =>
   f ->
   EquivM sym arch f
-applyCurrentFrame f = snd <$> withAssumptionFrame (CMR.asks envCurrentFrame) (return f)
+applyCurrentFrame f = snd <$> withAssumptionFrame (currentAsm) (return f)
 
 applyAssumptionFrame ::
-  forall sym arch f.
+  forall sym arch v f.
   PEM.ExprMappable sym f =>
-  AssumptionFrame sym ->
+  AssumptionSet sym v ->
   f ->
   EquivM sym arch (W4.Pred sym, f)
 applyAssumptionFrame frame f = withSym $ \sym -> do
@@ -467,14 +472,14 @@ applyAssumptionFrame frame f = withSym $ \sym -> do
 -- of all the assumptions in the given frame.
 withAssumptionFrame ::
   PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
+  EquivM sym arch (AssumptionSet sym v) ->
   EquivM sym arch f ->
   EquivM sym arch (W4.Pred sym, f)
 withAssumptionFrame asmf f = withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
 
 withAssumptionFrame_ ::
   PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
+  EquivM sym arch (AssumptionSet sym v) ->
   EquivM sym arch f ->
   EquivM sym arch f
 withAssumptionFrame_ asmf f = fmap snd $ withAssumptionFrame asmf f
@@ -523,7 +528,7 @@ checkSatisfiableWithModel ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch (Either SomeException a)
 checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
-  envFrame <- CMR.asks envCurrentFrame
+  envFrame <- currentAsm
   assumptions <- liftIO $ getAssumedPred sym envFrame
   goal <- liftIO $ W4.andPred sym assumptions p
  -- handle <- liftIO $ IO.openFile "solver.out" IO.WriteMode
@@ -606,7 +611,7 @@ isPredTruePar' ::
 isPredTruePar' timeout p = case W4.asConstantPred p of
   Just b -> Par.present $ return b
   _ -> do
-    frame <- CMR.asks envCurrentFrame
+    frame <- currentAsm
     case isAssumedPred frame p of
       True -> Par.present $ return True
       False -> Par.promise $ do

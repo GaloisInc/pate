@@ -64,7 +64,7 @@ type family DedicatedRegister arch :: LCT.CrucibleType -> DK.Type
 data HasDedicatedRegister arch =
   HasDedicatedRegister { asDedicatedRegister :: forall tp . MC.ArchReg arch tp -> Maybe (DedicatedRegister arch (MS.ToCrucibleType tp))
                        -- ^ Determine whether or not a register is a 'DedicatedRegister'
-                       , dedicatedRegisterValidity :: forall sym bin tp . (LCB.IsSymInterface sym) => sym -> PMC.EquivalenceContext sym arch -> PB.WhichBinaryRepr bin -> PSR.MacawRegEntry sym tp -> DedicatedRegister arch (MS.ToCrucibleType tp) -> IO (PS.AssumptionFrame sym)
+                       , dedicatedRegisterValidity :: forall sym v bin tp . (LCB.IsSymInterface sym) => sym -> PMC.EquivalenceContext sym arch -> PB.WhichBinaryRepr bin -> PSR.MacawRegEntry sym tp -> DedicatedRegister arch (MS.ToCrucibleType tp) -> IO (PS.AssumptionSet sym v)
                        -- ^ Compute an assumption frame for the given arch-specific 'DedicatedRegister'
                        }
 

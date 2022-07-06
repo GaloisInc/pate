@@ -377,7 +377,7 @@ applyAbsRange ::
   sym ->
   W4.SymExpr sym tp ->
   AbsRange tp ->
-  IO (PS.AssumptionFrame sym)
+  IO (PS.AssumptionSet sym v)
 applyAbsRange sym e rng = case rng of
   AbsIntConstant i -> do
     i' <- W4.intLit sym i
@@ -394,7 +394,7 @@ absDomainValToAsm ::
   sym ->
   PSR.MacawRegEntry sym tp ->
   MacawAbstractValue sym tp ->
-  IO (PS.AssumptionFrame sym)
+  IO (PS.AssumptionSet sym v)
 absDomainValToAsm sym e (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
   CLM.LLVMPointerRepr{} -> do
     CLM.LLVMPointer region offset <- return $ PSR.macawRegValue e
@@ -411,7 +411,7 @@ absDomainValToAsm sym e (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
   _ -> panic Solver "applyAbsDomainVal" ["Unexpected type for abstract domain"]
 
 
--- | Construct an 'PS.AssumptionFrame' asserting
+-- | Construct an 'PS.AssumptionSet' asserting
 -- that the values in the given initial state
 -- ('PS.SimInput') are necessarily in the given abstract domain
 absDomainValsToAsm ::
@@ -422,7 +422,7 @@ absDomainValsToAsm ::
   sym ->
   PS.SimState sym arch v bin ->
   AbstractDomainVals sym arch bin ->
-  IO (PS.AssumptionFrame sym)
+  IO (PS.AssumptionSet sym v)
 absDomainValsToAsm sym st vals = do
   memFrame <- MapF.foldrMWithKey accumulateCell mempty (absMemVals vals)
   regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
@@ -432,8 +432,8 @@ absDomainValsToAsm sym st vals = do
     accumulateCell ::
       PMC.MemCell sym arch w ->
       MemAbstractValue sym w ->
-      PS.AssumptionFrame sym ->
-      IO (PS.AssumptionFrame sym)
+      PS.AssumptionSet sym v ->
+      IO (PS.AssumptionSet sym v)
     accumulateCell cell (MemAbstractValue absVal) frame = do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
       frame' <- absDomainValToAsm sym (PSR.ptrToEntry val) absVal

@@ -74,7 +74,7 @@ data EquivEnv sym arch where
     -- ^ expression builder, wrapped with a validity proof
     , envStartTime :: TM.UTCTime
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
-    , envCurrentFrame :: AssumptionFrame sym
+    , envCurrentFrame :: Some (AssumptionSet sym)
     -- ^ the current assumption frame, accumulated as assumptions are added
     , envNonceGenerator :: N.NonceGenerator IO (PF.SymScope sym)
     , envParentNonce :: Some (PF.ProofNonce sym)

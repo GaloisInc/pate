@@ -105,14 +105,14 @@ getCurrentTOC ctx binRepr = do
     Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addr)
 
 ppc64DedicatedRegisterFrame
-  :: forall sym tp bin
+  :: forall sym v tp bin
    . (CB.IsSymInterface sym)
   => sym
   -> PMC.EquivalenceContext sym PPC.PPC64
   -> PB.WhichBinaryRepr bin
   -> PSR.MacawRegEntry sym tp
   -> PPC64DedicatedRegister (MS.ToCrucibleType tp)
-  -> IO (PS.AssumptionFrame sym)
+  -> IO (PS.AssumptionSet sym v)
 ppc64DedicatedRegisterFrame sym ctx binRepr entry dr =
   case dr of
     RegTOC -> do

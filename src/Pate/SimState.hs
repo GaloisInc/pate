@@ -58,7 +58,7 @@ module Pate.SimState
   , boundVarsAsFree
   , bindSpec
   -- assumption frames
-  , AssumptionFrame(..)
+  , AssumptionSet(..)
   , isAssumedPred
   , exprBinding
   , bindingToFrame
@@ -145,16 +145,16 @@ simOutRegs = simRegs . simOutState
 
 
 
-data AssumptionFrame sym where
-  AssumptionFrame ::
+data AssumptionSet sym (v :: VarScope) where
+  AssumptionSet ::
     { asmPreds :: ExprSet sym W4.BaseBoolType
     -- | equivalence on sub-expressions. In the common case where an expression maps
     -- to a single expression (i.e. a singleton 'ExprSet') we can apply the rewrite
     -- inline.
     , asmBinds :: MapF.MapF (W4.SymExpr sym) (ExprSet sym)
-    } -> AssumptionFrame sym
+    } -> AssumptionSet sym v
 
-instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionFrame sym) where
+instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym v) where
   asm1 <> asm2 = let
     preds = (asmPreds asm1) <> (asmPreds asm2)
     binds =
@@ -164,28 +164,31 @@ instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionFrame sym) where
         id
         (asmBinds asm1)
         (asmBinds asm2)
-    in AssumptionFrame preds binds
+    in AssumptionSet preds binds
 
-instance OrdF (W4.SymExpr sym) => Monoid (AssumptionFrame sym) where
-  mempty = AssumptionFrame mempty MapF.empty
+instance Scoped (AssumptionSet sym) where
+  unsafeCoerceScope (AssumptionSet a b) = AssumptionSet a b
+
+instance OrdF (W4.SymExpr sym) => Monoid (AssumptionSet sym v) where
+  mempty = AssumptionSet mempty MapF.empty
 
 -- | Lift an expression binding environment into an assumption frame
 bindingToFrame ::
-  forall sym.
+  forall sym v.
   W4.IsSymExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   ExprBindings sym ->
-  AssumptionFrame sym
-bindingToFrame binds = AssumptionFrame { asmPreds = mempty, asmBinds = MapF.map SetF.singleton binds }
+  AssumptionSet sym v
+bindingToFrame binds = AssumptionSet { asmPreds = mempty, asmBinds = MapF.map SetF.singleton binds }
 
 exprBinding ::
-  forall sym tp.
+  forall sym v tp.
   W4.IsSymExprBuilder sym =>
   -- | source expression
   W4.SymExpr sym tp ->
   -- | target expression
   W4.SymExpr sym tp ->
-  AssumptionFrame sym
+  AssumptionSet sym v
 exprBinding eSrc eTgt = case testEquality eSrc eTgt of
   Just Refl -> mempty
   _ -> mempty { asmBinds = (MapF.singleton eSrc (SetF.singleton eTgt)) }
@@ -198,7 +201,7 @@ macawRegBinding ::
   PSR.MacawRegEntry sym tp ->
   -- | new value
   PSR.MacawRegEntry sym tp' ->
-  IO (AssumptionFrame sym)
+  IO (AssumptionSet sym v)
 macawRegBinding sym var val = do
   case PSR.macawRegRepr var of
     CLM.LLVMPointerRepr _ -> do
@@ -213,17 +216,17 @@ macawRegBinding sym var val = do
     _ -> return mempty
 
 frameAssume ::
-  forall sym.
+  forall sym v.
   W4.IsSymExprBuilder sym =>
   W4.Pred sym ->
-  AssumptionFrame sym
-frameAssume p = AssumptionFrame (SetF.singleton p) MapF.empty
+  AssumptionSet sym v
+frameAssume p = AssumptionSet (SetF.singleton p) MapF.empty
 
 getUniqueBinding ::
-  forall sym tp.
+  forall sym v tp.
   W4.IsSymExprBuilder sym =>
   sym ->
-  AssumptionFrame sym ->
+  AssumptionSet sym v ->
   W4.SymExpr sym tp ->
   Maybe (W4.SymExpr sym tp)
 getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
@@ -237,10 +240,10 @@ getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
 -- | Compute a predicate that collects the individual assumptions in the frame, including
 -- equality on all bindings.
 getAssumedPred ::
-  forall sym.
+  forall sym v.
   W4.IsSymExprBuilder sym =>
   sym ->
-  AssumptionFrame sym ->
+  AssumptionSet sym v ->
   IO (W4.Pred sym)
 getAssumedPred sym asm = do
   bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
@@ -252,19 +255,19 @@ getAssumedPred sym asm = do
       W4.isEq sym eSrc eTgt
 
 isAssumedPred ::
-  forall sym.
+  forall sym v.
   W4.IsSymExprBuilder sym =>
-  AssumptionFrame sym ->
+  AssumptionSet sym v ->
   W4.Pred sym ->
   Bool
 isAssumedPred frame asm = SetF.member asm (asmPreds frame)
 
 -- | Explicitly rebind any known sub-expressions that are in the frame.
 rebindWithFrame ::
-  forall sym t solver fs tp.
+  forall sym v t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  AssumptionFrame sym ->
+  AssumptionSet sym v ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
 rebindWithFrame sym asm e = do
@@ -272,11 +275,11 @@ rebindWithFrame sym asm e = do
   rebindWithFrame' sym cache asm e
 
 rebindWithFrame' ::
-  forall sym t solver fs tp.
+  forall sym v t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   VarBindCache sym ->
-  AssumptionFrame sym ->
+  AssumptionSet sym v ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
 rebindWithFrame' sym cache asm = rewriteSubExprs' sym cache (getUniqueBinding sym asm)

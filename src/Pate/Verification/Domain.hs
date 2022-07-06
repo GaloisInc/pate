@@ -39,7 +39,7 @@ import qualified Pate.Solver as PS
 equateRegisters ::
   PER.RegisterDomain sym arch ->
   SimBundle sym arch v ->
-  EquivM sym arch (PSi.AssumptionFrame sym)
+  EquivM sym arch (PSi.AssumptionSet sym v)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
   fmap PRt.collapse $ PRt.zipWithRegStatesM (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
@@ -53,14 +53,14 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
     inStO = PSi.simInState $ PSi.simInO bundle
     inStP = PSi.simInState $ PSi.simInP bundle
 
-equateInitialMemory :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionFrame sym)
+equateInitialMemory :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionSet sym v)
 equateInitialMemory bundle =
   return $ PSi.bindingToFrame $ MT.mkMemoryBinding memStO memStP
   where
     memStO = MT.memState $ PSi.simInMem $ PSi.simInO bundle
     memStP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
-equateInitialStates :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionFrame sym)
+equateInitialStates :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionSet sym v)
 equateInitialStates bundle = withSym $ \sym -> do
   eqRegs <- equateRegisters (PER.universal sym) bundle
   eqMem <- equateInitialMemory bundle

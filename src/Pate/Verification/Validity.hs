@@ -37,7 +37,7 @@ validInitState ::
   Maybe (PPa.BlockPair arch) ->
   SimState sym arch v PB.Original ->
   SimState sym arch v PB.Patched ->
-  EquivM sym arch (AssumptionFrame sym)
+  EquivM sym arch (AssumptionSet sym v)
 validInitState mpPair stO stP = do
   fmap PRt.collapse $ PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> do
     validO <- validRegister (fmap PPa.pOriginal mpPair) vO r
@@ -45,14 +45,14 @@ validInitState mpPair stO stP = do
     return $ Const $ validO <> validP
 
 validRegister ::
-  forall bin sym arch tp.
+  forall bin sym v arch tp.
   PB.KnownBinary bin =>
   -- | if this register is an initial state, the corresponding
   -- starting block
   Maybe (PB.ConcreteBlock arch bin) ->
   PSR.MacawRegEntry sym tp ->
   MM.ArchReg arch tp ->
-  EquivM sym arch (AssumptionFrame sym)
+  EquivM sym arch (AssumptionSet sym v)
 validRegister mblockStart entry r = withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
   case PRe.registerCase hdr (PSR.macawRegRepr entry) r of

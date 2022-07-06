@@ -269,7 +269,7 @@ withPredomain ::
   EquivM sym arch a
 withPredomain bundle preD f = withSym $ \sym -> do
   vcfg <- asks envConfig
-  asmFrame <- asks envCurrentFrame
+  asmFrame <- currentAsm
   eqCtx <- equivalenceContext
 
   precond <- liftIO $ do
