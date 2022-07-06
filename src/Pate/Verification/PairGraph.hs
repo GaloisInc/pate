@@ -305,8 +305,10 @@ initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec node = withFreshVars blocks $ \vars ->
-    withAssumptionFrame (PVV.validInitState mBlocks (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)) $ initialDomain
+initialDomainSpec node = withFreshVars blocks $ \vars -> do
+  asm <- PVV.validInitState mBlocks (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
+  dom <- initialDomain
+  return (asm, dom)
   where
     -- We don't want to pass a 'PPa.BlockPair' to 'PVV.validInitState' for a return edge,
     -- as this creates unwanted assertions about the final value of the instruction pointer.

@@ -348,8 +348,10 @@ withSimSpec ::
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec blocks spec f = withSym $ \sym -> do
   withFreshVars blocks $ \vars -> do
-    (asm, body) <- liftIO $ bindSpec sym vars spec
-    withAssumption (return asm) $ f vars body
+    (asmSet, body) <- liftIO $ bindSpec sym vars spec
+    asm <- liftIO $ getAssumedPred sym asmSet
+    (_, body') <- withAssumption (return asm) $ f vars body
+    return $ (asmSet, body')
 
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
@@ -389,7 +391,7 @@ currentAsm = do
 withFreshVars ::
   Scoped f =>
   PPa.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (W4.Pred sym, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym v, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   varsO <- freshSimVars @_ @PBi.Original blocks

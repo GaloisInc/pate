@@ -143,7 +143,8 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
         postSpec <- makeFreshAbstractDomain bak bundle d from to
         -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
         -- below for where it's actually useful.
-        (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+        (asmSet, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+        asm <- liftIO $ PS.getAssumedPred sym asmSet
         withAssumption_ (return asm) $ do
           md <- widenPostcondition bak bundle d d'
           case md of
@@ -174,8 +175,8 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
       -- values of the slice again. This is accomplised by 'abstractOverVars', which
       -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
       -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-      
-      (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+      (asmSet, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+      asm <- liftIO $ PS.getAssumedPred sym asmSet
       withAssumption_ (return asm) $ do
         md <- widenPostcondition bak bundle d d'
         case md of

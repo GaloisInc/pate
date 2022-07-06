@@ -72,6 +72,7 @@ module Pate.SimState
 
 import           GHC.Stack ( HasCallStack )
 import qualified Data.Kind as DK
+import           Data.Proxy
 
 import           Control.Monad ( forM )
 
@@ -157,14 +158,40 @@ data AssumptionSet sym (v :: VarScope) where
 instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym v) where
   asm1 <> asm2 = let
     preds = (asmPreds asm1) <> (asmPreds asm2)
-    binds =
-      MapF.mergeWithKey
-        (\_ eset1 eset2 -> Just (eset1 <> eset2))
-        id
-        id
-        (asmBinds asm1)
-        (asmBinds asm2)
+    binds = mergeExprSetMap (Proxy @sym) (asmBinds asm1) (asmBinds asm2)
     in AssumptionSet preds binds
+
+mapExprSet ::
+  OrdF (W4.SymExpr sym) =>
+  Monad m =>
+  sym ->
+  (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) ->
+  ExprSet sym tp ->
+  m (ExprSet sym tp)
+mapExprSet _sym f s = SetF.fromList <$> traverse f (SetF.toList s)
+
+mergeExprSetMap ::
+  OrdF (W4.SymExpr sym) =>
+  Proxy sym ->
+  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
+  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
+  MapF.MapF (W4.SymExpr sym) (ExprSet sym)
+mergeExprSetMap _sym map1 map2 =
+  MapF.mergeWithKey
+    (\_ eset1 eset2 -> Just (eset1 <> eset2))
+    id
+    id
+    map1
+    map2
+
+instance OrdF (W4.SymExpr sym) => PEM.ExprMappable sym (AssumptionSet sym v) where
+  mapExpr sym f (AssumptionSet ps bs) = do
+    ps' <- mapExprSet sym f ps
+    bs' <- forM (MapF.toList bs) $ \(MapF.Pair k v) -> do
+      k' <- f k
+      v' <- mapExprSet sym f v
+      return $ MapF.singleton k' v'
+    return $ AssumptionSet ps' (foldr (mergeExprSetMap (Proxy @sym)) MapF.empty bs')
 
 instance Scoped (AssumptionSet sym) where
   unsafeCoerceScope (AssumptionSet a b) = AssumptionSet a b
@@ -324,7 +351,7 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
   SimSpec
     {
       specVars :: PPa.PatchPair (SimBoundVars sym arch v)
-    , specAsm :: W4.Pred sym
+    , specAsm :: AssumptionSet sym v
     , specBody :: f v
     }
 
@@ -350,9 +377,9 @@ viewSpecBody (SimSpec _ _ body) f = f body
 -- avoid exposing 'SimBoundVars' here by only providing 'SimVars'
 viewSpec ::
   SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> a) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> AssumptionSet sym v -> f v -> a) ->
   a
-viewSpec (SimSpec vars _ body) f = f (TF.fmapF boundVarsAsFree vars) body
+viewSpec (SimSpec vars asm body) f = f (TF.fmapF boundVarsAsFree vars) asm body
 
 -- | Transform a 'SimSpec' by viewing its initial bound variables as a
 -- 'SimVars' pair, with respect to an arbitrary scope. Note that we
@@ -371,6 +398,12 @@ unsafeCoerceSpecBody ::
   Scoped f =>
   SimSpec sym arch f -> f v
 unsafeCoerceSpecBody (SimSpec _ _ body) = unsafeCoerceScope body
+
+
+unsafeCoerceSpecAsm ::
+  Scoped f =>
+  SimSpec sym arch f -> AssumptionSet sym v
+unsafeCoerceSpecAsm (SimSpec _ asm _) = unsafeCoerceScope asm
 
 -- | The symbolic inputs and outputs of an original vs. patched block slice.
 data SimBundle sym arch v = SimBundle
@@ -465,7 +498,7 @@ bindSpec ::
   sym ->
   PPa.PatchPair (SimVars sym arch v) ->
   SimSpec sym arch f ->
-  IO (W4.Pred sym, f v)
+  IO (AssumptionSet sym v, f v)
 bindSpec sym vals spec = do
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> viewSpecVars spec $ \vars -> do
     let st = simVarState $ get vals
@@ -474,7 +507,7 @@ bindSpec sym vals spec = do
   cache <- freshVarBindCache
   let doRewrite = applyExprBindings' sym cache binds
   body <- PEM.mapExpr sym doRewrite (unsafeCoerceSpecBody spec)
-  asm <- doRewrite (specAsm spec)
+  asm <- PEM.mapExpr sym doRewrite (unsafeCoerceSpecAsm spec)
   return $ (asm, body)
 
 ------------------------------------

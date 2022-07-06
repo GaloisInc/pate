@@ -156,9 +156,10 @@ pairGraphComputeFixpoint ::
 pairGraphComputeFixpoint gr =
   case chooseWorkItem gr of
     Nothing -> return gr
-    Just (gr', nd, preSpec) -> PS.viewSpec preSpec $ \vars d -> do
-      gr'' <- withAssumption_ (return $ PS.specAsm preSpec) $
-        visitNode nd vars d gr'
+    Just (gr', nd, preSpec) -> do
+      gr'' <- PS.viewSpec preSpec $ \vars asm d ->
+        withAssumption_ (withSymIO $ \sym -> PS.getAssumedPred sym asm) $
+          visitNode nd vars d gr'
       pairGraphComputeFixpoint gr''
 
 -- | Perform the work of propagating abstract domain information through
