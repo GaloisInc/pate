@@ -379,11 +379,24 @@ freshSimVars blocks = do
   regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
   return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
+-- Although 'AssumptionSet' has a scope parameter, the current interface doesn't have a
+-- good mechanism for enforcing the fact that we are only pushing assumptions that
+-- are actually scoped properly.
+-- This is manifest in the fact that the background frame in 'envCurrentFrame' doesn't
+-- track any scope, and is therefore unsafely coerced into any target scope.
+-- TODO: Rather than trying to enforce this statically (which would be difficult and require
+-- tracking scopes in many more places) we can add runtime checks in places where scope
+-- violations would be problematic (i.e. when attempting to safely coerce one scope into another)
+
+-- | Project the current background 'AssumptionSet' into any scope 'v'
 currentAsm :: EquivM sym arch (AssumptionSet sym v)
 currentAsm = do
   Some frame <- CMR.asks envCurrentFrame
   return $ unsafeCoerceScope frame
 
+-- | Create a new 'SimSpec' by evaluating the given function under a fresh set
+-- of bound variables. The returned 'AssumptionSet' is set as the assumption
+-- in the resulting 'SimSpec'.
 withFreshVars ::
   Scoped f =>
   PPa.BlockPair arch ->
@@ -395,6 +408,8 @@ withFreshVars blocks f = do
   (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
   return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
+-- | Evaluate the given function in an assumption context augmented with the given
+-- 'AssumptionSet'.
 withAssumptionSet ::
   HasCallStack =>
   AssumptionSet sym v ->
@@ -404,6 +419,8 @@ withAssumptionSet asm f = do
   curAsm <- currentAsm
   CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ f
 
+-- | Evaluate the given function in an assumption context augmented with the given
+-- predicate.
 withAssumption ::
   HasCallStack =>
   W4.Pred sym ->
@@ -417,6 +434,8 @@ withEmptyAssumptionSet ::
 withEmptyAssumptionSet f =
   CMR.local (\env -> env { envCurrentFrame = Some mempty }) $ f
 
+-- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
+-- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
 applyCurrentAsms ::
   forall sym arch f.
   PEM.ExprMappable sym f =>
@@ -426,7 +445,7 @@ applyCurrentAsms f = do
   asm <- currentAsm
   applyAssumptionSet asm f
   
-
+-- | Rewrite the given 'f' with any bindings in the given 'AssumptionSet'.
 applyAssumptionSet ::
   forall sym arch v f.
   PEM.ExprMappable sym f =>

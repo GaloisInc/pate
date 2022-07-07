@@ -165,10 +165,6 @@ pairGraphComputeFixpoint gr =
           visitNode nd vars d gr'
       pairGraphComputeFixpoint gr''
 
--- | FIXME: Trivial instance to make 'withAssumptionFrame_' happy
-instance PEM.ExprMappable sym (PairGraph sym arch) where
-  mapExpr sym f g = return g
-
 -- | Perform the work of propagating abstract domain information through
 --   a single program "slice". First we check for equivalence of observables,
 --   then we check the totality of the computed exits, then we update any
