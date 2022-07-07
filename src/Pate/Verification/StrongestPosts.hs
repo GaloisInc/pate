@@ -74,7 +74,6 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PS
-import qualified Pate.ExprMappable as PEM
 
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
@@ -245,7 +244,7 @@ returnSiteBundle :: forall sym arch v.
   AbstractDomain sym arch v ->
   PPa.BlockPair arch {- ^ block pair being returned to -} ->
   EquivM sym arch (SimBundle sym arch v)
-returnSiteBundle vars preD pPair =
+returnSiteBundle vars _preD pPair =
   withSym $ \sym ->
   do let oVarState = PS.simVarState (PPa.pOriginal vars)
      let pVarState = PS.simVarState (PPa.pPatched vars)
@@ -512,8 +511,6 @@ data TotalityResult ptrW
   | TotalityCheckingError String
   | TotalityCheckCounterexample (TotalityCounterexample ptrW)
 
-
--- TODO? should we try to share work with the followExit/widenPostcondition calls?
 doCheckTotality :: forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
@@ -521,12 +518,7 @@ doCheckTotality :: forall sym arch v.
   EquivM sym arch (TotalityResult (MM.ArchAddrWidth arch))
 doCheckTotality bundle preD exits =
   withSym $ \sym ->
-    do vcfg <- asks envConfig
-       eqCtx <- equivalenceContext
-
-       let solver = PCfg.cfgSolver vcfg
-       let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
-
+    do
        -- compute the condition that leads to each of the computed
        -- exit pairs
        cases <- forM exits $ \(PPa.PatchPair oBlkt pBlkt) ->

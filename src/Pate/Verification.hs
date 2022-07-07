@@ -56,8 +56,6 @@ import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Backend.Online as LCBO
-
 
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
@@ -76,7 +74,6 @@ import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
 import qualified Pate.PatchPair as PPa
-import           Pate.Panic
 import qualified Pate.Proof as PF
 import qualified Pate.Solver as PS
 import qualified Pate.SymbolTable as PSym

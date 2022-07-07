@@ -18,7 +18,6 @@ module Pate.Verification.Widening
 import           Control.Monad (when, forM_, unless, filterM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
-import           Control.Monad.Reader (asks)
 import           Control.Monad.Writer (tell, execWriterT)
 
 import           Prettyprinter
@@ -29,8 +28,6 @@ import qualified Data.Text as Text
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import qualified Data.Parameterized.TraversableF as TF
---import qualified Data.Parameterized.Context as Ctx
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -44,7 +41,6 @@ import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER

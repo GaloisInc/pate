@@ -81,7 +81,6 @@ import           GHC.Stack ( HasCallStack, callStack )
 
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
-import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
@@ -113,12 +112,10 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.BinaryLoader as MBL
 
-import qualified What4.Config as WC
 import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
-import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
 import           What4.Utils.Process (filterAsync)
 import qualified What4.Protocol.Online as WPO
@@ -145,8 +142,6 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
-
-import Debug.Trace
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -511,8 +506,8 @@ checkSatisfiableWithModel timeout _desc p k = withSym $ \sym -> withSolverProces
     res' <- W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
     runInIO (k res')
 
--- | Check the satisfiability of a predicate, with the result (including model,
--- if applicable) available in the callback. This function implements all of the
+-- | Check the satisfiability of a predicate, returning with the result (including model,
+-- if applicable). This function implements all of the
 -- timeout logic. Note that it converts timeouts into 'W4R.Unknown' results.
 --
 -- Note that this can percolate up both async and synchronous exceptions. That
@@ -528,7 +523,7 @@ checkSatisfiableWithoutBindings
   -> sym
   -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
   -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
-checkSatisfiableWithoutBindings timeout sym doCheckSat =
+checkSatisfiableWithoutBindings timeout _sym doCheckSat =
   case PT.timeoutAsMicros timeout of
     Nothing -> doCheckSat
     Just micros -> do

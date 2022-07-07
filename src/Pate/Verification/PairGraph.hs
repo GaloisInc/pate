@@ -66,7 +66,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
-import qualified Pate.Verification.Validity as PVV
 
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
