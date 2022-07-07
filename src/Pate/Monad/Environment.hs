@@ -72,8 +72,6 @@ data EquivEnv sym arch where
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof
-    , envSolverProcess :: PSo.SomeSolverProcess sym
-    -- ^ handle to the current live solver process
     , envStartTime :: TM.UTCTime
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
     , envCurrentFrame :: Some (AssumptionSet sym)

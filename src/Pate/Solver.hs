@@ -8,7 +8,6 @@ module Pate.Solver (
   , solverAdapter
   , ValidSym
   , Sym(..)
-  , SomeSolverProcess(..)
   , withOnlineSolver
   ) where
 
@@ -106,17 +105,9 @@ type ValidSym sym =
 data Sym sym where
   Sym :: ( sym ~ WE.ExprBuilder scope st fs
          , ValidSym sym
+         , WPO.OnlineSolver solver
          )
       => PN.Nonce PN.GlobalNonceGenerator sym
       -> sym
-      -> WS.SolverAdapter st
+      -> CBO.OnlineBackend solver scope st fs
       -> Sym sym
-
-data SomeSolverProcess sym where
-  SomeSolverProcess :: forall sym scope st fs solver.
-    ( WPO.OnlineSolver solver
-    , (sym ~ WE.ExprBuilder scope st fs)
-    )
-    => WPO.SolverProcess scope solver
-    -> CBO.OnlineBackend solver scope st fs
-    -> SomeSolverProcess sym

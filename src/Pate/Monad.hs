@@ -280,15 +280,6 @@ withValidEnv ::
   a
 withValidEnv (EquivEnv { envValidSym = PSo.Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
-withSymSolver ::
-  (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
-  EquivM sym arch a
-withSymSolver f = withValid $ do
-  PSo.Sym _ sym adapter <- CMR.asks envValidSym
-  sym' <- liftIO $ WE.exprBuilderSplitConfig sym
-  liftIO $ WC.extendConfig (WSA.solver_adapter_config_options adapter) (W4.getConfiguration sym')
-  f sym' adapter
-
 withSym ::
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
@@ -301,8 +292,7 @@ withSolverProcess ::
      (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
      WPO.SolverProcess scope solver -> EquivM sym arch a) ->
   EquivM sym arch a
-withSolverProcess f = do
-  PSo.SomeSolverProcess _ bak <- CMR.asks envSolverProcess
+withSolverProcess f = withOnlineBackend $ \bak -> do
   let doPanic = panic Solver "withSolverProcess" ["Online solving not enabled"]
   IO.withRunInIO $ \runInIO -> LCBO.withSolverProcess bak doPanic $ \sp ->
     runInIO (f sp)
@@ -313,7 +303,7 @@ withOnlineBackend ::
      LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
   EquivM sym arch a
 withOnlineBackend f = do
-  PSo.SomeSolverProcess _ bak <- CMR.asks envSolverProcess
+  PSo.Sym _ _ bak <- CMR.asks envValidSym
   f bak
 
 withSymIO :: forall sym arch a.
