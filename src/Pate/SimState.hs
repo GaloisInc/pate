@@ -37,7 +37,8 @@ module Pate.SimState
   , SimOutput(..)
   , type VarScope
   , Scoped(..)
-  , SimSpec(..)
+  , SimSpec
+  , mkSimSpec
   , forSpec
   , viewSpec
   , viewSpecBody
@@ -58,7 +59,7 @@ module Pate.SimState
   , boundVarsAsFree
   , bindSpec
   -- assumption frames
-  , AssumptionSet(..)
+  , AssumptionSet
   , isAssumedPred
   , exprBinding
   , bindingToFrame
@@ -242,6 +243,8 @@ macawRegBinding sym var val = do
     CT.BoolRepr -> return $ exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
     _ -> return mempty
 
+-- TODO: this is generally unsafe, since we don't check that the incoming
+-- predicate actually respects the variable scope 'v'
 frameAssume ::
   forall sym v.
   W4.IsSymExprBuilder sym =>
@@ -260,7 +263,7 @@ getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
   Just es
     | SetF.size es == 1
     , [e'] <- SetF.toList es -> Just e'
-  Just es -> SetF.lookupMin $ SetF.filter (\e -> isJust $ W4.asConcrete e) es
+  Just es -> SetF.lookupMin $ SetF.filter (isJust . W4.asConcrete) es
   _ -> case W4.exprType e of
     W4.BaseBoolRepr | isAssumedPred asm e -> Just $ W4.truePred sym
     _ -> Nothing
@@ -351,10 +354,17 @@ class Scoped f where
 data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
   SimSpec
     {
-      specVars :: PPa.PatchPair (SimBoundVars sym arch v)
-    , specAsm :: AssumptionSet sym v
-    , specBody :: f v
-    }
+      _specVars :: PPa.PatchPair (SimBoundVars sym arch v)
+    , _specAsm :: AssumptionSet sym v
+    , _specBody :: f v
+    } -> SimSpec sym arch f
+
+mkSimSpec ::
+  PPa.PatchPair (SimBoundVars sym arch v) ->
+  AssumptionSet sym v ->
+  f v ->
+  SimSpec sym arch f
+mkSimSpec vars asms body = SimSpec vars asms body
 
 -- | Project out the bound variables with an arbitrary scope.
 -- This is a private function, since as we want to consider the

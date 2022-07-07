@@ -147,7 +147,7 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
         withAssumptionSet asm $ do
           md <- widenPostcondition bak bundle d d'
           case md of
-            NoWideningRequired ->
+            NoWideningRequired -> 
               return (freshDomain gr to postSpec)
             WideningError msg _ d'' ->
               do let msg' = ("Error during widening: " ++ msg)
@@ -268,11 +268,10 @@ withPredomain ::
   EquivM sym arch a
 withPredomain bundle preD f = withSym $ \sym -> do
   vcfg <- asks envConfig
-  asmFrame <- currentAsm
+  asm <- currentAsmPred
   eqCtx <- equivalenceContext
 
   precond <- liftIO $ do
-    asm <- PS.getAssumedPred sym asmFrame
     absDomPred <- PAD.absDomainToPrecond sym eqCtx bundle preD
     W4.andPred sym asm absDomPred
 

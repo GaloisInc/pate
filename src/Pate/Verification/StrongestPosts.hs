@@ -188,9 +188,7 @@ visitNode (GraphNode bPair) vars d gr0 = withPair bPair $ do
   withAssumptionSet validInit $
     do -- do the symbolic simulation
        bundle <- mkSimBundle bPair vars d
-       asmSet <- currentAsm
-       -- TODO: plumbing this around shouldn't be necessary
-       asm <- withSymIO $ \sym -> PS.getAssumedPred sym asmSet
+       asm <- currentAsmPred
  
   {-     traceBundle bundle $ unlines
          [ "== SP result =="

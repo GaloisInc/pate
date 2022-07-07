@@ -58,13 +58,13 @@ module Pate.Monad
   , withSimSpec
   , withFreshVars
   -- assumption management
-  , currentAsm
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
   , withEmptyAssumptionSet
   , applyAssumptionSet
   , applyCurrentAsms
+  , currentAsmPred
   -- nonces
   , freshNonce
   , withProofNonce
@@ -394,6 +394,12 @@ currentAsm = do
   Some frame <- CMR.asks envCurrentFrame
   return $ unsafeCoerceScope frame
 
+currentAsmPred :: EquivM sym arch (W4.Pred sym)
+currentAsmPred = withSym $ \sym -> do
+  asm <- currentAsm
+  liftIO $ getAssumedPred sym asm
+
+
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
 -- in the resulting 'SimSpec'.
@@ -406,7 +412,7 @@ withFreshVars blocks f = do
   varsO <- freshSimVars @_ @PBi.Original blocks
   varsP <- freshSimVars @_ @PBi.Patched blocks
   (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
-  return $ SimSpec (PPa.PatchPair varsO varsP) asm result
+  return $ mkSimSpec (PPa.PatchPair varsO varsP) asm result
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
@@ -437,10 +443,10 @@ withEmptyAssumptionSet f =
 -- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
 -- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
 applyCurrentAsms ::
-  forall sym arch f.
-  PEM.ExprMappable sym f =>
-  f ->
-  EquivM sym arch f
+  forall sym arch (v :: VarScope) f.
+  PEM.ExprMappable sym (f v) =>
+  f v ->
+  EquivM sym arch (f v)
 applyCurrentAsms f = do
   asm <- currentAsm
   applyAssumptionSet asm f
@@ -448,10 +454,10 @@ applyCurrentAsms f = do
 -- | Rewrite the given 'f' with any bindings in the given 'AssumptionSet'.
 applyAssumptionSet ::
   forall sym arch v f.
-  PEM.ExprMappable sym f =>
+  PEM.ExprMappable sym (f v) =>
   AssumptionSet sym v ->
-  f ->
-  EquivM sym arch f
+  f v ->
+  EquivM sym arch (f v)
 applyAssumptionSet asm f = withSym $ \sym -> do
   cache <- liftIO freshVarBindCache
   let
