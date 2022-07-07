@@ -141,6 +141,8 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
 
         postSpec <- makeFreshAbstractDomain bak bundle d from to
+        -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
+        -- below for where it's actually useful.
         (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
         withAssumption_ (return asm) $ do
           md <- widenPostcondition bak bundle d d'
@@ -158,6 +160,21 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
 
     -- have visited this location at least once before
     Just postSpec -> do
+      -- The variables in 'postSpec' represent the final values in the
+      -- post-state of the slice (which have been abstracted out by 'abstractOverVars').
+      -- To put everything in the same scope, we need to bind these variables to
+      -- the post-state expressions that we have currently as the result of symbolic
+      -- execution (i.e. the resulting state in 'SimOutput').
+      --
+      -- The result is a post-domain describing the proof target (i.e. d'), that
+      -- has been brought into the current scope 'v' (as the bound variables in the output
+      -- expressions are still in this scope).
+      --
+      -- After widening, this needs to be re-phrased with respect to the final
+      -- values of the slice again. This is accomplised by 'abstractOverVars', which
+      -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
+      -- from the current scope and can be stored as the updated domain in the 'PairGraph'
+      
       (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
       withAssumption_ (return asm) $ do
         md <- widenPostcondition bak bundle d d'
@@ -271,7 +288,7 @@ withPredomain bundle preD f = withSym $ \sym -> do
  where
    doPanic = panic Solver "withPredomain" ["Online solving not enabled"]
 
-widenPostcondition :: forall sym arch solver t st fs bak v v'.
+widenPostcondition :: forall sym arch solver t st fs bak v.
   ( bak ~ LCBO.OnlineBackend solver t st fs
   , sym ~ W4.ExprBuilder t st fs
   , W4.OnlineSolver solver

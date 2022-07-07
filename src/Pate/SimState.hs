@@ -104,7 +104,7 @@ import qualified Data.Parameterized.SetF as SetF
 ------------------------------------
 -- Crucible inputs and outputs
 
-data VarScope
+
 
 data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
@@ -282,39 +282,78 @@ rebindWithFrame' ::
 rebindWithFrame' sym cache asm = rewriteSubExprs' sym cache (getUniqueBinding sym asm)
 
 
--- | Proof that the interpretation of 'f' is independent of the scope variable.
--- This is necessary since we do want to convert between scopes as a result of binding.
-class Scoped f where
-  unsafeCoerceScope :: forall v v'. f v -> f v'
 
-data SimSpec sym arch (f :: VarScope -> DK.Type) where
-  SimSpec :: forall sym arch f v.
+-- | An empty type represent the kind for a shadow "variable scope" type parameter.
+-- This parameter tracks the scope of the bound variables that might appear in the
+-- inner What4 expressions anywhere in a datatype.
+-- This type variable is introduced when interpreting a 'SimSpec', which existentially
+-- quantifies over 'v'.
+-- The intended invariant is that each 'SimSpec' contains a distinct (fresh) 'SimBoundVars'
+-- which is associated with some scope parameter 'v'.
+-- Any type tagged with the same 'v' should only include
+-- bound variables from this initial 'SimBoundVars'.
+-- When values need to be converted from one scope to another (e.g. when instiantiating
+-- their bound variables with 'bindSpec'), we can "unsafely" coerce the scope
+-- from one type to another via 'unsafeCoerceScope'.
+-- TODO: A safe variant of 'unsafeCoerceScope' could perform a runtime check to
+-- ensure that the resulting value is well-scoped.
+data VarScope
+
+-- | A 'Scoped' type is parameterized by a phantom 'VarScope' type variable, used
+-- to track the scope of its inner bound variables.
+class Scoped f where
+  -- | Unsafely change the variable scope parameter for an instance of 'f'.
+  -- This should be a no-op and only used to make types match up where needed.
+  -- It is the responsibility of the user to ensure that this is only applied
+  -- in cases where 'f' has been rewritten to only contain bound variables
+  -- in the target scope.
+  -- TODO: We can check this statically to add a safe variant.
+  unsafeCoerceScope :: forall (v :: VarScope) v'. f v -> f v'
+
+-- | A lambda abstraction over 'f', which is parameterized by a variable scope.
+-- A 'SimSpec' can be interpreted via 'viewSpec' or modified via 'forSpec'.
+-- The 'VarScope' that 'f' is parameterized over is existentially quantified
+-- within the 'SimSpec', and is used to track the scope of the
+-- bound variables (provided as 'SimVars') within the closure (i.e. retaining
+-- the fact that the provided 'SimVars' represent the bound variables appearing
+-- in 'f')
+data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
+  SimSpec
     {
       specVars :: PPa.PatchPair (SimBoundVars sym arch v)
     , specAsm :: W4.Pred sym
     , specBody :: f v
-    } -> SimSpec sym arch f
+    }
 
--- | Project out the bound variables with an arbitrary scope
+-- | Project out the bound variables with an arbitrary scope.
+-- This is a private function, since as we want to consider the
+-- 'SimBoundVars' of the 'SimSpec' to be an implementation detail.
 viewSpecVars ::
   SimSpec sym arch f ->
   (forall v. PPa.PatchPair (SimBoundVars sym arch v) -> a) ->
   a
 viewSpecVars (SimSpec vars _ _) f = f vars
 
--- | Project out the body with an arbitrary scope
+-- | Project out the body with an arbitrary scope.
 viewSpecBody ::
   SimSpec sym arch f ->
   (forall v. f v -> a) ->
   a
 viewSpecBody (SimSpec _ _ body) f = f body
 
+-- | Interpret a 'SimSpec' by viewing its initial bound variables as a
+-- 'SimVars' pair, and its body, with respect to an arbitrary scope.
+-- Note that we
+-- avoid exposing 'SimBoundVars' here by only providing 'SimVars'
 viewSpec ::
   SimSpec sym arch f ->
   (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> a) ->
   a
 viewSpec (SimSpec vars _ body) f = f (TF.fmapF boundVarsAsFree vars) body
 
+-- | Transform a 'SimSpec' by viewing its initial bound variables as a
+-- 'SimVars' pair, with respect to an arbitrary scope. Note that we
+-- avoid exposing 'SimBoundVars' here by only providing 'SimVars'
 forSpec ::
   Applicative m =>
   SimSpec sym arch f ->
@@ -376,6 +415,8 @@ data SimVars sym arch v bin = SimVars
     simVarState :: SimState sym arch v bin
   }
 
+-- | Project out the initial values for the variables in 'SimBoundVars'.
+-- This is roughly analagous to converting a What4 bound variable into an expression.
 boundVarsAsFree :: SimBoundVars sym arch v bin -> SimVars sym arch v bin
 boundVarsAsFree bv = SimVars (simBoundVarState bv)
 
