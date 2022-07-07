@@ -55,7 +55,6 @@ module Pate.Monad
   , checkSatisfiableWithModel
   , isPredSat
   , isPredTrue'
-  , isPredTruePar'
   -- working under a 'SimSpec' context
   , withSimSpec
   , withFreshVars
@@ -138,6 +137,7 @@ import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import           Pate.Monad.Environment as PME
+import           Pate.Panic
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -145,6 +145,8 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
+
+import Debug.Trace
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -300,8 +302,10 @@ withSolverProcess ::
      WPO.SolverProcess scope solver -> EquivM sym arch a) ->
   EquivM sym arch a
 withSolverProcess f = do
-  PSo.SomeSolverProcess sp _ <- CMR.asks envSolverProcess
-  f sp
+  PSo.SomeSolverProcess _ bak <- CMR.asks envSolverProcess
+  let doPanic = panic Solver "withSolverProcess" ["Online solving not enabled"]
+  IO.withRunInIO $ \runInIO -> LCBO.withSolverProcess bak doPanic $ \sp ->
+    runInIO (f sp)
 
 withOnlineBackend ::
   (forall scope st fs solver.
@@ -511,18 +515,11 @@ checkSatisfiableWithModel ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch (Either SomeException a)
-checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
-  envFrame <- currentAsm
-  assumptions <- liftIO $ getAssumedPred sym envFrame
-  goal <- liftIO $ W4.andPred sym assumptions p
- -- handle <- liftIO $ IO.openFile "solver.out" IO.WriteMode
-
-  -- Set up a wrapper around the ground evaluation function that removes some
-  -- unwanted terms and performs an equivalent substitution step to remove
-  -- unbound variables (consistent with the initial query)
-  let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
-  IO.withRunInIO $ \runInIO -> do
-    tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= (\x -> k x)))
+checkSatisfiableWithModel timeout _desc p k = withSym $ \sym -> withSolverProcess $ \sp -> IO.withRunInIO $ \runInIO -> tryJust filterAsync $ WPO.inNewFrame sp $ do
+    W4.assume (WPO.solverConn sp) p
+    res <-  checkSatisfiableWithoutBindings timeout sym $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
+    res' <- W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
+    runInIO (k res')
 
 -- | Check the satisfiability of a predicate, with the result (including model,
 -- if applicable) available in the callback. This function implements all of the
@@ -539,24 +536,16 @@ checkSatisfiableWithoutBindings
   :: (sym ~ WE.ExprBuilder t st fs)
   => PT.Timeout
   -> sym
-  -> Maybe IO.Handle
-  -> WSA.SolverAdapter st
-  -> WE.BoolExpr t
-  -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
-  -> IO a
-checkSatisfiableWithoutBindings timeout sym mhandle adapter p k =
+  -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
+  -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
+checkSatisfiableWithoutBindings timeout sym doCheckSat =
   case PT.timeoutAsMicros timeout of
     Nothing -> doCheckSat
     Just micros -> do
       mres <- PT.timeout micros doCheckSat
       case mres of
-        Nothing -> k W4R.Unknown
+        Nothing -> return W4R.Unknown
         Just r -> return r
-  where
-    doCheckSat = WSA.solver_adapter_check_sat adapter sym (WSA.defaultLogData { WSA.logHandle = mhandle }) [p] $ \sr -> case sr of
-         W4R.Unsat core -> k (W4R.Unsat core)
-         W4R.Unknown -> k W4R.Unknown
-         W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
 -- | Returns True if the given predicate is satisfiable, and False otherwise
 --
@@ -585,20 +574,13 @@ isPredTrue' ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue' timeout p = join $ isPredTruePar' timeout p
-
-isPredTruePar' ::
-  Par.IsFuture (EquivM_ sym arch) future =>
-  PT.Timeout ->
-  W4.Pred sym ->
-  EquivM sym arch (future Bool)
-isPredTruePar' timeout p = case W4.asConstantPred p of
-  Just b -> Par.present $ return b
+isPredTrue' timeout p = case W4.asConstantPred p of
+  Just b -> return b
   _ -> do
     frame <- currentAsm
     case isAssumedPred frame p of
-      True -> Par.present $ return True
-      False -> Par.promise $ do
+      True -> return True
+      False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
         -- Convert exceptions into False because we can't prove that it is true
         res <- checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)

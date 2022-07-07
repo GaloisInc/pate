@@ -188,6 +188,7 @@ visitNode (GraphNode bPair) vars d gr0 = withPair bPair $ do
   withAssumptionSet validInit $
     do -- do the symbolic simulation
        bundle <- mkSimBundle bPair vars d
+     
  
   {-     traceBundle bundle $ unlines
          [ "== SP result =="
@@ -203,14 +204,15 @@ visitNode (GraphNode bPair) vars d gr0 = withPair bPair $ do
        exitPairs <- PD.discoverPairs bundle
        traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
-       gr1 <- checkObservables bPair bundle d gr0
+       withPredomain bundle d $ do
+         gr1 <- checkObservables bPair bundle d gr0
 
-       gr2 <- checkTotality bPair bundle d exitPairs gr1
+         gr2 <- checkTotality bPair bundle d exitPairs gr1
 
-       gr3 <- updateReturnNode bPair bundle d gr2
+         gr3 <- updateReturnNode bPair bundle d gr2
 
-       -- Follow all the exit pairs we found
-       foldM (\x y -> followExit bundle bPair d x y) gr3 (zip [0 ..] exitPairs)
+         -- Follow all the exit pairs we found
+         foldM (\x y -> followExit bundle bPair d x y) gr3 (zip [0 ..] exitPairs)
 
 
 visitNode (ReturnNode fPair) vars d gr0 =
@@ -227,10 +229,11 @@ visitNode (ReturnNode fPair) vars d gr0 =
      validState <- PVV.validInitState (Just ret) (PS.simVarState (PPa.pOriginal vars)) (PS.simVarState (PPa.pPatched vars))
      withAssumptionSet validState $
        do bundle <- returnSiteBundle vars d ret
-          traceBundle bundle "Processing return edge"
-  --        traceBundle bundle "== bundle asm =="
-  --        traceBundle bundle (show (W4.printSymExpr asm))
-          widenAlongEdge bundle (ReturnNode fPair) d gr (GraphNode ret)
+          withPredomain bundle d $ do
+            traceBundle bundle "Processing return edge"
+    --        traceBundle bundle "== bundle asm =="
+    --        traceBundle bundle (show (W4.printSymExpr asm))
+            widenAlongEdge bundle (ReturnNode fPair) d gr (GraphNode ret)
 
 
 -- | Construct a "dummy" simulation bundle that basically just
@@ -255,6 +258,22 @@ returnSiteBundle vars preD pPair =
      let simOutO   = PS.SimOutput oVarState blockEndVal
      let simOutP   = PS.SimOutput pVarState blockEndVal
      applyCurrentAsms $ SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO simOutP)
+
+
+-- | Run the given function a context where the
+-- given abstract domain is assumed to hold on the pre-state of the given
+-- bundle.
+withPredomain ::
+  forall sym arch v a.
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch a ->
+  EquivM sym arch a
+withPredomain bundle preD f = withSym $ \sym -> do
+  vcfg <- asks envConfig
+  eqCtx <- equivalenceContext
+  precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
+  withAssumption precond $ f
 
 data ObservableCheckResult sym ptrW
   = ObservableCheckEq
@@ -338,7 +357,6 @@ doCheckObservables bundle preD =
          , show (MT.prettyMemTraceSeq pSeq)
          ]
 -}
-       precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
 
        let doPanic = panic Solver "checkObservables" ["Online solving not enabled"]
 
@@ -356,7 +374,6 @@ doCheckObservables bundle preD =
          ]
 -}
        withSolverProcess $ \sp -> liftIO $ W4.inNewFrame sp $ do
-         W4.assume (W4.solverConn sp) precond
          W4.assume (W4.solverConn sp) =<< W4.notPred sym eqSeq
          W4.checkAndGetModel sp "checkObservableSequences" >>= \case
              Unsat _ -> return ObservableCheckEq
@@ -510,8 +527,6 @@ doCheckTotality bundle preD exits =
        let solver = PCfg.cfgSolver vcfg
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
-       precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
-
        -- compute the condition that leads to each of the computed
        -- exit pairs
        cases <- forM exits $ \(PPa.PatchPair oBlkt pBlkt) ->
@@ -527,7 +542,6 @@ doCheckTotality bundle preD exits =
          liftIO $ W4.orPred sym bothReturn abortCase
 
        withSolverProcess $ \sp -> liftIO $  W4.inNewFrame sp $ do
-         W4.assume (W4.solverConn sp) precond
          W4.assume (W4.solverConn sp) =<< W4.notPred sym isReturn
          forM_ cases $ \c ->
            W4.assume (W4.solverConn sp) =<< W4.notPred sym c

@@ -127,7 +127,7 @@ widenAlongEdge ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge bundle from d gr to = withPredomain bundle d $ withSym $ \sym ->
+widenAlongEdge bundle from d gr to = withSym $ \sym ->
 
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
@@ -239,28 +239,6 @@ tryWidenings (x:xs) =
 --   provided for the overall pair graph updates.
 localWideningGas :: Gas
 localWideningGas = Gas 100
-
-
-
--- | Run a continuation in a fresh solver assumption frame, where the
--- given abstract domain is assumed to hold on the pre-state of the given
--- bundle.
--- Additionally, the 'AssumptionFrame' from the 'EquivM' environment is
--- collapsed into a predicate and assumed in this fresh solver frame.
---
--- TODO: this is a bit of a cludge - we should standardize how EquivM interacts
--- with the online solver process. 
-withPredomain ::
-  forall sym arch v a.
-  SimBundle sym arch v ->
-  AbstractDomain sym arch v ->
-  EquivM sym arch a ->
-  EquivM sym arch a
-withPredomain bundle preD f = withSym $ \sym -> do
-  vcfg <- asks envConfig
-  eqCtx <- equivalenceContext
-  precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
-  withAssumption precond $ f
 
 widenPostcondition ::
   forall sym arch v.
