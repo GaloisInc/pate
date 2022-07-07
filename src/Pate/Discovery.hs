@@ -168,7 +168,8 @@ isMatchingCall bundle = withSym $ \sym -> do
   isArch <- matchingExits bundle MCS.MacawBlockEndArch
   isExpectedExit <- liftIO $ WI.orPred sym isArch isCall
   goal <- liftIO $ WI.andPred sym eqIPs isExpectedExit
-  withAssumption_ (exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)) $
+  asm <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
+  withAssumption asm $
     isPredTrue' goalTimeout goal
   where
     ipO = (PSS.simOutRegs $ PSS.simOutO bundle) ^. MC.curIP

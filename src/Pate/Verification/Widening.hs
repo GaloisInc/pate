@@ -88,7 +88,7 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-makeFreshAbstractDomain bak bundle preDom from to = withSym $ \sym -> do
+makeFreshAbstractDomain bak bundle preDom from to = do
   dom <- case from of
     GraphNode{} -> do
       initDom <- initialDomain
@@ -143,9 +143,8 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
         postSpec <- makeFreshAbstractDomain bak bundle d from to
         -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
         -- below for where it's actually useful.
-        (asmSet, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-        asm <- liftIO $ PS.getAssumedPred sym asmSet
-        withAssumption_ (return asm) $ do
+        (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+        withAssumptionSet asm $ do
           md <- widenPostcondition bak bundle d d'
           case md of
             NoWideningRequired ->
@@ -175,9 +174,8 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
       -- values of the slice again. This is accomplised by 'abstractOverVars', which
       -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
       -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-      (asmSet, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-      asm <- liftIO $ PS.getAssumedPred sym asmSet
-      withAssumption_ (return asm) $ do
+      (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+      withAssumptionSet asm $ do
         md <- widenPostcondition bak bundle d d'
         case md of
           NoWideningRequired ->

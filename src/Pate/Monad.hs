@@ -59,15 +59,12 @@ module Pate.Monad
   , withFreshVars
   -- assumption management
   , currentAsm
-  , withAssumption_
   , withAssumption
   , withSatAssumption
-  , withAssumptionFrame
-  , withAssumptionFrame'
-  , withAssumptionFrame_
-  , withEmptyAssumptionFrame
-  , applyAssumptionFrame
-  , applyCurrentFrame
+  , withAssumptionSet
+  , withEmptyAssumptionSet
+  , applyAssumptionSet
+  , applyCurrentAsms
   -- nonces
   , freshNonce
   , withProofNonce
@@ -348,10 +345,9 @@ withSimSpec ::
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec blocks spec f = withSym $ \sym -> do
   withFreshVars blocks $ \vars -> do
-    (asmSet, body) <- liftIO $ bindSpec sym vars spec
-    asm <- liftIO $ getAssumedPred sym asmSet
-    (_, body') <- withAssumption (return asm) $ f vars body
-    return $ (asmSet, body')
+    (asm, body) <- liftIO $ bindSpec sym vars spec
+    body' <- withAssumptionSet asm $ f vars body
+    return $ (asm, body')
 
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
@@ -399,114 +395,63 @@ withFreshVars blocks f = do
   (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
   return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
--- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
--- The resulting predicate is the conjunction of the initial assumptions and
--- any produced by the given function.
-withAssumption' ::
+withAssumptionSet ::
   HasCallStack =>
-  EquivM sym arch (W4.Pred sym) ->
-  EquivM sym arch (W4.Pred sym, f) ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumption' asmf f = withSym $ \sym -> do
-  asm <- asmf
-  frame <- currentAsm
-  (asm', a) <- CMR.local (\env -> env { envCurrentFrame = Some (frameAssume asm <> frame) }) $ f
-  asm'' <- liftIO $ W4.andPred sym asm asm'
-  return (asm'', a)
-
--- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it. Return the given assumption along with the function result.
-withAssumption ::
-  HasCallStack =>
-  EquivM sym arch (W4.Pred sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumption asmf f =
-  withSym $ \sym -> withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
-
--- | Run the given function under the given assumption frame, and rebind the resulting
--- value according to any explicit bindings. The returned predicate is the conjunction of
--- the given assumption frame and the frame produced by the function.
-withAssumptionFrame' ::
-  forall sym arch v f.
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionSet sym v) ->
-  EquivM sym arch (AssumptionSet sym v, f) ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumptionFrame' asmf f = withSym $ \sym -> do
-  asmFrame <- asmf
-  envFrame <- currentAsm
-  CMR.local (\env -> env { envCurrentFrame = Some (asmFrame <> envFrame) }) $ do
-    withAssumption' (liftIO $ getAssumedPred sym (asmFrame <> envFrame)) $ do
-      (frame', a) <- f
-      applyAssumptionFrame (asmFrame <> frame') a
-
-withEmptyAssumptionFrame ::
+  AssumptionSet sym v ->
   EquivM sym arch f ->
   EquivM sym arch f
-withEmptyAssumptionFrame f =
+withAssumptionSet asm f = do
+  curAsm <- currentAsm
+  CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ f
+
+withAssumption ::
+  HasCallStack =>
+  W4.Pred sym ->
+  EquivM sym arch f ->
+  EquivM sym arch f
+withAssumption asm f = withAssumptionSet (frameAssume asm) f
+
+withEmptyAssumptionSet ::
+  EquivM sym arch f ->
+  EquivM sym arch f
+withEmptyAssumptionSet f =
   CMR.local (\env -> env { envCurrentFrame = Some mempty }) $ f
 
-applyCurrentFrame ::
+applyCurrentAsms ::
   forall sym arch f.
   PEM.ExprMappable sym f =>
   f ->
   EquivM sym arch f
-applyCurrentFrame f = snd <$> withAssumptionFrame (currentAsm) (return f)
+applyCurrentAsms f = do
+  asm <- currentAsm
+  applyAssumptionSet asm f
+  
 
-applyAssumptionFrame ::
+applyAssumptionSet ::
   forall sym arch v f.
   PEM.ExprMappable sym f =>
   AssumptionSet sym v ->
   f ->
-  EquivM sym arch (W4.Pred sym, f)
-applyAssumptionFrame frame f = withSym $ \sym -> do
+  EquivM sym arch f
+applyAssumptionSet asm f = withSym $ \sym -> do
   cache <- liftIO freshVarBindCache
   let
     doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    doRebind = rebindWithFrame' sym cache frame
-  f' <- liftIO $ PEM.mapExpr sym doRebind f
-  p <- liftIO $ getAssumedPred sym frame
-  p' <- liftIO $ PEM.mapExpr sym doRebind p
-  return (p',f')
+    doRebind = rebindWithFrame' sym cache asm
+  liftIO $ PEM.mapExpr sym doRebind f
 
--- | Run the given function under the given assumption frame, and rebind the resulting
--- value according to any explicit bindings. The returned predicate is the conjunction
--- of all the assumptions in the given frame.
-withAssumptionFrame ::
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionSet sym v) ->
-  EquivM sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumptionFrame asmf f = withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
-
-withAssumptionFrame_ ::
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionSet sym v) ->
-  EquivM sym arch f ->
-  EquivM sym arch f
-withAssumptionFrame_ asmf f = fmap snd $ withAssumptionFrame asmf f
-
--- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
-withAssumption_ ::
-  HasCallStack =>
-  EquivM sym arch (W4.Pred sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch f
-withAssumption_ asmf f =
-  withSym $ \sym -> fmap snd $ withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
   PT.Timeout ->
-  EquivM sym arch (W4.Pred sym) ->
+  W4.Pred sym ->
   EquivM sym arch f ->
-  EquivM sym arch (Maybe (W4.Pred sym, f))
-withSatAssumption timeout asmf f = do
-  asm <- asmf
+  EquivM sym arch (Maybe f)
+withSatAssumption timeout asm f = do
   isPredSat timeout asm >>= \case
-    True ->  Just <$> (withAssumption (return asm) $ f)
+    True ->  Just <$> (withAssumption asm f)
     False -> return Nothing
 
 --------------------------------------

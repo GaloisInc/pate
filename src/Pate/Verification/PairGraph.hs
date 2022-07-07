@@ -305,22 +305,14 @@ initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec node = withFreshVars blocks $ \vars -> do
-  asm <- PVV.validInitState mBlocks (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
+initialDomainSpec (GraphNode blocks) = withFreshVars blocks $ \vars -> do
   dom <- initialDomain
-  return (asm, dom)
-  where
-    -- We don't want to pass a 'PPa.BlockPair' to 'PVV.validInitState' for a return edge,
-    -- as this creates unwanted assertions about the final value of the instruction pointer.
-    mBlocks :: Maybe (PPa.BlockPair arch)
-    mBlocks = case node of
-      GraphNode b -> Just b
-      ReturnNode{} -> Nothing
-
-    blocks :: PPa.BlockPair arch
-    blocks = case node of
-      GraphNode b -> b
-      ReturnNode fPair -> TF.fmapF PB.functionEntryToConcreteBlock fPair
+  return (mempty, dom)
+initialDomainSpec (ReturnNode fPair) =
+  let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair in
+    withFreshVars blocks $ \vars -> do
+      dom <- initialDomain
+      return (mempty, dom)
 
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those

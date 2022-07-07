@@ -65,5 +65,6 @@ proveAbortValid bundle condEq = withSym $ \sym -> do
   traceBundle bundle "Checking conditional equivalence validity"
   -- assuming conditional equivalence does not hold (i.e. the programs may diverge)
   -- prove that the original binary necessarily results in an abort branch
-  withAssumption_ (liftIO $ WI.notPred sym condEq) $
+  notCondEq <- liftIO $ WI.notPred sym condEq
+  withAssumption notCondEq $
     isPredTrue' heuristicTimeout oAbort
