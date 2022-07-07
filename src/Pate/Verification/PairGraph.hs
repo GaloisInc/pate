@@ -15,6 +15,8 @@ module Pate.Verification.PairGraph
   , initialGas
   , PairGraph
   , AbstractDomain
+  , initialDomain
+  , initialDomainSpec
   , initializePairGraph
   , chooseWorkItem
   , updateDomain
@@ -64,12 +66,13 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
+import qualified Pate.Verification.Validity as PVV
 
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
-import           Pate.Verification.AbstractDomain ( AbstractDomain )
+import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -116,7 +119,7 @@ data PairGraph sym arch =
   PairGraph
   { -- | The main data structure for the pair graph, which records the current abstract
     --   domain value for each reachable graph node.
-    pairGraphDomains :: !(Map (GraphNode arch) (AbstractDomain sym arch))
+    pairGraphDomains :: !(Map (GraphNode arch) (AbstractDomainSpec sym arch))
 
     -- | This data structure records the amount of remaining "gas" corresponding to each
     --   edge of the program graph. Initially, this map is empty. When we traverse an
@@ -181,7 +184,7 @@ ppProgramDomains ::
 ppProgramDomains ppPred gr =
   vcat
   [ vcat [ pretty pPair
-         , indent 4 (PAD.ppAbstractDomain ppPred (PS.specBody ad))
+         , PS.viewSpecBody ad $ \ad' -> indent 4 (PAD.ppAbstractDomain ppPred ad')
          ]
   | (pPair, ad) <- Map.toList (pairGraphDomains gr)
   ]
@@ -214,7 +217,7 @@ getReturnVectors gr fPair =
 getCurrentDomain ::
   PairGraph sym arch ->
   GraphNode arch ->
-  Maybe (AbstractDomain sym arch)
+  Maybe (AbstractDomainSpec sym arch)
 getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
 
 -- | If an observable counterexample has not already been found
@@ -294,6 +297,29 @@ reportAnalysisErrors logAction gr =
      liftIO $ F.forM_ msgs $ \msg -> do
        LJ.writeLog logAction (Event.StrongestPostMiscError pPair msg)
 
+
+initialDomain :: EquivM sym arch (PAD.AbstractDomain sym arch v)
+initialDomain = withSym $ \sym -> return $ PAD.AbstractDomain (PVD.universalDomain sym) (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)
+
+initialDomainSpec ::
+  forall sym arch.
+  GraphNode arch ->
+  EquivM sym arch (PAD.AbstractDomainSpec sym arch)
+initialDomainSpec node = withFreshVars blocks $ \vars ->
+    withAssumptionFrame (PVV.validInitState mBlocks (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)) $ initialDomain
+  where
+    -- We don't want to pass a 'PPa.BlockPair' to 'PVV.validInitState' for a return edge,
+    -- as this creates unwanted assertions about the final value of the instruction pointer.
+    mBlocks :: Maybe (PPa.BlockPair arch)
+    mBlocks = case node of
+      GraphNode b -> Just b
+      ReturnNode{} -> Nothing
+
+    blocks :: PPa.BlockPair arch
+    blocks = case node of
+      GraphNode b -> b
+      ReturnNode fPair -> TF.fmapF PB.functionEntryToConcreteBlock fPair
+
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those
 --   entry points and add them to the work list.
@@ -307,9 +333,7 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
-           iEqDom <- PVD.universalDomainSpec bPair
-           
-           let idom = fmap (\x -> PAD.AbstractDomainBody x (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)) iEqDom
+           idom <- initialDomainSpec (GraphNode bPair)
            return (freshDomain gr (GraphNode bPair) idom)
 
 -- | Given a pair graph, chose the next node in the graph to visit
@@ -318,7 +342,7 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
 chooseWorkItem ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
-  Maybe (PairGraph sym arch, GraphNode arch, AbstractDomain sym arch)
+  Maybe (PairGraph sym arch, GraphNode arch, AbstractDomainSpec sym arch)
 chooseWorkItem gr =
   -- choose the smallest pair from the worklist. This is a pretty brain-dead
   -- heuristic.  Perhaps we should do something more clever.
@@ -340,7 +364,7 @@ updateDomain ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ point pair we are jumping from -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
-  AbstractDomain sym arch {- ^ new domain value to insert -} ->
+  AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   Either (PairGraph sym arch) (PairGraph sym arch)
 updateDomain gr pFrom pTo d
   | g > 0 = Right gr
@@ -407,7 +431,7 @@ addReturnVector gr funPair retPair =
 freshDomain ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
-  AbstractDomain sym arch {- ^ new domain value to insert -} ->
+  AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   PairGraph sym arch
 freshDomain gr pTo d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)

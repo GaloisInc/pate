@@ -63,8 +63,8 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PCfg
 import qualified Pate.Discovery.ParsedFunctions as PDP
-import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
@@ -487,9 +487,9 @@ withOnlineSolver
 inlineCallee
   :: forall arch sym
    . (HasCallStack)
-  => DomainSpec sym arch
+  => PEE.EquivalenceDomain sym arch
   -> PPa.BlockPair arch
-  -> EquivM sym arch (DomainSpec sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
+  -> EquivM sym arch (PEE.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --

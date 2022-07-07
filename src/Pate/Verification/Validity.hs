@@ -35,8 +35,8 @@ import qualified Pate.SimulatorRegisters as PSR
 
 validInitState ::
   Maybe (PPa.BlockPair arch) ->
-  SimState sym arch PB.Original ->
-  SimState sym arch PB.Patched ->
+  SimState sym arch v PB.Original ->
+  SimState sym arch v PB.Patched ->
   EquivM sym arch (AssumptionFrame sym)
 validInitState mpPair stO stP = do
   fmap PRt.collapse $ PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> do

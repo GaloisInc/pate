@@ -37,9 +37,9 @@ import qualified Pate.SimState as PSS
 -- defines abnormal program exit. In general this can be expanded to other error states (i.e. null-pointer
 -- dereference), there necessarily exist abort conditions that this does not cover.
 isAbortedStatePred ::
-  forall sym arch bin.
+  forall sym arch v bin.
   PB.KnownBinary bin =>
-  PSS.SimOutput sym arch bin ->
+  PSS.SimOutput sym arch v bin ->
   EquivM sym arch (WI.Pred sym)
 isAbortedStatePred stOut = (PMC.binAbortFn <$> getBinCtx @bin) >>= \case
   Just abortFn -> withSym $ \sym -> do
@@ -54,8 +54,8 @@ isAbortedStatePred stOut = (PMC.binAbortFn <$> getBinCtx @bin) >>= \case
 -- | Prove that the original binary aborts only in cases where the equivalence condition
 -- is invalidated
 proveAbortValid ::
-  forall sym arch.
-  SimBundle sym arch ->
+  forall sym arch v.
+  SimBundle sym arch v ->
   -- | conditional equivalence predicate
   WI.Pred sym ->
   EquivM sym arch Bool

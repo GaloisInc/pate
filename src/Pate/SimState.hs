@@ -35,9 +35,13 @@ module Pate.SimState
     SimState(..)
   , SimInput(..)
   , SimOutput(..)
+  , type VarScope
+  , Scoped(..)
   , SimSpec(..)
-  , specMapList
-  , attachSpec
+  , forSpec
+  , viewSpec
+  , viewSpecBody
+  , unsafeCoerceSpecBody
   , SimBundle(..)
   , simInMem
   , simInRegs
@@ -49,7 +53,9 @@ module Pate.SimState
   , simOutO
   , simOutP
   -- variable binding
+  , SimBoundVars(..)
   , SimVars(..)
+  , boundVarsAsFree
   , bindSpec
   -- assumption frames
   , AssumptionFrame(..)
@@ -61,9 +67,11 @@ module Pate.SimState
   , getAssumedPred
   , rebindWithFrame
   , rebindWithFrame'
+  , bundleOutVars
   ) where
 
 import           GHC.Stack ( HasCallStack )
+import qualified Data.Kind as DK
 
 import           Control.Monad ( forM )
 
@@ -96,40 +104,42 @@ import qualified Data.Parameterized.SetF as SetF
 ------------------------------------
 -- Crucible inputs and outputs
 
-data SimState sym arch (bin :: PBi.WhichBinary) = SimState
+
+
+data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
     simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
   }
 
-data SimInput sym arch bin = SimInput
+data SimInput sym arch v bin = SimInput
   {
-    simInState :: SimState sym arch bin
+    simInState :: SimState sym arch v bin
   , simInBlock :: PB.ConcreteBlock arch bin
   }
 
 
 simInMem ::
-  SimInput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+  SimInput sym arch v bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
 simInMem = simMem . simInState
 
 simInRegs ::
-  SimInput sym arch bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
+  SimInput sym arch v bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
 simInRegs = simRegs . simInState
 
 
-data SimOutput sym arch bin = SimOutput
+data SimOutput sym arch v bin = SimOutput
   {
-    simOutState :: SimState sym arch bin
+    simOutState :: SimState sym arch v bin
   , simOutBlockEnd :: CS.RegValue sym (MCS.MacawBlockEndType arch)
   }
 
 simOutMem ::
-  SimOutput sym arch bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
+  SimOutput sym arch v bin -> MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
 simOutMem = simMem . simOutState
 
 simOutRegs ::
-  SimOutput sym arch bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
+  SimOutput sym arch v bin -> MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
 simOutRegs = simRegs . simOutState
 
 
@@ -271,90 +281,164 @@ rebindWithFrame' ::
   IO (W4B.Expr t tp)
 rebindWithFrame' sym cache asm = rewriteSubExprs' sym cache (getUniqueBinding sym asm)
 
-data SimSpec sym arch f = SimSpec
-  {
-    specVars :: PPa.PatchPair (SimVars sym arch)
-  , specAsm :: W4.Pred sym
-  , specBody :: f
-  }
 
 
-specVarsO :: SimSpec sym arch f -> SimVars sym arch PBi.Original
-specVarsO spec = PPa.pOriginal $ specVars spec
+-- | An empty type represent the kind for a shadow "variable scope" type parameter.
+-- This parameter tracks the scope of the bound variables that might appear in the
+-- inner What4 expressions anywhere in a datatype.
+-- This type variable is introduced when interpreting a 'SimSpec', which existentially
+-- quantifies over 'v'.
+-- The intended invariant is that each 'SimSpec' contains a distinct (fresh) 'SimBoundVars'
+-- which is associated with some scope parameter 'v'.
+-- Any type tagged with the same 'v' should only include
+-- bound variables from this initial 'SimBoundVars'.
+-- When values need to be converted from one scope to another (e.g. when instiantiating
+-- their bound variables with 'bindSpec'), we can "unsafely" coerce the scope
+-- from one type to another via 'unsafeCoerceScope'.
+-- TODO: A safe variant of 'unsafeCoerceScope' could perform a runtime check to
+-- ensure that the resulting value is well-scoped.
+data VarScope
 
-specVarsP :: SimSpec sym arch f -> SimVars sym arch PBi.Patched
-specVarsP spec = PPa.pPatched $ specVars spec
+-- | A 'Scoped' type is parameterized by a phantom 'VarScope' type variable, used
+-- to track the scope of its inner bound variables.
+class Scoped f where
+  -- | Unsafely change the variable scope parameter for an instance of 'f'.
+  -- This should be a no-op and only used to make types match up where needed.
+  -- It is the responsibility of the user to ensure that this is only applied
+  -- in cases where 'f' has been rewritten to only contain bound variables
+  -- in the target scope.
+  -- TODO: We can check this statically to add a safe variant.
+  unsafeCoerceScope :: forall (v :: VarScope) v'. f v -> f v'
 
-instance PEM.ExprMappable sym f => PEM.ExprMappable sym (SimSpec sym arch f) where
-  mapExpr sym f spec = do
-    -- it's not really obvious how to map the bound variables in general
-    -- we're going to leave it up the clients to not clobber any relevant bindings
-    --specVarsO' <- PEM.mapExpr sym f (specVarsO spec)
-    --specVarsP' <- PEM.mapExpr sym f (specVarsP spec)
-    specAsm' <- f (specAsm spec)
-    specBody' <- PEM.mapExpr sym f (specBody spec)
-    return $ SimSpec (specVars spec) specAsm' specBody'
+-- | A lambda abstraction over 'f', which is parameterized by a variable scope.
+-- A 'SimSpec' can be interpreted via 'viewSpec' or modified via 'forSpec'.
+-- The 'VarScope' that 'f' is parameterized over is existentially quantified
+-- within the 'SimSpec', and is used to track the scope of the
+-- bound variables (provided as 'SimVars') within the closure (i.e. retaining
+-- the fact that the provided 'SimVars' represent the bound variables appearing
+-- in 'f')
+data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
+  SimSpec
+    {
+      specVars :: PPa.PatchPair (SimBoundVars sym arch v)
+    , specAsm :: W4.Pred sym
+    , specBody :: f v
+    }
 
-instance Functor (SimSpec sym arch) where
-  fmap f spec = spec { specBody = f (specBody spec) }
+-- | Project out the bound variables with an arbitrary scope.
+-- This is a private function, since as we want to consider the
+-- 'SimBoundVars' of the 'SimSpec' to be an implementation detail.
+viewSpecVars ::
+  SimSpec sym arch f ->
+  (forall v. PPa.PatchPair (SimBoundVars sym arch v) -> a) ->
+  a
+viewSpecVars (SimSpec vars _ _) f = f vars
 
-attachSpec :: SimSpec sym arch f -> g -> SimSpec sym arch g
-attachSpec spec g = spec { specBody = g }
+-- | Project out the body with an arbitrary scope.
+viewSpecBody ::
+  SimSpec sym arch f ->
+  (forall v. f v -> a) ->
+  a
+viewSpecBody (SimSpec _ _ body) f = f body
 
-specMapList :: (f -> [g]) -> SimSpec sym arch f -> [SimSpec sym arch g]
-specMapList f spec = map (\bodyelem -> spec { specBody = bodyelem} ) (f (specBody spec))
+-- | Interpret a 'SimSpec' by viewing its initial bound variables as a
+-- 'SimVars' pair, and its body, with respect to an arbitrary scope.
+-- Note that we
+-- avoid exposing 'SimBoundVars' here by only providing 'SimVars'
+viewSpec ::
+  SimSpec sym arch f ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> a) ->
+  a
+viewSpec (SimSpec vars _ body) f = f (TF.fmapF boundVarsAsFree vars) body
+
+-- | Transform a 'SimSpec' by viewing its initial bound variables as a
+-- 'SimVars' pair, with respect to an arbitrary scope. Note that we
+-- avoid exposing 'SimBoundVars' here by only providing 'SimVars'
+forSpec ::
+  Applicative m =>
+  SimSpec sym arch f ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> m (g v)) ->
+  m (SimSpec sym arch g)
+forSpec (SimSpec vars asm body) f = SimSpec <$> pure vars <*> pure asm <*> f (TF.fmapF boundVarsAsFree vars) body
+
+-- | Unsafely coerce the body of a spec to have any scope.
+-- After this is used, the variables in the resulting 'f' should
+-- be rebound to actually be properly scoped to 'v'.
+unsafeCoerceSpecBody ::
+  Scoped f =>
+  SimSpec sym arch f -> f v
+unsafeCoerceSpecBody (SimSpec _ _ body) = unsafeCoerceScope body
 
 -- | The symbolic inputs and outputs of an original vs. patched block slice.
-data SimBundle sym arch = SimBundle
+data SimBundle sym arch v = SimBundle
   {
-    simIn :: PPa.PatchPair (SimInput sym arch)
-  , simOut :: PPa.PatchPair (SimOutput sym arch)
+    simIn :: PPa.PatchPair (SimInput sym arch v)
+  , simOut :: PPa.PatchPair (SimOutput sym arch v)
   }
 
-simInO :: SimBundle sym arch -> SimInput sym arch PBi.Original
+bundleOutVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
+bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
+
+simInO :: SimBundle sym arch v -> SimInput sym arch v PBi.Original
 simInO = PPa.pOriginal . simIn
 
-simInP :: SimBundle sym arch -> SimInput sym arch PBi.Patched
+simInP :: SimBundle sym arch v -> SimInput sym arch v PBi.Patched
 simInP = PPa.pPatched . simIn
 
-simOutO :: SimBundle sym arch -> SimOutput sym arch PBi.Original
+simOutO :: SimBundle sym arch v -> SimOutput sym arch v PBi.Original
 simOutO = PPa.pOriginal . simOut
 
-simOutP :: SimBundle sym arch -> SimOutput sym arch PBi.Patched
+simOutP :: SimBundle sym arch v -> SimOutput sym arch v PBi.Patched
 simOutP = PPa.pPatched . simOut
 
 
-simPair :: SimBundle sym arch -> PPa.BlockPair arch
+simPair :: SimBundle sym arch v -> PPa.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 ---------------------------------------
 -- Variable binding
 
-data SimVars sym arch bin = SimVars
+-- | "Free" bound variables representing the formal variables for some
+-- expression-containing value.
+-- TODO: Ideally the structure of this could be hidden, since 'SimSpec'
+-- should fully abstract its internal representation of the bound variables.
+data SimBoundVars sym arch v bin = SimBoundVars
   {
-    simVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
-  , simVarState :: SimState sym arch bin
+    simBoundVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
+  , simBoundVarState :: SimState sym arch v bin
   }
 
+-- | A value assignment for the bound variables of a 'SimSpec'. These may
+-- contain arbitrary What4 expressions (e.g. the result of symbolic execution).
+data SimVars sym arch v bin = SimVars
+  {
+    simVarState :: SimState sym arch v bin
+  }
+
+-- | Project out the initial values for the variables in 'SimBoundVars'.
+-- This is roughly analagous to converting a What4 bound variable into an expression.
+boundVarsAsFree :: SimBoundVars sym arch v bin -> SimVars sym arch v bin
+boundVarsAsFree bv = SimVars (simBoundVarState bv)
 
 mkVarBinds ::
-  forall sym arch bin.
+  forall sym arch v bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   W4.IsExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
-  SimVars sym arch bin ->
+  SimBoundVars sym arch v bin ->
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   IO (ExprBindings sym)
 mkVarBinds sym simVars mem regs = do
   let
-    memVar = MT.memState $ simMem $ simVarState simVars
+    memVar = MT.memState $ simMem $ simBoundVarState simVars
+    regVars = simBoundVarRegs simVars
     regBinds =
       MapF.toList $
       MM.regStateMap $
-      MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) (simVarRegs simVars) regs
+      MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
   regVarBinds <- fmap concat $ forM regBinds $ \(MapF.Pair _ (PSR.MacawRegVar val vars)) -> do
     case PSR.macawRegRepr val of
       CLM.LLVMPointerRepr{} -> do
@@ -367,47 +451,48 @@ mkVarBinds sym simVars mem regs = do
         return [Pair var (PSR.macawRegValue val)]
       CT.StructRepr Ctx.Empty -> return []
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
-
   mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
 
 bindSpec ::
-  PEM.ExprMappable sym f =>
+  forall sym arch s st fs f v.
+  Scoped f =>
+  PEM.ExprMappable sym (f v) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
-  sym -> 
-  SimState sym arch PBi.Original ->
-  SimState sym arch PBi.Patched ->
+  sym ->
+  PPa.PatchPair (SimVars sym arch v) ->
   SimSpec sym arch f ->
-  IO (W4.Pred sym, f)
-bindSpec sym stO stP spec = do
-  bindsO <- mkVarBinds sym (specVarsO spec) (MT.memState $ simMem stO) (simRegs stO)
-  bindsP <- mkVarBinds sym (specVarsP spec) (MT.memState $ simMem stP) (simRegs stP)
+  IO (W4.Pred sym, f v)
+bindSpec sym vals spec = do
+  (bindsO, bindsP) <- PPa.forBinsC $ \get -> viewSpecVars spec $ \vars -> do
+    let st = simVarState $ get vals
+    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st)
   binds <- mergeBindings sym bindsO bindsP
   cache <- freshVarBindCache
   let doRewrite = applyExprBindings' sym cache binds
-  body <- PEM.mapExpr sym doRewrite (specBody spec)
+  body <- PEM.mapExpr sym doRewrite (unsafeCoerceSpecBody spec)
   asm <- doRewrite (specAsm spec)
   return $ (asm, body)
 
 ------------------------------------
 -- ExprMappable instances
 
-instance PEM.ExprMappable sym (SimState sym arch bin) where
+instance PEM.ExprMappable sym (SimState sym arch v bin) where
   mapExpr sym f (SimState mem regs) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
 
-instance PEM.ExprMappable sym (SimInput sym arch bin) where
+instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk) = SimInput
     <$> PEM.mapExpr sym f st
     <*> return blk
 
-instance PEM.ExprMappable sym (SimOutput sym arch bin) where
+instance PEM.ExprMappable sym (SimOutput sym arch v bin) where
   mapExpr sym f (SimOutput out blkend) = SimOutput
     <$> PEM.mapExpr sym f out
     <*> PEM.mapExpr sym f blkend
 
-instance PEM.ExprMappable sym (SimBundle sym arch) where
+instance PEM.ExprMappable sym (SimBundle sym arch v) where
   mapExpr sym f (SimBundle in_ out) = SimBundle
     <$> PEM.mapExpr sym f in_
     <*> PEM.mapExpr sym f out

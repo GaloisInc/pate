@@ -14,36 +14,31 @@ module Pate.Verification.Domain (
     equateInitialStates
   , equateRegisters
   , universalDomain
-  , universalDomainSpec
   ) where
 
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
 import           Data.Parameterized.Classes()
-import GHC.Stack ( HasCallStack )
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
-import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSi
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PS
-import qualified Pate.Verification.Validity as PVV
 
 equateRegisters ::
   PER.RegisterDomain sym arch ->
-  SimBundle sym arch ->
+  SimBundle sym arch v ->
   EquivM sym arch (PSi.AssumptionFrame sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
@@ -58,14 +53,14 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
     inStO = PSi.simInState $ PSi.simInO bundle
     inStP = PSi.simInState $ PSi.simInP bundle
 
-equateInitialMemory :: SimBundle sym arch -> EquivM sym arch (PSi.AssumptionFrame sym)
+equateInitialMemory :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionFrame sym)
 equateInitialMemory bundle =
   return $ PSi.bindingToFrame $ MT.mkMemoryBinding memStO memStP
   where
     memStO = MT.memState $ PSi.simInMem $ PSi.simInO bundle
     memStP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
-equateInitialStates :: SimBundle sym arch -> EquivM sym arch (PSi.AssumptionFrame sym)
+equateInitialStates :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionFrame sym)
 equateInitialStates bundle = withSym $ \sym -> do
   eqRegs <- equateRegisters (PER.universal sym) bundle
   eqMem <- equateInitialMemory bundle
@@ -89,15 +84,6 @@ universalDomain sym =
     , PED.eqDomainStackMemory = PEM.universal sym
     , PED.eqDomainGlobalMemory = PEM.universal sym
     }
-
--- | Domain that includes entire state, except IP and SP registers
-universalDomainSpec ::
-  HasCallStack =>
-  PPa.BlockPair arch ->
-  EquivM sym arch (PEq.DomainSpec sym arch)
-universalDomainSpec blocks = withSym $ \sym -> withFreshVars blocks $ \stO stP ->
-  withAssumptionFrame (PVV.validInitState Nothing stO stP) $
-  return $ universalDomain sym
 
 {- Note [Names for Inputs]
 

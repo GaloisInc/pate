@@ -17,6 +17,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -337,15 +338,17 @@ unconstrainedRegister argNames reg = do
     _ -> throwHere $ PEE.UnsupportedRegisterType (Some (MS.typeToCrucible repr))
 
 withSimSpec ::
-  PEM.ExprMappable sym f =>
+  Scoped f =>
+  Scoped g =>
+  (forall v. PEM.ExprMappable sym (f v)) =>
   PPa.BlockPair arch ->
   SimSpec sym arch f ->
-  (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> f -> EquivM sym arch g) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> EquivM sym arch (g v)) ->
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec blocks spec f = withSym $ \sym -> do
-  withFreshVars blocks $ \stO stP -> do
-    (asm, body) <- liftIO $ bindSpec sym stO stP spec
-    withAssumption (return asm) $ f stO stP body
+  withFreshVars blocks $ \vars -> do
+    (asm, body) <- liftIO $ bindSpec sym vars spec
+    withAssumption (return asm) $ f vars body
 
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
@@ -363,28 +366,30 @@ lookupArgumentNames pp = do
     Nothing -> return []
     Just fd -> return (PH.functionArguments fd)
 
+-- TODO: unsafe, since we haven't enforced that v is fresh
 freshSimVars ::
-  forall sym (bin :: PBi.WhichBinary) arch.
+  forall sym (bin :: PBi.WhichBinary) arch v.
   PBi.KnownBinary bin =>
   PPa.BlockPair arch ->
-  EquivM sym arch (SimVars sym arch bin)
+  EquivM sym arch (SimBoundVars sym arch v bin)
 freshSimVars blocks = do
   binCtx <- getBinCtx @bin
   let baseMem = MBL.memoryImage $ PMC.binary binCtx
   mem <- withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
   argNames <- lookupArgumentNames blocks
   regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
-  return $ SimVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
+  return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
 
 
 withFreshVars ::
+  Scoped f =>
   PPa.BlockPair arch ->
-  (SimState sym arch PBi.Original -> SimState sym arch PBi.Patched -> EquivM sym arch (W4.Pred sym, f)) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (W4.Pred sym, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   varsO <- freshSimVars @_ @PBi.Original blocks
   varsP <- freshSimVars @_ @PBi.Patched blocks
-  (asm, result) <- f (simVarState varsO) (simVarState varsP)
+  (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
   return $ SimSpec (PPa.PatchPair varsO varsP) asm result
 
 -- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
@@ -655,7 +660,7 @@ execGroundFn (SymGroundEvalFn fn) e = do
     Nothing -> throwHere PEE.InvalidSMTModel
 
 getFootprints ::
-  SimBundle sym arch ->
+  SimBundle sym arch v ->
   EquivM sym arch (Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)))
 getFootprints bundle = withSym $ \sym -> do
   footO <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutO bundle)
@@ -689,7 +694,7 @@ traceBlockPair bp msg =
 -- This variant takes a 'SimBundle' as an input to provide context
 traceBundle
   :: (HasCallStack)
-  => SimBundle sym arch
+  => SimBundle sym arch v
   -> String
   -> EquivM sym arch ()
 traceBundle bundle msg =
