@@ -905,9 +905,6 @@ mkSimBundle pPair vars d =
      traceBlockPair pPair "Finished simulating blocks"
 
      let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
-     -- FIXME: ideally our term rewriting is smart enough to better handle
-     -- clashes, but for the moment this ensures that any concrete rewrites from
-     -- the initial state validity check are applied
-     bnd' <- applyCurrentAsms bnd
+
      eqRegs <- PVD.equateRegisters rd bnd
-     withAssumptionSet eqRegs $ applyCurrentAsms bnd'
+     withAssumptionSet eqRegs $ applyCurrentAsms bnd

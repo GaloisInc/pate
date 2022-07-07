@@ -260,6 +260,7 @@ getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
   Just es
     | SetF.size es == 1
     , [e'] <- SetF.toList es -> Just e'
+  Just es -> SetF.lookupMin $ SetF.filter (\e -> isJust $ W4.asConcrete e) es
   _ -> case W4.exprType e of
     W4.BaseBoolRepr | isAssumedPred asm e -> Just $ W4.truePred sym
     _ -> Nothing
