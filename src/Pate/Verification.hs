@@ -56,6 +56,8 @@ import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.FunctionHandle as CFH
 import qualified Lang.Crucible.LLVM.MemModel as CLM
+import qualified Lang.Crucible.Backend.Online as LCBO
+
 
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
@@ -74,6 +76,7 @@ import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
 import qualified Pate.PatchPair as PPa
+import           Pate.Panic
 import qualified Pate.Proof as PF
 import qualified Pate.Solver as PS
 import qualified Pate.SymbolTable as PSym
@@ -213,62 +216,67 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                   return (PPa.PatchPair mainO mainP : unpackedPairs upData)
               else
                 return (unpackedPairs upData)
-
+  let solver = PC.cfgSolver vcfg
+  let saveInteraction = PC.cfgSolverInteractionFile vcfg
+  let doPanic = panic Solver "doVerifyPairs" ["Online solving not enabled"]
   let
     -- TODO, something real here
     syscallModel = MT.MacawSyscallModel ()
 
     exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch globalRegion) undefops
 
-    ctxt = PMC.EquivalenceContext
-      { PMC.handles = ha
-      , PMC.binCtxs = contexts
-      , PMC.stackRegion = stackRegion
-      , PMC.globalRegion = globalRegion
-      , PMC._currentFunc = error "No function under analysis at startup"
-      , PMC.originalIgnorePtrs = unpackedOrigIgnore upData
-      , PMC.patchedIgnorePtrs = unpackedPatchIgnore upData
-      , PMC.equatedFunctions = unpackedEquatedFuncs upData
-      , PMC.observableMemory = unpackedObservableMemory upData
-      }
-    env = EquivEnv
-      { envWhichBinary = Nothing
-      , envValidArch = validArch
-      , envCtx = ctxt
-      , envArchVals = traceVals
-      , envLLVMArchVals = llvmVals
-      , envExtensions = exts
-      , envPCRegion = pcRegion
-      , envMemTraceVar = mvar
-      , envBlockEndVar = bvar
-      , envLogger = logAction
-      , envConfig = vcfg
-      , envFailureMode = PME.ThrowOnAnyFailure
-      , envValidSym = PS.Sym symNonce sym adapter
-      , envStartTime = startedAt
-      , envCurrentFrame = Some mempty
-      , envNonceGenerator = gen
-      , envParentNonce = Some topNonce
-      , envUndefPointerOps = undefops
-      , envParentBlocks = mempty
-      , envExitPairsCache = ePairCache
-      , envStatistics = statsVar
-      , envOverrides = \ovCfg -> M.fromList [ (n, ov)
-                                            | ov@(PVO.SomeOverride o) <- PVOL.overrides ovCfg
-                                            , let txtName = WF.functionName (PVO.functionName o)
-                                            , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
-                                            ]
-      }
-  -- Note from above: we are installing overrides for each override that cover
-  -- both local symbol definitions and the corresponding PLT stubs for each
-  -- override so that they cover both statically linked and dynamically-linked
-  -- function calls.
-  liftIO $ do
-    (result, stats) <- PSP.runVerificationLoop env pPairs'
-    endTime <- TM.getCurrentTime
-    let duration = TM.diffUTCTime endTime startTime
-    IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
-    return $ result
+  liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak ->
+    LCBO.withSolverProcess bak doPanic $ \sp -> do
+      let ctxt = PMC.EquivalenceContext
+            { PMC.handles = ha
+            , PMC.binCtxs = contexts
+            , PMC.stackRegion = stackRegion
+            , PMC.globalRegion = globalRegion
+            , PMC._currentFunc = error "No function under analysis at startup"
+            , PMC.originalIgnorePtrs = unpackedOrigIgnore upData
+            , PMC.patchedIgnorePtrs = unpackedPatchIgnore upData
+            , PMC.equatedFunctions = unpackedEquatedFuncs upData
+            , PMC.observableMemory = unpackedObservableMemory upData
+            }
+          env = EquivEnv
+            { envWhichBinary = Nothing
+            , envValidArch = validArch
+            , envCtx = ctxt
+            , envArchVals = traceVals
+            , envLLVMArchVals = llvmVals
+            , envExtensions = exts
+            , envPCRegion = pcRegion
+            , envMemTraceVar = mvar
+            , envBlockEndVar = bvar
+            , envLogger = logAction
+            , envConfig = vcfg
+            , envFailureMode = PME.ThrowOnAnyFailure
+            , envValidSym = PS.Sym symNonce sym adapter
+            , envSolverProcess = PS.SomeSolverProcess sp bak
+            , envStartTime = startedAt
+            , envCurrentFrame = Some mempty
+            , envNonceGenerator = gen
+            , envParentNonce = Some topNonce
+            , envUndefPointerOps = undefops
+            , envParentBlocks = mempty
+            , envExitPairsCache = ePairCache
+            , envStatistics = statsVar
+            , envOverrides = \ovCfg -> M.fromList [ (n, ov)
+                                                  | ov@(PVO.SomeOverride o) <- PVOL.overrides ovCfg
+                                                  , let txtName = WF.functionName (PVO.functionName o)
+                                                  , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
+                                                  ]
+            }
+      -- Note from above: we are installing overrides for each override that cover
+      -- both local symbol definitions and the corresponding PLT stubs for each
+      -- override so that they cover both statically linked and dynamically-linked
+      -- function calls.
+
+      (result, stats) <- PSP.runVerificationLoop env pPairs'
+      endTime <- TM.getCurrentTime
+      let duration = TM.diffUTCTime endTime startTime
+      IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
+      return $ result
 
 
 unpackBlockData ::

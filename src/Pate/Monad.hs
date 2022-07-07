@@ -30,6 +30,8 @@ module Pate.Monad
   , withValidEnv
   , withSymIO
   , withSym
+  , withSolverProcess
+  , withOnlineBackend
   , withPair
   , archFuns
   , runInIO1
@@ -61,10 +63,8 @@ module Pate.Monad
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
-  , withEmptyAssumptionSet
   , applyAssumptionSet
   , applyCurrentAsms
-  , currentAsmPred
   -- nonces
   , freshNonce
   , withProofNonce
@@ -107,6 +107,7 @@ import           Data.Parameterized.Some
 import qualified Lumberjack as LJ
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
+import qualified Lang.Crucible.Backend.Online as LCBO
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
@@ -121,7 +122,8 @@ import qualified What4.SatResult as W4R
 import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
 import           What4.Utils.Process (filterAsync)
-
+import qualified What4.Protocol.Online as WPO
+import qualified What4.Protocol.SMTWriter as W4
 import           What4.ExprHelpers
 
 import qualified Pate.Arch as PA
@@ -292,6 +294,24 @@ withSym f = withValid $ do
   PSo.Sym _ sym _ <- CMR.asks envValidSym
   f sym
 
+withSolverProcess ::
+  (forall scope st fs solver.
+     (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
+     WPO.SolverProcess scope solver -> EquivM sym arch a) ->
+  EquivM sym arch a
+withSolverProcess f = do
+  PSo.SomeSolverProcess sp _ <- CMR.asks envSolverProcess
+  f sp
+
+withOnlineBackend ::
+  (forall scope st fs solver.
+     (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
+     LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
+  EquivM sym arch a
+withOnlineBackend f = do
+  PSo.SomeSolverProcess _ bak <- CMR.asks envSolverProcess
+  f bak
+
 withSymIO :: forall sym arch a.
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> IO a) ->
   EquivM sym arch a
@@ -394,12 +414,6 @@ currentAsm = do
   Some frame <- CMR.asks envCurrentFrame
   return $ unsafeCoerceScope frame
 
-currentAsmPred :: EquivM sym arch (W4.Pred sym)
-currentAsmPred = withSym $ \sym -> do
-  asm <- currentAsm
-  liftIO $ getAssumedPred sym asm
-
-
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
 -- in the resulting 'SimSpec'.
@@ -421,9 +435,13 @@ withAssumptionSet ::
   AssumptionSet sym v ->
   EquivM sym arch f ->
   EquivM sym arch f
-withAssumptionSet asm f = do
+withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
   curAsm <- currentAsm
-  CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ f
+  p <- liftIO $ getAssumedPred sym asm
+  CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
+    IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
+      W4.assume (WPO.solverConn sp) p
+      inIO f
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.
@@ -433,12 +451,6 @@ withAssumption ::
   EquivM sym arch f ->
   EquivM sym arch f
 withAssumption asm f = withAssumptionSet (frameAssume asm) f
-
-withEmptyAssumptionSet ::
-  EquivM sym arch f ->
-  EquivM sym arch f
-withEmptyAssumptionSet f =
-  CMR.local (\env -> env { envCurrentFrame = Some mempty }) $ f
 
 -- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
 -- (set when evaluating under 'withAssumptionSet' and 'withAssumption').

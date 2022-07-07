@@ -8,6 +8,7 @@ module Pate.Solver (
   , solverAdapter
   , ValidSym
   , Sym(..)
+  , SomeSolverProcess(..)
   , withOnlineSolver
   ) where
 
@@ -110,3 +111,12 @@ data Sym sym where
       -> sym
       -> WS.SolverAdapter st
       -> Sym sym
+
+data SomeSolverProcess sym where
+  SomeSolverProcess :: forall sym scope st fs solver.
+    ( WPO.OnlineSolver solver
+    , (sym ~ WE.ExprBuilder scope st fs)
+    )
+    => WPO.SolverProcess scope solver
+    -> CBO.OnlineBackend solver scope st fs
+    -> SomeSolverProcess sym
