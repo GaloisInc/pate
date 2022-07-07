@@ -188,7 +188,6 @@ visitNode (GraphNode bPair) vars d gr0 = withPair bPair $ do
   withAssumptionSet validInit $
     do -- do the symbolic simulation
        bundle <- mkSimBundle bPair vars d
-       asm <- currentAsmPred
  
   {-     traceBundle bundle $ unlines
          [ "== SP result =="
@@ -204,14 +203,14 @@ visitNode (GraphNode bPair) vars d gr0 = withPair bPair $ do
        exitPairs <- PD.discoverPairs bundle
        traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
-       gr1 <- checkObservables bPair asm bundle d gr0
+       gr1 <- checkObservables bPair bundle d gr0
 
-       gr2 <- checkTotality bPair asm bundle d exitPairs gr1
+       gr2 <- checkTotality bPair bundle d exitPairs gr1
 
-       gr3 <- updateReturnNode bPair asm bundle d gr2
+       gr3 <- updateReturnNode bPair bundle d gr2
 
        -- Follow all the exit pairs we found
-       foldM (\x y -> followExit asm bundle bPair d x y) gr3 (zip [0 ..] exitPairs)
+       foldM (\x y -> followExit bundle bPair d x y) gr3 (zip [0 ..] exitPairs)
 
 
 visitNode (ReturnNode fPair) vars d gr0 =
@@ -264,14 +263,13 @@ data ObservableCheckResult sym ptrW
 
 checkObservables :: forall sym arch v.
   PPa.BlockPair arch ->
-  W4.Pred sym ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-checkObservables bPair asm bundle preD gr =
+checkObservables bPair bundle preD gr =
   considerObservableEvent gr bPair $
-    do res <- doCheckObservables asm bundle preD
+    do res <- doCheckObservables bundle preD
        case res of
          ObservableCheckEq ->
            do traceBundle bundle "Observables agree"
@@ -289,11 +287,10 @@ checkObservables bPair asm bundle preD gr =
               return (Just cex, gr)
 
 doCheckObservables :: forall sym arch v.
-  W4.Pred sym ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   EquivM sym arch (ObservableCheckResult sym (MM.ArchAddrWidth arch))
-doCheckObservables asm bundle preD =
+doCheckObservables bundle preD =
   withSym $ \sym ->
     do let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
        let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
@@ -341,7 +338,7 @@ doCheckObservables asm bundle preD =
          , show (MT.prettyMemTraceSeq pSeq)
          ]
 -}
-
+       asm <- currentAsmPred
        precond <- liftIO $ do
          eqPred <- PAD.absDomainToPrecond sym eqCtx bundle preD
          W4.andPred sym asm eqPred
@@ -475,15 +472,14 @@ equivalentSequences sym = \xs ys -> loop [xs] [ys]
 
 checkTotality :: forall sym arch v.
   PPa.BlockPair arch ->
-  W4.Pred sym ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-checkTotality bPair asm bundle preD exits gr =
+checkTotality bPair bundle preD exits gr =
   considerDesyncEvent gr bPair $
-    do tot <- doCheckTotality asm bundle preD exits
+    do tot <- doCheckTotality bundle preD exits
        case tot of
          CasesTotal ->
            do traceBundle bundle "Totality check succeeded."
@@ -508,12 +504,11 @@ data TotalityResult ptrW
 
 -- TODO? should we try to share work with the followExit/widenPostcondition calls?
 doCheckTotality :: forall sym arch v.
-  W4.Pred sym ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   EquivM sym arch (TotalityResult (MM.ArchAddrWidth arch))
-doCheckTotality asm bundle preD exits =
+doCheckTotality bundle preD exits =
   withSym $ \sym ->
     do vcfg <- asks envConfig
        eqCtx <- equivalenceContext
@@ -521,6 +516,7 @@ doCheckTotality asm bundle preD exits =
        let solver = PCfg.cfgSolver vcfg
        let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
+       asm <- currentAsmPred
        precond <- liftIO $ do
          eqInputsPred <- PAD.absDomainToPrecond sym eqCtx bundle preD
          W4.andPred sym asm eqInputsPred
@@ -660,16 +656,15 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
          if b then return x else return y
 
 followExit ::
-  W4.Pred sym ->
   SimBundle sym arch v ->
   PPa.BlockPair arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   (Integer, PPa.PatchPair (PB.BlockTarget arch)) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
-followExit asm bundle currBlock d gr (idx, pPair) =
+followExit bundle currBlock d gr (idx, pPair) =
   do traceBundle bundle ("Handling proof case " ++ show idx)
-     res <- manifestError (triageBlockTarget asm bundle currBlock d gr pPair)
+     res <- manifestError (triageBlockTarget bundle currBlock d gr pPair)
      case res of
        Left err ->
          do traceBlockPair currBlock ("Caught error: " ++ show err)
@@ -680,75 +675,69 @@ followExit asm bundle currBlock d gr (idx, pPair) =
 --  sim bundle might return.
 updateReturnNode ::
   PPa.BlockPair arch ->
-  W4.Pred sym ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-updateReturnNode bPair asm bundle preD gr =
-    withEmptyAssumptionSet $
-    withAssumption asm $
-    do -- TODO? use withSatAssumption here, or something similar using an online solver?
-       isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
-       case W4.asConstantPred isReturn of
-         Just False -> return gr
-         _ -> withAssumption isReturn $
-                handleReturn bundle bPair preD gr
+updateReturnNode bPair bundle preD gr =
+  do -- TODO? use withSatAssumption here, or something similar using an online solver?
+     isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
+     case W4.asConstantPred isReturn of
+       Just False -> return gr
+       _ -> withAssumption isReturn $
+              handleReturn bundle bPair preD gr
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
 triageBlockTarget ::
-  W4.Pred sym ->
   SimBundle sym arch v ->
   PPa.BlockPair arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
-triageBlockTarget asm bundle currBlock d gr (PPa.PatchPair blktO blktP) =
-  withEmptyAssumptionSet $
+triageBlockTarget bundle currBlock d gr (PPa.PatchPair blktO blktP) =
   do let
         blkO = PB.targetCall blktO
         blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
 
      traceBundle bundle ("  targetCall: " ++ show blkO)
-     withAssumption asm $ do
-       -- TODO? use withSatAssumption here, or something similar using an online solver?
-       matches <- PD.matchesBlockTarget bundle blktO blktP
-       withAssumption matches $
-         case (PB.targetReturn blktO, PB.targetReturn blktP) of
-           (Just blkRetO, Just blkRetP) ->
-             do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
+     -- TODO? use withSatAssumption here, or something similar using an online solver?
+     matches <- PD.matchesBlockTarget bundle blktO blktP
+     withAssumption matches $
+       case (PB.targetReturn blktO, PB.targetReturn blktP) of
+         (Just blkRetO, Just blkRetP) ->
+           do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
 
-                -- TODO, this isn't correct.  Syscalls don't correspond to
-                -- "ArchTermStmt" in any meaningful way, so this is all a misnomer.
-                isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
-                   (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
-                   (entryO, entryP) | entryO == entryP -> return False
-                   _ -> throwHere $ PEE.BlockExitMismatch
-                traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
+              -- TODO, this isn't correct.  Syscalls don't correspond to
+              -- "ArchTermStmt" in any meaningful way, so this is all a misnomer.
+              isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
+                 (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
+                 (entryO, entryP) | entryO == entryP -> return False
+                 _ -> throwHere $ PEE.BlockExitMismatch
+              traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
 
-                ctx <- view PME.envCtxL
-                let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+              ctx <- view PME.envCtxL
+              let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
-                isPLT <- findPLTSymbol blkO blkP
+              isPLT <- findPLTSymbol blkO blkP
 
-                if | isSyscall -> handleSyscall bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
-                   | isEquatedCallSite -> handleInlineCallee bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
-                   | Just pltSymbol <- isPLT -> handlePLTStub bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
-                   | otherwise -> handleOrdinaryFunCall bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
+              if | isSyscall -> handleSyscall bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
+                 | isEquatedCallSite -> handleInlineCallee bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
+                 | Just pltSymbol <- isPLT -> handlePLTStub bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
+                 | otherwise -> handleOrdinaryFunCall bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
-           (Nothing, Nothing) -> withSym $ \sym ->
-             do traceBundle bundle "No return target identified"
-                p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
-                        b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
-                        liftIO $ W4.orPred sym j b
-                withAssumption p $
-                  handleJump bundle currBlock d gr pPair
+         (Nothing, Nothing) -> withSym $ \sym ->
+           do traceBundle bundle "No return target identified"
+              p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
+                      b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
+                      liftIO $ W4.orPred sym j b
+              withAssumption p $
+                handleJump bundle currBlock d gr pPair
 
-           _ -> do traceBundle bundle "BlockExitMismatch"
-                   throwHere $ PEE.BlockExitMismatch
+         _ -> do traceBundle bundle "BlockExitMismatch"
+                 throwHere $ PEE.BlockExitMismatch
 
 
 -- | See if the given jump targets correspond to a PLT stub for
