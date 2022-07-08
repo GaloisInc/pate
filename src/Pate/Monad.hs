@@ -382,6 +382,7 @@ lookupArgumentNames pp = do
 -- TODO: Rather than trying to enforce this statically (which would be difficult and require
 -- tracking scopes in many more places) we can add runtime checks in places where scope
 -- violations would be problematic (i.e. when attempting to safely coerce one scope into another)
+-- see: https://github.com/GaloisInc/pate/issues/310
 
 -- | Project the current background 'AssumptionSet' into any scope 'v'
 currentAsm :: EquivM sym arch (AssumptionSet sym v)
