@@ -38,7 +38,7 @@ module Pate.SimState
   , type VarScope
   , Scoped(..)
   , SimSpec
-  , mkSimSpec
+  , freshSimSpec
   , forSpec
   , viewSpec
   , viewSpecBody
@@ -359,12 +359,25 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
     , _specBody :: f v
     }
 
-mkSimSpec ::
-  PPa.PatchPair (SimBoundVars sym arch v) ->
-  AssumptionSet sym v ->
-  f v ->
-  SimSpec sym arch f
-mkSimSpec vars asms body = SimSpec vars asms body
+-- | Create a 'SimSpec' with "fresh" bound variables
+freshSimSpec ::
+  forall sym arch f m.
+  Monad m =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  -- | These must all be fresh variables
+  (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
+  -- | This must be a fresh MemTrace
+  (forall bin. PBi.WhichBinaryRepr bin -> m (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))) ->
+  -- | Produce the body of the 'SimSpec' given the initial variables
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym v, (f v))) ->
+  m (SimSpec sym arch f)
+freshSimSpec mkReg mkMem mkBody = do
+  vars <- PPa.forBins' $ \bin -> do
+    regs <- MM.mkRegStateM (mkReg bin)
+    mem <- mkMem bin
+    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
+  (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
+  return $ SimSpec vars asm body
 
 -- | Project out the bound variables with an arbitrary scope.
 -- This is a private function, since as we want to consider the

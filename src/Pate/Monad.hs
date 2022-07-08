@@ -374,20 +374,6 @@ lookupArgumentNames pp = do
     Nothing -> return []
     Just fd -> return (PH.functionArguments fd)
 
--- TODO: unsafe, since we haven't enforced that v is fresh
-freshSimVars ::
-  forall sym (bin :: PBi.WhichBinary) arch v.
-  PBi.KnownBinary bin =>
-  PPa.BlockPair arch ->
-  EquivM sym arch (SimBoundVars sym arch v bin)
-freshSimVars blocks = do
-  binCtx <- getBinCtx @bin
-  let baseMem = MBL.memoryImage $ PMC.binary binCtx
-  mem <- withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
-  argNames <- lookupArgumentNames blocks
-  regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
-  return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
-
 -- Although 'AssumptionSet' has a scope parameter, the current interface doesn't have a
 -- good mechanism for enforcing the fact that we are only pushing assumptions that
 -- are actually scoped properly.
@@ -407,15 +393,21 @@ currentAsm = do
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
 -- in the resulting 'SimSpec'.
 withFreshVars ::
+  forall sym arch f.
   Scoped f =>
   PPa.BlockPair arch ->
   (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym v, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
-  varsO <- freshSimVars @_ @PBi.Original blocks
-  varsP <- freshSimVars @_ @PBi.Patched blocks
-  (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
-  return $ mkSimSpec (PPa.PatchPair varsO varsP) asm result
+  argNames <- lookupArgumentNames blocks
+  let
+    mkMem :: forall bin. PBi.WhichBinaryRepr bin -> EquivM sym arch (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
+    mkMem bin = do
+      binCtx <- getBinCtx' bin
+      let baseMem = MBL.memoryImage $ PMC.binary binCtx
+      withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+
+  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\v -> f v)
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.

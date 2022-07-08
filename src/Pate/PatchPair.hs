@@ -24,6 +24,7 @@ module Pate.PatchPair (
   , ppPatchPair
   , get
   , forBins
+  , forBins'
   , forBinsC
   , getPair'
   , matchEquatedAddress
@@ -54,6 +55,9 @@ get = getPair' knownRepr
 
 forBins :: Applicative m => (forall bin. PB.KnownBinary bin => m (f bin)) -> m (PatchPair f)
 forBins f = PatchPair <$> f @PB.Original <*> f @PB.Patched
+
+forBins' :: Applicative m => (forall bin. PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
+forBins' f = PatchPair <$> f PB.OriginalRepr <*> f PB.PatchedRepr
 
 forBinsC :: Applicative m => (forall bin. (forall tp. PatchPair tp -> tp bin) -> m f) -> m (f, f)
 forBinsC f = (,) <$> f (get @PB.Original) <*> f (get @PB.Original)
