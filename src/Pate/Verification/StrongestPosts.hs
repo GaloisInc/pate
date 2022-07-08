@@ -43,7 +43,6 @@ import qualified What4.Protocol.SMTWriter as W4
 import           What4.SatResult (SatResult(..))
 
 import qualified Lang.Crucible.Backend as LCB
-import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator.RegValue as LCS
 import           Lang.Crucible.Simulator.SymSequence
@@ -73,7 +72,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Solver as PS
 
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
@@ -269,7 +267,6 @@ withPredomain ::
   EquivM sym arch a ->
   EquivM sym arch a
 withPredomain bundle preD f = withSym $ \sym -> do
-  vcfg <- asks envConfig
   eqCtx <- equivalenceContext
   precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
   withAssumption precond $ f
@@ -308,18 +305,12 @@ doCheckObservables :: forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   EquivM sym arch (ObservableCheckResult sym (MM.ArchAddrWidth arch))
-doCheckObservables bundle preD =
+doCheckObservables bundle _preD =
   withSym $ \sym ->
     do let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
        let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
 
-       -- TODO, lots of duplication here...
-       vcfg <- asks envConfig
        stackRegion <- asks (PMC.stackRegion . envCtx)
-       eqCtx <- equivalenceContext
-
-       let solver = PCfg.cfgSolver vcfg
-       let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
 
        -- Grab the specified areas of observable memory
        obsMem <- asks (PMC.observableMemory . envCtx)

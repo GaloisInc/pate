@@ -357,7 +357,7 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
       _specVars :: PPa.PatchPair (SimBoundVars sym arch v)
     , _specAsm :: AssumptionSet sym v
     , _specBody :: f v
-    } -> SimSpec sym arch f
+    }
 
 mkSimSpec ::
   PPa.PatchPair (SimBoundVars sym arch v) ->

@@ -41,7 +41,6 @@ import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.MemCell as PMc
@@ -55,14 +54,11 @@ import qualified Pate.Proof.Instances ()
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 
-import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
-import qualified Pate.Solver as PS
 import qualified Pate.SimulatorRegisters as PSR
 
 import qualified Pate.Verification.Concretize as PVC
-import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -198,7 +194,7 @@ abstractOverVars ::
   PAD.AbstractDomainSpec sym arch {- ^ previous post-domain -} ->
   PAD.AbstractDomain sym arch v {- ^ computed post-domain -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-abstractOverVars bundle from to postSpec postResult = PS.forSpec postSpec $ \_vars _body ->
+abstractOverVars _bundle _from _to postSpec postResult = PS.forSpec postSpec $ \_vars _body ->
   return $ PS.unsafeCoerceScope postResult
 
 -- | Classifying what kind of widening has occurred
@@ -249,10 +245,6 @@ widenPostcondition bundle preD postD0 =
     widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
-   doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
-
-
-
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
    --
@@ -272,9 +264,7 @@ widenPostcondition bundle preD postD0 =
      EquivM sym arch (WidenResult sym arch v)
 
    widenLoop sym (Gas i) eqCtx postD mPrevRes =
-     do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-        let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
-        let prevLocs = case mPrevRes of
+     do let prevLocs = case mPrevRes of
               Just (Widen _ locs _) -> locs
               _ -> mempty
         -- no rebinding necessary yet
