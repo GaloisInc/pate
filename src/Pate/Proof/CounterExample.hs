@@ -273,9 +273,9 @@ getPathCondition ::
   EquivM sym arch (W4.Pred sym)
 getPathCondition stCond outO outP fn = withSym $ \sym -> do
   regCond <- getRegPathCondition (PE.stRegCond stCond) fn
-  withAssumption_ (return regCond) $ do
+  withAssumption regCond $ do
     memOCond <- getGenPathCondition fn (PS.simOutMem outO)
-    withAssumption_ (return memOCond) $ do
+    withAssumption memOCond $ do
       memPCond <- getGenPathCondition fn (PS.simOutMem outP)
       liftIO $ W4.andPred sym regCond memOCond >>= W4.andPred sym memPCond
 

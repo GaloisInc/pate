@@ -30,6 +30,8 @@ module Pate.Monad
   , withValidEnv
   , withSymIO
   , withSym
+  , withSolverProcess
+  , withOnlineBackend
   , withPair
   , archFuns
   , runInIO1
@@ -53,20 +55,15 @@ module Pate.Monad
   , checkSatisfiableWithModel
   , isPredSat
   , isPredTrue'
-  , isPredTruePar'
   -- working under a 'SimSpec' context
   , withSimSpec
   , withFreshVars
   -- assumption management
-  , withAssumption_
   , withAssumption
   , withSatAssumption
-  , withAssumptionFrame
-  , withAssumptionFrame'
-  , withAssumptionFrame_
-  , withEmptyAssumptionFrame
-  , applyAssumptionFrame
-  , applyCurrentFrame
+  , withAssumptionSet
+  , applyAssumptionSet
+  , applyCurrentAsms
   -- nonces
   , freshNonce
   , withProofNonce
@@ -84,7 +81,6 @@ import           GHC.Stack ( HasCallStack, callStack )
 
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
-import qualified System.IO as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try )
@@ -109,21 +105,21 @@ import           Data.Parameterized.Some
 import qualified Lumberjack as LJ
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
+import qualified Lang.Crucible.Backend.Online as LCBO
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MM
 import qualified Data.Macaw.BinaryLoader as MBL
 
-import qualified What4.Config as WC
 import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
-import qualified What4.Solver.Adapter as WSA
 import qualified What4.Symbol as WS
 import           What4.Utils.Process (filterAsync)
-
+import qualified What4.Protocol.Online as WPO
+import qualified What4.Protocol.SMTWriter as W4
 import           What4.ExprHelpers
 
 import qualified Pate.Arch as PA
@@ -138,6 +134,7 @@ import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import           Pate.Monad.Environment as PME
+import           Pate.Panic
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -278,21 +275,31 @@ withValidEnv ::
   a
 withValidEnv (EquivEnv { envValidSym = PSo.Sym {}, envValidArch = PA.SomeValidArch {}}) f = f
 
-withSymSolver ::
-  (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> WSA.SolverAdapter st -> EquivM sym arch a) ->
-  EquivM sym arch a
-withSymSolver f = withValid $ do
-  PSo.Sym _ sym adapter <- CMR.asks envValidSym
-  sym' <- liftIO $ WE.exprBuilderSplitConfig sym
-  liftIO $ WC.extendConfig (WSA.solver_adapter_config_options adapter) (W4.getConfiguration sym')
-  f sym' adapter
-
 withSym ::
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> EquivM sym arch a) ->
   EquivM sym arch a
 withSym f = withValid $ do
   PSo.Sym _ sym _ <- CMR.asks envValidSym
   f sym
+
+withSolverProcess ::
+  (forall scope st fs solver.
+     (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
+     WPO.SolverProcess scope solver -> EquivM sym arch a) ->
+  EquivM sym arch a
+withSolverProcess f = withOnlineBackend $ \bak -> do
+  let doPanic = panic Solver "withSolverProcess" ["Online solving not enabled"]
+  IO.withRunInIO $ \runInIO -> LCBO.withSolverProcess bak doPanic $ \sp ->
+    runInIO (f sp)
+
+withOnlineBackend ::
+  (forall scope st fs solver.
+     (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
+     LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
+  EquivM sym arch a
+withOnlineBackend f = do
+  PSo.Sym _ _ bak <- CMR.asks envValidSym
+  f bak
 
 withSymIO :: forall sym arch a.
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> IO a) ->
@@ -348,7 +355,8 @@ withSimSpec ::
 withSimSpec blocks spec f = withSym $ \sym -> do
   withFreshVars blocks $ \vars -> do
     (asm, body) <- liftIO $ bindSpec sym vars spec
-    withAssumption (return asm) $ f vars body
+    body' <- withAssumptionSet asm $ f vars body
+    return $ (asm, body')
 
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
@@ -366,140 +374,103 @@ lookupArgumentNames pp = do
     Nothing -> return []
     Just fd -> return (PH.functionArguments fd)
 
--- TODO: unsafe, since we haven't enforced that v is fresh
-freshSimVars ::
-  forall sym (bin :: PBi.WhichBinary) arch v.
-  PBi.KnownBinary bin =>
-  PPa.BlockPair arch ->
-  EquivM sym arch (SimBoundVars sym arch v bin)
-freshSimVars blocks = do
-  binCtx <- getBinCtx @bin
-  let baseMem = MBL.memoryImage $ PMC.binary binCtx
-  mem <- withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
-  argNames <- lookupArgumentNames blocks
-  regs <- MM.mkRegStateM (\r -> unconstrainedRegister argNames r)
-  return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
+-- Although 'AssumptionSet' has a scope parameter, the current interface doesn't have a
+-- good mechanism for enforcing the fact that we are only pushing assumptions that
+-- are actually scoped properly.
+-- This is manifest in the fact that the background frame in 'envCurrentFrame' doesn't
+-- track any scope, and is therefore unsafely coerced into any target scope.
+-- TODO: Rather than trying to enforce this statically (which would be difficult and require
+-- tracking scopes in many more places) we can add runtime checks in places where scope
+-- violations would be problematic (i.e. when attempting to safely coerce one scope into another)
+-- see: https://github.com/GaloisInc/pate/issues/310
 
+-- | Project the current background 'AssumptionSet' into any scope 'v'
+currentAsm :: EquivM sym arch (AssumptionSet sym v)
+currentAsm = do
+  Some frame <- CMR.asks envCurrentFrame
+  return $ unsafeCoerceScope frame
 
+-- | Create a new 'SimSpec' by evaluating the given function under a fresh set
+-- of bound variables. The returned 'AssumptionSet' is set as the assumption
+-- in the resulting 'SimSpec'.
 withFreshVars ::
+  forall sym arch f.
   Scoped f =>
   PPa.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (W4.Pred sym, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym v, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
-  varsO <- freshSimVars @_ @PBi.Original blocks
-  varsP <- freshSimVars @_ @PBi.Patched blocks
-  (asm, result) <- f (fmapF boundVarsAsFree $ PPa.PatchPair varsO varsP)
-  return $ SimSpec (PPa.PatchPair varsO varsP) asm result
+  argNames <- lookupArgumentNames blocks
+  let
+    mkMem :: forall bin. PBi.WhichBinaryRepr bin -> EquivM sym arch (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))
+    mkMem bin = do
+      binCtx <- getBinCtx' bin
+      let baseMem = MBL.memoryImage $ PMC.binary binCtx
+      withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
--- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
--- The resulting predicate is the conjunction of the initial assumptions and
--- any produced by the given function.
-withAssumption' ::
+  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\v -> f v)
+
+-- | Evaluate the given function in an assumption context augmented with the given
+-- 'AssumptionSet'.
+withAssumptionSet ::
   HasCallStack =>
-  EquivM sym arch (W4.Pred sym) ->
-  EquivM sym arch (W4.Pred sym, f) ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumption' asmf f = withSym $ \sym -> do
-  asm <- asmf
-  frame <- CMR.asks envCurrentFrame
-  (asm', a) <- CMR.local (\env -> env { envCurrentFrame = frameAssume asm <> frame }) $ f
-  asm'' <- liftIO $ W4.andPred sym asm asm'
-  return (asm'', a)
+  AssumptionSet sym v ->
+  EquivM sym arch f ->
+  EquivM sym arch f
+withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
+  curAsm <- currentAsm
+  p <- liftIO $ getAssumedPred sym asm
+  CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
+    IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
+      W4.assume (WPO.solverConn sp) p
+      inIO f
 
--- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it. Return the given assumption along with the function result.
+-- | Evaluate the given function in an assumption context augmented with the given
+-- predicate.
 withAssumption ::
   HasCallStack =>
-  EquivM sym arch (W4.Pred sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumption asmf f =
-  withSym $ \sym -> withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
-
--- | Run the given function under the given assumption frame, and rebind the resulting
--- value according to any explicit bindings. The returned predicate is the conjunction of
--- the given assumption frame and the frame produced by the function.
-withAssumptionFrame' ::
-  forall sym arch f.
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
-  EquivM sym arch (AssumptionFrame sym, f) ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumptionFrame' asmf f = withSym $ \sym -> do
-  asmFrame <- asmf
-  envFrame <- CMR.asks envCurrentFrame
-  CMR.local (\env -> env { envCurrentFrame = asmFrame <> envFrame }) $ do
-    withAssumption' (liftIO $ getAssumedPred sym (asmFrame <> envFrame)) $ do
-      (frame', a) <- f
-      applyAssumptionFrame (asmFrame <> frame') a
-
-withEmptyAssumptionFrame ::
+  W4.Pred sym ->
   EquivM sym arch f ->
   EquivM sym arch f
-withEmptyAssumptionFrame f =
-  CMR.local (\env -> env { envCurrentFrame = mempty }) $ f
+withAssumption asm f = withAssumptionSet (frameAssume asm) f
 
-applyCurrentFrame ::
-  forall sym arch f.
-  PEM.ExprMappable sym f =>
-  f ->
-  EquivM sym arch f
-applyCurrentFrame f = snd <$> withAssumptionFrame (CMR.asks envCurrentFrame) (return f)
-
-applyAssumptionFrame ::
-  forall sym arch f.
-  PEM.ExprMappable sym f =>
-  AssumptionFrame sym ->
-  f ->
-  EquivM sym arch (W4.Pred sym, f)
-applyAssumptionFrame frame f = withSym $ \sym -> do
+-- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
+-- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
+applyCurrentAsms ::
+  forall sym arch (v :: VarScope) f.
+  PEM.ExprMappable sym (f v) =>
+  f v ->
+  EquivM sym arch (f v)
+applyCurrentAsms f = do
+  asm <- currentAsm
+  applyAssumptionSet asm f
+  
+-- | Rewrite the given 'f' with any bindings in the given 'AssumptionSet'.
+applyAssumptionSet ::
+  forall sym arch v f.
+  PEM.ExprMappable sym (f v) =>
+  AssumptionSet sym v ->
+  f v ->
+  EquivM sym arch (f v)
+applyAssumptionSet asm f = withSym $ \sym -> do
   cache <- liftIO freshVarBindCache
   let
     doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    doRebind = rebindWithFrame' sym cache frame
-  f' <- liftIO $ PEM.mapExpr sym doRebind f
-  p <- liftIO $ getAssumedPred sym frame
-  p' <- liftIO $ PEM.mapExpr sym doRebind p
-  return (p',f')
+    doRebind = rebindWithFrame' sym cache asm
+  liftIO $ PEM.mapExpr sym doRebind f
 
--- | Run the given function under the given assumption frame, and rebind the resulting
--- value according to any explicit bindings. The returned predicate is the conjunction
--- of all the assumptions in the given frame.
-withAssumptionFrame ::
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch (W4.Pred sym, f)
-withAssumptionFrame asmf f = withAssumptionFrame' asmf ((\a -> (mempty, a)) <$> f)
-
-withAssumptionFrame_ ::
-  PEM.ExprMappable sym f =>
-  EquivM sym arch (AssumptionFrame sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch f
-withAssumptionFrame_ asmf f = fmap snd $ withAssumptionFrame asmf f
-
--- | Compute and assume the given predicate, then execute the inner function in a frame that assumes it.
-withAssumption_ ::
-  HasCallStack =>
-  EquivM sym arch (W4.Pred sym) ->
-  EquivM sym arch f ->
-  EquivM sym arch f
-withAssumption_ asmf f =
-  withSym $ \sym -> fmap snd $ withAssumption' asmf ((\a -> (W4.truePred sym, a)) <$> f)
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
   PT.Timeout ->
-  EquivM sym arch (W4.Pred sym) ->
+  W4.Pred sym ->
   EquivM sym arch f ->
-  EquivM sym arch (Maybe (W4.Pred sym, f))
-withSatAssumption timeout asmf f = do
-  asm <- asmf
+  EquivM sym arch (Maybe f)
+withSatAssumption timeout asm f = do
   isPredSat timeout asm >>= \case
-    True ->  Just <$> (withAssumption (return asm) $ f)
+    True ->  Just <$> (withAssumption asm f)
     False -> return Nothing
 
 --------------------------------------
@@ -522,21 +493,14 @@ checkSatisfiableWithModel ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM sym arch a) ->
   EquivM sym arch (Either SomeException a)
-checkSatisfiableWithModel timeout _desc p k = withSymSolver $ \sym adapter -> do
-  envFrame <- CMR.asks envCurrentFrame
-  assumptions <- liftIO $ getAssumedPred sym envFrame
-  goal <- liftIO $ W4.andPred sym assumptions p
- -- handle <- liftIO $ IO.openFile "solver.out" IO.WriteMode
+checkSatisfiableWithModel timeout _desc p k = withSym $ \sym -> withSolverProcess $ \sp -> IO.withRunInIO $ \runInIO -> tryJust filterAsync $ WPO.inNewFrame sp $ do
+    W4.assume (WPO.solverConn sp) p
+    res <-  checkSatisfiableWithoutBindings timeout sym $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
+    res' <- W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
+    runInIO (k res')
 
-  -- Set up a wrapper around the ground evaluation function that removes some
-  -- unwanted terms and performs an equivalent substitution step to remove
-  -- unbound variables (consistent with the initial query)
-  let mkResult r = W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure r
-  IO.withRunInIO $ \runInIO -> do
-    tryJust filterAsync $ checkSatisfiableWithoutBindings timeout sym Nothing adapter goal (\r -> runInIO (mkResult r >>= (\x -> k x)))
-
--- | Check the satisfiability of a predicate, with the result (including model,
--- if applicable) available in the callback. This function implements all of the
+-- | Check the satisfiability of a predicate, returning with the result (including model,
+-- if applicable). This function implements all of the
 -- timeout logic. Note that it converts timeouts into 'W4R.Unknown' results.
 --
 -- Note that this can percolate up both async and synchronous exceptions. That
@@ -550,24 +514,16 @@ checkSatisfiableWithoutBindings
   :: (sym ~ WE.ExprBuilder t st fs)
   => PT.Timeout
   -> sym
-  -> Maybe IO.Handle
-  -> WSA.SolverAdapter st
-  -> WE.BoolExpr t
-  -> (W4R.SatResult (W4G.GroundEvalFn t) () -> IO a)
-  -> IO a
-checkSatisfiableWithoutBindings timeout sym mhandle adapter p k =
+  -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
+  -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
+checkSatisfiableWithoutBindings timeout _sym doCheckSat =
   case PT.timeoutAsMicros timeout of
     Nothing -> doCheckSat
     Just micros -> do
       mres <- PT.timeout micros doCheckSat
       case mres of
-        Nothing -> k W4R.Unknown
+        Nothing -> return W4R.Unknown
         Just r -> return r
-  where
-    doCheckSat = WSA.solver_adapter_check_sat adapter sym (WSA.defaultLogData { WSA.logHandle = mhandle }) [p] $ \sr -> case sr of
-         W4R.Unsat core -> k (W4R.Unsat core)
-         W4R.Unknown -> k W4R.Unknown
-         W4R.Sat (evalFn, _) -> k (W4R.Sat evalFn)
 
 -- | Returns True if the given predicate is satisfiable, and False otherwise
 --
@@ -596,20 +552,13 @@ isPredTrue' ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredTrue' timeout p = join $ isPredTruePar' timeout p
-
-isPredTruePar' ::
-  Par.IsFuture (EquivM_ sym arch) future =>
-  PT.Timeout ->
-  W4.Pred sym ->
-  EquivM sym arch (future Bool)
-isPredTruePar' timeout p = case W4.asConstantPred p of
-  Just b -> Par.present $ return b
+isPredTrue' timeout p = case W4.asConstantPred p of
+  Just b -> return b
   _ -> do
-    frame <- CMR.asks envCurrentFrame
+    frame <- currentAsm
     case isAssumedPred frame p of
-      True -> Par.present $ return True
-      False -> Par.promise $ do
+      True -> return True
+      False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
         -- Convert exceptions into False because we can't prove that it is true
         res <- checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)

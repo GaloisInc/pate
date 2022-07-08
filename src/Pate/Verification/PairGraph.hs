@@ -66,7 +66,6 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 
 import qualified Pate.Verification.Domain as PVD
-import qualified Pate.Verification.Validity as PVV
 
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
@@ -305,20 +304,14 @@ initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec node = withFreshVars blocks $ \vars ->
-    withAssumptionFrame (PVV.validInitState mBlocks (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)) $ initialDomain
-  where
-    -- We don't want to pass a 'PPa.BlockPair' to 'PVV.validInitState' for a return edge,
-    -- as this creates unwanted assertions about the final value of the instruction pointer.
-    mBlocks :: Maybe (PPa.BlockPair arch)
-    mBlocks = case node of
-      GraphNode b -> Just b
-      ReturnNode{} -> Nothing
-
-    blocks :: PPa.BlockPair arch
-    blocks = case node of
-      GraphNode b -> b
-      ReturnNode fPair -> TF.fmapF PB.functionEntryToConcreteBlock fPair
+initialDomainSpec (GraphNode blocks) = withFreshVars blocks $ \_vars -> do
+  dom <- initialDomain
+  return (mempty, dom)
+initialDomainSpec (ReturnNode fPair) =
+  let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair in
+    withFreshVars blocks $ \_vars -> do
+      dom <- initialDomain
+      return (mempty, dom)
 
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those

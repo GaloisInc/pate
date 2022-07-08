@@ -18,7 +18,6 @@ module Pate.Verification.Widening
 import           Control.Monad (when, forM_, unless, filterM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
-import           Control.Monad.Reader (asks)
 import           Control.Monad.Writer (tell, execWriterT)
 
 import           Prettyprinter
@@ -29,8 +28,6 @@ import qualified Data.Text as Text
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import qualified Data.Parameterized.TraversableF as TF
---import qualified Data.Parameterized.Context as Ctx
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -44,8 +41,6 @@ import qualified Lang.Crucible.Backend.Online as LCBO
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
-import qualified Pate.Block as PB
-import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.MemCell as PMc
@@ -59,14 +54,11 @@ import qualified Pate.Proof.Instances ()
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
 
-import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
-import qualified Pate.Solver as PS
 import qualified Pate.SimulatorRegisters as PSR
 
 import qualified Pate.Verification.Concretize as PVC
-import qualified Pate.Verification.Domain as PVD
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -77,22 +69,17 @@ import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 --   have (i.e., all values are equal) as it will only ever be
 --   weakend via widening.
 makeFreshAbstractDomain ::
-  forall sym t solver st fs v arch.
-  ( LCB.IsSymInterface sym
-  , sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
-  , PA.ValidArch arch ) =>
-  LCBO.OnlineBackend solver t st fs ->
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-makeFreshAbstractDomain bak bundle preDom from to = withSym $ \sym -> do
+makeFreshAbstractDomain bundle preDom from to = do
   dom <- case from of
     GraphNode{} -> do
       initDom <- initialDomain
-      vals <- liftIO $ getInitalAbsDomainVals bak bundle preDom
+      vals <- withOnlineBackend $ \bak ->
+        liftIO $ getInitalAbsDomainVals bak bundle preDom
       return $ initDom { PAD.absDomVals = vals }
     ReturnNode{} -> do
       initDom <- initialDomain
@@ -132,22 +119,21 @@ widenAlongEdge ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ \sym ->
+widenAlongEdge bundle from d gr to = withSym $ \sym ->
 
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
      do traceBundle bundle ("First jump to " ++ show to)
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
-
-        postSpec <- makeFreshAbstractDomain bak bundle d from to
+        postSpec <- makeFreshAbstractDomain bundle d from to
         -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
         -- below for where it's actually useful.
         (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-        withAssumption_ (return asm) $ do
-          md <- widenPostcondition bak bundle d d'
+        withAssumptionSet asm $ do
+          md <- widenPostcondition bundle d d'
           case md of
-            NoWideningRequired ->
+            NoWideningRequired -> 
               return (freshDomain gr to postSpec)
             WideningError msg _ d'' ->
               do let msg' = ("Error during widening: " ++ msg)
@@ -174,10 +160,9 @@ widenAlongEdge bundle from d gr to = withPredomain bundle d $ \bak -> withSym $ 
       -- values of the slice again. This is accomplised by 'abstractOverVars', which
       -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
       -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-      
       (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-      withAssumption_ (return asm) $ do
-        md <- widenPostcondition bak bundle d d'
+      withAssumptionSet asm $ do
+        md <- widenPostcondition bundle d d'
         case md of
           NoWideningRequired ->
             do traceBundle bundle "Did not need to widen"
@@ -209,7 +194,7 @@ abstractOverVars ::
   PAD.AbstractDomainSpec sym arch {- ^ previous post-domain -} ->
   PAD.AbstractDomain sym arch v {- ^ computed post-domain -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-abstractOverVars bundle from to postSpec postResult = PS.forSpec postSpec $ \_vars _body ->
+abstractOverVars _bundle _from _to postSpec postResult = PS.forSpec postSpec $ \_vars _body ->
   return $ PS.unsafeCoerceScope postResult
 
 -- | Classifying what kind of widening has occurred
@@ -247,69 +232,19 @@ tryWidenings (x:xs) =
 localWideningGas :: Gas
 localWideningGas = Gas 100
 
-
-
--- | Run a continuation in a fresh solver assumption frame, where the
--- given abstract domain is assumed to hold on the pre-state of the given
--- bundle.
--- Additionally, the 'AssumptionFrame' from the 'EquivM' environment is
--- collapsed into a predicate and assumed in this fresh solver frame.
---
--- TODO: this is a bit of a cludge - we should standardize how EquivM interacts
--- with the online solver process. 
-withPredomain ::
-  forall sym arch v a.
-  SimBundle sym arch v ->
-  AbstractDomain sym arch v ->
-  (forall scope st fs solver.
-       W4.OnlineSolver solver =>
-       (sym ~ W4.ExprBuilder scope st fs) =>
-       LCBO.OnlineBackend solver scope st fs ->
-       EquivM sym arch a) ->
-  EquivM sym arch a
-withPredomain bundle preD f = withSym $ \sym -> do
-  vcfg <- asks envConfig
-  asmFrame <- asks envCurrentFrame
-  eqCtx <- equivalenceContext
-
-  precond <- liftIO $ do
-    asm <- PS.getAssumedPred sym asmFrame
-    absDomPred <- PAD.absDomainToPrecond sym eqCtx bundle preD
-    W4.andPred sym asm absDomPred
-
-  let solver = PCfg.cfgSolver vcfg
-  let saveInteraction = PCfg.cfgSolverInteractionFile vcfg
-
-  PS.withOnlineSolver solver saveInteraction sym $ \bak ->
-    do IO.withRunInIO $ \inIO -> LCBO.withSolverProcess bak doPanic $ \sp ->
-         do W4.inNewFrame sp $ do
-              W4.assume (W4.solverConn sp) precond
-              inIO (f bak)
- where
-   doPanic = panic Solver "withPredomain" ["Online solving not enabled"]
-
-widenPostcondition :: forall sym arch solver t st fs bak v.
-  ( bak ~ LCBO.OnlineBackend solver t st fs
-  , sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
-  , LCB.IsSymBackend sym bak
-  ) =>
-  bak ->
+widenPostcondition ::
+  forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v {- ^ predomain -} ->
   AbstractDomain sym arch v {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch v)
-widenPostcondition bak bundle preD postD0 =
+widenPostcondition bundle preD postD0 =
   withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
     widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
-   doPanic = panic Solver "widenPostcondition" ["Online solving not enabled"]
-
-
-
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
    --
@@ -319,11 +254,6 @@ widenPostcondition bak bundle preD postD0 =
    -- in hand that we can use to decide how to widen the current post-domain and try again.
    -- `widenUsingCounterexample` uses a fixed list of heuristics to decide how to do the widening.
    widenLoop ::
-     ( bak ~ LCBO.OnlineBackend solver t st fs
-     , sym ~ W4.ExprBuilder t st fs
-     , W4.OnlineSolver solver
-     , LCB.IsSymBackend sym bak
-     , PA.ValidArch arch ) =>
      sym ->
      Gas ->
      EquivContext sym arch ->
@@ -334,9 +264,7 @@ widenPostcondition bak bundle preD postD0 =
      EquivM sym arch (WidenResult sym arch v)
 
    widenLoop sym (Gas i) eqCtx postD mPrevRes =
-     do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-        let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
-        let prevLocs = case mPrevRes of
+     do let prevLocs = case mPrevRes of
               Just (Widen _ locs _) -> locs
               _ -> mempty
         -- no rebinding necessary yet
@@ -348,32 +276,30 @@ widenPostcondition bak bundle preD postD0 =
         -- (see: https://github.com/GaloisInc/pate/issues/287), so we should revisit how to separate
         -- these checks at that point.
         eqPostPred <- liftIO $ PAD.absDomainToPostCond sym eqCtx bundle preD postDomBody
-        res <- IO.withRunInIO $ \inIO ->
-          liftIO $ LCBO.withSolverProcess bak doPanic $ \sp ->
-            W4.inNewFrame sp $
-            do let conn = W4.solverConn sp
+        res <- withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> W4.inNewFrame sp $ do
+          let conn = W4.solverConn sp
 
-               -- check if we already satisfy the equality condition
-               W4.assume conn =<< W4.notPred sym eqPostPred
+          -- check if we already satisfy the equality condition
+          W4.assume conn =<< W4.notPred sym eqPostPred
 
-               W4.checkAndGetModel sp "prove postcondition" >>= \case
-                 Unsat _ -> return NoWideningRequired
-                 Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
-                 Sat evalFn -> 
-                   if i <= 0 then inIO $
-                     -- we ran out of gas
-                     do slice <- PP.simBundleToSlice bundle
-                        ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice (SymGroundEvalFn evalFn)
-                        let msg = unlines [ "Ran out of gas performing local widenings"
-                                          , show (pretty ineqRes)
-                                          ]
-                        return $ WideningError msg prevLocs postD
-                   else
-                     -- The current execution does not satisfy the postcondition, and we have
-                     -- a counterexample.
-                     -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
-                     -- out still
-                     inIO (widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD)
+          W4.checkAndGetModel sp "prove postcondition" >>= \case
+            Unsat _ -> return NoWideningRequired
+            Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
+            Sat evalFn -> 
+              if i <= 0 then inIO $
+                -- we ran out of gas
+                do slice <- PP.simBundleToSlice bundle
+                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice (SymGroundEvalFn evalFn)
+                   let msg = unlines [ "Ran out of gas performing local widenings"
+                                     , show (pretty ineqRes)
+                                     ]
+                   return $ WideningError msg prevLocs postD
+              else
+                -- The current execution does not satisfy the postcondition, and we have
+                -- a counterexample.
+                -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
+                -- out still
+                inIO (widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --

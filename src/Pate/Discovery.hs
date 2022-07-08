@@ -77,7 +77,6 @@ import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
-import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSS
@@ -108,37 +107,36 @@ discoverPairs bundle = do
                    , compatibleTargets blkO blkP]
       blocks <- getBlocks $ PSS.simPair bundle
 
-      result <- Par.forMPar allCalls $ \(blktO, blktP) -> startTimer $ do
+      result <- forM allCalls $ \(blktO, blktP) -> startTimer $ do
         let emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
         matches <- matchesBlockTarget bundle blktO blktP
         check <- withSymIO $ \sym -> WI.andPred sym precond matches
         case WI.asConstantPred check of
           Just True -> do
             emit PE.Reachable
-            return $ Par.Immediate $ Just $ PPa.PatchPair blktO blktP
+            return $ Just $ PPa.PatchPair blktO blktP
           Just False -> do
             emit PE.Unreachable
-            return $ Par.Immediate $ Nothing
+            return $ Nothing
           _ ->  do
             goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-            Par.promise $ do
-              er <- checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
-                case satRes of
-                  WR.Sat _ -> do
-                    emit PE.Reachable
-                    return $ Just $ PPa.PatchPair blktO blktP
-                  WR.Unsat _ -> do
-                    emit PE.Unreachable
-                    return Nothing
-                  WR.Unknown -> do
-                    emit PE.InconclusiveTarget
-                    throwHere PEE.InconclusiveSAT
-              case er of
-                Left _err -> do
+            er <- checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
+              case satRes of
+                WR.Sat _ -> do
+                  emit PE.Reachable
+                  return $ Just $ PPa.PatchPair blktO blktP
+                WR.Unsat _ -> do
+                  emit PE.Unreachable
+                  return Nothing
+                WR.Unknown -> do
                   emit PE.InconclusiveTarget
                   throwHere PEE.InconclusiveSAT
-                Right r -> return r
-      joined <- fmap catMaybes $ Par.joinFuture result
+            case er of
+              Left _err -> do
+                emit PE.InconclusiveTarget
+                throwHere PEE.InconclusiveSAT
+              Right r -> return r
+      let joined = catMaybes result
       modifyBlockCache envExitPairsCache pPair (++) joined
       return joined
   where
@@ -168,7 +166,8 @@ isMatchingCall bundle = withSym $ \sym -> do
   isArch <- matchingExits bundle MCS.MacawBlockEndArch
   isExpectedExit <- liftIO $ WI.orPred sym isArch isCall
   goal <- liftIO $ WI.andPred sym eqIPs isExpectedExit
-  withAssumption_ (exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)) $
+  asm <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
+  withAssumption asm $
     isPredTrue' goalTimeout goal
   where
     ipO = (PSS.simOutRegs $ PSS.simOutO bundle) ^. MC.curIP

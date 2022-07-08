@@ -34,8 +34,11 @@ module Data.Parameterized.SetF
   , fromList
   , member
   , size
+  , filter
+  , lookupMin
   ) where
 
+import Prelude hiding (filter)
 import           Data.Parameterized.Classes
 
 import           Data.Set (Set)
@@ -84,3 +87,13 @@ member e (SetF es) = S.member (AsOrd e) es
 size ::
   SetF f tp -> Int
 size (SetF es) = S.size es
+
+
+filter ::
+  (f tp -> Bool) -> SetF f tp -> SetF f tp
+filter f (SetF es) = SetF $ S.filter (f . unAsOrd) es
+
+lookupMin ::
+  SetF f tp -> Maybe (f tp)
+lookupMin (SetF es) = fmap unAsOrd $ S.lookupMin es
+

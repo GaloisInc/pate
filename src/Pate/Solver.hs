@@ -105,8 +105,9 @@ type ValidSym sym =
 data Sym sym where
   Sym :: ( sym ~ WE.ExprBuilder scope st fs
          , ValidSym sym
+         , WPO.OnlineSolver solver
          )
       => PN.Nonce PN.GlobalNonceGenerator sym
       -> sym
-      -> WS.SolverAdapter st
+      -> CBO.OnlineBackend solver scope st fs
       -> Sym sym
