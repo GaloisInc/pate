@@ -31,6 +31,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Map as Map
 import           Data.Proxy
 import qualified Data.Text as Text
+import           Data.Functor.Const
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
@@ -39,7 +40,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4
-import qualified What4.Protocol.SMTWriter as W4
+import qualified What4.Protocol.SMTWriter as W4 hiding ( bvAdd )
 import           What4.SatResult (SatResult(..))
 
 import qualified Lang.Crucible.Backend as LCB
@@ -50,6 +51,7 @@ import qualified Lang.Crucible.Utils.MuxTree as MT
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
+import qualified Data.Macaw.AbsDomain.AbsState as MAS
 
 import qualified Pate.Abort as PAb
 import qualified Pate.Address as PAd
@@ -72,6 +74,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Register.Traversal as PRt
 
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
@@ -162,6 +165,49 @@ pairGraphComputeFixpoint gr =
           visitNode nd vars d gr'
       pairGraphComputeFixpoint gr''
 
+
+absValueToAsm ::
+  forall sym arch v bin tp.
+  PS.SimVars sym arch v bin ->
+  PSR.MacawRegEntry sym tp ->
+  MAS.AbsValue (MM.ArchAddrWidth arch) tp ->
+  EquivM sym arch (PS.AssumptionSet sym v)
+absValueToAsm vars regEntry val = withSym $ \sym -> case val of
+  -- FIXME: check the MemAddr here to make sure we only use
+  -- stack offsets from this frame
+  MAS.StackOffsetAbsVal _ slot -> do
+    CLM.LLVMPointer region off <- return $ PSR.macawRegValue regEntry
+    stackRegion <- asks (PMC.stackRegion . envCtx)
+    -- the region of this value must be the stack region
+    let bindRegion =
+          PS.exprBinding (W4.natToIntegerPure region) (W4.natToIntegerPure stackRegion)
+
+    let w = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
+    slotBV <- liftIO $ W4.bvLit sym w (BV.mkBV w (fromIntegral slot))
+    let sb = PS.stackBase $ PS.simStackBase $ PS.simVarState vars
+    off' <- liftIO $ W4.bvAdd sym sb slotBV
+    -- the offset of this value must be frame + slot
+    let bindOffSet = PS.exprBinding off off'
+    return $ bindRegion <> bindOffSet
+  _ -> return $ mempty
+
+
+validAbsValues ::
+  forall sym arch v.
+  PPa.BlockPair arch ->
+  PPa.PatchPair (PS.SimVars sym arch v) ->
+  EquivM sym arch (PS.AssumptionSet sym v)
+validAbsValues blocks vars = do
+  (asmO, asmP) <- PPa.forBinsC $ \get -> do
+    absBlockState <- PD.getAbsDomain (get blocks)
+    let
+      absRegs = absBlockState ^. MAS.absRegState
+      var = get vars
+      regs = PS.simRegs $ PS.simVarState var
+    fmap PRt.collapse $ PRt.zipWithRegStatesM regs absRegs $ \_ re av ->
+      Const <$> absValueToAsm var re av
+  return (asmO <> asmP)
+
 -- | Perform the work of propagating abstract domain information through
 --   a single program "slice". First we check for equivalence of observables,
 --   then we check the totality of the computed exits, then we update any
@@ -182,7 +228,8 @@ visitNode :: forall sym arch v.
 
 visitNode (GraphNode bPair) vars d gr0 = withPair bPair $ do
   validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
-  withAssumptionSet validInit $
+  validAbs <- validAbsValues bPair  vars
+  withAssumptionSet (validInit <> validAbs) $
     do -- do the symbolic simulation
        bundle <- mkSimBundle bPair vars d
      

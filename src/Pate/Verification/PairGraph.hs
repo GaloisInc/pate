@@ -300,18 +300,21 @@ reportAnalysisErrors logAction gr =
 initialDomain :: EquivM sym arch (PAD.AbstractDomain sym arch v)
 initialDomain = withSym $ \sym -> return $ PAD.AbstractDomain (PVD.universalDomain sym) (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)
 
+
+
+
 initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 initialDomainSpec (GraphNode blocks) = withFreshVars blocks $ \_vars -> do
-  dom <- initialDomain
+  dom <- initialDomain 
   return (mempty, dom)
-initialDomainSpec (ReturnNode fPair) =
-  let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair in
-    withFreshVars blocks $ \_vars -> do
-      dom <- initialDomain
-      return (mempty, dom)
+initialDomainSpec (ReturnNode fPair) = do
+  let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
+  withFreshVars blocks $ \_vars -> do
+    dom <- initialDomain
+    return (mempty, dom)
 
 -- | Given a list of top-level function entry points to analyse,
 --   initialize a pair graph with default abstract domains for those

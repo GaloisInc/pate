@@ -255,8 +255,13 @@ simulate simInput = withBinary @bin $ do
   globals <- getGlobals simInput
   cres <- evalCFG globals regs cfg
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
+  -- we assume that the stack base is not modified during a single slice
+  -- (even when the result is a function call)
+  -- instead, we model changes to the stack frame when constructing the
+  -- PairGraph during verification
+  let postStackBase = PS.simStackBase $ PS.simInState simInput
 
-  return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs) exitClass)
+  return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs postStackBase) exitClass)
 
 
 data SliceBodyInfo arch ids =

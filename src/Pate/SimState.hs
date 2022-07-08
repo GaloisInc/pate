@@ -33,6 +33,7 @@ Functionality for handling the inputs and outputs of crucible.
 module Pate.SimState
   ( -- simulator state
     SimState(..)
+  , StackBase(..)
   , SimInput(..)
   , SimOutput(..)
   , type VarScope
@@ -106,12 +107,17 @@ import qualified Data.Parameterized.SetF as SetF
 ------------------------------------
 -- Crucible inputs and outputs
 
-
+-- | Points to the base of the stack. In any given context this will always be
+-- "free" as the base of the stack is always abstract, but it is rebound to account
+-- for changes to the stack pointer when moving between scopes.
+data StackBase sym arch (v :: VarScope) bin =
+  StackBase { stackBase :: W4.SymExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) }
 
 data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
     simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
+  , simStackBase :: StackBase sym arch v bin
   }
 
 data SimInput sym arch v bin = SimInput
@@ -368,14 +374,17 @@ freshSimSpec ::
   (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
   -- | This must be a fresh MemTrace
   (forall bin. PBi.WhichBinaryRepr bin -> m (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))) ->
+  -- | Fresh stack base
+  (forall bin v. PBi.WhichBinaryRepr bin -> m (StackBase sym arch v bin)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
   (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym v, (f v))) ->
   m (SimSpec sym arch f)
-freshSimSpec mkReg mkMem mkBody = do
+freshSimSpec mkReg mkMem mkStackBase mkBody = do
   vars <- PPa.forBins' $ \bin -> do
     regs <- MM.mkRegStateM (mkReg bin)
     mem <- mkMem bin
-    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
+    sb <- mkStackBase bin
+    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb)
   (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
   return $ SimSpec vars asm body
 
@@ -475,13 +484,15 @@ data SimVars sym arch v bin = SimVars
     simVarState :: SimState sym arch v bin
   }
 
+
+
 -- | Project out the initial values for the variables in 'SimBoundVars'.
 -- This is roughly analagous to converting a What4 bound variable into an expression.
 boundVarsAsFree :: SimBoundVars sym arch v bin -> SimVars sym arch v bin
 boundVarsAsFree bv = SimVars (simBoundVarState bv)
 
 mkVarBinds ::
-  forall sym arch v bin.
+  forall sym arch v v' bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   W4.IsExprBuilder sym =>
@@ -490,11 +501,14 @@ mkVarBinds ::
   SimBoundVars sym arch v bin ->
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
+  StackBase sym arch v' bin ->
   IO (ExprBindings sym)
-mkVarBinds sym simVars mem regs = do
+mkVarBinds sym simVars mem regs sb = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
+    stackVar = simStackBase $ simBoundVarState simVars
+    stackBinds = MapF.singleton (stackBase stackVar) (stackBase sb)
     regBinds =
       MapF.toList $
       MM.regStateMap $
@@ -511,7 +525,9 @@ mkVarBinds sym simVars mem regs = do
         return [Pair var (PSR.macawRegValue val)]
       CT.StructRepr Ctx.Empty -> return []
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
-  mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
+
+  binds <- mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
+  mergeBindings sym stackBinds binds
 
 bindSpec ::
   forall sym arch s st fs f v.
@@ -526,7 +542,7 @@ bindSpec ::
 bindSpec sym vals spec = do
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> viewSpecVars spec $ \vars -> do
     let st = simVarState $ get vals
-    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st)
+    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
   binds <- mergeBindings sym bindsO bindsP
   cache <- freshVarBindCache
   let doRewrite = applyExprBindings' sym cache binds
@@ -537,10 +553,14 @@ bindSpec sym vals spec = do
 ------------------------------------
 -- ExprMappable instances
 
+instance PEM.ExprMappable sym (StackBase sym arch v bin) where
+  mapExpr _sym f (StackBase sb) = StackBase <$> f sb
+
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs) = SimState
+  mapExpr sym f (SimState mem regs sb) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
+    <*> PEM.mapExpr sym f sb
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk) = SimInput

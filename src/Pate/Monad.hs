@@ -408,7 +408,11 @@ withFreshVars blocks f = do
       let baseMem = MBL.memoryImage $ PMC.binary binCtx
       withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
-  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\v -> f v)
+    mkStackBase :: forall bin v. EquivM sym arch (StackBase sym arch v bin)
+    mkStackBase = withSymIO $ \sym -> StackBase <$>
+      W4.freshConstant sym (WS.safeSymbol "frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+      
+  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
