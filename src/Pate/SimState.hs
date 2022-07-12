@@ -26,7 +26,7 @@ Functionality for handling the inputs and outputs of crucible.
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ImplicitParams #-}
-
+{-# LANGUAGE QuantifiedConstraints #-}
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -566,23 +566,30 @@ data ExprRewrite sym (v :: VarScope) (v' :: VarScope)
 data ScopedExpr sym tp (v :: VarScope) =
   ScopedExpr { unSE :: (W4.SymExpr sym tp) }
 
-instance PEM.ExprMappable sym (ScopedExpr sym tp v) where
-  mapExpr _sym f (ScopedExpr e) = ScopedExpr <$> f e
-
-instance Scoped (ScopedExpr sym tp) where
-  unsafeCoerceScope (ScopedExpr e) = ScopedExpr e
-
--- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable' (see 'liftScope', 'unSE', 'concreteScope', and 'applyExprRewrite' for manipulating 'ScopedExpr' values).
+-- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
+-- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
+-- the user to produce an expression that is scoped to 'v2'.
 scopedExprMap ::
   Scoped f =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
-  PEM.ExprMappable sym (f v) =>
+  PEM.ExprMappable sym (f v1) =>
   sym ->
-  f v ->
-  (forall tp. ScopedExpr sym tp v -> m (ScopedExpr sym tp v')) ->
-  m (f v')
+  f v1 ->
+  (forall tp. ScopedExpr sym tp v1 -> m (ScopedExpr sym tp v2)) ->
+  m (f v2)
 scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
+
+-- | Apply an 'ExprRewrite' to a 'ScopedExpr', rebinding its value
+-- and changing its scope.
+applyExprRewrite ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  ExprRewrite sym v v' ->
+  ScopedExpr sym tp v ->
+  IO (ScopedExpr sym tp v')
+applyExprRewrite sym (ExprRewrite cache binds) (ScopedExpr e) =
+  ScopedExpr <$> applyExprBindings' sym cache binds e
 
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
 -- incidentally include bound variables from other scopes)
@@ -614,14 +621,20 @@ concreteScope ::
   IO (ScopedExpr sym tp v)
 concreteScope sym c = liftScope0 sym (\sym' -> W4.concreteToSym sym' c)
 
+-- | Produce an 'ExprRewrite' that binds the terms in the given 'SimVars'
+-- to the bound variables in 'SimScope'.
+-- This rewrite is scope-modifying, because we will necessarily rewrite any
+-- of the bound variables from the original scope 'v1'.
+-- The given 'SimVars' may be arbitrary expressions, but necessarily
+-- in the scope 'v2'.
 getExprRewrite ::
-  forall v v' sym arch s st fs.
+  forall v1 v2 sym arch s st fs.
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
-  SimScope sym arch v ->
-  PPa.PatchPair (SimVars sym arch v') ->
-  IO (ExprRewrite sym v v')
+  SimScope sym arch v1 ->
+  PPa.PatchPair (SimVars sym arch v2) ->
+  IO (ExprRewrite sym v1 v2)
 getExprRewrite sym scope vals = do
   let vars = scopeBoundVars scope
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
@@ -629,25 +642,10 @@ getExprRewrite sym scope vals = do
     mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
   ExprRewrite <$> freshVarBindCache <*> mergeBindings sym bindsO bindsP
 
-applyExprRewrite ::
-  Scoped f =>
-  PEM.ExprMappable sym (f v') =>
-  OrdF (W4.SymExpr sym) =>
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  ExprRewrite sym v v' ->
-  f v ->
-  IO (f v')
-applyExprRewrite sym (ExprRewrite cache binds) body = do
-  let doRewrite = applyExprBindings' sym cache binds
-  PEM.mapExpr sym doRewrite (unsafeCoerceScope body)
-
-
-
 bindSpec ::
   forall sym arch s st fs f v.
   Scoped f =>
-  PEM.ExprMappable sym (f v) =>
+  (forall v'. PEM.ExprMappable sym (f v')) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
@@ -656,18 +654,22 @@ bindSpec ::
   IO (AssumptionSet sym v, f v)
 bindSpec sym vals (SimSpec scope@(SimScope _ asm) body) = do
   rew <- getExprRewrite sym scope vals
-  body' <- applyExprRewrite sym rew body
-  asm' <- applyExprRewrite sym rew asm
+  body' <- scopedExprMap sym body (applyExprRewrite sym rew)
+  asm' <- scopedExprMap sym asm (applyExprRewrite sym rew)
   return $ (asm', body')
 
 ------------------------------------
 -- ExprMappable instances
 
+-- TODO: in general we should restrict these to be scope-preserving,
+-- since allowing arbitrary modifications can violate the scoping
+-- assumptions
+
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs sb) = SimState
+  mapExpr sym f (SimState mem regs (ScopedExpr sb)) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
-    <*> PEM.mapExpr sym f sb
+    <*> (ScopedExpr <$> f sb)
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk absSt) = SimInput
