@@ -59,6 +59,7 @@ module Pate.Monad
   , withSimSpec
   , withFreshVars
   -- assumption management
+  , validateAssumptions
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
@@ -427,12 +428,16 @@ withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
   CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
     IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
       W4.assume (WPO.solverConn sp) p
-      curAsm' <- inIO $ currentAsm
-      WPO.checkAndGetModel sp "withAssumptionSet check assumptions" >>= \case
-        W4R.Unsat _ -> inIO $ throwHere $ PEE.AssumedFalse curAsm'
-        W4R.Unknown -> inIO $ throwHere $ PEE.AssumedFalse curAsm'
-        W4R.Sat{} -> return ()
+      inIO $ validateAssumptions
       inIO f
+
+validateAssumptions ::
+  HasCallStack => EquivM sym arch ()
+validateAssumptions = withSolverProcess $ \sp -> IO.withRunInIO $ \inIO ->
+  WPO.checkAndGetModel sp "check assumptions" >>= \case
+    W4R.Unsat _ -> inIO (currentAsm >>= \a -> throwHere $ PEE.AssumedFalse a)
+    W4R.Unknown -> inIO (currentAsm >>= \a -> throwHere $ PEE.AssumedFalse a)
+    W4R.Sat{} -> return ()
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.

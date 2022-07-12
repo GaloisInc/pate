@@ -188,9 +188,7 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
     off' <- liftIO $ W4.bvAdd sym sb slotBV
     -- the offset of this value must be frame + slot
     let bindOffSet = PS.exprBinding off off'
-    let (result :: PS.AssumptionSet sym v) = bindRegion <> bindOffSet
-    return bindOffSet
-    -- return $ bindRegion <> bindOffSet
+    return $ bindRegion <> bindOffSet
   _ -> return $ mempty
 
 
@@ -324,7 +322,7 @@ withPredomain ::
 withPredomain bundle preD f = withSym $ \sym -> do
   eqCtx <- equivalenceContext
   precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
-  withAssumption precond $ f
+  withAssumptionSet precond $ f
 
 data ObservableCheckResult sym ptrW
   = ObservableCheckEq

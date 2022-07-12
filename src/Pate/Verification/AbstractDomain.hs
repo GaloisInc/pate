@@ -441,7 +441,7 @@ absDomainValsToAsm sym st absBlockSt vals = do
   memFrame <- MapF.foldrMWithKey accumulateCell mempty (absMemVals vals)
   regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \r val absVal -> do
     mAbsVal <- case absBlockSt of
-      Just st -> return $ Just ((st ^. MAS.absRegState) ^. (MM.boundValue r))
+      Just ast -> return $ Just ((ast ^. MAS.absRegState) ^. (MM.boundValue r))
       Nothing -> return Nothing
     Const <$> absDomainValToAsm sym (Proxy @arch) val mAbsVal absVal
   return $ memFrame <> regFrame
@@ -487,16 +487,16 @@ absDomainToPrecond ::
   PE.EquivContext sym arch ->
   PS.SimBundle sym arch v ->
   AbstractDomain sym arch v ->
-  IO (W4.Pred sym)
+  IO (PS.AssumptionSet sym v)
 absDomainToPrecond sym eqCtx bundle d = do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
-  eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
+  eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
   valsPred <- do
     (predO, predP) <- PPa.forBinsC $ \get -> do
       let absBlockState = PS.simInAbsState (get $ PS.simIn bundle)
-      absDomainValsToPred sym (PS.simInState $ get $ PS.simIn bundle) (Just absBlockState) (get $ absDomVals d)
-    W4.andPred sym predO predP
-  W4.andPred sym eqInputsPred valsPred
+      absDomainValsToAsm sym (PS.simInState $ get $ PS.simIn bundle) (Just absBlockState) (get $ absDomVals d)
+    return $ (predO <> predP)
+  return $ (eqInputsPred <> valsPred)
 
 -- | Construct a 'W4.Pred' asserting that the given
 -- abstract domain holds in the post-state of the given
