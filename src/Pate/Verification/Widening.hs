@@ -223,58 +223,55 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
     -- out the bound variables
     v_to_v' <- liftIO $ PS.getExprRewrite sym scope_v postVars
     let
-      tryConst :: forall tp. PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
-      tryConst se = do
-        Just c <- lift $ withOnlineBackend $ \bak -> liftIO $
-          W4.asConcrete <$> PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE se)
-        liftIO $ PS.concreteScope @v' sym c
-
-      tryStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
-      tryStackOffset bin se = do
-        -- se[v]
-        -- se' := se[v/v']
-        se' <- liftIO $ PS.applyExprRewrite sym v_to_v' se
-        -- e'' := se'[v'/f(v)]
-        e'' <- fmap PS.unSE $ liftIO $ PS.applyExprRewrite sym v'_to_v se'
-        -- se is the original value, and e'' is the value rewritten
-        -- to be phrased over the post-state
-        let w' = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
-        W4.BaseBVRepr w <- return $ W4.exprType e''
-        Just Refl <- return $ testEquality w w'
-        let postFrame = PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
-        off <- liftIO $ PS.liftScope0 sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
-        asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
-        asFrameOffset' <- liftIO $ PS.applyExprRewrite sym v'_to_v asFrameOffset
-        asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
+      asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym tp v1 -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v2)
+      asScopedConst asm se = do
         Just c <- lift $ withOnlineBackend $ \bak -> withSolverProcess $ \sp ->
-               liftIO $ W4.inNewFrame sp $ do
-                 W4.assume (W4.solverConn sp) (PS.unSE asm)
-                 W4.asConcrete <$>
-                   PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE off)
-        sc <- liftIO $ PS.concreteScope @v' sym c
-        -- se'' := se[v/v'] + x
-        liftIO $ PS.liftScope2 sym W4.bvAdd postFrame sc
+          liftIO $ W4.inNewFrame sp $ do
+            W4.assume (W4.solverConn sp) asm
+            W4.asConcrete <$>
+              PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE se)
+        liftIO $ PS.concreteScope @v2 sym c
 
-      trySimpleAssign :: forall tp. PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
-      trySimpleAssign se = do
+      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
+      asStackOffset bin se = do
+        W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
+        Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
+
+        -- se[v]
+        let postFrame = PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+        off <- liftIO $ PS.liftScope0 @v' sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
+        -- asFrameOffset := frame[v'] + off
+        asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
+        -- asFrameOffset' := frame[v'/f(v)] + off
+        asFrameOffset' <- liftIO $ PS.applyExprRewrite sym v'_to_v asFrameOffset
+        -- asm := se == frame[v'/f(v)] + off
+        asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
+        -- assuming 'asm', is 'off' constant?
+        off' <- asScopedConst (PS.unSE asm) off
+        lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
+        -- return frame[v'] + off
+        liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
+
+      asSimpleAssign :: forall tp. PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
+      asSimpleAssign se = do
         -- se[v]
         -- se' := se[v/v']
         se' <- liftIO $ PS.applyExprRewrite sym v_to_v' se
-        -- e'' := se'[v'/f(v)]
-        e'' <- fmap PS.unSE $ liftIO $ PS.applyExprRewrite sym v'_to_v se'
+        -- e'' := se[v/f(v)]
+        e'' <- liftIO $ PS.applyExprRewrite sym v'_to_v se'
         -- se is the original value, and e'' is the value rewritten
         -- to be phrased over the post-state
         heuristicTimeout <- lift $ CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-        asm <- liftIO $ W4.isEq sym (PS.unSE se') e''
-        True <- lift $ isPredTrue' heuristicTimeout asm
+        asm <- liftIO $ PS.liftScope2 sym W4.isEq se e''
+        True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
         return se'
 
     PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym tp v) -> do
       mres <- runMaybeT $
-        tryConst se
-        <|> tryStackOffset PBi.OriginalRepr se
-        <|> tryStackOffset PBi.PatchedRepr se
-        <|> trySimpleAssign se
+            asScopedConst (W4.truePred sym) se
+        <|> asStackOffset PBi.OriginalRepr se
+        <|> asStackOffset PBi.PatchedRepr se
+        <|> asSimpleAssign se
       case mres of
         Just se' -> return se'
         -- FIXME: add graceful failure mode

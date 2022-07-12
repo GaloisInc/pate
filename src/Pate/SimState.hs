@@ -654,6 +654,7 @@ liftScope2 sym f (ScopedExpr e1) (ScopedExpr e2) = ScopedExpr <$> f sym e1 e2
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
 -- incidentally include bound variables from other scopes)
 liftScope0 ::
+  forall v sym tp.
   W4.IsSymExprBuilder sym =>
   sym ->
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> IO (W4.SymExpr sym' tp)) ->
