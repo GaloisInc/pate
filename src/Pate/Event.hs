@@ -30,6 +30,7 @@ import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.SimState as PS
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE

@@ -19,6 +19,7 @@ import           Control.Monad (when, forM_, unless, filterM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Writer (tell, execWriterT)
+import qualified Control.Monad.Reader as CMR
 
 import           Prettyprinter
 
@@ -32,7 +33,7 @@ import           Data.Parameterized.Some
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
 import qualified What4.Protocol.Online as W4
-import qualified What4.Protocol.SMTWriter as W4
+import qualified What4.Protocol.SMTWriter as W4 hiding (bvAdd)
 import           What4.SatResult (SatResult(..))
 
 import qualified Lang.Crucible.Backend as LCB
@@ -57,7 +58,9 @@ import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Config as PC
 
+import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.Concretize as PVC
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
@@ -69,12 +72,13 @@ import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 --   have (i.e., all values are equal) as it will only ever be
 --   weakend via widening.
 makeFreshAbstractDomain ::
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-makeFreshAbstractDomain bundle preDom from to = do
+makeFreshAbstractDomain scope bundle preDom from to = do
   dom <- case from of
     GraphNode{} -> do
       initDom <- initialDomain
@@ -88,7 +92,7 @@ makeFreshAbstractDomain bundle preDom from to = do
       -- will still hold
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
   postSpec <- initialDomainSpec to
-  abstractOverVars bundle from to postSpec dom
+  abstractOverVars scope bundle from to postSpec dom
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -113,20 +117,21 @@ makeFreshAbstractDomain bundle preDom from to = do
 --   If, for some reason, we cannot find appropraite locations to widen, we
 --   widen as much as we can, and report an error.
 widenAlongEdge ::
+  PS.SimScope sym arch v ->
   SimBundle sym arch v {- ^ results of symbolic execution for this block -} ->
   GraphNode arch {- ^ source node -} ->
   AbstractDomain sym arch v {- ^ source abstract domain -} ->
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge bundle from d gr to = withSym $ \sym ->
+widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
      do traceBundle bundle ("First jump to " ++ show to)
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
-        postSpec <- makeFreshAbstractDomain bundle d from to
+        postSpec <- makeFreshAbstractDomain scope bundle d from to
         -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
         -- below for where it's actually useful.
         (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
@@ -138,10 +143,10 @@ widenAlongEdge bundle from d gr to = withSym $ \sym ->
             WideningError msg _ d'' ->
               do let msg' = ("Error during widening: " ++ msg)
                  traceBundle bundle msg'
-                 postSpec' <- abstractOverVars bundle from to postSpec d''
+                 postSpec' <- abstractOverVars scope bundle from to postSpec d''
                  return $ recordMiscAnalysisError (freshDomain gr to postSpec') to (Text.pack msg')
             Widen _ _ d'' -> do
-              postSpec' <- abstractOverVars bundle from to postSpec d''
+              postSpec' <- abstractOverVars scope bundle from to postSpec d''
               return (freshDomain gr to postSpec')
 
     -- have visited this location at least once before
@@ -171,7 +176,7 @@ widenAlongEdge bundle from d gr to = withSym $ \sym ->
           WideningError msg _ d'' ->
             do let msg' = ("Error during widening: " ++ msg)
                traceBundle bundle msg'
-               postSpec' <- abstractOverVars bundle from to postSpec d''
+               postSpec' <- abstractOverVars scope bundle from to postSpec d''
                case updateDomain gr from to postSpec' of
                  Left gr' ->
                    do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
@@ -179,23 +184,95 @@ widenAlongEdge bundle from d gr to = withSym $ \sym ->
                  Right gr' -> return $ recordMiscAnalysisError gr' to (Text.pack msg')
 
           Widen _ _ d'' -> do
-            postSpec' <- abstractOverVars bundle from to postSpec d''
+            postSpec' <- abstractOverVars scope bundle from to postSpec d''
             case updateDomain gr from to postSpec' of
               Left gr' ->
                 do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
                    return gr'
               Right gr' -> return gr'
 
--- TODO: implement this to actually properly perform the scope transformation
+
 abstractOverVars ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   PAD.AbstractDomainSpec sym arch {- ^ previous post-domain -} ->
   PAD.AbstractDomain sym arch v {- ^ computed post-domain -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-abstractOverVars _bundle _from _to postSpec postResult = PS.forSpec postSpec $ \_vars _body ->
-  return $ PS.unsafeCoerceScope postResult
+abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -> do
+  -- the post-state of the slice phrased over 'v'
+  let outVars = PS.bundleOutVars bundle
+
+  PS.forSpec postSpec $ \(scope_v' :: PS.SimScope sym arch v') _body -> do
+    -- the variables representing the post-state (i.e. the target scope)
+    let postVars = PS.scopeVars scope_v'
+
+    validPost <- PVV.validInitState Nothing (PS.simVarState $ PPa.pOriginal postVars) (PS.simVarState $ PPa.pPatched postVars)
+
+    -- rewrite v'-scoped terms into v-scoped terms that represent
+    -- the result of symbolic execution (i.e. formally stating that
+    -- the initial bound variables of v' are equal to the results
+    -- of symbolic execution)
+    v'_to_v <- liftIO $ PS.getExprRewrite sym scope_v' outVars
+
+    -- Rewrite a v-scoped term to a v'-scoped term by simply swapping
+    -- out the bound variables
+    v_to_v' <- liftIO $ PS.getExprRewrite sym scope_v postVars
+
+    withAssumptionSet validPost $ PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym tp v) ->  do
+      mc <- withOnlineBackend $ \bak ->
+        liftIO $ PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE se)
+      case W4.asConcrete mc of
+        Just c -> liftIO $ PS.concreteScope @v' sym c
+        Nothing -> do
+          -- se[v]
+          -- se' := se[v/v']
+          se' <- liftIO $ PS.applyExprRewrite sym v_to_v' se
+          -- se'' := se'[v'/f(v)]
+          e'' <- fmap PS.unSE $ liftIO $ PS.applyExprRewrite sym v'_to_v se'
+          -- now se is the original value, and e'' is the value rewritten
+          -- to be phrased over the post-state
+          let w' = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
+          case W4.exprType e'' of
+            W4.BaseBVRepr w | Just Refl <- testEquality w w' -> do
+              let postFrameO = PS.simStackBase $ PS.simVarState $ PPa.pOriginal postVars
+
+              off <- liftIO $ PS.liftScope0 sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
+
+              asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrameO off
+              asFrameOffset' <- liftIO $ PS.applyExprRewrite sym v'_to_v asFrameOffset
+              asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
+
+              withOnlineBackend $ \bak -> do
+                c <- withSolverProcess $ \sp -> liftIO $ W4.inNewFrame sp $ do
+                  W4.assume (W4.solverConn sp) (PS.unSE asm)
+                  PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE off)
+                case W4.asConcrete c of
+                  Just c' -> liftIO $ do
+                    sc <- PS.concreteScope @v' sym c'
+                    -- se'' := se[v/v'] + x
+                    PS.liftScope2 sym W4.bvAdd postFrameO sc
+                  Nothing -> fail $ "Unable to rescope: result not constant:\n"
+                   ++ "asm: "
+                   ++ show (W4.printSymExpr (PS.unSE asm))
+                   ++ "\n"
+                   ++ show (W4.printSymExpr c)
+            _ -> do
+              heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+              asm <- liftIO $ W4.isEq sym (PS.unSE se') e''
+              isPredTrue' heuristicTimeout asm >>= \case
+                True -> return se'
+                False -> do
+                  fail $ "Unable to rescope::\n"
+                    ++ "asm: "
+                    ++ show (W4.printSymExpr asm)
+                    ++ show (W4.printSymExpr (PS.unSE se))
+                    ++ "****"
+                    ++ show (W4.printSymExpr (PS.unSE se'))
+                    ++ "****"
+                    ++ show (W4.printSymExpr e'')
 
 -- | Classifying what kind of widening has occurred
 data WidenKind =

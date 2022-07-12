@@ -27,6 +27,7 @@ import qualified Pate.Arch as PAr
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.PatchPair as PPa
+import qualified Pate.SimState as PS
 
 data InequivalenceReason =
     InequivalentRegisters
@@ -57,7 +58,7 @@ data InnerEquivalenceError arch
   | MissingPatchPairResult (PPa.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
-  | AssumedFalse
+  | forall sym v. AssumedFalse (PS.AssumptionSet sym v)
   | BlockExitMismatch
   | InvalidSMTModel
   | MismatchedAssumptionsPanic

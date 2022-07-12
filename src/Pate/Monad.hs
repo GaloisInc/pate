@@ -408,10 +408,10 @@ withFreshVars blocks f = do
       let baseMem = MBL.memoryImage $ PMC.binary binCtx
       withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
-    mkStackBase :: forall bin v. EquivM sym arch (StackBase sym arch v bin)
-    mkStackBase = withSymIO $ \sym -> StackBase <$>
-      W4.freshConstant sym (WS.safeSymbol "frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
-      
+    mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
+    mkStackBase = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
+      W4.freshConstant sym' (WS.safeSymbol "frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
 
 -- | Evaluate the given function in an assumption context augmented with the given
@@ -427,6 +427,11 @@ withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
   CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
     IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
       W4.assume (WPO.solverConn sp) p
+      curAsm' <- inIO $ currentAsm
+      WPO.checkAndGetModel sp "withAssumptionSet check assumptions" >>= \case
+        W4R.Unsat _ -> inIO $ throwHere $ PEE.AssumedFalse curAsm'
+        W4R.Unknown -> inIO $ throwHere $ PEE.AssumedFalse curAsm'
+        W4R.Sat{} -> return ()
       inIO f
 
 -- | Evaluate the given function in an assumption context augmented with the given
