@@ -96,6 +96,8 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Map ( Pair(..) )
 import qualified Data.Parameterized.TraversableF as TF
+import           Data.Functor.Const
+import           Data.List ( find )
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
@@ -115,6 +117,7 @@ import qualified Pate.Block as PB
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import qualified Data.Parameterized.SetF as SetF
@@ -529,37 +532,82 @@ mkVarBinds ::
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   StackBase sym arch v' ->
-  IO (ExprBindings sym)
+  IO (ExprRewrite sym v v')
 mkVarBinds sym simVars mem regs sb = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
     stackVar = simStackBase $ simBoundVarState simVars
-    stackBinds = MapF.singleton (unSE stackVar) (unSE sb)
-    regBinds =
-      MapF.toList $
-      MM.regStateMap $
-      MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
-  regVarBinds <- fmap concat $ forM regBinds $ \(MapF.Pair _ (PSR.MacawRegVar val vars)) -> do
+    stackBinds = singleRewrite' (unSE stackVar) (unSE sb)
+    
+    regBinds = MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
+  regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
     case PSR.macawRegRepr val of
       CLM.LLVMPointerRepr{} -> do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
         iRegion <- W4.natToInteger sym region
-        return $ [Pair regVar iRegion, Pair offVar off]
+        return $ Const $ singleRewrite' regVar iRegion <> singleRewrite' offVar off
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars
-        return [Pair var (PSR.macawRegValue val)]
-      CT.StructRepr Ctx.Empty -> return []
+        return $ Const $ singleRewrite' var (PSR.macawRegValue val)
+      CT.StructRepr Ctx.Empty -> return $ Const mempty
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
 
-  binds <- mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
-  mergeBindings sym stackBinds binds
+  return $ (fromBindings (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds
+
+newtype ExprList sym tp = ExprList [W4.SymExpr sym tp]
+  deriving (Monoid, Semigroup)
 
 -- | Wrapped expression bindings that convert expressions from one
 -- scope to another
-data ExprRewrite sym (v :: VarScope) (v' :: VarScope)
-   = ExprRewrite (VarBindCache sym) (ExprBindings sym)
+data ExprRewrite sym (v :: VarScope) (v' :: VarScope) = 
+      ExprRewrite (Maybe (VarBindCache sym)) (MapF.MapF (W4.SymExpr sym) (ExprList sym))
+ 
+instance OrdF (W4.SymExpr sym) => Semigroup (ExprRewrite sym v v') where
+  rew1 <> rew2 = case (rew1, rew2) of
+    (ExprRewrite _ binds1, ExprRewrite _ binds2) ->
+      ExprRewrite Nothing (MapF.mergeWithKey (\_ a1 a2 -> Just (a1 <> a2)) id id binds1 binds2)
+
+instance OrdF (W4.SymExpr sym) => Monoid (ExprRewrite sym v v') where
+  mempty = ExprRewrite Nothing MapF.empty
+
+-- UNSAFE: assumes that the incoming expressions adhere to the given scopes
+singleRewrite' ::
+  W4.SymExpr sym tp ->
+  W4.SymExpr sym tp ->
+  ExprRewrite sym v v'
+singleRewrite' e1 e2 = ExprRewrite Nothing (MapF.singleton e1 (ExprList [e2]))
+
+-- UNSAFE: assumes that the incoming expressions adhere to the given scopes
+fromBindings ::
+  ExprBindings sym -> ExprRewrite sym v v'
+fromBindings binds = ExprRewrite Nothing (TF.fmapF (\e -> ExprList [e]) binds)
+
+lookupExprList ::
+  W4.IsSymExprBuilder sym =>
+  MapF.MapF (W4.SymExpr sym) (ExprList sym) ->
+  W4.SymExpr sym tp ->
+  Maybe (W4.SymExpr sym tp)
+lookupExprList binds e = case MapF.lookup e binds of
+  -- if it's a singleton then just return that
+  Just (ExprList [e']) -> Just e'
+  -- if there are multiple entries
+  -- first try to find any constants and bind to the first one
+  Just (ExprList es)
+    | Just e' <- find (isJust . W4.asConcrete) es -> Just e'
+  -- otherwise just pick the first element
+  Just (ExprList (e' : _)) -> Just e'
+  _ -> Nothing
+
+asCached ::
+  forall sym t solver fs v v'.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  ExprRewrite sym v v' ->
+  IO (ExprRewrite sym v v')
+asCached rew@(ExprRewrite (Just _) _) = return rew
+asCached (ExprRewrite Nothing binds) = ExprRewrite <$> (Just <$> freshVarBindCache) <*> pure binds
+
 
 -- | An expr tagged with a scoped parameter (representing the fact that the
 -- expression is valid under the scope 'v')
@@ -583,13 +631,13 @@ scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$>
 -- | Apply an 'ExprRewrite' to a 'ScopedExpr', rebinding its value
 -- and changing its scope.
 applyExprRewrite ::
-  W4.IsSymExprBuilder sym =>
+  sym ~ W4B.ExprBuilder s st fs =>
   sym ->
   ExprRewrite sym v v' ->
   ScopedExpr sym tp v ->
   IO (ScopedExpr sym tp v')
-applyExprRewrite sym (ExprRewrite cache binds) (ScopedExpr e) =
-  ScopedExpr <$> applyExprBindings' sym cache binds e
+applyExprRewrite sym (ExprRewrite mcache binds) (ScopedExpr e) =
+  ScopedExpr <$> rewriteSubExprs sym mcache (lookupExprList binds) e
 
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
 -- incidentally include bound variables from other scopes)
@@ -640,7 +688,7 @@ getExprRewrite sym scope vals = do
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
     let st = simVarState $ get vals
     mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
-  ExprRewrite <$> freshVarBindCache <*> mergeBindings sym bindsO bindsP
+  asCached $ bindsO <> bindsP
 
 bindSpec ::
   forall sym arch s st fs f v.

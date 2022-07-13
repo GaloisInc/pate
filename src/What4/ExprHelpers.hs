@@ -232,12 +232,16 @@ rewriteSubExprs ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
+  Maybe (VarBindCache sym) ->
   (forall tp'. W4B.Expr t tp' -> Maybe (W4B.Expr t tp')) ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
-rewriteSubExprs sym f e = do
-  cache <- freshVarBindCache
-  rewriteSubExprs' sym cache f e
+rewriteSubExprs sym mcache f e = case mcache of
+  Just cache -> rewriteSubExprs' sym cache f e
+  Nothing -> do
+    cache <- freshVarBindCache
+    rewriteSubExprs' sym cache f e
+  
 
 data VarBindCache sym where
   VarBindCache :: sym ~ W4B.ExprBuilder t solver fs => W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t)) -> VarBindCache sym
@@ -294,8 +298,12 @@ rewriteSubExprs'' sym cache f e_outer = do
   -- This ensures that the What4 expression builder correctly re-establishes any invariants it requires
   -- after rebinding.
   Pair vars vals <- return $ toBindings binds
-  fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
-  W4.applySymFn sym fn vals >>= fixMux sym
+  case Ctx.viewSize (Ctx.size vals) of
+    -- no replacement
+    Ctx.ZeroSize -> return e_outer
+    _ -> do
+      fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
+      W4.applySymFn sym fn vals >>= fixMux sym
 
 -- | An expression binding environment. When applied to an expression 'e'
 -- with 'applyExprBindings', each sub-expression of 'e' is recursively inspected
@@ -331,7 +339,7 @@ applyExprBindings ::
   ExprBindings sym ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
-applyExprBindings sym binds = rewriteSubExprs sym (\e' -> MapF.lookup e' binds)
+applyExprBindings sym binds = rewriteSubExprs sym Nothing (\e' -> MapF.lookup e' binds)
 
 applyExprBindings' ::
   forall sym tp.
