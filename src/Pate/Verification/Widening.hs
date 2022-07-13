@@ -195,33 +195,40 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
                    return gr'
               Right gr' -> return gr'
 
-
+-- | bindSpec domain_out (bundle) == domain_in
 abstractOverVars ::
-  forall sym arch v.
-  PS.SimScope sym arch v ->
-  SimBundle sym arch v ->
+  forall sym arch pre.
+  PS.SimScope sym arch pre  ->
+  SimBundle sym arch pre ->
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   PAD.AbstractDomainSpec sym arch {- ^ previous post-domain -} ->
-  PAD.AbstractDomain sym arch v {- ^ computed post-domain -} ->
+  PAD.AbstractDomain sym arch pre {- ^ computed post-domain -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -> do
-  -- the post-state of the slice phrased over 'v'
+abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym -> do
+  -- the post-state of the slice phrased over 'pre'
   let outVars = PS.bundleOutVars bundle
 
-  PS.forSpec postSpec $ \(scope_v' :: PS.SimScope sym arch v') _body -> do
+  PS.forSpec postSpec $ \(scope_post :: PS.SimScope sym arch post) _body -> do
     -- the variables representing the post-state (i.e. the target scope)
-    let postVars = PS.scopeVars scope_v'
+    let postVars = PS.scopeVars scope_post
 
-    -- rewrite v'-scoped terms into v-scoped terms that represent
+    -- rewrite post-scoped terms into pre-scoped terms that represent
     -- the result of symbolic execution (i.e. formally stating that
-    -- the initial bound variables of v' are equal to the results
+    -- the initial bound variables of post are equal to the results
     -- of symbolic execution)
-    v'_to_v <- liftIO $ PS.getScopeCoercion sym scope_v' outVars
+    -- e[post] --> e[post/f(pre)]
+    -- e.g.
+    -- f := sp++;
+    -- sp1 + 2 --> (sp0 + 1) + 2
+    post_to_pre <- liftIO $ PS.getScopeCoercion sym scope_post outVars
 
-    -- Rewrite a v-scoped term to a v'-scoped term by simply swapping
+    -- Rewrite a pre-scoped term to a post-scoped term by simply swapping
     -- out the bound variables
-    v_to_v' <- liftIO $ PS.getScopeCoercion sym scope_v postVars
+    -- e[pre] --> e[pre/post]
+    pre_to_post <- liftIO $ PS.getScopeCoercion sym scope_pre postVars
+
+    -- Strategies for re-scoping expressions
     let
       asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym tp v1 -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v2)
       asScopedConst asm se = do
@@ -232,33 +239,33 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
               PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE se)
         liftIO $ PS.concreteScope @v2 sym c
 
-      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
+      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
       asStackOffset bin se = do
         W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
 
         -- se[v]
         let postFrame = PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
-        off <- liftIO $ PS.liftScope0 @v' sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
-        -- asFrameOffset := frame[v'] + off
+        off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
+        -- asFrameOffset := frame[post] + off
         asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
-        -- asFrameOffset' := frame[v'/f(v)] + off
-        asFrameOffset' <- liftIO $ PS.applyScopeCoercion sym v'_to_v asFrameOffset
-        -- asm := se == frame[v'/f(v)] + off
+        -- asFrameOffset' := frame[post/f(v)] + off
+        asFrameOffset' <- liftIO $ PS.applyScopeCoercion sym post_to_pre asFrameOffset
+        -- asm := se == frame[post/f(pre)] + off
         asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
         -- assuming 'asm', is 'off' constant?
         off' <- asScopedConst (PS.unSE asm) off
         lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
-        -- return frame[v'] + off
+        -- return frame[post] + off
         liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
-      asSimpleAssign :: forall tp. PS.ScopedExpr sym tp v -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v')
+      asSimpleAssign :: forall tp. PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
       asSimpleAssign se = do
-        -- se[v]
-        -- se' := se[v/v']
-        se' <- liftIO $ PS.applyScopeCoercion sym v_to_v' se
-        -- e'' := se[v/f(v)]
-        e'' <- liftIO $ PS.applyScopeCoercion sym v'_to_v se'
+        -- se[pre]
+        -- se' := se[pre/post]
+        se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+        -- e'' := se[post/f(pre)]
+        e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
         -- se is the original value, and e'' is the value rewritten
         -- to be phrased over the post-state
         heuristicTimeout <- lift $ CMR.asks (PC.cfgHeuristicTimeout . envConfig)
@@ -266,7 +273,7 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
         True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
         return se'
 
-    PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym tp v) -> do
+    PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym tp pre) -> do
       mres <- runMaybeT $
             asScopedConst (W4.truePred sym) se
         <|> asStackOffset PBi.OriginalRepr se
