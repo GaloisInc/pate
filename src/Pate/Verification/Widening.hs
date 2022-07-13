@@ -217,11 +217,11 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
     -- the result of symbolic execution (i.e. formally stating that
     -- the initial bound variables of v' are equal to the results
     -- of symbolic execution)
-    v'_to_v <- liftIO $ PS.getExprRewrite sym scope_v' outVars
+    v'_to_v <- liftIO $ PS.getScopeCoercion sym scope_v' outVars
 
     -- Rewrite a v-scoped term to a v'-scoped term by simply swapping
     -- out the bound variables
-    v_to_v' <- liftIO $ PS.getExprRewrite sym scope_v postVars
+    v_to_v' <- liftIO $ PS.getScopeCoercion sym scope_v postVars
     let
       asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym tp v1 -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v2)
       asScopedConst asm se = do
@@ -243,7 +243,7 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
         -- asFrameOffset := frame[v'] + off
         asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
         -- asFrameOffset' := frame[v'/f(v)] + off
-        asFrameOffset' <- liftIO $ PS.applyExprRewrite sym v'_to_v asFrameOffset
+        asFrameOffset' <- liftIO $ PS.applyScopeCoercion sym v'_to_v asFrameOffset
         -- asm := se == frame[v'/f(v)] + off
         asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
         -- assuming 'asm', is 'off' constant?
@@ -256,9 +256,9 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
       asSimpleAssign se = do
         -- se[v]
         -- se' := se[v/v']
-        se' <- liftIO $ PS.applyExprRewrite sym v_to_v' se
+        se' <- liftIO $ PS.applyScopeCoercion sym v_to_v' se
         -- e'' := se[v/f(v)]
-        e'' <- liftIO $ PS.applyExprRewrite sym v'_to_v se'
+        e'' <- liftIO $ PS.applyScopeCoercion sym v'_to_v se'
         -- se is the original value, and e'' is the value rewritten
         -- to be phrased over the post-state
         heuristicTimeout <- lift $ CMR.asks (PC.cfgHeuristicTimeout . envConfig)

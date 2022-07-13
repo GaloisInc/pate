@@ -67,9 +67,9 @@ module Pate.SimState
   -- variable binding
   , SimVars(..)
   , bindSpec
-  , ExprRewrite
-  , getExprRewrite
-  , applyExprRewrite
+  , ScopeCoercion
+  , getScopeCoercion
+  , applyScopeCoercion
   -- assumption frames
   , AssumptionSet
   , isAssumedPred
@@ -117,6 +117,7 @@ import qualified Pate.Block as PB
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Panic as P
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
@@ -538,7 +539,7 @@ mkVarBinds sym simVars mem regs sb = do
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
     stackVar = simStackBase $ simBoundVarState simVars
-    stackBinds = singleRewrite' (unSE stackVar) (unSE sb)
+    stackBinds = singleRewrite (unSE stackVar) (unSE sb)
     
     regBinds = MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
   regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
@@ -547,67 +548,53 @@ mkVarBinds sym simVars mem regs sb = do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
         iRegion <- W4.natToInteger sym region
-        return $ Const $ singleRewrite' regVar iRegion <> singleRewrite' offVar off
+        return $ Const $ singleRewrite regVar iRegion <> singleRewrite offVar off
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars
-        return $ Const $ singleRewrite' var (PSR.macawRegValue val)
+        return $ Const $ singleRewrite var (PSR.macawRegValue val)
       CT.StructRepr Ctx.Empty -> return $ Const mempty
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
 
-  return $ (fromBindings (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds
-
-newtype ExprList sym tp = ExprList [W4.SymExpr sym tp]
-  deriving (Monoid, Semigroup)
+  return $ (ExprRewrite (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds
 
 -- | Wrapped expression bindings that convert expressions from one
 -- scope to another
+-- Note that this mapping is not necessarily total and therefore cannot be assumed
+-- to completely convert an expression (it must be finalized as a 'ScopeCoercion')
 data ExprRewrite sym (v :: VarScope) (v' :: VarScope) = 
-      ExprRewrite (Maybe (VarBindCache sym)) (MapF.MapF (W4.SymExpr sym) (ExprList sym))
+      ExprRewrite (ExprBindings sym)
  
 instance OrdF (W4.SymExpr sym) => Semigroup (ExprRewrite sym v v') where
   rew1 <> rew2 = case (rew1, rew2) of
-    (ExprRewrite _ binds1, ExprRewrite _ binds2) ->
-      ExprRewrite Nothing (MapF.mergeWithKey (\_ a1 a2 -> Just (a1 <> a2)) id id binds1 binds2)
+    (ExprRewrite binds1, ExprRewrite binds2) ->
+      ExprRewrite (MapF.mergeWithKey (\_ -> mergeExprs) id id binds1 binds2)
+    where
+      mergeExprs :: forall tp. W4.SymExpr sym tp -> W4.SymExpr sym tp -> Maybe (W4.SymExpr sym tp)
+      mergeExprs e1 e2 = case testEquality e1 e2 of
+        Just _ -> Just e1
+        Nothing -> P.panic P.Rewriter "ExprRewrite" ["Unexpected variable clash"]
 
 instance OrdF (W4.SymExpr sym) => Monoid (ExprRewrite sym v v') where
-  mempty = ExprRewrite Nothing MapF.empty
+  mempty = ExprRewrite MapF.empty
+  
+data ScopeCoercion sym v v' =
+  ScopeCoercion (VarBindCache sym) (ExprRewrite sym v v')
+
 
 -- UNSAFE: assumes that the incoming expressions adhere to the given scopes
-singleRewrite' ::
+singleRewrite ::
   W4.SymExpr sym tp ->
   W4.SymExpr sym tp ->
   ExprRewrite sym v v'
-singleRewrite' e1 e2 = ExprRewrite Nothing (MapF.singleton e1 (ExprList [e2]))
+singleRewrite e1 e2 = ExprRewrite (MapF.singleton e1 e2)
 
--- UNSAFE: assumes that the incoming expressions adhere to the given scopes
-fromBindings ::
-  ExprBindings sym -> ExprRewrite sym v v'
-fromBindings binds = ExprRewrite Nothing (TF.fmapF (\e -> ExprList [e]) binds)
-
-lookupExprList ::
-  W4.IsSymExprBuilder sym =>
-  MapF.MapF (W4.SymExpr sym) (ExprList sym) ->
-  W4.SymExpr sym tp ->
-  Maybe (W4.SymExpr sym tp)
-lookupExprList binds e = case MapF.lookup e binds of
-  -- if it's a singleton then just return that
-  Just (ExprList [e']) -> Just e'
-  -- if there are multiple entries
-  -- first try to find any constants and bind to the first one
-  Just (ExprList es)
-    | Just e' <- find (isJust . W4.asConcrete) es -> Just e'
-  -- otherwise just pick the first element
-  Just (ExprList (e' : _)) -> Just e'
-  _ -> Nothing
-
-asCached ::
+-- TODO: check that the resulting binding is total
+asScopeCoercion ::
   forall sym t solver fs v v'.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   ExprRewrite sym v v' ->
-  IO (ExprRewrite sym v v')
-asCached rew@(ExprRewrite (Just _) _) = return rew
-asCached (ExprRewrite Nothing binds) = ExprRewrite <$> (Just <$> freshVarBindCache) <*> pure binds
-
+  IO (ScopeCoercion sym v v')
+asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 
 -- | An expr tagged with a scoped parameter (representing the fact that the
 -- expression is valid under the scope 'v')
@@ -628,16 +615,16 @@ scopedExprMap ::
   m (f v2)
 scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
 
--- | Apply an 'ExprRewrite' to a 'ScopedExpr', rebinding its value
+-- | Apply a 'ScopeCoercion' to a 'ScopedExpr', rebinding its value
 -- and changing its scope.
-applyExprRewrite ::
+applyScopeCoercion ::
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
-  ExprRewrite sym v v' ->
+  ScopeCoercion sym v v' ->
   ScopedExpr sym tp v ->
   IO (ScopedExpr sym tp v')
-applyExprRewrite sym (ExprRewrite mcache binds) (ScopedExpr e) =
-  ScopedExpr <$> rewriteSubExprs sym mcache (lookupExprList binds) e
+applyScopeCoercion sym (ScopeCoercion cache (ExprRewrite binds)) (ScopedExpr e) =
+  ScopedExpr <$> applyExprBindings' sym cache binds e
 
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
 -- incidentally include bound variables from other scopes)
@@ -670,26 +657,26 @@ concreteScope ::
   IO (ScopedExpr sym tp v)
 concreteScope sym c = liftScope0 sym (\sym' -> W4.concreteToSym sym' c)
 
--- | Produce an 'ExprRewrite' that binds the terms in the given 'SimVars'
+-- | Produce an 'ScopeCoercion' that binds the terms in the given 'SimVars'
 -- to the bound variables in 'SimScope'.
 -- This rewrite is scope-modifying, because we will necessarily rewrite any
 -- of the bound variables from the original scope 'v1'.
 -- The given 'SimVars' may be arbitrary expressions, but necessarily
 -- in the scope 'v2'.
-getExprRewrite ::
+getScopeCoercion ::
   forall v1 v2 sym arch s st fs.
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
   SimScope sym arch v1 ->
   PPa.PatchPair (SimVars sym arch v2) ->
-  IO (ExprRewrite sym v1 v2)
-getExprRewrite sym scope vals = do
+  IO (ScopeCoercion sym v1 v2)
+getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
     let st = simVarState $ get vals
     mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
-  asCached $ bindsO <> bindsP
+  asScopeCoercion $ bindsO <> bindsP
 
 bindSpec ::
   forall sym arch s st fs f v.
@@ -702,9 +689,9 @@ bindSpec ::
   SimSpec sym arch f ->
   IO (AssumptionSet sym v, f v)
 bindSpec sym vals (SimSpec scope@(SimScope _ asm) body) = do
-  rew <- getExprRewrite sym scope vals
-  body' <- scopedExprMap sym body (applyExprRewrite sym rew)
-  asm' <- scopedExprMap sym asm (applyExprRewrite sym rew)
+  rew <- getScopeCoercion sym scope vals
+  body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
+  asm' <- scopedExprMap sym asm (applyScopeCoercion sym rew)
   return $ (asm', body')
 
 ------------------------------------
