@@ -27,6 +27,7 @@ Functionality for handling the inputs and outputs of crucible.
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE OverloadedStrings   #-}
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -64,6 +65,7 @@ module Pate.SimState
   , simInP
   , simOutO
   , simOutP
+  , simSP
   -- variable binding
   , SimVars(..)
   , bindSpec
@@ -90,6 +92,10 @@ import           Data.Proxy
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad ( forM )
 import           Control.Monad ( forM )
+import           Control.Lens ( (^.) )
+
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
@@ -103,6 +109,7 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
+import qualified Data.Macaw.Types as MT
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
@@ -137,6 +144,10 @@ data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
   , simStackBase :: StackBase sym arch v
   }
+
+simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
+  PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
+simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
 
 data SimInput sym arch v bin = SimInput
   {
@@ -187,8 +198,35 @@ instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym v) where
     binds = mergeExprSetMap (Proxy @sym) (asmBinds asm1) (asmBinds asm2)
     in AssumptionSet preds binds
 
-instance Show (AssumptionSet sym v) where
-  show asms = "Assumptions"
+ppExprSet ::
+  W4.IsExpr (W4.SymExpr sym) =>
+  Proxy sym ->
+  ExprSet sym tp ->
+  PP.Doc a
+ppExprSet _ es =
+  let ps = [ W4.printSymExpr p | p <- SetF.toList es ]
+  in PP.sep (zipWith (<+>) ("{" : repeat ",") ps) <+> "}"
+
+ppBinds ::
+  W4.IsExpr (W4.SymExpr sym) =>
+  Proxy sym ->
+  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
+  PP.Doc a
+ppBinds sym bnds =
+  let bs = [ W4.printSymExpr e <+> "-->" <+>  ppExprSet sym es | MapF.Pair e es <- MapF.toList bnds ]
+  in PP.sep (zipWith (<+>) ("[" : repeat ",") bs) <+> "]"
+
+instance forall sym v. W4.IsExpr (W4.SymExpr sym) => PP.Pretty (AssumptionSet sym v) where
+  pretty asms =
+    PP.vsep $
+      [ "Predicate Assumptions"
+      , PP.indent 4 (ppExprSet (Proxy @sym) (asmPreds asms))
+      , "Bindings"
+      , PP.indent 4 (ppBinds (Proxy @sym) (asmBinds asms))
+      ]
+
+instance W4.IsExpr (W4.SymExpr sym) => Show (AssumptionSet sym v) where
+  show asms = show (PP.pretty asms)
 
 mapExprSet ::
   OrdF (W4.SymExpr sym) =>
@@ -541,7 +579,6 @@ mkVarBinds sym simVars mem regs sb = do
     stackVar = simStackBase $ simBoundVarState simVars
     stackBinds = singleRewrite (unSE stackVar) (unSE sb)
     
-    regBinds = MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
   regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
     case PSR.macawRegRepr val of
       CLM.LLVMPointerRepr{} -> do

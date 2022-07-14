@@ -26,6 +26,7 @@ module Pate.PatchPair (
   , forBins
   , forBins'
   , forBinsC
+  , catBins
   , getPair'
   , matchEquatedAddress
   ) where
@@ -53,14 +54,17 @@ getPair' PB.PatchedRepr pPair = pPatched pPair
 get :: forall bin tp. PB.KnownBinary bin => PatchPair tp -> tp bin
 get = getPair' knownRepr
 
-forBins :: Applicative m => (forall bin. PB.KnownBinary bin => m (f bin)) -> m (PatchPair f)
-forBins f = PatchPair <$> f @PB.Original <*> f @PB.Patched
+forBins :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m (f bin)) -> m (PatchPair f)
+forBins f = PatchPair <$> f (get @PB.Original) <*> f (get @PB.Patched)
 
 forBins' :: Applicative m => (forall bin. PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
 forBins' f = PatchPair <$> f PB.OriginalRepr <*> f PB.PatchedRepr
 
 forBinsC :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m f) -> m (f, f)
-forBinsC f = (,) <$> f (get @PB.Original) <*> f (get @PB.Original)
+forBinsC f = (,) <$> f (get @PB.Original) <*> f (get @PB.Patched)
+
+catBins :: Applicative m => Semigroup w => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m w) -> m w
+catBins f = (<>) <$> f (get @PB.Original) <*> f (get @PB.Patched)
 
 class PatchPairEq tp where
   ppEq :: tp PB.Original -> tp PB.Patched -> Bool

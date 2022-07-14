@@ -65,6 +65,7 @@ module Pate.Monad
   , withAssumptionSet
   , applyAssumptionSet
   , applyCurrentAsms
+  , currentAsm
   -- nonces
   , freshNonce
   , withProofNonce
@@ -411,7 +412,7 @@ withFreshVars blocks f = do
 
     mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
     mkStackBase = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
-      W4.freshConstant sym' (WS.safeSymbol "frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+      W4.freshConstant sym' (WS.safeSymbol "pre_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
 

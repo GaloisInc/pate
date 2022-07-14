@@ -193,20 +193,18 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
 
 
 validAbsValues ::
-  forall sym arch v.
-  PPa.BlockPair arch ->
-  PPa.PatchPair (PS.SimVars sym arch v) ->
+  forall sym arch v bin.
+  PBi.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  PS.SimVars sym arch v bin ->
   EquivM sym arch (PS.AssumptionSet sym v)
-validAbsValues blocks vars = do
-  (asmO, asmP) <- PPa.forBinsC $ \get -> do
-    absBlockState <- PD.getAbsDomain (get blocks)
-    let
-      absRegs = absBlockState ^. MAS.absRegState
-      var = get vars
-      regs = PS.simRegs $ PS.simVarState var
-    fmap PRt.collapse $ PRt.zipWithRegStatesM regs absRegs $ \_ re av ->
-      Const <$> absValueToAsm var re av
-  return (asmO <> asmP)
+validAbsValues block var = do
+  absBlockState <- PD.getAbsDomain block
+  let
+    absRegs = absBlockState ^. MAS.absRegState
+    regs = PS.simRegs $ PS.simVarState var
+  fmap PRt.collapse $ PRt.zipWithRegStatesM regs absRegs $ \_ re av ->
+    Const <$> absValueToAsm var re av
 
 -- | Perform the work of propagating abstract domain information through
 --   a single program "slice". First we check for equivalence of observables,
@@ -229,7 +227,7 @@ visitNode :: forall sym arch v.
 visitNode scope (GraphNode bPair) d gr0 = withPair bPair $ do
   let vars = PS.scopeVars scope
   validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
-  validAbs <- validAbsValues bPair  vars
+  validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
   withAssumptionSet (validInit <> validAbs) $
     do -- do the symbolic simulation
        bundle <- mkSimBundle bPair vars d
@@ -274,8 +272,8 @@ visitNode scope (ReturnNode fPair) d gr0 =
      let vars = PS.scopeVars scope
      validState <- PVV.validInitState (Just ret) (PS.simVarState (PPa.pOriginal vars)) (PS.simVarState (PPa.pPatched vars))
      withAssumptionSet validState $
-       do bundle <- returnSiteBundle vars d ret
-          withPredomain bundle d $ do
+       do (asm, bundle) <- returnSiteBundle vars d ret
+          withAssumptionSet asm $ withPredomain bundle d $ do
             traceBundle bundle "Processing return edge"
     --        traceBundle bundle "== bundle asm =="
     --        traceBundle bundle (show (W4.printSymExpr asm))
@@ -290,24 +288,35 @@ returnSiteBundle :: forall sym arch v.
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->
   PPa.BlockPair arch {- ^ block pair being returned to -} ->
-  EquivM sym arch (SimBundle sym arch v)
-returnSiteBundle vars _preD pPair =
-  withSym $ \sym ->
-  do let oVarState = PS.simVarState (PPa.pOriginal vars)
-     let pVarState = PS.simVarState (PPa.pPatched vars)
-     -- TODO: revisit how much sense this makes, since we might do some
-     -- transformations to represent the function call
-     oAbsState <- PD.getAbsDomain (PPa.pOriginal pPair)
-     pAbsState <- PD.getAbsDomain (PPa.pPatched pPair)
+  EquivM sym arch (PS.AssumptionSet sym v, SimBundle sym arch v)
+returnSiteBundle vars _preD pPair = withSym $ \sym -> do
+  simIn_ <- PPa.forBins $ \get -> do
+    absSt <- PD.getAbsDomain (get pPair)
+    return $ PS.SimInput (PS.simVarState (get vars)) (get pPair) absSt
+  blockEndVal <- liftIO (MCS.initBlockEnd (Proxy @arch) sym)
 
-     let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair) oAbsState
-     let simInP    = PS.SimInput pVarState (PPa.pPatched pPair) pAbsState
+  simOut_ <- PPa.forBins $ \get -> do
+    let inSt = PS.simInState $ get simIn_
+    postFrame <- withSymIO $ \sym -> PS.liftScope0 sym $ \sym' ->
+      W4.freshConstant sym' (W4.safeSymbol "post_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+    let postSt = inSt { PS.simStackBase = postFrame }
+    return $ PS.SimOutput postSt blockEndVal
 
-     blockEndVal <- liftIO (MCS.initBlockEnd (Proxy @arch) sym)
+  bundle <- applyCurrentAsms $ SimBundle simIn_ simOut_
 
-     let simOutO   = PS.SimOutput oVarState blockEndVal
-     let simOutP   = PS.SimOutput pVarState blockEndVal
-     applyCurrentAsms $ SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO simOutP)
+  -- assert that, upon return, the frame of the callee is the same as its
+  -- stack pointer (i.e. interpret the domain as if all of its values were
+  -- computed as offsets starting from the call site)
+  asms <- PPa.catBins $ \get -> do
+    let
+      inSt = PS.simInState $ get simIn_
+      initFrame = PS.simStackBase inSt
+      outVars = get (PS.bundleOutVars bundle)
+      CLM.LLVMPointer _ sp_pre = PSR.macawRegValue $ PS.simSP inSt
+    vAbs <- validAbsValues (get pPair) outVars
+    return $ vAbs <> (PS.exprBinding (PS.unSE initFrame) sp_pre)
+
+  return (asms, bundle)
 
 
 -- | Run the given function a context where the
@@ -723,8 +732,10 @@ updateReturnNode scope bPair bundle preD gr =
      isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
      case W4.asConstantPred isReturn of
        Just False -> return gr
-       _ -> withAssumption isReturn $
-              handleReturn scope bundle bPair preD gr
+       _ -> do
+         framesMatch <- PD.associateFrames bundle MCS.MacawBlockEndReturn
+         withAssumptionSet framesMatch $ withAssumption isReturn $
+           handleReturn scope bundle bPair preD gr
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
@@ -745,7 +756,8 @@ triageBlockTarget scope bundle currBlock d gr (PPa.PatchPair blktO blktP) =
      traceBundle bundle ("  targetCall: " ++ show blkO)
      -- TODO? use withSatAssumption here, or something similar using an online solver?
      matches <- PD.matchesBlockTarget bundle blktO blktP
-     withAssumption matches $
+     framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO)
+     withAssumptionSet framesMatch $ withAssumption matches $
        case (PB.targetReturn blktO, PB.targetReturn blktP) of
          (Just blkRetO, Just blkRetP) ->
            do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)

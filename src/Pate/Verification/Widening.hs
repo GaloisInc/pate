@@ -275,7 +275,12 @@ abstractOverVars scope_v bundle _from _to postSpec postResult = withSym $ \sym -
       case mres of
         Just se' -> return se'
         -- FIXME: add graceful failure mode
-        Nothing -> fail $ "Unable to rescope"
+        Nothing -> do
+          se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+          e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
+          curAsms <- currentAsm
+
+          fail $ "Unable to rescope:" ++ (show curAsms) ++ (show (W4.printSymExpr (PS.unSE se))) ++ "***" ++ (show (W4.printSymExpr (PS.unSE e'')))
 
 -- | Classifying what kind of widening has occurred
 data WidenKind =

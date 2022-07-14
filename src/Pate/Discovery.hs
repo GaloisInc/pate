@@ -18,6 +18,7 @@ module Pate.Discovery (
   getAbsDomain,
   getStackOffset,
   matchesBlockTarget,
+  associateFrames,
   matchingExits,
   isMatchingCall,
   concreteToLLVM
@@ -251,6 +252,38 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
 
     retO = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutO bundle
     retP = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutP bundle
+
+associateFrames ::
+  forall sym arch v.
+  SimBundle sym arch v ->
+  MCS.MacawBlockEndCase ->
+  EquivM sym arch (PSS.AssumptionSet sym v)
+associateFrames bundle exitCase = PPa.catBins $ \get -> do
+    let
+      st_pre = PSS.simInState $ get $ simIn bundle
+      st_post = PSS.simOutState $ get $ simOut bundle
+      frame_pre = PSS.unSE $ PSS.simStackBase $ st_pre
+      frame_post = PSS.unSE $ PSS.simStackBase $ st_post
+      CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post
+    case exitCase of
+      -- a backjump does not modify the frame
+      MCS.MacawBlockEndJump -> return $ PSS.exprBinding frame_post frame_pre
+      -- For a function call the post-state frame is the frame for the
+      -- target function, and so we represent that by asserting that it is
+      -- equal to the value of the stack pointer at the call site
+      MCS.MacawBlockEndCall -> return $ PSS.exprBinding frame_post sp_post
+      -- note that a return results in two transitions:
+      -- the first transitions to the "Return" graph node and then
+      -- the second transitions from that node to any of the call sites (nondeterministically)
+      -- this case is only for the first transition, which does not perform
+      -- any frame rebinding (as we don't yet know where we are returning to)
+      MCS.MacawBlockEndReturn -> return $ PSS.exprBinding frame_post frame_pre
+      -- a branch does not modify the frame
+      MCS.MacawBlockEndBranch -> return $ PSS.exprBinding frame_post frame_pre
+      -- nothing to do on failure
+      MCS.MacawBlockEndFail -> return mempty
+      -- this likely requires some architecture-specific reasoning
+      MCS.MacawBlockEndArch -> return mempty
 
 liftPartialRel ::
   CB.IsSymInterface sym =>
