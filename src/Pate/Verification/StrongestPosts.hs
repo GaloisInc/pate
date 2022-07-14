@@ -722,15 +722,20 @@ updateReturnNode ::
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-updateReturnNode scope bPair bundle preD gr =
-  do -- TODO? use withSatAssumption here, or something similar using an online solver?
-     isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
-     case W4.asConstantPred isReturn of
-       Just False -> return gr
-       _ -> do
-         framesMatch <- PD.associateFrames bundle MCS.MacawBlockEndReturn
-         withAssumptionSet framesMatch $ withAssumption isReturn $
-           handleReturn scope bundle bPair preD gr
+updateReturnNode scope bPair bundle preD gr = do
+  isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
+  maybeUpdate gr $ withSatAssumption (PS.frameAssume isReturn) $ do
+    framesMatch <- PD.associateFrames bundle MCS.MacawBlockEndReturn
+    withAssumptionSet framesMatch $
+      handleReturn scope bundle bPair preD gr
+
+maybeUpdate ::
+  PairGraph sym arch -> 
+  EquivM sym arch (Maybe (PairGraph sym arch)) ->
+  EquivM sym arch (PairGraph sym arch)
+maybeUpdate gr f = f >>= \case
+  Just gr' -> return gr'
+  Nothing -> return gr
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
@@ -748,44 +753,43 @@ triageBlockTarget scope bundle currBlock d gr (PPa.PatchPair blktO blktP) =
         blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
 
-     traceBundle bundle ("  targetCall: " ++ show blkO)
-     -- TODO? use withSatAssumption here, or something similar using an online solver?
+     traceBundle bundle ("  targetCall: " ++ show blkO) 
      matches <- PD.matchesBlockTarget bundle blktO blktP
-     framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO)
-     withAssumptionSet framesMatch $ withAssumption matches $
-       case (PB.targetReturn blktO, PB.targetReturn blktP) of
-         (Just blkRetO, Just blkRetP) ->
-           do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
+     maybeUpdate gr $ withSatAssumption (PS.frameAssume matches) $ do
+       framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO)
+       withAssumptionSet framesMatch $
+         case (PB.targetReturn blktO, PB.targetReturn blktP) of
+           (Just blkRetO, Just blkRetP) ->
+             do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
 
-              -- TODO, this isn't correct.  Syscalls don't correspond to
-              -- "ArchTermStmt" in any meaningful way, so this is all a misnomer.
-              isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
-                 (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
-                 (entryO, entryP) | entryO == entryP -> return False
-                 _ -> throwHere $ PEE.BlockExitMismatch
-              traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
+                -- TODO, this isn't correct.  Syscalls don't correspond to
+                -- "ArchTermStmt" in any meaningful way, so this is all a misnomer.
+                isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
+                   (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
+                   (entryO, entryP) | entryO == entryP -> return False
+                   _ -> throwHere $ PEE.BlockExitMismatch
+                traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
 
-              ctx <- view PME.envCtxL
-              let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+                ctx <- view PME.envCtxL
+                let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
-              isPLT <- findPLTSymbol blkO blkP
+                isPLT <- findPLTSymbol blkO blkP
 
-              if | isSyscall -> handleSyscall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
-                 | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
-                 | Just pltSymbol <- isPLT -> handlePLTStub scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
-                 | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
+                if | isSyscall -> handleSyscall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
+                   | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
+                   | Just pltSymbol <- isPLT -> handlePLTStub scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
+                   | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
-         (Nothing, Nothing) -> withSym $ \sym ->
-           do traceBundle bundle "No return target identified"
-              p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
-                      b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
-                      liftIO $ W4.orPred sym j b
-              withAssumption p $
-                handleJump scope bundle currBlock d gr pPair
+           (Nothing, Nothing) -> withSym $ \sym ->
+             do traceBundle bundle "No return target identified"
+                p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
+                        b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
+                        liftIO $ W4.orPred sym j b
+                withAssumption p $
+                  handleJump scope bundle currBlock d gr pPair
 
-         _ -> do traceBundle bundle "BlockExitMismatch"
-                 throwHere $ PEE.BlockExitMismatch
-
+           _ -> do traceBundle bundle "BlockExitMismatch"
+                   throwHere $ PEE.BlockExitMismatch
 
 -- | See if the given jump targets correspond to a PLT stub for
 --   the same symbol, and return it if so.

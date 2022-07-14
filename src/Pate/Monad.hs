@@ -429,15 +429,25 @@ withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
   CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
     IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
       W4.assume (WPO.solverConn sp) p
-      inIO $ validateAssumptions
+      inIO $ validateAssumptions curAsm asm
       inIO f
 
 validateAssumptions ::
-  HasCallStack => EquivM sym arch ()
-validateAssumptions = withSolverProcess $ \sp -> IO.withRunInIO $ \inIO ->
+  forall sym arch v. 
+  HasCallStack =>
+  AssumptionSet sym v ->
+  AssumptionSet sym v ->
+  EquivM sym arch ()
+validateAssumptions oldAsm newAsm = withSym $ \sym -> withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> do
+  let
+    simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
+    simp e = resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
+  
+  oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
+  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm
   WPO.checkAndGetModel sp "check assumptions" >>= \case
-    W4R.Unsat _ -> inIO (currentAsm >>= \a -> throwHere $ PEE.AssumedFalse a)
-    W4R.Unknown -> inIO (currentAsm >>= \a -> throwHere $ PEE.AssumedFalse a)
+    W4R.Unsat _ -> inIO (throwHere $ PEE.AssumedFalse oldAsm' newAsm')
+    W4R.Unknown -> inIO (throwHere $ PEE.AssumedFalse oldAsm' newAsm')
     W4R.Sat{} -> return ()
 
 -- | Evaluate the given function in an assumption context augmented with the given
@@ -474,19 +484,27 @@ applyAssumptionSet asm f = withSym $ \sym -> do
     doRebind = rebindWithFrame' sym cache asm
   liftIO $ PEM.mapExpr sym doRebind f
 
-
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
-  PT.Timeout ->
-  W4.Pred sym ->
+  AssumptionSet sym v ->
   EquivM sym arch f ->
   EquivM sym arch (Maybe f)
-withSatAssumption timeout asm f = do
-  isPredSat timeout asm >>= \case
-    True ->  Just <$> (withAssumption asm f)
-    False -> return Nothing
+withSatAssumption asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
+  p <- liftIO $ getAssumedPred sym asm
+  case W4.asConstantPred p of
+    Just False -> return Nothing
+    Just True -> Just <$> f
+    _ -> do
+      curAsm <- currentAsm
+      CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
+        IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
+          W4.assume (WPO.solverConn sp) p
+          b <- WPO.checkAndGetModel sp "check assumptions" >>= asSat
+          case b of
+            True -> Just <$> inIO f
+            False -> return Nothing
 
 --------------------------------------
 -- Sat helpers

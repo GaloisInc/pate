@@ -58,7 +58,7 @@ data InnerEquivalenceError arch
   | MissingPatchPairResult (PPa.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
-  | forall sym v. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PS.AssumptionSet sym v)
+  | forall sym v. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PS.AssumptionSet sym v) (PS.AssumptionSet sym v)
   | BlockExitMismatch
   | InvalidSMTModel
   | MismatchedAssumptionsPanic
