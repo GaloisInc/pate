@@ -415,7 +415,7 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
     return [ jumpTarget from tgt ]
 
   MD.ParsedBranch _ _ t f ->
-    return [ jumpTarget from t, jumpTarget from f ]
+    return [ branchTarget from t, branchTarget from f ]
 
   MD.ParsedLookupTable _jt st _ _ ->
     return [ jumpTarget' from next | next <- concreteNextIPs st ]
@@ -437,6 +437,14 @@ jumpTarget ::
     PB.BlockTarget arch bin
 jumpTarget from to =
   PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
+
+branchTarget ::
+    PB.ConcreteBlock arch bin ->
+    MC.ArchSegmentOff arch ->
+    PB.BlockTarget arch bin
+branchTarget from to =
+  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndBranch
+
 
 jumpTarget' ::
     PB.ConcreteBlock arch bin ->
