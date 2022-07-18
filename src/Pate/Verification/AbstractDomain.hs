@@ -68,6 +68,7 @@ import qualified Pate.Binary as PB
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PED
+import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
@@ -90,6 +91,9 @@ data AbstractDomain sym arch (v :: PS.VarScope) where
     , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomain sym arch v
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomain sym arch bin) where
+  traverseLocation sym (AbstractDomain a b) f = AbstractDomain <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f
 
 
 -- | An 'AbstractDomain' that is closed under a symbolic machine state via
@@ -186,6 +190,27 @@ data AbstractDomainVals sym arch (bin :: PB.WhichBinary) where
     { absRegVals :: MM.RegState (MM.ArchReg arch) (MacawAbstractValue sym)
     , absMemVals :: MapF.MapF (PMC.MemCell sym arch) (MemAbstractValue sym)
     } -> AbstractDomainVals sym arch bin
+
+
+mergeMemValMaps ::
+  OrdF k =>
+  MapF.MapF k (MemAbstractValue sym) ->
+  MapF.MapF k (MemAbstractValue sym) ->
+  MapF.MapF k (MemAbstractValue sym)
+mergeMemValMaps m1 m2 = MapF.mergeWithKey (\_ (MemAbstractValue v1) (MemAbstractValue v2) -> Just $ MemAbstractValue (combineAbsVals v1 v2)) id id m1 m2
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomainVals sym arch bin) where
+  traverseLocation sym vals f = do
+     rs <- MM.traverseRegsWith (\r v -> f (PL.Register r) (W4.truePred sym) >>= \case
+                           Just _ -> return v
+                           Nothing -> return $ noAbsVal (MT.typeRepr r)) (absRegVals vals)
+     ms <- forM (MapF.toList (absMemVals vals)) $ \(MapF.Pair (cell@PMC.MemCell{}) v) -> do
+       f (PL.Cell cell) (W4.truePred sym) >>= \case
+         Just (PL.Cell cell', _) -> return $ MapF.singleton cell' v
+         Nothing -> return $ MapF.empty
+     let ms' = foldr mergeMemValMaps MapF.empty ms
+     return $ AbstractDomainVals rs ms'
+
 
 emptyDomainVals :: PA.ValidArch arch => AbstractDomainVals sym arch bin
 emptyDomainVals = AbstractDomainVals
@@ -523,6 +548,24 @@ absDomainToPostCond sym eqCtx bundle preDom d = do
     predP <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutP bundle) Nothing valsP
     W4.andPred sym predO predP
   W4.andPred sym eqOutputsPred valsPred
+
+-- | Similar to 'absDomainToPostCond' but only asserts
+-- that the post-state values agree with the value domain
+-- (ignoring the equality domain in the given 'AbstractDomain')
+absDomainToPostCond_vals ::
+  IsSymInterface sym =>
+  PA.ValidArch arch =>
+  sym ->
+  PE.EquivContext sym arch ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ pre-domain for this slice -} ->
+  AbstractDomain sym arch v {- ^ target post-domain -} ->
+  IO (W4.Pred sym)
+absDomainToPostCond_vals sym eqCtx bundle preDom d = do
+  let PPa.PatchPair valsO valsP = absDomVals d
+  predO <- absDomainValsToPred sym (PS.simOutState $ PS.simOutO bundle) Nothing valsO
+  predP <- absDomainValsToPred sym (PS.simOutState $ PS.simOutP bundle) Nothing valsP
+  W4.andPred sym predO predP
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
   mapExpr sym f (AbstractDomainVals regVals memVals) = do

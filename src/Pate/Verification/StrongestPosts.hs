@@ -899,7 +899,7 @@ handlePLTStub ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   BS.ByteString {- ^ PLT symbol name -} ->
   EquivM sym arch (PairGraph sym arch)
-handlePLTStub scope bundle currBlock d gr _pPair pRetPair stubSymbol =
+handlePLTStub scope bundle currBlock d gr pPair pRetPair stubSymbol =
   do traceBundle bundle ("Handling PLT stub " ++ show stubSymbol)
 
      -- TODO!! Here we are just assuming the unknown function represented by the PLT stub
@@ -910,7 +910,8 @@ handlePLTStub scope bundle currBlock d gr _pPair pRetPair stubSymbol =
      -- Moreover, we should report this assumption about external functions as potentially leading
      -- to unsoundness.
 
-     handleJump scope bundle currBlock d gr pRetPair
+     --handleJump scope bundle currBlock d gr pRetPair
+     handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair
 
 
 handleReturn ::

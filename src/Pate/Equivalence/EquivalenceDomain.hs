@@ -6,6 +6,8 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 module Pate.Equivalence.EquivalenceDomain (
     EquivalenceDomain(..)
   , mux
@@ -22,6 +24,7 @@ import qualified Pate.Solver as PS
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Location as PL
 
 ---------------------------------------------
 -- Equivalence domain
@@ -37,6 +40,10 @@ data EquivalenceDomain sym arch where
       -- | The memory domain that is specific to non-stack (i.e. global) variables.
     , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
     }  -> EquivalenceDomain sym arch
+
+instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationTraversable sym arch (EquivalenceDomain sym arch) where
+  traverseLocation sym (EquivalenceDomain a b c) f = EquivalenceDomain <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+
 
 ppEquivalenceDomain ::
   forall sym arch a.

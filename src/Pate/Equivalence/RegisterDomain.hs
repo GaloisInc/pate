@@ -8,6 +8,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE LambdaCase   #-}
+
 module Pate.Equivalence.RegisterDomain (
     RegisterDomain
   , mux
@@ -38,6 +40,7 @@ import qualified Data.Macaw.CFG as MM
 
 import qualified Prettyprinter as PP
 
+import qualified Pate.Location as PL
 import qualified Pate.Solver as PS
 import qualified Pate.ExprMappable as PEM
 
@@ -62,6 +65,13 @@ traverseWithReg (RegisterDomain dom) f =
     where
       f' :: Some (MM.ArchReg arch) -> WI.Pred sym -> m (WI.Pred sym)
       f' (Some reg) p = f reg p
+
+instance (WI.IsExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationTraversable sym arch (RegisterDomain sym arch) where
+  traverseLocation sym (RegisterDomain d) f = do
+    d' <- Map.traverseMaybeWithKey (\(Some r) p -> f (PL.Register r) p >>= \case
+            Just (_, p') -> return (Just p')
+            Nothing -> return Nothing) d
+    return $ RegisterDomain d'
 
 update ::
   forall sym arch tp.

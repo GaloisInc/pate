@@ -53,6 +53,12 @@ module Pate.Equivalence
 
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad ( foldM )
+<<<<<<< HEAD
+=======
+import           Control.Monad.Trans.Except ( throwE, runExceptT )
+import           Control.Monad.Trans ( lift )
+import           Control.Monad.IO.Class ( MonadIO, liftIO )
+>>>>>>> 3772b3e (add Pate.Location for general traversals)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Data.Set as S
@@ -64,6 +70,7 @@ import           Lang.Crucible.Backend (IsSymInterface)
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register as PRe
@@ -350,6 +357,11 @@ data MemoryCondition sym arch = MemoryCondition
   , memCondRegEq :: MemRegionEquality sym arch
   }
 
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable sym arch (MemoryCondition sym arch) where
+  traverseLocation sym mcond f = do
+    dom' <- PL.traverseLocation sym (memCondDomain mcond) f
+    return $ mcond { memCondDomain = dom' }
+
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
 -- We require the pre-states in order to construct the initial equality assumption.
@@ -427,6 +439,16 @@ getRegionEquality sym memEq memO memP = case memEq of
 newtype RegisterCondition sym arch v =
   RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (AssumptionSet sym v)) }
 
+instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
+  traverseLocation sym body f = RegisterCondition <$>
+    MM.traverseRegsWith (\r (Const asm) -> do
+      p <- getAssumedPred sym asm
+      f (PL.Register r) p >>= \case
+        Just (_, p') -> return $ (Const (frameAssume p'))
+        Nothing -> return $ (Const mempty)
+                        ) (regCondPreds body)
+
+
 -- | Compute a structured 'RegisterCondition'
 -- where the predicate associated with each register
 -- is true iff the register is equal in two given states (conditional on
@@ -461,6 +483,54 @@ data StateCondition sym arch v = StateCondition
   , stMemCond :: MemoryCondition sym arch
   }
 
+<<<<<<< HEAD
+=======
+instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StateCondition sym arch v) where
+  traverseLocation sym (StateCondition a b c) f =
+    StateCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+
+
+{-
+-- | Traverse the locations in a 'StateCondition' and evaluate
+-- the given action against each predicate, yielding the first successful
+-- result
+firstStateCondition ::
+  MonadIO m =>
+  IsSymInterface sym =>
+  sym ->
+  W4.Pred sym ->
+  StateCondition sym arch v ->
+  (Location sym arch -> W4.Pred sym -> m (Maybe a)) ->
+  m (Maybe a)
+firstStateCondition sym firstTry cond f = do
+  r <- runExceptT $ do
+    (lift $ f NoLocation firstTry) >>= \case
+      Just a -> throwE a
+      Nothing -> return ()
+    _ <- MM.traverseRegsWith (\r (Const asm) -> do
+                            p <- getAssumedPred sym asm
+                            ma <- lift $ f (RegLocation r) p
+                            case ma of
+                              Just a -> throwE a
+                              Nothing -> return $ (Const asm)) (regCondPreds $ (stRegCond cond))
+
+    _ <- PEM.traverseWithCell (memCondDomain $ stStackCond cond) $ \cell p -> do
+      ma <- lift $ f (MemLocation cell) p
+      case ma of
+        Just a -> throwE a
+        Nothing -> return p
+    _ <- PEM.traverseWithCell (memCondDomain $ stMemCond cond) $ \cell p -> do
+      ma <- lift $ f (MemLocation cell) p
+      case ma of
+        Just a -> throwE a
+        Nothing -> return p
+    return ()
+  case r of
+    Left a -> return $ Just a
+    Right () -> return Nothing
+-}
+
+>>>>>>> 3772b3e (add Pate.Location for general traversals)
 eqDomPre ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
