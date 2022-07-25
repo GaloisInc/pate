@@ -66,7 +66,6 @@ import qualified Data.Macaw.AbsDomain.AbsState as MAS
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
-import qualified Pate.Discovery as PD
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PED

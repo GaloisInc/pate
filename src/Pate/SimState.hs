@@ -35,7 +35,7 @@ Functionality for handling the inputs and outputs of crucible.
 module Pate.SimState
   ( -- simulator state
     SimState(..)
-  , StackBase(..)
+  , StackBase
   , SimInput(..)
   , SimOutput(..)
   , type VarScope
@@ -91,7 +91,6 @@ import           Data.Proxy
 
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad ( forM )
-import           Control.Monad ( forM )
 import           Control.Lens ( (^.) )
 
 import qualified Prettyprinter as PP
@@ -100,10 +99,8 @@ import           Prettyprinter ( (<+>) )
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Map ( Pair(..) )
 import qualified Data.Parameterized.TraversableF as TF
 import           Data.Functor.Const
-import           Data.List ( find )
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
@@ -456,14 +453,6 @@ freshSimSpec mkReg mkMem mkStackBase mkBody = do
   (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
   return $ SimSpec (SimScope vars asm) body
 
--- | Project out the bound variables with an arbitrary scope.
--- This is a private function, since as we want to consider the
--- 'SimBoundVars' of the 'SimSpec' to be an implementation detail.
-viewSpecVars ::
-  SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimBoundVars sym arch v) -> a) ->
-  a
-viewSpecVars (SimSpec (SimScope vars _) _) f = f vars
 
 -- | Project out the body with an arbitrary scope.
 viewSpecBody ::
@@ -500,12 +489,6 @@ unsafeCoerceSpecBody ::
   Scoped f =>
   SimSpec sym arch f -> f v
 unsafeCoerceSpecBody (SimSpec _ body) = unsafeCoerceScope body
-
-
-unsafeCoerceSpecAsm ::
-  Scoped f =>
-  SimSpec sym arch f -> AssumptionSet sym v
-unsafeCoerceSpecAsm (SimSpec (SimScope _ asm) _) = unsafeCoerceScope asm
 
 -- | The symbolic inputs and outputs of an original vs. patched block slice.
 data SimBundle sym arch v = SimBundle

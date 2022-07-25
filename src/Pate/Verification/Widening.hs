@@ -64,7 +64,6 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
 
-import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.Concretize as PVC
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )

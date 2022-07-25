@@ -56,7 +56,6 @@ import           Control.Monad ( foldM )
 import           Control.Monad.IO.Class ( liftIO )
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as S
 import           GHC.Stack ( HasCallStack )
@@ -117,22 +116,6 @@ instance TestEquality (W4.SymExpr sym) => Eq (MemRegionEquality sym arch) where
   MemEqAtRegion r1 == MemEqAtRegion r2 = r1 == r2
   MemEqOutsideRegion r1 == MemEqOutsideRegion r2 = r1 == r2
   _ == _ = False
-
-equalValuesIO ::
-  HasCallStack =>
-  W4.IsExprBuilder sym =>
-  sym ->
-  PSR.MacawRegEntry sym tp ->
-  PSR.MacawRegEntry sym tp' ->
-  IO (W4.Pred sym)
-equalValuesIO sym entry1 entry2 = case (PSR.macawRegRepr entry1, PSR.macawRegRepr entry2) of
-  (CLM.LLVMPointerRepr w1, CLM.LLVMPointerRepr w2) ->
-    case testEquality w1 w2 of
-      Just Refl -> liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue entry1) (PSR.macawRegValue entry2)
-      Nothing -> return $ W4.falsePred sym
-  (CT.BoolRepr, CT.BoolRepr) -> liftIO $ W4.isEq sym (PSR.macawRegValue entry1) (PSR.macawRegValue entry2)
-  (CT.StructRepr Ctx.Empty, CT.StructRepr Ctx.Empty) -> return (W4.truePred sym)
-  (tp1, tp2) -> error ("equalValues: unsupported types: " ++ show (tp1, tp2))
 
 
 registerValuesEqual' ::
@@ -471,7 +454,7 @@ regCondToAsm ::
   sym ->
   RegisterCondition sym arch v ->
   IO (AssumptionSet sym v)
-regCondToAsm sym regCond = return $ PRt.collapse (regCondPreds regCond)
+regCondToAsm _sym regCond = return $ PRt.collapse (regCondPreds regCond)
 
 -- | A structured pre or post condition
 data StateCondition sym arch v = StateCondition

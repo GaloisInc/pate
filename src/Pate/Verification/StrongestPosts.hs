@@ -58,10 +58,8 @@ import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
-import qualified Pate.Config as PCfg
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
-import qualified Pate.Equivalence.EquivalenceDomain as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
@@ -78,7 +76,6 @@ import qualified Pate.Register.Traversal as PRt
 
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
-import qualified Pate.Verification.Domain as PVD
 
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
@@ -297,7 +294,7 @@ returnSiteBundle vars _preD pPair = withSym $ \sym -> do
 
   simOut_ <- PPa.forBins $ \get -> do
     let inSt = PS.simInState $ get simIn_
-    postFrame <- withSymIO $ \sym -> PS.liftScope0 sym $ \sym' ->
+    postFrame <- liftIO $ PS.liftScope0 sym $ \sym' ->
       W4.freshConstant sym' (W4.safeSymbol "post_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
     let postSt = inSt { PS.simStackBase = postFrame }
     return $ PS.SimOutput postSt blockEndVal
@@ -409,8 +406,6 @@ doCheckObservables bundle _preD =
          , show (MT.prettyMemTraceSeq pSeq)
          ]
 -}
-
-       let doPanic = panic Solver "checkObservables" ["Online solving not enabled"]
 
        eqSeq <- liftIO (equivalentSequences sym oSeq pSeq)
 
@@ -569,7 +564,7 @@ doCheckTotality :: forall sym arch v.
   AbstractDomain sym arch v ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   EquivM sym arch (TotalityResult (MM.ArchAddrWidth arch))
-doCheckTotality bundle preD exits =
+doCheckTotality bundle _preD exits =
   withSym $ \sym ->
     do
        -- compute the condition that leads to each of the computed
@@ -932,9 +927,7 @@ mkSimBundle ::
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->
   EquivM sym arch (SimBundle sym arch v)
-mkSimBundle pPair vars d =
-  withSym $ \sym ->
-
+mkSimBundle pPair vars _d =
   do let oVarState = PS.simVarState (PPa.pOriginal vars)
      let pVarState = PS.simVarState (PPa.pPatched vars)
      oAbsState <- PD.getAbsDomain (PPa.pOriginal pPair)
@@ -942,8 +935,6 @@ mkSimBundle pPair vars d =
 
      let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair) oAbsState
      let simInP    = PS.SimInput pVarState (PPa.pPatched pPair) pAbsState
-
-     let rd = PE.eqDomainRegisters (PAD.absDomEq d)
 
      traceBlockPair pPair "Simulating original blocks"
      (_asmO, simOutO_) <- PVSy.simulate simInO
