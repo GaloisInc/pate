@@ -253,6 +253,17 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
     retO = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutO bundle
     retP = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutP bundle
 
+-- | Compute an 'PSS.AssumptionSet' that assumes the association between
+-- the 'PSS.StackBase' of the input and output states of the given bundle,
+-- according to the given exit case.
+-- In most cases the assumption is that the stack base does not change (i.e.
+-- a backjump within a function maintains the same base). In the case that
+-- the block end is a 'MCS.MacawBlockEndCall', this assumes that outgoing
+-- stack base is now equal to the value of the stack register after the function call.
+--
+-- This assumption is needed in the final stage of widening, in order to re-phrase
+-- any stack offsets that appear in the resulting equivalence domain: from the callee's stack
+-- base to the caller's stack base.
 associateFrames ::
   forall sym arch v.
   SimBundle sym arch v ->
