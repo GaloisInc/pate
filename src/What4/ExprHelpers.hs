@@ -232,15 +232,12 @@ rewriteSubExprs ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  Maybe (VarBindCache sym) ->
   (forall tp'. W4B.Expr t tp' -> Maybe (W4B.Expr t tp')) ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
-rewriteSubExprs sym mcache f e = case mcache of
-  Just cache -> rewriteSubExprs' sym cache f e
-  Nothing -> do
-    cache <- freshVarBindCache
-    rewriteSubExprs' sym cache f e
+rewriteSubExprs sym f e = do
+  cache <- freshVarBindCache
+  rewriteSubExprs' sym cache f e
   
 
 data VarBindCache sym where
@@ -339,7 +336,7 @@ applyExprBindings ::
   ExprBindings sym ->
   W4B.Expr t tp ->
   IO (W4B.Expr t tp)
-applyExprBindings sym binds = rewriteSubExprs sym Nothing (\e' -> MapF.lookup e' binds)
+applyExprBindings sym binds = rewriteSubExprs sym (\e' -> MapF.lookup e' binds)
 
 applyExprBindings' ::
   forall sym tp.
