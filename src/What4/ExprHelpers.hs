@@ -945,15 +945,18 @@ simplifyBVOpInner sym simp_check go app = case app of
       W4B.SemiRingSum s <- W4B.asApp bv
       SR.SemiRingBVRepr SR.BVArithRepr w <- return $ WSum.sumRepr s
       let
-        doAdd bv1 bv2 = W4.bvAdd sym bv1 bv2
+        doAdd bv1 bv2 = do
+          bv1' <- go bv1
+          bv2' <- go bv2
+          W4.bvAdd sym bv1' bv2'
 
         doMul coef bv' = do
           coef_bv <- W4.bvLit sym w coef
-          bv'' <- W4.bvMul sym coef_bv bv' >>= go
-          W4.bvSelect sym idx n bv''
+          bv'' <- go bv'
+          W4.bvMul sym coef_bv bv''
 
-        doConst c = W4.bvLit sym w c >>= W4.bvSelect sym idx n
-      return $ WSum.evalM doAdd doMul doConst s
+        doConst c = W4.bvLit sym w c
+      return $ (WSum.evalM doAdd doMul doConst s >>= W4.bvSelect sym idx n)
     <|> do
       W4B.BVOrBits _ s <- W4B.asApp bv
       (b:bs) <- return $ W4B.bvOrToList s
