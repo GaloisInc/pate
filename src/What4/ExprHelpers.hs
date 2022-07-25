@@ -715,7 +715,7 @@ resolveConcreteLookups sym check e_outer = do
       case arr of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
           W4B.UpdateArray _ _ arr' idx' upd_val -> do
-            eqIdx <- Ctx.zipWithM (\e1 e2 -> Const <$> f e1 e2) idx idx'
+            eqIdx <- Ctx.zipWithM (\e1 e2 -> fmap Const $ check =<< (liftIO $ W4.isEq sym e1 e2)) idx idx'
             case TFC.foldrFC andPred (Just True) eqIdx of
               Just True -> return $ upd_val
               Just False -> resolveArr arr' idx

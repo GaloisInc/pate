@@ -8,12 +8,13 @@ module Pate.Verification.Simplify (
     simplifyPred
   , simplifySubPreds
   , simplifyPred_deep
+  , simplifyWithSolver
+  , simplifyBVOps_trace
   ) where
 
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
-import           Data.Proxy
 import           Data.Functor.Const ( Const(..) )
 import           Debug.Trace ( traceM )
 import           GHC.Stack ( HasCallStack )
@@ -23,7 +24,6 @@ import qualified What4.SatResult as W4R
 
 import qualified Pate.Config as PC
 import qualified Pate.ExprMappable as PEM
-import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
 
@@ -59,7 +59,7 @@ simplifySubPreds a = withValid $ withSym $ \sym -> do
 
 
 simplifyBVOps_trace ::
-  forall sym arch m t solver fs tp.
+  forall sym arch t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   (forall tp'.
@@ -85,35 +85,18 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
   pcache <- W4B.newIdxCache
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let
-    checkWork ::
-      forall tp.
-      W4.SymExpr sym tp ->
-      W4.SymExpr sym tp ->
-      EquivM_ sym arch (W4.SymExpr sym tp)
-    checkWork e_original e_simp = do
-      p <- liftIO $ W4.isEq sym e_original e_simp
-      isPredTrue' heuristicTimeout p >>= \case
-        True -> return e_simp
-        False -> do
-          emitWarning $
-            PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e_original e_simp)
-          return e_original
-
     checkPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
     checkPred p' = fmap (getConst) $ W4B.idxCacheEval pcache p' $
       Const <$> concretePred heuristicTimeout p'
-
+  
     doSimp :: forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)
-    doSimp e = W4B.idxCacheEval ecache e $ withSolverProcess $ \sp -> withSym $ \sym -> do
+    doSimp e = W4B.idxCacheEval ecache e $ do
       e1 <- WEH.resolveConcreteLookups sym checkPred e
-      e3 <- simplifyBVOps_trace sym checkWork e1
-      --e2 <- liftIO $ WEH.simplifyBVOps sym e1
-      -- just checking BV simplification here
-      --e3 <- checkWork e e1
+      e2 <- liftIO $ WEH.simplifyBVOps sym e1
+      e3 <- liftIO $ WEH.expandMuxEquality sym e2
       return e3
 
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (doSimp e)) a
-
 
 -- | Simplify a predicate by considering the
 -- logical necessity of each atomic sub-predicate under the current set of assumptions.

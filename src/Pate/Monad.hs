@@ -55,6 +55,7 @@ module Pate.Monad
   , checkSatisfiableWithModel
   , isPredSat
   , isPredTrue'
+  , concretePred
   -- working under a 'SimSpec' context
   , withSimSpec
   , withFreshVars
@@ -563,6 +564,37 @@ isPredTrue' timeout p = case W4.asConstantPred p of
         res <- checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)
         case res of
           Left _ex -> return False -- TODO!!! This swallows the exception!
+          Right x -> return x
+
+concretePred ::
+  PT.Timeout ->
+  W4.Pred sym ->
+  EquivM sym arch (Maybe Bool)
+concretePred timeout p = case W4.asConstantPred p of
+  Just b -> return $ Just b
+  _ -> do
+    
+    notp <- withSymIO $ \sym -> W4.notPred sym p
+    r <- checkSatisfiableWithModel timeout "concretePred" notp $ \res ->
+      case res of
+        W4R.Sat{} -> return $ Just False
+        W4R.Unsat{} -> return $ Just True
+        W4R.Unknown -> return $ Nothing
+    case r of
+      Left _ex -> return Nothing
+      Right (Just True) -> return $ Just True
+      Right Nothing -> return Nothing
+      -- the predicate is maybe false, but not necessarily false
+      Right (Just False) -> do
+        r' <- checkSatisfiableWithModel timeout "concretePred" p $ \res ->
+          case res of
+            -- p can be true or false
+            W4R.Sat{} -> return Nothing
+            -- p is necessarily false
+            W4R.Unsat{} -> return $ Just False
+            W4R.Unknown -> return $ Nothing
+        case r' of
+          Left _ex -> return Nothing
           Right x -> return x
 
 -- | Convert a 'W4R.Unsat' result into True
