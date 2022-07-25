@@ -58,6 +58,7 @@ module What4.ExprHelpers (
   , minimalPredAtoms
   , expandMuxEquality
   , simplifyBVOps
+  , simplifyBVOps'
   , simplifyConjuncts
   , boundVars
   , setProgramLoc
@@ -71,6 +72,7 @@ import           Unsafe.Coerce ( unsafeCoerce ) -- for mulMono axiom
 import           Control.Applicative
 import           Control.Monad.Except
 import qualified Control.Monad.IO.Class as IO
+import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.State as CMS
@@ -652,6 +654,30 @@ abstractOver sym sub outer = do
   outer_abs <- go outer
   W4.definedFn sym W4.emptySymbol (Ctx.empty Ctx.:> sub_bv) outer_abs W4.AlwaysUnfold
 
+simplifyIte ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.SymExpr sym tp {- ^ original expression (returned when recursive calls make no changes) -} ->
+  (W4.Pred sym -> m (Maybe Bool)) {- ^ predicate decider -} ->
+  (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) {- ^ recursive simplification -} ->
+  W4.Pred sym {- ^ condition -} ->
+  W4.SymExpr sym tp {- ^ true case -} ->
+  W4.SymExpr sym tp {- ^ false case -} ->
+  m (W4.SymExpr sym tp)
+simplifyIte sym e_outer check go p e_true e_false =
+  check p >>= \case
+    Just True -> go e_true
+    Just False -> go e_false
+    Nothing -> do
+      e_true' <- go e_true
+      e_false' <- go e_false
+      p' <- go p
+      if e_true == e_true' && e_false == e_false' && p == p' then
+        return e_outer
+      else liftIO $ W4.baseTypeIte sym p' e_true' e_false'
+
 -- | Resolve array lookups across array updates which are known to not alias.
 -- i.e. @select (update arr A V) B --> select arr B@ given that @f(A, B) = Just False@ (i.e.
 -- they are statically known to be inequivalent according to the given testing function)
@@ -660,10 +686,10 @@ resolveConcreteLookups ::
   IO.MonadIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  (forall tp'. W4.SymExpr sym tp' -> W4.SymExpr sym tp' -> m (Maybe Bool)) ->
+  (W4.Pred sym -> m (Maybe Bool)) ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-resolveConcreteLookups sym f e_outer = do
+resolveConcreteLookups sym check e_outer = do
   cache <- W4B.newIdxCache
   let
     andPred ::
@@ -708,6 +734,8 @@ resolveConcreteLookups sym f e_outer = do
       case e of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
           W4B.SelectArray _ arr idx -> resolveArr arr idx
+          W4B.BaseIte _ _ p e_true e_false ->
+            simplifyIte sym e check go p e_true e_false
           app -> do
             a0' <- W4B.traverseApp go app
             if (W4B.appExprApp a0) == a0' then return e
@@ -827,11 +855,12 @@ simplifyBVOpInner ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
+  (forall tp'. W4.SymExpr sym tp' ->  W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) {- ^ double-check simplification step -} ->
   -- | Recursive call to outer simplification function
   (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) ->
   W4B.App (W4B.Expr t) tp ->
   Maybe (IO (W4.SymExpr sym tp))
-simplifyBVOpInner sym go app = case app of
+simplifyBVOpInner sym simp_check go app = case app of
   W4B.BVConcat w u v -> do
       W4B.BVSelect upper n bv <- W4B.asApp u
       W4B.BVSelect lower n' bv' <- W4B.asApp v
@@ -973,35 +1002,71 @@ simplifyBVOpInner sym go app = case app of
 -- shifts, pushing slices through arithmetic operations, and dropping
 -- zero-extensions where possible.
 simplifyBVOps ::
-  forall sym t solver fs tp.
+  forall sym m t solver fs tp.
+  IO.MonadUnliftIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-simplifyBVOps sym outer = do
+  m (W4.SymExpr sym tp)
+simplifyBVOps sym outer = simplifyBVOps' sym (\_ e2 -> return e2) outer
+
+
+simplifyBVOps' ::
+  forall sym m t solver fs tp.
+  IO.MonadUnliftIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  (forall tp'. W4.SymExpr sym tp' ->  W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) {- ^ double-check simplification step -} ->
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+simplifyBVOps' sym simp_check outer = IO.withRunInIO $ \inIO -> do
   cache <- W4B.newIdxCache
   let
-    else_ :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
-    else_ e = case e of
-      W4B.AppExpr a0 -> do
-        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-        if (W4B.appExprApp a0) == a0' then return e
-        else W4B.sbMakeExpr sym a0' >>= go
-      W4B.NonceAppExpr a0 -> do
-        a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-        if (W4B.nonceExprApp a0) == a0' then return e
-        else W4B.sbNonceExpr sym a0' >>= go
-      _ -> return e      
-    
-    go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
-    go e = W4B.idxCacheEval cache e $ do
+    f :: forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))
+    f app = case simplifyBVOpInner sym (\e1 e2 -> inIO (simp_check e1 e2)) (\e' -> inIO (go e')) app of
+      Just g -> Just <$> liftIO g
+      Nothing -> return Nothing
+
+    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+    go e = W4B.idxCacheEval cache e $ simplifyApp sym simp_check f e
+
+  inIO (go outer)
+
+simplifyApp ::
+  forall sym m t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  (forall tp'. W4.SymExpr sym tp' ->  W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) {- ^ double-check simplification step -} ->
+  (forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))) {- ^ app simplification -} ->
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+simplifyApp sym simp_check simp_app outer = do
+  let
+    else_ :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+    else_ e = do
+      e' <- case e of
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else (liftIO $ W4B.sbMakeExpr sym a0') >>= go
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else (liftIO $ W4B.sbNonceExpr sym a0') >>= go
+        _ -> return e
+      simp_check e e'
+
+    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+    go e = do
       setProgramLoc sym e
       case e of
-        W4B.AppExpr a0 -> case simplifyBVOpInner sym go (W4B.appExprApp a0) of
-          Just go' -> go'
+        W4B.AppExpr a0 -> simp_app (W4B.appExprApp a0) >>= \case
+          Just e' -> simp_check e e'
           Nothing -> else_ e
         _ -> else_ e
   go outer
+
 
 -- | Simplify the given predicate by deciding which atoms are logically necessary
 -- according to the given provability function.

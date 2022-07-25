@@ -209,17 +209,16 @@ getDuration = do
 
 emitWarning ::
   HasCallStack =>
-  PE.BlocksPair arch ->
   PEE.InnerEquivalenceError arch ->
   EquivM sym arch ()
-emitWarning blks innererr = do
+emitWarning innererr = do
   wb <- CMR.asks envWhichBinary
   let err = PEE.EquivalenceError
         { PEE.errWhichBinary = wb
         , PEE.errStackTrace = Just callStack
         , PEE.errEquivError = innererr
         }
-  emitEvent (\_ -> PE.Warning blks err)
+  emitEvent (\_ -> PE.Warning err)
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do

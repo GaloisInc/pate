@@ -3,6 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 module Pate.Verification.Simplify (
     simplifyPred
   , simplifySubPreds
@@ -12,6 +13,7 @@ module Pate.Verification.Simplify (
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
+import           Data.Proxy
 import           Data.Functor.Const ( Const(..) )
 import           Debug.Trace ( traceM )
 import           GHC.Stack ( HasCallStack )
@@ -21,6 +23,7 @@ import qualified What4.SatResult as W4R
 
 import qualified Pate.Config as PC
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
 
@@ -54,6 +57,64 @@ simplifySubPreds a = withValid $ withSym $ \sym -> do
       _ -> return e
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (simplifyPred' e)) a
 
+
+simplifyBVOps_trace ::
+  forall sym arch m t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  (forall tp'.
+     W4.SymExpr sym tp' ->
+     W4.SymExpr sym tp' ->
+     EquivM_ sym arch (W4.SymExpr sym tp')) ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+simplifyBVOps_trace sym checkWork outer = do
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> EquivM_ sym arch (W4.SymExpr sym tp')
+    go e = W4B.idxCacheEval cache e $ WEH.simplifyBVOps' sym checkWork e
+  go outer
+
+simplifyWithSolver ::
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  f ->
+  EquivM sym arch f
+simplifyWithSolver a = withValid $ withSym $ \sym -> do
+  ecache <- W4B.newIdxCache
+  pcache <- W4B.newIdxCache
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  let
+    checkWork ::
+      forall tp.
+      W4.SymExpr sym tp ->
+      W4.SymExpr sym tp ->
+      EquivM_ sym arch (W4.SymExpr sym tp)
+    checkWork e_original e_simp = do
+      p <- liftIO $ W4.isEq sym e_original e_simp
+      isPredTrue' heuristicTimeout p >>= \case
+        True -> return e_simp
+        False -> do
+          emitWarning $
+            PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e_original e_simp)
+          return e_original
+
+    checkPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
+    checkPred p' = fmap (getConst) $ W4B.idxCacheEval pcache p' $
+      Const <$> concretePred heuristicTimeout p'
+
+    doSimp :: forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)
+    doSimp e = W4B.idxCacheEval ecache e $ withSolverProcess $ \sp -> withSym $ \sym -> do
+      e1 <- WEH.resolveConcreteLookups sym checkPred e
+      e3 <- simplifyBVOps_trace sym checkWork e1
+      --e2 <- liftIO $ WEH.simplifyBVOps sym e1
+      -- just checking BV simplification here
+      --e3 <- checkWork e e1
+      return e3
+
+  IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (doSimp e)) a
+
+
 -- | Simplify a predicate by considering the
 -- logical necessity of each atomic sub-predicate under the current set of assumptions.
 -- Additionally, simplify array lookups across unrelated updates.
@@ -71,7 +132,7 @@ simplifyPred_deep p = withSym $ \sym -> do
   -- remove redundant atoms
   p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
   -- resolve array lookups across unrelated updates
-  p2 <- WEH.resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) p1
+  p2 <- WEH.resolveConcreteLookups sym (\p' -> return $ W4.asConstantPred p') p1
   -- additional bitvector simplifications
   p3 <- liftIO $ WEH.simplifyBVOps sym p2
   -- drop any muxes across equality tests

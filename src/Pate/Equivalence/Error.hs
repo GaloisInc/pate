@@ -3,10 +3,13 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE OverloadedStrings   #-}
+
 module Pate.Equivalence.Error (
     InnerEquivalenceError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
+  , SimpResult(..)
   , equivalenceError
   , equivalenceErrorFor
   ) where
@@ -15,8 +18,12 @@ import qualified Control.Exception as X
 import           Data.Maybe ( catMaybes )
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Typeable ( Typeable )
+import           Data.Proxy
 import           GHC.Stack ( HasCallStack, CallStack, prettyCallStack, callStack )
 import qualified What4.Interface as W4
+
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Discovery as MD
@@ -69,9 +76,18 @@ data InnerEquivalenceError arch
   | InvalidCallTarget (PA.ConcreteAddress arch) (EquivalenceError arch)
   | IncompatibleDomainPolarities
   | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
-  | InconsistentSimplificationResult String String
+  | InconsistentSimplificationResult SimpResult
   | UnhandledLoop
   | MissingExpectedEquivalentFunction (PA.ConcreteAddress arch)
+
+data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>
+  SimpResult (Proxy sym) (W4.SymExpr sym tp) (W4.SymExpr sym tp)
+
+instance PP.Pretty SimpResult where
+  pretty (SimpResult _ e1 e2) = W4.printSymExpr e1 <+> W4.printSymExpr e2
+
+instance Show SimpResult where
+  show r = show (PP.pretty r)
 
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (InnerEquivalenceError arch)
@@ -84,12 +100,18 @@ data EquivalenceError arch where
       , errEquivError :: InnerEquivalenceError arch
       } -> EquivalenceError arch
 
-instance Show (EquivalenceError arch) where
-  show e@(EquivalenceError{}) = unlines $ catMaybes $
-    [ fmap (\(Some b) -> "For " ++ show b ++ " binary") (errWhichBinary e)
-    , fmap (\s -> "At " ++ prettyCallStack s) (errStackTrace e)
-    , Just (show (errEquivError e))
+instance MS.SymArchConstraints arch => PP.Pretty (InnerEquivalenceError arch) where
+  pretty = PP.viaShow
+
+instance PP.Pretty (EquivalenceError arch) where
+  pretty e@(EquivalenceError{}) = PP.vsep $ catMaybes $
+    [ fmap (\(Some b) -> "For " <+> PP.pretty (show b) <+> " binary") (errWhichBinary e)
+    , fmap (\s -> "At " <+> PP.pretty (prettyCallStack s)) (errStackTrace e)
+    , Just (PP.pretty (errEquivError e))
     ]
+
+instance Show (EquivalenceError arch) where
+  show e = show (PP.pretty e)
 
 instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (EquivalenceError arch)
 

@@ -144,7 +144,7 @@ doTest mwb cfg sv proxy@(PA.SomeValidArch {}) fp = do
       , PL.verificationCfg = PC.defaultVerificationCfg
       , PL.logger =
           LJ.LogAction $ \e -> case e of
-            PE.Warning _ err -> do
+            PE.Warning err -> do
               addLogMsg $ "WARNING: " ++ show err
             PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
             PE.ProofTraceEvent _ oAddr pAddr msg _ -> do
