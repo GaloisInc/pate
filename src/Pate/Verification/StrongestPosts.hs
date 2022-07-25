@@ -163,6 +163,7 @@ pairGraphComputeFixpoint gr =
       pairGraphComputeFixpoint gr''
 
 
+
 absValueToAsm ::
   forall sym arch v bin tp.
   PS.SimVars sym arch v bin ->
@@ -188,7 +189,11 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
     return $ bindRegion <> bindOffSet
   _ -> return $ mempty
 
-
+-- | Returns an 'PS.AssumptionSet' that assumes the initial abstract block state
+-- from Macaw ('MAS.AbsBlockState') corresponds to the given 'PB.ConcreteBlock'.
+-- Specifically each register is assumed to agree with the corresponding 'MAS.AbsValue'.
+-- TODO: At the moment this is limited to identifying stack offsets, but in general
+-- we could lift all of the abstract value information from Macaw.
 validAbsValues ::
   forall sym arch v bin.
   PBi.KnownBinary bin =>
@@ -281,6 +286,15 @@ visitNode scope (ReturnNode fPair) d gr0 =
 --   immediately returns the prestate as the poststate.
 --   This is used to compute widenings that propagate abstract domain
 --   information from function return nodes to the actual return sites.
+--   The only state update that occurs is that a fresh variable is created
+--   to represent the stack base in the output state.
+--   The returned 'PS.AssumptionSet' associates the internal stack base
+--   from the callee (i.e. in 'SimInput') with the stack
+--   pointer of the caller (i.e. in 'SimOutput').
+--   This effectively re-phrases the resulting domain from the
+--   function call with respect to the specific call site that we are
+--   returning, and allows us to properly contextualize any resulting inequalities
+--   with respect to what is visible in our stack frame.
 returnSiteBundle :: forall sym arch v.
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->

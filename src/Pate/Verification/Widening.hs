@@ -194,7 +194,16 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
                    return gr'
               Right gr' -> return gr'
 
--- | bindSpec domain_out (bundle) == domain_in
+-- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
+-- parameterized over the *output* state of the given 'SimBundle'.
+-- Until now, the widening process has used the same scope for the pre-domain and
+-- post-domain (i.e. both contain free variables corresponding to the initial values
+-- before symbolic execution).
+-- To abstract the computed post-domain from its calling context, we need to rephrase
+-- any symbolic terms it contains so that they only refer to the output state.
+-- Specifically, given a post-domain @dom[pre]@ phrased over the pre-state variables, and
+-- a function @f(pre)@ representing the result of symbolic execution, we want to compute
+-- @dom'[post]@ such that @dom'[post/f(pre)] == dom[pre]@.
 abstractOverVars ::
   forall sym arch pre.
   PS.SimScope sym arch pre  ->
