@@ -255,9 +255,10 @@ simulate simInput = withBinary @bin $ do
   globals <- getGlobals simInput
   cres <- evalCFG globals regs cfg
   (asm, postRegs, memTrace, exitClass) <- getGPValueAndTrace cres
-  -- in general we don't know anything about the post-state frame
+  -- In general we don't know anything about the post-state frame
   -- we need additional assumptions based on the exit condition of this
-  -- slice
+  -- slice. This is handled later in 'Pate.Discovery.associatedFrames' during
+  -- the final stage of widening.
   post_frame <- withSymIO $ \sym -> PS.liftScope0 sym $ \sym' ->
     W4.freshConstant sym' (W4.safeSymbol "post_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
   return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs post_frame) exitClass)

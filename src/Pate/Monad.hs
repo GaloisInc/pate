@@ -432,17 +432,23 @@ withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
       inIO $ validateAssumptions curAsm asm
       inIO f
 
+-- | Validates the current set of assumptions by checking that some model exists
+-- under the current assumption context.
+-- Takes the original assumption set and the recently-pushed assumption set, which
+-- is used for reporting in the case that the resulting assumption state is found to
+-- be inconsistent.
 validateAssumptions ::
   forall sym arch v. 
   HasCallStack =>
-  AssumptionSet sym v ->
-  AssumptionSet sym v ->
+  AssumptionSet sym v {- ^ original assumption set -} ->
+  AssumptionSet sym v {- ^ recently pushed assumption set -} ->
   EquivM sym arch ()
 validateAssumptions oldAsm newAsm = withSym $ \sym -> withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> do
   let
     simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
     simp e = resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
-  
+
+  -- Simplify the assumptions for readability
   oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
   newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm
   WPO.checkAndGetModel sp "check assumptions" >>= \case
@@ -501,6 +507,9 @@ withSatAssumption asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
       CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
         IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
           W4.assume (WPO.solverConn sp) p
+          -- FIXME: on an 'Unknown' result (or timeout) we need to throw an exception,
+          -- rather than considering the result to be 'Nothing', otherwise we
+          -- risk silently discarding feasible branches
           b <- WPO.checkAndGetModel sp "check assumptions" >>= asSat
           case b of
             True -> Just <$> inIO f
