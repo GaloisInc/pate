@@ -253,7 +253,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
 
         -- se[v]
-        let postFrame = PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+        let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
         off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
         -- asFrameOffset := frame[post] + off
         asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off

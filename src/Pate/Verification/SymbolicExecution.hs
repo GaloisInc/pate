@@ -259,8 +259,7 @@ simulate simInput = withBinary @bin $ do
   -- we need additional assumptions based on the exit condition of this
   -- slice. This is handled later in 'Pate.Discovery.associatedFrames' during
   -- the final stage of widening.
-  post_frame <- withSymIO $ \sym -> PS.liftScope0 sym $ \sym' ->
-    W4.freshConstant sym' (W4.safeSymbol "post_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+  post_frame <- withSymIO $ \sym -> PS.freshStackBase sym (Proxy @arch)
   return $ (asm, PS.SimOutput (PS.SimState memTrace postRegs post_frame) exitClass)
 
 

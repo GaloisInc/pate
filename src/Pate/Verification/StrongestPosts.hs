@@ -182,7 +182,7 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
 
     let w = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
     slotBV <- liftIO $ W4.bvLit sym w (BV.mkBV w (fromIntegral slot))
-    let sb = PS.unSE $ PS.simStackBase $ PS.simVarState vars
+    let sb = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState vars
     off' <- liftIO $ W4.bvAdd sym sb slotBV
     -- the offset of this value must be frame + slot
     let bindOffSet = PS.exprBinding off off'
@@ -308,8 +308,7 @@ returnSiteBundle vars _preD pPair = withSym $ \sym -> do
 
   simOut_ <- PPa.forBins $ \get -> do
     let inSt = PS.simInState $ get simIn_
-    postFrame <- liftIO $ PS.liftScope0 sym $ \sym' ->
-      W4.freshConstant sym' (W4.safeSymbol "post_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+    postFrame <- liftIO $ PS.freshStackBase sym (Proxy @arch)
     let postSt = inSt { PS.simStackBase = postFrame }
     return $ PS.SimOutput postSt blockEndVal
 
@@ -325,7 +324,7 @@ returnSiteBundle vars _preD pPair = withSym $ \sym -> do
       outVars = get (PS.bundleOutVars bundle)
       CLM.LLVMPointer _ sp_pre = PSR.macawRegValue $ PS.simSP inSt
     vAbs <- validAbsValues (get pPair) outVars
-    return $ vAbs <> (PS.exprBinding (PS.unSE initFrame) sp_pre)
+    return $ vAbs <> (PS.exprBinding (PS.unSE $ PS.unSB $ initFrame) sp_pre)
 
   return (asms, bundle)
 

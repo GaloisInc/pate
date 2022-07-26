@@ -411,8 +411,7 @@ withFreshVars blocks f = do
       withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
     mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
-    mkStackBase = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
-      W4.freshConstant sym' (WS.safeSymbol "pre_frame") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+    mkStackBase = withSymIO $ \sym -> freshStackBase sym (Proxy @arch)
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
 

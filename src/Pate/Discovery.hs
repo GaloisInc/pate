@@ -273,8 +273,8 @@ associateFrames bundle exitCase = PPa.catBins $ \get -> do
     let
       st_pre = PSS.simInState $ get $ simIn bundle
       st_post = PSS.simOutState $ get $ simOut bundle
-      frame_pre = PSS.unSE $ PSS.simStackBase $ st_pre
-      frame_post = PSS.unSE $ PSS.simStackBase $ st_post
+      frame_pre = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_pre
+      frame_post = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_post
       CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post
     case exitCase of
       -- a backjump does not modify the frame

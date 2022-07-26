@@ -35,7 +35,8 @@ Functionality for handling the inputs and outputs of crucible.
 module Pate.SimState
   ( -- simulator state
     SimState(..)
-  , StackBase
+  , StackBase(..)
+  , freshStackBase
   , SimInput(..)
   , SimOutput(..)
   , type VarScope
@@ -133,7 +134,18 @@ import qualified Data.Parameterized.SetF as SetF
 -- | Points to the base of the stack. In any given context this will always be
 -- "free" as the base of the stack is always abstract, but it is rebound to account
 -- for changes to the stack pointer when moving between scopes.
-type StackBase sym arch v = ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) v
+newtype StackBase sym arch v =
+  StackBase { unSB :: ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) v }
+
+freshStackBase ::
+  forall sym arch v.
+  W4.IsSymExprBuilder sym =>
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  sym ->
+  Proxy arch ->
+  IO (StackBase sym arch v)
+freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
+    W4.freshConstant sym' (W4.safeSymbol "stack_base") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
 
 data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
@@ -560,7 +572,7 @@ mkVarBinds sym simVars mem regs sb = do
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
     stackVar = simStackBase $ simBoundVarState simVars
-    stackBinds = singleRewrite (unSE stackVar) (unSE sb)
+    stackBinds = singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
     
   regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
     case PSR.macawRegRepr val of
@@ -722,10 +734,10 @@ bindSpec sym vals (SimSpec scope@(SimScope _ asm) body) = do
 -- assumptions
 
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs (ScopedExpr sb)) = SimState
+  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb))) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
-    <*> (ScopedExpr <$> f sb)
+    <*> ((StackBase . ScopedExpr) <$> f sb)
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk absSt) = SimInput
