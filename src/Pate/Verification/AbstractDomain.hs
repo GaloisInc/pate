@@ -396,8 +396,8 @@ absDomainValToAsm ::
   sym ->
   PE.EquivContext sym arch ->
   PSR.MacawRegEntry sym tp ->
-  Maybe (MAS.AbsValue (MM.ArchAddrWidth arch) tp) ->
-  MacawAbstractValue sym tp ->
+  Maybe (MAS.AbsValue (MM.ArchAddrWidth arch) tp) {- ^ the abstract value of this location according to macaw ('Maybe' because this is only available for registers in pre-domains) -} ->
+  MacawAbstractValue sym tp {- ^ the abstract value computed for this location in an earlier widening iteration -} ->
   IO (PS.AssumptionSet sym v)
 absDomainValToAsm sym eqCtx e mAbs (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
   CLM.LLVMPointerRepr{} -> do

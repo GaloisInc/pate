@@ -27,6 +27,7 @@ Helper functions for manipulating What4 expressions
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 module What4.ExprHelpers (
     iteM
@@ -52,6 +53,7 @@ module What4.ExprHelpers (
   , groundToConcrete
   , fixMux
   , ExprSet
+  , ppExprSet
   , getPredAtoms
   , abstractOver
   , resolveConcreteLookups
@@ -75,6 +77,9 @@ import           Control.Monad.ST ( RealWorld, stToIO )
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.State as CMS
 
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
+
 import           Data.Foldable (foldlM, foldrM)
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.HashTable.ST.Basic as H
@@ -83,6 +88,7 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.List ( foldl' )
 import           Data.List.NonEmpty (NonEmpty(..))
+import           Data.Proxy (Proxy(..))
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -539,6 +545,15 @@ groundToConcrete repr gv = case repr of
 type ExprSet sym = SetF (W4.SymExpr sym)
 
 type PredSet sym = ExprSet sym W4.BaseBoolType
+
+ppExprSet ::
+  W4.IsExpr (W4.SymExpr sym) =>
+  Proxy sym ->
+  ExprSet sym tp ->
+  PP.Doc a
+ppExprSet _ es =
+  let ps = [ W4.printSymExpr p | p <- SetF.toList es ]
+  in PP.sep (zipWith (<+>) ("{" : repeat ",") ps) <+> "}"
 
 -- | Get the atomic predicates which appear anywhere in the given predicate.
 -- TODO: does not consider all possible predicate constructors.

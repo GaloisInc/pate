@@ -207,15 +207,6 @@ instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym v) where
     binds = mergeExprSetMap (Proxy @sym) (asmBinds asm1) (asmBinds asm2)
     in AssumptionSet preds binds
 
-ppExprSet ::
-  W4.IsExpr (W4.SymExpr sym) =>
-  Proxy sym ->
-  ExprSet sym tp ->
-  PP.Doc a
-ppExprSet _ es =
-  let ps = [ W4.printSymExpr p | p <- SetF.toList es ]
-  in PP.sep (zipWith (<+>) ("{" : repeat ",") ps) <+> "}"
-
 ppBinds ::
   W4.IsExpr (W4.SymExpr sym) =>
   Proxy sym ->
@@ -631,7 +622,7 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 -- | An expr tagged with a scoped parameter (representing the fact that the
 -- expression is valid under the scope 'v')
 data ScopedExpr sym tp (v :: VarScope) =
-  ScopedExpr { unSE :: (W4.SymExpr sym tp) }
+  ScopedExpr { unSE :: W4.SymExpr sym tp }
 
 -- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates

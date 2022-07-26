@@ -204,6 +204,12 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 -- Specifically, given a post-domain @dom[pre]@ phrased over the pre-state variables, and
 -- a function @f(pre)@ representing the result of symbolic execution, we want to compute
 -- @dom'[post]@ such that @dom'[post/f(pre)] == dom[pre]@.
+--
+-- For any given sub-expression in the domain there are multiple possible strategies that
+-- can be applied to perform this re-scoping. Here we have a (neccessarily incomplete) list of
+-- strategies that are attempted, but in general they may all fail.
+-- TODO: Currently we treat a re-scoping failure as catastrophic, but it should
+-- be a recoverable warning that simply results in some loss of soundness.
 abstractOverVars ::
   forall sym arch pre.
   PS.SimScope sym arch pre  ->
@@ -211,7 +217,7 @@ abstractOverVars ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   PAD.AbstractDomainSpec sym arch {- ^ previous post-domain -} ->
-  PAD.AbstractDomain sym arch pre {- ^ computed post-domain -} ->
+  PAD.AbstractDomain sym arch pre {- ^ computed post-domain (with variables from the initial 'pre' scope) -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym -> do
   -- the post-state of the slice phrased over 'pre'

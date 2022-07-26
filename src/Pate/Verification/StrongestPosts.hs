@@ -163,7 +163,15 @@ pairGraphComputeFixpoint gr =
       pairGraphComputeFixpoint gr''
 
 
-
+-- | For a given 'PSR.MacawRegEntry' (representing the initial state of a register)
+-- and a corresponding 'MAS.AbsValue' (its initial abstract value according to Macaw),
+-- compute an 'PS.AssumptionSet' that assumes they correspond.
+-- Currently the only case that is covered is when macaw decides that the register
+-- is holding a stack offset (i.e. a 'MAS.StackOffsetAbsVal'). In this case we
+-- compute the expected value for the register by adding the stack offset to
+-- the stack base of the given 'PS.SimVars'.
+-- This is necessary to ensure that we can successfully re-scope any references
+-- to these registers in 'Pate.Verification.Widening.abstractOverVars'
 absValueToAsm ::
   forall sym arch v bin tp.
   PS.SimVars sym arch v bin ->
@@ -173,7 +181,7 @@ absValueToAsm ::
 absValueToAsm vars regEntry val = withSym $ \sym -> case val of
   -- FIXME: check the MemAddr here to make sure we only use
   -- stack offsets from this frame
-  MAS.StackOffsetAbsVal _ slot -> do
+  MAS.StackOffsetAbsVal _memAddr slot -> do
     CLM.LLVMPointer region off <- return $ PSR.macawRegValue regEntry
     stackRegion <- asks (PMC.stackRegion . envCtx)
     -- the region of this value must be the stack region
@@ -187,7 +195,7 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
     -- the offset of this value must be frame + slot
     let bindOffSet = PS.exprBinding off off'
     return $ bindRegion <> bindOffSet
-  _ -> return $ mempty
+  _ -> return mempty
 
 -- | Returns an 'PS.AssumptionSet' that assumes the initial abstract block state
 -- from Macaw ('MAS.AbsBlockState') corresponds to the given 'PB.ConcreteBlock'.
@@ -294,7 +302,7 @@ visitNode scope (ReturnNode fPair) d gr0 =
 --   This effectively re-phrases the resulting domain from the
 --   function call with respect to the specific call site that we are
 --   returning, and allows us to properly contextualize any resulting inequalities
---   with respect to what is visible in our stack frame.
+--   with respect to what is visible in the callers stack frame.
 returnSiteBundle :: forall sym arch v.
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->
@@ -962,6 +970,3 @@ mkSimBundle pPair vars _d =
      let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
 
      applyCurrentAsms bnd
-
-     -- eqRegs <- PVD.equateRegisters rd bnd
-     -- withAssumptionSet eqRegs $ applyCurrentAsms bnd
