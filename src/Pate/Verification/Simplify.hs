@@ -3,7 +3,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 module Pate.Verification.Simplify (
     simplifyPred
   , simplifySubPreds
@@ -62,10 +61,7 @@ simplifyBVOps_trace ::
   forall sym arch t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  (forall tp'.
-     W4.SymExpr sym tp' ->
-     W4.SymExpr sym tp' ->
-     EquivM_ sym arch (W4.SymExpr sym tp')) ->
+  WEH.SimpCheck sym (EquivM_ sym arch) ->
   W4.SymExpr sym tp ->
   EquivM sym arch (W4.SymExpr sym tp)
 simplifyBVOps_trace sym checkWork outer = do
@@ -75,6 +71,16 @@ simplifyBVOps_trace sym checkWork outer = do
     go e = W4B.idxCacheEval cache e $ WEH.simplifyBVOps' sym checkWork e
   go outer
 
+-- | Performs the following simplifications:
+-- Resolves any concrete array lookups with 'WEH.resolveConcreteLookups'
+-- Simplifies various bitvector operations using 'WEH.simplifyBVOps'
+-- The solver is used to decide equality for array accesses when resolving
+-- concrete lookups, and it is used to validate the result of simplification
+-- (i.e. the simplified expression should be provably equal to the original).
+-- Solver timeouts are handled by considering the result to be unknown -
+-- i.e. a 'Nothing' result from 'concretePred', which is treated the same
+-- as the case where a predicate is neither concretely true nor false (i.e.
+-- the simplifier cannot prune either branch).
 simplifyWithSolver ::
   forall sym arch f.
   PEM.ExprMappable sym f =>
@@ -85,6 +91,15 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
   pcache <- W4B.newIdxCache
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let
+    simpCheck :: WEH.SimpCheck sym (EquivM_ sym arch)
+    simpCheck = WEH.SimpCheck $ \e_orig e_simp -> do
+      valid <- liftIO $ W4.isEq sym e_orig e_simp
+      isPredTrue' heuristicTimeout valid >>= \case
+        True -> return e_simp
+        False ->
+          --TODO: raise warning if simplifier performs
+          --inconsistent step
+          return e_orig
     checkPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
     checkPred p' = fmap (getConst) $ W4B.idxCacheEval pcache p' $
       Const <$> concretePred heuristicTimeout p'
@@ -92,9 +107,8 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
     doSimp :: forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)
     doSimp e = W4B.idxCacheEval ecache e $ do
       e1 <- WEH.resolveConcreteLookups sym checkPred e
-      e2 <- liftIO $ WEH.simplifyBVOps sym e1
-      e3 <- liftIO $ WEH.expandMuxEquality sym e2
-      return e3
+      e2 <- WEH.simplifyBVOps' sym simpCheck e1
+      WEH.runSimpCheck simpCheck e e2
 
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (doSimp e)) a
 

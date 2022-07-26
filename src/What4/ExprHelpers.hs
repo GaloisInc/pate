@@ -64,6 +64,9 @@ module What4.ExprHelpers (
   , setProgramLoc
   , idxCacheEvalWriter
   , Tagged
+  , SimpCheck(..)
+  , noSimpCheck
+  , unliftSimpCheck
   ) where
 
 import           GHC.TypeNats
@@ -855,7 +858,7 @@ simplifyBVOpInner ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  (forall tp'. W4.SymExpr sym tp' ->  W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) {- ^ double-check simplification step -} ->
+  SimpCheck sym IO {- ^ double-check simplification step -} ->
   -- | Recursive call to outer simplification function
   (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) ->
   W4B.App (W4B.Expr t) tp ->
@@ -1011,7 +1014,7 @@ simplifyBVOps ::
   sym ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-simplifyBVOps sym outer = simplifyBVOps' sym (\_ e2 -> return e2) outer
+simplifyBVOps sym outer = simplifyBVOps' sym noSimpCheck outer
 
 
 simplifyBVOps' ::
@@ -1019,28 +1022,47 @@ simplifyBVOps' ::
   IO.MonadUnliftIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  (forall tp'. W4.SymExpr sym tp' ->  W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) {- ^ double-check simplification step -} ->
+  SimpCheck sym m {- ^ double-check simplification step -} ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-simplifyBVOps' sym simp_check outer = IO.withRunInIO $ \inIO -> do
-  cache <- W4B.newIdxCache
-  let
-    f :: forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))
-    f app = case simplifyBVOpInner sym (\e1 e2 -> inIO (simp_check e1 e2)) (\e' -> inIO (go e')) app of
-      Just g -> Just <$> liftIO g
-      Nothing -> return Nothing
+simplifyBVOps' sym simp_check outer = do
+  simp_check' <- unliftSimpCheck simp_check
+  IO.withRunInIO $ \inIO -> do
+    cache <- W4B.newIdxCache
+    let
+      f :: forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))
+      f app = case simplifyBVOpInner sym simp_check' (\e' -> inIO (go e')) app of
+        Just g -> Just <$> liftIO g
+        Nothing -> return Nothing
 
-    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
-    go e = W4B.idxCacheEval cache e $ simplifyApp sym simp_check f e
+      go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+      go e = W4B.idxCacheEval cache e $ simplifyApp sym simp_check f e
 
-  inIO (go outer)
+    inIO (go outer)
+
+-- | An action for validating a simplification step.
+-- After a step is taken, this function is given the original expression as the
+-- first argument and the simplified expression as the second argument.
+-- This action should check that the original and simplified expressions are equal,
+-- and return the simplified expression if they are, or the original expression if they are not,
+-- optionally raising any exceptions or warnings in the given monad.
+newtype SimpCheck sym m = SimpCheck
+  { runSimpCheck :: forall tp. W4.SymExpr sym tp -> W4.SymExpr sym tp -> m (W4.SymExpr sym tp) }
+
+
+noSimpCheck :: Applicative m => SimpCheck sym m
+noSimpCheck = SimpCheck (\_ e_patched -> pure e_patched)
+
+unliftSimpCheck :: IO.MonadUnliftIO m => SimpCheck sym m -> m (SimpCheck sym IO)
+unliftSimpCheck simp_check = IO.withRunInIO $ \inIO ->
+  return $ SimpCheck (\e1 e2 -> inIO (runSimpCheck simp_check e1 e2))
 
 simplifyApp ::
   forall sym m t solver fs tp.
   IO.MonadIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  (forall tp'. W4.SymExpr sym tp' ->  W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) {- ^ double-check simplification step -} ->
+  SimpCheck sym m {- ^ double-check simplification step -} ->
   (forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))) {- ^ app simplification -} ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
@@ -1058,14 +1080,14 @@ simplifyApp sym simp_check simp_app outer = do
           if (W4B.nonceExprApp a0) == a0' then return e
           else (liftIO $ W4B.sbNonceExpr sym a0') >>= go
         _ -> return e
-      simp_check e e'
+      runSimpCheck simp_check e e'
 
     go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
     go e = do
       setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> simp_app (W4B.appExprApp a0) >>= \case
-          Just e' -> simp_check e e'
+          Just e' -> runSimpCheck simp_check e e'
           Nothing -> else_ e
         _ -> else_ e
   go outer
