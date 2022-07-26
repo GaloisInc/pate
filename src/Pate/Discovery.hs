@@ -264,6 +264,7 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
 -- This assumption is needed in the final stage of widening, in order to re-phrase
 -- any stack offsets that appear in the resulting equivalence domain: from the callee's stack
 -- base to the caller's stack base.
+-- See: 'PSS.StackBase'
 associateFrames ::
   forall sym arch v.
   SimBundle sym arch v ->

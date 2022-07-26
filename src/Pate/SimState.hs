@@ -131,21 +131,8 @@ import qualified Data.Parameterized.SetF as SetF
 ------------------------------------
 -- Crucible inputs and outputs
 
--- | Points to the base of the stack. In any given context this will always be
--- "free" as the base of the stack is always abstract, but it is rebound to account
--- for changes to the stack pointer when moving between scopes.
-newtype StackBase sym arch v =
-  StackBase { unSB :: ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) v }
 
-freshStackBase ::
-  forall sym arch v.
-  W4.IsSymExprBuilder sym =>
-  MM.MemWidth (MM.ArchAddrWidth arch) =>
-  sym ->
-  Proxy arch ->
-  IO (StackBase sym arch v)
-freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
-    W4.freshConstant sym' (W4.safeSymbol "stack_base") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+
 
 data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
@@ -716,6 +703,137 @@ bindSpec sym vals (SimSpec scope@(SimScope _ asm) body) = do
   body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
   asm' <- scopedExprMap sym asm (applyScopeCoercion sym rew)
   return $ (asm', body')
+
+
+------------------------------------
+-- Stack relative references
+
+{- | = Stack Relative References
+
+== Stack Scope
+
+The equivalence domains are represented as sets of pointers which may diverge
+between the two programs. In the case of direct global variable accesses, these
+pointers are fully concrete and therefore valid in any scope. In contrast, stack
+accesses are always calculated with respect to the stack (or frame) pointer, and
+therefore stack pointers necessarily contain the free variable representing the
+initial value of the stack register.
+
+Without propagating additional information about this free variable, the
+equivalence domain becomes essentially meaningless.
+
+@
+void test() {
+  // slice 0
+  // SP := SP_0
+  // domain := {}
+  int i = 1;
+  int j = 2 OR 3;  // 2 in original function, 3 in patched function
+  // SP := SP_0 - 2
+  // domain := { SP_0 - 1 }
+  // end of slice 0
+  f();
+  // slice 1
+  // SP := SP_1
+  // domain := { SP_0 - 1}
+  g = i;
+  // end of slice 1
+}
+@
+
+At the return site for @f()@, the connection between the original value of the
+stack register (i.e. @SP_0@) and the current value (i.e. @SP_1@) has been
+lost. The equivalence domain is meaningless as @SP_0@ is a free variable in this
+context. The equivalence check fails and produces a counter-example where the
+value of @i@ disagrees between both programs.
+
+== Implementation
+
+The solution requires rewriting the stack pointers in the equivalence domain to
+instead be defined with respect to a constant base: the base address of the
+function frame. This allows stack accesses to be treated uniformly. At the start
+of each function we define the stack pointer to be a free variable: BASE that
+is maintained throughout the context of the function.
+
+@
+void test() {
+  // SP := BASE_0
+  // domain := {}
+  int i = 1;
+  int j = 2 OR 3;
+  // SP := BASE_0 - 2
+  // domain := { BASE_0 - 1 }
+  f();
+  // SP := BASE_0 - 2
+  // domain := { BASE - 1}
+  g = i;
+}
+@
+
+To support this change, we define the initial stack pointer for a function to be
+a distinguished stack base variable (i.e. 'StackBase'), which is treated
+specially during function calls.
+
+When verifying @f()@ we rephrase the incoming domain (i.e. @{BASE_0 - 1 }@) by asserting
+that the @BASE@ of @f()@ is equal to the value of the stack pointer just after
+the function call (e.g. @SP := BASE_0 - 3@ once the return address has been pushed onto the stack).
+
+@
+// domain := { BASE_0 - 1 } <- incoming domain
+// assume(SP == BASE_0 - 3)
+// assume(BASE_1 == SP)
+// domain := { BASE_1 + 2 } <- domain rephrased in terms of BASE_1
+@
+
+
+This now becomes the pre-domain when @f()@ is verified.
+
+@
+// domain := { BASE_1 + 2 }
+void f() {
+  int = 1 OR 2;
+  return;
+}
+// domain := { BASE_1 - 1; BASE_1 + 2 }
+@
+
+When verifying @test()@ following the call site of @f()@ we can now take this
+domain and re-phrase it once again in terms of the stack base of @test()@.
+
+@
+// domain := { BASE_1 - 1; BASE_1 + 2 } <- incoming domain (once f() returns)
+// assume(SP == BASE_1) --> BASE_1 == BASE_0 - 3
+// domain := { BASE_0 - 4; BASE_0 - 1 }
+@
+
+Notably this outgoing domain points past the current stack pointer, and therefore
+this inequality is unlikely to have any consequence (i.e. this will likely be overwritten
+and never accessed).
+
+Given this inequality, we can see that the final assignment to @g@ is equal between
+both programs, as the access to the stack variable
+@i@ is necessarily equal according to this domain (i.e. @BASE_0 - 0@) .
+
+
+-}
+
+
+-- | Points to the base of the stack. In any given context this will always be
+-- "free" as the base of the stack is always abstract, but it is rebound to account
+-- for changes to the stack pointer when moving between scopes.
+newtype StackBase sym arch v =
+  StackBase { unSB :: ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) v }
+
+freshStackBase ::
+  forall sym arch v.
+  W4.IsSymExprBuilder sym =>
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  sym ->
+  Proxy arch ->
+  IO (StackBase sym arch v)
+freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
+    W4.freshConstant sym' (W4.safeSymbol "stack_base") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+
 
 ------------------------------------
 -- ExprMappable instances

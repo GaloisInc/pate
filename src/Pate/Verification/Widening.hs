@@ -208,6 +208,8 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 -- For any given sub-expression in the domain there are multiple possible strategies that
 -- can be applied to perform this re-scoping. Here we have a (neccessarily incomplete) list of
 -- strategies that are attempted, but in general they may all fail.
+-- See: 'PS.StackBase' for a discussion on how this is used to re-scope stack relative
+-- accesses
 -- TODO: Currently we treat a re-scoping failure as catastrophic, but it should
 -- be a recoverable warning that simply results in some loss of soundness.
 abstractOverVars ::
