@@ -36,6 +36,7 @@ import qualified Prettyprinter as PP
 import           Control.Monad ( forM, unless )
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Writer as CMW
+import           Control.Lens ( (^.) )
 
 import           Data.Functor.Const
 import qualified Data.Set as S
@@ -60,6 +61,7 @@ import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MT
+import qualified Data.Macaw.AbsDomain.AbsState as MAS
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PB
@@ -392,16 +394,25 @@ applyAbsRange sym e rng = case rng of
 absDomainValToAsm ::
   W4.IsSymExprBuilder sym =>
   sym ->
+  PE.EquivContext sym arch ->
   PSR.MacawRegEntry sym tp ->
-  MacawAbstractValue sym tp ->
+  Maybe (MAS.AbsValue (MM.ArchAddrWidth arch) tp) {- ^ the abstract value of this location according to macaw ('Maybe' because this is only available for registers in pre-domains) -} ->
+  MacawAbstractValue sym tp {- ^ the abstract value computed for this location in an earlier widening iteration -} ->
   IO (PS.AssumptionSet sym v)
-absDomainValToAsm sym e (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
+absDomainValToAsm sym eqCtx e mAbs (MacawAbstractValue absVal) = case PSR.macawRegRepr e of
   CLM.LLVMPointerRepr{} -> do
     CLM.LLVMPointer region offset <- return $ PSR.macawRegValue e
     (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs) <- return $ absVal
     let regionInt = W4.natToIntegerPure region
-    regFrame <- applyAbsRange sym regionInt regAbs
+    -- Override the region with the stack region if the macaw value
+    -- domain thinks this is a stack slot
+    let regAbs' = case mAbs of
+          Just (MAS.StackOffsetAbsVal{}) ->
+            (extractAbsRange sym . W4.natToIntegerPure) $ PE.eqCtxStackRegion eqCtx
+          _ -> regAbs
+    regFrame <- applyAbsRange sym regionInt regAbs'
     offFrame <- applyAbsRange sym offset offsetAbs
+
     return $ regFrame <> offFrame
   CT.BoolRepr -> do
     b <- return $ PSR.macawRegValue e
@@ -420,13 +431,18 @@ absDomainValsToAsm ::
   MapF.OrdF (W4.SymExpr sym) =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
+  PE.EquivContext sym arch ->
   PS.SimState sym arch v bin ->
+  Maybe (MAS.AbsBlockState (MC.ArchReg arch)) {- ^ abstract block state according to macaw -} ->
   AbstractDomainVals sym arch bin ->
   IO (PS.AssumptionSet sym v)
-absDomainValsToAsm sym st vals = do
+absDomainValsToAsm sym eqCtx st absBlockSt vals = do
   memFrame <- MapF.foldrMWithKey accumulateCell mempty (absMemVals vals)
-  regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \_ val absVal ->
-    Const <$> absDomainValToAsm sym val absVal
+  regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \r val absVal -> do
+    mAbsVal <- case absBlockSt of
+      Just ast -> return $ Just ((ast ^. MAS.absRegState) ^. (MM.boundValue r))
+      Nothing -> return Nothing
+    Const <$> absDomainValToAsm sym eqCtx val mAbsVal absVal
   return $ memFrame <> regFrame
   where
     accumulateCell ::
@@ -436,7 +452,7 @@ absDomainValsToAsm sym st vals = do
       IO (PS.AssumptionSet sym v)
     accumulateCell cell (MemAbstractValue absVal) frame = do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
-      frame' <- absDomainValToAsm sym (PSR.ptrToEntry val) absVal
+      frame' <- absDomainValToAsm sym eqCtx (PSR.ptrToEntry val) Nothing absVal
       return $ frame <> frame'
 
 -- | Construct a 'W4.Pred' asserting
@@ -448,11 +464,13 @@ absDomainValsToPred ::
   MapF.OrdF (W4.SymExpr sym) =>
   MC.RegisterInfo (MC.ArchReg arch) =>
   sym ->
+  PE.EquivContext sym arch ->
   PS.SimState sym arch v bin ->
+  Maybe (MAS.AbsBlockState (MC.ArchReg arch)) {- ^ abstract block state according to macaw -} ->
   AbstractDomainVals sym arch bin ->
   IO (W4.Pred sym)
-absDomainValsToPred sym st vals = do
-  asm <- absDomainValsToAsm sym st vals
+absDomainValsToPred sym eqCtx st absBlockSt vals = do
+  asm <- absDomainValsToAsm sym eqCtx st absBlockSt vals
   PS.getAssumedPred sym asm
 
 -- | Construct a 'W4.Pred' asserting that the given
@@ -469,16 +487,16 @@ absDomainToPrecond ::
   PE.EquivContext sym arch ->
   PS.SimBundle sym arch v ->
   AbstractDomain sym arch v ->
-  IO (W4.Pred sym)
+  IO (PS.AssumptionSet sym v)
 absDomainToPrecond sym eqCtx bundle d = do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
-  eqInputsPred <- PE.preCondPredicate sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
+  eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
   valsPred <- do
-    let PPa.PatchPair valsO valsP = absDomVals d
-    predO <- absDomainValsToPred sym (PS.simInState $ PS.simInO bundle) valsO
-    predP <- absDomainValsToPred sym (PS.simInState $ PS.simInP bundle) valsP
-    W4.andPred sym predO predP
-  W4.andPred sym eqInputsPred valsPred
+    (predO, predP) <- PPa.forBinsC $ \get -> do
+      let absBlockState = PS.simInAbsState (get $ PS.simIn bundle)
+      absDomainValsToAsm sym eqCtx (PS.simInState $ get $ PS.simIn bundle) (Just absBlockState) (get $ absDomVals d)
+    return $ (predO <> predP)
+  return $ (eqInputsPred <> valsPred)
 
 -- | Construct a 'W4.Pred' asserting that the given
 -- abstract domain holds in the post-state of the given
@@ -501,8 +519,8 @@ absDomainToPostCond sym eqCtx bundle preDom d = do
   eqOutputsPred <- PE.postCondPredicate sym eqOutputs
   valsPred <- do
     let PPa.PatchPair valsO valsP = absDomVals d
-    predO <- absDomainValsToPred sym (PS.simOutState $ PS.simOutO bundle) valsO
-    predP <- absDomainValsToPred sym (PS.simOutState $ PS.simOutP bundle) valsP
+    predO <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutO bundle) Nothing valsO
+    predP <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutP bundle) Nothing valsP
     W4.andPred sym predO predP
   W4.andPred sym eqOutputsPred valsPred
 

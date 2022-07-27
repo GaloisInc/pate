@@ -213,26 +213,28 @@ getGenPathConditionIO sym fn isSat e = do
 -- represented by a 'SymGroundEvalFn').
 -- If all registers agree, then the resulting predicate is True.
 getRegPathCondition ::
-  forall sym arch.
+  forall sym arch v.
   -- | The target condition
-  PE.RegisterCondition sym arch ->
+  PE.RegisterCondition sym arch v ->
   SymGroundEvalFn sym ->
   EquivM sym arch (W4.Pred sym)
 getRegPathCondition regCond fn = withSym $ \sym ->
   TF.foldrMF (\x y -> getRegPath x y) (W4.truePred sym) (PE.regCondPreds regCond)
   where
     getRegPath ::
-      Const (W4.Pred sym) tp ->
+      Const (PS.AssumptionSet sym v) tp ->
       W4.Pred sym ->
       EquivM_ sym arch (W4.Pred sym)
-    getRegPath (Const regCond_pred) pathCond = withSym $ \sym -> execGroundFn fn regCond_pred >>= \case
-      -- if the post-equivalence is satisfied for this entry, then we don't need
-      -- to look at the path condition for these values
-      True -> return pathCond
-      -- for an entry that disagrees in the model, we extract the problematic path condition
-      False -> do
-        regPath' <- getGenPathCondition fn regCond_pred
-        liftIO $ W4.andPred sym pathCond regPath'
+    getRegPath (Const regCondAsm) pathCond = withSym $ \sym -> do
+      regCond_pred <- liftIO $ PS.getAssumedPred sym regCondAsm
+      execGroundFn fn regCond_pred >>= \case
+        -- if the post-equivalence is satisfied for this entry, then we don't need
+        -- to look at the path condition for these values
+        True -> return pathCond
+        -- for an entry that disagrees in the model, we extract the problematic path condition
+        False -> do
+          regPath' <- getGenPathCondition fn regCond_pred
+          liftIO $ W4.andPred sym pathCond regPath'
 
 -- | Return a function for deciding predicate satisfiability based on the current
 -- assumption state. The function caches the result on each predicate, and therefore is
@@ -266,7 +268,7 @@ getSatIO = withValid $ do
 -- excluding conditions which are necessarily true).
 getPathCondition ::
   forall sym arch v.
-  PE.StateCondition sym arch ->
+  PE.StateCondition sym arch v ->
   PS.SimOutput sym arch v PB.Original ->
   PS.SimOutput sym arch v PB.Patched ->
   SymGroundEvalFn sym ->

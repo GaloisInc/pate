@@ -59,11 +59,13 @@ module Pate.Monad
   , withSimSpec
   , withFreshVars
   -- assumption management
+  , validateAssumptions
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
   , applyAssumptionSet
   , applyCurrentAsms
+  , currentAsm
   -- nonces
   , freshNonce
   , withProofNonce
@@ -408,7 +410,10 @@ withFreshVars blocks f = do
       let baseMem = MBL.memoryImage $ PMC.binary binCtx
       withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
-  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\v -> f v)
+    mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
+    mkStackBase = withSymIO $ \sym -> freshStackBase sym (Proxy @arch)
+
+  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
@@ -423,7 +428,32 @@ withAssumptionSet asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
   CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
     IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
       W4.assume (WPO.solverConn sp) p
+      inIO $ validateAssumptions curAsm asm
       inIO f
+
+-- | Validates the current set of assumptions by checking that some model exists
+-- under the current assumption context.
+-- Takes the original assumption set and the recently-pushed assumption set, which
+-- is used for reporting in the case that the resulting assumption state is found to
+-- be inconsistent.
+validateAssumptions ::
+  forall sym arch v. 
+  HasCallStack =>
+  AssumptionSet sym v {- ^ original assumption set -} ->
+  AssumptionSet sym v {- ^ recently pushed assumption set -} ->
+  EquivM sym arch ()
+validateAssumptions oldAsm newAsm = withSym $ \sym -> withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> do
+  let
+    simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
+    simp e = resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
+
+  -- Simplify the assumptions for readability
+  oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
+  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm
+  WPO.checkAndGetModel sp "check assumptions" >>= \case
+    W4R.Unsat _ -> inIO (throwHere $ PEE.AssumedFalse oldAsm' newAsm')
+    W4R.Unknown -> inIO (throwHere $ PEE.AssumedFalse oldAsm' newAsm')
+    W4R.Sat{} -> return ()
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.
@@ -459,19 +489,30 @@ applyAssumptionSet asm f = withSym $ \sym -> do
     doRebind = rebindWithFrame' sym cache asm
   liftIO $ PEM.mapExpr sym doRebind f
 
-
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
-  PT.Timeout ->
-  W4.Pred sym ->
+  AssumptionSet sym v ->
   EquivM sym arch f ->
   EquivM sym arch (Maybe f)
-withSatAssumption timeout asm f = do
-  isPredSat timeout asm >>= \case
-    True ->  Just <$> (withAssumption asm f)
-    False -> return Nothing
+withSatAssumption asm f = withSym $ \sym -> withSolverProcess $ \sp -> do
+  p <- liftIO $ getAssumedPred sym asm
+  case W4.asConstantPred p of
+    Just False -> return Nothing
+    Just True -> Just <$> f
+    _ -> do
+      curAsm <- currentAsm
+      CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
+        IO.withRunInIO $ \inIO -> WPO.inNewFrame sp $ do
+          W4.assume (WPO.solverConn sp) p
+          -- FIXME: on an 'Unknown' result (or timeout) we need to throw an exception,
+          -- rather than considering the result to be 'Nothing', otherwise we
+          -- risk silently discarding feasible branches
+          b <- WPO.checkAndGetModel sp "check assumptions" >>= asSat
+          case b of
+            True -> Just <$> inIO f
+            False -> return Nothing
 
 --------------------------------------
 -- Sat helpers

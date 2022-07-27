@@ -2,11 +2,13 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
 module Pate.Discovery.ParsedFunctions (
     ParsedFunctionMap
   , newParsedFunctionMap
   , parsedFunctionContaining
   , parsedBlocksContaining
+  , parsedBlockEntry
   , ParsedBlocks(..)
   ) where
 
@@ -241,3 +243,24 @@ parsedBlocksContaining ::
   IO (Maybe (ParsedBlocks arch))
 parsedBlocksContaining blk pfm =
   fmap (viewSome buildParsedBlocks) <$> parsedFunctionContaining blk pfm
+
+-- | Find the 'MD.ParsedBlock' corresponding to the entry of a function.
+parsedBlockEntry ::
+  forall bin arch .
+  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  PB.ConcreteBlock arch bin ->
+  ParsedFunctionMap arch bin ->
+  IO (Maybe (Some (MD.ParsedBlock arch)))
+parsedBlockEntry blk pfm = parsedFunctionContaining blk pfm >>= \case
+  Just (Some dfi) -> do
+    st <- IORef.readIORef (parsedStateRef pfm)
+    let ds1 = discoveryState st
+    let mem = MD.memory ds1
+    case MM.resolveRegionOff mem (MM.addrBase baddr) (MM.addrOffset baddr) of
+      Nothing -> return Nothing
+      Just faddr -> case Map.lookup faddr (dfi ^. MD.parsedBlocks) of
+        Just pb -> return $ Just (Some pb)
+        Nothing -> return Nothing
+  Nothing -> return Nothing
+  where
+    baddr = PA.addrToMemAddr (PB.concreteAddress blk)

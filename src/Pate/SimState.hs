@@ -25,7 +25,9 @@ Functionality for handling the inputs and outputs of crucible.
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
-
+{-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE OverloadedStrings   #-}
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -33,10 +35,21 @@ Functionality for handling the inputs and outputs of crucible.
 module Pate.SimState
   ( -- simulator state
     SimState(..)
+  , StackBase(..)
+  , freshStackBase
   , SimInput(..)
   , SimOutput(..)
   , type VarScope
+  , SimScope
+  , scopeAsm
+  , scopeVars
   , Scoped(..)
+  , ScopedExpr
+  , unSE
+  , scopedExprMap
+  , liftScope0
+  , liftScope2
+  , concreteScope
   , SimSpec
   , freshSimSpec
   , forSpec
@@ -53,11 +66,13 @@ module Pate.SimState
   , simInP
   , simOutO
   , simOutP
+  , simSP
   -- variable binding
-  , SimBoundVars(..)
   , SimVars(..)
-  , boundVarsAsFree
   , bindSpec
+  , ScopeCoercion
+  , getScopeCoercion
+  , applyScopeCoercion
   -- assumption frames
   , AssumptionSet
   , isAssumedPred
@@ -75,23 +90,31 @@ import           GHC.Stack ( HasCallStack )
 import qualified Data.Kind as DK
 import           Data.Proxy
 
+import qualified Control.Monad.IO.Class as IO
 import           Control.Monad ( forM )
+import           Control.Lens ( (^.) )
+
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Map ( Pair(..) )
 import qualified Data.Parameterized.TraversableF as TF
+import           Data.Functor.Const
 
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
+import qualified Data.Macaw.AbsDomain.AbsState as MAS
+import qualified Data.Macaw.Types as MT
 
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Types as CT
 
 import qualified What4.Interface as W4
+import qualified What4.Concrete as W4
 import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Binary as PBi
@@ -99,6 +122,8 @@ import qualified Pate.Block as PB
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Panic as P
+import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import qualified Data.Parameterized.SetF as SetF
@@ -108,16 +133,23 @@ import qualified Data.Parameterized.SetF as SetF
 
 
 
+
 data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
     simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
+  , simStackBase :: StackBase sym arch v
   }
+
+simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
+  PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
+simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
 
 data SimInput sym arch v bin = SimInput
   {
     simInState :: SimState sym arch v bin
   , simInBlock :: PB.ConcreteBlock arch bin
+  , simInAbsState :: MAS.AbsBlockState (MM.ArchReg arch)
   }
 
 
@@ -161,6 +193,27 @@ instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym v) where
     preds = (asmPreds asm1) <> (asmPreds asm2)
     binds = mergeExprSetMap (Proxy @sym) (asmBinds asm1) (asmBinds asm2)
     in AssumptionSet preds binds
+
+ppBinds ::
+  W4.IsExpr (W4.SymExpr sym) =>
+  Proxy sym ->
+  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
+  PP.Doc a
+ppBinds sym bnds =
+  let bs = [ W4.printSymExpr e <+> "-->" <+>  ppExprSet sym es | MapF.Pair e es <- MapF.toList bnds ]
+  in PP.sep (zipWith (<+>) ("[" : repeat ",") bs) <+> "]"
+
+instance forall sym v. W4.IsExpr (W4.SymExpr sym) => PP.Pretty (AssumptionSet sym v) where
+  pretty asms =
+    PP.vsep $
+      [ "Predicate Assumptions"
+      , PP.indent 4 (ppExprSet (Proxy @sym) (asmPreds asms))
+      , "Bindings"
+      , PP.indent 4 (ppBinds (Proxy @sym) (asmBinds asms))
+      ]
+
+instance W4.IsExpr (W4.SymExpr sym) => Show (AssumptionSet sym v) where
+  show asms = show (PP.pretty asms)
 
 mapExprSet ::
   OrdF (W4.SymExpr sym) =>
@@ -354,10 +407,18 @@ class Scoped f where
 data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
   SimSpec
     {
-      _specVars :: PPa.PatchPair (SimBoundVars sym arch v)
-    , _specAsm :: AssumptionSet sym v
+      _specScope :: SimScope sym arch v
     , _specBody :: f v
     }
+
+data SimScope sym arch v =
+  SimScope
+    { scopeBoundVars :: PPa.PatchPair (SimBoundVars sym arch v)
+    , scopeAsm :: AssumptionSet sym v
+    }
+
+scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
+scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
@@ -368,32 +429,27 @@ freshSimSpec ::
   (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
   -- | This must be a fresh MemTrace
   (forall bin. PBi.WhichBinaryRepr bin -> m (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))) ->
+  -- | Fresh stack base
+  (forall bin v. PBi.WhichBinaryRepr bin -> m (StackBase sym arch v)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
   (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym v, (f v))) ->
   m (SimSpec sym arch f)
-freshSimSpec mkReg mkMem mkBody = do
+freshSimSpec mkReg mkMem mkStackBase mkBody = do
   vars <- PPa.forBins' $ \bin -> do
     regs <- MM.mkRegStateM (mkReg bin)
     mem <- mkMem bin
-    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs))
+    sb <- mkStackBase bin
+    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb)
   (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
-  return $ SimSpec vars asm body
+  return $ SimSpec (SimScope vars asm) body
 
--- | Project out the bound variables with an arbitrary scope.
--- This is a private function, since as we want to consider the
--- 'SimBoundVars' of the 'SimSpec' to be an implementation detail.
-viewSpecVars ::
-  SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimBoundVars sym arch v) -> a) ->
-  a
-viewSpecVars (SimSpec vars _ _) f = f vars
 
 -- | Project out the body with an arbitrary scope.
 viewSpecBody ::
   SimSpec sym arch f ->
   (forall v. f v -> a) ->
   a
-viewSpecBody (SimSpec _ _ body) f = f body
+viewSpecBody (SimSpec _ body) f = f body
 
 -- | Interpret a 'SimSpec' by viewing its initial bound variables as a
 -- 'SimVars' pair, and its body, with respect to an arbitrary scope.
@@ -401,9 +457,9 @@ viewSpecBody (SimSpec _ _ body) f = f body
 -- avoid exposing 'SimBoundVars' here by only providing 'SimVars'
 viewSpec ::
   SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> AssumptionSet sym v -> f v -> a) ->
+  (forall v. SimScope sym arch v -> f v -> a) ->
   a
-viewSpec (SimSpec vars asm body) f = f (TF.fmapF boundVarsAsFree vars) asm body
+viewSpec (SimSpec scope body) f = f scope body
 
 -- | Transform a 'SimSpec' by viewing its initial bound variables as a
 -- 'SimVars' pair, with respect to an arbitrary scope. Note that we
@@ -411,9 +467,10 @@ viewSpec (SimSpec vars asm body) f = f (TF.fmapF boundVarsAsFree vars) asm body
 forSpec ::
   Applicative m =>
   SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> m (g v)) ->
+  (forall v. SimScope sym arch v -> f v -> m (g v)) ->
   m (SimSpec sym arch g)
-forSpec (SimSpec vars asm body) f = SimSpec <$> pure vars <*> pure asm <*> f (TF.fmapF boundVarsAsFree vars) body
+forSpec (SimSpec scope body) f = SimSpec <$> pure scope <*> f scope body
+
 
 -- | Unsafely coerce the body of a spec to have any scope.
 -- After this is used, the variables in the resulting 'f' should
@@ -421,13 +478,7 @@ forSpec (SimSpec vars asm body) f = SimSpec <$> pure vars <*> pure asm <*> f (TF
 unsafeCoerceSpecBody ::
   Scoped f =>
   SimSpec sym arch f -> f v
-unsafeCoerceSpecBody (SimSpec _ _ body) = unsafeCoerceScope body
-
-
-unsafeCoerceSpecAsm ::
-  Scoped f =>
-  SimSpec sym arch f -> AssumptionSet sym v
-unsafeCoerceSpecAsm (SimSpec _ asm _) = unsafeCoerceScope asm
+unsafeCoerceSpecBody (SimSpec _ body) = unsafeCoerceScope body
 
 -- | The symbolic inputs and outputs of an original vs. patched block slice.
 data SimBundle sym arch v = SimBundle
@@ -475,13 +526,15 @@ data SimVars sym arch v bin = SimVars
     simVarState :: SimState sym arch v bin
   }
 
+
+
 -- | Project out the initial values for the variables in 'SimBoundVars'.
 -- This is roughly analagous to converting a What4 bound variable into an expression.
 boundVarsAsFree :: SimBoundVars sym arch v bin -> SimVars sym arch v bin
 boundVarsAsFree bv = SimVars (simBoundVarState bv)
 
 mkVarBinds ::
-  forall sym arch v bin.
+  forall sym arch v v' bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   W4.IsExprBuilder sym =>
@@ -490,62 +543,316 @@ mkVarBinds ::
   SimBoundVars sym arch v bin ->
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
-  IO (ExprBindings sym)
-mkVarBinds sym simVars mem regs = do
+  StackBase sym arch v' ->
+  IO (ExprRewrite sym v v')
+mkVarBinds sym simVars mem regs sb = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
-    regBinds =
-      MapF.toList $
-      MM.regStateMap $
-      MM.zipWithRegState (\(PSR.MacawRegVar _ vars) val -> PSR.MacawRegVar val vars) regVars regs
-  regVarBinds <- fmap concat $ forM regBinds $ \(MapF.Pair _ (PSR.MacawRegVar val vars)) -> do
+    stackVar = simStackBase $ simBoundVarState simVars
+    stackBinds = singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
+    
+  regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
     case PSR.macawRegRepr val of
       CLM.LLVMPointerRepr{} -> do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
         iRegion <- W4.natToInteger sym region
-        return $ [Pair regVar iRegion, Pair offVar off]
+        return $ Const $ singleRewrite regVar iRegion <> singleRewrite offVar off
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars
-        return [Pair var (PSR.macawRegValue val)]
-      CT.StructRepr Ctx.Empty -> return []
+        return $ Const $ singleRewrite var (PSR.macawRegValue val)
+      CT.StructRepr Ctx.Empty -> return $ Const mempty
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
-  mergeBindings sym (MT.mkMemoryBinding memVar mem) (MapF.fromList regVarBinds)
+
+  return $ (ExprRewrite (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds
+
+-- | Wrapped expression bindings that convert expressions from one
+-- scope to another
+-- Note that this mapping is not necessarily total and therefore cannot be assumed
+-- to completely convert an expression (it must be finalized as a 'ScopeCoercion')
+data ExprRewrite sym (v :: VarScope) (v' :: VarScope) = 
+      ExprRewrite (ExprBindings sym)
+ 
+instance OrdF (W4.SymExpr sym) => Semigroup (ExprRewrite sym v v') where
+  rew1 <> rew2 = case (rew1, rew2) of
+    (ExprRewrite binds1, ExprRewrite binds2) ->
+      ExprRewrite (MapF.mergeWithKey (\_ -> mergeExprs) id id binds1 binds2)
+    where
+      mergeExprs :: forall tp. W4.SymExpr sym tp -> W4.SymExpr sym tp -> Maybe (W4.SymExpr sym tp)
+      mergeExprs e1 e2 = case testEquality e1 e2 of
+        Just _ -> Just e1
+        Nothing -> P.panic P.Rewriter "ExprRewrite" ["Unexpected variable clash"]
+
+instance OrdF (W4.SymExpr sym) => Monoid (ExprRewrite sym v v') where
+  mempty = ExprRewrite MapF.empty
+  
+data ScopeCoercion sym v v' =
+  ScopeCoercion (VarBindCache sym) (ExprRewrite sym v v')
+
+
+-- UNSAFE: assumes that the incoming expressions adhere to the given scopes
+singleRewrite ::
+  W4.SymExpr sym tp ->
+  W4.SymExpr sym tp ->
+  ExprRewrite sym v v'
+singleRewrite e1 e2 = ExprRewrite (MapF.singleton e1 e2)
+
+-- TODO: check that the resulting binding is total
+asScopeCoercion ::
+  forall sym t solver fs v v'.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  ExprRewrite sym v v' ->
+  IO (ScopeCoercion sym v v')
+asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
+
+-- | An expr tagged with a scoped parameter (representing the fact that the
+-- expression is valid under the scope 'v')
+data ScopedExpr sym tp (v :: VarScope) =
+  ScopedExpr { unSE :: W4.SymExpr sym tp }
+
+-- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
+-- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
+-- the user to produce an expression that is scoped to 'v2'.
+scopedExprMap ::
+  Scoped f =>
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  PEM.ExprMappable sym (f v1) =>
+  sym ->
+  f v1 ->
+  (forall tp. ScopedExpr sym tp v1 -> m (ScopedExpr sym tp v2)) ->
+  m (f v2)
+scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
+
+-- | Apply a 'ScopeCoercion' to a 'ScopedExpr', rebinding its value
+-- and changing its scope.
+applyScopeCoercion ::
+  sym ~ W4B.ExprBuilder s st fs =>
+  sym ->
+  ScopeCoercion sym v v' ->
+  ScopedExpr sym tp v ->
+  IO (ScopedExpr sym tp v')
+applyScopeCoercion sym (ScopeCoercion cache (ExprRewrite binds)) (ScopedExpr e) =
+  ScopedExpr <$> applyExprBindings' sym cache binds e
+
+-- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
+-- incidentally include bound variables from other scopes)
+liftScope2 ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> W4.SymExpr sym' tp2 -> IO (W4.SymExpr sym' tp3)) ->
+  ScopedExpr sym tp1 v ->
+  ScopedExpr sym tp2 v ->
+  IO (ScopedExpr sym tp3 v)
+liftScope2 sym f (ScopedExpr e1) (ScopedExpr e2) = ScopedExpr <$> f sym e1 e2
+
+
+-- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
+-- incidentally include bound variables from other scopes)
+liftScope0 ::
+  forall v sym tp.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> IO (W4.SymExpr sym' tp)) ->
+  IO (ScopedExpr sym tp v)
+liftScope0 sym f = ScopedExpr <$> f sym
+
+-- | A concrete value is valid in all scopes
+concreteScope ::
+  forall v sym tp.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  W4.ConcreteVal tp ->
+  IO (ScopedExpr sym tp v)
+concreteScope sym c = liftScope0 sym (\sym' -> W4.concreteToSym sym' c)
+
+-- | Produce an 'ScopeCoercion' that binds the terms in the given 'SimVars'
+-- to the bound variables in 'SimScope'.
+-- This rewrite is scope-modifying, because we will necessarily rewrite any
+-- of the bound variables from the original scope 'v1'.
+-- The given 'SimVars' may be arbitrary expressions, but necessarily
+-- in the scope 'v2'.
+getScopeCoercion ::
+  forall v1 v2 sym arch s st fs.
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  sym ~ W4B.ExprBuilder s st fs =>
+  sym ->
+  SimScope sym arch v1 ->
+  PPa.PatchPair (SimVars sym arch v2) ->
+  IO (ScopeCoercion sym v1 v2)
+getScopeCoercion sym scope vals = do
+  let vars = scopeBoundVars scope
+  (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
+    let st = simVarState $ get vals
+    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
+  asScopeCoercion $ bindsO <> bindsP
 
 bindSpec ::
   forall sym arch s st fs f v.
   Scoped f =>
-  PEM.ExprMappable sym (f v) =>
+  (forall v'. PEM.ExprMappable sym (f v')) =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
   PPa.PatchPair (SimVars sym arch v) ->
   SimSpec sym arch f ->
   IO (AssumptionSet sym v, f v)
-bindSpec sym vals spec = do
-  (bindsO, bindsP) <- PPa.forBinsC $ \get -> viewSpecVars spec $ \vars -> do
-    let st = simVarState $ get vals
-    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st)
-  binds <- mergeBindings sym bindsO bindsP
-  cache <- freshVarBindCache
-  let doRewrite = applyExprBindings' sym cache binds
-  body <- PEM.mapExpr sym doRewrite (unsafeCoerceSpecBody spec)
-  asm <- PEM.mapExpr sym doRewrite (unsafeCoerceSpecAsm spec)
-  return $ (asm, body)
+bindSpec sym vals (SimSpec scope@(SimScope _ asm) body) = do
+  rew <- getScopeCoercion sym scope vals
+  body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
+  asm' <- scopedExprMap sym asm (applyScopeCoercion sym rew)
+  return $ (asm', body')
+
+
+------------------------------------
+-- Stack relative references
+
+{- | = Stack Relative References
+
+== Stack Scope
+
+The equivalence domains are represented as sets of pointers which may diverge
+between the two programs. In the case of direct global variable accesses, these
+pointers are fully concrete and therefore valid in any scope. In contrast, stack
+accesses are always calculated with respect to the stack (or frame) pointer, and
+therefore stack pointers necessarily contain the free variable representing the
+initial value of the stack register.
+
+Without propagating additional information about this free variable, the
+equivalence domain becomes essentially meaningless.
+
+@
+void test() {
+  // slice 0
+  // SP := SP_0
+  // domain := {}
+  int i = 1;
+  int j = 2 OR 3;  // 2 in original function, 3 in patched function
+  // SP := SP_0 - 2
+  // domain := { SP_0 - 1 }
+  // end of slice 0
+  f();
+  // slice 1
+  // SP := SP_1
+  // domain := { SP_0 - 1}
+  g = i;
+  // end of slice 1
+}
+@
+
+At the return site for @f()@, the connection between the original value of the
+stack register (i.e. @SP_0@) and the current value (i.e. @SP_1@) has been
+lost. The equivalence domain is meaningless as @SP_0@ is a free variable in this
+context. The equivalence check fails and produces a counter-example where the
+value of @i@ disagrees between both programs.
+
+== Implementation
+
+The solution requires rewriting the stack pointers in the equivalence domain to
+instead be defined with respect to a constant base: the base address of the
+function frame. This allows stack accesses to be treated uniformly. At the start
+of each function we define the stack pointer to be a free variable: BASE that
+is maintained throughout the context of the function.
+
+@
+void test() {
+  // SP := BASE_0
+  // domain := {}
+  int i = 1;
+  int j = 2 OR 3;
+  // SP := BASE_0 - 2
+  // domain := { BASE_0 - 1 }
+  f();
+  // SP := BASE_0 - 2
+  // domain := { BASE - 1}
+  g = i;
+}
+@
+
+To support this change, we define the initial stack pointer for a function to be
+a distinguished stack base variable (i.e. 'StackBase'), which is treated
+specially during function calls.
+
+When verifying @f()@ we rephrase the incoming domain (i.e. @{BASE_0 - 1 }@) by asserting
+that the @BASE@ of @f()@ is equal to the value of the stack pointer just after
+the function call (e.g. @SP := BASE_0 - 3@ once the return address has been pushed onto the stack).
+
+@
+// domain := { BASE_0 - 1 } <- incoming domain
+// assume(SP == BASE_0 - 3)
+// assume(BASE_1 == SP)
+// domain := { BASE_1 + 2 } <- domain rephrased in terms of BASE_1
+@
+
+
+This now becomes the pre-domain when @f()@ is verified.
+
+@
+// domain := { BASE_1 + 2 }
+void f() {
+  int = 1 OR 2;
+  return;
+}
+// domain := { BASE_1 - 1; BASE_1 + 2 }
+@
+
+When verifying @test()@ following the call site of @f()@ we can now take this
+domain and re-phrase it once again in terms of the stack base of @test()@.
+
+@
+// domain := { BASE_1 - 1; BASE_1 + 2 } <- incoming domain (once f() returns)
+// assume(SP == BASE_1) --> BASE_1 == BASE_0 - 3
+// domain := { BASE_0 - 4; BASE_0 - 1 }
+@
+
+Notably this outgoing domain points past the current stack pointer, and therefore
+this inequality is unlikely to have any consequence (i.e. this will likely be overwritten
+and never accessed).
+
+Given this inequality, we can see that the final assignment to @g@ is equal between
+both programs, as the access to the stack variable
+@i@ is necessarily equal according to this domain (i.e. @BASE_0 - 0@) .
+
+
+-}
+
+
+-- | Points to the base of the stack. In any given context this will always be
+-- "free" as the base of the stack is always abstract, but it is rebound to account
+-- for changes to the stack pointer when moving between scopes.
+newtype StackBase sym arch v =
+  StackBase { unSB :: ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) v }
+
+freshStackBase ::
+  forall sym arch v.
+  W4.IsSymExprBuilder sym =>
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  sym ->
+  Proxy arch ->
+  IO (StackBase sym arch v)
+freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
+    W4.freshConstant sym' (W4.safeSymbol "stack_base") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+
 
 ------------------------------------
 -- ExprMappable instances
 
+-- TODO: in general we should restrict these to be scope-preserving,
+-- since allowing arbitrary modifications can violate the scoping
+-- assumptions
+
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs) = SimState
+  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb))) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
+    <*> ((StackBase . ScopedExpr) <$> f sb)
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
-  mapExpr sym f (SimInput st blk) = SimInput
+  mapExpr sym f (SimInput st blk absSt) = SimInput
     <$> PEM.mapExpr sym f st
     <*> return blk
+    <*> return absSt
 
 instance PEM.ExprMappable sym (SimOutput sym arch v bin) where
   mapExpr sym f (SimOutput out blkend) = SimOutput

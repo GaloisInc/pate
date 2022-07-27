@@ -15,7 +15,10 @@ module Pate.Discovery (
   lookupBlocks,
   getBlocks,
   getBlocks',
+  getAbsDomain,
+  getStackOffset,
   matchesBlockTarget,
+  associateFrames,
   matchingExits,
   isMatchingCall,
   concreteToLLVM
@@ -31,6 +34,7 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
+import           Data.Int
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
@@ -46,6 +50,7 @@ import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 import           GHC.Stack ( HasCallStack, callStack )
 
+import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.BinaryLoader.ELF as MBLE
 import qualified Data.Macaw.CFG as MC
@@ -248,6 +253,50 @@ matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
     retO = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutO bundle
     retP = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutP bundle
 
+-- | Compute an 'PSS.AssumptionSet' that assumes the association between
+-- the 'PSS.StackBase' of the input and output states of the given bundle,
+-- according to the given exit case.
+-- In most cases the assumption is that the stack base does not change (i.e.
+-- a backjump within a function maintains the same base). In the case that
+-- the block end is a 'MCS.MacawBlockEndCall', this assumes that outgoing
+-- stack base is now equal to the value of the stack register after the function call.
+--
+-- This assumption is needed in the final stage of widening, in order to re-phrase
+-- any stack offsets that appear in the resulting equivalence domain: from the callee's stack
+-- base to the caller's stack base.
+-- See: 'PSS.StackBase'
+associateFrames ::
+  forall sym arch v.
+  SimBundle sym arch v ->
+  MCS.MacawBlockEndCase ->
+  EquivM sym arch (PSS.AssumptionSet sym v)
+associateFrames bundle exitCase = PPa.catBins $ \get -> do
+    let
+      st_pre = PSS.simInState $ get $ simIn bundle
+      st_post = PSS.simOutState $ get $ simOut bundle
+      frame_pre = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_pre
+      frame_post = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_post
+      CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post
+    case exitCase of
+      -- a backjump does not modify the frame
+      MCS.MacawBlockEndJump -> return $ PSS.exprBinding frame_post frame_pre
+      -- For a function call the post-state frame is the frame for the
+      -- target function, and so we represent that by asserting that it is
+      -- equal to the value of the stack pointer at the call site
+      MCS.MacawBlockEndCall -> return $ PSS.exprBinding frame_post sp_post
+      -- note that a return results in two transitions:
+      -- the first transitions to the "Return" graph node and then
+      -- the second transitions from that node to any of the call sites (nondeterministically)
+      -- this case is only for the first transition, which does not perform
+      -- any frame rebinding (as we don't yet know where we are returning to)
+      MCS.MacawBlockEndReturn -> return $ PSS.exprBinding frame_post frame_pre
+      -- a branch does not modify the frame
+      MCS.MacawBlockEndBranch -> return $ PSS.exprBinding frame_post frame_pre
+      -- nothing to do on failure
+      MCS.MacawBlockEndFail -> return mempty
+      -- this likely requires some architecture-specific reasoning
+      MCS.MacawBlockEndArch -> return mempty
+
 liftPartialRel ::
   CB.IsSymInterface sym =>
   sym ->
@@ -291,6 +340,35 @@ getSubBlocks b = withBinary @bin $
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ (\x -> validateBlockTarget x) tgts
      return tgts
+
+-- | Find the abstract domain for a given starting point
+getAbsDomain ::
+  forall sym arch bin.
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (MAS.AbsBlockState (MC.ArchReg arch))
+getAbsDomain b = withBinary @bin $ do
+  let addr = PB.concreteAddress b
+  pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
+  mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
+  case mtgt of
+    Just (Some pb) -> return $ MD.blockAbstractState pb
+    Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
+
+getStackOffset ::
+  forall sym arch bin.
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch Int64
+getStackOffset b = do
+  absSt <- getAbsDomain b
+  let
+    regs = absSt ^. MAS.absRegState
+    sp = regs ^. (MC.boundValue MC.sp_reg)
+  case sp of
+    MAS.StackOffsetAbsVal _ i -> return i
+    _ -> throwHere $ PEE.UnexpectedStackValue (PB.concreteAddress b)
+
 
 validateBlockTarget ::
   HasCallStack =>
@@ -349,7 +427,7 @@ concreteJumpTargets from pb = case MD.pblockTermStmt pb of
     return [ jumpTarget from tgt ]
 
   MD.ParsedBranch _ _ t f ->
-    return [ jumpTarget from t, jumpTarget from f ]
+    return [ branchTarget from t, branchTarget from f ]
 
   MD.ParsedLookupTable _jt st _ _ ->
     return [ jumpTarget' from next | next <- concreteNextIPs st ]
@@ -371,6 +449,14 @@ jumpTarget ::
     PB.BlockTarget arch bin
 jumpTarget from to =
   PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
+
+branchTarget ::
+    PB.ConcreteBlock arch bin ->
+    MC.ArchSegmentOff arch ->
+    PB.BlockTarget arch bin
+branchTarget from to =
+  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndBranch
+
 
 jumpTarget' ::
     PB.ConcreteBlock arch bin ->

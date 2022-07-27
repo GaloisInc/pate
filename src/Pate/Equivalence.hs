@@ -45,7 +45,7 @@ module Pate.Equivalence
   , MemoryCondition(..)
   , RegisterCondition(..)
   , StateCondition(..)
-  , preCondPredicate
+  , preCondAssumption
   , postCondPredicate
   , memPreCondToPred
   , memPostCondToPred
@@ -56,7 +56,6 @@ import           Control.Monad ( foldM )
 import           Control.Monad.IO.Class ( liftIO )
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as S
 import           GHC.Stack ( HasCallStack )
@@ -118,42 +117,31 @@ instance TestEquality (W4.SymExpr sym) => Eq (MemRegionEquality sym arch) where
   MemEqOutsideRegion r1 == MemEqOutsideRegion r2 = r1 == r2
   _ == _ = False
 
-equalValuesIO ::
-  HasCallStack =>
-  W4.IsExprBuilder sym =>
-  sym ->
-  PSR.MacawRegEntry sym tp ->
-  PSR.MacawRegEntry sym tp' ->
-  IO (W4.Pred sym)
-equalValuesIO sym entry1 entry2 = case (PSR.macawRegRepr entry1, PSR.macawRegRepr entry2) of
-  (CLM.LLVMPointerRepr w1, CLM.LLVMPointerRepr w2) ->
-    case testEquality w1 w2 of
-      Just Refl -> liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue entry1) (PSR.macawRegValue entry2)
-      Nothing -> return $ W4.falsePred sym
-  (CT.BoolRepr, CT.BoolRepr) -> liftIO $ W4.isEq sym (PSR.macawRegValue entry1) (PSR.macawRegValue entry2)
-  (CT.StructRepr Ctx.Empty, CT.StructRepr Ctx.Empty) -> return (W4.truePred sym)
-  (tp1, tp2) -> error ("equalValues: unsupported types: " ++ show (tp1, tp2))
-
 
 registerValuesEqual' ::
-  forall sym arch tp.
+  forall sym arch v tp.
   PA.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
   PA.HasDedicatedRegister arch ->
   sym ->
   MM.ArchReg arch tp ->
+  W4.Pred sym ->
   PSR.MacawRegEntry sym tp ->
   PSR.MacawRegEntry sym tp -> 
-  IO (W4.Pred sym)  
-registerValuesEqual' hdr sym r vO vP =
-  case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
-    PRe.RegIP -> return $ W4.truePred sym
+  IO (AssumptionSet sym v)
+registerValuesEqual' hdr sym r precond vO vP = do
+  asm <- case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
+    PRe.RegIP -> return $ mempty
     PRe.RegSP -> do
       let
         CLM.LLVMPointer _ offO = PSR.macawRegValue vO
         CLM.LLVMPointer _ offP = PSR.macawRegValue vP
-      W4.isEq sym offO offP
-    _ -> equalValuesIO sym vO vP  
+      return $ exprBinding offO offP
+    _ -> macawRegBinding sym vO vP
+  case W4.asConstantPred precond of
+    Just True -> return asm
+    Just False -> return mempty
+    _ -> frameAssume <$> (impM sym (return precond) (getAssumedPred sym asm))
 
 -- | This simply bundles up the necessary state elements necessary to resolve equality.
 data EquivContext sym arch where
@@ -174,7 +162,7 @@ registerValuesEqual ::
   PSR.MacawRegEntry sym tp ->
   PSR.MacawRegEntry sym tp ->
   IO (W4.Pred sym)
-registerValuesEqual sym (EquivContext hdr _) r vO vP = registerValuesEqual' hdr sym r vO vP
+registerValuesEqual sym (EquivContext hdr _) r vO vP = registerValuesEqual' hdr sym r (W4.truePred sym) vO vP >>= getAssumedPred sym
 
 -- | Resolve a domain predicate into a structured precondition.
 -- This resulting condition is asserting that each location is
@@ -190,7 +178,7 @@ getPredomain ::
   SimBundle sym arch v ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
-  IO (StateCondition sym arch)
+  IO (StateCondition sym arch v)
 getPredomain sym bundle eqCtx eqDom =
   eqDomPre sym (simInO bundle) (simInP bundle) eqCtx eqDom
 
@@ -207,8 +195,8 @@ impliesPredomain ::
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)  
 impliesPredomain sym inO inP eqCtx domAsm domConcl = do
-  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondPredicate sym inO inP
-  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondPredicate sym inO inP
+  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondAssumption sym inO inP >>= getAssumedPred sym
+  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondAssumption sym inO inP >>= getAssumedPred sym
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate into a structured precondition.
@@ -227,7 +215,7 @@ getPostdomain ::
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
-  IO (StateCondition sym arch)
+  IO (StateCondition sym arch v)
 getPostdomain sym bundle eqCtx domPre domPost =
   eqDomPost sym (simOutO bundle) (simOutP bundle) eqCtx domPre domPost
 
@@ -438,8 +426,8 @@ getRegionEquality sym memEq memO memP = case memEq of
 -- The conjunction of these predicates represents the assumption (as a precondition)
 -- or assertion (as a postcondition) that all of the registers are equal with respect
 -- to some equivalence domain.
-newtype RegisterCondition sym arch =
-  RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (W4.Pred sym)) }
+newtype RegisterCondition sym arch v =
+  RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (AssumptionSet sym v)) }
 
 -- | Compute a structured 'RegisterCondition'
 -- where the predicate associated with each register
@@ -454,25 +442,23 @@ regDomRel ::
   SimState sym arch v PBi.Original ->
   SimState sym arch v PBi.Patched ->
   PER.RegisterDomain sym arch ->
-  IO (RegisterCondition sym arch)
+  IO (RegisterCondition sym arch v)
 regDomRel hdr sym stO stP regDom  = RegisterCondition <$> do
   PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> Const <$> do
     let p = PER.registerInDomain sym r regDom
-    impM sym (return p) $ registerValuesEqual' hdr sym r vO vP
+    registerValuesEqual' hdr sym r p vO vP
 
 
-regCondToPred ::
+regCondToAsm ::
   W4.IsSymExprBuilder sym =>
   sym ->
-  RegisterCondition sym arch ->
-  IO (W4.Pred sym)
-regCondToPred sym regCond = do
-  let preds = MM.regStateMap (regCondPreds regCond)
-  MapF.foldrMWithKey (\_ (Const p) p' -> W4.andPred sym p p') (W4.truePred sym) preds
+  RegisterCondition sym arch v ->
+  IO (AssumptionSet sym v)
+regCondToAsm _sym regCond = return $ PRt.collapse (regCondPreds regCond)
 
 -- | A structured pre or post condition
-data StateCondition sym arch = StateCondition
-  { stRegCond :: RegisterCondition sym arch
+data StateCondition sym arch v = StateCondition
+  { stRegCond :: RegisterCondition sym arch v
   , stStackCond :: MemoryCondition sym arch
   , stMemCond :: MemoryCondition sym arch
   }
@@ -485,7 +471,7 @@ eqDomPre ::
   SimInput sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
-  IO (StateCondition sym arch)
+  IO (StateCondition sym arch v)
 eqDomPre sym inO inP (EquivContext hdr stackRegion) eqDom  = do
   let
     stO = simInState inO
@@ -507,7 +493,7 @@ eqDomPost ::
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
-  IO (StateCondition sym arch)
+  IO (StateCondition sym arch v)
 eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
   let
     stO = simOutState outO
@@ -519,20 +505,20 @@ eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
   return $ StateCondition regsEq stacksEq memEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
--- a single predicate.
-preCondPredicate ::
+-- a single 'AssumptionSet'.
+preCondAssumption ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
   SimInput sym arch v PBi.Original ->
   SimInput sym arch v PBi.Patched ->
-  StateCondition sym arch ->
-  IO (W4.Pred sym)
-preCondPredicate sym inO inP stCond = do
-  regsPred <- regCondToPred sym (stRegCond stCond)
+  StateCondition sym arch v ->
+  IO (AssumptionSet sym v)
+preCondAssumption sym inO inP stCond = do
+  regsPred <- regCondToAsm sym (stRegCond stCond)
   stackPred <- memPreCondToPred sym inO inP (stStackCond stCond)
   memPred <- memPreCondToPred sym inO inP (stMemCond stCond)
-  W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred
+  return $ (frameAssume memPred) <> (frameAssume stackPred) <> regsPred
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into
 -- a single predicate.
@@ -540,10 +526,11 @@ postCondPredicate ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  StateCondition sym arch ->
+  StateCondition sym arch v ->
   IO (W4.Pred sym)
 postCondPredicate sym stCond = do
-  regsPred <- regCondToPred sym (stRegCond stCond)
+  regsAsm <- regCondToAsm sym (stRegCond stCond)
+  regsPred <- getAssumedPred sym regsAsm
   stackPred <- memPostCondToPred sym (stStackCond stCond)
   memPred <- memPostCondToPred sym (stMemCond stCond)
   W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred

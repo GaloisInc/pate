@@ -17,7 +17,7 @@ main = do
         { testArchName = "ppc"
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
-            [
+            [ "stack-struct"
             ]
         , testExpectSelfEquivalenceFailure = []
         -- TODO: we should define a section name here and read its address

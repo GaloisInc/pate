@@ -27,6 +27,7 @@ import qualified Pate.Arch as PAr
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.PatchPair as PPa
+import qualified Pate.SimState as PS
 
 data InequivalenceReason =
     InequivalentRegisters
@@ -42,6 +43,7 @@ data InnerEquivalenceError arch
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
   | UnknownFunctionEntry (PA.ConcreteAddress arch)
+  | UnexpectedStackValue (PA.ConcreteAddress arch)
   | LookupNotAtFunctionStart CallStack (PA.ConcreteAddress arch)
   -- starting address of the block, then a starting and ending address bracketing a range of undiscovered instructions
   | UndiscoveredBlockPart (PA.ConcreteAddress arch) (PA.ConcreteAddress arch) (PA.ConcreteAddress arch)
@@ -56,7 +58,7 @@ data InnerEquivalenceError arch
   | MissingPatchPairResult (PPa.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
-  | AssumedFalse
+  | forall sym v. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PS.AssumptionSet sym v) (PS.AssumptionSet sym v)
   | BlockExitMismatch
   | InvalidSMTModel
   | MismatchedAssumptionsPanic
