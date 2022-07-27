@@ -204,7 +204,7 @@ concretizingWrite memVar globs bak crucState _addrWidth memRep (LCS.regValue -> 
   mem <- getMem crucState memVar
   -- Attempt to concretize the pointer we are writing to, so that we can minimize symbolic writes
   ptr' <- tryGlobPtr bak mem globs ptr
-  ptr'' <- PVC.resolveSingletonPointer bak ptr'
+  ptr'' <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) ptr'
   ty <- memReprToStorageType memRep
   let memVal = resolveMemVal memRep ty value
   mem' <- LCLM.storeRaw bak mem ptr'' ty LCLD.noAlignment memVal
@@ -240,7 +240,7 @@ concretizingRead memVar globs bak crucState _addrWidth memRep (LCS.regValue -> p
   -- Attempt to concretize the pointer we are reading from, avoiding a symbolic
   -- read if possible
   ptr' <- tryGlobPtr bak mem globs ptr
-  ptr''@(LCLM.LLVMPointer _ off) <- PVC.resolveSingletonPointer bak ptr'
+  ptr''@(LCLM.LLVMPointer _ off) <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) ptr'
   case WI.asBV off of
     Just _ -> do
       ty <- memReprToStorageType memRep

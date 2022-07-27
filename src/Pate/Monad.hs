@@ -54,6 +54,8 @@ module Pate.Monad
   , getFootprints
   -- sat helpers
   , checkSatisfiableWithModel
+  , goalSat
+  , heuristicSat
   , isPredSat
   , isPredTrue'
   , concretePred
@@ -81,6 +83,7 @@ module Pate.Monad
   , safeIO
   , goalSat
   , heuristicSat
+  , concretizeWithSolver
   )
   where
 
@@ -151,6 +154,7 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
+import qualified Pate.Verification.Concretize as PVC
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -576,6 +580,22 @@ heuristicSat desc p k = do
     Left _err -> k W4R.Unknown
     Right a -> return a
 
+-- | Concretize a symbolic expression in the current assumption context
+concretizeWithSolver ::
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+concretizeWithSolver e = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  let wsolver = PVC.WrappedSolver sym $ \desc p k -> do
+        r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
+          res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
+          inIO (k res')
+        case r of
+          Left _err -> k W4R.Unknown
+          Right a -> return a
+
+  PVC.resolveSingletonSymbolicAsDefault wsolver e
+
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --
 -- This function wraps some lower-level functions and invokes the SMT solver in
@@ -745,7 +765,7 @@ execGroundFn ::
   HasCallStack =>
   SymGroundEvalFn sym  ->
   W4.SymExpr sym tp ->
-  EquivM sym arch (W4G.GroundValue tp)
+  EquivM_ sym arch (W4G.GroundValue tp)
 execGroundFn (SymGroundEvalFn fn) e = do
   groundTimeout <- CMR.asks (PC.cfgGroundTimeout . envConfig)
   result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`

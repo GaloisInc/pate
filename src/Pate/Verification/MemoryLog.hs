@@ -169,16 +169,16 @@ concretizeWrites bak fp = do
     sym = LCB.backendGetSym bak
 
     concFree r =
-      WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger bak =<< WI.natToInteger sym r
+      WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger (PVC.wrappedBackend bak) =<< WI.natToInteger sym r
 
     concWrite mw =
       case mw of
         UnboundedWrite ptr -> do
-          ptr' <- PVC.resolveSingletonPointer bak ptr
+          ptr' <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) ptr
           return (UnboundedWrite ptr')
         MemoryWrite rsn w ptr len -> do
-          ptr' <- PVC.resolveSingletonPointer bak ptr
-          len' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) bak len
+          ptr' <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) ptr
+          len' <- PVC.resolveSingletonSymbolicAs (PVC.concreteBV w) (PVC.wrappedBackend bak) len
           return (MemoryWrite rsn w ptr' len')
 
 emptyFootprint :: Footprint sym

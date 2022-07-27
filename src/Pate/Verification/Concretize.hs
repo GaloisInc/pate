@@ -2,6 +2,9 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 module Pate.Verification.Concretize (
     Concretize
   , concreteBV
@@ -10,12 +13,15 @@ module Pate.Verification.Concretize (
   , resolveSingletonSymbolicAs
   , resolveSingletonSymbolicAsDefault
   , resolveSingletonPointer
+  , WrappedSolver(..)
+  , wrappedBackend
   ) where
 
 import qualified Data.Parameterized.NatRepr as PN
 import qualified Data.Traversable as T
 import           GHC.Stack ( HasCallStack )
 import           GHC.TypeLits ( type (<=) )
+import           Control.Monad.IO.Class ( MonadIO, liftIO )
 
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Backend.Online as LCBO
@@ -58,6 +64,21 @@ concreteBool = Concretize WT.BaseBoolRepr WI.asConstantPred toBlocking injectSym
     injectSymbolic sym True = return $ WI.truePred sym 
     injectSymbolic sym False = return $ WI.falsePred sym
 
+data WrappedSolver sym m where
+  WrappedSolver :: sym ~ (WE.ExprBuilder scope solver fs) =>
+    { solverSym :: sym
+    , _runSolver :: (forall a. String -> WI.Pred sym -> (WSat.SatResult (WEG.GroundEvalFn scope) () -> m a) -> m a)
+    } -> WrappedSolver sym m
+
+withSolver ::
+  WrappedSolver sym m ->
+  (forall scope solver fs.
+    sym ~ (WE.ExprBuilder scope solver fs) =>
+    sym ->
+    (forall a.  String -> WI.Pred sym -> (WSat.SatResult (WEG.GroundEvalFn scope) () -> m a) -> m a) -> m b) ->
+  m b
+withSolver (WrappedSolver sym f) g = g sym f
+
 -- | Attempt to resolve the given 'WI.SymExpr' to a concrete value using the SMT solver
 --
 -- This asks for a model. If it gets one, it adds a blocking clause and asks for
@@ -65,62 +86,67 @@ concreteBool = Concretize WT.BaseBoolRepr WI.asConstantPred toBlocking injectSym
 -- it. Otherwise, return the original symbolic value
 resolveSingletonSymbolicAs
   :: ( LCB.IsSymInterface sym
-     , sym ~ WE.ExprBuilder scope st fs
-     , WPO.OnlineSolver solver
      , HasCallStack
+     , MonadIO m
      )
   => Concretize sym tp
   -- ^ The strategy for concretizing the type
-  -> LCBO.OnlineBackend solver scope st fs
-  -- ^ The symbolic backend
+  -> WrappedSolver sym m
+  -- ^ Solver continuation
   -> WI.SymExpr sym tp
   -- ^ The symbolic term to concretize
-  -> IO (WI.SymExpr sym tp)
-resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic) bak val =
-  let sym = LCB.backendGetSym bak in
+  -> m (WI.SymExpr sym tp)
+resolveSingletonSymbolicAs (Concretize _tp asConcrete toBlocking injectSymbolic) wsolver val = withSolver wsolver $ \(sym :: WE.ExprBuilder scope solver fs) runSolver ->
   case asConcrete val of
     Just _ -> return val
     Nothing -> do
-      LCBO.withSolverProcess bak onlinePanic $ \sp -> do
-        val' <- WPO.inNewFrame sp $ do
-          msat <- WPO.checkAndGetModel sp "Concretize value (with no assumptions)"
-          mmodel <- case msat of
-            WSat.Unknown -> return Nothing
-            WSat.Unsat {} -> return Nothing
-            WSat.Sat mdl -> return (Just mdl)
-          T.forM mmodel $ \mdl -> WEG.groundEval mdl val
-        case val' of
-          Nothing -> return val -- We failed to get a model... leave it symbolic
-          Just concVal -> do
-            WPO.inNewFrame sp $ do
-              block <- toBlocking sym val concVal
-              WPS.assume (WPO.solverConn sp) block
-              msat <- WPO.checkAndGetModel sp "Concretize value (with blocking clause)"
-              case msat of
-                WSat.Unknown -> return val -- Total failure
-                WSat.Sat _mdl -> return val  -- There are multiple models
-                WSat.Unsat {} -> injectSymbolic sym concVal -- There is a single concrete result
-  where
-    onlinePanic = PP.panic PP.InlineCallee "resolveSingletonSymbolicValue" ["Online solver support is not enabled"]
+      val' <- runSolver "Concretize value (with no assumptions)" (WI.truePred sym) $ \msat -> do
+        mmodel <- case msat of
+          WSat.Unknown -> return Nothing
+          WSat.Unsat {} -> return Nothing
+          WSat.Sat mdl -> return (Just mdl)
+        liftIO $ T.forM mmodel $ \mdl -> WEG.groundEval mdl val
+      case val' of
+        Nothing -> return val -- We failed to get a model... leave it symbolic
+        Just concVal -> do
+          block <- liftIO $ toBlocking sym val concVal
+          runSolver "Concretize value (with blocking clause)" block $ \msat ->
+            case msat of
+              WSat.Unknown -> return val -- Total failure
+              WSat.Sat _mdl -> return val  -- There are multiple models
+              WSat.Unsat {} -> liftIO $ injectSymbolic sym concVal -- There is a single concrete result
 
+wrappedBackend
+  :: ( LCB.IsSymInterface sym
+     , sym ~ WE.ExprBuilder scope st fs
+     , HasCallStack
+     , WPO.OnlineSolver solver
+     )
+  => LCBO.OnlineBackend solver scope st fs
+  -> WrappedSolver sym IO
+wrappedBackend bak = WrappedSolver (LCB.backendGetSym bak) $ \desc p k ->
+  LCBO.withSolverProcess bak onlinePanic $ \sp -> WPO.inNewFrame sp $ do
+  WPS.assume (WPO.solverConn sp) p
+  WPO.checkAndGetModel sp desc >>= k
+  where
+    onlinePanic = PP.panic PP.InlineCallee "wrappedBackend" ["Online solver support is not enabled"]
 
 -- | Attempt to resolve the given 'WI.SymExpr' to a concrete value using the SMT solver
 -- Defers to 'resolveSingletonSymbolicAs' with default concretization strategies
 resolveSingletonSymbolicAsDefault
   :: ( LCB.IsSymInterface sym
-     , sym ~ WE.ExprBuilder scope st fs
-     , WPO.OnlineSolver solver
      , HasCallStack
+     , MonadIO m
      )
-  => LCBO.OnlineBackend solver scope st fs
-  -- ^ The symbolic backend
+  => WrappedSolver sym m
+  -- ^ Solver continuation
   -> WI.SymExpr sym tp
   -- ^ The symbolic term to concretize
-  -> IO (WI.SymExpr sym tp)
-resolveSingletonSymbolicAsDefault bak val = case WI.exprType val of
-  WI.BaseBoolRepr -> resolveSingletonSymbolicAs concreteBool bak val
-  WI.BaseIntegerRepr -> resolveSingletonSymbolicAs concreteInteger bak val
-  WI.BaseBVRepr w -> resolveSingletonSymbolicAs (concreteBV w) bak val
+  -> m (WI.SymExpr sym tp)
+resolveSingletonSymbolicAsDefault wsolver val = case WI.exprType val of
+  WI.BaseBoolRepr -> resolveSingletonSymbolicAs concreteBool wsolver val
+  WI.BaseIntegerRepr -> resolveSingletonSymbolicAs concreteInteger wsolver val
+  WI.BaseBVRepr w -> resolveSingletonSymbolicAs (concreteBV w) wsolver val
   _ -> return val -- unsupported type, therefore failure
 
 
@@ -130,18 +156,18 @@ resolveSingletonSymbolicAsDefault bak val = case WI.exprType val of
 -- neither) could be updated
 resolveSingletonPointer
   :: ( LCB.IsSymInterface sym
-     , sym ~ WE.ExprBuilder scope st fs
-     , WPO.OnlineSolver solver
      , 1 <= w
      , HasCallStack
+     , MonadIO m
      )
-  => LCBO.OnlineBackend solver scope st fs
-  -- ^ The symbolic backend
+  => WrappedSolver sym m
+  -- ^ Solver continuation
   -> LCLM.LLVMPtr sym w
   -- ^ The symbolic term to concretize
-  -> IO (LCLM.LLVMPtr sym w)
-resolveSingletonPointer bak ptr@(LCLM.LLVMPointer base off) = do
-  let sym = LCB.backendGetSym bak
-  base' <- WI.integerToNat sym =<< resolveSingletonSymbolicAs concreteInteger bak =<< WI.natToInteger sym base
-  off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) bak off
+  -> m (LCLM.LLVMPtr sym w)
+resolveSingletonPointer wsolver ptr@(LCLM.LLVMPointer base off) = do
+  let sym = solverSym wsolver
+  base_i <- (resolveSingletonSymbolicAs concreteInteger wsolver (WI.natToIntegerPure base))
+  base' <- liftIO $ WI.integerToNat sym base_i
+  off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) wsolver off
   return (LCLM.LLVMPointer base' off')
