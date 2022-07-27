@@ -48,8 +48,6 @@ import           Prelude hiding ( fail )
 import qualified What4.Expr as WE
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as W4
-import           System.IO
-import           Data.IORef
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM

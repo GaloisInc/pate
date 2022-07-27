@@ -53,17 +53,13 @@ module Pate.Equivalence
 
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad ( foldM )
-import           Control.Monad.IO.Class ( liftIO )
 import           Data.Parameterized.Classes
-import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some
 import qualified Data.Set as S
-import           GHC.Stack ( HasCallStack )
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Types as CT
 import           Lang.Crucible.Backend (IsSymInterface)
 
 import qualified Pate.Arch as PA
