@@ -19,7 +19,7 @@ module Pate.Verification.StrongestPosts
 
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
-import           Control.Monad (foldM, forM, forM_)
+import           Control.Monad (foldM, forM)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
 import           Control.Monad.Except (runExceptT, catchError)
@@ -39,8 +39,6 @@ import qualified Data.Parameterized.TraversableF as TF
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as W4
-import qualified What4.Protocol.SMTWriter as W4 hiding ( bvAdd )
 import           What4.SatResult (SatResult(..))
 
 import qualified Lang.Crucible.Backend as LCB

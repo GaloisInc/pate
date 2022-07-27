@@ -81,8 +81,6 @@ module Pate.Monad
   -- equivalence
   , equivalenceContext
   , safeIO
-  , goalSat
-  , heuristicSat
   , concretizeWithSolver
   )
   where
@@ -586,7 +584,7 @@ concretizeWithSolver ::
   EquivM sym arch (W4.SymExpr sym tp)
 concretizeWithSolver e = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  let wsolver = PVC.WrappedSolver sym $ \desc p k -> do
+  let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
         r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
           res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
           inIO (k res')

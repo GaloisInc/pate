@@ -33,18 +33,11 @@ import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 
-import qualified What4.Expr as W4
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as W4
-import qualified What4.Protocol.SMTWriter as W4 hiding (bvAdd)
 import           What4.SatResult (SatResult(..))
-
-import qualified Lang.Crucible.Backend as LCB
-import qualified Lang.Crucible.Backend.Online as LCBO
 
 import qualified Data.Macaw.CFG as MM
 
-import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
@@ -64,7 +57,6 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
 
-import qualified Pate.Verification.Concretize as PVC
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -381,30 +373,24 @@ widenPostcondition bundle preD postD0 =
         -- these checks at that point.
         eqPostPred <- liftIO $ PAD.absDomainToPostCond sym eqCtx bundle preD postDomBody
         not_goal <- liftIO $ W4.notPred sym eqPostPred
-        res <- withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> W4.inNewFrame sp $ do
-          let conn = W4.solverConn sp
-
-          -- check if we already satisfy the equality condition
-          W4.assume conn =<< W4.notPred sym eqPostPred
-
-          goalSat sp "prove postcondition" not_goal >>= \case
-            Unsat _ -> return NoWideningRequired
-            Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
-            Sat evalFn -> 
-              if i <= 0 then inIO $
-                -- we ran out of gas
-                do slice <- PP.simBundleToSlice bundle
-                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice (SymGroundEvalFn evalFn)
-                   let msg = unlines [ "Ran out of gas performing local widenings"
-                                     , show (pretty ineqRes)
-                                     ]
-                   return $ WideningError msg prevLocs postD
-              else
-                -- The current execution does not satisfy the postcondition, and we have
-                -- a counterexample.
-                -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
-                -- out still
-                inIO (widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD)
+        res <- goalSat "prove postcondition" not_goal $ \res -> case res of
+          Unsat _ -> return NoWideningRequired
+          Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
+          Sat evalFn ->
+            if i <= 0 then
+              -- we ran out of gas
+              do slice <- PP.simBundleToSlice bundle
+                 ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                 let msg = unlines [ "Ran out of gas performing local widenings"
+                                   , show (pretty ineqRes)
+                                   ]
+                 return $ WideningError msg prevLocs postD
+            else
+              -- The current execution does not satisfy the postcondition, and we have
+              -- a counterexample.
+              -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
+              -- out still
+              widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -452,7 +438,6 @@ getInitalAbsDomainVals ::
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
 getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
-  eqCtx <- equivalenceContext
   let
     getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
     getConcreteRange e = do
@@ -461,8 +446,8 @@ getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
 
   let PPa.PatchPair preO preP = PAD.absDomVals preDom
   IO.withRunInIO $ \inIO -> do
-    initO <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (getConcreteRange e)) (PS.simOutO bundle) preO
-    initP <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (getConcreteRange e)) (PS.simOutP bundle) preP
+    initO <- PAD.initAbsDomainVals sym (\e -> inIO (getConcreteRange e)) (PS.simOutO bundle) preO
+    initP <- PAD.initAbsDomainVals sym (\e -> inIO (getConcreteRange e)) (PS.simOutP bundle) preP
     return $ PPa.PatchPair initO initP
 
 widenUsingCounterexample ::
@@ -559,7 +544,7 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
 
 
 -- | Only return those cells not already excluded by the postdomain
-filterCells :: forall sym t st fs arch.
+filterCells :: forall sym arch.
   sym ->
   SymGroundEvalFn sym ->
   PEM.MemoryDomain sym arch ->
