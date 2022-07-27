@@ -28,7 +28,7 @@ import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification as PV
-
+import qualified Pate.Equivalence.Error as PEE
 
 data RunConfig arch =
   RunConfig
@@ -52,17 +52,19 @@ runEquivVerification ::
   PH.Hinted (PLE.LoadedELF arch) ->
   IO PEq.EquivalenceStatus
 runEquivVerification validArch@(PA.SomeValidArch {}) logAction pd dcfg original patched = do
-  liftToEquivStatus $ PV.verifyPairs validArch logAction original patched dcfg pd
+  liftToEquivStatus validArch $ PV.verifyPairs validArch logAction original patched dcfg pd
 
 liftToEquivStatus ::
+  forall arch e m.
   Show e =>
   Monad m =>
+  PA.SomeValidArch arch ->
   CME.ExceptT e m PEq.EquivalenceStatus ->
   m PEq.EquivalenceStatus
-liftToEquivStatus f = do
+liftToEquivStatus (PA.SomeValidArch {}) f = do
   v <- CME.runExceptT f
   case v of
-    Left err -> return $ PEq.Errored $ show err
+    Left err -> return $ PEq.Errored @arch (PEE.EquivalenceError Nothing Nothing (PEE.LoaderFailure (show err)))
     Right b -> return b
 
 -- | Given a patch configuration, check that
@@ -72,7 +74,7 @@ runSelfEquivConfig :: forall arch bin.
   RunConfig arch ->
   PB.WhichBinaryRepr bin ->
   IO PEq.EquivalenceStatus
-runSelfEquivConfig cfg wb = liftToEquivStatus $ do
+runSelfEquivConfig cfg wb = liftToEquivStatus (archProxy cfg) $ do
   pd <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- CME.lift $ BS.readFile fp
@@ -108,7 +110,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
 runEquivConfig :: forall arch.
   RunConfig arch ->
   IO PEq.EquivalenceStatus
-runEquivConfig cfg = liftToEquivStatus $ do
+runEquivConfig cfg = liftToEquivStatus (archProxy cfg) $ do
   pdata <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- CME.lift $ BS.readFile fp

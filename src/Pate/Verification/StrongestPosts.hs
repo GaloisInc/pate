@@ -22,7 +22,7 @@ import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM, forM_)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
-import           Control.Monad.Except (runExceptT)
+import           Control.Monad.Except (runExceptT, catchError)
 import           Numeric (showHex)
 import           Prettyprinter
 
@@ -124,17 +124,12 @@ runVerificationLoop env pPairs = do
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
      do pg0 <- initializePairGraph pPairs
-
-        -- To the main work of computing the dataflow fixpoint
-        pg <- pairGraphComputeFixpoint pg0
-
-        -- liftIO $ putStrLn "==== Whole program state ===="
-        -- liftIO $ print (ppProgramDomains W4.printSymExpr pg)
-
-        -- Report a summary of any errors we found during analysis
-        reportAnalysisErrors (envLogger env) pg
-
-        result <- pairGraphComputeVerdict pg
+        result <- catchError (do
+          -- Do the main work of computing the dataflow fixpoint
+          pg <- pairGraphComputeFixpoint pg0
+          -- Report a summary of any errors we found during analysis
+          reportAnalysisErrors (envLogger env) pg
+          pairGraphComputeVerdict pg) (pure . PE.Errored)
 
         emitEvent (PE.StrongestPostOverallResult result)
 
@@ -156,10 +151,11 @@ pairGraphComputeFixpoint ::
 pairGraphComputeFixpoint gr =
   case chooseWorkItem gr of
     Nothing -> return gr
-    Just (gr', nd, preSpec) -> do
+    Just (gr', nd, preSpec) -> startTimer $ do
       gr'' <- PS.viewSpec preSpec $ \scope d -> do
-        withAssumptionSet (PS.scopeAsm scope) $
+        withAssumptionSet (PS.scopeAsm scope) $ do
           visitNode scope nd d gr'
+      emitEvent $ PE.VisitedNode nd
       pairGraphComputeFixpoint gr''
 
 
@@ -452,7 +448,6 @@ doCheckObservables bundle _preD =
                   oSeq' <- reverse <$> groundObservableSequence sym evalFn oSeq -- (MT.memSeq oMem)
                   pSeq' <- reverse <$> groundObservableSequence sym evalFn pSeq -- (MT.memSeq pMem)
                   return (ObservableCheckCounterexample (ObservableCounterexample oSeq' pSeq'))
-
 
 -- | Right now, this requires the pointer and written value to be exactly equal.
 --   At some point, we may want to relax this in some way, but it's not immediately

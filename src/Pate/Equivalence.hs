@@ -75,6 +75,7 @@ import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -83,8 +84,9 @@ data EquivalenceStatus =
     Equivalent
   | Inequivalent
   | ConditionallyEquivalent
-  | Errored String
-  deriving (Show)
+  | forall arch. PA.ValidArch arch => Errored (PEE.EquivalenceError arch)
+
+deriving instance Show EquivalenceStatus
 
 instance Semigroup EquivalenceStatus where
   Errored err <> _ = Errored err

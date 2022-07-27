@@ -48,6 +48,8 @@ import           Prelude hiding ( fail )
 import qualified What4.Expr as WE
 import qualified What4.FunctionName as WF
 import qualified What4.Interface as W4
+import           System.IO
+import           Data.IORef
 
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
@@ -242,7 +244,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envBlockEndVar = bvar
           , envLogger = logAction
           , envConfig = vcfg
-          , envFailureMode = PME.ThrowOnAnyFailure
+          , envFailureMode = PME.ContinueAfterFailure
           , envValidSym = PS.Sym symNonce sym bak
           , envStartTime = startedAt
           , envCurrentFrame = Some mempty

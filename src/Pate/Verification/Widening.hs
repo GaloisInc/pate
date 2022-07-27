@@ -83,7 +83,7 @@ makeFreshAbstractDomain ::
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 makeFreshAbstractDomain scope bundle preDom from to = do
   dom <- case from of
-    GraphNode{} -> do
+    GraphNode{} -> startTimer $ do
       initDom <- initialDomain
       vals <- withOnlineBackend $ \bak ->
         liftIO $ getInitalAbsDomainVals bak bundle preDom
