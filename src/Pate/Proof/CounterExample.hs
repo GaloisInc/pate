@@ -339,13 +339,5 @@ getPointerTags fn e_outer = withValid $ withSym $ \sym -> do
       tags' <- go e
       return $ Const $ tags <> tags'
 
-    resolveEq :: forall tp'.
-      W4.SymExpr sym tp' ->
-      W4.SymExpr sym tp' ->
-      EquivM sym arch (Maybe Bool)
-    resolveEq e1 e2 = do
-      areEq <- liftIO $ W4.isEq sym e1 e2
-      Just <$> execGroundFn fn areEq
-
-  e_outer' <- resolveConcreteLookups sym (\e1 e2 -> resolveEq e1 e2) e_outer
+  e_outer' <- resolveConcreteLookups sym (\p -> Just <$> execGroundFn fn p) e_outer
   go e_outer'

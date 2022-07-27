@@ -64,7 +64,7 @@ data Event arch where
   AnalysisEnd :: PES.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
   AnalysisStart :: PPa.BlockPair arch -> Event arch
   ErrorRaised :: PEE.EquivalenceError arch -> Event arch
-  Warning :: BlocksPair arch -> PEE.EquivalenceError arch -> Event arch
+  Warning :: PEE.EquivalenceError arch -> Event arch
   -- | final top-level result
   ProvenGoal :: BlocksPair arch ->  PFI.SomeProofNonceExpr arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
   -- | intermediate results

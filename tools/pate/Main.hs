@@ -358,7 +358,8 @@ terminalFormatEvent evt =
         PE.Inequivalent _mdl ->
           let failStyle = PPRT.color PPRT.Red <> PPRT.bold
           in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
-    PE.ErrorRaised err -> layoutLn (PP.viaShow err)
+    PE.ErrorRaised err -> layoutLn ("ERROR:" <> PP.pretty err)
+    PE.Warning err -> layoutLn ("WARNING:" <> PP.pretty err)
     PE.ProvenGoal _ prf _ -> layoutLn (PP.viaShow prf)
     PE.HintErrorsCSV errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
