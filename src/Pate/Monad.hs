@@ -445,7 +445,7 @@ validateAssumptions ::
 validateAssumptions oldAsm newAsm = withSym $ \sym -> withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> do
   let
     simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    simp e = resolveConcreteLookups sym (\e1 e2 -> W4.asConstantPred <$> liftIO (W4.isEq sym e1 e2)) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
+    simp e = resolveConcreteLookups sym (pure . W4.asConstantPred) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
 
   -- Simplify the assumptions for readability
   oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
