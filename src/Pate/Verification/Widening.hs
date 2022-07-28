@@ -44,6 +44,7 @@ import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMc
 import           Pate.Equivalence as PEq
+import qualified Pate.Event as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Proof.Operations as PP
@@ -137,9 +138,9 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
               return (freshDomain gr to postSpec)
             WideningError msg _ d'' ->
               do let msg' = ("Error during widening: " ++ msg)
-                 traceBundle bundle msg'
+                 err <- emitError (PEE.WideningError msg')
                  postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                 return $ recordMiscAnalysisError (freshDomain gr to postSpec') to (Text.pack msg')
+                 return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
             Widen _ _ d'' -> do
               postSpec' <- abstractOverVars scope bundle from to postSpec d''
               return (freshDomain gr to postSpec')
@@ -170,13 +171,13 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 
           WideningError msg _ d'' ->
             do let msg' = ("Error during widening: " ++ msg)
-               traceBundle bundle msg'
+               err <- emitError (PEE.WideningError msg')
                postSpec' <- abstractOverVars scope bundle from to postSpec d''
                case updateDomain gr from to postSpec' of
                  Left gr' ->
                    do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                      return $ recordMiscAnalysisError gr' to (Text.pack msg')
-                 Right gr' -> return $ recordMiscAnalysisError gr' to (Text.pack msg')
+                      return $ recordMiscAnalysisError gr' to err
+                 Right gr' -> return $ recordMiscAnalysisError gr' to err
 
           Widen _ _ d'' -> do
             postSpec' <- abstractOverVars scope bundle from to postSpec d''
@@ -238,13 +239,13 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
 
     -- Strategies for re-scoping expressions
     let
-      asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym tp v1 -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v2)
+      asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
         Just c <- lift $ withAssumption asm $
           W4.asConcrete <$> concretizeWithSolver (PS.unSE se)
         liftIO $ PS.concreteScope @v2 sym c
 
-      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
+      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asStackOffset bin se = do
         W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
@@ -264,7 +265,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         -- return frame[post] + off
         liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
-      asSimpleAssign :: forall tp. PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
+      asSimpleAssign :: forall tp. PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asSimpleAssign se = do
         -- se[pre]
         -- se' := se[pre/post]
@@ -278,7 +279,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
         return se'
 
-    PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym tp pre) -> do
+    PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym pre tp) -> do
       mres <- runMaybeT $
             asScopedConst (W4.truePred sym) se
         <|> asStackOffset PBi.OriginalRepr se
@@ -378,40 +379,40 @@ widenPostcondition bundle preD postD0 =
 
         curAsms <- currentAsm
 
-        res <- withSolverProcess $ \sp ->
-          PL.firstLocation @sym @arch sym (PL.SingleLocation @sym (Just eqPost_vals), eqPost_eq) $ \_loc goal -> startTimer $ do
-            let emit r = inIO $
-                  emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
-            let conn = W4.solverConn sp
+        let locs = (PL.SingleLocation @sym (Just eqPost_vals), eqPost_eq)
 
-            emit PE.SolverStarted
+        res <- PL.firstLocation @sym @arch sym locs $ \_loc goal -> startTimer $ do
+          let emit r = withValid @() $
+                emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
 
-            -- check if we already satisfy the equality condition
-            not_goal <- liftIO $ W4.notPred sym goal
+          emit PE.SolverStarted
 
-            goalSat "prove postcondition" not_goal $ \res -> case res of
-              Unsat _ -> do
-                emit PE.SolverSuccess
-                return Nothing
-              Unknown -> do
-                emit PE.SolverError
-                return $ Just (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
-              Sat evalFn -> do
-                emit PE.SolverFailure
-                if i <= 0 then
-                  -- we ran out of gas
-                  do slice <- PP.simBundleToSlice bundle
-                     ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice (SymGroundEvalFn evalFn)
-                     let msg = unlines [ "Ran out of gas performing local widenings"
-                                       , show (pretty ineqRes)
-                                       ]
-                     return $ Just $ WideningError msg prevLocs postD
-                else
-                  -- The current execution does not satisfy the postcondition, and we have
-                  -- a counterexample.
-                  -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
-                  -- out still
-                  Just <$> widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD
+          -- check if we already satisfy the equality condition
+          not_goal <- liftIO $ W4.notPred sym goal
+
+          goalSat "prove postcondition" not_goal $ \res -> case res of
+            Unsat _ -> do
+              emit PE.SolverSuccess
+              return Nothing
+            Unknown -> do
+              emit PE.SolverError
+              return $ Just (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
+            Sat evalFn -> do
+              emit PE.SolverFailure
+              if i <= 0 then
+                -- we ran out of gas
+                do slice <- PP.simBundleToSlice bundle
+                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                   let msg = unlines [ "Ran out of gas performing local widenings"
+                                     , show (pretty ineqRes)
+                                     ]
+                   return $ Just $ WideningError msg prevLocs postD
+              else
+                -- The current execution does not satisfy the postcondition, and we have
+                -- a counterexample.
+                -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
+                -- out still
+                Just <$> widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -432,7 +433,7 @@ widenPostcondition bundle preD postD0 =
                traceBundle bundle "===== POSTDOMAIN ====="
                traceBundle bundle (show (PEE.ppEquivalenceDomain W4.printSymExpr (PS.specBody postD')))
 -}
-               return res
+               return er
 
           -- In this iteration, no additional widening was done, and we can exit the loop.
           -- The ultimate result we return depends on if we did any widening steps in

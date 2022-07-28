@@ -64,7 +64,7 @@ import           Pate.Monad
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
-
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
@@ -168,8 +168,14 @@ data PairGraph sym arch =
     -- | Other sorts of analysis errors not captured by the previous categories. These generally
     --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
     --   that may impact the soundness of the analysis.
-  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) (Set Text))
+  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError arch])
   }
+
+ppAbstractDomainSpec ::
+  (W4.Pred sym -> Doc a) ->
+  AbstractDomainSpec sym arch ->
+  Doc a
+ppAbstractDomainSpec _pPred _spec = pretty "<TODO>"
 
 ppProgramDomains ::
   forall sym arch a.
@@ -183,7 +189,7 @@ ppProgramDomains ::
 ppProgramDomains ppPred gr =
   vcat
   [ vcat [ pretty pPair
-         , PS.viewSpecBody ad $ \ad' -> indent 4 (PAD.ppAbstractDomain ppPred ad')
+         , ppAbstractDomainSpec ppPred ad
          ]
   | (pPair, ad) <- Map.toList (pairGraphDomains gr)
   ]
@@ -260,12 +266,12 @@ considerDesyncEvent gr bPair action =
 recordMiscAnalysisError ::
   PairGraph sym arch ->
   GraphNode arch ->
-  Text ->
+  PEE.EquivalenceError arch ->
   PairGraph sym arch
-recordMiscAnalysisError gr nd msg =
+recordMiscAnalysisError gr nd er =
   let m = Map.alter f nd (pairGraphMiscAnalysisErrors gr)
-      f Nothing  = Just (Set.singleton msg)
-      f (Just s) = Just (Set.insert msg s)
+      f Nothing  = Just [er]
+      f (Just s) = Just (er:s)
    in gr{ pairGraphMiscAnalysisErrors = m }
 
 

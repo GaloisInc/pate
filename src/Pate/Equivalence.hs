@@ -53,12 +53,9 @@ module Pate.Equivalence
 
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad ( foldM )
-<<<<<<< HEAD
-=======
 import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans ( lift )
 import           Control.Monad.IO.Class ( MonadIO, liftIO )
->>>>>>> 3772b3e (add Pate.Location for general traversals)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Data.Set as S
@@ -483,54 +480,11 @@ data StateCondition sym arch v = StateCondition
   , stMemCond :: MemoryCondition sym arch
   }
 
-<<<<<<< HEAD
-=======
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StateCondition sym arch v) where
   traverseLocation sym (StateCondition a b c) f =
     StateCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
 
 
-{-
--- | Traverse the locations in a 'StateCondition' and evaluate
--- the given action against each predicate, yielding the first successful
--- result
-firstStateCondition ::
-  MonadIO m =>
-  IsSymInterface sym =>
-  sym ->
-  W4.Pred sym ->
-  StateCondition sym arch v ->
-  (Location sym arch -> W4.Pred sym -> m (Maybe a)) ->
-  m (Maybe a)
-firstStateCondition sym firstTry cond f = do
-  r <- runExceptT $ do
-    (lift $ f NoLocation firstTry) >>= \case
-      Just a -> throwE a
-      Nothing -> return ()
-    _ <- MM.traverseRegsWith (\r (Const asm) -> do
-                            p <- getAssumedPred sym asm
-                            ma <- lift $ f (RegLocation r) p
-                            case ma of
-                              Just a -> throwE a
-                              Nothing -> return $ (Const asm)) (regCondPreds $ (stRegCond cond))
-
-    _ <- PEM.traverseWithCell (memCondDomain $ stStackCond cond) $ \cell p -> do
-      ma <- lift $ f (MemLocation cell) p
-      case ma of
-        Just a -> throwE a
-        Nothing -> return p
-    _ <- PEM.traverseWithCell (memCondDomain $ stMemCond cond) $ \cell p -> do
-      ma <- lift $ f (MemLocation cell) p
-      case ma of
-        Just a -> throwE a
-        Nothing -> return p
-    return ()
-  case r of
-    Left a -> return $ Just a
-    Right () -> return Nothing
--}
-
->>>>>>> 3772b3e (add Pate.Location for general traversals)
 eqDomPre ::
   IsSymInterface sym =>
   PA.ValidArch arch =>

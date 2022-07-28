@@ -84,6 +84,9 @@ data InnerEquivalenceError arch
   | MissingExpectedEquivalentFunction (PA.ConcreteAddress arch)
   | SolverStackMisalignment
   | LoaderFailure String
+  | WideningError String
+  | ObservabilityError String
+  | TotalityError String
 
 -- | Roughly categorizing how catastrophic an error is to the soundness of the verifier
 isRecoverable :: InnerEquivalenceError arch -> Bool

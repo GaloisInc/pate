@@ -365,8 +365,8 @@ checkObservables bPair bundle preD gr =
               return (Nothing, gr)
          ObservableCheckError msg ->
            do let msg' = ("Error checking observables: " ++ msg)
-              traceBundle bundle msg'
-              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) (Text.pack msg'))
+              err <- emitError (PEE.ObservabilityError msg')
+              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
          ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
            do traceBundle bundle ("Obserables disagree!")
               traceBundle bundle ("== Original sequence ==")
@@ -557,8 +557,8 @@ checkTotality bPair bundle preD exits gr =
               return (Nothing, gr)
          TotalityCheckingError msg ->
            do let msg' = ("Error while checking totality! " ++ msg)
-              traceBundle bundle msg'
-              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) (Text.pack msg'))
+              err <- emitError (PEE.TotalityError msg')
+              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
          TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
            do traceBundle bundle $ unlines
                 ["Found extra exit while checking totality:"
@@ -719,8 +719,8 @@ followExit scope bundle currBlock d gr (idx, pPair) =
      res <- manifestError (triageBlockTarget scope bundle currBlock d gr pPair)
      case res of
        Left err ->
-         do traceBlockPair currBlock ("Caught error: " ++ show err)
-            return (recordMiscAnalysisError gr (GraphNode currBlock) (Text.pack (show err)))
+         do emitEvent $ PE.ErrorEmitted err
+            return (recordMiscAnalysisError gr (GraphNode currBlock) err)
        Right gr' -> return gr'
 
 -- Update the return summary node for the current function if this
@@ -910,8 +910,7 @@ handlePLTStub scope bundle currBlock d gr pPair pRetPair stubSymbol =
      -- Moreover, we should report this assumption about external functions as potentially leading
      -- to unsoundness.
 
-     --handleJump scope bundle currBlock d gr pRetPair
-     handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair
+     handleJump scope bundle currBlock d gr pRetPair
 
 
 handleReturn ::

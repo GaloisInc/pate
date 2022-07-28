@@ -28,6 +28,7 @@ module Pate.Verification.AbstractDomain
   , absDomainValsToPred
   , absDomainToPrecond
   , absDomainToPostCond
+  , absDomainToPostCond_vals
   , ppAbstractDomain
   ) where
 
@@ -563,8 +564,8 @@ absDomainToPostCond_vals ::
   IO (W4.Pred sym)
 absDomainToPostCond_vals sym eqCtx bundle preDom d = do
   let PPa.PatchPair valsO valsP = absDomVals d
-  predO <- absDomainValsToPred sym (PS.simOutState $ PS.simOutO bundle) Nothing valsO
-  predP <- absDomainValsToPred sym (PS.simOutState $ PS.simOutP bundle) Nothing valsP
+  predO <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutO bundle) Nothing valsO
+  predP <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutP bundle) Nothing valsP
   W4.andPred sym predO predP
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where

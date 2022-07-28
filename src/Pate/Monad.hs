@@ -41,6 +41,7 @@ module Pate.Monad
   , startTimer
   , emitEvent
   , emitWarning
+  , emitError
   , getBinCtx
   , getBinCtx'
   , ifConfig
@@ -229,6 +230,14 @@ emitWarning innererr = do
         , PEE.errEquivError = innererr
         }
   emitEvent (\_ -> PE.Warning err)
+
+-- | Emit an event declaring that an error has been raised, but only throw
+-- the error if it is not recoverable (according to 'PEE.isRecoverable')
+emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch (PEE.EquivalenceError arch)
+emitError err = withValid $ do
+  Left err' <- manifestError (throwHere err >> return ())
+  emitEvent (\_ -> PE.ErrorRaised err')
+  return err'
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
