@@ -234,7 +234,7 @@ visitNode scope (GraphNode bPair) d gr0 = withPair bPair $ do
   withAssumptionSet (validInit <> validAbs) $
     do -- do the symbolic simulation
        bundle <- mkSimBundle bPair vars d
-     
+       withPredomain bundle d $ do
  
   {-     traceBundle bundle $ unlines
          [ "== SP result =="
@@ -244,13 +244,13 @@ visitNode scope (GraphNode bPair) d gr0 = withPair bPair $ do
               (PS.simRegs (PS.simOutState (PPa.pPatched (PS.simOut bundle)))))
          ] -}
 
-       -- Compute exit pairs
-       traceBundle bundle $ "Discovering exit pairs from " ++ (show bPair)
-       -- TODO, manifest errors here?
-       exitPairs <- PD.discoverPairs bundle
-       traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
+         -- Compute exit pairs
+         traceBundle bundle $ "Discovering exit pairs from " ++ (show bPair)
+         -- TODO, manifest errors here?
+         exitPairs <- PD.discoverPairs bundle
+         traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
-       withPredomain bundle d $ do
+
          gr1 <- checkObservables bPair bundle d gr0
 
          gr2 <- checkTotality bPair bundle d exitPairs gr1

@@ -18,6 +18,7 @@ import qualified Control.Lens as L
 
 import           Data.Map (Map)
 import qualified Data.Map as M
+import qualified Data.Set as Set
 import qualified Data.Time as TM
 
 import qualified Data.Parameterized.Nonce as N
@@ -94,7 +95,7 @@ data EquivEnv sym arch where
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     } -> EquivEnv sym arch
 
-type ExitPairCache arch = BlockCache arch [PPa.PatchPair (PB.BlockTarget arch)]
+type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
 
 data BlockCache arch a where
   BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a

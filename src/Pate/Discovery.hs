@@ -46,6 +46,7 @@ import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
+import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 import           GHC.Stack ( HasCallStack, callStack )
@@ -98,52 +99,51 @@ discoverPairs ::
   SimBundle sym arch v ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
 discoverPairs bundle = do
-  lookupBlockCache envExitPairsCache pPair >>= \case
+  cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
-    Nothing -> do
-      precond <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
-      blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
-      blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
+    Nothing -> return Set.empty
+  blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
+  blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
 
-      let
-        allCalls = [ (blkO, blkP)
-                   | blkO <- blksO
-                   , blkP <- blksP
-                   , compatibleTargets blkO blkP]
-      blocks <- getBlocks $ PSS.simPair bundle
+  let
+    allCalls = [ PPa.PatchPair blkO blkP
+               | blkO <- blksO
+               , blkP <- blksP
+               , compatibleTargets blkO blkP]
+  blocks <- getBlocks $ PSS.simPair bundle
+  let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
 
-      result <- forM allCalls $ \(blktO, blktP) -> startTimer $ do
-        let emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
-        matches <- matchesBlockTarget bundle blktO blktP
-        check <- withSymIO $ \sym -> WI.andPred sym precond matches
-        case WI.asConstantPred check of
-          Just True -> do
-            emit PE.Reachable
-            return $ Just $ PPa.PatchPair blktO blktP
-          Just False -> do
-            emit PE.Unreachable
-            return $ Nothing
-          _ ->  do
-            goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-            er <- checkSatisfiableWithModel goalTimeout "check" check $ \satRes -> do
-              case satRes of
-                WR.Sat _ -> do
-                  emit PE.Reachable
-                  return $ Just $ PPa.PatchPair blktO blktP
-                WR.Unsat _ -> do
-                  emit PE.Unreachable
-                  return Nothing
-                WR.Unknown -> do
-                  emit PE.InconclusiveTarget
-                  throwHere PEE.InconclusiveSAT
-            case er of
-              Left _err -> do
-                emit PE.InconclusiveTarget
-                throwHere PEE.InconclusiveSAT
-              Right r -> return r
-      let joined = catMaybes result
-      modifyBlockCache envExitPairsCache pPair (++) joined
-      return joined
+  result <- forM newCalls $ \(PPa.PatchPair blktO blktP) -> startTimer $ do
+    let emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
+    matches <- matchesBlockTarget bundle blktO blktP
+    case WI.asConstantPred matches of
+      Just True -> do
+        emit PE.Reachable
+        return $ Just $ PPa.PatchPair blktO blktP
+      Just False -> do
+        emit PE.Unreachable
+        return $ Nothing
+      _ ->  do
+        goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+        er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
+          case satRes of
+            WR.Sat _ -> do
+              emit PE.Reachable
+              return $ Just $ PPa.PatchPair blktO blktP
+            WR.Unsat _ -> do
+              emit PE.Unreachable
+              return Nothing
+            WR.Unknown -> do
+              emit PE.InconclusiveTarget
+              throwHere PEE.InconclusiveSAT
+        case er of
+          Left _err -> do
+            emit PE.InconclusiveTarget
+            throwHere PEE.InconclusiveSAT
+          Right r -> return r
+  let resultSet = Set.fromList (catMaybes result)
+  modifyBlockCache envExitPairsCache pPair Set.union resultSet
+  return $ Set.toList (Set.union resultSet cachedTargets)
   where
     pPair = PSS.simPair bundle
 
