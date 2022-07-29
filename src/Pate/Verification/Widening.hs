@@ -33,18 +33,11 @@ import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 
-import qualified What4.Expr as W4
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as W4
-import qualified What4.Protocol.SMTWriter as W4 hiding (bvAdd)
 import           What4.SatResult (SatResult(..))
-
-import qualified Lang.Crucible.Backend as LCB
-import qualified Lang.Crucible.Backend.Online as LCBO
 
 import qualified Data.Macaw.CFG as MM
 
-import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
@@ -64,7 +57,6 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
 
-import qualified Pate.Verification.Concretize as PVC
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -83,10 +75,9 @@ makeFreshAbstractDomain ::
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 makeFreshAbstractDomain scope bundle preDom from to = do
   dom <- case from of
-    GraphNode{} -> do
+    GraphNode{} -> startTimer $ do
       initDom <- initialDomain
-      vals <- withOnlineBackend $ \bak ->
-        liftIO $ getInitalAbsDomainVals bak bundle preDom
+      vals <- getInitalAbsDomainVals bundle preDom
       return $ initDom { PAD.absDomVals = vals }
     ReturnNode{} -> do
       initDom <- initialDomain
@@ -248,11 +239,8 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     let
       asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym tp v1 -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v2)
       asScopedConst asm se = do
-        Just c <- lift $ withOnlineBackend $ \bak -> withSolverProcess $ \sp ->
-          liftIO $ W4.inNewFrame sp $ do
-            W4.assume (W4.solverConn sp) asm
-            W4.asConcrete <$>
-              PVC.resolveSingletonSymbolicAsDefault bak (PS.unSE se)
+        Just c <- lift $ withAssumption asm $
+          W4.asConcrete <$> concretizeWithSolver (PS.unSE se)
         liftIO $ PS.concreteScope @v2 sym c
 
       asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
@@ -384,30 +372,25 @@ widenPostcondition bundle preD postD0 =
         -- (see: https://github.com/GaloisInc/pate/issues/287), so we should revisit how to separate
         -- these checks at that point.
         eqPostPred <- liftIO $ PAD.absDomainToPostCond sym eqCtx bundle preD postDomBody
-        res <- withSolverProcess $ \sp -> IO.withRunInIO $ \inIO -> W4.inNewFrame sp $ do
-          let conn = W4.solverConn sp
-
-          -- check if we already satisfy the equality condition
-          W4.assume conn =<< W4.notPred sym eqPostPred
-
-          W4.checkAndGetModel sp "prove postcondition" >>= \case
-            Unsat _ -> return NoWideningRequired
-            Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
-            Sat evalFn -> 
-              if i <= 0 then inIO $
-                -- we ran out of gas
-                do slice <- PP.simBundleToSlice bundle
-                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice (SymGroundEvalFn evalFn)
-                   let msg = unlines [ "Ran out of gas performing local widenings"
-                                     , show (pretty ineqRes)
-                                     ]
-                   return $ WideningError msg prevLocs postD
-              else
-                -- The current execution does not satisfy the postcondition, and we have
-                -- a counterexample.
-                -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
-                -- out still
-                inIO (widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD)
+        not_goal <- liftIO $ W4.notPred sym eqPostPred
+        res <- goalSat "prove postcondition" not_goal $ \res -> case res of
+          Unsat _ -> return NoWideningRequired
+          Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
+          Sat evalFn ->
+            if i <= 0 then
+              -- we ran out of gas
+              do slice <- PP.simBundleToSlice bundle
+                 ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                 let msg = unlines [ "Ran out of gas performing local widenings"
+                                   , show (pretty ineqRes)
+                                   ]
+                 return $ WideningError msg prevLocs postD
+            else
+              -- The current execution does not satisfy the postcondition, and we have
+              -- a counterexample.
+              -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
+              -- out still
+              widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -450,33 +433,26 @@ widenPostcondition bundle preD postD0 =
 -- output of symbolic execution, where possible.
 -- Uses the default concretization strategies from 'Pate.Verification.Concretize'
 getInitalAbsDomainVals ::
-  forall sym t solver st fs v arch.
-  ( LCB.IsSymInterface sym
-  , sym ~ W4.ExprBuilder t st fs
-  , W4.OnlineSolver solver
-  , PA.ValidArch arch ) =>
-  LCBO.OnlineBackend solver t st fs ->
+  forall sym arch v.
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
-  IO (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
-getInitalAbsDomainVals bak bundle preDom = do
+  EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
+getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
   let
-    sym = LCB.backendGetSym bak
-    getConcreteRange :: forall tp. W4.SymExpr sym tp -> IO (PAD.AbsRange tp)
+    getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
     getConcreteRange e = do
-      e' <- PVC.resolveSingletonSymbolicAsDefault bak e
+      e' <- concretizeWithSolver e
       return $ PAD.extractAbsRange sym e'
 
   let PPa.PatchPair preO preP = PAD.absDomVals preDom
-  initO <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutO bundle) preO
-  initP <- PAD.initAbsDomainVals sym getConcreteRange (PS.simOutP bundle) preP
-  return $ PPa.PatchPair initO initP
+  IO.withRunInIO $ \inIO -> do
+    initO <- PAD.initAbsDomainVals sym (\e -> inIO (getConcreteRange e)) (PS.simOutO bundle) preO
+    initP <- PAD.initAbsDomainVals sym (\e -> inIO (getConcreteRange e)) (PS.simOutP bundle) preP
+    return $ PPa.PatchPair initO initP
 
 widenUsingCounterexample ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   W4.Pred sym ->
@@ -504,7 +480,7 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
 
     , do slice <- PP.simBundleToSlice bundle
          ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
-                         (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice (SymGroundEvalFn evalFn)
+                         (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
          let msg = unlines [ "Could not find any values to widen!"
                            , show (pretty ineqRes)
                            ]
@@ -514,11 +490,9 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
 data MemCellSource = LocalChunkWrite | PreDomainCell
 
 widenValues ::
-  forall sym t st fs arch v.
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
+  forall sym arch v.
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
@@ -533,17 +507,15 @@ widenValues sym evalFn bundle postD = do
     Nothing -> return $ WideningError "widenValues" mempty postD
   where
      getRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
-     getRange e = liftIO $ do
-       g <- W4.groundEval evalFn e
+     getRange e = do
+       g <- execGroundFn evalFn e
        return $ PAD.groundToAbsRange (W4.exprType e) g
 
 -- TODO, lots of code duplication between the stack and heap cases.
 --  should we find some generalization?
 widenHeap ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   W4.Pred sym ->
@@ -572,24 +544,20 @@ widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD mem
 
 
 -- | Only return those cells not already excluded by the postdomain
-filterCells :: forall sym t st fs arch.
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
+filterCells :: forall sym arch.
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   PEM.MemoryDomain sym arch ->
   [Some (PMc.MemCell sym arch)] ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 filterCells sym evalFn memDom xs = filterM filterCell xs
   where
     filterCell (Some c) =
-      liftIO (W4.groundEval evalFn =<< PEM.mayContainCell sym memDom c)
+      execGroundFn evalFn =<< liftIO (PEM.mayContainCell sym memDom c)
 
 widenStack ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   W4.Pred sym ->
@@ -619,10 +587,8 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD me
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalHeapWrites ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
@@ -636,16 +602,14 @@ findUnequalHeapWrites sym evalFn bundle eqCtx =
      memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
      execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
        do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
-          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          cellEq' <- lift $ execGroundFn evalFn cellEq
           unless cellEq' (tell [Some cell])
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalStackWrites ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
@@ -659,16 +623,14 @@ findUnequalStackWrites sym evalFn bundle eqCtx =
      memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
      execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
        do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
-          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          cellEq' <- lift $ execGroundFn evalFn cellEq
           unless cellEq' (tell [Some cell])
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalHeapMemCells ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   AbstractDomain sym arch v ->
@@ -680,16 +642,14 @@ findUnequalHeapMemCells sym evalFn bundle eqCtx preD =
 
      execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) ->
        do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
-          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          cellEq' <- lift $ execGroundFn evalFn cellEq
           unless cellEq' (tell [Some cell])
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalStackMemCells ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   AbstractDomain sym arch v ->
@@ -701,14 +661,12 @@ findUnequalStackMemCells sym evalFn bundle eqCtx preD =
 
      execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) ->
        do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
-          cellEq' <- liftIO $ W4.groundEval evalFn cellEq
+          cellEq' <- lift $ execGroundFn evalFn cellEq
           unless cellEq' (tell [Some cell])
 
 widenRegisters ::
-  ( sym ~ W4.ExprBuilder t st fs
-  , PA.ValidArch arch ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   W4.Pred sym ->
@@ -743,10 +701,8 @@ widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD =
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalRegs ::
-  ( PA.ValidArch arch
-  , sym ~ W4.ExprBuilder t st fs ) =>
   sym ->
-  W4.GroundEvalFn t ->
+  SymGroundEvalFn sym ->
   EquivContext sym arch ->
   PER.RegisterDomain sym arch ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
@@ -757,9 +713,9 @@ findUnequalRegs sym evalFn eqCtx regPred oRegs pRegs =
     (\regName oRegVal ->
          do let pRegVal = MM.getBoundValue regName pRegs
             let pRegEq  = PER.registerInDomain sym regName regPred
-            regEq <- liftIO (W4.groundEval evalFn pRegEq)
+            regEq <- lift $ execGroundFn evalFn pRegEq
             when regEq $
               do isEqPred <- liftIO (registerValuesEqual sym eqCtx regName oRegVal pRegVal)
-                 isEq <- liftIO (W4.groundEval evalFn isEqPred)
+                 isEq <- lift $ execGroundFn evalFn isEqPred
                  when (not isEq) (tell [Some regName]))
     oRegs

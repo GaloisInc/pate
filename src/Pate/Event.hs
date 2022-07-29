@@ -110,3 +110,4 @@ data Event arch where
   GasExhausted :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> Event arch
   -- | Other errors that can occur inside of the strongest postcondition verifier
   StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> T.Text -> Event arch
+  VisitedNode :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> TM.NominalDiffTime -> Event arch

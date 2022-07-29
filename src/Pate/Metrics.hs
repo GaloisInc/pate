@@ -96,3 +96,4 @@ summarize e m =
     PE.StrongestPostMiscError {} -> m
     PE.StrongestPostOverallResult {} -> m
     PE.GasExhausted {} -> m
+    PE.VisitedNode{} -> m

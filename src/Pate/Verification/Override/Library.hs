@@ -204,8 +204,8 @@ doMemcpy ovCfg bak (Ctx.Empty Ctx.:> (LCS.regValue -> dest) Ctx.:> (LCS.regValue
     destPtr <- mapPtr (LCLM.llvmPointerBlock dest) (LCLM.llvmPointerOffset dest)
     srcPtr <- mapPtr (LCLM.llvmPointerBlock src) (LCLM.llvmPointerOffset src)
 
-    destPtr' <- PVC.resolveSingletonPointer bak destPtr
-    srcPtr' <- PVC.resolveSingletonPointer bak srcPtr
+    destPtr' <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) destPtr
+    srcPtr' <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) srcPtr
 
     nBytesBV <- LCLM.projectLLVM_bv bak nBytes
 
@@ -254,7 +254,7 @@ doMemset ovCfg bak (Ctx.Empty Ctx.:> (LCS.regValue -> dest) Ctx.:> (LCS.regValue
     let mapPtr = DMSM.applyGlobalMap (DMSM.mapRegionPointers (ocPointerMap ovCfg)) bak mem
 
     destPtr <- mapPtr (LCLM.llvmPointerBlock dest) (LCLM.llvmPointerOffset dest)
-    destPtr' <- PVC.resolveSingletonPointer bak destPtr
+    destPtr' <- PVC.resolveSingletonPointer (PVC.wrappedBackend bak) destPtr
 
     valBV <- LCLM.projectLLVM_bv bak val
     fillByteBV <- WI.bvTrunc sym (PN.knownNat @8) valBV

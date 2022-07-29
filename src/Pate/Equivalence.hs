@@ -53,17 +53,13 @@ module Pate.Equivalence
 
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad ( foldM )
-import           Control.Monad.IO.Class ( liftIO )
 import           Data.Parameterized.Classes
-import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Some
 import qualified Data.Set as S
-import           GHC.Stack ( HasCallStack )
 import qualified What4.Interface as W4
 
 import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.LLVM.MemModel as CLM
-import qualified Lang.Crucible.Types as CT
 import           Lang.Crucible.Backend (IsSymInterface)
 
 import qualified Pate.Arch as PA
@@ -75,6 +71,7 @@ import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -83,8 +80,9 @@ data EquivalenceStatus =
     Equivalent
   | Inequivalent
   | ConditionallyEquivalent
-  | Errored String
-  deriving (Show)
+  | forall arch. PA.ValidArch arch => Errored (PEE.EquivalenceError arch)
+
+deriving instance Show EquivalenceStatus
 
 instance Semigroup EquivalenceStatus where
   Errored err <> _ = Errored err

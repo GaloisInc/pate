@@ -52,6 +52,7 @@ import qualified Pate.Verification.Override.Library as PVOL
 data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
+  | ContinueAfterRecoverableFailures
 
 data EquivEnv sym arch where
   EquivEnv ::

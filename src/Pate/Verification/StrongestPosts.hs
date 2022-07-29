@@ -19,10 +19,10 @@ module Pate.Verification.StrongestPosts
 
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
-import           Control.Monad (foldM, forM, forM_)
+import           Control.Monad (foldM, forM)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
-import           Control.Monad.Except (runExceptT)
+import           Control.Monad.Except (runExceptT, catchError)
 import           Numeric (showHex)
 import           Prettyprinter
 
@@ -39,8 +39,6 @@ import qualified Data.Parameterized.TraversableF as TF
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
-import qualified What4.Protocol.Online as W4
-import qualified What4.Protocol.SMTWriter as W4 hiding ( bvAdd )
 import           What4.SatResult (SatResult(..))
 
 import qualified Lang.Crucible.Backend as LCB
@@ -124,17 +122,12 @@ runVerificationLoop env pPairs = do
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
      do pg0 <- initializePairGraph pPairs
-
-        -- To the main work of computing the dataflow fixpoint
-        pg <- pairGraphComputeFixpoint pg0
-
-        -- liftIO $ putStrLn "==== Whole program state ===="
-        -- liftIO $ print (ppProgramDomains W4.printSymExpr pg)
-
-        -- Report a summary of any errors we found during analysis
-        reportAnalysisErrors (envLogger env) pg
-
-        result <- pairGraphComputeVerdict pg
+        result <- catchError (do
+          -- Do the main work of computing the dataflow fixpoint
+          pg <- pairGraphComputeFixpoint pg0
+          -- Report a summary of any errors we found during analysis
+          reportAnalysisErrors (envLogger env) pg
+          pairGraphComputeVerdict pg) (pure . PE.Errored)
 
         emitEvent (PE.StrongestPostOverallResult result)
 
@@ -156,10 +149,11 @@ pairGraphComputeFixpoint ::
 pairGraphComputeFixpoint gr =
   case chooseWorkItem gr of
     Nothing -> return gr
-    Just (gr', nd, preSpec) -> do
+    Just (gr', nd, preSpec) -> startTimer $ do
       gr'' <- PS.viewSpec preSpec $ \scope d -> do
-        withAssumptionSet (PS.scopeAsm scope) $
+        withAssumptionSet (PS.scopeAsm scope) $ do
           visitNode scope nd d gr'
+      emitEvent $ PE.VisitedNode nd
       pairGraphComputeFixpoint gr''
 
 
@@ -441,18 +435,16 @@ doCheckObservables bundle _preD =
          , show (W4.printSymExpr eqSeq)
          ]
 -}
-       withSolverProcess $ \sp -> liftIO $ W4.inNewFrame sp $ do
-         W4.assume (W4.solverConn sp) =<< W4.notPred sym eqSeq
-         W4.checkAndGetModel sp "checkObservableSequences" >>= \case
-             Unsat _ -> return ObservableCheckEq
-             Unknown -> return (ObservableCheckError "UNKNOWN result when checking observable sequences")
-             Sat evalFn ->
-               do -- NB, observable sequences are stored in reverse order, so we reverse them here to
-                  -- display the counterexample in a more natural program order
-                  oSeq' <- reverse <$> groundObservableSequence sym evalFn oSeq -- (MT.memSeq oMem)
-                  pSeq' <- reverse <$> groundObservableSequence sym evalFn pSeq -- (MT.memSeq pMem)
-                  return (ObservableCheckCounterexample (ObservableCounterexample oSeq' pSeq'))
-
+       not_goal <- liftIO $ W4.notPred sym eqSeq
+       goalSat "checkObservableSequences" not_goal $ \res -> case res of
+         Unsat _ -> return ObservableCheckEq
+         Unknown -> return (ObservableCheckError "UNKNOWN result when checking observable sequences")
+         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
+           -- NB, observable sequences are stored in reverse order, so we reverse them here to
+           -- display the counterexample in a more natural program order
+           oSeq' <- reverse <$> groundObservableSequence sym evalFn oSeq -- (MT.memSeq oMem)
+           pSeq' <- reverse <$> groundObservableSequence sym evalFn pSeq -- (MT.memSeq pMem)
+           return (ObservableCheckCounterexample (ObservableCounterexample oSeq' pSeq'))
 
 -- | Right now, this requires the pointer and written value to be exactly equal.
 --   At some point, we may want to relax this in some way, but it's not immediately
@@ -602,49 +594,46 @@ doCheckTotality bundle _preD exits =
          abortCase <- liftIO $ W4.andPred sym abortO returnP
          liftIO $ W4.orPred sym bothReturn abortCase
 
-       withSolverProcess $ \sp -> liftIO $  W4.inNewFrame sp $ do
-         W4.assume (W4.solverConn sp) =<< W4.notPred sym isReturn
-         forM_ cases $ \c ->
-           W4.assume (W4.solverConn sp) =<< W4.notPred sym c
+       asm <- liftIO $ (forM (isReturn:cases) (W4.notPred sym) >>= (foldM (W4.andPred sym) (W4.truePred sym)))
 
-         W4.checkAndGetModel sp "prove postcondition" >>= \case
-           Unsat _ -> return CasesTotal
-           Unknown -> return (TotalityCheckingError "UNKNOWN result when checking totality")
-           Sat evalFn ->
-             -- We found an execution that does not correspond to one of the
-             -- executions listed above, so compute the counterexample.
-             --
-             -- TODO: if the location being jumped to is unconstrained (e.g., a return where we don't have
-             -- information about the calling context) the solver will invent nonsense addresses for
-             -- the location.  It might be better to only report concrete values for exit address
-             -- if it is unique.
-             do let oRegs  = PS.simRegs (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
-                let pRegs  = PS.simRegs (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
-                let oIPReg = oRegs ^. MM.curIP
-                let pIPReg = pRegs ^. MM.curIP
-                let oBlockEnd = PS.simOutBlockEnd (PPa.pOriginal (PS.simOut bundle))
-                let pBlockEnd = PS.simOutBlockEnd (PPa.pPatched  (PS.simOut bundle))
+       goalSat "doCheckTotality" asm $ \res -> case res of
+         Unsat _ -> return CasesTotal
+         Unknown -> return (TotalityCheckingError "UNKNOWN result when checking totality")
+         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn ->
+           -- We found an execution that does not correspond to one of the
+           -- executions listed above, so compute the counterexample.
+           --
+           -- TODO: if the location being jumped to is unconstrained (e.g., a return where we don't have
+           -- information about the calling context) the solver will invent nonsense addresses for
+           -- the location.  It might be better to only report concrete values for exit address
+           -- if it is unique.
+           do let oRegs  = PS.simRegs (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
+              let pRegs  = PS.simRegs (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
+              let oIPReg = oRegs ^. MM.curIP
+              let pIPReg = pRegs ^. MM.curIP
+              let oBlockEnd = PS.simOutBlockEnd (PPa.pOriginal (PS.simOut bundle))
+              let pBlockEnd = PS.simOutBlockEnd (PPa.pPatched  (PS.simOut bundle))
 
-                let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
-                let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
+              let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
+              let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
 
-                oBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn oBlockEnd
-                pBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn pBlockEnd
+              oBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn oBlockEnd
+              pBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn pBlockEnd
 
-                oIPV <- groundIPValue sym evalFn oIPReg
-                pIPV <- groundIPValue sym evalFn pIPReg
+              oIPV <- groundIPValue sym evalFn oIPReg
+              pIPV <- groundIPValue sym evalFn pIPReg
 
-                oInstr <- groundMuxTree sym evalFn (MT.memCurrentInstr oMem)
-                pInstr <- groundMuxTree sym evalFn (MT.memCurrentInstr pMem)
+              oInstr <- groundMuxTree sym evalFn (MT.memCurrentInstr oMem)
+              pInstr <- groundMuxTree sym evalFn (MT.memCurrentInstr pMem)
 
-                case (oIPV, pIPV) of
-                  (Just oval, Just pval) ->
-                     return (TotalityCheckCounterexample
-                       (TotalityCounterexample (oval,oBlockEndCase,oInstr) (pval,pBlockEndCase,pInstr)))
-                  (Nothing, _) ->
-                    return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr oIPReg)))
-                  (_, Nothing) ->
-                    return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr pIPReg)))
+              case (oIPV, pIPV) of
+                (Just oval, Just pval) ->
+                   return (TotalityCheckCounterexample
+                     (TotalityCounterexample (oval,oBlockEndCase,oInstr) (pval,pBlockEndCase,pInstr)))
+                (Nothing, _) ->
+                  return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr oIPReg)))
+                (_, Nothing) ->
+                  return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr pIPReg)))
 
 groundIPValue ::
   (sym ~ W4.ExprBuilder t st fs, LCB.IsSymInterface sym) =>

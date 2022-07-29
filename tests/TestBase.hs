@@ -152,6 +152,12 @@ doTest mwb cfg sv proxy@(PA.SomeValidArch {}) fp = do
                     True -> show oAddr
                     False -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
               addLogMsg $ addr ++ ":" ++ show msg
+            PE.StrongestPostDesync pPair _ ->
+              addLogMsg $ "Desync at: " ++ show pPair
+            PE.StrongestPostObservable pPair _ ->
+              addLogMsg $ "Observable counterexample at: " ++ show pPair
+            PE.StrongestPostOverallResult status _ ->
+              addLogMsg $ "Overall Result:" ++ show status
             _ -> return ()
       }
   result <- case mwb of

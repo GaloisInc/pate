@@ -12,6 +12,7 @@ module Pate.Equivalence.Error (
   , SimpResult(..)
   , equivalenceError
   , equivalenceErrorFor
+  , isRecoverable
   ) where
 
 import qualified Control.Exception as X
@@ -81,6 +82,14 @@ data InnerEquivalenceError arch
   | InconsistentSimplificationResult SimpResult
   | UnhandledLoop
   | MissingExpectedEquivalentFunction (PA.ConcreteAddress arch)
+  | SolverStackMisalignment
+  | LoaderFailure String
+
+-- | Roughly categorizing how catastrophic an error is to the soundness of the verifier
+isRecoverable :: InnerEquivalenceError arch -> Bool
+isRecoverable e = case e of
+  InconsistentSimplificationResult{} -> True
+  _ -> False
 
 data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>
   SimpResult (Proxy sym) (W4.SymExpr sym tp) (W4.SymExpr sym tp)
