@@ -362,6 +362,7 @@ tryWidenings (x:xs) =
     NoWideningRequired -> tryWidenings xs
     res -> return res
 
+type WidenState sym arch v = Either (AbstractDomain sym arch v) (WidenResult sym arch v)
 
 -- | This gives a fixed amount of gas for traversing the
 --   widening loop. Setting this value too low seems to
@@ -384,6 +385,71 @@ widenPostcondition bundle preD postD0 =
     widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
+   widenOnce ::
+     Gas ->
+     WidenState sym arch v ->
+     PL.Location sym arch l ->
+     W4.Pred sym ->
+     EquivM_ sym arch (WidenState sym arch v)
+   widenOnce (Gas i) prevState loc goal = case prevState of
+     Right NoWideningRequired -> return prevState
+     Right (WideningError{}) -> return prevState
+     _ -> startTimer $ withSym $ \sym -> do
+       eqCtx <- equivalenceContext
+       let (prevLocs, postD) = case prevState of
+             Left prevDom -> (mempty, prevDom)
+             --FIXME: we're dropping the widening Kind now since we're
+             --potentially doing multiple widenings in one iteration
+             Right (Widen _ locs prevDom) -> (locs, prevDom)
+       curAsms <- currentAsm
+       let emit r =
+             withValid @() $ emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
+       emit PE.SolverStarted
+
+       not_goal <- liftIO $ W4.notPred sym goal
+
+       goalSat "prove postcondition" not_goal $ \case
+         Unsat _ -> do
+           emit PE.SolverSuccess
+           return prevState
+         Unknown -> do
+           emit PE.SolverError
+           _ <- emitError $ PEE.WideningError "UNKNOWN result evaluating postcondition"
+           case loc of
+             PL.Cell c -> Right <$> widenCells [Some c] postD
+             PL.Register r -> Right <$> widenRegs [Some r] postD
+             _ -> return $ Right $ WideningError "UNKNOWN result evaluating postcondition" prevLocs postD
+         Sat evalFn -> do
+           emit PE.SolverFailure
+           if i <= 0 then
+             -- we ran out of gas
+             do slice <- PP.simBundleToSlice bundle
+                ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                let msg = unlines [ "Ran out of gas performing local widenings"
+                                  , show (pretty ineqRes)
+                                  ]
+                return $ Right $ WideningError msg prevLocs postD
+           else do
+             -- The current execution does not satisfy the postcondition, and we have
+             -- a counterexample.
+             -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
+             -- out still
+             res <- widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postD) preD prevLocs postD
+             case res of
+               -- this location was made equivalent by a previous widening in this same loop
+               NoWideningRequired -> case prevState of
+                 Left{} ->  do
+                   -- if we haven't performed any widenings yet, then this is an error
+                   slice <- PP.simBundleToSlice bundle
+                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
+                                   (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                   let msg = unlines [ "Could not find any values to widen!"
+                                     , show (pretty ineqRes)
+                                     ]
+                   return $ Right $ WideningError msg prevLocs postD
+                 Right{} -> return prevState
+               _ -> return $ Right res
+
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
    --
@@ -401,59 +467,14 @@ widenPostcondition bundle preD postD0 =
      {- ^ A summary of any widenings that were done in previous iterations.
           If @Nothing@, than no previous widenings have been performed. -} ->
      EquivM sym arch (WidenResult sym arch v)
-
    widenLoop sym (Gas i) eqCtx postD mPrevRes =
-     do let prevLocs = case mPrevRes of
-              Just (Widen _ locs _) -> locs
-              _ -> mempty
-        -- no rebinding necessary yet
-        let postDomBody = postD
-        --(postCondAsm, postDomBody) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
-        -- TODO: It is likely useful to separate checking the equality and value domains, rather
-        -- than checking them simultaneously here. The plan is to change this check to instead
-        -- iterate over the domain and check each location individually
-        -- (see: https://github.com/GaloisInc/pate/issues/287), so we should revisit how to separate
-        -- these checks at that point.
+     do
+        eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
+        eqPost_vals <- liftIO $ PAD.absDomainToPostCond_vals sym eqCtx bundle preD postD
 
-        eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postDomBody))
-        eqPost_vals <- liftIO $ PAD.absDomainToPostCond_vals sym eqCtx bundle preD postDomBody
+        let widenChecks = (PL.SingleLocation @sym (Just eqPost_vals), eqPost_eq)
 
-        curAsms <- currentAsm
-
-        let locs = (PL.SingleLocation @sym (Just eqPost_vals), eqPost_eq)
-
-        res <- PL.firstLocation @sym @arch sym locs $ \_loc goal -> startTimer $ do
-          let emit r = withValid @() $
-                emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
-
-          emit PE.SolverStarted
-
-          -- check if we already satisfy the equality condition
-          not_goal <- liftIO $ W4.notPred sym goal
-
-          goalSat "prove postcondition" not_goal $ \res -> case res of
-            Unsat _ -> do
-              emit PE.SolverSuccess
-              return Nothing
-            Unknown -> do
-              emit PE.SolverError
-              return $ Just (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
-            Sat evalFn -> do
-              emit PE.SolverFailure
-              if i <= 0 then
-                -- we ran out of gas
-                do slice <- PP.simBundleToSlice bundle
-                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
-                   let msg = unlines [ "Ran out of gas performing local widenings"
-                                     , show (pretty ineqRes)
-                                     ]
-                   return $ Just $ WideningError msg prevLocs postD
-              else
-                -- The current execution does not satisfy the postcondition, and we have
-                -- a counterexample.
-                -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
-                -- out still
-                Just <$> widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD
+        res <- PL.foldLocation @sym @arch sym widenChecks (Left postD) (widenOnce (Gas i))
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -462,12 +483,13 @@ widenPostcondition bundle preD postD0 =
         -- return `NoWideningRequired`.  Otherwise return the new abstract domain
         -- and a summary of the widenings we did.
         case res of
+
           -- Some kind of error occured while widening.
-          Just er@(WideningError msg locs' _postD') ->
+          Right er@(WideningError msg locs _postD') ->
             do traceBundle bundle "== Widening error! =="
                traceBundle bundle msg
                traceBundle bundle "Partial widening at locations:"
-               traceBundle bundle (show locs')
+               traceBundle bundle (show locs)
 {-
                traceBundle bundle "===== PREDOMAIN ====="
                traceBundle bundle (show (PEE.ppEquivalenceDomain W4.printSymExpr (PS.specBody preD)))
@@ -479,20 +501,24 @@ widenPostcondition bundle preD postD0 =
           -- In this iteration, no additional widening was done, and we can exit the loop.
           -- The ultimate result we return depends on if we did any widening steps in
           -- previous iterations.
-          Just NoWideningRequired ->
+          Right NoWideningRequired ->
             case mPrevRes of
               Nothing   -> return NoWideningRequired
               Just prevRes -> return prevRes
-          Nothing ->
+          -- no widening happened
+          Left{} ->
             case mPrevRes of
               Nothing   -> return NoWideningRequired
               Just prevRes -> return prevRes
           -- We had to do some widening in this iteration, so reenter the loop.
-          Just (Widen widenK locs' postD') ->
+          Right (Widen widenK locs postD') ->
             do traceBundle bundle "== Found a widening, returning into the loop =="
-               traceBundle bundle (show locs')
-               let newlocs = locs' <> prevLocs
+               traceBundle bundle (show locs)
+               let newlocs = case mPrevRes of
+                     Just (Widen _ prevLocs _) -> locs <> prevLocs
+                     _ -> locs
                widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
+
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the
 -- output of symbolic execution, where possible.
@@ -541,15 +567,6 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
       -- After that, we check for widenings relating to the precondition, i.e., frame conditions.
     , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
     , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
-
-
-    , do slice <- PP.simBundleToSlice bundle
-         ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
-                         (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
-         let msg = unlines [ "Could not find any values to widen!"
-                           , show (pretty ineqRes)
-                           ]
-         return $ WideningError msg prevLocs postD
     ]
 
 data MemCellSource = LocalChunkWrite | PreDomainCell
@@ -575,6 +592,33 @@ widenValues sym evalFn bundle postD = do
      getRange e = do
        g <- execGroundFn evalFn e
        return $ PAD.groundToAbsRange (W4.exprType e) g
+
+widenCells ::
+  [Some (PMc.MemCell sym arch)] ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenResult sym arch v)
+widenCells cells postD = withSym $ \sym -> do
+  newCells <- liftIO $ PEM.fromList sym [ (c, W4.truePred sym) | c <- cells ]
+  let heapDom = PEE.eqDomainGlobalMemory (PAD.absDomEq $ postD)
+  heapDom' <- liftIO $ PEM.intersect sym heapDom newCells
+  let pred' = (PAD.absDomEq postD){ PEE.eqDomainGlobalMemory = heapDom' }
+  let postD' = postD { PAD.absDomEq = pred' }
+  return (Widen WidenEquality (WidenLocs mempty (Set.fromList cells)) postD')
+
+widenRegs ::
+  [Some (MM.ArchReg arch)] ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenResult sym arch v)
+widenRegs newRegs postD = withSym $ \sym -> do
+  let
+    regs' = foldl
+                 (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
+                 (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
+                 newRegs
+    pred' = (PAD.absDomEq postD) { PEE.eqDomainRegisters = regs' }
+    postD' = postD { PAD.absDomEq = pred' }
+    locs = WidenLocs (Set.fromList newRegs) mempty
+  return (Widen WidenEquality locs postD')
 
 -- TODO, lots of code duplication between the stack and heap cases.
 --  should we find some generalization?
