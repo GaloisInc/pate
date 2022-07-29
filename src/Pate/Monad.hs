@@ -609,11 +609,11 @@ checkSatisfiableWithModel ::
   EquivM sym arch (Either SomeException a)
 checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
   st <- withOnlineBackend $ \bak -> liftIO $ LCB.saveAssumptionState bak
-  mres <- withSolverProcess $ \sp -> IO.withRunInIO $ \runInIO -> do
+  mres <- withSolverProcess $ \sp -> liftIO $ do
     WPO.push sp
     W4.assume (WPO.solverConn sp) p
     tryJust filterAsync $ do
-      res <- runInIO (checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel")
+      res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
       W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
   case mres of
     Left err -> withOnlineBackend $ \bak -> do
@@ -644,12 +644,12 @@ checkSatisfiableWithoutBindings
   -> sym
   -> String
   -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
-  -> EquivM sym arch (W4R.SatResult (W4G.GroundEvalFn t) ())
+  -> IO (W4R.SatResult (W4G.GroundEvalFn t) ())
 checkSatisfiableWithoutBindings timeout _sym _desc doCheckSat =
   case PT.timeoutAsMicros timeout of
-    Nothing -> liftIO $ doCheckSat
+    Nothing -> doCheckSat
     Just micros -> do
-      mres <- liftIO $ PT.timeout micros doCheckSat
+      mres <- PT.timeout micros doCheckSat
       case mres of
         Nothing -> return W4R.Unknown
         Just r -> return r
