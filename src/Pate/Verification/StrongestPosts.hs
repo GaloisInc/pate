@@ -31,10 +31,12 @@ import qualified Data.ByteString as BS
 import qualified Data.Map as Map
 import           Data.Proxy
 import           Data.Functor.Const
+import           Data.IORef ( IORef, newIORef, readIORef, modifyIORef )
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import qualified Data.Parameterized.TraversableF as TF
+import           Data.Parameterized.Nonce
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -56,6 +58,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
+import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PESt
@@ -421,7 +424,7 @@ doCheckObservables bundle _preD =
          ]
 -}
 
-       eqSeq <- liftIO (equivalentSequences sym oSeq pSeq)
+       eqSeq <- equivalentSequences oSeq pSeq
 
 {-
        traceBundle bundle $ unlines
@@ -467,26 +470,68 @@ eqMemOp sym (MT.MemOp xptr xdir xcond xw xval xend) (MT.MemOp yptr ydir ycond yw
 
   | otherwise = return (W4.falsePred sym)
 
+
+data SeqTwoCache a b = SeqTwoCache (IORef (Map.Map (Maybe (Nonce GlobalNonceGenerator a), Maybe (Nonce GlobalNonceGenerator a)) b))
+
+newSeqTwoCache :: IO (SeqTwoCache a b)
+newSeqTwoCache = SeqTwoCache <$> newIORef Map.empty
+
+-- TODO: clagged from SymSequence module
+symSequenceNonce :: SymSequence sym a -> Maybe (Nonce GlobalNonceGenerator a)
+symSequenceNonce SymSequenceNil = Nothing
+symSequenceNonce (SymSequenceCons n _ _ ) = Just n
+symSequenceNonce (SymSequenceAppend n _ _) = Just n
+symSequenceNonce (SymSequenceMerge n _ _ _) = Just n
+
+evalWithTwoCache :: MonadIO m =>
+  SeqTwoCache a b ->
+  SymSequence sym a ->
+  SymSequence sym a ->
+  m b ->
+  m b
+evalWithTwoCache (SeqTwoCache ref) seq1 seq2 f = do
+  m <- liftIO (readIORef ref)
+  let k = (symSequenceNonce seq1, symSequenceNonce seq2)
+  case Map.lookup k m of
+    Just v -> return v
+    Nothing -> do
+      v <- f
+      liftIO (modifyIORef ref (Map.insert k v))
+      return v
+
 -- TODO, this procedure can be exponential in the worst case,
 -- because of the way we are splitting along merges.
 --
 -- It might be possible to do this in a better way, but
 -- it's pretty tricky.
-equivalentSequences :: forall sym ptrW.
-  (LCB.IsSymInterface sym, 1 <= ptrW) =>
-  sym ->
+equivalentSequences :: forall sym arch ptrW.
+  (1 <= ptrW) =>
+  MM.MemWidth ptrW =>
   SymSequence sym (MT.MemEvent sym ptrW) ->
   SymSequence sym (MT.MemEvent sym ptrW) ->
-  IO (W4.Pred sym)
-equivalentSequences sym = \xs ys -> loop [xs] [ys]
- where
-  eqEvent :: MT.MemEvent sym ptrW -> MT.MemEvent sym ptrW -> IO (W4.Pred sym)
+  EquivM sym arch (W4.Pred sym)
+equivalentSequences seq1 seq2 = withSym $ \sym -> do
+  cache <- liftIO $ newSeqTwoCache
+  equivalentSequences' sym cache seq1 seq2
 
-  eqEvent (MT.MemOpEvent xop) (MT.MemOpEvent yop) = eqMemOp sym xop yop
+equivalentSequences' :: forall sym arch ptrW.
+  (1 <= ptrW) =>
+  MM.MemWidth ptrW =>
+  sym ->
+  SeqTwoCache (MT.MemEvent sym ptrW) (W4.Pred sym) ->
+  SymSequence sym (MT.MemEvent sym ptrW) ->
+  SymSequence sym (MT.MemEvent sym ptrW) ->
+  EquivM sym arch (W4.Pred sym)
+equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
+ where
+  eqEvent :: MT.MemEvent sym ptrW -> MT.MemEvent sym ptrW -> EquivM sym arch (W4.Pred sym)
+
+  eqEvent (MT.MemOpEvent xop) (MT.MemOpEvent yop) = liftIO $ eqMemOp sym xop yop
 
   eqEvent (MT.SyscallEvent _ x) (MT.SyscallEvent _ y) =
      case testEquality (W4.bvWidth x) (W4.bvWidth y) of
-       Just Refl | Just W4.LeqProof <- W4.isPosNat (W4.bvWidth x) -> W4.bvEq sym x y
+       Just Refl | Just W4.LeqProof <- W4.isPosNat (W4.bvWidth x) ->
+         liftIO $ W4.bvEq sym x y
        _ -> return (W4.falsePred sym)
 
   eqEvent MT.MemOpEvent{} MT.SyscallEvent{} = return (W4.falsePred sym)
@@ -497,46 +542,66 @@ equivalentSequences sym = \xs ys -> loop [xs] [ys]
   -- The lists are used to manage append nodes, which get pushed onto the
   -- top of the stack when encountered.  This potentially loses sharing,
   -- but is pretty tricky to do better.
+  loop ::
+    [SymSequence sym (MT.MemEvent sym ptrW)] ->
+    [SymSequence sym (MT.MemEvent sym ptrW)] ->
+    EquivM sym arch (W4.Pred sym)
+  loop seqs1 seqs2 = case (seqs1, seqs2) of
+    -- cache the special case when the stacks are both a single sequence
+    (seq1:[], seq2:[]) -> evalWithTwoCache cache seq1 seq2 $ loop' seqs1 seqs2
+    _ -> loop' seqs1 seqs2
 
+  loop' ::
+    [SymSequence sym (MT.MemEvent sym ptrW)] ->
+    [SymSequence sym (MT.MemEvent sym ptrW)] ->
+    EquivM sym arch (W4.Pred sym)
   -- nil/nil case, equal sequences
-  loop [] [] = return (W4.truePred sym)
+  loop' [] [] = return (W4.truePred sym)
 
   -- nil/cons and cons/nil cases, unequal sequences
-  loop [] (SymSequenceCons{}:_) = return (W4.falsePred sym)
-  loop (SymSequenceCons{}:_) [] = return (W4.falsePred sym)
+  loop' [] (SymSequenceCons{}:_) = return (W4.falsePred sym)
+  loop' (SymSequenceCons{}:_) [] = return (W4.falsePred sym)
 
   -- just pop empty sequences off the top of the stack
-  loop (SymSequenceNil:xs) ys = loop xs ys
-  loop xs (SymSequenceNil:ys) = loop xs ys
+  loop' (SymSequenceNil:xs) ys = loop xs ys
+  loop' xs (SymSequenceNil:ys) = loop xs ys
 
   -- push appended sequences onto the stack
-  loop (SymSequenceAppend _ xs1 xs2:xs) ys = loop (xs1:xs2:xs) ys
-  loop xs (SymSequenceAppend _ ys1 ys2:ys) = loop xs (ys1:ys2:ys)
+  loop' (SymSequenceAppend _ xs1 xs2:xs) ys = loop (xs1:xs2:xs) ys
+  loop' xs (SymSequenceAppend _ ys1 ys2:ys) = loop xs (ys1:ys2:ys)
 
   -- special case, both sequences split on the same predicate
-  loop (SymSequenceMerge _ px xs1 xs2:xs) (SymSequenceMerge _ py ys1 ys2:ys)
-    | Just Refl <- testEquality px py =
-    do eq1 <- loop (xs1:xs) (ys1:ys)
-       eq2 <- loop (xs2:xs) (ys2:ys)
-       W4.itePred sym px eq1 eq2
+  loop' (SymSequenceMerge _ px xs1 xs2:xs) ys_outer@(SymSequenceMerge _ py ys1 ys2:ys) =
+    do goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
+       p_eq <- liftIO $ W4.isEq sym px py
+       (isPredTrue' goalTimeout p_eq) >>= \case
+         True -> do
+           eq1 <- loop (xs1:xs) (ys1:ys)
+           eq2 <- loop (xs2:xs) (ys2:ys)
+           liftIO $ W4.itePred sym px eq1 eq2
+         False -> do
+           -- split along the left stack
+           eq1 <- loop (xs1:xs) ys_outer
+           eq2 <- loop (xs2:xs) ys_outer
+           liftIO $ W4.itePred sym px eq1 eq2
 
   -- split along merges on the top of the left stack
-  loop (SymSequenceMerge _ p xs1 xs2:xs) ys =
+  loop' (SymSequenceMerge _ p xs1 xs2:xs) ys =
     do eq1 <- loop (xs1:xs) ys
        eq2 <- loop (xs2:xs) ys
-       W4.itePred sym p eq1 eq2
+       liftIO $ W4.itePred sym p eq1 eq2
 
   -- split along merges on the top of the right stack
-  loop xs (SymSequenceMerge _ p ys1 ys2:ys) =
+  loop' xs (SymSequenceMerge _ p ys1 ys2:ys) =
     do eq1 <- loop xs (ys1:ys)
        eq2 <- loop xs (ys2:ys)
-       W4.itePred sym p eq1 eq2
+       liftIO $ W4.itePred sym p eq1 eq2
 
   -- cons/cons case.  Compare the heads and compare the tails
-  loop (SymSequenceCons _ x xs1:xs) (SymSequenceCons _ y ys1:ys) =
+  loop' (SymSequenceCons _ x xs1:xs) (SymSequenceCons _ y ys1:ys) =
     do eq1 <- eqEvent x y
        eq2 <- loop (xs1:xs) (ys1:ys)
-       W4.andPred sym eq1 eq2
+       liftIO $ W4.andPred sym eq1 eq2
 
 
 
