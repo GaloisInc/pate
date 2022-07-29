@@ -27,7 +27,6 @@ import           Control.Monad.Trans.Class ( lift )
 import           Prettyprinter
 
 import qualified Data.Set as Set
-import qualified Data.Text as Text
 
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
@@ -279,21 +278,39 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
         return se'
 
-    PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym pre tp) -> do
-      mres <- runMaybeT $
-            asScopedConst (W4.truePred sym) se
-        <|> asStackOffset PBi.OriginalRepr se
-        <|> asStackOffset PBi.PatchedRepr se
-        <|> asSimpleAssign se
-      case mres of
-        Just se' -> return se'
-        -- FIXME: add graceful failure mode
+      doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (Maybe (PS.ScopedExpr sym post tp))
+      doRescope _loc se = runMaybeT $ do
+          se' <- (    asScopedConst (W4.truePred sym) se
+                  <|> asStackOffset PBi.OriginalRepr se
+                  <|> asStackOffset PBi.PatchedRepr se
+                  <|> asSimpleAssign se
+                 )
+          lift (emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se'))
+          return se'
+
+    -- First traverse the equivalence domain and rescope its entries
+    -- In this case, failing to rescope is a (recoverable) error, as it results
+    -- in a loss of soundness; dropping an entry means that the resulting domain
+    -- is effectively now assuming equality on that entry.
+    eq_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc se ->
+      doRescope loc se >>= \case
+        Just se' -> return $ Just se'
         Nothing -> do
+          -- failed to rescope, emit a recoverable error and drop this entry
           se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
           e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
           curAsms <- currentAsm
+          _ <- emitError $ PEE.RescopingFailure curAsms se e''
+          return $ Nothing
 
-          fail $ "Unable to rescope:" ++ (show curAsms) ++ (show (W4.printSymExpr (PS.unSE se))) ++ "***" ++ (show (W4.printSymExpr (PS.unSE e'')))
+    -- Now traverse the value domain and rescope its entries. In this case
+    -- failing to rescope is not an error, as it is simply weakening the resulting
+    -- domain by not asserting any value constraints on that entry.
+    val_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> doRescope loc se
+
+    return $ PAD.AbstractDomain eq_post val_post
+
+
 
 -- | Classifying what kind of widening has occurred
 data WidenKind =
@@ -422,11 +439,11 @@ widenPostcondition bundle preD postD0 =
         -- and a summary of the widenings we did.
         case res of
           -- Some kind of error occured while widening.
-          Just er@(WideningError msg locs _postD') ->
+          Just er@(WideningError msg locs' _postD') ->
             do traceBundle bundle "== Widening error! =="
                traceBundle bundle msg
                traceBundle bundle "Partial widening at locations:"
-               traceBundle bundle (show locs)
+               traceBundle bundle (show locs')
 {-
                traceBundle bundle "===== PREDOMAIN ====="
                traceBundle bundle (show (PEE.ppEquivalenceDomain W4.printSymExpr (PS.specBody preD)))
@@ -447,10 +464,10 @@ widenPostcondition bundle preD postD0 =
               Nothing   -> return NoWideningRequired
               Just prevRes -> return prevRes
           -- We had to do some widening in this iteration, so reenter the loop.
-          Just (Widen widenK locs postD') ->
+          Just (Widen widenK locs' postD') ->
             do traceBundle bundle "== Found a widening, returning into the loop =="
-               traceBundle bundle (show locs)
-               let newlocs = locs <> prevLocs
+               traceBundle bundle (show locs')
+               let newlocs = locs' <> prevLocs
                widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the

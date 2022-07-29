@@ -562,7 +562,7 @@ absDomainToPostCond_vals ::
   AbstractDomain sym arch v {- ^ pre-domain for this slice -} ->
   AbstractDomain sym arch v {- ^ target post-domain -} ->
   IO (W4.Pred sym)
-absDomainToPostCond_vals sym eqCtx bundle preDom d = do
+absDomainToPostCond_vals sym eqCtx bundle _preDom d = do
   let PPa.PatchPair valsO valsP = absDomVals d
   predO <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutO bundle) Nothing valsO
   predP <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutP bundle) Nothing valsP

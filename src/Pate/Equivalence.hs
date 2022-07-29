@@ -53,9 +53,6 @@ module Pate.Equivalence
 
 import           Control.Lens hiding ( op, pre )
 import           Control.Monad ( foldM )
-import           Control.Monad.Trans.Except ( throwE, runExceptT )
-import           Control.Monad.Trans ( lift )
-import           Control.Monad.IO.Class ( MonadIO, liftIO )
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Data.Set as S

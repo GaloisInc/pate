@@ -29,7 +29,6 @@ module Pate.Equivalence.MemoryDomain (
   ) where
 
 import           Control.Monad ( forM, join )
-import qualified Control.Monad.IO.Class as IO
 import qualified Data.Map as M
 import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Classes

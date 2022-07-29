@@ -67,7 +67,7 @@ traverseWithReg (RegisterDomain dom) f =
       f' (Some reg) p = f reg p
 
 instance (WI.IsExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationTraversable sym arch (RegisterDomain sym arch) where
-  traverseLocation sym (RegisterDomain d) f = do
+  traverseLocation _sym (RegisterDomain d) f = do
     d' <- Map.traverseMaybeWithKey (\(Some r) p -> f (PL.Register r) p >>= \case
             Just (_, p') -> return (Just p')
             Nothing -> return Nothing) d

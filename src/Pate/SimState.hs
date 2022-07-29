@@ -47,6 +47,8 @@ module Pate.SimState
   , ScopedExpr
   , unSE
   , scopedExprMap
+  , scopedLocTraverse
+  , WithScope(..)
   , liftScope0
   , liftScope2
   , concreteScope
@@ -93,6 +95,8 @@ import           Data.Proxy
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad ( forM )
 import           Control.Lens ( (^.) )
+import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
+
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -123,6 +127,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Panic as P
+import qualified Pate.Location as PL
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
@@ -612,6 +617,12 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 data ScopedExpr sym (v :: VarScope) tp =
   ScopedExpr { unSE :: W4.SymExpr sym tp }
 
+instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
+  pretty (ScopedExpr e) = W4.printSymExpr e
+
+instance W4.IsExpr (W4.SymExpr sym) => Show (ScopedExpr sym v tp) where
+  show e = show (PP.pretty e)
+
 -- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
 -- the user to produce an expression that is scoped to 'v2'.
@@ -625,6 +636,39 @@ scopedExprMap ::
   (forall tp. ScopedExpr sym v1 tp -> m (ScopedExpr sym v2 tp)) ->
   m (f v2)
 scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
+
+-- | Perform a scope-modifying rewrite to an 'PL.LocationTraversable'.
+-- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
+-- the user to produce an expression that is scoped to 'v2'.
+scopedLocTraverse ::
+  forall sym arch f m v1 v2.
+  Scoped f =>
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  PL.LocationTraversable sym arch (f v1) =>
+  sym ->
+  f v1 ->
+  (forall tp l. PL.Location sym arch l -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
+  m (f v2)
+scopedLocTraverse sym body f = do
+  fmap unsafeCoerceScope $ PL.traverseLocation sym body $ \loc p -> runMaybeT $ do
+    ScopedExpr p' <- (MaybeT $ f loc (ScopedExpr p))
+    loc' <- PEM.mapExpr sym (\e' -> unSE @sym <$> (MaybeT (f loc (ScopedExpr e')))) loc
+    return (loc', p')
+
+--- FIXME: cludge for scopes missing from inner types
+-- | Tag any type with a scope type parameter
+newtype WithScope f (v :: VarScope) = WithScope { unWS :: f }
+
+instance Scoped (WithScope f) where
+  unsafeCoerceScope (WithScope a) = WithScope a
+
+instance PEM.ExprMappable sym f => PEM.ExprMappable sym (WithScope f v) where
+  mapExpr sym f (WithScope a) = WithScope <$> PEM.mapExpr sym f a
+
+instance PL.LocationTraversable sym arch f => PL.LocationTraversable sym arch (WithScope f v) where
+  traverseLocation sym (WithScope a) f = WithScope <$> PL.traverseLocation sym a f
+
 
 -- | Apply a 'ScopeCoercion' to a 'ScopedExpr', rebinding its value
 -- and changing its scope.

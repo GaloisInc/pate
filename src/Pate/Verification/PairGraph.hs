@@ -46,7 +46,6 @@ import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Classes
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Text (Text)
 import           Data.Word (Word32)
 import qualified Lumberjack as LJ
 
@@ -63,7 +62,6 @@ import qualified Pate.Event as Event
 import           Pate.Monad
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
-import qualified Pate.SimState as PS
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 

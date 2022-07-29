@@ -30,7 +30,6 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
 import           Data.Proxy
-import qualified Data.Text as Text
 import           Data.Functor.Const
 
 import           Data.Parameterized.Classes
@@ -899,7 +898,7 @@ handlePLTStub ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   BS.ByteString {- ^ PLT symbol name -} ->
   EquivM sym arch (PairGraph sym arch)
-handlePLTStub scope bundle currBlock d gr pPair pRetPair stubSymbol =
+handlePLTStub scope bundle currBlock d gr _pPair pRetPair stubSymbol =
   do traceBundle bundle ("Handling PLT stub " ++ show stubSymbol)
 
      -- TODO!! Here we are just assuming the unknown function represented by the PLT stub
