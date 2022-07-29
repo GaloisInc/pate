@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Verification.Widening
   ( widenAlongEdge
@@ -31,8 +32,11 @@ import qualified Data.Set as Set
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.SetF as SetF
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 import           What4.SatResult (SatResult(..))
 
 import qualified Data.Macaw.CFG as MM
@@ -186,6 +190,19 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
                    return gr'
               Right gr' -> return gr'
 
+data MaybeF f tp where
+  JustF :: f tp -> MaybeF f tp
+  NothingF :: MaybeF f tp
+
+runMaybeTF :: Monad m => MaybeT m (a tp) -> m (MaybeF a tp)
+runMaybeTF m = runMaybeT m >>= \case
+  Just a -> return $ JustF a
+  Nothing -> return $ NothingF
+
+toMaybe :: MaybeF a tp -> Maybe (a tp)
+toMaybe (JustF a) = Just a
+toMaybe NothingF = Nothing
+
 -- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
 -- parameterized over the *output* state of the given 'SimBundle'.
 -- Until now, the widening process has used the same scope for the pre-domain and
@@ -236,8 +253,14 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- e[pre] --> e[pre/post]
     pre_to_post <- liftIO $ PS.getScopeCoercion sym scope_pre postVars
 
+    cache <- W4B.newIdxCache
     -- Strategies for re-scoping expressions
     let
+      asConcrete :: forall v1 v2 tp. PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+      asConcrete se = do
+        Just c <- return $ (W4.asConcrete (PS.unSE se))
+        liftIO $ PS.concreteScope @v2 sym c
+
       asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
         Just c <- lift $ withAssumption asm $
@@ -278,11 +301,12 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
         return se'
 
-      doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (Maybe (PS.ScopedExpr sym post tp))
-      doRescope _loc se = runMaybeT $ do
-          se' <- (    asScopedConst (W4.truePred sym) se
+      doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
+      doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
+          se' <- (    asConcrete se
                   <|> asStackOffset PBi.OriginalRepr se
                   <|> asStackOffset PBi.PatchedRepr se
+                  <|> asScopedConst (W4.truePred sym) se
                   <|> asSimpleAssign se
                  )
           lift (emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se'))
@@ -294,19 +318,19 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- is effectively now assuming equality on that entry.
     eq_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc se ->
       doRescope loc se >>= \case
-        Just se' -> return $ Just se'
-        Nothing -> do
+        JustF se' -> return $ Just se'
+        NothingF -> do
           -- failed to rescope, emit a recoverable error and drop this entry
           se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
           e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
           curAsms <- currentAsm
           _ <- emitError $ PEE.RescopingFailure curAsms se e''
-          return $ Nothing
+          return Nothing
 
     -- Now traverse the value domain and rescope its entries. In this case
     -- failing to rescope is not an error, as it is simply weakening the resulting
     -- domain by not asserting any value constraints on that entry.
-    val_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> doRescope loc se
+    val_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> toMaybe <$> doRescope loc se
 
     return $ PAD.AbstractDomain eq_post val_post
 
