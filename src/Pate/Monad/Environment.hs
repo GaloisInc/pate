@@ -9,7 +9,6 @@ module Pate.Monad.Environment (
   , BlockCache(..)
   , freshBlockCache
   , ExitPairCache
-  , VerificationFailureMode(..)
   ) where
 
 import qualified Control.Concurrent as IO
@@ -50,11 +49,6 @@ import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
 
-data VerificationFailureMode =
-    ThrowOnAnyFailure
-  | ContinueAfterFailure
-  | ContinueAfterRecoverableFailures
-
 data EquivEnv sym arch where
   EquivEnv ::
     { envWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
@@ -70,7 +64,6 @@ data EquivEnv sym arch where
     -- symbolically executing functions in the "inline callee" feature
     , envLogger :: LJ.LogAction IO (PE.Event arch)
     , envConfig :: PC.VerificationConfig
-    , envFailureMode :: VerificationFailureMode
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof

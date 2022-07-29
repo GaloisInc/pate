@@ -141,7 +141,7 @@ doTest mwb cfg sv proxy@(PA.SomeValidArch {}) fp = do
       , PL.patchedPath = fp <.> "patched" <.> "exe"
       , PL.origHints = mempty
       , PL.patchedHints = mempty
-      , PL.verificationCfg = PC.defaultVerificationCfg
+      , PL.verificationCfg = PC.defaultVerificationCfg { PC.cfgFailureMode = PC.ThrowOnAnyFailure }
       , PL.logger =
           LJ.LogAction $ \e -> case e of
             PE.Warning err -> do

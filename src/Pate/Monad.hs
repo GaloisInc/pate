@@ -888,12 +888,12 @@ instance MF.MonadFail (EquivM_ sym arch) where
 manifestError :: EquivM_ sym arch a -> EquivM sym arch (Either (PEE.EquivalenceError arch) a)
 manifestError act = do
   catchError (Right <$> act) (pure . Left) >>= \case
-    r@(Left er) -> CMR.asks envFailureMode >>= \case
-      ThrowOnAnyFailure -> throwError er
-      ContinueAfterRecoverableFailures -> case PEE.isRecoverable (PEE.errEquivError er) of
+    r@(Left er) -> CMR.asks (PC.cfgFailureMode . envConfig) >>= \case
+      PC.ThrowOnAnyFailure -> throwError er
+      PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable (PEE.errEquivError er) of
         True -> return r
         False -> throwError er
-      ContinueAfterFailure -> return r
+      PC.ContinueAfterFailure -> return r
     r -> return r
 
 -- | Run an IO operation, internalizing any exceptions raised
