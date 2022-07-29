@@ -36,7 +36,6 @@ module Pate.Monad
   , archFuns
   , runInIO1
   , manifestError
-  , internalizeError
   , throwHere
   , getDuration
   , startTimer
@@ -91,7 +90,7 @@ import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
-import           Control.Exception hiding ( try )
+import           Control.Exception hiding ( try, finally )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Except
@@ -439,9 +438,8 @@ withAssumptionSet asm f = withSym $ \sym -> do
       frame <- LCB.pushAssumptionFrame bak
       LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
       return (frame, st)
-    mr <- manifestError (f >>= \r -> validateAssumptions curAsm asm >> return r)
-    safePop frame st
-    internalizeError mr
+    (f >>= \r -> validateAssumptions curAsm asm >> return r)
+      `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -531,14 +529,13 @@ withSatAssumption asm f = withSym $ \sym ->  do
           frame <- LCB.pushAssumptionFrame bak
           LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withSatAssumption" p)
           return (frame, st)
-        mr <- manifestError $ goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
+        (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
           W4R.Sat{} -> Just <$> f
           -- on an inconclusive result we can't safely return 'Nothing' since
           -- that may unsoundly exclude viable paths
           W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
-          W4R.Unsat{} -> return Nothing
-        safePop frame st
-        internalizeError mr
+          W4R.Unsat{} -> return Nothing)
+            `finally` safePop frame st
 
 --------------------------------------
 -- Sat helpers
@@ -626,10 +623,9 @@ checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
         liftIO $ LCBO.restoreSolverState bak st
         return $ Left err
     Right res -> withOnlineBackend $ \bak -> withSolverProcess $ \sp -> do
-      mr <- manifestError $ k res
-      catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (WPO.pop sp))
-        (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
-      Right <$> internalizeError mr
+      fmap Right $ k res `finally`
+        catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (WPO.pop sp))
+          (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
 
 -- | Check the satisfiability of a predicate, returning with the result (including model,
 -- if applicable). This function implements all of the
@@ -890,11 +886,6 @@ manifestError act = do
         False -> throwError er
       ContinueAfterFailure -> return r
     r -> return r
-
-internalizeError :: Either (PEE.EquivalenceError arch) a -> EquivM_ sym arch a
-internalizeError merr = case merr of
-  Left err -> throwError err
-  Right a -> return a
 
 -- | Run an IO operation, internalizing any exceptions raised
 safeIO ::
