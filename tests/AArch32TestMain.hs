@@ -17,7 +17,7 @@ main = do
         { testArchName = "aarch32"
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
-            [ "stack-struct"
+            [ "stack-struct", "unequal/stack-struct"
             ]
         , testExpectSelfEquivalenceFailure = [ ]
         -- TODO: we should define a section name here and read its address

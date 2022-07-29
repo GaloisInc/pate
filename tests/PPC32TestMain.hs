@@ -17,7 +17,7 @@ main = do
         { testArchName = "ppc32"
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
-            [ "stack-struct"
+            [ "stack-struct", "unequal/stack-struct"
             ]
         , testExpectSelfEquivalenceFailure =
             [
