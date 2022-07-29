@@ -537,7 +537,7 @@ mkVarBinds ::
   forall sym arch v v' bin.
   HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
-  W4.IsExprBuilder sym =>
+  W4.IsSymExprBuilder sym =>
   OrdF (W4.SymExpr sym) =>
   sym ->
   SimBoundVars sym arch v bin ->
