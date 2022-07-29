@@ -17,9 +17,9 @@ main = do
         { testArchName = "ppc"
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
-            [ "stack-struct"
+            [ "stack-struct", "unequal/stack-struct"
             ]
-        , testExpectSelfEquivalenceFailure = []
+        , testExpectSelfEquivalenceFailure = ["stack-struct"]
         -- TODO: we should define a section name here and read its address
         -- from the ELF
         -- see: https://github.com/GaloisInc/pate/issues/294

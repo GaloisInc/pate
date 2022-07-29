@@ -17,10 +17,10 @@ main = do
         { testArchName = "ppc32"
         , testArchProxy = PA.SomeValidArch archData
         , testExpectEquivalenceFailure =
-            [ "stack-struct"
+            [ "stack-struct", "unequal/stack-struct"
             ]
         , testExpectSelfEquivalenceFailure =
-            [
+            [ "stack-struct"
             ]
         -- TODO: we should define a section name here and read its address
         -- from the ELF
