@@ -316,7 +316,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- In this case, failing to rescope is a (recoverable) error, as it results
     -- in a loss of soundness; dropping an entry means that the resulting domain
     -- is effectively now assuming equality on that entry.
-    eq_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc se ->
+    eq_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc se ->
       doRescope loc se >>= \case
         JustF se' -> return $ Just se'
         NothingF -> do
@@ -330,7 +330,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- Now traverse the value domain and rescope its entries. In this case
     -- failing to rescope is not an error, as it is simply weakening the resulting
     -- domain by not asserting any value constraints on that entry.
-    val_post <- fmap PS.unWS $ PS.scopedLocTraverse @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> toMaybe <$> doRescope loc se
+    val_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> toMaybe <$> doRescope loc se
 
     return $ PAD.AbstractDomain eq_post val_post
 
@@ -472,7 +472,7 @@ widenPostcondition bundle preD postD0 =
         eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
         eqPost_vals <- liftIO $ PAD.absDomainToPostCond_vals sym eqCtx bundle preD postD
 
-        let widenChecks = (PL.SingleLocation @sym (Just eqPost_vals), eqPost_eq)
+        let widenChecks = (PL.LocationPredPair @sym @arch PL.NoLoc eqPost_vals, eqPost_eq)
 
         res <- PL.foldLocation @sym @arch sym widenChecks (Left postD) (widenOnce (Gas i))
 

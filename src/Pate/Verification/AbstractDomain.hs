@@ -93,8 +93,8 @@ data AbstractDomain sym arch (v :: PS.VarScope) where
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomain sym arch v
 
-instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomain sym arch bin) where
-  traverseLocation sym (AbstractDomain a b) f = AbstractDomain <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomain sym arch bin) where
+  witherLocation sym (AbstractDomain a b) f = AbstractDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f
 
 
 -- | An 'AbstractDomain' that is closed under a symbolic machine state via
@@ -216,8 +216,8 @@ mergeMemValMaps ::
   MapF.MapF k (MemAbstractValue sym)
 mergeMemValMaps m1 m2 = MapF.mergeWithKey (\_ (MemAbstractValue v1) (MemAbstractValue v2) -> Just $ MemAbstractValue (combineAbsVals v1 v2)) id id m1 m2
 
-instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomainVals sym arch bin) where
-  traverseLocation sym vals f = do
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomainVals sym arch bin) where
+  witherLocation sym vals f = do
      rs <- MM.traverseRegsWith (\r v -> f (PL.Register r) (W4.truePred sym) >>= \case
                            Just _ -> return v
                            Nothing -> return $ noAbsVal (MT.typeRepr r)) (absRegVals vals)

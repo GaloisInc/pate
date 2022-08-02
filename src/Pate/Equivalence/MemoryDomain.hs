@@ -79,11 +79,11 @@ traverseWithCellPar memDom f = do
     preds <- PMC.MemCellPred <$> traverse Par.joinFuture future_preds
     return $ MemoryDomain preds
 
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationWitherable sym arch (MemoryDomain sym arch) where
+  witherLocation sym (MemoryDomain mp) f = MemoryDomain <$> PL.witherLocation sym mp f
+
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable sym arch (MemoryDomain sym arch) where
-  traverseLocation sym d f = fmap MemoryDomain $ PMC.rebuild sym (memDomainPred d) $ \cell p -> do
-    f (PL.Cell cell) p >>= \case
-      Just (PL.Cell cell', p') -> return $ Just (cell', p')
-      _ -> return Nothing
+  traverseLocation sym d f = PL.witherLocation sym d (\loc v -> Just <$> f loc v)
 
       
 traverseWithCell ::

@@ -437,10 +437,8 @@ instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCon
   traverseLocation sym body f = RegisterCondition <$>
     MM.traverseRegsWith (\r (Const asm) -> do
       p <- getAssumedPred sym asm
-      f (PL.Register r) p >>= \case
-        Just (_, p') -> return $ (Const (frameAssume p'))
-        Nothing -> return $ (Const mempty)
-                        ) (regCondPreds body)
+      f (PL.Register r) p >>= \ (_, p') -> return $ (Const (frameAssume p'))
+      ) (regCondPreds body)
 
 
 -- | Compute a structured 'RegisterCondition'

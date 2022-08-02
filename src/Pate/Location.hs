@@ -13,8 +13,9 @@
 {-# LANGUAGE QuantifiedConstraints  #-}
 module Pate.Location (
     Location(..)
+  , LocationWitherable(..)
   , LocationTraversable(..)
-  , SingleLocation(..)
+  , LocationPredPair(..)
   ) where
 
 import           GHC.TypeLits
@@ -23,6 +24,7 @@ import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans.State ( StateT, get, put, execStateT )
 import           Control.Monad.Trans ( lift )
 
+import           Data.Parameterized.Classes
 import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFG as MM
 
@@ -57,16 +59,27 @@ instance PEM.ExprMappable sym (Location sym arch l) where
 
 -- TODO: this can be abstracted over 'W4.Pred'
 
--- | Defines 'f' to be viewed as a traversable collection of
+-- | Defines 'f' to be viewed as a witherable (traversable but
+-- optionally dropping elements instead of updating them) collection of
 -- 'Location' elements paired with 'W4.Pred' elements.
-class LocationTraversable sym arch f where
+class LocationWitherable sym arch f where
   -- | Traverse 'f' and map each element pair, optionally dropping
   -- it by returning 'Nothing'
-  traverseLocation ::
+  witherLocation ::
     IO.MonadIO m =>
     sym ->
     f ->
     (forall l. Location sym arch l -> W4.Pred sym -> m (Maybe (Location sym arch l, W4.Pred sym))) ->
+    m f
+
+-- | Defines 'f' to be viewed as a traversable collection of
+-- 'Location' elements paired with 'W4.Pred' elements.
+class LocationTraversable sym arch f where
+  traverseLocation ::
+    IO.MonadIO m =>
+    sym ->
+    f ->
+    (forall l. Location sym arch l -> W4.Pred sym -> m (Location sym arch l, W4.Pred sym)) ->
     m f
 
   -- | Return the first location (according to the traversal order
@@ -83,7 +96,7 @@ class LocationTraversable sym arch f where
       _ <- traverseLocation sym body $ \loc v' -> do
         lift (f loc v') >>= \case
           Just a -> throwE a
-          Nothing -> return Nothing
+          Nothing -> return (loc, v')
       return ()
     case r of
       Left a -> return $ Just a
@@ -107,24 +120,28 @@ class LocationTraversable sym arch f where
           a <- get
           a' <- lift (f a loc v')
           put a'
-          return Nothing
+          return (loc, v')
         return ()
 
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
+  LocationWitherable sym arch (PMC.MemCellPred sym arch) where
+  witherLocation sym mp f = PMC.witherCell sym mp $ \c p -> do
+    f (Cell c) p >>= \case
+      Just (Cell c', p') -> return $ Just (c', p')
+      Nothing -> return Nothing
 
--- | Wraps a single 'W4.Pred' as a 'LocationTraversable', where
--- a 'Just' result is paired with a 'NoLoc' location
-newtype SingleLocation sym = SingleLocation (Maybe (W4.Pred sym))
+-- | Wrapped location-predicate pair to make trivial 'LocationTraversable' values.
+data LocationPredPair sym arch = forall l.
+  LocationPredPair (Location sym arch l) (W4.Pred sym)
 
-instance LocationTraversable sym arch (SingleLocation sym) where
-  traverseLocation _sym (SingleLocation (Just p)) f = f NoLoc p >>= \case
-    Just (_, p') -> return $ SingleLocation (Just p')
-    Nothing -> return $ SingleLocation Nothing
-  traverseLocation _sym (SingleLocation Nothing) _f = return $ SingleLocation Nothing
+instance LocationTraversable sym arch (LocationPredPair sym arch) where
+  traverseLocation _sym (LocationPredPair l p) f =
+    f l p >>= \(l', p') -> return $ LocationPredPair l' p'
 
 instance (LocationTraversable sym arch a, LocationTraversable sym arch b) =>
   LocationTraversable sym arch (a, b) where
   traverseLocation sym (a, b) f = (,) <$> traverseLocation sym a f <*> traverseLocation sym b f
 
-instance (forall bin. (LocationTraversable sym arch (f bin))) =>
-  LocationTraversable sym arch (PPa.PatchPair f) where
-  traverseLocation sym (PPa.PatchPair a b) f = PPa.PatchPair <$> traverseLocation sym a f <*> traverseLocation sym b f
+instance (forall bin. (LocationWitherable sym arch (f bin))) =>
+  LocationWitherable sym arch (PPa.PatchPair f) where
+  witherLocation sym (PPa.PatchPair a b) f = PPa.PatchPair <$> witherLocation sym a f <*> witherLocation sym b f

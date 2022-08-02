@@ -17,7 +17,7 @@ module Pate.MemCell (
   , setMemCellRegion
   , MemCellPred(..)
   , traverseWithCell
-  , rebuild
+  , witherCell
   , mergeMemCellPred
   , muxMemCellPred
   , inMemCellPred
@@ -100,7 +100,9 @@ traverseWithCell ::
 traverseWithCell (MemCellPred memPred) f =
   MemCellPred <$> Map.traverseWithKey (\(Some cell@MemCell{}) p -> f cell p) memPred
 
-rebuild ::
+
+-- | Traverse a 'MemCellPred', optionally dropping elements instead of updating them.
+witherCell ::
   forall sym arch m.
   IO.MonadIO m =>
   WI.IsExprBuilder sym =>
@@ -109,7 +111,7 @@ rebuild ::
   MemCellPred sym arch ->
   (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (Maybe (MemCell sym arch w, WI.Pred sym))) ->
   m (MemCellPred sym arch)
-rebuild sym (MemCellPred memPred)  f = do
+witherCell sym (MemCellPred memPred)  f = do
   es <- fmap catMaybes $ forM (Map.toList memPred) $ \(Some (cell@MemCell{}), p) -> do
     f cell p >>= \case
       Just (cell', p') -> return $ Just (Some cell', p')

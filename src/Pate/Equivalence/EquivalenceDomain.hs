@@ -41,8 +41,8 @@ data EquivalenceDomain sym arch where
     , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
     }  -> EquivalenceDomain sym arch
 
-instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationTraversable sym arch (EquivalenceDomain sym arch) where
-  traverseLocation sym (EquivalenceDomain a b c) f = EquivalenceDomain <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationWitherable sym arch (EquivalenceDomain sym arch) where
+  witherLocation sym (EquivalenceDomain a b c) f = EquivalenceDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f <*> PL.witherLocation sym c f
 
 
 ppEquivalenceDomain ::

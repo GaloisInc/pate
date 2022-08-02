@@ -47,7 +47,7 @@ module Pate.SimState
   , ScopedExpr
   , unSE
   , scopedExprMap
-  , scopedLocTraverse
+  , scopedLocWither
   , WithScope(..)
   , liftScope0
   , liftScope2
@@ -637,21 +637,22 @@ scopedExprMap ::
   m (f v2)
 scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
 
--- | Perform a scope-modifying rewrite to an 'PL.LocationTraversable'.
+-- | Perform a scope-modifying rewrite to an 'PL.LocationWitherable' (optionally dropping
+-- elements instead of updating them).
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
 -- the user to produce an expression that is scoped to 'v2'.
-scopedLocTraverse ::
+scopedLocWither ::
   forall sym arch f m v1 v2.
   Scoped f =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
-  PL.LocationTraversable sym arch (f v1) =>
+  PL.LocationWitherable sym arch (f v1) =>
   sym ->
   f v1 ->
   (forall tp l. PL.Location sym arch l -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
   m (f v2)
-scopedLocTraverse sym body f = do
-  fmap unsafeCoerceScope $ PL.traverseLocation sym body $ \loc p -> runMaybeT $ do
+scopedLocWither sym body f = do
+  fmap unsafeCoerceScope $ PL.witherLocation sym body $ \loc p -> runMaybeT $ do
     ScopedExpr p' <- (MaybeT $ f loc (ScopedExpr p))
     loc' <- PEM.mapExpr sym (\e' -> unSE @sym <$> (MaybeT (f loc (ScopedExpr e')))) loc
     return (loc', p')
@@ -666,8 +667,8 @@ instance Scoped (WithScope f) where
 instance PEM.ExprMappable sym f => PEM.ExprMappable sym (WithScope f v) where
   mapExpr sym f (WithScope a) = WithScope <$> PEM.mapExpr sym f a
 
-instance PL.LocationTraversable sym arch f => PL.LocationTraversable sym arch (WithScope f v) where
-  traverseLocation sym (WithScope a) f = WithScope <$> PL.traverseLocation sym a f
+instance PL.LocationWitherable sym arch f => PL.LocationWitherable sym arch (WithScope f v) where
+  witherLocation sym (WithScope a) f = WithScope <$> PL.witherLocation sym a f
 
 
 -- | Apply a 'ScopeCoercion' to a 'ScopedExpr', rebinding its value
