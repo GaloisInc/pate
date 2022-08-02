@@ -150,6 +150,13 @@ absRangeRepr r = case r of
   AbsUnconstrained repr -> repr
 
 
+instance PP.Pretty (AbsRange tp) where
+  pretty ab = case ab of
+    AbsIntConstant i -> PP.pretty i
+    AbsBVConstant _ bv -> PP.pretty (show bv)
+    AbsBoolConstant b -> PP.pretty b
+    AbsUnconstrained _ -> "<top>"
+
 instance TestEquality AbsRange where
   testEquality r1 r2 = case (r1, r2) of
     (AbsIntConstant i1, AbsIntConstant i2) | i1 == i2 -> Just Refl
@@ -179,6 +186,15 @@ data MacawAbstractValue sym (tp :: MT.Type) where
       }
       -> MacawAbstractValue sym tp
   deriving Eq
+
+
+ppMacawAbstractValue :: MT.TypeRepr tp -> MacawAbstractValue sym tp -> PP.Doc a
+ppMacawAbstractValue repr v = case repr of
+  MT.BVTypeRepr _w |
+    MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs) <- v ->
+      PP.pretty regAbs PP.<+> "+" PP.<+> PP.pretty offsetAbs
+  MT.BoolTypeRepr | MacawAbstractValue (Ctx.Empty Ctx.:> bAbs) <- v -> PP.pretty bAbs
+  _ -> ""
 
 -- | An abstract value for a pointer, with a separate 'AbsRange' for the region and offset.
 data MemAbstractValue sym w where
@@ -582,9 +598,19 @@ instance PEM.ExprMappable sym (AbstractDomain sym arch v) where
     return $ AbstractDomain domEq vals
 
 ppAbstractDomainVals ::
+  forall sym arch bin a.
+  ( PA.ValidArch arch
+  , W4.IsSymExprBuilder sym
+  , ShowF (MM.ArchReg arch)
+  ) =>
   AbstractDomainVals sym arch bin ->
   PP.Doc a
-ppAbstractDomainVals _d = "<TODO>"
+ppAbstractDomainVals d =
+  PP.vsep
+   [ PP.pretty s <> PP.line <> (PP.indent 2 (ppMacawAbstractValue (MT.typeRepr reg) v))
+   | MapF.Pair reg v <- MapF.toList (MM.regStateMap (absRegVals d))
+   , Just s <- [PA.fromRegisterDisplay $ PA.displayRegister reg]
+   ]
 
 ppAbstractDomain ::
   forall sym arch v a.

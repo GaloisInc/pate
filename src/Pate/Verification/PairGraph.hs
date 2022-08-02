@@ -64,6 +64,7 @@ import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
+import qualified Pate.SimState as PS
 
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
@@ -169,12 +170,6 @@ data PairGraph sym arch =
   , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError arch])
   }
 
-ppAbstractDomainSpec ::
-  (W4.Pred sym -> Doc a) ->
-  AbstractDomainSpec sym arch ->
-  Doc a
-ppAbstractDomainSpec _pPred _spec = pretty "<TODO>"
-
 ppProgramDomains ::
   forall sym arch a.
   ( PA.ValidArch arch
@@ -187,9 +182,9 @@ ppProgramDomains ::
 ppProgramDomains ppPred gr =
   vcat
   [ vcat [ pretty pPair
-         , ppAbstractDomainSpec ppPred ad
+         , PS.viewSpecBody adSpec $ \ad -> PAD.ppAbstractDomain ppPred ad
          ]
-  | (pPair, ad) <- Map.toList (pairGraphDomains gr)
+  | (pPair, adSpec) <- Map.toList (pairGraphDomains gr)
   ]
 
 
