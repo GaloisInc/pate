@@ -624,7 +624,18 @@ data MemTraceState sym ptrW = MemTraceState
   }
 
 type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
+
+-- | A map from pointers (a region integer combined with a pointer-width bitvector)
+-- to bytes, representing the contents of memory at the given pointer.
 type MemTraceArrBytes sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
+
+
+-- | A map from pointers (a region integer combined with a pointer-width bitvector)
+-- to integers, representing the region that should be used when reading a pointer
+-- back from memory (each individual byte-width slice of the pointer bitvector is assigned
+-- the region of the pointer in this map).
+-- TODO: This is a very naive model of pointer regions - there are many situations where
+-- this is not enough information to accurately recover the region of a stored pointer.
 type MemTraceArrRegions sym ptrW = MemArrBase sym ptrW BaseIntegerType
 
 type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
@@ -1213,8 +1224,18 @@ readMemState :: forall sym ptrW ty.
   IO (RegValue sym (MS.ToCrucibleType ty))
 readMemState sym mem baseMem ptr repr = go 0 repr
   where
-  isPtrRead :: Bool
-  isPtrRead = case repr of
+  -- This is an incomplete heuristic for determining when the region in storage should
+  -- be used (i.e. the read value should be treated like a pointer).
+  -- In general it should be possible to read in pointers with smaller reads and
+  -- re-assemble them with their region intact. Additionally, a pointer-length read does
+  -- not guarantee that the result is actually a valid pointer in the resulting region.
+  --
+  -- TODO: track enough information in the underlying storage type to be able to
+  -- accurately determine when a read (of any length) should be considered a pointer
+  -- (with a defined region), and when bitvector operations on these pointers are
+  -- region-preserving.
+  isPtrReadWidth :: Bool
+  isPtrReadWidth = case repr of
     BVMemRepr byteWidth _ |
       Just Refl <- testEquality (natMultiply (knownNat @8) byteWidth) (memWidthNatRepr @ptrW)
         -> True
@@ -1234,7 +1255,7 @@ readMemState sym mem baseMem ptr repr = go 0 repr
                  Nothing ->
                    do regArrayBytes <- arrayLookup sym (memArrBytes mem) (Ctx.singleton reg)
                       membyte <- arrayLookup sym regArrayBytes (Ctx.singleton off)
-                      blk <- case isPtrRead of
+                      blk <- case isPtrReadWidth of
                         True -> do
                           regArrayRegion <- arrayLookup sym (memArrRegions mem) (Ctx.singleton reg)
                           regInt <- arrayLookup sym regArrayRegion (Ctx.singleton off)
