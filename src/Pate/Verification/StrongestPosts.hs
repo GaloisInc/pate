@@ -471,10 +471,10 @@ eqMemOp sym (MT.MemOp xptr xdir xcond xw xval xend) (MT.MemOp yptr ydir ycond yw
   | otherwise = return (W4.falsePred sym)
 
 
-data SeqTwoCache a b = SeqTwoCache (IORef (Map.Map (Maybe (Nonce GlobalNonceGenerator a), Maybe (Nonce GlobalNonceGenerator a)) b))
+data SeqPairCache a b = SeqPairCache (IORef (Map.Map (Maybe (Nonce GlobalNonceGenerator a), Maybe (Nonce GlobalNonceGenerator a)) b))
 
-newSeqTwoCache :: IO (SeqTwoCache a b)
-newSeqTwoCache = SeqTwoCache <$> newIORef Map.empty
+newSeqPairCache :: IO (SeqPairCache a b)
+newSeqPairCache = SeqPairCache <$> newIORef Map.empty
 
 -- TODO: clagged from SymSequence module
 symSequenceNonce :: SymSequence sym a -> Maybe (Nonce GlobalNonceGenerator a)
@@ -483,13 +483,13 @@ symSequenceNonce (SymSequenceCons n _ _ ) = Just n
 symSequenceNonce (SymSequenceAppend n _ _) = Just n
 symSequenceNonce (SymSequenceMerge n _ _ _) = Just n
 
-evalWithTwoCache :: MonadIO m =>
-  SeqTwoCache a b ->
+evalWithPairCache :: MonadIO m =>
+  SeqPairCache a b ->
   SymSequence sym a ->
   SymSequence sym a ->
   m b ->
   m b
-evalWithTwoCache (SeqTwoCache ref) seq1 seq2 f = do
+evalWithPairCache (SeqPairCache ref) seq1 seq2 f = do
   m <- liftIO (readIORef ref)
   let k = (symSequenceNonce seq1, symSequenceNonce seq2)
   case Map.lookup k m of
@@ -511,14 +511,14 @@ equivalentSequences :: forall sym arch ptrW.
   SymSequence sym (MT.MemEvent sym ptrW) ->
   EquivM sym arch (W4.Pred sym)
 equivalentSequences seq1 seq2 = withSym $ \sym -> do
-  cache <- liftIO $ newSeqTwoCache
+  cache <- liftIO newSeqPairCache
   equivalentSequences' sym cache seq1 seq2
 
 equivalentSequences' :: forall sym arch ptrW.
   (1 <= ptrW) =>
   MM.MemWidth ptrW =>
   sym ->
-  SeqTwoCache (MT.MemEvent sym ptrW) (W4.Pred sym) ->
+  SeqPairCache (MT.MemEvent sym ptrW) (W4.Pred sym) ->
   SymSequence sym (MT.MemEvent sym ptrW) ->
   SymSequence sym (MT.MemEvent sym ptrW) ->
   EquivM sym arch (W4.Pred sym)
@@ -548,7 +548,7 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
     EquivM sym arch (W4.Pred sym)
   loop seqs1 seqs2 = case (seqs1, seqs2) of
     -- cache the special case when the stacks are both a single sequence
-    (seq1:[], seq2:[]) -> evalWithTwoCache cache seq1 seq2 $ loop' seqs1 seqs2
+    (seq1:[], seq2:[]) -> evalWithPairCache cache seq1 seq2 $ loop' seqs1 seqs2
     _ -> loop' seqs1 seqs2
 
   loop' ::
