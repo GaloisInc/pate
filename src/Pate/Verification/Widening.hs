@@ -537,9 +537,10 @@ getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
       return $ PAD.extractAbsRange sym e'
 
   let PPa.PatchPair preO preP = PAD.absDomVals preDom
+  eqCtx <- equivalenceContext
   IO.withRunInIO $ \inIO -> do
-    initO <- PAD.initAbsDomainVals sym (\e -> inIO (getConcreteRange e)) (PS.simOutO bundle) preO
-    initP <- PAD.initAbsDomainVals sym (\e -> inIO (getConcreteRange e)) (PS.simOutP bundle) preP
+    initO <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (getConcreteRange e)) (PS.simOutO bundle) preO
+    initP <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (getConcreteRange e)) (PS.simOutP bundle) preP
     return $ PPa.PatchPair initO initP
 
 widenUsingCounterexample ::
