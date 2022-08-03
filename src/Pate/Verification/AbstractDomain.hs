@@ -73,6 +73,7 @@ import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register.Traversal as PRt
@@ -312,11 +313,12 @@ initAbsDomainVals ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
+  PE.EquivContext sym arch ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimOutput sym arch v bin ->
   AbstractDomainVals sym arch bin {- ^ values from pre-domain -} ->
   m (AbstractDomainVals sym arch bin)
-initAbsDomainVals sym f stOut preVals = do
+initAbsDomainVals sym eqCtx f stOut preVals = do
   foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
   -- NOTE: We need to include any cells from the pre-domain to ensure that we
   -- propagate forward any value constraints for memory that is not accessed in this
@@ -325,7 +327,7 @@ initAbsDomainVals sym f stOut preVals = do
   memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
     absVal <- getMemAbsVal cell
     return (MapF.Pair cell absVal)
-  regVals <- MM.traverseRegsWith (\_ v -> getAbsVal sym f v) (PS.simOutRegs stOut)
+  regVals <- MM.traverseRegsWith getRegAbsVal (PS.simOutRegs stOut)
   return (AbstractDomainVals regVals memVals)
   where
     getMemAbsVal ::
@@ -334,6 +336,17 @@ initAbsDomainVals sym f stOut preVals = do
     getMemAbsVal cell = do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
       MemAbstractValue <$> getAbsVal sym f (PSR.ptrToEntry val)
+
+    getRegAbsVal ::
+      MM.ArchReg arch tp ->
+      PSR.MacawRegEntry sym tp ->
+      m (MacawAbstractValue sym tp)
+    getRegAbsVal r e = case PR.registerCase (PE.eqCtxHDR eqCtx) (PSR.macawRegRepr e) r of
+      -- don't include these in the abstract value domain
+      PR.RegIP -> return $ noAbsVal (MT.typeRepr r)
+      PR.RegSP -> return $ noAbsVal (MT.typeRepr r)
+      PR.RegDedicated{} -> return $ noAbsVal (MT.typeRepr r)
+      _ -> getAbsVal sym f e
 
 -- | Convert the abstract domain from an expression into an equivalent 'AbsRange'
 -- TODO: Currently this only extracts concrete values
