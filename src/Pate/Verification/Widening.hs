@@ -219,8 +219,6 @@ toMaybe NothingF = Nothing
 -- strategies that are attempted, but in general they may all fail.
 -- See: 'PS.StackBase' for a discussion on how this is used to re-scope stack relative
 -- accesses
--- TODO: Currently we treat a re-scoping failure as catastrophic, but it should
--- be a recoverable warning that simply results in some loss of soundness.
 abstractOverVars ::
   forall sym arch pre.
   PS.SimScope sym arch pre  ->
@@ -303,6 +301,11 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
 
       doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
       doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
+          -- The decision of ordering here is only for efficiency: we expect only
+          -- one strategy to succeed (with the exception of 'asConcrete' being subsumed
+          -- by 'asScopedConst' but much faster, as it doesn't involve the solver).
+          -- TODO: We could do better by picking the strategy based on the term shape,
+          -- but it's not strictly necessary.
           se' <- (    asConcrete se
                   <|> asStackOffset PBi.OriginalRepr se
                   <|> asStackOffset PBi.PatchedRepr se
@@ -611,7 +614,7 @@ widenRegs ::
   EquivM sym arch (WidenResult sym arch v)
 widenRegs newRegs postD = withSym $ \sym -> do
   let
-    regs' = foldl
+    regs' = foldl'
                  (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
                  (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
                  newRegs
