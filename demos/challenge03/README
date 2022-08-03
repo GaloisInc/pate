@@ -1,0 +1,15 @@
+this directory contains variants of the challenge3 problem from here (compiled from c):
+
+https://github.com/Assured-Micropatching/Challenge-Problems
+
+unmodified:
+   the binaries compiled without any modifications
+
+aligned:
+   the patched binary has no-ops inserted to preserve
+   code alignment between the binaries.
+
+observable:
+  same as "aligned", but additionally:
+    * binaries are unstripped
+    * additional "observable" data section defined at 0x00030000
