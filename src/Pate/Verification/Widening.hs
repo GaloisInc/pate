@@ -28,7 +28,7 @@ import           Control.Monad.Trans.Class ( lift )
 import           Prettyprinter
 
 import qualified Data.Set as Set
-
+import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -418,6 +418,8 @@ widenPostcondition bundle preD postD0 =
          Unknown -> do
            emit PE.SolverError
            _ <- emitError $ PEE.WideningError "UNKNOWN result evaluating postcondition"
+           -- this is a recoverable error, since we can conservatively consider the location
+           -- under analysis as inequivalent in the resulting domain
            case loc of
              PL.Cell c -> Right <$> widenCells [Some c] postD
              PL.Register r -> Right <$> widenRegs [Some r] postD
@@ -602,9 +604,13 @@ widenCells ::
   EquivM sym arch (WidenResult sym arch v)
 widenCells cells postD = withSym $ \sym -> do
   newCells <- liftIO $ PEM.fromList sym [ (c, W4.truePred sym) | c <- cells ]
+  -- the domain semantics will ignore cells which have the wrong region, so
+  -- we can just add the cells to both at the cost of some redundancy
   let heapDom = PEE.eqDomainGlobalMemory (PAD.absDomEq $ postD)
   heapDom' <- liftIO $ PEM.intersect sym heapDom newCells
-  let pred' = (PAD.absDomEq postD){ PEE.eqDomainGlobalMemory = heapDom' }
+  let stackDom = PEE.eqDomainStackMemory (PAD.absDomEq $ postD)
+  stackDom' <- liftIO $ PEM.intersect sym stackDom newCells
+  let pred' = (PAD.absDomEq postD){ PEE.eqDomainGlobalMemory = heapDom', PEE.eqDomainStackMemory = stackDom' }
   let postD' = postD { PAD.absDomEq = pred' }
   return (Widen WidenEquality (WidenLocs mempty (Set.fromList cells)) postD')
 
