@@ -77,9 +77,9 @@ makeFreshAbstractDomain ::
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
-  EquivM sym arch (PAD.AbstractDomainSpec sym arch)
+  EquivM sym arch (PAD.AbstractDomain sym arch v)
 makeFreshAbstractDomain scope bundle preDom from to = do
-  dom <- case from of
+  case from of
     GraphNode{} -> startTimer $ do
       initDom <- initialDomain
       vals <- getInitalAbsDomainVals bundle preDom
@@ -90,8 +90,6 @@ makeFreshAbstractDomain scope bundle preDom from to = do
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
-  postSpec <- initialDomainSpec to
-  abstractOverVars scope bundle from to postSpec dom
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -130,23 +128,21 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
     Nothing ->
      do traceBundle bundle ("First jump to " ++ show to)
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
-        postSpec <- makeFreshAbstractDomain scope bundle d from to
-        -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
-        -- below for where it's actually useful.
-        (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-        withAssumptionSet asm $ do
-          md <- widenPostcondition bundle d d'
-          case md of
-            NoWideningRequired -> 
-              return (freshDomain gr to postSpec)
-            WideningError msg _ d'' ->
-              do let msg' = ("Error during widening: " ++ msg)
-                 err <- emitError (PEE.WideningError msg')
-                 postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                 return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
-            Widen _ _ d'' -> do
-              postSpec' <- abstractOverVars scope bundle from to postSpec d''
-              return (freshDomain gr to postSpec')
+        d' <- makeFreshAbstractDomain scope bundle d from to
+        postSpec <- initialDomainSpec to
+        md <- widenPostcondition bundle d d'
+        case md of
+          NoWideningRequired -> do
+            postSpec' <- abstractOverVars scope bundle from to postSpec d'
+            return (freshDomain gr to postSpec')
+          WideningError msg _ d'' ->
+            do let msg' = ("Error during widening: " ++ msg)
+               err <- emitError (PEE.WideningError msg')
+               postSpec' <- abstractOverVars scope bundle from to postSpec d''
+               return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
+          Widen _ _ d'' -> do
+            postSpec' <- abstractOverVars scope bundle from to postSpec d''
+            return (freshDomain gr to postSpec')
 
     -- have visited this location at least once before
     Just postSpec -> do
