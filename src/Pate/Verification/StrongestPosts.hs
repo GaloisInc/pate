@@ -236,8 +236,10 @@ visitNode scope (GraphNode bPair) d gr0 = withPair bPair $ do
   validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
   withAssumptionSet (validInit <> validAbs) $
     do -- do the symbolic simulation
-       bundle <- mkSimBundle bPair vars d
-       withPredomain bundle d $ do
+       bundle' <- mkSimBundle bPair vars d
+       withPredomain bundle' d $ do
+         -- simplify the bundle under the domain assumptions
+         bundle <- applyCurrentAsms bundle'
  
   {-     traceBundle bundle $ unlines
          [ "== SP result =="
