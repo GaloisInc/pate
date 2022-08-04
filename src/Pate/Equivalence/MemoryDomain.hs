@@ -8,6 +8,8 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE LambdaCase   #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Pate.Equivalence.MemoryDomain (
     MemoryDomain
@@ -44,6 +46,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Parallel as Par
+import qualified Pate.Location as PL
 
 ---------------------------------------------
 -- Memory domain
@@ -75,6 +78,12 @@ traverseWithCellPar memDom f = do
   Par.present $ do
     preds <- PMC.MemCellPred <$> traverse Par.joinFuture future_preds
     return $ MemoryDomain preds
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationWitherable sym arch (MemoryDomain sym arch) where
+  witherLocation sym (MemoryDomain mp) f = MemoryDomain <$> PL.witherLocation sym mp f
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable sym arch (MemoryDomain sym arch) where
+  traverseLocation sym d f = PL.witherLocation sym d (\loc v -> Just <$> f loc v)
 
       
 traverseWithCell ::

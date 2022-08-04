@@ -41,6 +41,7 @@ module Pate.Monad
   , startTimer
   , emitEvent
   , emitWarning
+  , emitError
   , getBinCtx
   , getBinCtx'
   , ifConfig
@@ -229,6 +230,14 @@ emitWarning innererr = do
         , PEE.errEquivError = innererr
         }
   emitEvent (\_ -> PE.Warning err)
+
+-- | Emit an event declaring that an error has been raised, but only throw
+-- the error if it is not recoverable (according to 'PEE.isRecoverable')
+emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch (PEE.EquivalenceError arch)
+emitError err = withValid $ do
+  Left err' <- manifestError (throwHere err >> return ())
+  emitEvent (\_ -> PE.ErrorRaised err')
+  return err'
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
@@ -879,12 +888,12 @@ instance MF.MonadFail (EquivM_ sym arch) where
 manifestError :: EquivM_ sym arch a -> EquivM sym arch (Either (PEE.EquivalenceError arch) a)
 manifestError act = do
   catchError (Right <$> act) (pure . Left) >>= \case
-    r@(Left er) -> CMR.asks envFailureMode >>= \case
-      ThrowOnAnyFailure -> throwError er
-      ContinueAfterRecoverableFailures -> case PEE.isRecoverable (PEE.errEquivError er) of
+    r@(Left er) -> CMR.asks (PC.cfgFailureMode . envConfig) >>= \case
+      PC.ThrowOnAnyFailure -> throwError er
+      PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable (PEE.errEquivError er) of
         True -> return r
         False -> throwError er
-      ContinueAfterFailure -> return r
+      PC.ContinueAfterFailure -> return r
     r -> return r
 
 -- | Run an IO operation, internalizing any exceptions raised

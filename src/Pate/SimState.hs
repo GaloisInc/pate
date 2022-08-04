@@ -47,6 +47,8 @@ module Pate.SimState
   , ScopedExpr
   , unSE
   , scopedExprMap
+  , scopedLocWither
+  , WithScope(..)
   , liftScope0
   , liftScope2
   , concreteScope
@@ -93,6 +95,8 @@ import           Data.Proxy
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad ( forM )
 import           Control.Lens ( (^.) )
+import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
+
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -123,6 +127,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Panic as P
+import qualified Pate.Location as PL
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
@@ -324,19 +329,20 @@ getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
 -- | Compute a predicate that collects the individual assumptions in the frame, including
 -- equality on all bindings.
 getAssumedPred ::
-  forall sym v.
+  forall sym m v.
   W4.IsSymExprBuilder sym =>
+  IO.MonadIO m =>
   sym ->
   AssumptionSet sym v ->
-  IO (W4.Pred sym)
+  m (W4.Pred sym)
 getAssumedPred sym asm = do
   bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
   let predList = SetF.toList $ (asmPreds asm) <> (SetF.fromList bindsAsm)
-  allPreds sym predList
+  IO.liftIO $ allPreds sym predList
   where
-    assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> IO [W4.Pred sym]
+    assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> m [W4.Pred sym]
     assumeBinds (MapF.Pair eSrc eTgts) = forM (SetF.toList eTgts) $ \eTgt ->
-      W4.isEq sym eSrc eTgt
+      IO.liftIO $ W4.isEq sym eSrc eTgt
 
 isAssumedPred ::
   forall sym v.
@@ -608,8 +614,14 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 
 -- | An expr tagged with a scoped parameter (representing the fact that the
 -- expression is valid under the scope 'v')
-data ScopedExpr sym tp (v :: VarScope) =
+data ScopedExpr sym (v :: VarScope) tp =
   ScopedExpr { unSE :: W4.SymExpr sym tp }
+
+instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
+  pretty (ScopedExpr e) = W4.printSymExpr e
+
+instance W4.IsExpr (W4.SymExpr sym) => Show (ScopedExpr sym v tp) where
+  show e = show (PP.pretty e)
 
 -- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
@@ -621,9 +633,43 @@ scopedExprMap ::
   PEM.ExprMappable sym (f v1) =>
   sym ->
   f v1 ->
-  (forall tp. ScopedExpr sym tp v1 -> m (ScopedExpr sym tp v2)) ->
+  (forall tp. ScopedExpr sym v1 tp -> m (ScopedExpr sym v2 tp)) ->
   m (f v2)
 scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
+
+-- | Perform a scope-modifying rewrite to an 'PL.LocationWitherable' (optionally dropping
+-- elements instead of updating them).
+-- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
+-- the user to produce an expression that is scoped to 'v2'.
+scopedLocWither ::
+  forall sym arch f m v1 v2.
+  Scoped f =>
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  PL.LocationWitherable sym arch (f v1) =>
+  sym ->
+  f v1 ->
+  (forall tp l. PL.Location sym arch l -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
+  m (f v2)
+scopedLocWither sym body f = do
+  fmap unsafeCoerceScope $ PL.witherLocation sym body $ \loc p -> runMaybeT $ do
+    ScopedExpr p' <- (MaybeT $ f loc (ScopedExpr p))
+    loc' <- PEM.mapExpr sym (\e' -> unSE @sym <$> (MaybeT (f loc (ScopedExpr e')))) loc
+    return (loc', p')
+
+--- FIXME: cludge for scopes missing from inner types
+-- | Tag any type with a scope type parameter
+newtype WithScope f (v :: VarScope) = WithScope { unWS :: f }
+
+instance Scoped (WithScope f) where
+  unsafeCoerceScope (WithScope a) = WithScope a
+
+instance PEM.ExprMappable sym f => PEM.ExprMappable sym (WithScope f v) where
+  mapExpr sym f (WithScope a) = WithScope <$> PEM.mapExpr sym f a
+
+instance PL.LocationWitherable sym arch f => PL.LocationWitherable sym arch (WithScope f v) where
+  witherLocation sym (WithScope a) f = WithScope <$> PL.witherLocation sym a f
+
 
 -- | Apply a 'ScopeCoercion' to a 'ScopedExpr', rebinding its value
 -- and changing its scope.
@@ -631,8 +677,8 @@ applyScopeCoercion ::
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
   ScopeCoercion sym v v' ->
-  ScopedExpr sym tp v ->
-  IO (ScopedExpr sym tp v')
+  ScopedExpr sym v tp ->
+  IO (ScopedExpr sym v' tp)
 applyScopeCoercion sym (ScopeCoercion cache (ExprRewrite binds)) (ScopedExpr e) =
   ScopedExpr <$> applyExprBindings' sym cache binds e
 
@@ -642,9 +688,9 @@ liftScope2 ::
   W4.IsSymExprBuilder sym =>
   sym ->
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> W4.SymExpr sym' tp2 -> IO (W4.SymExpr sym' tp3)) ->
-  ScopedExpr sym tp1 v ->
-  ScopedExpr sym tp2 v ->
-  IO (ScopedExpr sym tp3 v)
+  ScopedExpr sym v tp1 ->
+  ScopedExpr sym v tp2 ->
+  IO (ScopedExpr sym v tp3)
 liftScope2 sym f (ScopedExpr e1) (ScopedExpr e2) = ScopedExpr <$> f sym e1 e2
 
 
@@ -655,7 +701,7 @@ liftScope0 ::
   W4.IsSymExprBuilder sym =>
   sym ->
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> IO (W4.SymExpr sym' tp)) ->
-  IO (ScopedExpr sym tp v)
+  IO (ScopedExpr sym v tp)
 liftScope0 sym f = ScopedExpr <$> f sym
 
 -- | A concrete value is valid in all scopes
@@ -664,7 +710,7 @@ concreteScope ::
   W4.IsSymExprBuilder sym =>
   sym ->
   W4.ConcreteVal tp ->
-  IO (ScopedExpr sym tp v)
+  IO (ScopedExpr sym v tp)
 concreteScope sym c = liftScope0 sym (\sym' -> W4.concreteToSym sym' c)
 
 -- | Produce an 'ScopeCoercion' that binds the terms in the given 'SimVars'
@@ -822,7 +868,7 @@ both programs, as the access to the stack variable
 -- "free" as the base of the stack is always abstract, but it is rebound to account
 -- for changes to the stack pointer when moving between scopes.
 newtype StackBase sym arch v =
-  StackBase { unSB :: ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch)) v }
+  StackBase { unSB :: ScopedExpr sym v (W4.BaseBVType (MM.ArchAddrWidth arch)) }
 
 freshStackBase ::
   forall sym arch v.

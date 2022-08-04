@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Verification.Widening
   ( widenAlongEdge
@@ -27,13 +28,15 @@ import           Control.Monad.Trans.Class ( lift )
 import           Prettyprinter
 
 import qualified Data.Set as Set
-import qualified Data.Text as Text
-
+import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.SetF as SetF
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 import           What4.SatResult (SatResult(..))
 
 import qualified Data.Macaw.CFG as MM
@@ -41,8 +44,10 @@ import qualified Data.Macaw.CFG as MM
 import qualified Pate.Binary as PBi
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
+import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMc
 import           Pate.Equivalence as PEq
+import qualified Pate.Event as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Proof.Operations as PP
@@ -72,9 +77,9 @@ makeFreshAbstractDomain ::
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
-  EquivM sym arch (PAD.AbstractDomainSpec sym arch)
+  EquivM sym arch (PAD.AbstractDomain sym arch v)
 makeFreshAbstractDomain scope bundle preDom from to = do
-  dom <- case from of
+  case from of
     GraphNode{} -> startTimer $ do
       initDom <- initialDomain
       vals <- getInitalAbsDomainVals bundle preDom
@@ -85,8 +90,6 @@ makeFreshAbstractDomain scope bundle preDom from to = do
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
-  postSpec <- initialDomainSpec to
-  abstractOverVars scope bundle from to postSpec dom
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -125,23 +128,21 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
     Nothing ->
      do traceBundle bundle ("First jump to " ++ show to)
         -- initial state of the pair graph: choose the universal domain that equates as much as possible
-        postSpec <- makeFreshAbstractDomain scope bundle d from to
-        -- Here we need 'PS.bindSpec' just to make the types match up - see the usage
-        -- below for where it's actually useful.
-        (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-        withAssumptionSet asm $ do
-          md <- widenPostcondition bundle d d'
-          case md of
-            NoWideningRequired -> 
-              return (freshDomain gr to postSpec)
-            WideningError msg _ d'' ->
-              do let msg' = ("Error during widening: " ++ msg)
-                 traceBundle bundle msg'
-                 postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                 return $ recordMiscAnalysisError (freshDomain gr to postSpec') to (Text.pack msg')
-            Widen _ _ d'' -> do
-              postSpec' <- abstractOverVars scope bundle from to postSpec d''
-              return (freshDomain gr to postSpec')
+        d' <- makeFreshAbstractDomain scope bundle d from to
+        postSpec <- initialDomainSpec to
+        md <- widenPostcondition bundle d d'
+        case md of
+          NoWideningRequired -> do
+            postSpec' <- abstractOverVars scope bundle from to postSpec d'
+            return (freshDomain gr to postSpec')
+          WideningError msg _ d'' ->
+            do let msg' = ("Error during widening: " ++ msg)
+               err <- emitError (PEE.WideningError msg')
+               postSpec' <- abstractOverVars scope bundle from to postSpec d''
+               return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
+          Widen _ _ d'' -> do
+            postSpec' <- abstractOverVars scope bundle from to postSpec d''
+            return (freshDomain gr to postSpec')
 
     -- have visited this location at least once before
     Just postSpec -> do
@@ -169,13 +170,13 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 
           WideningError msg _ d'' ->
             do let msg' = ("Error during widening: " ++ msg)
-               traceBundle bundle msg'
+               err <- emitError (PEE.WideningError msg')
                postSpec' <- abstractOverVars scope bundle from to postSpec d''
                case updateDomain gr from to postSpec' of
                  Left gr' ->
                    do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                      return $ recordMiscAnalysisError gr' to (Text.pack msg')
-                 Right gr' -> return $ recordMiscAnalysisError gr' to (Text.pack msg')
+                      return $ recordMiscAnalysisError gr' to err
+                 Right gr' -> return $ recordMiscAnalysisError gr' to err
 
           Widen _ _ d'' -> do
             postSpec' <- abstractOverVars scope bundle from to postSpec d''
@@ -184,6 +185,19 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
                 do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
                    return gr'
               Right gr' -> return gr'
+
+data MaybeF f tp where
+  JustF :: f tp -> MaybeF f tp
+  NothingF :: MaybeF f tp
+
+runMaybeTF :: Monad m => MaybeT m (a tp) -> m (MaybeF a tp)
+runMaybeTF m = runMaybeT m >>= \case
+  Just a -> return $ JustF a
+  Nothing -> return $ NothingF
+
+toMaybe :: MaybeF a tp -> Maybe (a tp)
+toMaybe (JustF a) = Just a
+toMaybe NothingF = Nothing
 
 -- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
 -- parameterized over the *output* state of the given 'SimBundle'.
@@ -201,8 +215,6 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 -- strategies that are attempted, but in general they may all fail.
 -- See: 'PS.StackBase' for a discussion on how this is used to re-scope stack relative
 -- accesses
--- TODO: Currently we treat a re-scoping failure as catastrophic, but it should
--- be a recoverable warning that simply results in some loss of soundness.
 abstractOverVars ::
   forall sym arch pre.
   PS.SimScope sym arch pre  ->
@@ -235,15 +247,21 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- e[pre] --> e[pre/post]
     pre_to_post <- liftIO $ PS.getScopeCoercion sym scope_pre postVars
 
+    cache <- W4B.newIdxCache
     -- Strategies for re-scoping expressions
     let
-      asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym tp v1 -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp v2)
+      asConcrete :: forall v1 v2 tp. PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+      asConcrete se = do
+        Just c <- return $ (W4.asConcrete (PS.unSE se))
+        liftIO $ PS.concreteScope @v2 sym c
+
+      asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
         Just c <- lift $ withAssumption asm $
           W4.asConcrete <$> concretizeWithSolver (PS.unSE se)
         liftIO $ PS.concreteScope @v2 sym c
 
-      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
+      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asStackOffset bin se = do
         W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
@@ -263,7 +281,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         -- return frame[post] + off
         liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
-      asSimpleAssign :: forall tp. PS.ScopedExpr sym tp pre -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym tp post)
+      asSimpleAssign :: forall tp. PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asSimpleAssign se = do
         -- se[pre]
         -- se' := se[pre/post]
@@ -277,21 +295,45 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
         return se'
 
-    PS.scopedExprMap sym postResult $ \(se :: PS.ScopedExpr sym tp pre) -> do
-      mres <- runMaybeT $
-            asScopedConst (W4.truePred sym) se
-        <|> asStackOffset PBi.OriginalRepr se
-        <|> asStackOffset PBi.PatchedRepr se
-        <|> asSimpleAssign se
-      case mres of
-        Just se' -> return se'
-        -- FIXME: add graceful failure mode
-        Nothing -> do
+      doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
+      doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
+          -- The decision of ordering here is only for efficiency: we expect only
+          -- one strategy to succeed (with the exception of 'asConcrete' being subsumed
+          -- by 'asScopedConst' but much faster, as it doesn't involve the solver).
+          -- TODO: We could do better by picking the strategy based on the term shape,
+          -- but it's not strictly necessary.
+          se' <- (    asConcrete se
+                  <|> asStackOffset PBi.OriginalRepr se
+                  <|> asStackOffset PBi.PatchedRepr se
+                  <|> asScopedConst (W4.truePred sym) se
+                  <|> asSimpleAssign se
+                 )
+          lift (emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se'))
+          return se'
+
+    -- First traverse the equivalence domain and rescope its entries
+    -- In this case, failing to rescope is a (recoverable) error, as it results
+    -- in a loss of soundness; dropping an entry means that the resulting domain
+    -- is effectively now assuming equality on that entry.
+    eq_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc se ->
+      doRescope loc se >>= \case
+        JustF se' -> return $ Just se'
+        NothingF -> do
+          -- failed to rescope, emit a recoverable error and drop this entry
           se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
           e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
           curAsms <- currentAsm
+          _ <- emitError $ PEE.RescopingFailure curAsms se e''
+          return Nothing
 
-          fail $ "Unable to rescope:" ++ (show curAsms) ++ (show (W4.printSymExpr (PS.unSE se))) ++ "***" ++ (show (W4.printSymExpr (PS.unSE e'')))
+    -- Now traverse the value domain and rescope its entries. In this case
+    -- failing to rescope is not an error, as it is simply weakening the resulting
+    -- domain by not asserting any value constraints on that entry.
+    val_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> toMaybe <$> doRescope loc se
+
+    return $ PAD.AbstractDomain eq_post val_post
+
+
 
 -- | Classifying what kind of widening has occurred
 data WidenKind =
@@ -319,6 +361,7 @@ tryWidenings (x:xs) =
     NoWideningRequired -> tryWidenings xs
     res -> return res
 
+type WidenState sym arch v = Either (AbstractDomain sym arch v) (WidenResult sym arch v)
 
 -- | This gives a fixed amount of gas for traversing the
 --   widening loop. Setting this value too low seems to
@@ -341,6 +384,73 @@ widenPostcondition bundle preD postD0 =
     widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
+   widenOnce ::
+     Gas ->
+     WidenState sym arch v ->
+     PL.Location sym arch l ->
+     W4.Pred sym ->
+     EquivM_ sym arch (WidenState sym arch v)
+   widenOnce (Gas i) prevState loc goal = case prevState of
+     Right NoWideningRequired -> return prevState
+     Right (WideningError{}) -> return prevState
+     _ -> startTimer $ withSym $ \sym -> do
+       eqCtx <- equivalenceContext
+       let (prevLocs, postD) = case prevState of
+             Left prevDom -> (mempty, prevDom)
+             --FIXME: we're dropping the widening Kind now since we're
+             --potentially doing multiple widenings in one iteration
+             Right (Widen _ locs prevDom) -> (locs, prevDom)
+       curAsms <- currentAsm
+       let emit r =
+             withValid @() $ emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
+       emit PE.SolverStarted
+
+       not_goal <- liftIO $ W4.notPred sym goal
+
+       goalSat "prove postcondition" not_goal $ \case
+         Unsat _ -> do
+           emit PE.SolverSuccess
+           return prevState
+         Unknown -> do
+           emit PE.SolverError
+           _ <- emitError $ PEE.WideningError "UNKNOWN result evaluating postcondition"
+           -- this is a recoverable error, since we can conservatively consider the location
+           -- under analysis as inequivalent in the resulting domain
+           case loc of
+             PL.Cell c -> Right <$> widenCells [Some c] postD
+             PL.Register r -> Right <$> widenRegs [Some r] postD
+             _ -> return $ Right $ WideningError "UNKNOWN result evaluating postcondition" prevLocs postD
+         Sat evalFn -> do
+           emit PE.SolverFailure
+           if i <= 0 then
+             -- we ran out of gas
+             do slice <- PP.simBundleToSlice bundle
+                ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                let msg = unlines [ "Ran out of gas performing local widenings"
+                                  , show (pretty ineqRes)
+                                  ]
+                return $ Right $ WideningError msg prevLocs postD
+           else do
+             -- The current execution does not satisfy the postcondition, and we have
+             -- a counterexample.
+             -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
+             -- out still
+             res <- widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postD) preD prevLocs postD
+             case res of
+               -- this location was made equivalent by a previous widening in this same loop
+               NoWideningRequired -> case prevState of
+                 Left{} ->  do
+                   -- if we haven't performed any widenings yet, then this is an error
+                   slice <- PP.simBundleToSlice bundle
+                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
+                                   (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
+                   let msg = unlines [ "Could not find any values to widen!"
+                                     , show (pretty ineqRes)
+                                     ]
+                   return $ Right $ WideningError msg prevLocs postD
+                 Right{} -> return prevState
+               _ -> return $ Right res
+
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
    --
@@ -358,39 +468,14 @@ widenPostcondition bundle preD postD0 =
      {- ^ A summary of any widenings that were done in previous iterations.
           If @Nothing@, than no previous widenings have been performed. -} ->
      EquivM sym arch (WidenResult sym arch v)
-
    widenLoop sym (Gas i) eqCtx postD mPrevRes =
-     do let prevLocs = case mPrevRes of
-              Just (Widen _ locs _) -> locs
-              _ -> mempty
-        -- no rebinding necessary yet
-        let postDomBody = postD
-        --(postCondAsm, postDomBody) <- liftIO (PS.bindSpec sym oPostState pPostState postD)
-        -- TODO: It is likely useful to separate checking the equality and value domains, rather
-        -- than checking them simultaneously here. The plan is to change this check to instead
-        -- iterate over the domain and check each location individually
-        -- (see: https://github.com/GaloisInc/pate/issues/287), so we should revisit how to separate
-        -- these checks at that point.
-        eqPostPred <- liftIO $ PAD.absDomainToPostCond sym eqCtx bundle preD postDomBody
-        not_goal <- liftIO $ W4.notPred sym eqPostPred
-        res <- goalSat "prove postcondition" not_goal $ \res -> case res of
-          Unsat _ -> return NoWideningRequired
-          Unknown -> return (WideningError "UNKNOWN result evaluating postcondition" prevLocs postD)
-          Sat evalFn ->
-            if i <= 0 then
-              -- we ran out of gas
-              do slice <- PP.simBundleToSlice bundle
-                 ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
-                 let msg = unlines [ "Ran out of gas performing local widenings"
-                                   , show (pretty ineqRes)
-                                   ]
-                 return $ WideningError msg prevLocs postD
-            else
-              -- The current execution does not satisfy the postcondition, and we have
-              -- a counterexample.
-              -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
-              -- out still
-              widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postDomBody) preD prevLocs postD
+     do
+        eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
+        eqPost_vals <- liftIO $ PAD.absDomainToPostCond_vals sym eqCtx bundle preD postD
+
+        let widenChecks = (PL.LocationPredPair @sym @arch PL.NoLoc eqPost_vals, eqPost_eq)
+
+        res <- PL.foldLocation @sym @arch sym widenChecks (Left postD) (widenOnce (Gas i))
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -401,7 +486,7 @@ widenPostcondition bundle preD postD0 =
         case res of
 
           -- Some kind of error occured while widening.
-          WideningError msg locs _postD' ->
+          Right er@(WideningError msg locs _postD') ->
             do traceBundle bundle "== Widening error! =="
                traceBundle bundle msg
                traceBundle bundle "Partial widening at locations:"
@@ -412,22 +497,29 @@ widenPostcondition bundle preD postD0 =
                traceBundle bundle "===== POSTDOMAIN ====="
                traceBundle bundle (show (PEE.ppEquivalenceDomain W4.printSymExpr (PS.specBody postD')))
 -}
-               return res
+               return er
 
           -- In this iteration, no additional widening was done, and we can exit the loop.
           -- The ultimate result we return depends on if we did any widening steps in
           -- previous iterations.
-          NoWideningRequired ->
+          Right NoWideningRequired ->
             case mPrevRes of
               Nothing   -> return NoWideningRequired
               Just prevRes -> return prevRes
-
+          -- no widening happened
+          Left{} ->
+            case mPrevRes of
+              Nothing   -> return NoWideningRequired
+              Just prevRes -> return prevRes
           -- We had to do some widening in this iteration, so reenter the loop.
-          Widen widenK locs postD' ->
+          Right (Widen widenK locs postD') ->
             do traceBundle bundle "== Found a widening, returning into the loop =="
                traceBundle bundle (show locs)
-               let newlocs = locs <> prevLocs
+               let newlocs = case mPrevRes of
+                     Just (Widen _ prevLocs _) -> locs <> prevLocs
+                     _ -> locs
                widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
+
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the
 -- output of symbolic execution, where possible.
@@ -476,15 +568,6 @@ widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred p
       -- After that, we check for widenings relating to the precondition, i.e., frame conditions.
     , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
     , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
-
-
-    , do slice <- PP.simBundleToSlice bundle
-         ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
-                         (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
-         let msg = unlines [ "Could not find any values to widen!"
-                           , show (pretty ineqRes)
-                           ]
-         return $ WideningError msg prevLocs postD
     ]
 
 data MemCellSource = LocalChunkWrite | PreDomainCell
@@ -510,6 +593,37 @@ widenValues sym evalFn bundle postD = do
      getRange e = do
        g <- execGroundFn evalFn e
        return $ PAD.groundToAbsRange (W4.exprType e) g
+
+widenCells ::
+  [Some (PMc.MemCell sym arch)] ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenResult sym arch v)
+widenCells cells postD = withSym $ \sym -> do
+  newCells <- liftIO $ PEM.fromList sym [ (c, W4.truePred sym) | c <- cells ]
+  -- the domain semantics will ignore cells which have the wrong region, so
+  -- we can just add the cells to both at the cost of some redundancy
+  let heapDom = PEE.eqDomainGlobalMemory (PAD.absDomEq $ postD)
+  heapDom' <- liftIO $ PEM.intersect sym heapDom newCells
+  let stackDom = PEE.eqDomainStackMemory (PAD.absDomEq $ postD)
+  stackDom' <- liftIO $ PEM.intersect sym stackDom newCells
+  let pred' = (PAD.absDomEq postD){ PEE.eqDomainGlobalMemory = heapDom', PEE.eqDomainStackMemory = stackDom' }
+  let postD' = postD { PAD.absDomEq = pred' }
+  return (Widen WidenEquality (WidenLocs mempty (Set.fromList cells)) postD')
+
+widenRegs ::
+  [Some (MM.ArchReg arch)] ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenResult sym arch v)
+widenRegs newRegs postD = withSym $ \sym -> do
+  let
+    regs' = foldl'
+                 (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
+                 (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
+                 newRegs
+    pred' = (PAD.absDomEq postD) { PEE.eqDomainRegisters = regs' }
+    postD' = postD { PAD.absDomEq = pred' }
+    locs = WidenLocs (Set.fromList newRegs) mempty
+  return (Widen WidenEquality locs postD')
 
 -- TODO, lots of code duplication between the stack and heap cases.
 --  should we find some generalization?

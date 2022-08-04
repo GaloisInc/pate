@@ -242,7 +242,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envBlockEndVar = bvar
           , envLogger = logAction
           , envConfig = vcfg
-          , envFailureMode = PME.ContinueAfterFailure
           , envValidSym = PS.Sym symNonce sym bak
           , envStartTime = startedAt
           , envCurrentFrame = Some mempty

@@ -29,6 +29,7 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
+
 import qualified Prettyprinter as PP
 
 import qualified Pate.Address as PA
@@ -147,7 +148,15 @@ data BlockTarget arch bin =
     , targetReturn :: Maybe (ConcreteBlock arch bin)
     -- | The expected block exit case when this target is taken
     , targetEndCase :: MCS.MacawBlockEndCase
-    }
+    } deriving (Eq, Ord)
+
+instance PC.TestEquality (BlockTarget arch) where
+  testEquality e1 e2 = PC.orderingF_refl (PC.compareF e1 e2)
+
+instance PC.OrdF (BlockTarget arch) where
+  compareF e1 e2 = case PC.compareF (blockBinRepr $ targetCall e1) (blockBinRepr $ targetCall e2) of
+    PC.EQF -> PC.fromOrdering (compare e1 e2)
+    x -> x
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
   show (BlockTarget a b _) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"

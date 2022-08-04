@@ -6,7 +6,9 @@ module Pate.Event (
   EquivalenceResult(..),
   BlockTargetResult(..),
   BranchCompletenessResult(..),
-  Event(..)
+  Event(..),
+  SolverResultKind(..),
+  SolverProofKind(..)
   ) where
 
 import qualified Data.ElfEdit as DEE
@@ -30,6 +32,7 @@ import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
+import qualified Pate.SimState as PS
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Error as PEE
@@ -109,5 +112,28 @@ data Event arch where
   -- | The strongest postcondition analysis ran out of gas when analyzing the given pair
   GasExhausted :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> Event arch
   -- | Other errors that can occur inside of the strongest postcondition verifier
-  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> T.Text -> Event arch
+  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> PEE.EquivalenceError arch -> Event arch
+  -- | A recoverable error that occurred during verification
+  ErrorEmitted :: PEE.EquivalenceError arch -> TM.NominalDiffTime -> Event arch
+
   VisitedNode :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> TM.NominalDiffTime -> Event arch
+  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PS.AssumptionSet sym v -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
+
+  DomainWidened :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
+
+  InitialDomainFound :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
+
+  DomainAbstraction :: (PArch.ValidArch arch) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
+  ScopeAbstractionResult :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> PS.ScopedExpr sym v tp -> PS.ScopedExpr sym v' tp -> TM.NominalDiffTime -> Event arch
+
+data SolverResultKind =
+    SolverStarted
+  | SolverSuccess
+  | SolverError
+  | SolverFailure
+  deriving (Eq, Ord)
+
+
+data SolverProofKind =
+    EquivalenceProof
+  | TotalityProof

@@ -97,3 +97,9 @@ summarize e m =
     PE.StrongestPostOverallResult {} -> m
     PE.GasExhausted {} -> m
     PE.VisitedNode{} -> m
+    PE.ErrorEmitted{} -> m
+    PE.SolverEvent{} -> m
+    PE.DomainWidened{} -> m
+    PE.InitialDomainFound{} -> m
+    PE.DomainAbstraction{} -> m
+    PE.ScopeAbstractionResult{} -> m

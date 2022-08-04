@@ -9,6 +9,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE LambdaCase   #-}
 
 module Pate.MemCell (
     MemCell(..)
@@ -16,6 +17,7 @@ module Pate.MemCell (
   , setMemCellRegion
   , MemCellPred(..)
   , traverseWithCell
+  , witherCell
   , mergeMemCellPred
   , muxMemCellPred
   , inMemCellPred
@@ -26,9 +28,10 @@ module Pate.MemCell (
   , predToList
   ) where
 
-import           Control.Monad ( foldM )
+import           Control.Monad ( foldM, forM )
 import qualified Control.Monad.IO.Class as IO
 
+import           Data.Maybe (catMaybes)
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Map.Strict as Map
@@ -96,6 +99,24 @@ traverseWithCell ::
   m (MemCellPred sym arch)
 traverseWithCell (MemCellPred memPred) f =
   MemCellPred <$> Map.traverseWithKey (\(Some cell@MemCell{}) p -> f cell p) memPred
+
+
+-- | Traverse a 'MemCellPred', optionally dropping elements instead of updating them.
+witherCell ::
+  forall sym arch m.
+  IO.MonadIO m =>
+  WI.IsExprBuilder sym =>
+  PC.OrdF (WI.SymExpr sym) =>
+  sym ->
+  MemCellPred sym arch ->
+  (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (Maybe (MemCell sym arch w, WI.Pred sym))) ->
+  m (MemCellPred sym arch)
+witherCell sym (MemCellPred memPred)  f = do
+  es <- fmap catMaybes $ forM (Map.toList memPred) $ \(Some (cell@MemCell{}), p) -> do
+    f cell p >>= \case
+      Just (cell', p') -> return $ Just (Some cell', p')
+      Nothing -> return Nothing
+  IO.liftIO $ predFromList sym es
 
 predFromList ::
   WI.IsExprBuilder sym =>

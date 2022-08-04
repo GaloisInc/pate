@@ -10,7 +10,8 @@ module Pate.Config (
   MemRegion(..),
   parsePatchConfig,
   VerificationConfig(..),
-  defaultVerificationCfg
+  defaultVerificationCfg,
+  VerificationFailureMode(..)
   ) where
 
 import qualified Control.Monad.Except as CME
@@ -196,6 +197,11 @@ parsePatchConfig bs = CME.runExcept $ do
   txt <- liftExcept UnicodeError (DTE.decodeUtf8' bs)
   liftExcept TOMLError (Toml.decode patchDataCodec txt)
 
+data VerificationFailureMode =
+    ThrowOnAnyFailure
+  | ContinueAfterFailure
+  | ContinueAfterRecoverableFailures
+
 ----------------------------------
 -- Verification configuration
 data VerificationConfig =
@@ -221,7 +227,9 @@ data VerificationConfig =
     --
     -- This only captures the interaction with the solver during symbolic
     -- execution, and not the one-off queries issued by the rest of the verifier
-
+    , cfgFailureMode :: VerificationFailureMode
+    -- ^ Determines the behavior of the verifier when an error is thrown,
+    -- with respect to whether or not the error is deemed "recoverable"
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -234,4 +242,5 @@ defaultVerificationCfg =
                      , cfgGroundTimeout = PT.Seconds 5
                      , cfgMacawDir = Nothing
                      , cfgSolverInteractionFile = Nothing
+                     , cfgFailureMode = ContinueAfterRecoverableFailures
                      }

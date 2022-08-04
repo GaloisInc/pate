@@ -84,11 +84,29 @@ data InnerEquivalenceError arch
   | MissingExpectedEquivalentFunction (PA.ConcreteAddress arch)
   | SolverStackMisalignment
   | LoaderFailure String
+  | WideningError String
+  | ObservabilityError String
+  | TotalityError String
+  | forall sym v tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PS.AssumptionSet sym v) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
+
+ppInnerError :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> PP.Doc a
+ppInnerError e = case e of
+  RescopingFailure asms src tgt ->
+    PP.vsep
+      [ "Unable to rescope:"
+      , PP.pretty asms
+      , "Source Expression"
+      , PP.pretty src
+      , "Target Expression"
+      , PP.pretty tgt
+      ]
+  _ -> PP.viaShow e
 
 -- | Roughly categorizing how catastrophic an error is to the soundness of the verifier
 isRecoverable :: InnerEquivalenceError arch -> Bool
 isRecoverable e = case e of
   InconsistentSimplificationResult{} -> True
+  RescopingFailure{} -> True
   _ -> False
 
 data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>
@@ -118,7 +136,7 @@ instance PP.Pretty (EquivalenceError arch) where
   pretty e@(EquivalenceError{}) = PP.vsep $ catMaybes $
     [ fmap (\(Some b) -> "For " <+> PP.pretty (show b) <+> " binary") (errWhichBinary e)
     , fmap (\s -> "At " <+> PP.pretty (prettyCallStack s)) (errStackTrace e)
-    , Just (PP.pretty (errEquivError e))
+    , Just (ppInnerError (errEquivError e))
     ]
 
 instance Show (EquivalenceError arch) where

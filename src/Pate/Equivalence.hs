@@ -64,6 +64,7 @@ import           Lang.Crucible.Backend (IsSymInterface)
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register as PRe
@@ -350,6 +351,11 @@ data MemoryCondition sym arch = MemoryCondition
   , memCondRegEq :: MemRegionEquality sym arch
   }
 
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable sym arch (MemoryCondition sym arch) where
+  traverseLocation sym mcond f = do
+    dom' <- PL.traverseLocation sym (memCondDomain mcond) f
+    return $ mcond { memCondDomain = dom' }
+
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
 -- We require the pre-states in order to construct the initial equality assumption.
@@ -427,6 +433,14 @@ getRegionEquality sym memEq memO memP = case memEq of
 newtype RegisterCondition sym arch v =
   RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (AssumptionSet sym v)) }
 
+instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
+  traverseLocation sym body f = RegisterCondition <$>
+    MM.traverseRegsWith (\r (Const asm) -> do
+      p <- getAssumedPred sym asm
+      f (PL.Register r) p >>= \ (_, p') -> return $ (Const (frameAssume p'))
+      ) (regCondPreds body)
+
+
 -- | Compute a structured 'RegisterCondition'
 -- where the predicate associated with each register
 -- is true iff the register is equal in two given states (conditional on
@@ -460,6 +474,11 @@ data StateCondition sym arch v = StateCondition
   , stStackCond :: MemoryCondition sym arch
   , stMemCond :: MemoryCondition sym arch
   }
+
+instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StateCondition sym arch v) where
+  traverseLocation sym (StateCondition a b c) f =
+    StateCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+
 
 eqDomPre ::
   IsSymInterface sym =>

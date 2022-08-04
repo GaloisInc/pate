@@ -46,7 +46,6 @@ import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Classes
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Text (Text)
 import           Data.Word (Word32)
 import qualified Lumberjack as LJ
 
@@ -63,9 +62,9 @@ import qualified Pate.Event as Event
 import           Pate.Monad
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
-import qualified Pate.SimState as PS
-
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
+import qualified Pate.SimState as PS
 
 import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
@@ -168,7 +167,7 @@ data PairGraph sym arch =
     -- | Other sorts of analysis errors not captured by the previous categories. These generally
     --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
     --   that may impact the soundness of the analysis.
-  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) (Set Text))
+  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError arch])
   }
 
 ppProgramDomains ::
@@ -183,9 +182,9 @@ ppProgramDomains ::
 ppProgramDomains ppPred gr =
   vcat
   [ vcat [ pretty pPair
-         , PS.viewSpecBody ad $ \ad' -> indent 4 (PAD.ppAbstractDomain ppPred ad')
+         , PS.viewSpecBody adSpec $ \ad -> PAD.ppAbstractDomain ppPred ad
          ]
-  | (pPair, ad) <- Map.toList (pairGraphDomains gr)
+  | (pPair, adSpec) <- Map.toList (pairGraphDomains gr)
   ]
 
 
@@ -260,12 +259,12 @@ considerDesyncEvent gr bPair action =
 recordMiscAnalysisError ::
   PairGraph sym arch ->
   GraphNode arch ->
-  Text ->
+  PEE.EquivalenceError arch ->
   PairGraph sym arch
-recordMiscAnalysisError gr nd msg =
+recordMiscAnalysisError gr nd er =
   let m = Map.alter f nd (pairGraphMiscAnalysisErrors gr)
-      f Nothing  = Just (Set.singleton msg)
-      f (Just s) = Just (Set.insert msg s)
+      f Nothing  = Just [er]
+      f (Just s) = Just (er:s)
    in gr{ pairGraphMiscAnalysisErrors = m }
 
 

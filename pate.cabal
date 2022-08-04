@@ -109,6 +109,7 @@ library
                        Pate.Hints.CSV,
                        Pate.Hints.JSON,
                        Pate.Hints.DWARF,
+                       Pate.Location,
                        Pate.Monad,
                        Pate.Monad.Context,
                        Pate.Monad.Environment,
