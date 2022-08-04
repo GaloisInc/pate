@@ -27,8 +27,7 @@ module Pate.Equivalence.MemoryDomain (
   , dropFalseCells
   ) where
 
-import           Control.Monad ( forM, join )
-import qualified Data.Map as M
+import           Control.Monad ( forM )
 import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some ( Some(..) )
@@ -44,9 +43,7 @@ import qualified Data.Macaw.CFG as MM
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Parallel as Par
 import qualified Pate.Location as PL
-import qualified What4.ExprHelpers as WEH
 import qualified What4.PredMap as WPM
 
 ---------------------------------------------

@@ -20,7 +20,7 @@ main = do
             [ "stack-struct", "unequal/stack-struct"
             ]
         , testExpectSelfEquivalenceFailure =
-            [ "stack-struct"
+            [
             ]
         -- TODO: we should define a section name here and read its address
         -- from the ELF

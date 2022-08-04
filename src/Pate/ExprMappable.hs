@@ -27,7 +27,6 @@ import           Control.Monad.Trans.Class ( lift )
 import           Data.Functor.Const
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Context as Ctx
-import           Data.Parameterized.HasRepr ( typeRepr )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Types as CT

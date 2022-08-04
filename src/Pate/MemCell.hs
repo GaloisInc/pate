@@ -23,14 +23,8 @@ module Pate.MemCell (
   , writeMemCell
   ) where
 
-import           Control.Monad ( foldM, forM )
-import qualified Control.Monad.IO.Class as IO
-
-import           Data.Maybe (catMaybes)
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
-import qualified Data.Map.Strict as Map
-import qualified Data.Map.Merge.Strict as MapM
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PNR
@@ -89,79 +83,6 @@ instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
 -- described memory is contained in the 'Pate.Equivalence.MemoryDomain'.
 type MemCellPred sym arch (k :: WPM.PredOpK) = WPM.PredMap sym (Some (MemCell sym arch)) k
 
-{-
-traverseWithCell ::
-  forall sym arch k m.
-  Monad m =>
-  WI.IsExprBuilder sym =>
-  MemCellPred sym arch k ->
-  (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (WI.Pred sym)) ->
-  m (MemCellPred sym arch k)
-traverseWithCell (MemCellPred memPred) f =
-  MemCellPred <$> WEH.traversePredMap memPred (\(Some cell@MemCell{}) p -> f cell p)
-
-
--- | Traverse a 'MemCellPred', optionally dropping elements instead of updating them.
-witherCell ::
-  forall sym arch k m.
-  IO.MonadIO m =>
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  MemCellPred sym arch k ->
-  (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (Maybe (MemCell sym arch w, WI.Pred sym))) ->
-  m (MemCellPred sym arch k)
-witherCell sym (MemCellPred memPred)  f = do
-  es <- fmap catMaybes $ forM (WEH.predMapToList memPred) $ \(Some (cell@MemCell{}), p) -> do
-    f cell p >>= \case
-      Just (cell', p') -> return $ Just (Some cell', p')
-      Nothing -> return Nothing
-  IO.liftIO $ predFromList sym (WEH.predMapRepr memPred) es
-
-predFromList ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  WEH.PredMergeRepr k ->
-  [(Some (MemCell sym arch), WI.Pred sym)] ->
-  IO (MemCellPred sym arch k)
-predFromList sym r l = MemCellPred <$> WEH.predMapFromList sym r l
-
-predToList ::
-  MemCellPred sym arch k ->
-  [(Some (MemCell sym arch), WI.Pred sym)]
-predToList (MemCellPred cells) = WEH.predMapToList cells
-
--- | Drop entries from the map which are concretely false.
-dropFalseCells ::
-  forall sym arch k.
-  WI.IsExprBuilder sym =>
-  MemCellPred sym arch k ->
-  MemCellPred sym arch k
-dropFalseCells (MemCellPred cells) = MemCellPred $ WEH.dropUnit cells
-
-mergeMemCellPred ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  MemCellPred sym arch k ->
-  MemCellPred sym arch k ->
-  IO (MemCellPred sym arch k)
-mergeMemCellPred sym (MemCellPred cells1) (MemCellPred cells2) = fmap MemCellPred $
-  WEH.mergePredMaps sym cells1 cells2
-
-muxMemCellPred ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  WI.Pred sym ->
-  MemCellPred sym arch k ->
-  MemCellPred sym arch k ->
-  IO (MemCellPred sym arch k)
-muxMemCellPred sym p (MemCellPred cellsT) (MemCellPred cellsF) =
-  fmap MemCellPred $ WEH.muxPredMaps sym p cellsT cellsF
--}
-
 -- | Check if a 'MemCell' is in the given 'MemCellPred'. This is true
 -- if and only if:
 -- 1) The given cell is semantically equivalent to a cell in the 'MemCellPred'
@@ -170,7 +91,7 @@ muxMemCellPred sym p (MemCellPred cellsT) (MemCellPred cellsF) =
 -- (i.e. the 'w' bytes starting from the base address). The exact cell must be
 -- present in the 'MemCellPred' for the result of this function to be true.
 inMemCellPred ::
-  forall sym arch w k.
+  forall sym arch w.
   WI.IsExprBuilder sym =>
   PC.OrdF (WI.SymExpr sym) =>
   sym ->
