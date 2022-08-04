@@ -268,13 +268,13 @@ getSatIO = withValid $ do
 -- excluding conditions which are necessarily true).
 getPathCondition ::
   forall sym arch v.
-  PE.StateCondition sym arch v ->
+  PE.StatePostCondition sym arch v ->
   PS.SimOutput sym arch v PB.Original ->
   PS.SimOutput sym arch v PB.Patched ->
   SymGroundEvalFn sym ->
   EquivM sym arch (W4.Pred sym)
 getPathCondition stCond outO outP fn = withSym $ \sym -> do
-  regCond <- getRegPathCondition (PE.stRegCond stCond) fn
+  regCond <- getRegPathCondition (PE.stRegPostCond stCond) fn
   withAssumption regCond $ do
     memOCond <- getGenPathCondition fn (PS.simOutMem outO)
     withAssumption memOCond $ do

@@ -31,11 +31,9 @@ Definitions for equality over crucible input and output states.
 
 module Pate.Equivalence
   ( EquivalenceStatus(..)
-  , MemRegionEquality(..)
   , getPostdomain
   , getPredomain
   , impliesPredomain
-  , memDomPre
   , eqDomPost
   , resolveCellEquiv
   , resolveCellEquivMem
@@ -44,7 +42,8 @@ module Pate.Equivalence
   , EquivContext(..)
   , MemoryCondition(..)
   , RegisterCondition(..)
-  , StateCondition(..)
+  , StatePreCondition(..)
+  , StatePostCondition(..)
   , preCondAssumption
   , postCondPredicate
   , memPreCondToPred
@@ -76,6 +75,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
+import qualified What4.PredMap as WPM
 
 data EquivalenceStatus =
     Equivalent
@@ -177,7 +177,7 @@ getPredomain ::
   SimBundle sym arch v ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
-  IO (StateCondition sym arch v)
+  IO (StatePreCondition sym arch v)
 getPredomain sym bundle eqCtx eqDom =
   eqDomPre sym (simInO bundle) (simInP bundle) eqCtx eqDom
 
@@ -194,8 +194,8 @@ impliesPredomain ::
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)  
 impliesPredomain sym inO inP eqCtx domAsm domConcl = do
-  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondAssumption sym inO inP >>= getAssumedPred sym
-  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondAssumption sym inO inP >>= getAssumedPred sym
+  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondAssumption sym inO inP eqCtx >>= getAssumedPred sym
+  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondAssumption sym inO inP eqCtx >>= getAssumedPred sym
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate into a structured precondition.
@@ -214,7 +214,7 @@ getPostdomain ::
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
-  IO (StateCondition sym arch v)
+  IO (StatePostCondition sym arch v)
 getPostdomain sym bundle eqCtx domPre domPost =
   eqDomPost sym (simOutO bundle) (simOutP bundle) eqCtx domPre domPost
 
@@ -228,7 +228,7 @@ memPostCondToPred ::
   MemoryCondition sym arch ->
   IO (W4.Pred sym)
 memPostCondToPred sym memCond = do
-  let preds = map snd $ PEM.toList $ memCondDomain memCond
+  let preds = map snd $ WPM.toList $ memCondPred memCond
   foldM (W4.andPred sym) (W4.truePred sym) preds
 
 -- | Compute a structured 'MemoryCondition' that is true iff the output states are equal according to
@@ -253,8 +253,10 @@ memDomPost sym memEqRegion outO outP domPre domPost = do
   footO <- MT.traceFootprint sym memO
   footP <- MT.traceFootprint sym memP
   let foot = S.union footO footP
-  footCells <- PEM.excludeFootPrints sym (S.filter (MT.isDir MT.Write) foot) domPre
-  MemoryCondition <$> PEM.traverseWithCell footCells resolveCell <*> pure memEqRegion
+  footCells <- PEM.toList <$> PEM.excludeFootPrints sym (S.filter (MT.isDir MT.Write) foot) domPre
+  condPredList <- mapM (\(Some cell, p) -> resolveCell cell p >>= \p' -> return (Some cell, p')) footCells
+  condPred <- WPM.fromList sym WPM.PredConjRepr condPredList
+  return $ MemoryCondition condPred
   where
     stO = simOutState outO
     stP = simOutState outP
@@ -340,21 +342,14 @@ resolveCellEquivStack sym (EquivContext _ stackRegion) stO stP cell cond =
 
 -- | Structurally equivalent to a 'PEM.MemoryDomain', however the predicates
 -- relate to equality on the given cells.
--- Note in the case of a precondition, this isn't quite true,
--- since there is not a pointwise assertion for equality. Instead the predicate
--- is simply the condition under which that cell should be excluded from the
--- assumed initial equality ( see 'memDomPre' and 'memPreCondToPred' )
 data MemoryCondition sym arch = MemoryCondition
-  { memCondDomain :: PEM.MemoryDomain sym arch
-    -- | the region equality used to derive the predicates in the domain
-    -- this is needed to derive the final predicate
-  , memCondRegEq :: MemRegionEquality sym arch
+  { memCondPred :: PMC.MemCellPred sym arch WPM.PredConjT
   }
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable sym arch (MemoryCondition sym arch) where
   traverseLocation sym mcond f = do
-    dom' <- PL.traverseLocation sym (memCondDomain mcond) f
-    return $ mcond { memCondDomain = dom' }
+    dom' <- PL.traverseLocation sym (memCondPred mcond) f
+    return $ mcond { memCondPred = dom' }
 
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
@@ -366,13 +361,13 @@ memPreCondToPred ::
   IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  MemRegionEquality sym arch ->
   SimInput sym arch v PBi.Original ->
   SimInput sym arch v PBi.Patched ->
-  MemoryCondition sym arch ->
+  PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
-memPreCondToPred sym inO inP memCond  = do
-  let cells = PEM.toList $ memCondDomain memCond
-  let memEqRegion = memCondRegEq memCond
+memPreCondToPred sym memEqRegion inO inP memDom  = do
+  let cells = PEM.toList memDom
   mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) cells
   getRegionEquality sym memEqRegion mem' (MT.memState memP)
   where  
@@ -394,22 +389,6 @@ memPreCondToPred sym inO inP memCond  = do
           --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
           --val <- W4.baseTypeIte sym cond fresh original
           PMC.writeMemCell sym cond mem cell fresh
-
--- | Compute a precondition that is sufficiently strong to imply equality
--- on the given domain
--- This predicate is meant to be *assumed* true.
--- Note that since there is not a pointwise assertion for equality, the
--- resulting condition is simply the condition under which that cell should be excluded from the
--- assumed initial equality
-memDomPre ::
-  forall sym arch.
-  IsSymInterface sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
-  sym ->
-  MemRegionEquality sym arch ->
-  PEM.MemoryDomain sym arch ->
-  IO (MemoryCondition sym arch)
-memDomPre _sym memEqRegion memPred = return $ MemoryCondition memPred memEqRegion
 
 -- | Compute a predicate that is true if the two memory states are exactly equal with respect to the given
 -- type of region equality
@@ -468,16 +447,24 @@ regCondToAsm ::
   IO (AssumptionSet sym v)
 regCondToAsm _sym regCond = return $ PRt.collapse (regCondPreds regCond)
 
--- | A structured pre or post condition
-data StateCondition sym arch v = StateCondition
-  { stRegCond :: RegisterCondition sym arch v
-  , stStackCond :: MemoryCondition sym arch
-  , stMemCond :: MemoryCondition sym arch
+-- | A structured pre condition
+data StatePreCondition sym arch v = StatePreCondition
+  { stRegPreCond :: RegisterCondition sym arch v
+  , stStackPreDom :: PEM.MemoryDomain sym arch
+  , stMemPreDom :: PEM.MemoryDomain sym arch
   }
 
-instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StateCondition sym arch v) where
-  traverseLocation sym (StateCondition a b c) f =
-    StateCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+-- | A structured post condition
+data StatePostCondition sym arch v = StatePostCondition
+  { stRegPostCond :: RegisterCondition sym arch v
+  , stStackPostCond :: MemoryCondition sym arch
+  , stMemPostCond :: MemoryCondition sym arch
+  }
+
+
+instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
+  traverseLocation sym (StatePostCondition a b c) f =
+    StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
 
 
 eqDomPre ::
@@ -488,18 +475,14 @@ eqDomPre ::
   SimInput sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
-  IO (StateCondition sym arch v)
-eqDomPre sym inO inP (EquivContext hdr stackRegion) eqDom  = do
+  IO (StatePreCondition sym arch v)
+eqDomPre sym inO inP (EquivContext hdr _stackRegion) eqDom  = do
   let
     stO = simInState inO
     stP = simInState inP
     
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
-  stacksEq <-
-    memDomPre sym (MemEqAtRegion stackRegion) (PED.eqDomainStackMemory eqDom)
-  memEq <-
-    memDomPre sym (MemEqOutsideRegion stackRegion) (PED.eqDomainGlobalMemory eqDom)
-  return $ StateCondition regsEq stacksEq memEq
+  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom)
 
 eqDomPost ::
   W4.IsSymExprBuilder sym =>
@@ -510,7 +493,7 @@ eqDomPost ::
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
-  IO (StateCondition sym arch v)
+  IO (StatePostCondition sym arch v)
 eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
   let
     stO = simOutState outO
@@ -519,7 +502,7 @@ eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
   stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
   memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
-  return $ StateCondition regsEq stacksEq memEq
+  return $ StatePostCondition regsEq stacksEq memEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
 -- a single 'AssumptionSet'.
@@ -529,12 +512,13 @@ preCondAssumption ::
   sym ->
   SimInput sym arch v PBi.Original ->
   SimInput sym arch v PBi.Patched ->
-  StateCondition sym arch v ->
+  EquivContext sym arch ->
+  StatePreCondition sym arch v ->
   IO (AssumptionSet sym v)
-preCondAssumption sym inO inP stCond = do
-  regsPred <- regCondToAsm sym (stRegCond stCond)
-  stackPred <- memPreCondToPred sym inO inP (stStackCond stCond)
-  memPred <- memPreCondToPred sym inO inP (stMemCond stCond)
+preCondAssumption sym inO inP (EquivContext _hdr stackRegion) stCond = do
+  regsPred <- regCondToAsm sym (stRegPreCond stCond)
+  stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) inO inP (stStackPreDom stCond)
+  memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) inO inP (stMemPreDom stCond)
   return $ (frameAssume memPred) <> (frameAssume stackPred) <> regsPred
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into
@@ -543,11 +527,11 @@ postCondPredicate ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  StateCondition sym arch v ->
+  StatePostCondition sym arch v ->
   IO (W4.Pred sym)
 postCondPredicate sym stCond = do
-  regsAsm <- regCondToAsm sym (stRegCond stCond)
+  regsAsm <- regCondToAsm sym (stRegPostCond stCond)
   regsPred <- getAssumedPred sym regsAsm
-  stackPred <- memPostCondToPred sym (stStackCond stCond)
-  memPred <- memPostCondToPred sym (stMemCond stCond)
+  stackPred <- memPostCondToPred sym (stStackPostCond stCond)
+  memPred <- memPostCondToPred sym (stMemPostCond stCond)
   W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred

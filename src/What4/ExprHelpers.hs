@@ -91,6 +91,8 @@ import qualified Data.HashTable.ST.Basic as H
 import           Data.Word (Word64)
 import           Data.Set (Set)
 import qualified Data.Set as S
+import qualified Data.Map as Map
+import qualified Data.Map.Merge.Strict as MapM
 import           Data.List ( foldl' )
 import           Data.List.NonEmpty (NonEmpty(..))
 import           Data.Proxy (Proxy(..))

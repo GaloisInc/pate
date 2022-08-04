@@ -13,7 +13,6 @@
 
 module Pate.Equivalence.MemoryDomain (
     MemoryDomain
-  , traverseWithCellPar
   , traverseWithCell
   , universal
   , toList
@@ -47,6 +46,8 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Parallel as Par
 import qualified Pate.Location as PL
+import qualified What4.ExprHelpers as WEH
+import qualified What4.PredMap as WPM
 
 ---------------------------------------------
 -- Memory domain
@@ -57,27 +58,19 @@ import qualified Pate.Location as PL
 -- covered by the given 'PMC.MemCellPred'.
 data MemoryDomain sym arch =
     MemoryDomain
-      { memDomainPred :: PMC.MemCellPred sym arch
+      { memDomainPred :: PMC.MemCellPred sym arch WPM.PredDisjT
       -- ^ The locations excluded by this 'MemoryDomain' 
       }
 
 -- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain'. Predicates which are concretely false are dropped from in resulting internal 'PMC.MemCellPred' (this has no effect on the interpretation of the domain). Supports parallel traversal if the 'future' parameter is instantiated to 'Par.Future'.
-traverseWithCellPar ::
-  forall sym arch m future.
-  Par.IsFuture m future =>
+traverseWithCell ::
+  forall sym arch m.
+  Monad m =>
   W4.IsExprBuilder sym =>
   MemoryDomain sym arch ->
-  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (future (W4.Pred sym))) ->
-  m (future (MemoryDomain sym arch))
-traverseWithCellPar memDom f = do
-  let
-    f' :: Some (PMC.MemCell sym arch) -> W4.Pred sym -> m (future (W4.Pred sym))
-    f' (Some cell@(PMC.MemCell{})) p = f cell p
-  let PMC.MemCellPred predMap = memDomainPred memDom
-  future_preds <- M.traverseWithKey f' predMap
-  Par.present $ do
-    preds <- PMC.MemCellPred <$> traverse Par.joinFuture future_preds
-    return $ MemoryDomain preds
+  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
+  m (MemoryDomain sym arch)
+traverseWithCell (MemoryDomain mp) f = MemoryDomain <$> WPM.traverse mp (\sc p -> PMC.viewCell sc $ \c -> f c p)
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationWitherable sym arch (MemoryDomain sym arch) where
   witherLocation sym (MemoryDomain mp) f = MemoryDomain <$> PL.witherLocation sym mp f
@@ -85,26 +78,18 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationWitherable 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable sym arch (MemoryDomain sym arch) where
   traverseLocation sym d f = PL.witherLocation sym d (\loc v -> Just <$> f loc v)
 
-      
-traverseWithCell ::
-  forall sym arch m.
-  Monad m =>
-  W4.IsExprBuilder sym =>
-  MemoryDomain sym arch ->
-  (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) -> m (MemoryDomain sym arch)
-traverseWithCell memDom f = join $ traverseWithCellPar memDom (\cell p -> return $ f cell p)
 
 -- | Drop cells in the inner 'PMC.MemCellPred' that are concretely false
 dropFalseCells ::
   W4.IsExprBuilder sym =>
   MemoryDomain sym arch ->
   MemoryDomain sym arch
-dropFalseCells dom = dom { memDomainPred = PMC.dropFalseCells (memDomainPred dom) }
+dropFalseCells dom = dom { memDomainPred = WPM.dropUnit (memDomainPred dom) }
 
 toList ::
   MemoryDomain sym arch ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)]
-toList memDom = PMC.predToList (memDomainPred memDom)
+toList memDom = WPM.toList (memDomainPred memDom)
 
 
 cells ::
@@ -123,7 +108,7 @@ fromList ::
   sym ->
   [(Some (PMC.MemCell sym arch), W4.Pred sym)] ->
   IO (MemoryDomain sym arch)
-fromList sym l = MemoryDomain <$> (PMC.predFromList sym l)
+fromList sym l = MemoryDomain <$> (WPM.fromList sym WPM.PredDisjRepr l)
 
 mux ::
   W4.IsExprBuilder sym =>
@@ -133,10 +118,8 @@ mux ::
   MemoryDomain sym arch ->
   MemoryDomain sym arch ->
   IO (MemoryDomain sym arch)
-mux sym p predT predF = case W4.asConstantPred p of
-  Just True -> return predT
-  Just False -> return predF
-  _ -> MemoryDomain <$> PMC.muxMemCellPred sym p (memDomainPred predT) (memDomainPred predF)
+mux sym p predT predF =
+  MemoryDomain <$> WPM.mux sym p (memDomainPred predT) (memDomainPred predF)
 
 -- | Intersect two domains, where a cell is excluded in the resulting domain if it
 -- is excluded in either of the source domains
@@ -148,7 +131,7 @@ intersect ::
   MemoryDomain sym arch ->
   IO (MemoryDomain sym arch)
 intersect sym predT predF =
-  MemoryDomain <$> PMC.mergeMemCellPred sym (memDomainPred predT) (memDomainPred predF)
+  MemoryDomain <$> WPM.merge sym (memDomainPred predT) (memDomainPred predF)
 
 
 -- | True if the given 'PMC.MemCell' is not excluded by the given 'MemoryDomain'.
@@ -181,7 +164,7 @@ mayContainCell sym memDom cell = do
 
 -- | Domain that covers all of memory (i.e. no cells are excluded)
 universal :: W4.IsExprBuilder sym => sym -> MemoryDomain sym arch
-universal _sym = MemoryDomain (PMC.MemCellPred M.empty)
+universal _sym = MemoryDomain (WPM.empty WPM.PredDisjRepr)
 
 -- | Derive a 'MemoryDomain' from a set of 'MT.MemFootprint'.
 -- The resulting domain includes all of memory, except for the given footprints.
@@ -209,7 +192,7 @@ excludeFootPrints ::
   IO (MemoryDomain sym arch)
 excludeFootPrints sym foots memDom = do
   memDom' <- fromFootPrints sym foots
-  memLocs' <- PMC.mergeMemCellPred sym (memDomainPred memDom) (memDomainPred memDom')
+  memLocs' <- WPM.merge sym (memDomainPred memDom) (memDomainPred memDom')
   return $ memDom { memDomainPred = memLocs' }
 
 instance PEM.ExprMappable sym (MemoryDomain sym arch) where
