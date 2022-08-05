@@ -439,15 +439,18 @@ withAssumptionSet ::
   EquivM sym arch f
 withAssumptionSet asm f = withSym $ \sym -> do
   curAsm <- currentAsm
-  p <- PAS.toPred sym asm
-  CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
-    (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
-      st <- LCB.saveAssumptionState bak
-      frame <- LCB.pushAssumptionFrame bak
-      LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-      return (frame, st)
-    (f >>= \r -> validateAssumptions curAsm asm >> return r)
-      `finally` safePop frame st
+  p <- liftIO $ PAS.toPred sym asm
+  case PAS.isAssumedPred curAsm p of
+    True -> f
+    _ -> CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
+      (frame, st) <- withOnlineBackend $ \bak ->  do
+        st <- liftIO $ LCB.saveAssumptionState bak
+        frame <- liftIO $ LCB.pushAssumptionFrame bak
+        safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
+          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+        return (frame, st)
+      (f >>= \r -> validateAssumptions curAsm asm >> return r)
+        `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -518,18 +521,29 @@ withSatAssumption asm f = withSym $ \sym ->  do
     _ -> do
       curAsm <- currentAsm
       CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
-        (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
-          st <- LCB.saveAssumptionState bak
-          frame <- LCB.pushAssumptionFrame bak
-          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withSatAssumption" p)
-          return (frame, st)
-        (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
-          W4R.Sat{} -> Just <$> f
-          -- on an inconclusive result we can't safely return 'Nothing' since
-          -- that may unsoundly exclude viable paths
-          W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
-          W4R.Unsat{} -> return Nothing)
-            `finally` safePop frame st
+        mst <- withOnlineBackend $ \bak -> do
+          st <- liftIO $ LCB.saveAssumptionState bak
+          frame <- liftIO $  LCB.pushAssumptionFrame bak
+          catchError (safeIO (\_ -> PEE.AssumedFalse curAsm asm)
+            (do
+                LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+                return $ Just (frame, st)))
+            (\_ -> (liftIO $ LCB.popAssumptionFrame bak frame) >> return Nothing)
+        case mst of
+          Just (frame, st) ->
+            (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
+              W4R.Sat{} -> Just <$> f
+              -- on an inconclusive result we can't safely return 'Nothing' since
+              -- that may unsoundly exclude viable paths
+              W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
+              W4R.Unsat{} -> return Nothing)
+                `finally` safePop frame st
+          -- crucible failed to push the assumption, so we double check that
+          -- it is not satisfiable
+          Nothing -> goalSat "check assumptions" p $ \case
+            W4R.Sat{} -> throwHere $ PEE.InconclusiveSAT
+            W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
+            W4R.Unsat{} -> return Nothing
 
 --------------------------------------
 -- Sat helpers

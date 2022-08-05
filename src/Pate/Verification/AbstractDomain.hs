@@ -551,7 +551,7 @@ absDomainValsToPostCond sym eqCtx@(PE.EquivContext _hdr stackRegion) st absBlock
       IO (Some (PMC.MemCell sym arch), W4.Pred sym)
     mkCell cell (MemAbstractValue absVal) = do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
-      p <- PS.getAssumedPred sym =<<
+      p <- PAS.toPred sym =<<
         absDomainValToAsm sym eqCtx (PSR.ptrToEntry val) Nothing absVal
       return $ (Some cell, p)
 
