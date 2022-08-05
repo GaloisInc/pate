@@ -16,6 +16,7 @@ module Pate.Verification.Widening
   , WidenLocs(..)
   ) where
 
+import           Control.Lens ( (.~), (&) )
 import           Control.Monad (when, forM_, unless, filterM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
@@ -32,13 +33,16 @@ import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
+import qualified Data.Parameterized.Map as MapF
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import           What4.SatResult (SatResult(..))
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Macaw.Types as MT
 
+import           Pate.Panic
 import qualified Pate.Binary as PBi
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
@@ -337,6 +341,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
 data WidenKind =
     WidenValue -- ^ constant values disagree in the value domain
   | WidenEquality -- ^ values disagree between the original and patched binaries
+  deriving Show
 
 -- Result of attempting to widen.  Errors can occur for a couple of reasons:
 -- UNKNOWN results from solvers; running out of gas in the widening loop,
@@ -384,11 +389,13 @@ widenPostcondition bundle preD postD0 =
  where
    widenOnce ::
      Gas ->
+     WidenKind ->
+     Maybe (Some (PBi.WhichBinaryRepr)) ->
      WidenState sym arch v ->
      PL.Location sym arch l ->
      W4.Pred sym ->
      EquivM_ sym arch (WidenState sym arch v)
-   widenOnce (Gas i) prevState loc goal = case prevState of
+   widenOnce (Gas i) widenK mwb prevState loc goal = case prevState of
      Right NoWideningRequired -> return prevState
      Right (WideningError{}) -> return prevState
      _ -> startTimer $ withSym $ \sym -> do
@@ -411,13 +418,17 @@ widenPostcondition bundle preD postD0 =
            return prevState
          Unknown -> do
            emit PE.SolverError
-           _ <- emitError $ PEE.WideningError "UNKNOWN result evaluating postcondition"
+           _ <- emitError $ PEE.WideningError $ "UNKNOWN result evaluating postcondition: " ++ show widenK ++ " " ++ show (pretty loc)
            -- this is a recoverable error, since we can conservatively consider the location
            -- under analysis as inequivalent in the resulting domain
-           case loc of
-             PL.Cell c -> Right <$> widenCells [Some c] postD
-             PL.Register r -> Right <$> widenRegs [Some r] postD
-             _ -> return $ Right $ WideningError "UNKNOWN result evaluating postcondition" prevLocs postD
+
+           case widenK of
+             WidenValue | Just (Some wb) <- mwb -> Right <$> dropValueLoc wb loc postD
+             WidenEquality ->
+               case loc of
+                 PL.Cell c -> Right <$> widenCells [Some c] postD
+                 PL.Register r -> Right <$> widenRegs [Some r] postD
+             _ -> panic Verifier "widenPostcondition" [ "Unexpected widening case"]
          Sat evalFn -> do
            emit PE.SolverFailure
            if i <= 0 then
@@ -468,12 +479,16 @@ widenPostcondition bundle preD postD0 =
      EquivM sym arch (WidenResult sym arch v)
    widenLoop sym (Gas i) eqCtx postD mPrevRes =
      do
+        (valPostO, valPostP) <- liftIO $ PPa.forBinsC $ \get -> do
+          let
+            vals = get (PAD.absDomVals postD)
+            st = PS.simOutState $ get (PS.simOut bundle)
+          PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
+
+        res1 <- PL.foldLocation @sym @arch sym valPostO (Left postD) (widenOnce (Gas i) WidenValue (Just (Some PBi.OriginalRepr)))
+        res2 <- PL.foldLocation @sym @arch sym valPostP res1 (widenOnce (Gas i) WidenValue (Just (Some PBi.PatchedRepr)))
         eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
-        eqPost_vals <- liftIO $ PAD.absDomainToPostCond_vals sym eqCtx bundle preD postD
-
-        let widenChecks = (PL.LocationPredPair @sym @arch PL.NoLoc eqPost_vals, eqPost_eq)
-
-        res <- PL.foldLocation @sym @arch sym widenChecks (Left postD) (widenOnce (Gas i))
+        res <- PL.foldLocation @sym @arch sym eqPost_eq res2 (widenOnce (Gas i) WidenEquality Nothing)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -592,6 +607,25 @@ widenValues sym evalFn bundle postD = do
      getRange e = do
        g <- execGroundFn evalFn e
        return $ PAD.groundToAbsRange (W4.exprType e) g
+
+dropValueLoc ::
+  forall arch sym v l bin.
+  PBi.WhichBinaryRepr bin ->
+  PL.Location sym arch l ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenResult sym arch v)
+dropValueLoc wb loc postD = do
+  let
+    vals = PPa.getPair' wb (PAD.absDomVals postD)
+    v = case loc of
+      PL.Cell c -> vals { PAD.absMemVals = MapF.delete c (PAD.absMemVals vals) }
+      PL.Register r ->
+        vals { PAD.absRegVals = (PAD.absRegVals vals) & (MM.boundValue r) .~ (PAD.noAbsVal (MT.typeRepr r)) }
+    locs = case loc of
+      PL.Cell c -> WidenLocs Set.empty (Set.singleton (Some c))
+      PL.Register r -> WidenLocs (Set.singleton (Some r)) Set.empty
+    vals' = PPa.setPair wb v (PAD.absDomVals postD)
+  return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 
 widenCells ::
   [Some (PMc.MemCell sym arch)] ->

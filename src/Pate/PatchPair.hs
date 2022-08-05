@@ -28,6 +28,7 @@ module Pate.PatchPair (
   , forBinsC
   , catBins
   , getPair'
+  , setPair
   , matchEquatedAddress
   ) where
 
@@ -50,6 +51,11 @@ data PatchPair (tp :: PB.WhichBinary -> DK.Type) = PatchPair
 getPair' :: PB.WhichBinaryRepr bin -> PatchPair tp -> tp bin
 getPair' PB.OriginalRepr pPair = pOriginal pPair
 getPair' PB.PatchedRepr pPair = pPatched pPair
+
+
+setPair :: PB.WhichBinaryRepr bin -> tp bin -> PatchPair tp -> PatchPair tp
+setPair PB.OriginalRepr a pPair = pPair { pOriginal = a }
+setPair PB.PatchedRepr a pPair = pPair { pPatched = a }
 
 get :: forall bin tp. PB.KnownBinary bin => PatchPair tp -> tp bin
 get = getPair' knownRepr

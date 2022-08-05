@@ -108,6 +108,7 @@ isRecoverable :: InnerEquivalenceError arch -> Bool
 isRecoverable e = case e of
   InconsistentSimplificationResult{} -> True
   RescopingFailure{} -> True
+  WideningError{} -> True
   _ -> False
 
 data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>

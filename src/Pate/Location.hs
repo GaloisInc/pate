@@ -24,11 +24,14 @@ import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans.State ( StateT, get, put, execStateT )
 import           Control.Monad.Trans ( lift )
 
+import qualified Prettyprinter as PP
+
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Classes
 import           Data.Parameterized.HasRepr ( typeRepr )
 import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFG as MM
+
 
 import qualified Pate.PatchPair as PPa
 import qualified Pate.MemCell as PMC
@@ -41,24 +44,21 @@ import qualified What4.PredMap as WPM
 data LocK =
     RegK MT.Type
   | CellK Nat
-  | NoLocK
 
 
 data Location sym arch l where
   Register :: MM.ArchReg arch tp -> Location sym arch ('RegK tp)
   Cell :: 1 <= w => PMC.MemCell sym arch w -> Location sym arch ('CellK w)
-  -- | A location that does not correspond to any specific state element
-  -- FIXME: currently this is convenient for including additional predicates
-  -- during a location-based traversal, but it shouldn't be necessary once
-  -- all the necessary types are defined to be 'LocationTraversable'
-  NoLoc :: Location sym arch 'NoLocK
 
 instance PEM.ExprMappable sym (Location sym arch l) where
   mapExpr sym f loc = case loc of
     Register r -> return $ Register r
     Cell cell -> Cell <$> PEM.mapExpr sym f cell
-    NoLoc -> return NoLoc
 
+instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PP.Pretty (Location sym arch l) where
+  pretty loc = case loc of
+    Register r -> PP.pretty (showF r)
+    Cell c -> PMC.ppCell c
 
 -- TODO: this can be abstracted over 'W4.Pred'
 

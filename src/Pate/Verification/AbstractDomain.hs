@@ -27,9 +27,9 @@ module Pate.Verification.AbstractDomain
   , initAbsDomainVals
   , absDomainValsToPred
   , absDomainToPrecond
-  , absDomainToPostCond
-  , absDomainToPostCond_vals
+  , absDomainValsToPostCond
   , ppAbstractDomain
+  , noAbsVal
   ) where
 
 import qualified Prettyprinter as PP
@@ -79,6 +79,8 @@ import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.ExprMappable as PEM
 import           Pate.Panic
+
+import qualified What4.PredMap as WPM
 
 -- | Defining abstract domains which propagate forwards during strongest
 -- postcondition analysis.
@@ -511,6 +513,48 @@ absDomainValsToAsm sym eqCtx st absBlockSt vals = do
       frame' <- absDomainValToAsm sym eqCtx (PSR.ptrToEntry val) Nothing absVal
       return $ frame <> frame'
 
+absDomainValsToPostCond ::
+  forall sym arch v bin.
+  W4.IsSymExprBuilder sym =>
+  MapF.OrdF (W4.SymExpr sym) =>
+  MC.RegisterInfo (MC.ArchReg arch) =>
+  sym ->
+  PE.EquivContext sym arch ->
+  PS.SimState sym arch v bin ->
+  Maybe (MAS.AbsBlockState (MC.ArchReg arch)) {- ^ abstract block state according to macaw -} ->
+  AbstractDomainVals sym arch bin ->
+  IO (PE.StatePostCondition sym arch v)
+absDomainValsToPostCond sym eqCtx@(PE.EquivContext _hdr stackRegion) st absBlockSt vals = do
+  cells <- mapM (\(MapF.Pair cell v) -> mkCell cell v) (MapF.toList (absMemVals vals))
+  memCond' <- WPM.fromList sym WPM.PredConjRepr cells
+
+  stackCond <- fmap WPM.dropUnit $ WPM.traverse memCond' $ \(Some c) p -> do
+    let CLM.LLVMPointer cellRegion _ = PMC.cellPtr c
+    cond <- W4.natEq sym cellRegion stackRegion
+    W4.impliesPred sym cond p
+
+  memCond <- fmap WPM.dropUnit $ WPM.traverse memCond' $ \(Some c) p -> do
+    let CLM.LLVMPointer cellRegion _ = PMC.cellPtr c
+    cond <- W4.natEq sym cellRegion stackRegion >>= W4.notPred sym
+    W4.impliesPred sym cond p
+
+  regFrame <- PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \r val absVal -> do
+    mAbsVal <- case absBlockSt of
+      Just ast -> return $ Just ((ast ^. MAS.absRegState) ^. (MM.boundValue r))
+      Nothing -> return Nothing
+    Const <$> absDomainValToAsm sym eqCtx val mAbsVal absVal
+  return $ PE.StatePostCondition (PE.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond)
+  where
+    mkCell ::
+      PMC.MemCell sym arch w ->
+      MemAbstractValue sym w ->
+      IO (Some (PMC.MemCell sym arch), W4.Pred sym)
+    mkCell cell (MemAbstractValue absVal) = do
+      val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
+      p <- PS.getAssumedPred sym =<<
+        absDomainValToAsm sym eqCtx (PSR.ptrToEntry val) Nothing absVal
+      return $ (Some cell, p)
+
 -- | Construct a 'W4.Pred' asserting
 -- that the values in the given initial state
 -- ('PS.SimInput') are necessarily in the given abstract domain
@@ -554,49 +598,6 @@ absDomainToPrecond sym eqCtx bundle d = do
     return $ (predO <> predP)
   return $ (eqInputsPred <> valsPred)
 
--- | Construct a 'W4.Pred' asserting that the given
--- abstract domain holds in the post-state of the given
--- bundle: i.e. the resulting original and patched states are  equal
--- up to the equivalence domain, and known constraints on
--- values are satisfied.
--- This is intended to be proven to finally hold when verifying the given
--- 'PS.SimBundle'
-absDomainToPostCond ::
-  IsSymInterface sym =>
-  PA.ValidArch arch =>
-  sym ->
-  PE.EquivContext sym arch ->
-  PS.SimBundle sym arch v ->
-  AbstractDomain sym arch v {- ^ pre-domain for this slice -} ->
-  AbstractDomain sym arch v {- ^ target post-domain -} ->
-  IO (W4.Pred sym)
-absDomainToPostCond sym eqCtx bundle preDom d = do
-  eqOutputs <- PE.getPostdomain sym bundle eqCtx (absDomEq preDom) (absDomEq d)
-  eqOutputsPred <- PE.postCondPredicate sym eqOutputs
-  valsPred <- do
-    let PPa.PatchPair valsO valsP = absDomVals d
-    predO <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutO bundle) Nothing valsO
-    predP <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutP bundle) Nothing valsP
-    W4.andPred sym predO predP
-  W4.andPred sym eqOutputsPred valsPred
-
--- | Similar to 'absDomainToPostCond' but only asserts
--- that the post-state values agree with the value domain
--- (ignoring the equality domain in the given 'AbstractDomain')
-absDomainToPostCond_vals ::
-  IsSymInterface sym =>
-  PA.ValidArch arch =>
-  sym ->
-  PE.EquivContext sym arch ->
-  PS.SimBundle sym arch v ->
-  AbstractDomain sym arch v {- ^ pre-domain for this slice -} ->
-  AbstractDomain sym arch v {- ^ target post-domain -} ->
-  IO (W4.Pred sym)
-absDomainToPostCond_vals sym eqCtx bundle _preDom d = do
-  let PPa.PatchPair valsO valsP = absDomVals d
-  predO <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutO bundle) Nothing valsO
-  predP <- absDomainValsToPred sym eqCtx (PS.simOutState $ PS.simOutP bundle) Nothing valsP
-  W4.andPred sym predO predP
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
   mapExpr sym f (AbstractDomainVals regVals memVals) = do
