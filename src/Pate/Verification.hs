@@ -181,7 +181,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   mvar <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
-  undefops <- liftIO $ MT.mkUndefinedPtrOps sym
+  undefops <- liftIO $ MT.mkAnnotatedPtrOps sym
 
   -- PC values are assumed to be absolute
   pcRegion <- liftIO $ W4.natLit sym 0
