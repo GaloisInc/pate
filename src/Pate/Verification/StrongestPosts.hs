@@ -11,6 +11,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pate.Verification.StrongestPosts
   ( pairGraphComputeFixpoint
@@ -79,7 +80,7 @@ import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 
@@ -231,7 +232,7 @@ visitNode :: forall sym arch v.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 
-visitNode scope (GraphNode bPair) d gr0 = withPair bPair $ do
+visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ do
   let vars = PS.scopeVars scope
   validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
   validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
@@ -257,14 +258,14 @@ visitNode scope (GraphNode bPair) d gr0 = withPair bPair $ do
          traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
 
 
-         gr1 <- checkObservables bPair bundle d gr0
+         gr1 <- checkObservables node bundle d gr0
 
-         gr2 <- checkTotality bPair bundle d exitPairs gr1
+         gr2 <- checkTotality node bundle d exitPairs gr1
 
-         gr3 <- updateReturnNode scope bPair bundle d gr2
+         gr3 <- updateReturnNode scope node bundle d gr2
 
          -- Follow all the exit pairs we found
-         foldM (\x y -> followExit scope bundle bPair d x y) gr3 (zip [0 ..] exitPairs)
+         foldM (\x y -> followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
 
 
 visitNode scope (ReturnNode fPair) d gr0 =
@@ -277,7 +278,7 @@ visitNode scope (ReturnNode fPair) d gr0 =
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
    -- using the ordinary widening machinery.
 
-   processReturn gr ret = withPair ret $ do
+   processReturn gr node@(nodeBlocks -> ret) = withPair ret $ do
      let vars = PS.scopeVars scope
      validState <- PVV.validInitState (Just ret) (PS.simVarState (PPa.pOriginal vars)) (PS.simVarState (PPa.pPatched vars))
      withAssumptionSet validState $
@@ -286,7 +287,7 @@ visitNode scope (ReturnNode fPair) d gr0 =
             traceBundle bundle "Processing return edge"
     --        traceBundle bundle "== bundle asm =="
     --        traceBundle bundle (show (W4.printSymExpr asm))
-            widenAlongEdge scope bundle (ReturnNode fPair) d gr (GraphNode ret)
+            widenAlongEdge scope bundle (ReturnNode fPair) d gr (GraphNode node)
 
 
 -- | Construct a "dummy" simulation bundle that basically just
@@ -356,7 +357,7 @@ data ObservableCheckResult sym ptrW
   | ObservableCheckError String
 
 checkObservables :: forall sym arch v.
-  PPa.BlockPair arch ->
+  NodeEntry arch ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
@@ -609,7 +610,7 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
 
 
 checkTotality :: forall sym arch v.
-  PPa.BlockPair arch ->
+  NodeEntry arch ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
@@ -776,7 +777,7 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
 followExit ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   (Integer, PPa.PatchPair (PB.BlockTarget arch)) {- ^ next entry point -} ->
@@ -794,7 +795,7 @@ followExit scope bundle currBlock d gr (idx, pPair) =
 --  sim bundle might return.
 updateReturnNode ::
   PS.SimScope sym arch v ->
-  PPa.BlockPair arch ->
+  NodeEntry arch ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
@@ -819,7 +820,7 @@ maybeUpdate gr f = f >>= \case
 triageBlockTarget ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
@@ -863,7 +864,7 @@ triageBlockTarget scope bundle currBlock d gr (PPa.PatchPair blktO blktP) =
                         b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
                         liftIO $ W4.orPred sym j b
                 withAssumption p $
-                  handleJump scope bundle currBlock d gr pPair
+                  handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
 
            _ -> do traceBundle bundle "BlockExitMismatch"
                    throwHere $ PEE.BlockExitMismatch
@@ -906,7 +907,7 @@ findPLTSymbol blkO blkP =
 handleSyscall ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
@@ -921,7 +922,7 @@ handleSyscall _scope bundle _currBlock _d gr pPair pRetPair =
 handleInlineCallee ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
@@ -930,13 +931,12 @@ handleInlineCallee ::
 handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair =
   return gr -- TODO!
 
-
 -- | Record the return vector for this call, and then handle a
 --   jump to the entry point of the function.
 handleOrdinaryFunCall ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
@@ -945,10 +945,19 @@ handleOrdinaryFunCall ::
 handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
-       do let gr' = addReturnVector gr (PPa.PatchPair oFun pFun) pRetPair
+       do
+          -- augmenting this block with the its own calling context
+          currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
+            PCfg.AllSharedAbstractDomains -> return currBlock
+            PCfg.AllDistinctAbstractDomains -> return $ mkNodeEntry currBlock (nodeBlocks currBlock)
+          let
+            funNode = mkNodeReturn currBlock' (PPa.PatchPair oFun pFun)
+            returnSite = mkNodeEntry currBlock' pRetPair
+            callNode = mkNodeEntry currBlock' pPair
+            gr' = addReturnVector gr funNode returnSite
           matches <- PD.matchingExits bundle MCS.MacawBlockEndCall
           withAssumption matches $
-            handleJump scope bundle currBlock d gr' pPair
+            handleJump scope bundle currBlock d gr' callNode
      _ -> panic Verifier "handleOrdinaryFunCall"
               [ "Ordinary function call jumped to a location that is not a function start!"
               , show currBlock
@@ -959,7 +968,7 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
 handlePLTStub ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
@@ -976,31 +985,30 @@ handlePLTStub scope bundle currBlock d gr _pPair pRetPair stubSymbol =
      -- and only fall back on this default policy if no additional information can be found.
      -- Moreover, we should report this assumption about external functions as potentially leading
      -- to unsoundness.
-
-     handleJump scope bundle currBlock d gr pRetPair
+     handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pRetPair)
 
 
 handleReturn ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch ->
+  NodeEntry arch ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 handleReturn scope bundle currBlock d gr =
- do let fPair = TF.fmapF PB.blockFunctionEntry currBlock
-    widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode fPair)
+ do let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks currBlock)
+    widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode (mkNodeReturn currBlock fPair))
 
 handleJump ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  PPa.BlockPair arch {- ^ current entry point -} ->
+  NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
-  PPa.BlockPair arch {- ^ next entry point -} ->
+  NodeEntry arch {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleJump scope bundle currBlock d gr pPair =
-  widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode pPair)
+handleJump scope bundle currBlock d gr nextNode =
+  widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode nextNode)
 
 
 mkSimBundle ::

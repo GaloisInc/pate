@@ -65,7 +65,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases )
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 
@@ -81,18 +81,19 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
 makeFreshAbstractDomain scope bundle preDom from to = do
-  case from of
-    GraphNode{} -> startTimer $ do
+  case graphNodeCases from of
+    -- graph node
+    Left{} -> startTimer $ do
       initDom <- initialDomain
       vals <- getInitalAbsDomainVals bundle preDom
       return $ initDom { PAD.absDomVals = vals }
-    ReturnNode{} -> do
+    -- return node
+    Right{} -> do
       initDom <- initialDomain
       -- as a small optimization, we know that the return nodes leave the values
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
-
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
 --   and update the pair graph, if necessary.
