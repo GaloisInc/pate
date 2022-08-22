@@ -9,6 +9,7 @@ module Pate.Verification.PairGraph.Node (
   , CallingContext
   , graphNodeCases
   , mkNodeEntry
+  , addContext
   , mkNodeReturn
   , rootEntry
   , nodeBlocks
@@ -59,6 +60,9 @@ instance PA.ValidArch arch => Pretty (CallingContext arch) where
 
 rootEntry :: PPa.BlockPair arch -> NodeEntry arch
 rootEntry pPair = NodeEntry mempty pPair
+
+addContext :: PPa.BlockPair arch -> NodeEntry arch -> NodeEntry arch
+addContext newCtx (NodeEntry (CallingContext ctx) blks) = NodeEntry (CallingContext (newCtx:ctx)) blks
 
 mkNodeEntry :: NodeEntry arch -> PPa.BlockPair arch -> NodeEntry arch
 mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair

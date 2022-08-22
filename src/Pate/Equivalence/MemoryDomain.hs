@@ -67,7 +67,7 @@ traverseWithCell ::
   MemoryDomain sym arch ->
   (forall w. 1 <= w => PMC.MemCell sym arch w -> W4.Pred sym -> m (W4.Pred sym)) ->
   m (MemoryDomain sym arch)
-traverseWithCell (MemoryDomain mp) f = MemoryDomain <$> WPM.traverse mp (\sc p -> PMC.viewCell sc $ \c -> f c p)
+traverseWithCell (MemoryDomain mp) f = MemoryDomain <$> WPM.traverse mp (\(Some c) p -> PMC.viewCell c $ f c p)
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationWitherable sym arch (MemoryDomain sym arch) where
   witherLocation sym (MemoryDomain mp) f = MemoryDomain <$> PL.witherLocation sym mp f

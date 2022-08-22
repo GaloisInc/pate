@@ -14,6 +14,7 @@
 
 module Pate.MemCell (
     MemCell(..)
+  , bytesRepr
   , viewCell
   , ppCell
   , setMemCellRegion
@@ -54,8 +55,13 @@ data MemCell sym arch w where
     , cellEndian :: MM.Endianness
     } -> MemCell sym arch w
 
-viewCell :: Some (MemCell sym arch) -> (forall w. 1 <= w => MemCell sym arch w -> a) -> a
-viewCell (Some (mc@MemCell{})) f = f mc
+viewCell :: MemCell sym arch w -> ((1 <= w, 1 <= (8 WI.* w)) => a) -> a
+viewCell (mc@MemCell{}) f =
+  case PNR.leqMulPos (WI.knownNat @8) (cellWidth mc) of
+    PNR.LeqProof -> f
+
+bytesRepr :: MemCell sym arch w -> PNR.NatRepr (8 WI.* w)
+bytesRepr mc = WI.natMultiply (WI.knownNat @8) (cellWidth mc)
 
 instance PC.TestEquality (WI.SymExpr sym) => PC.TestEquality (MemCell sym arch) where
   testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2)

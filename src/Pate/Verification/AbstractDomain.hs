@@ -157,9 +157,9 @@ absRangeRepr r = case r of
 instance PP.Pretty (AbsRange tp) where
   pretty ab = case ab of
     AbsIntConstant i -> PP.pretty i
-    AbsBVConstant _ bv -> PP.pretty (show bv)
+    AbsBVConstant w bv -> W4C.ppConcrete (W4C.ConcreteBV w bv)
     AbsBoolConstant b -> PP.pretty b
-    AbsUnconstrained _ -> "<top>"
+    AbsUnconstrained _ -> "⊤"
 
 instance Show (AbsRange tp) where
   show ab = show (PP.pretty ab)
@@ -199,13 +199,13 @@ ppMacawAbstractValue :: MT.TypeRepr tp -> MacawAbstractValue sym tp -> PP.Doc a
 ppMacawAbstractValue repr v = case repr of
   MT.BVTypeRepr _w |
     MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs) <- v ->
-      PP.pretty regAbs PP.<+> "+" PP.<+> PP.pretty offsetAbs
+      PP.pretty regAbs PP.<> "+" PP.<> PP.pretty offsetAbs
   MT.BoolTypeRepr | MacawAbstractValue (Ctx.Empty Ctx.:> bAbs) <- v -> PP.pretty bAbs
   _ -> ""
 
 -- | An abstract value for a pointer, with a separate 'AbsRange' for the region and offset.
 data MemAbstractValue sym w where
-  MemAbstractValue :: (MacawAbstractValue sym (MT.BVType (8 W4.* w))) -> MemAbstractValue sym w
+  MemAbstractValue :: MacawAbstractValue sym (MT.BVType (8 W4.* w)) -> MemAbstractValue sym w
 
 
 -- | Mapping from locations to abstract values.
@@ -354,6 +354,14 @@ initAbsDomainVals sym eqCtx f stOut preVals = do
       PR.RegIP -> return $ noAbsVal (MT.typeRepr r)
       PR.RegSP -> return $ noAbsVal (MT.typeRepr r)
       PR.RegDedicated{} -> return $ noAbsVal (MT.typeRepr r)
+      -- for bitvector registers, we don't need to include them
+      -- if we don't have a constraint on their offset
+      PR.RegBV -> do
+        v <- getAbsVal sym f e
+        case MT.typeRepr r of
+          MT.BVTypeRepr _ |
+            MacawAbstractValue (Ctx.Empty Ctx.:> _ Ctx.:> AbsUnconstrained _) <- v -> return $ noAbsVal (MT.typeRepr r)
+          _ -> return v
       _ -> getAbsVal sym f e
 
 -- | Convert the abstract domain from an expression into an equivalent 'AbsRange'
@@ -625,11 +633,21 @@ ppAbstractDomainVals ::
   AbstractDomainVals sym arch bin ->
   PP.Doc a
 ppAbstractDomainVals d =
-  PP.vsep
-   [ PP.pretty s <> PP.line <> (PP.indent 2 (ppMacawAbstractValue (MT.typeRepr reg) v))
-   | MapF.Pair reg v <- MapF.toList (MM.regStateMap (absRegVals d))
-   , Just s <- [PA.fromRegisterDisplay $ PA.displayRegister reg]
-   ]
+  let
+    regs =
+      [ "== Registers ==" ] ++
+      [ PP.pretty s PP.<+> "-->" PP.<+> (ppMacawAbstractValue (MT.typeRepr reg) v)
+      | MapF.Pair reg v <- MapF.toList (MM.regStateMap (absRegVals d))
+      , Just s <- [PA.fromRegisterDisplay $ PA.displayRegister reg]
+      , False <- [isUnconstrained v]
+      ]
+    mem =
+      [ "== Memory ==" ] ++
+      [ PMC.viewCell cell $ PMC.ppCell cell PP.<+> "-->" PP.<+> (ppMacawAbstractValue (MT.BVTypeRepr (PMC.bytesRepr cell)) v)
+      | MapF.Pair (cell) (MemAbstractValue v) <- MapF.toList (absMemVals d)
+      , False <- [isUnconstrained v]
+      ]
+  in PP.vsep (regs ++ mem)
 
 ppAbstractDomain ::
   forall sym arch v a.

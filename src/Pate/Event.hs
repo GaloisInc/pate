@@ -76,7 +76,7 @@ data Event arch where
   ProofStarted :: BlocksPair arch -> PFI.SomeProofNonceExpr arch tp -> TM.NominalDiffTime -> Event arch
 
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
-  DiscoverBlockPair :: BlocksPair arch -> PB.BlockTarget arch PB.Original -> PB.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
+  DiscoverBlockPair :: BlocksPair arch -> PPa.PatchPair (PB.BlockTarget arch) -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch

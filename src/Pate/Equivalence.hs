@@ -490,7 +490,10 @@ eqDomPre sym inO inP (EquivContext hdr _stackRegion) eqDom  = do
   -- requiring that the number of allocations for each program always match
   -- this will cause a widening error if this isn't the case
   let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
-  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) maxRegionsEq
+  let stackBaseEq = case W4.asConstantPred (PER.registerInDomain sym MM.sp_reg (PED.eqDomainRegisters eqDom)) of
+        Just True -> exprBinding (unSE $ unSB $ simStackBase stO) (unSE $ unSB $ simStackBase stP)
+        _ -> mempty
+  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) (maxRegionsEq <> stackBaseEq)
 
 eqDomPost ::
   W4.IsSymExprBuilder sym =>

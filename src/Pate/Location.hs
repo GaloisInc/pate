@@ -131,7 +131,7 @@ class LocationTraversable sym arch f where
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
   LocationWitherable sym arch (PMC.MemCellPred sym arch k) where
-  witherLocation sym mp f = fmap WPM.dropUnit $ WPM.alter sym mp $ \sc p -> PMC.viewCell sc $ \c ->
+  witherLocation sym mp f = fmap WPM.dropUnit $ WPM.alter sym mp $ \(Some c) p -> PMC.viewCell c $
     f (Cell c) p >>= \case
       Just (Cell c', p') -> return $ (Some c', p')
       Nothing -> return $ (Some c, WPM.predOpUnit sym (typeRepr mp))

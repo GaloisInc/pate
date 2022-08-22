@@ -25,6 +25,7 @@ module Data.Macaw.CFGSlice
   , MacawBlockEndCase(..)
   , MacawBlockEndType
   , MacawBlockEnd(..)
+  , blockEndCaseEq
   , isBlockEndCase
   , blockEndCase
   , blockEndReturn
@@ -40,6 +41,7 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.Kind as Kind
 
 import qualified Data.Parameterized.Context as Ctx
+import           Data.Parameterized.Map ( Pair(..) )
 
 import           What4.Interface
 import           What4.Partial
@@ -126,15 +128,25 @@ assignBlockEnd archFns blendVar stmt = MSB.crucGenArchConstraints archFns $ do
   blend' <- blockEndAtom archFns blend
   MSB.addStmt $ CR.WriteGlobal blendVar blend'
 
+blockEndCaseEq :: IsSymInterface sym
+               => Proxy arch
+               -> sym
+               -> C.RegValue sym (MacawBlockEndType arch)
+               -> MacawBlockEndCase
+               -> IO (Pair (SymExpr sym) (SymExpr sym))
+blockEndCaseEq _ sym (_ Ctx.:> C.RV blendC' Ctx.:> _) blendC = do
+  blendC'' <- bvLit sym knownNat (BV.mkBV knownNat (toInteger $ fromEnum blendC))
+  return $ Pair blendC' blendC''
+
 isBlockEndCase :: IsSymInterface sym
                => Proxy arch
                -> sym
                -> C.RegValue sym (MacawBlockEndType arch)
                -> MacawBlockEndCase
                -> IO (Pred sym)
-isBlockEndCase _ sym (_ Ctx.:> C.RV blendC' Ctx.:> _) blendC = do
-  blendC'' <- bvLit sym knownNat (BV.mkBV knownNat (toInteger $ fromEnum blendC))
-  isEq sym blendC' blendC''
+isBlockEndCase arch sym blendC' blendC = do
+  Pair e1 e2 <- blockEndCaseEq arch sym blendC' blendC
+  isEq sym e1 e2
 
 blockEndCase :: IsSymInterface sym
              => Proxy arch

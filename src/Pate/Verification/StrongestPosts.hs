@@ -80,7 +80,7 @@ import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, mkNodeEntry, mkNodeReturn, nodeBlocks, nodeFuns, addContext )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 
@@ -649,8 +649,7 @@ doCheckTotality bundle _preD exits =
     do
        -- compute the condition that leads to each of the computed
        -- exit pairs
-       cases <- forM exits $ \(PPa.PatchPair oBlkt pBlkt) ->
-                  PD.matchesBlockTarget bundle oBlkt pBlkt
+       cases <- forM exits (\blkts -> PD.matchesBlockTarget bundle blkts >>= PS.getAssumedPred sym)
 
        -- TODO, I really don't understand this abort case stuff, but it was copied
        -- from the triple verifier.
@@ -802,7 +801,7 @@ updateReturnNode ::
 updateReturnNode scope bPair bundle preD gr = do
   isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
   maybeUpdate gr $ withSatAssumption (PAS.fromPred isReturn) $ do
-    framesMatch <- PD.associateFrames bundle MCS.MacawBlockEndReturn
+    framesMatch <- PD.associateFrames bundle MCS.MacawBlockEndReturn False
     withAssumptionSet framesMatch $
       handleReturn scope bundle bPair preD gr
 
@@ -824,16 +823,17 @@ triageBlockTarget ::
   PairGraph sym arch ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
-triageBlockTarget scope bundle currBlock d gr (PPa.PatchPair blktO blktP) =
+triageBlockTarget scope bundle currBlock d gr blkts@(PPa.PatchPair blktO blktP) =
   do let
         blkO = PB.targetCall blktO
         blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
 
+     isPLT <- findPLTSymbol blkO blkP
      traceBundle bundle ("  targetCall: " ++ show blkO) 
      matches <- PD.matchesBlockTarget bundle blktO blktP
      maybeUpdate gr $ withSatAssumption (PAS.fromPred matches) $ do
-       framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO)
+       framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO) (isJust isPLT)
        withAssumptionSet framesMatch $
          case (PB.targetReturn blktO, PB.targetReturn blktP) of
            (Just blkRetO, Just blkRetP) ->
@@ -850,7 +850,6 @@ triageBlockTarget scope bundle currBlock d gr (PPa.PatchPair blktO blktP) =
                 ctx <- view PME.envCtxL
                 let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
-                isPLT <- findPLTSymbol blkO blkP
 
                 if | isSyscall -> handleSyscall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
                    | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
@@ -945,13 +944,13 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
        do
-          -- augmenting this block with the its own calling context
+          -- augmenting this block with the return point as its calling context
           currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
             PCfg.AllSharedAbstractDomains -> return currBlock
-            PCfg.AllDistinctAbstractDomains -> return $ mkNodeEntry currBlock (nodeBlocks currBlock)
+            PCfg.AllDistinctAbstractDomains -> return $ addContext pRetPair currBlock
           let
             funNode = mkNodeReturn currBlock' (PPa.PatchPair oFun pFun)
-            returnSite = mkNodeEntry currBlock' pRetPair
+            returnSite = mkNodeEntry currBlock pRetPair
             callNode = mkNodeEntry currBlock' pPair
             gr' = addReturnVector gr funNode returnSite
           matches <- PD.matchingExits bundle MCS.MacawBlockEndCall
