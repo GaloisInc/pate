@@ -649,7 +649,7 @@ doCheckTotality bundle _preD exits =
     do
        -- compute the condition that leads to each of the computed
        -- exit pairs
-       cases <- forM exits (\blkts -> PD.matchesBlockTarget bundle blkts >>= PS.getAssumedPred sym)
+       cases <- forM exits (\blkts -> PD.matchesBlockTarget bundle blkts >>= PAS.toPred sym)
 
        -- TODO, I really don't understand this abort case stuff, but it was copied
        -- from the triple verifier.
@@ -831,8 +831,8 @@ triageBlockTarget scope bundle currBlock d gr blkts@(PPa.PatchPair blktO blktP) 
 
      isPLT <- findPLTSymbol blkO blkP
      traceBundle bundle ("  targetCall: " ++ show blkO) 
-     matches <- PD.matchesBlockTarget bundle blktO blktP
-     maybeUpdate gr $ withSatAssumption (PAS.fromPred matches) $ do
+     matches <- PD.matchesBlockTarget bundle blkts
+     maybeUpdate gr $ withSatAssumption matches $ do
        framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO) (isJust isPLT)
        withAssumptionSet framesMatch $
          case (PB.targetReturn blktO, PB.targetReturn blktP) of

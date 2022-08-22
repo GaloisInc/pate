@@ -116,7 +116,7 @@ discoverPairs bundle = withSym $ \sym -> do
 
   result <- forM newCalls $ \blkts -> startTimer $ do
     let emit r = emitEvent (PE.DiscoverBlockPair blocks blkts r)
-    matches <- (matchesBlockTarget bundle blkts >>= PSS.getAssumedPred sym)
+    matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
     case WI.asConstantPred matches of
       Just True -> do
         emit PE.Reachable
@@ -219,7 +219,7 @@ matchesBlockTarget ::
   forall sym arch v.
   SimBundle sym arch v ->
   PPa.PatchPair (PB.BlockTarget arch) ->
-  EquivM sym arch (PSS.AssumptionSet sym v)
+  EquivM sym arch (PAS.AssumptionSet sym)
 matchesBlockTarget bundle blktPair = withSym $ \sym -> do
   -- true when the resulting IPs call the given block targets
   PPa.catBins $ \get -> do
@@ -231,12 +231,12 @@ matchesBlockTarget bundle blktPair = withSym $ \sym -> do
       ret = MCS.blockEndReturn (Proxy @arch) endCase
 
     callPtr <- concreteToLLVM (PB.targetCall blkt)
-    let eqCall = PSS.bindPointers (PSR.macawRegValue ip) callPtr
+    let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
 
     targetRet <- targetReturnPtr blkt
-    eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PSS.bindPointers p1 p2) ret targetRet
+    eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
     MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
-    let eqCase = PSS.exprBinding e1 e2
+    let eqCase = PAS.exprBinding e1 e2
     return $ eqCall <> eqRet <> eqCase
 
 
@@ -291,10 +291,10 @@ associateFrames bundle exitCase isPLT = PPa.catBins $ \get -> do
 liftPartialRel ::
   CB.IsSymInterface sym =>
   sym ->
-  (a -> a -> IO (PSS.AssumptionSet sym v)) ->
+  (a -> a -> IO (PAS.AssumptionSet sym)) ->
   WP.PartExpr (WI.Pred sym) a ->
   WP.PartExpr (WI.Pred sym) a ->
-  IO (PSS.AssumptionSet sym v)
+  IO (PAS.AssumptionSet sym)
 liftPartialRel sym rel (WP.PE p1 e1) (WP.PE p2 e2) = do
   bothConds <- WI.andPred sym p1 p2
   rel' <- rel e1 e2
@@ -302,12 +302,12 @@ liftPartialRel sym rel (WP.PE p1 e1) (WP.PE p2 e2) = do
     Just True -> return rel'
     Just False -> return mempty
     Nothing -> do
-      relPred <- PSS.getAssumedPred sym rel'
-      justCase <- PSS.frameAssume <$> WI.impliesPred sym bothConds relPred
-      return $ (PSS.exprBinding p1 p2) <> justCase
-liftPartialRel sym _ WP.Unassigned WP.Unassigned = return mempty
-liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = PSS.frameAssume <$> WI.notPred sym p2
-liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = PSS.frameAssume <$> WI.notPred sym p1
+      relPred <- PAS.toPred sym rel'
+      justCase <- PAS.fromPred <$> WI.impliesPred sym bothConds relPred
+      return $ (PAS.exprBinding p1 p2) <> justCase
+liftPartialRel _sym _ WP.Unassigned WP.Unassigned = return mempty
+liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = PAS.fromPred <$> WI.notPred sym p2
+liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = PAS.fromPred <$> WI.notPred sym p1
 
 targetReturnPtr ::
   PB.BlockTarget arch bin ->
