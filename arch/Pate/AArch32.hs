@@ -187,7 +187,8 @@ argumentMapping =
 stubOverrides :: PA.ArchStubOverrides SA.AArch32
 stubOverrides = PA.ArchStubOverrides $
   Map.fromList
-    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0) ]
+    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
+    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
   where
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
 

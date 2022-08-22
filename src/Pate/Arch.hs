@@ -18,6 +18,7 @@ module Pate.Arch (
   StubOverride(..),
   ArchStubOverrides(..),
   mkMallocOverride,
+  mkClockOverride,
   lookupStubOverride
   ) where
 
@@ -170,12 +171,26 @@ mkMallocOverride _rLen rOut = StubOverride $ \sym st -> do
   let mr = PS.simMaxRegion st
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   mr_nat <- W4.integerToNat sym (PS.unSE mr)
-  zero <- W4.bvLit sym w (BVS.mkBV w 0)
+  zero <- W4.bvLit sym w (BVS.mkBV w 2)
   let fresh_ptr = PSR.ptrToEntry (CLM.LLVMPointer mr_nat zero)
   mr_inc <- PS.forScopedExpr sym mr $ \sym' mr' -> do
     one <- W4.intLit sym' 1
     W4.intAdd sym' mr' one
   return (st { PS.simMaxRegion = mr_inc, PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
+
+mkClockOverride ::
+  forall arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkClockOverride rOut = StubOverride $ \sym st -> do
+  let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  zero_bv <- W4.bvLit sym w (BVS.mkBV w 0)
+  zero_nat <- W4.natLit sym 0
+  let zero_ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat zero_bv)
+  return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ zero_ptr) })
+
 
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier
