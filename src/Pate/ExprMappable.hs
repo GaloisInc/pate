@@ -35,6 +35,7 @@ import qualified What4.Partial as WP
 import qualified What4.Expr.Builder as W4B
 
 import qualified What4.ExprHelpers as WEH
+import qualified What4.PredMap as WPM
 import qualified Pate.Parallel as Par
 
 -- Expression binding
@@ -128,3 +129,6 @@ newtype SkipTransformation a = SkipTransformation { unSkip :: a }
 
 instance ExprMappable sym (SkipTransformation a) where
   mapExpr _ _ = return
+
+instance (Ord f, ExprMappable sym f) => ExprMappable sym (WPM.PredMap sym f k) where
+  mapExpr sym f pm = WPM.alter sym pm (\v p -> (,) <$> mapExpr sym f v <*> f p)

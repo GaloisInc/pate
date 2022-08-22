@@ -10,32 +10,21 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
+{-# LANGUAGE KindSignatures   #-}
 
 module Pate.MemCell (
     MemCell(..)
+  , viewCell
   , ppCell
   , setMemCellRegion
-  , MemCellPred(..)
-  , traverseWithCell
-  , witherCell
-  , mergeMemCellPred
-  , muxMemCellPred
+  , MemCellPred
   , inMemCellPred
-  , dropFalseCells
   , readMemCell
   , writeMemCell
-  , predFromList
-  , predToList
   ) where
 
-import           Control.Monad ( foldM, forM )
-import qualified Control.Monad.IO.Class as IO
-
-import           Data.Maybe (catMaybes)
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.Memory as MM
-import qualified Data.Map.Strict as Map
-import qualified Data.Map.Merge.Strict as MapM
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PNR
@@ -49,6 +38,7 @@ import qualified Prettyprinter as PP
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
 import qualified What4.ExprHelpers as WEH
+import qualified What4.PredMap as WPM
 
 -- | A pointer with an attached width, representing the size of the "cell" in bytes.
 -- It represents a discrete read or write, used as the key when forming a 'Pate.Equivalence.MemPred'
@@ -63,6 +53,9 @@ data MemCell sym arch w where
     , cellWidth :: PNR.NatRepr w
     , cellEndian :: MM.Endianness
     } -> MemCell sym arch w
+
+viewCell :: Some (MemCell sym arch) -> (forall w. 1 <= w => MemCell sym arch w -> a) -> a
+viewCell (Some (mc@MemCell{})) f = f mc
 
 instance PC.TestEquality (WI.SymExpr sym) => PC.TestEquality (MemCell sym arch) where
   testEquality (MemCell (CLM.LLVMPointer reg1 off1) sz1 end1) (MemCell (CLM.LLVMPointer reg2 off2) sz2 end2)
@@ -88,102 +81,7 @@ instance PC.OrdF (WI.SymExpr sym) => Ord (MemCell sym arch w) where
 
 -- | Each 'MemCell' is associated with the predicate that says whether or not the
 -- described memory is contained in the 'Pate.Equivalence.MemoryDomain'.
-newtype MemCellPred sym arch = MemCellPred (Map.Map (Some (MemCell sym arch)) (WI.Pred sym))
-
-traverseWithCell ::
-  forall sym arch m.
-  Monad m =>
-  WI.IsExprBuilder sym =>
-  MemCellPred sym arch ->
-  (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (WI.Pred sym)) ->
-  m (MemCellPred sym arch)
-traverseWithCell (MemCellPred memPred) f =
-  MemCellPred <$> Map.traverseWithKey (\(Some cell@MemCell{}) p -> f cell p) memPred
-
-
--- | Traverse a 'MemCellPred', optionally dropping elements instead of updating them.
-witherCell ::
-  forall sym arch m.
-  IO.MonadIO m =>
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  MemCellPred sym arch ->
-  (forall w. 1 <= w => MemCell sym arch w -> WI.Pred sym -> m (Maybe (MemCell sym arch w, WI.Pred sym))) ->
-  m (MemCellPred sym arch)
-witherCell sym (MemCellPred memPred)  f = do
-  es <- fmap catMaybes $ forM (Map.toList memPred) $ \(Some (cell@MemCell{}), p) -> do
-    f cell p >>= \case
-      Just (cell', p') -> return $ Just (Some cell', p')
-      Nothing -> return Nothing
-  IO.liftIO $ predFromList sym es
-
-predFromList ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  [(Some (MemCell sym arch), WI.Pred sym)] ->
-  IO (MemCellPred sym arch)
-predFromList sym l = do
-  -- NOTE: We can't just use Data.Map.fromList here because it will discard duplicate
-  -- entries
-  let maps = map (\(cell, p) -> MemCellPred $ Map.singleton cell p) l
-  foldM (mergeMemCellPred sym) (MemCellPred Map.empty) maps
-
-predToList ::
-  MemCellPred sym arch ->
-  [(Some (MemCell sym arch), WI.Pred sym)]
-predToList (MemCellPred cells) = Map.toList cells
-
--- | Drop entries from the map which are concretely false.
-dropFalseCells ::
-  forall sym arch.
-  WI.IsExprBuilder sym =>
-  MemCellPred sym arch ->
-  MemCellPred sym arch
-dropFalseCells (MemCellPred cells) = MemCellPred $ Map.mapMaybe dropFalse cells
-  where
-    dropFalse ::
-      WI.Pred sym ->
-      Maybe (WI.Pred sym)
-    dropFalse p = case WI.asConstantPred p of
-      Just False -> Nothing
-      _ -> Just p
-
-mergeMemCellPred ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  MemCellPred sym arch ->
-  MemCellPred sym arch ->
-  IO (MemCellPred sym arch)
-mergeMemCellPred sym (MemCellPred cells1) (MemCellPred cells2) = fmap MemCellPred $ do
-  MapM.mergeA
-    MapM.preserveMissing
-    MapM.preserveMissing
-    (MapM.zipWithAMatched (\_ p1 p2 -> WI.orPred sym p1 p2))
-    cells1
-    cells2
-
-muxMemCellPred ::
-  WI.IsExprBuilder sym =>
-  PC.OrdF (WI.SymExpr sym) =>
-  sym ->
-  WI.Pred sym ->
-  MemCellPred sym arch ->
-  MemCellPred sym arch ->
-  IO (MemCellPred sym arch)
-muxMemCellPred sym p (MemCellPred cellsT) (MemCellPred cellsF) = case WI.asConstantPred p of
-  Just True -> return $ MemCellPred cellsT
-  Just False -> return $ MemCellPred cellsF
-  _ -> fmap MemCellPred $ do
-    notp <- WI.notPred sym p
-    MapM.mergeA
-      (MapM.traverseMissing (\_ pT -> WI.andPred sym pT p))
-      (MapM.traverseMissing (\_ pF -> WI.andPred sym pF notp))
-      (MapM.zipWithAMatched (\_ p1 p2 -> WI.baseTypeIte sym p p1 p2))
-      cellsT
-      cellsF
+type MemCellPred sym arch (k :: WPM.PredOpK) = WPM.PredMap sym (Some (MemCell sym arch)) k
 
 -- | Check if a 'MemCell' is in the given 'MemCellPred'. This is true
 -- if and only if:
@@ -198,12 +96,12 @@ inMemCellPred ::
   PC.OrdF (WI.SymExpr sym) =>
   sym ->
   MemCell sym arch w ->
-  MemCellPred sym arch ->
+  MemCellPred sym arch WPM.PredDisjT ->
   IO (WI.Pred sym)
-inMemCellPred sym cell (MemCellPred cells) =
-  case Map.lookup (Some cell) cells of
-    Just cond | Just True <- WI.asConstantPred cond -> return $ WI.truePred sym
-    _ -> go (WI.falsePred sym) (Map.toList cells)
+inMemCellPred sym cell cells =
+  case WI.asConstantPred (WPM.lookup sym (Some cell) cells) of
+    Just True -> return $ WI.truePred sym
+    _ -> go (WI.falsePred sym) (WPM.toList cells)
   where
     go :: WI.Pred sym -> [(Some (MemCell sym arch), WI.Pred sym)] -> IO (WI.Pred sym)
     go p ((Some cell', cond) : cells') = case WI.testEquality (cellWidth cell) (cellWidth cell') of
@@ -257,16 +155,6 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
-
-instance PEM.ExprMappable sym (MemCellPred sym arch) where
-  mapExpr sym f (MemCellPred memPred) = do
-    let (ks, vs) = unzip $ Map.toAscList memPred
-    ks' <- PEM.mapExpr sym f ks
-    vs' <- PEM.mapExpr sym f (map (PEM.ToExprMappable @sym) vs)
-    let vs'' = map PEM.unEM vs'
-    case ks == ks' of
-      True -> return $ MemCellPred (Map.fromAscList (zip ks vs''))
-      False -> IO.liftIO $ predFromList sym (zip ks' vs'')
 
 ppCell :: (WI.IsSymExprBuilder sym) => MemCell sym arch w -> PP.Doc a
 ppCell cell =

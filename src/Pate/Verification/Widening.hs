@@ -32,8 +32,6 @@ import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.SetF as SetF
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B

@@ -24,7 +24,9 @@ import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans.State ( StateT, get, put, execStateT )
 import           Control.Monad.Trans ( lift )
 
+import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Classes
+import           Data.Parameterized.HasRepr ( typeRepr )
 import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFG as MM
 
@@ -32,6 +34,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.MemCell as PMC
 import qualified Pate.ExprMappable as PEM
 import qualified What4.Interface as W4
+import qualified What4.PredMap as WPM
 
 -- | Generalized location-based traversals
 
@@ -124,11 +127,15 @@ class LocationTraversable sym arch f where
         return ()
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
-  LocationWitherable sym arch (PMC.MemCellPred sym arch) where
-  witherLocation sym mp f = PMC.witherCell sym mp $ \c p -> do
+  LocationWitherable sym arch (PMC.MemCellPred sym arch k) where
+  witherLocation sym mp f = fmap WPM.dropUnit $ WPM.alter sym mp $ \sc p -> PMC.viewCell sc $ \c ->
     f (Cell c) p >>= \case
-      Just (Cell c', p') -> return $ Just (c', p')
-      Nothing -> return Nothing
+      Just (Cell c', p') -> return $ (Some c', p')
+      Nothing -> return $ (Some c, WPM.predOpUnit sym (typeRepr mp))
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
+  LocationTraversable sym arch (PMC.MemCellPred sym arch k) where
+  traverseLocation sym mp f = witherLocation sym mp (\l p -> Just <$> f l p)
 
 -- | Wrapped location-predicate pair to make trivial 'LocationTraversable' values.
 data LocationPredPair sym arch = forall l.

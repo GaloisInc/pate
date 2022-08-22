@@ -532,7 +532,7 @@ absDomainToPrecond ::
   IO (PS.AssumptionSet sym v)
 absDomainToPrecond sym eqCtx bundle d = do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
-  eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqInputs
+  eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqCtx eqInputs
   valsPred <- do
     (predO, predP) <- PPa.forBinsC $ \get -> do
       let absBlockState = PS.simInAbsState (get $ PS.simIn bundle)

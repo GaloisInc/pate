@@ -132,6 +132,7 @@ library
                        Pate.ExprMappable,
                        What4.ExprHelpers,
                        What4.PathCondition,
+                       What4.PredMap,
                        Data.Parameterized.SetF,
                        Pate.SimState,
                        Pate.Equivalence,
