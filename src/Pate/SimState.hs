@@ -50,6 +50,7 @@ module Pate.SimState
   , scopedLocWither
   , WithScope(..)
   , liftScope0
+  , forScopedExpr
   , liftScope2
   , concreteScope
   , SimSpec
@@ -114,16 +115,19 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Panic as P
+import qualified Pate.Solver as PSo
 import qualified Pate.Location as PL
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import           Pate.AssumptionSet
+import           Data.Parameterized.SetF ( SetF )
+import qualified Data.Parameterized.SetF as SetF
+
+import qualified What4.ExprHelpers as WEH
 
 ------------------------------------
 -- Crucible inputs and outputs
-
-
 
 
 data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
@@ -131,6 +135,12 @@ data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
     simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
   , simStackBase :: StackBase sym arch v
+  -- | The most recent region allocated by malloc. Ideally this should always be
+  --   concrete (i.e. have some concrete constraint in the value domain), but
+  --   can be symbolic if the number of calls to @malloc()@ cannot be statically determined.
+  --   We model a @malloc@ call as simply returning a pointer at offset zero to a fresh
+  --   region, and then incrementing this value.
+  , simMaxRegion :: ScopedExpr sym v W4.BaseIntegerType
   }
 
 simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
@@ -230,15 +240,18 @@ freshSimSpec ::
   (forall bin. PBi.WhichBinaryRepr bin -> m (MT.MemTraceImpl sym (MM.ArchAddrWidth arch))) ->
   -- | Fresh stack base
   (forall bin v. PBi.WhichBinaryRepr bin -> m (StackBase sym arch v)) ->
+  -- | Fresh base region
+  (forall bin v. PBi.WhichBinaryRepr bin -> m (ScopedExpr sym v W4.BaseIntegerType)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
   (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym, (f v))) ->
   m (SimSpec sym arch f)
-freshSimSpec mkReg mkMem mkStackBase mkBody = do
+freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
   vars <- PPa.forBins' $ \bin -> do
     regs <- MM.mkRegStateM (mkReg bin)
     mem <- mkMem bin
     sb <- mkStackBase bin
-    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb)
+    mr <- mkMaxregion bin
+    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb mr)
   (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
   return $ SimSpec (SimScope vars asm) body
 
@@ -486,6 +499,13 @@ liftScope2 ::
   IO (ScopedExpr sym v tp3)
 liftScope2 sym f (ScopedExpr e1) (ScopedExpr e2) = ScopedExpr <$> f sym e1 e2
 
+forScopedExpr ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  ScopedExpr sym v tp1 ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> IO (W4.SymExpr sym' tp2)) ->
+  IO (ScopedExpr sym v tp2)
+forScopedExpr sym (ScopedExpr e1) f = ScopedExpr <$> f sym e1
 
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
 -- incidentally include bound variables from other scopes)
@@ -680,12 +700,12 @@ freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
 -- TODO: in general we should restrict these to be scope-preserving,
 -- since allowing arbitrary modifications can violate the scoping
 -- assumptions
-
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb))) = SimState
+  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb)) (ScopedExpr mr)) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
     <*> ((StackBase . ScopedExpr) <$> f sb)
+    <*> (ScopedExpr <$> f mr)
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk absSt) = SimInput

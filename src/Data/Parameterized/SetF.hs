@@ -52,6 +52,9 @@ import qualified Data.Foldable as Foldable
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
+
 import           Data.Set (Set)
 import qualified Data.Set as S
 

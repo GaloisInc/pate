@@ -419,7 +419,8 @@ widenPostcondition bundle preD postD0 =
            return prevState
          Unknown -> do
            emit PE.SolverError
-           _ <- emitError $ PEE.WideningError $ "UNKNOWN result evaluating postcondition: " ++ show widenK ++ " " ++ show (pretty loc)
+           let msg = "UNKNOWN result evaluating postcondition: " ++ show widenK ++ " " ++ show (pretty loc)
+           _ <- emitError $ PEE.WideningError msg
            -- this is a recoverable error, since we can conservatively consider the location
            -- under analysis as inequivalent in the resulting domain
 
@@ -429,6 +430,7 @@ widenPostcondition bundle preD postD0 =
                case loc of
                  PL.Cell c -> Right <$> widenCells [Some c] postD
                  PL.Register r -> Right <$> widenRegs [Some r] postD
+                 PL.NoLoc -> return $ Right $ WideningError msg prevLocs postD
              _ -> panic Verifier "widenPostcondition" [ "Unexpected widening case"]
          Sat evalFn -> do
            emit PE.SolverFailure
@@ -597,8 +599,11 @@ widenValues ::
 widenValues sym evalFn bundle postD = do
   (postD', mlocs) <- PAD.widenAbsDomainVals sym postD getRange bundle
   case mlocs of
-    Just (WidenLocs regLocs memLocs) ->
-      if regLocs == mempty && memLocs == mempty then
+    Just (WidenLocs regLocs memLocs) -> do
+      (mrUnchangedO, mrUnchangedP) <- PPa.forBinsC $ \get ->
+        return $ PAD.absMaxRegion (get (PAD.absDomVals postD)) == PAD.absMaxRegion (get (PAD.absDomVals postD'))
+
+      if regLocs == mempty && memLocs == mempty && mrUnchangedO && mrUnchangedP then
         return NoWideningRequired
       else
         return $ Widen WidenValue (WidenLocs regLocs memLocs) postD'
@@ -622,9 +627,11 @@ dropValueLoc wb loc postD = do
       PL.Cell c -> vals { PAD.absMemVals = MapF.delete c (PAD.absMemVals vals) }
       PL.Register r ->
         vals { PAD.absRegVals = (PAD.absRegVals vals) & (MM.boundValue r) .~ (PAD.noAbsVal (MT.typeRepr r)) }
+      PL.NoLoc -> vals
     locs = case loc of
       PL.Cell c -> WidenLocs Set.empty (Set.singleton (Some c))
       PL.Register r -> WidenLocs (Set.singleton (Some r)) Set.empty
+      PL.NoLoc -> WidenLocs Set.empty Set.empty
     vals' = PPa.setPair wb v (PAD.absDomVals postD)
   return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 

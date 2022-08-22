@@ -12,6 +12,7 @@ main = do
                                   , PA.validArchArgumentMapping = AArch32.argumentMapping
                                   , PA.validArchOrigExtraSymbols = mempty
                                   , PA.validArchPatchedExtraSymbols = mempty
+                                  , PA.validArchStubOverrides = AArch32.stubOverrides
                                   }
   let cfg = TestConfig
         { testArchName = "aarch32"

@@ -428,7 +428,11 @@ withFreshVars blocks f = do
     mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
     mkStackBase = withSymIO $ \sym -> freshStackBase sym (Proxy @arch)
 
-  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
+    mkMaxRegion :: forall v. EquivM sym arch (ScopedExpr sym v W4.BaseIntegerType)
+    mkMaxRegion = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
+      W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
+
+  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.

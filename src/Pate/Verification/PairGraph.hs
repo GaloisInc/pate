@@ -332,7 +332,20 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
            let node = GraphNode (rootEntry bPair)
            idom <- initialDomainSpec node
-           return (freshDomain gr node idom)
+           -- when the program is initialized, we assume no memory regions are allocated,
+           -- and therefore we pick a concrete initial region that doesn't overlap with
+           -- the global or stack regions.
+           --
+           -- in the event that this node is encountered again (i.e. the analysis entry
+           -- point is some intermediate program point), then this value domain will simply
+           -- be overridden as a result of widening
+           rootDom <- PS.forSpec idom $ \_ idom' -> do
+             vals' <- PPa.forBins $ \get -> do
+               let vals = get (PAD.absDomVals idom')
+               -- FIXME: compute this from the global and stack regions
+               return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
+             return $ idom' { PAD.absDomVals = vals' }
+           return (freshDomain gr node rootDom)
 
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the

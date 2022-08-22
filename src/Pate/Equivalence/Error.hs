@@ -17,6 +17,7 @@ module Pate.Equivalence.Error (
 
 import qualified Control.Exception as X
 import           Data.Maybe ( catMaybes )
+import qualified Data.ByteString as BS
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Typeable ( Typeable )
 import           Data.Proxy
@@ -89,6 +90,7 @@ data InnerEquivalenceError arch
   | ObservabilityError String
   | TotalityError String
   | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
+  | UnknownPLTStub BS.ByteString
 
 ppInnerError :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of

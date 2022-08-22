@@ -20,6 +20,7 @@ module Pate.PPC (
   , ppc64HasDedicatedRegister
   , ppc32HasDedicatedRegister
   , argumentMapping
+  , stubOverrides
   )
 where
 
@@ -31,6 +32,7 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Text as T
+import qualified Data.Map as Map
 import           Data.Void ( Void, absurd )
 import           Data.Word ( Word8 )
 import           GHC.Stack ( HasCallStack )
@@ -226,6 +228,11 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
+
+stubOverrides :: PA.ArchStubOverrides (PPC.AnyPPC v)
+stubOverrides = PA.ArchStubOverrides
+  --FIXME: add entry for malloc
+  Map.empty
 
 instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case

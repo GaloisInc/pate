@@ -71,6 +71,7 @@ import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PSo
 import           What4.ExprHelpers
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -145,7 +146,7 @@ registerValuesEqual' hdr sym r precond vO vP = do
 
 -- | This simply bundles up the necessary state elements necessary to resolve equality.
 data EquivContext sym arch where
-  EquivContext ::
+  EquivContext :: (PA.ValidArch arch, PSo.ValidSym sym) =>
     { eqCtxHDR :: PA.HasDedicatedRegister arch
     , eqCtxStackRegion :: W4.SymNat sym
     } -> EquivContext sym arch
@@ -453,6 +454,7 @@ data StatePreCondition sym arch v = StatePreCondition
   { stRegPreCond :: RegisterCondition sym arch v
   , stStackPreDom :: PEM.MemoryDomain sym arch
   , stMemPreDom :: PEM.MemoryDomain sym arch
+  , stExtraPreCond :: AssumptionSet sym
   }
 
 -- | A structured post condition
@@ -460,12 +462,13 @@ data StatePostCondition sym arch v = StatePostCondition
   { stRegPostCond :: RegisterCondition sym arch v
   , stStackPostCond :: MemoryCondition sym arch
   , stMemPostCond :: MemoryCondition sym arch
+  , stExtraPostCond :: AssumptionSet sym
   }
 
 
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
-  traverseLocation sym (StatePostCondition a b c) f =
-    StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+  traverseLocation sym (StatePostCondition a b c asm) f =
+    StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f <*> ((fromPred . snd) <$> (toPred sym asm >>= \p -> f PL.NoLoc p))
 
 
 eqDomPre ::
@@ -483,7 +486,11 @@ eqDomPre sym inO inP (EquivContext hdr _stackRegion) eqDom  = do
     stP = simInState inP
     
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
-  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom)
+  -- TODO: we haven't included this in the domain, and therefore we're simply
+  -- requiring that the number of allocations for each program always match
+  -- this will cause a widening error if this isn't the case
+  let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
+  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) maxRegionsEq
 
 eqDomPost ::
   W4.IsSymExprBuilder sym =>
@@ -503,7 +510,11 @@ eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
   stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
   memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
-  return $ StatePostCondition regsEq stacksEq memEq
+  -- TODO: we haven't included this in the domain, and therefore we're simply
+  -- requiring that the number of allocations for each program always match
+  -- this will cause a widening error if this isn't the case
+  let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
+  return $ StatePostCondition regsEq stacksEq memEq maxRegionsEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
 -- a single 'AssumptionSet'.
@@ -520,7 +531,7 @@ preCondAssumption sym inO inP (EquivContext _hdr stackRegion) stCond = do
   regsPred <- regCondToAsm sym (stRegPreCond stCond)
   stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) inO inP (stStackPreDom stCond)
   memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) inO inP (stMemPreDom stCond)
-  return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred
+  return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred <> stExtraPreCond stCond
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into
 -- a single predicate.
@@ -535,4 +546,5 @@ postCondPredicate sym stCond = do
   regsPred <- toPred sym regsAsm
   stackPred <- memPostCondToPred sym (stStackPostCond stCond)
   memPred <- memPostCondToPred sym (stMemPostCond stCond)
-  W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred
+  extraPred <- toPred sym (stExtraPostCond stCond)
+  W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred >>= W4.andPred sym extraPred

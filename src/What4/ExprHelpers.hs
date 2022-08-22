@@ -561,9 +561,7 @@ ppExprSet ::
   Proxy sym ->
   ExprSet sym tp ->
   PP.Doc a
-ppExprSet _ es =
-  let ps = [ W4.printSymExpr p | p <- SetF.toList es ]
-  in PP.sep (zipWith (<+>) ("{" : repeat ",") ps) <+> "}"
+ppExprSet _ es = SetF.ppSetF W4.printSymExpr es
 
 -- | Get the atomic predicates which appear anywhere in the given predicate.
 -- TODO: does not consider all possible predicate constructors.

@@ -444,6 +444,7 @@ machineToProxy em origHdr patchedHdr =
                                  , PA.validArchArgumentMapping = PPC.argumentMapping
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchStubOverrides = PPC.stubOverrides
                                  }
       in Right (Some (PA.SomeValidArch vad))
     (DEE.EM_PPC64, _) ->
@@ -453,6 +454,7 @@ machineToProxy em origHdr patchedHdr =
                                  , PA.validArchArgumentMapping = PPC.argumentMapping
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchStubOverrides = PPC.stubOverrides
                                  }
       in Right (Some (PA.SomeValidArch vad))
     (DEE.EM_ARM, EEP.ELFCLASS32) ->
@@ -464,6 +466,7 @@ machineToProxy em origHdr patchedHdr =
                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
                                  , PA.validArchPatchedExtraSymbols =
                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                 , PA.validArchStubOverrides = AArch32.stubOverrides
                                  }
       in Right (Some (PA.SomeValidArch vad))
     _ -> Left (UnsupportedArchitecture em)

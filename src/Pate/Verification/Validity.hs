@@ -66,15 +66,13 @@ validRegister mblockStart entry r = withSym $ \sym -> do
       stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
       let
         CLM.LLVMPointer region _ = PSR.macawRegValue entry
-      iRegion <- liftIO $ W4.natToInteger sym region
-      iStackRegion <- liftIO $ W4.natToInteger sym stackRegion
-      return $ exprBinding iRegion iStackRegion
+      return $ natBinding region stackRegion
     PRe.RegBV -> liftIO $ do
       let
         CLM.LLVMPointer region _ = PSR.macawRegValue entry
       zero <- W4.intLit sym 0
-      iRegion <- W4.natToInteger sym region
-      return $ exprBinding iRegion zero
+      nzero <- W4.integerToNat sym zero
+      return $ natBinding region nzero
     PRe.RegDedicated dr -> do
       ctx <- CMR.asks envCtx
       let binRepr = W4.knownRepr :: PB.WhichBinaryRepr bin

@@ -12,6 +12,7 @@ main = do
                                   , PA.validArchArgumentMapping = PPC.argumentMapping
                                   , PA.validArchOrigExtraSymbols = mempty
                                   , PA.validArchPatchedExtraSymbols = mempty
+                                  , PA.validArchStubOverrides = PPC.stubOverrides
                                   }
   let cfg64 = TestConfig
         { testArchName = "ppc"

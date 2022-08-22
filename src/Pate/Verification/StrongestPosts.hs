@@ -183,8 +183,7 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
     CLM.LLVMPointer region off <- return $ PSR.macawRegValue regEntry
     stackRegion <- asks (PMC.stackRegion . envCtx)
     -- the region of this value must be the stack region
-    let bindRegion =
-          PAS.exprBinding (W4.natToIntegerPure region) (W4.natToIntegerPure stackRegion)
+    let bindRegion = PAS.natBinding region stackRegion
 
     let w = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
     slotBV <- liftIO $ W4.bvLit sym w (BV.mkBV w (fromIntegral slot))
@@ -975,17 +974,24 @@ handlePLTStub ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   BS.ByteString {- ^ PLT symbol name -} ->
   EquivM sym arch (PairGraph sym arch)
-handlePLTStub scope bundle currBlock d gr _pPair pRetPair stubSymbol =
-  do traceBundle bundle ("Handling PLT stub " ++ show stubSymbol)
-
-     -- TODO!! Here we are just assuming the unknown function represented by the PLT stub
-     -- immediately returns without having any observable or memory effects!!
-     --
-     -- We should instead consult some parameter that defines the behavior of unknown functions,
-     -- and only fall back on this default policy if no additional information can be found.
-     -- Moreover, we should report this assumption about external functions as potentially leading
-     -- to unsoundness.
-     handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pRetPair)
+handlePLTStub scope bundle currBlock d gr0 pPair pRetPair stubSymbol = withSym $ \sym -> do
+  PA.SomeValidArch archData <- asks envValidArch
+  PA.StubOverride f <- case PA.lookupStubOverride archData stubSymbol of
+    Just f -> do
+      traceBundle bundle ("Using override for PLT stub " ++ show stubSymbol)
+      return f
+    Nothing -> do
+      -- we have no model for this stub, so we emit a warning and unsoundly
+      -- leave the state unmodified
+      emitWarning $ PEE.UnknownPLTStub stubSymbol
+      -- dummy override that does nothing
+      return $ PA.StubOverride $ \_ st -> return st
+  outputs <- PPa.forBins $ \get -> do
+    nextSt <- liftIO $ f sym (PS.simOutState (get (PS.simOut bundle)))
+    return $ (get (PS.simOut bundle)) { PS.simOutState = nextSt }
+  let bundle' = bundle { PS.simOut = outputs }
+  -- handleJump scope bundle' currBlock d gr0 pRetPair
+  handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
 
 
 handleReturn ::

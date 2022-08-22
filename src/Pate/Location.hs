@@ -15,7 +15,6 @@ module Pate.Location (
     Location(..)
   , LocationWitherable(..)
   , LocationTraversable(..)
-  , LocationPredPair(..)
   ) where
 
 import           GHC.TypeLits
@@ -44,21 +43,25 @@ import qualified What4.PredMap as WPM
 data LocK =
     RegK MT.Type
   | CellK Nat
+  | NoLocK
 
 
 data Location sym arch l where
   Register :: MM.ArchReg arch tp -> Location sym arch ('RegK tp)
   Cell :: 1 <= w => PMC.MemCell sym arch w -> Location sym arch ('CellK w)
+  NoLoc :: Location sym arch 'NoLocK
 
 instance PEM.ExprMappable sym (Location sym arch l) where
   mapExpr sym f loc = case loc of
     Register r -> return $ Register r
     Cell cell -> Cell <$> PEM.mapExpr sym f cell
+    NoLoc -> return NoLoc
 
 instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PP.Pretty (Location sym arch l) where
   pretty loc = case loc of
     Register r -> PP.pretty (showF r)
     Cell c -> PMC.ppCell c
+    NoLoc -> "<None>"
 
 -- TODO: this can be abstracted over 'W4.Pred'
 
@@ -137,13 +140,6 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
   LocationTraversable sym arch (PMC.MemCellPred sym arch k) where
   traverseLocation sym mp f = witherLocation sym mp (\l p -> Just <$> f l p)
 
--- | Wrapped location-predicate pair to make trivial 'LocationTraversable' values.
-data LocationPredPair sym arch = forall l.
-  LocationPredPair (Location sym arch l) (W4.Pred sym)
-
-instance LocationTraversable sym arch (LocationPredPair sym arch) where
-  traverseLocation _sym (LocationPredPair l p) f =
-    f l p >>= \(l', p') -> return $ LocationPredPair l' p'
 
 instance (LocationTraversable sym arch a, LocationTraversable sym arch b) =>
   LocationTraversable sym arch (a, b) where

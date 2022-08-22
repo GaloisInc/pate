@@ -12,17 +12,21 @@ module Pate.AArch32 (
   , handleExternalCall
   , hasDedicatedRegister
   , argumentMapping
+  , stubOverrides
   ) where
 
-import           Control.Lens ( (^?), (^.) )
+import           Control.Lens ( (^?), (^.), (&), (.~) )
 import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
+import qualified Data.Map as Map
 
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import qualified Data.Macaw.CFG as MC
@@ -179,6 +183,13 @@ argumentMapping =
                                   return $! DMAS.updateReg r0 (const (LCS.RV result)) registerFile
                             _ -> PP.panic PP.AArch32 "argumentMapping" ["Unsupported return value type: " ++ show retRepr]
                       }
+
+stubOverrides :: PA.ArchStubOverrides SA.AArch32
+stubOverrides = PA.ArchStubOverrides $
+  Map.fromList
+    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0) ]
+  where
+    r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
 
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
   archTermCase = \case

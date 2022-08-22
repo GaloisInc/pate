@@ -14,8 +14,14 @@ module Pate.Arch (
   DedicatedRegister,
   HasDedicatedRegister(..),
   RegisterDisplay(..),
-  fromRegisterDisplay
+  fromRegisterDisplay,
+  StubOverride(..),
+  ArchStubOverrides(..),
+  mkMallocOverride,
+  lookupStubOverride
   ) where
+
+import           Control.Lens ( (&), (.~) )
 
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
@@ -30,17 +36,22 @@ import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Symbolic as MS
+import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Types as LCT
+import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.SimState as PS
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
+
+import qualified What4.Interface as W4
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -127,7 +138,44 @@ data ValidArchData arch =
                 --
                 -- For example, these could be PLT stub symbols for ELF binaries
                 , validArchPatchedExtraSymbols :: Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
+                , validArchStubOverrides :: ArchStubOverrides arch
                 }
+
+-- | A PLT stub is allowed to make arbitrary modifications to the symbolic state
+data StubOverride arch =
+  StubOverride
+    (forall sym v bin.
+      W4.IsSymExprBuilder sym =>
+      PB.KnownBinary bin =>
+      sym ->
+      PS.SimState sym arch v bin ->
+      IO (PS.SimState sym arch v bin))
+
+data ArchStubOverrides arch =
+  ArchStubOverrides (Map.Map BS.ByteString (StubOverride arch))
+
+lookupStubOverride ::
+  ValidArchData arch -> BS.ByteString -> Maybe (StubOverride arch)
+lookupStubOverride va nm = let ArchStubOverrides ov = validArchStubOverrides va in
+  Map.lookup nm ov
+
+mkMallocOverride ::
+  forall arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ length argument (unused currently ) -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ register for fresh pointer -} ->
+  StubOverride arch
+mkMallocOverride _rLen rOut = StubOverride $ \sym st -> do
+  let mr = PS.simMaxRegion st
+  let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  mr_nat <- W4.integerToNat sym (PS.unSE mr)
+  zero <- W4.bvLit sym w (BVS.mkBV w 0)
+  let fresh_ptr = PSR.ptrToEntry (CLM.LLVMPointer mr_nat zero)
+  mr_inc <- PS.forScopedExpr sym mr $ \sym' mr' -> do
+    one <- W4.intLit sym' 1
+    W4.intAdd sym' mr' one
+  return (st { PS.simMaxRegion = mr_inc, PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
 
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier
