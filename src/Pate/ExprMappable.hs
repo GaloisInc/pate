@@ -11,6 +11,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 module Pate.ExprMappable (
@@ -18,6 +19,8 @@ module Pate.ExprMappable (
   , ExprFoldable(..)
   , SkipTransformation(..)
   , ToExprMappable(..)
+  , SymExprMappable(..)
+  , symExprMappable
   ) where
 
 import qualified Control.Monad.IO.Class as IO
@@ -26,6 +29,7 @@ import           Control.Monad.Trans.Class ( lift )
 
 import           Data.Functor.Const
 import           Data.Parameterized.Some
+import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
@@ -34,9 +38,12 @@ import qualified What4.Interface as WI
 import qualified What4.Partial as WP
 import qualified What4.Expr.Builder as W4B
 
+import qualified Data.Parameterized.SetF as SetF
 import qualified What4.ExprHelpers as WEH
 import qualified What4.PredMap as WPM
 import qualified Pate.Parallel as Par
+
+import Unsafe.Coerce(unsafeCoerce)
 
 -- Expression binding
 
@@ -132,3 +139,21 @@ instance ExprMappable sym (SkipTransformation a) where
 
 instance (Ord f, ExprMappable sym f) => ExprMappable sym (WPM.PredMap sym f k) where
   mapExpr sym f pm = WPM.alter sym pm (\v p -> (,) <$> mapExpr sym f v <*> f p)
+
+instance (OrdF f, ExprMappable sym (f tp)) => ExprMappable sym (SetF.SetF f tp) where
+  mapExpr sym f s = SetF.fromList <$> traverse (mapExpr sym f) (SetF.toList s)
+
+newtype SymExprMappable sym f = SymExprMappable (forall tp a. ((ExprMappable sym (f tp)) => a) -> a)
+
+-- | Deduce ad-hoc 'ExprMappable' instances for 'WI.SymExpr'.
+--   This uses an unsafe coercion to implicitly use the 'ExprMappable' instance
+--   defined in 'ToExprMappable'.
+--   This is necessary because 'WI.SymExpr' is a type family and therefore we cannot
+--   declare the obvious instance for it.
+symExprMappable ::
+  forall sym.
+  sym ->
+  SymExprMappable sym (WI.SymExpr sym)
+symExprMappable _sym = unsafeCoerce r
+  where r :: SymExprMappable sym (ToExprMappable sym)
+        r = SymExprMappable (\a -> a)

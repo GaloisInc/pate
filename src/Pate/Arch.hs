@@ -34,10 +34,10 @@ import qualified Data.Macaw.CFGSlice as MCS
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.Types as LCT
 
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.Monad.Context as PMC
-import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
@@ -64,7 +64,7 @@ type family DedicatedRegister arch :: LCT.CrucibleType -> DK.Type
 data HasDedicatedRegister arch =
   HasDedicatedRegister { asDedicatedRegister :: forall tp . MC.ArchReg arch tp -> Maybe (DedicatedRegister arch (MS.ToCrucibleType tp))
                        -- ^ Determine whether or not a register is a 'DedicatedRegister'
-                       , dedicatedRegisterValidity :: forall sym v bin tp . (LCB.IsSymInterface sym) => sym -> PMC.EquivalenceContext sym arch -> PB.WhichBinaryRepr bin -> PSR.MacawRegEntry sym tp -> DedicatedRegister arch (MS.ToCrucibleType tp) -> IO (PS.AssumptionSet sym v)
+                       , dedicatedRegisterValidity :: forall sym bin tp . (LCB.IsSymInterface sym) => sym -> PMC.EquivalenceContext sym arch -> PB.WhichBinaryRepr bin -> PSR.MacawRegEntry sym tp -> DedicatedRegister arch (MS.ToCrucibleType tp) -> IO (PAS.AssumptionSet sym)
                        -- ^ Compute an assumption frame for the given arch-specific 'DedicatedRegister'
                        }
 

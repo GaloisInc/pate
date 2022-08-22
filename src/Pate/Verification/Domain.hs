@@ -16,7 +16,6 @@ module Pate.Verification.Domain (
   , universalDomain
   ) where
 
-import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
 import           Data.Parameterized.Classes()
@@ -25,6 +24,7 @@ import qualified What4.Interface as W4
 import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -39,7 +39,7 @@ import qualified Pate.Solver as PS
 equateRegisters ::
   PER.RegisterDomain sym arch ->
   SimBundle sym arch v ->
-  EquivM sym arch (PSi.AssumptionSet sym v)
+  EquivM sym arch (PAS.AssumptionSet sym)
 equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
   fmap PRt.collapse $ PRt.zipWithRegStatesM (PSi.simRegs inStO) (PSi.simRegs inStP) $ \r vO vP -> case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
@@ -47,20 +47,20 @@ equateRegisters regRel bundle = withValid $ withSym $ \sym -> do
     _ -> do
       let cond = PER.registerInDomain sym r regRel
       case W4.asConstantPred cond of
-        Just True -> fmap Const $ liftIO $ PSi.macawRegBinding sym vO vP
+        Just True -> fmap Const $ return $ PAS.macawRegBinding sym vO vP
         _ -> return $ Const mempty
   where
     inStO = PSi.simInState $ PSi.simInO bundle
     inStP = PSi.simInState $ PSi.simInP bundle
 
-equateInitialMemory :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionSet sym v)
+equateInitialMemory :: SimBundle sym arch v -> EquivM sym arch (PAS.AssumptionSet sym)
 equateInitialMemory bundle =
-  return $ PSi.bindingToFrame $ MT.mkMemoryBinding memStO memStP
+  return $ PAS.fromExprBindings $ MT.mkMemoryBinding memStO memStP
   where
     memStO = MT.memState $ PSi.simInMem $ PSi.simInO bundle
     memStP = MT.memState $ PSi.simInMem $ PSi.simInP bundle
 
-equateInitialStates :: SimBundle sym arch v -> EquivM sym arch (PSi.AssumptionSet sym v)
+equateInitialStates :: SimBundle sym arch v -> EquivM sym arch (PAS.AssumptionSet sym)
 equateInitialStates bundle = withSym $ \sym -> do
   eqRegs <- equateRegisters (PER.universal sym) bundle
   eqMem <- equateInitialMemory bundle

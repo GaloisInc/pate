@@ -55,6 +55,7 @@ import qualified Lang.Crucible.Types as LCT
 import qualified SemMC.Architecture.PPC as SP
 
 import qualified Pate.Arch as PA
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
@@ -64,7 +65,6 @@ import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
-import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
@@ -105,21 +105,21 @@ getCurrentTOC ctx binRepr = do
     Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addr)
 
 ppc64DedicatedRegisterFrame
-  :: forall sym v tp bin
+  :: forall sym tp bin
    . (CB.IsSymInterface sym)
   => sym
   -> PMC.EquivalenceContext sym PPC.PPC64
   -> PB.WhichBinaryRepr bin
   -> PSR.MacawRegEntry sym tp
   -> PPC64DedicatedRegister (MS.ToCrucibleType tp)
-  -> IO (PS.AssumptionSet sym v)
+  -> IO (PAS.AssumptionSet sym)
 ppc64DedicatedRegisterFrame sym ctx binRepr entry dr =
   case dr of
     RegTOC -> do
       tocW <- getCurrentTOC ctx binRepr
       tocBV <- WI.bvLit sym PN.knownNat (BVS.mkBV PN.knownNat (W.unW tocW))
       let targetTOC = CLM.LLVMPointer (PMC.globalRegion ctx) tocBV
-      PS.macawRegBinding sym entry (PSR.ptrToEntry targetTOC)
+      return $ PAS.macawRegBinding sym entry (PSR.ptrToEntry targetTOC)
 
 -- | A dedicated register handler for the most common PPC64 ABI that uses a
 -- Table of Contents (TOC) register

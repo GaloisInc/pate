@@ -75,16 +75,6 @@ module Pate.SimState
   , ScopeCoercion
   , getScopeCoercion
   , applyScopeCoercion
-  -- assumption frames
-  , AssumptionSet
-  , isAssumedPred
-  , exprBinding
-  , bindingToFrame
-  , macawRegBinding
-  , frameAssume
-  , getAssumedPred
-  , rebindWithFrame
-  , rebindWithFrame'
   , bundleOutVars
   ) where
 
@@ -93,13 +83,11 @@ import qualified Data.Kind as DK
 import           Data.Proxy
 
 import qualified Control.Monad.IO.Class as IO
-import           Control.Monad ( forM )
 import           Control.Lens ( (^.) )
 import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
 
 
 import qualified Prettyprinter as PP
-import           Prettyprinter ( (<+>) )
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
@@ -107,7 +95,6 @@ import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
 import           Data.Functor.Const
 
-import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
@@ -131,7 +118,7 @@ import qualified Pate.Location as PL
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
-import qualified Data.Parameterized.SetF as SetF
+import           Pate.AssumptionSet
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -182,200 +169,6 @@ simOutRegs ::
 simOutRegs = simRegs . simOutState
 
 
-
-
-data AssumptionSet sym (v :: VarScope) where
-  AssumptionSet ::
-    { asmPreds :: ExprSet sym W4.BaseBoolType
-    -- | equivalence on sub-expressions. In the common case where an expression maps
-    -- to a single expression (i.e. a singleton 'ExprSet') we can apply the rewrite
-    -- inline.
-    , asmBinds :: MapF.MapF (W4.SymExpr sym) (ExprSet sym)
-    } -> AssumptionSet sym v
-
-instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym v) where
-  asm1 <> asm2 = let
-    preds = (asmPreds asm1) <> (asmPreds asm2)
-    binds = mergeExprSetMap (Proxy @sym) (asmBinds asm1) (asmBinds asm2)
-    in AssumptionSet preds binds
-
-ppBinds ::
-  W4.IsExpr (W4.SymExpr sym) =>
-  Proxy sym ->
-  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
-  PP.Doc a
-ppBinds sym bnds =
-  let bs = [ W4.printSymExpr e <+> "-->" <+>  ppExprSet sym es | MapF.Pair e es <- MapF.toList bnds ]
-  in PP.sep (zipWith (<+>) ("[" : repeat ",") bs) <+> "]"
-
-instance forall sym v. W4.IsExpr (W4.SymExpr sym) => PP.Pretty (AssumptionSet sym v) where
-  pretty asms =
-    PP.vsep $
-      [ "Predicate Assumptions"
-      , PP.indent 4 (ppExprSet (Proxy @sym) (asmPreds asms))
-      , "Bindings"
-      , PP.indent 4 (ppBinds (Proxy @sym) (asmBinds asms))
-      ]
-
-instance W4.IsExpr (W4.SymExpr sym) => Show (AssumptionSet sym v) where
-  show asms = show (PP.pretty asms)
-
-mapExprSet ::
-  OrdF (W4.SymExpr sym) =>
-  Monad m =>
-  sym ->
-  (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) ->
-  ExprSet sym tp ->
-  m (ExprSet sym tp)
-mapExprSet _sym f s = SetF.fromList <$> traverse f (SetF.toList s)
-
-mergeExprSetMap ::
-  OrdF (W4.SymExpr sym) =>
-  Proxy sym ->
-  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
-  MapF.MapF (W4.SymExpr sym) (ExprSet sym) ->
-  MapF.MapF (W4.SymExpr sym) (ExprSet sym)
-mergeExprSetMap _sym map1 map2 =
-  MapF.mergeWithKey
-    (\_ eset1 eset2 -> Just (eset1 <> eset2))
-    id
-    id
-    map1
-    map2
-
-instance OrdF (W4.SymExpr sym) => PEM.ExprMappable sym (AssumptionSet sym v) where
-  mapExpr sym f (AssumptionSet ps bs) = do
-    ps' <- mapExprSet sym f ps
-    bs' <- forM (MapF.toList bs) $ \(MapF.Pair k v) -> do
-      k' <- f k
-      v' <- mapExprSet sym f v
-      return $ MapF.singleton k' v'
-    return $ AssumptionSet ps' (foldr (mergeExprSetMap (Proxy @sym)) MapF.empty bs')
-
-instance Scoped (AssumptionSet sym) where
-  unsafeCoerceScope (AssumptionSet a b) = AssumptionSet a b
-
-instance OrdF (W4.SymExpr sym) => Monoid (AssumptionSet sym v) where
-  mempty = AssumptionSet mempty MapF.empty
-
--- | Lift an expression binding environment into an assumption frame
-bindingToFrame ::
-  forall sym v.
-  W4.IsSymExprBuilder sym =>
-  OrdF (W4.SymExpr sym) =>
-  ExprBindings sym ->
-  AssumptionSet sym v
-bindingToFrame binds = AssumptionSet { asmPreds = mempty, asmBinds = MapF.map SetF.singleton binds }
-
-exprBinding ::
-  forall sym v tp.
-  W4.IsSymExprBuilder sym =>
-  -- | source expression
-  W4.SymExpr sym tp ->
-  -- | target expression
-  W4.SymExpr sym tp ->
-  AssumptionSet sym v
-exprBinding eSrc eTgt = case testEquality eSrc eTgt of
-  Just Refl -> mempty
-  _ -> mempty { asmBinds = (MapF.singleton eSrc (SetF.singleton eTgt)) }
-
-macawRegBinding ::
-  W4.IsSymExprBuilder sym =>
-  MS.ToCrucibleType tp ~ MS.ToCrucibleType tp' =>
-  sym ->
-  -- | value to rebind
-  PSR.MacawRegEntry sym tp ->
-  -- | new value
-  PSR.MacawRegEntry sym tp' ->
-  IO (AssumptionSet sym v)
-macawRegBinding sym var val = do
-  case PSR.macawRegRepr var of
-    CLM.LLVMPointerRepr _ -> do
-      let CLM.LLVMPointer regVar offVar = PSR.macawRegValue var
-      let CLM.LLVMPointer regVal offVal = PSR.macawRegValue val
-      iRegVar <- W4.natToInteger sym regVar
-      iRegVal <- W4.natToInteger sym regVal
-      let regBind = exprBinding iRegVar iRegVal
-      let offBind = exprBinding offVar offVal
-      return (regBind <> offBind)
-    CT.BoolRepr -> return $ exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
-    _ -> return mempty
-
--- TODO: this is generally unsafe, since we don't check that the incoming
--- predicate actually respects the variable scope 'v'
-frameAssume ::
-  forall sym v.
-  W4.IsSymExprBuilder sym =>
-  W4.Pred sym ->
-  AssumptionSet sym v
-frameAssume p = AssumptionSet (SetF.singleton p) MapF.empty
-
-getUniqueBinding ::
-  forall sym v tp.
-  W4.IsSymExprBuilder sym =>
-  sym ->
-  AssumptionSet sym v ->
-  W4.SymExpr sym tp ->
-  Maybe (W4.SymExpr sym tp)
-getUniqueBinding sym asm e = case MapF.lookup e (asmBinds asm) of
-  Just es
-    | SetF.size es == 1
-    , [e'] <- SetF.toList es -> Just e'
-  Just es -> SetF.lookupMin $ SetF.filter (isJust . W4.asConcrete) es
-  _ -> case W4.exprType e of
-    W4.BaseBoolRepr | isAssumedPred asm e -> Just $ W4.truePred sym
-    _ -> Nothing
-
--- | Compute a predicate that collects the individual assumptions in the frame, including
--- equality on all bindings.
-getAssumedPred ::
-  forall sym m v.
-  W4.IsSymExprBuilder sym =>
-  IO.MonadIO m =>
-  sym ->
-  AssumptionSet sym v ->
-  m (W4.Pred sym)
-getAssumedPred sym asm = do
-  bindsAsm <- fmap concat $ mapM assumeBinds (MapF.toList (asmBinds asm))
-  let predList = SetF.toList $ (asmPreds asm) <> (SetF.fromList bindsAsm)
-  IO.liftIO $ allPreds sym predList
-  where
-    assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> m [W4.Pred sym]
-    assumeBinds (MapF.Pair eSrc eTgts) = forM (SetF.toList eTgts) $ \eTgt ->
-      IO.liftIO $ W4.isEq sym eSrc eTgt
-
-isAssumedPred ::
-  forall sym v.
-  W4.IsSymExprBuilder sym =>
-  AssumptionSet sym v ->
-  W4.Pred sym ->
-  Bool
-isAssumedPred frame asm = SetF.member asm (asmPreds frame)
-
--- | Explicitly rebind any known sub-expressions that are in the frame.
-rebindWithFrame ::
-  forall sym v t solver fs tp.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  sym ->
-  AssumptionSet sym v ->
-  W4B.Expr t tp ->
-  IO (W4B.Expr t tp)
-rebindWithFrame sym asm e = do
-  cache <- freshVarBindCache
-  rebindWithFrame' sym cache asm e
-
-rebindWithFrame' ::
-  forall sym v t solver fs tp.
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  sym ->
-  VarBindCache sym ->
-  AssumptionSet sym v ->
-  W4B.Expr t tp ->
-  IO (W4B.Expr t tp)
-rebindWithFrame' sym cache asm = rewriteSubExprs' sym cache (getUniqueBinding sym asm)
-
-
-
 -- | An empty type represent the kind for a shadow "variable scope" type parameter.
 -- This parameter tracks the scope of the bound variables that might appear in the
 -- inner What4 expressions anywhere in a datatype.
@@ -420,7 +213,7 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
 data SimScope sym arch v =
   SimScope
     { scopeBoundVars :: PPa.PatchPair (SimBoundVars sym arch v)
-    , scopeAsm :: AssumptionSet sym v
+    , scopeAsm :: AssumptionSet sym
     }
 
 scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
@@ -438,7 +231,7 @@ freshSimSpec ::
   -- | Fresh stack base
   (forall bin v. PBi.WhichBinaryRepr bin -> m (StackBase sym arch v)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym v, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym, (f v))) ->
   m (SimSpec sym arch f)
 freshSimSpec mkReg mkMem mkStackBase mkBody = do
   vars <- PPa.forBins' $ \bin -> do
@@ -743,11 +536,11 @@ bindSpec ::
   sym ->
   PPa.PatchPair (SimVars sym arch v) ->
   SimSpec sym arch f ->
-  IO (AssumptionSet sym v, f v)
-bindSpec sym vals (SimSpec scope@(SimScope _ asm) body) = do
+  IO (AssumptionSet sym, f v)
+bindSpec sym vals (SimSpec scope@(SimScope _ asm) (body :: f v')) = do
   rew <- getScopeCoercion sym scope vals
   body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
-  asm' <- scopedExprMap sym asm (applyScopeCoercion sym rew)
+  asm' <- unWS <$> scopedExprMap sym (WithScope @_ @v' asm) (applyScopeCoercion sym rew)
   return $ (asm', body')
 
 

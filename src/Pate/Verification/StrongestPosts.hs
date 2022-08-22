@@ -53,6 +53,7 @@ import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
 
 import qualified Pate.Abort as PAb
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -161,7 +162,7 @@ pairGraphComputeFixpoint gr =
 
 -- | For a given 'PSR.MacawRegEntry' (representing the initial state of a register)
 -- and a corresponding 'MAS.AbsValue' (its initial abstract value according to Macaw),
--- compute an 'PS.AssumptionSet' that assumes they correspond.
+-- compute an 'PAS.AssumptionSet' that assumes they correspond.
 -- Currently the only case that is covered is when macaw decides that the register
 -- is holding a stack offset (i.e. a 'MAS.StackOffsetAbsVal'). In this case we
 -- compute the expected value for the register by adding the stack offset to
@@ -173,7 +174,7 @@ absValueToAsm ::
   PS.SimVars sym arch v bin ->
   PSR.MacawRegEntry sym tp ->
   MAS.AbsValue (MM.ArchAddrWidth arch) tp ->
-  EquivM sym arch (PS.AssumptionSet sym v)
+  EquivM sym arch (PAS.AssumptionSet sym)
 absValueToAsm vars regEntry val = withSym $ \sym -> case val of
   -- FIXME: check the MemAddr here to make sure we only use
   -- stack offsets from this frame
@@ -182,14 +183,14 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
     stackRegion <- asks (PMC.stackRegion . envCtx)
     -- the region of this value must be the stack region
     let bindRegion =
-          PS.exprBinding (W4.natToIntegerPure region) (W4.natToIntegerPure stackRegion)
+          PAS.exprBinding (W4.natToIntegerPure region) (W4.natToIntegerPure stackRegion)
 
     let w = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
     slotBV <- liftIO $ W4.bvLit sym w (BV.mkBV w (fromIntegral slot))
     let sb = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState vars
     off' <- liftIO $ W4.bvAdd sym sb slotBV
     -- the offset of this value must be frame + slot
-    let bindOffSet = PS.exprBinding off off'
+    let bindOffSet = PAS.exprBinding off off'
     return $ bindRegion <> bindOffSet
   _ -> return mempty
 
@@ -203,7 +204,7 @@ validAbsValues ::
   PBi.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   PS.SimVars sym arch v bin ->
-  EquivM sym arch (PS.AssumptionSet sym v)
+  EquivM sym arch (PAS.AssumptionSet sym)
 validAbsValues block var = do
   absBlockState <- PD.getAbsDomain block
   let
@@ -294,7 +295,7 @@ visitNode scope (ReturnNode fPair) d gr0 =
 --   information from function return nodes to the actual return sites.
 --   The only state update that occurs is that a fresh variable is created
 --   to represent the stack base in the output state.
---   The returned 'PS.AssumptionSet' associates the internal stack base
+--   The returned 'PAS.AssumptionSet' associates the internal stack base
 --   from the callee (i.e. in 'SimInput') with the stack
 --   pointer of the caller (i.e. in 'SimOutput').
 --   This effectively re-phrases the resulting domain from the
@@ -305,7 +306,7 @@ returnSiteBundle :: forall sym arch v.
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->
   PPa.BlockPair arch {- ^ block pair being returned to -} ->
-  EquivM sym arch (PS.AssumptionSet sym v, SimBundle sym arch v)
+  EquivM sym arch (PAS.AssumptionSet sym, SimBundle sym arch v)
 returnSiteBundle vars _preD pPair = withSym $ \sym -> do
   simIn_ <- PPa.forBins $ \get -> do
     absSt <- PD.getAbsDomain (get pPair)
@@ -330,7 +331,7 @@ returnSiteBundle vars _preD pPair = withSym $ \sym -> do
       outVars = get (PS.bundleOutVars bundle)
       CLM.LLVMPointer _ sp_pre = PSR.macawRegValue $ PS.simSP inSt
     vAbs <- validAbsValues (get pPair) outVars
-    return $ vAbs <> (PS.exprBinding (PS.unSE $ PS.unSB $ initFrame) sp_pre)
+    return $ vAbs <> (PAS.exprBinding (PS.unSE $ PS.unSB $ initFrame) sp_pre)
 
   return (asms, bundle)
 
@@ -800,7 +801,7 @@ updateReturnNode ::
   EquivM sym arch (PairGraph sym arch)
 updateReturnNode scope bPair bundle preD gr = do
   isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
-  maybeUpdate gr $ withSatAssumption (PS.frameAssume isReturn) $ do
+  maybeUpdate gr $ withSatAssumption (PAS.fromPred isReturn) $ do
     framesMatch <- PD.associateFrames bundle MCS.MacawBlockEndReturn
     withAssumptionSet framesMatch $
       handleReturn scope bundle bPair preD gr
@@ -831,7 +832,7 @@ triageBlockTarget scope bundle currBlock d gr (PPa.PatchPair blktO blktP) =
 
      traceBundle bundle ("  targetCall: " ++ show blkO) 
      matches <- PD.matchesBlockTarget bundle blktO blktP
-     maybeUpdate gr $ withSatAssumption (PS.frameAssume matches) $ do
+     maybeUpdate gr $ withSatAssumption (PAS.fromPred matches) $ do
        framesMatch <- PD.associateFrames bundle (PB.targetEndCase blktO)
        withAssumptionSet framesMatch $
          case (PB.targetReturn blktO, PB.targetReturn blktP) of

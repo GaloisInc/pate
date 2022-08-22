@@ -67,7 +67,6 @@ module Pate.Monad
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
-  , applyAssumptionSet
   , applyCurrentAsms
   , currentAsm
   -- nonces
@@ -133,6 +132,8 @@ import           What4.ExprHelpers
 import           What4.ProgramLoc
 
 import qualified Pate.Arch as PA
+import           Pate.AssumptionSet ( AssumptionSet )
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
@@ -403,10 +404,8 @@ lookupArgumentNames pp = do
 -- see: https://github.com/GaloisInc/pate/issues/310
 
 -- | Project the current background 'AssumptionSet' into any scope 'v'
-currentAsm :: EquivM sym arch (AssumptionSet sym v)
-currentAsm = do
-  Some frame <- CMR.asks envCurrentFrame
-  return $ unsafeCoerceScope frame
+currentAsm :: EquivM sym arch (AssumptionSet sym)
+currentAsm = CMR.asks envCurrentFrame
 
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
@@ -415,7 +414,7 @@ withFreshVars ::
   forall sym arch f.
   Scoped f =>
   PPa.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym v, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   argNames <- lookupArgumentNames blocks
@@ -435,13 +434,13 @@ withFreshVars blocks f = do
 -- 'AssumptionSet'.
 withAssumptionSet ::
   HasCallStack =>
-  AssumptionSet sym v ->
+  AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch f
 withAssumptionSet asm f = withSym $ \sym -> do
   curAsm <- currentAsm
-  p <- liftIO $ getAssumedPred sym asm
-  CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
+  p <- PAS.toPred sym asm
+  CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
     (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
       st <- LCB.saveAssumptionState bak
       frame <- LCB.pushAssumptionFrame bak
@@ -467,10 +466,10 @@ safePop frame st = withOnlineBackend $ \bak ->
 -- is used for reporting in the case that the resulting assumption state is found to
 -- be inconsistent.
 validateAssumptions ::
-  forall sym arch v. 
+  forall sym arch. 
   HasCallStack =>
-  AssumptionSet sym v {- ^ original assumption set -} ->
-  AssumptionSet sym v {- ^ recently pushed assumption set -} ->
+  AssumptionSet sym {- ^ original assumption set -} ->
+  AssumptionSet sym {- ^ recently pushed assumption set -} ->
   EquivM sym arch ()
 validateAssumptions oldAsm newAsm = withSym $ \sym -> do
   let
@@ -491,48 +490,34 @@ withAssumption ::
   W4.Pred sym ->
   EquivM sym arch f ->
   EquivM sym arch f
-withAssumption asm f = withAssumptionSet (frameAssume asm) f
+withAssumption asm f = withAssumptionSet (PAS.fromPred asm) f
 
 -- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
 -- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
 applyCurrentAsms ::
-  forall sym arch (v :: VarScope) f.
-  PEM.ExprMappable sym (f v) =>
-  f v ->
-  EquivM sym arch (f v)
-applyCurrentAsms f = do
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  f ->
+  EquivM sym arch f
+applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
-  applyAssumptionSet asm f
-  
--- | Rewrite the given 'f' with any bindings in the given 'AssumptionSet'.
-applyAssumptionSet ::
-  forall sym arch v f.
-  PEM.ExprMappable sym (f v) =>
-  AssumptionSet sym v ->
-  f v ->
-  EquivM sym arch (f v)
-applyAssumptionSet asm f = withSym $ \sym -> do
-  cache <- liftIO freshVarBindCache
-  let
-    doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    doRebind = rebindWithFrame' sym cache asm
-  liftIO $ PEM.mapExpr sym doRebind f
+  PAS.apply sym asm f
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
-  AssumptionSet sym v ->
+  AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch (Maybe f)
 withSatAssumption asm f = withSym $ \sym ->  do
-  p <- liftIO $ getAssumedPred sym asm
+  p <- liftIO $ PAS.toPred sym asm
   case W4.asConstantPred p of
     Just False -> return Nothing
     Just True -> Just <$> f
     _ -> do
       curAsm <- currentAsm
-      CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
+      CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
         (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
           st <- LCB.saveAssumptionState bak
           frame <- LCB.pushAssumptionFrame bak
@@ -696,7 +681,7 @@ isPredTrue' timeout p = case W4.asConstantPred p of
   Just b -> return b
   _ -> do
     frame <- currentAsm
-    case isAssumedPred frame p of
+    case PAS.isAssumedPred frame p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p

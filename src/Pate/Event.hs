@@ -24,6 +24,7 @@ import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
 import qualified Pate.Arch as PArch
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
@@ -117,7 +118,7 @@ data Event arch where
   ErrorEmitted :: PEE.EquivalenceError arch -> TM.NominalDiffTime -> Event arch
 
   VisitedNode :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> TM.NominalDiffTime -> Event arch
-  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PS.AssumptionSet sym v -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
+  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PAS.AssumptionSet sym -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
 
   DomainWidened :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
 

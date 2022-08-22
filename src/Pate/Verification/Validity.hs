@@ -22,6 +22,7 @@ import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Arch as PA
+import           Pate.AssumptionSet
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
@@ -37,7 +38,7 @@ validInitState ::
   Maybe (PPa.BlockPair arch) ->
   SimState sym arch v PB.Original ->
   SimState sym arch v PB.Patched ->
-  EquivM sym arch (AssumptionSet sym v)
+  EquivM sym arch (AssumptionSet sym)
 validInitState mpPair stO stP = do
   fmap PRt.collapse $ PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> do
     validO <- validRegister (fmap PPa.pOriginal mpPair) vO r
@@ -45,21 +46,21 @@ validInitState mpPair stO stP = do
     return $ Const $ validO <> validP
 
 validRegister ::
-  forall bin sym v arch tp.
+  forall bin sym arch tp.
   PB.KnownBinary bin =>
   -- | if this register is an initial state, the corresponding
   -- starting block
   Maybe (PB.ConcreteBlock arch bin) ->
   PSR.MacawRegEntry sym tp ->
   MM.ArchReg arch tp ->
-  EquivM sym arch (AssumptionSet sym v)
+  EquivM sym arch (AssumptionSet sym)
 validRegister mblockStart entry r = withSym $ \sym -> do
   PA.SomeValidArch (PA.validArchDedicatedRegisters -> hdr) <- CMR.asks envValidArch
   case PRe.registerCase hdr (PSR.macawRegRepr entry) r of
     PRe.RegIP -> case mblockStart of
       Just blockStart -> do
         ptrO <- PD.concreteToLLVM blockStart
-        liftIO $ macawRegBinding sym entry (PSR.ptrToEntry ptrO)
+        return $ macawRegBinding sym entry (PSR.ptrToEntry ptrO)
       Nothing -> return $ mempty
     PRe.RegSP -> do
       stackRegion <- CMR.asks (PMC.stackRegion . envCtx)

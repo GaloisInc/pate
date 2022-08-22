@@ -250,42 +250,47 @@ rewriteSubExprs sym f e = do
   cache <- freshVarBindCache
   rewriteSubExprs' sym cache f e
   
-
 data VarBindCache sym where
-  VarBindCache :: sym ~ W4B.ExprBuilder t solver fs => W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t)) -> VarBindCache sym
+  VarBindCache :: sym ~ W4B.ExprBuilder t solver fs =>
+    W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t))
+    -> W4B.IdxCache t (W4B.Expr t)
+    -> VarBindCache sym
 
 freshVarBindCache ::
   forall sym t solver fs.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   IO (VarBindCache sym)
-freshVarBindCache = VarBindCache <$> W4B.newIdxCache
+freshVarBindCache = VarBindCache <$> W4B.newIdxCache <*> W4B.newIdxCache
 
 rewriteSubExprs' ::
-  forall sym tp.
+  forall sym tp m.
+  IO.MonadIO m =>
   sym ->
   VarBindCache sym ->
   (forall tp'. W4.SymExpr sym tp' -> Maybe (W4.SymExpr sym tp')) ->
   W4.SymExpr sym tp ->
-  IO (W4.SymExpr sym tp)
-rewriteSubExprs' sym (VarBindCache cache) = rewriteSubExprs'' sym cache
+  m (W4.SymExpr sym tp)
+rewriteSubExprs' sym (VarBindCache taggedCache resultCache) = rewriteSubExprs'' sym taggedCache resultCache
 
 rewriteSubExprs'' ::
-  forall sym t solver fs tp.
+  forall sym t solver fs tp m.
+  IO.MonadIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
   W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t))  ->
+  W4B.IdxCache t (W4B.Expr t) ->
   (forall tp'. W4B.Expr t tp' -> Maybe (W4B.Expr t tp')) ->
   W4B.Expr t tp ->
-  IO (W4B.Expr t tp)
-rewriteSubExprs'' sym cache f e_outer = do
+  m (W4B.Expr t tp)
+rewriteSubExprs'' sym taggedCache resultCache f e_outer = W4B.idxCacheEval resultCache e_outer $ do
   -- During this recursive descent, we find any sub-expressions which need to be rewritten
   -- and perform an in-place replacement with a bound variable, and track that replacement
   -- in the 'VarBinds' environment.
   -- i.e. given a map which takes 'x -> a' and 'z -> b', we would replace 'x + z' with 'bv_0 + bv_1' and
   -- record that 'a -> bv_0' and 'b -> bv_1'.
   let
-    go :: forall tp'. W4B.Expr t tp' -> CMW.WriterT (VarBinds sym) IO (W4B.Expr t tp')
-    go e = idxCacheEvalWriter cache e $ case f e of
+    go :: forall tp'. W4B.Expr t tp' -> CMW.WriterT (VarBinds sym) m (W4B.Expr t tp')
+    go e = idxCacheEvalWriter taggedCache e $ case f e of
       Just e' -> do
         bv <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType e')
         CMW.tell $ VarBinds $ MapF.singleton e' (SetF.singleton bv)
@@ -309,7 +314,7 @@ rewriteSubExprs'' sym cache f e_outer = do
   case Ctx.viewSize (Ctx.size vals) of
     -- no replacement
     Ctx.ZeroSize -> return e_outer
-    _ -> do
+    _ -> IO.liftIO $ do
       fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
       W4.applySymFn sym fn vals >>= fixMux sym
 

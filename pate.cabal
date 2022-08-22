@@ -75,6 +75,7 @@ library
   exposed-modules:     Data.Macaw.CFGSlice,
                        Pate.Abort,
                        Pate.Address,
+                       Pate.AssumptionSet,
                        Pate.Arch,
                        Pate.Binary,
                        Pate.Block,

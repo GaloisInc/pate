@@ -34,6 +34,7 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified What4.Interface as W4
 
 import qualified Pate.Arch as PA
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
@@ -43,7 +44,6 @@ import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import           Pate.SimState
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
@@ -69,7 +69,7 @@ data EquivEnv sym arch where
     -- ^ expression builder, wrapped with a validity proof
     , envStartTime :: TM.UTCTime
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
-    , envCurrentFrame :: Some (AssumptionSet sym)
+    , envCurrentFrame :: PAS.AssumptionSet sym
     -- ^ the current assumption frame, accumulated as assumptions are added
     , envNonceGenerator :: N.NonceGenerator IO (PF.SymScope sym)
     , envParentNonce :: Some (PF.ProofNonce sym)

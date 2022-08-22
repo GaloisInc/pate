@@ -32,6 +32,7 @@ import qualified Data.Macaw.Symbolic as MS
 import qualified Lang.Crucible.Types as CT
 
 import qualified Pate.Arch as PAr
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.PatchPair as PPa
@@ -66,7 +67,7 @@ data InnerEquivalenceError arch
   | MissingPatchPairResult (PPa.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
-  | forall sym v. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PS.AssumptionSet sym v) (PS.AssumptionSet sym v)
+  | forall sym. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)
   | BlockExitMismatch
   | InvalidSMTModel
   | MismatchedAssumptionsPanic
@@ -87,7 +88,7 @@ data InnerEquivalenceError arch
   | WideningError String
   | ObservabilityError String
   | TotalityError String
-  | forall sym v tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PS.AssumptionSet sym v) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
+  | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
 
 ppInnerError :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
