@@ -28,6 +28,7 @@ import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
@@ -229,10 +230,13 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
-stubOverrides :: PA.ArchStubOverrides (PPC.AnyPPC v)
-stubOverrides = PA.ArchStubOverrides
-  --FIXME: add entry for malloc
-  Map.empty
+stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
+stubOverrides = PA.ArchStubOverrides $
+  Map.fromList
+    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
+    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
+  where
+    r0 = gpr 0
 
 instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case
