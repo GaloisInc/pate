@@ -189,8 +189,11 @@ macawRegBinding _sym var val = do
   case PSR.macawRegRepr var of
     CLM.LLVMPointerRepr _ -> ptrBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
     CT.BoolRepr -> exprBinding (PSR.macawRegValue var) (PSR.macawRegValue val)
-    CT.SymbolicStructRepr Ctx.Empty -> mempty
-    _ -> panic Rewriter "macawRegBinding" ["Unexpected macaw types"]
+    CT.StructRepr Ctx.Empty -> mempty
+    _ -> panic Rewriter "macawRegBinding" ["Unexpected macaw types"
+                                          , show (PSR.macawRegRepr var)
+                                          , show (PSR.macawRegRepr val)
+                                          ]
 
 
 
