@@ -506,7 +506,7 @@ absDomainValsToAsm ::
   Maybe (MAS.AbsBlockState (MC.ArchReg arch)) {- ^ abstract block state according to macaw -} ->
   AbstractDomainVals sym arch bin ->
   IO (PAS.AssumptionSet sym)
-absDomainValsToAsm sym eqCtx@(PE.EquivContext{}) st absBlockSt vals = do
+absDomainValsToAsm sym eqCtx st absBlockSt vals = PE.eqCtxConstraints eqCtx $ do
   memFrame <- MapF.foldrMWithKey accumulateCell mempty (absMemVals vals)
   regFrame <- fmap PRt.collapse $ PRt.zipWithRegStatesM (PS.simRegs st) (absRegVals vals) $ \r val absVal -> do
     mAbsVal <- case absBlockSt of
@@ -521,7 +521,7 @@ absDomainValsToAsm sym eqCtx@(PE.EquivContext{}) st absBlockSt vals = do
       MemAbstractValue sym w ->
       PAS.AssumptionSet sym ->
       IO (PAS.AssumptionSet sym)
-    accumulateCell cell (MemAbstractValue absVal) frame = do
+    accumulateCell cell (MemAbstractValue absVal) frame = PE.eqCtxConstraints eqCtx $ do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
       frame' <- absDomainValToAsm sym eqCtx (PSR.ptrToEntry val) Nothing absVal
       return $ frame <> frame'
@@ -534,7 +534,7 @@ absDomainValsToPostCond ::
   Maybe (MAS.AbsBlockState (MC.ArchReg arch)) {- ^ abstract block state according to macaw -} ->
   AbstractDomainVals sym arch bin ->
   IO (PE.StatePostCondition sym arch v)
-absDomainValsToPostCond sym eqCtx@(PE.EquivContext _hdr stackRegion) st absBlockSt vals = do
+absDomainValsToPostCond sym eqCtx st absBlockSt vals = PE.eqCtxConstraints eqCtx $ do
   cells <- mapM (\(MapF.Pair cell v) -> mkCell cell v) (MapF.toList (absMemVals vals))
   memCond' <- WPM.fromList sym WPM.PredConjRepr cells
 
@@ -557,11 +557,13 @@ absDomainValsToPostCond sym eqCtx@(PE.EquivContext _hdr stackRegion) st absBlock
   maxRegionCond <- applyAbsRange sym (PS.unSE (PS.simMaxRegion st)) (absMaxRegion vals)
   return $ PE.StatePostCondition (PE.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond
   where
+    stackRegion = PE.eqCtxStackRegion eqCtx
+
     mkCell ::
       PMC.MemCell sym arch w ->
       MemAbstractValue sym w ->
       IO (Some (PMC.MemCell sym arch), W4.Pred sym)
-    mkCell cell (MemAbstractValue absVal) = do
+    mkCell cell (MemAbstractValue absVal) = PE.eqCtxConstraints eqCtx $ do
       val <- IO.liftIO $ PMC.readMemCell sym (PS.simMem st) cell
       p <- PAS.toPred sym =<<
         absDomainValToAsm sym eqCtx (PSR.ptrToEntry val) Nothing absVal
@@ -600,7 +602,7 @@ absDomainToPrecond ::
   PS.SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   IO (PAS.AssumptionSet sym)
-absDomainToPrecond sym eqCtx bundle d = do
+absDomainToPrecond sym eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
   eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqCtx eqInputs
   valsPred <- do
@@ -608,7 +610,7 @@ absDomainToPrecond sym eqCtx bundle d = do
       let absBlockState = PS.simInAbsState (get $ PS.simIn bundle)
       absDomainValsToAsm sym eqCtx (PS.simInState $ get $ PS.simIn bundle) (Just absBlockState) (get $ absDomVals d)
     return $ (predO <> predP)
-  return $ (eqInputsPred <> valsPred)
+  PAS.augment sym eqInputsPred valsPred
 
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where

@@ -25,6 +25,7 @@ Definitions for equality over crucible input and output states.
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -60,6 +61,7 @@ import qualified What4.Interface as W4
 import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Backend (IsSymInterface)
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Arch as PA
 import           Pate.AssumptionSet
@@ -146,9 +148,10 @@ registerValuesEqual' hdr sym r precond vO vP = do
 
 -- | This simply bundles up the necessary state elements necessary to resolve equality.
 data EquivContext sym arch where
-  EquivContext :: (PA.ValidArch arch, PSo.ValidSym sym) =>
+  EquivContext ::
     { eqCtxHDR :: PA.HasDedicatedRegister arch
     , eqCtxStackRegion :: W4.SymNat sym
+    , eqCtxConstraints :: forall a. (forall t st fs. (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) -> a
     } -> EquivContext sym arch
 
 -- | Equates 'MacawRegEntry' values with respect to a given register.
@@ -163,7 +166,7 @@ registerValuesEqual ::
   PSR.MacawRegEntry sym tp ->
   PSR.MacawRegEntry sym tp ->
   IO (W4.Pred sym)
-registerValuesEqual sym (EquivContext hdr _) r vO vP = registerValuesEqual' hdr sym r (W4.truePred sym) vO vP >>= toPred sym
+registerValuesEqual sym eqCtx r vO vP = registerValuesEqual' (eqCtxHDR eqCtx) sym r (W4.truePred sym) vO vP >>= toPred sym
 
 -- | Resolve a domain predicate into a structured precondition.
 -- This resulting condition is asserting that each location is
@@ -321,8 +324,8 @@ resolveCellEquivMem ::
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
-resolveCellEquivMem sym (EquivContext _ stackRegion) stO stP cell cond =
-  resolveCellEquiv sym (MemEqOutsideRegion stackRegion) stO stP cell cond
+resolveCellEquivMem sym eqCtx stO stP cell cond =
+  resolveCellEquiv sym (MemEqOutsideRegion (eqCtxStackRegion eqCtx)) stO stP cell cond
 
 -- | Compute a predicate that is true if the area of memory covered by the
 -- given 'PMC.MemCell' is equivalent on the two given states.
@@ -338,8 +341,8 @@ resolveCellEquivStack ::
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
-resolveCellEquivStack sym (EquivContext _ stackRegion) stO stP cell cond =
-  resolveCellEquiv sym (MemEqAtRegion stackRegion) stO stP cell cond
+resolveCellEquivStack sym eqCtx stO stP cell cond =
+  resolveCellEquiv sym (MemEqAtRegion (eqCtxStackRegion eqCtx)) stO stP cell cond
 
 
 -- | Structurally equivalent to a 'PEM.MemoryDomain', however the predicates
@@ -480,7 +483,7 @@ eqDomPre ::
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StatePreCondition sym arch v)
-eqDomPre sym inO inP (EquivContext hdr _stackRegion) eqDom  = do
+eqDomPre sym inO inP (eqCtxHDR -> hdr) eqDom  = do
   let
     stO = simInState inO
     stP = simInState inP
@@ -505,8 +508,10 @@ eqDomPost ::
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StatePostCondition sym arch v)
-eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
+eqDomPost sym outO outP eqCtx domPre domPost = do
   let
+    hdr = eqCtxHDR eqCtx
+    stackRegion = eqCtxStackRegion eqCtx
     stO = simOutState outO
     stP = simOutState outP
     
@@ -530,7 +535,7 @@ preCondAssumption ::
   EquivContext sym arch ->
   StatePreCondition sym arch v ->
   IO (AssumptionSet sym)
-preCondAssumption sym inO inP (EquivContext _hdr stackRegion) stCond = do
+preCondAssumption sym inO inP (eqCtxStackRegion -> stackRegion) stCond = do
   regsPred <- regCondToAsm sym (stRegPreCond stCond)
   stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) inO inP (stStackPreDom stCond)
   memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) inO inP (stMemPreDom stCond)

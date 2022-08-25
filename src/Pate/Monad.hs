@@ -916,7 +916,7 @@ safeIO mkex f = withValid $ (liftIO $ tryJust filterAsync f) >>= \case
 
 equivalenceContext ::
   EquivM sym arch (PEq.EquivContext sym arch)
-equivalenceContext = do
+equivalenceContext = withValid $ do
   PA.SomeValidArch d <- CMR.asks envValidArch
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
-  return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion
+  return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion (\x -> x)
