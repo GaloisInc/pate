@@ -67,8 +67,8 @@ data BranchCompletenessResult arch = BranchesComplete
 data Event arch where
   AnalysisEnd :: PES.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
   AnalysisStart :: PPa.BlockPair arch -> Event arch
-  ErrorRaised :: PEE.EquivalenceError arch -> Event arch
-  Warning :: PEE.EquivalenceError arch -> Event arch
+  ErrorRaised :: PEE.EquivalenceError -> Event arch
+  Warning :: PEE.EquivalenceError -> Event arch
   -- | final top-level result
   ProvenGoal :: BlocksPair arch ->  PFI.SomeProofNonceExpr arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
   -- | intermediate results
@@ -113,9 +113,9 @@ data Event arch where
   -- | The strongest postcondition analysis ran out of gas when analyzing the given pair
   GasExhausted :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> Event arch
   -- | Other errors that can occur inside of the strongest postcondition verifier
-  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> PEE.EquivalenceError arch -> Event arch
+  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> PEE.EquivalenceError -> Event arch
   -- | A recoverable error that occurred during verification
-  ErrorEmitted :: PEE.EquivalenceError arch -> TM.NominalDiffTime -> Event arch
+  ErrorEmitted :: PEE.EquivalenceError -> TM.NominalDiffTime -> Event arch
 
   VisitedNode :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> TM.NominalDiffTime -> Event arch
   SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PAS.AssumptionSet sym -> WI.Pred sym -> TM.NominalDiffTime -> Event arch

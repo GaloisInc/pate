@@ -224,17 +224,14 @@ emitWarning ::
   PEE.InnerEquivalenceError arch ->
   EquivM sym arch ()
 emitWarning innererr = do
-  wb <- CMR.asks envWhichBinary
-  let err = PEE.EquivalenceError
-        { PEE.errWhichBinary = wb
-        , PEE.errStackTrace = Just callStack
-        , PEE.errEquivError = innererr
-        }
+  err <- CMR.asks envWhichBinary >>= \case
+    Just (Some wb) -> return $ PEE.equivalenceErrorFor wb innererr
+    Nothing -> return $ PEE.equivalenceError innererr
   emitEvent (\_ -> PE.Warning err)
 
 -- | Emit an event declaring that an error has been raised, but only throw
 -- the error if it is not recoverable (according to 'PEE.isRecoverable')
-emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch (PEE.EquivalenceError arch)
+emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch PEE.EquivalenceError
 emitError err = withValid $ do
   Left err' <- manifestError (throwHere err >> return ())
   emitEvent (\_ -> PE.ErrorRaised err')
@@ -246,7 +243,7 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT (PEE.EquivalenceError arch) IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -255,7 +252,7 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (E
            , MonadThrow
            , MonadCatch
            , MonadMask
-           , MonadError (PEE.EquivalenceError arch)
+           , MonadError PEE.EquivalenceError
            )
 
 type EquivM sym arch a = (PA.ValidArch arch, PSo.ValidSym sym) => EquivM_ sym arch a
@@ -840,7 +837,7 @@ catchInIO ::
   IO a ->
   EquivM sym arch a
 catchInIO f =
-  (liftIO $ catch (Right <$> f) (\(e :: PEE.EquivalenceError arch) -> return $ Left e)) >>= \case
+  (liftIO $ catch (Right <$> f) (\(e :: PEE.EquivalenceError) -> return $ Left e)) >>= \case
     Left err -> throwError err
     Right result -> return result
 
@@ -866,7 +863,7 @@ runEquivM' env f = withValidEnv env $ (runExceptT $ CMR.runReaderT (unEQ f) env)
 runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
-  ExceptT (PEE.EquivalenceError arch) IO a
+  ExceptT PEE.EquivalenceError IO a
 runEquivM env f = withValidEnv env $ CMR.runReaderT (unEQ f) env
 
 ----------------------------------------
@@ -877,23 +874,19 @@ throwHere ::
   PEE.InnerEquivalenceError arch ->
   EquivM_ sym arch a
 throwHere err = withValid $ do
-  wb <- CMR.asks envWhichBinary
-  throwError $ PEE.EquivalenceError
-    { PEE.errWhichBinary = wb
-    , PEE.errStackTrace = Just callStack
-    , PEE.errEquivError = err
-    }
-
+  CMR.asks envWhichBinary >>= \case
+    Just (Some wb) -> throwError $ PEE.equivalenceErrorFor wb err
+    Nothing -> throwError $ PEE.equivalenceError err
 
 instance MF.MonadFail (EquivM_ sym arch) where
   fail msg = throwHere $ PEE.EquivCheckFailure $ "Fail: " ++ msg
 
-manifestError :: EquivM_ sym arch a -> EquivM sym arch (Either (PEE.EquivalenceError arch) a)
+manifestError :: EquivM_ sym arch a -> EquivM sym arch (Either PEE.EquivalenceError a)
 manifestError act = do
   catchError (Right <$> act) (pure . Left) >>= \case
     r@(Left er) -> CMR.asks (PC.cfgFailureMode . envConfig) >>= \case
       PC.ThrowOnAnyFailure -> throwError er
-      PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable (PEE.errEquivError er) of
+      PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable er of
         True -> return r
         False -> throwError er
       PC.ContinueAfterFailure -> return r
@@ -907,7 +900,7 @@ safeIO ::
   IO a ->
   EquivM_ sym arch a
 safeIO mkex f = withValid $ (liftIO $ tryJust filterAsync f) >>= \case
-  Left err | Just (ex :: PEE.EquivalenceError arch) <- fromException err ->
+  Left err | Just (ex :: PEE.EquivalenceError) <- fromException err ->
     throwError ex
   Left err -> throwHere (mkex err)
   Right a -> return a

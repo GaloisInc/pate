@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeOperators #-}
 module Pate.Arch (
   SomeValidArch(..),
+  ArchLoader(..),
   ValidArchData(..),
   ValidArch(..),
   DedicatedRegister,
@@ -19,7 +20,8 @@ module Pate.Arch (
   ArchStubOverrides(..),
   mkMallocOverride,
   mkClockOverride,
-  lookupStubOverride
+  lookupStubOverride,
+  mergeLoaders
   ) where
 
 import           Control.Lens ( (&), (.~) )
@@ -31,6 +33,7 @@ import qualified Data.Map as Map
 import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           GHC.TypeLits ( type (<=) )
+import           Data.Parameterized.Some ( Some(..) )
 
 import qualified Data.ElfEdit as E
 import qualified Data.Macaw.Architecture.Info as MI
@@ -199,3 +202,20 @@ mkClockOverride rOut = StubOverride $ \sym st -> do
 -- handles domains for external library calls
 data SomeValidArch arch where
   SomeValidArch :: (ValidArch arch) => ValidArchData arch -> SomeValidArch arch
+
+-- | Create a 'PA.SomeValidArch' from parsed ELF files
+data ArchLoader err =
+  ArchLoader (forall w.
+              E.ElfMachine ->
+              E.ElfHeaderInfo w ->
+              E.ElfHeaderInfo w ->
+              Either err (Some SomeValidArch)
+             )
+
+-- | Merge loaders by taking the first successful result (if it exists)
+mergeLoaders ::
+  ArchLoader err -> ArchLoader err -> ArchLoader err
+mergeLoaders (ArchLoader l1) (ArchLoader l2) = ArchLoader $ \m i1 i2 ->
+  case l1 m i1 i2 of
+    Left _ -> l2 m i1 i2
+    Right a -> Right a

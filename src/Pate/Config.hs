@@ -3,6 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Pate.Config (
   PatchData(..),
+  PatchDataParseError,
   BlockAlignment(..),
   Address(..),
   Allocation(..),

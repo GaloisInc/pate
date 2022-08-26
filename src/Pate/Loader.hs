@@ -4,6 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Pate.Loader
   (
@@ -17,7 +18,8 @@ where
 import qualified Control.Monad.Except as CME
 
 import qualified Data.ByteString as BS
-import           Data.Proxy ( Proxy(..) )
+import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.ElfEdit as DEE
 import qualified Lumberjack as LJ
 
 import qualified Pate.Arch as PA
@@ -30,56 +32,59 @@ import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
 
-data RunConfig arch =
+data RunConfig =
   RunConfig
-    { archProxy :: PA.SomeValidArch arch
-    , patchInfoPath :: Maybe FilePath
+    { patchInfoPath :: Maybe FilePath
     , patchData :: PC.PatchData
     , origPath :: FilePath
     , patchedPath :: FilePath
-    , logger :: LJ.LogAction IO (PE.Event arch)
+    , logger :: forall arch. PA.SomeValidArch arch -> LJ.LogAction IO (PE.Event arch)
     , verificationCfg :: PC.VerificationConfig
     , origHints :: PH.VerificationHints
     , patchedHints :: PH.VerificationHints
+    , archLoader :: PA.ArchLoader PEE.LoadError
     }
+
 
 runEquivVerification ::
   PA.SomeValidArch arch ->
+  [DEE.ElfParseError] ->
   LJ.LogAction IO (PE.Event arch) ->
   PC.PatchData ->
   PC.VerificationConfig ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   IO PEq.EquivalenceStatus
-runEquivVerification validArch@(PA.SomeValidArch {}) logAction pd dcfg original patched = do
-  liftToEquivStatus validArch $ PV.verifyPairs validArch logAction original patched dcfg pd
+runEquivVerification validArch@(PA.SomeValidArch {}) elfErrs logAction pd dcfg original patched = do
+  LJ.writeLog logAction (PE.ElfLoaderWarnings elfErrs)
+  (CME.runExceptT $ PV.verifyPairs validArch logAction original patched dcfg pd) >>= \case
+    Left err -> return $ PEq.Errored err
+    Right st -> return st
+
+type LoaderM = CME.ExceptT PEE.LoadError IO
 
 liftToEquivStatus ::
-  forall arch e m.
-  Show e =>
-  Monad m =>
-  PA.SomeValidArch arch ->
-  CME.ExceptT e m PEq.EquivalenceStatus ->
-  m PEq.EquivalenceStatus
-liftToEquivStatus (PA.SomeValidArch {}) f = do
+  LoaderM PEq.EquivalenceStatus ->
+  IO PEq.EquivalenceStatus
+liftToEquivStatus f = do
   v <- CME.runExceptT f
   case v of
-    Left err -> return $ PEq.Errored @arch (PEE.EquivalenceError Nothing Nothing (PEE.LoaderFailure (show err)))
+    Left err -> return $ PEq.Errored (PEE.loaderError err)
     Right b -> return b
 
 -- | Given a patch configuration, check that
 -- either the original or patched binary can be
 -- proven self-equivalent
-runSelfEquivConfig :: forall arch bin.
-  RunConfig arch ->
+runSelfEquivConfig :: forall bin.
+  RunConfig ->
   PB.WhichBinaryRepr bin ->
   IO PEq.EquivalenceStatus
-runSelfEquivConfig cfg wb = liftToEquivStatus (archProxy cfg) $ do
+runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   pd <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- CME.lift $ BS.readFile fp
       case PC.parsePatchConfig bytes of
-        Left e -> CME.throwError ("Bad patch info file: " ++ show e)
+        Left e -> CME.throwError $ PEE.BadPatchInfo fp e
         Right r -> return (r <> patchData cfg)
     Nothing -> return $ patchData cfg
   let
@@ -102,25 +107,25 @@ runSelfEquivConfig cfg wb = liftToEquivStatus (archProxy cfg) $ do
       , PC.ignorePatchedFunctions = PC.ignoreOriginalFunctions pd
       , PC.observableMemory = PC.observableMemory pd
       }
-  PA.SomeValidArch {} <- return $ archProxy cfg
-  bin <- CME.lift $ PLE.loadELF @arch Proxy $ path
+  Some (PLE.LoadedElfPair proxy errs bin _) <- PLE.loadELFs (archLoader cfg) path path
   let hintedBin = PH.Hinted (origHints cfg) bin
-  CME.lift $ runEquivVerification (archProxy cfg) (logger cfg) pd' (verificationCfg cfg) hintedBin hintedBin
+  let logger' = logger cfg proxy
+  CME.lift $ runEquivVerification proxy errs logger' pd' (verificationCfg cfg) hintedBin hintedBin
 
-runEquivConfig :: forall arch.
-  RunConfig arch ->
+runEquivConfig ::
+  RunConfig ->
   IO PEq.EquivalenceStatus
-runEquivConfig cfg = liftToEquivStatus (archProxy cfg) $ do
+runEquivConfig cfg = liftToEquivStatus $ do
   pdata <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- CME.lift $ BS.readFile fp
       case PC.parsePatchConfig bytes of
-        Left err -> CME.throwError ("Bad patch info file: " ++ show err)
+        Left err -> CME.throwError $ PEE.BadPatchInfo fp err
         Right r -> return (r <> patchData cfg)
     Nothing -> return $ patchData cfg
-  PA.SomeValidArch {} <- return $ archProxy cfg
-  original <- CME.lift $ PLE.loadELF @arch Proxy $ (origPath cfg)
-  patched <- CME.lift $ PLE.loadELF @arch Proxy $ (patchedPath cfg)
+  Some (PLE.LoadedElfPair proxy errs original patched) <-
+    PLE.loadELFs (archLoader cfg) (origPath cfg) (patchedPath cfg)
   let hintedOrig = PH.Hinted (origHints cfg) original
   let hintedPatched = PH.Hinted (patchedHints cfg) patched
-  CME.lift $ runEquivVerification (archProxy cfg) (logger cfg) pdata (verificationCfg cfg) hintedOrig hintedPatched
+  let logger' = logger cfg proxy
+  CME.lift $ runEquivVerification proxy errs logger' pdata (verificationCfg cfg) hintedOrig hintedPatched

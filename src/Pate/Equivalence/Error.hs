@@ -4,20 +4,25 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE LambdaCase   #-}
 
 module Pate.Equivalence.Error (
     InnerEquivalenceError(..)
+  , LoadError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
   , SimpResult(..)
   , equivalenceError
   , equivalenceErrorFor
   , isRecoverable
+  , loaderError
   ) where
 
 import qualified Control.Exception as X
 import           Data.Maybe ( catMaybes )
+import qualified Data.Binary.Get as DB
 import qualified Data.ByteString as BS
+import qualified Data.ElfEdit as DEE
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Typeable ( Typeable )
 import           Data.Proxy
@@ -34,6 +39,7 @@ import qualified Lang.Crucible.Types as CT
 
 import qualified Pate.Arch as PAr
 import qualified Pate.AssumptionSet as PAS
+import qualified Pate.Config as PC
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.PatchPair as PPa
@@ -48,7 +54,6 @@ data InequivalenceReason =
 
 data InnerEquivalenceError arch
   = BytesNotConsumed { disassemblyAddr :: PA.ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
-  | UnsupportedArchitecture
   | UnsupportedRegisterType (Some CT.TypeRepr)
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
@@ -78,7 +83,7 @@ data InnerEquivalenceError arch
   | UnexpectedUnverifiedTriple
   | MissingTOCEntry (MM.ArchSegmentOff arch)
   | BlockEndClassificationFailure
-  | InvalidCallTarget (PA.ConcreteAddress arch) (EquivalenceError arch)
+  | InvalidCallTarget (PA.ConcreteAddress arch) EquivalenceError
   | IncompatibleDomainPolarities
   | forall tp. UnsupportedGroundType (W4.BaseTypeRepr tp)
   | InconsistentSimplificationResult SimpResult
@@ -92,7 +97,7 @@ data InnerEquivalenceError arch
   | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
   | UnknownPLTStub BS.ByteString
 
-ppInnerError :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> PP.Doc a
+ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
   RescopingFailure asms src tgt ->
     PP.vsep
@@ -106,11 +111,16 @@ ppInnerError e = case e of
   _ -> PP.viaShow e
 
 -- | Roughly categorizing how catastrophic an error is to the soundness of the verifier
-isRecoverable :: InnerEquivalenceError arch -> Bool
-isRecoverable e = case e of
+isRecoverable' :: InnerEquivalenceError arch -> Bool
+isRecoverable' e = case e of
   InconsistentSimplificationResult{} -> True
   RescopingFailure{} -> True
   WideningError{} -> True
+  _ -> False
+
+isRecoverable :: EquivalenceError -> Bool
+isRecoverable err = case errEquivError err of
+  Left (SomeInnerError innerErr) -> isRecoverable' innerErr
   _ -> False
 
 data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>
@@ -125,43 +135,65 @@ instance Show SimpResult where
 deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
 instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (InnerEquivalenceError arch)
 
-data EquivalenceError arch where
+
+data LoadError where
+  ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
+  ElfArchitectureMismatch :: FilePath -> FilePath -> LoadError
+  UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
+  BadPatchInfo :: FilePath -> PC.PatchDataParseError -> LoadError
+deriving instance Show LoadError
+
+data SomeInnerError where
+  SomeInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> SomeInnerError
+
+data EquivalenceError where
   EquivalenceError ::
-    PAr.ValidArch arch =>
       { errWhichBinary :: Maybe (Some PBi.WhichBinaryRepr)
       , errStackTrace :: Maybe CallStack
-      , errEquivError :: InnerEquivalenceError arch
-      } -> EquivalenceError arch
+      , errEquivError :: Either SomeInnerError LoadError
+      } -> EquivalenceError
 
 instance MS.SymArchConstraints arch => PP.Pretty (InnerEquivalenceError arch) where
   pretty = PP.viaShow
 
-instance PP.Pretty (EquivalenceError arch) where
+
+ppEitherInnerError :: Either SomeInnerError LoadError -> PP.Doc a
+ppEitherInnerError (Left (SomeInnerError e)) = ppInnerError e
+ppEitherInnerError (Right e) = PP.pretty (show e)
+
+instance PP.Pretty EquivalenceError where
   pretty e@(EquivalenceError{}) = PP.vsep $ catMaybes $
     [ fmap (\(Some b) -> "For " <+> PP.pretty (show b) <+> " binary") (errWhichBinary e)
     , fmap (\s -> "At " <+> PP.pretty (prettyCallStack s)) (errStackTrace e)
-    , Just (ppInnerError (errEquivError e))
+    , Just (ppEitherInnerError (errEquivError e))
     ]
 
-instance Show (EquivalenceError arch) where
+instance Show EquivalenceError where
   show e = show (PP.pretty e)
 
-instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (EquivalenceError arch)
+instance X.Exception EquivalenceError
 
-equivalenceError :: (HasCallStack, PAr.ValidArch arch) => InnerEquivalenceError arch -> EquivalenceError arch
+loaderError :: HasCallStack => LoadError -> EquivalenceError
+loaderError err = EquivalenceError
+  { errWhichBinary = Nothing
+  , errStackTrace = Just callStack
+  , errEquivError = Right err
+  }
+
+equivalenceError :: (HasCallStack, PAr.ValidArch arch) => InnerEquivalenceError arch -> EquivalenceError
 equivalenceError err = EquivalenceError
   { errWhichBinary = Nothing
   , errStackTrace = Just callStack
-  , errEquivError = err
+  , errEquivError = Left (SomeInnerError err)
   }
 
 equivalenceErrorFor
   :: (HasCallStack, PAr.ValidArch arch)
   => PBi.WhichBinaryRepr bin
   -> InnerEquivalenceError arch
-  -> EquivalenceError arch
+  -> EquivalenceError
 equivalenceErrorFor repr err =
   EquivalenceError { errWhichBinary = Just (Some repr)
                    , errStackTrace = Just callStack
-                   , errEquivError = err
+                   , errEquivError = Left (SomeInnerError err)
                    }

@@ -168,7 +168,7 @@ data PairGraph sym arch =
     -- | Other sorts of analysis errors not captured by the previous categories. These generally
     --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
     --   that may impact the soundness of the analysis.
-  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError arch])
+  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError])
   }
 
 ppProgramDomains ::
@@ -260,7 +260,7 @@ considerDesyncEvent gr bPair action =
 recordMiscAnalysisError ::
   PairGraph sym arch ->
   GraphNode arch ->
-  PEE.EquivalenceError arch ->
+  PEE.EquivalenceError ->
   PairGraph sym arch
 recordMiscAnalysisError gr nd er =
   let m = Map.alter f nd (pairGraphMiscAnalysisErrors gr)

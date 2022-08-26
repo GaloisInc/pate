@@ -504,11 +504,11 @@ abortFnName :: T.Text
 abortFnName = "__pate_abort"
 
 addAddrSym
-  :: (w ~ MC.ArchAddrWidth arch, MM.MemWidth w, HasCallStack)
+  :: (MM.MemWidth w, HasCallStack)
   => MM.Memory w
   -> MD.AddrSymMap w
   -> PH.FunctionDescriptor
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MD.AddrSymMap w)
+  -> CME.ExceptT PEE.EquivalenceError IO (MD.AddrSymMap w)
 addAddrSym mem m funcDesc = do
   let symbol = TE.encodeUtf8 (PH.functionSymbol funcDesc)
   let addr0 = PH.functionAddress funcDesc
@@ -557,7 +557,7 @@ runDiscovery ::
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
+  CME.ExceptT PEE.EquivalenceError IO ([Word64], PMC.BinaryContext arch bin)
 runDiscovery mCFGDir repr extraSyms elf hints pd = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
@@ -656,11 +656,7 @@ lookupBlocks b = do
     Left ierr -> do
       let binRep :: PB.WhichBinaryRepr bin
           binRep = PC.knownRepr
-      let err = PEE.EquivalenceError { PEE.errWhichBinary = Just (Some binRep)
-                                     , PEE.errStackTrace = Just callStack
-                                     , PEE.errEquivError = ierr
-                                     }
-      CME.throwError err
+      CME.throwError $ PEE.equivalenceErrorFor binRep ierr
     Right blocks -> return blocks
 
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'

@@ -21,6 +21,7 @@ module Pate.PPC (
   , ppc32HasDedicatedRegister
   , argumentMapping
   , stubOverrides
+  , archLoader
   )
 where
 
@@ -29,6 +30,7 @@ import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
@@ -242,3 +244,30 @@ instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case
     PPC.PPCSyscall -> MCS.MacawBlockEndCall
     _ -> MCS.MacawBlockEndArch
+
+
+archLoader :: PA.ArchLoader PEE.LoadError
+archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
+  case (em, EEP.headerClass (EEP.header origHdr)) of
+    (EEP.EM_PPC, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                 , PA.validArchFunctionDomain = handleExternalCall
+                                 , PA.validArchDedicatedRegisters = ppc32HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchStubOverrides = stubOverrides
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    (EEP.EM_PPC64, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                 , PA.validArchFunctionDomain = handleExternalCall
+                                 , PA.validArchDedicatedRegisters = ppc64HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchStubOverrides = stubOverrides
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+
+    _ -> Left (PEE.UnsupportedArchitecture em)

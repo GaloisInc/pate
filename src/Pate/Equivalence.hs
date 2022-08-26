@@ -85,7 +85,7 @@ data EquivalenceStatus =
     Equivalent
   | Inequivalent
   | ConditionallyEquivalent
-  | forall arch. PA.ValidArch arch => Errored (PEE.EquivalenceError arch)
+  | Errored PEE.EquivalenceError
 
 deriving instance Show EquivalenceStatus
 

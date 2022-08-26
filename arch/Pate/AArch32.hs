@@ -13,15 +13,18 @@ module Pate.AArch32 (
   , hasDedicatedRegister
   , argumentMapping
   , stubOverrides
+  , archLoader
   ) where
 
 import           Control.Lens ( (^?), (^.), (&), (.~) )
 import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
+import           Data.Proxy ( Proxy(..) )
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
@@ -46,6 +49,8 @@ import           Data.Macaw.AArch32.Symbolic ()
 import qualified Language.ASL.Globals as ASL
 
 import qualified Pate.Arch as PA
+import qualified Pate.Discovery.PLT as PLT
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -196,6 +201,23 @@ instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
   archTermCase = \case
     MAA.ReturnIf{} -> MCS.MacawBlockEndReturn
     MAA.ReturnIfNot{} -> MCS.MacawBlockEndReturn
+
+archLoader :: PA.ArchLoader PEE.LoadError
+archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
+  case (em, EEP.headerClass (EEP.header origHdr)) of
+    (EEP.EM_ARM, EEP.ELFCLASS32) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                 , PA.validArchFunctionDomain = handleExternalCall
+                                 , PA.validArchDedicatedRegisters = hasDedicatedRegister
+                                 , PA.validArchArgumentMapping = argumentMapping
+                                 , PA.validArchOrigExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
+                                 , PA.validArchPatchedExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                 , PA.validArchStubOverrides = stubOverrides
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    _ -> Left (PEE.UnsupportedArchitecture em)
 
 {- Note [Thumb Code Discovery Hacks]
 
