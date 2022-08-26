@@ -29,6 +29,7 @@ import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Loader as PL
+import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Equivalence.Error as PEE
 
 data TestConfig where
@@ -136,29 +137,30 @@ doTest mwb cfg sv fp = do
     rcfg = PL.RunConfig
       { PL.patchInfoPath = infoPath
       , PL.patchData = defaultPatchData cfg
-      , PL.origPath = fp <.> "original" <.> "exe"
-      , PL.patchedPath = fp <.> "patched" <.> "exe"
-      , PL.origHints = mempty
-      , PL.patchedHints = mempty
+      , PL.origPaths = PLE.simplePaths (fp <.> "original" <.> "exe")
+      , PL.patchedPaths = PLE.simplePaths (fp <.> "patched" <.> "exe")
       , PL.verificationCfg = PC.defaultVerificationCfg { PC.cfgFailureMode = PC.ThrowOnAnyFailure }
-      , PL.logger = \(PA.SomeValidArch{}) ->
-          LJ.LogAction $ \e -> case e of
-            PE.Warning err -> do
-              addLogMsg $ "WARNING: " ++ show err
-            PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
-            PE.ProofTraceEvent _ oAddr pAddr msg _ -> do
-              let addr = case oAddr == pAddr of
-                    True -> show oAddr
-                    False -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
-              addLogMsg $ addr ++ ":" ++ show msg
-            PE.StrongestPostDesync pPair _ ->
-              addLogMsg $ "Desync at: " ++ show pPair
-            PE.StrongestPostObservable pPair _ ->
-              addLogMsg $ "Observable counterexample at: " ++ show pPair
-            PE.StrongestPostOverallResult status _ ->
-              addLogMsg $ "Overall Result:" ++ show status
-            _ -> return ()
+      , PL.logger = \(PA.SomeValidArch{}) -> do
+          let
+            act = LJ.LogAction $ \e -> case e of
+              PE.Warning err -> do
+                addLogMsg $ "WARNING: " ++ show err
+              PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
+              PE.ProofTraceEvent _ oAddr pAddr msg _ -> do
+                let addr = case oAddr == pAddr of
+                      True -> show oAddr
+                      False -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
+                addLogMsg $ addr ++ ":" ++ show msg
+              PE.StrongestPostDesync pPair _ ->
+                addLogMsg $ "Desync at: " ++ show pPair
+              PE.StrongestPostObservable pPair _ ->
+                addLogMsg $ "Observable counterexample at: " ++ show pPair
+              PE.StrongestPostOverallResult status _ ->
+                addLogMsg $ "Overall Result:" ++ show status
+              _ -> return ()
+          return $ PL.Logger act []
       , PL.archLoader = testArchLoader cfg
+      , PL.useDwarfHints = False
       }
   result <- case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb

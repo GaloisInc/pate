@@ -22,13 +22,7 @@ import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
 import           Control.Monad ( join )
-import qualified Data.Binary.Get as DB
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
-import qualified Data.List.NonEmpty as DLN
-import           Data.Maybe ( maybeToList )
-import           Data.Proxy ( Proxy(..) )
 import qualified Data.Traversable as T
 import qualified Language.C as LC
 import qualified Lumberjack as LJ
@@ -42,24 +36,15 @@ import qualified System.Exit as SE
 import qualified System.IO as IO
 import qualified What4.Interface as WI
 
-import qualified Data.ElfEdit as DEE
-import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Macaw.CFG as MC
-import qualified Data.Parameterized.Classes as PC
-import           Data.Parameterized.Some ( Some(..) )
-import qualified SemMC.Architecture.AArch32 as SA
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
-import qualified Pate.Discovery.PLT as PLT
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
-import qualified Pate.Hints as PH
-import qualified Pate.Hints.CSV as PHC
-import qualified Pate.Hints.DWARF as PHD
-import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Loader as PL
+import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
@@ -68,70 +53,37 @@ import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
-import qualified Pate.AArch32 as AArch32
-import qualified Pate.PPC as PPC
+import qualified Pate.ArchLoader as PAL
 
 import qualified JSONReport as JR
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
 
-parseHints
-  :: LJ.LogAction IO (PE.Event arch)
-  -> CLIOptions
-  -> IO (PH.VerificationHints, PH.VerificationHints)
-parseHints logAction opts = do
-  oHints <- parseOne (originalBinary opts) (originalAnvillHints opts) (originalProbabilisticHints opts) (originalCsvFunctionHints opts) (not (noDwarfHints opts))
-  pHints <- parseOne (patchedBinary opts) (patchedAnvillHints opts) (patchedProbabilisticHints opts) (patchedCsvFunctionHints opts) (not (noDwarfHints opts))
-  return (oHints, pHints)
-  where
-    parseOne binPath anvillDir mprobFile mcsvFile useDwarf = do
-      anvills <- T.forM anvillDir $ \anvillFile -> do
-        bytes <- BSL.readFile anvillFile
-        let (hints, errs) = PHJ.parseAnvillSpecHints bytes
-        case errs of
-          e1 : es -> LJ.writeLog logAction (PE.HintErrorsJSON (e1 DLN.:| es))
-          _ -> return ()
-        return hints
-
-      probs <- T.forM (maybeToList mprobFile) $ \probFile -> do
-        bytes <- BSL.readFile probFile
-        let (hints, errs) = PHJ.parseProbabilisticHints bytes
-        case errs of
-          e1 : es -> LJ.writeLog logAction (PE.HintErrorsJSON (e1 DLN.:| es))
-          _ -> return ()
-        return hints
-
-      csvs <- T.forM (maybeToList mcsvFile) $ \csvFile -> do
-        bytes <- BSL.readFile csvFile
-        let (hints, errs) = PHC.parseFunctionHints bytes
-        case errs of
-          e1 : es -> LJ.writeLog logAction (PE.HintErrorsCSV (e1 DLN.:| es))
-          _ -> return ()
-        return hints
-
-      let dwarfSource = if useDwarf then [binPath] else []
-      dwarves <- T.forM dwarfSource $ \elfFile -> do
-        bytes <- BSL.readFile elfFile
-        let (hints, errs) = PHD.parseDWARFHints bytes
-        case errs of
-          e1 : es -> LJ.writeLog logAction (PE.HintErrorsDWARF (e1 DLN.:| es))
-          _ -> return ()
-        return hints
-
-      return (mconcat (concat [anvills, probs, csvs, dwarves]))
 
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
-  ep <- archToProxy (originalBinary opts) (patchedBinary opts)
-  case ep of
-    Left err -> SE.die (show err)
-    Right (elfErrs, Some proxy) -> do
-      (logger, consumers) <- startLogger proxy (verbosity opts) (interactiveConfig opts) (logFile opts)
-      (logger', consumers') <- do
+  let
+    origPaths = PLE.LoadPaths
+      { PLE.binPath = originalBinary opts
+      , PLE.anvillHintsPaths = originalAnvillHints opts
+      , PLE.mprobHintsPath = originalProbabilisticHints opts
+      , PLE.mcsvHintsPath = originalCsvFunctionHints opts
+      }
+    patchedPaths = PLE.LoadPaths
+      { PLE.binPath = originalBinary opts
+      , PLE.anvillHintsPaths = patchedAnvillHints opts
+      , PLE.mprobHintsPath = patchedProbabilisticHints opts
+      , PLE.mcsvHintsPath = patchedCsvFunctionHints opts
+      }
+
+  let
+    mklogger :: forall arch. PA.SomeValidArch arch -> IO (PL.Logger arch)
+    mklogger proxy = do
+        (logger, consumers) <- startLogger proxy (verbosity opts) (interactiveConfig opts) (logFile opts)
         case proofSummaryJSON opts of
-          Nothing -> return (logger, consumers)
+          Nothing -> return $ PL.Logger logger consumers
           Just proofJSONFile -> do
             pc <- JR.consumeProofEvents proofJSONFile
             let recordProofEvent evt =
@@ -139,48 +91,34 @@ main = do
                     PE.ProofIntermediate bp sp _ -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
                     _ -> return ()
             let jl = LJ.LogAction recordProofEvent
-            return (logger <> jl, (JR.waitForConsumer pc, JR.sendEvent pc Nothing) : consumers)
-      (origHints, patchedHints) <- parseHints logger' opts
-      LJ.writeLog logger' (PE.ElfLoaderWarnings elfErrs)
-      let
-        verificationCfg =
-          PC.defaultVerificationCfg
-            { PC.cfgPairMain = not $ noPairMain opts
-            , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
-            , PC.cfgSolver = solver opts
-            , PC.cfgHeuristicTimeout = heuristicTimeout opts
-            , PC.cfgGoalTimeout = goalTimeout opts
-            , PC.cfgMacawDir = saveMacawCFGs opts
-            , PC.cfgSolverInteractionFile = solverInteractionFile opts
-            }
-        cfg = PL.RunConfig
-            { PL.archProxy = proxy
-            , PL.patchInfoPath = blockInfo opts
-            , PL.patchData = mempty
-            , PL.origPath = originalBinary opts
-            , PL.patchedPath = patchedBinary opts
-            , PL.logger = logger'
-            , PL.verificationCfg = verificationCfg
-            , PL.origHints = origHints
-            , PL.patchedHints = patchedHints
-            }
+            return $ PL.Logger (logger <> jl) ((JR.waitForConsumer pc, JR.sendEvent pc Nothing) : consumers)
+            
+  let
+    verificationCfg =
+      PC.defaultVerificationCfg
+        { PC.cfgPairMain = not $ noPairMain opts
+        , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
+        , PC.cfgSolver = solver opts
+        , PC.cfgHeuristicTimeout = heuristicTimeout opts
+        , PC.cfgGoalTimeout = goalTimeout opts
+        , PC.cfgMacawDir = saveMacawCFGs opts
+        , PC.cfgSolverInteractionFile = solverInteractionFile opts
+        }
+    cfg = PL.RunConfig
+        { PL.archLoader = PAL.archLoader
+        , PL.patchInfoPath = blockInfo opts
+        , PL.patchData = mempty
+        , PL.origPaths = origPaths
+        , PL.patchedPaths = patchedPaths
+        , PL.logger = mklogger
+        , PL.verificationCfg = verificationCfg
+        , PL.useDwarfHints = not $ noDwarfHints opts
+        }
 
-
-      status <- PL.runEquivConfig cfg
-
-
-      -- Shut down the logger cleanly (if we can - the interactive logger will be
-      -- persistent until the user kills it)
-      --
-      -- Each log consumer has its own shutdown action that we have to invoke
-      -- before the async action will finish; we then wait for each one to
-      -- finish.
-      F.forM_ consumers' $ \(_wait, shutdown) -> shutdown
-      F.forM_ consumers' $ \(wait, _shutdown) -> wait
-
-      case status of
-        PEq.Errored err -> SE.die (show err)
-        _ -> pure ()
+  status <- PL.runEquivConfig cfg
+  case status of
+    PEq.Errored err -> SE.die (show err)
+    _ -> pure ()
 
 
 data CLIOptions = CLIOptions
@@ -399,78 +337,6 @@ terminalFormatEvent evt =
                        ] <> PP.line)
     -- FIXME: handle other events
     _ -> layout ""
-
-data LoadError where
-  ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
-  ElfArchitectureMismatch :: FilePath -> FilePath -> LoadError
-  UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
-
-deriving instance Show LoadError
-
--- | Examine the input files to determine the architecture
-archToProxy :: FilePath -> FilePath -> IO (Either LoadError ([DEE.ElfParseError], Some PA.SomeValidArch))
-archToProxy origBinaryPath patchedBinaryPath = do
-  origBin <- BS.readFile origBinaryPath
-  patchedBin <- BS.readFile patchedBinaryPath
-  case (EEP.decodeElfHeaderInfo origBin, EEP.decodeElfHeaderInfo patchedBin) of
-    (Right (EEP.SomeElf origHdr), Right (EEP.SomeElf patchedHdr))
-      | Just PC.Refl <- PC.testEquality (DEE.headerClass (DEE.header origHdr)) (DEE.headerClass (DEE.header patchedHdr))
-      , DEE.headerMachine (DEE.header origHdr) == DEE.headerMachine (DEE.header patchedHdr) ->
-        let (origParseErrors, _origElf) = DEE.getElf origHdr
-            (patchedParseErrors, _patchedElf) = DEE.getElf patchedHdr
-            origMachine = DEE.headerMachine (DEE.header origHdr)
-        in return (fmap (origParseErrors ++ patchedParseErrors,) (machineToProxy origMachine origHdr patchedHdr))
-    (Left (off, msg), _) -> return (Left (ElfHeaderParseError origBinaryPath off msg))
-    (_, Left (off, msg)) -> return (Left (ElfHeaderParseError patchedBinaryPath off msg))
-    _ -> return (Left (ElfArchitectureMismatch origBinaryPath patchedBinaryPath))
-
--- | Create a 'PA.SomeValidArch' from parsed ELF files
---
--- Note that we do additional ELF parsing here so that we do not have to
--- propagate ELF-specific constraints throughout the analysis.  This includes
--- finding additional (dynamic) symbols from ELF files, which requires deep
--- ELF-specific inspection.
-machineToProxy
-  :: DEE.ElfMachine
-  -> EEP.ElfHeaderInfo w
-  -> EEP.ElfHeaderInfo w
-  -> Either LoadError (Some PA.SomeValidArch)
-machineToProxy em origHdr patchedHdr =
-  case (em, EEP.headerClass (EEP.header origHdr)) of
-    (DEE.EM_PPC, _) ->
-      let vad = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
-                                 , PA.validArchFunctionDomain = PPC.handleExternalCall
-                                 , PA.validArchDedicatedRegisters = PPC.ppc32HasDedicatedRegister
-                                 , PA.validArchArgumentMapping = PPC.argumentMapping
-                                 , PA.validArchOrigExtraSymbols = mempty
-                                 , PA.validArchPatchedExtraSymbols = mempty
-                                 , PA.validArchStubOverrides = PPC.stubOverrides
-                                 }
-      in Right (Some (PA.SomeValidArch vad))
-    (DEE.EM_PPC64, _) ->
-      let vad = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
-                                 , PA.validArchFunctionDomain = PPC.handleExternalCall
-                                 , PA.validArchDedicatedRegisters = PPC.ppc64HasDedicatedRegister
-                                 , PA.validArchArgumentMapping = PPC.argumentMapping
-                                 , PA.validArchOrigExtraSymbols = mempty
-                                 , PA.validArchPatchedExtraSymbols = mempty
-                                 , PA.validArchStubOverrides = PPC.stubOverrides
-                                 }
-      in Right (Some (PA.SomeValidArch vad))
-    (DEE.EM_ARM, EEP.ELFCLASS32) ->
-      let vad = PA.ValidArchData { PA.validArchSyscallDomain = AArch32.handleSystemCall
-                                 , PA.validArchFunctionDomain = AArch32.handleExternalCall
-                                 , PA.validArchDedicatedRegisters = AArch32.hasDedicatedRegister
-                                 , PA.validArchArgumentMapping = AArch32.argumentMapping
-                                 , PA.validArchOrigExtraSymbols =
-                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
-                                 , PA.validArchPatchedExtraSymbols =
-                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
-                                 , PA.validArchStubOverrides = AArch32.stubOverrides
-                                 }
-      in Right (Some (PA.SomeValidArch vad))
-    _ -> Left (UnsupportedArchitecture em)
-
 
 logParser :: OA.Parser (Maybe InteractiveConfig)
 logParser = (Just <$> interactiveParser) <|> pure Nothing

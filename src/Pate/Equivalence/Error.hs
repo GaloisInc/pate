@@ -44,6 +44,9 @@ import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
+import qualified Pate.Hints.CSV as PHC
+import qualified Pate.Hints.DWARF as PHD
+import qualified Pate.Hints.JSON as PHJ
 
 data InequivalenceReason =
     InequivalentRegisters
@@ -141,7 +144,12 @@ data LoadError where
   ElfArchitectureMismatch :: FilePath -> FilePath -> LoadError
   UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
   BadPatchInfo :: FilePath -> PC.PatchDataParseError -> LoadError
+  JSONParseError :: FilePath -> PHJ.JSONError -> LoadError
+  CSVParseError :: FilePath -> PHC.CSVParseError -> LoadError
+  DWARFError :: FilePath -> PHD.DWARFError -> LoadError
+  ElfParseError :: DEE.ElfParseError -> LoadError
 deriving instance Show LoadError
+
 
 data SomeInnerError where
   SomeInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> SomeInnerError
