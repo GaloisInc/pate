@@ -55,7 +55,8 @@ import qualified Pate.SimState as PS
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
 
-import qualified What4.Interface as W4
+import qualified What4.Interface as W4 hiding ( integerToNat )
+import qualified What4.ExprHelpers as W4 ( integerToNat )
 
 -- | The type of architecture-specific dedicated registers
 --

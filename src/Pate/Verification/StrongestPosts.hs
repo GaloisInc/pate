@@ -241,7 +241,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ 
        withPredomain bundle' d $ do
          -- simplify the bundle under the domain assumptions
          bundle <- applyCurrentAsms bundle'
- 
+         traceBundle bundle $ "visitNode:  incoming domain\n" ++ (show (PAD.ppAbstractDomain (\_ -> pretty "") d))
+         
   {-     traceBundle bundle $ unlines
          [ "== SP result =="
          , show (MM.getBoundValue (MM.sp_reg @(MM.ArchReg arch))
@@ -1037,5 +1038,5 @@ mkSimBundle pPair vars _d =
      traceBlockPair pPair "Finished simulating blocks"
 
      let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
-
-     applyCurrentAsms bnd
+     return bnd
+     -- applyCurrentAsms bnd

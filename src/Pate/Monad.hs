@@ -345,7 +345,7 @@ unconstrainedRegister argNames reg = do
           let margName = PA.argumentNameFrom argNames reg
           let name = maybe (showF reg) T.unpack margName
           ptr@(CLM.LLVMPointer region off) <- freshPtr sym name n
-          iRegion <- W4.natToInteger sym region
+          let iRegion = W4.natToIntegerPure region
           return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
       | otherwise -> withSymIO $ \sym -> do
           -- For bitvector types that are not pointer width, fix their region number to 0 since they cannot be pointers

@@ -231,6 +231,10 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
   -- the post-state of the slice phrased over 'pre'
   let outVars = PS.bundleOutVars bundle
 
+  curAsm <- currentAsm
+
+  traceBundle bundle $ "AbstractOverVars:  curAsm\n" ++ (show (pretty curAsm))
+
   PS.forSpec postSpec $ \(scope_post :: PS.SimScope sym arch post) _body -> do
     -- the variables representing the post-state (i.e. the target scope)
     let postVars = PS.scopeVars scope_post

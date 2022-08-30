@@ -63,6 +63,7 @@ import qualified Lang.Crucible.LLVM.MemModel.Partial as Partial
 
 import qualified Pate.Panic as PP
 import qualified Pate.Verification.Concretize as PVC
+import           What4.ExprHelpers ( integerToNat )
 
 llvmPtrWidth :: (LCB.IsSymInterface sym) => LCLM.LLVMPtr sym w -> PN.NatRepr w
 llvmPtrWidth ptr =
@@ -169,7 +170,7 @@ concretizeWrites bak fp = do
     sym = LCB.backendGetSym bak
 
     concFree r =
-      WI.integerToNat sym =<< PVC.resolveSingletonSymbolicAs PVC.concreteInteger (PVC.wrappedBackend bak) =<< WI.natToInteger sym r
+      integerToNat sym =<< (PVC.resolveSingletonSymbolicAs PVC.concreteInteger (PVC.wrappedBackend bak) (WI.natToIntegerPure r))
 
     concWrite mw =
       case mw of

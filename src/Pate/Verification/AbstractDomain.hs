@@ -610,7 +610,8 @@ absDomainToPrecond sym eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
       let absBlockState = PS.simInAbsState (get $ PS.simIn bundle)
       absDomainValsToAsm sym eqCtx (PS.simInState $ get $ PS.simIn bundle) (Just absBlockState) (get $ absDomVals d)
     return $ (predO <> predP)
-  PAS.augment sym eqInputsPred valsPred
+  return $ (eqInputsPred <> valsPred)
+  --PAS.augment sym eqInputsPred valsPred
 
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where

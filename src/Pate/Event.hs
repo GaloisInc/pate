@@ -60,6 +60,7 @@ data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches
                                    | BranchesIncomplete (PF.InequivalenceResult arch)
 
+
 -- | Events that can be reported from the verifier
 --
 -- This can include traditional logging information, but also statistics about

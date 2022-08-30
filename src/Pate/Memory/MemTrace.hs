@@ -134,11 +134,12 @@ import Lang.Crucible.Simulator.SymSequence
 import Lang.Crucible.Types
 import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
-import What4.Interface
+import What4.Interface hiding ( integerToNat )
 
 
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
+import           What4.ExprHelpers ( integerToNat )
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Memory as PM
 
@@ -243,7 +244,7 @@ asSymPtr ::
   LLVMPtr sym w ->
   IO (SymPtr sym w)
 asSymPtr sym (LLVMPointer reg off) = do
-  ireg <- natToInteger sym reg
+  let ireg = natToIntegerPure reg
   mkStruct sym (Empty :> ireg :> off)
 
 fromSymPtr ::
@@ -252,7 +253,7 @@ fromSymPtr ::
   SymPtr sym w ->
   IO (LLVMPtr sym w )
 fromSymPtr sym sptr = do
-  reg <- structField sym sptr Ctx.i1of2
+  reg <- WEH.assumePositiveInt sym <$> structField sym sptr Ctx.i1of2
   off <- structField sym sptr Ctx.i2of2
   nreg <- integerToNat sym reg
   return $ LLVMPointer nreg off
@@ -828,8 +829,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
     MacawFreshSymbolic t -> liftToCrucibleState mvar $ \sym -> case t of
        MT.BoolTypeRepr -> liftIO $ freshConstant sym (safeSymbol "macawFresh") BaseBoolRepr
        MT.BVTypeRepr n -> liftIO $ do
-         regI <- freshConstant sym (safeSymbol "macawFresh") BaseIntegerRepr
-         reg <- integerToNat sym regI
+         reg <- freshNat sym (safeSymbol "macawFresh")
          off <- freshConstant sym (safeSymbol "macawFresh") (BaseBVRepr n)
          return $ LLVMPointer reg off
        _ -> error ( "MacawFreshSymbolic is unsupported in the trace memory model: " ++ show t)
@@ -1228,7 +1228,7 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   let w = ptrWidth ptr
   offBV <- bvLit sym w $ BV.mkBV w off'
   bvIdx <- bvAdd sym off offBV
-  ireg <- natToInteger sym reg
+  let ireg = natToIntegerPure reg
   return $ Empty :> ireg :> bvIdx
 
 concatPtrs ::
@@ -1297,7 +1297,7 @@ chunkBV sym endianness w bv
 -- | Read a packed value from the underlying array (without adding to the read trace)
 readMemState :: forall sym ptrW ty.
   MemWidth ptrW =>
-  IsExprBuilder sym =>
+  IsSymExprBuilder sym =>
   MemWidth ptrW =>
   sym ->
   MemTraceState sym ptrW ->
@@ -1342,7 +1342,7 @@ readMemState sym mem baseMem ptr repr = go 0 repr
                         True -> do
                           regArrayRegion <- arrayLookup sym (memArrRegions mem) (Ctx.singleton reg)
                           regInt <- arrayLookup sym regArrayRegion (Ctx.singleton off)
-                          integerToNat sym regInt
+                          integerToNat sym (WEH.assumePositiveInt sym regInt)
                         False -> return blk0
                       return (blk, membyte)
              return $ LLVMPointer blk content
@@ -1799,7 +1799,7 @@ memEqOutsideRegion ::
   MemTraceState sym ptrW ->
   IO (Pred sym)
 memEqOutsideRegion sym region mem1 mem2 = do
-  iRegion <- natToInteger sym region
+  let iRegion = natToIntegerPure region
   mem1StackBytes <- arrayLookup sym (memArrBytes mem1) (Ctx.singleton iRegion)
   mem1StackRegions <- arrayLookup sym (memArrRegions mem1) (Ctx.singleton iRegion)
   mem2Bytes' <- arrayUpdate sym (memArrBytes mem2) (Ctx.singleton iRegion) mem1StackBytes
@@ -1820,7 +1820,7 @@ memEqAtRegion ::
   MemTraceState sym ptrW ->
   IO (Pred sym)
 memEqAtRegion sym stackRegion mem1 mem2 = do
-  iStackRegion <- natToInteger sym stackRegion
+  let iStackRegion = natToIntegerPure stackRegion
   mem1StackBytes <- arrayLookup sym (memArrBytes mem1) (Ctx.singleton iStackRegion)
   mem2StackBytes <- arrayLookup sym (memArrBytes mem2) (Ctx.singleton iStackRegion)
   mem1StackRegions <- arrayLookup sym (memArrRegions mem1) (Ctx.singleton iStackRegion)

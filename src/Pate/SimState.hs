@@ -369,7 +369,7 @@ mkVarBinds sym simVars mem regs sb = do
       CLM.LLVMPointerRepr{} -> do
         CLM.LLVMPointer region off <- return $ PSR.macawRegValue val
         (Ctx.Empty Ctx.:> regVar Ctx.:> offVar) <- return $ vars
-        iRegion <- W4.natToInteger sym region
+        let iRegion = W4.natToIntegerPure region
         return $ Const $ singleRewrite regVar iRegion <> singleRewrite offVar off
       CT.BoolRepr -> do
         Ctx.Empty Ctx.:> var <- return vars

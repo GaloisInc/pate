@@ -69,6 +69,8 @@ module What4.ExprHelpers (
   , SimpCheck(..)
   , noSimpCheck
   , unliftSimpCheck
+  , assumePositiveInt
+  , integerToNat
   ) where
 
 import           GHC.TypeNats
@@ -115,9 +117,68 @@ import qualified What4.Concrete as W4C
 import qualified What4.SemiRing as SR
 import qualified What4.Expr.BoolMap as BM
 import qualified What4.Symbol as WS
+import qualified What4.Utils.AbstractDomains as W4AD
 
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
+
+-- | Sets the abstract domain of the given integer to assume
+--   that it is positive. 
+assumePositiveInt ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  W4.SymExpr sym W4.BaseIntegerType ->
+  W4.SymExpr sym W4.BaseIntegerType
+assumePositiveInt _sym e = 
+  let
+    rng = W4AD.rangeMax (W4AD.singleRange 0) (W4.integerBounds e)
+  in W4.unsafeSetAbstractValue rng e
+
+-- | Copied from https://github.com/GaloisInc/what4/commit/de5e73170b98e1f7e9c9baa9f044e2dfd21016cb
+--   Using this definition for 'intMax' allows more abstract domain information to be used
+--   in order to statically determine the result. Additionally the resulting expression
+--   contains a more precise abstract domain based on the semantics of 'max'.
+intMax ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  W4.SymInteger sym ->
+  W4.SymInteger sym ->
+  IO (W4.SymInteger sym)
+intMax sym x y =
+  do x_le_y <- W4.intLe sym x y
+     y_le_x <- W4.intLe sym y x
+     case (W4.asConstantPred x_le_y, W4.asConstantPred y_le_x) of
+       -- x <= y
+       (Just True, _) -> return y
+       -- x < y
+       (_, Just False) -> return y
+       -- y < x
+       (Just False, _) -> return x
+       -- y <= x
+       (_, Just True) -> return x
+       _ ->
+         do let rng_x = W4.integerBounds x
+            let rng_y = W4.integerBounds y
+            W4.unsafeSetAbstractValue (W4AD.rangeMax rng_x rng_y) <$>
+              W4.intIte sym x_le_y y x
+
+-- | Overriding 'W4.integerToNat' to use a modified 'intMax' that
+--   statically evaluates in more cases. In particular this ensures that
+--   integers with a positive abstract domain aren't wrapped in any additional checks,
+--   and that the inner integer is statically known to be positive.
+integerToNat ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  W4.SymExpr sym W4.BaseIntegerType ->
+  IO (W4.SymNat sym)
+integerToNat sym x = unsafeIntToNat <$> (intMax sym x =<< W4.intLit sym 0)
+
+unsafeIntToNat ::
+  W4.IsExprBuilder sym =>
+  W4.SymExpr sym W4.BaseIntegerType ->
+  W4.SymNat sym
+unsafeIntToNat i = unsafeCoerce i
+
 
 iteM ::
   W4.IsExprBuilder sym =>
@@ -373,8 +434,8 @@ mapExprPtr ::
   CLM.LLVMPtr sym w ->
   m (CLM.LLVMPtr sym w)
 mapExprPtr sym f (CLM.LLVMPointer reg off) = do
-  regInt <- (IO.liftIO $ W4.natToInteger sym reg) >>= f
-  reg' <- IO.liftIO $ W4.integerToNat sym regInt
+  regInt <- f (W4.natToIntegerPure reg)
+  reg' <- IO.liftIO $ integerToNat sym regInt
   off' <- f off
   return $ CLM.LLVMPointer reg' off'
 
@@ -400,8 +461,7 @@ freshPtr ::
 freshPtr sym name w = do
   off <- W4.freshConstant sym (WS.safeSymbol (name ++ "_offset")) (W4.BaseBVRepr w)
   reg <- W4.freshNat sym (WS.safeSymbol (name ++ "_region"))
-  return $ CLM.LLVMPointer reg off
-
+  return $ (CLM.LLVMPointer reg off)
 
 mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> W4.LeqProof 1 (x W4.* w)
 mulMono _x w = unsafeCoerce (W4.leqRefl w)
