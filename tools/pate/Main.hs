@@ -72,7 +72,7 @@ main = do
       , PLE.mcsvHintsPath = originalCsvFunctionHints opts
       }
     patchedPaths = PLE.LoadPaths
-      { PLE.binPath = originalBinary opts
+      { PLE.binPath = patchedBinary opts
       , PLE.anvillHintsPaths = patchedAnvillHints opts
       , PLE.mprobHintsPath = patchedProbabilisticHints opts
       , PLE.mcsvHintsPath = patchedCsvFunctionHints opts
