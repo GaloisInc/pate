@@ -408,7 +408,7 @@ withPtrWidth (LLVMPointer _blk bv) f | BaseBVRepr w <- exprType bv = f w
 --withPtrWidth _ _ = error "impossible"
 
 mkBinOp ::
-  forall sym a.
+  forall sym.
   IsSymInterface sym =>
   sym ->
   UndefPtrOpTag ->

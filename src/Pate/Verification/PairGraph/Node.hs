@@ -16,7 +16,7 @@ module Pate.Verification.PairGraph.Node (
   , nodeFuns
   ) where
 
-import           Prettyprinter ( Pretty(..), viaShow, sep, (<+>) )
+import           Prettyprinter ( Pretty(..), sep, (<+>) )
 
 import qualified Pate.Arch as PA
 import qualified Pate.PatchPair as PPa

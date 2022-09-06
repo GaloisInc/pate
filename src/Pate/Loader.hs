@@ -25,7 +25,6 @@ import qualified Data.Foldable as F
 
 import qualified Data.ByteString as BS
 import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.ElfEdit as DEE
 import qualified Lumberjack as LJ
 
 

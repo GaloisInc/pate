@@ -16,13 +16,12 @@ module Pate.AArch32 (
   , archLoader
   ) where
 
-import           Control.Lens ( (^?), (^.), (&), (.~) )
+import           Control.Lens ( (^?), (^.) )
 import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Proxy ( Proxy(..) )
 import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Set as Set
@@ -201,6 +200,8 @@ instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
   archTermCase = \case
     MAA.ReturnIf{} -> MCS.MacawBlockEndReturn
     MAA.ReturnIfNot{} -> MCS.MacawBlockEndReturn
+    MAA.CallIf{} -> MCS.MacawBlockEndCall
+    MAA.CallIfNot{} -> MCS.MacawBlockEndCall
 
 archLoader :: PA.ArchLoader PEE.LoadError
 archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->

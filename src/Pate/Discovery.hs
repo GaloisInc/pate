@@ -49,7 +49,7 @@ import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
-import           GHC.Stack ( HasCallStack, callStack )
+import           GHC.Stack ( HasCallStack )
 
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Data.Macaw.BinaryLoader as MBL

@@ -80,7 +80,7 @@ import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, mkNodeEntry, mkNodeReturn, nodeBlocks, nodeFuns, addContext )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 
@@ -974,7 +974,7 @@ handlePLTStub ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   BS.ByteString {- ^ PLT symbol name -} ->
   EquivM sym arch (PairGraph sym arch)
-handlePLTStub scope bundle currBlock d gr0 pPair pRetPair stubSymbol = withSym $ \sym -> do
+handlePLTStub scope bundle currBlock d gr0 _pPair pRetPair stubSymbol = withSym $ \sym -> do
   PA.SomeValidArch archData <- asks envValidArch
   PA.StubOverride f <- case PA.lookupStubOverride archData stubSymbol of
     Just f -> do

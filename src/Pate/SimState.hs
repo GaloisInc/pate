@@ -115,16 +115,11 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Panic as P
-import qualified Pate.Solver as PSo
 import qualified Pate.Location as PL
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import           Pate.AssumptionSet
-import           Data.Parameterized.SetF ( SetF )
-import qualified Data.Parameterized.SetF as SetF
-
-import qualified What4.ExprHelpers as WEH
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -357,7 +352,7 @@ mkVarBinds ::
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   StackBase sym arch v' ->
   IO (ExprRewrite sym v v')
-mkVarBinds sym simVars mem regs sb = do
+mkVarBinds _sym simVars mem regs sb = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars

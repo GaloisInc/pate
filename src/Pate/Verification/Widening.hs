@@ -80,7 +80,7 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
-makeFreshAbstractDomain scope bundle preDom from to = do
+makeFreshAbstractDomain _scope bundle preDom from _to = do
   case graphNodeCases from of
     -- graph node
     Left{} -> startTimer $ do
@@ -574,7 +574,7 @@ widenUsingCounterexample ::
   WidenLocs sym arch {- ^ previous widening -}   ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
-widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD prevLocs postD =
+widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD _prevLocs postD =
   tryWidenings
     [ -- First check for any disagreement in the constant values
       widenValues sym evalFn bundle postD
