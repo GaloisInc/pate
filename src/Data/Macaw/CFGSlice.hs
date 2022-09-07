@@ -128,8 +128,14 @@ assignBlockEnd archFns blendVar stmt = MSB.crucGenArchConstraints archFns $ do
   blend' <- blockEndAtom archFns blend
   MSB.addStmt $ CR.WriteGlobal blendVar blend'
 
-blockEndCaseEq :: IsSymInterface sym
-               => Proxy arch
+-- | Return a pair of expressions '(e, c)' where the 'e' represents
+--   the symbolic backing for the given 'MacawBlockEndType' and 'c'
+--   is the given concrete 'MacawBlockEndCase' injected into a symbolic value.
+--   (i.e. the predicate 'e == c' is true iff the first argument matches the
+--   given concrete exit case).
+blockEndCaseEq :: forall sym arch proxy
+                . IsSymInterface sym
+               => proxy arch
                -> sym
                -> C.RegValue sym (MacawBlockEndType arch)
                -> MacawBlockEndCase
@@ -138,8 +144,9 @@ blockEndCaseEq _ sym (_ Ctx.:> C.RV blendC' Ctx.:> _) blendC = do
   blendC'' <- bvLit sym knownNat (BV.mkBV knownNat (toInteger $ fromEnum blendC))
   return $ Pair blendC' blendC''
 
-isBlockEndCase :: IsSymInterface sym
-               => Proxy arch
+isBlockEndCase :: forall sym arch proxy
+                . IsSymInterface sym
+               => proxy arch
                -> sym
                -> C.RegValue sym (MacawBlockEndType arch)
                -> MacawBlockEndCase
@@ -148,8 +155,9 @@ isBlockEndCase arch sym blendC' blendC = do
   Pair e1 e2 <- blockEndCaseEq arch sym blendC' blendC
   isEq sym e1 e2
 
-blockEndCase :: IsSymInterface sym
-             => Proxy arch
+blockEndCase :: forall sym arch proxy
+              . IsSymInterface sym
+             => proxy arch
              -> sym
              -> C.RegValue sym (MacawBlockEndType arch)
              -> IO (C.MuxTree sym MacawBlockEndCase)
@@ -160,13 +168,15 @@ blockEndCase arch sym blend = do
       p <- isBlockEndCase arch sym blend blendC
       C.mergeMuxTree sym p (C.toMuxTree sym blendC) mt
 
-blockEndReturn :: Proxy arch
+blockEndReturn :: forall sym arch proxy
+                . proxy arch
                -> C.RegValue sym (MacawBlockEndType arch)
                -> (C.RegValue sym (C.MaybeType (MM.LLVMPointerType (M.ArchAddrWidth arch))))
 blockEndReturn _ (_ Ctx.:> _ Ctx.:> C.RV mret) = mret
 
-initBlockEnd :: IsSymInterface sym
-             => Proxy arch
+initBlockEnd :: forall sym arch proxy
+              . IsSymInterface sym
+             => proxy arch
              -> sym
              -> IO (C.RegValue sym (MacawBlockEndType arch))
 initBlockEnd _ sym = do

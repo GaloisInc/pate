@@ -118,7 +118,22 @@ instance
 
 
 instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
-  mapExpr _sym f e = f e
+  mapExpr sym f e = applyExprMappable sym f e
+
+-- | This is a bit redundant, but it forces the function to be evaluated
+--   according to the 'ToExprMappable' instance for 'ExprMappable', which
+--   avoids the potential for conflicting instances for 'W4B.Expr' vs. 'WI.SymExpr'
+--   when using 'symExprMappable'.
+applyExprMappable ::
+  forall sym tp m.
+  IO.MonadIO m =>
+  WI.IsSymExprBuilder sym =>
+  sym ->
+  (forall tp'. WI.SymExpr sym tp' -> m (WI.SymExpr sym tp')) ->
+  WI.SymExpr sym tp ->
+  m (WI.SymExpr sym tp)
+applyExprMappable sym f e | SymExprMappable asEM <- symExprMappable sym =
+  asEM @tp $ mapExpr sym f e
 
 -- | Wrap a 'WI.SymExpr' as an 'ExprMappable, which can't be defined directly
 -- as it is a type family
@@ -151,10 +166,23 @@ newtype SymExprMappable sym f = SymExprMappable (forall tp a. ((ExprMappable sym
 --   defined in 'ToExprMappable'.
 --   This is necessary because 'WI.SymExpr' is a type family and therefore we cannot
 --   declare the obvious instance for it.
+--   TODO: This wouldn't be necessary if 'mapExpr' was instead defined to require
+--   that 'sym' is an 'ExprBuilder', but we would need to thread that constraint
+--   around in more places to be able to support that.
 symExprMappable ::
   forall sym.
   sym ->
   SymExprMappable sym (WI.SymExpr sym)
-symExprMappable _sym = unsafeCoerce r
+symExprMappable _sym =
+  -- here we are coercing 'SymExprMappable sym (ToExprMappable sym)' into
+  -- 'SymExprMappable sym (WI.SymExpr sym)'.
+  -- This is (mostly) safe because really we are only coercing 'ToExprMappable sym' to
+  -- 'WI.SymExpr sym'.
+  -- The one caveat is that if 'sym' is concretely known to be an 'ExprBuilder' then
+  -- the 'W4B.Expr' instance will be ignored in favor of the 'ToExprBuilder' instance.
+  -- We therefore define the 'W4B.Expr' instance to go through this interface instead
+  -- of applying the function directly, which ensures that the 'ToExprMappable' instance
+  -- is always used regardless of additonal constraints on 'sym'.
+  unsafeCoerce r
   where r :: SymExprMappable sym (ToExprMappable sym)
         r = SymExprMappable (\a -> a)

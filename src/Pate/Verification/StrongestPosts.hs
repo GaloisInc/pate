@@ -947,8 +947,8 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
        do
           -- augmenting this block with the return point as its calling context
           currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
-            PCfg.AllSharedAbstractDomains -> return currBlock
-            PCfg.AllDistinctAbstractDomains -> return $ addContext pRetPair currBlock
+            PCfg.SharedFunctionAbstractDomains -> return currBlock
+            PCfg.DistinctFunctionAbstractDomains -> return $ addContext pRetPair currBlock
           let
             funNode = mkNodeReturn currBlock' (PPa.PatchPair oFun pFun)
             returnSite = mkNodeEntry currBlock pRetPair

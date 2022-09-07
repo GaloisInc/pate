@@ -21,7 +21,6 @@ module Pate.AssumptionSet (
   , fromPred
   , toPred
   , apply
-  , apply'
   , isAssumedPred
   ) where
 
@@ -54,6 +53,22 @@ import qualified What4.ExprHelpers as WEH
 import           What4.ExprHelpers ( ExprSet, VarBindCache, ExprBindings, ppExprSet )
 import qualified Pate.ExprMappable as PEM
 
+-- | A structured collection of predicates intended to represent an assumption state.
+--   Logically it is simply a set of predicates that can be added to the solver's
+--   assumption state. It also contains a collection of one-to-many expression
+--   rewrite rules (bindings) which represent equality assumptions that can be
+--   explicitly applied to simplify What4 terms (see 'apply').
+--   When flatting an 'AssumptionSet' into a 'W4.Pred', the binding environment is
+--   included (e.g. e -> @{e1, e2} ==> (e == e1) && (e == e2)@).
+--   Rewriting terms with the binding environment is therefore strictly optional,
+--   as the relevant equality assumptions are always present in the solver state.
+--
+--   NOTE: Currently there are no assumptions made about the given collection of
+--   predicates or bindings. Rewrite loops are implicitly broken arbitrarily
+--   when a binding environment is applied, and inconsistent assumptions are only
+--   determined when attempting to add them to the solver state.
+--   Trivial bindings (i.e. @e --> {e}@) are dropped by most operations, but this
+--   not strictly required.
 data AssumptionSet sym =
   AssumptionSet
     { asmPreds :: ExprSet sym W4.BaseBoolType
@@ -163,6 +178,10 @@ natBinding ::
   AssumptionSet sym
 natBinding n1 n2 = exprBinding (W4.natToIntegerPure n1) (W4.natToIntegerPure n2)
 
+-- | Bind the first argument to the second in the resulting
+--   'AssumptionSet' by binding the component expressions of the given pointer.
+--   e.g.
+--   @ptrBinding ptr(reg1,off1) ptr(reg2,off2) == [ reg1 --> {reg2}, off1 --> {off2} ]@
 ptrBinding ::
   W4.IsSymExprBuilder sym =>
   CLM.LLVMPtr sym w ->
@@ -175,7 +194,14 @@ ptrBinding (CLM.LLVMPointer reg1 off1) (CLM.LLVMPointer reg2 off2) =
   in (regBind <> offBind)
 
 
-
+-- | Bind the first argument to the second in the resulting
+--   'AssumptionSet' by binding the component expressions of the given value.
+--   e.g.
+--   @
+--   macawRegBinding ptr(reg1,off1) ptr(reg2,off2) == [ reg1 --> {reg2}, off1 --> {off2} ]
+--   macawRegBinding bool1 bool2 == [ bool1 --> {bool2} ]
+--   @
+--   Only supports pointers, booleans and empty structs.
 macawRegBinding ::
   W4.IsSymExprBuilder sym =>
   MS.ToCrucibleType tp ~ MS.ToCrucibleType tp' =>
@@ -211,12 +237,12 @@ apply ::
   m f
 apply sym asm f = do
   cache <- IO.liftIO WEH.freshVarBindCache
-  apply' sym cache asm f
+  applyWithCache sym cache asm f
 
 -- | Rewrite the given 'f' with any bindings in the given 'AssumptionSet'.
 --   Bindings are applied repeatedly to each component expression until a fixpoint
 --   is reached or a loop is detected.
-apply' ::
+applyWithCache ::
   forall sym f m t solver fs.
   PEM.ExprMappable sym f =>
   IO.MonadIO m =>
@@ -226,7 +252,7 @@ apply' ::
   AssumptionSet sym ->
   f ->
   m f
-apply' sym cache asm f = do
+applyWithCache sym cache asm f = do
   let
     doRebind :: forall tp. ExprSet sym tp -> W4.SymExpr sym tp -> m (W4.SymExpr sym tp)
     doRebind ancestors e = do
@@ -249,13 +275,17 @@ augment ::
   m (AssumptionSet sym)
 augment sym origAsm newAsm = do
   cache <- IO.liftIO WEH.freshVarBindCache
-  origAsm' <- PEM.mapExpr sym (apply' sym cache newAsm) origAsm
+  origAsm' <- PEM.mapExpr sym (applyWithCache sym cache newAsm) origAsm
   return $ newAsm <> origAsm'
 
 -- | Retrieve a value that the given expression is bound to in
 --   the given 'AssumptionSet'.
 --   In the case of multiple results, constant values are preferred,
 --   otherwise the least element of all possible symbolic bindings is returned.
+--   This is a heuristic used in 'apply' for usefully applying a binding
+--   environment to a term when multiple possible bindings are found.
+--   e.g. given @asm = [ x --> {y, 3} ]@ then @getSomeBinding asm x == 3@, therefore
+--   @apply (x + z) == (3 + z)@
 getSomeBinding ::
   forall sym tp.
   W4.IsSymExprBuilder sym =>
@@ -289,8 +319,16 @@ getAllBindings sym ancestors asm e = case SetF.member e ancestors of
       W4.BaseBoolRepr | isAssumedPred asm e -> SetF.singleton (W4.truePred sym)
       _ -> SetF.empty
 
--- | Compute a predicate that collects the individual assumptions in the frame, including
--- equality on all bindings.
+-- | Compute a predicate that forms a conjunction from the individual predicates
+--   and bindings in the given 'AssumptionSet'. The resulting predicate is therefore true iff
+--   all of the given predicates are true and all of the equalities represented from the
+--   binding environment are true.
+-- e.g.
+-- @
+-- let asm = (fromPred (x > 0) <> exprBinding (y, x) <> exprBinding (y, z))
+-- asm ==> [ x > 0; y --> {x, z} ]
+-- toPred asm ==> x > 0 && y == x && y == z
+-- @
 toPred ::
   forall sym m.
   W4.IsSymExprBuilder sym =>

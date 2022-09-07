@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Pate.Config (
   PatchData(..),
-  PatchDataParseError,
+  PatchDataParseError(..),
   BlockAlignment(..),
   Address(..),
   Allocation(..),
@@ -208,11 +208,14 @@ data VerificationFailureMode =
 data ContextSensitivity =
     -- | All calls to any given function share the same abstract domain, i.e.
     --   the resulting domain is proven to hold at every return site.
-    AllSharedAbstractDomains
+    SharedFunctionAbstractDomains
     -- | Each call to a function has a distinct abstract domain that holds
     --   at its (single) return site (distinguished by tagging the function node with
-    --   the calling node)
-  | AllDistinctAbstractDomains
+    --   the calling node).
+    --   Note: Calls within loops will still share domains for each loop iteration.
+    --   Recursion may result in infinite loops and requires some additional consideration
+    --   to handle: https://github.com/GaloisInc/pate/issues/330
+  | DistinctFunctionAbstractDomains
 
 ----------------------------------
 -- Verification configuration
@@ -256,5 +259,5 @@ defaultVerificationCfg =
                      , cfgMacawDir = Nothing
                      , cfgSolverInteractionFile = Nothing
                      , cfgFailureMode = ThrowOnAnyFailure
-                     , cfgContextSensitivity = AllDistinctAbstractDomains
+                     , cfgContextSensitivity = DistinctFunctionAbstractDomains
                      }

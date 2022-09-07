@@ -458,14 +458,22 @@ data StatePreCondition sym arch v = StatePreCondition
   , stStackPreDom :: PEM.MemoryDomain sym arch
   , stMemPreDom :: PEM.MemoryDomain sym arch
   , stExtraPreCond :: AssumptionSet sym
+  -- ^ assumptions about meta-state (i.e. 'simMaxRegion' and 'simStackBase')
+ 
   }
 
 -- | A structured post condition
+-- TODO: It may make sense to redefine this as a general 'PL.Location' to 'AssumptionSet'
+-- map, which would make it more natural to include additional meta-state elements
+-- rather than having a catch-all "extra" condition at the end.
+-- We only ever intepret this data via 'PL.traverseLocation' to collect and prove the
+-- individual assertions.
 data StatePostCondition sym arch v = StatePostCondition
   { stRegPostCond :: RegisterCondition sym arch v
   , stStackPostCond :: MemoryCondition sym arch
   , stMemPostCond :: MemoryCondition sym arch
   , stExtraPostCond :: AssumptionSet sym
+  -- ^ conditions on meta-state (i.e. 'simMaxRegion' and 'simStackBase')
   }
 
 

@@ -146,7 +146,10 @@ data ValidArchData arch =
                 , validArchStubOverrides :: ArchStubOverrides arch
                 }
 
--- | A PLT stub is allowed to make arbitrary modifications to the symbolic state
+-- | A stub is allowed to make arbitrary modifications to the symbolic state
+--   Currently this is used to define the semantics for PLT stubs, but in principle
+--   could be used to represent any function that we want to manually define semantics
+--   for rather than include in the analysis.
 data StubOverride arch =
   StubOverride
     (forall sym v bin.
@@ -164,6 +167,16 @@ lookupStubOverride ::
 lookupStubOverride va nm = let ArchStubOverrides ov = validArchStubOverrides va in
   Map.lookup nm ov
 
+-- | Defines an override for @malloc@ that returns a 0-offset pointer in the
+--   region defined by 'PS.simMaxRegion', and then increments that region.
+--   Each @malloc@ call therefore returns a pointer in a region that is globally
+--   unique.
+--   For simplicity we can simply return a pointer with a concrete offset of 0, as
+--   this can be easily propagated in the value domain but cannot be introspected.
+--   The override takes two registers: the register used to pass in the length of the
+--   allocated region, and the register used to store the resulting pointer.
+--   NOTE: Currently the region length is unused, as the memory model as no way to represent
+--   restrictions on the size of regions.
 mkMallocOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
@@ -175,13 +188,18 @@ mkMallocOverride _rLen rOut = StubOverride $ \sym st -> do
   let mr = PS.simMaxRegion st
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   mr_nat <- W4.integerToNat sym (PS.unSE mr)
-  zero <- W4.bvLit sym w (BVS.mkBV w 2)
+  zero <- W4.bvLit sym w (BVS.mkBV w 0)
   let fresh_ptr = PSR.ptrToEntry (CLM.LLVMPointer mr_nat zero)
   mr_inc <- PS.forScopedExpr sym mr $ \sym' mr' -> do
     one <- W4.intLit sym' 1
     W4.intAdd sym' mr' one
   return (st { PS.simMaxRegion = mr_inc, PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
 
+-- | Defines an override for @clock@ that returns a value representing the current time.
+--   Takes a single register used to store the return value.
+--- NOTE: Currently this just returns a concrete value of 0. Ideally we should take
+--  the same approach as @malloc@ and increment some nonce to make @clock@ calls distinct
+--  but provably equal between the programs provided they happen in the same order.
 mkClockOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
