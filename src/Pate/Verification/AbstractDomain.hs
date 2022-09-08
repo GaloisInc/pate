@@ -13,6 +13,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Pate.Verification.AbstractDomain
   ( AbstractDomain(..)
@@ -20,6 +21,7 @@ module Pate.Verification.AbstractDomain
   , AbsRange(..)
   , AbstractDomainVals(..)
   , WidenLocs(..)
+  , DomainKind(..)
   , emptyDomainVals
   , groundToAbsRange
   , extractAbsRange
@@ -49,6 +51,7 @@ import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
+import           Data.Default
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.GroundEval as W4G
@@ -75,10 +78,12 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
+import qualified Pate.Solver as PSo
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.ExprMappable as PEM
 import           Pate.Panic
+import           Pate.TraceTree
 
 import qualified What4.PredMap as WPM
 
@@ -670,3 +675,18 @@ ppAbstractDomain ppPred d =
   , "== Patched Value Constraints =="
   , ppAbstractDomainVals (PPa.pPatched $ absDomVals d)
   ]
+
+
+data DomainKind = Predomain | Postdomain | ExternalPostDomain | SomeDomain
+  deriving (Eq, Ord, Show)
+
+
+instance Default DomainKind where
+  def = SomeDomain
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
+  type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)
+  type TraceNodeLabel "domain" = DomainKind
+  
+  prettyNode (Some absDom) = ppAbstractDomain (\_ -> "") absDom
+  nodeTags = [("symbolic", \_ -> "<TODO: domain symbolic summary>")]

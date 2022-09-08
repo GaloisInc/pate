@@ -1,5 +1,8 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies #-}
 
 {-# LANGUAGE OverloadedStrings #-}
 module Pate.Verification.PairGraph.Node (
@@ -20,6 +23,7 @@ import           Prettyprinter ( Pretty(..), sep, (<+>) )
 
 import qualified Pate.Arch as PA
 import qualified Pate.PatchPair as PPa
+import           Pate.TraceTree
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -95,3 +99,7 @@ instance PA.ValidArch arch => Pretty (GraphNode arch) where
 
 instance PA.ValidArch arch => Show (GraphNode arch) where
   show e = show (pretty e)
+
+instance PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
+  type TraceNodeType '(sym, arch) "node" = GraphNode arch
+  prettyNode = pretty

@@ -18,11 +18,14 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Pate.Monad
   ( EquivEnv(..)
   , EquivM
   , EquivM_
+  , EquivSubTrace
+  , ValidSymArch
   , runEquivM
   , SimBundle(..)
   , withBinary
@@ -81,11 +84,16 @@ module Pate.Monad
   , equivalenceContext
   , safeIO
   , concretizeWithSolver
+  , emitTrace
+  , emitTraceLabel
+  , withSubTraces
+  , subTrace
   )
   where
 
-import           GHC.Stack ( HasCallStack, callStack )
+import           GHC.Stack ( HasCallStack, CallStack, callStack, prettyCallStack )
 
+import           GHC.TypeLits ( Symbol, KnownSymbol )
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
@@ -93,14 +101,19 @@ import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try, finally )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
+import qualified Control.Monad.Writer as CMW
 import           Control.Monad.Except
 
+import qualified Data.IORef as IO
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
+import           Data.Kind ( Type )
 import           Data.Typeable
+
+import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.TraversableF
@@ -108,6 +121,11 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
+import           Data.Parameterized.SymbolRepr ( SymbolRepr, knownSymbol, symbolRepr )
+
+import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.TraversableFC as TFC
+
 
 import qualified Lumberjack as LJ
 
@@ -154,6 +172,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
 import qualified Pate.Verification.Concretize as PVC
+import           Pate.TraceTree
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -243,7 +262,7 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError (CMW.WriterT (TraceTree '(sym, arch)) IO)) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -253,9 +272,75 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (E
            , MonadCatch
            , MonadMask
            , MonadError PEE.EquivalenceError
+           , CMW.MonadWriter (TraceTree '(sym, arch))
            )
 
-type EquivM sym arch a = (PA.ValidArch arch, PSo.ValidSym sym) => EquivM_ sym arch a
+type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
+type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
+
+
+-- TODO: We could parameterize EquivM over its Writer output type instead, which
+-- would make this a bit more straightforward at the cost of some refactoring.
+newtype EquivSubTrace sym arch nm a =
+  EquivSubTrace (CMW.WriterT (TraceTreeNode '(sym, arch) nm) (EquivM_ sym arch) a)
+
+deriving instance IsTraceNode '(sym, arch) nm => Functor (EquivSubTrace sym arch nm)
+deriving instance IsTraceNode '(sym, arch) nm => Applicative (EquivSubTrace sym arch nm)
+deriving instance IsTraceNode '(sym, arch) nm => Monad (EquivSubTrace sym arch nm)
+deriving instance IsTraceNode '(sym, arch) nm => IO.MonadIO (EquivSubTrace sym arch nm)
+
+withSubTraces ::
+  forall nm sym arch a.
+  IsTraceNode '(sym, arch) nm =>
+  EquivSubTrace sym arch nm a ->
+  EquivM sym arch a
+withSubTraces (EquivSubTrace f) = do
+  (r, w) <- CMW.runWriterT f
+  CMW.tell =<< mkTraceTree w
+  return r
+
+subTrace ::
+  forall nm sym arch a.
+  IsTraceNode '(sym, arch) nm =>
+  TraceNodeType '(sym, arch) nm ->
+  EquivM sym arch a ->
+  EquivSubTrace sym arch nm a
+subTrace v f = EquivSubTrace $ do
+  env <- CMR.ask
+  (IO.liftIO $ runEquivM env f) >>= \case
+    (Left err, w) -> mkTraceTreeNode v def w >>= CMW.tell >> throwError err
+    (Right result, w) -> mkTraceTreeNode v def w >>= CMW.tell >> return result
+
+emitTrace ::
+  forall nm sym arch.
+  IsTraceNode '(sym, arch) nm =>
+  TraceNodeType '(sym, arch) nm ->
+  EquivM sym arch ()
+emitTrace v = emitTraceLabel @nm def v
+
+emitTraceLabel ::
+  forall nm sym arch.
+  IsTraceNode '(sym, arch) nm =>
+  TraceNodeLabel nm ->
+  TraceNodeType '(sym, arch) nm ->
+  EquivM sym arch ()
+emitTraceLabel lbl v = do
+  node <- mkTraceTreeNode @nm v lbl mempty
+  CMW.tell =<< mkTraceTree node
+
+instance IsTraceNode (k :: l) "binary" where
+  type TraceNodeType k "binary" = Some PBi.WhichBinaryRepr
+  prettyNode (Some wb) = PP.pretty (show wb)
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "bundle" where
+  type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
+  prettyNode (Some bundle) = "<TODO: pretty bundle>"
+  nodeTags = [("symbolic", \_ -> "<TODO: pretty bundle>")]
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "blocktarget" where
+  type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (PB.BlockTarget arch)
+  prettyNode blkts = PP.pretty blkts
+
 
 withBinary ::
   forall bin sym arch a.
@@ -285,7 +370,7 @@ withValid f = do
   env <- CMR.ask
   withValidEnv env $ f
 
-withValidEnv ::
+withValidEnv :: forall a sym arch.
   EquivEnv sym arch ->
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
   a
@@ -431,6 +516,11 @@ withFreshVars blocks f = do
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
 
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "assumption" where
+  type TraceNodeType '(sym,arch) "assumption" = AssumptionSet sym
+  prettyNode asm = PP.pretty asm
+  nodeTags = [("solver", PP.pretty)]
+  
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
@@ -439,6 +529,7 @@ withAssumptionSet ::
   EquivM_ sym arch f ->
   EquivM sym arch f
 withAssumptionSet asm f = withSym $ \sym -> do
+  emitTrace @"assumption" asm
   curAsm <- currentAsm
   p <- liftIO $ PAS.toPred sym asm
   case PAS.isAssumedPred curAsm p of
@@ -507,6 +598,11 @@ applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
   PAS.apply sym asm f
 
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "satAssumption" where
+  type TraceNodeType '(sym,arch) "satAssumption" = AssumptionSet sym
+  prettyNode asm = "Satisfiable" PP.<+> PP.pretty asm
+  nodeTags = [("solver", PP.pretty)]
+
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
@@ -514,7 +610,8 @@ withSatAssumption ::
   AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch (Maybe f)
-withSatAssumption asm f = withSym $ \sym ->  do
+withSatAssumption asm f = withSym $ \sym -> do
+  emitTrace @"satAssumption" asm
   p <- liftIO $ PAS.toPred sym asm
   case W4.asConstantPred p of
     Just False -> return Nothing
@@ -830,7 +927,13 @@ traceBundle bundle msg =
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- CMR.ask
-    catchInIO (f (\x -> runEquivM' env x))
+    ref <- IO.liftIO $ IO.newIORef (mempty :: TraceTree '(sym,arch))
+
+    catchInIO (f (\x -> runEquivM env x >>= \case
+                     (Left err, w) -> IO.modifyIORef' ref ((<>) w) >> throwIO err
+                     (Right result, w) -> IO.modifyIORef' ref ((<>) w) >> return result))
+      `finally`
+      (IO.liftIO (IO.readIORef ref) >>= CMW.tell)
 
 catchInIO ::
   forall sym arch a.
@@ -852,19 +955,11 @@ runInIO1 f g = IO.withRunInIO $ \runInIO -> g (\a -> runInIO (f a))
 ----------------------------------------
 -- Running
 
-runEquivM' ::
-  EquivEnv sym arch ->
-  EquivM sym arch a ->
-  IO a
-runEquivM' env f = withValidEnv env $ (runExceptT $ CMR.runReaderT (unEQ f) env) >>= \case
-  Left err -> throwIO err
-  Right result -> return result
-
 runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
-  ExceptT PEE.EquivalenceError IO a
-runEquivM env f = withValidEnv env $ CMR.runReaderT (unEQ f) env
+  IO (Either PEE.EquivalenceError a, TraceTree '(sym,arch))
+runEquivM env f = withValidEnv env $ CMW.runWriterT (runExceptT $ (CMR.runReaderT (unEQ f) env))
 
 ----------------------------------------
 -- Errors

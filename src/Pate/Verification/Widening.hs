@@ -117,6 +117,7 @@ makeFreshAbstractDomain _scope bundle preDom from _to = do
 --   If, for some reason, we cannot find appropraite locations to widen, we
 --   widen as much as we can, and report an error.
 widenAlongEdge ::
+  forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v {- ^ results of symbolic execution for this block -} ->
   GraphNode arch {- ^ source node -} ->
@@ -124,8 +125,8 @@ widenAlongEdge ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
-
+widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
+  emitTrace @"node" @sym @arch to
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
@@ -228,6 +229,7 @@ abstractOverVars ::
   PAD.AbstractDomain sym arch pre {- ^ computed post-domain (with variables from the initial 'pre' scope) -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym -> do
+  emitTraceLabel @"domain" PAD.Postdomain (Some postResult)
   -- the post-state of the slice phrased over 'pre'
   let outVars = PS.bundleOutVars bundle
 
@@ -338,7 +340,9 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- domain by not asserting any value constraints on that entry.
     val_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> toMaybe <$> doRescope loc se
 
-    return $ PAD.AbstractDomain eq_post val_post
+    let dom = PAD.AbstractDomain eq_post val_post
+    emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
+    return dom
 
 
 

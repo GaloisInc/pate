@@ -12,6 +12,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Pate.Verification.StrongestPosts
   ( pairGraphComputeFixpoint
@@ -22,6 +24,7 @@ import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM)
 import           Control.Monad.IO.Class
+import           System.IO as IO
 import           Control.Monad.Reader (asks)
 import           Control.Monad.Except (runExceptT, catchError)
 import           Numeric (showHex)
@@ -34,8 +37,12 @@ import           Data.Proxy
 import           Data.Functor.Const
 import           Data.IORef ( IORef, newIORef, readIORef, modifyIORef )
 
+import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.Terminal as PPRT
+
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
 import           Data.Parameterized.Nonce
 
@@ -75,7 +82,7 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Register.Traversal as PRt
-
+import           Pate.TraceTree
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 
@@ -117,11 +124,14 @@ runVerificationLoop ::
   [PPa.FunPair arch] ->
   IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
-  result <- runExceptT (runEquivM env doVerify)
+  (result, trees) <- runEquivM env doVerify
+  withValidEnv @(IO ()) env $ do
+    let p = ppFullTraceTree [Summary] trees
+    let s = PP.layoutPretty PP.defaultLayoutOptions p
+    PPRT.renderIO IO.stdout s
   case result of
-    Left err -> withValidEnv env (error (show err))
+    Left err -> return (PE.Errored err, mempty)
     Right r  -> return r
-
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
@@ -142,6 +152,7 @@ runVerificationLoop env pPairs = do
 
         return (result, stats)
 
+
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
 --   to all reachable positions in the program graph and we reach stability,
@@ -149,16 +160,21 @@ runVerificationLoop env pPairs = do
 --
 --   TODO, could also imagine putting timeouts/compute time limits here.
 pairGraphComputeFixpoint ::
-  PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
-pairGraphComputeFixpoint gr =
-  case chooseWorkItem gr of
-    Nothing -> return gr
-    Just (gr', nd, preSpec) -> startTimer $ do
-      gr'' <- PS.viewSpec preSpec $ \scope d -> do
-        withAssumptionSet (PS.scopeAsm scope) $ do
-          visitNode scope nd d gr'
-      emitEvent $ PE.VisitedNode nd
-      pairGraphComputeFixpoint gr''
+  forall sym arch. PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
+pairGraphComputeFixpoint gr_outer =
+  withSubTraces $ do
+    let go (gr :: PairGraph sym arch) = case chooseWorkItem gr of
+          Nothing -> return gr
+          Just (gr', nd, preSpec) -> do
+            gr'' <- subTrace @"node" nd $ startTimer $ do
+              PS.viewSpec preSpec $ \scope d -> do
+                emitTraceLabel @"domain" PAD.Predomain (Some d)
+                withAssumptionSet (PS.scopeAsm scope) $ do
+                  gr'' <- visitNode scope nd d gr'
+                  emitEvent $ PE.VisitedNode nd
+                  return gr''
+            go gr''
+    go gr_outer
 
 
 -- | For a given 'PSR.MacawRegEntry' (representing the initial state of a register)
@@ -231,17 +247,18 @@ visitNode :: forall sym arch v.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 
-visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ do
+visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $  do
   let vars = PS.scopeVars scope
   validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
   validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
   withAssumptionSet (validInit <> validAbs) $
     do -- do the symbolic simulation
        bundle' <- mkSimBundle bPair vars d
+       emitTrace @"bundle" (Some bundle')
        withPredomain bundle' d $ do
          -- simplify the bundle under the domain assumptions
          bundle <- applyCurrentAsms bundle'
-         traceBundle bundle $ "visitNode:  incoming domain\n" ++ (show (PAD.ppAbstractDomain (\_ -> pretty "") d))
+         traceBundle bundle $ "visitNode:  incoming domain\n" ++ (show (PAD.ppAbstractDomain (\_ -> "") d))
          
   {-     traceBundle bundle $ unlines
          [ "== SP result =="
@@ -265,7 +282,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ 
          gr3 <- updateReturnNode scope node bundle d gr2
 
          -- Follow all the exit pairs we found
-         foldM (\x y -> followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
+         withSubTraces $
+           foldM (\x y@(_,tgt) -> subTrace @"blocktarget" tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
 
 
 visitNode scope (ReturnNode fPair) d gr0 =
@@ -781,7 +799,7 @@ followExit ::
   PairGraph sym arch ->
   (Integer, PPa.PatchPair (PB.BlockTarget arch)) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
-followExit scope bundle currBlock d gr (idx, pPair) =
+followExit scope bundle currBlock d gr (idx, pPair) = 
   do traceBundle bundle ("Handling proof case " ++ show idx)
      res <- manifestError (triageBlockTarget scope bundle currBlock d gr pPair)
      case res of
@@ -930,6 +948,10 @@ handleInlineCallee ::
 handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair =
   return gr -- TODO!
 
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "funcall" where
+  type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (PB.FunctionEntry arch)
+  prettyNode funs = PP.pretty funs
+
 -- | Record the return vector for this call, and then handle a
 --   jump to the entry point of the function.
 handleOrdinaryFunCall ::
@@ -945,6 +967,7 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
        do
+          emitTrace @"funcall" (PPa.PatchPair oFun pFun)
           -- augmenting this block with the return point as its calling context
           currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
             PCfg.SharedFunctionAbstractDomains -> return currBlock
