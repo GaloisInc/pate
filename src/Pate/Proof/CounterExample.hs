@@ -56,6 +56,7 @@ import qualified What4.Expr.GroundEval as W4G
 import qualified What4.SatResult as W4R
 
 import qualified Pate.Arch as PA
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence as PE
@@ -222,11 +223,11 @@ getRegPathCondition regCond fn = withSym $ \sym ->
   TF.foldrMF (\x y -> getRegPath x y) (W4.truePred sym) (PE.regCondPreds regCond)
   where
     getRegPath ::
-      Const (PS.AssumptionSet sym v) tp ->
+      Const (PAS.AssumptionSet sym) tp ->
       W4.Pred sym ->
       EquivM_ sym arch (W4.Pred sym)
     getRegPath (Const regCondAsm) pathCond = withSym $ \sym -> do
-      regCond_pred <- liftIO $ PS.getAssumedPred sym regCondAsm
+      regCond_pred <- liftIO $ PAS.toPred sym regCondAsm
       execGroundFn fn regCond_pred >>= \case
         -- if the post-equivalence is satisfied for this entry, then we don't need
         -- to look at the path condition for these values

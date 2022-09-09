@@ -24,6 +24,7 @@ common shared
                        bv-sized >= 1 && < 1.1,
                        bytestring >= 0.9 && < 0.12,
                        containers >= 0.5 && < 0.7,
+                       binary,
                        directory >= 1 && < 2,
                        deepseq >= 1.3 && < 2,
                        cassava >= 0.5 && < 0.6,
@@ -75,6 +76,7 @@ library
   exposed-modules:     Data.Macaw.CFGSlice,
                        Pate.Abort,
                        Pate.Address,
+                       Pate.AssumptionSet,
                        Pate.Arch,
                        Pate.Binary,
                        Pate.Block,
@@ -191,7 +193,7 @@ test-suite pate-test-ppc
   import: shared-test
   type: exitcode-stdio-1.0
   main-is: PPCTestMain.hs
-  other-modules: TestBase, Pate.PPC 
+  other-modules: TestBase, Pate.PPC
   hs-source-dirs: tests, arch
   build-depends: macaw-ppc,
                  macaw-ppc-symbolic,
@@ -237,7 +239,6 @@ common shared-exec
   build-depends: base,
                  bytestring,
                  elf-edit >= 0.39,
-                 binary,
                  containers,
                  filepath,
                  filemanip,
@@ -256,6 +257,7 @@ executable pate
   main-is:             Main.hs
   other-modules:       Pate.PPC,
                        Pate.AArch32,
+                       Pate.ArchLoader,
                        JSONReport
   hs-source-dirs:      tools/pate tools arch
   build-depends:       async,

@@ -20,6 +20,8 @@ module Pate.PPC (
   , ppc64HasDedicatedRegister
   , ppc32HasDedicatedRegister
   , argumentMapping
+  , stubOverrides
+  , archLoader
   )
 where
 
@@ -27,10 +29,13 @@ import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Text as T
+import qualified Data.Map as Map
 import           Data.Void ( Void, absurd )
 import           Data.Word ( Word8 )
 import           GHC.Stack ( HasCallStack )
@@ -55,6 +60,7 @@ import qualified Lang.Crucible.Types as LCT
 import qualified SemMC.Architecture.PPC as SP
 
 import qualified Pate.Arch as PA
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
@@ -64,7 +70,6 @@ import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
-import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
@@ -105,21 +110,21 @@ getCurrentTOC ctx binRepr = do
     Nothing -> CMC.throwM (PEE.MissingTOCEntry @PPC.PPC64 addr)
 
 ppc64DedicatedRegisterFrame
-  :: forall sym v tp bin
+  :: forall sym tp bin
    . (CB.IsSymInterface sym)
   => sym
   -> PMC.EquivalenceContext sym PPC.PPC64
   -> PB.WhichBinaryRepr bin
   -> PSR.MacawRegEntry sym tp
   -> PPC64DedicatedRegister (MS.ToCrucibleType tp)
-  -> IO (PS.AssumptionSet sym v)
+  -> IO (PAS.AssumptionSet sym)
 ppc64DedicatedRegisterFrame sym ctx binRepr entry dr =
   case dr of
     RegTOC -> do
       tocW <- getCurrentTOC ctx binRepr
       tocBV <- WI.bvLit sym PN.knownNat (BVS.mkBV PN.knownNat (W.unW tocW))
       let targetTOC = CLM.LLVMPointer (PMC.globalRegion ctx) tocBV
-      PS.macawRegBinding sym entry (PSR.ptrToEntry targetTOC)
+      return $ PAS.macawRegBinding sym entry (PSR.ptrToEntry targetTOC)
 
 -- | A dedicated register handler for the most common PPC64 ABI that uses a
 -- Table of Contents (TOC) register
@@ -227,7 +232,42 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
+stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
+stubOverrides = PA.ArchStubOverrides $
+  Map.fromList
+    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
+    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
+  where
+    r0 = gpr 0
+
 instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case
     PPC.PPCSyscall -> MCS.MacawBlockEndCall
     _ -> MCS.MacawBlockEndArch
+
+
+archLoader :: PA.ArchLoader PEE.LoadError
+archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
+  case (em, EEP.headerClass (EEP.header origHdr)) of
+    (EEP.EM_PPC, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                 , PA.validArchFunctionDomain = handleExternalCall
+                                 , PA.validArchDedicatedRegisters = ppc32HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchStubOverrides = stubOverrides
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    (EEP.EM_PPC64, _) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                 , PA.validArchFunctionDomain = handleExternalCall
+                                 , PA.validArchDedicatedRegisters = ppc64HasDedicatedRegister
+                                 , PA.validArchArgumentMapping = argumentMapping
+                                 , PA.validArchOrigExtraSymbols = mempty
+                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchStubOverrides = stubOverrides
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+
+    _ -> Left (PEE.UnsupportedArchitecture em)

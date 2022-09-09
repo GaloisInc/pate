@@ -1,26 +1,21 @@
 module Main ( main ) where
 
-import qualified Pate.Arch as PA
 import qualified Pate.PPC as PPC
 import           TestBase
 
 main :: IO ()
 main = do
-  let archData = PA.ValidArchData { PA.validArchSyscallDomain = PPC.handleSystemCall
-                                  , PA.validArchFunctionDomain = PPC.handleExternalCall
-                                  , PA.validArchDedicatedRegisters = PPC.ppc32HasDedicatedRegister
-                                  , PA.validArchArgumentMapping = PPC.argumentMapping
-                                  , PA.validArchOrigExtraSymbols = mempty
-                                  , PA.validArchPatchedExtraSymbols = mempty
-                                  }
   let cfg32 = TestConfig
         { testArchName = "ppc32"
-        , testArchProxy = PA.SomeValidArch archData
+        , testArchLoader = PPC.archLoader
         , testExpectEquivalenceFailure =
             [ "stack-struct", "unequal/stack-struct"
+            -- https://github.com/GaloisInc/pate/issues/327
+            , "malloc-simple", "unequal/malloc-simple"
             ]
-        , testExpectSelfEquivalenceFailure =
-            [
+        , testExpectSelfEquivalenceFailure = [
+            -- https://github.com/GaloisInc/pate/issues/327
+            "malloc-simple"
             ]
         -- TODO: we should define a section name here and read its address
         -- from the ELF

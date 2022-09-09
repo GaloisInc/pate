@@ -25,6 +25,7 @@ Definitions for equality over crucible input and output states.
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -60,8 +61,10 @@ import qualified What4.Interface as W4
 import qualified Data.Macaw.CFG as MM
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Backend (IsSymInterface)
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Arch as PA
+import           Pate.AssumptionSet
 import qualified Pate.Binary as PBi
 import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
@@ -70,6 +73,7 @@ import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Solver as PSo
 import           What4.ExprHelpers
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -81,7 +85,7 @@ data EquivalenceStatus =
     Equivalent
   | Inequivalent
   | ConditionallyEquivalent
-  | forall arch. PA.ValidArch arch => Errored (PEE.EquivalenceError arch)
+  | Errored PEE.EquivalenceError
 
 deriving instance Show EquivalenceStatus
 
@@ -118,7 +122,7 @@ instance TestEquality (W4.SymExpr sym) => Eq (MemRegionEquality sym arch) where
 
 
 registerValuesEqual' ::
-  forall sym arch v tp.
+  forall sym arch tp.
   PA.ValidArch arch =>
   W4.IsSymExprBuilder sym =>
   PA.HasDedicatedRegister arch ->
@@ -127,7 +131,7 @@ registerValuesEqual' ::
   W4.Pred sym ->
   PSR.MacawRegEntry sym tp ->
   PSR.MacawRegEntry sym tp -> 
-  IO (AssumptionSet sym v)
+  IO (AssumptionSet sym)
 registerValuesEqual' hdr sym r precond vO vP = do
   asm <- case PRe.registerCase hdr (PSR.macawRegRepr vO) r of
     PRe.RegIP -> return $ mempty
@@ -136,17 +140,18 @@ registerValuesEqual' hdr sym r precond vO vP = do
         CLM.LLVMPointer _ offO = PSR.macawRegValue vO
         CLM.LLVMPointer _ offP = PSR.macawRegValue vP
       return $ exprBinding offO offP
-    _ -> macawRegBinding sym vO vP
+    _ -> return $ macawRegBinding sym vO vP
   case W4.asConstantPred precond of
     Just True -> return asm
     Just False -> return mempty
-    _ -> frameAssume <$> (impM sym (return precond) (getAssumedPred sym asm))
+    _ -> fromPred <$> (impM sym (return precond) (toPred sym asm))
 
 -- | This simply bundles up the necessary state elements necessary to resolve equality.
 data EquivContext sym arch where
   EquivContext ::
     { eqCtxHDR :: PA.HasDedicatedRegister arch
     , eqCtxStackRegion :: W4.SymNat sym
+    , eqCtxConstraints :: forall a. (forall t st fs. (sym ~ W4B.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) -> a
     } -> EquivContext sym arch
 
 -- | Equates 'MacawRegEntry' values with respect to a given register.
@@ -161,7 +166,7 @@ registerValuesEqual ::
   PSR.MacawRegEntry sym tp ->
   PSR.MacawRegEntry sym tp ->
   IO (W4.Pred sym)
-registerValuesEqual sym (EquivContext hdr _) r vO vP = registerValuesEqual' hdr sym r (W4.truePred sym) vO vP >>= getAssumedPred sym
+registerValuesEqual sym eqCtx r vO vP = registerValuesEqual' (eqCtxHDR eqCtx) sym r (W4.truePred sym) vO vP >>= toPred sym
 
 -- | Resolve a domain predicate into a structured precondition.
 -- This resulting condition is asserting that each location is
@@ -194,8 +199,8 @@ impliesPredomain ::
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)  
 impliesPredomain sym inO inP eqCtx domAsm domConcl = do
-  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondAssumption sym inO inP eqCtx >>= getAssumedPred sym
-  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondAssumption sym inO inP eqCtx >>= getAssumedPred sym
+  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondAssumption sym inO inP eqCtx >>= toPred sym
+  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondAssumption sym inO inP eqCtx >>= toPred sym
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate into a structured precondition.
@@ -319,8 +324,8 @@ resolveCellEquivMem ::
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
-resolveCellEquivMem sym (EquivContext _ stackRegion) stO stP cell cond =
-  resolveCellEquiv sym (MemEqOutsideRegion stackRegion) stO stP cell cond
+resolveCellEquivMem sym eqCtx stO stP cell cond =
+  resolveCellEquiv sym (MemEqOutsideRegion (eqCtxStackRegion eqCtx)) stO stP cell cond
 
 -- | Compute a predicate that is true if the area of memory covered by the
 -- given 'PMC.MemCell' is equivalent on the two given states.
@@ -336,8 +341,8 @@ resolveCellEquivStack ::
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
-resolveCellEquivStack sym (EquivContext _ stackRegion) stO stP cell cond =
-  resolveCellEquiv sym (MemEqAtRegion stackRegion) stO stP cell cond
+resolveCellEquivStack sym eqCtx stO stP cell cond =
+  resolveCellEquiv sym (MemEqAtRegion (eqCtxStackRegion eqCtx)) stO stP cell cond
 
 
 -- | Structurally equivalent to a 'PEM.MemoryDomain', however the predicates
@@ -410,13 +415,13 @@ getRegionEquality sym memEq memO memP = case memEq of
 -- or assertion (as a postcondition) that all of the registers are equal with respect
 -- to some equivalence domain.
 newtype RegisterCondition sym arch v =
-  RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (AssumptionSet sym v)) }
+  RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (AssumptionSet sym)) }
 
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
   traverseLocation sym body f = RegisterCondition <$>
     MM.traverseRegsWith (\r (Const asm) -> do
-      p <- getAssumedPred sym asm
-      f (PL.Register r) p >>= \ (_, p') -> return $ (Const (frameAssume p'))
+      p <- toPred sym asm
+      f (PL.Register r) p >>= \ (_, p') -> return $ (Const (fromPred p'))
       ) (regCondPreds body)
 
 
@@ -444,7 +449,7 @@ regCondToAsm ::
   W4.IsSymExprBuilder sym =>
   sym ->
   RegisterCondition sym arch v ->
-  IO (AssumptionSet sym v)
+  IO (AssumptionSet sym)
 regCondToAsm _sym regCond = return $ PRt.collapse (regCondPreds regCond)
 
 -- | A structured pre condition
@@ -452,19 +457,29 @@ data StatePreCondition sym arch v = StatePreCondition
   { stRegPreCond :: RegisterCondition sym arch v
   , stStackPreDom :: PEM.MemoryDomain sym arch
   , stMemPreDom :: PEM.MemoryDomain sym arch
+  , stExtraPreCond :: AssumptionSet sym
+  -- ^ assumptions about meta-state (i.e. 'simMaxRegion' and 'simStackBase')
+ 
   }
 
 -- | A structured post condition
+-- TODO: It may make sense to redefine this as a general 'PL.Location' to 'AssumptionSet'
+-- map, which would make it more natural to include additional meta-state elements
+-- rather than having a catch-all "extra" condition at the end.
+-- We only ever intepret this data via 'PL.traverseLocation' to collect and prove the
+-- individual assertions.
 data StatePostCondition sym arch v = StatePostCondition
   { stRegPostCond :: RegisterCondition sym arch v
   , stStackPostCond :: MemoryCondition sym arch
   , stMemPostCond :: MemoryCondition sym arch
+  , stExtraPostCond :: AssumptionSet sym
+  -- ^ conditions on meta-state (i.e. 'simMaxRegion' and 'simStackBase')
   }
 
 
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
-  traverseLocation sym (StatePostCondition a b c) f =
-    StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f
+  traverseLocation sym (StatePostCondition a b c asm) f =
+    StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f <*> ((fromPred . snd) <$> (toPred sym asm >>= \p -> f PL.NoLoc p))
 
 
 eqDomPre ::
@@ -476,13 +491,20 @@ eqDomPre ::
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StatePreCondition sym arch v)
-eqDomPre sym inO inP (EquivContext hdr _stackRegion) eqDom  = do
+eqDomPre sym inO inP (eqCtxHDR -> hdr) eqDom  = do
   let
     stO = simInState inO
     stP = simInState inP
     
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
-  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom)
+  -- TODO: we haven't included this in the domain, and therefore we're simply
+  -- requiring that the number of allocations for each program always match
+  -- this will cause a widening error if this isn't the case
+  let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
+  let stackBaseEq = case W4.asConstantPred (PER.registerInDomain sym MM.sp_reg (PED.eqDomainRegisters eqDom)) of
+        Just True -> exprBinding (unSE $ unSB $ simStackBase stO) (unSE $ unSB $ simStackBase stP)
+        _ -> mempty
+  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) (maxRegionsEq <> stackBaseEq)
 
 eqDomPost ::
   W4.IsSymExprBuilder sym =>
@@ -494,15 +516,21 @@ eqDomPost ::
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StatePostCondition sym arch v)
-eqDomPost sym outO outP (EquivContext hdr stackRegion) domPre domPost = do
+eqDomPost sym outO outP eqCtx domPre domPost = do
   let
+    hdr = eqCtxHDR eqCtx
+    stackRegion = eqCtxStackRegion eqCtx
     stO = simOutState outO
     stP = simOutState outP
     
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
   stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
   memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
-  return $ StatePostCondition regsEq stacksEq memEq
+  -- TODO: we haven't included this in the domain, and therefore we're simply
+  -- requiring that the number of allocations for each program always match
+  -- this will cause a widening error if this isn't the case
+  let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
+  return $ StatePostCondition regsEq stacksEq memEq maxRegionsEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
 -- a single 'AssumptionSet'.
@@ -514,12 +542,12 @@ preCondAssumption ::
   SimInput sym arch v PBi.Patched ->
   EquivContext sym arch ->
   StatePreCondition sym arch v ->
-  IO (AssumptionSet sym v)
-preCondAssumption sym inO inP (EquivContext _hdr stackRegion) stCond = do
+  IO (AssumptionSet sym)
+preCondAssumption sym inO inP (eqCtxStackRegion -> stackRegion) stCond = do
   regsPred <- regCondToAsm sym (stRegPreCond stCond)
   stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) inO inP (stStackPreDom stCond)
   memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) inO inP (stMemPreDom stCond)
-  return $ (frameAssume memPred) <> (frameAssume stackPred) <> regsPred
+  return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred <> stExtraPreCond stCond
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into
 -- a single predicate.
@@ -531,7 +559,8 @@ postCondPredicate ::
   IO (W4.Pred sym)
 postCondPredicate sym stCond = do
   regsAsm <- regCondToAsm sym (stRegPostCond stCond)
-  regsPred <- getAssumedPred sym regsAsm
+  regsPred <- toPred sym regsAsm
   stackPred <- memPostCondToPred sym (stStackPostCond stCond)
   memPred <- memPostCondToPred sym (stMemPostCond stCond)
-  W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred
+  extraPred <- toPred sym (stExtraPostCond stCond)
+  W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred >>= W4.andPred sym extraPred

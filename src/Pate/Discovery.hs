@@ -49,7 +49,7 @@ import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
-import           GHC.Stack ( HasCallStack, callStack )
+import           GHC.Stack ( HasCallStack )
 
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -70,6 +70,7 @@ import qualified What4.SatResult as WR
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
@@ -98,7 +99,7 @@ discoverPairs ::
   forall sym arch v.
   SimBundle sym arch v ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-discoverPairs bundle = do
+discoverPairs bundle = withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty
@@ -113,13 +114,13 @@ discoverPairs bundle = do
   blocks <- getBlocks $ PSS.simPair bundle
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
 
-  result <- forM newCalls $ \(PPa.PatchPair blktO blktP) -> startTimer $ do
-    let emit r = emitEvent (PE.DiscoverBlockPair blocks blktO blktP r)
-    matches <- matchesBlockTarget bundle blktO blktP
+  result <- forM newCalls $ \blkts -> startTimer $ do
+    let emit r = emitEvent (PE.DiscoverBlockPair blocks blkts r)
+    matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
     case WI.asConstantPred matches of
       Just True -> do
         emit PE.Reachable
-        return $ Just $ PPa.PatchPair blktO blktP
+        return $ Just $ blkts
       Just False -> do
         emit PE.Unreachable
         return $ Nothing
@@ -129,7 +130,7 @@ discoverPairs bundle = do
           case satRes of
             WR.Sat _ -> do
               emit PE.Reachable
-              return $ Just $ PPa.PatchPair blktO blktP
+              return $ Just $ blkts
             WR.Unsat _ -> do
               emit PE.Unreachable
               return Nothing
@@ -217,43 +218,29 @@ exactEquivalence inO inP = withSym $ \sym -> do
 matchesBlockTarget ::
   forall sym arch v.
   SimBundle sym arch v ->
-  PB.BlockTarget arch PB.Original ->
-  PB.BlockTarget arch PB.Patched ->
-  EquivM sym arch (WI.Pred sym)
-matchesBlockTarget bundle blktO blktP = withSym $ \sym -> do
+  PPa.PatchPair (PB.BlockTarget arch) ->
+  EquivM sym arch (PAS.AssumptionSet sym)
+matchesBlockTarget bundle blktPair = withSym $ \sym -> do
   -- true when the resulting IPs call the given block targets
-  ptrO <- concreteToLLVM (PB.targetCall blktO)
-  ptrP <- concreteToLLVM (PB.targetCall blktP)
+  PPa.catBins $ \get -> do
+    let
+      blkt = get blktPair
+      regs = PSS.simOutRegs $ get (PSS.simOut bundle)
+      ip = regs ^. MC.curIP
+      endCase = PSS.simOutBlockEnd $ get (PSS.simOut bundle)
+      ret = MCS.blockEndReturn (Proxy @arch) endCase
 
-  eqCall <- liftIO $ do
-    eqO <- MT.llvmPtrEq sym ptrO (PSR.macawRegValue ipO)
-    eqP <- MT.llvmPtrEq sym ptrP (PSR.macawRegValue ipP)
-    WI.andPred sym eqO eqP
+    callPtr <- concreteToLLVM (PB.targetCall blkt)
+    let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
 
-  -- true when the resulting return IPs match the given block return addresses
-  targetRetO <- targetReturnPtr blktO
-  targetRetP <- targetReturnPtr blktP
+    targetRet <- targetReturnPtr blkt
+    eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
+    MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
+    let eqCase = PAS.exprBinding e1 e2
+    return $ eqCall <> eqRet <> eqCase
 
-  eqRet <- liftIO $ do
-    eqRetO <- liftPartialRel sym (MT.llvmPtrEq sym) retO targetRetO
-    eqRetP <- liftPartialRel sym (MT.llvmPtrEq sym) retP targetRetP
-    WI.andPred sym eqRetO eqRetP
 
-  -- check that the exit condition is as expected
-  eqCase <- matchingExits bundle $ PB.targetEndCase blktO
-
-  liftIO $ WI.andPred sym eqCall eqRet >>= WI.andPred sym eqCase
-  where
-    regsO = PSS.simOutRegs $ PSS.simOutO bundle
-    regsP = PSS.simOutRegs $ PSS.simOutP bundle
-
-    ipO = regsO ^. MC.curIP
-    ipP = regsP ^. MC.curIP
-
-    retO = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutO bundle
-    retP = MCS.blockEndReturn (Proxy @arch) $ PSS.simOutBlockEnd $ PSS.simOutP bundle
-
--- | Compute an 'PSS.AssumptionSet' that assumes the association between
+-- | Compute an 'PAS.AssumptionSet' that assumes the association between
 -- the 'PSS.StackBase' of the input and output states of the given bundle,
 -- according to the given exit case.
 -- In most cases the assumption is that the stack base does not change (i.e.
@@ -269,8 +256,9 @@ associateFrames ::
   forall sym arch v.
   SimBundle sym arch v ->
   MCS.MacawBlockEndCase ->
-  EquivM sym arch (PSS.AssumptionSet sym v)
-associateFrames bundle exitCase = PPa.catBins $ \get -> do
+  Bool ->
+  EquivM sym arch (PAS.AssumptionSet sym)
+associateFrames bundle exitCase isPLT = PPa.catBins $ \get -> do
     let
       st_pre = PSS.simInState $ get $ simIn bundle
       st_post = PSS.simOutState $ get $ simOut bundle
@@ -279,19 +267,22 @@ associateFrames bundle exitCase = PPa.catBins $ \get -> do
       CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post
     case exitCase of
       -- a backjump does not modify the frame
-      MCS.MacawBlockEndJump -> return $ PSS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndJump -> return $ PAS.exprBinding frame_post frame_pre
+      -- PLT stubs are treated specially and do not create return nodes, so
+      -- the pre and post frames are the same
+      MCS.MacawBlockEndCall | isPLT -> return $ PAS.exprBinding frame_post frame_pre
       -- For a function call the post-state frame is the frame for the
       -- target function, and so we represent that by asserting that it is
       -- equal to the value of the stack pointer at the call site
-      MCS.MacawBlockEndCall -> return $ PSS.exprBinding frame_post sp_post
+      MCS.MacawBlockEndCall -> return $ PAS.exprBinding frame_post sp_post
       -- note that a return results in two transitions:
       -- the first transitions to the "Return" graph node and then
       -- the second transitions from that node to any of the call sites (nondeterministically)
       -- this case is only for the first transition, which does not perform
       -- any frame rebinding (as we don't yet know where we are returning to)
-      MCS.MacawBlockEndReturn -> return $ PSS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndReturn -> return $ PAS.exprBinding frame_post frame_pre
       -- a branch does not modify the frame
-      MCS.MacawBlockEndBranch -> return $ PSS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndBranch -> return $ PAS.exprBinding frame_post frame_pre
       -- nothing to do on failure
       MCS.MacawBlockEndFail -> return mempty
       -- this likely requires some architecture-specific reasoning
@@ -300,19 +291,23 @@ associateFrames bundle exitCase = PPa.catBins $ \get -> do
 liftPartialRel ::
   CB.IsSymInterface sym =>
   sym ->
-  (a -> a -> IO (WI.Pred sym)) ->
+  (a -> a -> IO (PAS.AssumptionSet sym)) ->
   WP.PartExpr (WI.Pred sym) a ->
   WP.PartExpr (WI.Pred sym) a ->
-  IO (WI.Pred sym)
+  IO (PAS.AssumptionSet sym)
 liftPartialRel sym rel (WP.PE p1 e1) (WP.PE p2 e2) = do
-  eqPreds <- WI.isEq sym p1 p2
   bothConds <- WI.andPred sym p1 p2
   rel' <- rel e1 e2
-  justCase <- WI.impliesPred sym bothConds rel'
-  WI.andPred sym eqPreds justCase
-liftPartialRel sym _ WP.Unassigned WP.Unassigned = return $ WI.truePred sym
-liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = WI.notPred sym p2
-liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = WI.notPred sym p1
+  case WI.asConstantPred bothConds of
+    Just True -> return rel'
+    Just False -> return mempty
+    Nothing -> do
+      relPred <- PAS.toPred sym rel'
+      justCase <- PAS.fromPred <$> WI.impliesPred sym bothConds relPred
+      return $ (PAS.exprBinding p1 p2) <> justCase
+liftPartialRel _sym _ WP.Unassigned WP.Unassigned = return mempty
+liftPartialRel sym _ WP.Unassigned (WP.PE p2 _) = PAS.fromPred <$> WI.notPred sym p2
+liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = PAS.fromPred <$> WI.notPred sym p1
 
 targetReturnPtr ::
   PB.BlockTarget arch bin ->
@@ -509,11 +504,11 @@ abortFnName :: T.Text
 abortFnName = "__pate_abort"
 
 addAddrSym
-  :: (w ~ MC.ArchAddrWidth arch, MM.MemWidth w, HasCallStack)
+  :: (MM.MemWidth w, HasCallStack)
   => MM.Memory w
   -> MD.AddrSymMap w
   -> PH.FunctionDescriptor
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (MD.AddrSymMap w)
+  -> CME.ExceptT PEE.EquivalenceError IO (MD.AddrSymMap w)
 addAddrSym mem m funcDesc = do
   let symbol = TE.encodeUtf8 (PH.functionSymbol funcDesc)
   let addr0 = PH.functionAddress funcDesc
@@ -562,7 +557,7 @@ runDiscovery ::
   PLE.LoadedELF arch ->
   PH.VerificationHints ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO ([Word64], PMC.BinaryContext arch bin)
+  CME.ExceptT PEE.EquivalenceError IO ([Word64], PMC.BinaryContext arch bin)
 runDiscovery mCFGDir repr extraSyms elf hints pd = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
@@ -661,11 +656,7 @@ lookupBlocks b = do
     Left ierr -> do
       let binRep :: PB.WhichBinaryRepr bin
           binRep = PC.knownRepr
-      let err = PEE.EquivalenceError { PEE.errWhichBinary = Just (Some binRep)
-                                     , PEE.errStackTrace = Just callStack
-                                     , PEE.errEquivError = ierr
-                                     }
-      CME.throwError err
+      CME.throwError $ PEE.equivalenceErrorFor binRep ierr
     Right blocks -> return blocks
 
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'

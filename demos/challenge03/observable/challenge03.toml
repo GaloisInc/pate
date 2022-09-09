@@ -1,0 +1,4 @@
+patch-pairs = [ { original-block-address = 0x000108dc, patched-block-address = 0x000108dc }
+              ]
+
+observable-memory = [ { start-address = 0x00030000, length=100 } ]

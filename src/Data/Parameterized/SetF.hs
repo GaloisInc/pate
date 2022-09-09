@@ -26,20 +26,31 @@ Sets over a types with a parameteric type parameter
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Data.Parameterized.SetF
   ( SetF
+  , empty
   , singleton
+  , insert
   , toList
   , fromList
   , member
   , size
   , filter
   , lookupMin
+  , union
+  , unions
+  , null
+  , ppSetF
   ) where
 
-import Prelude hiding (filter)
+import Prelude hiding (filter, null)
 import           Data.Parameterized.Classes
+import qualified Data.Foldable as Foldable
+
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
 
 import           Data.Set (Set)
 import qualified Data.Set as S
@@ -60,11 +71,21 @@ deriving instance OrdF f => Semigroup (SetF f tp)
 deriving instance OrdF f => Monoid (SetF f tp)
 
 
+empty :: SetF f tp
+empty = SetF S.empty
+
 singleton ::
   OrdF f =>
   f tp ->
   SetF f tp
 singleton e = SetF (S.singleton (AsOrd e))
+
+insert ::
+  OrdF f =>
+  f tp ->
+  SetF f tp ->
+  SetF f tp
+insert e (SetF es) = SetF (S.insert (AsOrd e) es)
 
 toList ::
   SetF f tp ->
@@ -88,6 +109,13 @@ size ::
   SetF f tp -> Int
 size (SetF es) = S.size es
 
+union :: OrdF f =>
+  SetF f tp -> SetF f tp -> SetF f tp
+union (SetF a) (SetF b) = SetF (S.union a b)
+
+unions ::
+  (Foldable t, OrdF f) => t (SetF f tp) -> SetF f tp
+unions = Foldable.foldl' union empty
 
 filter ::
   (f tp -> Bool) -> SetF f tp -> SetF f tp
@@ -97,3 +125,17 @@ lookupMin ::
   SetF f tp -> Maybe (f tp)
 lookupMin (SetF es) = fmap unAsOrd $ S.lookupMin es
 
+null ::
+  SetF f tp -> Bool
+null (SetF es) = S.null es
+
+ppSetF ::
+  (f tp -> PP.Doc a) ->
+  SetF f tp ->
+  PP.Doc a
+ppSetF ppElem es =
+  let ps = [ ppElem p | p <- toList es ]
+  in PP.sep (zipWith (<+>) ("{" : repeat ",") ps) <+> "}"
+
+instance PP.Pretty (a tp) => PP.Pretty (SetF a tp) where
+  pretty s = ppSetF PP.pretty s

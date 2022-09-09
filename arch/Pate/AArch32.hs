@@ -12,17 +12,23 @@ module Pate.AArch32 (
   , handleExternalCall
   , hasDedicatedRegister
   , argumentMapping
+  , stubOverrides
+  , archLoader
   ) where
 
 import           Control.Lens ( (^?), (^.) )
 import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
+import           Data.Proxy ( Proxy(..) )
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
+import qualified Data.Map as Map
 
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import qualified Data.Macaw.CFG as MC
@@ -42,6 +48,8 @@ import           Data.Macaw.AArch32.Symbolic ()
 import qualified Language.ASL.Globals as ASL
 
 import qualified Pate.Arch as PA
+import qualified Pate.Discovery.PLT as PLT
+import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -180,10 +188,37 @@ argumentMapping =
                             _ -> PP.panic PP.AArch32 "argumentMapping" ["Unsupported return value type: " ++ show retRepr]
                       }
 
+stubOverrides :: PA.ArchStubOverrides SA.AArch32
+stubOverrides = PA.ArchStubOverrides $
+  Map.fromList
+    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
+    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
+  where
+    r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
+
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
   archTermCase = \case
     MAA.ReturnIf{} -> MCS.MacawBlockEndReturn
     MAA.ReturnIfNot{} -> MCS.MacawBlockEndReturn
+    MAA.CallIf{} -> MCS.MacawBlockEndCall
+    MAA.CallIfNot{} -> MCS.MacawBlockEndCall
+
+archLoader :: PA.ArchLoader PEE.LoadError
+archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
+  case (em, EEP.headerClass (EEP.header origHdr)) of
+    (EEP.EM_ARM, EEP.ELFCLASS32) ->
+      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                 , PA.validArchFunctionDomain = handleExternalCall
+                                 , PA.validArchDedicatedRegisters = hasDedicatedRegister
+                                 , PA.validArchArgumentMapping = argumentMapping
+                                 , PA.validArchOrigExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
+                                 , PA.validArchPatchedExtraSymbols =
+                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                 , PA.validArchStubOverrides = stubOverrides
+                                 }
+      in Right (Some (PA.SomeValidArch vad))
+    _ -> Left (PEE.UnsupportedArchitecture em)
 
 {- Note [Thumb Code Discovery Hacks]
 

@@ -34,6 +34,7 @@ import qualified What4.Protocol.Online as WPO
 import qualified What4.Protocol.SMTWriter as WPS
 import qualified What4.SatResult as WSat
 
+import           What4.ExprHelpers ( integerToNat )
 import qualified Pate.Panic as PP
 
 data Concretize sym tp where
@@ -168,6 +169,6 @@ resolveSingletonPointer
 resolveSingletonPointer wsolver ptr@(LCLM.LLVMPointer base off) = do
   let sym = solverSym wsolver
   base_i <- (resolveSingletonSymbolicAs concreteInteger wsolver (WI.natToIntegerPure base))
-  base' <- liftIO $ WI.integerToNat sym base_i
+  base' <- liftIO $ integerToNat sym base_i
   off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) wsolver off
   return (LCLM.LLVMPointer base' off')

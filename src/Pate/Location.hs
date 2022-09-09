@@ -15,7 +15,6 @@ module Pate.Location (
     Location(..)
   , LocationWitherable(..)
   , LocationTraversable(..)
-  , LocationPredPair(..)
   ) where
 
 import           GHC.TypeLits
@@ -24,11 +23,14 @@ import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans.State ( StateT, get, put, execStateT )
 import           Control.Monad.Trans ( lift )
 
+import qualified Prettyprinter as PP
+
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Classes
 import           Data.Parameterized.HasRepr ( typeRepr )
 import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFG as MM
+
 
 import qualified Pate.PatchPair as PPa
 import qualified Pate.MemCell as PMC
@@ -47,10 +49,6 @@ data LocK =
 data Location sym arch l where
   Register :: MM.ArchReg arch tp -> Location sym arch ('RegK tp)
   Cell :: 1 <= w => PMC.MemCell sym arch w -> Location sym arch ('CellK w)
-  -- | A location that does not correspond to any specific state element
-  -- FIXME: currently this is convenient for including additional predicates
-  -- during a location-based traversal, but it shouldn't be necessary once
-  -- all the necessary types are defined to be 'LocationTraversable'
   NoLoc :: Location sym arch 'NoLocK
 
 instance PEM.ExprMappable sym (Location sym arch l) where
@@ -59,6 +57,11 @@ instance PEM.ExprMappable sym (Location sym arch l) where
     Cell cell -> Cell <$> PEM.mapExpr sym f cell
     NoLoc -> return NoLoc
 
+instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PP.Pretty (Location sym arch l) where
+  pretty loc = case loc of
+    Register r -> PP.pretty (showF r)
+    Cell c -> PMC.ppCell c
+    NoLoc -> "<None>"
 
 -- TODO: this can be abstracted over 'W4.Pred'
 
@@ -128,7 +131,7 @@ class LocationTraversable sym arch f where
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
   LocationWitherable sym arch (PMC.MemCellPred sym arch k) where
-  witherLocation sym mp f = fmap WPM.dropUnit $ WPM.alter sym mp $ \sc p -> PMC.viewCell sc $ \c ->
+  witherLocation sym mp f = fmap WPM.dropUnit $ WPM.alter sym mp $ \(Some c) p -> PMC.viewCell c $
     f (Cell c) p >>= \case
       Just (Cell c', p') -> return $ (Some c', p')
       Nothing -> return $ (Some c, WPM.predOpUnit sym (typeRepr mp))
@@ -137,13 +140,6 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) =>
   LocationTraversable sym arch (PMC.MemCellPred sym arch k) where
   traverseLocation sym mp f = witherLocation sym mp (\l p -> Just <$> f l p)
 
--- | Wrapped location-predicate pair to make trivial 'LocationTraversable' values.
-data LocationPredPair sym arch = forall l.
-  LocationPredPair (Location sym arch l) (W4.Pred sym)
-
-instance LocationTraversable sym arch (LocationPredPair sym arch) where
-  traverseLocation _sym (LocationPredPair l p) f =
-    f l p >>= \(l', p') -> return $ LocationPredPair l' p'
 
 instance (LocationTraversable sym arch a, LocationTraversable sym arch b) =>
   LocationTraversable sym arch (a, b) where

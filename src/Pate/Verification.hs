@@ -34,6 +34,7 @@ import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Trans as CMT
+import qualified Data.ElfEdit as DEE
 import qualified Data.Map as M
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
@@ -72,7 +73,6 @@ import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
-import qualified Pate.Monad.Environment as PME
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
 import qualified Pate.Solver as PS
@@ -105,7 +105,7 @@ runDiscovery
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PH.Hinted (PLE.LoadedELF arch)
   -> PC.PatchData
-  -> CME.ExceptT (PEE.EquivalenceError arch) IO (PPa.PatchPair (PMC.BinaryContext arch))
+  -> CME.ExceptT PEE.EquivalenceError IO (PPa.PatchPair (PMC.BinaryContext arch))
 runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' pd = do
   binCtxO <- discoverCheckingHints PBi.OriginalRepr (PA.validArchOrigExtraSymbols archData) elf
   binCtxP <- discoverCheckingHints PBi.PatchedRepr (PA.validArchPatchedExtraSymbols archData) elf'
@@ -139,7 +139,7 @@ verifyPairs ::
   PH.Hinted (PLE.LoadedELF arch) ->
   PC.VerificationConfig ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
+  CME.ExceptT PEE.EquivalenceError IO PEq.EquivalenceStatus
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
@@ -165,13 +165,13 @@ doVerifyPairs ::
   PC.PatchData ->
   N.NonceGenerator IO scope ->
   sym ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO PEq.EquivalenceStatus
+  CME.ExceptT PEE.EquivalenceError IO PEq.EquivalenceStatus
 doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
                                 , MS.genArchVals (Proxy @MS.LLVMMemory) (Proxy @arch) Nothing) of
     (Just vs1, Just vs2) -> pure (vs1, vs2)
-    _ -> CME.throwError $ PEE.equivalenceError PEE.UnsupportedArchitecture
+    _ -> CME.throwError $ PEE.loaderError $ PEE.UnsupportedArchitecture (DEE.headerMachine $ PLE.loadedHeader $ PH.hinted elf)
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf' pd
 
@@ -181,7 +181,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   mvar <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
-  undefops <- liftIO $ MT.mkUndefinedPtrOps sym
+  undefops <- liftIO $ MT.mkAnnotatedPtrOps sym
 
   -- PC values are assumed to be absolute
   pcRegion <- liftIO $ W4.natLit sym 0
@@ -244,7 +244,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envConfig = vcfg
           , envValidSym = PS.Sym symNonce sym bak
           , envStartTime = startedAt
-          , envCurrentFrame = Some mempty
+          , envCurrentFrame = mempty
           , envNonceGenerator = gen
           , envParentNonce = Some topNonce
           , envUndefPointerOps = undefops
@@ -270,12 +270,13 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
 
 
 unpackBlockData ::
+  forall arch bin.
   HasCallStack =>
   PBi.KnownBinary bin =>
   PA.ValidArch arch =>
   PMC.BinaryContext arch bin ->
   PC.Address ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO (PB.FunctionEntry arch bin)
+  CME.ExceptT PEE.EquivalenceError IO (PB.FunctionEntry arch bin)
 unpackBlockData ctxt (PC.Address w) =
   case PM.resolveAbsoluteAddress mem (fromIntegral w) of
     Just segAddr ->
@@ -286,7 +287,7 @@ unpackBlockData ctxt (PC.Address w) =
                               , PB.functionSymbol = Nothing
                               , PB.functionBinRepr = W4.knownRepr
                               }
-    Nothing -> CME.throwError (PEE.equivalenceError (PEE.LookupNotAtFunctionStart callStack caddr))
+    Nothing -> CME.throwError (PEE.equivalenceError @arch (PEE.LookupNotAtFunctionStart callStack caddr))
   where
     mem = MBL.memoryImage (PMC.binary ctxt)
     caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
@@ -304,7 +305,7 @@ unpackPatchData :: forall arch.
   PA.ValidArch arch =>
   PPa.PatchPair (PMC.BinaryContext arch) ->
   PC.PatchData ->
-  CME.ExceptT (PEE.EquivalenceError arch) IO (UnpackedPatchData arch)
+  CME.ExceptT PEE.EquivalenceError IO (UnpackedPatchData arch)
 unpackPatchData contexts pd =
    do pairs' <-
          DT.forM (PC.patchPairs pd) $ \(PC.BlockAlignment { PC.originalBlockStart = bd, PC.patchedBlockStart = bd' }) ->

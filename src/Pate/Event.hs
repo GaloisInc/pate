@@ -24,6 +24,7 @@ import qualified What4.Expr as WE
 import qualified What4.Interface as WI
 
 import qualified Pate.Arch as PArch
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
@@ -59,6 +60,7 @@ data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches
                                    | BranchesIncomplete (PF.InequivalenceResult arch)
 
+
 -- | Events that can be reported from the verifier
 --
 -- This can include traditional logging information, but also statistics about
@@ -66,8 +68,8 @@ data BranchCompletenessResult arch = BranchesComplete
 data Event arch where
   AnalysisEnd :: PES.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
   AnalysisStart :: PPa.BlockPair arch -> Event arch
-  ErrorRaised :: PEE.EquivalenceError arch -> Event arch
-  Warning :: PEE.EquivalenceError arch -> Event arch
+  ErrorRaised :: PEE.EquivalenceError -> Event arch
+  Warning :: PEE.EquivalenceError -> Event arch
   -- | final top-level result
   ProvenGoal :: BlocksPair arch ->  PFI.SomeProofNonceExpr arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
   -- | intermediate results
@@ -75,7 +77,7 @@ data Event arch where
   ProofStarted :: BlocksPair arch -> PFI.SomeProofNonceExpr arch tp -> TM.NominalDiffTime -> Event arch
 
   CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
-  DiscoverBlockPair :: BlocksPair arch -> PB.BlockTarget arch PB.Original -> PB.BlockTarget arch PB.Patched -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
+  DiscoverBlockPair :: BlocksPair arch -> PPa.PatchPair (PB.BlockTarget arch) -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
   CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
@@ -106,18 +108,18 @@ data Event arch where
   -- | The strongest postcondition verifier has completed with the given status
   StrongestPostOverallResult :: PE.EquivalenceStatus -> TM.NominalDiffTime -> Event arch
   -- | The strongest postcondition verifier discovered an observable difference in behavior (reported as a counterexample)
-  StrongestPostObservable :: (WI.IsExprBuilder sym) => PPa.BlockPair arch -> PVSC.ObservableCounterexample sym (DMC.ArchAddrWidth arch) -> Event arch
+  StrongestPostObservable :: (PArch.ValidArch arch, WI.IsExprBuilder sym) => PVPN.NodeEntry arch -> PVSC.ObservableCounterexample sym (DMC.ArchAddrWidth arch) -> Event arch
   -- | The strongest postcondition verifier has discovered a desynchronization in the control flow of the programs
-  StrongestPostDesync :: PPa.BlockPair arch -> PVSC.TotalityCounterexample (DMC.ArchAddrWidth arch) -> Event arch
+  StrongestPostDesync :: (PArch.ValidArch arch) => PVPN.NodeEntry arch -> PVSC.TotalityCounterexample (DMC.ArchAddrWidth arch) -> Event arch
   -- | The strongest postcondition analysis ran out of gas when analyzing the given pair
   GasExhausted :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> Event arch
   -- | Other errors that can occur inside of the strongest postcondition verifier
-  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> PEE.EquivalenceError arch -> Event arch
+  StrongestPostMiscError :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> PEE.EquivalenceError -> Event arch
   -- | A recoverable error that occurred during verification
-  ErrorEmitted :: PEE.EquivalenceError arch -> TM.NominalDiffTime -> Event arch
+  ErrorEmitted :: PEE.EquivalenceError -> TM.NominalDiffTime -> Event arch
 
   VisitedNode :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> TM.NominalDiffTime -> Event arch
-  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PS.AssumptionSet sym v -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
+  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PAS.AssumptionSet sym -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
 
   DomainWidened :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
 

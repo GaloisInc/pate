@@ -3,6 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Pate.Config (
   PatchData(..),
+  PatchDataParseError(..),
   BlockAlignment(..),
   Address(..),
   Allocation(..),
@@ -11,7 +12,8 @@ module Pate.Config (
   parsePatchConfig,
   VerificationConfig(..),
   defaultVerificationCfg,
-  VerificationFailureMode(..)
+  VerificationFailureMode(..),
+  ContextSensitivity(..)
   ) where
 
 import qualified Control.Monad.Except as CME
@@ -202,6 +204,19 @@ data VerificationFailureMode =
   | ContinueAfterFailure
   | ContinueAfterRecoverableFailures
 
+-- | Controls how abstract domains are shared between function call nodes in the pairgraph.
+data ContextSensitivity =
+    -- | All calls to any given function share the same abstract domain, i.e.
+    --   the resulting domain is proven to hold at every return site.
+    SharedFunctionAbstractDomains
+    -- | Each call to a function has a distinct abstract domain that holds
+    --   at its (single) return site (distinguished by tagging the function node with
+    --   the calling node).
+    --   Note: Calls within loops will still share domains for each loop iteration.
+    --   Recursion may result in infinite loops and requires some additional consideration
+    --   to handle: https://github.com/GaloisInc/pate/issues/330
+  | DistinctFunctionAbstractDomains
+
 ----------------------------------
 -- Verification configuration
 data VerificationConfig =
@@ -230,6 +245,7 @@ data VerificationConfig =
     , cfgFailureMode :: VerificationFailureMode
     -- ^ Determines the behavior of the verifier when an error is thrown,
     -- with respect to whether or not the error is deemed "recoverable"
+    , cfgContextSensitivity :: ContextSensitivity
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -242,5 +258,6 @@ defaultVerificationCfg =
                      , cfgGroundTimeout = PT.Seconds 5
                      , cfgMacawDir = Nothing
                      , cfgSolverInteractionFile = Nothing
-                     , cfgFailureMode = ContinueAfterRecoverableFailures
+                     , cfgFailureMode = ThrowOnAnyFailure
+                     , cfgContextSensitivity = DistinctFunctionAbstractDomains
                      }

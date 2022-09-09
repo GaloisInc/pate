@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
@@ -66,7 +67,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..) )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, rootEntry )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -139,7 +140,7 @@ data PairGraph sym arch =
     --   call to the given FunPair, we record the program point pair where the function
     --   returns to here. This is used to tell us where we need to propagate abstract domain
     --   information when visiting a ReturnNode.
-  , pairGraphReturnVectors :: !(Map (PPa.FunPair arch) (Set (PPa.BlockPair arch)))
+  , pairGraphReturnVectors :: !(Map (NodeReturn arch) (Set (NodeEntry arch)))
 
     -- TODO, I'm not entirely sure I love this idea of tracking error conditions in this
     -- data structure like this.  It works for now, but maybe is worth thinking about some more.
@@ -151,14 +152,14 @@ data PairGraph sym arch =
     -- | If we find a counterexample regarding observables in a particular block, record it here.
     --   Later, this can be used to generate reports to the user.  We also avoid checking for
     --   additional counterexamples for the given block if we have already found one.
-  , pairGraphObservableReports :: !(Map (PPa.BlockPair arch) (ObservableCounterexample sym (MM.ArchAddrWidth arch)))
+  , pairGraphObservableReports :: !(Map (NodeEntry arch) (ObservableCounterexample sym (MM.ArchAddrWidth arch)))
 
     -- | If we find a counterexample to the exit totality check, record it here.  This occurs when
     --   the programs have sufficiently-different control flow that they cannot be synchronized, or
     --   when the analysis encounters some control-flow construct it doesn't know how to handle.
     --   Once we find a desynchronization error for a particular block, we do not look for additional
     --   involving that same block.
-  , pairGraphDesyncReports :: !(Map (PPa.BlockPair arch) (TotalityCounterexample (MM.ArchAddrWidth arch)))
+  , pairGraphDesyncReports :: !(Map (NodeEntry arch) (TotalityCounterexample (MM.ArchAddrWidth arch)))
 
     -- | Keep track of the target nodes whenever we run out of gas while trying to reach fixpoint.
     --   This can be used to report to the user instances where the analysis may be incomplete.
@@ -167,7 +168,7 @@ data PairGraph sym arch =
     -- | Other sorts of analysis errors not captured by the previous categories. These generally
     --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
     --   that may impact the soundness of the analysis.
-  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError arch])
+  , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError])
   }
 
 ppProgramDomains ::
@@ -206,8 +207,8 @@ emptyPairGraph =
 --   the sites we have encountered so far where this function may return to.
 getReturnVectors ::
   PairGraph sym arch ->
-  PPa.FunPair arch ->
-  Set (PPa.BlockPair arch)
+  NodeReturn arch ->
+  Set (NodeEntry arch)
 getReturnVectors gr fPair =
   fromMaybe mempty (Map.lookup fPair (pairGraphReturnVectors gr))
 
@@ -223,7 +224,7 @@ getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
 --   currently is one.
 considerObservableEvent :: Monad m =>
   PairGraph sym arch ->
-  PPa.BlockPair arch ->
+  NodeEntry arch ->
   (m (Maybe (ObservableCounterexample sym (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
   m (PairGraph sym arch)
 considerObservableEvent gr bPair action =
@@ -241,7 +242,7 @@ considerObservableEvent gr bPair action =
 --   currently is one.
 considerDesyncEvent :: Monad m =>
   PairGraph sym arch ->
-  PPa.BlockPair arch ->
+  NodeEntry arch ->
   (m (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
   m (PairGraph sym arch)
 considerDesyncEvent gr bPair action =
@@ -259,7 +260,7 @@ considerDesyncEvent gr bPair action =
 recordMiscAnalysisError ::
   PairGraph sym arch ->
   GraphNode arch ->
-  PEE.EquivalenceError arch ->
+  PEE.EquivalenceError ->
   PairGraph sym arch
 recordMiscAnalysisError gr nd er =
   let m = Map.alter f nd (pairGraphMiscAnalysisErrors gr)
@@ -306,10 +307,11 @@ initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec (GraphNode blocks) = withFreshVars blocks $ \_vars -> do
-  dom <- initialDomain 
-  return (mempty, dom)
-initialDomainSpec (ReturnNode fPair) = do
+initialDomainSpec (graphNodeCases -> Left blocks) =
+  withFreshVars blocks $ \_vars -> do
+    dom <- initialDomain
+    return (mempty, dom)
+initialDomainSpec (graphNodeCases -> Right fPair) = do
   let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
   withFreshVars blocks $ \_vars -> do
     dom <- initialDomain
@@ -328,8 +330,22 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
-           idom <- initialDomainSpec (GraphNode bPair)
-           return (freshDomain gr (GraphNode bPair) idom)
+           let node = GraphNode (rootEntry bPair)
+           idom <- initialDomainSpec node
+           -- when the program is initialized, we assume no memory regions are allocated,
+           -- and therefore we pick a concrete initial region that doesn't overlap with
+           -- the global or stack regions.
+           --
+           -- in the event that this node is encountered again (i.e. the analysis entry
+           -- point is some intermediate program point), then this value domain will simply
+           -- be overridden as a result of widening
+           rootDom <- PS.forSpec idom $ \_ idom' -> do
+             vals' <- PPa.forBins $ \get -> do
+               let vals = get (PAD.absDomVals idom')
+               -- FIXME: compute this from the global and stack regions
+               return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
+             return $ idom' { PAD.absDomVals = vals' }
+           return (freshDomain gr node rootDom)
 
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the
@@ -384,8 +400,8 @@ updateDomain gr pFrom pTo d
 --   information from function returns to their call sites.
 addReturnVector ::
   PairGraph sym arch ->
-  PPa.FunPair arch {- ^ The function being called -}  ->
-  PPa.BlockPair arch {- ^ The program point where it returns to -} ->
+  NodeReturn arch {- ^ The function being called -}  ->
+  NodeEntry arch {- ^ The program point where it returns to -} ->
   PairGraph sym arch
 addReturnVector gr funPair retPair =
    -- If the domain graph already has a node corresponding to the

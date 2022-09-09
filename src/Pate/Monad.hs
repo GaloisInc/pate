@@ -67,7 +67,6 @@ module Pate.Monad
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
-  , applyAssumptionSet
   , applyCurrentAsms
   , currentAsm
   -- nonces
@@ -133,6 +132,8 @@ import           What4.ExprHelpers
 import           What4.ProgramLoc
 
 import qualified Pate.Arch as PA
+import           Pate.AssumptionSet ( AssumptionSet )
+import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
@@ -223,17 +224,14 @@ emitWarning ::
   PEE.InnerEquivalenceError arch ->
   EquivM sym arch ()
 emitWarning innererr = do
-  wb <- CMR.asks envWhichBinary
-  let err = PEE.EquivalenceError
-        { PEE.errWhichBinary = wb
-        , PEE.errStackTrace = Just callStack
-        , PEE.errEquivError = innererr
-        }
+  err <- CMR.asks envWhichBinary >>= \case
+    Just (Some wb) -> return $ PEE.equivalenceErrorFor wb innererr
+    Nothing -> return $ PEE.equivalenceError innererr
   emitEvent (\_ -> PE.Warning err)
 
 -- | Emit an event declaring that an error has been raised, but only throw
 -- the error if it is not recoverable (according to 'PEE.isRecoverable')
-emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch (PEE.EquivalenceError arch)
+emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch PEE.EquivalenceError
 emitError err = withValid $ do
   Left err' <- manifestError (throwHere err >> return ())
   emitEvent (\_ -> PE.ErrorRaised err')
@@ -245,7 +243,7 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT (PEE.EquivalenceError arch) IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -254,7 +252,7 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (E
            , MonadThrow
            , MonadCatch
            , MonadMask
-           , MonadError (PEE.EquivalenceError arch)
+           , MonadError PEE.EquivalenceError
            )
 
 type EquivM sym arch a = (PA.ValidArch arch, PSo.ValidSym sym) => EquivM_ sym arch a
@@ -347,7 +345,7 @@ unconstrainedRegister argNames reg = do
           let margName = PA.argumentNameFrom argNames reg
           let name = maybe (showF reg) T.unpack margName
           ptr@(CLM.LLVMPointer region off) <- freshPtr sym name n
-          iRegion <- W4.natToInteger sym region
+          let iRegion = W4.natToIntegerPure region
           return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
       | otherwise -> withSymIO $ \sym -> do
           -- For bitvector types that are not pointer width, fix their region number to 0 since they cannot be pointers
@@ -403,10 +401,8 @@ lookupArgumentNames pp = do
 -- see: https://github.com/GaloisInc/pate/issues/310
 
 -- | Project the current background 'AssumptionSet' into any scope 'v'
-currentAsm :: EquivM sym arch (AssumptionSet sym v)
-currentAsm = do
-  Some frame <- CMR.asks envCurrentFrame
-  return $ unsafeCoerceScope frame
+currentAsm :: EquivM sym arch (AssumptionSet sym)
+currentAsm = CMR.asks envCurrentFrame
 
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
@@ -415,7 +411,7 @@ withFreshVars ::
   forall sym arch f.
   Scoped f =>
   PPa.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym v, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   argNames <- lookupArgumentNames blocks
@@ -429,26 +425,33 @@ withFreshVars blocks f = do
     mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
     mkStackBase = withSymIO $ \sym -> freshStackBase sym (Proxy @arch)
 
-  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\v -> f v)
+    mkMaxRegion :: forall v. EquivM sym arch (ScopedExpr sym v W4.BaseIntegerType)
+    mkMaxRegion = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
+      W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
+
+  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
   HasCallStack =>
-  AssumptionSet sym v ->
+  AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch f
 withAssumptionSet asm f = withSym $ \sym -> do
   curAsm <- currentAsm
-  p <- liftIO $ getAssumedPred sym asm
-  CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
-    (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
-      st <- LCB.saveAssumptionState bak
-      frame <- LCB.pushAssumptionFrame bak
-      LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-      return (frame, st)
-    (f >>= \r -> validateAssumptions curAsm asm >> return r)
-      `finally` safePop frame st
+  p <- liftIO $ PAS.toPred sym asm
+  case PAS.isAssumedPred curAsm p of
+    True -> f
+    _ -> CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
+      (frame, st) <- withOnlineBackend $ \bak ->  do
+        st <- liftIO $ LCB.saveAssumptionState bak
+        frame <- liftIO $ LCB.pushAssumptionFrame bak
+        safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
+          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+        return (frame, st)
+      (f >>= \r -> validateAssumptions curAsm asm >> return r)
+        `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -467,10 +470,10 @@ safePop frame st = withOnlineBackend $ \bak ->
 -- is used for reporting in the case that the resulting assumption state is found to
 -- be inconsistent.
 validateAssumptions ::
-  forall sym arch v. 
+  forall sym arch. 
   HasCallStack =>
-  AssumptionSet sym v {- ^ original assumption set -} ->
-  AssumptionSet sym v {- ^ recently pushed assumption set -} ->
+  AssumptionSet sym {- ^ original assumption set -} ->
+  AssumptionSet sym {- ^ recently pushed assumption set -} ->
   EquivM sym arch ()
 validateAssumptions oldAsm newAsm = withSym $ \sym -> do
   let
@@ -491,60 +494,57 @@ withAssumption ::
   W4.Pred sym ->
   EquivM sym arch f ->
   EquivM sym arch f
-withAssumption asm f = withAssumptionSet (frameAssume asm) f
+withAssumption asm f = withAssumptionSet (PAS.fromPred asm) f
 
 -- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
 -- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
 applyCurrentAsms ::
-  forall sym arch (v :: VarScope) f.
-  PEM.ExprMappable sym (f v) =>
-  f v ->
-  EquivM sym arch (f v)
-applyCurrentAsms f = do
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  f ->
+  EquivM sym arch f
+applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
-  applyAssumptionSet asm f
-  
--- | Rewrite the given 'f' with any bindings in the given 'AssumptionSet'.
-applyAssumptionSet ::
-  forall sym arch v f.
-  PEM.ExprMappable sym (f v) =>
-  AssumptionSet sym v ->
-  f v ->
-  EquivM sym arch (f v)
-applyAssumptionSet asm f = withSym $ \sym -> do
-  cache <- liftIO freshVarBindCache
-  let
-    doRebind :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    doRebind = rebindWithFrame' sym cache asm
-  liftIO $ PEM.mapExpr sym doRebind f
+  PAS.apply sym asm f
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
   HasCallStack =>
-  AssumptionSet sym v ->
+  AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch (Maybe f)
 withSatAssumption asm f = withSym $ \sym ->  do
-  p <- liftIO $ getAssumedPred sym asm
+  p <- liftIO $ PAS.toPred sym asm
   case W4.asConstantPred p of
     Just False -> return Nothing
     Just True -> Just <$> f
     _ -> do
       curAsm <- currentAsm
-      CMR.local (\env -> env { envCurrentFrame = Some (asm <> curAsm) }) $ do
-        (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
-          st <- LCB.saveAssumptionState bak
-          frame <- LCB.pushAssumptionFrame bak
-          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withSatAssumption" p)
-          return (frame, st)
-        (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
-          W4R.Sat{} -> Just <$> f
-          -- on an inconclusive result we can't safely return 'Nothing' since
-          -- that may unsoundly exclude viable paths
-          W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
-          W4R.Unsat{} -> return Nothing)
-            `finally` safePop frame st
+      CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
+        mst <- withOnlineBackend $ \bak -> do
+          st <- liftIO $ LCB.saveAssumptionState bak
+          frame <- liftIO $  LCB.pushAssumptionFrame bak
+          catchError (safeIO (\_ -> PEE.AssumedFalse curAsm asm)
+            (do
+                LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+                return $ Just (frame, st)))
+            (\_ -> (liftIO $ LCB.popAssumptionFrame bak frame) >> return Nothing)
+        case mst of
+          Just (frame, st) ->
+            (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
+              W4R.Sat{} -> Just <$> f
+              -- on an inconclusive result we can't safely return 'Nothing' since
+              -- that may unsoundly exclude viable paths
+              W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
+              W4R.Unsat{} -> return Nothing)
+                `finally` safePop frame st
+          -- crucible failed to push the assumption, so we double check that
+          -- it is not satisfiable
+          Nothing -> goalSat "check assumptions" p $ \case
+            W4R.Sat{} -> throwHere $ PEE.InconclusiveSAT
+            W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
+            W4R.Unsat{} -> return Nothing
 
 --------------------------------------
 -- Sat helpers
@@ -696,7 +696,7 @@ isPredTrue' timeout p = case W4.asConstantPred p of
   Just b -> return b
   _ -> do
     frame <- currentAsm
-    case isAssumedPred frame p of
+    case PAS.isAssumedPred frame p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
@@ -837,7 +837,7 @@ catchInIO ::
   IO a ->
   EquivM sym arch a
 catchInIO f =
-  (liftIO $ catch (Right <$> f) (\(e :: PEE.EquivalenceError arch) -> return $ Left e)) >>= \case
+  (liftIO $ catch (Right <$> f) (\(e :: PEE.EquivalenceError) -> return $ Left e)) >>= \case
     Left err -> throwError err
     Right result -> return result
 
@@ -863,7 +863,7 @@ runEquivM' env f = withValidEnv env $ (runExceptT $ CMR.runReaderT (unEQ f) env)
 runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
-  ExceptT (PEE.EquivalenceError arch) IO a
+  ExceptT PEE.EquivalenceError IO a
 runEquivM env f = withValidEnv env $ CMR.runReaderT (unEQ f) env
 
 ----------------------------------------
@@ -874,23 +874,19 @@ throwHere ::
   PEE.InnerEquivalenceError arch ->
   EquivM_ sym arch a
 throwHere err = withValid $ do
-  wb <- CMR.asks envWhichBinary
-  throwError $ PEE.EquivalenceError
-    { PEE.errWhichBinary = wb
-    , PEE.errStackTrace = Just callStack
-    , PEE.errEquivError = err
-    }
-
+  CMR.asks envWhichBinary >>= \case
+    Just (Some wb) -> throwError $ PEE.equivalenceErrorFor wb err
+    Nothing -> throwError $ PEE.equivalenceError err
 
 instance MF.MonadFail (EquivM_ sym arch) where
   fail msg = throwHere $ PEE.EquivCheckFailure $ "Fail: " ++ msg
 
-manifestError :: EquivM_ sym arch a -> EquivM sym arch (Either (PEE.EquivalenceError arch) a)
+manifestError :: EquivM_ sym arch a -> EquivM sym arch (Either PEE.EquivalenceError a)
 manifestError act = do
   catchError (Right <$> act) (pure . Left) >>= \case
     r@(Left er) -> CMR.asks (PC.cfgFailureMode . envConfig) >>= \case
       PC.ThrowOnAnyFailure -> throwError er
-      PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable (PEE.errEquivError er) of
+      PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable er of
         True -> return r
         False -> throwError er
       PC.ContinueAfterFailure -> return r
@@ -904,7 +900,7 @@ safeIO ::
   IO a ->
   EquivM_ sym arch a
 safeIO mkex f = withValid $ (liftIO $ tryJust filterAsync f) >>= \case
-  Left err | Just (ex :: PEE.EquivalenceError arch) <- fromException err ->
+  Left err | Just (ex :: PEE.EquivalenceError) <- fromException err ->
     throwError ex
   Left err -> throwHere (mkex err)
   Right a -> return a
@@ -913,7 +909,7 @@ safeIO mkex f = withValid $ (liftIO $ tryJust filterAsync f) >>= \case
 
 equivalenceContext ::
   EquivM sym arch (PEq.EquivContext sym arch)
-equivalenceContext = do
+equivalenceContext = withValid $ do
   PA.SomeValidArch d <- CMR.asks envValidArch
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
-  return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion
+  return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion (\x -> x)

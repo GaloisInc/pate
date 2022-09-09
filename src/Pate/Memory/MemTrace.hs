@@ -56,6 +56,7 @@ module Pate.Memory.MemTrace
 , mkMemTraceVar
 , mkMemoryBinding
 , mkUndefinedPtrOps
+, mkAnnotatedPtrOps
 , macawTraceExtensions
 , memEqOutsideRegion
 , memEqAtRegion
@@ -133,11 +134,12 @@ import Lang.Crucible.Simulator.SymSequence
 import Lang.Crucible.Types
 import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
-import What4.Interface
+import What4.Interface hiding ( integerToNat )
 
 
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
+import           What4.ExprHelpers ( integerToNat )
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Memory as PM
 
@@ -157,15 +159,21 @@ import qualified Pate.Memory as PM
 -- | A collection of functions used to produce undefined values for each pointer operation.
 data UndefinedPtrOps sym =
   UndefinedPtrOps
-    { undefPtrOff :: (forall w. sym -> LLVMPtr sym w -> IO (SymBV sym w))
-    , undefPtrLt :: UndefinedPtrPredOp sym
-    , undefPtrLeq :: UndefinedPtrPredOp sym
-    , undefPtrAdd :: UndefinedPtrBinOp sym
-    , undefPtrSub :: UndefinedPtrBinOp sym
-    , undefPtrAnd :: UndefinedPtrBinOp sym
-    , undefPtrXor :: UndefinedPtrBinOp sym
+    { undefPtrOff :: UndefinedPtrUnOp sym (SymBV' sym)
+    , undefPtrLt :: UndefinedPtrBinOp sym (Const (Pred sym))
+    , undefPtrLeq :: UndefinedPtrBinOp sym (Const (Pred sym))
+    , undefPtrAdd :: UndefinedPtrBinOp sym (LLVMPtr' sym)
+    , undefPtrSub :: UndefinedPtrBinOp sym (LLVMPtr' sym)
+    , undefPtrAnd :: UndefinedPtrBinOp sym (LLVMPtr' sym)
+    , undefPtrXor :: UndefinedPtrBinOp sym (LLVMPtr' sym)
     , undefPtrClassify :: UndefPtrClassify sym
     }
+
+-- Needed since SymBV is a type alias
+newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
+
+-- Needed since LLVMPtr is a type alias
+newtype LLVMPtr' sym w = LLVMPtr' { unLLVMPtr:: LLVMPtr sym w }
 
 data UndefPtrOpTag =
     UndefPtrOff
@@ -193,33 +201,37 @@ instance Semigroup (UndefPtrClassify sym) where
 instance Monoid (UndefPtrClassify sym) where
   mempty = UndefPtrClassify $ \_ -> return mempty
 
+data AssertedResult sym f = AssertedResult
+  { assertedPred :: Pred sym
+  , assertedResult :: f
+  }
+
 -- | Wraps a function which is used to produce an "undefined" pointer that
 -- may result from a binary pointer operation.
 -- The given predicate is true when the operation is defined. i.e if this predicate
 -- is true then this undefined value is unused. The two other arguments are the original inputs to the binary pointer operation.
-newtype UndefinedPtrBinOp sym =
+newtype UndefinedPtrBinOp sym a =
   UndefinedPtrBinOp
-    { mkUndefPtr ::
+    { mkBinUndef ::
         forall w.
         sym ->
+        (AssertedResult sym (a w)) ->
         LLVMPtr sym w ->
         LLVMPtr sym w ->
-        IO (LLVMPtr sym w)
+        IO (a w)
     }
 
--- | Wraps a function which is used to produce an "undefined" predicate that
--- may result from a binary pointer operation.
--- The given predicate is true when the operation is defined. i.e if this predicate
--- is true then this undefined value is unused. The two other arguments are the original inputs to the binary pointer operation.
-newtype UndefinedPtrPredOp sym =
-  UndefinedPtrPredOp
-    { mkUndefPred ::
+
+newtype UndefinedPtrUnOp sym a =
+  UndefinedPtrUnOp
+    { mkUnUndef ::
         forall w.
         sym ->
+        (AssertedResult sym (a w)) ->
         LLVMPtr sym w ->
-        LLVMPtr sym w ->
-        IO (Pred sym)
+        IO (a w)
     }
+
 
 -- | Wrapping a pointer as a struct, so that it may be represented as the
 -- result of an uninterpreted function.
@@ -232,7 +244,7 @@ asSymPtr ::
   LLVMPtr sym w ->
   IO (SymPtr sym w)
 asSymPtr sym (LLVMPointer reg off) = do
-  ireg <- natToInteger sym reg
+  let ireg = natToIntegerPure reg
   mkStruct sym (Empty :> ireg :> off)
 
 fromSymPtr ::
@@ -241,7 +253,7 @@ fromSymPtr ::
   SymPtr sym w ->
   IO (LLVMPtr sym w )
 fromSymPtr sym sptr = do
-  reg <- structField sym sptr Ctx.i1of2
+  reg <- WEH.assumePositiveInt sym <$> structField sym sptr Ctx.i1of2
   off <- structField sym sptr Ctx.i2of2
   nreg <- integerToNat sym reg
   return $ LLVMPointer nreg off
@@ -400,33 +412,105 @@ mkBinOp ::
   IsSymInterface sym =>
   sym ->
   UndefPtrOpTag ->
-  IO (UndefinedPtrBinOp sym, UndefPtrClassify sym)
+  IO (UndefinedPtrBinOp sym (LLVMPtr' sym), UndefPtrClassify sym)
 mkBinOp sym tag = do
   (PolyFunMaker fn', classifier) <- cachedPolyFun sym $ mkBinUF tag
   let binop =
-        UndefinedPtrBinOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+        UndefinedPtrBinOp $ \sym' r ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
           sptr1 <- asSymPtr sym' ptr1
           sptr2 <- asSymPtr sym' ptr2
           resultfn <- fn' sym' w
           sptrResult <- applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
-          fromSymPtr sym' sptrResult
+          undefResultPtr <- fromSymPtr sym' sptrResult
+          LLVMPtr' <$> muxPtr sym (assertedPred r) (unLLVMPtr $ assertedResult r) undefResultPtr
+
   return (binop, classifier)
 
 mkPredOp ::
   IsSymInterface sym =>
   sym ->
   UndefPtrOpTag ->
-  IO (UndefinedPtrPredOp sym, UndefPtrClassify sym)
+  IO (UndefinedPtrBinOp sym (Const (Pred sym)), UndefPtrClassify sym)
 mkPredOp sym tag = do
   (PolyFunMaker fn', classifier) <- cachedPolyFun sym $ mkPredUF tag
   let binop =
-        UndefinedPtrPredOp $ \sym' ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
+        UndefinedPtrBinOp $ \sym' r ptr1 ptr2 -> withPtrWidth ptr1 $ \w -> do
           sptr1 <- asSymPtr sym' ptr1
           sptr2 <- asSymPtr sym' ptr2
           resultfn <- fn' sym' w
-          applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
+          undefResultPred <- applyPolyFun resultfn (Empty :> sptr1 :> sptr2)
+          Const <$> baseTypeIte sym (assertedPred r) (getConst $ assertedResult r) undefResultPred
+
   return (binop, classifier)
 
+data PtrAssert sym tp = PtrAssert
+  { _ptrAssertPred :: Pred sym -- TODO: extract pointer assertions so we can assume them
+  , ptrAssertTag:: UndefPtrOpTag
+  }
+
+newtype PtrAssertions sym = PtrAssertions (IORef (MapF.MapF (SymAnnotation sym) (PtrAssert sym)))
+
+
+annotatePredicate ::
+  IsSymExprBuilder sym =>
+  sym ->
+  PtrAssertions sym ->
+  UndefPtrOpTag ->
+  AssertedResult sym (Const (Pred sym) w) ->
+  IO (Const (Pred sym) w)
+annotatePredicate sym (PtrAssertions ref) tag (AssertedResult assertion (Const p)) = do
+  (ann, p') <- annotateTerm sym p
+  modifyIORef' ref (MapF.insert ann (PtrAssert assertion tag))
+  return $ Const p'
+
+annotatePtr ::
+  IsSymExprBuilder sym =>
+  sym ->
+  PtrAssertions sym ->
+  UndefPtrOpTag ->
+  AssertedResult sym (LLVMPtr' sym w) ->
+  IO (LLVMPtr' sym w)
+annotatePtr sym (PtrAssertions ref) tag (AssertedResult assertion (LLVMPtr' (LLVMPointer reg off))) = do
+  (annReg, reg') <- annotateTerm sym (natToIntegerPure reg)
+  (annOff, off') <- annotateTerm sym off
+  regNat' <- integerToNat sym reg'
+  modifyIORef' ref (MapF.insert annReg (PtrAssert assertion tag))
+  modifyIORef' ref (MapF.insert annOff (PtrAssert assertion tag))
+  return $ LLVMPtr' (LLVMPointer regNat' off')
+
+-- | Add annotations to the result of potentially undefined pointer operations,
+--   but leave them otherwise unmodified.
+mkAnnotatedPtrOps ::
+  forall sym.
+  IsSymInterface sym =>
+  sym ->
+  IO (UndefinedPtrOps sym)
+mkAnnotatedPtrOps sym = do
+  asnsRef <- newIORef MapF.empty
+  let asns = PtrAssertions asnsRef
+  let classify = UndefPtrClassify $ \e -> case getAnnotation sym e of
+        Just ann -> do
+          m <- readIORef asnsRef
+          case MapF.lookup ann m of
+            Just ptrAsn -> return $ Set.singleton (ptrAssertTag ptrAsn)
+            Nothing -> return $ Set.empty
+        Nothing -> return $ Set.empty
+  return $
+    UndefinedPtrOps
+      { undefPtrOff = UndefinedPtrUnOp $ \sym' (AssertedResult cond (SymBV' bv)) _ -> do
+          (annBV, bv') <- annotateTerm sym' bv
+          modifyIORef' asnsRef (MapF.insert annBV (PtrAssert cond UndefPtrOff))
+          return $ SymBV' bv'
+      , undefPtrLt =  UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLt r
+      , undefPtrLeq = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLeq r
+      , undefPtrAdd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAdd r
+      , undefPtrSub = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrSub r
+      , undefPtrAnd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAnd r
+      , undefPtrXor = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrXor r
+      , undefPtrClassify = classify
+      }
+
+-- | Wrap potentially undefined pointer operations in uninterpreted functions
 mkUndefinedPtrOps ::
   forall sym.
   IsSymInterface sym =>
@@ -435,11 +519,12 @@ mkUndefinedPtrOps ::
 mkUndefinedPtrOps sym = do
   (PolyFunMaker offFn, classOff) <- cachedPolyFun sym $ mkOffUF UndefPtrOff
   let
-    offPtrFn :: forall w. sym -> LLVMPtr sym w -> IO (SymBV sym w)
-    offPtrFn sym'  ptr = withPtrWidth ptr $ \w -> do
+    offPtrFn :: UndefinedPtrUnOp sym (SymBV' sym)
+    offPtrFn  = UndefinedPtrUnOp $ \sym' r ptr -> withPtrWidth ptr $ \w -> do
       sptr <- asSymPtr sym' ptr
       resultfn <- offFn sym' w
-      applyPolyFun resultfn (Empty :> sptr)
+      undefResultBV <- applyPolyFun resultfn (Empty :> sptr)
+      SymBV' <$> baseTypeIte sym' (assertedPred r) (unSymBV $ assertedResult r) undefResultBV
 
   (undefPtrLt', classLt) <- mkPredOp sym UndefPtrLt
   (undefPtrLeq', classLeq) <- mkPredOp sym UndefPtrLeq
@@ -744,8 +829,7 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
     MacawFreshSymbolic t -> liftToCrucibleState mvar $ \sym -> case t of
        MT.BoolTypeRepr -> liftIO $ freshConstant sym (safeSymbol "macawFresh") BaseBoolRepr
        MT.BVTypeRepr n -> liftIO $ do
-         regI <- freshConstant sym (safeSymbol "macawFresh") BaseIntegerRepr
-         reg <- integerToNat sym regI
+         reg <- freshNat sym (safeSymbol "macawFresh")
          off <- freshConstant sym (safeSymbol "macawFresh") (BaseBVRepr n)
          return $ LLVMPointer reg off
        _ -> error ( "MacawFreshSymbolic is unsupported in the trace memory model: " ++ show t)
@@ -931,8 +1015,7 @@ doPtrToBits bak mkundef ptr@(LLVMPointer base off) = do
         Just True -> return off
         _ -> do
           assert bak cond $ AssertFailureSimError "doPtrToBits" "doPtrToBits"
-          undef <- undefPtrOff mkundef sym ptr
-          bvIte sym cond off undef
+          unSymBV <$> mkUnUndef (undefPtrOff mkundef) sym (AssertedResult cond (SymBV' off)) ptr
 
 liftToCrucibleState ::
   GlobalVar mem ->
@@ -1027,9 +1110,11 @@ ptrOp w (RegEntry _ (LLVMPointer region offset)) (RegEntry _ (LLVMPointer region
   addrWidthsArePositive w $ readOnlyWithBak $ \bak -> do
     f bak region offset region' offset'
 
+
+
 ptrPredOp ::
   IsSymBackend sym bak =>
-  UndefinedPtrPredOp sym ->
+  UndefinedPtrBinOp sym (Const (Pred sym)) ->
   RegionConstraint sym ->
   (sym -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)) ->
   bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (Pred sym)
@@ -1041,8 +1126,7 @@ ptrPredOp mkundef regconstraint f bak reg1 off1 reg2 off2  = do
     Just True -> return result
     _ -> do
       assert bak cond $ AssertFailureSimError "ptrPredOp" $ "ptrPredOp: " ++ regConstraintMsg regconstraint
-      undef <- mkUndefPred mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
-      itePred sym cond result undef
+      getConst <$> mkBinUndef mkundef sym (AssertedResult cond (Const result)) (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
 
 muxPtr ::
   IsSymInterface sym =>
@@ -1059,7 +1143,7 @@ muxPtr sym p (LLVMPointer region offset) (LLVMPointer region' offset') = do
 
 ptrBinOp ::
   IsSymBackend sym bak =>
-  UndefinedPtrBinOp sym ->
+  UndefinedPtrBinOp sym (LLVMPtr' sym) ->
   RegionConstraint sym ->
   (bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)) ->
   bak -> SymNat sym -> SymBV sym w -> SymNat sym -> SymBV sym w -> IO (LLVMPtr sym w)
@@ -1071,8 +1155,7 @@ ptrBinOp mkundef regconstraint f bak reg1 off1 reg2 off2 = do
     Just True -> return result
     _ -> do
       assert bak cond $ AssertFailureSimError "ptrBinOp" $ "ptrBinOp: " ++ regConstraintMsg regconstraint
-      undef <- mkUndefPtr mkundef sym (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
-      muxPtr sym cond result undef
+      unLLVMPtr <$> mkBinUndef mkundef sym (AssertedResult cond (LLVMPtr' result)) (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
 
 isZero :: IsExprBuilder sym => sym -> SymNat sym -> IO (Pred sym)
 isZero sym reg = do
@@ -1145,7 +1228,7 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   let w = ptrWidth ptr
   offBV <- bvLit sym w $ BV.mkBV w off'
   bvIdx <- bvAdd sym off offBV
-  ireg <- natToInteger sym reg
+  let ireg = natToIntegerPure reg
   return $ Empty :> ireg :> bvIdx
 
 concatPtrs ::
@@ -1214,7 +1297,7 @@ chunkBV sym endianness w bv
 -- | Read a packed value from the underlying array (without adding to the read trace)
 readMemState :: forall sym ptrW ty.
   MemWidth ptrW =>
-  IsExprBuilder sym =>
+  IsSymExprBuilder sym =>
   MemWidth ptrW =>
   sym ->
   MemTraceState sym ptrW ->
@@ -1259,7 +1342,7 @@ readMemState sym mem baseMem ptr repr = go 0 repr
                         True -> do
                           regArrayRegion <- arrayLookup sym (memArrRegions mem) (Ctx.singleton reg)
                           regInt <- arrayLookup sym regArrayRegion (Ctx.singleton off)
-                          integerToNat sym regInt
+                          integerToNat sym (WEH.assumePositiveInt sym regInt)
                         False -> return blk0
                       return (blk, membyte)
              return $ LLVMPointer blk content
@@ -1716,7 +1799,7 @@ memEqOutsideRegion ::
   MemTraceState sym ptrW ->
   IO (Pred sym)
 memEqOutsideRegion sym region mem1 mem2 = do
-  iRegion <- natToInteger sym region
+  let iRegion = natToIntegerPure region
   mem1StackBytes <- arrayLookup sym (memArrBytes mem1) (Ctx.singleton iRegion)
   mem1StackRegions <- arrayLookup sym (memArrRegions mem1) (Ctx.singleton iRegion)
   mem2Bytes' <- arrayUpdate sym (memArrBytes mem2) (Ctx.singleton iRegion) mem1StackBytes
@@ -1737,7 +1820,7 @@ memEqAtRegion ::
   MemTraceState sym ptrW ->
   IO (Pred sym)
 memEqAtRegion sym stackRegion mem1 mem2 = do
-  iStackRegion <- natToInteger sym stackRegion
+  let iStackRegion = natToIntegerPure stackRegion
   mem1StackBytes <- arrayLookup sym (memArrBytes mem1) (Ctx.singleton iStackRegion)
   mem2StackBytes <- arrayLookup sym (memArrBytes mem2) (Ctx.singleton iStackRegion)
   mem1StackRegions <- arrayLookup sym (memArrRegions mem1) (Ctx.singleton iStackRegion)
