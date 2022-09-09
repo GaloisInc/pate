@@ -51,7 +51,6 @@ import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
-import           Data.Default
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.GroundEval as W4G
@@ -677,12 +676,9 @@ ppAbstractDomain ppPred d =
   ]
 
 
-data DomainKind = Predomain | Postdomain | ExternalPostDomain | SomeDomain
+data DomainKind = Predomain | Postdomain | ExternalPostDomain
   deriving (Eq, Ord, Show)
 
-
-instance Default DomainKind where
-  def = SomeDomain
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
   type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)

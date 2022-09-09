@@ -282,7 +282,7 @@ type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
 -- TODO: We could parameterize EquivM over its Writer output type instead, which
 -- would make this a bit more straightforward at the cost of some refactoring.
 newtype EquivSubTrace sym arch nm a =
-  EquivSubTrace (CMW.WriterT (TraceTreeNode '(sym, arch) nm) (EquivM_ sym arch) a)
+  EquivSubTrace (CMW.WriterT ([TraceTreeNode '(sym, arch) nm]) (EquivM_ sym arch) a)
 
 deriving instance IsTraceNode '(sym, arch) nm => Functor (EquivSubTrace sym arch nm)
 deriving instance IsTraceNode '(sym, arch) nm => Applicative (EquivSubTrace sym arch nm)
@@ -299,24 +299,35 @@ withSubTraces (EquivSubTrace f) = do
   CMW.tell =<< mkTraceTree w
   return r
 
-subTrace ::
+subTraceLabel ::
   forall nm sym arch a.
   IsTraceNode '(sym, arch) nm =>
   TraceNodeType '(sym, arch) nm ->
+  TraceNodeLabel nm ->
   EquivM sym arch a ->
   EquivSubTrace sym arch nm a
-subTrace v f = EquivSubTrace $ do
+subTraceLabel v lbl f = EquivSubTrace $ do
   env <- CMR.ask
   (IO.liftIO $ runEquivM env f) >>= \case
-    (Left err, w) -> mkTraceTreeNode v def w >>= CMW.tell >> throwError err
-    (Right result, w) -> mkTraceTreeNode v def w >>= CMW.tell >> return result
+    (Left err, w) -> mkTraceTreeNode v lbl w >>= (\x -> CMW.tell [x]) >> throwError err
+    (Right result, w) -> mkTraceTreeNode v lbl w >>= (\x -> CMW.tell [x]) >> return result
+
+subTrace ::
+  forall nm sym arch a.
+  IsTraceNode '(sym, arch) nm =>
+  TraceNodeLabel nm ~ () =>
+  TraceNodeType '(sym, arch) nm ->
+  EquivM sym arch a ->
+  EquivSubTrace sym arch nm a
+subTrace v f = subTraceLabel v () f
 
 emitTrace ::
   forall nm sym arch.
   IsTraceNode '(sym, arch) nm =>
   TraceNodeType '(sym, arch) nm ->
+  TraceNodeLabel nm ~ () =>
   EquivM sym arch ()
-emitTrace v = emitTraceLabel @nm def v
+emitTrace v = emitTraceLabel @nm () v
 
 emitTraceLabel ::
   forall nm sym arch.
@@ -326,7 +337,7 @@ emitTraceLabel ::
   EquivM sym arch ()
 emitTraceLabel lbl v = do
   node <- mkTraceTreeNode @nm v lbl mempty
-  CMW.tell =<< mkTraceTree node
+  CMW.tell =<< mkTraceTree [node]
 
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some PBi.WhichBinaryRepr

@@ -44,7 +44,6 @@ module Pate.TraceTree (
   , ppTraceTree
   , ppFullTraceTree
   , ppFullTraceTreeNode
-  , def
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -54,7 +53,6 @@ import           Data.String
 import           Data.Maybe ( mapMaybe, fromJust )
 import qualified Data.Map as Map
 import           Data.Map ( Map )
-import           Data.Default
 
 import qualified Prettyprinter as PP
 
@@ -88,7 +86,7 @@ data TraceTreeNode (k :: l) nm where
 newtype TraceTree k = TraceTree [Some (TraceTreeNode k)]
   deriving ( Semigroup, Monoid )
 
-class (KnownSymbol nm, Eq (TraceNodeLabel nm), Default (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Symbol) where
+class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Symbol) where
   type TraceNodeType k nm :: Type
 
   -- | Labels can be used to distinguish nodes that share the same symbol in a
@@ -101,6 +99,9 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm), Default (TraceNodeLabel nm)) => I
   --   respect to the 'Full' tag
   prettyNode :: TraceNodeType k nm -> PP.Doc a
 
+  -- | Mapping from tracing tags to pretty-printers, allowing the contents
+  --   of this node to be presented differently (or not at all) depending
+  --   on what kind of printing is requested.
   nodeTags :: [(TraceTag, TraceNodeType k nm -> PP.Doc a)]
   nodeTags = [(Summary, prettyNode @l @k @nm)]
 
@@ -120,13 +121,6 @@ getNodePrinter (t : tags) = case Map.lookup t (tagsMap @k @nm) of
   Just f -> Just f
   Nothing -> getNodePrinter @k @nm tags
 
-instance IsTraceNode k nm => Monoid (TraceTreeNode k nm) where
-  mempty = TraceTreeNode def []
-
-instance IsTraceNode k nm => Semigroup (TraceTreeNode k nm) where
-  (TraceTreeNode nm subtrees1) <> (TraceTreeNode _ subtrees2) =
-    (TraceTreeNode nm (subtrees1 <> subtrees2))
-
 mkTraceTreeNode ::
   forall nm k m.
   IO.MonadIO m =>
@@ -140,9 +134,9 @@ mkTraceTreeNode v lbl subtree = return $ TraceTreeNode lbl [(v, subtree)]
 mkTraceTree ::
   forall nm k m.
   IO.MonadIO m =>
-  TraceTreeNode k nm ->
+  [TraceTreeNode k nm] ->
   m (TraceTree k)
-mkTraceTree n = return $ TraceTree [(Some n)]
+mkTraceTree ns = return $ TraceTree (map Some ns)
 
 -- | Inspect one level of a 'TraceTreeNode' and defer inspecting subtrees
 --   Although the current implementation is pure, this is a
@@ -185,7 +179,7 @@ findNode ::
   IsTraceNode k nm =>
   TraceTree k ->
   m (Maybe (TraceTreeNode k nm))  
-findNode tree = findNode' tree ((==) def)
+findNode tree = findNode' tree (\_ -> True)
 
 findNodeLabel ::
   forall nm k m.

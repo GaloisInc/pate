@@ -126,7 +126,7 @@ widenAlongEdge ::
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
 widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
-  emitTrace @"node" @sym @arch to
+  emitTrace @"node" to
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
