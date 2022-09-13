@@ -341,16 +341,16 @@ emitTraceLabel lbl v = do
 
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some PBi.WhichBinaryRepr
-  prettyNode (Some wb) = PP.pretty (show wb)
+  prettyNode () (Some wb) = PP.pretty (show wb)
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "bundle" where
   type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
-  prettyNode (Some bundle) = "<TODO: pretty bundle>"
-  nodeTags = [("symbolic", \_ -> "<TODO: pretty bundle>")]
+  prettyNode () (Some bundle) = "<TODO: pretty bundle>"
+  nodeTags = [("symbolic", \_ _ -> "<TODO: pretty bundle>")]
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "blocktarget" where
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (PB.BlockTarget arch)
-  prettyNode blkts = PP.pretty blkts
+  prettyNode () blkts = PP.pretty blkts
 
 
 withBinary ::
@@ -529,8 +529,8 @@ withFreshVars blocks f = do
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "assumption" where
   type TraceNodeType '(sym,arch) "assumption" = AssumptionSet sym
-  prettyNode asm = PP.pretty asm
-  nodeTags = [("solver", PP.pretty)]
+  prettyNode () asm = PP.pretty asm
+  nodeTags = [("solver", \_ -> PP.pretty)]
   
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
@@ -611,8 +611,8 @@ applyCurrentAsms f = withSym $ \sym -> do
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "satAssumption" where
   type TraceNodeType '(sym,arch) "satAssumption" = AssumptionSet sym
-  prettyNode asm = "Satisfiable" PP.<+> PP.pretty asm
-  nodeTags = [("solver", PP.pretty)]
+  prettyNode () asm = "Satisfiable" PP.<+> PP.pretty asm
+  nodeTags = [("solver", \_ -> PP.pretty)]
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.

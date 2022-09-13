@@ -26,6 +26,7 @@
 
 module Pate.Verification
   ( verifyPairs
+  , SomeTraceTree(..)
   ) where
 
 import qualified Control.Concurrent.MVar as MVar
@@ -80,6 +81,7 @@ import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.StrongestPosts as PSP
+import           Pate.TraceTree
 
 -- | Run code discovery using macaw
 --
@@ -130,6 +132,10 @@ runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' pd = do
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
              return oCtxHinted
 
+data SomeTraceTree where
+  SomeTraceTree :: (PA.ValidArch arch, PS.ValidSym sym) => TraceTree '(sym, arch) -> SomeTraceTree
+  NoTraceTree :: SomeTraceTree
+
 verifyPairs ::
   forall arch.
   PA.ValidArch arch =>
@@ -139,7 +145,7 @@ verifyPairs ::
   PH.Hinted (PLE.LoadedELF arch) ->
   PC.VerificationConfig ->
   PC.PatchData ->
-  CME.ExceptT PEE.EquivalenceError IO PEq.EquivalenceStatus
+  CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus, SomeTraceTree)
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
@@ -148,7 +154,8 @@ verifyPairs validArch logAction elf elf' vcfg pd = do
   -- helpful for the kinds of problems we are facing.
   liftIO $ WE.startCaching sym
 
-  doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
+  (result, tree) <- doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
+  return $ (result, SomeTraceTree tree)
 
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
@@ -165,7 +172,7 @@ doVerifyPairs ::
   PC.PatchData ->
   N.NonceGenerator IO scope ->
   sym ->
-  CME.ExceptT PEE.EquivalenceError IO PEq.EquivalenceStatus
+  CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus, TraceTree '(sym,arch))
 doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
@@ -262,11 +269,11 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     -- override so that they cover both statically linked and dynamically-linked
     -- function calls.
 
-    (result, stats) <- PSP.runVerificationLoop env pPairs'
+    (result, stats, tree) <- PSP.runVerificationLoop env pPairs'
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
-    return $ result
+    return $ (result, tree)
 
 
 unpackBlockData ::

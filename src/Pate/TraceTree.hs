@@ -33,10 +33,14 @@ module Pate.TraceTree (
     TraceTree
   , TraceTreeNode
   , IsTraceNode(..)
+  , isTraceNode
+  , prettyNodeAt
   , TraceTag(..)
   , viewTraceTreeNode
   , viewTraceTree
-  , findNode
+  , findNodes
+  , nodeValue
+  , nodeValueLabel
   , asTreeKind
   , mkTraceTreeNode
   , mkTraceTree
@@ -44,6 +48,7 @@ module Pate.TraceTree (
   , ppTraceTree
   , ppFullTraceTree
   , ppFullTraceTreeNode
+  , prettySummary
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -77,8 +82,7 @@ instance IsString TraceTag where
 --   to the type represented by 'nm' via the 'IsTraceNode' class
 data TraceTreeNode (k :: l) nm where
   TraceTreeNode :: IsTraceNode k nm =>
-    TraceNodeLabel nm ->
-    [(TraceNodeType k nm, TraceTree k)] ->
+    [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)] ->
     TraceTreeNode k nm
 
 -- | A heterogenous list of 'TraceTreeNode' elements, representing
@@ -86,7 +90,10 @@ data TraceTreeNode (k :: l) nm where
 newtype TraceTree k = TraceTree [Some (TraceTreeNode k)]
   deriving ( Semigroup, Monoid )
 
-class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Symbol) where
+isTraceNode :: TraceTreeNode k nm -> (IsTraceNode k nm => a) -> a
+isTraceNode TraceTreeNode{} a = a
+
+class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Symbol)  where
   type TraceNodeType k nm :: Type
 
   -- | Labels can be used to distinguish nodes that share the same symbol in a
@@ -97,29 +104,55 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
   -- | Pretty print the full contents of this node.
   --   This is the default printer when examining the node with
   --   respect to the 'Full' tag
-  prettyNode :: TraceNodeType k nm -> PP.Doc a
+  prettyNode :: TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a
 
   -- | Mapping from tracing tags to pretty-printers, allowing the contents
   --   of this node to be presented differently (or not at all) depending
   --   on what kind of printing is requested.
-  nodeTags :: [(TraceTag, TraceNodeType k nm -> PP.Doc a)]
+  nodeTags :: [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
   nodeTags = [(Summary, prettyNode @l @k @nm)]
+
+prettySummary ::
+  forall k nm a.
+  IsTraceNode k nm =>
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  Maybe (PP.Doc a)
+prettySummary lbl v = prettyNodeAt @k @nm [Summary] lbl v
+
+prettyNodeAt ::
+  forall k nm a.
+  IsTraceNode k nm =>
+  [TraceTag] ->
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  Maybe (PP.Doc a)
+prettyNodeAt tags lbl v = case getNodePrinter @k @nm tags of
+  Just pp -> Just (pp lbl v)
+  Nothing -> Nothing
 
 tagsMap ::
   forall k nm a.
   IsTraceNode k nm =>
-  Map TraceTag (TraceNodeType k nm -> PP.Doc a)
+  Map TraceTag (TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)
 tagsMap = Map.fromList ((Full, prettyNode @_ @k @nm):nodeTags @_ @k @nm)
 
 getNodePrinter ::
   forall k nm a.
   IsTraceNode k nm =>
   [TraceTag] ->
-  Maybe (TraceNodeType k nm -> PP.Doc a)
+  Maybe (TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)
 getNodePrinter [] = Nothing
 getNodePrinter (t : tags) = case Map.lookup t (tagsMap @k @nm) of
   Just f -> Just f
   Nothing -> getNodePrinter @k @nm tags
+
+--  These functions assume that the IO monad is required to both inspect
+--  and construct 'TraceTree' and 'TraceTreeNode' values. 
+--  Although the current implementation is pure, this is a
+--  forward-compatible interface for a more robust implementation with
+--  sharing and snapshots
+
 
 mkTraceTreeNode ::
   forall nm k m.
@@ -129,28 +162,32 @@ mkTraceTreeNode ::
   TraceNodeLabel nm ->
   TraceTree k ->
   m (TraceTreeNode k nm)
-mkTraceTreeNode v lbl subtree = return $ TraceTreeNode lbl [(v, subtree)]
+mkTraceTreeNode v lbl subtree = return $ TraceTreeNode [((v,lbl), subtree)]
 
+-- | Collect a homogeneous list of nodes into a single 'TraceTreeNode'
+--   and return a singleton 'TraceTree'
 mkTraceTree ::
   forall nm k m.
   IO.MonadIO m =>
+  IsTraceNode k nm =>
   [TraceTreeNode k nm] ->
   m (TraceTree k)
-mkTraceTree ns = return $ TraceTree (map Some ns)
+mkTraceTree ns =
+  let
+    contents :: [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)]
+    contents = concat $ map (\(TraceTreeNode xs) -> xs) ns
+
+    node :: TraceTreeNode k nm
+    node = TraceTreeNode contents
+  in return $ TraceTree [Some node]
 
 -- | Inspect one level of a 'TraceTreeNode' and defer inspecting subtrees
---   Although the current implementation is pure, this is a
---   forward-compatible interface for a more robust implementation with
---   sharing and snapshots
 viewTraceTreeNode ::
+  forall k nm m.
   IO.MonadIO m =>
   TraceTreeNode k nm ->
-  m [(TraceNodeType k nm, m (TraceTree k))]
-viewTraceTreeNode (TraceTreeNode _lbl subtrees) = return (map (\(v, t) -> (v, return t)) subtrees)
-
-nodeLabel ::
-  TraceTreeNode k nm -> TraceNodeLabel nm
-nodeLabel (TraceTreeNode lbl _) = lbl
+  m [((TraceNodeType k nm, TraceNodeLabel nm), m (TraceTree k))]
+viewTraceTreeNode (TraceTreeNode subtrees) = return (map (\(v, t) -> (v, return t)) subtrees)
 
 -- | Retrieve the top-level list of nodes for a 'TraceTree'
 viewTraceTree ::
@@ -159,36 +196,45 @@ viewTraceTree ::
   m [(Some (TraceTreeNode k))]
 viewTraceTree (TraceTree ls) = return ls
 
--- | Find the first node in the top-level of a 'TraceTree'
---   that matches the Symbol constraint, if it exists.
-findNode' ::
+-- | Find all nodes in the given 'TraceTree' that match the given Symbol
+--   (as implied by the 'nm' type parameter)
+findNodes ::
   forall nm k m.
   IO.MonadIO m =>
   IsTraceNode k nm =>
   TraceTree k ->
+  m [TraceTreeNode k nm]
+findNodes (TraceTree xs) = return $ mapMaybe asTreeKind xs
+
+nodeValue' ::
+  forall nm k m.
+  IO.MonadIO m =>
+  IsTraceNode k nm =>
   (TraceNodeLabel nm -> Bool) ->
-  m (Maybe (TraceTreeNode k nm))
-findNode' (TraceTree []) _lbl = return Nothing
-findNode' (TraceTree (x : xs)) lblCheck = case asTreeKind x of
-  Just v | lblCheck (nodeLabel v) -> return (Just v)
-  _ -> findNode' (TraceTree xs) lblCheck
+  [TraceTreeNode k nm] ->
+  m [TraceNodeType k nm]
+nodeValue' lblCheck nodes =
+  return $ concat $ map (\(TraceTreeNode xs) -> mapMaybe (\((x,lbl),_) -> if lblCheck lbl then Just x else Nothing) xs) nodes
 
-findNode ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  TraceTree k ->
-  m (Maybe (TraceTreeNode k nm))  
-findNode tree = findNode' tree (\_ -> True)
-
-findNodeLabel ::
+-- | From the list of nodes, collect all values that have the given
+--   label (ignoring subtrees)
+nodeValueLabel ::
   forall nm k m.
   IO.MonadIO m =>
   IsTraceNode k nm =>
   TraceNodeLabel nm ->
-  TraceTree k ->
-  m (Maybe (TraceTreeNode k nm))    
-findNodeLabel lbl tree = findNode' tree ((==) lbl)
+  [TraceTreeNode k nm] ->
+  m [TraceNodeType k nm]
+nodeValueLabel lbl = nodeValue' (\lbl' -> lbl == lbl')
+
+-- | From the list of nodes, collect all values
+nodeValue ::
+  forall nm k m.
+  IO.MonadIO m =>
+  IsTraceNode k nm =>
+  [TraceTreeNode k nm] ->
+  m [TraceNodeType k nm]  
+nodeValue = nodeValue' (\_ -> True)
 
 -- | Return a 'Just' result if the given 'TraceTree' matches the given symbol
 asTreeKind ::
@@ -200,6 +246,7 @@ asTreeKind (Some node@(TraceTreeNode{} :: TraceTreeNode k nm')) =
   case testEquality (knownSymbol @nm) (knownSymbol @nm') of
     Just Refl -> Just node
     Nothing -> Nothing
+
 
 -- NOTE: We actually probably don't want to expose
 -- pure versions of these printers, but its unclear if
@@ -213,13 +260,13 @@ ppTraceTreeNode ::
   (TraceTree k -> Maybe (PP.Doc a)) ->
   TraceTreeNode k nm ->
   Maybe (PP.Doc a)
-ppTraceTreeNode tags ppSubTree (TraceTreeNode _ nodes) =
+ppTraceTreeNode tags ppSubTree (TraceTreeNode nodes) =
   case getNodePrinter @k @nm tags of
     Just prettyV -> Just $
       PP.vsep $
-       (map (\(v, subtree) -> case ppSubTree subtree of
-                     Just prettyTree -> PP.vsep [prettyV v, PP.indent 2 prettyTree]
-                     Nothing -> prettyV v
+       (map (\((v,lbl), subtree) -> case ppSubTree subtree of
+                     Just prettyTree -> PP.vsep [prettyV lbl v, PP.indent 2 prettyTree]
+                     Nothing -> prettyV lbl v
              ) nodes)      
     Nothing -> Nothing
 

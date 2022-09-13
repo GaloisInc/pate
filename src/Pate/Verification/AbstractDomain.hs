@@ -680,9 +680,16 @@ data DomainKind = Predomain | Postdomain | ExternalPostDomain
   deriving (Eq, Ord, Show)
 
 
+ppDomainKind ::
+  DomainKind -> PP.Doc a
+ppDomainKind = \case
+  Predomain -> "Node predomain"
+  Postdomain -> "Computed postdomain"
+  ExternalPostDomain -> "Postdomain after variable abstraction"
+
 instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
   type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)
   type TraceNodeLabel "domain" = DomainKind
   
-  prettyNode (Some absDom) = ppAbstractDomain (\_ -> "") absDom
-  nodeTags = [("symbolic", \_ -> "<TODO: domain symbolic summary>")]
+  prettyNode lbl (Some absDom) = PP.pretty (show lbl) PP.<+> ppAbstractDomain (\_ -> "") absDom
+  nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl), ("symbolic", \_ _ -> "<TODO: domain symbolic summary>")]

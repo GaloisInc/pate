@@ -102,4 +102,4 @@ instance PA.ValidArch arch => Show (GraphNode arch) where
 
 instance PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
   type TraceNodeType '(sym, arch) "node" = GraphNode arch
-  prettyNode = pretty
+  prettyNode () = pretty

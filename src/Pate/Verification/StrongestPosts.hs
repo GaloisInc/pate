@@ -122,16 +122,12 @@ runVerificationLoop ::
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the entry points of functions.
   [PPa.FunPair arch] ->
-  IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
+  IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics, TraceTree '(sym, arch))
 runVerificationLoop env pPairs = do
   (result, trees) <- runEquivM env doVerify
-  withValidEnv @(IO ()) env $ do
-    let p = ppFullTraceTree [Summary] trees
-    let s = PP.layoutPretty PP.defaultLayoutOptions p
-    PPRT.renderIO IO.stdout s
   case result of
-    Left err -> return (PE.Errored err, mempty)
-    Right r  -> return r
+    Left err -> return (PE.Errored err, mempty, trees)
+    Right (status, stats) -> return (status, stats, trees)
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
@@ -950,7 +946,7 @@ handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair =
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "funcall" where
   type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (PB.FunctionEntry arch)
-  prettyNode funs = PP.pretty funs
+  prettyNode () funs = PP.pretty funs
 
 -- | Record the return vector for this call, and then handle a
 --   jump to the entry point of the function.
