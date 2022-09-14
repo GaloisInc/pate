@@ -1,0 +1,13 @@
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XTypeApplications
+:set -XScopedTypeVariables
+:set -XTemplateHaskell
+:set prompt-function promptFn
+:set -interactive-print printFn
+default (GotoIndex)
+import Data.Parameterized.Some
+import Control.Monad.IO.Class
+import System.IO
+
+import System.IO.Unsafe

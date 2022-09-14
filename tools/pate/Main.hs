@@ -18,6 +18,9 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
+module Main ( main, runMain, cliOptions ) where
+  
+
 import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
@@ -51,6 +54,7 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
+import qualified Pate.Verification as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
 import qualified Pate.ArchLoader as PAL
@@ -60,10 +64,16 @@ import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
 
-
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
+  status <- runMain opts
+  case status of
+    (PEq.Errored err, _) -> SE.die (show err)
+    _ -> pure ()  
+
+runMain :: CLIOptions -> IO (PEq.EquivalenceStatus, PV.SomeTraceTree)
+runMain opts = do
   let
     origPaths = PLE.LoadPaths
       { PLE.binPath = originalBinary opts
@@ -115,10 +125,10 @@ main = do
         , PL.useDwarfHints = not $ noDwarfHints opts
         }
 
-  status <- PL.runEquivConfig cfg
-  case status of
-    PEq.Errored err -> SE.die (show err)
-    _ -> pure ()
+  PL.runEquivConfig cfg
+
+
+
 
 
 data CLIOptions = CLIOptions

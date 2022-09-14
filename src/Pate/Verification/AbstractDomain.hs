@@ -676,6 +676,9 @@ ppAbstractDomain ppPred d =
   ]
 
 
+instance (PA.ValidArch arch, W4.IsSymExprBuilder sym) => Show (AbstractDomain sym arch v) where
+  show a = show (ppAbstractDomain (\_ -> "") a)
+
 data DomainKind = Predomain | Postdomain | ExternalPostDomain
   deriving (Eq, Ord, Show)
 

@@ -13,9 +13,18 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 
 module Pate.Interactive.Repl where
 
+import qualified Language.Haskell.TH as TH
+import qualified Language.Haskell.TH.Syntax as TH
+import qualified Language.Haskell.TH.Ppr as TH
 
 import qualified Options.Applicative as OA
 import qualified System.IO as IO
@@ -23,16 +32,17 @@ import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
 import           Data.Maybe ( mapMaybe )
 import           Control.Monad ( foldM )
-import           Control.Monad.Reader ( MonadReader, ReaderT, ask, asks, runReaderT )
+import           Control.Monad.State ( MonadState, StateT, modify, get, gets, runStateT )
 import qualified Control.Monad.IO.Class as IO
 
 import           Data.Parameterized.Some
+import           Data.Parameterized.Classes
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Terminal as PPRT
 
-import           Data.Parameterized.SymbolRepr ( SymbolRepr, knownSymbol, symbolRepr )
+import           Data.Parameterized.SymbolRepr ( SymbolRepr, KnownSymbol, knownSymbol, symbolRepr )
 
 
 import qualified Pate.Arch as PA
@@ -45,32 +55,61 @@ import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Interactive.ReplHelper as PIRH
 
 import           Pate.TraceTree
 
+import Unsafe.Coerce(unsafeCoerce)
+
 import qualified Main as PM
 
-data LoadedTraceTreeNode sym arch where
-  LoadedTraceTreeNode :: (PA.ValidArch arch, PS.ValidSym sym, IsTraceNode '(sym,arch) nm) => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> IO (TraceTree '(sym, arch)) -> LoadedTraceTreeNode sym arch
+-- | Defining a 'Show' instance for a type which depends on 'PS.ValidSym'
+--   and 'PA.ValidArch'.
+class ShowIfValid a where
+  showIfValid :: Maybe (ValidSymArchRepr Sym Arch Sym Arch) -> a -> String
 
-newtype NodeList = NodeList (forall sym arch. [LoadedTraceTreeNode sym arch])
+instance ((PS.ValidSym Sym, PA.ValidArch Arch) => Show a) => ShowIfValid a where
+  showIfValid repr a = case repr of
+    Just ValidSymArchRepr -> show a
+    Nothing -> "<<No Binary Loaded>>"
+
+printFn :: ShowIfValid a => a -> IO ()
+printFn a = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \x ->
+  IO.putStrLn (showIfValid x a)
+
+promptFn :: [String] -> Int -> IO String
+promptFn _ _ = execReplM printToplevel >> return "\n> "
+
 
 instance IsTraceNode (k :: l) "toplevel" where
   type TraceNodeType k "toplevel" = ()
   prettyNode () () = "<Toplevel>"
 
-data ReplEnv sym arch where
-  ReplEnv :: forall nm sym arch. IsTraceNode '(sym, arch) nm =>
-    { replTree :: TraceTree '(sym, arch)
-    , replSymRepr :: SymbolRepr nm
-    , replLabel :: TraceNodeLabel nm
-    , replValue :: TraceNodeType '(sym,arch) nm
-    , replTags :: [TraceTag]
-    , replNext :: [LoadedTraceTreeNode sym arch]
-    } -> ReplEnv sym arch
+data TraceNode sym arch nm where
+  TraceNode :: forall nm sym arch. (PS.ValidSym sym, PA.ValidArch arch, IsTraceNode '(sym, arch) nm) => TraceNodeLabel nm -> (TraceNodeType '(sym, arch) nm) -> IO (TraceTree '(sym, arch)) -> TraceNode sym arch nm
 
-newtype ReplM_ sym arch a = ReplM_ { unReplM :: (ReaderT (ReplEnv sym arch) IO a) }
-  deriving ( Functor, Applicative, Monad, MonadReader (ReplEnv sym arch), IO.MonadIO )
+data ReplState sym arch where
+  ReplState :: 
+    { replTree :: TraceTree '(sym, arch)
+    , replNode :: Some (TraceNode sym arch)
+    , replTags :: [TraceTag]
+    -- path used to navigate to this tree node
+    , replPrev :: [Some (TraceNode sym arch)]
+    -- tags used to collect the 'next' results
+    , replNextTags :: [TraceTag]
+    , replNext :: [Some (TraceNode sym arch)]
+    , replValidRepr :: ValidSymArchRepr sym arch sym arch
+    } -> ReplState sym arch
+
+data ValidSymArchRepr sym arch symExt archExt where
+  ValidSymArchRepr :: (sym ~ symExt, arch ~ archExt, PA.ValidArch arch, PS.ValidSym sym) => ValidSymArchRepr sym arch symExt archExt
+
+data ReplIOStore =
+    NoTreeLoaded
+  | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState (ReplState sym arch)
+
+newtype ReplM_ sym arch a = ReplM_ { unReplM :: (StateT (ReplState sym arch) IO a) }
+  deriving ( Functor, Applicative, Monad, MonadState (ReplState sym arch), IO.MonadIO )
 
 type ReplM sym arch a = (PA.ValidArch arch, PS.ValidSym sym) => ReplM_ sym arch a
 
@@ -78,40 +117,51 @@ runReplM :: forall a. (forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => 
 runReplM f = do
   t <- IO.readIORef ref
   case t of
-    NodeList ((LoadedTraceTreeNode repr lbl v (lt :: IO (TraceTree '(sym, arch)))):_) -> do
-      lt' <- lt
-      Just <$> runReaderT (unReplM @sym @arch f) (ReplEnv lt' repr lbl v [Summary])
-    NodeList [] -> return Nothing
+    NoTreeLoaded -> return Nothing
+    SomeReplState (st :: ReplState sym arch) -> do
+      (a, st') <- runStateT (unReplM @sym @arch f) st
+      IO.writeIORef ref (SomeReplState st')
+      return $ Just a
 
 execReplM :: (forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => ReplM_ sym arch ()) -> IO ()
 execReplM f = runReplM @() f >>= \case
   Just _ -> return ()
   Nothing -> IO.putStrLn "No tree loaded" >> return ()
 
--- | The current trace tree stack. Navigating to subtrees pushes elements onto the stack
---   while going "back" pops elements off.
-ref :: IO.IORef NodeList
-ref = IO.unsafePerformIO (IO.newIORef (NodeList []))
 
--- | Representation of the current options for loading the next tree
-nextRefs :: IO.IORef NodeList
-nextRefs = IO.unsafePerformIO (IO.newIORef (NodeList []))
+ref :: IO.IORef ReplIOStore
+ref = IO.unsafePerformIO (IO.newIORef NoTreeLoaded)
 
-promptFn :: [String] -> Int -> IO String
-promptFn _modules _promptNumber = execReplM printToplevel >> return "\n> "
-
-run ::
-  String -> IO ()
+run :: String -> IO ()
 run rawOpts = do
+  PIRH.setLastRunCmd rawOpts
   opts <- OA.handleParseResult (OA.execParserPure OA.defaultPrefs PM.cliOptions (words rawOpts))
   result <- PM.runMain opts
   case result of
     (_, PV.SomeTraceTree tree) -> do
       IO.putStrLn "Loaded tree"
-      IO.writeIORef ref (NodeList [(LoadedTraceTreeNode (knownSymbol @"toplevel") () () (return tree))])
+      let st = ReplState
+            { replTree = tree
+            , replNode = Some (TraceNode @"toplevel" () () (return tree))
+            , replTags = [Summary]
+            , replPrev = []
+            , replNextTags = [Summary]
+            , replNext = []
+            , replValidRepr = ValidSymArchRepr
+            }
+      IO.writeIORef ref (SomeReplState st)
+      execReplM updateNextNodes
     (err, _) -> do
-      IO.writeIORef ref (NodeList [])
-      fail (show err)
+      IO.writeIORef ref NoTreeLoaded
+      IO.putStrLn $ "Verifier run failed:\n" ++ (show err)
+
+rerun :: IO ()
+rerun = do
+  PIRH.getLastRunCmd >>= \case
+    Just rawOpts -> do
+      IO.putStrLn $ "run \"" ++ rawOpts ++ "\""
+      run rawOpts
+    Nothing -> IO.putStrLn "No previous run found"
 
 printPretty :: PP.Doc PPRT.AnsiStyle -> ReplM sym arch ()
 printPretty p = do
@@ -120,77 +170,110 @@ printPretty p = do
 
 printTreeSummary :: ReplM sym arch ()
 printTreeSummary = do
-  t <- asks replTree
+  t <- gets replTree
   let p = ppFullTraceTree [Summary] t
   printPretty p
 
-prettySomeNode ::
-  forall nm sym arch a.
-  (Int, [PP.Doc a], [LoadedTraceTreeNode sym arch]) ->
+addNextNodes ::
+  forall nm sym arch.
   TraceTreeNode '(sym, arch) nm ->
-  ReplM sym arch (Int, [PP.Doc a], [LoadedTraceTreeNode sym arch])
-prettySomeNode (idx, prevpp, nextTrees) node = isTraceNode node $ do
-  tags <- asks replTags
-  contents <- IO.liftIO $ viewTraceTreeNode  node
-  let shownContents =
-        mapMaybe (\((v, lbl), subtree) -> case prettyNodeAt @'(sym, arch) @nm tags lbl v of
-               Just pp -> Just (pp, (LoadedTraceTreeNode (knownSymbol @nm) lbl v subtree))
-               Nothing -> Nothing) contents
-  let pp = (map (\(idx' :: Int,(p, _)) -> PP.pretty idx' <> ":" <+> p) (zip [idx..] shownContents))
- 
-  return (idx + length shownContents, prevpp ++ pp, nextTrees ++ map snd shownContents)
+  ReplM sym arch ()
+addNextNodes node = isTraceNode node $ do
+  tags <- gets replNextTags
+  contents <- IO.liftIO $ viewTraceTreeNode node
+  case nodeShownAt @'(sym,arch) @nm tags of
+    True -> do
+      let nextTrees = map (\((v, lbl), subtree) -> Some (TraceNode @nm lbl v subtree)) contents
+      modify (\st -> st { replNext = (replNext st) ++ nextTrees })
+    False -> return ()
+
+updateNextNodes ::
+  ReplM sym arch ()
+updateNextNodes = do
+  tags <- gets replTags
+  t <- gets replTree
+  nodes <- viewTraceTree t
+  modify (\st -> st { replNext = [ ], replNextTags = tags })
+  mapM_ (\(Some node) -> addNextNodes node) nodes
+   
+
+prettyNextNodes ::
+  forall sym arch a.
+  ReplM sym arch (PP.Doc a)
+prettyNextNodes = do
+  tags <- gets replNextTags
+  nextNodes <- gets replNext
+  
+  let ppContents =
+        map (\(Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) ->
+               case prettyNodeAt @'(sym, arch) @nm tags lbl v of
+                 Just pp -> pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")"
+                 Nothing -> "<ERROR: Unexpected missing printer>"
+            ) nextNodes
+  return $ PP.vsep (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents))
 
 printToplevel :: forall sym arch. ReplM sym arch ()
 printToplevel = do
-  t <- asks replTree
-  nodes <- viewTraceTree t
-  case nodes of
-    [] -> withValue $ \(_ :: SymbolRepr nm) lbl v -> do
-      let pp = prettyNode @_ @'(sym, arch) @nm lbl v
-      printPretty pp
-      IO.liftIO $ IO.writeIORef nextRefs []  
-    _ -> do
-      (_, pp, nextTrees) <- foldM (\idx (Some node) -> prettySomeNode idx node) (0,[],[]) nodes
-      printPretty (PP.vsep pp)
-      IO.liftIO $ IO.writeIORef nextRefs nextTrees 
-
-withValue ::
-  (forall nm.  IsTraceNode '(sym,arch) nm => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> ReplM sym arch a) ->
-  ReplM sym arch a
-withValue f = do
-  ReplEnv _ repr lbl v _ <- ask
-  f repr lbl v
-
-back :: IO ()
-back = do
-  trees <- IO.readIORef ref
-  case trees of
-    [] -> IO.putStrLn "No tree loaded"
-    [_] -> IO.putStrLn "At top level"
-    (_:trees') -> IO.writeIORef ref trees'
+  nextNodes <- gets replNext
+  pp <- case nextNodes of
+    [] -> return "<No Subtrees>"
+    _ -> prettyNextNodes
+  printPretty pp
 
 
-goto' :: Int -> ReplM sym arch (LoadedTraceTreeNode sym arch)
+up :: IO ()
+up = execReplM $ do
+  prevNodes <- gets replPrev
+  case prevNodes of
+    [] -> IO.liftIO $ IO.putStrLn "At top level"
+    (Some popped:prevNodes') -> do
+      loadTraceNode popped
+      modify $ \st -> st { replPrev = prevNodes' }
+
+currentNode :: ReplM_ sym arch (Some (TraceNode sym arch))
+currentNode = gets replNode
+
+withCurrentNode :: (forall nm. IsTraceNode '(sym,arch) nm => TraceNode sym arch nm -> ReplM sym arch a) -> ReplM_ sym arch a
+withCurrentNode f = do
+  Some (node@TraceNode{}) <- currentNode
+  f node
+
+
+loadTraceNode :: TraceNode sym arch nm -> ReplM sym arch ()
+loadTraceNode (node@(TraceNode lbl v nextTreeFn)) = do
+  nextTree <- IO.liftIO nextTreeFn
+  modify $ \st -> st
+    { replTree = nextTree
+    , replNode = Some node
+    , replTags = replTags st
+    , replPrev = replPrev st
+    , replNextTags = []
+    , replNext = []
+    }
+  updateNextNodes
+
+goto' :: Int -> ReplM sym arch (Maybe (Some (TraceNode sym arch)))
 goto' idx = do
-  nextTrees <- IO.readIORef nextRefs
-  case idx < length nextTrees of
+  nextNodes <- gets replNext
+  case idx < length nextNodes of
     True -> do
-      let nextTree = nextTrees !! idx
-      IO.modifyIORef' ref (\t -> nextTree : t)
-      return $ Just nextTree
+      Some nextNode <- return $ nextNodes !! idx
+      lastNode <- currentNode
+      loadTraceNode nextNode
+      modify $ \st -> st { replPrev = lastNode : (replPrev st) }
+      return $ Just (Some nextNode)
     False -> return Nothing
 
 goto :: Int -> IO ()
-goto idx = goto' idx >>= \case
-  Just _ -> return ()
-  Nothing -> IO.putStrLn "No such option"
+goto idx = execReplM $ do
+  goto' idx >>= \case
+    Just _ -> return ()
+    Nothing -> IO.liftIO $ IO.putStrLn "No such option"
 
 gotoIndex :: forall sym arch. Integer -> ReplM sym arch String
-gotoIndex idx = (IO.liftIO $ goto' (fromIntegral idx)) >>= \case
-  Just (LoadedTraceTreeNode (nm :: SymbolRepr nm) lbl v _) -> do
-    tags <- asks replTags
-    let pp = prettyNodeAt @'(sym, arch) @nm tags lbl v
-    return $ show pp
+gotoIndex idx = (goto' (fromIntegral idx)) >>= \case
+  Just (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) ->
+    return $ show (prettyNode @_ @'(sym, arch) @nm lbl v)
   Nothing -> return "No such option"
 
 gotoIndexPure :: Integer -> String
@@ -198,6 +281,61 @@ gotoIndexPure idx = IO.unsafePerformIO $
   runReplM (gotoIndex idx) >>= \case
     Just s -> return s
     Nothing -> return "No tree loaded"
+-- Hacks to export the arch and sym parameters to the toplevel
+
+data Arch
+data Sym
+
+coerceValidRepr ::
+  ValidSymArchRepr sym arch sym arch -> ValidSymArchRepr sym arch Sym Arch
+coerceValidRepr repr = unsafeCoerce repr
+
+
+coerceTraceNode :: ReplM_ sym arch (Some (TraceNode Sym Arch))
+coerceTraceNode = do
+  Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm) <- currentNode
+  repr <- gets replValidRepr
+  ValidSymArchRepr <- return $ coerceValidRepr repr
+  return $ Some (TraceNode @nm lbl v subtree)
+
+
+getSomeNode :: IO (Some (TraceNode Sym Arch))
+getSomeNode = runReplM @(Some (TraceNode Sym Arch)) coerceTraceNode >>= \case
+  Just v -> return v
+  Nothing -> fail "getSomeNode"
+
+getValidRepr :: ReplM_ sym arch (ValidSymArchRepr Sym Arch Sym Arch)
+getValidRepr = do
+  repr <- gets replValidRepr
+  ValidSymArchRepr <- return $ coerceValidRepr repr
+  return $ ValidSymArchRepr
+
+validRepr :: IO (ValidSymArchRepr Sym Arch Sym Arch)
+validRepr = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \case
+  Just repr -> return repr
+  Nothing -> fail "validRepr"
+
+getNode :: forall nm. KnownSymbol nm => IO (TraceNode Sym Arch nm)
+getNode = do
+  Some (node@(TraceNode{}) :: TraceNode Sym Arch nm') <- getSomeNode
+  case testEquality (knownSymbol @nm) (knownSymbol @nm') of
+    Just Refl -> return node
+    Nothing -> fail "getNode"
+
+
+this :: TH.ExpQ
+this = do
+  node <- IO.liftIO getSomeNode
+  tpName <- case node of
+    Some (TraceNode{} :: TraceNode Sym Arch nm) -> return $ (TH.LitT (TH.StrTyLit (show (knownSymbol @nm))))
+  [| IO.unsafePerformIO (getV @($( return tpName ))) |]
+
+getV :: forall nm. KnownSymbol nm => IO (TraceNodeType '(Sym,Arch) nm)
+getV = do
+  Some ((TraceNode lbl v _) :: TraceNode Sym Arch nm') <- getSomeNode
+  case testEquality (knownSymbol @nm) (knownSymbol @nm') of
+    Just Refl -> return v
+    Nothing -> fail "getV"
 
 -- Hack to allow navigating by entering numbers into the repl
 newtype GotoIndex = GotoIndex Integer
@@ -207,5 +345,4 @@ instance Num GotoIndex where
 
 instance Show GotoIndex where
   show (GotoIndex i) = gotoIndexPure i
-
 

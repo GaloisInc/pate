@@ -35,6 +35,7 @@ module Pate.TraceTree (
   , IsTraceNode(..)
   , isTraceNode
   , prettyNodeAt
+  , nodeShownAt
   , TraceTag(..)
   , viewTraceTreeNode
   , viewTraceTree
@@ -130,6 +131,13 @@ prettyNodeAt ::
 prettyNodeAt tags lbl v = case getNodePrinter @k @nm tags of
   Just pp -> Just (pp lbl v)
   Nothing -> Nothing
+
+nodeShownAt ::
+  forall k nm.
+  IsTraceNode k nm =>
+  [TraceTag] ->
+  Bool
+nodeShownAt tags = isJust (getNodePrinter @k @nm tags)
 
 tagsMap ::
   forall k nm a.
