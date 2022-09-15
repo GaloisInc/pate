@@ -1,4 +1,4 @@
-module Pate.Interactive.ReplHelper 
+module ReplHelper 
   ( getLastRunCmd
   , setLastRunCmd
   , freshNonce

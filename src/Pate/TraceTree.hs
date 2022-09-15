@@ -113,7 +113,7 @@ propagateStatus :: NodeStatus -> NodeStatus -> NodeStatus
 propagateStatus stNew stOld = case isFinished stOld of
   True -> stOld
   False -> case (stNew, stOld) of
-   (NodeError newErr newFin, NodeError oldErr _) -> NodeError oldErr newFin
+   (NodeError _newErr newFin, NodeError oldErr _) -> NodeError oldErr newFin
    (NodeError newErr newFin, NodeStatus _) -> NodeError newErr newFin
    (NodeStatus True, _) -> stNew
    _ -> stOld

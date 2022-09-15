@@ -20,7 +20,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 
-module Pate.Interactive.Repl where
+module Repl where
 
 import qualified Language.Haskell.TH as TH
 import qualified Language.Haskell.TH.Syntax as TH
@@ -58,7 +58,7 @@ import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Interactive.ReplHelper as PIRH
+import qualified ReplHelper as PIRH
 
 import           Pate.TraceTree
 
