@@ -74,7 +74,7 @@ main = do
     PEq.Errored err -> SE.die (show err)
     _ -> pure ()  
 
-runMain :: SomeTraceTree (Type, Type) -> CLIOptions -> IO (PEq.EquivalenceStatus)
+runMain :: SomeTraceTree -> CLIOptions -> IO (PEq.EquivalenceStatus)
 runMain traceTree opts = do
   let
     origPaths = PLE.LoadPaths

@@ -54,6 +54,8 @@ module Pate.TraceTree (
   , noTraceTree
   , startSomeTraceTree
   , viewSomeTraceTree
+  , isNodeFinal
+  , isTreeFinal
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -61,7 +63,6 @@ import           Data.Kind ( Type )
 import qualified Control.Monad.IO.Class as IO
 import qualified Data.IORef as IO
 import           Data.String
-import           Data.Maybe ( mapMaybe, fromJust )
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 
@@ -69,7 +70,7 @@ import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
-import           Data.Parameterized.SymbolRepr ( SymbolRepr, knownSymbol, symbolRepr )
+import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr )
 
 data TraceTag =
     Summary
@@ -142,6 +143,7 @@ singleNode ::
 singleNode lbl v = do
   l <- emptyIOList
   t <- emptyIOList
+  finalizeIOList t
   addIOList ((v, lbl), TraceTree t) l
   return $ TraceTreeNode l
 
@@ -231,6 +233,12 @@ viewTraceTreeNode ::
   IO [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)]
 viewTraceTreeNode (TraceTreeNode subtrees) = reverse <$> evalIOList subtrees
 
+isNodeFinal ::
+  forall k nm.
+  TraceTreeNode k nm ->
+  IO Bool
+isNodeFinal (TraceTreeNode subtrees) = isFinalIOList subtrees
+
 -- | Retrieve the top-level list of nodes for a 'TraceTree' in
 --   the order that they were added.
 viewTraceTree ::
@@ -238,21 +246,27 @@ viewTraceTree ::
   IO [(Some (TraceTreeNode k))]
 viewTraceTree (TraceTree ls) = reverse <$> evalIOList ls
 
-data SomeTraceTree' l =
+isTreeFinal ::
+  forall k.
+  TraceTree k ->
+  IO Bool
+isTreeFinal (TraceTree ls) = isFinalIOList ls
+
+data SomeTraceTree' =
     StartTree
   -- ^ a trace tree that we intend to build but hasn't been initialized yet
-  | forall (k :: l). SomeTraceTree' (TraceTree k)
+  | forall k. SomeTraceTree' (TraceTree k)
 
-data SomeTraceTree l =
-    SomeTraceTree (IO.IORef (SomeTraceTree' l))
+data SomeTraceTree =
+    SomeTraceTree (IO.IORef (SomeTraceTree'))
   | NoTreeBuild
 
-someTraceTree :: forall l. IO (SomeTraceTree l)
+someTraceTree :: IO (SomeTraceTree)
 someTraceTree = do
   ref <- IO.newIORef StartTree
   return $ SomeTraceTree ref
 
-noTraceTree :: SomeTraceTree l
+noTraceTree :: SomeTraceTree
 noTraceTree = NoTreeBuild
 
 noTreeBuilder :: TreeBuilder k
@@ -265,7 +279,7 @@ noNodeBuilder = do
   let builder = NodeBuilder (return ()) (\_ _ _ -> return ())
   return $ (TraceTreeNode l, builder)
 
-startSomeTraceTree :: forall l (k :: l). SomeTraceTree l -> IO (TreeBuilder k)
+startSomeTraceTree :: forall k. SomeTraceTree -> IO (TreeBuilder k)
 startSomeTraceTree NoTreeBuild = return $ noTreeBuilder
 startSomeTraceTree (SomeTraceTree ref) = do
   (tree, builder) <- startTree @k
@@ -273,131 +287,14 @@ startSomeTraceTree (SomeTraceTree ref) = do
   return builder
 
 viewSomeTraceTree ::
-  forall l a.
-  SomeTraceTree l ->
+  forall a.
+  SomeTraceTree ->
   (IO a) {- ^ action for when no tree is loaded -} ->
-  (forall (k :: l). TraceTree k -> IO a) ->
+  (forall l (k :: l). TraceTree k -> IO a) ->
   IO a
 viewSomeTraceTree NoTreeBuild noTreeFn _ = noTreeFn
 viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
   t <- IO.readIORef ref
   case t of
-    SomeTraceTree' (t' :: TraceTree k) -> f @k t'
+    SomeTraceTree' (t' :: TraceTree k) -> f @_ @k t'
     StartTree -> noTreeFn
-    
-
-{-
--- | Find all nodes in the given 'TraceTree' that match the given Symbol
---   (as implied by the 'nm' type parameter)
-findNodes ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  TraceTree k ->
-  m [TraceTreeNode k nm]
-findNodes (TraceTree xs) = return $ mapMaybe asTreeKind xs
-
-nodeValue' ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  (TraceNodeLabel nm -> Bool) ->
-  [TraceTreeNode k nm] ->
-  m [TraceNodeType k nm]
-nodeValue' lblCheck nodes =
-  return $ concat $ map (\(TraceTreeNode xs) -> mapMaybe (\((x,lbl),_) -> if lblCheck lbl then Just x else Nothing) xs) nodes
-
--- | From the list of nodes, collect all values that have the given
---   label (ignoring subtrees)
-nodeValueLabel ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  TraceNodeLabel nm ->
-  [TraceTreeNode k nm] ->
-  m [TraceNodeType k nm]
-nodeValueLabel lbl = nodeValue' (\lbl' -> lbl == lbl')
-
--- | From the list of nodes, collect all values
-nodeValue ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  [TraceTreeNode k nm] ->
-  m [TraceNodeType k nm]  
-nodeValue = nodeValue' (\_ -> True)
-
--- | Return a 'Just' result if the given 'TraceTree' matches the given symbol
-asTreeKind ::
-  forall nm k.
-  IsTraceNode k nm =>
-  Some (TraceTreeNode k) ->
-  Maybe (TraceTreeNode k nm)
-asTreeKind (Some node@(TraceTreeNode{} :: TraceTreeNode k nm')) =
-  case testEquality (knownSymbol @nm) (knownSymbol @nm') of
-    Just Refl -> Just node
-    Nothing -> Nothing
-
-
--- NOTE: We actually probably don't want to expose
--- pure versions of these printers, but its unclear if
--- it's worth writing the general printers in monadic form
--- or if we should just rely on some frontend to layout the tree
--- (where it will make assumptions about what kinds of nodes will
--- be present)
-ppTraceTreeNode ::
-  forall k nm a.
-  [TraceTag] ->
-  (TraceTree k -> Maybe (PP.Doc a)) ->
-  TraceTreeNode k nm ->
-  Maybe (PP.Doc a)
-ppTraceTreeNode tags ppSubTree (TraceTreeNode nodes) =
-  case getNodePrinter @k @nm tags of
-    Just prettyV -> Just $
-      PP.vsep $
-       (map (\((v,lbl), subtree) -> case ppSubTree subtree of
-                     Just prettyTree -> PP.vsep [prettyV lbl v, PP.indent 2 prettyTree]
-                     Nothing -> prettyV lbl v
-             ) nodes)      
-    Nothing -> Nothing
-
-ppTraceTree ::
-  (forall nm. TraceTreeNode k nm -> Maybe (PP.Doc a)) ->
-  TraceTree k ->
-  PP.Doc a
-ppTraceTree ppNode (TraceTree trees) =
-  PP.vsep $ mapMaybe (\(Some node) -> ppNode node) trees
-
-ppFullTraceTree ::
-  forall k a.
-  [TraceTag] ->
-  TraceTree k ->
-  PP.Doc a  
-ppFullTraceTree tags tree_outer =
-  let
-    ppNode :: forall nm. TraceTreeNode k nm -> Maybe (PP.Doc a)
-    ppNode node = ppTraceTreeNode tags ppTree node
-    
-    ppTree tree = Just (ppTraceTree ppNode tree)
-  in fromJust (ppTree tree_outer)
-
-ppFullTraceTreeNode ::
-  forall k nm a.
-  [TraceTag] ->
-  TraceTreeNode k nm ->
-  Maybe (PP.Doc a)
-ppFullTraceTreeNode tags node_outer =
-  let
-    ppNode :: forall nm'. TraceTreeNode k nm' -> Maybe (PP.Doc a)
-    ppNode node = ppTraceTreeNode tags ppTree node
-    
-    ppTree tree = Just (ppTraceTree ppNode tree)
-  in ppNode node_outer
-
-instance forall k nm. PP.Pretty (TraceTreeNode k nm) where
-  -- the 'Full' tag is always defined
-  pretty node = fromJust (ppFullTraceTreeNode [Full] node)
-
-instance PP.Pretty (TraceTree k) where
-  pretty tree = ppFullTraceTree [Full] tree
--}

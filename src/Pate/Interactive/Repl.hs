@@ -30,6 +30,7 @@ import qualified Options.Applicative as OA
 import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
+import qualified Control.Concurrent as IO
 import           Data.Maybe ( mapMaybe )
 import           Control.Monad ( foldM )
 import           Control.Monad.State ( MonadState, StateT, modify, get, gets, runStateT )
@@ -80,9 +81,7 @@ printFn a = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \x -
   IO.putStrLn (showIfValid x a)
 
 promptFn :: [String] -> Int -> IO String
-promptFn _ _ = execReplM printToplevel >> return "\n> "
-
-
+promptFn _ _ = execReplM (updateNextNodes >> printToplevel) >> return "\n> "
 
 
 data TraceNode sym arch nm where
@@ -90,8 +89,7 @@ data TraceNode sym arch nm where
 
 data ReplState sym arch where
   ReplState :: 
-    { replTree :: TraceTree '(sym, arch)
-    , replNode :: Some (TraceNode sym arch)
+    { replNode :: Some (TraceNode sym arch)
     , replTags :: [TraceTag]
     -- path used to navigate to this tree node
     , replPrev :: [Some (TraceNode sym arch)]
@@ -106,8 +104,10 @@ data ValidSymArchRepr sym arch symExt archExt where
 
 data ReplIOStore =
     NoTreeLoaded
+  -- main thread has started but hasn't yet produced a tree
+  | WaitingForToplevel IO.ThreadId SomeTraceTree
+  -- we've started navigating the resulting tree
   | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState (ReplState sym arch)
-
 
 
 newtype ReplM_ sym arch a = ReplM_ { unReplM :: (StateT (ReplState sym arch) IO a) }
@@ -119,52 +119,60 @@ runReplM :: forall a. (forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => 
 runReplM f = do
   t <- IO.readIORef ref
   case t of
-    NoTreeLoaded -> return Nothing
+    NoTreeLoaded -> IO.putStrLn "No tree loaded" >> return Nothing
+    WaitingForToplevel _ tree -> loadSomeTree tree >>= \case
+      True -> runReplM f
+      False -> IO.putStrLn "Waiting for verifier.." >> return Nothing
     SomeReplState (st :: ReplState sym arch) -> do
       (a, st') <- runStateT (unReplM @sym @arch f) st
       IO.writeIORef ref (SomeReplState st')
       return $ Just a
 
 execReplM :: (forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => ReplM_ sym arch ()) -> IO ()
-execReplM f = runReplM @() f >>= \case
-  Just _ -> return ()
-  Nothing -> IO.putStrLn "No tree loaded" >> return ()
+execReplM f = runReplM @() f >> return ()
 
 
 ref :: IO.IORef ReplIOStore
 ref = IO.unsafePerformIO (IO.newIORef NoTreeLoaded)
 
+loadSomeTree ::
+  SomeTraceTree -> IO Bool
+loadSomeTree topTraceTree = do
+  let doFail = IO.putStrLn "Unexpected tree structure" >> return False
+  -- we assume that root entry of the tree contains evidence that the
+  -- trace tree parameter (as determined during runtime) satisfies the
+  -- necessary validity constraints to form a 'ReplState'
+  viewSomeTraceTree topTraceTree (return False) $ \(toptree :: TraceTree k) -> do
+      (IO.liftIO $ viewTraceTree toptree) >>= \case
+        [(Some (node :: TraceTreeNode k nm))] -> isTraceNode node $ do
+          case testEquality (knownSymbol @nm) (knownSymbol @"toplevel") of
+            Nothing -> doFail
+            Just Refl -> viewTraceTreeNode node >>= \case
+              [((toplevel@PME.ValidRepr,_), tree)] -> do
+                IO.putStrLn "Loaded tree"
+                let st = ReplState
+                      { replNode = Some (TraceNode @"toplevel" () toplevel tree)
+                      , replTags = [Summary]
+                      , replPrev = []
+                      , replNextTags = [Summary]
+                      , replNext = []
+                      , replValidRepr = ValidSymArchRepr
+                      }
+                IO.writeIORef ref (SomeReplState st)
+                execReplM updateNextNodes
+                return True
+              _ -> doFail
+        _ -> doFail  
+
 run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
   opts <- OA.handleParseResult (OA.execParserPure OA.defaultPrefs PM.cliOptions (words rawOpts))
-  topTraceTree <- someTraceTree @(Type,Type)
-  result <- PM.runMain topTraceTree opts
-  let doFail = IO.writeIORef ref NoTreeLoaded >> IO.putStrLn "Trace tree not loaded"
-  
-  viewSomeTraceTree @(Type,Type) topTraceTree doFail $ \(toptree :: TraceTree k) -> do
-      nodes <- (IO.liftIO $ viewTraceTree toptree)
-      case nodes of
-        [(Some (node :: TraceTreeNode k nm))] -> isTraceNode node $ do
-          case testEquality (knownSymbol @nm) (knownSymbol @"toplevel") of
-            Nothing -> doFail
-            Just Refl -> do
-              contents <- viewTraceTreeNode node
-              case contents of
-                [((toplevel,_), tree)] -> PME.withToplevelNode toplevel $ do              
-                  IO.putStrLn "Loaded tree"
-                  let st = ReplState
-                        { replNode = Some (TraceNode @"toplevel" () toplevel tree)
-                        , replTags = [Summary]
-                        , replPrev = []
-                        , replNextTags = [Summary]
-                        , replNext = []
-                        , replValidRepr = ValidSymArchRepr
-                        }
-                  IO.writeIORef ref (SomeReplState st)
-                  execReplM updateNextNodes
-                _ -> doFail
-        _ -> doFail
+  topTraceTree <- someTraceTree
+  tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
+    Left err -> IO.putStrLn $ "Verifier failed: " ++ show err
+    Right _a -> return ()
+  IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
 
 rerun :: IO ()
 rerun = do
@@ -179,13 +187,6 @@ printPretty p = do
   let s = PP.layoutPretty PP.defaultLayoutOptions p
   IO.liftIO $ PPRT.renderIO IO.stdout s  
 
-{-
-printTreeSummary :: ReplM sym arch ()
-printTreeSummary = do
-  t <- gets replTree
-  let p = ppFullTraceTree [Summary] t
-  printPretty p
--}
 
 addNextNodes ::
   forall nm sym arch.
@@ -209,6 +210,10 @@ updateNextNodes = do
   modify (\st -> st { replNext = [ ], replNextTags = tags })
   mapM_ (\(Some node) -> addNextNodes node) nodes
 
+addFinalTag :: Bool -> PP.Doc a -> PP.Doc a
+addFinalTag True p = p
+addFinalTag False p = p <+> "(*)"
+
 prettyNextNodes ::
   forall sym arch a.
   ReplM sym arch (PP.Doc a)
@@ -216,11 +221,13 @@ prettyNextNodes = do
   tags <- gets replNextTags
   nextNodes <- gets replNext
   
-  let ppContents =
-        map (\(Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) ->
+  ppContents <- 
+       mapM (\(Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) ->
                case prettyNodeAt @'(sym, arch) @nm tags lbl v of
-                 Just pp -> pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")"
-                 Nothing -> "<ERROR: Unexpected missing printer>"
+                 Just pp -> do
+                   b <- IO.liftIO $ isTreeFinal subtree
+                   return $ addFinalTag b $ pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")"
+                 Nothing -> return "<ERROR: Unexpected missing printer>"
             ) nextNodes
   return $ PP.vsep (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents))
 
@@ -241,6 +248,16 @@ up = execReplM $ do
     (Some popped:prevNodes') -> do
       loadTraceNode popped
       modify $ \st -> st { replPrev = prevNodes' }
+
+top :: IO ()
+top = execReplM $ do
+  prevNodes <- gets replPrev
+  case prevNodes of
+    [] -> IO.liftIO $ IO.putStrLn "<<At top level>>"
+    _ -> do
+      Some init <- return $ last prevNodes
+      loadTraceNode init
+      modify $ \st -> st { replPrev = [] }
 
 currentNode :: ReplM_ sym arch (Some (TraceNode sym arch))
 currentNode = gets replNode
@@ -351,7 +368,7 @@ fetch' mi = do
 
 fetchV :: forall nm. Maybe Int -> KnownSymbol nm => IO (TraceNodeType '(Sym,Arch) nm)
 fetchV mi = do
-  Some ((TraceNode lbl v _) :: TraceNode Sym Arch nm') <- fetchSomeNode mi
+  Some ((TraceNode _lbl v _) :: TraceNode Sym Arch nm') <- fetchSomeNode mi
   case testEquality (knownSymbol @nm) (knownSymbol @nm') of
     Just Refl -> return v
     Nothing -> fail "fetchV"

@@ -8,6 +8,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -15,7 +16,7 @@ module Pate.Monad.Environment (
   , BlockCache(..)
   , freshBlockCache
   , ExitPairCache
-  , withToplevelNode
+  , ValidRepr(..)
   , getTopLevel
   ) where
 
@@ -27,7 +28,7 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import qualified Data.Set as Set
 import qualified Data.Time as TM
-import           Data.Kind ( Type )
+import           Data.Kind ( Type, Constraint )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -104,18 +105,24 @@ data EquivEnv sym arch where
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
 
 -- | Needed to produce evidence that our trace tree is valid
-data ValidRepr k where
+data ValidRepr (k :: l) where
   ValidRepr :: forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => ValidRepr '(sym, arch)
 
-instance IsTraceNode (k :: (Type,Type)) "toplevel" where
+instance IsTraceNode (k :: l) "toplevel" where
   type TraceNodeType k "toplevel" = ValidRepr k
   prettyNode () _ = PP.pretty "<Toplevel>"
 
 getTopLevel :: forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => TraceNodeType '(sym,arch) "toplevel"
 getTopLevel = ValidRepr @sym @arch
 
-withToplevelNode :: IsTraceNode k "toplevel" => TraceNodeType k "toplevel" -> (forall sym arch. (k ~ '(sym, arch), PSo.ValidSym sym, PA.ValidArch arch) => a) -> a
+{- 
+type family PolyEq l n (k :: l) (j :: n) :: Constraint
+
+type instance PolyEq l l k j = k ~ j
+
+withToplevelNode :: IsTraceNode (k :: l) "toplevel" => TraceNodeType k "toplevel" -> (forall sym arch. (l ~ (Type, Type), PolyEq l (Type, Type) k '(sym, arch), PSo.ValidSym sym, PA.ValidArch arch) => a) -> a
 withToplevelNode ValidRepr f = f
+-}
 
 data BlockCache arch a where
   BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a
