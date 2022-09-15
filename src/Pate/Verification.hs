@@ -26,7 +26,6 @@
 
 module Pate.Verification
   ( verifyPairs
-  , SomeTraceTree(..)
   ) where
 
 import qualified Control.Concurrent.MVar as MVar
@@ -132,10 +131,6 @@ runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' pd = do
                liftIO $ LJ.writeLog logAction (PE.FunctionEntryInvalidHints repr invalidEntries)
              return oCtxHinted
 
-data SomeTraceTree where
-  SomeTraceTree :: (PA.ValidArch arch, PS.ValidSym sym) => TraceTree '(sym, arch) -> SomeTraceTree
-  NoTraceTree :: SomeTraceTree
-
 verifyPairs ::
   forall arch.
   PA.ValidArch arch =>
@@ -145,7 +140,7 @@ verifyPairs ::
   PH.Hinted (PLE.LoadedELF arch) ->
   PC.VerificationConfig ->
   PC.PatchData ->
-  CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus, SomeTraceTree)
+  CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus)
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
@@ -154,8 +149,7 @@ verifyPairs validArch logAction elf elf' vcfg pd = do
   -- helpful for the kinds of problems we are facing.
   liftIO $ WE.startCaching sym
 
-  (result, tree) <- doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
-  return $ (result, SomeTraceTree tree)
+  doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
@@ -172,7 +166,7 @@ doVerifyPairs ::
   PC.PatchData ->
   N.NonceGenerator IO scope ->
   sym ->
-  CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus, TraceTree '(sym,arch))
+  CME.ExceptT PEE.EquivalenceError IO PEq.EquivalenceStatus
 doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   startTime <- liftIO TM.getCurrentTime
   (traceVals, llvmVals) <- case ( MS.genArchVals (Proxy @MT.MemTraceK) (Proxy @arch) Nothing
@@ -225,6 +219,9 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
 
     exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch globalRegion) undefops
 
+  
+  (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTraceTree (PC.cfgTraceTree vcfg)
+
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
           { PMC.handles = ha
@@ -263,17 +260,19 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                                                 , let txtName = WF.functionName (PVO.functionName o)
                                                 , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
                                                 ]
+          , envTreeBuilder = treeBuilder
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each
     -- override so that they cover both statically linked and dynamically-linked
     -- function calls.
 
-    (result, stats, tree) <- PSP.runVerificationLoop env pPairs'
+    (result, stats) <- PSP.runVerificationLoop env pPairs'
+    finalizeTree treeBuilder
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
-    return $ (result, tree)
+    return result
 
 
 unpackBlockData ::

@@ -38,6 +38,7 @@ import qualified System.Console.ANSI as SCA
 import qualified System.Exit as SE
 import qualified System.IO as IO
 import qualified What4.Interface as WI
+import           Data.Kind ( Type) 
 
 import qualified Data.Macaw.CFG as MC
 
@@ -63,17 +64,18 @@ import qualified JSONReport as JR
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
+import           Pate.TraceTree
 
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
-  status <- runMain opts
+  status <- runMain noTraceTree opts
   case status of
-    (PEq.Errored err, _) -> SE.die (show err)
+    PEq.Errored err -> SE.die (show err)
     _ -> pure ()  
 
-runMain :: CLIOptions -> IO (PEq.EquivalenceStatus, PV.SomeTraceTree)
-runMain opts = do
+runMain :: SomeTraceTree (Type, Type) -> CLIOptions -> IO (PEq.EquivalenceStatus)
+runMain traceTree opts = do
   let
     origPaths = PLE.LoadPaths
       { PLE.binPath = originalBinary opts
@@ -113,6 +115,7 @@ runMain opts = do
         , PC.cfgGoalTimeout = goalTimeout opts
         , PC.cfgMacawDir = saveMacawCFGs opts
         , PC.cfgSolverInteractionFile = solverInteractionFile opts
+        , PC.cfgTraceTree = traceTree
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader

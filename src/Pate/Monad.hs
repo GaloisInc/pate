@@ -291,7 +291,7 @@ withSubTraces ::
   EquivM sym arch a
 withSubTraces (EquivSubTrace f) = do
   treeBuilder <- CMR.asks envTreeBuilder
-  (node, builder) <- IO.liftIO (startNode @'(sym, arch) @nm)
+  (node, builder) <- IO.liftIO ((startNode treeBuilder) @nm )
   IO.liftIO $ addNode treeBuilder node
   r <- (CMR.runReaderT f builder)
         `finally`
@@ -942,7 +942,7 @@ traceBundle bundle msg =
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- CMR.ask
-    catchInIO (f (\x -> runEquivM' env x >>= \case
+    catchInIO (f (\x -> runEquivM env x >>= \case
                      Left err -> throwIO err
                      Right r -> return r))
 
@@ -970,20 +970,8 @@ runEquivM ::
   forall sym arch a.
   EquivEnv sym arch ->
   EquivM sym arch a ->
-  IO (Either PEE.EquivalenceError a, TraceTree '(sym,arch))
-runEquivM env f = withValidEnv env $ do
-  (tree, treeBuilder) <- startTree @'(sym,arch)
-  let env' = env { envTreeBuilder = treeBuilder }
-  r <- (runExceptT $ (CMR.runReaderT (unEQ f) env'))
-  finalizeTree treeBuilder
-  return (r, tree)
-
-runEquivM' ::
-  forall sym arch a.
-  EquivEnv sym arch ->
-  EquivM sym arch a ->
   IO (Either PEE.EquivalenceError a)
-runEquivM' env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
+runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
 
 ----------------------------------------
 -- Errors

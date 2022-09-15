@@ -34,6 +34,7 @@ import           Data.Maybe ( mapMaybe )
 import           Control.Monad ( foldM )
 import           Control.Monad.State ( MonadState, StateT, modify, get, gets, runStateT )
 import qualified Control.Monad.IO.Class as IO
+import           Data.Kind ( Type )
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -51,6 +52,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
+import qualified Pate.Monad.Environment as PME
 import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification as PV
@@ -81,9 +83,7 @@ promptFn :: [String] -> Int -> IO String
 promptFn _ _ = execReplM printToplevel >> return "\n> "
 
 
-instance IsTraceNode (k :: l) "toplevel" where
-  type TraceNodeType k "toplevel" = ()
-  prettyNode () () = "<Toplevel>"
+
 
 data TraceNode sym arch nm where
   TraceNode :: forall nm sym arch. (PS.ValidSym sym, PA.ValidArch arch, IsTraceNode '(sym, arch) nm) => TraceNodeLabel nm -> (TraceNodeType '(sym, arch) nm) -> TraceTree '(sym, arch) -> TraceNode sym arch nm
@@ -107,6 +107,8 @@ data ValidSymArchRepr sym arch symExt archExt where
 data ReplIOStore =
     NoTreeLoaded
   | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState (ReplState sym arch)
+
+
 
 newtype ReplM_ sym arch a = ReplM_ { unReplM :: (StateT (ReplState sym arch) IO a) }
   deriving ( Functor, Applicative, Monad, MonadState (ReplState sym arch), IO.MonadIO )
@@ -136,25 +138,33 @@ run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
   opts <- OA.handleParseResult (OA.execParserPure OA.defaultPrefs PM.cliOptions (words rawOpts))
-  result <- PM.runMain opts
-  case result of
-    (_, PV.SomeTraceTree tree) -> do
-      IO.putStrLn "Loaded tree"
-      let st = ReplState
-            { replTree = tree
-            , replNode = Some (TraceNode @"toplevel" () () tree)
-            , replTags = [Summary]
-            , replPrev = []
-            , replNextTags = [Summary]
-            , replNext = []
-            , replValidRepr = ValidSymArchRepr
-            }
-      IO.writeIORef ref (SomeReplState st)
-      execReplM updateNextNodes
-    (err, _) -> do
-      IO.writeIORef ref NoTreeLoaded
-      IO.putStrLn $ "Verifier run failed:\n" ++ (show err)
-
+  topTraceTree <- someTraceTree @(Type,Type)
+  result <- PM.runMain topTraceTree opts
+  let doFail = IO.writeIORef ref NoTreeLoaded >> IO.putStrLn "Trace tree not loaded"
+  
+  viewSomeTraceTree @(Type,Type) topTraceTree doFail $ \(toptree :: TraceTree k) -> do
+      nodes <- (IO.liftIO $ viewTraceTree toptree)
+      case nodes of
+        [(Some (node :: TraceTreeNode k nm))] -> isTraceNode node $ do
+          case testEquality (knownSymbol @nm) (knownSymbol @"toplevel") of
+            Nothing -> doFail
+            Just Refl -> do
+              contents <- viewTraceTreeNode node
+              case contents of
+                [((toplevel,_), tree)] -> PME.withToplevelNode toplevel $ do              
+                  IO.putStrLn "Loaded tree"
+                  let st = ReplState
+                        { replNode = Some (TraceNode @"toplevel" () toplevel tree)
+                        , replTags = [Summary]
+                        , replPrev = []
+                        , replNextTags = [Summary]
+                        , replNext = []
+                        , replValidRepr = ValidSymArchRepr
+                        }
+                  IO.writeIORef ref (SomeReplState st)
+                  execReplM updateNextNodes
+                _ -> doFail
+        _ -> doFail
 
 rerun :: IO ()
 rerun = do

@@ -65,7 +65,7 @@ runEquivVerification ::
   PC.VerificationConfig ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  IO (PEq.EquivalenceStatus, PV.SomeTraceTree)
+  IO (PEq.EquivalenceStatus)
 runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct consumers) pd dcfg original patched = do
   let elfErrs = mapMaybe (\e -> case e of PEE.ElfParseError pe -> Just pe; _ -> Nothing) loadErrs
   case elfErrs of
@@ -84,7 +84,7 @@ runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct con
     (e : es) -> LJ.writeLog logAct (PE.HintErrorsDWARF (e DLN.:| es))
     _ -> return ()
   st <- (CME.runExceptT $ PV.verifyPairs validArch logAct original patched dcfg pd) >>= \case
-    Left err -> return $ (PEq.Errored err, PV.NoTraceTree)
+    Left err -> return $ PEq.Errored err
     Right st -> return st
   -- Shut down the logger cleanly (if we can - the interactive logger will be
   -- persistent until the user kills it)
@@ -97,12 +97,12 @@ runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct con
   return st
 
 liftToEquivStatus ::
-  LoaderM (PEq.EquivalenceStatus, PV.SomeTraceTree) ->
-  IO (PEq.EquivalenceStatus, PV.SomeTraceTree)
+  LoaderM (PEq.EquivalenceStatus) ->
+  IO (PEq.EquivalenceStatus)
 liftToEquivStatus f = do
   v <- CME.runExceptT (CMW.runWriterT f)
   case v of
-    Left err -> return $ (PEq.Errored (PEE.loaderError err), PV.NoTraceTree)
+    Left err -> return $ PEq.Errored (PEE.loaderError err)
     Right (b, _) -> return b
 
 -- | Given a patch configuration, check that
@@ -111,7 +111,7 @@ liftToEquivStatus f = do
 runSelfEquivConfig :: forall bin.
   RunConfig ->
   PB.WhichBinaryRepr bin ->
-  IO (PEq.EquivalenceStatus, PV.SomeTraceTree)
+  IO (PEq.EquivalenceStatus)
 runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   pd <- case patchInfoPath cfg of
     Just fp -> do
@@ -146,7 +146,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
 
 runEquivConfig ::
   RunConfig ->
-  IO (PEq.EquivalenceStatus, PV.SomeTraceTree)
+  IO (PEq.EquivalenceStatus)
 runEquivConfig cfg = liftToEquivStatus $ do
   pdata <- case patchInfoPath cfg of
     Just fp -> do

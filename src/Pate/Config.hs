@@ -27,9 +27,11 @@ import           Text.Printf ( PrintfArg, printf )
 import qualified Toml
 import           Toml ( (.=) )
 import           Numeric (readHex)
+import           Data.Kind ( Type )
 
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
+import           Pate.TraceTree
 
 -- | A newtype wrapper for a number representing an address
 --
@@ -246,6 +248,8 @@ data VerificationConfig =
     -- ^ Determines the behavior of the verifier when an error is thrown,
     -- with respect to whether or not the error is deemed "recoverable"
     , cfgContextSensitivity :: ContextSensitivity
+    , cfgTraceTree :: SomeTraceTree ((Type,Type))
+    -- ^ handle on a trace tree that has been provided
     }
 
 defaultVerificationCfg :: VerificationConfig
@@ -260,4 +264,5 @@ defaultVerificationCfg =
                      , cfgSolverInteractionFile = Nothing
                      , cfgFailureMode = ThrowOnAnyFailure
                      , cfgContextSensitivity = DistinctFunctionAbstractDomains
+                     , cfgTraceTree = noTraceTree
                      }

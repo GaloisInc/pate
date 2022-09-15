@@ -2,6 +2,12 @@
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -9,6 +15,8 @@ module Pate.Monad.Environment (
   , BlockCache(..)
   , freshBlockCache
   , ExitPairCache
+  , withToplevelNode
+  , getTopLevel
   ) where
 
 import qualified Control.Concurrent as IO
@@ -19,11 +27,13 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import qualified Data.Set as Set
 import qualified Data.Time as TM
+import           Data.Kind ( Type )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
+import qualified Prettyprinter as PP
 
 import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as MS
@@ -92,6 +102,20 @@ data EquivEnv sym arch where
     } -> EquivEnv sym arch
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
+
+-- | Needed to produce evidence that our trace tree is valid
+data ValidRepr k where
+  ValidRepr :: forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => ValidRepr '(sym, arch)
+
+instance IsTraceNode (k :: (Type,Type)) "toplevel" where
+  type TraceNodeType k "toplevel" = ValidRepr k
+  prettyNode () _ = PP.pretty "<Toplevel>"
+
+getTopLevel :: forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => TraceNodeType '(sym,arch) "toplevel"
+getTopLevel = ValidRepr @sym @arch
+
+withToplevelNode :: IsTraceNode k "toplevel" => TraceNodeType k "toplevel" -> (forall sym arch. (k ~ '(sym, arch), PSo.ValidSym sym, PA.ValidArch arch) => a) -> a
+withToplevelNode ValidRepr f = f
 
 data BlockCache arch a where
   BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a

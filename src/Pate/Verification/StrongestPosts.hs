@@ -30,6 +30,7 @@ import           Control.Monad.Except (runExceptT, catchError)
 import           Numeric (showHex)
 import           Prettyprinter
 
+import           Data.Kind (Type)
 import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
@@ -122,31 +123,32 @@ runVerificationLoop ::
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the entry points of functions.
   [PPa.FunPair arch] ->
-  IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics, TraceTree '(sym, arch))
+  IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
-  (result, trees) <- runEquivM env doVerify
+  result <- runEquivM env doVerify
   case result of
-    Left err -> return (PE.Errored err, mempty, trees)
-    Right (status, stats) -> return (status, stats, trees)
+    Left err -> return (PE.Errored err, mempty)
+    Right r -> return r
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
    doVerify =
-     do pg0 <- initializePairGraph pPairs
-        result <- catchError (do
-          -- Do the main work of computing the dataflow fixpoint
-          pg <- pairGraphComputeFixpoint pg0
-          -- Report a summary of any errors we found during analysis
-          reportAnalysisErrors (envLogger env) pg
-          pairGraphComputeVerdict pg) (pure . PE.Errored)
+     do withSubTraces $ subTrace @"toplevel" (PME.getTopLevel @sym @arch) $ do
+          pg0 <- initializePairGraph pPairs
+          result <- catchError (do
+            -- Do the main work of computing the dataflow fixpoint
+            pg <- pairGraphComputeFixpoint pg0
+            -- Report a summary of any errors we found during analysis
+            reportAnalysisErrors (envLogger env) pg
+            pairGraphComputeVerdict pg) (pure . PE.Errored)
 
-        emitEvent (PE.StrongestPostOverallResult result)
+          emitEvent (PE.StrongestPostOverallResult result)
 
-        -- TODO, does reporting these kind of statistics make sense for this verification method?
-        -- Currently, we only really do this to make the types fit at the call site.
-        statVar <- asks envStatistics
-        stats <- liftIO $ MVar.readMVar statVar
+          -- TODO, does reporting these kind of statistics make sense for this verification method?
+          -- Currently, we only really do this to make the types fit at the call site.
+          statVar <- asks envStatistics
+          stats <- liftIO $ MVar.readMVar statVar
 
-        return (result, stats)
+          return (result, stats)
 
 
 -- | Execute the forward dataflow fixpoint algorithm.

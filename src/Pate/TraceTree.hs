@@ -49,6 +49,11 @@ module Pate.TraceTree (
   , addNodeValue
   , finalizeNode
   , finalizeTree
+  , SomeTraceTree
+  , someTraceTree
+  , noTraceTree
+  , startSomeTraceTree
+  , viewSomeTraceTree
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -111,17 +116,18 @@ data NodeBuilder k nm where
 data TreeBuilder k where
   TreeBuilder ::
     { finalizeTree :: IO ()
+    , startNode :: forall nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
     , addNode :: forall nm. TraceTreeNode k nm -> IO ()
     } -> TreeBuilder k
 
 startTree :: forall k. IO (TraceTree k, TreeBuilder k)
 startTree = do
   l <- emptyIOList
-  let builder = TreeBuilder (finalizeIOList l) $ \node -> addIOList (Some node) l
+  let builder = TreeBuilder (finalizeIOList l) (startNode' @k) (\node -> addIOList (Some node) l) 
   return (TraceTree l, builder)
 
-startNode :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
-startNode = do
+startNode' :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
+startNode' = do
   l <- emptyIOList
   let builder = NodeBuilder (finalizeIOList l) $ \lbl v subtree ->
         addIOList ((v, lbl), subtree) l
@@ -231,6 +237,54 @@ viewTraceTree ::
   TraceTree k ->
   IO [(Some (TraceTreeNode k))]
 viewTraceTree (TraceTree ls) = reverse <$> evalIOList ls
+
+data SomeTraceTree' l =
+    StartTree
+  -- ^ a trace tree that we intend to build but hasn't been initialized yet
+  | forall (k :: l). SomeTraceTree' (TraceTree k)
+
+data SomeTraceTree l =
+    SomeTraceTree (IO.IORef (SomeTraceTree' l))
+  | NoTreeBuild
+
+someTraceTree :: forall l. IO (SomeTraceTree l)
+someTraceTree = do
+  ref <- IO.newIORef StartTree
+  return $ SomeTraceTree ref
+
+noTraceTree :: SomeTraceTree l
+noTraceTree = NoTreeBuild
+
+noTreeBuilder :: TreeBuilder k
+noTreeBuilder = TreeBuilder (return ()) noNodeBuilder (\_ -> return ())
+
+noNodeBuilder :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
+noNodeBuilder = do
+  -- todo: add constructor for IOList that is always empty?
+  l <- emptyIOList
+  let builder = NodeBuilder (return ()) (\_ _ _ -> return ())
+  return $ (TraceTreeNode l, builder)
+
+startSomeTraceTree :: forall l (k :: l). SomeTraceTree l -> IO (TreeBuilder k)
+startSomeTraceTree NoTreeBuild = return $ noTreeBuilder
+startSomeTraceTree (SomeTraceTree ref) = do
+  (tree, builder) <- startTree @k
+  IO.writeIORef ref (SomeTraceTree' tree)
+  return builder
+
+viewSomeTraceTree ::
+  forall l a.
+  SomeTraceTree l ->
+  (IO a) {- ^ action for when no tree is loaded -} ->
+  (forall (k :: l). TraceTree k -> IO a) ->
+  IO a
+viewSomeTraceTree NoTreeBuild noTreeFn _ = noTreeFn
+viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
+  t <- IO.readIORef ref
+  case t of
+    SomeTraceTree' (t' :: TraceTree k) -> f @k t'
+    StartTree -> noTreeFn
+    
 
 {-
 -- | Find all nodes in the given 'TraceTree' that match the given Symbol
