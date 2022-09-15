@@ -86,7 +86,7 @@ instance IsTraceNode (k :: l) "toplevel" where
   prettyNode () () = "<Toplevel>"
 
 data TraceNode sym arch nm where
-  TraceNode :: forall nm sym arch. (PS.ValidSym sym, PA.ValidArch arch, IsTraceNode '(sym, arch) nm) => TraceNodeLabel nm -> (TraceNodeType '(sym, arch) nm) -> IO (TraceTree '(sym, arch)) -> TraceNode sym arch nm
+  TraceNode :: forall nm sym arch. (PS.ValidSym sym, PA.ValidArch arch, IsTraceNode '(sym, arch) nm) => TraceNodeLabel nm -> (TraceNodeType '(sym, arch) nm) -> TraceTree '(sym, arch) -> TraceNode sym arch nm
 
 data ReplState sym arch where
   ReplState :: 
@@ -142,7 +142,7 @@ run rawOpts = do
       IO.putStrLn "Loaded tree"
       let st = ReplState
             { replTree = tree
-            , replNode = Some (TraceNode @"toplevel" () () (return tree))
+            , replNode = Some (TraceNode @"toplevel" () () tree)
             , replTags = [Summary]
             , replPrev = []
             , replNextTags = [Summary]
@@ -155,11 +155,12 @@ run rawOpts = do
       IO.writeIORef ref NoTreeLoaded
       IO.putStrLn $ "Verifier run failed:\n" ++ (show err)
 
+
 rerun :: IO ()
 rerun = do
   PIRH.getLastRunCmd >>= \case
     Just rawOpts -> do
-      IO.putStrLn $ "run \"" ++ rawOpts ++ "\""
+      IO.putStrLn $ ":run \"" ++ rawOpts ++ "\""
       run rawOpts
     Nothing -> IO.putStrLn "No previous run found"
 
@@ -168,11 +169,13 @@ printPretty p = do
   let s = PP.layoutPretty PP.defaultLayoutOptions p
   IO.liftIO $ PPRT.renderIO IO.stdout s  
 
+{-
 printTreeSummary :: ReplM sym arch ()
 printTreeSummary = do
   t <- gets replTree
   let p = ppFullTraceTree [Summary] t
   printPretty p
+-}
 
 addNextNodes ::
   forall nm sym arch.
@@ -191,11 +194,10 @@ updateNextNodes ::
   ReplM sym arch ()
 updateNextNodes = do
   tags <- gets replTags
-  t <- gets replTree
-  nodes <- viewTraceTree t
+  (Some (TraceNode _ _ t))  <- gets replNode
+  nodes <- IO.liftIO $ viewTraceTree t
   modify (\st -> st { replNext = [ ], replNextTags = tags })
   mapM_ (\(Some node) -> addNextNodes node) nodes
-   
 
 prettyNextNodes ::
   forall sym arch a.
@@ -216,7 +218,7 @@ printToplevel :: forall sym arch. ReplM sym arch ()
 printToplevel = do
   nextNodes <- gets replNext
   pp <- case nextNodes of
-    [] -> return "<No Subtrees>"
+    [] -> return "<<No Subtrees>>"
     _ -> prettyNextNodes
   printPretty pp
 
@@ -225,13 +227,20 @@ up :: IO ()
 up = execReplM $ do
   prevNodes <- gets replPrev
   case prevNodes of
-    [] -> IO.liftIO $ IO.putStrLn "At top level"
+    [] -> IO.liftIO $ IO.putStrLn "<<At top level>>"
     (Some popped:prevNodes') -> do
       loadTraceNode popped
       modify $ \st -> st { replPrev = prevNodes' }
 
 currentNode :: ReplM_ sym arch (Some (TraceNode sym arch))
 currentNode = gets replNode
+
+fetchNode :: Int -> ReplM_ sym arch (Maybe (Some (TraceNode sym arch)))
+fetchNode i = do
+  nextNodes <- gets replNext
+  case 0 <= i && i < length nextNodes of
+    True -> return $ Just (nextNodes !! i)
+    False -> return Nothing
 
 withCurrentNode :: (forall nm. IsTraceNode '(sym,arch) nm => TraceNode sym arch nm -> ReplM sym arch a) -> ReplM_ sym arch a
 withCurrentNode f = do
@@ -240,13 +249,9 @@ withCurrentNode f = do
 
 
 loadTraceNode :: TraceNode sym arch nm -> ReplM sym arch ()
-loadTraceNode (node@(TraceNode lbl v nextTreeFn)) = do
-  nextTree <- IO.liftIO nextTreeFn
+loadTraceNode node = do
   modify $ \st -> st
-    { replTree = nextTree
-    , replNode = Some node
-    , replTags = replTags st
-    , replPrev = replPrev st
+    { replNode = Some node
     , replNextTags = []
     , replNext = []
     }
@@ -254,15 +259,13 @@ loadTraceNode (node@(TraceNode lbl v nextTreeFn)) = do
 
 goto' :: Int -> ReplM sym arch (Maybe (Some (TraceNode sym arch)))
 goto' idx = do
-  nextNodes <- gets replNext
-  case idx < length nextNodes of
-    True -> do
-      Some nextNode <- return $ nextNodes !! idx
+  fetchNode idx >>= \case
+    Just (Some nextNode) -> do
       lastNode <- currentNode
       loadTraceNode nextNode
       modify $ \st -> st { replPrev = lastNode : (replPrev st) }
       return $ Just (Some nextNode)
-    False -> return Nothing
+    Nothing -> return Nothing
 
 goto :: Int -> IO ()
 goto idx = execReplM $ do
@@ -291,18 +294,26 @@ coerceValidRepr ::
 coerceValidRepr repr = unsafeCoerce repr
 
 
-coerceTraceNode :: ReplM_ sym arch (Some (TraceNode Sym Arch))
-coerceTraceNode = do
-  Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm) <- currentNode
+coerceTraceNode :: forall nm sym arch. TraceNode sym arch nm -> ReplM_ sym arch (TraceNode Sym Arch nm)
+coerceTraceNode (TraceNode lbl v subtree) = do
   repr <- gets replValidRepr
   ValidSymArchRepr <- return $ coerceValidRepr repr
-  return $ Some (TraceNode @nm lbl v subtree)
+  return $ TraceNode @nm lbl v subtree
 
-
-getSomeNode :: IO (Some (TraceNode Sym Arch))
-getSomeNode = runReplM @(Some (TraceNode Sym Arch)) coerceTraceNode >>= \case
-  Just v -> return v
-  Nothing -> fail "getSomeNode"
+fetchSomeNode :: Maybe Int -> IO (Some (TraceNode Sym Arch))
+fetchSomeNode mi = do
+  r <- runReplM @(Maybe (Some (TraceNode Sym Arch))) $ do
+    case mi of
+      Just i -> fetchNode i >>= \case
+        Just (Some tr) -> (Just . Some) <$> coerceTraceNode tr
+        Nothing -> return Nothing
+      Nothing -> do
+        Some tr <- currentNode
+        (Just . Some) <$> coerceTraceNode tr
+  case r of
+    Just (Just v) -> return v
+    _ | Just i <- mi -> fail $ "No such node: " ++ show i
+    _ -> fail "fetchSomeNode"
 
 getValidRepr :: ReplM_ sym arch (ValidSymArchRepr Sym Arch Sym Arch)
 getValidRepr = do
@@ -315,27 +326,25 @@ validRepr = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \cas
   Just repr -> return repr
   Nothing -> fail "validRepr"
 
-getNode :: forall nm. KnownSymbol nm => IO (TraceNode Sym Arch nm)
-getNode = do
-  Some (node@(TraceNode{}) :: TraceNode Sym Arch nm') <- getSomeNode
-  case testEquality (knownSymbol @nm) (knownSymbol @nm') of
-    Just Refl -> return node
-    Nothing -> fail "getNode"
-
-
 this :: TH.ExpQ
-this = do
-  node <- IO.liftIO getSomeNode
+this = fetch' Nothing
+
+fetch :: Int -> TH.ExpQ
+fetch i = fetch' (Just i)
+
+fetch' :: Maybe Int -> TH.ExpQ
+fetch' mi = do
+  node <- IO.liftIO $ fetchSomeNode mi
   tpName <- case node of
     Some (TraceNode{} :: TraceNode Sym Arch nm) -> return $ (TH.LitT (TH.StrTyLit (show (knownSymbol @nm))))
-  [| IO.unsafePerformIO (getV @($( return tpName ))) |]
+  [| IO.unsafePerformIO (fetchV @($( return tpName )) mi) |]  
 
-getV :: forall nm. KnownSymbol nm => IO (TraceNodeType '(Sym,Arch) nm)
-getV = do
-  Some ((TraceNode lbl v _) :: TraceNode Sym Arch nm') <- getSomeNode
+fetchV :: forall nm. Maybe Int -> KnownSymbol nm => IO (TraceNodeType '(Sym,Arch) nm)
+fetchV mi = do
+  Some ((TraceNode lbl v _) :: TraceNode Sym Arch nm') <- fetchSomeNode mi
   case testEquality (knownSymbol @nm) (knownSymbol @nm') of
     Just Refl -> return v
-    Nothing -> fail "getV"
+    Nothing -> fail "fetchV"
 
 -- Hack to allow navigating by entering numbers into the repl
 newtype GotoIndex = GotoIndex Integer

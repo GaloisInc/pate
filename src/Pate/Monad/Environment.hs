@@ -48,6 +48,7 @@ import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
+import           Pate.TraceTree
 
 data EquivEnv sym arch where
   EquivEnv ::
@@ -86,6 +87,8 @@ data EquivEnv sym arch where
                    => PVOL.OverrideConfig sym w
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
+    , envTreeBuilder :: TreeBuilder '(sym, arch)
+    -- ^ structured tracing
     } -> EquivEnv sym arch
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))

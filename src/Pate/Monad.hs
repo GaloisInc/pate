@@ -218,7 +218,7 @@ withProofNonce ::
   forall tp sym arch a.
   (PF.ProofNonce sym tp -> EquivM sym arch a) ->
   EquivM sym arch a
-withProofNonce f = withValid $do
+withProofNonce f = withValid $ do
   nonce <- freshNonce
   let proofNonce = PF.ProofNonce nonce
   CMR.local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
@@ -262,7 +262,7 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError (CMW.WriterT (TraceTree '(sym, arch)) IO)) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -272,7 +272,6 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (E
            , MonadCatch
            , MonadMask
            , MonadError PEE.EquivalenceError
-           , CMW.MonadWriter (TraceTree '(sym, arch))
            )
 
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
@@ -282,12 +281,8 @@ type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
 -- TODO: We could parameterize EquivM over its Writer output type instead, which
 -- would make this a bit more straightforward at the cost of some refactoring.
 newtype EquivSubTrace sym arch nm a =
-  EquivSubTrace (CMW.WriterT ([TraceTreeNode '(sym, arch) nm]) (EquivM_ sym arch) a)
-
-deriving instance IsTraceNode '(sym, arch) nm => Functor (EquivSubTrace sym arch nm)
-deriving instance IsTraceNode '(sym, arch) nm => Applicative (EquivSubTrace sym arch nm)
-deriving instance IsTraceNode '(sym, arch) nm => Monad (EquivSubTrace sym arch nm)
-deriving instance IsTraceNode '(sym, arch) nm => IO.MonadIO (EquivSubTrace sym arch nm)
+  EquivSubTrace (CMR.ReaderT (NodeBuilder '(sym, arch) nm) (EquivM_ sym arch) a)
+  deriving (Functor, Applicative, Monad, IO.MonadIO)
 
 withSubTraces ::
   forall nm sym arch a.
@@ -295,8 +290,12 @@ withSubTraces ::
   EquivSubTrace sym arch nm a ->
   EquivM sym arch a
 withSubTraces (EquivSubTrace f) = do
-  (r, w) <- CMW.runWriterT f
-  CMW.tell =<< mkTraceTree w
+  treeBuilder <- CMR.asks envTreeBuilder
+  (node, builder) <- IO.liftIO (startNode @'(sym, arch) @nm)
+  IO.liftIO $ addNode treeBuilder node
+  r <- (CMR.runReaderT f builder)
+        `finally`
+       (IO.liftIO $ finalizeNode builder)
   return r
 
 subTraceLabel ::
@@ -307,10 +306,14 @@ subTraceLabel ::
   EquivM sym arch a ->
   EquivSubTrace sym arch nm a
 subTraceLabel v lbl f = EquivSubTrace $ do
-  env <- CMR.ask
-  (IO.liftIO $ runEquivM env f) >>= \case
-    (Left err, w) -> mkTraceTreeNode v lbl w >>= (\x -> CMW.tell [x]) >> throwError err
-    (Right result, w) -> mkTraceTreeNode v lbl w >>= (\x -> CMW.tell [x]) >> return result
+  nodeBuilder <- CMR.ask
+  (subtree, treeBuilder) <- IO.liftIO $ startTree @'(sym, arch)
+  IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
+  r <- CMR.lift $
+    (CMR.local (\env -> env { envTreeBuilder = treeBuilder }) (withValid $ f))
+    `finally`
+    (IO.liftIO $ finalizeTree treeBuilder)
+  return r
 
 subTrace ::
   forall nm sym arch a.
@@ -336,8 +339,9 @@ emitTraceLabel ::
   TraceNodeType '(sym, arch) nm ->
   EquivM sym arch ()
 emitTraceLabel lbl v = do
-  node <- mkTraceTreeNode @nm v lbl mempty
-  CMW.tell =<< mkTraceTree [node]
+  treeBuilder <- CMR.asks envTreeBuilder
+  node <- IO.liftIO $ singleNode @'(sym,arch) @nm lbl v
+  IO.liftIO $ addNode treeBuilder node
 
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some PBi.WhichBinaryRepr
@@ -938,13 +942,9 @@ traceBundle bundle msg =
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- CMR.ask
-    ref <- IO.liftIO $ IO.newIORef (mempty :: TraceTree '(sym,arch))
-
-    catchInIO (f (\x -> runEquivM env x >>= \case
-                     (Left err, w) -> IO.modifyIORef' ref ((<>) w) >> throwIO err
-                     (Right result, w) -> IO.modifyIORef' ref ((<>) w) >> return result))
-      `finally`
-      (IO.liftIO (IO.readIORef ref) >>= CMW.tell)
+    catchInIO (f (\x -> runEquivM' env x >>= \case
+                     Left err -> throwIO err
+                     Right r -> return r))
 
 catchInIO ::
   forall sym arch a.
@@ -967,10 +967,23 @@ runInIO1 f g = IO.withRunInIO $ \runInIO -> g (\a -> runInIO (f a))
 -- Running
 
 runEquivM ::
+  forall sym arch a.
   EquivEnv sym arch ->
   EquivM sym arch a ->
   IO (Either PEE.EquivalenceError a, TraceTree '(sym,arch))
-runEquivM env f = withValidEnv env $ CMW.runWriterT (runExceptT $ (CMR.runReaderT (unEQ f) env))
+runEquivM env f = withValidEnv env $ do
+  (tree, treeBuilder) <- startTree @'(sym,arch)
+  let env' = env { envTreeBuilder = treeBuilder }
+  r <- (runExceptT $ (CMR.runReaderT (unEQ f) env'))
+  finalizeTree treeBuilder
+  return (r, tree)
+
+runEquivM' ::
+  forall sym arch a.
+  EquivEnv sym arch ->
+  EquivM sym arch a ->
+  IO (Either PEE.EquivalenceError a)
+runEquivM' env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
 
 ----------------------------------------
 -- Errors

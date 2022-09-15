@@ -39,22 +39,22 @@ module Pate.TraceTree (
   , TraceTag(..)
   , viewTraceTreeNode
   , viewTraceTree
-  , findNodes
-  , nodeValue
-  , nodeValueLabel
-  , asTreeKind
-  , mkTraceTreeNode
-  , mkTraceTree
-  , ppTraceTreeNode
-  , ppTraceTree
-  , ppFullTraceTree
-  , ppFullTraceTreeNode
   , prettySummary
+  , NodeBuilder
+  , TreeBuilder
+  , startTree
+  , startNode
+  , singleNode
+  , addNode
+  , addNodeValue
+  , finalizeNode
+  , finalizeTree
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
 import           Data.Kind ( Type )
 import qualified Control.Monad.IO.Class as IO
+import qualified Data.IORef as IO
 import           Data.String
 import           Data.Maybe ( mapMaybe, fromJust )
 import qualified Data.Map as Map
@@ -75,6 +75,69 @@ data TraceTag =
 instance IsString TraceTag where
   fromString str = Custom str
 
+-- | Allowing for lazy evaluation of trace trees
+
+data IOList' a = IOList' { ioList :: [a], ioListFinal :: Bool }
+newtype IOList a = IOList (IO.IORef (IOList' a))
+
+evalIOList' :: IOList a -> IO (IOList' a)
+evalIOList' (IOList ref) = do
+  IO.liftIO $ IO.readIORef ref
+
+evalIOList :: IOList a -> IO [a]
+evalIOList l = ioList <$> evalIOList' l
+
+addIOList :: a -> IOList a -> IO ()
+addIOList a (IOList ref) =
+  IO.modifyIORef ref (\(IOList' as isFinal) -> (IOList' (a : as) isFinal))
+
+finalizeIOList :: IOList a -> IO ()
+finalizeIOList (IOList ref) = IO.modifyIORef ref (\(IOList' as _) -> IOList' as True)
+
+isFinalIOList :: IOList a -> IO Bool
+isFinalIOList l = ioListFinal <$> evalIOList' l
+
+emptyIOList :: IO (IOList a)
+emptyIOList = do
+  r <- IO.liftIO $ IO.newIORef (IOList' [] False)
+  return $ IOList r
+
+data NodeBuilder k nm where
+  NodeBuilder ::
+    { finalizeNode :: IO ()
+    , addNodeValue :: TraceNodeLabel nm -> TraceNodeType k nm -> TraceTree k -> IO ()
+    } -> NodeBuilder k nm
+
+data TreeBuilder k where
+  TreeBuilder ::
+    { finalizeTree :: IO ()
+    , addNode :: forall nm. TraceTreeNode k nm -> IO ()
+    } -> TreeBuilder k
+
+startTree :: forall k. IO (TraceTree k, TreeBuilder k)
+startTree = do
+  l <- emptyIOList
+  let builder = TreeBuilder (finalizeIOList l) $ \node -> addIOList (Some node) l
+  return (TraceTree l, builder)
+
+startNode :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
+startNode = do
+  l <- emptyIOList
+  let builder = NodeBuilder (finalizeIOList l) $ \lbl v subtree ->
+        addIOList ((v, lbl), subtree) l
+  return (TraceTreeNode l, builder)
+
+singleNode ::
+  forall k nm.
+  IsTraceNode k nm =>
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  IO (TraceTreeNode k nm)
+singleNode lbl v = do
+  l <- emptyIOList
+  t <- emptyIOList
+  addIOList ((v, lbl), TraceTree t) l
+  return $ TraceTreeNode l
 
 -- | A labeled node in a 'TraceTree' that contains a list of sub-trees
 --   annotated with values according to the 'IsTraceNode' class instance
@@ -83,13 +146,12 @@ instance IsString TraceTag where
 --   to the type represented by 'nm' via the 'IsTraceNode' class
 data TraceTreeNode (k :: l) nm where
   TraceTreeNode :: IsTraceNode k nm =>
-    [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)] ->
+    IOList ((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k) ->
     TraceTreeNode k nm
 
 -- | A heterogenous list of 'TraceTreeNode' elements, representing
 --   all of the tracing context that was emitted at this level
-newtype TraceTree k = TraceTree [Some (TraceTreeNode k)]
-  deriving ( Semigroup, Monoid )
+newtype TraceTree k = TraceTree (IOList (Some (TraceTreeNode k)))
 
 isTraceNode :: TraceTreeNode k nm -> (IsTraceNode k nm => a) -> a
 isTraceNode TraceTreeNode{} a = a
@@ -155,55 +217,22 @@ getNodePrinter (t : tags) = case Map.lookup t (tagsMap @k @nm) of
   Just f -> Just f
   Nothing -> getNodePrinter @k @nm tags
 
---  These functions assume that the IO monad is required to both inspect
---  and construct 'TraceTree' and 'TraceTreeNode' values. 
---  Although the current implementation is pure, this is a
---  forward-compatible interface for a more robust implementation with
---  sharing and snapshots
-
-
-mkTraceTreeNode ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  TraceNodeType k nm ->
-  TraceNodeLabel nm ->
-  TraceTree k ->
-  m (TraceTreeNode k nm)
-mkTraceTreeNode v lbl subtree = return $ TraceTreeNode [((v,lbl), subtree)]
-
--- | Collect a homogeneous list of nodes into a single 'TraceTreeNode'
---   and return a singleton 'TraceTree'
-mkTraceTree ::
-  forall nm k m.
-  IO.MonadIO m =>
-  IsTraceNode k nm =>
-  [TraceTreeNode k nm] ->
-  m (TraceTree k)
-mkTraceTree ns =
-  let
-    contents :: [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)]
-    contents = concat $ map (\(TraceTreeNode xs) -> xs) ns
-
-    node :: TraceTreeNode k nm
-    node = TraceTreeNode contents
-  in return $ TraceTree [Some node]
-
--- | Inspect one level of a 'TraceTreeNode' and defer inspecting subtrees
+-- | Inspect one level of a 'TraceTreeNode', returning the
+--   contents in the order that they were added.
 viewTraceTreeNode ::
-  forall k nm m.
-  IO.MonadIO m =>
+  forall k nm.
   TraceTreeNode k nm ->
-  m [((TraceNodeType k nm, TraceNodeLabel nm), m (TraceTree k))]
-viewTraceTreeNode (TraceTreeNode subtrees) = return (map (\(v, t) -> (v, return t)) subtrees)
+  IO [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)]
+viewTraceTreeNode (TraceTreeNode subtrees) = reverse <$> evalIOList subtrees
 
--- | Retrieve the top-level list of nodes for a 'TraceTree'
+-- | Retrieve the top-level list of nodes for a 'TraceTree' in
+--   the order that they were added.
 viewTraceTree ::
-  IO.MonadIO m =>
   TraceTree k ->
-  m [(Some (TraceTreeNode k))]
-viewTraceTree (TraceTree ls) = return ls
+  IO [(Some (TraceTreeNode k))]
+viewTraceTree (TraceTree ls) = reverse <$> evalIOList ls
 
+{-
 -- | Find all nodes in the given 'TraceTree' that match the given Symbol
 --   (as implied by the 'nm' type parameter)
 findNodes ::
@@ -317,3 +346,4 @@ instance forall k nm. PP.Pretty (TraceTreeNode k nm) where
 
 instance PP.Pretty (TraceTree k) where
   pretty tree = ppFullTraceTree [Full] tree
+-}
