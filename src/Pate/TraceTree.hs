@@ -47,15 +47,16 @@ module Pate.TraceTree (
   , singleNode
   , addNode
   , addNodeValue
-  , finalizeNode
-  , finalizeTree
+  , updateTreeStatus
+  , updateNodeStatus
   , SomeTraceTree
   , someTraceTree
   , noTraceTree
   , startSomeTraceTree
   , viewSomeTraceTree
-  , isNodeFinal
-  , isTreeFinal
+  , NodeStatus(..)
+  , getNodeStatus
+  , getTreeStatus
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -78,12 +79,16 @@ data TraceTag =
   | Custom String
   deriving (Eq, Ord)
 
+data NodeStatus =
+    NodeStatus { isFinished :: Bool }
+  | NodeError { nodeError :: String, isFinished :: Bool }
+
+
 instance IsString TraceTag where
   fromString str = Custom str
 
 -- | Allowing for lazy evaluation of trace trees
-
-data IOList' a = IOList' { ioList :: [a], ioListFinal :: Bool }
+data IOList' a = IOList' { ioList :: [a], ioListStatus :: NodeStatus }
 newtype IOList a = IOList (IO.IORef (IOList' a))
 
 evalIOList' :: IOList a -> IO (IOList' a)
@@ -95,42 +100,71 @@ evalIOList l = ioList <$> evalIOList' l
 
 addIOList :: a -> IOList a -> IO ()
 addIOList a (IOList ref) =
-  IO.modifyIORef ref (\(IOList' as isFinal) -> (IOList' (a : as) isFinal))
+  IO.modifyIORef ref (\(IOList' as st) -> (IOList' (a : as) st))
 
-finalizeIOList :: IOList a -> IO ()
-finalizeIOList (IOList ref) = IO.modifyIORef ref (\(IOList' as _) -> IOList' as True)
+modifyIOListStatus :: (NodeStatus -> NodeStatus) -> IOList a -> IO ()
+modifyIOListStatus f (IOList ref) = IO.modifyIORef ref (\(IOList' as st) -> IOList' as (f st))
 
-isFinalIOList :: IOList a -> IO Bool
-isFinalIOList l = ioListFinal <$> evalIOList' l
+propagateIOListStatus :: NodeStatus -> IOList a -> IO ()
+propagateIOListStatus st l = modifyIOListStatus (propagateStatus st) l
+
+
+propagateStatus :: NodeStatus -> NodeStatus -> NodeStatus
+propagateStatus stNew stOld = case isFinished stOld of
+  True -> stOld
+  False -> case (stNew, stOld) of
+   (NodeError newErr newFin, NodeError oldErr _) -> NodeError oldErr newFin
+   (NodeError newErr newFin, NodeStatus _) -> NodeError newErr newFin
+   (NodeStatus True, _) -> stNew
+   _ -> stOld
+
+getIOListStatus :: IOList a -> IO NodeStatus
+getIOListStatus l = ioListStatus <$> evalIOList' l
 
 emptyIOList :: IO (IOList a)
 emptyIOList = do
-  r <- IO.liftIO $ IO.newIORef (IOList' [] False)
+  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus False))
   return $ IOList r
 
 data NodeBuilder k nm where
   NodeBuilder ::
-    { finalizeNode :: IO ()
+    { updateNodeStatus :: NodeStatus -> IO ()
     , addNodeValue :: TraceNodeLabel nm -> TraceNodeType k nm -> TraceTree k -> IO ()
     } -> NodeBuilder k nm
 
 data TreeBuilder k where
   TreeBuilder ::
-    { finalizeTree :: IO ()
+    { updateTreeStatus :: NodeStatus -> IO ()
     , startNode :: forall nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
     , addNode :: forall nm. TraceTreeNode k nm -> IO ()
     } -> TreeBuilder k
 
-startTree :: forall k. IO (TraceTree k, TreeBuilder k)
-startTree = do
+addNodeDependency :: NodeBuilder k nm -> TreeBuilder k -> TreeBuilder k
+addNodeDependency nodeBuilder treeBuilder =
+  let finish st = case st of
+        -- importantly, we don't propagate regular status updates to ancestors,
+        -- otherwise finalizing a child would cause all parents to finalize
+        NodeStatus _ -> updateTreeStatus treeBuilder st
+        _ -> updateNodeStatus nodeBuilder st >> updateTreeStatus treeBuilder st
+  in treeBuilder { updateTreeStatus = finish } 
+
+addTreeDependency :: TreeBuilder k -> NodeBuilder k nm -> NodeBuilder k nm
+addTreeDependency treeBuilder nodeBuilder =
+  let finish st = case st of
+        NodeStatus _ -> updateNodeStatus nodeBuilder st
+        _ -> updateTreeStatus treeBuilder st >> updateNodeStatus nodeBuilder st
+  in nodeBuilder { updateNodeStatus = finish }
+
+startTree :: forall k nm. IO (TraceTree k, TreeBuilder k)
+startTree  = do
   l <- emptyIOList
-  let builder = TreeBuilder (finalizeIOList l) (startNode' @k) (\node -> addIOList (Some node) l) 
+  let builder = TreeBuilder (\st -> propagateIOListStatus st l) (startNode' @k) (\node -> addIOList (Some node) l) 
   return (TraceTree l, builder)
 
 startNode' :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
 startNode' = do
   l <- emptyIOList
-  let builder = NodeBuilder (finalizeIOList l) $ \lbl v subtree ->
+  let builder = NodeBuilder (\st -> propagateIOListStatus st l) $ \lbl v subtree ->
         addIOList ((v, lbl), subtree) l
   return (TraceTreeNode l, builder)
 
@@ -143,7 +177,7 @@ singleNode ::
 singleNode lbl v = do
   l <- emptyIOList
   t <- emptyIOList
-  finalizeIOList t
+  modifyIOListStatus (\_ -> NodeStatus True) t
   addIOList ((v, lbl), TraceTree t) l
   return $ TraceTreeNode l
 
@@ -233,11 +267,11 @@ viewTraceTreeNode ::
   IO [((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k)]
 viewTraceTreeNode (TraceTreeNode subtrees) = reverse <$> evalIOList subtrees
 
-isNodeFinal ::
+getNodeStatus ::
   forall k nm.
   TraceTreeNode k nm ->
-  IO Bool
-isNodeFinal (TraceTreeNode subtrees) = isFinalIOList subtrees
+  IO NodeStatus
+getNodeStatus (TraceTreeNode subtrees) = getIOListStatus subtrees
 
 -- | Retrieve the top-level list of nodes for a 'TraceTree' in
 --   the order that they were added.
@@ -246,11 +280,11 @@ viewTraceTree ::
   IO [(Some (TraceTreeNode k))]
 viewTraceTree (TraceTree ls) = reverse <$> evalIOList ls
 
-isTreeFinal ::
+getTreeStatus ::
   forall k.
   TraceTree k ->
-  IO Bool
-isTreeFinal (TraceTree ls) = isFinalIOList ls
+  IO NodeStatus
+getTreeStatus (TraceTree ls) = getIOListStatus ls
 
 data SomeTraceTree' =
     StartTree
@@ -270,13 +304,13 @@ noTraceTree :: SomeTraceTree
 noTraceTree = NoTreeBuild
 
 noTreeBuilder :: TreeBuilder k
-noTreeBuilder = TreeBuilder (return ()) noNodeBuilder (\_ -> return ())
+noTreeBuilder = TreeBuilder (\_ -> return ()) noNodeBuilder (\_ -> return ())
 
 noNodeBuilder :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
 noNodeBuilder = do
   -- todo: add constructor for IOList that is always empty?
   l <- emptyIOList
-  let builder = NodeBuilder (return ()) (\_ _ _ -> return ())
+  let builder = NodeBuilder (\_ -> return ()) (\_ _ _ -> return ())
   return $ (TraceTreeNode l, builder)
 
 startSomeTraceTree :: forall k. SomeTraceTree -> IO (TreeBuilder k)

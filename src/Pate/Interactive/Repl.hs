@@ -81,7 +81,7 @@ printFn a = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \x -
   IO.putStrLn (showIfValid x a)
 
 promptFn :: [String] -> Int -> IO String
-promptFn _ _ = execReplM (updateNextNodes >> printToplevel) >> return "\n> "
+promptFn _ _ = execReplM (updateNextNodes >> printToplevel) >> return ""
 
 
 data TraceNode sym arch nm where
@@ -210,9 +210,17 @@ updateNextNodes = do
   modify (\st -> st { replNext = [ ], replNextTags = tags })
   mapM_ (\(Some node) -> addNextNodes node) nodes
 
-addFinalTag :: Bool -> PP.Doc a -> PP.Doc a
-addFinalTag True p = p
-addFinalTag False p = p <+> "(*)"
+addStatusTag :: NodeStatus -> PP.Doc a -> PP.Doc a
+addStatusTag st p = case ppStatusTag st of
+  Just pst -> p <+> "(" <> pst <> ")"
+  Nothing -> p
+
+ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
+ppStatusTag st = case st of
+  NodeStatus False -> Just "*"
+  NodeError _ False -> Just "*x"
+  NodeError _ True -> Just "x"
+  _ -> Nothing
 
 prettyNextNodes ::
   forall sym arch a.
@@ -225,8 +233,8 @@ prettyNextNodes = do
        mapM (\(Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) ->
                case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                  Just pp -> do
-                   b <- IO.liftIO $ isTreeFinal subtree
-                   return $ addFinalTag b $ pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")"
+                   b <- IO.liftIO $ getTreeStatus subtree
+                   return $ addStatusTag b $ pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")"
                  Nothing -> return "<ERROR: Unexpected missing printer>"
             ) nextNodes
   return $ PP.vsep (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents))
@@ -234,9 +242,18 @@ prettyNextNodes = do
 printToplevel :: forall sym arch. ReplM sym arch ()
 printToplevel = do
   nextNodes <- gets replNext
+  (Some (TraceNode _ _ t))  <- gets replNode
+  st <- IO.liftIO $ getTreeStatus t
+  let prompt = case ppStatusTag st of
+        Just pst -> (pst <+> ">")
+        Nothing -> ">"
+    
   pp <- case nextNodes of
-    [] -> return "<<No Subtrees>>"
-    _ -> prettyNextNodes
+    [] -> return $ PP.vsep [ "<<No Subtrees>>", prompt ]
+    _ -> do
+      p <- prettyNextNodes
+      return $ PP.vsep [ p, prompt ]
+
   printPretty pp
 
 
@@ -258,6 +275,17 @@ top = execReplM $ do
       Some init <- return $ last prevNodes
       loadTraceNode init
       modify $ \st -> st { replPrev = [] }
+
+status :: IO ()
+status = execReplM $ do
+  (Some (TraceNode _ _ t))  <- gets replNode
+  st <- IO.liftIO $ getTreeStatus t
+  let msg = case st of
+        NodeStatus False -> "Unfinished"
+        NodeStatus True -> "Success"
+        NodeError msg _ -> "Error: " ++ msg
+  IO.liftIO $ IO.putStrLn msg
+
 
 currentNode :: ReplM_ sym arch (Some (TraceNode sym arch))
 currentNode = gets replNode

@@ -291,11 +291,11 @@ withSubTraces ::
   EquivM sym arch a
 withSubTraces (EquivSubTrace f) = do
   treeBuilder <- CMR.asks envTreeBuilder
-  (node, builder) <- IO.liftIO ((startNode treeBuilder) @nm )
+  (node, nodeBuilder) <- IO.liftIO ((startNode treeBuilder) @nm )
   IO.liftIO $ addNode treeBuilder node
-  r <- (CMR.runReaderT f builder)
-        `finally`
-       (IO.liftIO $ finalizeNode builder)
+  r <- catchError
+        (CMR.runReaderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
+        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError (show e) True)) >> throwError e)
   return r
 
 subTraceLabel ::
@@ -310,9 +310,10 @@ subTraceLabel v lbl f = EquivSubTrace $ do
   (subtree, treeBuilder) <- IO.liftIO $ startTree @'(sym, arch)
   IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
   r <- CMR.lift $
-    (CMR.local (\env -> env { envTreeBuilder = treeBuilder }) (withValid $ f))
-    `finally`
-    (IO.liftIO $ finalizeTree treeBuilder)
+    catchError
+      (CMR.local (\env -> env { envTreeBuilder = treeBuilder }) $ (withValid $ f)
+        >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus True)) >> return r)
+      (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError (show e) True)) >> throwError e)
   return r
 
 subTrace ::

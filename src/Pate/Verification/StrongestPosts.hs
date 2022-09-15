@@ -293,7 +293,7 @@ visitNode scope (ReturnNode fPair) d gr0 =
    -- Here, we're using a bit of a trick to propagate abstract domain information to call sites.
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
    -- using the ordinary widening machinery.
-
+  
    processReturn gr node@(nodeBlocks -> ret) = withPair ret $ do
      let vars = PS.scopeVars scope
      validState <- PVV.validInitState (Just ret) (PS.simVarState (PPa.pOriginal vars)) (PS.simVarState (PPa.pPatched vars))
