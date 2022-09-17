@@ -88,6 +88,7 @@ module Pate.Monad
   , emitTraceLabel
   , withSubTraces
   , subTrace
+  , subTree
   )
   where
 
@@ -112,6 +113,7 @@ import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Kind ( Type )
 import           Data.Typeable
+import           Data.Default
 
 import qualified Prettyprinter as PP
 
@@ -262,7 +264,7 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: (CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO)) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -274,6 +276,16 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (E
            , MonadError PEE.EquivalenceError
            )
 
+
+instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
+  type NodeBuilderM (EquivM_ sym arch) = EquivSubTrace sym arch
+  getTreeBuilder = CMR.asks envTreeBuilder
+  getNodeBuilder = EquivSubTrace getNodeBuilderT
+
+  liftTreeBuilder treeBuilder f = EquivSubTrace $ liftToNodeBuilder (CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f)
+
+  liftNodeBuilder nodeBuilder (EquivSubTrace f) = runNodeBuilderT f nodeBuilder
+
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
 type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
 
@@ -281,9 +293,15 @@ type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
 -- TODO: We could parameterize EquivM over its Writer output type instead, which
 -- would make this a bit more straightforward at the cost of some refactoring.
 newtype EquivSubTrace sym arch nm a =
-  EquivSubTrace (CMR.ReaderT (NodeBuilder '(sym, arch) nm) (EquivM_ sym arch) a)
-  deriving (Functor, Applicative, Monad, IO.MonadIO)
+  EquivSubTrace (NodeBuilderT '(sym, arch) (EquivM_ sym arch) nm a)
+  deriving (Functor
+           , Applicative
+           , Monad
+           , IO.MonadIO
+           , MonadError PEE.EquivalenceError
+           )
 
+{-
 withSubTraces ::
   forall nm sym arch a.
   IsTraceNode '(sym, arch) nm =>
@@ -297,6 +315,17 @@ withSubTraces (EquivSubTrace f) = do
         (CMR.runReaderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
         (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError (show e) True)) >> throwError e)
   return r
+
+subTree ::
+  forall nm sym arch a.
+  IsTraceNode '(sym, arch) nm =>
+  String ->
+  EquivSubTrace sym arch nm a ->
+  EquivM sym arch a
+subTree lbl f =
+  withSubTraces @"subtree" $
+    subTrace @"subtree" lbl $
+      withSubTraces @nm f
 
 subTraceLabel ::
   forall nm sym arch a.
@@ -316,22 +345,15 @@ subTraceLabel v lbl f = EquivSubTrace $ do
       (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError (show e) True)) >> throwError e)
   return r
 
-subTrace ::
-  forall nm sym arch a.
-  IsTraceNode '(sym, arch) nm =>
-  TraceNodeLabel nm ~ () =>
-  TraceNodeType '(sym, arch) nm ->
-  EquivM sym arch a ->
-  EquivSubTrace sym arch nm a
-subTrace v f = subTraceLabel v () f
+
 
 emitTrace ::
   forall nm sym arch.
   IsTraceNode '(sym, arch) nm =>
   TraceNodeType '(sym, arch) nm ->
-  TraceNodeLabel nm ~ () =>
+  Default (TraceNodeLabel nm) =>
   EquivM sym arch ()
-emitTrace v = emitTraceLabel @nm () v
+emitTrace v = emitTraceLabel @nm def v
 
 emitTraceLabel ::
   forall nm sym arch.
@@ -343,6 +365,8 @@ emitTraceLabel lbl v = do
   treeBuilder <- CMR.asks envTreeBuilder
   node <- IO.liftIO $ singleNode @'(sym,arch) @nm lbl v
   IO.liftIO $ addNode treeBuilder node
+
+-}
 
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some PBi.WhichBinaryRepr
@@ -531,11 +555,6 @@ withFreshVars blocks f = do
       W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "assumption" where
-  type TraceNodeType '(sym,arch) "assumption" = AssumptionSet sym
-  prettyNode () asm = PP.pretty asm
-  nodeTags = [("solver", \_ -> PP.pretty)]
   
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
@@ -545,7 +564,6 @@ withAssumptionSet ::
   EquivM_ sym arch f ->
   EquivM sym arch f
 withAssumptionSet asm f = withSym $ \sym -> do
-  emitTrace @"assumption" asm
   curAsm <- currentAsm
   p <- liftIO $ PAS.toPred sym asm
   case PAS.isAssumedPred curAsm p of
@@ -697,11 +715,21 @@ heuristicSat desc p k = do
     Left _err -> k W4R.Unknown
     Right a -> return a
 
+data ConcretizeAttempt sym =
+  forall tp. ConcretizeAttempt (W4.SymExpr sym tp)
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "concretize" where
+  type TraceNodeType '(sym,arch) "concretize" = ConcretizeAttempt sym
+  prettyNode () (ConcretizeAttempt t) = W4.printSymExpr t
+  nodeTags = [(Summary, \() (ConcretizeAttempt t) -> PP.pretty (head (lines (show (W4.printSymExpr t)))))]
+
+
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::
   W4.SymExpr sym tp ->
   EquivM sym arch (W4.SymExpr sym tp)
 concretizeWithSolver e = withSym $ \sym -> do
+  
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
         r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
@@ -711,7 +739,10 @@ concretizeWithSolver e = withSym $ \sym -> do
           Left _err -> k W4R.Unknown
           Right a -> return a
 
-  PVC.resolveSingletonSymbolicAsDefault wsolver e
+  subTree "concretizeWithSolver" $ subTrace @"concretize" (ConcretizeAttempt e) $ do
+    e' <- PVC.resolveSingletonSymbolicAsDefault wsolver e
+    emitTrace @"concretize" (ConcretizeAttempt e)
+    return e'
 
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --
@@ -972,7 +1003,7 @@ runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   IO (Either PEE.EquivalenceError a)
-runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
+runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f)) env
 
 ----------------------------------------
 -- Errors

@@ -28,11 +28,17 @@ type class with a (distinct) symbol.
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 module Pate.TraceTree (
     TraceTree
   , TraceTreeNode
   , IsTraceNode(..)
+
   , isTraceNode
   , prettyNodeAt
   , nodeShownAt
@@ -57,6 +63,19 @@ module Pate.TraceTree (
   , NodeStatus(..)
   , getNodeStatus
   , getTreeStatus
+  , MonadTreeBuilder(..)
+  , NodeBuilderT(..)
+  , TreeBuilderT(..)
+  , NodeBuilderM
+  , liftToNodeBuilder
+  , runNodeBuilderT
+  , getNodeBuilderT
+  , withSubTraces
+  , subTraceLabel
+  , subTree
+  , subTrace
+  , emitTraceLabel
+  , emitTrace
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -66,6 +85,12 @@ import qualified Data.IORef as IO
 import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
+import           Data.Default
+import qualified Control.Monad.Reader as CMR
+import qualified Control.Monad.Trans as CMT
+import           Control.Monad.Error
+import           Control.Monad.Except
+import           Control.Monad.Catch
 
 import qualified Prettyprinter as PP
 
@@ -332,3 +357,144 @@ viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
   case t of
     SomeTraceTree' (t' :: TraceTree k) -> f @_ @k t'
     StartTree -> noTreeFn
+
+-- named subtrees
+instance IsTraceNode k "subtree" where
+  type TraceNodeType k "subtree" = String
+  prettyNode () nm = PP.pretty nm
+
+-- ad-hoc messages
+instance IsTraceNode k "message" where
+  type TraceNodeType k "message" = String
+  prettyNode () msg = PP.pretty msg
+  nodeTags = [("message", \_ msg -> PP.pretty msg)]
+
+
+class MonadTreeBuilder k m | m -> k where
+  type NodeBuilderM m :: Symbol -> Type -> Type
+  getTreeBuilder :: m (TreeBuilder k)
+  getNodeBuilder :: NodeBuilderM m nm (NodeBuilder k nm)
+  
+  liftTreeBuilder :: forall nm a. TreeBuilder k -> m a -> NodeBuilderM m nm a
+  liftNodeBuilder :: forall nm a. NodeBuilder k nm -> NodeBuilderM m nm a -> m a
+  
+newtype TreeBuilderT k m a = TreeBuilderT (CMR.ReaderT (TreeBuilder k) m a)
+  deriving (Functor, Applicative, Monad, CMT.MonadTrans, IO.MonadIO, MonadThrow, MonadCatch, MonadMask)
+
+instance CMR.MonadReader r m => CMR.MonadReader r (TreeBuilderT k m) where
+  ask = TreeBuilderT $ lift CMR.ask
+  local f (TreeBuilderT g) = TreeBuilderT $ do
+    treeBuilder <- CMR.ask
+    lift $ CMR.local f (CMR.runReaderT g treeBuilder)
+
+deriving instance MonadError e m => MonadError e (TreeBuilderT k m)
+
+newtype NodeBuilderT k m nm a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a)
+  deriving (Functor, Applicative, Monad, IO.MonadIO)
+
+liftToNodeBuilder :: Monad m => m a -> NodeBuilderT k m nm a
+liftToNodeBuilder f = NodeBuilderT (lift f)
+
+runNodeBuilderT :: NodeBuilderT k m nm a -> NodeBuilder k nm -> m a
+runNodeBuilderT (NodeBuilderT f) nodeBuilder = CMR.runReaderT f nodeBuilder
+
+getNodeBuilderT :: Monad m => NodeBuilderT k m nm (NodeBuilder k nm)
+getNodeBuilderT = NodeBuilderT $ CMR.ask
+
+deriving instance MonadError e m => MonadError e (NodeBuilderT k m nm)
+
+instance Monad m => MonadTreeBuilder k (TreeBuilderT k m) where
+  type NodeBuilderM (TreeBuilderT k m) = NodeBuilderT k (TreeBuilderT k m)
+  getTreeBuilder = TreeBuilderT CMR.ask
+  getNodeBuilder = getNodeBuilderT
+
+  liftTreeBuilder treeBuilder (TreeBuilderT f) = liftToNodeBuilder (TreeBuilderT $ CMR.local (\_ -> treeBuilder) f)
+  liftNodeBuilder nodeBuilder f = runNodeBuilderT f nodeBuilder
+
+type IsTreeBuilder k e m =
+  (IO.MonadIO m, MonadError e m, Show e, MonadTreeBuilder k m)
+
+type IsNodeBuilder k e nm m =
+  (Monad (NodeBuilderM m nm), IO.MonadIO (NodeBuilderM m nm), MonadError e (NodeBuilderM m nm), Show e)
+
+withSubTraces ::
+  forall nm k m e a.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm =>
+  NodeBuilderM m nm a ->
+  m a
+withSubTraces f = do
+  treeBuilder <- getTreeBuilder
+  (node, nodeBuilder') <- IO.liftIO ((startNode treeBuilder) @nm )
+  let nodeBuilder = addTreeDependency treeBuilder nodeBuilder'
+  IO.liftIO $ addNode treeBuilder node  
+  r <- catchError
+        (liftNodeBuilder nodeBuilder f >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
+        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError (show e) True)) >> throwError e)
+  return r
+
+subTraceLabel ::
+  forall nm k m e a.
+  IsTreeBuilder k e m =>
+  IsNodeBuilder k e nm m =>
+  TraceNodeType k nm ->
+  TraceNodeLabel nm ->
+  m a ->
+  NodeBuilderM m nm a
+subTraceLabel v lbl f = do
+  nodeBuilder <- getNodeBuilder @k @m
+  (subtree, treeBuilder') <- IO.liftIO $ startTree @k
+  let treeBuilder = addNodeDependency nodeBuilder treeBuilder'
+  IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
+  r <- catchError
+        (liftTreeBuilder treeBuilder' f
+          >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus True)) >> return r)
+        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError (show e) True)) >> throwError e)
+  return r
+
+subTrace ::
+  forall nm k m e a.
+  IsTreeBuilder k e m =>
+  IsNodeBuilder k e nm m =>
+  Default (TraceNodeLabel nm) =>
+  TraceNodeType k nm ->
+  m a ->
+  NodeBuilderM m nm a
+subTrace v f = subTraceLabel v def f
+
+subTree ::
+  forall nm k m e a.
+  IsTreeBuilder k e m =>
+  IsNodeBuilder k e "subtree" m =>
+  IsNodeBuilder k e nm m =>
+  IsTraceNode k nm =>
+  String ->
+  NodeBuilderM m nm a ->
+  m a 
+subTree lbl f = withSubTraces $ 
+  subTrace @"subtree" @k @m lbl
+    $ withSubTraces @nm @k f
+
+
+emitTraceLabel ::
+  forall nm k m.
+  IO.MonadIO m =>
+  MonadTreeBuilder k m =>
+  IsTraceNode k nm =>
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  m ()
+emitTraceLabel lbl v = do
+  treeBuilder <- getTreeBuilder
+  node <- IO.liftIO $ singleNode @k @nm lbl v
+  IO.liftIO $ addNode treeBuilder node
+
+emitTrace ::
+  forall nm k m.
+  IO.MonadIO m =>
+  MonadTreeBuilder k m =>
+  Default (TraceNodeLabel nm) =>
+  IsTraceNode k nm =>
+  TraceNodeType k nm ->
+  m ()
+emitTrace v = emitTraceLabel @nm def v

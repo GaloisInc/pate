@@ -287,6 +287,14 @@ status = execReplM $ do
   IO.liftIO $ IO.putStrLn msg
 
 
+showTag :: TraceTag -> IO ()
+showTag tag = execReplM $ do
+  modify $ \st -> st { replTags = tag:(replTags st) }
+
+hideTag :: TraceTag -> IO ()
+hideTag tag = execReplM $ do
+  modify $ \st -> st { replTags = [ t | t <- (replTags st), t /= tag] }
+
 currentNode :: ReplM_ sym arch (Some (TraceNode sym arch))
 currentNode = gets replNode
 
@@ -321,6 +329,21 @@ goto' idx = do
       modify $ \st -> st { replPrev = lastNode : (replPrev st) }
       return $ Just (Some nextNode)
     Nothing -> return Nothing
+      
+wait :: Int -> IO ()
+wait idx = execReplM $ do
+    updateNextNodes
+    goto' idx >>= \case
+      Just _ -> return ()
+      Nothing -> do
+        Some (TraceNode _ _ t) <- gets replNode
+        st <- IO.liftIO $ getTreeStatus t
+        case isFinished st of
+          True -> IO.liftIO $ IO.putStrLn "No such option" >> return ()
+          False -> do
+            nextNodes <- gets replNext
+            IO.liftIO (IO.putStrLn $ (show (length nextNodes)) ++ "/" ++ show idx)
+            IO.liftIO $ (IO.threadDelay 1000000 >> wait idx)
 
 goto :: Int -> IO ()
 goto idx = execReplM $ do

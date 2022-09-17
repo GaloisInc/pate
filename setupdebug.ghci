@@ -3,6 +3,7 @@
 :set -XTypeApplications
 :set -XScopedTypeVariables
 :set -XTemplateHaskell
+:set -XOverloadedStrings
 :set prompt-function promptFn
 :set -interactive-print printFn
 default (GotoIndex)

@@ -10,6 +10,8 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Pate.Verification.Widening
   ( widenAlongEdge
@@ -29,7 +31,7 @@ import           Control.Monad.Trans.Class ( lift )
 import           Prettyprinter
 
 import qualified Data.Set as Set
-import           Data.List (foldl')
+import           Data.List (foldl', head)
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -68,6 +70,7 @@ import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases )
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
+import           Pate.TraceTree
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -203,6 +206,15 @@ toMaybe :: MaybeF a tp -> Maybe (a tp)
 toMaybe (JustF a) = Just a
 toMaybe NothingF = Nothing
 
+data TermAbstraction sym =
+  forall v tp. TermAbstraction (PS.ScopedExpr sym v tp)
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "term abstraction" where
+  type TraceNodeType '(sym,arch) "term abstraction" = TermAbstraction sym
+  prettyNode () (TermAbstraction t) = pretty t
+  nodeTags = [(Summary, \() (TermAbstraction t) -> pretty (head (lines (show t))))]
+
+
 -- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
 -- parameterized over the *output* state of the given 'SimBundle'.
 -- Until now, the widening process has used the same scope for the pre-domain and
@@ -234,8 +246,9 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
   let outVars = PS.bundleOutVars bundle
 
   curAsm <- currentAsm
-
-  traceBundle bundle $ "AbstractOverVars:  curAsm\n" ++ (show (pretty curAsm))
+  emitTrace @"assumption" curAsm
+  
+  --traceBundle bundle $ "AbstractOverVars:  curAsm\n" ++ (show (pretty curAsm))
 
   PS.forSpec postSpec $ \(scope_post :: PS.SimScope sym arch post) _body -> do
     -- the variables representing the post-state (i.e. the target scope)
@@ -266,6 +279,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
 
       asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
+        lift $ emitTrace @"message" "asScopedConst"
         Just c <- lift $ withAssumption asm $
           W4.asConcrete <$> concretizeWithSolver (PS.unSE se)
         liftIO $ PS.concreteScope @v2 sym c
@@ -274,6 +288,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
       asStackOffset bin se = do
         W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
+        lift $ emitTrace @"message" "asStackOffset"
 
         -- se[v]
         let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
@@ -286,7 +301,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
         -- assuming 'asm', is 'off' constant?
         off' <- asScopedConst (PS.unSE asm) off
-        lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
+        -- lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
         -- return frame[post] + off
         liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
@@ -324,21 +339,24 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- In this case, failing to rescope is a (recoverable) error, as it results
     -- in a loss of soundness; dropping an entry means that the resulting domain
     -- is effectively now assuming equality on that entry.
-    eq_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc se ->
-      doRescope loc se >>= \case
-        JustF se' -> return $ Just se'
-        NothingF -> do
-          -- failed to rescope, emit a recoverable error and drop this entry
-          se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
-          e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
-          curAsms <- currentAsm
-          _ <- emitError $ PEE.RescopingFailure curAsms se e''
-          return Nothing
+    
+    eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
+      subTrace @"term abstraction" (TermAbstraction se) $
+        doRescope loc se >>= \case
+          JustF se' -> return $ Just se'
+          NothingF -> do
+            -- failed to rescope, emit a recoverable error and drop this entry
+            se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+            e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
+            curAsms <- currentAsm
+            _ <- emitError $ PEE.RescopingFailure curAsms se e''
+            return Nothing
 
     -- Now traverse the value domain and rescope its entries. In this case
     -- failing to rescope is not an error, as it is simply weakening the resulting
     -- domain by not asserting any value constraints on that entry.
-    val_post <- fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se -> toMaybe <$> doRescope loc se
+    val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se ->
+      subTrace @"term abstraction" (TermAbstraction se) $ toMaybe <$> doRescope loc se
 
     let dom = PAD.AbstractDomain eq_post val_post
     emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
