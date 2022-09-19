@@ -38,7 +38,6 @@ module Pate.TraceTree (
     TraceTree
   , TraceTreeNode
   , IsTraceNode(..)
-
   , isTraceNode
   , prettyNodeAt
   , nodeShownAt
@@ -58,18 +57,15 @@ module Pate.TraceTree (
   , SomeTraceTree
   , someTraceTree
   , noTraceTree
-  , startSomeTraceTree
   , viewSomeTraceTree
   , NodeStatus(..)
   , getNodeStatus
   , getTreeStatus
   , MonadTreeBuilder(..)
-  , NodeBuilderT(..)
-  , TreeBuilderT(..)
-  , NodeBuilderM
-  , liftToNodeBuilder
-  , runNodeBuilderT
-  , getNodeBuilderT
+  , NodeBuilderT
+  , TreeBuilderT
+  , startSomeTreeBuilder
+  , runTreeBuilderT
   , withSubTraces
   , subTraceLabel
   , subTree
@@ -86,6 +82,7 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
+import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT
 import           Control.Monad.Error
@@ -104,6 +101,8 @@ data TraceTag =
   | Custom String
   deriving (Eq, Ord)
 
+-- TODO: we could store the actual error here with some more type parameter
+-- plumbing
 data NodeStatus =
     NodeStatus { isFinished :: Bool }
   | NodeError { nodeError :: String, isFinished :: Bool }
@@ -216,6 +215,7 @@ data TraceTreeNode (k :: l) nm where
     IOList ((TraceNodeType k nm, TraceNodeLabel nm), TraceTree k) ->
     TraceTreeNode k nm
 
+
 -- | A heterogenous list of 'TraceTreeNode' elements, representing
 --   all of the tracing context that was emitted at this level
 newtype TraceTree k = TraceTree (IOList (Some (TraceTreeNode k)))
@@ -224,6 +224,11 @@ isTraceNode :: TraceTreeNode k nm -> (IsTraceNode k nm => a) -> a
 isTraceNode TraceTreeNode{} a = a
 
 class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Symbol)  where
+  -- TODO: these types often have extra parameters where we need to wrap them
+  -- in a 'Some' to get them down to a 'Type'.
+  -- In general we could have this class take an extra 'Ctx' used to
+  -- hold the extra type parameters that should be extenstially quantified
+  -- in the tree
   type TraceNodeType k nm :: Type
 
   -- | Labels can be used to distinguish nodes that share the same symbol in a
@@ -311,21 +316,27 @@ getTreeStatus ::
   IO NodeStatus
 getTreeStatus (TraceTree ls) = getIOListStatus ls
 
-data SomeTraceTree' =
-    StartTree
-  -- ^ a trace tree that we intend to build but hasn't been initialized yet
-  | forall k. SomeTraceTree' (TraceTree k)
 
-data SomeTraceTree =
-    SomeTraceTree (IO.IORef (SomeTraceTree'))
+data SomeTraceTree' (tp :: l -> Type) =
+    StartTree 
+  -- ^ a trace tree that we intend to build but hasn't been initialized yet
+  | forall (k :: l). SomeTraceTree' (tp k) (TreeBuilder k) (TraceTree k)
+
+-- The 'tp' parameter stands for the type of a singleton value that any
+-- valid tree should have (i.e. a witness to the validity of the tree)
+-- We could make this fully polymorphic (i.e. make tp :: forall l. l -> Type), to
+-- account for cases where the kind of the type parameters to the tree isn't
+-- statically known, but this seem excessive for most use cases.
+data SomeTraceTree tp =
+    SomeTraceTree (IO.IORef (SomeTraceTree' tp))
   | NoTreeBuild
 
-someTraceTree :: IO (SomeTraceTree)
+someTraceTree :: forall tp. IO (SomeTraceTree tp)
 someTraceTree = do
   ref <- IO.newIORef StartTree
   return $ SomeTraceTree ref
 
-noTraceTree :: SomeTraceTree
+noTraceTree :: forall tp. SomeTraceTree tp
 noTraceTree = NoTreeBuild
 
 noTreeBuilder :: TreeBuilder k
@@ -338,24 +349,17 @@ noNodeBuilder = do
   let builder = NodeBuilder (\_ -> return ()) (\_ _ _ -> return ())
   return $ (TraceTreeNode l, builder)
 
-startSomeTraceTree :: forall k. SomeTraceTree -> IO (TreeBuilder k)
-startSomeTraceTree NoTreeBuild = return $ noTreeBuilder
-startSomeTraceTree (SomeTraceTree ref) = do
-  (tree, builder) <- startTree @k
-  IO.writeIORef ref (SomeTraceTree' tree)
-  return builder
-
 viewSomeTraceTree ::
-  forall a.
-  SomeTraceTree ->
+  forall tp a.
+  SomeTraceTree tp ->
   (IO a) {- ^ action for when no tree is loaded -} ->
-  (forall l (k :: l). TraceTree k -> IO a) ->
+  (forall k. tp k -> TraceTree k -> IO a) ->
   IO a
 viewSomeTraceTree NoTreeBuild noTreeFn _ = noTreeFn
 viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
   t <- IO.readIORef ref
   case t of
-    SomeTraceTree' (t' :: TraceTree k) -> f @_ @k t'
+    SomeTraceTree' validRepr _ (t' :: TraceTree k) -> f @k validRepr t'
     StartTree -> noTreeFn
 
 -- named subtrees
@@ -370,58 +374,82 @@ instance IsTraceNode k "message" where
   nodeTags = [("message", \_ msg -> PP.pretty msg)]
 
 
-class MonadTreeBuilder k m | m -> k where
-  type NodeBuilderM m :: Symbol -> Type -> Type
+class Monad m => MonadTreeBuilder k m | m -> k where
   getTreeBuilder :: m (TreeBuilder k)
-  getNodeBuilder :: NodeBuilderM m nm (NodeBuilder k nm)
-  
-  liftTreeBuilder :: forall nm a. TreeBuilder k -> m a -> NodeBuilderM m nm a
-  liftNodeBuilder :: forall nm a. NodeBuilder k nm -> NodeBuilderM m nm a -> m a
-  
+  withTreeBuilder :: forall a. TreeBuilder k -> m a -> m a
+
+
+startSomeTreeBuilder ::
+  forall k m tp a.
+  IO.MonadIO m =>
+  tp k ->
+  SomeTraceTree tp ->
+  m (TreeBuilder k)
+startSomeTreeBuilder _ NoTreeBuild = return noTreeBuilder
+startSomeTreeBuilder validRepr someTree@(SomeTraceTree ref) = (IO.liftIO $ IO.readIORef ref) >>= \case
+  StartTree -> do
+    (tree, builder) <- IO.liftIO $ startTree @k
+    IO.liftIO $ IO.writeIORef ref (SomeTraceTree' validRepr builder tree)
+    return builder
+  -- If a tree has already started we need to just throw it away and start again
+  SomeTraceTree'{} -> do
+    IO.liftIO $ IO.writeIORef ref StartTree
+    startSomeTreeBuilder validRepr someTree
+
+liftTreeBuilder :: forall k nm m a.
+  MonadTreeBuilder k m =>
+  TreeBuilder k ->
+  m a ->
+  NodeBuilderT k nm m a
+liftTreeBuilder treeBuilder f = CMR.lift (withTreeBuilder treeBuilder f)
+
+
 newtype TreeBuilderT k m a = TreeBuilderT (CMR.ReaderT (TreeBuilder k) m a)
   deriving (Functor, Applicative, Monad, CMT.MonadTrans, IO.MonadIO, MonadThrow, MonadCatch, MonadMask)
 
 instance CMR.MonadReader r m => CMR.MonadReader r (TreeBuilderT k m) where
   ask = TreeBuilderT $ lift CMR.ask
-  local f (TreeBuilderT g) = TreeBuilderT $ do
+  local f g = TreeBuilderT $ do
     treeBuilder <- CMR.ask
-    lift $ CMR.local f (CMR.runReaderT g treeBuilder)
+    lift $ CMR.local f (runTreeBuilderT g treeBuilder)
+
+runTreeBuilderT :: TreeBuilderT k m a -> TreeBuilder k -> m a
+runTreeBuilderT (TreeBuilderT f) treeBuilder  = CMR.runReaderT f treeBuilder
 
 deriving instance MonadError e m => MonadError e (TreeBuilderT k m)
 
-newtype NodeBuilderT k m nm a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a)
-  deriving (Functor, Applicative, Monad, IO.MonadIO)
+newtype NodeBuilderT k nm m a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a)
+  deriving (Functor, Applicative, Monad, IO.MonadIO, CMR.MonadTrans)
 
-liftToNodeBuilder :: Monad m => m a -> NodeBuilderT k m nm a
-liftToNodeBuilder f = NodeBuilderT (lift f)
+deriving instance MonadError e m => MonadError e (NodeBuilderT k nm m)
 
-runNodeBuilderT :: NodeBuilderT k m nm a -> NodeBuilder k nm -> m a
+runNodeBuilderT :: NodeBuilderT k nm m a -> NodeBuilder k nm -> m a
 runNodeBuilderT (NodeBuilderT f) nodeBuilder = CMR.runReaderT f nodeBuilder
 
-getNodeBuilderT :: Monad m => NodeBuilderT k m nm (NodeBuilder k nm)
-getNodeBuilderT = NodeBuilderT $ CMR.ask
+getNodeBuilder :: forall k nm m. Monad m => NodeBuilderT k nm m (NodeBuilder k nm)
+getNodeBuilder = NodeBuilderT $ CMR.ask
 
-deriving instance MonadError e m => MonadError e (NodeBuilderT k m nm)
 
 instance Monad m => MonadTreeBuilder k (TreeBuilderT k m) where
-  type NodeBuilderM (TreeBuilderT k m) = NodeBuilderT k (TreeBuilderT k m)
   getTreeBuilder = TreeBuilderT CMR.ask
-  getNodeBuilder = getNodeBuilderT
+  withTreeBuilder treeBuilder (TreeBuilderT f) = TreeBuilderT $ CMR.local (\_ -> treeBuilder) f
 
-  liftTreeBuilder treeBuilder (TreeBuilderT f) = liftToNodeBuilder (TreeBuilderT $ CMR.local (\_ -> treeBuilder) f)
-  liftNodeBuilder nodeBuilder f = runNodeBuilderT f nodeBuilder
+
+instance MonadTreeBuilder k m => MonadTreeBuilder k (MaybeT m) where
+  getTreeBuilder = CMT.lift getTreeBuilder
+  withTreeBuilder treeBuilder (MaybeT f) =
+    MaybeT $ withTreeBuilder treeBuilder f
+
 
 type IsTreeBuilder k e m =
   (IO.MonadIO m, MonadError e m, Show e, MonadTreeBuilder k m)
 
-type IsNodeBuilder k e nm m =
-  (Monad (NodeBuilderM m nm), IO.MonadIO (NodeBuilderM m nm), MonadError e (NodeBuilderM m nm), Show e)
 
 withSubTraces ::
   forall nm k m e a.
   IsTreeBuilder k e m =>
   IsTraceNode k nm =>
-  NodeBuilderM m nm a ->
+  NodeBuilderT k nm m a ->
   m a
 withSubTraces f = do
   treeBuilder <- getTreeBuilder
@@ -429,20 +457,19 @@ withSubTraces f = do
   let nodeBuilder = addTreeDependency treeBuilder nodeBuilder'
   IO.liftIO $ addNode treeBuilder node  
   r <- catchError
-        (liftNodeBuilder nodeBuilder f >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
+        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
         (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError (show e) True)) >> throwError e)
   return r
 
 subTraceLabel ::
   forall nm k m e a.
   IsTreeBuilder k e m =>
-  IsNodeBuilder k e nm m =>
   TraceNodeType k nm ->
   TraceNodeLabel nm ->
   m a ->
-  NodeBuilderM m nm a
+  NodeBuilderT k nm m a
 subTraceLabel v lbl f = do
-  nodeBuilder <- getNodeBuilder @k @m
+  nodeBuilder <- getNodeBuilder @k @nm @m
   (subtree, treeBuilder') <- IO.liftIO $ startTree @k
   let treeBuilder = addNodeDependency nodeBuilder treeBuilder'
   IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
@@ -455,21 +482,19 @@ subTraceLabel v lbl f = do
 subTrace ::
   forall nm k m e a.
   IsTreeBuilder k e m =>
-  IsNodeBuilder k e nm m =>
+  IsTraceNode k nm =>
   Default (TraceNodeLabel nm) =>
   TraceNodeType k nm ->
   m a ->
-  NodeBuilderM m nm a
+  NodeBuilderT k nm m a
 subTrace v f = subTraceLabel v def f
 
 subTree ::
   forall nm k m e a.
   IsTreeBuilder k e m =>
-  IsNodeBuilder k e "subtree" m =>
-  IsNodeBuilder k e nm m =>
   IsTraceNode k nm =>
   String ->
-  NodeBuilderM m nm a ->
+  NodeBuilderT k nm m a ->
   m a 
 subTree lbl f = withSubTraces $ 
   subTrace @"subtree" @k @m lbl

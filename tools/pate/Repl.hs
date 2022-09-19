@@ -105,7 +105,7 @@ data ValidSymArchRepr sym arch symExt archExt where
 data ReplIOStore =
     NoTreeLoaded
   -- main thread has started but hasn't yet produced a tree
-  | WaitingForToplevel IO.ThreadId SomeTraceTree
+  | WaitingForToplevel IO.ThreadId (SomeTraceTree PA.ValidRepr)
   -- we've started navigating the resulting tree
   | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState (ReplState sym arch)
 
@@ -136,33 +136,26 @@ ref :: IO.IORef ReplIOStore
 ref = IO.unsafePerformIO (IO.newIORef NoTreeLoaded)
 
 loadSomeTree ::
-  SomeTraceTree -> IO Bool
+  SomeTraceTree PA.ValidRepr -> IO Bool
 loadSomeTree topTraceTree = do
   let doFail = IO.putStrLn "Unexpected tree structure" >> return False
-  -- we assume that root entry of the tree contains evidence that the
-  -- trace tree parameter (as determined during runtime) satisfies the
-  -- necessary validity constraints to form a 'ReplState'
-  viewSomeTraceTree topTraceTree (return False) $ \(toptree :: TraceTree k) -> do
-      (IO.liftIO $ viewTraceTree toptree) >>= \case
-        [(Some (node :: TraceTreeNode k nm))] -> isTraceNode node $ do
-          case testEquality (knownSymbol @nm) (knownSymbol @"toplevel") of
-            Nothing -> doFail
-            Just Refl -> viewTraceTreeNode node >>= \case
-              [((toplevel@PME.ValidRepr,_), tree)] -> do
-                IO.putStrLn "Loaded tree"
-                let st = ReplState
-                      { replNode = Some (TraceNode @"toplevel" () toplevel tree)
-                      , replTags = [Summary]
-                      , replPrev = []
-                      , replNextTags = [Summary]
-                      , replNext = []
-                      , replValidRepr = ValidSymArchRepr
-                      }
-                IO.writeIORef ref (SomeReplState st)
-                execReplM updateNextNodes
-                return True
-              _ -> doFail
-        _ -> doFail  
+  viewSomeTraceTree topTraceTree (return False) $ \PA.ValidRepr (toptree :: TraceTree k) -> do
+      IO.putStrLn "Loaded tree"
+      let st = ReplState
+            { replNode = Some (TraceNode @"toplevel" () () toptree)
+            , replTags = [Summary]
+            , replPrev = []
+            , replNextTags = [Summary]
+            , replNext = []
+            , replValidRepr = ValidSymArchRepr
+            }
+      IO.writeIORef ref (SomeReplState st)
+      execReplM updateNextNodes
+      return True
+
+instance IsTraceNode k "toplevel" where
+  type TraceNodeType k "toplevel" = ()
+  prettyNode () () = "<Toplevel>"
 
 run :: String -> IO ()
 run rawOpts = do

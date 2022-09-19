@@ -1,6 +1,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE DataKinds #-}
 module Pate.Config (
   PatchData(..),
   PatchDataParseError(..),
@@ -22,6 +24,7 @@ import qualified Data.ByteString as BS
 import qualified Data.HashMap.Strict as DHS
 import qualified Data.Text.Encoding as DTE
 import qualified Data.Text.Encoding.Error as DTEE
+import           Data.Kind (Type)
 import           Numeric.Natural ( Natural )
 import           Text.Printf ( PrintfArg, printf )
 import qualified Toml
@@ -220,7 +223,8 @@ data ContextSensitivity =
 
 ----------------------------------
 -- Verification configuration
-data VerificationConfig =
+-- TODO: 'validRepr' is parameterized here just to break a module import loop
+data VerificationConfig validRepr =
   VerificationConfig
     { cfgPairMain :: Bool
     -- ^ start by pairing the entry points of the binaries
@@ -247,11 +251,12 @@ data VerificationConfig =
     -- ^ Determines the behavior of the verifier when an error is thrown,
     -- with respect to whether or not the error is deemed "recoverable"
     , cfgContextSensitivity :: ContextSensitivity
-    , cfgTraceTree :: SomeTraceTree
+    , cfgTraceTree :: SomeTraceTree (validRepr :: (Type, Type) -> Type)
     -- ^ handle on a trace tree that has been provided
     }
 
-defaultVerificationCfg :: VerificationConfig
+
+defaultVerificationCfg :: VerificationConfig validRepr
 defaultVerificationCfg =
   VerificationConfig { cfgPairMain = True
                      , cfgDiscoverFuns = True

@@ -61,6 +61,7 @@ import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 import qualified Pate.ArchLoader as PAL
 
 import qualified JSONReport as JR
+import qualified Pate.Arch as PA
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
@@ -74,7 +75,7 @@ main = do
     PEq.Errored err -> SE.die (show err)
     _ -> pure ()  
 
-runMain :: SomeTraceTree -> CLIOptions -> IO (PEq.EquivalenceStatus)
+runMain :: SomeTraceTree PA.ValidRepr -> CLIOptions -> IO (PEq.EquivalenceStatus)
 runMain traceTree opts = do
   let
     origPaths = PLE.LoadPaths

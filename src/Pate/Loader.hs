@@ -46,7 +46,7 @@ data RunConfig =
     , origPaths :: PLE.LoadPaths
     , patchedPaths :: PLE.LoadPaths
     , logger :: forall arch. PA.SomeValidArch arch -> IO (Logger arch)
-    , verificationCfg :: PC.VerificationConfig
+    , verificationCfg :: PC.VerificationConfig PA.ValidRepr
     , archLoader :: PA.ArchLoader PEE.LoadError
     , useDwarfHints :: Bool
     }
@@ -62,7 +62,7 @@ runEquivVerification ::
   [PEE.LoadError] ->
   Logger arch ->
   PC.PatchData ->
-  PC.VerificationConfig ->
+  PC.VerificationConfig PA.ValidRepr ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   IO (PEq.EquivalenceStatus)

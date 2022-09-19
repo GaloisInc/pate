@@ -24,7 +24,6 @@ module Pate.Monad
   ( EquivEnv(..)
   , EquivM
   , EquivM_
-  , EquivSubTrace
   , ValidSymArch
   , runEquivM
   , SimBundle(..)
@@ -203,7 +202,7 @@ modifyBlockCache f pPair merge val = do
 -- If the flag is set in the environment, execute the first action. Otherwise,
 -- execute the second.
 ifConfig ::
-  (PC.VerificationConfig -> Bool) ->
+  (PC.VerificationConfig PA.ValidRepr -> Bool) ->
   EquivM sym arch a ->
   EquivM sym arch a ->
   EquivM sym arch a
@@ -276,30 +275,12 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: (CMR.ReaderT (EquivEnv sym arch) (
            , MonadError PEE.EquivalenceError
            )
 
-
 instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
-  type NodeBuilderM (EquivM_ sym arch) = EquivSubTrace sym arch
   getTreeBuilder = CMR.asks envTreeBuilder
-  getNodeBuilder = EquivSubTrace getNodeBuilderT
-
-  liftTreeBuilder treeBuilder f = EquivSubTrace $ liftToNodeBuilder (CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f)
-
-  liftNodeBuilder nodeBuilder (EquivSubTrace f) = runNodeBuilderT f nodeBuilder
+  withTreeBuilder treeBuilder f = CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f
 
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
 type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
-
-
--- TODO: We could parameterize EquivM over its Writer output type instead, which
--- would make this a bit more straightforward at the cost of some refactoring.
-newtype EquivSubTrace sym arch nm a =
-  EquivSubTrace (NodeBuilderT '(sym, arch) (EquivM_ sym arch) nm a)
-  deriving (Functor
-           , Applicative
-           , Monad
-           , IO.MonadIO
-           , MonadError PEE.EquivalenceError
-           )
 
 {-
 withSubTraces ::
@@ -1003,7 +984,7 @@ runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   IO (Either PEE.EquivalenceError a)
-runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f)) env
+runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
 
 ----------------------------------------
 -- Errors

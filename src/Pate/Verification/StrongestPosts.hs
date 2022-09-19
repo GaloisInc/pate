@@ -131,8 +131,7 @@ runVerificationLoop env pPairs = do
     Right r -> return r
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
-   doVerify =
-     do withSubTraces $ subTrace @"toplevel" (PME.getTopLevel @sym @arch) $ do
+   doVerify = do
           pg0 <- initializePairGraph pPairs
           result <- catchError (do
             -- Do the main work of computing the dataflow fixpoint

@@ -16,8 +16,6 @@ module Pate.Monad.Environment (
   , BlockCache(..)
   , freshBlockCache
   , ExitPairCache
-  , ValidRepr(..)
-  , getTopLevel
   ) where
 
 import qualified Control.Concurrent as IO
@@ -75,7 +73,7 @@ data EquivEnv sym arch where
     -- ^ The global variable used to hold memory for the LLVM memory model while
     -- symbolically executing functions in the "inline callee" feature
     , envLogger :: LJ.LogAction IO (PE.Event arch)
-    , envConfig :: PC.VerificationConfig
+    , envConfig :: PC.VerificationConfig PA.ValidRepr
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof
@@ -99,30 +97,9 @@ data EquivEnv sym arch where
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     , envTreeBuilder :: TreeBuilder '(sym, arch)
-    -- ^ structured tracing
     } -> EquivEnv sym arch
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
-
--- | Needed to produce evidence that our trace tree is valid
-data ValidRepr (k :: l) where
-  ValidRepr :: forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => ValidRepr '(sym, arch)
-
-instance IsTraceNode (k :: l) "toplevel" where
-  type TraceNodeType k "toplevel" = ValidRepr k
-  prettyNode () _ = PP.pretty "<Toplevel>"
-
-getTopLevel :: forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => TraceNodeType '(sym,arch) "toplevel"
-getTopLevel = ValidRepr @sym @arch
-
-{- 
-type family PolyEq l n (k :: l) (j :: n) :: Constraint
-
-type instance PolyEq l l k j = k ~ j
-
-withToplevelNode :: IsTraceNode (k :: l) "toplevel" => TraceNodeType k "toplevel" -> (forall sym arch. (l ~ (Type, Type), PolyEq l (Type, Type) k '(sym, arch), PSo.ValidSym sym, PA.ValidArch arch) => a) -> a
-withToplevelNode ValidRepr f = f
--}
 
 data BlockCache arch a where
   BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a

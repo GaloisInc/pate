@@ -138,7 +138,7 @@ verifyPairs ::
   LJ.LogAction IO (PE.Event arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  PC.VerificationConfig ->
+  PC.VerificationConfig PA.ValidRepr ->
   PC.PatchData ->
   CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus)
 verifyPairs validArch logAction elf elf' vcfg pd = do
@@ -162,7 +162,7 @@ doVerifyPairs ::
   LJ.LogAction IO (PE.Event arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  PC.VerificationConfig ->
+  PC.VerificationConfig PA.ValidRepr ->
   PC.PatchData ->
   N.NonceGenerator IO scope ->
   sym ->
@@ -220,7 +220,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch globalRegion) undefops
 
   
-  (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTraceTree (PC.cfgTraceTree vcfg)
+  (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder PA.ValidRepr (PC.cfgTraceTree vcfg)
 
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
