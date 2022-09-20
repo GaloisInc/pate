@@ -12,3 +12,5 @@ import Control.Monad.IO.Class
 import System.IO
 
 import System.IO.Unsafe
+import Control.Concurrent
+setNumCapabilities 6

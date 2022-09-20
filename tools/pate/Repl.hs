@@ -107,7 +107,7 @@ data ReplIOStore =
   -- main thread has started but hasn't yet produced a tree
   | WaitingForToplevel IO.ThreadId (SomeTraceTree PA.ValidRepr)
   -- we've started navigating the resulting tree
-  | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState (ReplState sym arch)
+  | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState IO.ThreadId (ReplState sym arch)
 
 
 newtype ReplM_ sym arch a = ReplM_ { unReplM :: (StateT (ReplState sym arch) IO a) }
@@ -120,24 +120,34 @@ runReplM f = do
   t <- IO.readIORef ref
   case t of
     NoTreeLoaded -> IO.putStrLn "No tree loaded" >> return Nothing
-    WaitingForToplevel _ tree -> loadSomeTree tree >>= \case
+    WaitingForToplevel tid tree -> loadSomeTree tid tree >>= \case
       True -> runReplM f
       False -> IO.putStrLn "Waiting for verifier.." >> return Nothing
-    SomeReplState (st :: ReplState sym arch) -> do
+    SomeReplState tid (st :: ReplState sym arch) -> do
       (a, st') <- runStateT (unReplM @sym @arch f) st
-      IO.writeIORef ref (SomeReplState st')
+      IO.writeIORef ref (SomeReplState tid st')
       return $ Just a
 
 execReplM :: (forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => ReplM_ sym arch ()) -> IO ()
 execReplM f = runReplM @() f >> return ()
 
 
+retrieveOldRef :: IO ()
+retrieveOldRef = IO.readIORef PIRH.anyRef >>= \case
+  Nothing -> IO.putStrLn "No old ref"
+  Just x -> IO.writeIORef ref (PIRH.fromAnything x)
+
+stashThisRef :: IO ()
+stashThisRef = do
+  x <- IO.readIORef ref
+  IO.writeIORef PIRH.anyRef (Just (PIRH.Anything x))
+
 ref :: IO.IORef ReplIOStore
 ref = IO.unsafePerformIO (IO.newIORef NoTreeLoaded)
 
 loadSomeTree ::
-  SomeTraceTree PA.ValidRepr -> IO Bool
-loadSomeTree topTraceTree = do
+  IO.ThreadId -> SomeTraceTree PA.ValidRepr -> IO Bool
+loadSomeTree tid topTraceTree = do
   let doFail = IO.putStrLn "Unexpected tree structure" >> return False
   viewSomeTraceTree topTraceTree (return False) $ \PA.ValidRepr (toptree :: TraceTree k) -> do
       IO.putStrLn "Loaded tree"
@@ -149,7 +159,7 @@ loadSomeTree topTraceTree = do
             , replNext = []
             , replValidRepr = ValidSymArchRepr
             }
-      IO.writeIORef ref (SomeReplState st)
+      IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
       return True
 
@@ -249,6 +259,13 @@ printToplevel = do
 
   printPretty pp
 
+stop :: IO ()
+stop = do
+  IO.readIORef ref >>= \case
+    NoTreeLoaded -> IO.putStrLn "No tree loaded"
+    WaitingForToplevel tid _ -> IO.killThread tid
+    SomeReplState tid _ -> IO.killThread tid
+  IO.writeIORef ref NoTreeLoaded
 
 up :: IO ()
 up = execReplM $ do
@@ -276,7 +293,7 @@ status = execReplM $ do
   let msg = case st of
         NodeStatus False -> "Unfinished"
         NodeStatus True -> "Success"
-        NodeError msg _ -> "Error: " ++ msg
+        NodeError e _ -> "Error: " ++ (show e)
   IO.liftIO $ IO.putStrLn msg
 
 

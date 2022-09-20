@@ -18,6 +18,7 @@ module Pate.Verification.Widening
   , WidenLocs(..)
   ) where
 
+import           GHC.Stack
 import           Control.Lens ( (.~), (&) )
 import           Control.Monad (when, forM_, unless, filterM)
 import           Control.Monad.IO.Class
@@ -68,6 +69,7 @@ import qualified Pate.Config as PC
 
 import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases )
+import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 import           Pate.TraceTree
@@ -214,6 +216,14 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "term abstraction" whe
   prettyNode () (TermAbstraction t) = pretty t
   nodeTags = [(Summary, \() (TermAbstraction t) -> pretty (head (lines (show t))))]
 
+data ConcretizeAttempt sym =
+  forall tp. ConcretizeAttempt (W4.SymExpr sym tp)
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "concretize" where
+  type TraceNodeType '(sym,arch) "concretize" = ConcretizeAttempt sym
+  prettyNode () (ConcretizeAttempt t) = W4.printSymExpr t
+  nodeTags = [(Summary, \() (ConcretizeAttempt t) -> pretty (head (lines (show (W4.printSymExpr t)))))]
+
 
 -- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
 -- parameterized over the *output* state of the given 'SimBundle'.
@@ -272,24 +282,24 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     cache <- W4B.newIdxCache
     -- Strategies for re-scoping expressions
     let
-      asConcrete :: forall v1 v2 tp. PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+      asConcrete :: forall v1 v2 tp. HasCallStack => PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asConcrete se = do
         Just c <- return $ (W4.asConcrete (PS.unSE se))
         liftIO $ PS.concreteScope @v2 sym c
 
-      asScopedConst :: forall v1 v2 tp. W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+      asScopedConst :: forall v1 v2 tp. HasCallStack => W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
-        lift $ emitTrace @"message" "asScopedConst"
-        Just c <- lift $ withAssumption asm $
-          W4.asConcrete <$> concretizeWithSolver (PS.unSE se)
+        Just c <- lift $ withAssumption asm $ do
+          emitTrace @"message" "concretizeWithSolver"
+          e' <- concretizeWithSolver (PS.unSE se)
+          emitTrace @"concretize" (ConcretizeAttempt e')
+          return $ W4.asConcrete e'
         liftIO $ PS.concreteScope @v2 sym c
 
-      asStackOffset :: forall bin tp. PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
+      asStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asStackOffset bin se = do
         W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
-        lift $ emitTrace @"message" "asStackOffset"
-
         -- se[v]
         let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
         off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
@@ -300,12 +310,14 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         -- asm := se == frame[post/f(pre)] + off
         asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
         -- assuming 'asm', is 'off' constant?
+        emitTrace @"assumption" (PAs.fromPred (PS.unSE asm))
         off' <- asScopedConst (PS.unSE asm) off
+        emitTrace @"term abstraction" (TermAbstraction off')
         -- lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
         -- return frame[post] + off
         liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
-      asSimpleAssign :: forall tp. PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
+      asSimpleAssign :: forall tp. HasCallStack => PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asSimpleAssign se = do
         -- se[pre]
         -- se' := se[pre/post]
@@ -325,16 +337,16 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
           -- one strategy to succeed (with the exception of 'asConcrete' being subsumed
           -- by 'asScopedConst' but much faster, as it doesn't involve the solver).
           -- TODO: We could do better by picking the strategy based on the term shape,
-          -- but it's not strictly necessary.
-          se' <- (    asConcrete se
-                  <|> asStackOffset PBi.OriginalRepr se
-                  <|> asStackOffset PBi.PatchedRepr se
-                  <|> asScopedConst (W4.truePred sym) se
-                  <|> asSimpleAssign se
-                 )
-          lift (emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se'))
-          return se'
-
+          -- but it's not strictly necessary.       
+        se' <- traceAlternatives $
+          [ ("asConcrete", asConcrete se)
+          , ("asSimpleAssign", asSimpleAssign se)
+          , ("asScopedConst", asScopedConst (W4.truePred sym) se)
+          , ("asStackOffsetO", asStackOffset PBi.OriginalRepr se)
+          , ("asStackOffsetP", asStackOffset PBi.PatchedRepr se)
+          ]
+        lift $ emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se')
+        return se'
     -- First traverse the equivalence domain and rescope its entries
     -- In this case, failing to rescope is a (recoverable) error, as it results
     -- in a loss of soundness; dropping an entry means that the resulting domain

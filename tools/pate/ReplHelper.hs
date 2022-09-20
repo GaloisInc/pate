@@ -1,3 +1,5 @@
+{-# LANGUAGE GADTs #-}
+
 module ReplHelper 
   ( getLastRunCmd
   , setLastRunCmd
@@ -5,11 +7,15 @@ module ReplHelper
   , nonceValid
   , thePromptFn
   , loadNonce
+  , anyRef
+  , Anything(..)
+  , fromAnything
   ) where
 
 import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
+import Unsafe.Coerce(unsafeCoerce)
 
 lastRunCmd :: IO.IORef (Maybe String)
 lastRunCmd = IO.unsafePerformIO (IO.newIORef Nothing)
@@ -33,3 +39,13 @@ nonceValid i = do
 
 thePromptFn :: IO.IORef (IO String)
 thePromptFn = IO.unsafePerformIO (IO.newIORef (return ""))
+
+data Anything where
+  Anything :: a -> Anything
+
+fromAnything :: Anything -> a
+fromAnything (Anything a) = unsafeCoerce a
+
+
+anyRef :: IO.IORef (Maybe Anything)
+anyRef = IO.unsafePerformIO (IO.newIORef Nothing)

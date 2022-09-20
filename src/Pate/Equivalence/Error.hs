@@ -47,6 +47,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import           Pate.TraceTree
 
 data InequivalenceReason =
     InequivalentRegisters
@@ -205,3 +206,6 @@ equivalenceErrorFor repr err =
                    , errStackTrace = Just callStack
                    , errEquivError = Left (SomeInnerError err)
                    }
+
+instance IsNodeError EquivalenceError where
+  propagateErr _ = True

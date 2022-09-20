@@ -696,14 +696,6 @@ heuristicSat desc p k = do
     Left _err -> k W4R.Unknown
     Right a -> return a
 
-data ConcretizeAttempt sym =
-  forall tp. ConcretizeAttempt (W4.SymExpr sym tp)
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "concretize" where
-  type TraceNodeType '(sym,arch) "concretize" = ConcretizeAttempt sym
-  prettyNode () (ConcretizeAttempt t) = W4.printSymExpr t
-  nodeTags = [(Summary, \() (ConcretizeAttempt t) -> PP.pretty (head (lines (show (W4.printSymExpr t)))))]
-
 
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::
@@ -720,10 +712,7 @@ concretizeWithSolver e = withSym $ \sym -> do
           Left _err -> k W4R.Unknown
           Right a -> return a
 
-  subTree "concretizeWithSolver" $ subTrace @"concretize" (ConcretizeAttempt e) $ do
-    e' <- PVC.resolveSingletonSymbolicAsDefault wsolver e
-    emitTrace @"concretize" (ConcretizeAttempt e)
-    return e'
+  PVC.resolveSingletonSymbolicAsDefault wsolver e
 
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --

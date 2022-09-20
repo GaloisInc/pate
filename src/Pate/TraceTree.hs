@@ -72,9 +72,12 @@ module Pate.TraceTree (
   , subTrace
   , emitTraceLabel
   , emitTrace
+  , traceAlternatives
+  , IsNodeError(..)
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
+import           GHC.Stack
 import           Data.Kind ( Type )
 import qualified Control.Monad.IO.Class as IO
 import qualified Data.IORef as IO
@@ -88,6 +91,7 @@ import qualified Control.Monad.Trans as CMT
 import           Control.Monad.Error
 import           Control.Monad.Except
 import           Control.Monad.Catch
+import           Control.Applicative
 
 import qualified Prettyprinter as PP
 
@@ -101,11 +105,14 @@ data TraceTag =
   | Custom String
   deriving (Eq, Ord)
 
--- TODO: we could store the actual error here with some more type parameter
--- plumbing
+
+class Show e => IsNodeError e where
+  propagateErr :: e -> Bool
+
+-- TODO: We could expose the error type here with some plumbing
 data NodeStatus =
     NodeStatus { isFinished :: Bool }
-  | NodeError { nodeError :: String, isFinished :: Bool }
+  | forall e. IsNodeError e => NodeError { nodeError :: e, isFinished :: Bool }
 
 
 instance IsString TraceTag where
@@ -168,15 +175,16 @@ addNodeDependency nodeBuilder treeBuilder =
   let finish st = case st of
         -- importantly, we don't propagate regular status updates to ancestors,
         -- otherwise finalizing a child would cause all parents to finalize
-        NodeStatus _ -> updateTreeStatus treeBuilder st
-        _ -> updateNodeStatus nodeBuilder st >> updateTreeStatus treeBuilder st
+        NodeError e _ | propagateErr e -> updateNodeStatus nodeBuilder st >> updateTreeStatus treeBuilder st
+        _ -> updateTreeStatus treeBuilder st
   in treeBuilder { updateTreeStatus = finish } 
 
 addTreeDependency :: TreeBuilder k -> NodeBuilder k nm -> NodeBuilder k nm
 addTreeDependency treeBuilder nodeBuilder =
   let finish st = case st of
-        NodeStatus _ -> updateNodeStatus nodeBuilder st
-        _ -> updateTreeStatus treeBuilder st >> updateNodeStatus nodeBuilder st
+        NodeError e _ | propagateErr e -> updateTreeStatus treeBuilder st >> updateNodeStatus nodeBuilder st
+        _ -> updateNodeStatus nodeBuilder st
+
   in nodeBuilder { updateNodeStatus = finish }
 
 startTree :: forall k nm. IO (TraceTree k, TreeBuilder k)
@@ -380,7 +388,7 @@ class Monad m => MonadTreeBuilder k m | m -> k where
 
 
 startSomeTreeBuilder ::
-  forall k m tp a.
+  forall k m tp.
   IO.MonadIO m =>
   tp k ->
   SomeTraceTree tp ->
@@ -413,23 +421,6 @@ instance CMR.MonadReader r m => CMR.MonadReader r (TreeBuilderT k m) where
     treeBuilder <- CMR.ask
     lift $ CMR.local f (runTreeBuilderT g treeBuilder)
 
-runTreeBuilderT :: TreeBuilderT k m a -> TreeBuilder k -> m a
-runTreeBuilderT (TreeBuilderT f) treeBuilder  = CMR.runReaderT f treeBuilder
-
-deriving instance MonadError e m => MonadError e (TreeBuilderT k m)
-
-newtype NodeBuilderT k nm m a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a)
-  deriving (Functor, Applicative, Monad, IO.MonadIO, CMR.MonadTrans)
-
-deriving instance MonadError e m => MonadError e (NodeBuilderT k nm m)
-
-runNodeBuilderT :: NodeBuilderT k nm m a -> NodeBuilder k nm -> m a
-runNodeBuilderT (NodeBuilderT f) nodeBuilder = CMR.runReaderT f nodeBuilder
-
-getNodeBuilder :: forall k nm m. Monad m => NodeBuilderT k nm m (NodeBuilder k nm)
-getNodeBuilder = NodeBuilderT $ CMR.ask
-
-
 instance Monad m => MonadTreeBuilder k (TreeBuilderT k m) where
   getTreeBuilder = TreeBuilderT CMR.ask
   withTreeBuilder treeBuilder (TreeBuilderT f) = TreeBuilderT $ CMR.local (\_ -> treeBuilder) f
@@ -440,9 +431,75 @@ instance MonadTreeBuilder k m => MonadTreeBuilder k (MaybeT m) where
   withTreeBuilder treeBuilder (MaybeT f) =
     MaybeT $ withTreeBuilder treeBuilder f
 
+instance (MonadTreeBuilder k m) => MonadTreeBuilder k (ExceptT e m) where
+  getTreeBuilder = CMT.lift getTreeBuilder
+  withTreeBuilder treeBuilder f = ExceptT $ withTreeBuilder treeBuilder (runExceptT f)
+
+instance (MonadError e m, MonadTreeBuilder k m) => MonadTreeBuilder k (AltT e m) where
+  getTreeBuilder = CMT.lift getTreeBuilder
+  withTreeBuilder treeBuilder (AltT f) = AltT $ withTreeBuilder treeBuilder f
+
+runTreeBuilderT :: TreeBuilderT k m a -> TreeBuilder k -> m a
+runTreeBuilderT (TreeBuilderT f) treeBuilder  = CMR.runReaderT f treeBuilder
+
+deriving instance MonadError e m => MonadError e (TreeBuilderT k m)
+
+newtype NodeBuilderT k nm m a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a)
+  deriving (Functor, Applicative, Monad, IO.MonadIO, CMR.MonadTrans)
+
+deriving instance Alternative m => Alternative (NodeBuilderT k nm m)
+
+-- Running alternative executions in a context where failure raises
+-- a special exception, so it can be captured by the subtrace handlers
+
+data AltErr e =
+    AltErr
+  | InnerErr e
+
+instance Show e => Show (AltErr e) where
+  show = \case
+    AltErr -> "Alternative not taken"
+    InnerErr e -> show e
+
+instance IsNodeError e => IsNodeError (AltErr e) where
+  propagateErr = \case
+    AltErr -> False
+    InnerErr e -> propagateErr e
+
+newtype AltT e m a = AltT (ExceptT (AltErr e) m a)
+  deriving (Functor, Applicative, Monad, IO.MonadIO, CMT.MonadTrans, MonadError (AltErr e))
+
+runAltT :: MonadError e m => AltT e m a -> m (Maybe a)
+runAltT (AltT f) = runExceptT f >>= \case
+  Left AltErr -> return Nothing
+  Left (InnerErr e) -> throwError e
+  Right r -> return $ Just r
+
+
+maybeToAlt :: MonadError e m => MaybeT m a -> AltT e m a
+maybeToAlt f = (lift $ runMaybeT f) >>= \case
+  Just r -> return r
+  Nothing -> empty
+
+
+instance Monad m => Alternative (AltT e m) where
+  empty = AltT (throwError AltErr)
+  (AltT f) <|> (AltT g) = AltT $ catchError f $ \e -> case e of
+    AltErr -> g
+    InnerErr{} -> throwError e
+
+deriving instance MonadError e m => MonadError e (NodeBuilderT k nm m)
+   
+
+runNodeBuilderT :: NodeBuilderT k nm m a -> NodeBuilder k nm -> m a
+runNodeBuilderT (NodeBuilderT f) nodeBuilder = CMR.runReaderT f nodeBuilder
+
+getNodeBuilder :: forall k nm m. Monad m => NodeBuilderT k nm m (NodeBuilder k nm)
+getNodeBuilder = NodeBuilderT $ CMR.ask
+
 
 type IsTreeBuilder k e m =
-  (IO.MonadIO m, MonadError e m, Show e, MonadTreeBuilder k m)
+  (IO.MonadIO m, MonadError e m, IsNodeError e, MonadTreeBuilder k m)
 
 
 withSubTraces ::
@@ -458,7 +515,7 @@ withSubTraces f = do
   IO.liftIO $ addNode treeBuilder node  
   r <- catchError
         (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
-        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError (show e) True)) >> throwError e)
+        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError e True)) >> throwError e)
   return r
 
 subTraceLabel ::
@@ -476,8 +533,28 @@ subTraceLabel v lbl f = do
   r <- catchError
         (liftTreeBuilder treeBuilder' f
           >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus True)) >> return r)
-        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError (show e) True)) >> throwError e)
+        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError e True)) >> throwError e)
   return r
+
+traceAlternatives' ::
+  IsTreeBuilder k e m =>
+  [(String, MaybeT m a)] ->
+  NodeBuilderT k "function_name" (AltT e m) a
+traceAlternatives' [] = lift $ empty
+traceAlternatives' ((nm, f) : alts) =
+  (subTrace @"function_name" nm (maybeToAlt f)) <|> traceAlternatives' alts
+
+instance IsTraceNode (k :: l) "function_name" where
+  type TraceNodeType k "function_name" = String
+  prettyNode () st = PP.pretty (show st)
+
+traceAlternatives ::
+  IsTreeBuilder k e m =>
+  [(String, MaybeT m a)] ->
+  MaybeT m a
+traceAlternatives [] = fail ""
+traceAlternatives alts = MaybeT $ runAltT $ withSubTraces (traceAlternatives' alts)
+
 
 subTrace ::
   forall nm k m e a.
