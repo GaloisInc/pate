@@ -207,6 +207,7 @@ data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
   | ContinueAfterRecoverableFailures
+  deriving (Eq, Ord, Show, Read)
 
 -- | Controls how abstract domains are shared between function call nodes in the pairgraph.
 data ContextSensitivity =

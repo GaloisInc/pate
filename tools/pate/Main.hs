@@ -117,6 +117,7 @@ runMain traceTree opts = do
         , PC.cfgMacawDir = saveMacawCFGs opts
         , PC.cfgSolverInteractionFile = solverInteractionFile opts
         , PC.cfgTraceTree = traceTree
+        , PC.cfgFailureMode = errMode opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader
@@ -158,6 +159,7 @@ data CLIOptions = CLIOptions
   , proofSummaryJSON :: Maybe FilePath
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
+  , errMode :: PC.VerificationFailureMode
   } deriving (Eq, Ord, Show)
 
 data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
@@ -378,6 +380,13 @@ logParser = (Just <$> interactiveParser) <|> pure Nothing
                                                       <> OA.help "The source file for the patched program"
                                                       )
 
+modeParser :: OA.Parser PC.VerificationFailureMode
+modeParser = OA.option OA.auto (OA.long "errormode"
+                                <> OA.help "Verifier error handling mode"
+                                <> OA.short 'e'
+                                <> OA.value PC.ThrowOnAnyFailure
+                                <> OA.showDefault)
+
 cliOptions :: OA.ParserInfo CLIOptions
 cliOptions = OA.info (OA.helper <*> parser)
   (  OA.fullDesc
@@ -481,3 +490,5 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.metavar "FILE"
         <> OA.help "A file to save debug logs to"
         ))
+   <*> modeParser
+ 
