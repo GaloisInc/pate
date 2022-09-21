@@ -81,7 +81,9 @@ printFn a = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \x -
   IO.putStrLn (showIfValid x a)
 
 promptFn :: [String] -> Int -> IO String
-promptFn _ _ = execReplM (updateNextNodes >> printToplevel) >> return ""
+promptFn _ _ = runReplM (updateNextNodes >> printToplevel) >>= \case
+  Just () -> return ""
+  Nothing -> return ">"
 
 
 data TraceNode sym arch nm where
@@ -97,6 +99,7 @@ data ReplState sym arch where
     , replNextTags :: [TraceTag]
     , replNext :: [Some (TraceNode sym arch)]
     , replValidRepr :: ValidSymArchRepr sym arch sym arch
+    , replLastOptsPrinted :: String
     } -> ReplState sym arch
 
 data ValidSymArchRepr sym arch symExt archExt where
@@ -119,10 +122,10 @@ runReplM :: forall a. (forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => 
 runReplM f = do
   t <- IO.readIORef ref
   case t of
-    NoTreeLoaded -> IO.putStrLn "No tree loaded" >> return Nothing
+    NoTreeLoaded -> return Nothing
     WaitingForToplevel tid tree -> loadSomeTree tid tree >>= \case
       True -> runReplM f
-      False -> IO.putStrLn "Waiting for verifier.." >> return Nothing
+      False -> return Nothing
     SomeReplState tid (st :: ReplState sym arch) -> do
       (a, st') <- runStateT (unReplM @sym @arch f) st
       IO.writeIORef ref (SomeReplState tid st')
@@ -158,6 +161,7 @@ loadSomeTree tid topTraceTree = do
             , replNextTags = [Summary]
             , replNext = []
             , replValidRepr = ValidSymArchRepr
+            , replLastOptsPrinted = ""
             }
       IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
@@ -227,8 +231,9 @@ ppStatusTag st = case st of
 
 prettyNextNodes ::
   forall sym arch a.
+  Int ->
   ReplM sym arch (PP.Doc a)
-prettyNextNodes = do
+prettyNextNodes startAt = do
   tags <- gets replNextTags
   nextNodes <- gets replNext
   
@@ -240,24 +245,33 @@ prettyNextNodes = do
                    return $ addStatusTag b $ pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")"
                  Nothing -> return "<ERROR: Unexpected missing printer>"
             ) nextNodes
-  return $ PP.vsep (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents))
+  return $ PP.vsep (drop startAt (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents)))
+
 
 printToplevel :: forall sym arch. ReplM sym arch ()
 printToplevel = do
+  p <- prettyNextNodes 0
   nextNodes <- gets replNext
   (Some (TraceNode _ _ t))  <- gets replNode
   st <- IO.liftIO $ getTreeStatus t
+
   let prompt = case ppStatusTag st of
         Just pst -> (pst <+> ">")
         Nothing -> ">"
-    
+  nextNodes <- gets replNext
   pp <- case nextNodes of
     [] -> return $ PP.vsep [ "<<No Subtrees>>", prompt ]
     _ -> do
-      p <- prettyNextNodes
+      p <- prettyNextNodes 0
       return $ PP.vsep [ p, prompt ]
 
-  printPretty pp
+  lastPp <- gets replLastOptsPrinted
+  let thisPp = show p
+  case lastPp == thisPp of
+    True -> printPretty prompt
+    False -> do
+      modify $ \st -> st { replLastOptsPrinted = thisPp }
+      printPretty pp
 
 stop :: IO ()
 stop = do
@@ -287,15 +301,19 @@ top = execReplM $ do
       modify $ \st -> st { replPrev = [] }
 
 status :: IO ()
-status = execReplM $ do
-  (Some (TraceNode _ _ t))  <- gets replNode
-  st <- IO.liftIO $ getTreeStatus t
-  let msg = case st of
-        NodeStatus False -> "Unfinished"
-        NodeStatus True -> "Success"
-        NodeError e _ -> "Error: " ++ (show e)
-  IO.liftIO $ IO.putStrLn msg
-
+status = do
+  tr <- IO.readIORef ref
+  case tr of
+    NoTreeLoaded -> IO.putStrLn "No tree loaded"
+    WaitingForToplevel{} -> IO.putStrLn "Waiting for verifier..."
+    SomeReplState {} -> execReplM $ do
+      (Some (TraceNode _ _ t))  <- gets replNode
+      st <- IO.liftIO $ getTreeStatus t
+      let msg = case st of
+            NodeStatus False -> "Unfinished"
+            NodeStatus True -> "Success"
+            NodeError e _ -> "Error: " ++ (show e)
+      IO.liftIO $ IO.putStrLn msg
 
 showTag :: TraceTag -> IO ()
 showTag tag = execReplM $ do
@@ -327,6 +345,7 @@ loadTraceNode node = do
     { replNode = Some node
     , replNextTags = []
     , replNext = []
+    , replLastOptsPrinted = ""
     }
   updateNextNodes
 
@@ -340,11 +359,14 @@ goto' idx = do
       return $ Just (Some nextNode)
     Nothing -> return Nothing
       
-wait :: Int -> IO ()
-wait idx = execReplM $ do
+wait' :: Int -> Int -> ReplM sym arch ()
+wait' lastShown idx = do
     updateNextNodes
-    goto' idx >>= \case
-      Just _ -> return ()
+    fetchNode idx >>= \case
+      Just _ -> do
+        pp <- prettyNextNodes 0
+        modify $ \st -> st { replLastOptsPrinted = show pp }
+        prettyNextNodes lastShown >>= (\x -> printPretty (x <> "\n"))
       Nothing -> do
         Some (TraceNode _ _ t) <- gets replNode
         st <- IO.liftIO $ getTreeStatus t
@@ -352,8 +374,14 @@ wait idx = execReplM $ do
           True -> IO.liftIO $ IO.putStrLn "No such option" >> return ()
           False -> do
             nextNodes <- gets replNext
-            IO.liftIO (IO.putStrLn $ (show (length nextNodes)) ++ "/" ++ show idx)
-            IO.liftIO $ (IO.threadDelay 1000000 >> wait idx)
+            if length nextNodes > lastShown then
+              prettyNextNodes lastShown >>= (\x -> printPretty (x <> "\n"))
+            else
+              return ()
+            ((IO.liftIO $ IO.threadDelay 1000000) >> wait' (length nextNodes) idx)
+
+wait :: Int -> IO ()
+wait idx = execReplM $ wait' 0 idx
 
 goto :: Int -> IO ()
 goto idx = execReplM $ do
