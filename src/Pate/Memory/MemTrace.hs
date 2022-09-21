@@ -135,7 +135,7 @@ import Lang.Crucible.Types
 import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface hiding ( integerToNat )
-
+import qualified What4.Interface as W4
 
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
@@ -239,7 +239,7 @@ type BasePtrType w = BaseStructType (EmptyCtx ::> BaseIntegerType ::> BaseBVType
 type SymPtr sym w = SymExpr sym (BasePtrType w)
 
 asSymPtr ::
-  IsSymExprBuilder sym =>
+  IsExprBuilder sym =>
   sym ->
   LLVMPtr sym w ->
   IO (SymPtr sym w)
@@ -351,9 +351,9 @@ mkBinUF ::
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat ::> BasePtrType AnyNat) (BasePtrType AnyNat)
 mkBinUF tag  = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
-    repr = Empty :> ptrRepr :> ptrRepr
-  c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr)
+    ptrRepr' = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr' :> ptrRepr'
+  c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) ptrRepr')
   return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
 mkPredUF ::
@@ -374,8 +374,8 @@ mkOffUF ::
   PolyFunMaker sym (EmptyCtx ::> BasePtrType AnyNat) (BaseBVType AnyNat)
 mkOffUF tag = PolyFunMaker $ \sym w -> do
   let
-    ptrRepr = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
-    repr = Empty :> ptrRepr
+    ptrRepr' = BaseStructRepr (Empty :> BaseIntegerRepr :> BaseBVRepr w)
+    repr = Empty :> ptrRepr'
   c <- freshConstant sym (polySymbol tag w) (BaseArrayRepr (flattenStructRepr repr) (BaseBVRepr w))
   return $ PolyFun (mkClassify tag c) $ \args -> arrayLookup sym c =<< flattenStructs sym args
 
@@ -473,7 +473,7 @@ annotatePtr ::
 annotatePtr sym (PtrAssertions ref) tag (AssertedResult assertion (LLVMPtr' (LLVMPointer reg off))) = do
   (annReg, reg') <- annotateTerm sym (natToIntegerPure reg)
   (annOff, off') <- annotateTerm sym off
-  regNat' <- integerToNat sym reg'
+  regNat' <- integerToNat sym (WEH.assumePositiveInt sym reg')
   modifyIORef' ref (MapF.insert annReg (PtrAssert assertion tag))
   modifyIORef' ref (MapF.insert annOff (PtrAssert assertion tag))
   return $ LLVMPtr' (LLVMPointer regNat' off')
@@ -703,27 +703,33 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   --   derived from the same initial memory, so we can assume the base memories are identical.
   }
 
+
+
 data MemTraceState sym ptrW = MemTraceState
-  { memArrBytes :: MemTraceArrBytes sym ptrW
-  , memArrRegions :: MemTraceArrRegions sym ptrW
+  { memArrStruct :: W4.SymExpr sym (BaseMemoryType ptrW)
+  , memReadFnCache :: IORef (MapF.MapF W4.NatRepr (SymReadFn sym ptrW))
+  , memWriteFnCache :: IORef (MapF.MapF W4.NatRepr (SymWriteFn sym ptrW))
   }
+
+memArrBytes ::
+  IsExprBuilder sym =>
+  sym ->
+  MemTraceState sym ptrW ->
+  IO (W4.SymExpr sym (BaseMemorySubType ptrW (BaseBVType 8)))
+memArrBytes sym st = structField sym (memArrStruct st) Ctx.i1of2
+
+memArrRegions ::
+  IsExprBuilder sym =>
+  sym ->
+  MemTraceState sym ptrW ->
+  IO (W4.SymExpr sym (BaseMemorySubType ptrW BaseIntegerType))  
+memArrRegions sym st = structField sym (memArrStruct st) Ctx.i2of2
 
 type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
 
--- | A map from pointers (a region integer combined with a pointer-width bitvector)
--- to bytes, representing the contents of memory at the given pointer.
-type MemTraceArrBytes sym ptrW = MemArrBase sym ptrW (BaseBVType 8)
+type BaseMemorySubType ptrW tp = BaseArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp)
 
-
--- | A map from pointers (a region integer combined with a pointer-width bitvector)
--- to integers, representing the region that should be used when reading a pointer
--- back from memory (each individual byte-width slice of the pointer bitvector is assigned
--- the region of the pointer in this map).
--- TODO: This is a very naive model of pointer regions - there are many situations where
--- this is not enough information to accurately recover the region of a stored pointer.
-type MemTraceArrRegions sym ptrW = MemArrBase sym ptrW BaseIntegerType
-
-type MemArrBase sym ptrW tp = RegValue sym (SymbolicArrayType (EmptyCtx ::> BaseIntegerType) (BaseArrayType (EmptyCtx ::> BaseBVType ptrW) tp))
+type BaseMemoryType ptrW = BaseStructType (EmptyCtx ::> BaseMemorySubType ptrW (BaseBVType 8) ::> BaseMemorySubType ptrW BaseIntegerType)
 
 type MemTrace arch = IntrinsicType "memory_trace" (EmptyCtx ::> BVType (ArchAddrWidth arch))
 
@@ -748,15 +754,17 @@ initMemTrace ::
   AddrWidthRepr ptrW ->
   IO (MemTraceImpl sym ptrW)
 initMemTrace sym baseMem Addr32 = do
-  arrBytes <- ioFreshConstant sym "InitMemBytes" knownRepr
-  arrRegions <- ioFreshConstant sym "InitMemRegions" knownRepr
+  memStructs <- ioFreshConstant sym "InitMem" knownRepr
+  readCache <- newIORef MapF.empty
+  writeCache <- newIORef MapF.empty
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem
+  return $ MemTraceImpl sq (MemTraceState memStructs readCache writeCache) (toMuxTree sym Nothing) baseMem
 initMemTrace sym baseMem Addr64 = do
-  arrBytes <- ioFreshConstant sym "InitMemBytes" knownRepr
-  arrRegions <- ioFreshConstant sym "InitMemRegions" knownRepr
+  memStructs <- ioFreshConstant sym "InitMem" knownRepr
+  readCache <- newIORef MapF.empty
+  writeCache <- newIORef MapF.empty
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem
+  return $ MemTraceImpl sq (MemTraceState memStructs readCache writeCache) (toMuxTree sym Nothing) baseMem
 
 
 mkMemoryBinding ::
@@ -769,10 +777,9 @@ mkMemoryBinding ::
   WEH.ExprBindings sym
 mkMemoryBinding memSrc memTgt =
   let
-    MemTraceState memSrcArrBytes memSrcArrRegions = memSrc
-    MemTraceState memTgtArrBytes memTgtArrRegions = memTgt
-  in MapF.fromList [MapF.Pair memSrcArrBytes memTgtArrBytes
-                   ,MapF.Pair memSrcArrRegions memTgtArrRegions
+    MemTraceState memSrcStruct _ _ = memSrc
+    MemTraceState memTgtStruct _ _ = memTgt
+  in MapF.fromList [MapF.Pair memSrcStruct memTgtStruct
                    ]
 
 
@@ -781,13 +788,13 @@ instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
   type Intrinsic sym "memory_trace" (EmptyCtx ::> BVType ptrW) = MemTraceImpl sym ptrW
   muxIntrinsic sym _ _ (Empty :> BVRepr _) p t f = do
     memSeq'   <- muxSymSequence sym p (memSeq t) (memSeq f)
-    memArrBytes'   <- baseTypeIte sym p (memArrBytes $ memState t) (memArrBytes $ memState f)
-    memArrRegions'   <- baseTypeIte sym p (memArrRegions $ memState t) (memArrRegions $ memState f)
+    memArrStruct'   <- baseTypeIte sym p (memArrStruct $ memState t) (memArrStruct $ memState f)
     memInstr' <- mergeMuxTree sym p (memCurrentInstr t) (memCurrentInstr f)
 
     -- NB, we assume that the "base" memories are always the same, so we can arbitrarily choose
     -- one to use.
-    return $ MemTraceImpl memSeq' (MemTraceState memArrBytes' memArrRegions') memInstr' (memBaseMemory t)
+    -- similarly we assume that the read/write function caches are shared
+    return $ MemTraceImpl memSeq' (MemTraceState memArrStruct' (memReadFnCache $ memState t) (memWriteFnCache $ memState t)) memInstr' (memBaseMemory t)
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -1231,23 +1238,6 @@ arrayIdx sym ptr@(LLVMPointer reg off) off' = do
   let ireg = natToIntegerPure reg
   return $ Empty :> ireg :> bvIdx
 
-concatPtrs ::
-  1 <= w1 =>
-  1 <= w2 =>
-  IsExprBuilder sym =>
-  sym ->
-  Endianness ->
-  LLVMPtr sym w1 ->
-  LLVMPtr sym w2 ->
-  IO (LLVMPtr sym (w1 + w2))
-concatPtrs sym endianness (LLVMPointer reg1 off1) (LLVMPointer _ off2) = do
-  bv <- case endianness of
-    BigEndian -> bvConcat sym off1 off2
-    LittleEndian -> do
-      Refl <- return $ plusComm (bvWidth off1) (bvWidth off2)
-      bvConcat sym off2 off1
-  return $ LLVMPointer reg1 bv
-
 -- | Annotate nat proofs with the associated inequality that
 -- is being proven to provide documentation about
 -- each proof step.
@@ -1294,6 +1284,144 @@ chunkBV sym endianness w bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
 
+memRepr' :: forall ptrW tp. MemWidth ptrW => KnownRepr BaseTypeRepr tp => BaseTypeRepr (BaseMemorySubType ptrW tp)
+memRepr' = BaseArrayRepr (Ctx.empty :> BaseIntegerRepr) (BaseArrayRepr (Ctx.empty :> BaseBVRepr (memWidthNatRepr @ptrW)) knownRepr)
+
+baseMemRepr :: forall ptrW. MemWidth ptrW => BaseTypeRepr (BaseMemoryType ptrW)
+baseMemRepr = BaseStructRepr (Ctx.empty :> memRepr' @ptrW :> memRepr' @ptrW)
+                                                       
+ptrRepr :: forall w. 1 <= w => NatRepr w -> BaseTypeRepr (BasePtrType w)
+ptrRepr repr = BaseStructRepr (Ctx.empty :> BaseIntegerRepr :> BaseBVRepr repr)
+
+ptrReprBytes :: forall w. 1 <= w => NatRepr w -> BaseTypeRepr (BasePtrType (8*w))
+ptrReprBytes repr | LeqProof <- mulMono (knownNat @8) repr = ptrRepr (natMultiply (knownNat @8) repr)
+
+viewSymIdx ::
+  1 <= w =>
+  IsExprBuilder sym =>
+  sym ->
+  SymPtr sym w ->
+  IO (W4.SymExpr sym BaseIntegerType, W4.SymExpr sym (BaseBVType w))
+viewSymIdx sym ptr = do
+  reg <- WEH.assumePositiveInt sym <$> structField sym ptr Ctx.i1of2
+  off <- structField sym ptr Ctx.i2of2
+  return (reg, off)
+
+offsetSymPtr ::
+  1 <= ptrW =>
+  IsExprBuilder sym =>
+  sym ->
+  SymPtr sym ptrW ->
+  Integer ->
+  IO (SymPtr sym ptrW)
+offsetSymPtr _sym ptr 0 = return ptr
+offsetSymPtr sym ptr off' = do
+  reg <- WEH.assumePositiveInt sym <$> structField sym ptr Ctx.i1of2
+  off <- structField sym ptr Ctx.i2of2
+  BaseBVRepr w <- return $ W4.exprType off
+  offBV <- bvLit sym w $ BV.mkBV w off'
+  bvIdx <- bvAdd sym off offBV
+  mkStruct sym (Empty :> reg :> bvIdx)
+  
+concatSymPtrs ::
+  1 <= w1 =>
+  1 <= w2 =>
+  IsExprBuilder sym =>
+  sym ->
+  Endianness ->
+  SymPtr sym w1 ->
+  SymPtr sym w2 ->
+  IO (SymPtr sym (w1 + w2))
+concatSymPtrs sym endianness ptr1 ptr2 = do
+  (reg1, off1) <- viewSymIdx sym ptr1
+  (_, off2) <- viewSymIdx sym ptr2
+  bv <- case endianness of
+    BigEndian -> bvConcat sym off1 off2
+    LittleEndian -> do
+      Refl <- return $ plusComm (bvWidth off1) (bvWidth off2)
+      bvConcat sym off2 off1
+  mkStruct sym (Ctx.empty :> reg1 :> bv)
+
+type SymReadFnArgs ptrW w = (EmptyCtx ::> BaseMemoryType ptrW ::> BasePtrType ptrW) 
+
+data SymReadFn sym ptrW w =
+  SymReadFn
+   { bigEndRead :: W4.SymFn sym (SymReadFnArgs ptrW w) (BasePtrType (8*w))
+   , littleEndRead :: W4.SymFn sym (SymReadFnArgs ptrW w) (BasePtrType (8*w))
+   }
+
+getSymReadFn :: SymReadFn sym ptrW w -> Endianness -> W4.SymFn sym (SymReadFnArgs ptrW w) (BasePtrType (8*w))
+getSymReadFn fn BigEndian = bigEndRead fn
+getSymReadFn fn LittleEndian = littleEndRead fn
+
+mkReadFn ::
+  forall w ptrW sym.
+  1 <= w =>
+  MemWidth ptrW =>
+  IsSymExprBuilder sym =>  
+  sym ->
+  NatRepr w ->
+  Endianness ->
+  IO (W4.SymFn sym (EmptyCtx ::> BaseMemoryType ptrW ::> BasePtrType ptrW) (BasePtrType (8*w)))
+mkReadFn sym w endianness = do
+  memVar <- W4.freshBoundVar sym (W4.safeSymbol "mem") (baseMemRepr @ptrW)
+  let memExpr = W4.varExpr sym memVar
+  bytesArr <- W4.structField sym memExpr Ctx.i1of2
+  regionsArr <- W4.structField sym memExpr Ctx.i2of2
+  
+  ptrVar <- W4.freshBoundVar sym (W4.safeSymbol "ptr") (ptrRepr (memWidthNatRepr @ptrW))
+  let ptr = W4.varExpr sym ptrVar
+
+  
+  let go :: 1 <= w' => Integer -> NatRepr w' -> IO (W4.SymExpr sym (BasePtrType (8*w')))
+      go n byteWidth =
+        case isZeroOrGT1 (decNat byteWidth) of
+          Left Refl
+            | Refl <- zeroSubEq byteWidth (knownNat @1) ->
+              do (reg, off) <- offsetSymPtr sym ptr n >>= viewSymIdx sym
+                 blk0 <- intLit sym 0
+                 (blk, content) <-
+                       do regArrayBytes <- arrayLookup sym bytesArr (Ctx.singleton reg)
+                          membyte <- arrayLookup sym regArrayBytes (Ctx.singleton off)
+                          blk <- case isPtrReadWidth of
+                            True -> do
+                              regArrayRegion <- arrayLookup sym regionsArr (Ctx.singleton reg)
+                              WEH.assumePositiveInt sym <$> arrayLookup sym regArrayRegion (Ctx.singleton off)
+                            False -> return blk0
+                          return (blk, membyte)
+                 mkStruct sym (Ctx.empty :> WEH.assumePositiveInt sym blk :> content)
+          Right LeqProof
+            | byteWidth' <- decNat byteWidth
+            , tailRepr <- byteWidth'
+            , headRepr <- knownNat @1
+            , Refl <- lemmaMul (knownNat @8) byteWidth
+            , Refl <- mulComm (knownNat @8) byteWidth'
+            , Refl <- mulComm (knownNat @8) byteWidth
+            , LeqProof <- mulMono (knownNat @8) byteWidth' -> do
+              hd <- go n headRepr
+              tl <- go (n + 1) tailRepr
+              concatSymPtrs sym endianness hd tl
+
+  e <- go 0 w
+  let nm = W4.safeSymbol ("read_" ++ (show (W4.natValue w)))
+  W4.definedFn sym nm (Ctx.empty :> memVar :> ptrVar) e W4.UnfoldConcrete
+  where
+
+  -- This is an incomplete heuristic for determining when the region in storage should
+  -- be used (i.e. the read value should be treated like a pointer).
+  -- In general it should be possible to read in pointers with smaller reads and
+  -- re-assemble them with their region intact. Additionally, a pointer-length read does
+  -- not guarantee that the result is actually a valid pointer in the resulting region.
+  --
+  -- TODO: track enough information in the underlying storage type to be able to
+  -- accurately determine when a read (of any length) should be considered a pointer
+  -- (with a defined region), and when bitvector operations on these pointers are
+  -- region-preserving.
+  isPtrReadWidth :: Bool
+  isPtrReadWidth = case testEquality (natMultiply (knownNat @8) w) (memWidthNatRepr @ptrW) of
+    Just Refl -> True
+    Nothing -> False
+  
 -- | Read a packed value from the underlying array (without adding to the read trace)
 readMemState :: forall sym ptrW ty.
   MemWidth ptrW =>
@@ -1307,56 +1435,25 @@ readMemState :: forall sym ptrW ty.
   IO (RegValue sym (MS.ToCrucibleType ty))
 readMemState sym mem baseMem ptr repr = go 0 repr
   where
-  -- This is an incomplete heuristic for determining when the region in storage should
-  -- be used (i.e. the read value should be treated like a pointer).
-  -- In general it should be possible to read in pointers with smaller reads and
-  -- re-assemble them with their region intact. Additionally, a pointer-length read does
-  -- not guarantee that the result is actually a valid pointer in the resulting region.
-  --
-  -- TODO: track enough information in the underlying storage type to be able to
-  -- accurately determine when a read (of any length) should be considered a pointer
-  -- (with a defined region), and when bitvector operations on these pointers are
-  -- region-preserving.
-  isPtrReadWidth :: Bool
-  isPtrReadWidth = case repr of
-    BVMemRepr byteWidth _ |
-      Just Refl <- testEquality (natMultiply (knownNat @8) byteWidth) (memWidthNatRepr @ptrW)
-        -> True
-    _ -> False
 
   go :: Integer -> MemRepr ty' -> IO (RegValue sym (MS.ToCrucibleType ty'))
-  go n (BVMemRepr byteWidth endianness) =
-    case isZeroOrGT1 (decNat byteWidth) of
-      Left Refl
-        | Refl <- zeroSubEq byteWidth (knownNat @1) ->
-          do (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
-             blk0 <- natLit sym 0
-             ro <- asConcreteReadOnly sym reg off byteWidth endianness baseMem
-             (blk, content) <-
-               case ro of
-                 Just val -> return (blk0, val)
-                 Nothing ->
-                   do regArrayBytes <- arrayLookup sym (memArrBytes mem) (Ctx.singleton reg)
-                      membyte <- arrayLookup sym regArrayBytes (Ctx.singleton off)
-                      blk <- case isPtrReadWidth of
-                        True -> do
-                          regArrayRegion <- arrayLookup sym (memArrRegions mem) (Ctx.singleton reg)
-                          regInt <- arrayLookup sym regArrayRegion (Ctx.singleton off)
-                          integerToNat sym (WEH.assumePositiveInt sym regInt)
-                        False -> return blk0
-                      return (blk, membyte)
-             return $ LLVMPointer blk content
-      Right LeqProof
-        | byteWidth' <- decNat byteWidth
-        , tailRepr <- BVMemRepr byteWidth' endianness
-        , headRepr <- BVMemRepr (knownNat @1) endianness
-        , Refl <- lemmaMul (knownNat @8) byteWidth
-        , Refl <- mulComm (knownNat @8) byteWidth'
-        , Refl <- mulComm (knownNat @8) byteWidth
-        , LeqProof <- mulMono (knownNat @8) byteWidth' -> do
-          hd <- go n headRepr
-          tl <- go (n + 1) tailRepr
-          concatPtrs sym endianness hd tl
+  go n (BVMemRepr byteWidth endianness) = do
+    (_ :> reg :> off) <- arrayIdx sym ptr n
+    ro <- asConcreteReadOnly sym reg off byteWidth endianness baseMem
+    blk0 <- natLit sym 0
+    case ro of
+      Just val -> return $ LLVMPointer blk0 val
+      Nothing -> do
+        fnMap <- readIORef (memReadFnCache mem)
+        readFn <- case MapF.lookup byteWidth fnMap of
+          Just readFn -> return $ getSymReadFn readFn endianness
+          Nothing -> do
+            readFn <- SymReadFn <$> mkReadFn sym byteWidth BigEndian <*> mkReadFn sym byteWidth LittleEndian
+            atomicModifyIORef' (memReadFnCache mem) (\x -> (MapF.insert byteWidth readFn x,()))
+            return $ getSymReadFn readFn endianness
+        sptr <- mkStruct sym (Ctx.empty :> reg :> off)
+        readValue <- W4.applySymFn sym readFn (Ctx.empty :> memArrStruct mem :> sptr)
+        fromSymPtr sym readValue
 
   go _n (FloatMemRepr _infoRepr _endianness) = fail "creating fresh float values not supported in freshRegValue"
 
@@ -1442,11 +1539,81 @@ writeMemState sym cond memSt ptr repr val = do
   MemTraceImpl _ memSt' _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
+
+type SymWriteFnArgs ptrW w = (EmptyCtx ::> BaseMemoryType ptrW ::> BasePtrType ptrW ::> BasePtrType (8*w))
+
+data SymWriteFn sym ptrW w =
+  SymWriteFn
+    { bigEndWrite :: W4.SymFn sym (SymWriteFnArgs ptrW w) (BaseMemoryType ptrW)
+    , littleEndWrite :: W4.SymFn sym (SymWriteFnArgs ptrW w) (BaseMemoryType ptrW)
+    }
+
+getSymWriteFn :: SymWriteFn sym ptrW w -> Endianness -> W4.SymFn sym (SymWriteFnArgs ptrW w) (BaseMemoryType ptrW)
+getSymWriteFn fn BigEndian = bigEndWrite fn
+getSymWriteFn fn LittleEndian = littleEndWrite fn
+
+mkWriteFn ::
+  forall w ptrW sym.
+  1 <= w =>
+  MemWidth ptrW =>
+  IsSymExprBuilder sym =>  
+  sym ->
+  NatRepr w ->
+  Endianness ->  
+  IO (W4.SymFn sym (SymWriteFnArgs ptrW w) (BaseMemoryType ptrW))
+mkWriteFn sym w endianness = do
+  LeqProof <- return $ mulMono (knownNat @8) w
+  memVar <- W4.freshBoundVar sym (W4.safeSymbol "mem") (baseMemRepr @ptrW)
+  let memExpr = W4.varExpr sym memVar
+  ptrVar <- W4.freshBoundVar sym (W4.safeSymbol "ptr") (ptrRepr (memWidthNatRepr @ptrW))
+  let ptr = W4.varExpr sym ptrVar
+
+  valVar <- W4.freshBoundVar sym (W4.safeSymbol "val") (ptrReprBytes w)
+  let val = W4.varExpr sym valVar
+  (region, bv_outer) <- viewSymIdx sym val
+  let go ::
+        1 <= w' =>
+        Integer ->
+        NatRepr w' -> 
+        SymBV sym (8*w') ->
+        W4.SymExpr sym (BaseMemoryType ptrW) ->
+        IO (W4.SymExpr sym (BaseMemoryType ptrW))
+      go n byteWidth bv mem =
+        case isZeroOrGT1 (decNat byteWidth) of
+          Left Refl -> do
+            inBytesArr <- W4.structField sym memExpr Ctx.i1of2
+            inRegionsArr <- W4.structField sym memExpr Ctx.i2of2
+            (reg, off) <- offsetSymPtr sym ptr n >>= viewSymIdx sym
+            Refl <- return $ zeroSubEq byteWidth (knownNat @1)
+            regArrayBytes <- arrayLookup sym inBytesArr (Ctx.singleton reg)
+            regArrayBytes' <- arrayUpdate sym regArrayBytes (Ctx.singleton off) bv
+            outBytesArr <- arrayUpdate sym inBytesArr (Ctx.singleton reg) regArrayBytes'
+            regionInt <- case exprType bv_outer of
+              BaseBVRepr val_w | Just Refl <- testEquality val_w (memWidthNatRepr @ptrW) ->
+                return $ region
+              _ -> intLit sym 0
+            regArrayRegions <- arrayLookup sym inRegionsArr (Ctx.singleton reg)
+            regArrayRegions' <- arrayUpdate sym regArrayRegions (Ctx.singleton off) regionInt
+            outRegionsArr <- arrayUpdate sym inRegionsArr (Ctx.singleton reg) regArrayRegions'
+            mkStruct sym (Ctx.empty :> outBytesArr :> outRegionsArr)
+          Right LeqProof -> do
+            let
+              byteWidth' = decNat byteWidth
+              repr' = byteWidth'
+              reprHead = (knownNat @1)
+            LeqProof <- return $ oneSubEq byteWidth
+            (hd, tl) <- chunkBV sym endianness byteWidth bv
+            mem1 <- go n reprHead hd mem
+            go (n + 1) repr' tl mem1
+  e <- go 0 w bv_outer memExpr
+  let nm = W4.safeSymbol ("write_" ++ (show (W4.natValue w)))
+  W4.definedFn sym nm (Ctx.empty :> memVar :> ptrVar :> valVar) e W4.UnfoldConcrete
+  
 -- | Write to the memory array and set the dirty bits on
 -- any written addresses
 writeMemBV :: forall sym ptrW w.
   1 <= ptrW =>
-  IsExprBuilder sym =>
+  IsSymExprBuilder sym =>
   MemWidth ptrW =>
   sym ->
   MemTraceState sym ptrW ->
@@ -1454,39 +1621,20 @@ writeMemBV :: forall sym ptrW w.
   MemRepr (MT.BVType w) ->
   LLVMPtr sym w ->
   IO (MemTraceState sym ptrW)
-writeMemBV sym mem_init ptr repr (LLVMPointer region val) = go 0 repr val mem_init
-  where
-  go ::
-    Integer ->
-    MemRepr (MT.BVType w') ->
-    SymBV sym w' ->
-    MemTraceState sym ptrW ->
-    IO (MemTraceState sym ptrW)
-  go n (BVMemRepr byteWidth endianness) bv mem =
-    case isZeroOrGT1 (decNat byteWidth) of
-      Left Refl -> do
-        (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr n
-        Refl <- return $ zeroSubEq byteWidth (knownNat @1)
-        regArrayBytes <- arrayLookup sym (memArrBytes mem) (Ctx.singleton reg)
-        regArrayBytes' <- arrayUpdate sym regArrayBytes (Ctx.singleton off) bv
-        arrBytes <- arrayUpdate sym (memArrBytes mem) (Ctx.singleton reg) regArrayBytes'
-        regionInt <- case (exprType val) of
-          BaseBVRepr w | Just Refl <- testEquality w (memWidthNatRepr @ptrW) ->
-            return $ natToIntegerPure region
-          _ -> intLit sym 0
-        regArrayRegions <- arrayLookup sym (memArrRegions mem) (Ctx.singleton reg)
-        regArrayRegions' <- arrayUpdate sym regArrayRegions (Ctx.singleton off) regionInt
-        arrRegions <- arrayUpdate sym (memArrRegions mem) (Ctx.singleton reg) regArrayRegions'
-        return $ mem { memArrBytes = arrBytes, memArrRegions = arrRegions }
-      Right LeqProof -> do
-        let
-          byteWidth' = decNat byteWidth
-          repr' = BVMemRepr byteWidth' endianness
-          reprHead = BVMemRepr (knownNat @1) endianness
-        LeqProof <- return $ oneSubEq byteWidth
-        (hd, tl) <- chunkBV sym endianness byteWidth bv
-        mem1 <- go n reprHead hd mem
-        go (n + 1) repr' tl mem1
+writeMemBV sym mem_init ptr repr val = case repr of
+  BVMemRepr byteWidth endianness -> do
+    sptr <- asSymPtr sym ptr
+    sval <- asSymPtr sym val
+    fnMap <- readIORef (memWriteFnCache mem_init)
+    writeFn <- case MapF.lookup byteWidth fnMap of
+      Just writeFn -> return $ getSymWriteFn writeFn endianness
+      Nothing -> do
+        writeFn <- SymWriteFn <$> mkWriteFn sym byteWidth BigEndian <*>mkWriteFn sym byteWidth LittleEndian
+        atomicModifyIORef' (memWriteFnCache mem_init) (\x -> (MapF.insert byteWidth writeFn x,()))
+        return $ getSymWriteFn writeFn endianness
+        
+    memStruct' <- W4.applySymFn sym writeFn (Ctx.empty :> memArrStruct mem_init :> sptr :> sval)
+    return $ mem_init { memArrStruct = memStruct' }
 
 ifCond ::
   IsSymInterface sym =>
@@ -1525,9 +1673,8 @@ doMemOpInternal sym dir cond ptrW = go where
         Write -> do
           mem <- get
           memSt' <- liftIO $ writeMemBV sym (memState mem) ptr repr regVal
-          arrBytes <- liftIO $ ifCond sym cond (memArrBytes $ memSt') (memArrBytes $ memState mem)
-          arrRegions <- liftIO $ ifCond sym cond (memArrRegions $ memSt') (memArrRegions $ memState mem)
-          put $ mem { memState = MemTraceState arrBytes arrRegions }
+          memStruct' <- liftIO $ ifCond sym cond (memArrStruct $ memSt') (memArrStruct $ memState mem)
+          put $ mem { memState = MemTraceState memStruct' (memReadFnCache $ memState mem) (memWriteFnCache $ memState mem) }
     FloatMemRepr _infoRepr _endianness -> fail "reading floats not supported in doMemOpInternal"
     PackedVecMemRepr _countRepr recRepr -> addrWidthsArePositive ptrW $ do
       elemSize <- liftIO $ bvLit sym ptrWidthNatRepr (BV.mkBV ptrWidthNatRepr (memReprByteSize recRepr))
@@ -1800,13 +1947,18 @@ memEqOutsideRegion ::
   IO (Pred sym)
 memEqOutsideRegion sym region mem1 mem2 = do
   let iRegion = natToIntegerPure region
-  mem1StackBytes <- arrayLookup sym (memArrBytes mem1) (Ctx.singleton iRegion)
-  mem1StackRegions <- arrayLookup sym (memArrRegions mem1) (Ctx.singleton iRegion)
-  mem2Bytes' <- arrayUpdate sym (memArrBytes mem2) (Ctx.singleton iRegion) mem1StackBytes
-  mem2Regions' <- arrayUpdate sym (memArrRegions mem2) (Ctx.singleton iRegion) mem1StackRegions
+  bytesArr1 <- memArrBytes sym mem1
+  regionsArr1 <- memArrRegions sym mem1
+  mem1StackBytes <- arrayLookup sym bytesArr1 (Ctx.singleton iRegion)
+  mem1StackRegions <- arrayLookup sym regionsArr1 (Ctx.singleton iRegion)
 
-  bytesEq <- isEq sym (memArrBytes mem1) mem2Bytes'
-  regionsEq <- isEq sym (memArrRegions mem1) mem2Regions'
+  bytesArr2 <- memArrBytes sym mem2
+  regionsArr2 <- memArrRegions sym mem2  
+  mem2Bytes' <- arrayUpdate sym bytesArr2 (Ctx.singleton iRegion) mem1StackBytes
+  mem2Regions' <- arrayUpdate sym regionsArr2 (Ctx.singleton iRegion) mem1StackRegions
+
+  bytesEq <- isEq sym bytesArr1 mem2Bytes'
+  regionsEq <- isEq sym regionsArr1 mem2Regions'
   andPred sym bytesEq regionsEq
 
 -- | Memory states are equivalent in the given region.
@@ -1821,10 +1973,15 @@ memEqAtRegion ::
   IO (Pred sym)
 memEqAtRegion sym stackRegion mem1 mem2 = do
   let iStackRegion = natToIntegerPure stackRegion
-  mem1StackBytes <- arrayLookup sym (memArrBytes mem1) (Ctx.singleton iStackRegion)
-  mem2StackBytes <- arrayLookup sym (memArrBytes mem2) (Ctx.singleton iStackRegion)
-  mem1StackRegions <- arrayLookup sym (memArrRegions mem1) (Ctx.singleton iStackRegion)
-  mem2StackRegions <- arrayLookup sym (memArrRegions mem2) (Ctx.singleton iStackRegion)
+  bytesArr1 <- memArrBytes sym mem1
+  regionsArr1 <- memArrRegions sym mem1
+  bytesArr2 <- memArrBytes sym mem2
+  regionsArr2 <- memArrRegions sym mem2  
+  
+  mem1StackBytes <- arrayLookup sym bytesArr1 (Ctx.singleton iStackRegion)
+  mem2StackBytes <- arrayLookup sym bytesArr2 (Ctx.singleton iStackRegion)
+  mem1StackRegions <- arrayLookup sym regionsArr1 (Ctx.singleton iStackRegion)
+  mem2StackRegions <- arrayLookup sym regionsArr2 (Ctx.singleton iStackRegion)
 
   bytesEq <- isEq sym mem1StackBytes mem2StackBytes
   regionsEq <- isEq sym mem1StackRegions mem2StackRegions
@@ -1839,10 +1996,7 @@ memEqExact ::
   MemTraceState sym ptrW ->
   MemTraceState sym ptrW ->
   IO (Pred sym)
-memEqExact sym mem1 mem2 = do
-  bytesEq <- isEq sym (memArrBytes mem1) (memArrBytes mem2)
-  regionsEq <- isEq sym (memArrRegions mem1) (memArrRegions mem2)
-  andPred sym bytesEq regionsEq
+memEqExact sym mem1 mem2 = isEq sym (memArrStruct mem1) (memArrStruct mem2)
 
 instance PEM.ExprMappable sym (MemOpCondition sym) where
   mapExpr _sym f = \case
@@ -1894,9 +2048,8 @@ instance PEM.ExprMappable sym (MemTraceImpl sym w) where
 
 instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do
-    memArrBytes' <- f $ memArrBytes memSt
-    memArrRegions' <- f $ memArrRegions memSt
-    return $ MemTraceState memArrBytes' memArrRegions'
+    memArrStruct' <- f $ memArrStruct memSt
+    return $ MemTraceState memArrStruct' (memReadFnCache memSt) (memWriteFnCache memSt)
 
 instance PEM.ExprMappable sym (MemFootprint sym arch) where
   mapExpr sym f (MemFootprint ptr w dir cond end) = do
