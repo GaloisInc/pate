@@ -435,7 +435,7 @@ mapExprPtr ::
   m (CLM.LLVMPtr sym w)
 mapExprPtr sym f (CLM.LLVMPointer reg off) = do
   regInt <- f (W4.natToIntegerPure reg)
-  reg' <- IO.liftIO $ integerToNat sym regInt
+  reg' <- IO.liftIO $ integerToNat sym (assumePositiveInt sym regInt)
   off' <- f off
   return $ CLM.LLVMPointer reg' off'
 

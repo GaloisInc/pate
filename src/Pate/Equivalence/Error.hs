@@ -15,6 +15,7 @@ module Pate.Equivalence.Error (
   , equivalenceError
   , equivalenceErrorFor
   , isRecoverable
+  , isTracedWhenWarning
   , loaderError
   ) where
 
@@ -97,9 +98,11 @@ data InnerEquivalenceError arch
   | LoaderFailure String
   | WideningError String
   | ObservabilityError String
+  | ObservableDifferenceFound -- only raised as an informative warning
   | TotalityError String
   | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
   | UnknownPLTStub BS.ByteString
+  | NotImplementedYet String
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
@@ -120,7 +123,21 @@ isRecoverable' e = case e of
   InconsistentSimplificationResult{} -> True
   RescopingFailure{} -> True
   WideningError{} -> True
+  NotImplementedYet{} -> True
+  UnexpectedTailCallEntry{} -> True
   _ -> False
+
+-- | When an error is raised as a warning, this determines if it should be displayed
+-- in the trace tree
+isTracedWhenWarning' :: InnerEquivalenceError arch -> Bool
+isTracedWhenWarning' e = case e of
+  UnknownPLTStub{} -> False
+  _ -> True
+
+isTracedWhenWarning :: EquivalenceError -> Bool
+isTracedWhenWarning err = case errEquivError err of
+  Left (SomeInnerError innerErr) -> isTracedWhenWarning' innerErr
+  _ -> True
 
 isRecoverable :: EquivalenceError -> Bool
 isRecoverable err = case errEquivError err of

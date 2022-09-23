@@ -58,7 +58,7 @@ newtype CallingContext arch = CallingContext [PPa.BlockPair arch]
 
 instance PA.ValidArch arch => Pretty (CallingContext arch) where
   pretty (CallingContext bps) =
-    let bs = [ pretty bp | bp <- bps ]
+    let bs = reverse $ [ pretty bp | bp <- bps ]
     in sep (zipWith (<+>) ("[" : repeat "->") bs) <+> "]"
 
 
@@ -102,4 +102,8 @@ instance PA.ValidArch arch => Show (GraphNode arch) where
 
 instance PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
   type TraceNodeType '(sym, arch) "node" = GraphNode arch
+  prettyNode () = pretty
+
+instance PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
+  type TraceNodeType '(sym, arch) "entrynode" = NodeEntry arch
   prettyNode () = pretty

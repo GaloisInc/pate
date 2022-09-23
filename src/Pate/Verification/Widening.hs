@@ -12,6 +12,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Pate.Verification.Widening
   ( widenAlongEdge
@@ -130,8 +131,7 @@ widenAlongEdge ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
-  emitTrace @"node" to
+widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
   case getCurrentDomain gr to of
     -- This is the first time we have discovered this location
     Nothing ->
@@ -208,23 +208,6 @@ toMaybe :: MaybeF a tp -> Maybe (a tp)
 toMaybe (JustF a) = Just a
 toMaybe NothingF = Nothing
 
-data TermAbstraction sym =
-  forall v tp. TermAbstraction (PS.ScopedExpr sym v tp)
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "term abstraction" where
-  type TraceNodeType '(sym,arch) "term abstraction" = TermAbstraction sym
-  prettyNode () (TermAbstraction t) = pretty t
-  nodeTags = [(Summary, \() (TermAbstraction t) -> pretty (head (lines (show t))))]
-
-data ConcretizeAttempt sym =
-  forall tp. ConcretizeAttempt (W4.SymExpr sym tp)
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "concretize" where
-  type TraceNodeType '(sym,arch) "concretize" = ConcretizeAttempt sym
-  prettyNode () (ConcretizeAttempt t) = W4.printSymExpr t
-  nodeTags = [(Summary, \() (ConcretizeAttempt t) -> pretty (head (lines (show (W4.printSymExpr t)))))]
-
-
 -- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
 -- parameterized over the *output* state of the given 'SimBundle'.
 -- Until now, the widening process has used the same scope for the pre-domain and
@@ -284,12 +267,14 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     let
       asScopedConst :: forall v1 v2 tp. HasCallStack => W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
+        emitTrace @"assumption" (PAs.fromPred asm)
         Just c <- lift $ withAssumption asm $ do
-          emitTrace @"message" "concretizeWithSolver"
           e' <- concretizeWithSolver (PS.unSE se)
-          emitTrace @"concretize" (ConcretizeAttempt e')
+          emitTraceLabel @"expr" "output" (Some e')
           return $ W4.asConcrete e'
-        liftIO $ PS.concreteScope @v2 sym c
+        off' <- liftIO $ PS.concreteScope @v2 sym c
+        emitTraceLabel @"expr" "final output" (Some (PS.unSE off'))
+        return off'
 
       asStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asStackOffset bin se = do
@@ -304,10 +289,8 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         asFrameOffset' <- liftIO $ PS.applyScopeCoercion sym post_to_pre asFrameOffset
         -- asm := se == frame[post/f(pre)] + off
         asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
-        -- assuming 'asm', is 'off' constant?
-        emitTrace @"assumption" (PAs.fromPred (PS.unSE asm))
-        off' <- asScopedConst (PS.unSE asm) off
-        emitTrace @"term abstraction" (TermAbstraction off')
+        -- assuming 'asm', is 'off' constant?        
+        off' <- asScopedConst (PS.unSE asm) off        
         -- lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
         -- return frame[post] + off
         liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
@@ -350,7 +333,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- is effectively now assuming equality on that entry.
     
     eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
-      subTrace @"term abstraction" (TermAbstraction se) $
+      subTrace @"expr" (Some (PS.unSE se)) $
         doRescope loc se >>= \case
           JustF se' -> return $ Just se'
           NothingF -> do
@@ -365,7 +348,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- failing to rescope is not an error, as it is simply weakening the resulting
     -- domain by not asserting any value constraints on that entry.
     val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se ->
-      subTrace @"term abstraction" (TermAbstraction se) $ toMaybe <$> doRescope loc se
+      subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
 
     let dom = PAD.AbstractDomain eq_post val_post
     emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
@@ -410,6 +393,17 @@ type WidenState sym arch v = Either (AbstractDomain sym arch v) (WidenResult sym
 localWideningGas :: Gas
 localWideningGas = Gas 100
 
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "widenresult" where
+  type TraceNodeType '(sym,arch) "widenresult" = Some (WidenResult sym arch)
+  prettyNode () (Some wr) = case wr of
+    NoWideningRequired -> "No Widening Required"
+    WideningError msg _ _ -> "Error while widening:\n" <+> pretty msg
+    Widen wk (WidenLocs _regs _cells) d -> "Widened domain:" <+> PAD.ppAbstractDomain (\_ -> "") d
+  nodeTags = [(Summary, \() (Some wr) -> case wr of
+                NoWideningRequired -> "No Widening Required"
+                WideningError{} -> "Error while widening"
+                Widen _wk (WidenLocs regs cells) _ -> ("Widened:" <+> pretty (Set.size regs) <+> "registers and" <+> pretty (Set.size cells) <+> "memory cells"))]
+
 widenPostcondition ::
   forall sym arch v.
   SimBundle sym arch v ->
@@ -420,7 +414,8 @@ widenPostcondition bundle preD postD0 =
   withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
-    widenLoop sym localWideningGas eqCtx postD0 Nothing
+    subTree @"domain" "widenPostcondition" $
+      widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
    widenOnce ::
@@ -514,8 +509,8 @@ widenPostcondition bundle preD postD0 =
      Maybe (WidenResult sym arch v)
      {- ^ A summary of any widenings that were done in previous iterations.
           If @Nothing@, than no previous widenings have been performed. -} ->
-     EquivM sym arch (WidenResult sym arch v)
-   widenLoop sym (Gas i) eqCtx postD mPrevRes =
+     NodeBuilderT '(sym,arch) "domain" (EquivM_ sym arch) (WidenResult sym arch v)
+   widenLoop sym (Gas i) eqCtx postD mPrevRes = subTraceLabel' PAD.Postdomain  (Some postD) $ \unlift ->
      do
         (valPostO, valPostP) <- liftIO $ PPa.forBinsC $ \get -> do
           let
@@ -569,7 +564,7 @@ widenPostcondition bundle preD postD0 =
                let newlocs = case mPrevRes of
                      Just (Widen _ prevLocs _) -> locs <> prevLocs
                      _ -> locs
-               widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
+               unlift $ widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
 
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the
@@ -585,13 +580,14 @@ getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
     getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
     getConcreteRange e = do
       e' <- concretizeWithSolver e
+      emitTraceLabel @"expr" "output" (Some e')
       return $ PAD.extractAbsRange sym e'
 
   let PPa.PatchPair preO preP = PAD.absDomVals preDom
   eqCtx <- equivalenceContext
-  IO.withRunInIO $ \inIO -> do
-    initO <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (getConcreteRange e)) (PS.simOutO bundle) preO
-    initP <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (getConcreteRange e)) (PS.simOutP bundle) preP
+  subTree @"expr" "getInitalAbsDomainVals" $ IO.withRunInIO $ \inIO -> do
+    initO <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) (PS.simOutO bundle) preO
+    initP <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) (PS.simOutP bundle) preP
     return $ PPa.PatchPair initO initP
 
 widenUsingCounterexample ::

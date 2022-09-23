@@ -220,7 +220,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch globalRegion) undefops
 
   
-  (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder PA.ValidRepr (PC.cfgTraceTree vcfg)
+  (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder (PA.ValidRepr sym validArch) (PC.cfgTraceTree vcfg)
 
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
@@ -268,7 +268,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     -- function calls.
 
     (result, stats) <- PSP.runVerificationLoop env pPairs'
-    updateTreeStatus treeBuilder (NodeStatus True)
+    finalizeTree treeBuilder
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)

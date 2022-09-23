@@ -59,6 +59,7 @@ module Pate.TraceTree (
   , noTraceTree
   , viewSomeTraceTree
   , NodeStatus(..)
+  , NodeStatusLevel(..)
   , getNodeStatus
   , getTreeStatus
   , MonadTreeBuilder(..)
@@ -68,18 +69,25 @@ module Pate.TraceTree (
   , runTreeBuilderT
   , withSubTraces
   , subTraceLabel
+  , subTraceLabel'
   , subTree
   , subTrace
   , emitTraceLabel
   , emitTrace
   , traceAlternatives
   , IsNodeError(..)
+  , emitTraceWarning
+  , emitTraceError
+  , finalizeTree
+  , withTracing
+  , withTracingLabel
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
 import           GHC.Stack
 import           Data.Kind ( Type )
 import qualified Control.Monad.IO.Class as IO
+import qualified Control.Monad.IO.Unlift as IO
 import qualified Data.IORef as IO
 import           Data.String
 import qualified Data.Map as Map
@@ -97,7 +105,7 @@ import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
-import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr )
+import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSym(..), SymbolRepr )
 
 data TraceTag =
     Summary
@@ -109,11 +117,25 @@ data TraceTag =
 class Show e => IsNodeError e where
   propagateErr :: e -> Bool
 
--- TODO: We could expose the error type here with some plumbing
-data NodeStatus =
-    NodeStatus { isFinished :: Bool }
-  | forall e. IsNodeError e => NodeError { nodeError :: e, isFinished :: Bool }
 
+data NodeStatusLevel =
+    StatusSuccess
+  | forall e. IsNodeError e => StatusWarning e
+  | forall e. IsNodeError e => StatusError e
+
+isHigherStatusLevel :: NodeStatusLevel -> NodeStatusLevel -> Bool
+isHigherStatusLevel (StatusWarning _) StatusSuccess = True
+isHigherStatusLevel (StatusError _) (StatusWarning _) = True
+isHigherStatusLevel (StatusError _) StatusSuccess = True
+isHigherStatusLevel _ _ = False
+
+-- TODO: We could expose the error type here with some plumbing
+data NodeStatus = NodeStatus { nodeStatusLevel :: NodeStatusLevel, isFinished :: Bool }
+
+shouldPropagate :: NodeStatusLevel -> Bool
+shouldPropagate StatusSuccess = False
+shouldPropagate (StatusWarning e) = propagateErr e
+shouldPropagate (StatusError e) = propagateErr e
 
 instance IsString TraceTag where
   fromString str = Custom str
@@ -143,18 +165,16 @@ propagateIOListStatus st l = modifyIOListStatus (propagateStatus st) l
 propagateStatus :: NodeStatus -> NodeStatus -> NodeStatus
 propagateStatus stNew stOld = case isFinished stOld of
   True -> stOld
-  False -> case (stNew, stOld) of
-   (NodeError _newErr newFin, NodeError oldErr _) -> NodeError oldErr newFin
-   (NodeError newErr newFin, NodeStatus _) -> NodeError newErr newFin
-   (NodeStatus True, _) -> stNew
-   _ -> stOld
+  False -> case isHigherStatusLevel (nodeStatusLevel stNew) (nodeStatusLevel stOld) of
+    True -> stNew
+    False -> stOld { isFinished = isFinished stNew }
 
 getIOListStatus :: IOList a -> IO NodeStatus
 getIOListStatus l = ioListStatus <$> evalIOList' l
 
 emptyIOList :: IO (IOList a)
 emptyIOList = do
-  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus False))
+  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess False))
   return $ IOList r
 
 data NodeBuilder k nm where
@@ -172,19 +192,18 @@ data TreeBuilder k where
 
 addNodeDependency :: NodeBuilder k nm -> TreeBuilder k -> TreeBuilder k
 addNodeDependency nodeBuilder treeBuilder =
-  let finish st = case st of
+  let finish st = case shouldPropagate (nodeStatusLevel st) of
         -- importantly, we don't propagate regular status updates to ancestors,
         -- otherwise finalizing a child would cause all parents to finalize
-        NodeError e _ | propagateErr e -> updateNodeStatus nodeBuilder st >> updateTreeStatus treeBuilder st
-        _ -> updateTreeStatus treeBuilder st
+        True -> updateNodeStatus nodeBuilder st >> updateTreeStatus treeBuilder st
+        False -> updateTreeStatus treeBuilder st
   in treeBuilder { updateTreeStatus = finish } 
 
 addTreeDependency :: TreeBuilder k -> NodeBuilder k nm -> NodeBuilder k nm
 addTreeDependency treeBuilder nodeBuilder =
-  let finish st = case st of
-        NodeError e _ | propagateErr e -> updateTreeStatus treeBuilder st >> updateNodeStatus nodeBuilder st
-        _ -> updateNodeStatus nodeBuilder st
-
+  let finish st = case shouldPropagate (nodeStatusLevel st) of
+        True -> updateTreeStatus treeBuilder st >> updateNodeStatus nodeBuilder st
+        False -> updateNodeStatus nodeBuilder st
   in nodeBuilder { updateNodeStatus = finish }
 
 startTree :: forall k nm. IO (TraceTree k, TreeBuilder k)
@@ -209,7 +228,7 @@ singleNode ::
 singleNode lbl v = do
   l <- emptyIOList
   t <- emptyIOList
-  modifyIOListStatus (\_ -> NodeStatus True) t
+  modifyIOListStatus (\_ -> NodeStatus StatusSuccess True) t
   addIOList ((v, lbl), TraceTree t) l
   return $ TraceTreeNode l
 
@@ -370,10 +389,18 @@ viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
     SomeTraceTree' validRepr _ (t' :: TraceTree k) -> f @k validRepr t'
     StartTree -> noTreeFn
 
+newtype SomeSymRepr = SomeSymRepr (SomeSym SymbolRepr)
+
+instance Eq SomeSymRepr where
+  (SomeSymRepr (SomeSym s1)) == (SomeSymRepr (SomeSym s2)) = case testEquality s1 s2 of
+    Just Refl -> True
+    Nothing -> False
+
 -- named subtrees
 instance IsTraceNode k "subtree" where
   type TraceNodeType k "subtree" = String
-  prettyNode () nm = PP.pretty nm
+  type TraceNodeLabel "subtree" = SomeSymRepr
+  prettyNode (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (symbolRepr lbl) <> "]"
 
 -- ad-hoc messages
 instance IsTraceNode k "message" where
@@ -449,6 +476,13 @@ newtype NodeBuilderT k nm m a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a
 
 deriving instance Alternative m => Alternative (NodeBuilderT k nm m)
 
+
+instance IO.MonadUnliftIO m => IO.MonadUnliftIO (NodeBuilderT k nm m) where
+  withRunInIO f = do
+    nodeBuilder <- getNodeBuilder
+    lift $ IO.withRunInIO $ \inIO ->
+      f (\x -> inIO (runNodeBuilderT x nodeBuilder))
+
 -- Running alternative executions in a context where failure raises
 -- a special exception, so it can be captured by the subtrace handlers
 
@@ -497,7 +531,6 @@ runNodeBuilderT (NodeBuilderT f) nodeBuilder = CMR.runReaderT f nodeBuilder
 getNodeBuilder :: forall k nm m. Monad m => NodeBuilderT k nm m (NodeBuilder k nm)
 getNodeBuilder = NodeBuilderT $ CMR.ask
 
-
 type IsTreeBuilder k e m =
   (IO.MonadIO m, MonadError e m, IsNodeError e, MonadTreeBuilder k m)
 
@@ -514,27 +547,61 @@ withSubTraces f = do
   let nodeBuilder = addTreeDependency treeBuilder nodeBuilder'
   IO.liftIO $ addNode treeBuilder node  
   r <- catchError
-        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
-        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError e True)) >> throwError e)
+        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus StatusSuccess True)) >> return r)
+        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus (StatusError e) True)) >> throwError e)
   return r
 
-subTraceLabel ::
+subTraceLabel' ::
   forall nm k m e a.
   IsTreeBuilder k e m =>
-  TraceNodeType k nm ->
   TraceNodeLabel nm ->
-  m a ->
+  TraceNodeType k nm ->
+  ((forall b. NodeBuilderT k nm m b -> m b) -> m a) ->
   NodeBuilderT k nm m a
-subTraceLabel v lbl f = do
+subTraceLabel' lbl v f = do
   nodeBuilder <- getNodeBuilder @k @nm @m
   (subtree, treeBuilder') <- IO.liftIO $ startTree @k
   let treeBuilder = addNodeDependency nodeBuilder treeBuilder'
   IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
   r <- catchError
-        (liftTreeBuilder treeBuilder' f
-          >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus True)) >> return r)
-        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError e True)) >> throwError e)
+        (liftTreeBuilder treeBuilder (f (\g -> runNodeBuilderT g nodeBuilder))
+          >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus StatusSuccess True)) >> return r)
+        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) True)) >> throwError e)
   return r
+
+subTraceLabel ::
+  forall nm k m e a.
+  IsTreeBuilder k e m =>
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  m a ->
+  NodeBuilderT k nm m a
+subTraceLabel lbl v f = subTraceLabel' lbl v (\_ -> f)
+
+-- | Tag the current sub-computation as having raised a warning
+emitTraceWarning ::
+  forall k m e.
+  IsTreeBuilder k e m =>
+  e ->
+  m ()
+emitTraceWarning e = do
+  treeBuilder <- getTreeBuilder
+  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusWarning e) False)
+
+-- | Tag the current sub-computation as having raised an error
+emitTraceError ::
+  forall k m e.
+  IsTreeBuilder k e m =>
+  e ->
+  m ()
+emitTraceError e = do
+  treeBuilder <- getTreeBuilder
+  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) False)
+
+finalizeTree ::
+  TreeBuilder k ->
+  IO ()
+finalizeTree treeBuilder = updateTreeStatus treeBuilder (NodeStatus StatusSuccess True)
 
 traceAlternatives' ::
   IsTreeBuilder k e m =>
@@ -564,7 +631,7 @@ subTrace ::
   TraceNodeType k nm ->
   m a ->
   NodeBuilderT k nm m a
-subTrace v f = subTraceLabel v def f
+subTrace v f = subTraceLabel def v f
 
 subTree ::
   forall nm k m e a.
@@ -573,8 +640,8 @@ subTree ::
   String ->
   NodeBuilderT k nm m a ->
   m a 
-subTree lbl f = withSubTraces $ 
-  subTrace @"subtree" @k @m lbl
+subTree treenm f = withSubTraces $ 
+  subTraceLabel @"subtree" @k @m (SomeSymRepr (SomeSym (knownSymbol @nm))) treenm 
     $ withSubTraces @nm @k f
 
 
@@ -590,6 +657,27 @@ emitTraceLabel lbl v = do
   treeBuilder <- getTreeBuilder
   node <- IO.liftIO $ singleNode @k @nm lbl v
   IO.liftIO $ addNode treeBuilder node
+
+withTracingLabel ::
+  forall nm k e m a.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm =>
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  m a ->
+  m a
+withTracingLabel lbl v f = withSubTraces @nm @k $ subTraceLabel lbl v f
+
+withTracing ::
+  forall nm k e m a.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm =>
+  Default (TraceNodeLabel nm) =>
+  TraceNodeType k nm ->
+  m a ->
+  m a
+withTracing v f = withTracingLabel @nm @k def v f
+
 
 emitTrace ::
   forall nm k m.

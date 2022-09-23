@@ -279,14 +279,15 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ 
          gr3 <- updateReturnNode scope node bundle d gr2
 
          -- Follow all the exit pairs we found
-         withSubTraces $
-           foldM (\x y@(_,tgt) -> subTrace @"blocktarget" tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
+         subTree @"blocktarget" "Block Exits" $
+           foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
 
 
 visitNode scope (ReturnNode fPair) d gr0 =
   -- propagate the abstract domain of the return node to
   -- all of the known call sites of this function.
-  foldM processReturn gr0 (getReturnVectors gr0 fPair)
+  subTree @"entrynode" "Block Returns" $
+    foldM (\gr node -> subTrace node $ processReturn gr node) gr0 (getReturnVectors gr0 fPair)
 
  where
    -- Here, we're using a bit of a trick to propagate abstract domain information to call sites.
@@ -371,6 +372,27 @@ data ObservableCheckResult sym ptrW
   | ObservableCheckCounterexample (ObservableCounterexample sym ptrW)
   | ObservableCheckError String
 
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "observable_result" where
+  type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym (MM.ArchAddrWidth arch)
+  prettyNode () = \case
+    ObservableCheckEq -> "Observably Equivalent"
+    ObservableCheckCounterexample (ObservableCounterexample oSeq pSeq) -> PP.vsep $ 
+       ["Observable Inequivalence Detected:"
+       , "== Original sequence =="
+       ] ++ (map MT.prettyMemEvent oSeq) ++
+       [ "== Patched sequence ==" ]
+       ++ (map MT.prettyMemEvent pSeq)
+
+    ObservableCheckError msg -> PP.vsep $
+      [ "Error during observability check"
+      , PP.pretty msg
+      ]
+  nodeTags = [(Summary, \() res -> case res of
+                  ObservableCheckEq -> "Observably Equivalent"
+                  ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
+                  ObservableCheckError{} -> "Error during observability check")
+             ]
+
 checkObservables :: forall sym arch v.
   NodeEntry arch ->
   SimBundle sym arch v ->
@@ -380,21 +402,23 @@ checkObservables :: forall sym arch v.
 checkObservables bPair bundle preD gr =
   considerObservableEvent gr bPair $
     do res <- doCheckObservables bundle preD
-       case res of
-         ObservableCheckEq ->
-           do traceBundle bundle "Observables agree"
-              return (Nothing, gr)
-         ObservableCheckError msg ->
-           do let msg' = ("Error checking observables: " ++ msg)
-              err <- emitError (PEE.ObservabilityError msg')
-              return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
-         ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
-           do traceBundle bundle ("Obserables disagree!")
-              traceBundle bundle ("== Original sequence ==")
-              traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
-              traceBundle bundle ("== Patched sequence ==")
-              traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
-              return (Just cex, gr)
+       withTracing @"observable_result" res $
+         case res of
+           ObservableCheckEq ->
+             do traceBundle bundle "Observables agree"
+                return (Nothing, gr)
+           ObservableCheckError msg ->
+             do let msg' = ("Error checking observables: " ++ msg)
+                err <- emitError (PEE.ObservabilityError msg')
+                return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
+           ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
+             do traceBundle bundle ("Obserables disagree!")
+                traceBundle bundle ("== Original sequence ==")
+                traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
+                traceBundle bundle ("== Patched sequence ==")
+                traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
+                emitWarning $ PEE.ObservableDifferenceFound
+                return (Just cex, gr)
 
 doCheckObservables :: forall sym arch v.
   SimBundle sym arch v ->
@@ -927,6 +951,7 @@ handleSyscall ::
   EquivM sym arch (PairGraph sym arch)
 handleSyscall _scope bundle _currBlock _d gr pPair pRetPair =
   do traceBundle bundle ("Encountered syscall! " ++ show pPair ++ " " ++ show pRetPair)
+     _ <- emitError $ PEE.NotImplementedYet "handleSyscall"
      return gr -- TODO!
 
 
@@ -940,7 +965,8 @@ handleInlineCallee ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair =
+handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair = do
+  _ <- emitError $ PEE.NotImplementedYet "handleInlineCallee"
   return gr -- TODO!
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "funcall" where
@@ -982,6 +1008,11 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
               , show pRetPair
               ]
 
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "pltstub" where
+  type TraceNodeType '(sym,arch) "pltstub" = (String, Bool)
+  prettyNode () (nm, True) = "Defined PLT stub call:" <+> PP.pretty nm
+  prettyNode () (nm, False) = "Undefined PLT stub call:" <+> PP.pretty nm
+
 handlePLTStub ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -996,11 +1027,13 @@ handlePLTStub scope bundle currBlock d gr0 _pPair pRetPair stubSymbol = withSym 
   PA.SomeValidArch archData <- asks envValidArch
   PA.StubOverride f <- case PA.lookupStubOverride archData stubSymbol of
     Just f -> do
+      emitTrace @"pltstub" (show stubSymbol,True)
       traceBundle bundle ("Using override for PLT stub " ++ show stubSymbol)
       return f
     Nothing -> do
       -- we have no model for this stub, so we emit a warning and unsoundly
       -- leave the state unmodified
+      emitTrace @"pltstub" (show stubSymbol,False)
       emitWarning $ PEE.UnknownPLTStub stubSymbol
       -- dummy override that does nothing
       return $ PA.StubOverride $ \_ st -> return st

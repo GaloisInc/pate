@@ -228,7 +228,7 @@ data SomeValidArch arch where
 
 -- | Needed to produce evidence for 'Pate.TraceTree' that both type parameters are valid
 data ValidRepr (k :: (DK.Type, DK.Type)) where
-  ValidRepr :: forall sym arch. (PSo.ValidSym sym, ValidArch arch) => ValidRepr '(sym, arch)
+  ValidRepr :: forall sym arch. (PSo.ValidSym sym, ValidArch arch) => sym -> SomeValidArch arch -> ValidRepr '(sym, arch)
 
 -- | Create a 'PA.SomeValidArch' from parsed ELF files
 data ArchLoader err =

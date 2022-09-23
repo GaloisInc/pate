@@ -113,6 +113,7 @@ import qualified Data.Time as TM
 import           Data.Kind ( Type )
 import           Data.Typeable
 import           Data.Default
+import           Data.String ( IsString(..) )
 
 import qualified Prettyprinter as PP
 
@@ -247,6 +248,9 @@ emitWarning innererr = do
   err <- CMR.asks envWhichBinary >>= \case
     Just (Some wb) -> return $ PEE.equivalenceErrorFor wb innererr
     Nothing -> return $ PEE.equivalenceError innererr
+  case PEE.isTracedWhenWarning err of
+    True -> emitTraceWarning err
+    False -> return ()
   emitEvent (\_ -> PE.Warning err)
 
 -- | Emit an event declaring that an error has been raised, but only throw
@@ -362,6 +366,31 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "blocktarget" where
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (PB.BlockTarget arch)
   prettyNode () blkts = PP.pretty blkts
 
+newtype ExprLabel = ExprLabel String
+  deriving (Eq, Ord, Show)
+
+instance Default ExprLabel where
+  def = ExprLabel ""
+
+instance IsString ExprLabel where
+  fromString str = ExprLabel str
+
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "expr" where
+  type TraceNodeType '(sym,arch) "expr" = Some (W4.SymExpr sym)
+  type TraceNodeLabel "expr" = ExprLabel
+  
+  prettyNode _lbl (Some e) = W4.printSymExpr e
+  nodeTags = [(Summary, \(ExprLabel lbl) (Some e) ->
+                  let pfx = case lbl of
+                        "" -> ""
+                        _ -> "(" <> PP.pretty lbl <> ") "
+                      ls = lines (show (W4.printSymExpr e))
+                  in case ls of
+                    [] -> pfx
+                    [a] -> pfx <> PP.pretty a
+                    (a:as) -> pfx <> PP.pretty a <> ".." <> PP.pretty (last as)
+              )]
 
 withBinary ::
   forall bin sym arch a.
@@ -995,9 +1024,9 @@ manifestError act = do
     r@(Left er) -> CMR.asks (PC.cfgFailureMode . envConfig) >>= \case
       PC.ThrowOnAnyFailure -> throwError er
       PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable er of
-        True -> return r
+        True -> emitTraceError er >> return r
         False -> throwError er
-      PC.ContinueAfterFailure -> return r
+      PC.ContinueAfterFailure -> emitTraceError er >> return r
     r -> return r
 
 -- | Run an IO operation, internalizing any exceptions raised
