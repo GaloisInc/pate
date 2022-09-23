@@ -5,6 +5,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -12,6 +13,7 @@ module Pate.Block (
   -- * Block data
     BlockEntryKind(..)
   , ConcreteBlock(..)
+  , FunCallKind(..)
   , BlockTarget(..)
   , BlockPair
   , FunPair
@@ -185,9 +187,15 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 , functionBinRepr :: PB.WhichBinaryRepr bin
                 }
 
+data FunCallKind = NormalFunCall | TailFunCall
+  deriving (Eq, Ord, Show)
+
 instance MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "funcall" where
   type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (FunctionEntry arch)
-  prettyNode () funs = PP.pretty funs
+  type TraceNodeLabel "funcall" = FunCallKind
+  prettyNode k funs = case k of
+    NormalFunCall -> PP.pretty funs
+    TailFunCall -> "Tail Call:" PP.<+> PP.pretty funs
 
 equivFuns :: FunctionEntry arch PB.Original -> FunctionEntry arch PB.Patched -> Bool
 equivFuns fn1 fn2 =

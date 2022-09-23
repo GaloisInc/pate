@@ -34,6 +34,7 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import           Data.Proxy
 import           Data.Functor.Const
 import           Data.IORef ( IORef, newIORef, readIORef, modifyIORef )
@@ -894,14 +895,16 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
                  | Just pltSymbol <- isPLT -> handlePLTStub scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
                  | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
-         (Nothing, Nothing) -> withSym $ \sym ->
+         (Nothing, Nothing) | PB.targetEndCase blktO == PB.targetEndCase blktP -> withSym $ \sym ->
            do traceBundle bundle "No return target identified"
-              p <- do j <- PD.matchingExits bundle MCS.MacawBlockEndJump
-                      b <- PD.matchingExits bundle MCS.MacawBlockEndBranch
-                      liftIO $ W4.orPred sym j b
-              withAssumption p $
-                handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
-
+              -- exits without returns need to either be a jump, branch or tail calls
+              -- we consider those cases here (having already assumed a specific
+              -- block exit condition)
+              case PB.targetEndCase blktO of
+                MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
+                MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
+                MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
+                _ -> throwHere $ PEE.BlockExitMismatch
          _ -> do traceBundle bundle "BlockExitMismatch"
                  throwHere $ PEE.BlockExitMismatch
 
@@ -969,6 +972,44 @@ handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair = do
   _ <- emitError $ PEE.NotImplementedYet "handleInlineCallee"
   return gr -- TODO!
 
+-- TODO: there's a fair bit copied from the ordinary function call case here,
+-- the only difference is that we link up the return of tail-called function
+-- to the caller
+handleTailFunCall ::
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  NodeEntry arch {- ^ current entry point -} ->
+  AbstractDomain sym arch v {- ^ current abstract domain -} ->
+  PairGraph sym arch ->
+  PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
+  EquivM sym arch (PairGraph sym arch)
+handleTailFunCall scope bundle currBlock d gr pPair =
+  case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
+    (Just oFun, Just pFun) -> do
+      emitTraceLabel @"funcall" PB.TailFunCall (PPa.PatchPair oFun pFun)
+      currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
+        PCfg.SharedFunctionAbstractDomains -> return currBlock
+        PCfg.DistinctFunctionAbstractDomains -> return $ addContext pPair currBlock
+      -- find the function call block to determine where this tail will ultimately return to
+      funEntry <- PPa.forBins $ \get -> return $ (PB.blockFunctionEntry (get (nodeBlocks currBlock)))
+      -- node representing the return sites of the caller
+      let
+        callerFunNode = mkNodeReturn currBlock funEntry
+        tailCallFunNode = mkNodeReturn currBlock' (PPa.PatchPair oFun pFun)
+        tailCallNode = mkNodeEntry currBlock' pPair
+        callers = getReturnVectors gr callerFunNode
+        gr' = Set.foldl' (\gr'' caller -> addReturnVector gr'' tailCallFunNode caller) gr callers
+      case Set.null callers of
+        True -> (emitError $ PEE.UnexpectedTailCallEntry funEntry) >> return ()
+        False -> return ()
+      matches <- PD.matchingExits bundle MCS.MacawBlockEndCall
+      withAssumption matches $
+        handleJump scope bundle currBlock d gr' tailCallNode
+    _ -> panic Verifier "handleTailFunCall"
+             [ "Tail function call jumped to a location that is not a function start!"
+             , show currBlock
+             , show pPair
+             ]
 
 -- | Record the return vector for this call, and then handle a
 --   jump to the entry point of the function.
@@ -985,7 +1026,7 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
    case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
      (Just oFun, Just pFun) ->
        do
-          emitTrace @"funcall" (PPa.PatchPair oFun pFun)
+          emitTraceLabel @"funcall" PB.NormalFunCall (PPa.PatchPair oFun pFun)
           -- augmenting this block with the return point as its calling context
           currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
             PCfg.SharedFunctionAbstractDomains -> return currBlock
