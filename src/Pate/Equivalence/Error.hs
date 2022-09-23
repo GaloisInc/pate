@@ -103,6 +103,7 @@ data InnerEquivalenceError arch
   | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
   | UnknownPLTStub BS.ByteString
   | NotImplementedYet String
+  | UnexpectedTailCallEntry (PB.FunPair arch)
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
