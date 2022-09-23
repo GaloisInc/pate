@@ -428,6 +428,11 @@ instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
 instance W4.IsExpr (W4.SymExpr sym) => Show (ScopedExpr sym v tp) where
   show e = show (PP.pretty e)
 
+instance TestEquality (W4.SymExpr sym) => Eq (ScopedExpr sym v tp) where
+  e1 == e2 = case testEquality (unSE e1) (unSE e2) of
+    Just _ -> True
+    Nothing -> False
+
 -- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
 -- the user to produce an expression that is scoped to 'v2'.

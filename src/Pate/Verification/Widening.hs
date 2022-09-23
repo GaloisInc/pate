@@ -282,11 +282,6 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     cache <- W4B.newIdxCache
     -- Strategies for re-scoping expressions
     let
-      asConcrete :: forall v1 v2 tp. HasCallStack => PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
-      asConcrete se = do
-        Just c <- return $ (W4.asConcrete (PS.unSE se))
-        liftIO $ PS.concreteScope @v2 sym c
-
       asScopedConst :: forall v1 v2 tp. HasCallStack => W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
         Just c <- lift $ withAssumption asm $ do
@@ -334,16 +329,18 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
       doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
       doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
           -- The decision of ordering here is only for efficiency: we expect only
-          -- one strategy to succeed (with the exception of 'asConcrete' being subsumed
-          -- by 'asScopedConst' but much faster, as it doesn't involve the solver).
+          -- one strategy to succeed.
+          -- NOTE: Although it is possible for multiple strategies to be applicable,
+          -- they (should) all return semantically equivalent terms
           -- TODO: We could do better by picking the strategy based on the term shape,
-          -- but it's not strictly necessary.       
+          -- but it's not strictly necessary.
+
         se' <- traceAlternatives $
-          [ ("asConcrete", asConcrete se)
+          [ ("asScopedConst", asScopedConst (W4.truePred sym) se)
           , ("asSimpleAssign", asSimpleAssign se)
-          , ("asScopedConst", asScopedConst (W4.truePred sym) se)
           , ("asStackOffsetO", asStackOffset PBi.OriginalRepr se)
           , ("asStackOffsetP", asStackOffset PBi.PatchedRepr se)
+
           ]
         lift $ emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se')
         return se'
