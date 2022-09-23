@@ -71,6 +71,8 @@ module What4.ExprHelpers (
   , unliftSimpCheck
   , assumePositiveInt
   , integerToNat
+  , evalGroundExpr
+  , unfoldDefinedFns
   ) where
 
 import           GHC.TypeNats
@@ -82,7 +84,9 @@ import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
 import qualified Control.Monad.Writer as CMW
+import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.State as CMS
+import qualified Data.IORef as IO
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -1301,3 +1305,98 @@ idxCacheEvalWriter cache e f = do
     return $ Tagged w result
   CMW.tell w
   return result
+
+addBinds ::
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  MapF.MapF (W4.BoundVar sym) (W4.SymExpr sym) ->
+  Ctx.Assignment (W4.BoundVar sym) ctx ->
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  MapF.MapF (W4.BoundVar sym) (W4.SymExpr sym)
+addBinds binds (vars Ctx.:> var) (vals Ctx.:> val) = MapF.insert var val (addBinds binds vars vals)
+addBinds binds Ctx.Empty Ctx.Empty = binds
+
+data BindingContext t =
+  BindingContext (MapF.MapF (W4B.ExprBoundVar t) (W4B.Expr t)) (W4B.IdxCache t W4G.GroundValueWrapper)
+
+augmentContext ::
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  IO.MonadIO m =>
+  BindingContext t ->
+  Ctx.Assignment (W4.BoundVar sym) ctx ->
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  m (BindingContext t)
+augmentContext (BindingContext binds _) vars vals = do
+  cache <- W4B.newIdxCache
+  return $ BindingContext (addBinds binds vars vals) cache
+
+-- TODO: It's not exactly clear why this is necessary, for some reason the solver is
+-- struggling to evaluate defined functions in some contexts, and so we need to handhold it
+evalGroundExpr' ::
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  BindingContext t ->
+  -- this is a bit clumsy, but it's to work around the fact that GroundEval wants
+  -- everything in MaybeT, and so we can't store useful error messages
+  IO.IORef String ->
+  (forall u . W4B.Expr t u -> IO (W4G.GroundValue u)) ->
+  W4B.Expr t tp ->
+  MaybeT IO (W4G.GroundValueWrapper tp)
+evalGroundExpr' binds@(BindingContext bindMap cache) erref f e = W4B.idxCacheEval cache e $ case e of
+  W4B.BoundVarExpr var | Just val <- MapF.lookup var bindMap -> evalGroundExpr' binds erref f val
+  _ -> lift (runMaybeT (W4G.tryEvalGroundExpr (\e' -> W4G.unGVW <$> evalGroundExpr' binds erref f e') e)) >>= \case
+    Just x -> return $ W4G.GVW x
+    Nothing -> case e of
+      W4B.NonceAppExpr a0 -> case W4B.nonceExprApp a0 of
+        W4B.FnApp fn argVs | W4B.DefinedFnInfo argBs body _ <- W4B.symFnInfo fn -> do
+          -- importantly 'addBinds' overwrites any existing bindings, which ensures that
+          -- scoping rules are observed
+          binds' <- augmentContext binds argBs argVs
+          evalGroundExpr' binds' erref f body
+        W4B.Annotation _ _ e' -> evalGroundExpr' binds erref f e'
+        _ -> do
+          let err = unwords ["evalGroundExpr': could not evaluate subexpression:", show e]
+          IO.liftIO $ IO.writeIORef erref err
+          fail ""
+      _ -> W4G.GVW <$> lift (f e)
+
+evalGroundExpr ::
+  (forall u . W4B.Expr t u -> IO (W4G.GroundValue u)) ->
+  W4B.Expr t tp ->
+  IO (W4G.GroundValue tp)
+evalGroundExpr f e = do
+  ref <- IO.newIORef "unspecified error"
+  cache <- W4B.newIdxCache
+  runMaybeT (evalGroundExpr' (BindingContext MapF.empty cache) ref f e) >>= \case
+    Just x -> return (W4G.unGVW x)
+    Nothing -> do
+      msg <- IO.readIORef ref
+      fail $ unwords ["evalGroundExpr: could not evaluate expression:", msg]
+
+
+unfoldDefinedFns ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+unfoldDefinedFns sym e_outer = do
+  cache <- W4B.newIdxCache
+
+  let
+    go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
+    go e = W4B.idxCacheEval cache e $ case e of
+      W4B.AppExpr a0 -> do
+        a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+        if (W4B.appExprApp a0) == a0' then return e
+        else IO.liftIO $ W4B.sbMakeExpr sym a0'
+      W4B.NonceAppExpr a0 ->
+        case W4B.nonceExprApp a0 of
+          W4B.FnApp fn argVs | W4B.DefinedFnInfo argBs body _ <- W4B.symFnInfo fn -> do
+            fn' <- W4.definedFn sym W4.emptySymbol argBs body W4.AlwaysUnfold
+            argVs' <- TFC.traverseFC go argVs
+            W4.applySymFn sym fn' argVs'
+          _ -> do            
+            a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+            if (W4B.nonceExprApp a0) == a0' then return e
+            else IO.liftIO $ W4B.sbNonceExpr sym a0'
+      _ -> return e
+  go e_outer

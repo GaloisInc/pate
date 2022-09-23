@@ -79,6 +79,7 @@ data InnerEquivalenceError arch
   | forall sym. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)
   | BlockExitMismatch
   | InvalidSMTModel
+  | FailedToGroundValue  String
   | MismatchedAssumptionsPanic
   | UnexpectedNonBoundVar
   | UnsatisfiableAssumptions

@@ -319,8 +319,8 @@ withOnlineBackend f = do
 
 withSymIO :: forall sym arch a.
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> IO a) ->
-  EquivM sym arch a
-withSymIO f = withSym (\sym -> liftIO (f sym))
+  EquivM_ sym arch a
+withSymIO f = withValid $ withSym (\sym -> liftIO (f sym))
 
 archFuns :: forall sym arch.
   EquivM sym arch (MS.MacawSymbolicArchFunctions arch)
@@ -440,7 +440,8 @@ withAssumptionSet ::
   EquivM sym arch f
 withAssumptionSet asm f = withSym $ \sym -> do
   curAsm <- currentAsm
-  p <- liftIO $ PAS.toPred sym asm
+  p' <- liftIO $ PAS.toPred sym asm
+  p <- liftIO $ unfoldDefinedFns sym p'
   case PAS.isAssumedPred curAsm p of
     True -> f
     _ -> CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
@@ -514,8 +515,9 @@ withSatAssumption ::
   AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch (Maybe f)
-withSatAssumption asm f = withSym $ \sym ->  do
-  p <- liftIO $ PAS.toPred sym asm
+withSatAssumption asm f = withSym $ \sym -> do
+  p' <- liftIO $ PAS.toPred sym asm
+  p <- liftIO $ unfoldDefinedFns sym p'
   case W4.asConstantPred p of
     Just False -> return Nothing
     Just True -> Just <$> f
@@ -589,6 +591,7 @@ concretizeWithSolver ::
   W4.SymExpr sym tp ->
   EquivM sym arch (W4.SymExpr sym tp)
 concretizeWithSolver e = withSym $ \sym -> do
+  e <- liftIO $ unfoldDefinedFns sym e
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
         r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
@@ -598,7 +601,10 @@ concretizeWithSolver e = withSym $ \sym -> do
           Left _err -> k W4R.Unknown
           Right a -> return a
 
-  PVC.resolveSingletonSymbolicAsDefault wsolver e
+  e'' <- PVC.resolveSingletonSymbolicAsDefault wsolver e
+  case W4.asConcrete e'' of
+    Just _ -> return e''
+    Nothing -> return e
 
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --
@@ -616,7 +622,8 @@ checkSatisfiableWithModel ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch (Either SomeException a)
-checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
+checkSatisfiableWithModel timeout desc p' k = withSym $ \sym -> do
+  p <- liftIO $ unfoldDefinedFns sym p'
   st <- withOnlineBackend $ \bak -> liftIO $ LCB.saveAssumptionState bak
   mres <- withSolverProcess $ \sp -> liftIO $ do
     WPO.push sp
@@ -769,13 +776,14 @@ execGroundFn ::
   SymGroundEvalFn sym  ->
   W4.SymExpr sym tp ->
   EquivM_ sym arch (W4G.GroundValue tp)
-execGroundFn (SymGroundEvalFn fn) e = do
+execGroundFn (SymGroundEvalFn fn) e' = do
   groundTimeout <- CMR.asks (PC.cfgGroundTimeout . envConfig)
-  result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`
-    [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
-    , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
-    , Handler (\(ie :: IOError) -> liftIO (putStrLn ("IOErr: " ++ show ie)) >> return Nothing)
-    ]
+  e <- withSymIO $ \sym -> unfoldDefinedFns sym e'
+  result <- IO.withRunInIO $ \inIO -> (PT.timeout' groundTimeout $ (W4G.groundEval fn e)) `catches`
+      [ Handler (\(ae :: ArithException) -> inIO $ throwHere $ PEE.FailedToGroundValue  ("ArithEx: " ++ show ae))
+      , Handler (\(ie :: IOException) -> inIO $ throwHere $ PEE.FailedToGroundValue  ("IOEx: " ++ show ie))
+      , Handler (\(ie :: IOError) -> inIO $ throwHere $ PEE.FailedToGroundValue  ("IOErr: " ++ show ie))
+      ]
   case result of
     Just a -> return a
     Nothing -> throwHere PEE.InvalidSMTModel
