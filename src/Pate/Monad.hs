@@ -472,13 +472,12 @@ withSimSpec ::
   (forall v. PEM.ExprMappable sym (f v)) =>
   PPa.BlockPair arch ->
   SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> EquivM sym arch (g v)) ->
+  (forall v. SimScope sym arch v -> f v -> EquivM sym arch (g v)) ->
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec blocks spec f = withSym $ \sym -> do
-  withFreshVars blocks $ \vars -> do
-    (asm, body) <- liftIO $ bindSpec sym vars spec
-    body' <- withAssumptionSet asm $ f vars body
-    return $ (asm, body')
+  spec_fresh <- withFreshVars blocks $ \vars -> liftIO $ bindSpec sym vars spec
+  forSpec spec_fresh $ \scope body ->
+    withAssumptionSet (scopeAsm scope) (f scope body)
 
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)

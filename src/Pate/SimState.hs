@@ -351,13 +351,17 @@ mkVarBinds ::
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   StackBase sym arch v' ->
+  ScopedExpr sym v' W4.BaseIntegerType ->
   IO (ExprRewrite sym v v')
-mkVarBinds _sym simVars mem regs sb = do
+mkVarBinds _sym simVars mem regs sb mr = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
     stackVar = simStackBase $ simBoundVarState simVars
     stackBinds = singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
+
+    maxRegVar = simMaxRegion $ simBoundVarState simVars
+    maxRegBinds = singleRewrite (unSE $ maxRegVar) (unSE $ mr)
     
   regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
     case PSR.macawRegRepr val of
@@ -372,7 +376,7 @@ mkVarBinds _sym simVars mem regs sb = do
       CT.StructRepr Ctx.Empty -> return $ Const mempty
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
 
-  return $ (ExprRewrite (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds
+  return $ (ExprRewrite (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds <> maxRegBinds
 
 -- | Wrapped expression bindings that convert expressions from one
 -- scope to another
@@ -539,7 +543,7 @@ getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
     let st = simVarState $ get vals
-    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
+    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simMaxRegion st)
   asScopeCoercion $ bindsO <> bindsP
 
 bindSpec ::

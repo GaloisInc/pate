@@ -352,6 +352,7 @@ isAssumedPred ::
   AssumptionSet sym ->
   W4.Pred sym ->
   Bool
+isAssumedPred _ asm | Just b <- W4.asConstantPred asm = b
 isAssumedPred frame asm = SetF.member asm (asmPreds frame)
 
 -- | Explicitly rebind any known sub-expressions that are in the frame.
