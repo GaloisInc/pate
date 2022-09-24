@@ -6,7 +6,6 @@
 :set -XOverloadedStrings
 :set prompt-function promptFn
 :set -interactive-print printFn
-default (GotoIndex)
 import Data.Parameterized.Some
 import Control.Monad.IO.Class
 import System.IO

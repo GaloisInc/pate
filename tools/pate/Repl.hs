@@ -34,6 +34,7 @@ import qualified Control.Concurrent as IO
 import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT )
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
+import           Text.Read (readMaybe)
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -58,17 +59,18 @@ import qualified Main as PM
 
 -- | Defining a 'Show' instance for a type which depends on 'PS.ValidSym'
 --   and 'PA.ValidArch'.
-class ShowIfValid a where
-  showIfValid :: Maybe (ValidSymArchRepr Sym Arch Sym Arch) -> a -> String
-
-instance ((PS.ValidSym Sym, PA.ValidArch Arch) => Show a) => ShowIfValid a where
-  showIfValid repr a = case repr of
-    Just (ValidSymArchRepr{}) -> show a
-    Nothing -> "<<No Binary Loaded>>"
-
-printFn :: ShowIfValid a => a -> IO ()
-printFn a = runReplM @(ValidSymArchRepr Sym Arch Sym Arch) getValidRepr >>= \x -> do
-  IO.putStrLn (showIfValid x a)
+printFn :: ((PS.ValidSym Sym, PA.ValidArch Arch) => Show a) => a -> IO ()
+printFn a = do
+  r <- runReplM $ do
+    ValidSymArchRepr{} <- getValidRepr
+    let str = show a
+    str' <- case readMaybe @Integer str of
+      Just i -> gotoIndex i
+      Nothing -> return str
+    IO.liftIO $ IO.putStrLn str'
+  case r of
+    Just () -> return ()
+    Nothing -> IO.putStrLn "<<No Binary Loaded>>"
 
 valid :: ((PS.ValidSym Sym, PA.ValidArch Arch) => IO a) -> IO a
 valid f = do
@@ -534,18 +536,3 @@ fetchV mi = do
   case testEquality (knownSymbol @nm) (knownSymbol @nm') of
     Just Refl -> return v
     Nothing -> fail "fetchV"
-
--- Hack to allow navigating by entering numbers into the repl
-newtype GotoIndex = GotoIndex Integer
-
-instance Num GotoIndex where
-  fromInteger = GotoIndex
-  _ + _ = error "unsupported"
-  _ * _ = error "unsupported"
-  abs _ = error "unsupported"
-  signum _ = error "unsupported"
-  negate _ = error "unsupported"
-
-instance Show GotoIndex where
-  show (GotoIndex i) = gotoIndexPure i
-
