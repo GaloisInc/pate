@@ -124,7 +124,6 @@ isRecoverable' e = case e of
   RescopingFailure{} -> True
   WideningError{} -> True
   NotImplementedYet{} -> True
-  UnexpectedTailCallEntry{} -> True
   _ -> False
 
 -- | When an error is raised as a warning, this determines if it should be displayed
