@@ -605,7 +605,7 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
 getBlocks'
   :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m)
   => PMC.EquivalenceContext sym arch
-  -> PPa.BlockPair arch
+  -> PB.BlockPair arch
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
   bs1 <- liftIO $ lookupBlocks' ctxO blkO
@@ -626,7 +626,7 @@ getBlocks' ctx pPair = do
 
 getBlocks ::
   HasCallStack =>
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
   PDP.ParsedBlocks opbs <- lookupBlocks blkO

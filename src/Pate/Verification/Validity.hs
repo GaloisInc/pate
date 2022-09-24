@@ -35,7 +35,7 @@ import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 
 validInitState ::
-  Maybe (PPa.BlockPair arch) ->
+  Maybe (PB.BlockPair arch) ->
   SimState sym arch v PB.Original ->
   SimState sym arch v PB.Patched ->
   EquivM sym arch (AssumptionSet sym)

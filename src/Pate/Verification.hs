@@ -299,7 +299,7 @@ unpackBlockData ctxt (PC.Address w) =
     caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
 
 data UnpackedPatchData arch =
-  UnpackedPatchData { unpackedPairs :: [PPa.FunPair arch]
+  UnpackedPatchData { unpackedPairs :: [PB.FunPair arch]
                     , unpackedOrigIgnore :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     , unpackedPatchIgnore :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     , unpackedEquatedFuncs :: [(PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)]

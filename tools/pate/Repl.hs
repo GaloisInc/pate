@@ -19,23 +19,20 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 
 module Repl where
 
 import qualified Language.Haskell.TH as TH
-import qualified Language.Haskell.TH.Syntax as TH
-import qualified Language.Haskell.TH.Ppr as TH
 
 import qualified Options.Applicative as OA
 import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
 import qualified Control.Concurrent as IO
-import           Data.Maybe ( mapMaybe, catMaybes )
-import           Control.Monad ( foldM )
-import           Control.Monad.State ( MonadState, StateT, modify, get, gets, runStateT )
+import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT )
 import qualified Control.Monad.IO.Class as IO
-import           Data.Kind ( Type )
 import           Data.Proxy
 
 import           Data.Parameterized.Some
@@ -45,20 +42,12 @@ import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Terminal as PPRT
 
-import           Data.Parameterized.SymbolRepr ( SymbolRepr, KnownSymbol, knownSymbol, symbolRepr )
+import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol )
 
 
 import qualified Pate.Arch as PA
 import qualified Pate.Solver as PS
-import qualified Pate.Binary as PBi
-import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
-import qualified Pate.Event as PE
-import qualified Pate.Monad.Environment as PME
-import qualified Pate.Loader as PL
-import qualified Pate.Loader.ELF as PLE
-import qualified Pate.Verification as PV
-import qualified Pate.Equivalence.Error as PEE
 import qualified ReplHelper as PIRH
 
 import           Pate.TraceTree
@@ -94,7 +83,7 @@ sym = IO.unsafePerformIO $ do
 
 arch :: Proxy Arch
 arch = IO.unsafePerformIO $ do
-  ValidSymArchRepr _ (arch :: PA.SomeValidArch arch) <- validRepr
+  ValidSymArchRepr _ (_arch :: PA.SomeValidArch arch) <- validRepr
   return $ Proxy @arch
 
 promptFn :: [String] -> Int -> IO String
@@ -102,7 +91,7 @@ promptFn _ _ = do
   tryKillWaitThread
   IO.readIORef waitThread >>= \case
     WaitThread _ gas | gas <= 0 -> execReplM updateNextNodes >> getPrompt
-    WaitThread _ gas -> return ""
+    WaitThread _ _gas -> return ""
 
 data TraceNode sym arch nm where
   TraceNode :: forall nm sym arch. (PS.ValidSym sym, PA.ValidArch arch, IsTraceNode '(sym, arch) nm) => TraceNodeLabel nm -> (TraceNodeType '(sym, arch) nm) -> TraceTree '(sym, arch) -> TraceNode sym arch nm
@@ -178,7 +167,6 @@ waitThread = IO.unsafePerformIO (IO.newIORef (WaitThread Nothing 0))
 loadSomeTree ::
   IO.ThreadId -> SomeTraceTree PA.ValidRepr -> IO Bool
 loadSomeTree tid topTraceTree = do
-  let doFail = IO.putStrLn "Unexpected tree structure" >> return False
   viewSomeTraceTree topTraceTree (return False) $ \(PA.ValidRepr sym arch) (toptree :: TraceTree k) -> do
       IO.putStrLn "Loaded tree"
       let st = ReplState
@@ -284,7 +272,7 @@ prettyNextNodes startAt onlyFinished = do
             ) nextNodes
 
   let ppContents = case onlyFinished of
-        True -> map snd $ takeWhile (\(fin, pp) -> fin) ppContents'
+        True -> map snd $ takeWhile (\(fin, _) -> fin) ppContents'
         False -> map snd ppContents'
   return $ PP.vsep (drop startAt (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents)))
 
@@ -298,7 +286,7 @@ getPrompt = do
     Just st | Just pst <- ppStatusTag st -> return $ (show (pst <> ">"))
     _ -> return ">"
 
-ls' :: forall sym arch a. ReplM sym arch ()
+ls' :: forall sym arch. ReplM sym arch ()
 ls' = do
   updateNextNodes
   p <- prettyNextNodes 0 False
@@ -443,7 +431,7 @@ tryKillWaitThread = do
 
 killWaitThread :: IO ()
 killWaitThread = do
-  mtid <- IO.atomicModifyIORef' waitThread (\(WaitThread tid gas) -> (WaitThread Nothing 0, tid))
+  mtid <- IO.atomicModifyIORef' waitThread (\(WaitThread tid _gas) -> (WaitThread Nothing 0, tid))
   case mtid of
     Just tid -> IO.killThread tid
     Nothing -> return ()
@@ -552,6 +540,11 @@ newtype GotoIndex = GotoIndex Integer
 
 instance Num GotoIndex where
   fromInteger = GotoIndex
+  _ + _ = error "unsupported"
+  _ * _ = error "unsupported"
+  abs _ = error "unsupported"
+  signum _ = error "unsupported"
+  negate _ = error "unsupported"
 
 instance Show GotoIndex where
   show (GotoIndex i) = gotoIndexPure i

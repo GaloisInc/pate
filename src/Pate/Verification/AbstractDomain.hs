@@ -15,6 +15,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Verification.AbstractDomain
   ( AbstractDomain(..)
   , AbstractDomainSpec

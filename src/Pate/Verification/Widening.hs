@@ -14,6 +14,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Verification.Widening
   ( widenAlongEdge
   , WidenLocs(..)
@@ -27,13 +29,12 @@ import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Writer (tell, execWriterT)
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Trans.Maybe
-import           Control.Applicative ( (<|>) )
 import           Control.Monad.Trans.Class ( lift )
 
 import           Prettyprinter
 
 import qualified Data.Set as Set
-import           Data.List (foldl', head)
+import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -398,7 +399,7 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "widenresult" where
   prettyNode () (Some wr) = case wr of
     NoWideningRequired -> "No Widening Required"
     WideningError msg _ _ -> "Error while widening:\n" <+> pretty msg
-    Widen wk (WidenLocs _regs _cells) d -> "Widened domain:" <+> PAD.ppAbstractDomain (\_ -> "") d
+    Widen _wk (WidenLocs _regs _cells) d -> "Widened domain:" <+> PAD.ppAbstractDomain (\_ -> "") d
   nodeTags = [(Summary, \() (Some wr) -> case wr of
                 NoWideningRequired -> "No Widening Required"
                 WideningError{} -> "Error while widening"

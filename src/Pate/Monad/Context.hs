@@ -63,7 +63,7 @@ data EquivalenceContext sym arch where
     , globalRegion :: W4.SymNat sym
       -- NB, currentFunc is misnamed, as it corresponds to a pair of blocks under consideration,
       -- but they might not be function entry points
-    , _currentFunc :: PPa.BlockPair arch
+    , _currentFunc :: PB.BlockPair arch
     , originalIgnorePtrs :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
     , patchedIgnorePtrs :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
     , equatedFunctions :: [(PA.ConcreteAddress arch, PA.ConcreteAddress arch)]

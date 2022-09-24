@@ -38,7 +38,6 @@ import qualified System.Console.ANSI as SCA
 import qualified System.Exit as SE
 import qualified System.IO as IO
 import qualified What4.Interface as WI
-import           Data.Kind ( Type) 
 
 import qualified Data.Macaw.CFG as MC
 
@@ -55,13 +54,11 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
-import qualified Pate.Verification as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
 import qualified Pate.ArchLoader as PAL
 
 import qualified JSONReport as JR
-import qualified Pate.Arch as PA
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS

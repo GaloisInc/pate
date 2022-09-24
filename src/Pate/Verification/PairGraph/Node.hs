@@ -5,6 +5,9 @@
 {-# LANGUAGE TypeFamilies #-}
 
 {-# LANGUAGE OverloadedStrings #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Verification.PairGraph.Node (
     GraphNode(..)
   , NodeEntry
@@ -22,7 +25,7 @@ module Pate.Verification.PairGraph.Node (
 import           Prettyprinter ( Pretty(..), sep, (<+>) )
 
 import qualified Pate.Arch as PA
-import qualified Pate.PatchPair as PPa
+import qualified Pate.Block as PB
 import           Pate.TraceTree
 
 -- | Nodes in the program graph consist either of a pair of
@@ -41,19 +44,19 @@ data GraphNode arch
  deriving (Eq, Ord)
 
 data NodeEntry arch =
-  NodeEntry { graphNodeContext :: CallingContext arch, nodeBlocks :: PPa.BlockPair arch }
+  NodeEntry { graphNodeContext :: CallingContext arch, nodeBlocks :: PB.BlockPair arch }
   deriving (Eq, Ord)
 
 data NodeReturn arch =
-  NodeReturn { returnNodeContext :: CallingContext arch, nodeFuns :: PPa.FunPair arch }
+  NodeReturn { returnNodeContext :: CallingContext arch, nodeFuns :: PB.FunPair arch }
   deriving (Eq, Ord)
 
-graphNodeCases :: GraphNode arch -> Either (PPa.BlockPair arch) (PPa.FunPair arch)
+graphNodeCases :: GraphNode arch -> Either (PB.BlockPair arch) (PB.FunPair arch)
 graphNodeCases (GraphNode (NodeEntry _ blks)) = Left blks
 graphNodeCases (ReturnNode (NodeReturn _ funs)) = Right funs
 
 -- | Additional context used to distinguish function calls
-newtype CallingContext arch = CallingContext [PPa.BlockPair arch]
+newtype CallingContext arch = CallingContext [PB.BlockPair arch]
   deriving (Eq, Ord, Semigroup, Monoid)
 
 instance PA.ValidArch arch => Pretty (CallingContext arch) where
@@ -62,16 +65,16 @@ instance PA.ValidArch arch => Pretty (CallingContext arch) where
     in sep (zipWith (<+>) ("[" : repeat "->") bs) <+> "]"
 
 
-rootEntry :: PPa.BlockPair arch -> NodeEntry arch
+rootEntry :: PB.BlockPair arch -> NodeEntry arch
 rootEntry pPair = NodeEntry mempty pPair
 
-addContext :: PPa.BlockPair arch -> NodeEntry arch -> NodeEntry arch
+addContext :: PB.BlockPair arch -> NodeEntry arch -> NodeEntry arch
 addContext newCtx (NodeEntry (CallingContext ctx) blks) = NodeEntry (CallingContext (newCtx:ctx)) blks
 
-mkNodeEntry :: NodeEntry arch -> PPa.BlockPair arch -> NodeEntry arch
+mkNodeEntry :: NodeEntry arch -> PB.BlockPair arch -> NodeEntry arch
 mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
 
-mkNodeReturn :: NodeEntry arch -> PPa.FunPair arch -> NodeReturn arch
+mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
 mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
 
 instance PA.ValidArch arch => Show (CallingContext arch) where

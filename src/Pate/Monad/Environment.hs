@@ -26,13 +26,11 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import qualified Data.Set as Set
 import qualified Data.Time as TM
-import           Data.Kind ( Type, Constraint )
 
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
 import qualified Lumberjack as LJ
-import qualified Prettyprinter as PP
 
 import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as MS
@@ -85,7 +83,7 @@ data EquivEnv sym arch where
     , envParentNonce :: Some (PF.ProofNonce sym)
     -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
-    , envParentBlocks :: [PPa.BlockPair arch]
+    , envParentBlocks :: [PB.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel
     , envExitPairsCache :: ExitPairCache arch
     -- ^ cache for intermediate proof results
@@ -102,7 +100,7 @@ data EquivEnv sym arch where
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
 
 data BlockCache arch a where
-  BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a
+  BlockCache :: IO.MVar (Map (PB.BlockPair arch) a) -> BlockCache arch a
 
 envCtxL :: L.Lens' (EquivEnv sym arch) (PMC.EquivalenceContext sym arch)
 envCtxL f ee = fmap (\c' -> ee { envCtx = c' }) (f (envCtx ee))

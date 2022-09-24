@@ -84,6 +84,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Address as PA
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
@@ -210,7 +211,7 @@ data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) 
       -- | Proofs for all intermediate function calls between the start of this slice and the final
       -- exit of this slice, showing that the post-domain is satisfied by continuing after each
       -- function call returns.
-    , prfBlockSliceCalls :: [(PPa.BlockPair arch, node ProofFunctionCallType)]
+    , prfBlockSliceCalls :: [(PB.BlockPair arch, node ProofFunctionCallType)]
       -- | Proof that the post-domain is satisfied if this block slice exits with a return.
     , prfBlockSliceReturn :: Maybe (node ProofTripleType)
       -- | Proof that the post-domain is satisfied if this block slice exits with an unknown branch class.
@@ -230,7 +231,7 @@ data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) 
   -- The post-states indicate what memory locations have different values after
   -- the two programs execute
   ProofInlinedCall ::
-    { prfInlinedBlocks :: PPa.BlockPair arch
+    { prfInlinedBlocks :: PB.BlockPair arch
     , prfInlinedResults :: Either String (PVM.WriteSummary sym (MM.ArchAddrWidth arch))
     } -> ProofApp sym arch node ProofBlockSliceType
 
@@ -260,7 +261,7 @@ data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) 
   -- a given pre-domain. The scope of the slice is dependent on which parent node
   -- this is attached to.
   ProofTriple ::
-    { prfTripleBlocks :: PPa.BlockPair arch
+    { prfTripleBlocks :: PB.BlockPair arch
     , prfTriplePreDomain :: node ProofDomainType
     , prfTriplePostDomain :: node ProofDomainType
     , prfTripleStatus :: node ProofStatusType

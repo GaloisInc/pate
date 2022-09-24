@@ -18,7 +18,9 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Binary
   ( type WhichBinary
@@ -30,7 +32,9 @@ module Pate.Binary
 where
 
 import           Data.Parameterized.Classes
-
+import           Data.Parameterized.Some
+import qualified Prettyprinter as PP
+import           Pate.TraceTree
 
 -- | A type-level tag describing whether the data value is from an original binary or a patched binary
 data WhichBinary = Original | Patched deriving (Bounded, Enum, Eq, Ord, Read, Show)
@@ -42,6 +46,10 @@ type Patched = 'Patched
 data WhichBinaryRepr (bin :: WhichBinary) where
   OriginalRepr :: WhichBinaryRepr 'Original
   PatchedRepr :: WhichBinaryRepr 'Patched
+
+instance IsTraceNode (k :: l) "binary" where
+  type TraceNodeType k "binary" = Some WhichBinaryRepr
+  prettyNode () (Some wb) = PP.pretty (show wb)
 
 instance TestEquality WhichBinaryRepr where
   testEquality repr1 repr2 = case (repr1, repr2) of

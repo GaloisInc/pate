@@ -321,11 +321,11 @@ initialDomainSpec (graphNodeCases -> Right fPair) = do
 --   initialize a pair graph with default abstract domains for those
 --   entry points and add them to the work list.
 initializePairGraph :: forall sym arch.
-  [PPa.FunPair arch] ->
+  [PB.FunPair arch] ->
   EquivM sym arch (PairGraph sym arch)
 initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
   where
-    initPair :: PairGraph sym arch -> PPa.FunPair arch -> EquivM sym arch (PairGraph sym arch)
+    initPair :: PairGraph sym arch -> PB.FunPair arch -> EquivM sym arch (PairGraph sym arch)
     initPair gr fnPair =
       do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do

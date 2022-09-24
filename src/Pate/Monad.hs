@@ -20,6 +20,8 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Monad
   ( EquivEnv(..)
   , EquivM
@@ -91,9 +93,8 @@ module Pate.Monad
   )
   where
 
-import           GHC.Stack ( HasCallStack, CallStack, callStack, prettyCallStack )
+import           GHC.Stack ( HasCallStack, callStack )
 
-import           GHC.TypeLits ( Symbol, KnownSymbol )
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
 import qualified Control.Monad.IO.Unlift as IO
@@ -101,10 +102,8 @@ import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try, finally )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
-import qualified Control.Monad.Writer as CMW
 import           Control.Monad.Except
 
-import qualified Data.IORef as IO
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
@@ -118,16 +117,12 @@ import           Data.String ( IsString(..) )
 import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
-import           Data.Parameterized.TraversableF
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
-import           Data.Parameterized.SymbolRepr ( SymbolRepr, knownSymbol, symbolRepr )
 
 import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.TraversableFC as TFC
-
 
 import qualified Lumberjack as LJ
 
@@ -178,7 +173,7 @@ import           Pate.TraceTree
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (Maybe a)
 lookupBlockCache f pPair = do
   BlockCache cache <- CMR.asks f
@@ -189,7 +184,7 @@ lookupBlockCache f pPair = do
 
 modifyBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   (a -> a -> a) ->
   a ->
   EquivM sym arch ()
@@ -286,85 +281,7 @@ instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
 type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
 
-{-
-withSubTraces ::
-  forall nm sym arch a.
-  IsTraceNode '(sym, arch) nm =>
-  EquivSubTrace sym arch nm a ->
-  EquivM sym arch a
-withSubTraces (EquivSubTrace f) = do
-  treeBuilder <- CMR.asks envTreeBuilder
-  (node, nodeBuilder) <- IO.liftIO ((startNode treeBuilder) @nm )
-  IO.liftIO $ addNode treeBuilder node
-  r <- catchError
-        (CMR.runReaderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus True)) >> return r)
-        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeError (show e) True)) >> throwError e)
-  return r
 
-subTree ::
-  forall nm sym arch a.
-  IsTraceNode '(sym, arch) nm =>
-  String ->
-  EquivSubTrace sym arch nm a ->
-  EquivM sym arch a
-subTree lbl f =
-  withSubTraces @"subtree" $
-    subTrace @"subtree" lbl $
-      withSubTraces @nm f
-
-subTraceLabel ::
-  forall nm sym arch a.
-  IsTraceNode '(sym, arch) nm =>
-  TraceNodeType '(sym, arch) nm ->
-  TraceNodeLabel nm ->
-  EquivM sym arch a ->
-  EquivSubTrace sym arch nm a
-subTraceLabel v lbl f = EquivSubTrace $ do
-  nodeBuilder <- CMR.ask
-  (subtree, treeBuilder) <- IO.liftIO $ startTree @'(sym, arch)
-  IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
-  r <- CMR.lift $
-    catchError
-      (CMR.local (\env -> env { envTreeBuilder = treeBuilder }) $ (withValid $ f)
-        >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus True)) >> return r)
-      (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeError (show e) True)) >> throwError e)
-  return r
-
-
-
-emitTrace ::
-  forall nm sym arch.
-  IsTraceNode '(sym, arch) nm =>
-  TraceNodeType '(sym, arch) nm ->
-  Default (TraceNodeLabel nm) =>
-  EquivM sym arch ()
-emitTrace v = emitTraceLabel @nm def v
-
-emitTraceLabel ::
-  forall nm sym arch.
-  IsTraceNode '(sym, arch) nm =>
-  TraceNodeLabel nm ->
-  TraceNodeType '(sym, arch) nm ->
-  EquivM sym arch ()
-emitTraceLabel lbl v = do
-  treeBuilder <- CMR.asks envTreeBuilder
-  node <- IO.liftIO $ singleNode @'(sym,arch) @nm lbl v
-  IO.liftIO $ addNode treeBuilder node
-
--}
-
-instance IsTraceNode (k :: l) "binary" where
-  type TraceNodeType k "binary" = Some PBi.WhichBinaryRepr
-  prettyNode () (Some wb) = PP.pretty (show wb)
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "bundle" where
-  type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
-  prettyNode () (Some bundle) = "<TODO: pretty bundle>"
-  nodeTags = [("symbolic", \_ _ -> "<TODO: pretty bundle>")]
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "blocktarget" where
-  type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (PB.BlockTarget arch)
-  prettyNode () blkts = PP.pretty blkts
 
 newtype ExprLabel = ExprLabel String
   deriving (Eq, Ord, Show)
@@ -499,7 +416,7 @@ withSimSpec ::
   Scoped f =>
   Scoped g =>
   (forall v. PEM.ExprMappable sym (f v)) =>
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   SimSpec sym arch f ->
   (forall v. SimScope sym arch v -> f v -> EquivM sym arch (g v)) ->
   EquivM sym arch (SimSpec sym arch g)
@@ -511,7 +428,7 @@ withSimSpec blocks spec f = withSym $ \sym -> do
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
 lookupArgumentNames
-  :: PPa.BlockPair arch
+  :: PB.BlockPair arch
   -> EquivM sym arch [T.Text]
 lookupArgumentNames pp = do
   let origEntryAddr = PB.concreteAddress (PPa.pOriginal pp)
@@ -544,7 +461,7 @@ currentAsm = CMR.asks envCurrentFrame
 withFreshVars ::
   forall sym arch f.
   Scoped f =>
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
@@ -641,10 +558,6 @@ applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
   PAS.apply sym asm f
 
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "satAssumption" where
-  type TraceNodeType '(sym,arch) "satAssumption" = AssumptionSet sym
-  prettyNode () asm = "Satisfiable" PP.<+> PP.pretty asm
-  nodeTags = [("solver", \_ -> PP.pretty)]
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
@@ -654,7 +567,6 @@ withSatAssumption ::
   EquivM_ sym arch f ->
   EquivM sym arch (Maybe f)
 withSatAssumption asm f = withSym $ \sym -> do
-  emitTrace @"satAssumption" asm
   p <- liftIO $ PAS.toPred sym asm
   case W4.asConstantPred p of
     Just False -> return Nothing
@@ -931,11 +843,11 @@ getFootprints bundle = withSym $ \sym -> do
   return $ S.union footO footP
 
 -- | Update 'envCurrentFunc' if the given pair is a function entry point
-withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
+withPair :: PB.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
 withPair pPair f = do
   env <- CMR.ask
   let env' = env { envParentBlocks = pPair:envParentBlocks env }
-  let entryPair = fmapF (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
+  let entryPair = TF.fmapF (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
   CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ entryPair) f
 
 -- | Emit a trace event to the frontend
@@ -943,7 +855,7 @@ withPair pPair f = do
 -- This variant takes a 'BlockPair' as an input to provide context
 traceBlockPair
   :: (HasCallStack)
-  => PPa.BlockPair arch
+  => PB.BlockPair arch
   -> String
   -> EquivM sym arch ()
 traceBlockPair bp msg =

@@ -133,7 +133,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
          ]
        Nothing -> []
    where
-     ppBlockPairReturn :: PPa.BlockPair arch -> PP.Doc a
+     ppBlockPairReturn :: PB.BlockPair arch -> PP.Doc a
      ppBlockPairReturn pPair = PPa.ppPatchPairEq PB.equivBlocks go pPair
        where
          go :: PB.ConcreteBlock arch bin -> PP.Doc a
@@ -158,13 +158,13 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
          ]
        Nothing -> []
    where
-     ppBlockPairReturn :: PPa.BlockPair arch -> PP.Doc a
+     ppBlockPairReturn :: PB.BlockPair arch -> PP.Doc a
      ppBlockPairReturn pPair = PPa.ppPatchPairEq PB.equivBlocks go pPair
        where
          go :: PB.ConcreteBlock arch bin -> PP.Doc a
          go blk = PP.parens (PP.pretty (PB.ppBlock blk) <+> "-> return")
 
-     ppBlockPairTarget :: PPa.BlockPair arch -> PPa.BlockPair arch -> PP.Doc a
+     ppBlockPairTarget :: PB.BlockPair arch -> PB.BlockPair arch -> PP.Doc a
      ppBlockPairTarget (PPa.PatchPair srcO srcP) (PPa.PatchPair tgtO tgtP) =
        if PPa.ppEq srcO srcP && PPa.ppEq tgtO tgtP then
          go (srcO, tgtO)

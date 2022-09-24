@@ -488,7 +488,7 @@ inlineCallee
   :: forall arch sym
    . (HasCallStack)
   => PEE.EquivalenceDomain sym arch
-  -> PPa.BlockPair arch
+  -> PB.BlockPair arch
   -> EquivM sym arch (PEE.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
 inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state

@@ -15,6 +15,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Verification.StrongestPosts
   ( pairGraphComputeFixpoint
   , runVerificationLoop
@@ -24,13 +26,11 @@ import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM)
 import           Control.Monad.IO.Class
-import           System.IO as IO
 import           Control.Monad.Reader (asks)
-import           Control.Monad.Except (runExceptT, catchError)
+import           Control.Monad.Except (catchError)
 import           Numeric (showHex)
 import           Prettyprinter
 
-import           Data.Kind (Type)
 import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.Map as Map
@@ -39,7 +39,6 @@ import           Data.Functor.Const
 import           Data.IORef ( IORef, newIORef, readIORef, modifyIORef )
 
 import qualified Prettyprinter as PP
-import qualified Prettyprinter.Render.Terminal as PPRT
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
@@ -122,7 +121,7 @@ runVerificationLoop ::
   PA.ValidArch arch =>
   EquivEnv sym arch ->
   -- | A list of block pairs to test for equivalence. They must be the entry points of functions.
-  [PPa.FunPair arch] ->
+  [PB.FunPair arch] ->
   IO (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
 runVerificationLoop env pPairs = do
   result <- runEquivM env doVerify
@@ -322,7 +321,7 @@ visitNode scope (ReturnNode fPair) d gr0 =
 returnSiteBundle :: forall sym arch v.
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->
-  PPa.BlockPair arch {- ^ block pair being returned to -} ->
+  PB.BlockPair arch {- ^ block pair being returned to -} ->
   EquivM sym arch (PAS.AssumptionSet sym, SimBundle sym arch v)
 returnSiteBundle vars _preD pPair = withSym $ \sym -> do
   simIn_ <- PPa.forBins $ \get -> do
@@ -886,7 +885,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
               traceBundle bundle ("  Is Syscall? " ++ show isSyscall)
 
               ctx <- view PME.envCtxL
-              let isEquatedCallSite = any (PPa.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+              let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
 
               if | isSyscall -> handleSyscall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
@@ -969,9 +968,6 @@ handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair = do
   _ <- emitError $ PEE.NotImplementedYet "handleInlineCallee"
   return gr -- TODO!
 
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "funcall" where
-  type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (PB.FunctionEntry arch)
-  prettyNode () funs = PP.pretty funs
 
 -- | Record the return vector for this call, and then handle a
 --   jump to the entry point of the function.
@@ -1069,7 +1065,7 @@ handleJump scope bundle currBlock d gr nextNode =
 
 
 mkSimBundle ::
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   AbstractDomain sym arch v ->
   EquivM sym arch (SimBundle sym arch v)

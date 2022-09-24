@@ -43,6 +43,7 @@ import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Config as PC
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Hints.CSV as PHC
@@ -75,7 +76,7 @@ data InnerEquivalenceError arch
   | UnexpectedBlockKind String
   | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
-  | MissingPatchPairResult (PPa.BlockPair arch)
+  | MissingPatchPairResult (PB.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
   | forall sym. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)

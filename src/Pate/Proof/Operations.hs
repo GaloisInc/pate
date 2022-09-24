@@ -56,6 +56,7 @@ import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
 
+import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -248,7 +249,7 @@ lazyProofFinal f fin = mkLazyProof (f >>= \(a, app) -> return (a, LazyProofBodyA
 --
 -- Despite the name, this does not lazily compute anything
 lazyProofEvent ::
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (a, LazyProofApp sym arch tp) ->
   EquivM sym arch (a, LazyProof sym arch tp)
 lazyProofEvent ppair f = lazyProofFinal f $ \e -> do
@@ -257,7 +258,7 @@ lazyProofEvent ppair f = lazyProofFinal f $ \e -> do
   emitEvent (PE.ProofIntermediate blocks (PFI.SomeProofNonceExpr vsym e))
 
 lazyProofEvent_ ::
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (LazyProofApp sym arch tp) ->
   EquivM sym arch (LazyProof sym arch tp)
 lazyProofEvent_ ppair f = snd <$> lazyProofEvent ppair (f >>= \a -> return ((), a))
@@ -296,13 +297,13 @@ forkProofFinal f fin = mkLazyProof go fin
       return (futureRes, LazyProofBodyFuture futurePrf)
 
 forkProofEvent_ ::
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (LazyProofApp sym arch tp) ->
   EquivM sym arch (LazyProof sym arch tp)
 forkProofEvent_ ppair f = snd <$> forkProofEvent ppair (f >>= \app -> return ((), app)) 
 
 forkProofEvent ::
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (a, LazyProofApp sym arch tp) ->
   EquivM sym arch (Par.Future a, LazyProof sym arch tp)
 forkProofEvent ppair f = forkProofFinal f $ \e -> do

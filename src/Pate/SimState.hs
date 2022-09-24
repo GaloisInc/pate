@@ -31,6 +31,7 @@ Functionality for handling the inputs and outputs of crucible.
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.SimState
   ( -- simulator state
@@ -90,6 +91,7 @@ import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
 
 import qualified Prettyprinter as PP
 
+import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
@@ -120,6 +122,7 @@ import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import           Pate.AssumptionSet
+import           Pate.TraceTree
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -294,6 +297,12 @@ data SimBundle sym arch v = SimBundle
   , simOut :: PPa.PatchPair (SimOutput sym arch v)
   }
 
+instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "bundle" where
+  type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
+  prettyNode () (Some _bundle) = "<TODO: pretty bundle>"
+  nodeTags = [("symbolic", \_ _ -> "<TODO: pretty bundle>")]
+
+
 bundleOutVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
 bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
 
@@ -310,7 +319,7 @@ simOutP :: SimBundle sym arch v -> SimOutput sym arch v PBi.Patched
 simOutP = PPa.pPatched . simOut
 
 
-simPair :: SimBundle sym arch v -> PPa.BlockPair arch
+simPair :: SimBundle sym arch v -> PB.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 ---------------------------------------
