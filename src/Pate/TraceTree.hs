@@ -613,7 +613,7 @@ traceAlternatives' ((nm, f) : alts) =
 
 instance IsTraceNode (k :: l) "function_name" where
   type TraceNodeType k "function_name" = String
-  prettyNode () st = PP.pretty (show st)
+  prettyNode () st = PP.pretty st
 
 traceAlternatives ::
   IsTreeBuilder k e m =>

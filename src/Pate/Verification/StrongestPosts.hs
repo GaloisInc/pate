@@ -275,7 +275,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ 
 
          gr2 <- checkTotality node bundle d exitPairs gr1
 
-         gr3 <- updateReturnNode scope node bundle d gr2
+         gr3 <- withTracing @"function_name" "updateReturnNode" $
+           updateReturnNode scope node bundle d gr2
 
          -- Follow all the exit pairs we found
          subTree @"blocktarget" "Block Exits" $
