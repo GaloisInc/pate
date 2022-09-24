@@ -10,6 +10,8 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE DataKinds   #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.AssumptionSet (
     AssumptionSet
   , augment

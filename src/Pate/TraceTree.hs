@@ -84,7 +84,6 @@ module Pate.TraceTree (
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
-import           GHC.Stack
 import           Data.Kind ( Type )
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.IO.Unlift as IO
@@ -96,7 +95,6 @@ import           Data.Default
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT
-import           Control.Monad.Error
 import           Control.Monad.Except
 import           Control.Monad.Catch
 import           Control.Applicative

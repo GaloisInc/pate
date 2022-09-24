@@ -44,7 +44,6 @@ import qualified Pate.Config as PC
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
-import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
