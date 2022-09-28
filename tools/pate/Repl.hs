@@ -109,7 +109,6 @@ data ReplState sym arch where
     , replNext :: [Some (TraceNode sym arch)]
     , replValidRepr :: ValidSymArchRepr sym arch sym arch
     , replLastOptsPrinted :: String
-    , replFinalResult :: Maybe PEq.EquivalenceStatus
     } -> ReplState sym arch
 
 data ValidSymArchRepr sym arch symExt archExt where
@@ -166,6 +165,11 @@ decrementWait (WaitThread mtid gas) = WaitThread mtid (gas - 1)
 waitThread :: IO.IORef WaitThread
 waitThread = IO.unsafePerformIO (IO.newIORef (WaitThread Nothing 0))
 
+
+finalResult :: IO.IORef (Maybe (Either String PEq.EquivalenceStatus))
+finalResult = IO.unsafePerformIO (IO.newIORef Nothing)
+
+
 loadSomeTree ::
   IO.ThreadId -> SomeTraceTree PA.ValidRepr -> IO Bool
 loadSomeTree tid topTraceTree = do
@@ -179,7 +183,6 @@ loadSomeTree tid topTraceTree = do
             , replNext = []
             , replValidRepr = ValidSymArchRepr sym arch
             , replLastOptsPrinted = ""
-            , replFinalResult = Nothing
             }
       IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
@@ -197,10 +200,12 @@ run rawOpts = do
   tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
     Left err -> do
       killWaitThread
-      case show err of
+      let msg = show err
+      case msg of
         "thread killed" -> return ()
         _ -> IO.putStrLn $ "Verifier failed: " ++ show err
-    Right a -> execReplM (modify (\st -> st { replFinalResult = Just a }))
+      IO.writeIORef finalResult (Just (Left msg))
+    Right a -> IO.writeIORef finalResult (Just (Right a))
   IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
   wait
 
@@ -343,12 +348,12 @@ status = do
         NodeStatus (StatusWarning e) _ -> IO.liftIO $  IO.putStrLn $ "Warning: \n" ++ (show e)
         NodeStatus (StatusError e) _ ->  IO.liftIO $  IO.putStrLn $ "Error: \n" ++ (show e)
         NodeStatus StatusSuccess False ->  IO.liftIO $ IO.putStrLn $ "In progress.."
-        NodeStatus StatusSuccess True -> do
-          prevNodes <- gets replPrev
-          finalResult <- gets replFinalResult
-          case (prevNodes, finalResult) of
-            ([], Just r) -> printPrettyLn (PP.viaShow r)
-            _ -> IO.liftIO $ IO.putStrLn "Finalized"
+        NodeStatus StatusSuccess True -> IO.liftIO $ IO.putStrLn "Finalized"
+      prevNodes <- gets replPrev
+      fin <- IO.liftIO $ IO.readIORef finalResult
+      case (prevNodes, fin) of
+        ([], Just r) -> printPrettyLn (PP.viaShow r)
+        _ -> return ()
 
 showTag :: TraceTag -> IO ()
 showTag tag = execReplM $ do
