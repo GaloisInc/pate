@@ -501,8 +501,7 @@ withAssumptionSet asm f = withSym $ \sym -> do
         safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
           LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
         return (frame, st)
-      (f >>= \r -> validateAssumptions curAsm asm >> return r)
-        `finally` safePop frame st
+      f `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
