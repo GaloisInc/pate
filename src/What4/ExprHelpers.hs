@@ -71,6 +71,7 @@ module What4.ExprHelpers (
   , unliftSimpCheck
   , assumePositiveInt
   , integerToNat
+  , asConstantOffset
   ) where
 
 import           GHC.TypeNats
@@ -404,6 +405,21 @@ mergeBindings _sym binds1 binds2 =
     return
     binds1
     binds2
+
+
+asConstantOffset ::
+  forall sym t solver fs w.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.SymExpr sym (W4.BaseBVType w) ->
+  Maybe (W4.SymExpr sym (W4.BaseBVType w), W4C.ConcreteVal (W4.BaseBVType w))
+asConstantOffset _sym e =
+  case W4B.asApp e of
+    (Just (W4B.SemiRingSum ws)) |
+      SR.SemiRingBVRepr SR.BVArithRepr w <- WSum.sumRepr ws
+      , Just (coef1, off1, coef2) <- WSum.asAffineVar ws
+      , coef1 == BVS.one w -> Just (off1, W4C.ConcreteBV w coef2)
+    _ -> Nothing
 
 -- | Rewrite the sub-expressions of an expression according to the given binding environment.
 applyExprBindings ::

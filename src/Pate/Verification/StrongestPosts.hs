@@ -48,6 +48,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import           Data.Parameterized.Nonce
 
 import qualified What4.Expr as W4
+import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import           What4.SatResult (SatResult(..))
 
@@ -91,6 +92,8 @@ import           Pate.Verification.PairGraph
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
+import qualified Pate.ExprMappable as PEM
+import           What4.ExprHelpers
 
 -- Overall module notes/thoughts
 --
@@ -254,7 +257,24 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $ 
        emitTrace @"bundle" (Some bundle')
        withPredomain bundle' d $ do
          -- simplify the bundle under the domain assumptions
-         bundle <- applyCurrentAsms bundle'
+         bundle'' <- applyCurrentAsms bundle'
+         heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
+
+         bundle <- withSym $ \sym -> do
+           conccache <- W4B.newIdxCache
+           ecache <- W4B.newIdxCache
+
+           let
+             concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
+             concPred p = getConst <$> (W4B.idxCacheEval conccache p $ (Const <$> concretePred heuristicTimeout p))
+
+
+             simp :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+             simp e = W4B.idxCacheEval ecache e $
+               resolveConcreteLookups sym concPred e >>= simplifyBVOps sym >>= (\e' -> liftIO $ fixMux sym e')
+
+           PEM.mapExpr sym simp bundle''
+
          traceBundle bundle $ "visitNode:  incoming domain\n" ++ (show (PAD.ppAbstractDomain (\_ -> "") d))
          
   {-     traceBundle bundle $ unlines

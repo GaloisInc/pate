@@ -33,6 +33,7 @@ import           Control.Monad.Trans.Class ( lift )
 
 import           Prettyprinter
 
+import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
 import           Data.List (foldl')
 import           Data.Parameterized.Classes()
@@ -43,6 +44,7 @@ import qualified Data.Parameterized.Map as MapF
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
 import           What4.SatResult (SatResult(..))
+import qualified What4.Concrete as W4C
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.Types as MT
@@ -60,6 +62,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Proof.Operations as PP
 import qualified Pate.Proof.CounterExample as PP
 import qualified Pate.Proof.Instances ()
+import qualified Pate.ExprMappable as PEM
 
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
@@ -75,6 +78,7 @@ import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 import           Pate.TraceTree
+import qualified What4.ExprHelpers as WEH
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -209,6 +213,15 @@ toMaybe :: MaybeF a tp -> Maybe (a tp)
 toMaybe (JustF a) = Just a
 toMaybe NothingF = Nothing
 
+memVars ::
+  PS.SimVars sym arch v bin -> EquivM sym arch (Set.Set (Some (W4.BoundVar sym)))
+memVars vars = do
+  let
+    mem = MT.memState $ PS.simMem $ PS.simVarState vars
+    binds = MT.mkMemoryBinding mem mem
+  withValid $
+    (Set.unions <$> mapM (\(Some e) -> IO.liftIO $ WEH.boundVars e) (MapF.keys binds))
+
 -- | Compute an'PAD.AbstractDomainSpec' from the input 'PAD.AbstractDomain' that is
 -- parameterized over the *output* state of the given 'SimBundle'.
 -- Until now, the widening process has used the same scope for the pre-domain and
@@ -266,6 +279,11 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     cache <- W4B.newIdxCache
     -- Strategies for re-scoping expressions
     let
+      asConcrete :: forall v1 v2 tp. PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+      asConcrete se = do
+        Just c <- return $ (W4.asConcrete (PS.unSE se))
+        liftIO $ PS.concreteScope @v2 sym c
+
       asScopedConst :: forall v1 v2 tp. HasCallStack => W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
       asScopedConst asm se = do
         emitTrace @"assumption" (PAs.fromPred asm)
@@ -277,12 +295,36 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
         emitTraceLabel @"expr" "final output" (Some (PS.unSE off'))
         return off'
 
+      -- static version of 'asStackOffset' (no solver)
+      simpleStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
+      simpleStackOffset bin se = do
+        W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
+        Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
+        let preFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin (PS.scopeVars scope_pre))
+        let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+
+        -- se = preFrame + off1
+        Just (se_base, W4C.ConcreteBV _ se_off) <- return $ WEH.asConstantOffset sym (PS.unSE se)
+        -- postFrame = preFrame + off2
+        Just (postFrame_base, W4C.ConcreteBV _ postFrame_off) <- return $ WEH.asConstantOffset sym (PS.unSE postFrame)
+        p1 <- liftIO $ W4.isEq sym se_base (PS.unSE preFrame)
+        Just True <- return $ W4.asConstantPred p1
+        p2 <- liftIO $ W4.isEq sym postFrame_base (PS.unSE preFrame)
+        Just True <- return $ W4.asConstantPred p2
+        -- preFrame = postFrame - off2
+        -- se = (postFrame - off2) + off1
+        -- se = postFrame + (off1 - off2)
+        off' <- liftIO $ PS.concreteScope @post sym (W4C.ConcreteBV w (BVS.sub w se_off postFrame_off))
+        liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
+
+
       asStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
       asStackOffset bin se = do
         W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
         Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
         -- se[v]
         let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+
         off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
         -- asFrameOffset := frame[post] + off
         asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
@@ -319,13 +361,36 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
           -- TODO: We could do better by picking the strategy based on the term shape,
           -- but it's not strictly necessary.
 
-        se' <- traceAlternatives $
-          [ ("asScopedConst", asScopedConst (W4.truePred sym) se)
-          , ("asSimpleAssign", asSimpleAssign se)
-          , ("asStackOffsetO", asStackOffset PBi.OriginalRepr se)
-          , ("asStackOffsetP", asStackOffset PBi.PatchedRepr se)
+        asStackOffsetStrats <- PPa.catBins $ \get -> do
+          let stackbase = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState $ (get (PS.scopeVars scope_pre))
+          sbVars <- IO.liftIO $ WEH.boundVars stackbase
+          seVars <- IO.liftIO $ WEH.boundVars (PS.unSE se)
 
-          ]
+          -- as an optimization, we omit this test for
+          -- terms which contain memory accesses (i.e. depend on
+          -- the memory variable somehow), since we don't have any support for
+          -- indirect reads
+          mvars <- lift $ memVars (get (PS.scopeVars scope_pre))
+          let noMem = Set.null (Set.intersection seVars mvars)
+
+          let bin = get PPa.patchPairRepr
+
+          case Set.isSubsetOf sbVars seVars && noMem of
+            True -> return $ [("asStackOffset (" ++ show bin ++ ")", asStackOffset bin se)]
+            False -> return $ []
+
+
+
+        se' <- traceAlternatives $
+          -- first try strategies that don't use the solver
+          [ ("asConcrete", asConcrete se)
+          , ("simpleStackOffsetO", simpleStackOffset PBi.OriginalRepr se)
+          , ("simpleStackOffsetP", simpleStackOffset PBi.PatchedRepr se)
+          -- solver-based strategies now
+          , ("asScopedConst", asScopedConst (W4.truePred sym) se)
+          , ("asSimpleAssign", asSimpleAssign se)
+          ] ++ asStackOffsetStrats
+
         lift $ emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se')
         return se'
     -- First traverse the equivalence domain and rescope its entries
@@ -334,7 +399,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym
     -- is effectively now assuming equality on that entry.
     
     eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
-      subTrace @"expr" (Some (PS.unSE se)) $
+       subTrace @"expr" (Some (PS.unSE se)) $
         doRescope loc se >>= \case
           JustF se' -> return $ Just se'
           NothingF -> do
@@ -577,12 +642,14 @@ getInitalAbsDomainVals ::
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
 getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
+  PEM.SymExprMappable asEM <- return $ PEM.symExprMappable sym
   let
     getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
     getConcreteRange e = do
-      e' <- concretizeWithSolver e
-      emitTraceLabel @"expr" "output" (Some e')
-      return $ PAD.extractAbsRange sym e'
+      e' <- asEM @tp $ applyCurrentAsms e
+      e'' <- concretizeWithSolver e'
+      emitTraceLabel @"expr" "output" (Some e'')
+      return $ PAD.extractAbsRange sym e''
 
   let PPa.PatchPair preO preP = PAD.absDomVals preDom
   eqCtx <- equivalenceContext

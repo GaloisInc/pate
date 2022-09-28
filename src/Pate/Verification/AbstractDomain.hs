@@ -49,6 +49,7 @@ import           Data.Set ( Set )
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
+import           Data.Parameterized.Pair (fstPair)
 import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
@@ -336,7 +337,8 @@ initAbsDomainVals sym eqCtx f stOut preVals = do
   -- NOTE: We need to include any cells from the pre-domain to ensure that we
   -- propagate forward any value constraints for memory that is not accessed in this
   -- slice
-  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ (MapF.keys $ absMemVals preVals)
+  let prevCells = map fstPair $ filter (\(MapF.Pair _ (MemAbstractValue v)) -> not (isUnconstrained v)) (MapF.toList (absMemVals preVals))
+  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
   memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
     absVal <- getMemAbsVal cell
     return (MapF.Pair cell absVal)

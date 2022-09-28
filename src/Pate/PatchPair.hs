@@ -11,6 +11,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Pate.PatchPair (
     PatchPair(..)
+  , patchPairRepr
   , PatchPairC(..)
   , toPatchPairC
   , mergePatchPairCs
@@ -54,6 +55,9 @@ setPair PB.PatchedRepr a pPair = pPair { pPatched = a }
 
 get :: forall bin tp. PB.KnownBinary bin => PatchPair tp -> tp bin
 get = getPair' knownRepr
+
+patchPairRepr :: PatchPair PB.WhichBinaryRepr
+patchPairRepr = PatchPair PB.OriginalRepr PB.PatchedRepr
 
 forBins :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m (f bin)) -> m (PatchPair f)
 forBins f = PatchPair <$> f (get @PB.Original) <*> f (get @PB.Patched)
