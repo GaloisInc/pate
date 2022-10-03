@@ -13,6 +13,8 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DefaultSignatures #-}
+
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 module Pate.ExprMappable (
@@ -59,6 +61,27 @@ class ExprMappable sym f where
     f ->
     m f
 
+  default mapExpr ::
+    ExprMappable2 sym sym f f =>
+    WI.IsSymExprBuilder sym =>
+    IO.MonadIO m =>
+    sym ->
+    (forall tp. WI.SymExpr sym tp -> m (WI.SymExpr sym tp)) ->
+    f ->
+    m f
+  mapExpr sym f a = mapExpr2 sym sym f a
+
+class ExprMappable2 sym sym' f f' where
+  mapExpr2 ::
+    (WI.IsSymExprBuilder sym,
+    WEH.HasIntegerToNat sym',
+    IO.MonadIO m) =>
+    sym ->
+    sym' ->
+    (forall tp. WI.SymExpr sym tp -> m (WI.SymExpr sym' tp)) ->
+    f ->
+    m f'
+
 class ExprFoldable sym f where
   foldExpr ::
     WI.IsSymExprBuilder sym =>
@@ -76,11 +99,18 @@ instance ExprMappable sym f => ExprFoldable sym f where
 instance (ExprMappable sym a, ExprMappable sym b) => ExprMappable sym (a, b) where
   mapExpr sym f (a, b) = (,) <$> mapExpr sym f a <*> mapExpr sym f b
 
+instance (ExprMappable2 sym sym' a a', ExprMappable2 sym sym' b b') => ExprMappable2 sym sym' (a, b) (a', b') where
+  mapExpr2 sym sym' f (a, b) = (,) <$> mapExpr2 sym sym' f a <*> mapExpr2 sym sym' f b
+
+instance ExprMappable2 sym sym' (CS.RegValue' sym (CT.BaseToType bt)) (CS.RegValue' sym' (CT.BaseToType bt)) where
+  mapExpr2 _ _ f (CS.RV x) = CS.RV <$> f x
+
 instance ExprMappable sym (CS.RegValue' sym (CT.BaseToType bt)) where
-  mapExpr _ f (CS.RV x) = CS.RV <$> f x
+
+instance ExprMappable2 sym sym' (CS.RegValue' sym (CLM.LLVMPointerType w)) (CS.RegValue' sym' (CLM.LLVMPointerType w)) where
+  mapExpr2 sym sym' f (CS.RV x) = CS.RV <$> WEH.mapExprPtr2 sym sym' f x
 
 instance ExprMappable sym (CS.RegValue' sym (CLM.LLVMPointerType w)) where
-  mapExpr sym f (CS.RV x) = CS.RV <$> WEH.mapExprPtr sym f x
 
 instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue' sym (CT.MaybeType tp)) where
   mapExpr sym f (CS.RV pe) = CS.RV <$> case pe of
@@ -90,15 +120,39 @@ instance ExprMappable sym (CS.RegValue' sym tp) => ExprMappable sym (CS.RegValue
       return $ WP.PE p' e'
     WP.Unassigned -> return WP.Unassigned
 
+instance forall sym sym' tp. ExprMappable2 sym sym' (CS.RegValue' sym tp) (CS.RegValue' sym' tp) => ExprMappable2 sym sym' (CS.RegValue' sym (CT.MaybeType tp)) (CS.RegValue' sym' (CT.MaybeType tp)) where
+  mapExpr2 sym sym' f (CS.RV pe) = do
+    (e' :: CS.RegValue sym' (CT.MaybeType tp)) <- case pe of
+      WP.PE p e -> do
+        (p' :: WI.Pred sym') <- f p
+        CS.RV e' <- mapExpr2 @_ @_ @_ @(CS.RegValue' sym' tp) sym sym' f (CS.RV @sym @tp e)
+        return $ (WP.PE @(WI.Pred sym') @(CS.RegValue sym' tp) p' e')
+      WP.Unassigned -> return $ (WP.Err @_ @(WI.Pred sym') @(CS.RegValue sym' tp) ())
+    return $ CS.RV e'
 
 instance ExprMappable sym (f (a tp)) => ExprMappable sym (Par.ConstF f a tp) where
   mapExpr sym f (Par.ConstF a) = Par.ConstF <$> mapExpr sym f a
 
+instance ExprMappable2 sym sym' (f (a tp)) (g (b tp)) => ExprMappable2 sym sym' (Par.ConstF f a tp) (Par.ConstF g b tp) where
+  mapExpr2 sym sym' f (Par.ConstF a) = Par.ConstF <$> mapExpr2 sym sym' f a
+
 instance ExprMappable sym f => ExprMappable sym ((Const f) tp)  where
   mapExpr sym f (Const e) = Const <$> mapExpr sym f e
 
+instance ExprMappable2 sym sym' f g => ExprMappable2 sym sym' ((Const f) tp) ((Const g) tp') where
+  mapExpr2 sym sym' f (Const e) = Const <$> mapExpr2 sym sym' f e
+
 instance (forall tp. ExprMappable sym (f tp)) => ExprMappable sym (Some f) where
   mapExpr sym f (Some v) = Some <$> mapExpr sym f v
+
+instance forall sym sym' f f'. (forall tp. ExprMappable2 sym sym' (f tp) (f' tp)) => ExprMappable2 sym sym' (Some f) (Some f') where
+  mapExpr2 sym sym' f (Some (v :: f tp)) = Some <$> mapExpr2 @_ @_ @(f tp) @(f' tp) sym sym' f v
+
+instance ExprMappable2 sym sym' a a' => ExprMappable2 sym sym' (Maybe a) (Maybe a') where
+  mapExpr2 sym sym' f ma = case ma of
+    Just a -> Just <$> mapExpr2 sym sym' f a
+    Nothing -> return Nothing
+
 
 instance ExprMappable sym a => ExprMappable sym (Maybe a) where
   mapExpr sym f ma = case ma of
@@ -116,6 +170,16 @@ instance
     x' <- mapExpr sym f x
     return $ asn' Ctx.:> x'
 
+instance ExprMappable2 sym sym' (Ctx.Assignment f Ctx.EmptyCtx) (Ctx.Assignment f' Ctx.EmptyCtx)  where
+  mapExpr2 _sym _sym' _f _ = return Ctx.empty
+
+instance
+  (ExprMappable2 sym sym' (Ctx.Assignment f ctx) (Ctx.Assignment f' ctx), ExprMappable2 sym sym' (f tp) (f' tp)) =>
+  ExprMappable2 sym sym' (Ctx.Assignment f (ctx Ctx.::> tp)) (Ctx.Assignment f' (ctx Ctx.::> tp)) where
+  mapExpr2 sym sym' f (asn Ctx.:> x) = do
+    asn' <- mapExpr2 sym sym' f asn
+    x' <- mapExpr2 sym sym' f x
+    return $ asn' Ctx.:> x'
 
 instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
   mapExpr sym f e = applyExprMappable sym f e

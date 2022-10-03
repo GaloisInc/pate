@@ -189,7 +189,7 @@ argumentMapping =
                       }
 
 stubOverrides :: PA.ArchStubOverrides SA.AArch32
-stubOverrides = PA.ArchStubOverrides $
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride r0) $
   Map.fromList
     [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
     , (BSC.pack "clock", PA.mkClockOverride r0)  ]

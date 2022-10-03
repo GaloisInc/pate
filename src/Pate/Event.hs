@@ -1,4 +1,11 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 -- | Events that can be reported from the verifier
 module Pate.Event (
   Blocks(..),
@@ -22,6 +29,7 @@ import           Data.Word ( Word64 )
 import qualified GHC.Stack as GS
 import qualified What4.Expr as WE
 import qualified What4.Interface as WI
+import qualified Prettyprinter as PP
 
 import qualified Pate.Arch as PArch
 import qualified Pate.AssumptionSet as PAS
@@ -42,6 +50,8 @@ import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification.PairGraph.Node as PVPN
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
+import           Pate.TraceTree
+
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
   Blocks :: PN.NatRepr (DMC.ArchAddrWidth arch) -> PB.ConcreteBlock arch bin -> [MD.ParsedBlock arch ids] -> Blocks arch bin
@@ -55,6 +65,11 @@ data EquivalenceResult arch = Equivalent
 data BlockTargetResult = Reachable
                        | InconclusiveTarget
                        | Unreachable
+  deriving (Eq, Ord, Show)
+
+instance IsTraceNode k "blocktargetresult" where
+  type TraceNodeType k "blocktargetresult" = BlockTargetResult
+  prettyNode () result = PP.pretty (show result)
 
 data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches

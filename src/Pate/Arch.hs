@@ -23,7 +23,10 @@ module Pate.Arch (
   ArchStubOverrides(..),
   mkMallocOverride,
   mkClockOverride,
+  mkDefaultStubOverride,
   lookupStubOverride,
+  defaultStubOverride,
+  withStubOverride,
   mergeLoaders
   ) where
 
@@ -156,20 +159,41 @@ data ValidArchData arch =
 --   for rather than include in the analysis.
 data StubOverride arch =
   StubOverride
-    (forall sym v bin.
+    (forall sym.
       W4.IsSymExprBuilder sym =>
-      PB.KnownBinary bin =>
       sym ->
-      PS.SimState sym arch v bin ->
-      IO (PS.SimState sym arch v bin))
+      IO (StateTransformer sym arch))
+
+data StateTransformer sym arch =
+  StateTransformer (forall v bin. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin))
+
+mkStubOverride :: forall arch.
+  (forall sym bin v.W4.IsSymExprBuilder sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
+  StubOverride arch
+mkStubOverride f = StubOverride $ \sym -> return $ StateTransformer (\st -> f sym st)
+
+withStubOverride ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  StubOverride arch ->
+  ((forall bin. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) -> IO a) ->
+  IO a
+withStubOverride sym (StubOverride ov) f = do
+  StateTransformer ov' <- ov sym
+  f ov'
+
 
 data ArchStubOverrides arch =
-  ArchStubOverrides (Map.Map BS.ByteString (StubOverride arch))
+  ArchStubOverrides (StubOverride arch) (Map.Map BS.ByteString (StubOverride arch))
 
 lookupStubOverride ::
   ValidArchData arch -> BS.ByteString -> Maybe (StubOverride arch)
-lookupStubOverride va nm = let ArchStubOverrides ov = validArchStubOverrides va in
+lookupStubOverride va nm = let ArchStubOverrides _ ov = validArchStubOverrides va in
   Map.lookup nm ov
+
+defaultStubOverride ::
+  ValidArchData arch -> StubOverride arch
+defaultStubOverride va = let ArchStubOverrides _default _ = validArchStubOverrides va in _default
 
 -- | Defines an override for @malloc@ that returns a 0-offset pointer in the
 --   region defined by 'PS.simMaxRegion', and then increments that region.
@@ -188,7 +212,7 @@ mkMallocOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ length argument (unused currently ) -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ register for fresh pointer -} ->
   StubOverride arch
-mkMallocOverride _rLen rOut = StubOverride $ \sym st -> do
+mkMallocOverride _rLen rOut = mkStubOverride $ \sym st -> do
   let mr = PS.simMaxRegion st
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   mr_nat <- W4.integerToNat sym (PS.unSE mr)
@@ -210,13 +234,27 @@ mkClockOverride ::
   MS.SymArchConstraints arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkClockOverride rOut = StubOverride $ \sym st -> do
+mkClockOverride rOut = mkStubOverride $ \sym st -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   zero_bv <- W4.bvLit sym w (BVS.mkBV w 0)
   zero_nat <- W4.natLit sym 0
   let zero_ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat zero_bv)
   return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ zero_ptr) })
 
+-- | Default override returns the same arbitrary value for both binaries
+mkDefaultStubOverride ::
+  forall arch.
+  MS.SymArchConstraints arch =>
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkDefaultStubOverride rOut = StubOverride $ \sym -> do
+  let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "plt_default") (W4.BaseBVRepr w)
+  return $ StateTransformer $ \st -> do
+    let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+    zero_nat <- W4.natLit sym 0
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
 
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier

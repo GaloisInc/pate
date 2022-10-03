@@ -45,6 +45,7 @@ module What4.ExprHelpers (
   , rewriteSubExprs
   , rewriteSubExprs'
   , mapExprPtr
+  , mapExprPtr2
   , freshPtr
   , freshPtrBytes
   , ExprFilter(..)
@@ -72,6 +73,7 @@ module What4.ExprHelpers (
   , assumePositiveInt
   , integerToNat
   , asConstantOffset
+  , HasIntegerToNat(..)
   ) where
 
 import           GHC.TypeNats
@@ -452,6 +454,28 @@ mapExprPtr ::
 mapExprPtr sym f (CLM.LLVMPointer reg off) = do
   regInt <- f (W4.natToIntegerPure reg)
   reg' <- IO.liftIO $ integerToNat sym (assumePositiveInt sym regInt)
+  off' <- f off
+  return $ CLM.LLVMPointer reg' off'
+
+class HasIntegerToNat sym where
+  intToNat :: sym -> W4.SymExpr sym W4.BaseIntegerType -> IO (W4.SymNat sym)
+
+instance W4.IsExprBuilder sym => HasIntegerToNat sym where
+  intToNat sym e = integerToNat sym (assumePositiveInt sym e)
+
+mapExprPtr2 ::
+  forall sym sym' m w.
+  W4.IsExprBuilder sym =>
+  HasIntegerToNat sym' =>
+  IO.MonadIO m =>
+  sym ->
+  sym' ->
+  (forall tp. W4.SymExpr sym tp -> m (W4.SymExpr sym' tp)) ->
+  CLM.LLVMPtr sym w ->
+  m (CLM.LLVMPtr sym' w)
+mapExprPtr2 _sym sym' f (CLM.LLVMPointer reg off) = do
+  regInt <- f (W4.natToIntegerPure reg)
+  reg' <- IO.liftIO $ intToNat sym' regInt
   off' <- f off
   return $ CLM.LLVMPointer reg' off'
 

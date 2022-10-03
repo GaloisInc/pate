@@ -233,7 +233,7 @@ argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
 stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
-stubOverrides = PA.ArchStubOverrides $
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride r0) $
   Map.fromList
     [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
     , (BSC.pack "clock", PA.mkClockOverride r0)  ]

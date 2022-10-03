@@ -113,35 +113,39 @@ discoverPairs bundle = withSym $ \sym -> do
                , compatibleTargets blkO blkP]
   blocks <- getBlocks $ PSS.simPair bundle
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
-
-  result <- forM newCalls $ \blkts -> startTimer $ do
-    let emit r = emitEvent (PE.DiscoverBlockPair blocks blkts r)
-    matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
-    case WI.asConstantPred matches of
-      Just True -> do
-        emit PE.Reachable
-        return $ Just $ blkts
-      Just False -> do
-        emit PE.Unreachable
-        return $ Nothing
-      _ ->  do
-        goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-        er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
-          case satRes of
-            WR.Sat _ -> do
-              emit PE.Reachable
-              return $ Just $ blkts
-            WR.Unsat _ -> do
-              emit PE.Unreachable
-              return Nothing
-            WR.Unknown -> do
+  subTree @"blocktarget" "Cached Pairs" $
+    mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
+  
+  result <-
+    subTree @"blocktarget" "Discovered Pairs" $ 
+    forM newCalls $ \blkts -> subTrace blkts $ startTimer $ do
+      let emit r = (emitEvent (PE.DiscoverBlockPair blocks blkts r) >> emitTrace @"blocktargetresult" r)
+      matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
+      case WI.asConstantPred matches of
+        Just True -> do
+          emit PE.Reachable
+          return $ Just $ blkts
+        Just False -> do
+          emit PE.Unreachable
+          return $ Nothing
+        _ ->  do
+          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+          er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
+            case satRes of
+              WR.Sat _ -> do
+                emit PE.Reachable
+                return $ Just $ blkts
+              WR.Unsat _ -> do
+                emit PE.Unreachable
+                return Nothing
+              WR.Unknown -> do
+                emit PE.InconclusiveTarget
+                throwHere PEE.InconclusiveSAT
+          case er of
+            Left _err -> do
               emit PE.InconclusiveTarget
               throwHere PEE.InconclusiveSAT
-        case er of
-          Left _err -> do
-            emit PE.InconclusiveTarget
-            throwHere PEE.InconclusiveSAT
-          Right r -> return r
+            Right r -> return r
   let resultSet = Set.fromList (catMaybes result)
   modifyBlockCache envExitPairsCache pPair Set.union resultSet
   return $ Set.toList (Set.union resultSet cachedTargets)
@@ -478,15 +482,19 @@ callTargets from next_ips ret = do
    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
    binCtx <- getBinCtx @bin
    let mem = MBL.memoryImage (PMC.binary binCtx)
-   forM next_ips $ \next -> do
+   fmap catMaybes $ forM next_ips $ \next -> do
      let nextMem = PA.addrToMemAddr next
-     let Just segoff = MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem)
-     let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
-                               , PB.functionSymbol = Nothing
-                               , PB.functionBinRepr = PC.knownRepr
-                               }
-     let pb = PB.functionEntryToConcreteBlock fe
-     return (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
+     case MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem) of
+       Just segoff -> do
+         let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
+                                   , PB.functionSymbol = Nothing
+                                   , PB.functionBinRepr = PC.knownRepr
+                                   }
+         let pb = PB.functionEntryToConcreteBlock fe
+         return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
+       Nothing -> do
+         _ <- emitError $ PEE.MissingRegionOffset (MM.addrBase nextMem) (MM.addrOffset nextMem)
+         return Nothing                                        
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map

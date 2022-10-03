@@ -33,6 +33,7 @@ import           Prettyprinter
 
 import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Proxy
@@ -229,6 +230,66 @@ validAbsValues block var = do
   fmap PRt.collapse $ PRt.zipWithRegStatesM regs absRegs $ \_ re av ->
     Const <$> absValueToAsm var re av
 
+processBundle ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  NodeEntry arch ->
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+processBundle scope node bundle d gr0 = do
+  exitPairs <- PD.discoverPairs bundle
+
+  gr1 <- checkObservables node bundle d gr0
+
+  gr2 <- checkTotality node bundle d exitPairs gr1
+
+  mgr3 <- withTracing @"function_name" "updateReturnNode" $
+    updateReturnNode scope node bundle d gr2
+  gr3 <- case mgr3 of
+    Just gr3 -> return gr3
+    Nothing -> case null exitPairs of
+      True -> do
+        emitError $ PEE.BlockHasNoExit (PS.simPair bundle)
+        handleReturn scope bundle node d gr2
+      False -> return gr2
+
+  -- Follow all the exit pairs we found
+  subTree @"blocktarget" "Block Exits" $
+    foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
+
+withSimBundle ::
+  forall sym arch v a.
+  PS.SimScope sym arch v ->
+  PB.BlockPair arch ->
+  (SimBundle sym arch v -> EquivM_ sym arch a) ->
+  EquivM sym arch a
+withSimBundle scope bPair f = withPair bPair $ do
+  let vars = PS.scopeVars scope
+  validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
+  validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
+  withAssumptionSet (validInit <> validAbs) $ do
+    bundle0 <- mkSimBundle bPair vars
+    bundle1 <- withSym $ \sym -> do
+      heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
+      conccache <- W4B.newIdxCache
+      ecache <- W4B.newIdxCache
+      let
+        concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
+        concPred p = getConst <$> (W4B.idxCacheEval conccache p $ (Const <$> concretePred heuristicTimeout p))
+
+
+        simp :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+        simp e = W4B.idxCacheEval ecache e $
+          resolveConcreteLookups sym concPred e >>= simplifyBVOps sym >>= (\e' -> liftIO $ fixMux sym e')
+
+      PEM.mapExpr sym simp bundle0
+    bundle <- applyCurrentAsms bundle1
+    emitTrace @"bundle" (Some bundle)
+    f bundle
+ 
+         
 -- | Perform the work of propagating abstract domain information through
 --   a single program "slice". First we check for equivalence of observables,
 --   then we check the totality of the computed exits, then we update any
@@ -246,63 +307,7 @@ visitNode :: forall sym arch v.
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-
-visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withPair bPair $  do
-  let vars = PS.scopeVars scope
-  validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
-  validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
-  withAssumptionSet (validInit <> validAbs) $
-    do -- do the symbolic simulation
-       bundle' <- mkSimBundle bPair vars d
-       emitTrace @"bundle" (Some bundle')
-       withPredomain bundle' d $ do
-         -- simplify the bundle under the domain assumptions
-         bundle'' <- applyCurrentAsms bundle'
-         heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
-
-         bundle <- withSym $ \sym -> do
-           conccache <- W4B.newIdxCache
-           ecache <- W4B.newIdxCache
-
-           let
-             concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
-             concPred p = getConst <$> (W4B.idxCacheEval conccache p $ (Const <$> concretePred heuristicTimeout p))
-
-
-             simp :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
-             simp e = W4B.idxCacheEval ecache e $
-               resolveConcreteLookups sym concPred e >>= simplifyBVOps sym >>= (\e' -> liftIO $ fixMux sym e')
-
-           PEM.mapExpr sym simp bundle''
-
-         traceBundle bundle $ "visitNode:  incoming domain\n" ++ (show (PAD.ppAbstractDomain (\_ -> "") d))
-         
-  {-     traceBundle bundle $ unlines
-         [ "== SP result =="
-         , show (MM.getBoundValue (MM.sp_reg @(MM.ArchReg arch))
-              (PS.simRegs (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))))
-         , show (MM.getBoundValue (MM.sp_reg @(MM.ArchReg arch))
-              (PS.simRegs (PS.simOutState (PPa.pPatched (PS.simOut bundle)))))
-         ] -}
-
-         -- Compute exit pairs
-         traceBundle bundle $ "Discovering exit pairs from " ++ (show bPair)
-         -- TODO, manifest errors here?
-         exitPairs <- PD.discoverPairs bundle
-         traceBundle bundle $ (show (length exitPairs) ++ " pairs found!")
-
-
-         gr1 <- checkObservables node bundle d gr0
-
-         gr2 <- checkTotality node bundle d exitPairs gr1
-
-         gr3 <- withTracing @"function_name" "updateReturnNode" $
-           updateReturnNode scope node bundle d gr2
-
-         -- Follow all the exit pairs we found
-         subTree @"blocktarget" "Block Exits" $
-           foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
-
+visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withSimBundle scope bPair $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr0    
 
 visitNode scope (ReturnNode fPair) d gr0 =
   -- propagate the abstract domain of the return node to
@@ -430,7 +435,7 @@ checkObservables bPair bundle preD gr =
                 return (Nothing, gr)
            ObservableCheckError msg ->
              do let msg' = ("Error checking observables: " ++ msg)
-                err <- emitError (PEE.ObservabilityError msg')
+                err <- emitError' (PEE.ObservabilityError msg')
                 return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
            ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
              do traceBundle bundle ("Obserables disagree!")
@@ -667,7 +672,22 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
        eq2 <- loop (xs1:xs) (ys1:ys)
        liftIO $ W4.andPred sym eq1 eq2
 
-
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "totality" where
+  type TraceNodeType '(sym,arch) "totality" = TotalityResult (MM.ArchAddrWidth arch)
+  prettyNode () r = case r of
+    CasesTotal -> "Cases total"
+    TotalityCheckingError msg -> "Error:" <+> PP.pretty msg
+    TotalityCheckCounterexample (TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) -> PP.vsep $
+      ["Found extra exit while checking totality:"
+      , PP.pretty (showHex oIP "") <+> PP.pretty (PPI.ppExitCase oEnd) <+> PP.pretty (show oInstr)
+      , PP.pretty (showHex pIP "") <+> PP.pretty (PPI.ppExitCase pEnd) <+> PP.pretty (show pInstr)
+      ]
+  nodeTags = [(Summary, \_ r -> case r of
+                   CasesTotal -> "Total"
+                   TotalityCheckingError{} -> "Error"
+                   TotalityCheckCounterexample{} -> "Not total")
+             ]
+   
 
 checkTotality :: forall sym arch v.
   NodeEntry arch ->
@@ -679,13 +699,16 @@ checkTotality :: forall sym arch v.
 checkTotality bPair bundle preD exits gr =
   considerDesyncEvent gr bPair $
     do tot <- doCheckTotality bundle preD exits
+       withTracing @"totality" tot $ case tot of
+         TotalityCheckCounterexample{} -> emitWarning $ PEE.NonTotalBlockExits (nodeBlocks bPair)
+         _ -> return()
        case tot of
          CasesTotal ->
            do traceBundle bundle "Totality check succeeded."
               return (Nothing, gr)
          TotalityCheckingError msg ->
            do let msg' = ("Error while checking totality! " ++ msg)
-              err <- emitError (PEE.TotalityError msg')
+              err <- emitError' (PEE.TotalityError msg')
               return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
          TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
            do traceBundle bundle $ unlines
@@ -693,6 +716,7 @@ checkTotality bPair bundle preD exits gr =
                 , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
                 , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
                 ]
+              
               return (Just cex, gr)
 
 data TotalityResult ptrW
@@ -702,7 +726,7 @@ data TotalityResult ptrW
 
 doCheckTotality :: forall sym arch v.
   SimBundle sym arch v ->
-  AbstractDomain sym arch v ->
+  AbstractDomain sym arch v -> 
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   EquivM sym arch (TotalityResult (MM.ArchAddrWidth arch))
 doCheckTotality bundle _preD exits =
@@ -858,10 +882,10 @@ updateReturnNode ::
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
+  EquivM sym arch (Maybe (PairGraph sym arch))
 updateReturnNode scope bPair bundle preD gr = do
   isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
-  maybeUpdate gr $ withSatAssumption (PAS.fromPred isReturn) $ do
+  withSatAssumption (PAS.fromPred isReturn) $ do
     bundle' <- PD.associateFrames bundle MCS.MacawBlockEndReturn False
     handleReturn scope bundle' bPair preD gr
 
@@ -898,6 +922,11 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
          (Just blkRetO, Just blkRetP) ->
            do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
 
+              -- something has gone wrong with code discovery and we're
+              -- returning directly into the start of a function
+              case (PB.asFunctionEntry blkRetO, PB.asFunctionEntry blkRetP)  of
+                (Nothing,Nothing) -> return ()
+                _ -> emitError $ PEE.CallReturnsToFunctionEntry pPair
               -- TODO, this isn't correct.  Syscalls don't correspond to
               -- "ArchTermStmt" in any meaningful way, so this is all a misnomer.
               isSyscall <- case (PB.concreteBlockEntry blkO, PB.concreteBlockEntry blkP) of
@@ -912,7 +941,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
 
               if | isSyscall -> handleSyscall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
                  | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
-                 | Just pltSymbol <- isPLT -> handlePLTStub scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP) pltSymbol
+                 | Just pltSymbol <- isPLT -> handlePLTStub scope bundle currBlock d gr pPair (Just (PPa.PatchPair blkRetO blkRetP)) pltSymbol
                  | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
          (Nothing, Nothing) | PB.targetEndCase blktO == PB.targetEndCase blktP -> withSym $ \sym ->
@@ -921,6 +950,8 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
               -- we consider those cases here (having already assumed a specific
               -- block exit condition)
               case PB.targetEndCase blktO of
+                MCS.MacawBlockEndCall | Just pltSymbol <- isPLT ->
+                  handlePLTStub scope bundle currBlock d gr pPair Nothing pltSymbol
                 MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
                 MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
                 MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
@@ -1078,12 +1109,27 @@ handlePLTStub ::
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
-  PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
+  Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point, Nothing for tail calls -} ->
   BS.ByteString {- ^ PLT symbol name -} ->
   EquivM sym arch (PairGraph sym arch)
-handlePLTStub scope bundle currBlock d gr0 _pPair pRetPair stubSymbol = withSym $ \sym -> do
+handlePLTStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
+    -- TODO: generalize a class of stubs which may abort
+    -- and determine if any observable checks need to be considered
+    -- (or any additional logic for if this abort is expected as a result
+    -- of a patch removing bad behavior)
+  | stubSymbol == BSC.pack "abort" = do
+  -- for an abort we don't want to follow this branch any further, so we
+  -- just return the pairgraph unmodified
+  -- FIXME: currently this just treats "abort()" like a "return()" so
+  -- that we actually continue our analysis. Need to determine exactly
+  -- what bookkeeping is needed to have the verifier correctly continue
+  -- after encountering an abort
+  return gr0
+  --handleReturn scope bundle currBlock d gr0
+  
+handlePLTStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym $ \sym -> do
   PA.SomeValidArch archData <- asks envValidArch
-  PA.StubOverride f <- case PA.lookupStubOverride archData stubSymbol of
+  ov <- case PA.lookupStubOverride archData stubSymbol of
     Just f -> do
       emitTrace @"pltstub" (show stubSymbol,True)
       traceBundle bundle ("Using override for PLT stub " ++ show stubSymbol)
@@ -1094,14 +1140,40 @@ handlePLTStub scope bundle currBlock d gr0 _pPair pRetPair stubSymbol = withSym 
       emitTrace @"pltstub" (show stubSymbol,False)
       emitWarning $ PEE.UnknownPLTStub stubSymbol
       -- dummy override that does nothing
-      return $ PA.StubOverride $ \_ st -> return st
-  outputs <- PPa.forBins $ \get -> do
-    nextSt <- liftIO $ f sym (PS.simOutState (get (PS.simOut bundle)))
+      return $ PA.defaultStubOverride archData
+  outputs <- liftIO $ PA.withStubOverride sym ov $ \f -> PPa.forBins $ \get -> do
+    nextSt <- f (PS.simOutState (get (PS.simOut bundle)))
     return $ (get (PS.simOut bundle)) { PS.simOutState = nextSt }
   let bundle' = bundle { PS.simOut = outputs }
-  -- handleJump scope bundle' currBlock d gr0 pRetPair
-  handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
+  case mpRetPair of
+    Just pRetPair -> do
+      {-
+      -- unresolved issues handling loops with this approach
+      nextBundleSpec <- withFreshScope pRetPair $ \freshScope ->
+        withSimBundle freshScope pRetPair $ \nextBundle -> do
+          -- NOTE: the validity assumptions established in this context
+          -- are thrown away, but should (in theory) be satisfied when
+          -- we instantiate the initial variables of this bundle to the output
+          -- of the previous step
+          initDom <- initialDomain
+          withPredomain nextBundle initDom $ do
+            exits <- PD.discoverPairs nextBundle
+            subTree @"blocktarget" "Blah Exits" $ mapM_ (\tgt -> subTrace tgt $ return ()) exits
+            return nextBundle
+      vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
+      (_, nextBundle) <- liftIO $ PS.bindSpec sym vars nextBundleSpec
 
+      -- NOTE: formally we would like to continue as if the bundle started in the
+      -- same place, it just managed to make more progress, so we
+      -- just use the same initial SimInput (i.e. pretending that we started from currBlock)
+      processBundle scope currBlock nextBundle d gr0
+
+      -- this is morally equivalent to the above approach, but involves creating
+      -- nodes for each PLT stub call and handling it like a normal jump
+      -}
+      handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
+    Nothing ->
+      handleReturn scope bundle' currBlock d gr0
 
 handleReturn ::
   PS.SimScope sym arch v ->
@@ -1129,9 +1201,8 @@ handleJump scope bundle currBlock d gr nextNode =
 mkSimBundle ::
   PB.BlockPair arch ->
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
-  AbstractDomain sym arch v ->
   EquivM sym arch (SimBundle sym arch v)
-mkSimBundle pPair vars _d =
+mkSimBundle pPair vars =
   do let oVarState = PS.simVarState (PPa.pOriginal vars)
      let pVarState = PS.simVarState (PPa.pPatched vars)
      oAbsState <- PD.getAbsDomain (PPa.pOriginal pPair)

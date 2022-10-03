@@ -124,6 +124,8 @@ import           What4.ExprHelpers
 import           Pate.AssumptionSet
 import           Pate.TraceTree
 
+import           Data.Coerce ( coerce ) 
+
 ------------------------------------
 -- Crucible inputs and outputs
 
@@ -151,6 +153,7 @@ data SimInput sym arch v bin = SimInput
   , simInBlock :: PB.ConcreteBlock arch bin
   , simInAbsState :: MAS.AbsBlockState (MM.ArchReg arch)
   }
+
 
 
 simInMem ::
@@ -296,6 +299,10 @@ data SimBundle sym arch v = SimBundle
     simIn :: PPa.PatchPair (SimInput sym arch v)
   , simOut :: PPa.PatchPair (SimOutput sym arch v)
   }
+
+
+instance Scoped (SimBundle sym arch) where
+  unsafeCoerceScope bundle = coerce bundle
 
 instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "bundle" where
   type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)

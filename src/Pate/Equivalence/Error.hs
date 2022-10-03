@@ -104,6 +104,10 @@ data InnerEquivalenceError arch
   | UnknownPLTStub BS.ByteString
   | NotImplementedYet String
   | UnexpectedTailCallEntry (PB.FunPair arch)
+  | forall w. MissingRegionOffset Int (MM.MemWord w)
+  | BlockHasNoExit (PB.BlockPair arch)
+  | CallReturnsToFunctionEntry (PB.BlockPair arch)
+  | NonTotalBlockExits (PB.BlockPair arch)
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
@@ -125,6 +129,8 @@ isRecoverable' e = case e of
   RescopingFailure{} -> True
   WideningError{} -> True
   NotImplementedYet{} -> True
+  MissingRegionOffset{} -> True
+  BlockHasNoExit{} -> True
   _ -> False
 
 -- | When an error is raised as a warning, this determines if it should be displayed

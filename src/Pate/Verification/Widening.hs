@@ -151,7 +151,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
             return (freshDomain gr to postSpec')
           WideningError msg _ d'' ->
             do let msg' = ("Error during widening: " ++ msg)
-               err <- emitError (PEE.WideningError msg')
+               err <- emitError' (PEE.WideningError msg')
                postSpec' <- abstractOverVars scope bundle from to postSpec d''
                return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
           Widen _ _ d'' -> do
@@ -184,7 +184,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
 
           WideningError msg _ d'' ->
             do let msg' = ("Error during widening: " ++ msg)
-               err <- emitError (PEE.WideningError msg')
+               err <- emitError' (PEE.WideningError msg')
                postSpec' <- abstractOverVars scope bundle from to postSpec d''
                case updateDomain gr from to postSpec' of
                  Left gr' ->

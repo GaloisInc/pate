@@ -46,6 +46,7 @@ module Pate.Monad
   , emitEvent
   , emitWarning
   , emitError
+  , emitError'
   , getBinCtx
   , getBinCtx'
   , ifConfig
@@ -66,6 +67,7 @@ module Pate.Monad
   -- working under a 'SimSpec' context
   , withSimSpec
   , withFreshVars
+  , withFreshScope
   -- assumption management
   , validateAssumptions
   , withAssumption
@@ -250,11 +252,14 @@ emitWarning innererr = do
 
 -- | Emit an event declaring that an error has been raised, but only throw
 -- the error if it is not recoverable (according to 'PEE.isRecoverable')
-emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch PEE.EquivalenceError
-emitError err = withValid $ do
+emitError' :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch PEE.EquivalenceError
+emitError' err = withValid $ do
   Left err' <- manifestError (throwHere err >> return ())
   emitEvent (\_ -> PE.ErrorRaised err')
   return err'
+
+emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch ()
+emitError err = void $ emitError' err
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
@@ -455,6 +460,17 @@ lookupArgumentNames pp = do
 currentAsm :: EquivM sym arch (AssumptionSet sym)
 currentAsm = CMR.asks envCurrentFrame
 
+withFreshScope ::
+  forall sym arch f.
+  Scoped f =>
+  PB.BlockPair arch ->
+  (forall v. SimScope sym arch v -> EquivM sym arch (f v)) ->
+  EquivM sym arch (SimSpec sym arch f)
+withFreshScope bPair f = do
+  dummy_spec <- withFreshVars @sym @arch @(WithScope ()) bPair $ \_ -> do
+    return (mempty, WithScope ())
+  forSpec dummy_spec $ \scope _ -> f scope
+
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
 -- in the resulting 'SimSpec'.
@@ -462,7 +478,7 @@ withFreshVars ::
   forall sym arch f.
   Scoped f =>
   PB.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym,(f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   argNames <- lookupArgumentNames blocks
@@ -501,7 +517,7 @@ withAssumptionSet asm f = withSym $ \sym -> do
         safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
           LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
         return (frame, st)
-      f `finally` safePop frame st
+      (validateAssumptions curAsm asm >> f) `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -526,15 +542,15 @@ validateAssumptions ::
   AssumptionSet sym {- ^ recently pushed assumption set -} ->
   EquivM sym arch ()
 validateAssumptions oldAsm newAsm = withSym $ \sym -> do
-  let
+  {- let
     simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
     simp e = resolveConcreteLookups sym (pure . W4.asConstantPred) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
 
   oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
-  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm  
+  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm -}
   goalSat "validateAssumptions" (W4.truePred sym) $ \res -> case res of
-    W4R.Unsat _ -> throwHere $ PEE.AssumedFalse oldAsm' newAsm'
-    W4R.Unknown -> throwHere $ PEE.AssumedFalse oldAsm' newAsm'
+    W4R.Unsat _ -> throwHere $ PEE.AssumedFalse oldAsm newAsm
+    W4R.Unknown -> throwHere $ PEE.AssumedFalse oldAsm newAsm
     W4R.Sat{} -> return ()
 
 -- | Evaluate the given function in an assumption context augmented with the given
