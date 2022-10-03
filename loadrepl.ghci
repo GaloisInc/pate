@@ -4,8 +4,14 @@
 :set -XScopedTypeVariables
 :set -XTemplateHaskell
 :set -XOverloadedStrings
-:set prompt-function promptFn
-:set -interactive-print printFn
+
+:set prompt-function ReplBase.promptFn
+:set -interactive-print ReplBase.printFn
+:def! run (\args -> return ("run " ++ args))
+
+:load Repl
+initFns
+
 import Data.Parameterized.Some
 import Control.Monad.IO.Class
 import System.IO
@@ -13,3 +19,5 @@ import System.IO
 import System.IO.Unsafe
 import Control.Concurrent
 setNumCapabilities 6
+
+

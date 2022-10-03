@@ -35,6 +35,8 @@ import           Control.Monad.State ( MonadState, StateT, modify, gets, runStat
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
 import           Text.Read (readMaybe)
+import           System.Exit
+import           System.Environment
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
@@ -50,12 +52,19 @@ import qualified Pate.Arch as PA
 import qualified Pate.Solver as PS
 import qualified Pate.Equivalence as PEq
 import qualified ReplHelper as PIRH
+import qualified ReplBase
+import           ReplBase ( Sym, Arch )
 
 import           Pate.TraceTree
 
 import Unsafe.Coerce(unsafeCoerce)
 
 import qualified Main as PM
+
+initFns :: IO ()
+initFns = do
+  IO.writeIORef ReplBase.printFnRef (ReplBase.SomePrintFn printFn)
+  IO.writeIORef ReplBase.promptFnRef promptFn
 
 -- | Defining a 'Show' instance for a type which depends on 'PS.ValidSym'
 --   and 'PA.ValidArch'.
@@ -195,19 +204,35 @@ instance IsTraceNode k "toplevel" where
 run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
-  opts <- OA.handleParseResult (OA.execParserPure OA.defaultPrefs PM.cliOptions (words rawOpts))
-  topTraceTree <- someTraceTree
-  tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
-    Left err -> do
-      killWaitThread
-      let msg = show err
-      case msg of
-        "thread killed" -> return ()
-        _ -> IO.putStrLn $ "Verifier failed: " ++ show err
-      IO.writeIORef finalResult (Just (Left msg))
-    Right a -> IO.writeIORef finalResult (Just (Right a))
-  IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
-  wait
+  case OA.execParserPure OA.defaultPrefs PM.cliOptions (words rawOpts) of
+    OA.Success opts -> do
+      topTraceTree <- someTraceTree
+      tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
+        Left err -> do
+          killWaitThread
+          let msg = show err
+          case msg of
+            "thread killed" -> return ()
+            _ -> IO.putStrLn $ "Verifier failed: " ++ show err
+          IO.writeIORef finalResult (Just (Left msg))
+        Right a -> IO.writeIORef finalResult (Just (Right a))
+      IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
+      wait
+    OA.Failure failure -> do
+      progn <- getProgName
+      let (msg, exit) = OA.renderFailure failure progn
+      case exit of
+        ExitSuccess -> IO.putStrLn msg
+        _           -> IO.hPutStrLn IO.stderr msg
+      return ()
+    _ -> return ()
+
+-- exit if no tree is loaded
+checkAlive :: IO String
+checkAlive = do
+  IO.readIORef ref >>= \case
+    NoTreeLoaded -> return ":! kill -6 $PPID\n"
+    _ -> return "" -- IO.hPutStrLn IO.stdin "\"asdf\"" >> return ""
 
 rerun :: IO ()
 rerun = do
@@ -481,9 +506,6 @@ gotoIndexPure idx = IO.unsafePerformIO $
     Just s -> return s
     Nothing -> return "No tree loaded"
 -- Hacks to export the arch and sym parameters to the toplevel
-
-data Arch
-data Sym
 
 coerceValidRepr ::
   ValidSymArchRepr sym arch sym arch -> ValidSymArchRepr sym arch Sym Arch

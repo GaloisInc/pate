@@ -1,5 +1,7 @@
 {-# LANGUAGE GADTs #-}
 
+{-# OPTIONS_GHC -fno-warn-unused-imports #-}
+
 module ReplHelper 
   ( getLastRunCmd
   , setLastRunCmd
@@ -11,6 +13,8 @@ module ReplHelper
   , Anything(..)
   , fromAnything
   ) where
+
+
 
 import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
