@@ -297,6 +297,7 @@ executable pate
   import:              shared-exec, shared, toplevel
   build-depends:       pate-base
   main-is:             Main.hs
+  hs-source-dirs:      tools/pate
   default-language: Haskell2010
   -- Bake in RTS options to use multiple threads and to control the GC
   --

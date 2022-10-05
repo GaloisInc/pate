@@ -1126,6 +1126,10 @@ handlePLTStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
   -- after encountering an abort
   return gr0
   --handleReturn scope bundle currBlock d gr0
+  -- TODO: is 'err' the same as 'abort'?
+  | stubSymbol == BSC.pack "err" =  return gr0
+  -- TODO: is 'perror' the same as 'abort'?
+  | stubSymbol == BSC.pack "perror" =  return gr0
   
 handlePLTStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym $ \sym -> do
   PA.SomeValidArch archData <- asks envValidArch
@@ -1147,31 +1151,29 @@ handlePLTStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym
   let bundle' = bundle { PS.simOut = outputs }
   case mpRetPair of
     Just pRetPair -> do
-      {-
-      -- unresolved issues handling loops with this approach
-      nextBundleSpec <- withFreshScope pRetPair $ \freshScope ->
-        withSimBundle freshScope pRetPair $ \nextBundle -> do
-          -- NOTE: the validity assumptions established in this context
-          -- are thrown away, but should (in theory) be satisfied when
-          -- we instantiate the initial variables of this bundle to the output
-          -- of the previous step
-          initDom <- initialDomain
-          withPredomain nextBundle initDom $ do
-            exits <- PD.discoverPairs nextBundle
-            subTree @"blocktarget" "Blah Exits" $ mapM_ (\tgt -> subTrace tgt $ return ()) exits
-            return nextBundle
-      vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
-      (_, nextBundle) <- liftIO $ PS.bindSpec sym vars nextBundleSpec
+      parents <- asks envParentBlocks
+      case elem pRetPair parents of
+        True ->
+          -- already looking at this pair on this control path, so we treat
+          -- it like a jump to avoid a loop
+          handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
+        False -> do
+          -- otherwise, inline the next blocks
+          nextBundleSpec <- withFreshScope pRetPair $ \freshScope ->
+            withSimBundle freshScope pRetPair $ \nextBundle -> do
+              -- NOTE: the validity assumptions established in this context
+              -- are thrown away, but should (in theory) be satisfied when
+              -- we instantiate the initial variables of this bundle to the output
+              -- of the previous step
+              return nextBundle
+          vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
+          (_, nextBundle) <- liftIO $ PS.bindSpec sym vars nextBundleSpec
 
-      -- NOTE: formally we would like to continue as if the bundle started in the
-      -- same place, it just managed to make more progress, so we
-      -- just use the same initial SimInput (i.e. pretending that we started from currBlock)
-      processBundle scope currBlock nextBundle d gr0
+          -- NOTE: formally we would like to continue as if the bundle started in the
+          -- same place, it just managed to make more progress, so we
+          -- just use the same initial SimInput (i.e. pretending that we started from currBlock)
+          withPair pRetPair $ processBundle scope currBlock nextBundle d gr0
 
-      -- this is morally equivalent to the above approach, but involves creating
-      -- nodes for each PLT stub call and handling it like a normal jump
-      -}
-      handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
     Nothing ->
       handleReturn scope bundle' currBlock d gr0
 
