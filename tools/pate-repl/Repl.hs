@@ -224,7 +224,6 @@ run rawOpts = do
       case exit of
         ExitSuccess -> IO.putStrLn msg
         _           -> IO.hPutStrLn IO.stderr msg
-      return ()
     _ -> return ()
 
 -- exit if no tree is loaded
@@ -414,13 +413,35 @@ loadTraceNode node = do
     }
   updateNextNodes
 
+goto_err'' :: [Some (TraceNode sym arch)] -> ReplM sym arch ()
+goto_err'' (Some node@(TraceNode _ _ subtree) : xs) = (IO.liftIO $ getTreeStatus subtree) >>= \case
+  NodeStatus StatusSuccess True -> goto_err'' xs
+  NodeStatus _ False -> goto_err'' xs
+  _ -> goto_node' node >> goto_err'
+goto_err'' [] = return ()
+
+goto_err' :: ReplM sym arch ()
+goto_err' = do
+  updateNextNodes
+  nextNodes <- gets replNext
+  goto_err'' (reverse nextNodes)
+  
+
+goto_err :: IO ()
+goto_err = execReplM (goto_err' >> ls')
+
+goto_node' :: TraceNode sym arch nm -> ReplM sym arch ()
+goto_node' nextNode = do
+  lastNode <- currentNode
+  loadTraceNode nextNode
+  modify $ \st -> st { replPrev = lastNode : (replPrev st) }
+  
+       
 goto' :: Int -> ReplM sym arch (Maybe (Some (TraceNode sym arch)))
 goto' idx = do
   fetchNode idx >>= \case
     Just (Some nextNode) -> do
-      lastNode <- currentNode
-      loadTraceNode nextNode
-      modify $ \st -> st { replPrev = lastNode : (replPrev st) }
+      goto_node' nextNode
       ls'
       return $ Just (Some nextNode)
     Nothing -> return Nothing

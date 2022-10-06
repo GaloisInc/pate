@@ -108,6 +108,10 @@ data InnerEquivalenceError arch
   | BlockHasNoExit (PB.BlockPair arch)
   | CallReturnsToFunctionEntry (PB.BlockPair arch)
   | NonTotalBlockExits (PB.BlockPair arch)
+  | forall bin. MissingParsedBlockEntry (PB.ConcreteBlock arch bin)
+  | OrphanedFunctionReturns
+  | MissingDomainForBlock (PB.BlockPair arch)
+  | MissingDomainForFun (PB.FunPair arch)
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
@@ -131,6 +135,8 @@ isRecoverable' e = case e of
   NotImplementedYet{} -> True
   MissingRegionOffset{} -> True
   BlockHasNoExit{} -> True
+  OrphanedFunctionReturns{} -> True
+  CallReturnsToFunctionEntry{} -> True
   _ -> False
 
 -- | When an error is raised as a warning, this determines if it should be displayed

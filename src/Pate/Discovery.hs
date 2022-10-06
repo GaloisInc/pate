@@ -21,7 +21,8 @@ module Pate.Discovery (
   associateFrames,
   matchingExits,
   isMatchingCall,
-  concreteToLLVM
+  concreteToLLVM,
+  nextBlock
   ) where
 
 import           Control.Lens ( (^.) )
@@ -35,6 +36,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
 import           Data.Int
+import qualified Data.List as L
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
@@ -672,6 +674,38 @@ lookupBlocks b = do
           binRep = PC.knownRepr
       CME.throwError $ PEE.equivalenceErrorFor binRep ierr
     Right blocks -> return blocks
+
+-- | Find the 'MD.ParsedBlock' corresponding to exactly this
+--   'PB.ConcreteBlock' if it exists.
+-- TODO: should this necessarily exist?
+findStartingBlock ::
+  forall sym arch bin.
+  HasCallStack =>
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (Maybe (Some (MD.ParsedBlock arch)))
+findStartingBlock b = do
+  binCtx <- getBinCtx @bin
+  ebs <- liftIO $ lookupBlocks' binCtx b
+  case ebs of
+    Left _ -> return Nothing
+    Right (PDP.ParsedBlocks blocks) ->
+      return $ fmap Some $
+        L.find (\pb -> PA.segOffToAddr (MD.pblockAddr pb) == PB.concreteAddress b) blocks
+
+-- | From a 'PB.ConcreteBlock', if it corresponds to the start of a
+--   block, find a 'PB.ConcreteBlock' immediately following
+--   the end of the corresponding 'MD.ParsedBlock'
+nextBlock ::
+  forall sym arch bin.
+  HasCallStack =>
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (Maybe (PB.ConcreteBlock arch bin))
+nextBlock b = do
+  findStartingBlock b >>= \case
+    Just (Some pb) -> return $ Just (PB.ConcreteBlock (PA.addOffset (fromIntegral (MD.blockSize pb)) (PB.concreteAddress b)) PB.BlockEntryJump WI.knownRepr (PB.blockFunctionEntry b))
+    Nothing -> return Nothing
 
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'
 --

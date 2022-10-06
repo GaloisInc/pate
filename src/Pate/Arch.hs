@@ -8,7 +8,12 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE PolyKinds #-}
-  
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Arch (
   SomeValidArch(..),
   ValidRepr(..),
@@ -40,6 +45,9 @@ import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           GHC.TypeLits ( type (<=) )
 import           Data.Parameterized.Some ( Some(..) )
+
+import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
 
 import qualified Data.ElfEdit as E
 import qualified Data.Macaw.Architecture.Info as MI
@@ -234,12 +242,13 @@ mkClockOverride ::
   MS.SymArchConstraints arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkClockOverride rOut = mkStubOverride $ \sym st -> do
+mkClockOverride rOut = StubOverride $ \sym -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  zero_bv <- W4.bvLit sym w (BVS.mkBV w 0)
-  zero_nat <- W4.natLit sym 0
-  let zero_ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat zero_bv)
-  return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ zero_ptr) })
+  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "current_time") (W4.BaseBVRepr w)
+  return $ StateTransformer $ \st -> do
+    zero_nat <- W4.natLit sym 0
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
 
 -- | Default override returns the same arbitrary value for both binaries
 mkDefaultStubOverride ::
@@ -251,7 +260,6 @@ mkDefaultStubOverride rOut = StubOverride $ \sym -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "plt_default") (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
-    let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
@@ -276,6 +284,11 @@ data ArchLoader err =
               E.ElfHeaderInfo w ->
               Either err (Some SomeValidArch)
              )
+
+instance (ValidArch arch, PSo.ValidSym sym, rv ~ MC.ArchReg arch) => MC.PrettyRegValue rv (PSR.MacawRegEntry sym) where
+  ppValueEq r tp = case fromRegisterDisplay (displayRegister r) of
+    Just r_str -> Just (PP.pretty r_str <> PP.pretty ":" <+> PP.pretty (show tp))
+    Nothing -> Nothing
 
 -- | Merge loaders by taking the first successful result (if it exists)
 mergeLoaders ::

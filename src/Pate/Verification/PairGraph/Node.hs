@@ -20,9 +20,13 @@ module Pate.Verification.PairGraph.Node (
   , rootEntry
   , nodeBlocks
   , nodeFuns
+  , returnToEntry
+  , functionEntryOf
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>) )
+
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
@@ -76,6 +80,15 @@ mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
 
 mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
 mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
+
+-- | Get the node corresponding to the entry point for the function
+returnToEntry :: NodeReturn arch -> NodeEntry arch
+returnToEntry (NodeReturn ctx fns) = NodeEntry ctx (TF.fmapF PB.functionEntryToConcreteBlock fns)
+
+-- | For an intermediate entry point in a function, find the entry point
+--   corresponding to the function start
+functionEntryOf :: NodeEntry arch -> NodeEntry arch
+functionEntryOf (NodeEntry ctx blks) = NodeEntry ctx (TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
 
 instance PA.ValidArch arch => Show (CallingContext arch) where
   show c = show (pretty c)

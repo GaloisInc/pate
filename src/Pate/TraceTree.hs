@@ -63,6 +63,7 @@ module Pate.TraceTree (
   , getNodeStatus
   , getTreeStatus
   , MonadTreeBuilder(..)
+  , IsTreeBuilder
   , NodeBuilderT
   , TreeBuilderT
   , startSomeTreeBuilder

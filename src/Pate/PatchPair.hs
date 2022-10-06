@@ -62,7 +62,7 @@ patchPairRepr = PatchPair PB.OriginalRepr PB.PatchedRepr
 forBins :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m (f bin)) -> m (PatchPair f)
 forBins f = PatchPair <$> f (get @PB.Original) <*> f (get @PB.Patched)
 
-forBins' :: Applicative m => (forall bin. PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
+forBins' :: Applicative m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
 forBins' f = PatchPair <$> f PB.OriginalRepr <*> f PB.PatchedRepr
 
 forBinsC :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m f) -> m (f, f)

@@ -9,6 +9,7 @@ module Pate.Discovery.ParsedFunctions (
   , parsedFunctionContaining
   , parsedBlocksContaining
   , parsedBlockEntry
+  , isFunctionStart
   , ParsedBlocks(..)
   ) where
 
@@ -243,6 +244,18 @@ parsedBlocksContaining ::
   IO (Maybe (ParsedBlocks arch))
 parsedBlocksContaining blk pfm =
   fmap (viewSome buildParsedBlocks) <$> parsedFunctionContaining blk pfm
+
+isFunctionStart ::
+  forall bin arch .
+  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  PB.ConcreteBlock arch bin ->
+  ParsedFunctionMap arch bin ->
+  IO Bool
+isFunctionStart blk pfm = parsedFunctionContaining blk pfm >>= \case
+  Just (Some dfi) -> do
+    let baddr = PA.addrToMemAddr (PB.concreteAddress blk)
+    return $ baddr == (MM.segoffAddr (MD.discoveredFunAddr dfi))
+  Nothing -> return False
 
 -- | Find the 'MD.ParsedBlock' corresponding to the entry of a function.
 parsedBlockEntry ::

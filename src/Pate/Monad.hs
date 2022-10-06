@@ -106,6 +106,8 @@ import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Except
 
+import qualified Control.Concurrent.MVar as IO
+
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
@@ -824,6 +826,93 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
   joinFuture future = withValid $ catchInIO $ Par.joinFuture future
   forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
+
+{-
+data SolverOutput sym where  
+  SolverOutput :: WSat.SatResult (SymGroundEvalFn sym) () -> SolverOutput sym
+  SolverErr :: String -> SolverOutput sym
+
+data SolverInput sym where
+  SolverInput :: PT.Timeout -> W4.Pred sym -> SolverInput sym
+  -- solver thread that picked up this input
+  SolverQueued :: IO.MVar (SolverOutput sym) -> SolverInput sym
+
+data ForkedSolver sym where
+  ForkedSolver ::
+    IO.ThreadId ->
+    IO.MVar (SolverOutput sym) ->
+    ForkedSolver sym
+
+data ForkedSolverPool sym where
+  ForkedSolverPool ::
+    IO.MVar (SolverInput sym) -> [ForkedSolver sym] -> ForkedSolverPool sym
+
+forkedSat ::
+  PT.Timeout ->
+  W4.Pred sym ->
+  ForkedSolverPool sym ->
+  EquivM sym arch (IO (WSat.SatResult (SymGroundEvalFn sym) ()))
+forkedSat timeout p (ForkedSolverPool inVar _) = do
+  IO.putMVar inVar (SolverInput timeout p)
+  -- TODO: is putMVar blocking until a thread picks it up?
+  st <- IO.takeMVar inVar
+  case st of
+    SolverInput{} -> fail "Nobody picked up"
+    SolverQueued outVar -> return $ do
+      result <- IO.takeMVar outVar
+      case result of
+        SolverOutput r -> return r
+        SolverErr msg -> fail msg
+
+forkSolverPool :: Integer -> EquivM sym arch (ForkedSolverPool sym)
+forkSolverPool i = do
+  inVar <- IO.newEmptyVar
+  solvers <- mapM (\_ -> forkSolver inVar) [0..i-1]
+  return $ ForkedSolverPool inVar solvers
+  
+forkSolver ::
+  IO.MVar (SolverInput sym) ->
+  EquivM sym arch (ForkedSolver sym)
+forkSolver inVar = do
+  st <- withOnlineBackend $ \bak -> liftIO $ LCB.saveAssumptionState bak
+  IO.withRunInIO $ \runinIO -> do
+    outVar <- IO.newEmptyVar
+    let
+      f :: IO ()
+      f = do
+        
+        lastInput <- IO.modifyMVarMasked stVar $ \case
+          SolverInput timeout goal -> do
+            _ <- IO.tryTakeMVar outVar
+            return $ (SolverQueued outVar, SolverInput timeout goal)
+          SolverQueued outVar' -> return $ (SolverQueued outVar', SolverQueued outVar')
+          
+        case lastInput of
+          SolverQueued{} -> f
+          SolverInput timeout goal -> runinIO $ do
+            out <- withSolverProcess $ \sp -> do
+              mres <- liftIO $ do
+                WPO.pop sp
+                WPI.push sp
+                W4.assume (WPO.solverConn sp) p
+                tryJust filterAsync $ do
+                  res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
+                  W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
+              case mres of
+                Left err -> withOnlineBackend $ \bak -> do
+                  _ <- liftIO $ tryJust filterAsync (LCBO.restoreSolverState bak st)
+                    withSolverProcess $ \sp -> do
+                      liftIO $ LCBO.restoreSolverState bak st
+                      WPI.push sp
+                      return $ SolverErr (show err)
+                Right r -> return $ SolverOutput r
+        IO.putMVar outVar out
+        f
+    thistid <- IO.myThreadId
+    tid <- IO.forkFinally (runInIO (withSolverProcess $ \sp -> WPI.push sp) >> f) \case
+      Left _ -> IO.putMVar outVar (SolverErr "Thread Killed") >> return ()
+      Right _ -> IO.putMVar outVar (SolverErr "Thread Killed") >> return ()
+-}
 
 withGroundEvalFn ::
   SymGroundEvalFn sym ->

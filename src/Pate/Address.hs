@@ -5,6 +5,7 @@ module Pate.Address (
   , segOffToAddr
   , memAddrToAddr
   , addrToMemAddr
+  , addOffset
   ) where
 
 import qualified Prettyprinter as PP
@@ -19,6 +20,9 @@ instance Show (ConcreteAddress arch) where
 
 instance PP.Pretty (ConcreteAddress arch) where
   pretty (ConcreteAddress addr) = PP.pretty addr
+
+addOffset :: MM.MemWidth (MM.ArchAddrWidth arch) => Integer -> ConcreteAddress arch -> ConcreteAddress arch
+addOffset i (ConcreteAddress addr) = ConcreteAddress (MM.incAddr i addr)
 
 memAddrToAddr ::
   MM.MemAddr (MM.ArchAddrWidth arch) ->

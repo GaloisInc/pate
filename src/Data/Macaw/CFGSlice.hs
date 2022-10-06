@@ -183,6 +183,7 @@ initBlockEnd _ sym = do
   blendK <- bvLit sym (knownNat @8) (BV.mkBV (knownNat @8) (toInteger $ fromEnum MacawBlockEndReturn))
   return $ (Ctx.empty Ctx.:> C.RV blendK Ctx.:> C.RV Unassigned)
 
+
 termStmtToBlockEnd :: forall arch ids. HasArchEndCase arch => M.ParsedTermStmt arch ids -> MacawBlockEnd arch
 termStmtToBlockEnd tm0 =
   case tm0 of
