@@ -54,10 +54,10 @@ RUN mkdir -p /home/src
 COPY . /home/src
 WORKDIR /home/src
 RUN ln -sf cabal.project.dist cabal.project
-RUN cabal configure pkg:pate -w ghc-8.10.4 && \
-  cabal build pkg:pate -j5
+RUN cabal configure pate-repl-base -w ghc-8.10.4 && \
+  cabal build pate-repl-base -j5
 
-RUN cp $(cabal exec -- which pate) /usr/local/bin/pate
+RUN ln -s pate.sh /usr/local/bin/pate
 
 FROM ubuntu:20.04
 RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
@@ -72,6 +72,4 @@ COPY --from=0 /usr/local/bin/pate \
               /usr/local/bin/yices \
               /usr/local/bin/yices-smt2 \
               /usr/local/bin/
-EXPOSE 5000
-ENV ADDR=0.0.0.0
 ENTRYPOINT ["/usr/local/bin/pate"]
