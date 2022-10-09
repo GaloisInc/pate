@@ -216,6 +216,7 @@ archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
                                  , PA.validArchPatchedExtraSymbols =
                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
                                  , PA.validArchStubOverrides = stubOverrides
+                                 , PA.validArchExtraRegister = Just (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T"))
                                  }
       in Right (Some (PA.SomeValidArch vad))
     _ -> Left (PEE.UnsupportedArchitecture em)

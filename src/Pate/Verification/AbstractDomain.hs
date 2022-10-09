@@ -34,6 +34,7 @@ module Pate.Verification.AbstractDomain
   , absDomainValsToPostCond
   , ppAbstractDomain
   , noAbsVal
+  , domainValsToAbsState
   ) where
 
 import qualified Prettyprinter as PP
@@ -41,7 +42,8 @@ import qualified Prettyprinter as PP
 import           Control.Monad ( forM, unless )
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Writer as CMW
-import           Control.Lens ( (^.) )
+import           Control.Monad.Identity ( runIdentity )
+import           Control.Lens ( (^.), (.~), (&) )
 
 import           Data.Functor.Const
 import qualified Data.Set as S
@@ -54,6 +56,7 @@ import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
+import           Data.Proxy
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.GroundEval as W4G
@@ -471,6 +474,36 @@ applyAbsRange sym e rng = case rng of
   AbsBoolConstant True -> return $ PAS.exprBinding e (W4.truePred sym)
   AbsBoolConstant False -> return $ PAS.exprBinding e (W4.falsePred sym)
   AbsUnconstrained{} -> return mempty
+
+macawAbsValueToAbsValue ::
+  PA.ValidArch arch =>
+  f arch ->
+  MT.TypeRepr tp ->
+  MacawAbstractValue sym tp ->
+  MAS.AbsValue (MM.ArchAddrWidth arch) tp
+macawAbsValueToAbsValue _ repr (MacawAbstractValue absVal) = case repr of
+  MT.BVTypeRepr{} | (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs) <- absVal ->
+    case (regAbs, offsetAbs) of
+      (AbsIntConstant 0, AbsBVConstant _w i) -> MAS.FinSet (S.singleton (BV.asUnsigned i))
+      -- FIXME: add StackOffset and CodePointers here
+      _ -> MAS.TopV
+  MT.BoolTypeRepr | (Ctx.Empty Ctx.:> bAbs) <- absVal ->
+    case bAbs of
+      AbsBoolConstant b -> MAS.BoolConst b
+      _ -> MAS.TopV
+  _ -> MAS.TopV
+                                     
+domainValsToAbsState ::
+  forall sym arch bin.
+  PA.ValidArch arch =>
+  MAS.AbsBlockState (MM.ArchReg arch) ->
+  AbstractDomainVals sym arch bin ->
+  MAS.AbsBlockState (MM.ArchReg arch)
+domainValsToAbsState baseSt d = runIdentity $ do
+  regState <- PRt.zipWithRegStatesM (absRegVals d) (baseSt ^. MAS.absRegState) $ \r macawVal absVal -> do
+    let macawAbsVal' = macawAbsValueToAbsValue (Proxy @arch) (MT.typeRepr r) macawVal
+    return $ MAS.meet macawAbsVal' absVal
+  return $ (baseSt & MAS.absRegState .~ regState)
 
 absDomainValToAsm ::
   W4.IsSymExprBuilder sym =>

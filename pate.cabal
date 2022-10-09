@@ -111,6 +111,7 @@ library
                        Pate.Ground,
                        Pate.Hints,
                        Pate.Hints.CSV,
+                       Pate.Hints.BSI,
                        Pate.Hints.JSON,
                        Pate.Hints.DWARF,
                        Pate.Location,

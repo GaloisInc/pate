@@ -41,6 +41,7 @@ import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
 
 import qualified Prettyprinter as PP
+import           Prettyprinter ( (<+>) )
 
 import qualified Pate.Address as PA
 import qualified Pate.PatchPair as PPa
@@ -150,8 +151,9 @@ ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> Stri
 ppBlock b = show (concreteAddress b)
 
 instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch bin) where
-  pretty = PP.viaShow . concreteAddress
-
+  pretty cb = case functionSymbol (blockFunctionEntry cb) of
+    Just s -> PP.viaShow s <+> "(" <> PP.viaShow (concreteAddress cb) <> ")"
+    Nothing -> PP.viaShow (concreteAddress cb)
 
 data BlockTarget arch bin =
   BlockTarget
@@ -209,7 +211,9 @@ ppFunctionEntry :: MM.MemWidth (MM.ArchAddrWidth arch) => FunctionEntry arch bin
 ppFunctionEntry fe = show (functionAddress fe)
 
 instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (FunctionEntry arch bin) where
-  pretty = PP.viaShow . functionAddress
+  pretty fe = case functionSymbol fe of
+    Just s -> PP.viaShow s <+> "(" <> PP.viaShow (functionAddress fe) <> ")"
+    Nothing -> PP.viaShow (functionAddress fe)
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (FunctionEntry arch bin) where
   show fe = ppFunctionEntry fe

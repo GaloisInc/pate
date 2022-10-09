@@ -33,12 +33,14 @@ import           Control.Monad ( unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
+import           System.IO as IO
 import qualified Control.Monad.Trans as CMT
 import qualified Data.ElfEdit as DEE
 import qualified Data.Map as M
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.List as L
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
@@ -64,6 +66,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
+import qualified Pate.Discovery.ParsedFunctions as PD
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
@@ -151,6 +154,38 @@ verifyPairs validArch logAction elf elf' vcfg pd = do
 
   doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
+
+findFunctionByName ::
+  PBi.KnownBinary bin =>
+  MM.ArchConstraints arch =>
+  String ->
+  PMC.BinaryContext arch bin ->
+  IO (Maybe (PB.FunctionEntry arch bin))
+findFunctionByName nm context = do
+  let fns = PMC.functionHintIndex context
+  let mem = MBL.memoryImage (PMC.binary context)
+  let pfm = PMC.parsedFunctionMap context
+  mapM_ (\(ca, fd) -> IO.putStrLn ((show ca) ++ " " ++ (show (PH.functionSymbol fd)))) (M.toList fns)
+  
+  case L.find (\(ca, fd) -> PH.functionSymbol fd == T.pack nm) (M.toList fns) of
+    Just (ca, _) -> do
+      let caAddr = PAd.addrToMemAddr ca
+      -- FIXME: This is a bit clunky, and only necessary because there
+      -- isn't an interface for just asking the parsed function map
+      -- for an address
+      case MM.resolveRegionOff mem (MM.addrBase caAddr) (MM.addrOffset caAddr) of
+        Just segoff -> do
+           let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
+                                     , PB.functionSymbol = Nothing
+                                     , PB.functionBinRepr = W4.knownRepr
+                                     }
+           PD.resolveFunctionEntry fe pfm
+        Nothing -> return Nothing
+    Nothing -> do
+      -- resolve the entry point and then see if we can find the function now
+      _ <- PD.resolveFunctionEntry (PMC.binEntry context) pfm
+      PD.findFunctionByName nm pfm
+  
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
   forall arch sym scope st fs.
@@ -201,16 +236,23 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
   ePairCache <- liftIO $ freshBlockCache
   statsVar <- liftIO $ MVar.newMVar mempty
+  
 
   -- compute function entry pairs from the input PatchData
   upData <- unpackPatchData contexts pd
   -- include the process entry point, if configured to do so
-  pPairs' <- if PC.cfgPairMain vcfg then
-               do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
-                  let mainP = PMC.binEntry . PPa.pPatched $ contexts
-                  return (PPa.PatchPair mainO mainP : unpackedPairs upData)
-              else
-                return (unpackedPairs upData)
+  pPairs' <- case PC.cfgStartSymbol vcfg of
+    Just s -> do
+      mstartO <- liftIO $ findFunctionByName s (PPa.pOriginal contexts)
+      mstartP <- liftIO $ findFunctionByName s (PPa.pPatched contexts)
+      case (mstartO,mstartP) of
+        (Just startO, Just startP) ->
+           return (PPa.PatchPair startO startP : unpackedPairs upData)
+        _ -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
+    Nothing -> 
+      do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
+         let mainP = PMC.binEntry . PPa.pPatched $ contexts
+         return (PPa.PatchPair mainO mainP : unpackedPairs upData)
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   let

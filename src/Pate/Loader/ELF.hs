@@ -43,6 +43,7 @@ import qualified Pate.Hints as PH
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Hints.BSI as PHB
 
 data LoadedELF arch =
   LoadedELF
@@ -56,11 +57,12 @@ data LoadPaths = LoadPaths
    , anvillHintsPaths :: [FilePath]
    , mprobHintsPath :: Maybe FilePath
    , mcsvHintsPath :: Maybe FilePath
+   , mbsiHintsPath :: Maybe FilePath
    }
 
 -- | A 'LoadPaths' with only the path to the binary defined
 simplePaths :: FilePath -> LoadPaths
-simplePaths fp = LoadPaths fp [] Nothing Nothing
+simplePaths fp = LoadPaths fp [] Nothing Nothing Nothing
 
 -- a LoadError exception is unrecoverable, while written results should just be raised
 -- as warnings
@@ -169,4 +171,10 @@ parseHints paths useDwarf = do
     CMW.tell (fmap (PEE.DWARFError elfFile) errs)
     return hints
 
-  return (mconcat (concat [anvills, probs, csvs, dwarves]))
+  bsis <- T.forM (maybeToList (mbsiHintsPath paths)) $ \bsiFile -> do
+    bytes <- IO.liftIO $ BSL.readFile bsiFile
+    let (hints, errs) = PHB.parseSymbolSpecHints bytes
+    CMW.tell (fmap (PEE.BSIParseError bsiFile) errs)
+    return hints
+
+  return (mconcat (concat [anvills, probs, csvs, dwarves, bsis]))

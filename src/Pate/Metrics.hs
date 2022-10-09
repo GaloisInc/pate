@@ -89,6 +89,7 @@ summarize e m =
     PE.HintErrorsCSV {} -> m
     PE.HintErrorsJSON {} -> m
     PE.HintErrorsDWARF {} -> m
+    PE.HintErrorsBSI{} -> m
     PE.ProofTraceEvent {} -> m
     PE.ProofTraceFormulaEvent {} -> m
     PE.StrongestPostDesync {} -> m

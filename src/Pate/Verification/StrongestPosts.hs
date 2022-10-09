@@ -27,7 +27,7 @@ import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks)
-import           Control.Monad.Except (catchError)
+import           Control.Monad.Except (catchError, throwError)
 import           Control.Monad.Trans (lift)
 import           Numeric (showHex)
 import           Prettyprinter
@@ -202,8 +202,11 @@ pairGraphComputeFixpoint gr0 = do
               Just preSpec -> PS.viewSpec preSpec $ \scope d -> withValidInit scope (nodeBlocks fnEntry) $ updateExtraEdges scope fnEntry d gr1
               Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnEntry)
           go gr2 >>= go_orphans
-  withSubTraces $ (go gr0 >>= go_orphans)
-
+  withSubTraces $ do
+    gr1 <- go gr0
+    (lift $ asks (PCfg.cfgAddOrphanEdges . envConfig)) >>= \case
+      True -> go_orphans gr1
+      False -> return gr1
 
 -- | For an orphan return, we treat it the same as an undefined PLT stub,
 --   since we effectively have no way to characterize the function behavior.
@@ -266,6 +269,8 @@ absValueToAsm vars regEntry val = withSym $ \sym -> case val of
     return $ bindRegion <> bindOffSet
   _ -> return mempty
 
+
+
 -- | Returns an 'PS.AssumptionSet' that assumes the initial abstract block state
 -- from Macaw ('MAS.AbsBlockState') corresponds to the given 'PB.ConcreteBlock'.
 -- Specifically each register is assumed to agree with the corresponding 'MAS.AbsValue'.
@@ -284,6 +289,26 @@ validAbsValues block var = do
     regs = PS.simRegs $ PS.simVarState var
   fmap PRt.collapse $ PRt.zipWithRegStatesM regs absRegs $ \_ re av ->
     Const <$> absValueToAsm var re av
+
+-- | Inject the current value domain into macaw so it can be used
+--   during code discovery
+updateAbsBlockState ::
+  NodeEntry arch ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch ()
+updateAbsBlockState node d = do
+  let pPair = nodeBlocks node
+  case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
+    (Just oFn, Just pFn) -> do
+      let fnPair = PPa.PatchPair oFn pFn
+      PPa.catBins $ \get -> do
+        let vals = get (PAD.absDomVals d)
+        pfm <- PMC.parsedFunctionMap <$> getBinCtx
+        let initAbsDom = PD.getInitAbsDomain pfm (get fnPair)
+        let absDom = PAD.domainValsToAbsState initAbsDom vals
+        return ()
+        --liftIO $ PD.setAbstractState (get fnPair) absDom pfm
+    _ -> return ()
 
 processBundle ::
   forall sym arch v.
@@ -344,7 +369,7 @@ withSimBundle ::
   EquivM sym arch a
 withSimBundle scope bPair f = do
   let vars = PS.scopeVars scope
-  bundle0 <- mkSimBundle bPair vars
+  bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle bPair vars
   bundle1 <- withSym $ \sym -> do
     heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
     conccache <- W4B.newIdxCache
@@ -402,9 +427,11 @@ visitNode :: forall sym arch v.
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withValidInit scope bPair $ do
-  gr1 <- updateExtraEdges scope node d gr0
-  withSimBundle scope bPair $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
+visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = do
+  updateAbsBlockState node d
+  withValidInit scope bPair $ do
+    gr1 <- updateExtraEdges scope node d gr0
+    withSimBundle scope bPair $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
 
 visitNode scope (ReturnNode fPair) d gr0 =
   -- propagate the abstract domain of the return node to

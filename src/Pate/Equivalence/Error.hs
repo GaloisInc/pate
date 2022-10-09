@@ -48,6 +48,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Hints.BSI as PHB
 import           Pate.TraceTree
 
 data InequivalenceReason =
@@ -177,7 +178,9 @@ data LoadError where
   JSONParseError :: FilePath -> PHJ.JSONError -> LoadError
   CSVParseError :: FilePath -> PHC.CSVParseError -> LoadError
   DWARFError :: FilePath -> PHD.DWARFError -> LoadError
+  BSIParseError :: FilePath -> PHB.JSONError -> LoadError
   ElfParseError :: DEE.ElfParseError -> LoadError
+  ConfigError :: String -> LoadError
 deriving instance Show LoadError
 
 

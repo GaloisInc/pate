@@ -83,6 +83,10 @@ runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct con
   case dwarfErrs of
     (e : es) -> LJ.writeLog logAct (PE.HintErrorsDWARF (e DLN.:| es))
     _ -> return ()
+  let bsiErrs = mapMaybe (\e -> case e of PEE.BSIParseError _fp pe -> Just pe; _ -> Nothing) loadErrs
+  case bsiErrs of
+    (e : es) -> LJ.writeLog logAct (PE.HintErrorsBSI (e DLN.:| es))
+    _ -> return ()
   st <- (CME.runExceptT $ PV.verifyPairs validArch logAct original patched dcfg pd) >>= \case
     Left err -> return $ PEq.Errored err
     Right st -> return st

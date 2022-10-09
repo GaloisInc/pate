@@ -80,12 +80,14 @@ runMain traceTree opts = do
       , PLE.anvillHintsPaths = originalAnvillHints opts
       , PLE.mprobHintsPath = originalProbabilisticHints opts
       , PLE.mcsvHintsPath = originalCsvFunctionHints opts
+      , PLE.mbsiHintsPath = originalBSIFunctionHints opts
       }
     patchedPaths = PLE.LoadPaths
       { PLE.binPath = patchedBinary opts
       , PLE.anvillHintsPaths = patchedAnvillHints opts
       , PLE.mprobHintsPath = patchedProbabilisticHints opts
       , PLE.mcsvHintsPath = patchedCsvFunctionHints opts
+      , PLE.mbsiHintsPath = patchedBSIFunctionHints opts
       }
 
   let
@@ -106,7 +108,7 @@ runMain traceTree opts = do
   let
     verificationCfg =
       PC.defaultVerificationCfg
-        { PC.cfgPairMain = not $ noPairMain opts
+        { PC.cfgStartSymbol = startSymbol opts
         , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
         , PC.cfgSolver = solver opts
         , PC.cfgHeuristicTimeout = heuristicTimeout opts
@@ -138,7 +140,7 @@ data CLIOptions = CLIOptions
   , patchedBinary :: FilePath
   , blockInfo :: Maybe FilePath
   -- , interactiveConfig :: Maybe InteractiveConfig
-  , noPairMain :: Bool
+  , startSymbol :: Maybe String
   , noDiscoverFuns :: Bool
   , solver :: PS.Solver
   , goalTimeout :: PTi.Timeout
@@ -149,6 +151,8 @@ data CLIOptions = CLIOptions
   , patchedProbabilisticHints :: Maybe FilePath
   , originalCsvFunctionHints :: Maybe FilePath
   , patchedCsvFunctionHints :: Maybe FilePath
+  , originalBSIFunctionHints :: Maybe FilePath
+  , patchedBSIFunctionHints :: Maybe FilePath
   , noDwarfHints :: Bool
   , verbosity :: PV.Verbosity
   , saveMacawCFGs :: Maybe FilePath
@@ -322,6 +326,7 @@ terminalFormatEvent evt =
     PE.HintErrorsCSV errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsDWARF errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.HintErrorsBSI errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.FunctionEntryInvalidHints _ errs ->
       layout ("Invalid function entry hints:" <> PP.line
                <> PP.vsep [ PP.pretty fn <> "@" <> ppHex addr
@@ -418,11 +423,11 @@ cliOptions = OA.info (OA.helper <*> parser)
       <> OA.help "Block information relating binaries"
       )))
     -- <*> logParser
-    <*> (OA.switch
-      (  OA.long "ignoremain"
-      <> OA.short 'm'
-      <> OA.help "Don't add the main entry points to the set of function equivalence checks."
-      ))
+    <*> (OA.optional (OA.strOption
+      (  OA.long "startsymbol"
+      <> OA.short 's'
+      <> OA.help "Start analysis from the function with this symbol, otherwise start at the program entrypoint"
+      )))
     <*> (OA.switch
       (  OA.long "nodiscovery"
       <> OA.short 'd'
@@ -466,6 +471,14 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.optional (OA.strOption
         ( OA.long "patched-csv-function-hints"
          <> OA.help "Parse a CSV file containing function name/address hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "original-bsi-hints"
+         <> OA.help "Parse a JSON file containing function name/address hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "patched-bsi-hints"
+         <> OA.help "Parse a JSON file containing function name/address hints"
         ))
     <*> OA.switch ( OA.long "no-dwarf-hints"
                   <> OA.help "Do not extract metadata from the DWARF information in the binaries"

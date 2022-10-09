@@ -39,6 +39,7 @@ import qualified Pate.Block as PB
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Hints.BSI as PHB
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.SimState as PS
@@ -105,6 +106,7 @@ data Event arch where
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
   HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch
+  HintErrorsBSI :: DLN.NonEmpty PHB.JSONError -> Event arch
   -- | A very low-level event generated during the proof construction or evaluation
   --
   -- It records a pair of block addresses and a message that describes the state

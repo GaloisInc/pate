@@ -10,15 +10,19 @@ module Pate.Discovery.ParsedFunctions (
   , parsedBlocksContaining
   , parsedBlockEntry
   , isFunctionStart
+  , findFunctionByName
+  , resolveFunctionEntry
+  , setAbstractState
+  , getInitAbsDomain
   , ParsedBlocks(..)
   ) where
 
 
-import           Control.Lens ( (^.) )
+import           Control.Lens ( (^.), (&), (.~) )
 import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
-import           Data.Maybe ( mapMaybe )
+import           Data.Maybe ( mapMaybe, isJust )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..), viewSome )
@@ -43,12 +47,14 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Memory as PM
+import qualified Pate.Register.Traversal as PRt
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
 data ParsedFunctionState arch bin =
   ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (Some (MD.DiscoveryFunInfo arch))
                       , discoveryState :: MD.DiscoveryState arch
+                      , functionAbstractStates :: Map.Map (MM.ArchSegmentOff arch) (DMAA.AbsBlockState (MM.ArchReg arch))
                       }
 
 -- | A (lazily constructed) map of function entry points to the blocks for that function
@@ -66,6 +72,8 @@ data ParsedFunctionMap arch bin =
                     -- The information we use out of this is a list of functions
                     -- that the analysis should ignore. See Note [Ignored
                     -- Functions] for details.
+                    , pfmInitState :: MD.DiscoveryState arch
+                    -- ^ initial discovery state
                     }
 
 -- | Allocate a new empty 'ParsedFunctionMap'
@@ -86,10 +94,13 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd = do
   return ParsedFunctionMap { parsedStateRef = ref
                            , persistenceDir = mCFGDir
                            , patchData = pd
+                           , pfmInitState = ds0
                            }
   where
+    ds0 = MD.emptyDiscoveryState mem syms archInfo
     s0 = ParsedFunctionState { parsedFunctionCache = mempty
-                             , discoveryState = MD.emptyDiscoveryState mem syms archInfo
+                             , functionAbstractStates = mempty
+                             , discoveryState = ds0
                              }
 
 funInfoToFunEntry ::
@@ -162,6 +173,65 @@ emptyFunction faddr =
                                   , DMDP.blockJumpBounds = DMAJ.functionStartBounds
                                   }
 
+getInitAbsDomain ::
+  ParsedFunctionMap arch bin ->
+  PB.FunctionEntry arch bin ->
+  DMAA.AbsBlockState (MM.ArchReg arch)
+getInitAbsDomain (ParsedFunctionMap _ _ _ initSt) fnEntry =
+  let
+    faddr = PB.functionSegAddr fnEntry
+    archInfo = MD.archInfo initSt
+  in MAI.mkInitialAbsState archInfo (MD.memory initSt) faddr
+
+
+eqAbsStates ::
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  DMAA.AbsBlockState (MM.ArchReg arch) ->
+  DMAA.AbsBlockState (MM.ArchReg arch) ->
+  Bool
+eqAbsStates st1 st2 = case (DMAA.joinAbsBlockState st1 st2, DMAA.joinAbsBlockState st2 st1) of
+  (Nothing, Nothing) -> True
+  _ -> False
+
+-- | Modify the discovery state to inject additional abstract state information
+--   when analyzing the given function
+-- TODO: should setting the abstract state of an already explored function
+-- be considered an error? Right now we just delete the corresponding entry in the cache
+setAbstractState ::
+  MM.ArchConstraints arch =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  PB.FunctionEntry arch bin ->
+  DMAA.AbsBlockState (MM.ArchReg arch) ->
+  ParsedFunctionMap arch bin ->
+  IO ()
+setAbstractState fnEntry absSt0 pfm@(ParsedFunctionMap pfmRef _ _ initSt) = do
+  let faddr = PB.functionSegAddr fnEntry
+  let archInfo = MD.archInfo initSt
+  st <- IORef.readIORef pfmRef  
+  let baseAbsSt = case Map.lookup faddr (functionAbstractStates st) of
+        Just baseAbsSt' -> baseAbsSt'
+        Nothing -> getInitAbsDomain pfm fnEntry
+  -- FIXME: this ignores the stack
+  absStRegs <- PRt.zipWithRegStatesM (baseAbsSt ^. DMAA.absRegState) (absSt0 ^. DMAA.absRegState) $ \r oldV newV -> return $ DMAA.meet oldV newV
+  let absSt = (absSt0 & DMAA.absRegState .~ absStRegs)
+  case eqAbsStates absSt0 absSt of
+    True -> return ()
+    False -> do
+      let absSts' = Map.insert faddr absSt (functionAbstractStates st)
+      -- this is a bit weird, should we actually discard the whole function cache, since
+      -- we're discarding the discovery state?
+      let cache' = Map.delete fnEntry (parsedFunctionCache st)
+      let mkInit mem segOff = case Map.lookup segOff absSts' of
+            _ -> MAI.mkInitialAbsState archInfo mem segOff
+            Just newInit -> newInit
+            Nothing -> MAI.mkInitialAbsState archInfo mem segOff
+      let
+        ainfo' = archInfo{ MAI.mkInitialAbsState = mkInit }
+        -- reset the discovery state with this injected abstract state information
+        dst' = MD.emptyDiscoveryState (MD.memory initSt) (MD.symbolNames initSt) ainfo'
+        st' = st { parsedFunctionCache = mempty, functionAbstractStates = absSts', discoveryState = (discoveryState st) }      
+      IORef.writeIORef pfmRef st'
+
 -- | Return the 'MD.DiscoveryFunInfo' (raw macaw code discovery artifact)
 -- corresponding to the function that contains the given basic block
 --
@@ -178,7 +248,7 @@ parsedFunctionContaining ::
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
-parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir pd) = do
+parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir pd _) = do
   let baddr = PA.addrToMemAddr (PB.concreteAddress blk)
   st <- IORef.readIORef pfmRef
   let ds1 = discoveryState st
@@ -234,6 +304,18 @@ parsedFunctionContaining blk (ParsedFunctionMap pfmRef mCFGDir pd) = do
                       , discoveryState = ds2
                       }, Some dfi)
 
+resolveFunctionEntry ::
+  forall bin arch .
+  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  PB.FunctionEntry arch bin ->
+  ParsedFunctionMap arch bin ->
+  IO (Maybe (PB.FunctionEntry arch bin))
+resolveFunctionEntry fe pfm = do
+  let cb = PB.functionEntryToConcreteBlock fe
+  parsedFunctionContaining cb pfm >>= \case
+    Just (Some dfi) -> return $ Just $ funInfoToFunEntry PC.knownRepr dfi
+    Nothing -> return Nothing
+
 -- | Similar to 'parsedFunctionContaining', except that it constructs the
 -- 'ParsedBlocks' structure used in most of the verifier.
 parsedBlocksContaining ::
@@ -244,6 +326,16 @@ parsedBlocksContaining ::
   IO (Maybe (ParsedBlocks arch))
 parsedBlocksContaining blk pfm =
   fmap (viewSome buildParsedBlocks) <$> parsedFunctionContaining blk pfm
+
+findFunctionByName ::
+  String ->
+  ParsedFunctionMap arch bin ->
+  IO (Maybe (PB.FunctionEntry arch bin))
+findFunctionByName nm pfm = do
+  st <- IORef.readIORef (parsedStateRef pfm)
+  let fns = parsedFunctionCache st
+  -- todo: match this better
+  return $ F.find (\fe -> isJust (PB.functionSymbol fe) && nm == show (PB.functionSymbol fe)) (Map.keys fns)
 
 isFunctionStart ::
   forall bin arch .

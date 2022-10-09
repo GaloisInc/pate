@@ -227,7 +227,7 @@ data ContextSensitivity =
 -- TODO: 'validRepr' is parameterized here just to break a module import loop
 data VerificationConfig validRepr =
   VerificationConfig
-    { cfgPairMain :: Bool
+    { cfgStartSymbol :: Maybe String
     -- ^ start by pairing the entry points of the binaries
     , cfgDiscoverFuns :: Bool
     -- ^ discover additional functions pairs during analysis
@@ -254,12 +254,14 @@ data VerificationConfig validRepr =
     , cfgContextSensitivity :: ContextSensitivity
     , cfgTraceTree :: SomeTraceTree (validRepr :: (Type, Type) -> Type)
     -- ^ handle on a trace tree that has been provided
+    , cfgAddOrphanEdges :: Bool
+    -- ^ flag to control if "orphaned" graph edges should be added back in
     }
 
 
 defaultVerificationCfg :: VerificationConfig validRepr
 defaultVerificationCfg =
-  VerificationConfig { cfgPairMain = True
+  VerificationConfig { cfgStartSymbol = Nothing
                      , cfgDiscoverFuns = True
                      , cfgSolver = PS.Yices
                      , cfgHeuristicTimeout = PT.Seconds 10
@@ -270,4 +272,5 @@ defaultVerificationCfg =
                      , cfgFailureMode = ThrowOnAnyFailure
                      , cfgContextSensitivity = DistinctFunctionAbstractDomains
                      , cfgTraceTree = noTraceTree
+                     , cfgAddOrphanEdges = True
                      }

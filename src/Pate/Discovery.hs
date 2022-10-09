@@ -30,6 +30,7 @@ import           Control.Monad (forM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO, MonadIO )
+import           System.IO as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
@@ -485,7 +486,7 @@ callTargets from next_ips ret = do
    binCtx <- getBinCtx @bin
    let mem = MBL.memoryImage (PMC.binary binCtx)
    fmap catMaybes $ forM next_ips $ \next -> do
-     let nextMem = PA.addrToMemAddr next
+     let nextMem = PA.addrToMemAddr next  
      case MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem) of
        Just segoff -> do
          let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
