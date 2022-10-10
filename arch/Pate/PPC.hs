@@ -156,6 +156,7 @@ instance PA.ValidArch PPC.PPC32 where
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
   binArchInfo = const PPC.ppc32_linux_info
+  discoveryRegister = const False
 
 instance PA.ValidArch PPC.PPC64 where
   rawBVReg r = case r of
@@ -168,6 +169,7 @@ instance PA.ValidArch PPC.PPC64 where
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
   binArchInfo = PPC.ppc64_linux_info
+  discoveryRegister = const False
 
 -- | Determine the argument name for the argument held in the given register.
 --
@@ -257,7 +259,6 @@ archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
-                                 , PA.validArchExtraRegister = Nothing
                                  }
       in Right (Some (PA.SomeValidArch vad))
     (EEP.EM_PPC64, _) ->
@@ -268,7 +269,6 @@ archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
-                                 , PA.validArchExtraRegister = Nothing
                                  }
       in Right (Some (PA.SomeValidArch vad))
 

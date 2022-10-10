@@ -86,6 +86,8 @@ import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.State as CMS
+import           Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
+import qualified System.IO as IO
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -113,6 +115,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified What4.Expr.Builder as W4B
 import qualified What4.ProgramLoc as W4PL
+import qualified What4.Expr.ArrayUpdateMap as AUM
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Expr.WeightedSum as WSum
 import qualified What4.Interface as W4
@@ -500,7 +503,8 @@ freshPtr ::
   IO (CLM.LLVMPtr sym w)
 freshPtr sym name w = do
   off <- W4.freshConstant sym (WS.safeSymbol (name ++ "_offset")) (W4.BaseBVRepr w)
-  reg <- W4.freshNat sym (WS.safeSymbol (name ++ "_region"))
+  regI <- W4.freshBoundedInt sym (WS.safeSymbol (name ++ "_region")) (Just 0) Nothing
+  reg <- integerToNat sym regI
   return $ (CLM.LLVMPointer reg off)
 
 mulMono :: forall p q x w. (1 <= x, 1 <= w) => p x -> q w -> W4.LeqProof 1 (x W4.* w)
@@ -827,39 +831,90 @@ resolveConcreteLookups sym check e_outer = do
       Just b' -> Just (b && b')
       Nothing -> Nothing
     andPred _ Nothing = Nothing
-    
+
     resolveArr ::
       forall idx idx1 idx2 tp'.
       idx ~ (idx1 Ctx.::> idx2) =>
       W4.SymExpr sym (W4.BaseArrayType idx tp') ->
       Ctx.Assignment (W4.SymExpr sym) idx ->
-      m (W4.SymExpr sym tp')
-    resolveArr arr_base idx_base = do
-      arr <- go arr_base
-      idx <- TFC.traverseFC go idx_base
-      val <- liftIO $ W4.arrayLookup sym arr idx
+      m (Maybe (W4.SymExpr sym tp'))
+    resolveArr arr idx = do
       case arr of
+        W4B.BoundVarExpr{} -> do
+          idx' <- TFC.traverseFC go idx
+          case idx == idx' of
+            True -> return Nothing
+            False -> Just <$> (liftIO $ W4.arrayLookup sym arr idx')
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
           W4B.UpdateArray _ _ arr' idx' upd_val -> do
-            eqIdx <- Ctx.zipWithM (\e1 e2 -> fmap Const $ check =<< (liftIO $ W4.isEq sym e1 e2)) idx idx'
-            case TFC.foldrFC andPred (Just True) eqIdx of
-              Just True -> return $ upd_val
+            equalIndexes idx idx' >>= \case
+              Just True -> Just <$> (go upd_val)
               Just False -> resolveArr arr' idx
-              _ -> return val
-          W4B.SelectArray _ arr' idx' -> do
-            arr'' <- resolveArr arr' idx'
-            case arr'' == arr of
-              True -> return val
-              False -> resolveArr arr'' idx
-          _ -> return val
-        _ -> return val
+              Nothing -> return Nothing
+          W4B.SelectArray _ inner_arr inner_idx -> resolveArr inner_arr inner_idx >>= \case
+            Just arr' -> resolveArr arr' idx
+            Nothing -> do
+              inner_arr' <- go inner_arr
+              inner_idx' <- TFC.traverseFC go inner_idx
+              case inner_arr == inner_arr' && inner_idx' == inner_idx of
+                True -> return Nothing
+                False -> do
+                  arr' <- liftIO $ W4.arrayLookup sym inner_arr' inner_idx'
+                  idx' <- TFC.traverseFC go idx
+                  Just <$> (liftIO $ W4.arrayLookup sym arr' idx')
+          W4B.ArrayMap _ _ aum arr' -> do
+            case asConcreteIndices idx of
+              Just cidx | Just e <- AUM.lookup cidx aum -> Just <$> (go e)
+              Just{} -> resolveArr arr' idx
+              _ -> (runMaybeT $ checkConcMap idx (AUM.toList aum)) >>= \case
+                -- got an equal result
+                Just (Just upd_val) -> Just <$> (go upd_val)
+                -- proved that no entries equal this one
+                Just Nothing -> resolveArr arr' idx
+                -- inconclusive result, give up
+                Nothing -> return Nothing
+          _ -> return Nothing
+        _ -> return Nothing
+
+    equalIndexes ::
+      Ctx.Assignment (W4.SymExpr sym) ctx ->
+      Ctx.Assignment (W4.SymExpr sym) ctx ->
+      m (Maybe Bool)
+    equalIndexes Ctx.Empty Ctx.Empty = return (Just True)
+    equalIndexes (asn1 Ctx.:> e1) (asn2 Ctx.:> e2) = do
+      p <- liftIO $ W4.isEq sym e1 e2
+      check p >>= \case
+        Just True -> equalIndexes asn1 asn2
+        Just False -> return $ Just False
+        Nothing -> return Nothing
+
+    checkConcMap ::
+      forall ctx tp'.
+      Ctx.Assignment (W4.SymExpr sym) ctx ->
+      [(Ctx.Assignment W4B.IndexLit ctx, W4.SymExpr sym tp')] ->
+      MaybeT m (Maybe (W4.SymExpr sym tp'))
+    checkConcMap _ [] = return Nothing
+    checkConcMap symIdx ((concIdx, val) : xs) = do
+      symIdx' <- liftIO $ asSymbolicIndex sym concIdx
+      (lift $ equalIndexes symIdx symIdx') >>= \case
+        Just True -> return $ Just val
+        Just False -> checkConcMap symIdx xs
+        Nothing -> fail ""
     
     go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
     go e = W4B.idxCacheEval cache e $ do
       setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> case W4B.appExprApp a0 of
-          W4B.SelectArray _ arr idx -> resolveArr arr idx
+          W4B.SelectArray _ arr idx -> do
+            resolveArr arr idx >>= \case
+              Just e' -> return e'
+              Nothing -> do
+                arr' <- go arr
+                idx' <- TFC.traverseFC go idx
+                case arr' == arr && idx == idx' of
+                  True -> return e
+                  False -> liftIO $ W4.arrayLookup sym arr' idx'
           W4B.BaseIte _ _ p e_true e_false ->
             simplifyIte sym e check go p e_true e_false
           app -> do
@@ -872,6 +927,68 @@ resolveConcreteLookups sym check e_outer = do
           else liftIO $ W4B.sbNonceExpr sym a0'
         _ -> return e
   go e_outer
+
+-- Debugging
+printAtoms ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+printAtoms sym e_outer = do
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
+    go e = W4B.idxCacheEval cache e $ do
+      liftIO $ IO.putStrLn $ (show (W4.printSymExpr e))
+      case e of
+        W4B.BoundVarExpr{} -> liftIO $ IO.putStrLn "BoundVarExpr"
+        W4B.AppExpr a0 -> case W4B.appExprApp a0 of
+          W4B.SelectArray{} -> liftIO $ IO.putStrLn "SelectArray"
+          W4B.UpdateArray{} -> liftIO $ IO.putStrLn "UpdateArray"
+          W4B.BaseIte{} -> liftIO $ IO.putStrLn "BaseIte"
+          W4B.ArrayMap{} -> liftIO $ IO.putStrLn "BaseIte"
+          _ -> return ()
+        W4B.NonceAppExpr{} -> liftIO $ IO.putStrLn "NonceExpr"
+        _ -> return ()
+      case e of
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else W4B.sbNonceExpr sym a0'
+        _ -> return e
+  go e_outer
+
+asSymbolicIndex ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  Ctx.Assignment W4B.IndexLit ctx ->
+  IO (Ctx.Assignment (W4.SymExpr sym) ctx)
+asSymbolicIndex _ Ctx.Empty = return Ctx.Empty
+asSymbolicIndex sym (idx Ctx.:> W4B.IntIndexLit i) = do
+  idx' <- asSymbolicIndex sym idx
+  i' <- W4.intLit sym i
+  return $ (idx' Ctx.:> i')
+asSymbolicIndex sym (idx Ctx.:> W4B.BVIndexLit w bv) = do
+  idx' <- asSymbolicIndex sym idx
+  bv' <- W4.bvLit sym w bv
+  return $ (idx' Ctx.:> bv')
+
+-- FIXME: clagged from What4.Expr.Builder
+asConcreteIndices :: W4.IsExpr e
+                  => Ctx.Assignment e ctx
+                  -> Maybe (Ctx.Assignment W4B.IndexLit ctx)
+asConcreteIndices = TFC.traverseFC f
+  where f :: W4.IsExpr e => e tp -> Maybe (W4B.IndexLit tp)
+        f x =
+          case W4.exprType x of
+            W4.BaseIntegerRepr  -> W4B.IntIndexLit <$> W4.asInteger x
+            W4.BaseBVRepr w -> W4B.BVIndexLit w <$> W4.asBV x
+            _ -> Nothing
 
 -- TODO: it's unclear if What4's existing abstract domains are
 -- precise enough to capture what we need here
@@ -1067,7 +1184,7 @@ simplifyBVOpInner sym simp_check go app = case app of
 
       return $ WSum.evalM doAdd doMul doConst s
      -- push selection into sums
-    <|> do
+    {- <|> do
       W4B.SemiRingSum s <- W4B.asApp bv
       SR.SemiRingBVRepr SR.BVArithRepr w <- return $ WSum.sumRepr s
       let
@@ -1083,6 +1200,7 @@ simplifyBVOpInner sym simp_check go app = case app of
 
         doConst c = W4.bvLit sym w c
       return $ (WSum.evalM doAdd doMul doConst s >>= W4.bvSelect sym idx n)
+    -}
     <|> do
       W4B.BVOrBits _ s <- W4B.asApp bv
       (b:bs) <- return $ W4B.bvOrToList s
@@ -1151,7 +1269,8 @@ simplifyBVOps' ::
 simplifyBVOps' sym simp_check outer = do
   simp_check' <- unliftSimpCheck simp_check
   IO.withRunInIO $ \inIO -> do
-    cache <- W4B.newIdxCache
+    cache1 <- W4B.newIdxCache
+    cache2 <- W4B.newIdxCache
     let
       f :: forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))
       f app = case simplifyBVOpInner sym simp_check' (\e' -> inIO (go e')) app of
@@ -1159,7 +1278,7 @@ simplifyBVOps' sym simp_check outer = do
         Nothing -> return Nothing
 
       go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
-      go e = W4B.idxCacheEval cache e $ simplifyApp sym simp_check f e
+      go e = W4B.idxCacheEval cache1 e $ simplifyApp sym cache2 simp_check f e
 
     inIO (go outer)
 
@@ -1177,7 +1296,7 @@ noSimpCheck :: Applicative m => SimpCheck sym m
 noSimpCheck = SimpCheck (\_ e_patched -> pure e_patched)
 
 unliftSimpCheck :: IO.MonadUnliftIO m => SimpCheck sym m -> m (SimpCheck sym IO)
-unliftSimpCheck simp_check = IO.withRunInIO $ \inIO ->
+unliftSimpCheck simp_check = IO.withRunInIO $ \inIO -> do
   return $ SimpCheck (\e1 e2 -> inIO (runSimpCheck simp_check e1 e2))
 
 simplifyApp ::
@@ -1185,11 +1304,12 @@ simplifyApp ::
   IO.MonadIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
+  W4B.IdxCache t (W4B.Expr t) ->
   SimpCheck sym m {- ^ double-check simplification step -} ->
   (forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))) {- ^ app simplification -} ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-simplifyApp sym simp_check simp_app outer = do
+simplifyApp sym cache simp_check simp_app outer = do
   let
     else_ :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
     else_ e = do
@@ -1206,7 +1326,7 @@ simplifyApp sym simp_check simp_app outer = do
       runSimpCheck simp_check e e'
 
     go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
-    go e = do
+    go e = W4B.idxCacheEval cache e $ do
       setProgramLoc sym e
       case e of
         W4B.AppExpr a0 -> simp_app (W4B.appExprApp a0) >>= \case

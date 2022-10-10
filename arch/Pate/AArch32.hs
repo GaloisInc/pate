@@ -75,7 +75,7 @@ hackyExtractBlockPrecond
 hackyExtractBlockPrecond _ absState =
   case absState ^. MA.absRegState . MC.boundValue (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) of
     MA.FinSet (Set.toList -> [bi]) -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = bi == 1 })
-    MA.FinSet {} -> Left "Multiple FinSet values for PSTATE_T"
+    MA.FinSet s -> Left ("Multiple FinSet values for PSTATE_T" ++ (show s))
     MA.StridedInterval {} -> Left "StridedInterval where PSTATE_T expected"
     MA.SubValue {} -> Left "SubValue where PSTATE_T expected"
     MA.TopV -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False })
@@ -98,7 +98,7 @@ instance PA.ValidArch SA.AArch32 where
   displayRegister = display
   argumentNameFrom = argumentNameFrom
   binArchInfo = const hacky_arm_linux_info
-
+  discoveryRegister reg = Some reg == (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")))
 
 argumentNameFrom
   :: [T.Text]
@@ -216,7 +216,6 @@ archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
                                  , PA.validArchPatchedExtraSymbols =
                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
                                  , PA.validArchStubOverrides = stubOverrides
-                                 , PA.validArchExtraRegister = Just (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T"))
                                  }
       in Right (Some (PA.SomeValidArch vad))
     _ -> Left (PEE.UnsupportedArchitecture em)

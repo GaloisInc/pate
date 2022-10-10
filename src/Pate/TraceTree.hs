@@ -82,6 +82,7 @@ module Pate.TraceTree (
   , finalizeTree
   , withTracing
   , withTracingLabel
+  , withNoTracing
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -687,3 +688,11 @@ emitTrace ::
   TraceNodeType k nm ->
   m ()
 emitTrace v = emitTraceLabel @nm def v
+
+-- | Squelch tracing in this subcomputation
+withNoTracing ::
+  forall k e m a.
+  IsTreeBuilder k e m =>
+  m a ->
+  m a
+withNoTracing f = withTreeBuilder noTreeBuilder f

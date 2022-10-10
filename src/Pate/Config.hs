@@ -256,6 +256,7 @@ data VerificationConfig validRepr =
     -- ^ handle on a trace tree that has been provided
     , cfgAddOrphanEdges :: Bool
     -- ^ flag to control if "orphaned" graph edges should be added back in
+    , cfgCheckSimplifier :: Bool
     }
 
 
@@ -273,4 +274,5 @@ defaultVerificationCfg =
                      , cfgContextSensitivity = DistinctFunctionAbstractDomains
                      , cfgTraceTree = noTraceTree
                      , cfgAddOrphanEdges = True
+                     , cfgCheckSimplifier = False
                      }

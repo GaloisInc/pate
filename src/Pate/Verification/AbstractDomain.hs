@@ -75,6 +75,7 @@ import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
+import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -492,18 +493,22 @@ macawAbsValueToAbsValue _ repr (MacawAbstractValue absVal) = case repr of
       AbsBoolConstant b -> MAS.BoolConst b
       _ -> MAS.TopV
   _ -> MAS.TopV
-                                     
+
+
 domainValsToAbsState ::
   forall sym arch bin.
   PA.ValidArch arch =>
-  MAS.AbsBlockState (MM.ArchReg arch) ->
   AbstractDomainVals sym arch bin ->
-  MAS.AbsBlockState (MM.ArchReg arch)
-domainValsToAbsState baseSt d = runIdentity $ do
-  regState <- PRt.zipWithRegStatesM (absRegVals d) (baseSt ^. MAS.absRegState) $ \r macawVal absVal -> do
-    let macawAbsVal' = macawAbsValueToAbsValue (Proxy @arch) (MT.typeRepr r) macawVal
-    return $ MAS.meet macawAbsVal' absVal
-  return $ (baseSt & MAS.absRegState .~ regState)
+  PD.AbsStateOverride arch
+domainValsToAbsState d =
+  MapF.mapMaybeWithKey  (\r _ ->
+    let
+      macawVal = (absRegVals d) ^. MM.boundValue r
+    in case macawAbsValueToAbsValue (Proxy @arch) (MT.typeRepr r) macawVal of
+      MAS.TopV -> Nothing
+      v | PA.discoveryRegister r -> Just v
+      _ -> Nothing
+    ) (MM.archRegSet @(MM.ArchReg arch))
 
 absDomainValToAsm ::
   W4.IsSymExprBuilder sym =>

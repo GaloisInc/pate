@@ -109,7 +109,7 @@ data InnerEquivalenceError arch
   | BlockHasNoExit (PB.BlockPair arch)
   | CallReturnsToFunctionEntry (PB.BlockPair arch)
   | NonTotalBlockExits (PB.BlockPair arch)
-  | forall bin. MissingParsedBlockEntry (PB.ConcreteBlock arch bin)
+  | forall bin. MissingParsedBlockEntry String (PB.ConcreteBlock arch bin)
   | OrphanedFunctionReturns
   | MissingDomainForBlock (PB.BlockPair arch)
   | MissingDomainForFun (PB.FunPair arch)
@@ -161,7 +161,7 @@ data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>
   SimpResult (Proxy sym) (W4.SymExpr sym tp) (W4.SymExpr sym tp)
 
 instance PP.Pretty SimpResult where
-  pretty (SimpResult _ e1 e2) = W4.printSymExpr e1 <+> W4.printSymExpr e2
+  pretty (SimpResult _ e1 e2) = PP.vsep [W4.printSymExpr e1, W4.printSymExpr e2]
 
 instance Show SimpResult where
   show r = show (PP.pretty r)

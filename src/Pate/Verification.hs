@@ -165,8 +165,6 @@ findFunctionByName nm context = do
   let fns = PMC.functionHintIndex context
   let mem = MBL.memoryImage (PMC.binary context)
   let pfm = PMC.parsedFunctionMap context
-  mapM_ (\(ca, fd) -> IO.putStrLn ((show ca) ++ " " ++ (show (PH.functionSymbol fd)))) (M.toList fns)
-  
   case L.find (\(ca, fd) -> PH.functionSymbol fd == T.pack nm) (M.toList fns) of
     Just (ca, _) -> do
       let caAddr = PAd.addrToMemAddr ca

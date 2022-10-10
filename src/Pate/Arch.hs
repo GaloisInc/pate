@@ -148,6 +148,9 @@ class
 
   binArchInfo :: MBL.LoadedBinary arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch)) -> MI.ArchitectureInfo arch
 
+  -- register should be propagated during discovery
+  discoveryRegister :: forall tp. MC.ArchReg arch tp -> Bool
+
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
                 , validArchFunctionDomain :: PVE.ExternalDomain PVE.ExternalCall arch
@@ -159,8 +162,6 @@ data ValidArchData arch =
                 -- For example, these could be PLT stub symbols for ELF binaries
                 , validArchPatchedExtraSymbols :: Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
                 , validArchStubOverrides :: ArchStubOverrides arch
-                -- FIXME: magic extra register for mysterious purposes
-                , validArchExtraRegister :: Maybe (MC.ArchReg arch (MT.BVType 1))
                 }
 
 -- | A stub is allowed to make arbitrary modifications to the symbolic state

@@ -27,6 +27,7 @@ module Pate.Monad
   , EquivM
   , EquivM_
   , ValidSymArch
+  , ExprLabel(..)
   , runEquivM
   , SimBundle(..)
   , withBinary
