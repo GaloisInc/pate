@@ -54,10 +54,15 @@ RUN mkdir -p /home/src
 COPY . /home/src
 WORKDIR /home/src
 RUN ln -sf cabal.project.dist cabal.project
-RUN cabal configure pate-repl-base -w ghc-8.10.4 && \
-  cabal build pate-repl-base -j5
+RUN cabal configure pkg:pate -w ghc-8.10.4
+RUN cabal build dismantle-arm-xml
+RUN cabal build --only-dependencies macaw-aarch32 -j5
+RUN cabal build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
+RUN cabal build pkg:pate --only-dependencies -j5
+RUN cabal build pkg:pate -j5
 
-RUN ln -s pate.sh /usr/local/bin/pate
+RUN mkdir -p /usr/local/bin/pate
+RUN cp -r /home/src /usr/local/bin/pate
 
 FROM ubuntu:20.04
 RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
@@ -72,4 +77,4 @@ COPY --from=0 /usr/local/bin/pate \
               /usr/local/bin/yices \
               /usr/local/bin/yices-smt2 \
               /usr/local/bin/
-ENTRYPOINT ["/usr/local/bin/pate"]
+ENTRYPOINT ["/usr/local/bin/pate/pate.sh"]
