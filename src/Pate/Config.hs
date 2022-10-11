@@ -257,6 +257,7 @@ data VerificationConfig validRepr =
     , cfgAddOrphanEdges :: Bool
     -- ^ flag to control if "orphaned" graph edges should be added back in
     , cfgCheckSimplifier :: Bool
+    , cfgIgnoreUnnamedFunctions :: Bool
     }
 
 
@@ -275,4 +276,5 @@ defaultVerificationCfg =
                      , cfgTraceTree = noTraceTree
                      , cfgAddOrphanEdges = True
                      , cfgCheckSimplifier = False
+                     , cfgIgnoreUnnamedFunctions = True
                      }

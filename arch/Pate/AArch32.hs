@@ -78,7 +78,7 @@ hackyExtractBlockPrecond _ absState =
     MA.FinSet s -> Left ("Multiple FinSet values for PSTATE_T" ++ (show s))
     MA.StridedInterval {} -> Left "StridedInterval where PSTATE_T expected"
     MA.SubValue {} -> Left "SubValue where PSTATE_T expected"
-    MA.TopV -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False })
+    MA.TopV -> Left "TopV where PSTATE_T expected" {- Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False }) -}
 
 -- | A modified version of the AArch32 code discovery configuration
 --
@@ -190,9 +190,12 @@ argumentMapping =
 
 stubOverrides :: PA.ArchStubOverrides SA.AArch32
 stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride r0) $
-  Map.fromList
-    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
-    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
+  Map.fromList $ map (\(nm,v) -> (BSC.pack nm, v)) $
+    [ ("malloc", PA.mkMallocOverride r0 r0)
+    , ("clock", PA.mkClockOverride r0)
+    , ("getopt", PA.mkDefaultStubOverride r0)
+    , ("fprintf", PA.mkDefaultStubOverride r0)
+    ]
   where
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
 

@@ -159,6 +159,7 @@ runVerificationLoop env pPairs = do
 
           return (result, stats)
 
+{-
 resolveNode ::
   GraphNode arch ->
   EquivM sym arch (GraphNode arch)
@@ -169,11 +170,17 @@ resolveNode nd = case nd of
     pPair' <- PPa.forBins $ \get -> do
       let fnEntry = get fnPair
       pfm <- PMC.parsedFunctionMap <$> getBinCtx
-      (liftIO $ PD.resolveFunctionEntry fnEntry pfm) >>= \case
-        Just fnEntry' -> return $ (get pPair) { PB.blockFunctionEntry = fnEntry' }
-        Nothing -> return (get pPair)
+      fnEntry' <- liftIO $ PD.resolveFunctionEntry fnEntry pfm
+      return $ (get pPair) { PB.blockFunctionEntry = fnEntry' }
     return $ GraphNode (mkNodeEntry entry pPair')
-  (ReturnNode{}) -> return nd
+  (ReturnNode ret) -> do
+    let fnPair = nodeFuns ret
+    fnPair' <- PPa.forBins $ \get -> do
+      let fnEntry = get fnPair
+      pfm <- PMC.parsedFunctionMap <$> getBinCtx
+      liftIO $ PD.resolveFunctionEntry fnEntry pfm
+    return $ ReturnNode (mkNodeReturn (returnToEntry ret) fnPair')
+-}
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -187,13 +194,11 @@ pairGraphComputeFixpoint gr0 = do
   let
     go (gr :: PairGraph sym arch) = case chooseWorkItem gr of
       Nothing -> return gr
-      Just (gr', nd', preSpec) -> do
-        nd <- (lift $ resolveNode nd')
+      Just (gr', nd, preSpec) -> do
         gr'' <- subTrace @"node" nd $ startTimer $ do
           PS.viewSpec preSpec $ \scope d -> do
             emitTraceLabel @"domain" PAD.Predomain (Some d)
             withAssumptionSet (PS.scopeAsm scope) $ do
-
               gr'' <- visitNode scope nd d gr'
               emitEvent $ PE.VisitedNode nd
               return gr''
@@ -398,12 +403,11 @@ withValidInit scope bPair f = withPair bPair $ do
 
 withSimBundle ::
   forall sym arch v a.
-  PS.SimScope sym arch v ->
+  PPa.PatchPair (PS.SimVars sym arch v) ->
   PB.BlockPair arch ->
   (SimBundle sym arch v -> EquivM_ sym arch a) ->
   EquivM sym arch a
-withSimBundle scope bPair f = do
-  let vars = PS.scopeVars scope
+withSimBundle vars bPair f = do
   bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle bPair vars
   bundle1 <- withSym $ \sym -> do
     heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
@@ -514,7 +518,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = do
 
   withValidInit scope bPair $ do
     gr1 <- updateExtraEdges scope node d gr0
-    withSimBundle scope bPair $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
+    let vars = PS.scopeVars scope
+    withSimBundle vars bPair $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
 
 visitNode scope (ReturnNode fPair) d gr0 =
   -- propagate the abstract domain of the return node to
@@ -1105,6 +1110,29 @@ maybeUpdate gr f = f >>= \case
   Just gr' -> return gr'
   Nothing -> return gr
 
+skippedFnName :: BS.ByteString
+skippedFnName = BSC.pack "__pate_skipped"
+
+-- | Return the name of a function if we want to replace its call with
+--   stub semantics
+getFunctionStub ::
+  PB.BlockPair arch ->
+  EquivM sym arch (Maybe BS.ByteString)
+getFunctionStub pPair@(PPa.PatchPair blkO blkP) = do
+  PA.SomeValidArch archData <- asks envValidArch
+  findPLTSymbol blkO blkP >>= \case
+    Just nm -> return $ Just nm
+    Nothing | Just fnPair <- asFunctionPair pPair -> do
+      (mnm1, mnm2) <- PPa.forBinsC $ \get -> return $ PB.functionSymbol (get fnPair)
+      case (mnm1, mnm2) of
+        (Just nm1, Just nm2) | nm1 == nm2, Just{} <- PA.lookupStubOverride archData nm1 ->
+          return $ Just nm1
+        (Nothing, Nothing) -> asks (PCfg.cfgIgnoreUnnamedFunctions . envConfig) >>= \case
+          True -> return $ Just "__pate_skipped"
+          False -> return Nothing
+        _ -> return Nothing
+    Nothing -> return Nothing
+
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
 triageBlockTarget ::
@@ -1121,11 +1149,11 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
         blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
 
-     isPLT <- findPLTSymbol blkO blkP
+     isStub <- getFunctionStub pPair
      traceBundle bundle' ("  targetCall: " ++ show blkO)
      matches <- PD.matchesBlockTarget bundle' blkts
      maybeUpdate gr $ withSatAssumption matches $ do
-       bundle <- PD.associateFrames bundle' (PB.targetEndCase blktO) (isJust isPLT)
+       bundle <- PD.associateFrames bundle' (PB.targetEndCase blktO) (isJust isStub)
        case (PB.targetReturn blktO, PB.targetReturn blktP) of
          (Just blkRetO, Just blkRetP) ->
            do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
@@ -1139,7 +1167,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
 
               if | isPreArch -> handleArchStmt scope bundle currBlock d gr (PB.targetEndCase blktO) pPair (Just (PPa.PatchPair blkRetO blkRetP))
                  | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair  (PPa.PatchPair blkRetO blkRetP)
-                 | Just pltSymbol <- isPLT -> handlePLTStub scope bundle currBlock d gr pPair (Just (PPa.PatchPair blkRetO blkRetP)) pltSymbol
+                 | Just stubSymbol <- isStub -> handleStub scope bundle currBlock d gr pPair (Just (PPa.PatchPair blkRetO blkRetP)) stubSymbol
                  | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
          (Nothing, Nothing) | PB.targetEndCase blktO == PB.targetEndCase blktP -> withSym $ \sym ->
@@ -1148,8 +1176,8 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
               -- we consider those cases here (having already assumed a specific
               -- block exit condition)
               case PB.targetEndCase blktO of
-                MCS.MacawBlockEndCall | Just pltSymbol <- isPLT ->
-                  handlePLTStub scope bundle currBlock d gr pPair Nothing pltSymbol
+                MCS.MacawBlockEndCall | Just stubSymbol <- isStub ->
+                  handleStub scope bundle currBlock d gr pPair Nothing stubSymbol
                 MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
                 MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
                 MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
@@ -1310,11 +1338,17 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
               , show pRetPair
               ]
 
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "pltstub" where
-  type TraceNodeType '(sym,arch) "pltstub" = (String, Bool)
-  prettyNode () (nm, True) = "Defined PLT stub call:" <+> PP.pretty nm
-  prettyNode () (nm, False) = "Undefined PLT stub call:" <+> PP.pretty nm
+data FnStubKind = DefinedFn | UndefinedFn | SkippedFn
+  deriving (Eq, Ord, Show)
 
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
+  type TraceNodeType '(sym,arch) "fnstub" = String
+  type TraceNodeLabel "fnstub" = FnStubKind
+  prettyNode DefinedFn nm = "Defined Function stub call:" <+> PP.pretty nm
+  prettyNode UndefinedFn nm = "Undefined Function stub call:" <+> PP.pretty nm
+  prettyNode SkippedFn _nm = "Skipped unnamed function"
+  
 -- | Mark the function that this entry belongs to as terminal, indicating
 --   that it might have no valid exits (i.e. if a terminal exit is the only
 --   return path for the function).
@@ -1328,7 +1362,7 @@ handleTerminalFunction node gr = do
   let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks node)
   return $ addTerminalNode gr (mkNodeReturn node fPair)
 
-handlePLTStub ::
+handleStub ::
   HasCallStack =>
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -1339,7 +1373,7 @@ handlePLTStub ::
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point, Nothing for tail calls -} ->
   BS.ByteString {- ^ PLT symbol name -} ->
   EquivM sym arch (PairGraph sym arch)
-handlePLTStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
+handleStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
     -- TODO: generalize a class of stubs which may abort
     -- and determine if any observable checks need to be considered
     -- (or any additional logic for if this abort is expected as a result
@@ -1351,21 +1385,27 @@ handlePLTStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
   -- TODO: is 'perror' the same as 'abort'?
   | stubSymbol == BSC.pack "perror" =  handleTerminalFunction currBlock gr0
   
-handlePLTStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym $ \sym -> do
+handleStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym $ \sym -> do
   PA.SomeValidArch archData <- asks envValidArch
-  ov <- case PA.lookupStubOverride archData stubSymbol of
+  mov <- case PA.lookupStubOverride archData stubSymbol of
+    _ | stubSymbol == skippedFnName -> do
+      emitTraceLabel @"fnstub" SkippedFn ""
+      return Nothing
     Just f -> do
-      emitTrace @"pltstub" (show stubSymbol,True)
+      emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
       traceBundle bundle ("Using override for PLT stub " ++ show stubSymbol)
-      return f
+      return $ Just f
     Nothing -> do
       -- we have no model for this stub, so we emit a warning and use
       -- the default (likely unsound) stub, defined by the architecture
       -- (usually writes a symbolic value to r0)
-      emitTrace @"pltstub" (show stubSymbol,False)
+      emitTraceLabel @"fnstub" UndefinedFn (show stubSymbol)
       emitWarning $ PEE.UnknownPLTStub stubSymbol
-      -- dummy override that does nothing
-      return $ PA.defaultStubOverride archData
+      return Nothing
+
+  let ov = case mov of
+        Just f -> f
+        Nothing -> PA.defaultStubOverride archData
   outputs <- liftIO $ PA.withStubOverride sym ov $ \f -> PPa.forBins $ \get -> do
     nextSt <- f (PS.simOutState (get (PS.simOut bundle)))
     return $ (get (PS.simOut bundle)) { PS.simOutState = nextSt }
@@ -1373,27 +1413,17 @@ handlePLTStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym
   case mpRetPair of
     Just pRetPair -> do
       parents <- asks envParentBlocks
-      case elem pRetPair parents of
-        True ->
-          -- already looking at this pair on this control path, so we treat
-          -- it like a jump to avoid a loop
-          handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
-        False -> do
-          -- otherwise, inline the next blocks
-          nextBundleSpec <- withFreshScope pRetPair $ \freshScope -> withValidInit freshScope pRetPair $ 
-            withSimBundle freshScope pRetPair $ \nextBundle -> do
-              -- NOTE: the validity assumptions established in this context
-              -- are thrown away, but should (in theory) be satisfied when
-              -- we instantiate the initial variables of this bundle to the output
-              -- of the previous step
-              return nextBundle
+      case (elem pRetPair parents, mov) of
+        (False, Just{}) -> do
+          --  inline the next blocks
           vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
-          (_, nextBundle) <- liftIO $ PS.bindSpec sym vars nextBundleSpec
-
-          -- NOTE: formally we would like to continue as if the bundle started in the
-          -- same place, it just managed to make more progress, so we
-          -- just use the same initial SimInput (i.e. pretending that we started from currBlock)
-          withPair pRetPair $ processBundle scope currBlock nextBundle d gr0
+          
+          withPair pRetPair $ withSimBundle vars (nodeBlocks currBlock) $ \nextBundle -> withPair (nodeBlocks currBlock) $ do
+            processBundle scope currBlock nextBundle d gr0
+        _ ->
+          -- for previously-accessed nodes or undefined stubs, we treat it
+          -- like a jump
+          handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
 
     Nothing ->
       handleReturn scope bundle' currBlock d gr0

@@ -177,11 +177,11 @@ findFunctionByName nm context = do
                                      , PB.functionSymbol = Nothing
                                      , PB.functionBinRepr = W4.knownRepr
                                      }
-           PD.resolveFunctionEntry fe pfm
+           Just <$> PD.resolveFunctionEntry fe pfm
         Nothing -> return Nothing
     Nothing -> do
       -- resolve the entry point and then see if we can find the function now
-      _ <- PD.resolveFunctionEntry (PMC.binEntry context) pfm
+      _ <- PD.parsedFunctionContaining (PB.functionEntryToConcreteBlock (PMC.binEntry context)) pfm        
       PD.findFunctionByName nm pfm
   
 -- | Verify equality of the given binaries.

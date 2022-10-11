@@ -183,7 +183,6 @@ loadSomeTree ::
   IO.ThreadId -> SomeTraceTree PA.ValidRepr -> IO Bool
 loadSomeTree tid topTraceTree = do
   viewSomeTraceTree topTraceTree (return False) $ \(PA.ValidRepr sym arch) (toptree :: TraceTree k) -> do
-      IO.putStrLn "Loaded tree"
       let st = ReplState
             { replNode = Some (TraceNode @"toplevel" () () toptree)
             , replTags = [Summary]
@@ -496,8 +495,12 @@ waitIO = do
   case t of
     NoTreeLoaded -> return ()
     WaitingForToplevel{} -> do
-      IO.putStrLn "Verifier is starting..."
-      IO.threadDelay 1000000 >> waitIO
+      IO.readIORef finalResult >>= \case
+        Just (Left msg) -> IO.putStrLn ("Error:\n" ++ msg) >> return ()
+        Just (Right{}) -> return ()
+        Nothing -> do
+          IO.putStrLn "Verifier is starting..."
+          IO.threadDelay 1000000 >> waitIO
     SomeReplState{} -> execReplM $ waitRepl 0
 
 wait :: IO ()

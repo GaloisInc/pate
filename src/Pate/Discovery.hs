@@ -31,6 +31,8 @@ import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO, MonadIO )
 import           System.IO as IO
+import qualified Data.IORef as IO
+import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
@@ -118,42 +120,64 @@ discoverPairs bundle = withSym $ \sym -> do
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
   subTree @"blocktarget" "Cached Pairs" $
     mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
-  
+
+
+  cache <- IO.liftIO $ IO.newIORef (Map.empty :: Map.Map (Some (PB.BlockTarget arch)) Bool)
+  let
+    -- quickly filter out unreachable block exits
+    checkSat :: forall bin. PB.KnownBinary bin => PB.BlockTarget arch bin -> EquivM sym arch Bool
+    checkSat blkt = do
+      cache' <- IO.liftIO $  IO.readIORef cache
+      case Map.lookup (Some blkt) cache' of
+        Just result -> return result
+        Nothing -> do
+          matches <- (matchesBlockTargetOne bundle blkt >>= PAS.toPred sym)
+          result <- goalSat "discoverPairs" matches $ \satRes -> case satRes of
+            WR.Sat{} -> return True
+            WR.Unsat{} -> return False
+            WR.Unknown{} -> throwHere PEE.InconclusiveSAT
+          IO.liftIO $ IO.modifyIORef cache (Map.insert (Some blkt) result)
+          return result
   result <-
     subTree @"blocktarget" "Discovered Pairs" $ 
     forM newCalls $ \blkts -> subTrace blkts $ startTimer $ do
       let emit r = (emitEvent (PE.DiscoverBlockPair blocks blkts r) >> emitTrace @"blocktargetresult" r)
-      matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
-      case WI.asConstantPred matches of
-        Just True -> do
-          emit PE.Reachable
-          return $ Just $ blkts
-        Just False -> do
-          emit PE.Unreachable
-          return $ Nothing
-        _ ->  do
-          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-          er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
-            case satRes of
-              WR.Sat _ -> do
-                emit PE.Reachable
-                return $ Just $ blkts
-              WR.Unsat _ -> do
-                emit PE.Unreachable
-                return Nothing
-              WR.Unknown -> do
-                emit PE.InconclusiveTarget
-                throwHere PEE.InconclusiveSAT
-          case er of
-            Left _err -> do
-              emit PE.InconclusiveTarget
-              throwHere PEE.InconclusiveSAT
-            Right r -> return r
+      (satO, satP) <- PPa.forBinsC $ \get -> checkSat (get blkts)
+      case (satO, satP) of
+        (False, _) -> return Nothing
+        (_, False) -> return Nothing
+        (True, True) -> do
+          matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
+          case WI.asConstantPred matches of
+            Just True -> do
+              emit PE.Reachable
+              return $ Just $ blkts
+            Just False -> do
+              emit PE.Unreachable
+              return $ Nothing
+            _ ->  do
+              goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+              er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
+                case satRes of
+                  WR.Sat _ -> do
+                    emit PE.Reachable
+                    return $ Just $ blkts
+                  WR.Unsat _ -> do
+                    emit PE.Unreachable
+                    return Nothing
+                  WR.Unknown -> do
+                    emit PE.InconclusiveTarget
+                    throwHere PEE.InconclusiveSAT
+              case er of
+                Left _err -> do
+                  emit PE.InconclusiveTarget
+                  throwHere PEE.InconclusiveSAT
+                Right r -> return r
   let resultSet = Set.fromList (catMaybes result)
   modifyBlockCache envExitPairsCache pPair Set.union resultSet
   return $ Set.toList (Set.union resultSet cachedTargets)
   where
-    pPair = PSS.simPair bundle
+  pPair = PSS.simPair bundle
 
 matchingExits ::
   forall sym arch v.
@@ -222,29 +246,37 @@ exactEquivalence inO inP = withSym $ \sym -> do
 
   liftIO $ WI.andPred sym regsEq memEq
 
+matchesBlockTargetOne ::
+  forall sym arch bin v.
+  PB.KnownBinary bin =>
+  SimBundle sym arch v ->
+  PB.BlockTarget arch bin ->
+  EquivM sym arch (PAS.AssumptionSet sym)
+matchesBlockTargetOne bundle blkt = withSym $ \sym -> do
+    -- true when the resulting IPs call the given block targets
+   let
+     regs = PSS.simOutRegs $ PPa.get @bin (PSS.simOut bundle)
+     ip = regs ^. MC.curIP
+     endCase = PSS.simOutBlockEnd $ PPa.get @bin (PSS.simOut bundle)
+     ret = MCS.blockEndReturn (Proxy @arch) endCase
+
+   callPtr <- concreteToLLVM (PB.targetCall blkt)
+   let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
+
+   targetRet <- targetReturnPtr blkt
+   eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
+   MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
+   let eqCase = PAS.exprBinding e1 e2
+   return $ eqCall <> eqRet <> eqCase
+  
+
 matchesBlockTarget ::
   forall sym arch v.
   SimBundle sym arch v ->
   PPa.PatchPair (PB.BlockTarget arch) ->
   EquivM sym arch (PAS.AssumptionSet sym)
-matchesBlockTarget bundle blktPair = withSym $ \sym -> do
-  -- true when the resulting IPs call the given block targets
-  PPa.catBins $ \get -> do
-    let
-      blkt = get blktPair
-      regs = PSS.simOutRegs $ get (PSS.simOut bundle)
-      ip = regs ^. MC.curIP
-      endCase = PSS.simOutBlockEnd $ get (PSS.simOut bundle)
-      ret = MCS.blockEndReturn (Proxy @arch) endCase
-
-    callPtr <- concreteToLLVM (PB.targetCall blkt)
-    let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
-
-    targetRet <- targetReturnPtr blkt
-    eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
-    MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
-    let eqCase = PAS.exprBinding e1 e2
-    return $ eqCall <> eqRet <> eqCase
+matchesBlockTarget bundle blktPair =
+  PPa.catBins $ \get -> matchesBlockTargetOne bundle (get blktPair)
 
 
 -- | Compute an 'PAS.AssumptionSet' that assumes the association between
@@ -265,7 +297,7 @@ associateFrames ::
   MCS.MacawBlockEndCase ->
   Bool ->
   EquivM sym arch (SimBundle sym arch v)
-associateFrames bundle exitCase isPLT = do
+associateFrames bundle exitCase isStub = do
   (asm :: PAS.AssumptionSet sym) <- PPa.catBins $ \get -> do
     let
       st_pre = PSS.simInState $ get $ simIn bundle
@@ -276,9 +308,9 @@ associateFrames bundle exitCase isPLT = do
     case exitCase of
       -- a backjump does not modify the frame
       MCS.MacawBlockEndJump -> return $ PAS.exprBinding frame_post frame_pre
-      -- PLT stubs are treated specially and do not create return nodes, so
+      -- Stubs are treated specially and do not create return nodes, so
       -- the pre and post frames are the same
-      MCS.MacawBlockEndCall | isPLT -> return $ PAS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndCall | isStub -> return $ PAS.exprBinding frame_post frame_pre
       -- For a function call the post-state frame is the frame for the
       -- target function, and so we represent that by asserting that it is
       -- equal to the value of the stack pointer at the call site
@@ -486,6 +518,7 @@ callTargets from next_ips ret = do
    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
    binCtx <- getBinCtx @bin
    let mem = MBL.memoryImage (PMC.binary binCtx)
+   let pfm = PMC.parsedFunctionMap binCtx
    fmap catMaybes $ forM next_ips $ \next -> do
      let nextMem = PA.addrToMemAddr next  
      case MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem) of
@@ -494,7 +527,8 @@ callTargets from next_ips ret = do
                                    , PB.functionSymbol = Nothing
                                    , PB.functionBinRepr = PC.knownRepr
                                    }
-         let pb = PB.functionEntryToConcreteBlock fe
+         fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
+         let pb = PB.functionEntryToConcreteBlock fe'
          return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
        Nothing -> do
          -- this isn't necessarily an error, since we always double check

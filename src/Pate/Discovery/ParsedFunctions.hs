@@ -309,12 +309,14 @@ resolveFunctionEntry ::
   (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
   PB.FunctionEntry arch bin ->
   ParsedFunctionMap arch bin ->
-  IO (Maybe (PB.FunctionEntry arch bin))
-resolveFunctionEntry fe pfm = do
-  let cb = PB.functionEntryToConcreteBlock fe
-  parsedFunctionContaining cb pfm >>= \case
-    Just (Some dfi) -> return $ Just $ funInfoToFunEntry PC.knownRepr dfi
-    Nothing -> return Nothing
+  IO (PB.FunctionEntry arch bin)
+resolveFunctionEntry fe _ | Just{} <- PB.functionSymbol fe = return fe
+resolveFunctionEntry fe (ParsedFunctionMap pfmRef _ _ _ _) = do
+  st <- IORef.readIORef pfmRef
+  let syms = MD.symbolNames (discoveryState st)
+  case Map.lookup (PB.functionSegAddr fe) syms of
+    Just nm -> return $ fe { PB.functionSymbol = Just nm }
+    Nothing -> return fe
 
 -- | Similar to 'parsedFunctionContaining', except that it constructs the
 -- 'ParsedBlocks' structure used in most of the verifier.
