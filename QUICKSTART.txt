@@ -1,0 +1,9 @@
+Building
+===========
+cd pate
+docker build . -t pate
+
+Running (with existing test binaries in pate/demo directory)
+===========
+cd pate
+docker run --rm -it -v `pwd`/demos:/demos pate -o /demos/challenge09/static/challenge09.original.exe -p /demos/challenge09/static/challenge09.patched.exe --original-bsi-hints /demos/challenge09/static/challenge09.json --patched-bsi-hints /demos/challenge09/static/challenge09.json -e ContinueAfterFailure --save-macaw-cfgs /demos/challenge09/static/CFGs/ -s "main"
