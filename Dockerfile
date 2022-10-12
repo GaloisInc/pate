@@ -85,9 +85,10 @@ RUN cabal v2-build lib:pate
 COPY ./arch /home/src/arch
 COPY ./tools /home/src/tools
 COPY ./*.ghci /home/src/
-COPY ./pate.sh ./home/src
 
 RUN cabal v2-build pate-repl-base
+
+COPY ./pate.sh /home/src/pate.sh
 
 ## FROM ubuntu:20.04
 

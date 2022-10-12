@@ -1,5 +1,6 @@
 Building
 ===========
+git submodule update --init
 cd pate
 docker build . -t pate
 
