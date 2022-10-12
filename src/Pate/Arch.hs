@@ -25,6 +25,7 @@ module Pate.Arch (
   RegisterDisplay(..),
   fromRegisterDisplay,
   StubOverride(..),
+  StateTransformer(..),
   ArchStubOverrides(..),
   mkMallocOverride,
   mkClockOverride,
@@ -33,7 +34,8 @@ module Pate.Arch (
   lookupStubOverride,
   defaultStubOverride,
   withStubOverride,
-  mergeLoaders
+  mergeLoaders,
+  idStubOverride
   ) where
 
 import           Control.Lens ( (&), (.~), (^.) )
@@ -193,6 +195,9 @@ mkStubOverride :: forall arch.
   (forall sym bin v.W4.IsSymExprBuilder sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
   StubOverride arch
 mkStubOverride f = StubOverride $ \sym _ -> return $ StateTransformer (\st -> f sym st)
+
+idStubOverride :: StubOverride arch
+idStubOverride = mkStubOverride $ \_ -> return
 
 withStubOverride ::
   LCB.IsSymInterface sym =>

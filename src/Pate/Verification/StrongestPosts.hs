@@ -27,6 +27,7 @@ import           GHC.Stack ( HasCallStack )
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM)
+import           Control.Monad.Identity ( runIdentity )
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks, local)
 import           Control.Monad.Except (catchError, throwError)
@@ -1213,38 +1214,78 @@ maybeUpdate gr f = f >>= \case
 skippedFnName :: BS.ByteString
 skippedFnName = BSC.pack "__pate_skipped"
 
--- | Return the name of a function if we want to replace its call with
---   stub semantics
 getFunctionStub ::
-  PB.BlockPair arch ->
+  forall sym arch bin.
+  PBi.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
   EquivM sym arch (Maybe BS.ByteString)
-getFunctionStub pPair@(PPa.PatchPair blkO blkP) = do
+getFunctionStub blk = do
   PA.SomeValidArch archData <- asks envValidArch
-  findPLTSymbol blkO blkP >>= \case
+  findPLTSymbol blk >>= \case
     Just nm -> return $ Just nm
-    Nothing | Just fnPair <- asFunctionPair pPair -> do
-      (mnm1, mnm2) <- PPa.forBinsC $ \get -> return $ PB.functionSymbol (get fnPair)
-      case (mnm1, mnm2) of
-        (Just nm1, Just nm2) | nm1 == nm2, Just{} <- PA.lookupStubOverride archData nm1 ->
-          return $ Just nm1
-        (Just nm1, Just nm2) | nm1 == nm2, Set.member nm1 abortStubs ->
-          return $ Just nm1
-        (Just nm1, Just nm2) | nm1 == nm2, isIgnoredBlock pPair ->
-          return $ Just nm1
-        (Nothing, Nothing) -> asks (PCfg.cfgIgnoreUnnamedFunctions . envConfig) >>= \case
-          True -> return $ Just "__pate_skipped"
+    Nothing | Just fnEntry <- PB.asFunctionEntry blk -> do
+      let mnm = PB.functionSymbol fnEntry
+      case mnm of
+        Just nm | Just{} <- PA.lookupStubOverride archData nm -> return $ Just nm
+        Just nm | Set.member nm abortStubs -> return $ Just nm
+        Just nm | PB.functionIgnored fnEntry -> return $ Just nm
+        Nothing | PB.functionIgnored fnEntry -> return $ Just skippedFnName
+        Nothing -> asks (PCfg.cfgIgnoreUnnamedFunctions . envConfig) >>= \case
+          True -> return $ Just skippedFnName
           False -> return Nothing
         _ -> return Nothing
     Nothing -> return Nothing
 
-isIgnoredBlock :: PPa.PatchPair (PB.ConcreteBlock arch) -> Bool
-isIgnoredBlock blks = case asFunctionPair blks of
-  Just fnPair -> PB.functionIgnored (PPa.pOriginal fnPair) && PB.functionIgnored (PPa.pPatched fnPair)
+type StubPair = PPa.PatchPair (Const (Maybe BS.ByteString))
+
+viewStubPair ::
+  StubPair ->
+  (Maybe BS.ByteString, Maybe BS.ByteString)
+viewStubPair (PPa.PatchPair (Const sO) (Const sP)) = (sO,sP)
+
+-- | Return the name of a function if we want to replace its call with
+--   stub semantics
+getFunctionStubPair ::
+  PB.BlockPair arch ->
+  EquivM sym arch StubPair
+getFunctionStubPair pPair = PPa.forBins $ \get -> do
+  msym <- getFunctionStub (get pPair)
+  return $ Const msym
+
+hasStub :: StubPair -> Bool
+hasStub stubPair = case viewStubPair stubPair of
+  (Just{}, _) -> True
+  (_, Just{}) -> True
+  _ -> False
+
+-- | True if either stub has an abort symbol
+hasTerminalStub :: StubPair -> Bool
+hasTerminalStub stubPair = case viewStubPair stubPair of
+  (Just nm, _) | isAbortStub nm -> True
+  (_, Just nm) | isAbortStub nm -> True
+  _ -> False
+ 
+bothTerminalStub :: StubPair -> Bool
+bothTerminalStub stubPair = case viewStubPair stubPair of
+  (Just nm1, Just nm2) | isAbortStub nm1 && isAbortStub nm2 -> True
+  _ -> False
+
+isIgnoredBlock :: PB.ConcreteBlock arch bin -> Bool
+isIgnoredBlock blk = case PB.asFunctionEntry blk of
+  Just fnEntry -> PB.functionIgnored fnEntry
   Nothing -> False
+
+{-
+isIgnoredBlockPair :: PPa.PatchPair (PB.ConcreteBlock arch) -> Bool
+isIgnoredBlockPair blks = isIgnoredBlock (PPa.pOriginal blks) (PPa.pPatched blks)
+-}
 
 -- FIXME: defined by the architecture?
 abortStubs :: Set.Set (BS.ByteString)
 abortStubs = Set.fromList $ map BSC.pack ["abort","err","perror","exit"]
+
+isAbortStub :: BS.ByteString -> Bool
+isAbortStub nm = Set.member nm abortStubs
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
@@ -1262,11 +1303,11 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
         blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
 
-     isStub <- getFunctionStub pPair
+     stubPair <- getFunctionStubPair pPair
      traceBundle bundle' ("  targetCall: " ++ show blkO)
      matches <- PD.matchesBlockTarget bundle' blkts
      maybeUpdate gr $ withSatAssumption matches $ do
-       bundle <- PD.associateFrames bundle' (PB.targetEndCase blktO) (isJust isStub)
+       bundle <- PD.associateFrames bundle' (PB.targetEndCase blktO) (hasStub stubPair)
        case (PB.targetReturn blktO, PB.targetReturn blktP) of
          (Just blkRetO, Just blkRetP) ->
            do traceBundle bundle ("  Return target " ++ show blkRetO ++ ", " ++ show blkRetP)
@@ -1280,7 +1321,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
 
               if | isPreArch -> handleArchStmt scope bundle currBlock d gr (PB.targetEndCase blktO) pPair (Just (PPa.PatchPair blkRetO blkRetP))
                  | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair  (PPa.PatchPair blkRetO blkRetP)
-                 | Just stubSymbol <- isStub -> handleStub scope bundle currBlock d gr pPair (Just (PPa.PatchPair blkRetO blkRetP)) stubSymbol
+                 | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just (PPa.PatchPair blkRetO blkRetP)) stubPair
                  | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
          (Nothing, Nothing) | PB.targetEndCase blktO == PB.targetEndCase blktP -> withSym $ \sym ->
@@ -1289,8 +1330,8 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
               -- we consider those cases here (having already assumed a specific
               -- block exit condition)
               case PB.targetEndCase blktO of
-                MCS.MacawBlockEndCall | Just stubSymbol <- isStub ->
-                  handleStub scope bundle currBlock d gr pPair Nothing stubSymbol
+                MCS.MacawBlockEndCall | hasStub stubPair ->
+                  handleStub scope bundle currBlock d gr pPair Nothing stubPair
                 MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
                 MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
                 MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
@@ -1298,6 +1339,28 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
          _ -> do traceBundle bundle "BlockExitMismatch"
                  throwHere $ PEE.BlockExitMismatch
 
+findPLTSymbol ::
+  forall sym arch bin.
+  PBi.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (Maybe BS.ByteString)
+findPLTSymbol blk = do
+  PA.SomeValidArch archData <- asks envValidArch
+  let
+    extraMapPair = PPa.PatchPair (Const (PA.validArchOrigExtraSymbols archData)) (Const (PA.validArchPatchedExtraSymbols archData))
+    Const extraMap = PPa.get @bin extraMapPair
+    addr = PAd.addrToMemAddr (PB.concreteAddress blk)
+  case (MM.asAbsoluteAddr addr) of
+    Just mw -> do
+      let syms = [ s | (s,bv) <- Map.toList extraMap
+                 , BV.asUnsigned bv == toInteger (MM.memWordValue mw)
+                 ]
+      case syms of
+        [sym] -> return (Just sym)
+        _ -> return Nothing
+    _ -> return Nothing
+
+{-
 -- | See if the given jump targets correspond to a PLT stub for
 --   the same symbol, and return it if so.
 findPLTSymbol ::
@@ -1329,6 +1392,7 @@ findPLTSymbol blkO blkP =
            _ -> return Nothing
 
        _ -> return  Nothing
+-}
 
 -- TODO: This is a bit tricky because it might involve architecture-specific
 -- reasoning
@@ -1476,6 +1540,91 @@ handleTerminalFunction node gr = do
   let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks node)
   return $ addTerminalNode gr (mkNodeReturn node fPair)
 
+getStubOverrideOne ::
+  PB.ConcreteBlock arch bin ->
+  Maybe BS.ByteString ->
+  EquivM sym arch (Maybe (PA.StubOverride arch))
+getStubOverrideOne blk mstubSymbol = do
+  PA.SomeValidArch archData <- asks envValidArch
+  case mstubSymbol of       
+    Just stubSymbol | stubSymbol == skippedFnName -> do
+      emitTraceLabel @"fnstub" SkippedFn ""
+      return Nothing
+    Just stubSymbol | isIgnoredBlock blk -> do
+      emitTraceLabel @"fnstub" IgnoredFn (show stubSymbol)
+      return Nothing
+    Just stubSymbol | Just f <- PA.lookupStubOverride archData stubSymbol -> do
+      emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
+      return $ Just f
+    Nothing | isIgnoredBlock blk -> do
+      emitTraceLabel @"fnstub" IgnoredFn (show skippedFnName)
+      return $ Nothing
+    Nothing -> return Nothing
+      
+combineOverrides ::
+  PA.ValidArchData arch ->
+  PA.StubOverride arch ->
+  PA.StubOverride arch ->
+  PA.StubOverride arch
+combineOverrides validArch (PA.StubOverride f1) (PA.StubOverride f2) = PA.StubOverride $ \sym wsolver -> do
+  f1' <- f1 sym wsolver
+  f2' <- f2 sym wsolver
+  let fnPair = PPa.PatchPair (Const f1') (Const f2')
+  return $ PA.StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
+    let Const (PA.StateTransformer fn) = PPa.get @bin fnPair
+    fn st
+
+-- We need to make sure that we only "merge" stubs
+-- if we have mismatched stubs, otherwise we will
+-- break the stub semantics
+mergeStubOverrides ::
+  PA.ValidArchData arch ->
+  StubPair ->
+  PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) ->
+  EquivM sym arch (PA.StubOverride arch)
+mergeStubOverrides validArch
+  (PPa.PatchPair (Const sym1) (Const sym2))
+  (PPa.PatchPair (Const mov1) (Const mov2)) = do
+  PA.SomeValidArch archData <- asks envValidArch
+  let ov1 = case (sym1, mov1) of
+        (Just{}, Just ov1) -> ov1
+        (Just{}, Nothing) -> PA.defaultStubOverride validArch
+        (Nothing,_) -> PA.idStubOverride
+  let ov2 = case (sym2, mov2) of
+        (Just{}, Just ov2) -> ov2
+        (Just{}, Nothing) -> PA.defaultStubOverride validArch
+        (Nothing,_) -> PA.idStubOverride
+
+  case (sym1,sym2) of
+    (Just nm1, Just nm2) | nm1 == nm2 -> return ov1
+    _ -> return $ combineOverrides archData ov1 ov2 
+
+bothDefinedOverrides ::
+  PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) -> Bool
+bothDefinedOverrides (PPa.PatchPair (Const (Just{})) (Const (Just{}))) = True
+bothDefinedOverrides _ = False
+
+transportStub ::
+  StubPair ->
+  NodeEntry arch ->
+  PPa.PatchPair (PB.ConcreteBlock arch) {- ^ jump target -} ->
+  PPa.PatchPair (PB.ConcreteBlock arch){- ^ return target -} ->
+  NodeEntry arch
+transportStub stubs currBlock pPair pRetPair = runIdentity $ do
+  blks <- PPa.forBins $ \get -> do
+    case get stubs of
+      -- for an abort stub, we should jump back to the entry point
+      -- that caused this
+      -- FIXME: this is an approximation that allows us to
+      -- continue in the case of divergent control flow,
+      -- but is not exactly semantically correct
+      Const (Just nm) | isAbortStub nm -> return $ get (nodeBlocks currBlock)
+      -- for a normal stub, jump to the return
+      Const (Just nm) ->  return $ get pRetPair
+      -- otherwise, jump to the actual target
+      Const Nothing -> return $ get pPair
+  return $ mkNodeEntry currBlock blks
+
 handleStub ::
   HasCallStack =>
   PS.SimScope sym arch v ->
@@ -1485,62 +1634,42 @@ handleStub ::
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point, Nothing for tail calls -} ->
-  BS.ByteString {- ^ PLT symbol name -} ->
+  StubPair {- ^ stub names -} ->
   EquivM sym arch (PairGraph sym arch)
-handleStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
-    -- TODO: generalize a class of stubs which may abort
-    -- and determine if any observable checks need to be considered
-    -- (or any additional logic for if this abort is expected as a result
-    -- of a patch removing bad behavior)
-    --
-  | Set.member stubSymbol abortStubs = handleTerminalFunction currBlock gr0
-  
-handleStub scope bundle currBlock d gr0 pPair mpRetPair stubSymbol = withSym $ \sym -> do
-  PA.SomeValidArch archData <- asks envValidArch
-  mov <- case PA.lookupStubOverride archData stubSymbol of
-    _ | stubSymbol == skippedFnName -> do
-      emitTraceLabel @"fnstub" SkippedFn ""
-      return Nothing
-    _ | isIgnoredBlock pPair -> do
-      emitTraceLabel @"fnstub" IgnoredFn (show stubSymbol)
-      return Nothing
-    Just f -> do
-      emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
-      traceBundle bundle ("Using override for PLT stub " ++ show stubSymbol)
-      return $ Just f
-    Nothing -> do
-      -- we have no model for this stub, so we emit a warning and use
-      -- the default (likely unsound) stub, defined by the architecture
-      -- (usually writes a symbolic value to r0)
-      emitTraceLabel @"fnstub" UndefinedFn (show stubSymbol)
-      emitWarning $ PEE.UnknownPLTStub stubSymbol
-      return Nothing
+handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \sym -> do
+  gr0 <- case hasTerminalStub stubPair of
+    True -> handleTerminalFunction currBlock gr0_
+    False -> return gr0_
+  case bothTerminalStub stubPair of
+    True -> return gr0
+    False -> do  
+      PA.SomeValidArch archData <- asks envValidArch
+      ovPair <- PPa.forBins $ \get -> Const <$> getStubOverrideOne (get pPair) (getConst (get stubPair))
+      ov <- mergeStubOverrides archData stubPair ovPair
+      wsolver <- getWrappedSolver
 
-  let ov = case mov of
-        Just f -> f
-        Nothing -> PA.defaultStubOverride archData
-  wsolver <- getWrappedSolver
-  outputs <- catchInIO $ PA.withStubOverride sym wsolver ov $ \f -> PPa.forBins $ \get -> do
-    nextSt <- f (PS.simOutState (get (PS.simOut bundle)))
-    return $ (get (PS.simOut bundle)) { PS.simOutState = nextSt }
-  let bundle' = bundle { PS.simOut = outputs }
-  case mpRetPair of
-    Just pRetPair -> do
-      parents <- asks envParentBlocks
-      case (elem pRetPair parents, mov) of
-        (False, Just{}) -> do
-          --  inline the next blocks
-          vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
-          
-          withPair pRetPair $ withSimBundle vars (nodeBlocks currBlock) $ \nextBundle -> withPair (nodeBlocks currBlock) $ do
-            processBundle scope currBlock nextBundle d gr0
-        _ ->
-          -- for previously-accessed nodes or undefined stubs, we treat it
-          -- like a jump
-          handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
+      outputs <- catchInIO $ PA.withStubOverride sym wsolver ov $ \f -> PPa.forBins $ \get -> do
+        nextSt <- f (PS.simOutState (get (PS.simOut bundle)))
+        return $ (get (PS.simOut bundle)) { PS.simOutState = nextSt }
+      let bundle' = bundle { PS.simOut = outputs }
+      case mpRetPair of
+        Just pRetPair -> do
+          parents <- asks envParentBlocks
+          case (elem pRetPair parents) of
+            False | bothDefinedOverrides ovPair -> do
+              --  inline the next blocks
+              vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
 
-    Nothing ->
-      handleReturn scope bundle' currBlock d gr0
+              withPair pRetPair $ withSimBundle vars (nodeBlocks currBlock) $ \nextBundle -> withPair (nodeBlocks currBlock) $ do
+                processBundle scope currBlock nextBundle d gr0
+            _ -> do
+              -- for previously-accessed nodes or undefined stubs, we treat it
+              -- like a jump
+              let tgt = transportStub stubPair currBlock pPair pRetPair
+              handleJump scope bundle' currBlock d gr0 tgt
+        -- unclear what to do here?
+        Nothing ->
+          handleReturn scope bundle' currBlock d gr0
 
 handleReturn ::
   PS.SimScope sym arch v ->
