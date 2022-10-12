@@ -6,4 +6,80 @@ docker build . -t pate
 Running (with existing test binaries in pate/demo directory)
 ===========
 cd pate
-docker run --rm -it -v `pwd`/demos:/demos pate -o /demos/challenge09/static/challenge09.original.exe -p /demos/challenge09/static/challenge09.patched.exe --original-bsi-hints /demos/challenge09/static/challenge09.json --patched-bsi-hints /demos/challenge09/static/challenge09.json -e ContinueAfterFailure --save-macaw-cfgs /demos/challenge09/static/CFGs/ -s "main"
+docker run --rm -it -v `pwd`/demos:/demos pate \
+    -o /demos/challenge09/static/challenge09.original.exe \
+    -p /demos/challenge09/static/challenge09.patched.exe \
+    --original-bsi-hints /demos/challenge09/static/challenge09.json \
+    --patched-bsi-hints /demos/challenge09/static/challenge09.json \
+    -e ContinueAfterFailure \
+    --save-macaw-cfgs /demos/challenge09/static/CFGs/ \
+    -s "main" \
+    -b /demos/challenge09/static/challenge09.toml
+
+Verifier Interaction
+==============
+At the toplevel there is a list of block entry points that have been analyzed.
+This includes: function entries, intermediate blocks within functions and
+function returns.
+
+Entry points may appear multiple times as a result of re-analysis due to
+additional equivalence information (i.e. propagating relaxed equivalence
+assumptions).
+
+Selecting an entry point will provide additional detail about its analysis.
+Most significantly a function call or intermediate block will provide a
+list of all possible exits, which can be individually inspected.
+
+Each entry point is associated with an equivalence domain: a set of
+locations (registers, stack slots and memory addresses) that are
+potentially not equal at this point. Locations outside of this set have been proven
+to be equal (ignoring skipped functions).
+
+The analysis takes the equivalence domain of an entry point and computes
+an equivalence domain for each possible exit point (according to the
+semantics of the block).
+
+Differences between the two binaries may be reported into two ways:
+  * Observable trace differences
+      - library calls or writes to distinguished memory regions
+        which have different contents or occur in different orders
+  * Control flow divergence
+      - Significant divergence in control flow between the programs
+        (i.e. one program returns while the other calls a function)
+    
+Icons
+======================
+Menu items may be annotated with icons to indicate some exceptional
+status during analysis.
+
+! - a warning was raised, indicating an additional assumption was needed
+x - an error was raised, indicating an unexpected situation that required recovery
+* - this item is still processing, results may be incomplete if inspected
+
+Commands
+==============
+wait -- poll for results
+[0-9]+ -- select a menu item (descend into subtree)
+up -- go to parent (ascend from subtree)
+status -- print status of current node (i.e. if finished, any warnings or errors)
+full_status -- as above, but don't truncate long messages
+ls -- print contents of current level 
+top -- go to toplevel (i.e. go back to list of block entry points)
+stop -- kill the verifier process (session remains active, but without further results)
+goto_err -- go to the latest child node that raised an error
+next -- select the highest-numbered menu item
+showTag "<tag>" -- mark a tag category as visible (shows more trace data for debugging)
+
+Ctrl-D -- exit
+
+Advanced
+===============
+The interactive console is an active GHCI session. Any haskell expression
+can therefore be evaluated at the prompt (the above commands are simply
+IO functions that have been loaded).
+
+When evaluating expressions, the functions 'this' and 'fetch' may
+be used with template haskell to access the contents of the tree.
+For example, at the toplevel '$(fetch 3)' will evaluate to the
+'GraphNode' value for the third item in the result list (if it is available).
+
