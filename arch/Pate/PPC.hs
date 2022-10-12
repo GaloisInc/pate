@@ -62,6 +62,7 @@ import qualified SemMC.Architecture.PPC as SP
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
+import qualified Pate.Block as PBl
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -259,6 +260,7 @@ archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
+                                 , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
                                  }
       in Right (Some (PA.SomeValidArch vad))
     (EEP.EM_PPC64, _) ->
@@ -269,6 +271,7 @@ archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
+                                 , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
                                  }
       in Right (Some (PA.SomeValidArch vad))
 

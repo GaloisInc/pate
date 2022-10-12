@@ -113,6 +113,7 @@ data InnerEquivalenceError arch
   | OrphanedFunctionReturns
   | MissingDomainForBlock (PB.BlockPair arch)
   | MissingDomainForFun (PB.FunPair arch)
+  | SkippedInequivalentBlocks (PB.BlockPair arch)
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of

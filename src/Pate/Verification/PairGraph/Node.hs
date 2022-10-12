@@ -14,6 +14,7 @@ module Pate.Verification.PairGraph.Node (
   , NodeReturn
   , CallingContext
   , graphNodeCases
+  , graphNodeBlocks
   , mkNodeEntry
   , addContext
   , mkNodeReturn
@@ -54,6 +55,10 @@ data NodeEntry arch =
 data NodeReturn arch =
   NodeReturn { returnNodeContext :: CallingContext arch, nodeFuns :: PB.FunPair arch }
   deriving (Eq, Ord)
+
+graphNodeBlocks :: GraphNode arch -> PB.BlockPair arch
+graphNodeBlocks (GraphNode ne) = nodeBlocks ne
+graphNodeBlocks (ReturnNode ret) = TF.fmapF PB.functionEntryToConcreteBlock (nodeFuns ret)
 
 graphNodeCases :: GraphNode arch -> Either (PB.BlockPair arch) (PB.FunPair arch)
 graphNodeCases (GraphNode (NodeEntry _ blks)) = Left blks
@@ -118,7 +123,11 @@ instance PA.ValidArch arch => Show (GraphNode arch) where
 
 instance PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
   type TraceNodeType '(sym, arch) "node" = GraphNode arch
-  prettyNode () = pretty
+  prettyNode () nd = case nd of
+    GraphNode e -> case functionEntryOf e == e of
+      True -> "Function Entry" <+> pretty e
+      False -> pretty e
+    ReturnNode ret -> "Return" <+> pretty ret
 
 instance PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
   type TraceNodeType '(sym, arch) "entrynode" = NodeEntry arch

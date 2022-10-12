@@ -75,6 +75,7 @@ import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
+import qualified Pate.Block as PBl
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
@@ -499,7 +500,7 @@ domainValsToAbsState ::
   forall sym arch bin.
   PA.ValidArch arch =>
   AbstractDomainVals sym arch bin ->
-  PD.AbsStateOverride arch
+  PBl.AbsStateOverride arch
 domainValsToAbsState d =
   MapF.mapMaybeWithKey  (\r _ ->
     let

@@ -55,11 +55,15 @@ collectFunctions (fnSpecs, errs) v =
     JSON.Object o
       | Just (JSON.Number fnAddrS) <- HMS.lookup (T.pack "address") o
       , Just fnAddr <- DS.toBoundedInteger fnAddrS
-      , Just (JSON.String fnName) <- HMS.lookup (T.pack "source_match") o ->
-        let fd = PH.FunctionDescriptor { PH.functionSymbol = fnName
-                                       , PH.functionAddress = fnAddr
-                                       , PH.functionArguments = []
-                                       }
+      , Just fnSrc <- HMS.lookup (T.pack "source_match") o ->
+        let
+          fnName = case fnSrc of
+            (JSON.String fnName') -> fnName'
+            _ -> (T.pack $ "_MISSING_" ++ (show (fnAddr)))
+          fd = PH.FunctionDescriptor { PH.functionSymbol = fnName
+                                     , PH.functionAddress = fnAddr
+                                     , PH.functionArguments = []
+                                     }
         in ((fnName, fd) : fnSpecs, errs)
     JSON.Object o | Just _ <- HMS.lookup (T.pack "source_match") o ->
       (fnSpecs, errs)

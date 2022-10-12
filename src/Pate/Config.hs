@@ -258,6 +258,9 @@ data VerificationConfig validRepr =
     -- ^ flag to control if "orphaned" graph edges should be added back in
     , cfgCheckSimplifier :: Bool
     , cfgIgnoreUnnamedFunctions :: Bool
+    , cfgIgnoreDivergedControlFlow :: Bool
+    -- ^ unless blocks are explicitly marked as expected to be equal, avoid
+    --   traversing graph edges with diverging control flow
     }
 
 
@@ -277,4 +280,5 @@ defaultVerificationCfg =
                      , cfgAddOrphanEdges = True
                      , cfgCheckSimplifier = False
                      , cfgIgnoreUnnamedFunctions = True
+                     , cfgIgnoreDivergedControlFlow = True
                      }

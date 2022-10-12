@@ -242,7 +242,7 @@ rerun = do
 
 printPretty :: PP.Doc PPRT.AnsiStyle -> ReplM_ sym arch ()
 printPretty p = do
-  let s = PP.layoutPretty PP.defaultLayoutOptions p
+  let s = PP.layoutPretty (PP.defaultLayoutOptions { PP.layoutPageWidth = PP.AvailablePerLine 120 1.0 }) p
   IO.liftIO $ PPRT.renderIO IO.stdout s  
 
 printPrettyLn :: PP.Doc PPRT.AnsiStyle -> ReplM_ sym arch ()
@@ -358,18 +358,22 @@ top = execReplM $ do
       modify $ \st -> st { replPrev = [] }
   ls'
 
-status :: IO ()
-status = do
+status' :: Maybe Int -> IO ()
+status' mlimit = do
   tr <- IO.readIORef ref
   case tr of
     NoTreeLoaded -> IO.putStrLn "No tree loaded"
-    WaitingForToplevel{} -> IO.putStrLn "Waiting for verifier..."
+    WaitingForToplevel{} -> do
+      fin <- IO.liftIO $ IO.readIORef finalResult
+      case fin of
+        Just r -> IO.putStrLn (show r)
+        _ -> IO.putStrLn "Waiting for verifier..."
     SomeReplState {} -> execReplM $ do
       (Some (TraceNode _ _ t))  <- gets replNode
       st <- IO.liftIO $ getTreeStatus t
       case st of
-        NodeStatus (StatusWarning e) _ -> IO.liftIO $  IO.putStrLn $ "Warning: \n" ++ (show e)
-        NodeStatus (StatusError e) _ ->  IO.liftIO $  IO.putStrLn $ "Error: \n" ++ (show e)
+        NodeStatus (StatusWarning e) _ -> IO.liftIO $  IO.putStrLn $ "Warning: \n" ++ (chopMsg mlimit (show e))
+        NodeStatus (StatusError e) _ ->  IO.liftIO $  IO.putStrLn $ "Error: \n" ++ (chopMsg mlimit (show e))
         NodeStatus StatusSuccess False ->  IO.liftIO $ IO.putStrLn $ "In progress.."
         NodeStatus StatusSuccess True -> IO.liftIO $ IO.putStrLn "Finalized"
       prevNodes <- gets replPrev
@@ -377,6 +381,16 @@ status = do
       case (prevNodes, fin) of
         ([], Just r) -> printPrettyLn (PP.viaShow r)
         _ -> return ()
+
+full_status :: IO ()
+full_status = status' Nothing
+
+status :: IO ()
+status = status' (Just 2000)
+
+chopMsg :: Maybe Int -> String -> String
+chopMsg Nothing msg = msg
+chopMsg (Just limit) msg = take limit msg
 
 showTag :: TraceTag -> IO ()
 showTag tag = execReplM $ do
@@ -428,6 +442,12 @@ goto_err' = do
 
 goto_err :: IO ()
 goto_err = execReplM (goto_err' >> ls')
+
+next :: IO ()
+next = execReplM $ do
+  nextNodes <- gets replNext
+  goto' (length nextNodes - 1)
+  return ()
 
 goto_node' :: TraceNode sym arch nm -> ReplM sym arch ()
 goto_node' nextNode = do
@@ -497,7 +517,7 @@ waitIO = do
     WaitingForToplevel{} -> do
       IO.readIORef finalResult >>= \case
         Just (Left msg) -> IO.putStrLn ("Error:\n" ++ msg) >> return ()
-        Just (Right{}) -> return ()
+        Just (Right r) -> IO.putStrLn (show r)
         Nothing -> do
           IO.putStrLn "Verifier is starting..."
           IO.threadDelay 1000000 >> waitIO

@@ -108,8 +108,25 @@ discoverPairs bundle = withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty
-  blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
-  blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
+  cache <- IO.liftIO $ IO.newIORef (Map.empty :: Map.Map (Some (PB.BlockTarget arch)) Bool)
+  let
+    -- quickly filter out unreachable block exits
+    checkSat :: forall bin. PB.KnownBinary bin => PB.BlockTarget arch bin -> EquivM_ sym arch Bool
+    checkSat blkt = do
+      matches <- (matchesBlockTargetOne bundle blkt >>= PAS.toPred sym)
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      result <- isPredSat' goalTimeout matches >>= \case
+        Just True -> return True
+        Just False -> return False
+        Nothing -> throwHere PEE.InconclusiveSAT
+      IO.liftIO $ IO.modifyIORef cache (Map.insert (Some blkt) result)
+      return result
+          
+  blksO' <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
+  blksO <- CMR.filterM checkSat blksO'
+  
+  blksP' <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
+  blksP <- CMR.filterM checkSat blksP'
 
   let
     allCalls = [ PPa.PatchPair blkO blkP
@@ -122,57 +139,37 @@ discoverPairs bundle = withSym $ \sym -> do
     mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
 
 
-  cache <- IO.liftIO $ IO.newIORef (Map.empty :: Map.Map (Some (PB.BlockTarget arch)) Bool)
-  let
-    -- quickly filter out unreachable block exits
-    checkSat :: forall bin. PB.KnownBinary bin => PB.BlockTarget arch bin -> EquivM sym arch Bool
-    checkSat blkt = do
-      cache' <- IO.liftIO $  IO.readIORef cache
-      case Map.lookup (Some blkt) cache' of
-        Just result -> return result
-        Nothing -> do
-          matches <- (matchesBlockTargetOne bundle blkt >>= PAS.toPred sym)
-          result <- goalSat "discoverPairs" matches $ \satRes -> case satRes of
-            WR.Sat{} -> return True
-            WR.Unsat{} -> return False
-            WR.Unknown{} -> throwHere PEE.InconclusiveSAT
-          IO.liftIO $ IO.modifyIORef cache (Map.insert (Some blkt) result)
-          return result
+
   result <-
     subTree @"blocktarget" "Discovered Pairs" $ 
     forM newCalls $ \blkts -> subTrace blkts $ startTimer $ do
       let emit r = (emitEvent (PE.DiscoverBlockPair blocks blkts r) >> emitTrace @"blocktargetresult" r)
-      (satO, satP) <- PPa.forBinsC $ \get -> checkSat (get blkts)
-      case (satO, satP) of
-        (False, _) -> return Nothing
-        (_, False) -> return Nothing
-        (True, True) -> do
-          matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
-          case WI.asConstantPred matches of
-            Just True -> do
-              emit PE.Reachable
-              return $ Just $ blkts
-            Just False -> do
-              emit PE.Unreachable
-              return $ Nothing
-            _ ->  do
-              goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-              er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
-                case satRes of
-                  WR.Sat _ -> do
-                    emit PE.Reachable
-                    return $ Just $ blkts
-                  WR.Unsat _ -> do
-                    emit PE.Unreachable
-                    return Nothing
-                  WR.Unknown -> do
-                    emit PE.InconclusiveTarget
-                    throwHere PEE.InconclusiveSAT
-              case er of
-                Left _err -> do
-                  emit PE.InconclusiveTarget
-                  throwHere PEE.InconclusiveSAT
-                Right r -> return r
+      matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
+      case WI.asConstantPred matches of
+        Just True -> do
+          emit PE.Reachable
+          return $ Just $ blkts
+        Just False -> do
+          emit PE.Unreachable
+          return $ Nothing
+        _ ->  do
+          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+          er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
+            case satRes of
+              WR.Sat _ -> do
+                emit PE.Reachable
+                return $ Just $ blkts
+              WR.Unsat _ -> do
+                emit PE.Unreachable
+                return Nothing
+              WR.Unknown -> do
+                emit PE.InconclusiveTarget
+                throwHere PEE.InconclusiveSAT
+          case er of
+            Left _err -> do
+              emit PE.InconclusiveTarget
+              throwHere PEE.InconclusiveSAT
+            Right r -> return r
   let resultSet = Set.fromList (catMaybes result)
   modifyBlockCache envExitPairsCache pPair Set.union resultSet
   return $ Set.toList (Set.union resultSet cachedTargets)
@@ -526,6 +523,7 @@ callTargets from next_ips ret = do
          let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
                                    , PB.functionSymbol = Nothing
                                    , PB.functionBinRepr = PC.knownRepr
+                                   , PB.functionIgnored = False
                                    }
          fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
          let pb = PB.functionEntryToConcreteBlock fe'
@@ -626,6 +624,7 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
   let startEntry' = PB.FunctionEntry { PB.functionSegAddr = startEntry
                                      , PB.functionSymbol = Nothing
                                      , PB.functionBinRepr = repr
+                                     , PB.functionIgnored = False
                                      }
   let abortFnEntry = do
         fnDesc <- lookup abortFnName (PH.functionEntries hints)
@@ -633,6 +632,7 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
         return PB.FunctionEntry { PB.functionSegAddr = abortFnAddr
                                 , PB.functionSymbol = Just (TE.encodeUtf8 abortFnName)
                                 , PB.functionBinRepr = repr
+                                , PB.functionIgnored = False
                                 }
 
   let symTab = buildSymbolTable hints extraSyms

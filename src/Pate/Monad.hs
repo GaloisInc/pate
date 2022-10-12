@@ -63,6 +63,7 @@ module Pate.Monad
   , goalSat
   , heuristicSat
   , isPredSat
+  , isPredSat'
   , isPredTrue'
   , concretePred
   -- working under a 'SimSpec' context
@@ -93,6 +94,8 @@ module Pate.Monad
   , withSubTraces
   , subTrace
   , subTree
+  , getWrappedSolver
+  , catchInIO
   )
   where
 
@@ -105,13 +108,17 @@ import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try, finally )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
+import           Control.Monad.Reader ( asks )
 import           Control.Monad.Except
+
 
 import qualified Control.Concurrent.MVar as IO
 
+import           Data.Maybe ( fromMaybe )
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
+import qualified Data.IORef as IO
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Kind ( Type )
@@ -123,6 +130,7 @@ import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
@@ -500,7 +508,47 @@ withFreshVars blocks f = do
       W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
-  
+
+-- should we clear this between nodes?
+withFreshSatCache ::
+  EquivM_ sym arch f ->
+  EquivM sym arch f
+withFreshSatCache f = do
+  unsatCacheRef <- asks envUnsatCacheRef
+  unsatCache <- liftIO $ IO.readIORef unsatCacheRef
+  satCache <- asks envSatCacheRef
+  -- preserve any known unsat results
+  freshUnsatCacheRef <- liftIO $ IO.newIORef unsatCache
+  -- discard any known sat results
+  freshSatCacheRef <- liftIO $ IO.newIORef SetF.empty
+  result <- CMR.local (\env -> env { envUnsatCacheRef = freshUnsatCacheRef, envSatCacheRef = freshSatCacheRef }) f
+  -- preserve learned sat results
+  newSatResults <- liftIO $ IO.readIORef freshSatCacheRef
+  liftIO $ IO.modifyIORef satCache (SetF.union newSatResults)
+  return result
+
+markPredSat ::
+  W4.Pred sym ->
+  EquivM sym arch ()
+markPredSat p = do
+  satCache <- asks envSatCacheRef
+  liftIO $ IO.modifyIORef satCache (SetF.insert p)
+
+markPredUnsat ::
+  W4.Pred sym ->
+  EquivM sym arch ()
+markPredUnsat p = do
+  unsatCache <- asks envUnsatCacheRef
+  liftIO $ IO.modifyIORef unsatCache (SetF.insert p)
+
+-- | Mark the result as sat or unsat as appropriate
+processSatResult ::
+  W4.Pred sym ->
+  W4R.SatResult a b ->
+  EquivM sym arch ()
+processSatResult p r =
+  void $ W4R.traverseSatResult (\a -> markPredSat p >> return a) (\b -> markPredUnsat p >> return b) r
+
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
@@ -513,14 +561,15 @@ withAssumptionSet asm f = withSym $ \sym -> do
   p <- liftIO $ PAS.toPred sym asm
   case PAS.isAssumedPred curAsm p of
     True -> f
-    _ -> CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
-      (frame, st) <- withOnlineBackend $ \bak ->  do
-        st <- liftIO $ LCB.saveAssumptionState bak
-        frame <- liftIO $ LCB.pushAssumptionFrame bak
-        safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
-          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-        return (frame, st)
-      (validateAssumptions curAsm asm >> f) `finally` safePop frame st
+    _ ->
+        CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
+        (frame, st) <- withOnlineBackend $ \bak ->  do
+          st <- liftIO $ LCB.saveAssumptionState bak
+          frame <- liftIO $ LCB.pushAssumptionFrame bak
+          safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
+            LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+          return (frame, st)
+        (validateAssumptions curAsm asm >> withFreshSatCache f) `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -589,7 +638,7 @@ withSatAssumption asm f = withSym $ \sym -> do
   case W4.asConstantPred p of
     Just False -> return Nothing
     Just True -> Just <$> f
-    _ -> do
+    _ ->  do
       curAsm <- currentAsm
       CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
         mst <- withOnlineBackend $ \bak -> do
@@ -603,7 +652,7 @@ withSatAssumption asm f = withSym $ \sym -> do
         case mst of
           Just (frame, st) ->
             (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
-              W4R.Sat{} -> Just <$> f
+              W4R.Sat{} -> Just <$> (withFreshSatCache f)
               -- on an inconclusive result we can't safely return 'Nothing' since
               -- that may unsoundly exclude viable paths
               W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
@@ -633,10 +682,13 @@ goalSat ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
 goalSat desc p k = do
-  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  checkSatisfiableWithModel goalTimeout desc p k >>= \case
-    Left _err -> k W4R.Unknown
-    Right a -> return a
+  isPredSat_cache p >>= \case
+    Just False -> k (W4R.Unsat ())
+    _ -> do
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      checkSatisfiableWithModel goalTimeout desc p k >>= \case
+        Left _err -> k W4R.Unknown
+        Right a -> return a
 
 -- | Check satisfiability of the given predicate in the current assumption sate
 -- Any thrown exceptions are captured and passed to the continuation as an
@@ -654,6 +706,21 @@ heuristicSat desc p k = do
     Left _err -> k W4R.Unknown
     Right a -> return a
 
+getWrappedSolver ::
+  EquivM sym arch (PVC.WrappedSolver sym IO)
+getWrappedSolver = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  IO.withRunInIO $ \inIO -> return $ PVC.WrappedSolver sym $ \_desc p k -> inIO $ do
+    isPredSat_cache p >>= \case
+      Just False -> liftIO $ (k (W4R.Unsat ()))
+      _ -> do
+        r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO' -> do
+          res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO' (execGroundFn r' e'))) pure res
+          k res'
+        case r of
+          Left _err -> liftIO $ k W4R.Unknown
+          Right a -> return a
+  
 
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::
@@ -663,12 +730,15 @@ concretizeWithSolver e = withSym $ \sym -> do
   
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
-        r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
-          res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
-          inIO (k res')
-        case r of
-          Left _err -> k W4R.Unknown
-          Right a -> return a
+        isPredSat_cache p >>= \case
+          Just False -> (k (W4R.Unsat ()))
+          _ -> do
+            r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
+              res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
+              inIO (k res')
+            case r of
+              Left _err -> k W4R.Unknown
+              Right a -> return a
 
   PVC.resolveSingletonSymbolicAsDefault wsolver e
 
@@ -704,6 +774,7 @@ checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
         liftIO $ LCBO.restoreSolverState bak st
         return $ Left err
     Right res -> withOnlineBackend $ \bak -> withSolverProcess $ \sp -> do
+      processSatResult p res
       fmap Right $ k res `finally`
         catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (WPO.pop sp))
           (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
@@ -746,9 +817,36 @@ isPredSat ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredSat timeout p = case W4.asConstantPred p of
-  Just b -> return b
-  Nothing -> either (const False) id <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
+isPredSat timeout p = fromMaybe False <$> isPredSat' timeout p
+
+isPredSat' ::
+  forall sym arch .
+  HasCallStack =>
+  PT.Timeout ->
+  W4.Pred sym ->
+  EquivM sym arch (Maybe Bool)
+isPredSat' timeout p = isPredSat_cache p >>= \case
+  Just b -> return $ Just b
+  Nothing -> 
+    either (const Nothing) Just <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
+
+-- | Do we have a cached result for this predicate?
+isPredSat_cache :: 
+  W4.Pred sym ->
+  EquivM sym arch (Maybe Bool)
+isPredSat_cache p = case W4.asConstantPred p of
+  Just b -> return $ Just b
+  Nothing -> do
+    satCacheRef <- asks envSatCacheRef
+    satCache <- liftIO $ IO.readIORef satCacheRef
+
+    unSatCacheRef <- asks envUnsatCacheRef
+    unSatCache <- liftIO $ IO.readIORef unSatCacheRef
+    case SetF.member p satCache of
+      True -> return $ Just True
+      False -> case SetF.member p unSatCache of
+        True -> return $ Just False
+        False -> return Nothing
 
 -- | Convert a 'W4R.Sat' result to True, and other results to False
 asSat :: Monad m => W4R.SatResult mdl core -> m Bool
@@ -772,11 +870,10 @@ isPredTrue' timeout p = case W4.asConstantPred p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        -- Convert exceptions into False because we can't prove that it is true
-        res <- checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)
-        case res of
-          Left _ex -> return False -- TODO!!! This swallows the exception!
-          Right x -> return x
+        isPredSat' timeout notp >>= \case
+          Just True -> return False
+          Just False -> return True
+          Nothing -> return False -- TODO!!! This swallows the exception!
 
 concretePred ::
   HasCallStack =>
@@ -788,27 +885,22 @@ concretePred timeout p = case W4.asConstantPred p of
   _ -> do
     
     notp <- withSymIO $ \sym -> W4.notPred sym p
-    r <- checkSatisfiableWithModel timeout "concretePred" notp $ \res ->
-      case res of
-        W4R.Sat{} -> return $ Just False
-        W4R.Unsat{} -> return $ Just True
-        W4R.Unknown -> return $ Nothing
+    
+    r <- isPredSat' timeout notp >>= \case
+      Just True -> return $ Just False
+      Just False -> return $ Just True
+      Nothing -> return Nothing
     case r of
-      Left _ex -> return Nothing
-      Right (Just True) -> return $ Just True
-      Right Nothing -> return Nothing
+      Nothing -> return Nothing
+      Just True -> return $ Just True
       -- the predicate is maybe false, but not necessarily false
-      Right (Just False) -> do
-        r' <- checkSatisfiableWithModel timeout "concretePred" p $ \res ->
-          case res of
-            -- p can be true or false
-            W4R.Sat{} -> return Nothing
-            -- p is necessarily false
-            W4R.Unsat{} -> return $ Just False
-            W4R.Unknown -> return $ Nothing
-        case r' of
-          Left _ex -> return Nothing
-          Right x -> return x
+      Just False -> do
+        isPredSat' timeout p >>= \case
+          -- p can be true or false
+          Just True -> return Nothing
+          -- p is necessarily false
+          Just False -> return $ Just False
+          Nothing -> return Nothing
 
 -- | Convert a 'W4R.Unsat' result into True
 --

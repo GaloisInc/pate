@@ -28,7 +28,7 @@ import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM)
 import           Control.Monad.IO.Class
-import           Control.Monad.Reader (asks)
+import           Control.Monad.Reader (asks, local)
 import           Control.Monad.Except (catchError, throwError)
 import           Control.Monad.Trans (lift)
 import           System.IO as IO
@@ -50,7 +50,9 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
+import qualified Data.Parameterized.Context as Ctx
 
 import qualified What4.Expr as W4
 import qualified What4.Expr.Builder as W4B
@@ -63,6 +65,7 @@ import qualified Lang.Crucible.Simulator.RegValue as LCS
 import           Lang.Crucible.Simulator.SymSequence
 import qualified Lang.Crucible.Utils.MuxTree as MT
 
+import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
@@ -96,7 +99,7 @@ import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns, graphNodeBlocks )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import qualified Pate.ExprMappable as PEM
@@ -182,6 +185,15 @@ resolveNode nd = case nd of
     return $ ReturnNode (mkNodeReturn (returnToEntry ret) fnPair')
 -}
 
+shouldProcessNode ::
+  GraphNode arch ->
+  EquivM sym arch Bool
+shouldProcessNode node = do
+  let PPa.PatchPair blkO blkP = graphNodeBlocks node
+  case PB.concreteAddress blkO == PB.concreteAddress blkP of
+    True -> return True
+    False -> not <$> asks (PCfg.cfgIgnoreDivergedControlFlow . envConfig)
+
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
 --   to all reachable positions in the program graph and we reach stability,
@@ -195,13 +207,17 @@ pairGraphComputeFixpoint gr0 = do
     go (gr :: PairGraph sym arch) = case chooseWorkItem gr of
       Nothing -> return gr
       Just (gr', nd, preSpec) -> do
-        gr'' <- subTrace @"node" nd $ startTimer $ do
-          PS.viewSpec preSpec $ \scope d -> do
-            emitTraceLabel @"domain" PAD.Predomain (Some d)
-            withAssumptionSet (PS.scopeAsm scope) $ do
-              gr'' <- visitNode scope nd d gr'
-              emitEvent $ PE.VisitedNode nd
-              return gr''
+        gr'' <- subTrace @"node" nd $ startTimer $
+          shouldProcessNode nd >>= \case
+            False -> do
+              emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
+              return gr'
+            True -> PS.viewSpec preSpec $ \scope d -> do
+              emitTraceLabel @"domain" PAD.Predomain (Some d)
+              withAssumptionSet (PS.scopeAsm scope) $ do
+                gr'' <- visitNode scope nd d gr'
+                emitEvent $ PE.VisitedNode nd
+                return gr''
         go gr''
 
     -- Orphaned returns can appear when we never find a return branch for
@@ -250,7 +266,8 @@ orphanReturnBundle scope pPair = withSym $ \sym -> do
     absSt <- PD.getAbsDomain (get pPair)
     return $ PS.SimInput (PS.simVarState (get vars)) (get pPair) absSt
 
-  simOut_ <- liftIO $ PA.withStubOverride sym ov $ \f -> PPa.forBins $ \get -> do
+  wsolver <- getWrappedSolver
+  simOut_ <- catchInIO $ PA.withStubOverride sym wsolver ov $ \f -> PPa.forBins $ \get -> do
     let inSt = PS.simInState $ get simIn_
     outSt <- f inSt
     --FIXME: this happens to correspond to a default "return" case,
@@ -323,6 +340,66 @@ asFunctionPair (PPa.PatchPair blkO blkP) = case (PB.asFunctionEntry blkO, PB.asF
   (Just fnO, Just fnP) -> Just (PPa.PatchPair fnO fnP)
   _ -> Nothing
 
+getFunctionAbs ::
+  NodeEntry arch ->
+  AbstractDomain sym arch v ->
+  PairGraph sym arch ->
+  EquivM sym arch (PPa.PatchPair (Const (Map.Map (MM.ArchSegmentOff arch) (PB.AbsStateOverride arch))))
+getFunctionAbs node d gr = do
+  case asFunctionPair (nodeBlocks node) of
+    -- this is a function pair, so use the given domain
+    Just fnPair ->  PPa.forBins $ \get -> do
+      let
+        vals = get (PAD.absDomVals d)
+        absSt = PAD.domainValsToAbsState vals
+        fe = get (fnPair)
+      return $ Const (Map.singleton (PB.functionSegAddr fe) absSt)
+    Nothing -> do
+      -- this is some sub-block in a function, so use the domain for
+      -- the function entry point
+      let fnPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks node)  
+      case getCurrentDomain gr (GraphNode node) of
+        Just preSpec -> PS.viewSpec preSpec $ \scope d' -> PPa.forBins $ \get -> do
+          let
+            vals = get (PAD.absDomVals d)
+            absSt = PAD.domainValsToAbsState vals
+            fe = get (fnPair)
+          return $ Const (Map.singleton (PB.functionSegAddr fe) absSt)
+        Nothing -> throwHere $ PEE.MissingDomainForFun fnPair
+
+-- | Setup a special-purpose ParsedFunctionMap with this block having a special
+--   domain 
+withAbsDomain ::
+  NodeEntry arch ->
+  AbstractDomain sym arch v ->
+  PairGraph sym arch ->
+  EquivM_ sym arch a ->
+  EquivM sym arch a
+withAbsDomain node d gr f = do
+  let pPair = nodeBlocks node
+  ovPair <- getFunctionAbs node d gr  
+  binCtxPair <- PPa.forBins $ \get -> do
+    binCtx <- getBinCtx
+    PA.SomeValidArch archData <- asks envValidArch
+    let
+      blk = get (pPair)
+      Const absSt = get ovPair
+      defaultInit = PA.validArchInitAbs archData
+      pfm = PMC.parsedFunctionMap binCtx
+    pfm' <- liftIO $ PD.addOverrides defaultInit pfm absSt
+    return $ binCtx { PMC.parsedFunctionMap = pfm' }
+  local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair } }) $ do
+    let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
+    PPa.catBins $ \get -> do
+      pfm <- PMC.parsedFunctionMap <$> getBinCtx
+      (liftIO $ PD.parsedFunctionContaining (get fnBlks) pfm) >>= \case
+        Just{} -> return ()
+        Nothing -> throwHere $ PEE.MissingDomainForBlock fnBlks
+    f
+        
+
+   
+{-
 -- | Inject the current value domain into macaw so it can be used
 --   during code discovery
 updateAbsBlockState ::
@@ -336,14 +413,15 @@ updateAbsBlockState node d = do
       PPa.catBins $ \get -> do
         let vals = get (PAD.absDomVals d)
         pfm <- PMC.parsedFunctionMap <$> getBinCtx
-        let absDom = PAD.domainValsToAbsState vals
-        liftIO $ PD.setAbstractState (get fnPair) absDom pfm
+
+        
+        liftIO $ PD.setAbstractState defaultInit (get fnPair) absDom pfm
         (liftIO $ PD.parsedFunctionContaining (get pPair) pfm) >>= \case
           Just{} -> return ()
           Nothing -> throwHere $ PEE.MissingParsedBlockEntry "parsedFunctionContaining" (get pPair)
 
     _ -> return ()
-
+-}
 processBundle ::
   forall sym arch v.
   PS.SimScope sym arch v ->
@@ -512,10 +590,8 @@ visitNode :: forall sym arch v.
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = do
-  updateAbsBlockState node d
+visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withAbsDomain node d gr0 $ do
   checkParsedBlocks bPair
-
   withValidInit scope bPair $ do
     gr1 <- updateExtraEdges scope node d gr0
     let vars = PS.scopeVars scope
@@ -796,6 +872,21 @@ equivalentSequences seq1 seq2 = withSym $ \sym -> do
   cache <- liftIO newSeqPairCache
   equivalentSequences' sym cache seq1 seq2
 
+eqSymBVs ::
+  Ctx.Assignment (MT.SymBV' sym) ctx1 ->
+  Ctx.Assignment (MT.SymBV' sym) ctx2 ->
+  EquivM sym arch (W4.Pred sym)
+eqSymBVs (asn1 Ctx.:> MT.SymBV' bv1) (asn2 Ctx.:> MT.SymBV' bv2) = case testEquality (W4.bvWidth bv1) (W4.bvWidth bv2) of
+  Just Refl | Just W4.LeqProof <- W4.isPosNat (W4.bvWidth bv1) -> withSym $ \sym -> do
+    hdeq <- liftIO $ W4.bvEq sym bv1 bv2
+    tleq <- eqSymBVs asn1 asn2
+    liftIO $ W4.andPred sym hdeq tleq
+  _ -> withSym $ \sym -> return $ W4.falsePred sym
+eqSymBVs Ctx.Empty Ctx.Empty = withSym $ \sym -> return $ W4.truePred sym
+-- mismatched sizes
+eqSymBVs _ _ = withSym $ \sym -> return $ W4.falsePred sym
+  
+
 equivalentSequences' :: forall sym arch ptrW.
   (1 <= ptrW) =>
   MM.MemWidth ptrW =>
@@ -809,15 +900,18 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
   eqEvent :: MT.MemEvent sym ptrW -> MT.MemEvent sym ptrW -> EquivM sym arch (W4.Pred sym)
 
   eqEvent (MT.MemOpEvent xop) (MT.MemOpEvent yop) = liftIO $ eqMemOp sym xop yop
-
+  
   eqEvent (MT.SyscallEvent _ x) (MT.SyscallEvent _ y) =
      case testEquality (W4.bvWidth x) (W4.bvWidth y) of
        Just Refl | Just W4.LeqProof <- W4.isPosNat (W4.bvWidth x) ->
          liftIO $ W4.bvEq sym x y
        _ -> return (W4.falsePred sym)
 
-  eqEvent MT.MemOpEvent{} MT.SyscallEvent{} = return (W4.falsePred sym)
-  eqEvent MT.SyscallEvent{} MT.MemOpEvent{} = return (W4.falsePred sym)
+  eqEvent (MT.ExternalCallEvent nmx x) (MT.ExternalCallEvent nmy y)
+    | nmx == nmy
+    = eqSymBVs x y
+    
+  eqEvent _ _ = return (W4.falsePred sym)
 
   -- The arguments to this loop are lists of SymSeqence values, which
   -- are basically a stack of list segments.
@@ -1043,6 +1137,12 @@ groundMemEvent sym evalFn (MT.SyscallEvent i x) =
   do i' <- MT.toMuxTree sym <$> groundMuxTree sym evalFn i
      x' <- W4.bvLit sym (W4.bvWidth x) =<< W4.groundEval evalFn x
      return (MT.SyscallEvent i' x')
+groundMemEvent sym evalFn (MT.ExternalCallEvent nm xs) =
+  do xs' <- TFC.traverseFC (\(MT.SymBV' x) ->
+                              case W4.exprType x of
+                                W4.BaseBVRepr w ->
+                                  MT.SymBV' <$> (W4.groundEval evalFn x >>= W4.bvLit sym w)) xs
+     return (MT.ExternalCallEvent nm xs')
 
 groundMemOp ::
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
@@ -1127,11 +1227,24 @@ getFunctionStub pPair@(PPa.PatchPair blkO blkP) = do
       case (mnm1, mnm2) of
         (Just nm1, Just nm2) | nm1 == nm2, Just{} <- PA.lookupStubOverride archData nm1 ->
           return $ Just nm1
+        (Just nm1, Just nm2) | nm1 == nm2, Set.member nm1 abortStubs ->
+          return $ Just nm1
+        (Just nm1, Just nm2) | nm1 == nm2, isIgnoredBlock pPair ->
+          return $ Just nm1
         (Nothing, Nothing) -> asks (PCfg.cfgIgnoreUnnamedFunctions . envConfig) >>= \case
           True -> return $ Just "__pate_skipped"
           False -> return Nothing
         _ -> return Nothing
     Nothing -> return Nothing
+
+isIgnoredBlock :: PPa.PatchPair (PB.ConcreteBlock arch) -> Bool
+isIgnoredBlock blks = case asFunctionPair blks of
+  Just fnPair -> PB.functionIgnored (PPa.pOriginal fnPair) && PB.functionIgnored (PPa.pPatched fnPair)
+  Nothing -> False
+
+-- FIXME: defined by the architecture?
+abortStubs :: Set.Set (BS.ByteString)
+abortStubs = Set.fromList $ map BSC.pack ["abort","err","perror","exit"]
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
@@ -1338,7 +1451,7 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
               , show pRetPair
               ]
 
-data FnStubKind = DefinedFn | UndefinedFn | SkippedFn
+data FnStubKind = DefinedFn | UndefinedFn | SkippedFn | IgnoredFn
   deriving (Eq, Ord, Show)
 
 
@@ -1348,6 +1461,7 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   prettyNode DefinedFn nm = "Defined Function stub call:" <+> PP.pretty nm
   prettyNode UndefinedFn nm = "Undefined Function stub call:" <+> PP.pretty nm
   prettyNode SkippedFn _nm = "Skipped unnamed function"
+  prettyNode IgnoredFn nm = "Ignoring function: " <+> PP.pretty nm
   
 -- | Mark the function that this entry belongs to as terminal, indicating
 --   that it might have no valid exits (i.e. if a terminal exit is the only
@@ -1378,18 +1492,17 @@ handleStub scope bundle currBlock d gr0 _pPair _pRetPair stubSymbol
     -- and determine if any observable checks need to be considered
     -- (or any additional logic for if this abort is expected as a result
     -- of a patch removing bad behavior)
-    -- 
-  | stubSymbol == BSC.pack "abort" = handleTerminalFunction currBlock gr0
-  -- TODO: is 'err' the same as 'abort'?
-  | stubSymbol == BSC.pack "err" =  handleTerminalFunction currBlock gr0
-  -- TODO: is 'perror' the same as 'abort'?
-  | stubSymbol == BSC.pack "perror" =  handleTerminalFunction currBlock gr0
+    --
+  | Set.member stubSymbol abortStubs = handleTerminalFunction currBlock gr0
   
-handleStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym $ \sym -> do
+handleStub scope bundle currBlock d gr0 pPair mpRetPair stubSymbol = withSym $ \sym -> do
   PA.SomeValidArch archData <- asks envValidArch
   mov <- case PA.lookupStubOverride archData stubSymbol of
     _ | stubSymbol == skippedFnName -> do
       emitTraceLabel @"fnstub" SkippedFn ""
+      return Nothing
+    _ | isIgnoredBlock pPair -> do
+      emitTraceLabel @"fnstub" IgnoredFn (show stubSymbol)
       return Nothing
     Just f -> do
       emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
@@ -1406,7 +1519,8 @@ handleStub scope bundle currBlock d gr0 _pPair mpRetPair stubSymbol = withSym $ 
   let ov = case mov of
         Just f -> f
         Nothing -> PA.defaultStubOverride archData
-  outputs <- liftIO $ PA.withStubOverride sym ov $ \f -> PPa.forBins $ \get -> do
+  wsolver <- getWrappedSolver
+  outputs <- catchInIO $ PA.withStubOverride sym wsolver ov $ \f -> PPa.forBins $ \get -> do
     nextSt <- f (PS.simOutState (get (PS.simOut bundle)))
     return $ (get (PS.simOut bundle)) { PS.simOutState = nextSt }
   let bundle' = bundle { PS.simOut = outputs }

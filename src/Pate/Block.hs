@@ -33,12 +33,17 @@ module Pate.Block (
   , ppBlock
   , ppFunctionEntry
   , matchEquatedAddress
+  , AbsStateOverride
+  , MkInitialAbsState(..)
+  , defaultMkInitialAbsState
   ) where
 
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Macaw.AbsDomain.AbsState as DMAA
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -187,6 +192,8 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
   FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch
                 , functionSymbol  :: Maybe BSC.ByteString
                 , functionBinRepr :: PB.WhichBinaryRepr bin
+                , functionIgnored :: Bool
+                -- ^ does our toplevel configuration tell us to ignore this function?
                 }
 
 data FunCallKind = NormalFunCall | TailFunCall
@@ -222,7 +229,7 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => PC.ShowF (FunctionEntry arch) wh
   showF fe = show fe
 
 instance PC.TestEquality (FunctionEntry arch) where
-  testEquality (FunctionEntry segAddr1 _s1 binrepr1) (FunctionEntry segAddr2 _s2 binrepr2) =
+  testEquality (FunctionEntry segAddr1 _s1 binrepr1 _ign1) (FunctionEntry segAddr2 _s2 binrepr2 _ign2) =
     case PC.testEquality binrepr1 binrepr2 of
       Just PC.Refl | segAddr1 == segAddr2 -> Just PC.Refl
       _ -> Nothing
@@ -231,7 +238,7 @@ instance Eq (FunctionEntry arch bin) where
   fe1 == fe2 = PC.isJust $ PC.testEquality fe1 fe2
 
 instance PC.OrdF (FunctionEntry arch) where
-  compareF (FunctionEntry segAddr1 _s1 binrepr1) (FunctionEntry segAddr2 _s2 binrepr2) =
+  compareF (FunctionEntry segAddr1 _s1 binrepr1 _ign1) (FunctionEntry segAddr2 _s2 binrepr2 _ign2) =
     PC.lexCompareF binrepr1 binrepr2 $ PC.fromOrdering $
       compare segAddr1 segAddr2
 
@@ -240,7 +247,7 @@ instance Ord (FunctionEntry arch bin) where
   compare fe1 fe2 = PC.toOrdering $ PC.compareF fe1 fe2
 
 functionEntryToConcreteBlock :: FunctionEntry arch bin -> ConcreteBlock arch bin
-functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr) =
+functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr _ign) =
   ConcreteBlock
   { concreteAddress    = PA.segOffToAddr segAddr
   , concreteBlockEntry = BlockEntryInitFunction
@@ -265,3 +272,16 @@ matchEquatedAddress pPair (origAddr, patchedAddr) =
   and [ origAddr == concreteAddress (PPa.pOriginal pPair)
       , patchedAddr == concreteAddress (PPa.pPatched pPair)
       ]
+
+
+-- FIXME: put this somewhere more sensible
+
+type AbsStateOverride arch =  MapF.MapF (MM.ArchReg arch) (DMAA.AbsValue (MM.ArchAddrWidth arch))
+
+-- Defining overrides for initial abstract values for blocks
+-- FIXME: also concrete?
+data MkInitialAbsState arch =
+  MkInitialAbsState { mkInitAbs :: MM.Memory (MM.RegAddrWidth (MM.ArchReg arch)) -> MM.ArchSegmentOff arch -> AbsStateOverride arch }
+
+defaultMkInitialAbsState :: MkInitialAbsState arch
+defaultMkInitialAbsState = MkInitialAbsState (\_ _ -> MapF.empty)

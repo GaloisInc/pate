@@ -37,10 +37,12 @@ import           System.IO as IO
 import qualified Control.Monad.Trans as CMT
 import qualified Data.ElfEdit as DEE
 import qualified Data.Map as M
+import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.List as L
+import qualified Data.IORef as IO
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
@@ -176,6 +178,7 @@ findFunctionByName nm context = do
            let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
                                      , PB.functionSymbol = Nothing
                                      , PB.functionBinRepr = W4.knownRepr
+                                     , PB.functionIgnored = False
                                      }
            Just <$> PD.resolveFunctionEntry fe pfm
         Nothing -> return Nothing
@@ -262,6 +265,9 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   
   (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder (PA.ValidRepr sym validArch) (PC.cfgTraceTree vcfg)
 
+  satCache <- liftIO $ IO.newIORef SetF.empty
+  unsatCache <- liftIO $ IO.newIORef SetF.empty
+  
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
           { PMC.handles = ha
@@ -301,6 +307,8 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                                                 , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
                                                 ]
           , envTreeBuilder = treeBuilder
+          , envSatCacheRef = satCache
+          , envUnsatCacheRef = unsatCache
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each
@@ -332,6 +340,7 @@ unpackBlockData ctxt (PC.Address w) =
       return PB.FunctionEntry { PB.functionSegAddr = segAddr
                               , PB.functionSymbol = Nothing
                               , PB.functionBinRepr = W4.knownRepr
+                              , PB.functionIgnored = False
                               }
     Nothing -> CME.throwError (PEE.equivalenceError @arch (PEE.LookupNotAtFunctionStart callStack caddr))
   where

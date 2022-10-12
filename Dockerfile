@@ -9,6 +9,8 @@ RUN apt install -y curl zlibc zlib1g zlib1g-dev git zip \
   locale-gen en_US.UTF-8 && \
   pip3 install toml
 
+RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
+
 ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US:en
 ENV LC_ALL en_US.UTF-8
@@ -51,30 +53,68 @@ RUN mkdir -p /root/.ghcup && ghcup --version && ghcup install cabal && ghcup ins
 ENV PATH="/root/.ghcup/bin:${PATH}"
 RUN cabal update
 RUN mkdir -p /home/src
-COPY . /home/src
+
+COPY ./submodules/arm-asl-parser /home/src/submodules/arm-asl-parser
+COPY ./submodules/parameterized-utils /home/src/submodules/parameterized-utils
+COPY ./submodules/dismantle /home/src/submodules/dismantle
+COPY ./submodules/what4 /home/submodules/what4
+COPY ./submodules/what4-serialize /home/submodules/what4-serialize
+
+COPY ./cabal.project.dist /home/src/cabal.project.dist
+
+COPY ./pate.cabal /home/src/
+
 WORKDIR /home/src
+
+COPY ./submodules/llvm-pretty/llvm-pretty.cabal /home/src/submodules/llvm-pretty/llvm-pretty.cabal
+
 RUN ln -sf cabal.project.dist cabal.project
 RUN cabal configure pkg:pate -w ghc-8.10.4
 RUN cabal build dismantle-arm-xml
+
+COPY ./submodules/asl-translator /home/src/submodules/asl-translator
+COPY ./submodules/crucible/ /home/src/submodules/crucible
+COPY ./submodules/dwarf /home/src/submodules/dwarf
+COPY ./submodules/elf-edit /home/src/submodules/elf-edit
+COPY ./submodules/flexdis86 /home/src/submodules/flexdis86
+COPY ./submodules/llvm-pretty /home/src/submodules/llvm-pretty
+COPY ./submodules/macaw /home/src/submodules/macaw
+COPY ./submodules/macaw-loader /home/src/submodules/macaw-loader
+COPY ./submodules/renovate /home/src/submodules/renovate
+COPY ./submodules/semmc /home/src/submodules/semmc
+
 RUN cabal build --only-dependencies macaw-aarch32 -j5
 RUN cabal build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
+
+COPY ./arch /home/src/arch
+COPY ./src /home/src/src
+COPY ./tools /home/src/tools
+COPY ./*.ghci /home/src/
+COPY ./pate.sh ./home/src
+
 RUN cabal build pkg:pate --only-dependencies -j5
 RUN cabal build pkg:pate -j5
+RUN cabal build pate-repl-base
 
-RUN mkdir -p /usr/local/bin/pate
-RUN cp -r /home/src /usr/local/bin/pate
 
-FROM ubuntu:20.04
-RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
+## FROM ubuntu:20.04
 
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
+ENV PATH="/home/src/:/root/.ghcup/bin:${PATH}"
 
-COPY --from=0 /usr/local/bin/pate \
-              /usr/local/bin/cvc4 \
-              /usr/local/bin/z3 \
-              /usr/local/bin/yices \
-              /usr/local/bin/yices-smt2 \
-              /usr/local/bin/
-ENTRYPOINT ["/usr/local/bin/pate/pate.sh"]
+# ENV LANG en_US.UTF-8
+# ENV LANGUAGE en_US:en
+# ENV LC_ALL en_US.UTF-8
+
+## COPY --from=0 /usr/local/bin/cvc4 \
+##              /usr/local/bin/z3 \
+##              /usr/local/bin/yices \
+##              /usr/local/bin/yices-smt2 \
+##              /usr/local/bin/
+
+## COPY --from=0 /home/src /usr/local/bin/pate
+
+## RUN mkdir -p /root/
+
+## COPY --from=0 /root/.ghcup /root/.ghcup
+
+ENTRYPOINT ["/home/src/pate.sh"]

@@ -30,6 +30,9 @@ import qualified Data.Time as TM
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
+import qualified Data.IORef as IO
+import qualified Data.Parameterized.SetF as SetF
+
 import qualified Lumberjack as LJ
 
 import qualified Data.Macaw.Memory as DMM
@@ -95,7 +98,21 @@ data EquivEnv sym arch where
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     , envTreeBuilder :: TreeBuilder '(sym, arch)
+    , envUnsatCacheRef :: IO.IORef (SolverCache sym)
+    , envSatCacheRef :: IO.IORef (SolverCache sym)
     } -> EquivEnv sym arch
+
+-- pushing assumption contexts should:
+--    preserve the Unsat cache from the outer context into the inner context
+--    (i.e. adding assumptions cannot make an unsatsfiable predicate satisfiable)
+--    discard the Sat cache from the outer context
+--    (i.e. previously satisfiable predicate may become unsatisfiable with more assumpionts)
+-- popping assumption contexts should
+--    discard any discovered Unsat results from inner context
+--    (i.e. relaxing assumptions may cause previously unsatsfiable results to now be satisfiable)
+--    preserve any learned Sat results from inner context
+--    (i.e. relaxing assumptions cannot may a satsifiable result unsatisfiable)
+type SolverCache sym = SetF.SetF (W4.SymExpr sym) W4.BaseBoolType
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
 

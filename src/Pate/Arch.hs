@@ -28,6 +28,7 @@ module Pate.Arch (
   ArchStubOverrides(..),
   mkMallocOverride,
   mkClockOverride,
+  mkWriteOverride,
   mkDefaultStubOverride,
   lookupStubOverride,
   defaultStubOverride,
@@ -35,7 +36,7 @@ module Pate.Arch (
   mergeLoaders
   ) where
 
-import           Control.Lens ( (&), (.~) )
+import           Control.Lens ( (&), (.~), (^.) )
 
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
@@ -45,11 +46,14 @@ import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           GHC.TypeLits ( type (<=) )
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.Context as Ctx
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
 import qualified Data.ElfEdit as E
+import qualified Data.Macaw.AbsDomain.AbsState as DMAA
 import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -62,6 +66,7 @@ import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
+import qualified Pate.Block as PB
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimulatorRegisters as PSR
@@ -69,8 +74,10 @@ import qualified Pate.SimState as PS
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
+import qualified Pate.Verification.Concretize as PVC
 
 import qualified What4.Interface as W4 hiding ( integerToNat )
+import qualified What4.Concrete as W4
 import qualified What4.ExprHelpers as W4 ( integerToNat )
 
 -- | The type of architecture-specific dedicated registers
@@ -162,6 +169,9 @@ data ValidArchData arch =
                 -- For example, these could be PLT stub symbols for ELF binaries
                 , validArchPatchedExtraSymbols :: Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
                 , validArchStubOverrides :: ArchStubOverrides arch
+                , validArchInitAbs :: PB.MkInitialAbsState arch
+                -- ^ variant of Macaw's mkInitialAbsState that's tuned to
+                -- our override mechanisms
                 }
 
 -- | A stub is allowed to make arbitrary modifications to the symbolic state
@@ -171,8 +181,9 @@ data ValidArchData arch =
 data StubOverride arch =
   StubOverride
     (forall sym.
-      W4.IsSymExprBuilder sym =>
+      LCB.IsSymInterface sym =>
       sym ->
+      PVC.WrappedSolver sym IO ->
       IO (StateTransformer sym arch))
 
 data StateTransformer sym arch =
@@ -181,16 +192,17 @@ data StateTransformer sym arch =
 mkStubOverride :: forall arch.
   (forall sym bin v.W4.IsSymExprBuilder sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
   StubOverride arch
-mkStubOverride f = StubOverride $ \sym -> return $ StateTransformer (\st -> f sym st)
+mkStubOverride f = StubOverride $ \sym _ -> return $ StateTransformer (\st -> f sym st)
 
 withStubOverride ::
-  W4.IsSymExprBuilder sym =>
+  LCB.IsSymInterface sym =>
   sym ->
+  PVC.WrappedSolver sym IO ->
   StubOverride arch ->
   ((forall bin. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) -> IO a) ->
   IO a
-withStubOverride sym (StubOverride ov) f = do
-  StateTransformer ov' <- ov sym
+withStubOverride sym wsolver (StubOverride ov) f = do
+  StateTransformer ov' <- ov sym wsolver
   f ov'
 
 
@@ -245,7 +257,7 @@ mkClockOverride ::
   MS.SymArchConstraints arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkClockOverride rOut = StubOverride $ \sym -> do
+mkClockOverride rOut = StubOverride $ \sym _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "current_time") (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
@@ -253,13 +265,54 @@ mkClockOverride rOut = StubOverride $ \sym -> do
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
 
+
+mkWriteOverride ::
+  forall arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  T.Text {- ^ name of call -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ fd -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
+  let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  -- TODO: must be less than len
+  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "written") (W4.BaseBVRepr w_mem)
+  return $ StateTransformer $ \st -> do
+    let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
+
+    let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue flen
+    let (CLM.LLVMPointer _ fd_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue fd_reg
+    len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
+    st' <- case W4.asConcrete len_bv' of
+      Just (W4.ConcreteBV _ lenC)
+        | Just (Some w) <- W4.someNat (BVS.asUnsigned lenC)
+        , Just W4.LeqProof <- W4.isPosNat w -> do
+        let mem = PS.simMem st
+        -- endianness doesn't really matter, as long as we're consistent
+        let memrepr = MC.BVMemRepr w MC.LittleEndian
+        (CLM.LLVMPointer _ val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
+        --FIXME: ignores regions
+        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' fd_bv Ctx.:> PMT.SymBV' val_bv) mem
+        return $ st { PS.simMem = mem' }
+      _ ->
+        -- FIXME: what to do for non-concrete write lengths?
+        return st
+    zero_nat <- W4.natLit sym 0
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    
+    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
+
+
 -- | Default override returns the same arbitrary value for both binaries
 mkDefaultStubOverride ::
   forall arch.
   MS.SymArchConstraints arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkDefaultStubOverride rOut = StubOverride $ \sym -> do
+mkDefaultStubOverride rOut = StubOverride $ \sym _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "plt_default") (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
@@ -300,3 +353,6 @@ mergeLoaders (ArchLoader l1) (ArchLoader l2) = ArchLoader $ \m i1 i2 ->
   case l1 m i1 i2 of
     Left _ -> l2 m i1 i2
     Right a -> Right a
+
+
+

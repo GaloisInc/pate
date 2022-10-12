@@ -72,6 +72,7 @@ data EquivalenceContext sym arch where
 
 $(L.makeLenses ''EquivalenceContext)
 
+
 {- Note [Ignored Functions]
 
 We want to support ignoring parts of a program during verification. This is

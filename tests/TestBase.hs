@@ -139,7 +139,7 @@ doTest mwb cfg sv fp = do
       , PL.patchData = defaultPatchData cfg
       , PL.origPaths = PLE.simplePaths (fp <.> "original" <.> "exe")
       , PL.patchedPaths = PLE.simplePaths (fp <.> "patched" <.> "exe")
-      , PL.verificationCfg = PC.defaultVerificationCfg { PC.cfgFailureMode = PC.ThrowOnAnyFailure, PC.cfgAddOrphanEdges = False, PC.cfgCheckSimplifier = True}
+      , PL.verificationCfg = PC.defaultVerificationCfg { PC.cfgFailureMode = PC.ThrowOnAnyFailure, PC.cfgAddOrphanEdges = False, PC.cfgCheckSimplifier = True, PC.cfgIgnoreUnnamedFunctions = False, PC.cfgIgnoreDivergedControlFlow = False}
       , PL.logger = \(PA.SomeValidArch{}) -> do
           let
             act = LJ.LogAction $ \e -> case e of
