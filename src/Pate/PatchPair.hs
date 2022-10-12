@@ -20,6 +20,7 @@ module Pate.PatchPair (
   , ppPatchPairEq
   , ppPatchPairC
   , ppPatchPair
+  , ppPatchPair'
   , get
   , forBins
   , forBins'
@@ -137,7 +138,8 @@ instance ShowF tp => Show (PatchPair tp) where
 instance (forall bin. PP.Pretty (f bin)) => PP.Pretty (PatchPair f) where
   pretty = ppPatchPairEq ppEq PP.pretty
 
-
+ppPatchPair' :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
+ppPatchPair' f pPair = ppPatchPairEq (\x y -> show (f x) == show (f y)) f pPair
 
 
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a

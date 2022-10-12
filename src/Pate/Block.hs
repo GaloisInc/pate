@@ -6,6 +6,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -31,6 +34,7 @@ module Pate.Block (
   -- * Pretty Printers
   , ppBlockEntry
   , ppBlock
+  , ppBlockAddr
   , ppFunctionEntry
   , matchEquatedAddress
   , AbsStateOverride
@@ -155,10 +159,15 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => PC.ShowF (ConcreteBlock arch) wh
 ppBlock :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> String
 ppBlock b = show (concreteAddress b)
 
+ppBlockAddr :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> PP.Doc a
+ppBlockAddr b = PP.viaShow (concreteAddress b)
+
 instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch bin) where
   pretty cb = case functionSymbol (blockFunctionEntry cb) of
     Just s -> PP.viaShow s <+> "(" <> PP.viaShow (concreteAddress cb) <> ")"
     Nothing -> PP.viaShow (concreteAddress cb)
+
+
 
 data BlockTarget arch bin =
   BlockTarget
@@ -183,10 +192,26 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) wher
 instance MM.MemWidth (MM.ArchAddrWidth arch) => PP.Pretty (BlockTarget arch bin) where
   pretty blkt = PP.pretty (show blkt)
 
+ppBlockTarget ::
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  BlockTarget arch bin ->
+  PP.Doc a
+ppBlockTarget (BlockTarget tgt ret c) = case c of
+  MCS.MacawBlockEndJump -> "Jump to:" <+> PP.pretty tgt
+  MCS.MacawBlockEndBranch -> "Branch to:" <+> PP.pretty tgt
+  MCS.MacawBlockEndCall -> case ret of
+    Just r -> "Call to:" <+> PP.pretty tgt <+> "Returns to:" <+> PP.pretty r
+    Nothing -> "Tail call to " <+> PP.pretty tgt
+  MCS.MacawBlockEndReturn -> "Return"
+  MCS.MacawBlockEndFail -> "Analysis Failure"
+  MCS.MacawBlockEndArch -> case ret of
+    Just r -> "Arch-specific exit to:" <+> PP.pretty tgt <+> PP.pretty r
+    Nothing ->  "Arch-specific exit to:" <+> PP.pretty tgt <+> "without return"
 
-instance MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget" where
+instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget" where
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (BlockTarget arch)
-  prettyNode () blkts = PP.pretty blkts
+  prettyNode () blkts = PPa.ppPatchPair' ppBlockTarget blkts
+  nodeTags = mkTags @'(sym,arch) @"blocktarget" [Simplified,Summary]
 
 data FunctionEntry arch (bin :: PB.WhichBinary) =
   FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch
@@ -199,12 +224,13 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
 data FunCallKind = NormalFunCall | TailFunCall
   deriving (Eq, Ord, Show)
 
-instance MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "funcall" where
+instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "funcall" where
   type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (FunctionEntry arch)
   type TraceNodeLabel "funcall" = FunCallKind
   prettyNode k funs = case k of
     NormalFunCall -> PP.pretty funs
     TailFunCall -> "Tail Call:" PP.<+> PP.pretty funs
+  nodeTags = mkTags @'(sym,arch) @"funcall" [Summary, Simplified]
 
 equivFuns :: FunctionEntry arch PB.Original -> FunctionEntry arch PB.Patched -> Bool
 equivFuns fn1 fn2 =

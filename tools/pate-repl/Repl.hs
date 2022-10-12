@@ -45,7 +45,7 @@ import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Terminal as PPRT
 
-import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol )
+import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, SymbolRepr )
 
 
 import qualified Pate.Arch as PA
@@ -185,9 +185,9 @@ loadSomeTree tid topTraceTree = do
   viewSomeTraceTree topTraceTree (return False) $ \(PA.ValidRepr sym arch) (toptree :: TraceTree k) -> do
       let st = ReplState
             { replNode = Some (TraceNode @"toplevel" () () toptree)
-            , replTags = [Summary]
+            , replTags = [Simplified]
             , replPrev = []
-            , replNextTags = [Summary]
+            , replNextTags = [Simplified]
             , replNext = []
             , replValidRepr = ValidSymArchRepr sym arch
             , replLastOptsPrinted = ""
@@ -275,6 +275,13 @@ addStatusTag st p = case ppStatusTag st of
   Just pst -> p <+> "(" <> pst <> ")"
   Nothing -> p
 
+addSuffix :: PP.Doc a -> NodeStatus -> SymbolRepr nm -> ReplM sym arch (PP.Doc a)
+addSuffix pp s nm = do
+  tags <- gets replTags
+  case tags of
+    [Simplified] -> return $ addStatusTag s pp
+    _ -> return $ addStatusTag s pp <+> "(" <> PP.pretty (show nm) <> ")"
+
 ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
 ppStatusTag st = case st of
   NodeStatus StatusSuccess False -> Just "*"
@@ -297,7 +304,9 @@ prettyNextNodes startAt onlyFinished = do
        mapM (\(Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
-                  Just pp -> return $ (isFinished b, addStatusTag b $ pp <+> "(" <> PP.pretty (show (knownSymbol @nm)) <> ")")
+                  Just pp -> do
+                    pp' <- addSuffix pp b (knownSymbol @nm)
+                    return $ (isFinished b, pp')
                   Nothing -> return (isFinished b, "<ERROR: Unexpected missing printer>")
             ) nextNodes
 

@@ -96,6 +96,8 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.SymbolTable as PSym
 import qualified What4.ExprHelpers as WEH
 
+import           Pate.TraceTree
+
 --------------------------------------------------------
 -- Block pair matching
 
@@ -104,7 +106,7 @@ discoverPairs ::
   forall sym arch v.
   SimBundle sym arch v ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-discoverPairs bundle = withSym $ \sym -> do
+discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty

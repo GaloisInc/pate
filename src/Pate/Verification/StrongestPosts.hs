@@ -362,7 +362,7 @@ getFunctionAbs node d gr = do
       case getCurrentDomain gr (GraphNode node) of
         Just preSpec -> PS.viewSpec preSpec $ \scope d' -> PPa.forBins $ \get -> do
           let
-            vals = get (PAD.absDomVals d)
+            vals = get (PAD.absDomVals d')
             absSt = PAD.domainValsToAbsState vals
             fe = get (fnPair)
           return $ Const (Map.singleton (PB.functionSegAddr fe) absSt)
@@ -383,7 +383,6 @@ withAbsDomain node d gr f = do
     binCtx <- getBinCtx
     PA.SomeValidArch archData <- asks envValidArch
     let
-      blk = get (pPair)
       Const absSt = get ovPair
       defaultInit = PA.validArchInitAbs archData
       pfm = PMC.parsedFunctionMap binCtx
@@ -1324,7 +1323,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
                  | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just (PPa.PatchPair blkRetO blkRetP)) stubPair
                  | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair (PPa.PatchPair blkRetO blkRetP)
 
-         (Nothing, Nothing) | PB.targetEndCase blktO == PB.targetEndCase blktP -> withSym $ \sym ->
+         (Nothing, Nothing) | PB.targetEndCase blktO == PB.targetEndCase blktP ->
            do traceBundle bundle "No return target identified"
               -- exits without returns need to either be a jump, branch or tail calls
               -- we consider those cases here (having already assumed a specific
@@ -1518,7 +1517,6 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
 data FnStubKind = DefinedFn | UndefinedFn | SkippedFn | IgnoredFn
   deriving (Eq, Ord, Show)
 
-
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   type TraceNodeType '(sym,arch) "fnstub" = String
   type TraceNodeLabel "fnstub" = FnStubKind
@@ -1526,6 +1524,7 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   prettyNode UndefinedFn nm = "Undefined Function stub call:" <+> PP.pretty nm
   prettyNode SkippedFn _nm = "Skipped unnamed function"
   prettyNode IgnoredFn nm = "Ignoring function: " <+> PP.pretty nm
+  nodeTags = mkTags @'(sym,arch) @"fnstub" [Summary, Simplified]
   
 -- | Mark the function that this entry belongs to as terminal, indicating
 --   that it might have no valid exits (i.e. if a terminal exit is the only
@@ -1559,14 +1558,13 @@ getStubOverrideOne blk mstubSymbol = do
     Nothing | isIgnoredBlock blk -> do
       emitTraceLabel @"fnstub" IgnoredFn (show skippedFnName)
       return $ Nothing
-    Nothing -> return Nothing
+    _ -> return Nothing
       
 combineOverrides ::
-  PA.ValidArchData arch ->
   PA.StubOverride arch ->
   PA.StubOverride arch ->
   PA.StubOverride arch
-combineOverrides validArch (PA.StubOverride f1) (PA.StubOverride f2) = PA.StubOverride $ \sym wsolver -> do
+combineOverrides (PA.StubOverride f1) (PA.StubOverride f2) = PA.StubOverride $ \sym wsolver -> do
   f1' <- f1 sym wsolver
   f2' <- f2 sym wsolver
   let fnPair = PPa.PatchPair (Const f1') (Const f2')
@@ -1581,23 +1579,23 @@ mergeStubOverrides ::
   PA.ValidArchData arch ->
   StubPair ->
   PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) ->
-  EquivM sym arch (PA.StubOverride arch)
+  PA.StubOverride arch
 mergeStubOverrides validArch
   (PPa.PatchPair (Const sym1) (Const sym2))
-  (PPa.PatchPair (Const mov1) (Const mov2)) = do
-  PA.SomeValidArch archData <- asks envValidArch
-  let ov1 = case (sym1, mov1) of
+  (PPa.PatchPair (Const mov1) (Const mov2)) =
+  let
+    ov1' = case (sym1, mov1) of
         (Just{}, Just ov1) -> ov1
         (Just{}, Nothing) -> PA.defaultStubOverride validArch
         (Nothing,_) -> PA.idStubOverride
-  let ov2 = case (sym2, mov2) of
+    ov2' = case (sym2, mov2) of
         (Just{}, Just ov2) -> ov2
         (Just{}, Nothing) -> PA.defaultStubOverride validArch
         (Nothing,_) -> PA.idStubOverride
 
-  case (sym1,sym2) of
-    (Just nm1, Just nm2) | nm1 == nm2 -> return ov1
-    _ -> return $ combineOverrides archData ov1 ov2 
+  in case (sym1,sym2) of
+    (Just nm1, Just nm2) | nm1 == nm2 -> ov1'
+    _ -> combineOverrides ov1' ov2' 
 
 bothDefinedOverrides ::
   PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) -> Bool
@@ -1620,7 +1618,7 @@ transportStub stubs currBlock pPair pRetPair = runIdentity $ do
       -- but is not exactly semantically correct
       Const (Just nm) | isAbortStub nm -> return $ get (nodeBlocks currBlock)
       -- for a normal stub, jump to the return
-      Const (Just nm) ->  return $ get pRetPair
+      Const (Just{}) ->  return $ get pRetPair
       -- otherwise, jump to the actual target
       Const Nothing -> return $ get pPair
   return $ mkNodeEntry currBlock blks
@@ -1645,7 +1643,7 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
     False -> do  
       PA.SomeValidArch archData <- asks envValidArch
       ovPair <- PPa.forBins $ \get -> Const <$> getStubOverrideOne (get pPair) (getConst (get stubPair))
-      ov <- mergeStubOverrides archData stubPair ovPair
+      let ov = mergeStubOverrides archData stubPair ovPair
       wsolver <- getWrappedSolver
 
       outputs <- catchInIO $ PA.withStubOverride sym wsolver ov $ \f -> PPa.forBins $ \get -> do

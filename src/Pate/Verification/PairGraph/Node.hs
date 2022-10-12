@@ -3,6 +3,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PolyKinds #-}
 
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -25,12 +28,13 @@ module Pate.Verification.PairGraph.Node (
   , functionEntryOf
   ) where
 
-import           Prettyprinter ( Pretty(..), sep, (<+>) )
+import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
+import qualified Pate.PatchPair as PPa
 import           Pate.TraceTree
 
 -- | Nodes in the program graph consist either of a pair of
@@ -70,8 +74,8 @@ newtype CallingContext arch = CallingContext [PB.BlockPair arch]
 
 instance PA.ValidArch arch => Pretty (CallingContext arch) where
   pretty (CallingContext bps) =
-    let bs = reverse $ [ pretty bp | bp <- bps ]
-    in sep (zipWith (<+>) ("[" : repeat "->") bs) <+> "]"
+    let bs = [ pretty bp | bp <- bps ]
+    in sep (zipWith (<+>) ( "via:" : repeat "->") bs)
 
 
 rootEntry :: PB.BlockPair arch -> NodeEntry arch
@@ -102,14 +106,17 @@ instance PA.ValidArch arch => Show (NodeEntry arch) where
   show e = show (pretty e)
 
 instance PA.ValidArch arch => Pretty (NodeEntry arch) where
-  pretty e = case graphNodeContext e of
-    CallingContext [] -> pretty (nodeBlocks e)
-    _ -> pretty (graphNodeContext e) <+> ":" <+> pretty (nodeBlocks e)
+  pretty e = case functionEntryOf e == e of
+    True -> case graphNodeContext e of
+      CallingContext [] -> pretty (nodeBlocks e)
+      _ -> pretty (nodeBlocks e) <+> "[" <+> pretty (graphNodeContext e) <+> "]"
+    False -> PPa.ppPatchPair' PB.ppBlockAddr (nodeBlocks e)
+      <+> "[" <+> pretty (graphNodeContext (addContext (nodeBlocks (functionEntryOf e)) e)) <+> "]"
 
 instance PA.ValidArch arch => Pretty (NodeReturn arch) where
   pretty e = case returnNodeContext e of
     CallingContext [] -> pretty (nodeFuns e)
-    _ -> pretty (returnNodeContext e) <+> ":" <+> pretty (nodeFuns e)
+    _ -> pretty (nodeFuns e) <+> "[" <+> pretty (returnNodeContext e) <+> "]"
 
 instance PA.ValidArch arch => Show (NodeReturn arch) where
   show e = show (pretty e)
@@ -121,14 +128,19 @@ instance PA.ValidArch arch => Pretty (GraphNode arch) where
 instance PA.ValidArch arch => Show (GraphNode arch) where
   show e = show (pretty e)
 
-instance PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
-  type TraceNodeType '(sym, arch) "node" = GraphNode arch
-  prettyNode () nd = case nd of
-    GraphNode e -> case functionEntryOf e == e of
-      True -> "Function Entry" <+> pretty e
-      False -> pretty e
-    ReturnNode ret -> "Return" <+> pretty ret
+tracePrettyNode ::
+  PA.ValidArch arch => GraphNode arch -> Doc a
+tracePrettyNode nd = case nd of
+  GraphNode e -> case functionEntryOf e == e of
+    True -> "Function Entry" <+> pretty e
+    False -> pretty e
+  ReturnNode ret -> "Return" <+> pretty ret
 
-instance PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
+instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
+  type TraceNodeType '(sym, arch) "node" = GraphNode arch
+  prettyNode () nd = tracePrettyNode nd
+  nodeTags = mkTags @'(sym,arch) @"node" [Simplified, Summary]
+
+instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
   type TraceNodeType '(sym, arch) "entrynode" = NodeEntry arch
   prettyNode () = pretty

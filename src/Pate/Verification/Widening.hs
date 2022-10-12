@@ -247,178 +247,185 @@ abstractOverVars ::
   PAD.AbstractDomainSpec sym arch {- ^ previous post-domain -} ->
   PAD.AbstractDomain sym arch pre {- ^ computed post-domain (with variables from the initial 'pre' scope) -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-abstractOverVars scope_pre bundle _from _to postSpec postResult = withSym $ \sym -> do
-  emitTraceLabel @"domain" PAD.Postdomain (Some postResult)
-  -- the post-state of the slice phrased over 'pre'
-  let outVars = PS.bundleOutVars bundle
+abstractOverVars scope_pre bundle _from _to postSpec postResult = do
+  result <- withTracing @"function_name" "widenPostcondition" $ go
+  PS.viewSpec result $ \_ d -> do
+    emitTraceLabel @"domain" PAD.ExternalPostDomain (Some d)
+  return result
+  where
+    go :: EquivM sym arch (PAD.AbstractDomainSpec sym arch)
+    go = withSym $ \sym -> do
+      emitTraceLabel @"domain" PAD.Postdomain (Some postResult)
+      -- the post-state of the slice phrased over 'pre'
+      let outVars = PS.bundleOutVars bundle
 
-  curAsm <- currentAsm
-  emitTrace @"assumption" curAsm
-  
-  --traceBundle bundle $ "AbstractOverVars:  curAsm\n" ++ (show (pretty curAsm))
+      curAsm <- currentAsm
+      emitTrace @"assumption" curAsm
 
-  withSimSpec (PS.simPair bundle) postSpec $ \(scope_post :: PS.SimScope sym arch post) _body -> do
-    -- the variables representing the post-state (i.e. the target scope)
-    let postVars = PS.scopeVars scope_post
+      --traceBundle bundle $ "AbstractOverVars:  curAsm\n" ++ (show (pretty curAsm))
 
-    -- rewrite post-scoped terms into pre-scoped terms that represent
-    -- the result of symbolic execution (i.e. formally stating that
-    -- the initial bound variables of post are equal to the results
-    -- of symbolic execution)
-    -- e[post] --> e[post/f(pre)]
-    -- e.g.
-    -- f := sp++;
-    -- sp1 + 2 --> (sp0 + 1) + 2
-    post_to_pre <- liftIO $ PS.getScopeCoercion sym scope_post outVars
+      withSimSpec (PS.simPair bundle) postSpec $ \(scope_post :: PS.SimScope sym arch post) _body -> do
+        -- the variables representing the post-state (i.e. the target scope)
+        let postVars = PS.scopeVars scope_post
 
-    -- Rewrite a pre-scoped term to a post-scoped term by simply swapping
-    -- out the bound variables
-    -- e[pre] --> e[pre/post]
-    pre_to_post <- liftIO $ PS.getScopeCoercion sym scope_pre postVars
+        -- rewrite post-scoped terms into pre-scoped terms that represent
+        -- the result of symbolic execution (i.e. formally stating that
+        -- the initial bound variables of post are equal to the results
+        -- of symbolic execution)
+        -- e[post] --> e[post/f(pre)]
+        -- e.g.
+        -- f := sp++;
+        -- sp1 + 2 --> (sp0 + 1) + 2
+        post_to_pre <- liftIO $ PS.getScopeCoercion sym scope_post outVars
 
-    cache <- W4B.newIdxCache
-    -- Strategies for re-scoping expressions
-    let
-      asConcrete :: forall v1 v2 tp. PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
-      asConcrete se = do
-        Just c <- return $ (W4.asConcrete (PS.unSE se))
-        liftIO $ PS.concreteScope @v2 sym c
+        -- Rewrite a pre-scoped term to a post-scoped term by simply swapping
+        -- out the bound variables
+        -- e[pre] --> e[pre/post]
+        pre_to_post <- liftIO $ PS.getScopeCoercion sym scope_pre postVars
 
-      asScopedConst :: forall v1 v2 tp. HasCallStack => W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
-      asScopedConst asm se = do
-        emitTrace @"assumption" (PAs.fromPred asm)
-        Just c <- lift $ withAssumption asm $ do
-          e' <- concretizeWithSolver (PS.unSE se)
-          emitTraceLabel @"expr" "output" (Some e')
-          return $ W4.asConcrete e'
-        off' <- liftIO $ PS.concreteScope @v2 sym c
-        emitTraceLabel @"expr" "final output" (Some (PS.unSE off'))
-        return off'
+        cache <- W4B.newIdxCache
+        -- Strategies for re-scoping expressions
+        let
+          asConcrete :: forall v1 v2 tp. PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+          asConcrete se = do
+            Just c <- return $ (W4.asConcrete (PS.unSE se))
+            liftIO $ PS.concreteScope @v2 sym c
 
-      -- static version of 'asStackOffset' (no solver)
-      simpleStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
-      simpleStackOffset bin se = do
-        W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
-        Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
-        let preFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin (PS.scopeVars scope_pre))
-        let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+          asScopedConst :: forall v1 v2 tp. HasCallStack => W4.Pred sym -> PS.ScopedExpr sym v1 tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym v2 tp)
+          asScopedConst asm se = do
+            emitTrace @"assumption" (PAs.fromPred asm)
+            Just c <- lift $ withAssumption asm $ do
+              e' <- concretizeWithSolver (PS.unSE se)
+              emitTraceLabel @"expr" "output" (Some e')
+              return $ W4.asConcrete e'
+            off' <- liftIO $ PS.concreteScope @v2 sym c
+            emitTraceLabel @"expr" "final output" (Some (PS.unSE off'))
+            return off'
 
-        -- se = preFrame + off1
-        Just (se_base, W4C.ConcreteBV _ se_off) <- return $ WEH.asConstantOffset sym (PS.unSE se)
-        -- postFrame = preFrame + off2
-        Just (postFrame_base, W4C.ConcreteBV _ postFrame_off) <- return $ WEH.asConstantOffset sym (PS.unSE postFrame)
-        p1 <- liftIO $ W4.isEq sym se_base (PS.unSE preFrame)
-        Just True <- return $ W4.asConstantPred p1
-        p2 <- liftIO $ W4.isEq sym postFrame_base (PS.unSE preFrame)
-        Just True <- return $ W4.asConstantPred p2
-        -- preFrame = postFrame - off2
-        -- se = (postFrame - off2) + off1
-        -- se = postFrame + (off1 - off2)
-        off' <- liftIO $ PS.concreteScope @post sym (W4C.ConcreteBV w (BVS.sub w se_off postFrame_off))
-        liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
+          -- static version of 'asStackOffset' (no solver)
+          simpleStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
+          simpleStackOffset bin se = do
+            W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
+            Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
+            let preFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin (PS.scopeVars scope_pre))
+            let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
 
-
-      asStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
-      asStackOffset bin se = do
-        W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
-        Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
-        -- se[v]
-        let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
-
-        off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
-        -- asFrameOffset := frame[post] + off
-        asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
-        -- asFrameOffset' := frame[post/f(v)] + off
-        asFrameOffset' <- liftIO $ PS.applyScopeCoercion sym post_to_pre asFrameOffset
-        -- asm := se == frame[post/f(pre)] + off
-        asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
-        -- assuming 'asm', is 'off' constant?        
-        off' <- asScopedConst (PS.unSE asm) off        
-        -- lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
-        -- return frame[post] + off
-        liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
-
-      asSimpleAssign :: forall tp. HasCallStack => PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
-      asSimpleAssign se = do
-        -- se[pre]
-        -- se' := se[pre/post]
-        se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
-        -- e'' := se[post/f(pre)]
-        e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
-        -- se is the original value, and e'' is the value rewritten
-        -- to be phrased over the post-state
-        heuristicTimeout <- lift $ CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-        asm <- liftIO $ PS.liftScope2 sym W4.isEq se e''
-        True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
-        return se'
-
-      doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
-      doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
-          -- The decision of ordering here is only for efficiency: we expect only
-          -- one strategy to succeed.
-          -- NOTE: Although it is possible for multiple strategies to be applicable,
-          -- they (should) all return semantically equivalent terms
-          -- TODO: We could do better by picking the strategy based on the term shape,
-          -- but it's not strictly necessary.
-
-        asStackOffsetStrats <- PPa.catBins $ \get -> do
-          let stackbase = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState $ (get (PS.scopeVars scope_pre))
-          sbVars <- IO.liftIO $ WEH.boundVars stackbase
-          seVars <- IO.liftIO $ WEH.boundVars (PS.unSE se)
-
-          -- as an optimization, we omit this test for
-          -- terms which contain memory accesses (i.e. depend on
-          -- the memory variable somehow), since we don't have any support for
-          -- indirect reads
-          mvars <- lift $ memVars (get (PS.scopeVars scope_pre))
-          let noMem = Set.null (Set.intersection seVars mvars)
-
-          let bin = get PPa.patchPairRepr
-
-          case Set.isSubsetOf sbVars seVars && noMem of
-            True -> return $ [("asStackOffset (" ++ show bin ++ ")", asStackOffset bin se)]
-            False -> return $ []
+            -- se = preFrame + off1
+            Just (se_base, W4C.ConcreteBV _ se_off) <- return $ WEH.asConstantOffset sym (PS.unSE se)
+            -- postFrame = preFrame + off2
+            Just (postFrame_base, W4C.ConcreteBV _ postFrame_off) <- return $ WEH.asConstantOffset sym (PS.unSE postFrame)
+            p1 <- liftIO $ W4.isEq sym se_base (PS.unSE preFrame)
+            Just True <- return $ W4.asConstantPred p1
+            p2 <- liftIO $ W4.isEq sym postFrame_base (PS.unSE preFrame)
+            Just True <- return $ W4.asConstantPred p2
+            -- preFrame = postFrame - off2
+            -- se = (postFrame - off2) + off1
+            -- se = postFrame + (off1 - off2)
+            off' <- liftIO $ PS.concreteScope @post sym (W4C.ConcreteBV w (BVS.sub w se_off postFrame_off))
+            liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
 
+          asStackOffset :: forall bin tp. HasCallStack => PBi.WhichBinaryRepr bin -> PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
+          asStackOffset bin se = do
+            W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
+            Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
+            -- se[v]
+            let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
 
-        se' <- traceAlternatives $
-          -- first try strategies that don't use the solver
-          [ ("asConcrete", asConcrete se)
-          , ("simpleStackOffsetO", simpleStackOffset PBi.OriginalRepr se)
-          , ("simpleStackOffsetP", simpleStackOffset PBi.PatchedRepr se)
-          -- solver-based strategies now
-          , ("asScopedConst", asScopedConst (W4.truePred sym) se)
-          , ("asSimpleAssign", asSimpleAssign se)
-          ] ++ asStackOffsetStrats
+            off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
+            -- asFrameOffset := frame[post] + off
+            asFrameOffset <- liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off
+            -- asFrameOffset' := frame[post/f(v)] + off
+            asFrameOffset' <- liftIO $ PS.applyScopeCoercion sym post_to_pre asFrameOffset
+            -- asm := se == frame[post/f(pre)] + off
+            asm <- liftIO $ PS.liftScope2 sym W4.isEq se asFrameOffset'
+            -- assuming 'asm', is 'off' constant?        
+            off' <- asScopedConst (PS.unSE asm) off        
+            -- lift $ traceBundle bundle (show $ W4.printSymExpr (PS.unSE off'))
+            -- return frame[post] + off
+            liftIO $ PS.liftScope2 sym W4.bvAdd postFrame off'
 
-        lift $ emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se')
-        return se'
-    -- First traverse the equivalence domain and rescope its entries
-    -- In this case, failing to rescope is a (recoverable) error, as it results
-    -- in a loss of soundness; dropping an entry means that the resulting domain
-    -- is effectively now assuming equality on that entry.
-    
-    eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
-       subTrace @"expr" (Some (PS.unSE se)) $
-        doRescope loc se >>= \case
-          JustF se' -> return $ Just se'
-          NothingF -> do
-            -- failed to rescope, emit a recoverable error and drop this entry
+          asSimpleAssign :: forall tp. HasCallStack => PS.ScopedExpr sym pre tp -> MaybeT (EquivM_ sym arch) (PS.ScopedExpr sym post tp)
+          asSimpleAssign se = do
+            -- se[pre]
+            -- se' := se[pre/post]
             se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+            -- e'' := se[post/f(pre)]
             e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
-            curAsms <- currentAsm
-            _ <- emitError $ PEE.RescopingFailure curAsms se e''
-            return Nothing
+            -- se is the original value, and e'' is the value rewritten
+            -- to be phrased over the post-state
+            heuristicTimeout <- lift $ CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+            asm <- liftIO $ PS.liftScope2 sym W4.isEq se e''
+            True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
+            return se'
 
-    -- Now traverse the value domain and rescope its entries. In this case
-    -- failing to rescope is not an error, as it is simply weakening the resulting
-    -- domain by not asserting any value constraints on that entry.
-    val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se ->
-      subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
+          doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
+          doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
+              -- The decision of ordering here is only for efficiency: we expect only
+              -- one strategy to succeed.
+              -- NOTE: Although it is possible for multiple strategies to be applicable,
+              -- they (should) all return semantically equivalent terms
+              -- TODO: We could do better by picking the strategy based on the term shape,
+              -- but it's not strictly necessary.
 
-    let dom = PAD.AbstractDomain eq_post val_post
-    emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
-    return dom
+            asStackOffsetStrats <- PPa.catBins $ \get -> do
+              let stackbase = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState $ (get (PS.scopeVars scope_pre))
+              sbVars <- IO.liftIO $ WEH.boundVars stackbase
+              seVars <- IO.liftIO $ WEH.boundVars (PS.unSE se)
+
+              -- as an optimization, we omit this test for
+              -- terms which contain memory accesses (i.e. depend on
+              -- the memory variable somehow), since we don't have any support for
+              -- indirect reads
+              mvars <- lift $ memVars (get (PS.scopeVars scope_pre))
+              let noMem = Set.null (Set.intersection seVars mvars)
+
+              let bin = get PPa.patchPairRepr
+
+              case Set.isSubsetOf sbVars seVars && noMem of
+                True -> return $ [("asStackOffset (" ++ show bin ++ ")", asStackOffset bin se)]
+                False -> return $ []
+
+
+
+            se' <- traceAlternatives $
+              -- first try strategies that don't use the solver
+              [ ("asConcrete", asConcrete se)
+              , ("simpleStackOffsetO", simpleStackOffset PBi.OriginalRepr se)
+              , ("simpleStackOffsetP", simpleStackOffset PBi.PatchedRepr se)
+              -- solver-based strategies now
+              , ("asScopedConst", asScopedConst (W4.truePred sym) se)
+              , ("asSimpleAssign", asSimpleAssign se)
+              ] ++ asStackOffsetStrats
+
+            lift $ emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se')
+            return se'
+        -- First traverse the equivalence domain and rescope its entries
+        -- In this case, failing to rescope is a (recoverable) error, as it results
+        -- in a loss of soundness; dropping an entry means that the resulting domain
+        -- is effectively now assuming equality on that entry.
+
+        eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
+           subTrace @"expr" (Some (PS.unSE se)) $
+            doRescope loc se >>= \case
+              JustF se' -> return $ Just se'
+              NothingF -> do
+                -- failed to rescope, emit a recoverable error and drop this entry
+                se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+                e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
+                curAsms <- currentAsm
+                _ <- emitError $ PEE.RescopingFailure curAsms se e''
+                return Nothing
+
+        -- Now traverse the value domain and rescope its entries. In this case
+        -- failing to rescope is not an error, as it is simply weakening the resulting
+        -- domain by not asserting any value constraints on that entry.
+        val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se ->
+          subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
+
+        let dom = PAD.AbstractDomain eq_post val_post
+        emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
+        return dom
 
 
 
@@ -477,10 +484,10 @@ widenPostcondition ::
   AbstractDomain sym arch v {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch v)
 widenPostcondition bundle preD postD0 =
-  withSym $ \sym -> do
+  withTracing @"function_name" "widenPostcondition" $ withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
-    subTree @"domain" "widenPostcondition" $
+    subTree @"domain" "Widening Steps" $
       widenLoop sym localWideningGas eqCtx postD0 Nothing
 
  where
@@ -641,7 +648,7 @@ getInitalAbsDomainVals ::
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
-getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
+getInitalAbsDomainVals bundle preDom = withTracing @"function_name" "getInitalAbsDomainVals" $ withSym $ \sym -> do
   PEM.SymExprMappable asEM <- return $ PEM.symExprMappable sym
   let
     getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
@@ -653,7 +660,7 @@ getInitalAbsDomainVals bundle preDom = withSym $ \sym -> do
 
   let PPa.PatchPair preO preP = PAD.absDomVals preDom
   eqCtx <- equivalenceContext
-  subTree @"expr" "getInitalAbsDomainVals" $ IO.withRunInIO $ \inIO -> do
+  subTree @"expr" "Initial Domain" $ IO.withRunInIO $ \inIO -> do
     initO <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) (PS.simOutO bundle) preO
     initP <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) (PS.simOutP bundle) preP
     return $ PPa.PatchPair initO initP

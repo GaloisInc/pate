@@ -83,6 +83,7 @@ module Pate.TraceTree (
   , withTracing
   , withTracingLabel
   , withNoTracing
+  , mkTags
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -110,6 +111,7 @@ import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSy
 data TraceTag =
     Summary
   | Full
+  | Simplified
   | Custom String
   deriving (Eq, Ord)
 
@@ -274,6 +276,9 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
   nodeTags :: [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
   nodeTags = [(Summary, prettyNode @l @k @nm)]
 
+mkTags :: forall k nm a. IsTraceNode k nm => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
+mkTags tags = map (\tag -> (tag, prettyNode @_ @k @nm)) tags
+
 prettySummary ::
   forall k nm a.
   IsTraceNode k nm =>
@@ -400,7 +405,14 @@ instance Eq SomeSymRepr where
 instance IsTraceNode k "subtree" where
   type TraceNodeType k "subtree" = String
   type TraceNodeLabel "subtree" = SomeSymRepr
-  prettyNode (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (symbolRepr lbl) <> "]"
+  prettyNode lbl nm = prettyTree lbl nm
+  nodeTags = [(Simplified, prettyTree)]
+
+prettyTree ::
+  SomeSymRepr ->
+  String ->
+  PP.Doc a
+prettyTree (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (symbolRepr lbl) <> "]"
 
 -- ad-hoc messages
 instance IsTraceNode k "message" where
