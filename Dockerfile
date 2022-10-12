@@ -68,7 +68,7 @@ RUN cabal v2-build dismantle-arm-xml
 RUN cabal v2-build --only-dependencies macaw-aarch32
 RUN cabal v2-build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
 RUN cabal v2-build semmc-ppc
-RUN cabal v2-build semmc-aarch32
+RUN cabal v2-build lib:semmc-aarch32
 RUN cabal v2-build macaw-ppc
 RUN cabal v2-build macaw-ppc-symbolic
 RUN cabal v2-build macaw-aarch32-symbolic
