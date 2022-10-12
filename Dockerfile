@@ -46,75 +46,51 @@ RUN mkdir -p /home/cvc4/src; \
      make -j4 && \
      make install)
 
-RUN curl -L https://downloads.haskell.org/~ghcup/0.1.13/x86_64-linux-ghcup-0.1.13 -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
-RUN mkdir -p /root/.ghcup && ghcup --version && ghcup install cabal && ghcup install ghc 8.10.4 && ghcup set ghc 8.10.4
+RUN curl -L https://downloads.haskell.org/~ghcup/0.1.16/x86_64-linux-ghcup-0.1.16 -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
+RUN mkdir -p /root/.ghcup && ghcup --version && ghcup install cabal && ghcup install ghc 8.10.7 && ghcup set ghc 8.10.7
 
 ######################################################################
 ENV PATH="/root/.ghcup/bin:${PATH}"
 RUN cabal update
 RUN mkdir -p /home/src
 
-COPY ./submodules/arm-asl-parser /home/src/submodules/arm-asl-parser
-COPY ./submodules/parameterized-utils /home/src/submodules/parameterized-utils
-COPY ./submodules/dismantle /home/src/submodules/dismantle
-COPY ./submodules/what4 /home/submodules/what4
-COPY ./submodules/what4-serialize /home/submodules/what4-serialize
-
 COPY ./cabal.project.dist /home/src/cabal.project.dist
-
-COPY ./pate.cabal /home/src/
+COPY ./pate.cabal /home/src/pate.cabal
+COPY ./submodules /home/src/submodules
 
 WORKDIR /home/src
 
-COPY ./submodules/llvm-pretty/llvm-pretty.cabal /home/src/submodules/llvm-pretty/llvm-pretty.cabal
+RUN cp cabal.project.dist cabal.project
+RUN cabal v2-configure --keep-going --ghc-options="-fno-safe-haskell"
 
-RUN ln -sf cabal.project.dist cabal.project
-RUN cabal configure pkg:pate -w ghc-8.10.4
-RUN cabal build dismantle-arm-xml
+RUN cabal v2-build --only-dependencies dismantle-arm-xml
+RUN cabal v2-build dismantle-arm-xml
+RUN cabal v2-build --only-dependencies macaw-aarch32
+RUN cabal v2-build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
+RUN cabal v2-build semmc-ppc
+RUN cabal v2-build semmc-aarch32
+RUN cabal v2-build macaw-ppc
+RUN cabal v2-build macaw-ppc-symbolic
+RUN cabal v2-build macaw-aarch32-symbolic
+RUN cabal v2-build macaw-loader-aarch32
 
-COPY ./submodules/asl-translator /home/src/submodules/asl-translator
-COPY ./submodules/crucible/ /home/src/submodules/crucible
-COPY ./submodules/dwarf /home/src/submodules/dwarf
-COPY ./submodules/elf-edit /home/src/submodules/elf-edit
-COPY ./submodules/flexdis86 /home/src/submodules/flexdis86
-COPY ./submodules/llvm-pretty /home/src/submodules/llvm-pretty
-COPY ./submodules/macaw /home/src/submodules/macaw
-COPY ./submodules/macaw-loader /home/src/submodules/macaw-loader
-COPY ./submodules/renovate /home/src/submodules/renovate
-COPY ./submodules/semmc /home/src/submodules/semmc
+RUN cabal v2-build --only-dependencies lib:pate
 
-RUN cabal build --only-dependencies macaw-aarch32 -j5
-RUN cabal build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
+COPY ./src /home/src/src
+
+COPY ./tools/pate/ /home/src/tools/pate
+
+RUN cabal v2-build lib:pate
 
 COPY ./arch /home/src/arch
-COPY ./src /home/src/src
 COPY ./tools /home/src/tools
 COPY ./*.ghci /home/src/
 COPY ./pate.sh ./home/src
 
-RUN cabal build pkg:pate --only-dependencies -j5
-RUN cabal build pkg:pate -j5
-RUN cabal build pate-repl-base
-
+RUN cabal v2-build pate-repl-base
 
 ## FROM ubuntu:20.04
 
 ENV PATH="/home/src/:/root/.ghcup/bin:${PATH}"
-
-# ENV LANG en_US.UTF-8
-# ENV LANGUAGE en_US:en
-# ENV LC_ALL en_US.UTF-8
-
-## COPY --from=0 /usr/local/bin/cvc4 \
-##              /usr/local/bin/z3 \
-##              /usr/local/bin/yices \
-##              /usr/local/bin/yices-smt2 \
-##              /usr/local/bin/
-
-## COPY --from=0 /home/src /usr/local/bin/pate
-
-## RUN mkdir -p /root/
-
-## COPY --from=0 /root/.ghcup /root/.ghcup
 
 ENTRYPOINT ["/home/src/pate.sh"]
