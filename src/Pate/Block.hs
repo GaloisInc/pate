@@ -18,6 +18,7 @@ module Pate.Block (
   , ConcreteBlock(..)
   , FunCallKind(..)
   , BlockTarget(..)
+  , syntheticTargets
   , BlockPair
   , FunPair
   , equivBlocks
@@ -47,6 +48,7 @@ import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some
 import qualified Data.Macaw.AbsDomain.AbsState as DMAA
 
 import qualified Prettyprinter as PP
@@ -70,7 +72,7 @@ data BlockEntryKind arch =
   | BlockEntryJump
     -- ^ block was entered by an arbitrary jump
     -- problems
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Enum, Bounded)
 
 ppBlockEntry :: BlockEntryKind arch -> String
 ppBlockEntry be = case be of
@@ -131,9 +133,9 @@ mkConcreteBlock' from k a =
 
 
 instance PC.TestEquality (ConcreteBlock arch) where
-  testEquality (ConcreteBlock addr1 entry1 binrepr1 fe1) (ConcreteBlock addr2 entry2 binrepr2 fe2) =
+  testEquality (ConcreteBlock addr1 _entry1 binrepr1 fe1) (ConcreteBlock addr2 _entry2 binrepr2 fe2) =
     case PC.testEquality binrepr1 binrepr2 of
-      Just PC.Refl | addr1 == addr2 && entry1 == entry2 && fe1 == fe2 -> Just PC.Refl
+      Just PC.Refl | addr1 == addr2 && fe1 == fe2 -> Just PC.Refl
       _ -> Nothing
 
 instance Eq (ConcreteBlock arch bin) where
@@ -141,10 +143,9 @@ instance Eq (ConcreteBlock arch bin) where
   _ == _ = False
 
 instance PC.OrdF (ConcreteBlock arch) where
-  compareF (ConcreteBlock addr1 entry1 binrepr1 fe1) (ConcreteBlock addr2 entry2 binrepr2 fe2) =
+  compareF (ConcreteBlock addr1 _entry1 binrepr1 fe1) (ConcreteBlock addr2 _entry2 binrepr2 fe2) =
     PC.lexCompareF binrepr1 binrepr2 $ PC.fromOrdering $
       compare addr1 addr2 <>
-      compare entry1 entry2 <>
       compare fe1 fe2
 
 instance Ord (ConcreteBlock arch bin) where
@@ -163,11 +164,12 @@ ppBlockAddr :: MM.MemWidth (MM.ArchAddrWidth arch) => ConcreteBlock arch bin -> 
 ppBlockAddr b = PP.viaShow (concreteAddress b)
 
 instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch bin) where
-  pretty cb = case functionSymbol (blockFunctionEntry cb) of
-    Just s -> PP.viaShow s <+> "(" <> PP.viaShow (concreteAddress cb) <> ")"
-    Nothing -> PP.viaShow (concreteAddress cb)
-
-
+  pretty cb =
+    PP.hsep $ [      
+      case functionSymbol (blockFunctionEntry cb) of
+        Just s -> PP.viaShow s <+> "(" <> PP.viaShow (concreteAddress cb) <> ")"
+        Nothing -> PP.viaShow (concreteAddress cb)
+      ]
 
 data BlockTarget arch bin =
   BlockTarget
@@ -177,6 +179,15 @@ data BlockTarget arch bin =
     , targetEndCase :: MCS.MacawBlockEndCase
     } deriving (Eq, Ord)
 
+-- | This is a cludge to convince discovery to emit all of
+--   the reachable block targets for only one program
+syntheticTargets :: ConcreteBlock arch bin -> [BlockTarget arch bin]
+syntheticTargets blk =
+  [ BlockTarget (blk { concreteBlockEntry = entry_case }) mret case_
+  | entry_case <- [minBound..maxBound]
+  , mret <- [Just blk, Nothing]
+  , case_ <- [minBound..maxBound]
+  ]
 
 instance PC.TestEquality (BlockTarget arch) where
   testEquality e1 e2 = PC.orderingF_refl (PC.compareF e1 e2)
@@ -212,6 +223,11 @@ instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(s
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (BlockTarget arch)
   prettyNode () blkts = PPa.ppPatchPair' ppBlockTarget blkts
   nodeTags = mkTags @'(sym,arch) @"blocktarget" [Simplified,Summary]
+
+instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget1" where
+  type TraceNodeType '(sym,arch) "blocktarget1" = Some (BlockTarget arch)
+  prettyNode () (Some blkt) = ppBlockTarget blkt
+  nodeTags = mkTags @'(sym,arch) @"blocktarget1" [Simplified,Summary]
 
 data FunctionEntry arch (bin :: PB.WhichBinary) =
   FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch

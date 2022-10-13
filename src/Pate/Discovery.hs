@@ -47,6 +47,7 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import           Data.Parameterized.WithRepr
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -105,8 +106,9 @@ import           Pate.TraceTree
 discoverPairs ::
   forall sym arch v.
   SimBundle sym arch v ->
+  Maybe (Some PB.WhichBinaryRepr) ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
+discoverPairs bundle frozen = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty
@@ -123,12 +125,27 @@ discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ 
         Nothing -> throwHere PEE.InconclusiveSAT
       IO.liftIO $ IO.modifyIORef cache (Map.insert (Some blkt) result)
       return result
-          
-  blksO' <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
-  blksO <- CMR.filterM checkSat blksO'
-  
-  blksP' <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
-  blksP <- CMR.filterM checkSat blksP'
+
+  (blksO, blksP) <- PPa.forBinsL $ \get -> do
+    let repr = get PPa.patchPairRepr
+    case Just (Some repr) == frozen of
+      True -> do
+        let blks = PB.syntheticTargets (get pPair)
+        subTree @"blocktarget1" "Synthetic Targets" $ do
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
+        subTree @"blocktarget1" "Synthetic Sat Targets" $ do
+          blks' <- CMR.lift $ CMR.filterM checkSat blks
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
+          return blks'
+      False -> do
+        blks <- getSubBlocks (get pPair)
+        subTree @"blocktarget1" "Real Targets" $ do
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
+        subTree @"blocktarget1" "Real Sat Targets" $ do
+          blks' <- CMR.lift $ CMR.filterM checkSat blks
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
+          return blks'
+        
 
   let
     allCalls = [ PPa.PatchPair blkO blkP
@@ -136,6 +153,7 @@ discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ 
                , blkP <- blksP
                , compatibleTargets blkO blkP]
   blocks <- getBlocks $ PSS.simPair bundle
+  
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
   subTree @"blocktarget" "Cached Pairs" $
     mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
@@ -383,11 +401,9 @@ getSubBlocks b = withBinary @bin $
 -- | Find the abstract domain for a given starting point
 getAbsDomain ::
   forall sym arch bin.
-  HasCallStack =>
-  PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (MAS.AbsBlockState (MC.ArchReg arch))
-getAbsDomain b = withBinary @bin $ do
+getAbsDomain b = withRepr (PB.blockBinRepr b) $ withBinary @bin $ do
   let addr = PB.concreteAddress b
   pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
   mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
@@ -513,8 +529,7 @@ callTargets ::
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
     EquivM sym arch [PB.BlockTarget arch bin]
-callTargets from next_ips ret = do
-   let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
+callTargets from next_ips mret = do
    binCtx <- getBinCtx @bin
    let mem = MBL.memoryImage (PMC.binary binCtx)
    let pfm = PMC.parsedFunctionMap binCtx
@@ -529,6 +544,7 @@ callTargets from next_ips ret = do
                                    }
          fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
          let pb = PB.functionEntryToConcreteBlock fe'
+         let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) mret
          return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
        Nothing -> do
          -- this isn't necessarily an error, since we always double check

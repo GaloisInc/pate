@@ -406,7 +406,7 @@ instance IsTraceNode k "subtree" where
   type TraceNodeType k "subtree" = String
   type TraceNodeLabel "subtree" = SomeSymRepr
   prettyNode lbl nm = prettyTree lbl nm
-  nodeTags = [(Simplified, prettyTree)]
+  nodeTags = [(Summary, prettyTree), (Simplified, \_ nm -> PP.pretty nm) ]
 
 prettyTree ::
   SomeSymRepr ->

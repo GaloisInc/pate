@@ -73,6 +73,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
 
 import           Pate.Verification.PairGraph
+import qualified Pate.Verification.Simplify as PSi
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases )
 import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -248,7 +249,7 @@ abstractOverVars ::
   PAD.AbstractDomain sym arch pre {- ^ computed post-domain (with variables from the initial 'pre' scope) -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 abstractOverVars scope_pre bundle _from _to postSpec postResult = do
-  result <- withTracing @"function_name" "widenPostcondition" $ go
+  result <- withTracing @"function_name" "abstractOverVars" $ go
   PS.viewSpec result $ \_ d -> do
     emitTraceLabel @"domain" PAD.ExternalPostDomain (Some d)
   return result
@@ -405,7 +406,10 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         -- in a loss of soundness; dropping an entry means that the resulting domain
         -- is effectively now assuming equality on that entry.
 
-        eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomEq postResult)) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
+        simplifier <- PSi.getSimplifier
+        domEq_simplified <- PSi.applySimplifier simplifier (PAD.absDomEq postResult)
+
+        eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domEq_simplified) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
            subTrace @"expr" (Some (PS.unSE se)) $
             doRescope loc se >>= \case
               JustF se' -> return $ Just se'
@@ -420,7 +424,8 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         -- Now traverse the value domain and rescope its entries. In this case
         -- failing to rescope is not an error, as it is simply weakening the resulting
         -- domain by not asserting any value constraints on that entry.
-        val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre (PAD.absDomVals postResult)) $ \loc se ->
+        domVals_simplified <- PSi.applySimplifier simplifier (PAD.absDomVals postResult)
+        val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domVals_simplified) $ \loc se ->
           subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
 
         let dom = PAD.AbstractDomain eq_post val_post

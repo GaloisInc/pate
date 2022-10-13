@@ -19,6 +19,7 @@ module Pate.Discovery.ParsedFunctions (
 
 
 import           Control.Lens ( (^.), (&), (.~) )
+import qualified Control.Exception as IO
 import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
@@ -43,6 +44,7 @@ import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Discovery.State as MD
 import qualified Data.Macaw.Discovery.ParsedContents as DMDP
 import qualified What4.Interface as W4
+import           What4.Utils.Process (filterAsync)
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
@@ -312,11 +314,15 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir pd) = do
           -- IORef that might be evaluated multiple times if there is a lot of
           -- contention. If that becomes a problem, we may want to change this
           -- to an MVar where we fully evaluate each result before updating it.
-          Some dfi <- IORef.atomicModifyIORef' pfmRef (atomicAnalysis ignoredAddresses faddr)
-          let binRep :: PBi.WhichBinaryRepr bin
-              binRep = PC.knownRepr
-          saveCFG mCFGDir binRep dfi
-          return (Just (Some dfi))
+          (IO.tryJust filterAsync $ IO.evaluate $ atomicAnalysis ignoredAddresses faddr st) >>= \case
+            Right (pfm', Some dfi) -> do
+              let binRep :: PBi.WhichBinaryRepr bin
+                  binRep = PC.knownRepr
+              IORef.writeIORef pfmRef pfm'
+              saveCFG mCFGDir binRep dfi
+              return (Just (Some dfi))
+            Left _e -> return Nothing -- TODO: throw exception here?
+          
   where
     -- The entire analysis is bundled up in here so that we can issue an atomic
     -- update to the cache that preserves the discovery state. If we didn't do

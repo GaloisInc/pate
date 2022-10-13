@@ -3,19 +3,29 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications   #-}
+{-# LANGUAGE DataKinds   #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 module Pate.Verification.Simplify (
     simplifyPred
   , simplifySubPreds
   , simplifyPred_deep
   , simplifyWithSolver
   , simplifyBVOps_trace
+  , Simplifier
+  , applySimplifier
+  , runSimplifier
+  , getSimplifier
   ) where
 
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import           Data.Functor.Const ( Const(..) )
+import           Data.Parameterized.Some
 import           Debug.Trace ( traceM )
+import           Data.Proxy
 import           GHC.Stack ( HasCallStack )
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
@@ -23,8 +33,10 @@ import qualified What4.SatResult as W4R
 
 import qualified Pate.Config as PC
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
+import           Pate.TraceTree
 
 -- | Under the current assumptions, attempt to collapse a predicate
 -- into either trivially true or false
@@ -157,3 +169,62 @@ simplifyPred_deep p = withSym $ \sym -> do
       traceM ("ERROR: simplifyPred_deep: exception " ++ show exn)
       return p
     Right r' -> return r'
+
+
+
+
+
+data Simplifier sym arch = Simplifier { runSimplifier :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp) }
+
+applySimplifier ::
+  PEM.ExprMappable sym v =>
+  Simplifier sym arch ->
+  v ->
+  EquivM sym arch v
+applySimplifier simplifier v = withSym $ \sym -> PEM.mapExpr sym (runSimplifier simplifier) v
+
+getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
+getSimplifier = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  conccache <- W4B.newIdxCache
+  ecache <- W4B.newIdxCache
+  let
+    concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
+    concPred p = getConst <$> (W4B.idxCacheEval conccache p $ do
+                                  emitTraceLabel @"expr" "concPred_input" (Some p)
+                                  concretePred heuristicTimeout p >>= \case
+                                    Just b -> (emitTrace @"message" "concrete" >> return (Const (Just b)))
+                                    Nothing -> (emitTrace @"message" "abstract" >> return (Const Nothing))
+                               )
+
+    simp :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+    simp e = W4B.idxCacheEval ecache e $ do
+      -- TODO: clean up this tracing a bit
+      emitTraceLabel @"expr" "input" (Some e)
+      e1 <- WEH.resolveConcreteLookups sym concPred e
+      emitIfChanged "resolveConcreteLookups" e e1
+      valid <- liftIO $ W4.isEq sym e e1
+      e2 <- WEH.simplifyBVOps sym e1
+      emitIfChanged "simplifyBVOps" e1 e2
+      e3 <- liftIO $ WEH.fixMux sym e2
+      emitIfChanged "fixMux" e2 e3
+
+      shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
+      case shouldCheck of
+        True -> do
+          valid <- liftIO $ W4.isEq sym e e3
+          concPred valid >>= \case
+            Just True -> return e3
+            _ -> throwHere $ PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e e3)
+        False -> return e3
+  return $ Simplifier $ \v -> withNoTracing $ PEM.mapExpr sym simp v
+
+
+emitIfChanged ::
+  ExprLabel ->
+  W4.SymExpr sym tp ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch ()
+emitIfChanged msg e1 e2 = case W4.testEquality e1 e2 of
+  Just W4.Refl -> return ()
+  Nothing -> emitTraceLabel @"expr" msg (Some e2) >> return ()

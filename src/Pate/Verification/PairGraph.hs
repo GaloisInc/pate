@@ -37,6 +37,7 @@ module Pate.Verification.PairGraph
   , addExtraEdge
   , getExtraEdges
   , addTerminalNode
+  , emptyReturnVector
   ) where
 
 import           Prettyprinter
@@ -71,7 +72,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, rootEntry, nodeBlocks )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, rootEntry, nodeBlocks, rootReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -368,7 +369,8 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
                -- FIXME: compute this from the global and stack regions
                return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
              return $ idom' { PAD.absDomVals = vals' }
-           return (freshDomain gr node rootDom)
+           let gr1 = freshDomain gr node rootDom
+           return $ emptyReturnVector gr1 (rootReturn fnPair)
 
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the
@@ -416,6 +418,16 @@ updateDomain gr pFrom pTo d
      -- if it is not in the map
       Gas g = fromMaybe initialGas (Map.lookup (pFrom,pTo) (pairGraphGas gr))
 
+emptyReturnVector ::
+  PairGraph sym arch ->
+  NodeReturn arch ->
+  PairGraph sym arch
+emptyReturnVector gr ret = gr{ pairGraphReturnVectors = rvs }
+  where
+    rvs = Map.alter f ret (pairGraphReturnVectors gr)
+    f Nothing  = Just (Set.empty)
+    f (Just s) = Just s
+                 
 -- | When we encounter a function call, record where the function
 --   returns to so that we can correctly propagate abstract domain
 --   information from function returns to their call sites.

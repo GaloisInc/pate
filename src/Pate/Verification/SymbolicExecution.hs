@@ -206,7 +206,7 @@ evalCFG globals regs cfg =
   do bak <- liftIO $ CB.newSimpleBackend sym
      archRepr <- archStructRepr
      initCtx <- initSimContext bak
-     liftIO $ id
+     safeIO (\e -> PEE.SymbolicExecutionError (show e)) $ id
        . CS.executeCrucible []
        . CS.InitialState initCtx globals CS.defaultAbortHandler archRepr
        . CS.runOverrideSim archRepr

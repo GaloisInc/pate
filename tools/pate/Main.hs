@@ -117,6 +117,8 @@ runMain traceTree opts = do
         , PC.cfgSolverInteractionFile = solverInteractionFile opts
         , PC.cfgTraceTree = traceTree
         , PC.cfgFailureMode = errMode opts
+        , PC.cfgIgnoreUnnamedFunctions = skipUnnamedFns opts
+        , PC.cfgIgnoreDivergedControlFlow = skipDivergedControl opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader
@@ -161,6 +163,8 @@ data CLIOptions = CLIOptions
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
   , errMode :: PC.VerificationFailureMode
+  , skipUnnamedFns :: Bool
+  , skipDivergedControl :: Bool
   } deriving (Eq, Ord, Show)
 
 {-
@@ -510,4 +514,11 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.help "A file to save debug logs to"
         ))
    <*> modeParser
- 
+   <*> OA.switch
+       (  OA.long "skip-unnamed-functions"
+       <> OA.help "Skip analysis of functions without symbols"
+       )
+   <*> OA.switch
+       (  OA.long "skip-divergent-control-flow"
+       <> OA.help "Skip node processing for "
+       )

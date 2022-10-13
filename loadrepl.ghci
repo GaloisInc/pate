@@ -18,6 +18,7 @@ import System.IO
 
 import System.IO.Unsafe
 import Control.Concurrent
+import Pate.TraceTree
 setNumCapabilities 6
 
 

@@ -114,6 +114,7 @@ data InnerEquivalenceError arch
   | MissingDomainForBlock (PB.BlockPair arch)
   | MissingDomainForFun (PB.FunPair arch)
   | SkippedInequivalentBlocks (PB.BlockPair arch)
+  | SymbolicExecutionError String
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of

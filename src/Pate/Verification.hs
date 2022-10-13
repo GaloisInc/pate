@@ -212,6 +212,8 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf' pd
 
+
+  
   -- Implicit parameters for the LLVM memory model
   let ?memOpts = CLM.laxPointerMemOptions
 
@@ -242,18 +244,35 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   -- compute function entry pairs from the input PatchData
   upData <- unpackPatchData contexts pd
   -- include the process entry point, if configured to do so
-  pPairs' <- case PC.cfgStartSymbol vcfg of
+
+  entryPoint <- case PC.cfgStartSymbol vcfg of
     Just s -> do
       mstartO <- liftIO $ findFunctionByName s (PPa.pOriginal contexts)
       mstartP <- liftIO $ findFunctionByName s (PPa.pPatched contexts)
       case (mstartO,mstartP) of
-        (Just startO, Just startP) ->
-           return (PPa.PatchPair startO startP : unpackedPairs upData)
+        (Just startO, Just startP) -> return $ (PPa.PatchPair startO startP)
         _ -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
-    Nothing -> 
+    Nothing ->
       do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
          let mainP = PMC.binEntry . PPa.pPatched $ contexts
-         return (PPa.PatchPair mainO mainP : unpackedPairs upData)
+         return (PPa.PatchPair mainO mainP)
+
+  PA.SomeValidArch archData <- return validArch
+  let defaultInit = PA.validArchInitAbs archData
+
+  -- inject an override for the initial abstract state
+  contexts1 <- PPa.forBins $ \get -> do
+    let
+      pfm = PMC.parsedFunctionMap (get contexts)
+      blk = get entryPoint
+      mem = MBL.memoryImage (PMC.binary (get contexts))
+    
+    let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
+    let ov = M.singleton (PB.functionSegAddr blk) initAbs
+    pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm ov
+    return $ (get contexts) { PMC.parsedFunctionMap = pfm' }
+    
+  let pPairs' = entryPoint : (unpackedPairs upData)
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   let
@@ -271,7 +290,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
           { PMC.handles = ha
-          , PMC.binCtxs = contexts
+          , PMC.binCtxs = contexts1
           , PMC.stackRegion = stackRegion
           , PMC.globalRegion = globalRegion
           , PMC._currentFunc = error "No function under analysis at startup"

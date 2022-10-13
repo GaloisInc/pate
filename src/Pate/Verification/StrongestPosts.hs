@@ -54,6 +54,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
 import qualified Data.Parameterized.Context as Ctx
+import           Data.Parameterized.WithRepr
 
 import qualified What4.Expr as W4
 import qualified What4.Expr.Builder as W4B
@@ -98,9 +99,10 @@ import qualified Pate.Register.Traversal as PRt
 import           Pate.TraceTree
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
+import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns, graphNodeBlocks )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns, graphNodeBlocks, getFrozen, isThisFrozen, applyFreeze, FrozenContext(..), frozenRepr, unfreezeReturn, freezeNodeFn)
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import qualified Pate.ExprMappable as PEM
@@ -381,12 +383,10 @@ withAbsDomain node d gr f = do
   ovPair <- getFunctionAbs node d gr  
   binCtxPair <- PPa.forBins $ \get -> do
     binCtx <- getBinCtx
-    PA.SomeValidArch archData <- asks envValidArch
     let
       Const absSt = get ovPair
-      defaultInit = PA.validArchInitAbs archData
       pfm = PMC.parsedFunctionMap binCtx
-    pfm' <- liftIO $ PD.addOverrides defaultInit pfm absSt
+    pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm absSt
     return $ binCtx { PMC.parsedFunctionMap = pfm' }
   local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair } }) $ do
     let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
@@ -431,14 +431,13 @@ processBundle ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 processBundle scope node bundle d gr0 = do
-  exitPairs <- PD.discoverPairs bundle
+  exitPairs <- PD.discoverPairs bundle (frozenRepr (getFrozen node))
 
   gr1 <- checkObservables node bundle d gr0
 
   gr2 <- checkTotality node bundle d exitPairs gr1
 
-  mgr3 <- withTracing @"function_name" "updateReturnNode" $
-    updateReturnNode scope node bundle d gr2
+  mgr3 <- updateReturnNode scope node bundle d gr2
   gr3 <- case mgr3 of
     Just gr3 -> return gr3
     Nothing ->
@@ -479,64 +478,22 @@ withValidInit scope bPair f = withPair bPair $ do
   validAbs <- PPa.catBins $ \get -> validAbsValues (get bPair) (get vars)
   withAssumptionSet (validInit <> validAbs) $ f  
 
+
+
 withSimBundle ::
   forall sym arch v a.
   PPa.PatchPair (PS.SimVars sym arch v) ->
-  PB.BlockPair arch ->
+  NodeEntry arch ->
   (SimBundle sym arch v -> EquivM_ sym arch a) ->
   EquivM sym arch a
-withSimBundle vars bPair f = do
-  bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle bPair vars
-  bundle1 <- withSym $ \sym -> do
-    heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
-    conccache <- W4B.newIdxCache
-    ecache <- W4B.newIdxCache
-    let
-      concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
-      concPred p = getConst <$> (W4B.idxCacheEval conccache p $ do
-                                    emitTraceLabel @"expr" "concPred_input" (Some p)
-                                    concretePred heuristicTimeout p >>= \case
-                                      Just b -> (emitTrace @"message" "concrete" >> return (Const (Just b)))
-                                      Nothing -> (emitTrace @"message" "abstract" >> return (Const Nothing))
-                                 )
-
-      simp :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
-      simp e = W4B.idxCacheEval ecache e $ do
-        -- TODO: clean up this tracing a bit
-        emitTraceLabel @"expr" "input" (Some e)
-        e1 <- resolveConcreteLookups sym concPred e
-        emitIfChanged "resolveConcreteLookups" e e1
-        valid <- liftIO $ W4.isEq sym e e1
-        e2 <- simplifyBVOps sym e1
-        emitIfChanged "simplifyBVOps" e1 e2
-        e3 <- liftIO $ fixMux sym e2
-        emitIfChanged "fixMux" e2 e3
-
-        shouldCheck <- asks (PCfg.cfgCheckSimplifier . envConfig)
-        case shouldCheck of
-          True -> do
-            valid <- liftIO $ W4.isEq sym e e3
-            concPred valid >>= \case
-              Just True -> return e3
-              _ -> throwHere $ PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e e3)
-          False -> return e3
-    -- this is a bit expensive to generate all the time
-    -- TODO: add a flag to control when this should be created
-    withNoTracing $
-      withTracing @"function_name" "mkSimBundle-simplification" $
-        PEM.mapExpr sym simp bundle0
+withSimBundle vars node f = do
+  let bPair = nodeBlocks node
+  bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle node vars
+  simplifier <- PSi.getSimplifier
+  bundle1 <- PSi.applySimplifier simplifier bundle0
   bundle <- applyCurrentAsms bundle1
   emitTrace @"bundle" (Some bundle)
   f bundle
-
-emitIfChanged ::
-  ExprLabel ->
-  W4.SymExpr sym tp ->
-  W4.SymExpr sym tp ->
-  EquivM sym arch ()
-emitIfChanged msg e1 e2 = case testEquality e1 e2 of
-  Just Refl -> return ()
-  Nothing -> emitTraceLabel @"expr" msg (Some e2) >> return ()
 
 handleExtraEdge ::
   PS.SimScope sym arch v ->
@@ -595,7 +552,7 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withAbsDomain nod
   withValidInit scope bPair $ do
     gr1 <- updateExtraEdges scope node d gr0
     let vars = PS.scopeVars scope
-    withSimBundle vars bPair $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
+    withSimBundle vars node $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
 
 visitNode scope (ReturnNode fPair) d gr0 =
   -- propagate the abstract domain of the return node to
@@ -1245,11 +1202,13 @@ viewStubPair (PPa.PatchPair (Const sO) (Const sP)) = (sO,sP)
 -- | Return the name of a function if we want to replace its call with
 --   stub semantics
 getFunctionStubPair ::
-  PB.BlockPair arch ->
+  NodeEntry arch ->
   EquivM sym arch StubPair
-getFunctionStubPair pPair = PPa.forBins $ \get -> do
-  msym <- getFunctionStub (get pPair)
-  return $ Const msym
+getFunctionStubPair node = PPa.forBins $ \get -> do
+  case isThisFrozen get node of
+    -- never process a frozen node as if it has stub semantics
+    True -> return $ Const Nothing
+    False -> Const <$> getFunctionStub (get (nodeBlocks node))
 
 hasStub :: StubPair -> Bool
 hasStub stubPair = case viewStubPair stubPair of
@@ -1301,8 +1260,9 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
         blkO = PB.targetCall blktO
         blkP = PB.targetCall blktP
         pPair = PPa.PatchPair blkO blkP
+        nextNode = mkNodeEntry currBlock pPair
 
-     stubPair <- getFunctionStubPair pPair
+     stubPair <- getFunctionStubPair nextNode
      traceBundle bundle' ("  targetCall: " ++ show blkO)
      matches <- PD.matchesBlockTarget bundle' blkts
      maybeUpdate gr $ withSatAssumption matches $ do
@@ -1332,8 +1292,8 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
                 MCS.MacawBlockEndCall | hasStub stubPair ->
                   handleStub scope bundle currBlock d gr pPair Nothing stubPair
                 MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
-                MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
-                MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr (mkNodeEntry currBlock pPair)
+                MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr nextNode
+                MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr nextNode
                 _ -> throwHere $ PEE.BlockExitMismatch
          _ -> do traceBundle bundle "BlockExitMismatch"
                  throwHere $ PEE.BlockExitMismatch
@@ -1514,7 +1474,7 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
               , show pRetPair
               ]
 
-data FnStubKind = DefinedFn | UndefinedFn | SkippedFn | IgnoredFn
+data FnStubKind = DefinedFn | UndefinedFn | SkippedFn | IgnoredFn | DivergedJump
   deriving (Eq, Ord, Show)
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
@@ -1523,7 +1483,8 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   prettyNode DefinedFn nm = "Defined Function stub call:" <+> PP.pretty nm
   prettyNode UndefinedFn nm = "Undefined Function stub call:" <+> PP.pretty nm
   prettyNode SkippedFn _nm = "Skipped unnamed function"
-  prettyNode IgnoredFn nm = "Ignoring function: " <+> PP.pretty nm
+  prettyNode IgnoredFn nm = "Ignoring function:" <+> PP.pretty nm
+  prettyNode DivergedJump nm = "Diverging jump:" <+> PP.pretty nm
   nodeTags = mkTags @'(sym,arch) @"fnstub" [Summary, Simplified]
   
 -- | Mark the function that this entry belongs to as terminal, indicating
@@ -1558,7 +1519,9 @@ getStubOverrideOne blk mstubSymbol = do
     Nothing | isIgnoredBlock blk -> do
       emitTraceLabel @"fnstub" IgnoredFn (show skippedFnName)
       return $ Nothing
-    _ -> return Nothing
+    _ -> do
+      emitTraceLabel @"fnstub" DivergedJump (show (PP.pretty blk))
+      return Nothing
       
 combineOverrides ::
   PA.StubOverride arch ->
@@ -1601,6 +1564,24 @@ bothDefinedOverrides ::
   PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) -> Bool
 bothDefinedOverrides (PPa.PatchPair (Const (Just{})) (Const (Just{}))) = True
 bothDefinedOverrides _ = False
+
+
+-- | If we have a mismatch in our stub semantics, we need to create
+--   a freeze node for whichever binary hit the stub
+--   TODO: this is only one case of how we might handle divergent control
+--   flow
+freezeMismatchedStubs ::
+  StubPair ->
+  Maybe (Some PBi.WhichBinaryRepr)
+freezeMismatchedStubs stubs = case viewStubPair stubs of
+  (Just{}, Just{}) -> Nothing
+  (Nothing, Just{}) -> Just (Some PBi.PatchedRepr)
+  (Just{}, Nothing) -> Just (Some PBi.OriginalRepr)
+  -- shouldn't happen when handling stubs, since we have no
+  -- stub symbol in this case
+  (Nothing, Nothing) -> Nothing
+
+
 
 transportStub ::
   StubPair ->
@@ -1658,13 +1639,29 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
               --  inline the next blocks
               vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
 
-              withPair pRetPair $ withSimBundle vars (nodeBlocks currBlock) $ \nextBundle -> withPair (nodeBlocks currBlock) $ do
+              withPair pRetPair $ withSimBundle vars currBlock $ \nextBundle -> withPair (nodeBlocks currBlock) $ do
                 processBundle scope currBlock nextBundle d gr0
             _ -> do
               -- for previously-accessed nodes or undefined stubs, we treat it
               -- like a jump
-              let tgt = transportStub stubPair currBlock pPair pRetPair
-              handleJump scope bundle' currBlock d gr0 tgt
+              case freezeMismatchedStubs stubPair of
+                Just (Some bin) -> do
+                  -- a synthetic graph node representing
+                  -- the result of pausing execution on the given
+                  -- binary and continuing on the other
+                  currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
+                     PCfg.SharedFunctionAbstractDomains -> return currBlock
+                     PCfg.DistinctFunctionAbstractDomains -> return $ addContext pRetPair currBlock
+                  let
+                    callNode = mkNodeEntry currBlock' pPair
+                    callNode' = applyFreeze bin callNode pRetPair
+                    -- FIXME: return edges?
+                  handleJump scope bundle' currBlock d gr0 callNode'
+                Nothing -> do
+                  -- in this case
+                  -- have inlined the effects of both stubs
+                  -- and so diverging control flow is not an issue
+                  handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
         -- unclear what to do here?
         Nothing ->
           handleReturn scope bundle' currBlock d gr0
@@ -1678,7 +1675,25 @@ handleReturn ::
   EquivM sym arch (PairGraph sym arch)
 handleReturn scope bundle currBlock d gr =
  do let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks currBlock)
-    widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode (mkNodeReturn currBlock fPair))
+    let ret = mkNodeReturn currBlock fPair
+
+    let
+      ret_thaw = unfreezeReturn ret
+      vecs = getReturnVectors gr ret_thaw
+        
+    case getFrozen currBlock of
+      NotFrozen -> widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode ret)
+      _ | Set.null vecs ->  widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode ret)
+
+      FrozenBlock bin -> do
+        let bin_other = PBi.flipRepr bin
+        -- mark the other binary as having been frozen just before this return
+        let blk_swapped = freezeNodeFn bin_other currBlock
+        -- virtual jump
+        widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode blk_swapped)
+      -- other side is waiting to return, so process the final return now
+      FrozenReturn{} -> do
+        widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode ret_thaw)
 
 handleJump ::
   PS.SimScope sym arch v ->
@@ -1692,25 +1707,66 @@ handleJump scope bundle currBlock d gr nextNode =
   widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode nextNode)
 
 
+-- | A no-op transition that matches the exit of the given output
+noTransition ::
+  forall sym arch v bin.
+  PS.SimInput sym arch v bin ->
+  PS.SimOutput sym arch v (PBi.OtherBinary bin) ->
+  EquivM sym arch (PS.SimOutput sym arch v bin)
+noTransition simIn_ otherSimOut = withSym $ \sym -> do
+  ptr <- PD.concreteToLLVM (PS.simInBlock simIn_)
+  blkEnd <- liftIO $ MCS.copyBlockEnd (Proxy @arch) sym ptr (PS.simOutBlockEnd otherSimOut)
+  stackBase <- liftIO $ PS.freshStackBase sym (Proxy @arch)
+  return $ PS.SimOutput ((PS.simInState simIn_) { PS.simStackBase = stackBase }) blkEnd
+
+mkSimBundleOne ::
+  PB.ConcreteBlock arch bin ->
+  PS.SimVars sym arch v bin ->
+  EquivM sym arch (PS.SimInput sym arch v bin, PS.SimOutput sym arch v bin)
+mkSimBundleOne blk vars = do
+  let varState = PS.simVarState vars
+  absState <- PD.getAbsDomain blk
+  let simIn_ = PS.SimInput varState blk absState
+  (_asmO, simOut_) <- withRepr (PB.blockBinRepr blk) $ PVSy.simulate simIn_
+  return (simIn_, simOut_)
+
+
 mkSimBundle ::
-  PB.BlockPair arch ->
+  NodeEntry arch ->
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   EquivM sym arch (SimBundle sym arch v)
-mkSimBundle pPair vars =
-  do let oVarState = PS.simVarState (PPa.pOriginal vars)
-     let pVarState = PS.simVarState (PPa.pPatched vars)
-     oAbsState <- PD.getAbsDomain (PPa.pOriginal pPair)
-     pAbsState <- PD.getAbsDomain (PPa.pPatched pPair)
+mkSimBundle node vars = do
+  case frozenRepr (getFrozen node) of
+    -- if one binary is frozen, manufacture a synthetic bundle for it
+    Just (Some bin) -> do
+      let otherBin = PBi.flipRepr bin
+      -- actual transition
+      (simInOther, simOutOther) <- mkSimBundleOne (PPa.getPair' otherBin (nodeBlocks node)) (PPa.getPair' otherBin vars)
+      let
+        var = PPa.getPair' bin vars
+        blk = PPa.getPair' bin (nodeBlocks node)
+      absState <- PD.getAbsDomain blk
+      let simIn_ = PS.SimInput (PS.simVarState var) blk absState
+      simOut_ <- noTransition simIn_ simOutOther
+      let inputs = PPa.mkPair bin simIn_ simInOther
+      let outputs = PPa.mkPair bin simOut_ simOutOther
+      return $ SimBundle inputs outputs
+    Nothing -> do
+      let pPair = nodeBlocks node
+      let oVarState = PS.simVarState (PPa.pOriginal vars)
+      let pVarState = PS.simVarState (PPa.pPatched vars)
+      oAbsState <- PD.getAbsDomain (PPa.pOriginal pPair)
+      pAbsState <- PD.getAbsDomain (PPa.pPatched pPair)
 
-     let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair) oAbsState
-     let simInP    = PS.SimInput pVarState (PPa.pPatched pPair) pAbsState
+      let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair) oAbsState
+      let simInP    = PS.SimInput pVarState (PPa.pPatched pPair) pAbsState
 
-     traceBlockPair pPair "Simulating original blocks"
-     (_asmO, simOutO_) <- PVSy.simulate simInO
-     traceBlockPair pPair "Simulating patched blocks"
-     (_asmP, simOutP_) <- PVSy.simulate simInP
-     traceBlockPair pPair "Finished simulating blocks"
+      traceBlockPair pPair "Simulating original blocks"
+      (_asmO, simOutO_) <- PVSy.simulate simInO
+      traceBlockPair pPair "Simulating patched blocks"
+      (_asmP, simOutP_) <- PVSy.simulate simInP
+      traceBlockPair pPair "Finished simulating blocks"
 
-     let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
-     return bnd
+      let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
+      return bnd
      -- applyCurrentAsms bnd

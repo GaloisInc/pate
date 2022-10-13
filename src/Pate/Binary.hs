@@ -28,9 +28,12 @@ module Pate.Binary
   , Original
   , Patched
   , WhichBinaryRepr(..)
+  , OtherBinary
+  , flipRepr
   )
 where
 
+import           Data.Parameterized.WithRepr
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Prettyprinter as PP
@@ -46,6 +49,16 @@ type Patched = 'Patched
 data WhichBinaryRepr (bin :: WhichBinary) where
   OriginalRepr :: WhichBinaryRepr 'Original
   PatchedRepr :: WhichBinaryRepr 'Patched
+
+type family OtherBinary (bin :: WhichBinary) :: WhichBinary
+
+type instance OtherBinary Original = Patched
+type instance OtherBinary Patched = Original
+
+flipRepr :: WhichBinaryRepr bin -> WhichBinaryRepr (OtherBinary bin)
+flipRepr = \case
+  OriginalRepr -> PatchedRepr
+  PatchedRepr -> OriginalRepr
 
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some WhichBinaryRepr
@@ -75,3 +88,5 @@ instance KnownRepr WhichBinaryRepr Patched where
   knownRepr = PatchedRepr
 
 type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
+
+instance IsRepr WhichBinaryRepr

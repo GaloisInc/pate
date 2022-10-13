@@ -6,6 +6,8 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE GADTs #-}
 
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -16,23 +18,35 @@ module Pate.Verification.PairGraph.Node (
   , NodeEntry
   , NodeReturn
   , CallingContext
+  , FrozenContext(..)
   , graphNodeCases
   , graphNodeBlocks
   , mkNodeEntry
   , addContext
   , mkNodeReturn
   , rootEntry
+  , rootReturn
   , nodeBlocks
   , nodeFuns
   , returnToEntry
   , functionEntryOf
+  , getFrozen
+  , freezeNode
+  , isThisFrozen
+  , applyFreeze
+  , unfreezeReturn
+  , frozenRepr
+  , freezeNodeFn
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 
+import           Data.Parameterized.Classes
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
+import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.PatchPair as PPa
 import           Pate.TraceTree
@@ -52,6 +66,7 @@ data GraphNode arch
   | ReturnNode (NodeReturn arch)
  deriving (Eq, Ord)
 
+-- A frozen binary 
 data NodeEntry arch =
   NodeEntry { graphNodeContext :: CallingContext arch, nodeBlocks :: PB.BlockPair arch }
   deriving (Eq, Ord)
@@ -69,20 +84,95 @@ graphNodeCases (GraphNode (NodeEntry _ blks)) = Left blks
 graphNodeCases (ReturnNode (NodeReturn _ funs)) = Right funs
 
 -- | Additional context used to distinguish function calls
-newtype CallingContext arch = CallingContext [PB.BlockPair arch]
-  deriving (Eq, Ord, Semigroup, Monoid)
+--   "Freezing" one binary in a node indicates that it should not continue
+--   execution until the other binary has returned
+data CallingContext arch = CallingContext { ctxAncestors :: [PB.BlockPair arch], ctxFrozen :: FrozenContext arch }
+  deriving (Eq, Ord)
+
+data FrozenContext arch where
+  FrozenBlock :: PBi.WhichBinaryRepr bin -> FrozenContext arch
+  FrozenReturn :: PBi.WhichBinaryRepr bin -> FrozenContext arch
+  NotFrozen :: FrozenContext arch
+
+instance Eq (FrozenContext arch) where
+  FrozenBlock repr1 == FrozenBlock repr2 | Just Refl <- testEquality repr1 repr2 = True
+  FrozenReturn repr1 == FrozenReturn repr2 | Just Refl <- testEquality repr1 repr2 = True
+  NotFrozen == NotFrozen = True
+  _ == _ = False
+
+instance Ord (FrozenContext arch) where
+  compare frzn1 frzn2 = case (frzn1, frzn2) of
+    (FrozenBlock repr1, FrozenBlock repr2) -> toOrdering (compareF repr1 repr2)
+    (FrozenBlock{},FrozenReturn{}) -> GT
+    (FrozenBlock{},NotFrozen) -> GT
+
+    (FrozenReturn{}, FrozenBlock{}) -> LT
+    (FrozenReturn repr1, FrozenReturn repr2) -> toOrdering (compareF repr1 repr2)
+    (FrozenReturn{},NotFrozen) -> GT
+
+    (NotFrozen, NotFrozen) -> EQ
+    (NotFrozen, _) -> LT
+
+frozenRepr :: FrozenContext arch -> Maybe (Some PBi.WhichBinaryRepr)
+frozenRepr (FrozenBlock bin) = Just (Some bin)
+frozenRepr (FrozenReturn bin) = Just (Some bin)
+frozenRepr NotFrozen = Nothing
+
+freezeBlock :: PBi.WhichBinaryRepr bin -> CallingContext arch -> CallingContext arch
+freezeBlock bin (CallingContext ctx _) = CallingContext ctx (FrozenBlock bin)
+
+freezeReturnCtx ::  PBi.WhichBinaryRepr bin -> CallingContext arch -> CallingContext arch
+freezeReturnCtx bin (CallingContext ctx _) = CallingContext ctx (FrozenReturn bin)
+
+unfreezeCtx :: CallingContext arch -> CallingContext arch
+unfreezeCtx (CallingContext blks _) = CallingContext blks NotFrozen
 
 instance PA.ValidArch arch => Pretty (CallingContext arch) where
-  pretty (CallingContext bps) =
-    let bs = [ pretty bp | bp <- bps ]
-    in sep (zipWith (<+>) ( "via:" : repeat "->") bs)
+  pretty (CallingContext bps frzn) =
+    let
+      bs = [ pretty bp | bp <- bps ]
+    in sep ((zipWith (<+>) ( "via:" : repeat "<-") bs) ++ case frozenRepr frzn of
+               Just (Some PBi.OriginalRepr) -> ["<<patched>>"]
+               Just (Some PBi.PatchedRepr) -> ["<<original>>"]
+               Nothing -> [])
+
+freezeNodeFn :: PBi.WhichBinaryRepr bin ->  NodeEntry arch -> NodeEntry arch
+freezeNodeFn bin (NodeEntry ctx blks) = NodeEntry (freezeReturnCtx bin ctx) blks
+
+freezeNode :: PBi.WhichBinaryRepr bin -> NodeEntry arch -> NodeEntry arch
+freezeNode bin (NodeEntry ctx blks) = NodeEntry (freezeBlock bin ctx) blks
+
+unfreezeReturn :: NodeReturn arch -> NodeReturn arch
+unfreezeReturn (NodeReturn ctx fns) = NodeReturn (unfreezeCtx ctx) fns
+
+
+getFrozen :: NodeEntry arch -> FrozenContext arch
+getFrozen (NodeEntry ctx _) = ctxFrozen ctx
+
+isThisFrozen :: (forall tp. PPa.PatchPair tp -> tp bin) -> NodeEntry arch -> Bool
+isThisFrozen get node = frozenRepr (getFrozen node) == Just (Some (get PPa.patchPairRepr))
+
+
+applyFreeze ::
+  PBi.WhichBinaryRepr bin ->
+  NodeEntry arch {- ^ current entry point -} ->
+  PPa.PatchPair (PB.ConcreteBlock arch) {- ^ target -} ->
+  NodeEntry arch
+applyFreeze bin (NodeEntry ctx blks) pPair =
+  let
+    blk = PPa.getPair' bin pPair
+    blks' = PPa.setPair bin blk blks
+  in NodeEntry (freezeBlock bin ctx) blks'
 
 
 rootEntry :: PB.BlockPair arch -> NodeEntry arch
-rootEntry pPair = NodeEntry mempty pPair
+rootEntry pPair = NodeEntry (CallingContext [] NotFrozen) pPair
+
+rootReturn :: PB.FunPair arch -> NodeReturn arch
+rootReturn pPair = NodeReturn (CallingContext [] NotFrozen) pPair
 
 addContext :: PB.BlockPair arch -> NodeEntry arch -> NodeEntry arch
-addContext newCtx (NodeEntry (CallingContext ctx) blks) = NodeEntry (CallingContext (newCtx:ctx)) blks
+addContext newCtx (NodeEntry (CallingContext ctx frzn) blks) = NodeEntry (CallingContext (newCtx:ctx) frzn) blks
 
 mkNodeEntry :: NodeEntry arch -> PB.BlockPair arch -> NodeEntry arch
 mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
@@ -108,14 +198,14 @@ instance PA.ValidArch arch => Show (NodeEntry arch) where
 instance PA.ValidArch arch => Pretty (NodeEntry arch) where
   pretty e = case functionEntryOf e == e of
     True -> case graphNodeContext e of
-      CallingContext [] -> pretty (nodeBlocks e)
+      CallingContext [] _ -> pretty (nodeBlocks e)
       _ -> pretty (nodeBlocks e) <+> "[" <+> pretty (graphNodeContext e) <+> "]"
     False -> PPa.ppPatchPair' PB.ppBlockAddr (nodeBlocks e)
       <+> "[" <+> pretty (graphNodeContext (addContext (nodeBlocks (functionEntryOf e)) e)) <+> "]"
 
 instance PA.ValidArch arch => Pretty (NodeReturn arch) where
   pretty e = case returnNodeContext e of
-    CallingContext [] -> pretty (nodeFuns e)
+    CallingContext [] _ -> pretty (nodeFuns e)
     _ -> pretty (nodeFuns e) <+> "[" <+> pretty (returnNodeContext e) <+> "]"
 
 instance PA.ValidArch arch => Show (NodeReturn arch) where

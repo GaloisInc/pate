@@ -315,11 +315,12 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
 mkDefaultStubOverride ::
   forall arch.
   MS.SymArchConstraints arch =>
+  String -> 
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkDefaultStubOverride rOut = StubOverride $ \sym _ -> do
+mkDefaultStubOverride nm rOut = StubOverride $ \sym _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "plt_default") (W4.BaseBVRepr w)
+  fresh_bv <- W4.freshConstant sym (W4.safeSymbol nm) (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
