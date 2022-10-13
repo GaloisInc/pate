@@ -1635,7 +1635,8 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
         Just pRetPair -> do
           parents <- asks envParentBlocks
           case (elem pRetPair parents) of
-            False | bothDefinedOverrides ovPair -> do
+            -- FIXME: evaluate how safe inlining is
+            False | bothDefinedOverrides ovPair, False -> do
               --  inline the next blocks
               vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
 
