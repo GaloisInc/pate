@@ -51,6 +51,13 @@ data Location sym arch l where
   Cell :: 1 <= w => PMC.MemCell sym arch w -> Location sym arch ('CellK w)
   NoLoc :: Location sym arch 'NoLocK
 
+instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => TestEquality (Location sym arch) where
+  testEquality loc1 loc2 = case (loc1, loc2) of
+    (Register r1, Register r2) | Just Refl <- testEquality r1 r2 -> Just Refl
+    (Cell c1, Cell c2) | Just Refl <- testEquality c1 c2 -> Just Refl
+    (NoLoc, NoLoc) -> Just Refl
+    _ -> Nothing
+
 instance PEM.ExprMappable sym (Location sym arch l) where
   mapExpr sym f loc = case loc of
     Register r -> return $ Register r

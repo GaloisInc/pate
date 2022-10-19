@@ -60,6 +60,7 @@ import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
@@ -216,11 +217,11 @@ getGenPathConditionIO sym fn isSat e = do
 getRegPathCondition ::
   forall sym arch v.
   -- | The target condition
-  PE.RegisterCondition sym arch v ->
+  PEC.RegisterCondition sym arch v ->
   SymGroundEvalFn sym ->
   EquivM sym arch (W4.Pred sym)
 getRegPathCondition regCond fn = withSym $ \sym ->
-  TF.foldrMF (\x y -> getRegPath x y) (W4.truePred sym) (PE.regCondPreds regCond)
+  TF.foldrMF (\x y -> getRegPath x y) (W4.truePred sym) (PEC.regCondPreds regCond)
   where
     getRegPath ::
       Const (PAS.AssumptionSet sym) tp ->

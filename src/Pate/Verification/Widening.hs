@@ -35,6 +35,7 @@ import           Prettyprinter
 
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
@@ -51,6 +52,7 @@ import qualified Data.Macaw.Types as MT
 
 import           Pate.Panic
 import qualified Pate.Binary as PBi
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Location as PL
@@ -74,7 +76,8 @@ import qualified Pate.Config as PC
 
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.Simplify as PSi
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases )
+import qualified Pate.Verification.ConditionalEquiv as PVC
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases, nodeFuns )
 import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
@@ -106,6 +109,121 @@ makeFreshAbstractDomain _scope bundle preDom from _to = do
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
+
+
+getEquivPostCondition ::
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  GraphNode arch {- ^ target -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (PEC.EquivalenceCondition sym arch v)
+getEquivPostCondition _scope bundle to gr = withSym $ \sym -> do
+  case getEquivCondition gr to of
+    Just condSpec -> do
+      -- FIXME: what to do with asm?
+      (_asm, cond) <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) condSpec
+      return cond
+    Nothing -> return $ PEC.universal sym
+
+computeEquivCondition ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
+  (forall l. PL.Location sym arch l -> Bool) {- ^ filter for locations to force equal -} ->
+  EquivM sym arch (PEC.EquivalenceCondition sym arch v)
+computeEquivCondition scope bundle d f = withSym $ \sym -> PEC.fromLocationTraversable @sym @arch sym d $ \loc eqPred -> case f loc of
+  -- irrelevant location
+  False -> return $ W4.truePred sym
+  True -> do
+    goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+    isPredTrue' goalTimeout eqPred >>= \case
+      True -> return $ W4.truePred sym
+      False -> do      
+        -- eqPred is the predicate asserting equality
+        -- on this location, which already includes accesses to
+        -- the relevant state elements. We only have to inspect this
+        -- predicate in order to compute a sufficient predicate that
+        -- implies it
+        cond1 <- PVC.computeEqCondition bundle eqPred
+        cond2 <- PVC.weakenEqCondition bundle cond1 eqPred
+        PVC.checkAndMinimizeEqCondition bundle cond2 eqPred
+
+-- | After widening an edge, insert an equivalence condition
+--   into the pairgraph for candidate functions
+initializeCondition ::
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+initializeCondition _ _ _ _ (GraphNode _) gr = return gr
+initializeCondition scope bundle d from to@(ReturnNode ret) gr = do
+  eqCondFns <- CMR.asks envEqCondFns
+  case Map.lookup (nodeFuns ret) eqCondFns of
+    Just locFilter -> do
+      eqCond <- computeEquivCondition scope bundle d (\l -> locFilter (Some l))
+      let gr1 = setEquivCondition to (PS.mkSimSpec scope eqCond) gr
+      return $ dropDomain to (markEdge from to gr1)
+    Nothing -> return gr
+
+-- | Push an equivalence condition back up the graph.
+--   Returns 'Nothing' if there is nothing to do (i.e. no condition or
+--   existing condition is already implied)
+--
+--   FIXME: Formally, any update to the equivalence condition requires
+--   invalidating any subsequent nodes, since we now may be propagating
+--   stronger equivalence domains
+
+propagateCondition ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+propagateCondition scope bundle from to gr = withSym $ \sym -> do
+  pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  preCond <- case getEquivCondition gr from of
+    Just condSpec -> do
+      -- FIXME: what to do with asm?
+      -- bind the pre-state condition to the initial variables
+       (_asm, cond) <- liftIO $ PS.bindSpec sym (PS.bundleInVars bundle) condSpec
+       return cond
+    Nothing -> return $ PEC.universal sym
+  case getEquivCondition gr to of
+    -- no target equivalence condition, nothing to do
+    Nothing -> return Nothing
+    Just condSpec -> do
+      -- FIXME: what to do with asm?
+      -- bind the target condition to the result of symbolic execution
+      (_asm, cond) <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) condSpec
+      preCond_pred <- PEC.toPred sym preCond
+      cond' <- withAssumption preCond_pred $ do
+        -- TODO: could do a scoped wither here just for clarity
+        PL.witherLocation @sym @arch sym cond $ \loc postCond_pred -> do
+          isPredTrue' goalTimeout postCond_pred >>= \case
+            -- pre-condition is already sufficient to imply the target post-condition, so
+            -- nothing further to propagate
+            -- (will also happen for entries that are not in the current path condition)
+            True -> return $ Nothing
+            -- pre-condition is insufficient, so propagation is required
+            False -> return $ Just (loc, postCond_pred)
+      cond_pred <- PEC.toPred sym cond'
+      case W4.asConstantPred cond_pred of
+        -- nothing propagated, so no changes to the graph required
+        Just True -> return Nothing
+        _ -> do
+          -- predicate the computed condition to only apply to the current path
+          -- note that this condition is still scoped to the initial variables of the slice
+          preCond' <- PEC.mux sym pathCond cond' preCond
+          -- no rescoping required - this is the easy direction for propagation
+          return $ Just $ setEquivCondition from (PS.mkSimSpec scope preCond') gr
+
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
 --   and update the pair graph, if necessary.
@@ -137,69 +255,86 @@ widenAlongEdge ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PairGraph sym arch)
-widenAlongEdge scope bundle from d gr to = withSym $ \sym ->
-  case getCurrentDomain gr to of
-    -- This is the first time we have discovered this location
-    Nothing ->
-     do traceBundle bundle ("First jump to " ++ show to)
-        -- initial state of the pair graph: choose the universal domain that equates as much as possible
-        d' <- makeFreshAbstractDomain scope bundle d from to
-        postSpec <- initialDomainSpec to
-        md <- widenPostcondition bundle d d'
-        case md of
-          NoWideningRequired -> do
-            postSpec' <- abstractOverVars scope bundle from to postSpec d'
-            return (freshDomain gr to postSpec')
-          WideningError msg _ d'' ->
-            do let msg' = ("Error during widening: " ++ msg)
-               err <- emitError' (PEE.WideningError msg')
-               postSpec' <- abstractOverVars scope bundle from to postSpec d''
-               return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
-          Widen _ _ d'' -> do
-            postSpec' <- abstractOverVars scope bundle from to postSpec d''
-            return (freshDomain gr to postSpec')
+widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
+  propagateCondition scope bundle from to gr >>= \case
+    Just gr_ ->
+      -- since this 'to' edge has propagated backwards
+      -- an equivalence condition, we need to restart the analysis
+      -- for 'from'
+      -- 'dropDomain' clears domains for all nodes following 'from' (including 'to')
+      -- and re-adds ancestors of 'from' to be considered for analysis
+      return $ dropDomain from (markEdge from to gr_)
+      -- if no postcondition propagation is needed, we continue under
+      -- the strengthened assumption that the equivalence postcondition
+      -- is satisfied (potentially allowing for a stronger equivalence
+      -- domain to be established)
+    Nothing -> do
+      postCond <- getEquivPostCondition scope bundle to gr >>= PEC.toPred sym
 
-    -- have visited this location at least once before
-    Just postSpec -> do
-      -- The variables in 'postSpec' represent the final values in the
-      -- post-state of the slice (which have been abstracted out by 'abstractOverVars').
-      -- To put everything in the same scope, we need to bind these variables to
-      -- the post-state expressions that we have currently as the result of symbolic
-      -- execution (i.e. the resulting state in 'SimOutput').
-      --
-      -- The result is a post-domain describing the proof target (i.e. d'), that
-      -- has been brought into the current scope 'v' (as the bound variables in the output
-      -- expressions are still in this scope).
-      --
-      -- After widening, this needs to be re-phrased with respect to the final
-      -- values of the slice again. This is accomplised by 'abstractOverVars', which
-      -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
-      -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-      (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
-      withAssumptionSet asm $ do
-        md <- widenPostcondition bundle d d'
-        case md of
-          NoWideningRequired ->
-            do traceBundle bundle "Did not need to widen"
-               return gr
+      withAssumption postCond $ do  
+        case getCurrentDomain gr to of
+          -- This is the first time we have discovered this location
+          Nothing ->
+           do traceBundle bundle ("First jump to " ++ show to)
+              -- initial state of the pair graph: choose the universal domain that equates as much as possible
+              d' <- makeFreshAbstractDomain scope bundle d from to
+              postSpec <- initialDomainSpec to
+              md <- widenPostcondition bundle d d'
+              case md of
+                NoWideningRequired -> do
+                  postSpec' <- abstractOverVars scope bundle from to postSpec d'
+                  return (freshDomain gr to postSpec')
+                WideningError msg _ d'' ->
+                  do let msg' = ("Error during widening: " ++ msg)
+                     err <- emitError' (PEE.WideningError msg')
+                     postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                     return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
+                Widen _ _ d'' -> do
+                  postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                  let gr1 = freshDomain gr to postSpec'
+                  initializeCondition scope bundle d'' from to gr1
 
-          WideningError msg _ d'' ->
-            do let msg' = ("Error during widening: " ++ msg)
-               err <- emitError' (PEE.WideningError msg')
-               postSpec' <- abstractOverVars scope bundle from to postSpec d''
-               case updateDomain gr from to postSpec' of
-                 Left gr' ->
-                   do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                      return $ recordMiscAnalysisError gr' to err
-                 Right gr' -> return $ recordMiscAnalysisError gr' to err
+          -- have visited this location at least once before
+          Just postSpec -> do
+            -- The variables in 'postSpec' represent the final values in the
+            -- post-state of the slice (which have been abstracted out by 'abstractOverVars').
+            -- To put everything in the same scope, we need to bind these variables to
+            -- the post-state expressions that we have currently as the result of symbolic
+            -- execution (i.e. the resulting state in 'SimOutput').
+            --
+            -- The result is a post-domain describing the proof target (i.e. d'), that
+            -- has been brought into the current scope 'v' (as the bound variables in the output
+            -- expressions are still in this scope).
+            --
+            -- After widening, this needs to be re-phrased with respect to the final
+            -- values of the slice again. This is accomplised by 'abstractOverVars', which
+            -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
+            -- from the current scope and can be stored as the updated domain in the 'PairGraph'
+            (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+            withAssumptionSet asm $ do
+              md <- widenPostcondition bundle d d'
+              case md of
+                NoWideningRequired ->
+                  do traceBundle bundle "Did not need to widen"
+                     return gr
 
-          Widen _ _ d'' -> do
-            postSpec' <- abstractOverVars scope bundle from to postSpec d''
-            case updateDomain gr from to postSpec' of
-              Left gr' ->
-                do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                   return gr'
-              Right gr' -> return gr'
+                WideningError msg _ d'' ->
+                  do let msg' = ("Error during widening: " ++ msg)
+                     err <- emitError' (PEE.WideningError msg')
+                     postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                     case updateDomain gr from to postSpec' of
+                       Left gr' ->
+                         do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
+                            return $ recordMiscAnalysisError gr' to err
+                       Right gr' -> return $ recordMiscAnalysisError gr' to err
+
+                Widen _ _ d'' -> do
+                  postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                  case updateDomain gr from to postSpec' of
+                    Left gr' ->
+                      do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
+                         return gr'
+                    Right gr' -> return gr'
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp

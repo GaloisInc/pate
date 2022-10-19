@@ -38,6 +38,10 @@ module Pate.Verification.PairGraph
   , getExtraEdges
   , addTerminalNode
   , emptyReturnVector
+  , getEquivCondition
+  , setEquivCondition
+  , dropDomain
+  , markEdge
   ) where
 
 import           Prettyprinter
@@ -68,6 +72,7 @@ import qualified Pate.Event as Event
 import           Pate.Monad
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
@@ -183,6 +188,12 @@ data PairGraph sym arch =
     -- | Avoid adding extra edges to these nodes, as we expect these functions
     --   may not actually return on any path (i.e. they end in an abort or exit)
   , pairGraphTerminalNodes :: !(Set (NodeReturn arch))
+  , pairGraphEquivConditions :: !(Map (GraphNode arch) (PEC.EquivConditionSpec sym arch))
+    -- | Any edges that have been followed at any point (which may later become infeasible
+    -- due to further analysis)
+  , pairGraphEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
+    -- | Reverse map of the above (from descendants to ancestors)
+  , pairGraphBackEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
   }
 
 ppProgramDomains ::
@@ -217,6 +228,9 @@ emptyPairGraph =
   , pairGraphMiscAnalysisErrors = mempty
   , pairGraphExtraEdges = mempty
   , pairGraphTerminalNodes = mempty
+  , pairGraphEquivConditions = mempty
+  , pairGraphEdges = mempty
+  , pairGraphBackEdges = mempty
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -234,6 +248,68 @@ getCurrentDomain ::
   GraphNode arch ->
   Maybe (AbstractDomainSpec sym arch)
 getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
+
+getEdgesFrom ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Set (GraphNode arch)
+getEdgesFrom pg nd = case Map.lookup nd (pairGraphEdges pg) of
+  Just s -> s
+  Nothing -> Set.empty
+
+getBackEdgesFrom ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Set (GraphNode arch)
+getBackEdgesFrom pg nd = case Map.lookup nd (pairGraphBackEdges pg) of
+  Just s -> s
+  Nothing -> Set.empty
+
+-- | Delete the abstract domain for the given node, following
+--   any reachable edges and discarding those domains as well
+--   This is necessary if a domain is "narrowed": i.e. it moves
+--   from assuming fewer equalities to assuming more equalities.
+--   Marks any ancestors as requiring re-analysis
+dropDomain ::
+  GraphNode arch -> 
+  PairGraph sym arch ->
+  PairGraph sym arch 
+dropDomain nd pg = case getCurrentDomain pg nd of
+  Just d ->
+    let
+      -- clear this domain and all descendant domains
+      pg' = case Set.null (getBackEdgesFrom pg nd) of
+        -- don't drop the domain for a toplevel entrypoint, but mark it for
+        -- re-analysis
+        True -> pg { pairGraphWorklist = Set.insert nd (pairGraphWorklist pg) }
+        False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), pairGraphWorklist = Set.delete nd (pairGraphWorklist pg) }
+      pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
+      -- mark all ancestors as requiring re-processing
+    in addAncestors Set.empty pg'' nd
+  Nothing -> pg
+  where
+    addAncestors :: Set (GraphNode arch) -> PairGraph sym arch -> GraphNode arch -> PairGraph sym arch
+    addAncestors considered pg_ nd_ = case Set.member nd_ considered of
+      True -> pg_
+      False -> case addToWorkList nd_ pg_ of
+        Just pg' -> pg'
+        -- if this node has no defined domain (i.e it was dropped as part of the previous
+        -- step) then we consider further ancestors
+        Nothing -> Set.foldl' (addAncestors (Set.insert nd_ considered)) pg_ (getBackEdgesFrom pg_ nd_)
+
+
+getEquivCondition ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Maybe (PEC.EquivConditionSpec sym arch)
+getEquivCondition pg nd = Map.lookup nd (pairGraphEquivConditions pg)
+  
+setEquivCondition ::
+  GraphNode arch ->
+  PEC.EquivConditionSpec sym arch ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+setEquivCondition nd cond pg = pg { pairGraphEquivConditions = Map.insert nd cond (pairGraphEquivConditions pg) }
 
 -- | If an observable counterexample has not already been found
 --   for this block pair, run the given action to check if there
@@ -402,14 +478,16 @@ updateDomain ::
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   Either (PairGraph sym arch) (PairGraph sym arch)
 updateDomain gr pFrom pTo d
-  | g > 0 = Right gr
+  | g > 0 = Right $ markEdge pFrom pTo $ gr
             { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
             , pairGraphGas      = Map.insert (pFrom,pTo) (Gas (g-1)) (pairGraphGas gr)
             , pairGraphWorklist = Set.insert pTo (pairGraphWorklist gr)
+            , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
+            , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
             }
 
   | otherwise =
-            Left gr
+            Left $ markEdge pFrom pTo $ gr
             { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
             }
 
@@ -469,6 +547,15 @@ addReturnVector gr funPair retPair =
 
     wl = Set.insert (ReturnNode funPair) (pairGraphWorklist gr)
 
+-- | Add a node back to the worklist to be re-analyzed if there is
+--   an existing abstract domain for it. Otherwise return Nothing.
+addToWorkList ::
+  GraphNode arch ->
+  PairGraph sym arch ->
+  Maybe (PairGraph sym arch)
+addToWorkList nd gr = case getCurrentDomain gr nd of
+  Just{} -> Just $ gr { pairGraphWorklist = Set.insert nd (pairGraphWorklist gr) }
+  Nothing -> Nothing
 
 -- | Add an initial abstract domain value to a graph node, and
 --   record it in the worklist to be visited.
@@ -482,12 +569,23 @@ freshDomain gr pTo d =
     , pairGraphWorklist = Set.insert pTo (pairGraphWorklist gr)
     }
 
+markEdge ::
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+markEdge from to gr =
+  gr { pairGraphEdges = Map.insertWith Set.union from (Set.singleton to) (pairGraphEdges gr)
+     , pairGraphBackEdges = Map.insertWith Set.union to (Set.singleton from) (pairGraphBackEdges gr)}
+
 addExtraEdge ::
   PairGraph sym arch ->
   NodeEntry arch ->
   GraphNode arch ->
   PairGraph sym arch
-addExtraEdge gr from to = gr { pairGraphExtraEdges = Map.insertWith Set.union from (Set.singleton to) ( pairGraphExtraEdges gr ) }
+addExtraEdge gr from to = markEdge (GraphNode from) to $
+  gr { pairGraphExtraEdges = Map.insertWith Set.union from (Set.singleton to) ( pairGraphExtraEdges gr)
+     }
 
 
 getExtraEdges ::

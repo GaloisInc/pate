@@ -268,7 +268,7 @@ archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
                                  -- this ignores the heuristic from macaw's arch definition
                                  -- that uses the address low bit to set this flag
                                  , PA.validArchInitAbs = PB.defaultMkInitialAbsState
-                                 -- , PA.validArchInitAbs = PB.MkInitialAbsState (\_ _ -> MapF.singleton (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) (MA.FinSet (Set.singleton 1)))
+                                 --, PA.validArchInitAbs = PB.MkInitialAbsState (\_ _ -> MapF.singleton (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) (MA.FinSet (Set.singleton 1)))
                                  }
       in Right (Some (PA.SomeValidArch vad))
     _ -> Left (PEE.UnsupportedArchitecture em)

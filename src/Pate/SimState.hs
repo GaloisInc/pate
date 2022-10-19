@@ -55,6 +55,7 @@ module Pate.SimState
   , liftScope2
   , concreteScope
   , SimSpec
+  , mkSimSpec
   , freshSimSpec
   , forSpec
   , viewSpec
@@ -78,6 +79,7 @@ module Pate.SimState
   , getScopeCoercion
   , applyScopeCoercion
   , bundleOutVars
+  , bundleInVars
   ) where
 
 import           GHC.Stack ( HasCallStack )
@@ -146,6 +148,7 @@ data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
 simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
   PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
 simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
+
 
 data SimInput sym arch v bin = SimInput
   {
@@ -220,6 +223,9 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
       _specScope :: SimScope sym arch v
     , _specBody :: f v
     }
+
+mkSimSpec :: SimScope sym arch v -> f v -> SimSpec sym arch f
+mkSimSpec scope body = SimSpec scope body
 
 data SimScope sym arch v =
   SimScope
@@ -312,6 +318,9 @@ instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTrac
 
 bundleOutVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
 bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
+
+bundleInVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
+bundleInVars bundle = TF.fmapF (SimVars . simInState) (simIn bundle)
 
 simInO :: SimBundle sym arch v -> SimInput sym arch v PBi.Original
 simInO = PPa.pOriginal . simIn

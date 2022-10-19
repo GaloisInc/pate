@@ -37,6 +37,7 @@ module Pate.Verification.PairGraph.Node (
   , unfreezeReturn
   , frozenRepr
   , freezeNodeFn
+  , returnOfEntry
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -142,6 +143,9 @@ freezeNodeFn bin (NodeEntry ctx blks) = NodeEntry (freezeReturnCtx bin ctx) blks
 freezeNode :: PBi.WhichBinaryRepr bin -> NodeEntry arch -> NodeEntry arch
 freezeNode bin (NodeEntry ctx blks) = NodeEntry (freezeBlock bin ctx) blks
 
+freezeReturn :: PBi.WhichBinaryRepr bin -> NodeReturn arch -> NodeReturn arch
+freezeReturn bin (NodeReturn ctx fns) = NodeReturn (freezeBlock bin ctx) fns
+
 unfreezeReturn :: NodeReturn arch -> NodeReturn arch
 unfreezeReturn (NodeReturn ctx fns) = NodeReturn (unfreezeCtx ctx) fns
 
@@ -183,6 +187,10 @@ mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
 -- | Get the node corresponding to the entry point for the function
 returnToEntry :: NodeReturn arch -> NodeEntry arch
 returnToEntry (NodeReturn ctx fns) = NodeEntry ctx (TF.fmapF PB.functionEntryToConcreteBlock fns)
+
+-- | Get the return node that this entry would return to
+returnOfEntry :: NodeEntry arch -> NodeReturn arch
+returnOfEntry (NodeEntry ctx blks) = NodeReturn ctx (TF.fmapF PB.blockFunctionEntry blks)
 
 -- | For an intermediate entry point in a function, find the entry point
 --   corresponding to the function start

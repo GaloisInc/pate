@@ -19,6 +19,7 @@ module Pate.Discovery.ParsedFunctions (
 
 
 import           Control.Lens ( (^.), (&), (.~) )
+import qualified Data.ByteString.Char8 as BSC
 import qualified Control.Exception as IO
 import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
@@ -375,14 +376,18 @@ parsedBlocksContaining blk pfm =
   fmap (viewSome buildParsedBlocks) <$> parsedFunctionContaining blk pfm
 
 findFunctionByName ::
+  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
   String ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (PB.FunctionEntry arch bin))
 findFunctionByName nm pfm = do
   st <- IORef.readIORef (parsedStateRef pfm)
-  let fns = parsedFunctionCache st
-  -- todo: match this better
-  return $ F.find (\fe -> isJust (PB.functionSymbol fe) && nm == show (PB.functionSymbol fe)) (Map.keys fns)
+  let syms = Map.toList $ MD.symbolNames (discoveryState st)
+  case F.find (\(_addr,nm_) -> BSC.pack nm == nm_) syms of
+    Just (addr,nm_) -> do
+      let fe = PB.FunctionEntry addr (Just nm_) W4.knownRepr False
+      Just <$> resolveFunctionEntry fe pfm
+    Nothing -> return Nothing
 
 isFunctionStart ::
   forall bin arch .

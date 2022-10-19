@@ -164,28 +164,8 @@ findFunctionByName ::
   PMC.BinaryContext arch bin ->
   IO (Maybe (PB.FunctionEntry arch bin))
 findFunctionByName nm context = do
-  let fns = PMC.functionHintIndex context
-  let mem = MBL.memoryImage (PMC.binary context)
   let pfm = PMC.parsedFunctionMap context
-  case L.find (\(ca, fd) -> PH.functionSymbol fd == T.pack nm) (M.toList fns) of
-    Just (ca, _) -> do
-      let caAddr = PAd.addrToMemAddr ca
-      -- FIXME: This is a bit clunky, and only necessary because there
-      -- isn't an interface for just asking the parsed function map
-      -- for an address
-      case MM.resolveRegionOff mem (MM.addrBase caAddr) (MM.addrOffset caAddr) of
-        Just segoff -> do
-           let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
-                                     , PB.functionSymbol = Nothing
-                                     , PB.functionBinRepr = W4.knownRepr
-                                     , PB.functionIgnored = False
-                                     }
-           Just <$> PD.resolveFunctionEntry fe pfm
-        Nothing -> return Nothing
-    Nothing -> do
-      -- resolve the entry point and then see if we can find the function now
-      _ <- PD.parsedFunctionContaining (PB.functionEntryToConcreteBlock (PMC.binEntry context)) pfm        
-      PD.findFunctionByName nm pfm
+  PD.findFunctionByName nm pfm
   
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
@@ -314,10 +294,12 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envValidSym = PS.Sym symNonce sym bak
           , envStartTime = startedAt
           , envCurrentFrame = mempty
+          , envPathCondition = mempty
           , envNonceGenerator = gen
           , envParentNonce = Some topNonce
           , envUndefPointerOps = undefops
           , envParentBlocks = mempty
+          , envEqCondFns = mempty
           , envExitPairsCache = ePairCache
           , envStatistics = statsVar
           , envOverrides = \ovCfg -> M.fromList [ (n, ov)

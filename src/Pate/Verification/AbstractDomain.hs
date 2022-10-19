@@ -79,6 +79,7 @@ import qualified Pate.Block as PBl
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
@@ -108,6 +109,9 @@ data AbstractDomain sym arch (v :: PS.VarScope) where
     , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomain sym arch v
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomain sym arch bin) where
+  traverseLocation sym x f = PL.witherLocation sym x (\loc p -> Just <$> f loc p)
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomain sym arch bin) where
   witherLocation sym (AbstractDomain a b) f = AbstractDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f
@@ -602,7 +606,7 @@ absDomainValsToPostCond sym eqCtx st absBlockSt vals = PE.eqCtxConstraints eqCtx
     Const <$> absDomainValToAsm sym eqCtx val mAbsVal absVal
 
   maxRegionCond <- applyAbsRange sym (PS.unSE (PS.simMaxRegion st)) (absMaxRegion vals)
-  return $ PE.StatePostCondition (PE.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond
+  return $ PE.StatePostCondition (PEC.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond
   where
     stackRegion = PE.eqCtxStackRegion eqCtx
 

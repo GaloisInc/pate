@@ -75,6 +75,7 @@ module Pate.Monad
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
+  , withPathCondition
   , applyCurrentAsms
   , currentAsm
   -- nonces
@@ -550,6 +551,16 @@ processSatResult p r =
   void $ W4R.traverseSatResult (\a -> markPredSat p >> return a) (\b -> markPredUnsat p >> return b) r
 
 -- | Evaluate the given function in an assumption context augmented with the given
+-- 'AssumptionSet', which is also added to the current path condition.
+-- Returns 'Nothing' of the assumption is not satisfiable (i.e. the path is infeasible)
+withPathCondition ::
+  HasCallStack =>
+  AssumptionSet sym ->
+  EquivM_ sym arch f ->
+  EquivM sym arch (Maybe f)
+withPathCondition asm f = CMR.local (\env -> env { envPathCondition = (asm <> (envPathCondition env)) }) $ withSatAssumption asm f
+
+-- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
   HasCallStack =>
@@ -701,10 +712,13 @@ heuristicSat ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
 heuristicSat desc p k = do
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  checkSatisfiableWithModel heuristicTimeout desc p k >>= \case
-    Left _err -> k W4R.Unknown
-    Right a -> return a
+  isPredSat_cache p >>= \case
+    Just False -> k (W4R.Unsat ())
+    _ -> do
+      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+      checkSatisfiableWithModel heuristicTimeout desc p k >>= \case
+        Left _err -> k W4R.Unknown
+        Right a -> return a
 
 getWrappedSolver ::
   EquivM sym arch (PVC.WrappedSolver sym IO)

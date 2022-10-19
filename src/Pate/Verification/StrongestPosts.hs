@@ -102,7 +102,7 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns, graphNodeBlocks, getFrozen, isThisFrozen, applyFreeze, FrozenContext(..), frozenRepr, unfreezeReturn, freezeNodeFn)
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns, graphNodeBlocks, getFrozen, isThisFrozen, applyFreeze, FrozenContext(..), frozenRepr, unfreezeReturn, freezeNodeFn, freezeNode, returnOfEntry)
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import qualified Pate.ExprMappable as PEM
@@ -379,6 +379,7 @@ withAbsDomain ::
   EquivM_ sym arch a ->
   EquivM sym arch a
 withAbsDomain node d gr f = do
+  PA.SomeValidArch archData <- asks envValidArch
   let pPair = nodeBlocks node
   ovPair <- getFunctionAbs node d gr  
   binCtxPair <- PPa.forBins $ \get -> do
@@ -386,7 +387,8 @@ withAbsDomain node d gr f = do
     let
       Const absSt = get ovPair
       pfm = PMC.parsedFunctionMap binCtx
-    pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm absSt
+      defaultInit = PA.validArchInitAbs archData
+    pfm' <- liftIO $ PD.addOverrides defaultInit pfm absSt
     return $ binCtx { PMC.parsedFunctionMap = pfm' }
   local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair } }) $ do
     let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
@@ -1155,7 +1157,7 @@ updateReturnNode ::
   EquivM sym arch (Maybe (PairGraph sym arch))
 updateReturnNode scope bPair bundle preD gr = do
   isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
-  withSatAssumption (PAS.fromPred isReturn) $ do
+  withPathCondition (PAS.fromPred isReturn) $ do
     bundle' <- PD.associateFrames bundle MCS.MacawBlockEndReturn False
     handleReturn scope bundle' bPair preD gr
 
@@ -1265,7 +1267,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP)
      stubPair <- getFunctionStubPair nextNode
      traceBundle bundle' ("  targetCall: " ++ show blkO)
      matches <- PD.matchesBlockTarget bundle' blkts
-     maybeUpdate gr $ withSatAssumption matches $ do
+     maybeUpdate gr $ withPathCondition matches $ do
        bundle <- PD.associateFrames bundle' (PB.targetEndCase blktO) (hasStub stubPair)
        case (PB.targetReturn blktO, PB.targetReturn blktP) of
          (Just blkRetO, Just blkRetP) ->
@@ -1561,7 +1563,8 @@ mergeStubOverrides validArch
     _ -> combineOverrides ov1' ov2' 
 
 bothDefinedOverrides ::
-  PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) -> Bool
+  PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) ->
+  Bool
 bothDefinedOverrides (PPa.PatchPair (Const (Just{})) (Const (Just{}))) = True
 bothDefinedOverrides _ = False
 
@@ -1615,7 +1618,7 @@ handleStub ::
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point, Nothing for tail calls -} ->
   StubPair {- ^ stub names -} ->
   EquivM sym arch (PairGraph sym arch)
-handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \sym -> do
+handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \sym -> do   
   gr0 <- case hasTerminalStub stubPair of
     True -> handleTerminalFunction currBlock gr0_
     False -> return gr0_
@@ -1654,10 +1657,15 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
                      PCfg.SharedFunctionAbstractDomains -> return currBlock
                      PCfg.DistinctFunctionAbstractDomains -> return $ addContext pRetPair currBlock
                   let
-                    callNode = mkNodeEntry currBlock' pPair
-                    callNode' = applyFreeze bin callNode pRetPair
+                    -- FIXME: this is a bit weird, since we end up making
+                    -- a function that returns into itself for stubs
+                    funNode = returnOfEntry currBlock'
+                    callNode_ = mkNodeEntry currBlock' pPair
+                    callNode = applyFreeze bin callNode_ pRetPair
+                    returnSite = freezeNode bin (mkNodeEntry currBlock pRetPair)
+                    gr' = addReturnVector gr0 funNode returnSite
                     -- FIXME: return edges?
-                  handleJump scope bundle' currBlock d gr0 callNode'
+                  handleJump scope bundle' currBlock d gr' callNode
                 Nothing -> do
                   -- in this case
                   -- have inlined the effects of both stubs
@@ -1682,19 +1690,21 @@ handleReturn scope bundle currBlock d gr =
       ret_thaw = unfreezeReturn ret
       vecs = getReturnVectors gr ret_thaw
         
-    case getFrozen currBlock of
-      NotFrozen -> widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode ret)
-      _ | Set.null vecs ->  widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode ret)
+    next <- case getFrozen currBlock of
+      NotFrozen -> return $ ReturnNode ret
+      _ | Set.null vecs -> return $ ReturnNode ret
 
       FrozenBlock bin -> do
         let bin_other = PBi.flipRepr bin
         -- mark the other binary as having been frozen just before this return
         let blk_swapped = freezeNodeFn bin_other currBlock
         -- virtual jump
-        widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode blk_swapped)
+        return $ GraphNode blk_swapped
       -- other side is waiting to return, so process the final return now
       FrozenReturn{} -> do
-        widenAlongEdge scope bundle (GraphNode currBlock) d gr (ReturnNode ret_thaw)
+        return $ ReturnNode ret_thaw
+    withTracing @"node" next $ 
+      widenAlongEdge scope bundle (GraphNode currBlock) d gr next
 
 handleJump ::
   PS.SimScope sym arch v ->
