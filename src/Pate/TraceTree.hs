@@ -421,6 +421,16 @@ instance IsTraceNode k "message" where
   nodeTags = [("message", \_ msg -> PP.pretty msg)]
 
 
+instance forall k. IsTraceNode k "simplemessage" where
+  type TraceNodeType k "simplemessage" = String
+  prettyNode () msg = PP.pretty msg
+  nodeTags = mkTags @k @"simplemessage" [Summary, Simplified]
+
+instance IsTraceNode k "bool" where
+  type TraceNodeType k "bool" = Bool
+  type TraceNodeLabel "bool" = String
+  prettyNode msg b = PP.pretty msg <> ":" PP.<+> PP.pretty b
+
 class Monad m => MonadTreeBuilder k m | m -> k where
   getTreeBuilder :: m (TreeBuilder k)
   withTreeBuilder :: forall a. TreeBuilder k -> m a -> m a

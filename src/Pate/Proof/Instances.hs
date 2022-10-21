@@ -228,7 +228,7 @@ instance forall sym arch.
   PP.Pretty (PED.EquivalenceDomain sym arch) where
   pretty prf = PP.vsep
     [ "Registers:"
-    , PP.indent 4 $ PER.ppRegisterDomain (\_ -> "Conditional") (PED.eqDomainRegisters prf)
+    , PP.indent 4 $ PER.ppRegisterDomain (\_ -> "Conditional") (\r -> Just $ PP.pretty (showF r)) (PED.eqDomainRegisters prf)
     , "Stack Memory:"
     , PP.indent 4 $ PEM.ppMemoryDomainEntries (\_ -> "Conditional") (PED.eqDomainStackMemory prf)
     , "Global Memory:"

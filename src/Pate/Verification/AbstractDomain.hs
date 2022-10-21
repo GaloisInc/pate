@@ -715,7 +715,7 @@ ppAbstractDomain ::
 ppAbstractDomain ppPred d =
   PP.vsep $
   [ "== Equivalence Domain =="
-  , PED.ppEquivalenceDomain ppPred (absDomEq d)
+  , PED.ppEquivalenceDomain ppPred (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq d)
   , "== Original Value Constraints =="
   , ppAbstractDomainVals (PPa.pOriginal $ absDomVals d)
   , "== Patched Value Constraints =="
@@ -745,3 +745,17 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domai
   nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl),
               (Simplified, \lbl _ -> ppDomainKind lbl),
               ("symbolic", \_ _ -> "<TODO: domain symbolic summary>")]
+
+-- simplified variant of domain trace node
+-- currently only displays equivalence domain
+instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "simpledomain" where
+  type TraceNodeType '(sym,arch) "simpledomain" = Some (AbstractDomain sym arch)
+  type TraceNodeLabel "simpledomain" = DomainKind
+  
+  prettyNode lbl (Some absDom) =
+    PP.vsep
+      [ PP.pretty (show lbl)
+      , PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom)
+      ]
+  nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl),
+              (Simplified, \lbl _ -> ppDomainKind lbl)]

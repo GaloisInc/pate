@@ -15,6 +15,7 @@ module Pate.Verification.Concretize (
   , resolveSingletonPointer
   , WrappedSolver(..)
   , wrappedBackend
+  , symbolicFromConcrete
   ) where
 
 import qualified Data.Parameterized.NatRepr as PN
@@ -172,3 +173,18 @@ resolveSingletonPointer wsolver ptr@(LCLM.LLVMPointer base off) = do
   base' <- liftIO $ integerToNat sym base_i
   off' <- resolveSingletonSymbolicAs (concreteBV (LCLM.ptrWidth ptr)) wsolver off
   return (LCLM.LLVMPointer base' off')
+
+
+symbolicFromConcrete
+  :: ( LCB.IsSymInterface sym
+     , HasCallStack
+     )
+  => sym
+  -> WEG.GroundValue tp
+  -> WI.SymExpr sym tp
+  -> IO (WI.SymExpr sym tp)
+symbolicFromConcrete sym gv e = case WI.exprType e of
+  WI.BaseBoolRepr -> let (Concretize _ _ _ inject) = concreteBool in inject sym gv
+  WI.BaseIntegerRepr -> let (Concretize _ _ _ inject) = concreteInteger in inject sym gv
+  WI.BaseBVRepr w -> let (Concretize _ _ _ inject) = concreteBV w in inject sym gv
+  _ -> return e

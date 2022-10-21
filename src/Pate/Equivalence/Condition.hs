@@ -11,6 +11,7 @@
 {-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Pate.Equivalence.Condition (
     EquivalenceCondition(..)
@@ -53,6 +54,7 @@ import qualified What4.PredMap as WPM
 import qualified Pate.Solver as PSo
 
 import qualified Pate.ExprMappable as PEM
+import           Pate.TraceTree
 ---------------------------------------------
 -- Equivalence Condition
 
@@ -106,6 +108,13 @@ instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => 
     Just (_, p') -> pure p'
     Nothing -> pure $ W4.truePred sym)
 
+instance forall sym arch. IsTraceNode '(sym,arch) "eqcond" where
+  type TraceNodeType '(sym,arch) "eqcond" = Some (EquivalenceCondition sym arch)
+  type TraceNodeLabel "eqcond" = String
+  prettyNode msg _eqCond = PP.pretty msg
+  nodeTags = [ (Summary, \_ _ -> "Equivalence Condition")
+             , (Simplified, \_ _ -> "Equivalence Condition")
+             ]
 
 -- | A mapping from registers to a predicate representing an equality condition for
 -- that specific register.

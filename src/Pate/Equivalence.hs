@@ -80,6 +80,7 @@ import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified What4.PredMap as WPM
+import qualified Pate.ExprMappable as PEM
 
 data EquivalenceStatus =
     Equivalent
@@ -356,6 +357,9 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable
     dom' <- PL.traverseLocation sym (memCondPred mcond) f
     return $ mcond { memCondPred = dom' }
 
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PEM.ExprMappable sym (MemoryCondition sym arch) where
+  mapExpr sym f (MemoryCondition cond) = MemoryCondition <$> PEM.mapExpr sym f cond
+
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
 -- We require the pre-states in order to construct the initial equality assumption.
@@ -467,6 +471,10 @@ data StatePostCondition sym arch v = StatePostCondition
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
   traverseLocation sym (StatePostCondition a b c asm) f =
     StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f <*> ((fromPred . snd) <$> (toPred sym asm >>= \p -> f PL.NoLoc p))
+
+instance W4.IsSymExprBuilder sym => PEM.ExprMappable sym (StatePostCondition sym arch v) where
+  mapExpr sym f (StatePostCondition a b c asm) =
+    StatePostCondition <$> PEM.mapExpr sym f a <*> PEM.mapExpr sym f b <*> PEM.mapExpr sym f c <*>  PEM.mapExpr sym f asm
 
 
 eqDomPre ::

@@ -642,8 +642,6 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
 
   let startEntry = DLN.head entries
   
-  liftIO $ IO.putStrLn (show entries)
-  
   let startEntry' = PB.FunctionEntry { PB.functionSegAddr = startEntry
                                      , PB.functionSymbol = Nothing
                                      , PB.functionBinRepr = repr

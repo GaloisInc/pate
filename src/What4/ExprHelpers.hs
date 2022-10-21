@@ -74,6 +74,8 @@ module What4.ExprHelpers (
   , integerToNat
   , asConstantOffset
   , HasIntegerToNat(..)
+  , stripAnnotations
+  , assertPositiveNat
   ) where
 
 import           GHC.TypeNats
@@ -139,6 +141,18 @@ assumePositiveInt _sym e =
   let
     rng = W4AD.rangeMax (W4AD.singleRange 0) (W4.integerBounds e)
   in W4.unsafeSetAbstractValue rng e
+
+-- | Redundant assumption that ensures regions are consistent
+assertPositiveNat ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  W4.SymNat sym ->
+  IO (W4.Pred sym)
+assertPositiveNat sym e = do
+  let i = W4.natToIntegerPure e
+  let e' = W4.unsafeSetAbstractValue W4AD.unboundedRange i
+  zero <- W4.intLit sym 0
+  W4.intLe sym zero e'
 
 -- | Copied from https://github.com/GaloisInc/what4/commit/de5e73170b98e1f7e9c9baa9f044e2dfd21016cb
 --   Using this definition for 'intMax' allows more abstract domain information to be used
@@ -784,6 +798,31 @@ abstractOver sym sub outer = do
   outer_abs <- go outer
   W4.definedFn sym W4.emptySymbol (Ctx.empty Ctx.:> sub_bv) outer_abs W4.AlwaysUnfold
 
+stripAnnotations ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+stripAnnotations sym outer = do
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
+    go e = W4B.idxCacheEval cache e $ do
+      setProgramLoc sym e
+      case e of
+        W4B.NonceAppExpr a0 | W4B.Annotation _ _ e' <- W4B.nonceExprApp a0 -> go e'
+        W4B.AppExpr a0 -> do
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          if (W4B.appExprApp a0) == a0' then return e
+          else W4B.sbMakeExpr sym a0'
+        W4B.NonceAppExpr a0 -> do
+          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
+          if (W4B.nonceExprApp a0) == a0' then return e
+          else W4B.sbNonceExpr sym a0'
+        _ -> return e
+  go outer
+
 simplifyIte ::
   forall m sym t solver fs tp.
   IO.MonadIO m =>
@@ -1184,7 +1223,7 @@ simplifyBVOpInner sym simp_check go app = case app of
 
       return $ WSum.evalM doAdd doMul doConst s
      -- push selection into sums
-    {- <|> do
+    <|> do
       W4B.SemiRingSum s <- W4B.asApp bv
       SR.SemiRingBVRepr SR.BVArithRepr w <- return $ WSum.sumRepr s
       let
@@ -1200,7 +1239,6 @@ simplifyBVOpInner sym simp_check go app = case app of
 
         doConst c = W4.bvLit sym w c
       return $ (WSum.evalM doAdd doMul doConst s >>= W4.bvSelect sym idx n)
-    -}
     <|> do
       W4B.BVOrBits _ s <- W4B.asApp bv
       (b:bs) <- return $ W4B.bvOrToList s
@@ -1243,6 +1281,7 @@ simplifyBVOpInner sym simp_check go app = case app of
       return $ do
         lhs' <- W4.bvSelect sym (W4.knownNat @0) rhs_w lhs
         W4.isEq sym lhs' rhs' >>= go
+      
   _ -> Nothing
 
 -- | Deep simplification of bitvector operations by removing redundant

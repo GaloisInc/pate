@@ -38,6 +38,7 @@ import qualified Lumberjack as LJ
 import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFGSlice as MCS
+import qualified Data.Macaw.CFG as MC
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as CS
 
@@ -105,6 +106,8 @@ data EquivEnv sym arch where
     , envTreeBuilder :: TreeBuilder '(sym, arch)
     , envUnsatCacheRef :: IO.IORef (SolverCache sym)
     , envSatCacheRef :: IO.IORef (SolverCache sym)
+    , envTargetEquivRegs :: Set.Set (Some (MC.ArchReg arch))
+    , envPtrAssertions :: MT.PtrAssertions sym
     } -> EquivEnv sym arch
 
 -- pushing assumption contexts should:

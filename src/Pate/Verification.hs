@@ -74,6 +74,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Location as PL
 import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
@@ -200,7 +201,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   mvar <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
-  undefops <- liftIO $ MT.mkAnnotatedPtrOps sym
+  (undefops, ptrAsserts) <- liftIO $ MT.mkAnnotatedPtrOps sym
 
   -- PC values are assumed to be absolute
   pcRegion <- liftIO $ W4.natLit sym 0
@@ -266,6 +267,19 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
 
   satCache <- liftIO $ IO.newIORef SetF.empty
   unsatCache <- liftIO $ IO.newIORef SetF.empty
+
+  let targetRegsRaw = PC.cfgTargetEquivRegs vcfg
+
+  targetRegs <- fmap S.fromList $ mapM (\r_raw -> case PA.readRegister @arch r_raw of
+           Just r -> return r
+           Nothing -> CME.throwError $ PEE.loaderError $ PEE.ConfigError $ "Unknown register: " ++ r_raw) targetRegsRaw
+
+  -- TODO: this can be made more configurable
+  let
+    condFns :: M.Map (PB.FunPair arch) (Some (PL.Location sym arch) -> Bool)
+    condFns = M.singleton entryPoint (\(Some loc) -> case loc of
+                                             PL.Register r -> S.member (Some r) targetRegs
+                                             _ -> False)
   
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
@@ -299,7 +313,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envParentNonce = Some topNonce
           , envUndefPointerOps = undefops
           , envParentBlocks = mempty
-          , envEqCondFns = mempty
+          , envEqCondFns = condFns
           , envExitPairsCache = ePairCache
           , envStatistics = statsVar
           , envOverrides = \ovCfg -> M.fromList [ (n, ov)
@@ -310,6 +324,8 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envTreeBuilder = treeBuilder
           , envSatCacheRef = satCache
           , envUnsatCacheRef = unsatCache
+          , envTargetEquivRegs = targetRegs
+          , envPtrAssertions = ptrAsserts
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each

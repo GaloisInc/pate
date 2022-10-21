@@ -67,6 +67,8 @@ module Pate.Memory.MemTrace
 , prettyMemTraceSeq
 , addExternalCallEvent
 , SymBV'(..)
+, getPtrAssertion
+, PtrAssertions
 ) where
 
 import Unsafe.Coerce
@@ -464,6 +466,18 @@ data PtrAssert sym tp = PtrAssert
 
 newtype PtrAssertions sym = PtrAssertions (IORef (MapF.MapF (SymAnnotation sym) (PtrAssert sym)))
 
+-- | Retrieve any pointer assertions associate with this expression
+getPtrAssertion ::
+  IsSymExprBuilder sym =>
+  sym ->
+  PtrAssertions sym ->
+  SymExpr sym tp ->
+  IO (Maybe (Pred sym, SymExpr sym tp))
+getPtrAssertion sym (PtrAssertions ref) e = do
+  asserts <- readIORef ref
+  case getAnnotation sym e of
+    Just ann | Just (PtrAssert p _) <- MapF.lookup ann asserts, Just e' <- getUnannotatedTerm sym e -> return $ Just (p, e')
+    _ -> return $ Nothing
 
 annotatePredicate ::
   IsSymExprBuilder sym =>
@@ -498,7 +512,7 @@ mkAnnotatedPtrOps ::
   forall sym.
   IsSymInterface sym =>
   sym ->
-  IO (UndefinedPtrOps sym)
+  IO (UndefinedPtrOps sym, PtrAssertions sym)
 mkAnnotatedPtrOps sym = do
   asnsRef <- newIORef MapF.empty
   let asns = PtrAssertions asnsRef
@@ -509,20 +523,21 @@ mkAnnotatedPtrOps sym = do
             Just ptrAsn -> return $ Set.singleton (ptrAssertTag ptrAsn)
             Nothing -> return $ Set.empty
         Nothing -> return $ Set.empty
-  return $
-    UndefinedPtrOps
-      { undefPtrOff = UndefinedPtrUnOp $ \sym' (AssertedResult cond (SymBV' bv)) _ -> do
-          (annBV, bv') <- annotateTerm sym' bv
-          modifyIORef' asnsRef (MapF.insert annBV (PtrAssert cond UndefPtrOff))
-          return $ SymBV' bv'
-      , undefPtrLt =  UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLt r
-      , undefPtrLeq = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLeq r
-      , undefPtrAdd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAdd r
-      , undefPtrSub = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrSub r
-      , undefPtrAnd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAnd r
-      , undefPtrXor = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrXor r
-      , undefPtrClassify = classify
-      }
+  let uops =
+        UndefinedPtrOps
+          { undefPtrOff = UndefinedPtrUnOp $ \sym' (AssertedResult cond (SymBV' bv)) _ -> do
+              (annBV, bv') <- annotateTerm sym' bv
+              modifyIORef' asnsRef (MapF.insert annBV (PtrAssert cond UndefPtrOff))
+              return $ SymBV' bv'
+          , undefPtrLt =  UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLt r
+          , undefPtrLeq = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLeq r
+          , undefPtrAdd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAdd r
+          , undefPtrSub = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrSub r
+          , undefPtrAnd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAnd r
+          , undefPtrXor = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrXor r
+          , undefPtrClassify = classify
+          }
+  return (uops, asns)
 
 -- | Wrap potentially undefined pointer operations in uninterpreted functions
 mkUndefinedPtrOps ::

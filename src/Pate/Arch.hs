@@ -31,6 +31,7 @@ module Pate.Arch (
   mkClockOverride,
   mkWriteOverride,
   mkDefaultStubOverride,
+  mkObservableOverride,
   lookupStubOverride,
   defaultStubOverride,
   withStubOverride,
@@ -160,6 +161,9 @@ class
   -- register should be propagated during discovery
   discoveryRegister :: forall tp. MC.ArchReg arch tp -> Bool
 
+  -- parsing registers from user input
+  readRegister :: String -> Maybe (Some (MC.ArchReg arch))
+
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
                 , validArchFunctionDomain :: PVE.ExternalDomain PVE.ExternalCall arch
@@ -270,6 +274,27 @@ mkClockOverride rOut = StubOverride $ \sym _ -> do
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
 
+mkObservableOverride ::
+  forall arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  T.Text {- ^ name of call -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r0 -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r1 -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r3 -} ->
+  StubOverride arch
+mkObservableOverride nm r0_reg r1_reg r3_reg = StubOverride $ \sym wsolver -> do
+  let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "written") (W4.BaseBVRepr w_mem)
+  return $ StateTransformer $ \st -> do
+    let (CLM.LLVMPointer _ r1_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r1_reg
+    let (CLM.LLVMPointer _ r3_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r3_reg
+    let mem = PS.simMem st
+    mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' r1_val) mem
+    let st' = st { PS.simMem = mem' }
+    zero_nat <- W4.natLit sym 0
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue r0_reg) .~ ptr ) })
 
 mkWriteOverride ::
   forall arch.

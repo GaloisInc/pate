@@ -41,14 +41,18 @@ import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Trans.Maybe as MaybeT
 
+import qualified Data.Set as Set
 import           Data.List.NonEmpty (NonEmpty(..))
 
+import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableFC as TFC
 
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Expr.BoolMap as BM
+import qualified What4.SemiRing as SR
+import qualified What4.Expr.WeightedSum as WSum
 
 -- | Compute a predicate representing the path condition of the
 -- expression according to its internal mux structure.
@@ -93,7 +97,7 @@ runPathM ::
 runPathM sym fn dec f = do
   cache <- W4B.newIdxCache
   let
-    env = PathMEnv sym fn dec (W4.truePred sym) cache
+    env = PathMEnv sym fn dec (W4.truePred sym) mempty cache
     PathM f' = do
       a <- f
       p <- getFullPath
@@ -110,6 +114,7 @@ data PathMEnv sym where
     , _fn :: W4G.GroundEvalFn t
     , _isSat :: W4.Pred sym -> IO (Maybe Bool)
     , pathAsms ::  W4.Pred sym
+    , pathBVars :: Set.Set (Some (W4.BoundVar sym))
     , _pathCondCache :: W4B.IdxCache t (ExprAsms sym)
     } ->
     PathMEnv sym
@@ -160,7 +165,7 @@ watchPath f = evalPath f >>= \case
 
 withSym :: (W4.IsExprBuilder sym => sym -> PathM sym a) -> PathM sym a
 withSym f = do
-  PathMEnv sym _ _ _ _ <- CMR.ask
+  PathMEnv sym _ _ _ _ _ <- CMR.ask
   f sym
 
 withValid :: forall a sym. (forall t solver fs. sym ~ (W4B.ExprBuilder t solver fs) => PathM sym a) -> PathM sym a
@@ -217,18 +222,19 @@ groundEval ::
   W4.SymExpr sym tp ->
   PathM sym (W4G.GroundValue tp)
 groundEval e = do
-  PathMEnv _ fn _ _ _ <- CMR.ask
+  PathMEnv _ fn _ _ _ _ <- CMR.ask
   liftIO (W4G.groundEval fn e)
 
 isSat ::
   W4.Pred sym ->
   PathM sym (Maybe Bool)
 isSat p = do
-  PathMEnv _ _ f _ _ <- CMR.ask
-  groundEval p >>= \case
+  PathMEnv _ _ f _ _ _ <- CMR.ask
+  return $ W4.asConstantPred p
+  {- groundEval p >>= \case
     True -> return $ Just True
     False -> liftIO (f p)
-
+  -}
 forMuxes ::
   forall sym tp a.
   W4.SymExpr sym tp ->
@@ -286,18 +292,62 @@ altBVOp ::
   PathM sym a
 altBVOp f_signed e1 e2 = withSym $ \sym -> forMuxes2 e1 e2 $ \e1' e2' -> do
   e1'' <- withPathCond e1'
-  e2'' <- withPathCond e2'  
+  e2'' <- withPathCond e2'
+  f_signed e1'' e2''
   unsigned1 <- liftIO $ isUnsigned sym e1''
   unsigned2 <- liftIO $ isUnsigned sym e2''
-  unsigned <- liftIO $ W4.andPred sym unsigned1 unsigned2
+  
+  --unsigned <- liftIO $ W4.andPred sym unsigned1 unsigned2
   (do    
-      getPredCase BM.Positive unsigned 
+      getPredCase BM.Positive unsigned1
+      getPredCase BM.Positive unsigned2
       f_signed e1'' e2'')
    <|>
     (do
-      getPredCase BM.Negative unsigned 
+      getPredCase BM.Negative unsigned1
+      getPredCase BM.Negative unsigned2
+      f_signed e1'' e2'')
+   <|>
+    (do
+      getPredCase BM.Positive unsigned1
+      getPredCase BM.Negative unsigned2
+      f_signed e1'' e2'')
+   <|>
+    (do
+      getPredCase BM.Negative unsigned1
+      getPredCase BM.Positive unsigned2
       f_signed e1'' e2'')
 
+-- | For integer operations, consider separately the case  where both
+-- operands are zero
+-- TODO: other cases to consider for integers?
+altIntOp ::
+  (W4.SymInteger sym -> W4.SymInteger sym  -> PathM sym a) ->
+  W4.SymInteger sym ->
+  W4.SymInteger sym ->
+  PathM sym a
+altIntOp f e1 e2 = withSym $ \sym -> forMuxes2 e1 e2 $ \e1' e2' -> do
+  e1'' <- withPathCond e1'
+  e2'' <- withPathCond e2'
+  isZero1 <- liftIO $ isZero sym e1''
+  isZero2 <- liftIO $ isZero sym e2''
+  bothZero <- liftIO $ W4.andPred sym isZero1 isZero2
+  (do
+      getPredCase BM.Positive bothZero
+      f e1'' e2'')
+    <|>
+    (do
+      getPredCase BM.Negative bothZero
+      f e1'' e2'')
+
+isZero ::
+  W4.IsExprBuilder sym =>
+  sym ->
+  W4.SymInteger sym ->
+  IO (W4.Pred sym)  
+isZero sym i = do
+  zero <- liftIO $ W4.intLit sym 0
+  liftIO $ W4.isEq sym i zero
 
 -- | True if this bitvector has the same signed vs. unsigned interpretation
 isUnsigned ::
@@ -347,6 +397,17 @@ getPredCase pol_outer e_outer = do
       altBVOp
         (\e1' e2' -> liftBinOp f e1' e2' >>= applyPolarity pol)
         e1 e2 
+
+    intOp ::
+      BM.Polarity ->
+      (sym -> W4.SymInteger sym -> W4.SymInteger sym -> IO (W4.Pred sym)) ->
+      W4.SymInteger sym ->
+      W4.SymInteger sym ->
+      PathM sym (W4.Pred sym)      
+    intOp pol f e1 e2 =
+      altIntOp
+        (\e1' e2' -> liftBinOp f e1' e2' >>= applyPolarity pol)
+        e1 e2 
     
     go :: BM.Polarity -> W4.Pred sym -> PathM sym (W4.Pred sym)
     go pol e_inner = withValid $ withSym $ \sym -> forMuxes e_inner $ \e -> do
@@ -386,6 +447,10 @@ getPredCase pol_outer e_outer = do
                     BM.BoolMapTerms (t:|ts) -> foldM eval (W4.falsePred sym) (t:ts)
 
             W4B.NotPred p -> go (BM.negatePolarity pol) p
+
+            -- inject additional zero checks for integers
+            -- W4B.BaseEq W4.BaseIntegerRepr e1 e2 -> intOp pol W4.isEq e1 e2
+
             W4B.BaseEq _ e1 e2 -> binOp pol W4.isEq e1 e2
             W4B.BVUlt e1 e2 -> binOp pol W4.bvUlt e1 e2
              
@@ -408,6 +473,11 @@ predAgrees pol p = do
     True -> return ()
     False -> mzero
 
+withBVar ::
+  W4.BoundVar sym tp ->
+  PathM sym a ->
+  PathM sym a
+withBVar bv f = withValid $ CMR.local (\env -> env { pathBVars = Set.insert (Some bv) (pathBVars env)}) $ f
 
 data ExprAsms sym tp where
   ExprAsms :: W4.SymExpr sym tp -> W4.Pred sym -> ExprAsms sym tp
@@ -421,7 +491,7 @@ withPathCond ::
   W4.SymExpr sym tp ->
   PathM sym (W4.SymExpr sym tp)
 withPathCond e_outer = withValid $ do
-  PathMEnv sym _ _ _ cache <- CMR.ask
+  PathMEnv sym _ _ _ _ cache <- CMR.ask
   let
     watch :: forall tp'.
       PathM sym (W4.SymExpr sym tp') ->
@@ -434,7 +504,7 @@ withPathCond e_outer = withValid $ do
       W4.SymBV sym w1 ->
       W4.SymBV sym w2 ->
       PathM sym (ExprAsms sym tp3)      
-    bvOp f e1 e2 =
+    bvOp f e1 e2 = 
       altBVOp
         (\e1' e2' -> watch $ liftBinOp f e1' e2')
         e1 e2 
@@ -451,10 +521,42 @@ withPathCond e_outer = withValid $ do
       
       forMuxes e_inner $ \e -> do
         case e of
+          W4B.BoundVarExpr var -> do
+            bvars <- CMR.asks pathBVars
+            case Set.member (Some var) bvars of
+              True -> return $ ExprAsms e (W4.truePred sym)
+              False -> case W4.exprType e of
+                W4.BaseBVRepr w -> watch $  withBVar var $ do
+                  unsigned <- liftIO $ isUnsigned sym e
+                  ((do
+                      getPredCase BM.Positive unsigned  
+                      return e)
+                    <|>
+                    do
+                      getPredCase BM.Negative unsigned 
+                      return e)
+                _ -> return $ ExprAsms e (W4.truePred sym)         
           W4B.AppExpr a0 -> case W4B.appExprApp a0 of
             W4B.BVAshr _ e1 e2 -> bvOp W4.bvAshr e1 e2
             W4B.BVSdiv _ e1 e2 -> bvOp W4.bvSdiv e1 e2
             W4B.BVSext w e1 -> bvOp (\_sym e1' _ -> W4.bvSext sym w e1') e1 e1
+            -- W4B.BVZext w e1 -> bvOp (\_sym e1' _ -> W4.bvZext sym w e1') e1 e1
+            {-
+            W4B.SemiRingSum s | SR.SemiRingBVRepr SR.BVBitsRepr w <- WSum.sumRepr s ->
+              let
+                 doAdd e1 e2 = altBVOp (liftBinOp W4.bvXorBits) e1 e2
+                 doMul coef bv' = (liftIO $ W4.bvLit sym w coef) >>= \coef' -> altBVOp (liftBinOp W4.bvAndBits) coef' bv'
+                 doConst c = liftIO (W4.bvLit sym w c)
+
+               in watch $ WSum.evalM doAdd doMul doConst s
+            W4B.SemiRingSum s | SR.SemiRingBVRepr SR.BVArithRepr w <- WSum.sumRepr s ->
+              let
+                 doAdd e1 e2 = altBVOp (liftBinOp W4.bvAdd) e1 e2
+                 doMul coef bv' = (liftIO $ W4.bvLit sym w coef) >>= \coef' -> altBVOp (liftBinOp W4.bvMul) coef' bv'
+                 doConst c = liftIO (W4.bvLit sym w c)
+
+               in watch $ WSum.evalM doAdd doMul doConst s
+            -}
             app -> watch $ do
               a0' <- W4B.traverseApp go app
               if (W4B.appExprApp a0) == a0' then return e

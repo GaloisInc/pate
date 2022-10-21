@@ -11,6 +11,10 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE QuantifiedConstraints  #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Location (
     Location(..)
   , LocationWitherable(..)
@@ -37,6 +41,8 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.ExprMappable as PEM
 import qualified What4.Interface as W4
 import qualified What4.PredMap as WPM
+
+import           Pate.TraceTree
 
 -- | Generalized location-based traversals
 
@@ -69,6 +75,10 @@ instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PP.Pret
     Register r -> PP.pretty (showF r)
     Cell c -> PMC.ppCell c
     NoLoc -> "<None>"
+
+instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "loc" where
+  type TraceNodeType '(sym,arch) "loc" = Some (Location sym arch)
+  prettyNode () (Some l) = PP.pretty l
 
 -- TODO: this can be abstracted over 'W4.Pred'
 

@@ -275,7 +275,7 @@ dropDomain ::
   PairGraph sym arch ->
   PairGraph sym arch 
 dropDomain nd pg = case getCurrentDomain pg nd of
-  Just d ->
+  Just{}->
     let
       -- clear this domain and all descendant domains
       pg' = case Set.null (getBackEdgesFrom pg nd) of

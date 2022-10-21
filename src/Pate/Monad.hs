@@ -57,6 +57,8 @@ module Pate.Monad
   , SymGroundEvalFn(..)
   , execGroundFn
   , withGroundEvalFn
+  , wrapGroundEvalFn
+  , extractBindings
   , getFootprints
   -- sat helpers
   , checkSatisfiableWithModel
@@ -77,6 +79,7 @@ module Pate.Monad
   , withAssumptionSet
   , withPathCondition
   , applyCurrentAsms
+  , applyCurrentAsmsExpr
   , currentAsm
   -- nonces
   , freshNonce
@@ -134,6 +137,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import qualified Data.Parameterized.TraversableF as TF
@@ -625,7 +629,7 @@ withAssumption ::
   EquivM sym arch f
 withAssumption asm f = withAssumptionSet (PAS.fromPred asm) f
 
--- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
+-- | Rewrite the given 'f' with any in bindings the current 'AssumptionSet'
 -- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
 applyCurrentAsms ::
   forall sym arch f.
@@ -636,6 +640,14 @@ applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
   PAS.apply sym asm f
 
+
+applyCurrentAsmsExpr ::
+  forall sym arch tp.
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+applyCurrentAsmsExpr e = withSym $ \sym -> do
+  PEM.SymExprMappable aEM <- return $ PEM.symExprMappable sym
+  aEM @tp $ applyCurrentAsms e
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
@@ -1021,6 +1033,43 @@ forkSolver inVar = do
       Right _ -> IO.putMVar outVar (SolverErr "Thread Killed") >> return ()
 -}
 
+wrapGroundEvalFn ::
+  SymGroundEvalFn sym ->
+  Set (Some (W4.SymExpr sym)) ->
+  EquivM sym arch (SymGroundEvalFn sym)
+wrapGroundEvalFn fn@(SymGroundEvalFn gfn) es = withSym $ \sym -> do
+  binds <- extractBindings fn es
+  IO.withRunInIO $ \runInIO -> do
+    let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= (W4G.groundEval gfn)))
+    return $ SymGroundEvalFn fn'
+
+{-
+-- | Modified grounding that first applies some manual rewrites
+safeGroundEvalFn ::
+  SymGroundEvalFn sym ->
+  W4.SymExpr sym tp ->
+  (forall t st fs. sym ~ WE.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
+  EquivM sym arch a  
+safeGroundEvalFn fn e f = withSym $ \sym -> do
+  binds <- extractBindings fn e
+  IO.withRunInIO $ \runInIO -> do
+    let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= \e'' -> runInIO (emitTraceLabel @"expr" "safeGroundInput" (Some e'') >> execGroundFn fn e'')))
+    f fn'
+-}
+
+extractBindings ::
+  SymGroundEvalFn sym ->
+  Set (Some (W4.SymExpr sym)) ->
+  EquivM sym arch (ExprBindings sym)
+extractBindings fn e = withSym $ \sym -> do
+  vars <- (S.toList . S.unions) <$> mapM (\(Some e') -> liftIO $ boundVars e') (S.toList e)
+  fmap MapF.fromList $ mapM (\(Some var) -> do
+    let varE = W4.varExpr sym var
+    gv <- execGroundFn fn varE
+    val <- liftIO $ PVC.symbolicFromConcrete sym gv varE
+    return $ MapF.Pair varE val) vars
+  
+
 withGroundEvalFn ::
   SymGroundEvalFn sym ->
   (forall t st fs. sym ~ WE.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
@@ -1043,7 +1092,7 @@ execGroundFn (SymGroundEvalFn fn) e = do
     ]
   case result of
     Just a -> return a
-    Nothing -> throwHere PEE.InvalidSMTModel
+    Nothing -> throwHere $ PEE.FailedToGroundExpr (PEE.SomeExpr @_ @sym e)
 
 getFootprints ::
   SimBundle sym arch v ->

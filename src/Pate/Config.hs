@@ -261,6 +261,9 @@ data VerificationConfig validRepr =
     , cfgIgnoreDivergedControlFlow :: Bool
     -- ^ unless blocks are explicitly marked as expected to be equal, avoid
     --   traversing graph edges with diverging control flow
+    , cfgTargetEquivRegs :: [String]
+    -- ^ registers to be asserted equal during conditional equivalence analysis
+    --   (no conditional equivalence analysis is done if empty)
     }
 
 
@@ -281,4 +284,5 @@ defaultVerificationCfg =
                      , cfgCheckSimplifier = False
                      , cfgIgnoreUnnamedFunctions = True
                      , cfgIgnoreDivergedControlFlow = True
+                     , cfgTargetEquivRegs = []
                      }

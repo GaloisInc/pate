@@ -83,6 +83,7 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
@@ -216,12 +217,12 @@ pairGraphComputeFixpoint gr0 = do
               emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
               return gr'
             True -> PS.viewSpec preSpec $ \scope d -> do
-              emitTraceLabel @"domain" PAD.Predomain (Some d)
+              emitTraceLabel @"simpledomain" PAD.Predomain (Some d)
               withAssumptionSet (PS.scopeAsm scope) $ do
                 gr'' <- visitNode scope nd d gr'
                 emitEvent $ PE.VisitedNode nd
                 return gr''
-        go gr''
+        go gr''      
 
     -- Orphaned returns can appear when we never find a return branch for
     -- a function (e.g. possibly due to a code analysis failure)
@@ -246,11 +247,16 @@ pairGraphComputeFixpoint gr0 = do
               Just preSpec -> PS.viewSpec preSpec $ \scope d -> withValidInit scope (nodeBlocks fnEntry) $ updateExtraEdges scope fnEntry d gr1
               Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnEntry)
           go gr2 >>= go_orphans
+
+      
   withSubTraces $ do
     gr1 <- go gr0
     (lift $ asks (PCfg.cfgAddOrphanEdges . envConfig)) >>= \case
       True -> go_orphans gr1
       False -> return gr1
+
+
+
 
 -- | For an orphan return, we treat it the same as an undefined PLT stub,
 --   since we effectively have no way to characterize the function behavior.
@@ -550,15 +556,31 @@ visitNode :: forall sym arch v.
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withAbsDomain node d gr0 $ do
+  -- FIXME: duplicated
+  case getEquivCondition gr0 (GraphNode node) of
+    Just eqCondSpec -> withSym $ \sym -> do
+      (_asm, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      eqCond_pred <- PEC.toPred sym eqCond
+      emitTraceLabel @"eqcond" ("Equivalence Condition: \n" ++ show (W4.printSymExpr eqCond_pred)) (Some eqCond)
+    Nothing -> return ()
+ 
+  
   checkParsedBlocks bPair
   withValidInit scope bPair $ do
     gr1 <- updateExtraEdges scope node d gr0
     let vars = PS.scopeVars scope
     withSimBundle vars node $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
 
-visitNode scope (ReturnNode fPair) d gr0 =
+visitNode scope (ReturnNode fPair) d gr0 = do
   -- propagate the abstract domain of the return node to
   -- all of the known call sites of this function.
+  case getEquivCondition gr0 (ReturnNode fPair) of
+    Just eqCondSpec -> withSym $ \sym -> do
+      (_asm, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      eqCond_pred <- PEC.toPred sym eqCond
+      emitTraceLabel @"eqcond" ("Equivalence Condition: \n" ++ show (W4.printSymExpr eqCond_pred)) (Some eqCond)
+    Nothing -> return ()
+ 
   subTree @"entrynode" "Block Returns" $
     foldM (\gr node -> subTrace node $ processReturn gr node) gr0 (getReturnVectors gr0 fPair)
 
@@ -662,6 +684,11 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "observable_result" wh
       , PP.pretty msg
       ]
   nodeTags = [(Summary, \() res -> case res of
+                  ObservableCheckEq -> "Observably Equivalent"
+                  ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
+                  ObservableCheckError{} -> "Error during observability check")
+             ] ++
+             [(Simplified, \() res -> case res of
                   ObservableCheckEq -> "Observably Equivalent"
                   ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
                   ObservableCheckError{} -> "Error during observability check")
@@ -1670,7 +1697,10 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
                   -- in this case
                   -- have inlined the effects of both stubs
                   -- and so diverging control flow is not an issue
-                  handleJump scope bundle' currBlock d gr0 (mkNodeEntry currBlock pRetPair)
+
+                  -- check if this stub introduced an observable event
+                  gr1 <- checkObservables currBlock bundle' d gr0
+                  handleJump scope bundle' currBlock d gr1 (mkNodeEntry currBlock pRetPair)
         -- unclear what to do here?
         Nothing ->
           handleReturn scope bundle' currBlock d gr0

@@ -5,9 +5,11 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
+{-# LANGUAGE AllowAmbiguousTypes   #-}
 
 module Pate.Equivalence.Error (
     InnerEquivalenceError(..)
+  , SomeExpr(..)
   , LoadError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
@@ -115,6 +117,13 @@ data InnerEquivalenceError arch
   | MissingDomainForFun (PB.FunPair arch)
   | SkippedInequivalentBlocks (PB.BlockPair arch)
   | SymbolicExecutionError String
+  | UnsatisfiableEquivalenceCondition (SomeExpr W4.BaseBoolType)
+  | forall tp. FailedToGroundExpr (SomeExpr tp)
+
+data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
+
+instance Show (SomeExpr tp) where
+  show (SomeExpr e) = show (W4.printSymExpr e)
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
