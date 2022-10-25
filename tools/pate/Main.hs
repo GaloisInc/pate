@@ -119,6 +119,7 @@ runMain traceTree opts = do
         , PC.cfgFailureMode = errMode opts
         , PC.cfgIgnoreUnnamedFunctions = skipUnnamedFns opts
         , PC.cfgIgnoreDivergedControlFlow = skipDivergedControl opts
+        , PC.cfgTargetEquivRegs = targetEquivRegs opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader
@@ -165,6 +166,7 @@ data CLIOptions = CLIOptions
   , errMode :: PC.VerificationFailureMode
   , skipUnnamedFns :: Bool
   , skipDivergedControl :: Bool
+  , targetEquivRegs :: [String]
   } deriving (Eq, Ord, Show)
 
 {-
@@ -522,3 +524,7 @@ cliOptions = OA.info (OA.helper <*> parser)
        (  OA.long "skip-divergent-control-flow"
        <> OA.help "Skip node processing for "
        )
+    <*> OA.many (OA.strOption
+        ( OA.long "target-equiv-regs"
+        <> OA.help "Compute an equivalence condition sufficient to establish equality on the given registers after the toplevel entrypoint returns"
+        ))

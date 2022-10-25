@@ -281,14 +281,12 @@ mkObservableOverride ::
   T.Text {- ^ name of call -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r0 -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r1 -} ->
-  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r3 -} ->
   StubOverride arch
-mkObservableOverride nm r0_reg r1_reg r3_reg = StubOverride $ \sym wsolver -> do
+mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "written") (W4.BaseBVRepr w_mem)
   return $ StateTransformer $ \st -> do
     let (CLM.LLVMPointer _ r1_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r1_reg
-    let (CLM.LLVMPointer _ r3_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r3_reg
     let mem = PS.simMem st
     mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' r1_val) mem
     let st' = st { PS.simMem = mem' }

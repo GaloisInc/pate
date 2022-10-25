@@ -105,8 +105,17 @@ instance PA.ValidArch SA.AArch32 where
   binArchInfo = const hacky_arm_linux_info
   discoveryRegister reg =
        Some reg == (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")))
-    -- useful for indirect jumps
-    -- || Some reg == (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")))
+  readRegister = \case
+    "r0" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
+    "r1" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
+    "r2" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
+    "r3" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
+    "r4" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")
+    -- TODO
+    "sp" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R13")
+    "r13" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R13")
+    "pc" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_PC")
+    _ -> Nothing
 
 argumentNameFrom
   :: [T.Text]
@@ -206,12 +215,12 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
     -- FIXME: fixup arguments for fwrite
     , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
+    , ("printf", PA.mkObservableOverride "printf" r0 r1)
     -- FIXME: default stubs below here
     ] ++
     (map mkDefault $
       [ "getopt"
       , "fprintf"
-      , "printf"
       , "open"
       , "atoi"
       , "openat"
@@ -242,7 +251,7 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
     r1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
     r2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
-
+    --r3 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
 
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
   archTermCase = \case

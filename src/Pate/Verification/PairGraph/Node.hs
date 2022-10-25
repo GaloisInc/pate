@@ -242,3 +242,4 @@ instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "node" w
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
   type TraceNodeType '(sym, arch) "entrynode" = NodeEntry arch
   prettyNode () = pretty
+  nodeTags = mkTags @'(sym,arch) @"entrynode" [Simplified, Summary]

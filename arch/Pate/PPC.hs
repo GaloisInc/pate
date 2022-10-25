@@ -158,6 +158,8 @@ instance PA.ValidArch PPC.PPC32 where
   argumentNameFrom = argumentNameFromGeneric
   binArchInfo = const PPC.ppc32_linux_info
   discoveryRegister = const False
+  -- FIXME: TODO
+  readRegister _ = Nothing
 
 instance PA.ValidArch PPC.PPC64 where
   rawBVReg r = case r of
@@ -171,6 +173,8 @@ instance PA.ValidArch PPC.PPC64 where
   argumentNameFrom = argumentNameFromGeneric
   binArchInfo = PPC.ppc64_linux_info
   discoveryRegister = const False
+  -- FIXME: TODO
+  readRegister _ = Nothing
 
 -- | Determine the argument name for the argument held in the given register.
 --

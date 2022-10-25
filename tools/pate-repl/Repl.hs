@@ -31,7 +31,7 @@ import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
 import qualified Control.Concurrent as IO
-import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT )
+import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT, get, put, forM )
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
 import           Text.Read (readMaybe)
@@ -45,7 +45,7 @@ import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Terminal as PPRT
 
-import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, SymbolRepr )
+import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, SymbolRepr, symbolRepr )
 
 
 import qualified Pate.Arch as PA
@@ -73,10 +73,11 @@ printFn a = do
   r <- runReplM $ do
     ValidSymArchRepr{} <- getValidRepr
     let str = show a
-    str' <- case readMaybe @Integer str of
-      Just i -> gotoIndex i
-      Nothing -> return str
-    IO.liftIO $ IO.putStrLn str'
+    case readMaybe @Integer str of
+      Just i -> goto' (fromIntegral i) >>= \case
+        Just{} -> return ()
+        Nothing -> IO.liftIO $ IO.putStrLn "No such options"
+      Nothing -> IO.liftIO $ IO.putStrLn str
   case r of
     Just () -> return ()
     Nothing -> IO.putStrLn "<<No Binary Loaded>>"
@@ -115,9 +116,10 @@ data ReplState sym arch where
     , replPrev :: [Some (TraceNode sym arch)]
     -- tags used to collect the 'next' results
     , replNextTags :: [TraceTag]
-    , replNext :: [Some (TraceNode sym arch)]
+    , replNext :: [(Int, Some (TraceNode sym arch))]
     , replValidRepr :: ValidSymArchRepr sym arch sym arch
     , replLastOptsPrinted :: String
+    , replNesting :: Int
     } -> ReplState sym arch
 
 data ValidSymArchRepr sym arch symExt archExt where
@@ -191,6 +193,7 @@ loadSomeTree tid topTraceTree = do
             , replNext = []
             , replValidRepr = ValidSymArchRepr sym arch
             , replLastOptsPrinted = ""
+            , replNesting = 0
             }
       IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
@@ -248,6 +251,14 @@ printPretty p = do
 printPrettyLn :: PP.Doc PPRT.AnsiStyle -> ReplM_ sym arch ()
 printPrettyLn p = printPretty (p <> "\n")
 
+isSubTreeNode ::
+  forall sym arch nm.
+  TraceNode sym arch nm -> Bool
+isSubTreeNode (TraceNode{}) = case symbolRepr (knownSymbol @nm) of
+  "subtree" -> True
+  "function_name" -> True
+  _ -> False
+
 addNextNodes ::
   forall nm sym arch.
   TraceTreeNode '(sym, arch) nm ->
@@ -255,11 +266,31 @@ addNextNodes ::
 addNextNodes node = isTraceNode node $ do
   tags <- gets replNextTags
   contents <- IO.liftIO $ viewTraceTreeNode node
+  nesting <- gets replNesting
+  let nextTrees = map (\((v, lbl), subtree) -> (nesting, Some (TraceNode @nm lbl v subtree))) contents
   case nodeShownAt @'(sym,arch) @nm tags of
     True -> do
-      let nextTrees = map (\((v, lbl), subtree) -> Some (TraceNode @nm lbl v subtree)) contents
-      modify (\st -> st { replNext = (replNext st) ++ nextTrees })
+      nextSubs <- fmap concat $ forM nextTrees $ \(n, Some nextNode) -> do
+        next <- maybeSubNodes nextNode (return []) (gets replNext)
+        case (isSubTreeNode nextNode, next) of
+          (True, []) -> return []
+          _ -> return $ [(n, Some nextNode)] ++ next
+      modify (\st -> st { replNext = (replNext st) ++ nextSubs })
     False -> return ()
+
+-- | Run the sub-computation as if the given node is the current node,
+--   restoring the state afterwards
+withNode ::
+  TraceNode sym arch nm ->
+  ReplM sym arch a ->
+  ReplM sym arch a
+withNode nd f = do
+  oldst <- get
+  modify $ \st -> st {replNesting = (replNesting st) + 1}
+  loadTraceNode nd
+  a <- f
+  put oldst
+  return a
 
 updateNextNodes ::
   ReplM sym arch ()
@@ -291,6 +322,25 @@ ppStatusTag st = case st of
   NodeStatus (StatusError _) True -> Just "x"
   NodeStatus StatusSuccess True -> Nothing
 
+maybeSubNodes ::
+  forall sym arch nm a.
+  TraceNode sym arch nm ->
+  ReplM sym arch a ->
+  ReplM sym arch a ->
+  ReplM sym arch a
+maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
+  case symbolRepr (knownSymbol @nm) of
+    "subtree" -> withNode nd $ f
+    _ -> do
+      mr <- withNode nd $ do
+        nextNodes <- gets replNext
+        case length nextNodes == 1 of
+          True -> Just <$> f
+          False -> return Nothing
+      case mr of
+        Just a -> return a
+        Nothing -> g
+
 prettyNextNodes ::
   forall sym arch a.
   Int ->
@@ -301,12 +351,17 @@ prettyNextNodes startAt onlyFinished = do
   nextNodes <- gets replNext
   
   ppContents' <- 
-       mapM (\(Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
+       mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
                     pp' <- addSuffix pp b (knownSymbol @nm)
-                    return $ (isFinished b, pp')
+                    return $ (isFinished b, PP.indent (nesting*2) $ pp')
+                    {-
+                    maybeSubNodes nd ()) $ do
+                      subpp <- prettyNextNodes 0 onlyFinished
+                      return $ (isFinished b, PP.vsep [pp', PP.indent 2 subpp])
+                    -}
                   Nothing -> return (isFinished b, "<ERROR: Unexpected missing printer>")
             ) nextNodes
 
@@ -330,11 +385,11 @@ ls' = do
   updateNextNodes
   p <- prettyNextNodes 0 False
   nextNodes <- gets replNext
-  let pp = case nextNodes of
-        [] -> "<<No Subtrees>>"
-        _ -> p
-  printPrettyLn pp
-
+  (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) <- gets replNode
+  let thisPretty = prettyNode @_ @'(sym, arch) @nm lbl v
+  case nextNodes of
+    [] -> printPrettyLn thisPretty
+    _ -> printPrettyLn (PP.vsep [thisPretty,p])
 
 ls :: IO ()
 ls = execReplM ls'
@@ -416,7 +471,7 @@ fetchNode :: Int -> ReplM_ sym arch (Maybe (Some (TraceNode sym arch)))
 fetchNode i = do
   nextNodes <- gets replNext
   case 0 <= i && i < length nextNodes of
-    True -> return $ Just (nextNodes !! i)
+    True -> return $ Just (snd $ nextNodes !! i)
     False -> return Nothing
 
 withCurrentNode :: (forall nm. IsTraceNode '(sym,arch) nm => TraceNode sym arch nm -> ReplM sym arch a) -> ReplM_ sym arch a
@@ -446,7 +501,7 @@ goto_err' :: ReplM sym arch ()
 goto_err' = do
   updateNextNodes
   nextNodes <- gets replNext
-  goto_err'' (reverse nextNodes)
+  goto_err'' (map snd $ reverse nextNodes)
   
 
 goto_err :: IO ()
@@ -477,7 +532,7 @@ goto' idx = do
 finishedPrefix :: ReplM sym arch (Int)
 finishedPrefix = do
   nextNodes <- gets replNext
-  nextStatuses <- mapM (\(Some (TraceNode _ _ t)) -> (IO.liftIO $ getTreeStatus t)) nextNodes
+  nextStatuses <- mapM (\(_, Some (TraceNode _ _ t)) -> (IO.liftIO $ getTreeStatus t)) nextNodes
   return $ length (takeWhile isFinished nextStatuses)
 
 waitRepl :: Int -> ReplM sym arch ()
