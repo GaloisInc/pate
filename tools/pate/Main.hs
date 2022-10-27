@@ -18,6 +18,9 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
+module Main ( main, runMain, cliOptions ) where
+  
+
 import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
@@ -59,11 +62,18 @@ import qualified JSONReport as JR
 import qualified Pate.Interactive as I
 import qualified Pate.Interactive.Port as PIP
 import qualified Pate.Interactive.State as IS
-
+import           Pate.TraceTree
 
 main :: IO ()
 main = do
   opts <- OA.execParser cliOptions
+  status <- runMain noTraceTree opts
+  case status of
+    PEq.Errored err -> SE.die (show err)
+    _ -> pure ()  
+
+runMain :: SomeTraceTree PA.ValidRepr -> CLIOptions -> IO (PEq.EquivalenceStatus)
+runMain traceTree opts = do
   let
     origPaths = PLE.LoadPaths
       { PLE.binPath = originalBinary opts
@@ -103,6 +113,8 @@ main = do
         , PC.cfgGoalTimeout = goalTimeout opts
         , PC.cfgMacawDir = saveMacawCFGs opts
         , PC.cfgSolverInteractionFile = solverInteractionFile opts
+        , PC.cfgTraceTree = traceTree
+        , PC.cfgFailureMode = errMode opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader
@@ -115,10 +127,10 @@ main = do
         , PL.useDwarfHints = not $ noDwarfHints opts
         }
 
-  status <- PL.runEquivConfig cfg
-  case status of
-    PEq.Errored err -> SE.die (show err)
-    _ -> pure ()
+  PL.runEquivConfig cfg
+
+
+
 
 
 data CLIOptions = CLIOptions
@@ -144,6 +156,7 @@ data CLIOptions = CLIOptions
   , proofSummaryJSON :: Maybe FilePath
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
+  , errMode :: PC.VerificationFailureMode
   } deriving (Eq, Ord, Show)
 
 data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
@@ -364,6 +377,13 @@ logParser = (Just <$> interactiveParser) <|> pure Nothing
                                                       <> OA.help "The source file for the patched program"
                                                       )
 
+modeParser :: OA.Parser PC.VerificationFailureMode
+modeParser = OA.option OA.auto (OA.long "errormode"
+                                <> OA.help "Verifier error handling mode"
+                                <> OA.short 'e'
+                                <> OA.value PC.ThrowOnAnyFailure
+                                <> OA.showDefault)
+
 cliOptions :: OA.ParserInfo CLIOptions
 cliOptions = OA.info (OA.helper <*> parser)
   (  OA.fullDesc
@@ -467,3 +487,5 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.metavar "FILE"
         <> OA.help "A file to save debug logs to"
         ))
+   <*> modeParser
+ 

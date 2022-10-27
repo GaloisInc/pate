@@ -257,8 +257,9 @@ associateFrames ::
   SimBundle sym arch v ->
   MCS.MacawBlockEndCase ->
   Bool ->
-  EquivM sym arch (PAS.AssumptionSet sym)
-associateFrames bundle exitCase isPLT = PPa.catBins $ \get -> do
+  EquivM sym arch (SimBundle sym arch v)
+associateFrames bundle exitCase isPLT = do
+  (asm :: PAS.AssumptionSet sym) <- PPa.catBins $ \get -> do
     let
       st_pre = PSS.simInState $ get $ simIn bundle
       st_post = PSS.simOutState $ get $ simOut bundle
@@ -287,6 +288,11 @@ associateFrames bundle exitCase isPLT = PPa.catBins $ \get -> do
       MCS.MacawBlockEndFail -> return mempty
       -- this likely requires some architecture-specific reasoning
       MCS.MacawBlockEndArch -> return mempty
+  -- we apply the rewrite in-line here so that the transformation of
+  -- the frame variable is included as part of the semantics for this bundle
+  withSym $ \sym -> do
+    out' <- PAS.apply sym asm (simOut bundle)
+    return $ bundle { simOut = out' }
 
 liftPartialRel ::
   CB.IsSymInterface sym =>
@@ -599,7 +605,7 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
 getBlocks'
   :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m)
   => PMC.EquivalenceContext sym arch
-  -> PPa.BlockPair arch
+  -> PB.BlockPair arch
   -> m (PE.BlocksPair arch)
 getBlocks' ctx pPair = do
   bs1 <- liftIO $ lookupBlocks' ctxO blkO
@@ -620,7 +626,7 @@ getBlocks' ctx pPair = do
 
 getBlocks ::
   HasCallStack =>
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
 getBlocks pPair = do
   PDP.ParsedBlocks opbs <- lookupBlocks blkO

@@ -13,6 +13,9 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Verification.AbstractDomain
   ( AbstractDomain(..)
@@ -20,6 +23,7 @@ module Pate.Verification.AbstractDomain
   , AbsRange(..)
   , AbstractDomainVals(..)
   , WidenLocs(..)
+  , DomainKind(..)
   , emptyDomainVals
   , groundToAbsRange
   , extractAbsRange
@@ -75,10 +79,12 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Register as PR
 import qualified Pate.SimState as PS
+import qualified Pate.Solver as PSo
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.ExprMappable as PEM
 import           Pate.Panic
+import           Pate.TraceTree
 
 import qualified What4.PredMap as WPM
 
@@ -670,3 +676,25 @@ ppAbstractDomain ppPred d =
   , "== Patched Value Constraints =="
   , ppAbstractDomainVals (PPa.pPatched $ absDomVals d)
   ]
+
+
+instance (PA.ValidArch arch, W4.IsSymExprBuilder sym) => Show (AbstractDomain sym arch v) where
+  show a = show (ppAbstractDomain (\_ -> "") a)
+
+data DomainKind = Predomain | Postdomain | ExternalPostDomain
+  deriving (Eq, Ord, Show)
+
+
+ppDomainKind ::
+  DomainKind -> PP.Doc a
+ppDomainKind = \case
+  Predomain -> "Node predomain"
+  Postdomain -> "Computed postdomain"
+  ExternalPostDomain -> "Postdomain after variable abstraction"
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
+  type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)
+  type TraceNodeLabel "domain" = DomainKind
+  
+  prettyNode lbl (Some absDom) = PP.pretty (show lbl) PP.<+> ppAbstractDomain (\_ -> "") absDom
+  nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl), ("symbolic", \_ _ -> "<TODO: domain symbolic summary>")]

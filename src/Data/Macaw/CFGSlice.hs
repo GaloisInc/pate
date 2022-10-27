@@ -77,7 +77,7 @@ data MacawBlockEndCase =
   -- | An otherwise-unclassified arch exit. Some arch exits may end up being classified
   -- as either calls or returns, according to 'archTermCase'
   | MacawBlockEndArch
-  deriving (Eq, Enum, Bounded, Ord)
+  deriving (Eq, Enum, Bounded, Ord, Show)
 
 
 class HasArchTermEndCase (f :: (M.Type -> Kind.Type) -> Kind.Type) where

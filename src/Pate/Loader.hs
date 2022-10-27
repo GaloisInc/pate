@@ -46,7 +46,7 @@ data RunConfig =
     , origPaths :: PLE.LoadPaths
     , patchedPaths :: PLE.LoadPaths
     , logger :: forall arch. PA.SomeValidArch arch -> IO (Logger arch)
-    , verificationCfg :: PC.VerificationConfig
+    , verificationCfg :: PC.VerificationConfig PA.ValidRepr
     , archLoader :: PA.ArchLoader PEE.LoadError
     , useDwarfHints :: Bool
     }
@@ -62,10 +62,10 @@ runEquivVerification ::
   [PEE.LoadError] ->
   Logger arch ->
   PC.PatchData ->
-  PC.VerificationConfig ->
+  PC.VerificationConfig PA.ValidRepr ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  IO PEq.EquivalenceStatus
+  IO (PEq.EquivalenceStatus)
 runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct consumers) pd dcfg original patched = do
   let elfErrs = mapMaybe (\e -> case e of PEE.ElfParseError pe -> Just pe; _ -> Nothing) loadErrs
   case elfErrs of
@@ -97,8 +97,8 @@ runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct con
   return st
 
 liftToEquivStatus ::
-  LoaderM PEq.EquivalenceStatus ->
-  IO PEq.EquivalenceStatus
+  LoaderM (PEq.EquivalenceStatus) ->
+  IO (PEq.EquivalenceStatus)
 liftToEquivStatus f = do
   v <- CME.runExceptT (CMW.runWriterT f)
   case v of
@@ -111,7 +111,7 @@ liftToEquivStatus f = do
 runSelfEquivConfig :: forall bin.
   RunConfig ->
   PB.WhichBinaryRepr bin ->
-  IO PEq.EquivalenceStatus
+  IO (PEq.EquivalenceStatus)
 runSelfEquivConfig cfg wb = liftToEquivStatus $ do
   pd <- case patchInfoPath cfg of
     Just fp -> do
@@ -146,7 +146,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
 
 runEquivConfig ::
   RunConfig ->
-  IO PEq.EquivalenceStatus
+  IO (PEq.EquivalenceStatus)
 runEquivConfig cfg = liftToEquivStatus $ do
   pdata <- case patchInfoPath cfg of
     Just fp -> do

@@ -80,6 +80,7 @@ import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.StrongestPosts as PSP
+import           Pate.TraceTree
 
 -- | Run code discovery using macaw
 --
@@ -137,9 +138,9 @@ verifyPairs ::
   LJ.LogAction IO (PE.Event arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  PC.VerificationConfig ->
+  PC.VerificationConfig PA.ValidRepr ->
   PC.PatchData ->
-  CME.ExceptT PEE.EquivalenceError IO PEq.EquivalenceStatus
+  CME.ExceptT PEE.EquivalenceError IO (PEq.EquivalenceStatus)
 verifyPairs validArch logAction elf elf' vcfg pd = do
   Some gen <- liftIO N.newIONonceGenerator
   sym <- liftIO $ WE.newExprBuilder WE.FloatRealRepr WE.EmptyExprBuilderState gen 
@@ -161,7 +162,7 @@ doVerifyPairs ::
   LJ.LogAction IO (PE.Event arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
   PH.Hinted (PLE.LoadedELF arch) ->
-  PC.VerificationConfig ->
+  PC.VerificationConfig PA.ValidRepr ->
   PC.PatchData ->
   N.NonceGenerator IO scope ->
   sym ->
@@ -218,6 +219,9 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
 
     exts = MT.macawTraceExtensions eval syscallModel mvar (trivialGlobalMap @_ @arch globalRegion) undefops
 
+  
+  (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder (PA.ValidRepr sym validArch) (PC.cfgTraceTree vcfg)
+
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
           { PMC.handles = ha
@@ -256,6 +260,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                                                 , let txtName = WF.functionName (PVO.functionName o)
                                                 , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
                                                 ]
+          , envTreeBuilder = treeBuilder
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each
@@ -263,10 +268,11 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     -- function calls.
 
     (result, stats) <- PSP.runVerificationLoop env pPairs'
+    finalizeTree treeBuilder
     endTime <- TM.getCurrentTime
     let duration = TM.diffUTCTime endTime startTime
     IO.liftIO $ LJ.writeLog logAction (PE.AnalysisEnd stats duration)
-    return $ result
+    return result
 
 
 unpackBlockData ::
@@ -293,7 +299,7 @@ unpackBlockData ctxt (PC.Address w) =
     caddr = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
 
 data UnpackedPatchData arch =
-  UnpackedPatchData { unpackedPairs :: [PPa.FunPair arch]
+  UnpackedPatchData { unpackedPairs :: [PB.FunPair arch]
                     , unpackedOrigIgnore :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     , unpackedPatchIgnore :: [(MM.MemWord (MM.ArchAddrWidth arch), Integer)]
                     , unpackedEquatedFuncs :: [(PAd.ConcreteAddress arch, PAd.ConcreteAddress arch)]

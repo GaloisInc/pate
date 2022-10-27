@@ -31,6 +31,7 @@ Functionality for handling the inputs and outputs of crucible.
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.SimState
   ( -- simulator state
@@ -90,6 +91,7 @@ import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
 
 import qualified Prettyprinter as PP
 
+import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
@@ -120,6 +122,7 @@ import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimulatorRegisters as PSR
 import           What4.ExprHelpers
 import           Pate.AssumptionSet
+import           Pate.TraceTree
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -294,6 +297,12 @@ data SimBundle sym arch v = SimBundle
   , simOut :: PPa.PatchPair (SimOutput sym arch v)
   }
 
+instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "bundle" where
+  type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
+  prettyNode () (Some _bundle) = "<TODO: pretty bundle>"
+  nodeTags = [("symbolic", \_ _ -> "<TODO: pretty bundle>")]
+
+
 bundleOutVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
 bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
 
@@ -310,7 +319,7 @@ simOutP :: SimBundle sym arch v -> SimOutput sym arch v PBi.Patched
 simOutP = PPa.pPatched . simOut
 
 
-simPair :: SimBundle sym arch v -> PPa.BlockPair arch
+simPair :: SimBundle sym arch v -> PB.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)
 
 ---------------------------------------
@@ -351,13 +360,17 @@ mkVarBinds ::
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   StackBase sym arch v' ->
+  ScopedExpr sym v' W4.BaseIntegerType ->
   IO (ExprRewrite sym v v')
-mkVarBinds _sym simVars mem regs sb = do
+mkVarBinds _sym simVars mem regs sb mr = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
     stackVar = simStackBase $ simBoundVarState simVars
     stackBinds = singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
+
+    maxRegVar = simMaxRegion $ simBoundVarState simVars
+    maxRegBinds = singleRewrite (unSE $ maxRegVar) (unSE $ mr)
     
   regVarBinds <- fmap PRt.collapse $ PRt.zipWithRegStatesM regVars regs $ \_ (PSR.MacawRegVar _ vars) val -> do
     case PSR.macawRegRepr val of
@@ -372,7 +385,7 @@ mkVarBinds _sym simVars mem regs sb = do
       CT.StructRepr Ctx.Empty -> return $ Const mempty
       repr -> error ("mkVarBinds: unsupported type " ++ show repr)
 
-  return $ (ExprRewrite (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds
+  return $ (ExprRewrite (MT.mkMemoryBinding memVar mem)) <> regVarBinds <> stackBinds <> maxRegBinds
 
 -- | Wrapped expression bindings that convert expressions from one
 -- scope to another
@@ -423,6 +436,11 @@ instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
 
 instance W4.IsExpr (W4.SymExpr sym) => Show (ScopedExpr sym v tp) where
   show e = show (PP.pretty e)
+
+instance TestEquality (W4.SymExpr sym) => Eq (ScopedExpr sym v tp) where
+  e1 == e2 = case testEquality (unSE e1) (unSE e2) of
+    Just _ -> True
+    Nothing -> False
 
 -- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
@@ -539,7 +557,7 @@ getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
   (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
     let st = simVarState $ get vals
-    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st)
+    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simMaxRegion st)
   asScopeCoercion $ bindsO <> bindsP
 
 bindSpec ::

@@ -15,6 +15,7 @@ module Pate.Equivalence.Error (
   , equivalenceError
   , equivalenceErrorFor
   , isRecoverable
+  , isTracedWhenWarning
   , loaderError
   ) where
 
@@ -42,11 +43,12 @@ import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Config as PC
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
-import qualified Pate.PatchPair as PPa
+import qualified Pate.Block as PB
 import qualified Pate.SimState as PS
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import           Pate.TraceTree
 
 data InequivalenceReason =
     InequivalentRegisters
@@ -73,7 +75,7 @@ data InnerEquivalenceError arch
   | UnexpectedBlockKind String
   | UnexpectedMultipleEntries [MM.ArchSegmentOff arch] [MM.ArchSegmentOff arch]
   | forall ids. InvalidBlockTerminal (MD.ParsedTermStmt arch ids)
-  | MissingPatchPairResult (PPa.BlockPair arch)
+  | MissingPatchPairResult (PB.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
   | forall sym. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)
@@ -96,9 +98,11 @@ data InnerEquivalenceError arch
   | LoaderFailure String
   | WideningError String
   | ObservabilityError String
+  | ObservableDifferenceFound -- only raised as an informative warning
   | TotalityError String
   | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
   | UnknownPLTStub BS.ByteString
+  | NotImplementedYet String
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
@@ -119,7 +123,20 @@ isRecoverable' e = case e of
   InconsistentSimplificationResult{} -> True
   RescopingFailure{} -> True
   WideningError{} -> True
+  NotImplementedYet{} -> True
   _ -> False
+
+-- | When an error is raised as a warning, this determines if it should be displayed
+-- in the trace tree
+isTracedWhenWarning' :: InnerEquivalenceError arch -> Bool
+isTracedWhenWarning' e = case e of
+  UnknownPLTStub{} -> False
+  _ -> True
+
+isTracedWhenWarning :: EquivalenceError -> Bool
+isTracedWhenWarning err = case errEquivError err of
+  Left (SomeInnerError innerErr) -> isTracedWhenWarning' innerErr
+  _ -> True
 
 isRecoverable :: EquivalenceError -> Bool
 isRecoverable err = case errEquivError err of
@@ -205,3 +222,6 @@ equivalenceErrorFor repr err =
                    , errStackTrace = Just callStack
                    , errEquivError = Left (SomeInnerError err)
                    }
+
+instance IsNodeError EquivalenceError where
+  propagateErr _ = True

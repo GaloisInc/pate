@@ -1,0 +1,15 @@
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XTypeApplications
+:set -XScopedTypeVariables
+:set -XTemplateHaskell
+:set -XOverloadedStrings
+:set prompt-function promptFn
+:set -interactive-print printFn
+import Data.Parameterized.Some
+import Control.Monad.IO.Class
+import System.IO
+
+import System.IO.Unsafe
+import Control.Concurrent
+setNumCapabilities 6

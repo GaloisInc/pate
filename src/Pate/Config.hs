@@ -1,6 +1,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE DataKinds #-}
 module Pate.Config (
   PatchData(..),
   PatchDataParseError(..),
@@ -22,6 +24,7 @@ import qualified Data.ByteString as BS
 import qualified Data.HashMap.Strict as DHS
 import qualified Data.Text.Encoding as DTE
 import qualified Data.Text.Encoding.Error as DTEE
+import           Data.Kind (Type)
 import           Numeric.Natural ( Natural )
 import           Text.Printf ( PrintfArg, printf )
 import qualified Toml
@@ -30,6 +33,7 @@ import           Numeric (readHex)
 
 import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PT
+import           Pate.TraceTree
 
 -- | A newtype wrapper for a number representing an address
 --
@@ -203,6 +207,7 @@ data VerificationFailureMode =
     ThrowOnAnyFailure
   | ContinueAfterFailure
   | ContinueAfterRecoverableFailures
+  deriving (Eq, Ord, Show, Read)
 
 -- | Controls how abstract domains are shared between function call nodes in the pairgraph.
 data ContextSensitivity =
@@ -219,7 +224,8 @@ data ContextSensitivity =
 
 ----------------------------------
 -- Verification configuration
-data VerificationConfig =
+-- TODO: 'validRepr' is parameterized here just to break a module import loop
+data VerificationConfig validRepr =
   VerificationConfig
     { cfgPairMain :: Bool
     -- ^ start by pairing the entry points of the binaries
@@ -246,9 +252,12 @@ data VerificationConfig =
     -- ^ Determines the behavior of the verifier when an error is thrown,
     -- with respect to whether or not the error is deemed "recoverable"
     , cfgContextSensitivity :: ContextSensitivity
+    , cfgTraceTree :: SomeTraceTree (validRepr :: (Type, Type) -> Type)
+    -- ^ handle on a trace tree that has been provided
     }
 
-defaultVerificationCfg :: VerificationConfig
+
+defaultVerificationCfg :: VerificationConfig validRepr
 defaultVerificationCfg =
   VerificationConfig { cfgPairMain = True
                      , cfgDiscoverFuns = True
@@ -260,4 +269,5 @@ defaultVerificationCfg =
                      , cfgSolverInteractionFile = Nothing
                      , cfgFailureMode = ThrowOnAnyFailure
                      , cfgContextSensitivity = DistinctFunctionAbstractDomains
+                     , cfgTraceTree = noTraceTree
                      }

@@ -67,7 +67,7 @@ data BranchCompletenessResult arch = BranchesComplete
 -- verification successes and failures that can be streamed to the user.
 data Event arch where
   AnalysisEnd :: PES.EquivalenceStatistics -> TM.NominalDiffTime -> Event arch
-  AnalysisStart :: PPa.BlockPair arch -> Event arch
+  AnalysisStart :: PB.BlockPair arch -> Event arch
   ErrorRaised :: PEE.EquivalenceError -> Event arch
   Warning :: PEE.EquivalenceError -> Event arch
   -- | final top-level result
@@ -119,14 +119,14 @@ data Event arch where
   ErrorEmitted :: PEE.EquivalenceError -> TM.NominalDiffTime -> Event arch
 
   VisitedNode :: (PArch.ValidArch arch) => PVPN.GraphNode arch -> TM.NominalDiffTime -> Event arch
-  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> SolverProofKind -> SolverResultKind -> PAS.AssumptionSet sym -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
+  SolverEvent :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> SolverProofKind -> SolverResultKind -> PAS.AssumptionSet sym -> WI.Pred sym -> TM.NominalDiffTime -> Event arch
 
-  DomainWidened :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
+  DomainWidened :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> TM.NominalDiffTime -> Event arch
 
-  InitialDomainFound :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
+  InitialDomainFound :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> TM.NominalDiffTime -> Event arch
 
-  DomainAbstraction :: (PArch.ValidArch arch) => PPa.BlockPair arch -> TM.NominalDiffTime -> Event arch
-  ScopeAbstractionResult :: (sym ~ WE.ExprBuilder t st fs) => PPa.BlockPair arch -> PS.ScopedExpr sym v tp -> PS.ScopedExpr sym v' tp -> TM.NominalDiffTime -> Event arch
+  DomainAbstraction :: (PArch.ValidArch arch) => PB.BlockPair arch -> TM.NominalDiffTime -> Event arch
+  ScopeAbstractionResult :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> PS.ScopedExpr sym v tp -> PS.ScopedExpr sym v' tp -> TM.NominalDiffTime -> Event arch
 
 data SolverResultKind =
     SolverStarted

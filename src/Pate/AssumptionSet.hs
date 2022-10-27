@@ -8,7 +8,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE DataKinds   #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.AssumptionSet (
     AssumptionSet
@@ -27,7 +29,7 @@ module Pate.AssumptionSet (
 import           Control.Monad ( forM )
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
-
+import           Data.Default
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -52,6 +54,7 @@ import           Pate.Panic
 import qualified What4.ExprHelpers as WEH
 import           What4.ExprHelpers ( ExprSet, VarBindCache, ExprBindings, ppExprSet )
 import qualified Pate.ExprMappable as PEM
+import           Pate.TraceTree
 
 -- | A structured collection of predicates intended to represent an assumption state.
 --   Logically it is simply a set of predicates that can be added to the solver's
@@ -351,6 +354,7 @@ isAssumedPred ::
   AssumptionSet sym ->
   W4.Pred sym ->
   Bool
+isAssumedPred _ asm | Just b <- W4.asConstantPred asm = b
 isAssumedPred frame asm = SetF.member asm (asmPreds frame)
 
 -- | Explicitly rebind any known sub-expressions that are in the frame.
@@ -376,3 +380,15 @@ rebindWithFrame' ::
   W4B.Expr t tp ->
   m (W4B.Expr t tp)
 rebindWithFrame' sym cache asm = WEH.rewriteSubExprs' sym cache (getSomeBinding sym asm)
+
+data IsAssumptionSat = UnknownSatAssumption | IsSatAssumption
+  deriving (Eq, Ord, Show)
+
+instance Default IsAssumptionSat where
+  def = UnknownSatAssumption
+
+instance W4.IsExpr (W4.SymExpr sym) => IsTraceNode '(sym,arch) "assumption" where
+  type TraceNodeType '(sym,arch) "assumption" = AssumptionSet sym
+  type TraceNodeLabel "assumption" = IsAssumptionSat
+  prettyNode _ asm = PP.pretty asm
+  nodeTags = [(Summary, \_ _ -> "assumptions")]

@@ -11,10 +11,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Pate.PatchPair (
     PatchPair(..)
-  , BlockPair
-  , FunPair
   , PatchPairC(..)
-  , PatchPairEq(..)
   , toPatchPairC
   , mergePatchPairCs
   , zipMPatchPairC
@@ -29,7 +26,7 @@ module Pate.PatchPair (
   , catBins
   , getPair'
   , setPair
-  , matchEquatedAddress
+  , ppEq
   ) where
 
 import           Data.Functor.Const ( Const(..) )
@@ -38,9 +35,7 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Prettyprinter as PP
 
-import           Pate.Address
 import qualified Pate.Binary as PB
-import qualified Pate.Block as PBl
 import qualified Pate.ExprMappable as PEM
 
 data PatchPair (tp :: PB.WhichBinary -> DK.Type) = PatchPair
@@ -72,9 +67,9 @@ forBinsC f = (,) <$> f (get @PB.Original) <*> f (get @PB.Patched)
 catBins :: Applicative m => Semigroup w => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m w) -> m w
 catBins f = (<>) <$> f (get @PB.Original) <*> f (get @PB.Patched)
 
-class PatchPairEq tp where
-  ppEq :: tp PB.Original -> tp PB.Patched -> Bool
-
+-- | True if the two given values would be printed identically
+ppEq :: PP.Pretty x => PP.Pretty y => x -> y -> Bool
+ppEq x y = show (PP.pretty x) == show (PP.pretty y)
 
 data PatchPairC tp = PatchPairC
   { pcOriginal :: tp
@@ -130,22 +125,15 @@ instance (forall bin. PEM.ExprMappable sym (f bin)) => PEM.ExprMappable sym (Pat
 instance TF.TraversableF PatchPair where
   traverseF f (PatchPair o p) = PatchPair <$> f o <*> f p
 
-type BlockPair arch = PatchPair (PBl.ConcreteBlock arch)
 
-instance PatchPairEq (PBl.ConcreteBlock arch) where
-  ppEq = PBl.equivBlocks
 
 instance ShowF tp => Show (PatchPair tp) where
   show (PatchPair a1 a2) = showF a1 ++ " vs. " ++ showF a2
 
-instance (PatchPairEq f, (forall bin. PP.Pretty (f bin))) => PP.Pretty (PatchPair f) where
+instance (forall bin. PP.Pretty (f bin)) => PP.Pretty (PatchPair f) where
   pretty = ppPatchPairEq ppEq PP.pretty
 
 
-type FunPair arch = PatchPair (PBl.FunctionEntry arch)
-
-instance PatchPairEq (PBl.FunctionEntry arch) where
-  ppEq x y = PBl.functionAddress x == PBl.functionAddress y
 
 
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
@@ -177,16 +165,4 @@ ppPatchPairCEq f ppair@(PatchPairC o p) = case o == p of
   False -> ppPatchPairC f ppair
 
 
--- | Returns 'True' if the equated function pair (specified by address) matches
--- the current call target
-matchEquatedAddress
-  :: BlockPair arch
-  -- ^ Addresses of the call targets in the original and patched binaries (in
-  -- the 'proveLocalPostcondition' loop)
-  -> (ConcreteAddress arch, ConcreteAddress arch)
-  -- ^ Equated function pair
-  -> Bool
-matchEquatedAddress pPair (origAddr, patchedAddr) =
-  and [ origAddr == PBl.concreteAddress (pOriginal pPair)
-      , patchedAddr == PBl.concreteAddress (pPatched pPair)
-      ]
+

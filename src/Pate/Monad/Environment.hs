@@ -2,6 +2,13 @@
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -48,6 +55,7 @@ import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
+import           Pate.TraceTree
 
 data EquivEnv sym arch where
   EquivEnv ::
@@ -63,7 +71,7 @@ data EquivEnv sym arch where
     -- ^ The global variable used to hold memory for the LLVM memory model while
     -- symbolically executing functions in the "inline callee" feature
     , envLogger :: LJ.LogAction IO (PE.Event arch)
-    , envConfig :: PC.VerificationConfig
+    , envConfig :: PC.VerificationConfig PA.ValidRepr
     -- ^ input equivalence problems to solve
     , envValidSym :: PSo.Sym sym
     -- ^ expression builder, wrapped with a validity proof
@@ -75,7 +83,7 @@ data EquivEnv sym arch where
     , envParentNonce :: Some (PF.ProofNonce sym)
     -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
-    , envParentBlocks :: [PPa.BlockPair arch]
+    , envParentBlocks :: [PB.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel
     , envExitPairsCache :: ExitPairCache arch
     -- ^ cache for intermediate proof results
@@ -86,12 +94,13 @@ data EquivEnv sym arch where
                    => PVOL.OverrideConfig sym w
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
+    , envTreeBuilder :: TreeBuilder '(sym, arch)
     } -> EquivEnv sym arch
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
 
 data BlockCache arch a where
-  BlockCache :: IO.MVar (Map (PPa.BlockPair arch) a) -> BlockCache arch a
+  BlockCache :: IO.MVar (Map (PB.BlockPair arch) a) -> BlockCache arch a
 
 envCtxL :: L.Lens' (EquivEnv sym arch) (PMC.EquivalenceContext sym arch)
 envCtxL f ee = fmap (\c' -> ee { envCtx = c' }) (f (envCtx ee))

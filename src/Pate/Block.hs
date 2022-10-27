@@ -3,11 +3,18 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Block (
   -- * Block data
     BlockEntryKind(..)
   , ConcreteBlock(..)
   , BlockTarget(..)
+  , BlockPair
+  , FunPair
   , equivBlocks
   , blockMemAddr
   , mkConcreteBlock
@@ -23,6 +30,7 @@ module Pate.Block (
   , ppBlockEntry
   , ppBlock
   , ppFunctionEntry
+  , matchEquatedAddress
   ) where
 
 import qualified Data.ByteString.Char8 as BSC
@@ -33,8 +41,9 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Prettyprinter as PP
 
 import qualified Pate.Address as PA
+import qualified Pate.PatchPair as PPa
 import qualified Pate.Binary as PB
-
+import           Pate.TraceTree
 
 -- | The way this block is entered dictates the initial equivalence relation we can assume
 data BlockEntryKind arch =
@@ -150,6 +159,7 @@ data BlockTarget arch bin =
     , targetEndCase :: MCS.MacawBlockEndCase
     } deriving (Eq, Ord)
 
+
 instance PC.TestEquality (BlockTarget arch) where
   testEquality e1 e2 = PC.orderingF_refl (PC.compareF e1 e2)
 
@@ -161,12 +171,23 @@ instance PC.OrdF (BlockTarget arch) where
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
   show (BlockTarget a b _) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
 
+instance MM.MemWidth (MM.ArchAddrWidth arch) => PP.Pretty (BlockTarget arch bin) where
+  pretty blkt = PP.pretty (show blkt)
+
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget" where
+  type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (BlockTarget arch)
+  prettyNode () blkts = PP.pretty blkts
 
 data FunctionEntry arch (bin :: PB.WhichBinary) =
   FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch
                 , functionSymbol  :: Maybe BSC.ByteString
                 , functionBinRepr :: PB.WhichBinaryRepr bin
                 }
+
+instance MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "funcall" where
+  type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (FunctionEntry arch)
+  prettyNode () funs = PP.pretty funs
 
 equivFuns :: FunctionEntry arch PB.Original -> FunctionEntry arch PB.Patched -> Bool
 equivFuns fn1 fn2 =
@@ -214,3 +235,21 @@ functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr) =
   , blockBinRepr       = binRepr
   , blockFunctionEntry = fe
   }
+
+type BlockPair arch = PPa.PatchPair (ConcreteBlock arch)
+
+type FunPair arch = PPa.PatchPair (FunctionEntry arch)
+
+-- | Returns 'True' if the equated function pair (specified by address) matches
+-- the current call target
+matchEquatedAddress
+  :: BlockPair arch
+  -- ^ Addresses of the call targets in the original and patched binaries (in
+  -- the 'proveLocalPostcondition' loop)
+  -> (PA.ConcreteAddress arch, PA.ConcreteAddress arch)
+  -- ^ Equated function pair
+  -> Bool
+matchEquatedAddress pPair (origAddr, patchedAddr) =
+  and [ origAddr == concreteAddress (PPa.pOriginal pPair)
+      , patchedAddr == concreteAddress (PPa.pPatched pPair)
+      ]

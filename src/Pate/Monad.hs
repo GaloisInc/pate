@@ -18,11 +18,15 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Monad
   ( EquivEnv(..)
   , EquivM
   , EquivM_
+  , ValidSymArch
   , runEquivM
   , SimBundle(..)
   , withBinary
@@ -81,6 +85,11 @@ module Pate.Monad
   , equivalenceContext
   , safeIO
   , concretizeWithSolver
+  , emitTrace
+  , emitTraceLabel
+  , withSubTraces
+  , subTrace
+  , subTree
   )
   where
 
@@ -100,14 +109,20 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
+import           Data.Kind ( Type )
 import           Data.Typeable
+import           Data.Default
+import           Data.String ( IsString(..) )
+
+import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
-import           Data.Parameterized.TraversableF
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
+
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Lumberjack as LJ
 
@@ -154,10 +169,11 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
 import qualified Pate.Verification.Concretize as PVC
+import           Pate.TraceTree
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   EquivM sym arch (Maybe a)
 lookupBlockCache f pPair = do
   BlockCache cache <- CMR.asks f
@@ -168,7 +184,7 @@ lookupBlockCache f pPair = do
 
 modifyBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   (a -> a -> a) ->
   a ->
   EquivM sym arch ()
@@ -182,7 +198,7 @@ modifyBlockCache f pPair merge val = do
 -- If the flag is set in the environment, execute the first action. Otherwise,
 -- execute the second.
 ifConfig ::
-  (PC.VerificationConfig -> Bool) ->
+  (PC.VerificationConfig PA.ValidRepr -> Bool) ->
   EquivM sym arch a ->
   EquivM sym arch a ->
   EquivM sym arch a
@@ -199,7 +215,7 @@ withProofNonce ::
   forall tp sym arch a.
   (PF.ProofNonce sym tp -> EquivM sym arch a) ->
   EquivM sym arch a
-withProofNonce f = withValid $do
+withProofNonce f = withValid $ do
   nonce <- freshNonce
   let proofNonce = PF.ProofNonce nonce
   CMR.local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
@@ -227,6 +243,9 @@ emitWarning innererr = do
   err <- CMR.asks envWhichBinary >>= \case
     Just (Some wb) -> return $ PEE.equivalenceErrorFor wb innererr
     Nothing -> return $ PEE.equivalenceError innererr
+  case PEE.isTracedWhenWarning err of
+    True -> emitTraceWarning err
+    False -> return ()
   emitEvent (\_ -> PE.Warning err)
 
 -- | Emit an event declaring that an error has been raised, but only throw
@@ -243,7 +262,7 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: (CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO)) a }
   deriving (Functor
            , Applicative
            , Monad
@@ -255,7 +274,40 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: CMR.ReaderT (EquivEnv sym arch) (E
            , MonadError PEE.EquivalenceError
            )
 
-type EquivM sym arch a = (PA.ValidArch arch, PSo.ValidSym sym) => EquivM_ sym arch a
+instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
+  getTreeBuilder = CMR.asks envTreeBuilder
+  withTreeBuilder treeBuilder f = CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f
+
+type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
+type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
+
+
+
+newtype ExprLabel = ExprLabel String
+  deriving (Eq, Ord, Show)
+
+instance Default ExprLabel where
+  def = ExprLabel ""
+
+instance IsString ExprLabel where
+  fromString str = ExprLabel str
+
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "expr" where
+  type TraceNodeType '(sym,arch) "expr" = Some (W4.SymExpr sym)
+  type TraceNodeLabel "expr" = ExprLabel
+  
+  prettyNode _lbl (Some e) = W4.printSymExpr e
+  nodeTags = [(Summary, \(ExprLabel lbl) (Some e) ->
+                  let pfx = case lbl of
+                        "" -> ""
+                        _ -> "(" <> PP.pretty lbl <> ") "
+                      ls = lines (show (W4.printSymExpr e))
+                  in case ls of
+                    [] -> pfx
+                    [a] -> pfx <> PP.pretty a
+                    (a:as) -> pfx <> PP.pretty a <> ".." <> PP.pretty (last as)
+              )]
 
 withBinary ::
   forall bin sym arch a.
@@ -285,7 +337,7 @@ withValid f = do
   env <- CMR.ask
   withValidEnv env $ f
 
-withValidEnv ::
+withValidEnv :: forall a sym arch.
   EquivEnv sym arch ->
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => a) ->
   a
@@ -364,20 +416,19 @@ withSimSpec ::
   Scoped f =>
   Scoped g =>
   (forall v. PEM.ExprMappable sym (f v)) =>
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   SimSpec sym arch f ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> f v -> EquivM sym arch (g v)) ->
+  (forall v. SimScope sym arch v -> f v -> EquivM sym arch (g v)) ->
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec blocks spec f = withSym $ \sym -> do
-  withFreshVars blocks $ \vars -> do
-    (asm, body) <- liftIO $ bindSpec sym vars spec
-    body' <- withAssumptionSet asm $ f vars body
-    return $ (asm, body')
+  spec_fresh <- withFreshVars blocks $ \vars -> liftIO $ bindSpec sym vars spec
+  forSpec spec_fresh $ \scope body ->
+    withAssumptionSet (scopeAsm scope) (f scope body)
 
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
 lookupArgumentNames
-  :: PPa.BlockPair arch
+  :: PB.BlockPair arch
   -> EquivM sym arch [T.Text]
 lookupArgumentNames pp = do
   let origEntryAddr = PB.concreteAddress (PPa.pOriginal pp)
@@ -410,7 +461,7 @@ currentAsm = CMR.asks envCurrentFrame
 withFreshVars ::
   forall sym arch f.
   Scoped f =>
-  PPa.BlockPair arch ->
+  PB.BlockPair arch ->
   (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym, (f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
@@ -430,7 +481,7 @@ withFreshVars blocks f = do
       W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
-
+  
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
@@ -507,6 +558,7 @@ applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
   PAS.apply sym asm f
 
+
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
 withSatAssumption ::
@@ -514,7 +566,7 @@ withSatAssumption ::
   AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch (Maybe f)
-withSatAssumption asm f = withSym $ \sym ->  do
+withSatAssumption asm f = withSym $ \sym -> do
   p <- liftIO $ PAS.toPred sym asm
   case W4.asConstantPred p of
     Just False -> return Nothing
@@ -584,11 +636,13 @@ heuristicSat desc p k = do
     Left _err -> k W4R.Unknown
     Right a -> return a
 
+
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::
   W4.SymExpr sym tp ->
   EquivM sym arch (W4.SymExpr sym tp)
 concretizeWithSolver e = withSym $ \sym -> do
+  
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
         r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
@@ -789,11 +843,11 @@ getFootprints bundle = withSym $ \sym -> do
   return $ S.union footO footP
 
 -- | Update 'envCurrentFunc' if the given pair is a function entry point
-withPair :: PPa.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
+withPair :: PB.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
 withPair pPair f = do
   env <- CMR.ask
   let env' = env { envParentBlocks = pPair:envParentBlocks env }
-  let entryPair = fmapF (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
+  let entryPair = TF.fmapF (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
   CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ entryPair) f
 
 -- | Emit a trace event to the frontend
@@ -801,7 +855,7 @@ withPair pPair f = do
 -- This variant takes a 'BlockPair' as an input to provide context
 traceBlockPair
   :: (HasCallStack)
-  => PPa.BlockPair arch
+  => PB.BlockPair arch
   -> String
   -> EquivM sym arch ()
 traceBlockPair bp msg =
@@ -830,7 +884,9 @@ traceBundle bundle msg =
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- CMR.ask
-    catchInIO (f (\x -> runEquivM' env x))
+    catchInIO (f (\x -> runEquivM env x >>= \case
+                     Left err -> throwIO err
+                     Right r -> return r))
 
 catchInIO ::
   forall sym arch a.
@@ -852,19 +908,12 @@ runInIO1 f g = IO.withRunInIO $ \runInIO -> g (\a -> runInIO (f a))
 ----------------------------------------
 -- Running
 
-runEquivM' ::
-  EquivEnv sym arch ->
-  EquivM sym arch a ->
-  IO a
-runEquivM' env f = withValidEnv env $ (runExceptT $ CMR.runReaderT (unEQ f) env) >>= \case
-  Left err -> throwIO err
-  Right result -> return result
-
 runEquivM ::
+  forall sym arch a.
   EquivEnv sym arch ->
   EquivM sym arch a ->
-  ExceptT PEE.EquivalenceError IO a
-runEquivM env f = withValidEnv env $ CMR.runReaderT (unEQ f) env
+  IO (Either PEE.EquivalenceError a)
+runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
 
 ----------------------------------------
 -- Errors
@@ -887,9 +936,9 @@ manifestError act = do
     r@(Left er) -> CMR.asks (PC.cfgFailureMode . envConfig) >>= \case
       PC.ThrowOnAnyFailure -> throwError er
       PC.ContinueAfterRecoverableFailures -> case PEE.isRecoverable er of
-        True -> return r
+        True -> emitTraceError er >> return r
         False -> throwError er
-      PC.ContinueAfterFailure -> return r
+      PC.ContinueAfterFailure -> emitTraceError er >> return r
     r -> return r
 
 -- | Run an IO operation, internalizing any exceptions raised

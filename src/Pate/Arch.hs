@@ -7,8 +7,11 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE PolyKinds #-}
+  
 module Pate.Arch (
   SomeValidArch(..),
+  ValidRepr(..),
   ArchLoader(..),
   ValidArchData(..),
   ValidArch(..),
@@ -52,6 +55,7 @@ import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.SimState as PS
+import qualified Pate.Solver as PSo
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
 
@@ -221,6 +225,10 @@ mkClockOverride rOut = StubOverride $ \sym st -> do
 -- handles domains for external library calls
 data SomeValidArch arch where
   SomeValidArch :: (ValidArch arch) => ValidArchData arch -> SomeValidArch arch
+
+-- | Needed to produce evidence for 'Pate.TraceTree' that both type parameters are valid
+data ValidRepr (k :: (DK.Type, DK.Type)) where
+  ValidRepr :: forall sym arch. (PSo.ValidSym sym, ValidArch arch) => sym -> SomeValidArch arch -> ValidRepr '(sym, arch)
 
 -- | Create a 'PA.SomeValidArch' from parsed ELF files
 data ArchLoader err =

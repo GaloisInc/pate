@@ -1,0 +1,3 @@
+:def! run (\args -> return ("stop\n:reload\n:script setupdebug.ghci\nrun " ++ args))
+:def! restart (\_ -> return "stop\n:reload\n:script setupdebug.ghci")
+:def! rerun (\_ -> return ("stop\n:reload\n:script setupdebug.ghci\nrerun"))
