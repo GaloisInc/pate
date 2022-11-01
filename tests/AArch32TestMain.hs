@@ -9,7 +9,7 @@ main = do
         { testArchName = "aarch32"
         , testArchLoader = AArch32.archLoader
         , testExpectEquivalenceFailure =
-            [ "stack-struct", "unequal/stack-struct"
+            [ "stack-struct", "unequal/stack-struct", "max-signed"
             ]
         , testExpectSelfEquivalenceFailure = []
         -- TODO: we should define a section name here and read its address
