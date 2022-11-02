@@ -192,8 +192,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     _ -> CME.throwError $ PEE.loaderError $ PEE.UnsupportedArchitecture (DEE.headerMachine $ PLE.loadedHeader $ PH.hinted elf)
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf' pd
-
-
   
   -- Implicit parameters for the LLVM memory model
   let ?memOpts = CLM.laxPointerMemOptions

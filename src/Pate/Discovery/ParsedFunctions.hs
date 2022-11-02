@@ -292,10 +292,9 @@ parsedFunctionContaining ::
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
 parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir pd) = do
-  let baddr = PA.addrToMemAddr (PB.concreteAddress blk)
+  let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
   st <- IORef.readIORef pfmRef
   let ds0 = discoveryState st
-  let mem = MD.memory ds0
   ignoredAddresses <- getIgnoredFns pfm
 
   -- First, check if we have a cached set of blocks for this state
@@ -303,26 +302,21 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir pd) = do
     Just sdfi -> return (Just sdfi)
     Nothing -> do
       -- Otherwise, run code discovery at this address
-      case MM.resolveRegionOff mem (MM.addrBase baddr) (MM.addrOffset baddr) of
-        Nothing -> return Nothing -- This could be an exception... but perhaps better as a proof failure node
-        Just faddr -> do
-          -- NOTE: We are using the strict atomic modify IORef here. The code is
-          -- not attempting to force the modified state or returned function to
-          -- normal form.
-          --
-          -- It isn't clear if this will be a problem in practice or not. We
-          -- think that the worst case is that we end up with thunks in the
-          -- IORef that might be evaluated multiple times if there is a lot of
-          -- contention. If that becomes a problem, we may want to change this
-          -- to an MVar where we fully evaluate each result before updating it.
-          (IO.tryJust filterAsync $ IO.evaluate $ atomicAnalysis ignoredAddresses faddr st) >>= \case
-            Right (pfm', Some dfi) -> do
-              let binRep :: PBi.WhichBinaryRepr bin
-                  binRep = PC.knownRepr
-              IORef.writeIORef pfmRef pfm'
-              saveCFG mCFGDir binRep dfi
-              return (Just (Some dfi))
-            Left _e -> return Nothing -- TODO: throw exception here?
+      -- NOTE: We are using the strict atomic modify IORef here. The code is
+      -- not attempting to force the modified state or returned function to
+      -- normal form.
+      --
+      -- It isn't clear if this will be a problem in practice or not. We
+      -- think that the worst case is that we end up with thunks in the
+      -- IORef that might be evaluated multiple times if there is a lot of
+      -- contention. If that becomes a problem, we may want to change this
+      -- to an MVar where we fully evaluate each result before updating it.
+      (pfm', Some dfi) <- return $ atomicAnalysis ignoredAddresses faddr st
+      let binRep :: PBi.WhichBinaryRepr bin
+          binRep = PC.knownRepr
+      IORef.writeIORef pfmRef pfm'
+      saveCFG mCFGDir binRep dfi
+      return (Just (Some dfi))
           
   where
     -- The entire analysis is bundled up in here so that we can issue an atomic
