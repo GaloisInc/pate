@@ -26,6 +26,7 @@ module Repl where
 
 import qualified Language.Haskell.TH as TH
 
+import qualified System.Console.ANSI as ANSI
 import qualified Options.Applicative as OA
 import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
@@ -34,6 +35,8 @@ import qualified Control.Concurrent as IO
 import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT, get, put, forM )
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
+import qualified Data.Text.IO as Text
+import qualified Data.Text.Lazy as TextL
 import           Text.Read (readMaybe)
 import           System.Exit
 import           System.Environment
@@ -44,6 +47,7 @@ import           Data.Parameterized.Classes
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Terminal as PPRT
+import qualified Prettyprinter.Render.Text as PPText
 
 import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, SymbolRepr, symbolRepr )
 
@@ -60,6 +64,9 @@ import           Pate.TraceTree
 import Unsafe.Coerce(unsafeCoerce)
 
 import qualified Main as PM
+
+maxSubEntries :: Int
+maxSubEntries = 5
 
 initFns :: IO ()
 initFns = do
@@ -243,13 +250,13 @@ rerun = do
       run rawOpts
     Nothing -> IO.putStrLn "No previous run found"
 
-printPretty :: PP.Doc PPRT.AnsiStyle -> ReplM_ sym arch ()
+printPretty :: PP.Doc ann -> ReplM_ sym arch ()
 printPretty p = do
-  let s = PP.layoutPretty (PP.defaultLayoutOptions { PP.layoutPageWidth = PP.AvailablePerLine 120 1.0 }) p
-  IO.liftIO $ PPRT.renderIO IO.stdout s  
+  let s = PP.layoutSmart (PP.defaultLayoutOptions { PP.layoutPageWidth = PP.Unbounded }) p
+  IO.liftIO $ Text.putStr (PPText.renderStrict s)
 
-printPrettyLn :: PP.Doc PPRT.AnsiStyle -> ReplM_ sym arch ()
-printPrettyLn p = printPretty (p <> "\n")
+printPrettyLn :: PP.Doc ann -> ReplM_ sym arch ()
+printPrettyLn p = printPretty (p <> PP.line)
 
 isSubTreeNode ::
   forall sym arch nm.
@@ -259,6 +266,13 @@ isSubTreeNode (TraceNode{}) = case symbolRepr (knownSymbol @nm) of
   "function_name" -> True
   _ -> False
 
+truncateSubNodes :: [(Int, Some (TraceNode sym arch))] -> ReplM sym arch [(Int, Some (TraceNode sym arch))]
+truncateSubNodes next = do
+  let (shown,hidden) = splitAt (maxSubEntries-1) next
+  case hidden of
+    ((idx,n):_) -> return $ (shown ++ [((-1) * idx,n)])
+    _ -> return shown
+
 addNextNodes ::
   forall nm sym arch.
   TraceTreeNode '(sym, arch) nm ->
@@ -267,7 +281,11 @@ addNextNodes node = isTraceNode node $ do
   tags <- gets replNextTags
   contents <- IO.liftIO $ viewTraceTreeNode node
   nesting <- gets replNesting
-  let nextTrees = map (\((v, lbl), subtree) -> (nesting, Some (TraceNode @nm lbl v subtree))) contents
+  let nextTrees' = map (\((v, lbl), subtree) -> (nesting, Some (TraceNode @nm lbl v subtree))) contents
+
+  nextTrees <- case nesting > 0 of
+    True -> truncateSubNodes nextTrees'
+    False -> return $ nextTrees'
   case nodeShownAt @'(sym,arch) @nm tags of
     True -> do
       nextSubs <- fmap concat $ forM nextTrees $ \(n, Some nextNode) -> do
@@ -306,12 +324,16 @@ addStatusTag st p = case ppStatusTag st of
   Just pst -> p <+> "(" <> pst <> ")"
   Nothing -> p
 
-addSuffix :: PP.Doc a -> NodeStatus -> SymbolRepr nm -> ReplM sym arch (PP.Doc a)
-addSuffix pp s nm = do
+addSuffix :: Int -> PP.Doc a -> NodeStatus -> SymbolRepr nm -> ReplM sym arch (PP.Doc a)
+addSuffix nesting pp s nm = do
   tags <- gets replTags
-  case tags of
+  pp' <- case tags of
     [Simplified] -> return $ addStatusTag s pp
     _ -> return $ addStatusTag s pp <+> "(" <> PP.pretty (show nm) <> ")"
+  case nesting < 0 of
+    True -> return $ pp' <> PP.line <> "... <more results>"
+    False -> return pp'
+
 
 ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
 ppStatusTag st = case st of
@@ -329,9 +351,9 @@ maybeSubNodes ::
   ReplM sym arch a ->
   ReplM sym arch a
 maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
-  case symbolRepr (knownSymbol @nm) of
-    "subtree" -> withNode nd $ f
-    _ -> do
+  case isSubTreeNode nd of
+    True -> withNode nd $ f
+    False -> do
       mr <- withNode nd $ do
         nextNodes <- gets replNext
         case length nextNodes == 1 of
@@ -355,8 +377,9 @@ prettyNextNodes startAt onlyFinished = do
                 b <- IO.liftIO $ getTreeStatus subtree
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
-                    pp' <- addSuffix pp b (knownSymbol @nm)
-                    return $ (isFinished b, PP.indent (nesting*2) $ pp')
+                    pp' <- addSuffix nesting pp b (knownSymbol @nm)
+                    let indent = abs(nesting)*2
+                    return $ (isFinished b, PP.indent indent $ pp')
                     {-
                     maybeSubNodes nd ()) $ do
                       subpp <- prettyNextNodes 0 onlyFinished
