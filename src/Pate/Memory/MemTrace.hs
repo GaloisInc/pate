@@ -65,6 +65,10 @@ module Pate.Memory.MemTrace
 , prettyMemOp
 , prettyMemEvent
 , prettyMemTraceSeq
+, addExternalCallEvent
+, SymBV'(..)
+, getPtrAssertion
+, PtrAssertions
 ) where
 
 import Unsafe.Coerce
@@ -77,6 +81,7 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
 import qualified Data.Vector as V
+import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Proxy
 import           Data.IORef
 import           Data.Set (Set)
@@ -171,6 +176,17 @@ data UndefinedPtrOps sym =
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
+
+instance PEM.ExprMappable sym (SymBV' sym w) where
+  mapExpr _sym f (SymBV' bv) = SymBV' <$> f bv
+
+instance IsExpr (SymExpr sym) => Pretty (SymBV' sym w) where
+  pretty (SymBV' bv) = printSymExpr bv
+
+instance IsExpr (SymExpr sym) => Show (SymBV' sym w) where
+  show (SymBV' bv) = show (printSymExpr bv)
+
+instance IsExpr (SymExpr sym) => ShowF (SymBV' sym) where
 
 -- Needed since LLVMPtr is a type alias
 newtype LLVMPtr' sym w = LLVMPtr' { unLLVMPtr:: LLVMPtr sym w }
@@ -450,6 +466,18 @@ data PtrAssert sym tp = PtrAssert
 
 newtype PtrAssertions sym = PtrAssertions (IORef (MapF.MapF (SymAnnotation sym) (PtrAssert sym)))
 
+-- | Retrieve any pointer assertions associate with this expression
+getPtrAssertion ::
+  IsSymExprBuilder sym =>
+  sym ->
+  PtrAssertions sym ->
+  SymExpr sym tp ->
+  IO (Maybe (Pred sym, SymExpr sym tp))
+getPtrAssertion sym (PtrAssertions ref) e = do
+  asserts <- readIORef ref
+  case getAnnotation sym e of
+    Just ann | Just (PtrAssert p _) <- MapF.lookup ann asserts, Just e' <- getUnannotatedTerm sym e -> return $ Just (p, e')
+    _ -> return $ Nothing
 
 annotatePredicate ::
   IsSymExprBuilder sym =>
@@ -484,7 +512,7 @@ mkAnnotatedPtrOps ::
   forall sym.
   IsSymInterface sym =>
   sym ->
-  IO (UndefinedPtrOps sym)
+  IO (UndefinedPtrOps sym, PtrAssertions sym)
 mkAnnotatedPtrOps sym = do
   asnsRef <- newIORef MapF.empty
   let asns = PtrAssertions asnsRef
@@ -495,20 +523,21 @@ mkAnnotatedPtrOps sym = do
             Just ptrAsn -> return $ Set.singleton (ptrAssertTag ptrAsn)
             Nothing -> return $ Set.empty
         Nothing -> return $ Set.empty
-  return $
-    UndefinedPtrOps
-      { undefPtrOff = UndefinedPtrUnOp $ \sym' (AssertedResult cond (SymBV' bv)) _ -> do
-          (annBV, bv') <- annotateTerm sym' bv
-          modifyIORef' asnsRef (MapF.insert annBV (PtrAssert cond UndefPtrOff))
-          return $ SymBV' bv'
-      , undefPtrLt =  UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLt r
-      , undefPtrLeq = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLeq r
-      , undefPtrAdd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAdd r
-      , undefPtrSub = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrSub r
-      , undefPtrAnd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAnd r
-      , undefPtrXor = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrXor r
-      , undefPtrClassify = classify
-      }
+  let uops =
+        UndefinedPtrOps
+          { undefPtrOff = UndefinedPtrUnOp $ \sym' (AssertedResult cond (SymBV' bv)) _ -> do
+              (annBV, bv') <- annotateTerm sym' bv
+              modifyIORef' asnsRef (MapF.insert annBV (PtrAssert cond UndefPtrOff))
+              return $ SymBV' bv'
+          , undefPtrLt =  UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLt r
+          , undefPtrLeq = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePredicate sym' asns UndefPtrLeq r
+          , undefPtrAdd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAdd r
+          , undefPtrSub = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrSub r
+          , undefPtrAnd = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrAnd r
+          , undefPtrXor = UndefinedPtrBinOp $ \sym' r _ _ -> annotatePtr sym' asns UndefPtrXor r
+          , undefPtrClassify = classify
+          }
+  return (uops, asns)
 
 -- | Wrap potentially undefined pointer operations in uninterpreted functions
 mkUndefinedPtrOps ::
@@ -669,15 +698,36 @@ instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
         (toOrdering $ compareF vo1 vo2) <>
         compare end1 end2
 
+
+
 data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
   SyscallEvent :: forall sym ptrW w.
     (1 <= w) =>
     MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
       {- ^ location and dissassembly of the instruction generating this system call -} ->
-    SymExpr sym (BaseBVType w)
-      {- ^ The value of R0 when this system call occurred -} ->
+    SymBV sym w
+      {- ^ Value of r0 during this syscall -} ->
     MemEvent sym ptrW
+  ExternalCallEvent :: forall sym ptrW ctx.
+    Text ->
+    Ctx.Assignment (SymBV' sym) ctx
+      {- ^ relevant data for this visible call -} ->
+    MemEvent sym ptrW
+
+addExternalCallEvent ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  Text {- ^ name of the external call -} ->
+  Ctx.Assignment (SymBV' sym) ctx {- ^ data relevant to the call -} ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+addExternalCallEvent sym nm data_ mem = do
+  let
+    event = ExternalCallEvent nm data_
+  memSeq' <- consSymSequence sym event (memSeq mem)
+  return $ mem { memSeq = memSeq' }
 
 prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
 prettyMemEvent (MemOpEvent op) = prettyMemOp op
@@ -685,7 +735,8 @@ prettyMemEvent (SyscallEvent i v) =
   case viewMuxTree i of
     [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
     _ -> "Syscall" <+> printSymExpr v
-
+prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> pretty (show vs)
+  
 prettyMemTraceSeq :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemTraceSeq sym ptrW -> Doc ann
 prettyMemTraceSeq = prettySymSequence prettyMemEvent
 
@@ -1742,7 +1793,9 @@ observableEvents sym opIsObservable mem = evalWithFreshCache f (memSeq mem)
      case x of
        -- always include system call events
        SyscallEvent{} -> consSymSequence sym x xs
-
+       -- always include external call events
+       ExternalCallEvent{} -> consSymSequence sym x xs
+       
        -- Include memory operations only if they acutally
        -- happen (their condition is true) and if they are
        -- deemed observable by the given filtering function.
@@ -1861,6 +1914,7 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
   mapExpr sym f = \case
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
     SyscallEvent i arg -> SyscallEvent i <$> f arg -- TODO? rewrite the mux tree?
+    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr sym f) vs
 
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
   mapExpr sym f = evalWithFreshCache $ \rec -> \case

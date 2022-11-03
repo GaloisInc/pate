@@ -42,7 +42,6 @@ module Pate.Equivalence
   , registerValuesEqual
   , EquivContext(..)
   , MemoryCondition(..)
-  , RegisterCondition(..)
   , StatePreCondition(..)
   , StatePostCondition(..)
   , preCondAssumption
@@ -76,10 +75,12 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
 import           What4.ExprHelpers
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified What4.PredMap as WPM
+import qualified Pate.ExprMappable as PEM
 
 data EquivalenceStatus =
     Equivalent
@@ -356,6 +357,9 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable
     dom' <- PL.traverseLocation sym (memCondPred mcond) f
     return $ mcond { memCondPred = dom' }
 
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PEM.ExprMappable sym (MemoryCondition sym arch) where
+  mapExpr sym f (MemoryCondition cond) = MemoryCondition <$> PEM.mapExpr sym f cond
+
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
 -- We require the pre-states in order to construct the initial equality assumption.
@@ -409,20 +413,7 @@ getRegionEquality sym memEq memO memP = case memEq of
   MemEqAtRegion stackRegion -> MT.memEqAtRegion sym stackRegion memO memP
   MemEqOutsideRegion stackRegion -> MT.memEqOutsideRegion sym stackRegion memO memP
 
--- | A mapping from registers to a predicate representing an equality condition for
--- that specific register.
--- The conjunction of these predicates represents the assumption (as a precondition)
--- or assertion (as a postcondition) that all of the registers are equal with respect
--- to some equivalence domain.
-newtype RegisterCondition sym arch v =
-  RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (AssumptionSet sym)) }
 
-instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
-  traverseLocation sym body f = RegisterCondition <$>
-    MM.traverseRegsWith (\r (Const asm) -> do
-      p <- toPred sym asm
-      f (PL.Register r) p >>= \ (_, p') -> return $ (Const (fromPred p'))
-      ) (regCondPreds body)
 
 
 -- | Compute a structured 'RegisterCondition'
@@ -438,8 +429,8 @@ regDomRel ::
   SimState sym arch v PBi.Original ->
   SimState sym arch v PBi.Patched ->
   PER.RegisterDomain sym arch ->
-  IO (RegisterCondition sym arch v)
-regDomRel hdr sym stO stP regDom  = RegisterCondition <$> do
+  IO (PEC.RegisterCondition sym arch v)
+regDomRel hdr sym stO stP regDom  = PEC.RegisterCondition <$> do
   PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> Const <$> do
     let p = PER.registerInDomain sym r regDom
     registerValuesEqual' hdr sym r p vO vP
@@ -448,13 +439,13 @@ regDomRel hdr sym stO stP regDom  = RegisterCondition <$> do
 regCondToAsm ::
   W4.IsSymExprBuilder sym =>
   sym ->
-  RegisterCondition sym arch v ->
+  PEC.RegisterCondition sym arch v ->
   IO (AssumptionSet sym)
-regCondToAsm _sym regCond = return $ PRt.collapse (regCondPreds regCond)
+regCondToAsm _sym regCond = return $ PRt.collapse (PEC.regCondPreds regCond)
 
 -- | A structured pre condition
 data StatePreCondition sym arch v = StatePreCondition
-  { stRegPreCond :: RegisterCondition sym arch v
+  { stRegPreCond :: PEC.RegisterCondition sym arch v
   , stStackPreDom :: PEM.MemoryDomain sym arch
   , stMemPreDom :: PEM.MemoryDomain sym arch
   , stExtraPreCond :: AssumptionSet sym
@@ -469,7 +460,7 @@ data StatePreCondition sym arch v = StatePreCondition
 -- We only ever intepret this data via 'PL.traverseLocation' to collect and prove the
 -- individual assertions.
 data StatePostCondition sym arch v = StatePostCondition
-  { stRegPostCond :: RegisterCondition sym arch v
+  { stRegPostCond :: PEC.RegisterCondition sym arch v
   , stStackPostCond :: MemoryCondition sym arch
   , stMemPostCond :: MemoryCondition sym arch
   , stExtraPostCond :: AssumptionSet sym
@@ -480,6 +471,10 @@ data StatePostCondition sym arch v = StatePostCondition
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
   traverseLocation sym (StatePostCondition a b c asm) f =
     StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f <*> ((fromPred . snd) <$> (toPred sym asm >>= \p -> f PL.NoLoc p))
+
+instance W4.IsSymExprBuilder sym => PEM.ExprMappable sym (StatePostCondition sym arch v) where
+  mapExpr sym f (StatePostCondition a b c asm) =
+    StatePostCondition <$> PEM.mapExpr sym f a <*> PEM.mapExpr sym f b <*> PEM.mapExpr sym f c <*>  PEM.mapExpr sym f asm
 
 
 eqDomPre ::

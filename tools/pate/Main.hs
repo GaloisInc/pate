@@ -21,13 +21,9 @@
 module Main ( main, runMain, cliOptions ) where
   
 
-import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
-import           Control.Monad ( join )
 import qualified Data.Foldable as F
-import qualified Data.Traversable as T
-import qualified Language.C as LC
 import qualified Lumberjack as LJ
 import           Numeric ( showHex )
 import qualified Options.Applicative as OA
@@ -59,9 +55,9 @@ import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 import qualified Pate.ArchLoader as PAL
 
 import qualified JSONReport as JR
-import qualified Pate.Interactive as I
-import qualified Pate.Interactive.Port as PIP
-import qualified Pate.Interactive.State as IS
+-- import qualified Pate.Interactive as I
+-- import qualified Pate.Interactive.Port as PIP
+-- import qualified Pate.Interactive.State as IS
 import           Pate.TraceTree
 
 main :: IO ()
@@ -80,18 +76,20 @@ runMain traceTree opts = do
       , PLE.anvillHintsPaths = originalAnvillHints opts
       , PLE.mprobHintsPath = originalProbabilisticHints opts
       , PLE.mcsvHintsPath = originalCsvFunctionHints opts
+      , PLE.mbsiHintsPath = originalBSIFunctionHints opts
       }
     patchedPaths = PLE.LoadPaths
       { PLE.binPath = patchedBinary opts
       , PLE.anvillHintsPaths = patchedAnvillHints opts
       , PLE.mprobHintsPath = patchedProbabilisticHints opts
       , PLE.mcsvHintsPath = patchedCsvFunctionHints opts
+      , PLE.mbsiHintsPath = patchedBSIFunctionHints opts
       }
 
   let
     mklogger :: forall arch. PA.SomeValidArch arch -> IO (PL.Logger arch)
     mklogger proxy = do
-        (logger, consumers) <- startLogger proxy (verbosity opts) (interactiveConfig opts) (logFile opts)
+        (logger, consumers) <- startLogger proxy (verbosity opts) {- (interactiveConfig opts) -} (logFile opts)
         case proofSummaryJSON opts of
           Nothing -> return $ PL.Logger logger consumers
           Just proofJSONFile -> do
@@ -106,7 +104,7 @@ runMain traceTree opts = do
   let
     verificationCfg =
       PC.defaultVerificationCfg
-        { PC.cfgPairMain = not $ noPairMain opts
+        { PC.cfgStartSymbol = startSymbol opts
         , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
         , PC.cfgSolver = solver opts
         , PC.cfgHeuristicTimeout = heuristicTimeout opts
@@ -115,6 +113,9 @@ runMain traceTree opts = do
         , PC.cfgSolverInteractionFile = solverInteractionFile opts
         , PC.cfgTraceTree = traceTree
         , PC.cfgFailureMode = errMode opts
+        , PC.cfgIgnoreUnnamedFunctions = skipUnnamedFns opts
+        , PC.cfgIgnoreDivergedControlFlow = skipDivergedControl opts
+        , PC.cfgTargetEquivRegs = targetEquivRegs opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader
@@ -137,8 +138,8 @@ data CLIOptions = CLIOptions
   { originalBinary :: FilePath
   , patchedBinary :: FilePath
   , blockInfo :: Maybe FilePath
-  , interactiveConfig :: Maybe InteractiveConfig
-  , noPairMain :: Bool
+  -- , interactiveConfig :: Maybe InteractiveConfig
+  , startSymbol :: Maybe String
   , noDiscoverFuns :: Bool
   , solver :: PS.Solver
   , goalTimeout :: PTi.Timeout
@@ -149,6 +150,8 @@ data CLIOptions = CLIOptions
   , patchedProbabilisticHints :: Maybe FilePath
   , originalCsvFunctionHints :: Maybe FilePath
   , patchedCsvFunctionHints :: Maybe FilePath
+  , originalBSIFunctionHints :: Maybe FilePath
+  , patchedBSIFunctionHints :: Maybe FilePath
   , noDwarfHints :: Bool
   , verbosity :: PV.Verbosity
   , saveMacawCFGs :: Maybe FilePath
@@ -157,8 +160,12 @@ data CLIOptions = CLIOptions
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
   , errMode :: PC.VerificationFailureMode
+  , skipUnnamedFns :: Bool
+  , skipDivergedControl :: Bool
+  , targetEquivRegs :: [String]
   } deriving (Eq, Ord, Show)
 
+{-
 data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
                -- ^ Logs will go to an interactive viewer
                --
@@ -166,6 +173,7 @@ data InteractiveConfig = Interactive PIP.Port (Maybe (IS.SourcePair FilePath))
                -- source) are provided, their contents are displayed when
                -- appropriate (on a per-function basis).
                deriving (Eq, Ord, Show)
+-}
 
 printAtVerbosity
   :: PV.Verbosity
@@ -196,10 +204,10 @@ printAtVerbosity verb evt =
 -- cleanly.
 startLogger :: PA.SomeValidArch arch
             -> PV.Verbosity
-            -> Maybe InteractiveConfig
+            -- -> Maybe InteractiveConfig
             -> Maybe FilePath
             -> IO (LJ.LogAction IO (PE.Event arch), [(IO (), IO ())])
-startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile = do
+startLogger (PA.SomeValidArch {}) verb {- mIntConf -} mLogFile = do
   (fileLogger, loggerAsync) <- case mLogFile of
         Nothing -> return (LJ.LogAction $ \_ -> return (), [])
         Just fp -> do
@@ -207,6 +215,8 @@ startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile = do
           IO.hSetBuffering hdl IO.LineBuffering
           IO.hSetEncoding hdl IO.utf8
           logToHandle hdl
+  return (fileLogger, loggerAsync)
+  {- 
   case mIntConf of
     Nothing -> return (fileLogger, loggerAsync)
     Just (Interactive port mSourceFiles) -> do
@@ -229,6 +239,7 @@ startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile = do
         CCA.wait ui
       let shutdown = CC.writeChan uiChan Nothing
       return (uiLogger <> fileLogger, [(CCA.wait consumer, shutdown)] <> loggerAsync)
+  -}
   where
     logToHandle hdl = do
       chan <- CC.newChan
@@ -250,6 +261,7 @@ startLogger (PA.SomeValidArch {}) verb mIntConf mLogFile = do
       let shutdown = CC.writeChan chan Nothing
       return (logAct, [(CCA.wait consumer, shutdown)])
 
+{- 
 parseSources :: IS.SourcePair FilePath -> IO (Maybe (IS.SourcePair LC.CTranslUnit))
 parseSources (IS.SourcePair os ps) = do
   eos' <- LC.parseCFilePre os
@@ -264,6 +276,7 @@ parseSources (IS.SourcePair os ps) = do
       IO.hPutStrLn IO.stderr ("Error parsing " ++ os)
       IO.hPutStrLn IO.stderr (show e)
       return Nothing
+-}
 
 layout :: PP.Doc ann -> PP.SimpleDocStream ann
 layout = PP.layoutPretty PP.defaultLayoutOptions
@@ -315,6 +328,7 @@ terminalFormatEvent evt =
     PE.HintErrorsCSV errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsDWARF errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
+    PE.HintErrorsBSI errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.FunctionEntryInvalidHints _ errs ->
       layout ("Invalid function entry hints:" <> PP.line
                <> PP.vsep [ PP.pretty fn <> "@" <> ppHex addr
@@ -351,6 +365,7 @@ terminalFormatEvent evt =
     -- FIXME: handle other events
     _ -> layout ""
 
+{- 
 logParser :: OA.Parser (Maybe InteractiveConfig)
 logParser = (Just <$> interactiveParser) <|> pure Nothing
   where
@@ -376,6 +391,7 @@ logParser = (Just <$> interactiveParser) <|> pure Nothing
                                                       <> OA.metavar "FILE"
                                                       <> OA.help "The source file for the patched program"
                                                       )
+-}
 
 modeParser :: OA.Parser PC.VerificationFailureMode
 modeParser = OA.option OA.auto (OA.long "errormode"
@@ -408,12 +424,12 @@ cliOptions = OA.info (OA.helper <*> parser)
       <> OA.metavar "FILENAME"
       <> OA.help "Block information relating binaries"
       )))
-    <*> logParser
-    <*> (OA.switch
-      (  OA.long "ignoremain"
-      <> OA.short 'm'
-      <> OA.help "Don't add the main entry points to the set of function equivalence checks."
-      ))
+    -- <*> logParser
+    <*> (OA.optional (OA.strOption
+      (  OA.long "startsymbol"
+      <> OA.short 's'
+      <> OA.help "Start analysis from the function with this symbol, otherwise start at the program entrypoint"
+      )))
     <*> (OA.switch
       (  OA.long "nodiscovery"
       <> OA.short 'd'
@@ -458,6 +474,14 @@ cliOptions = OA.info (OA.helper <*> parser)
         ( OA.long "patched-csv-function-hints"
          <> OA.help "Parse a CSV file containing function name/address hints"
         ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "original-bsi-hints"
+         <> OA.help "Parse a JSON file containing function name/address hints"
+        ))
+    <*> OA.optional (OA.strOption
+        ( OA.long "patched-bsi-hints"
+         <> OA.help "Parse a JSON file containing function name/address hints"
+        ))
     <*> OA.switch ( OA.long "no-dwarf-hints"
                   <> OA.help "Do not extract metadata from the DWARF information in the binaries"
                   )
@@ -488,4 +512,15 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.help "A file to save debug logs to"
         ))
    <*> modeParser
- 
+   <*> OA.switch
+       (  OA.long "skip-unnamed-functions"
+       <> OA.help "Skip analysis of functions without symbols"
+       )
+   <*> OA.switch
+       (  OA.long "skip-divergent-control-flow"
+       <> OA.help "Skip node processing for "
+       )
+    <*> OA.many (OA.strOption
+        ( OA.long "target-equiv-regs"
+        <> OA.help "Compute an equivalence condition sufficient to establish equality on the given registers after the toplevel entrypoint returns"
+        ))

@@ -33,12 +33,15 @@ import           Control.Monad ( unless )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
+import           System.IO as IO
 import qualified Control.Monad.Trans as CMT
 import qualified Data.ElfEdit as DEE
 import qualified Data.Map as M
+import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
+import qualified Data.IORef as IO
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Time as TM
@@ -64,11 +67,13 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Discovery as PD
+import qualified Pate.Discovery.ParsedFunctions as PD
 import           Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Location as PL
 import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
@@ -151,6 +156,17 @@ verifyPairs validArch logAction elf elf' vcfg pd = do
 
   doVerifyPairs validArch logAction elf elf' vcfg pd gen sym
 
+
+findFunctionByName ::
+  PBi.KnownBinary bin =>
+  MM.ArchConstraints arch =>
+  String ->
+  PMC.BinaryContext arch bin ->
+  IO (Maybe (PB.FunctionEntry arch bin))
+findFunctionByName nm context = do
+  let pfm = PMC.parsedFunctionMap context
+  PD.findFunctionByName nm pfm
+  
 -- | Verify equality of the given binaries.
 doVerifyPairs ::
   forall arch sym scope st fs.
@@ -175,14 +191,14 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
     _ -> CME.throwError $ PEE.loaderError $ PEE.UnsupportedArchitecture (DEE.headerMachine $ PLE.loadedHeader $ PH.hinted elf)
   ha <- liftIO CFH.newHandleAllocator
   contexts <- runDiscovery logAction (PC.cfgMacawDir vcfg) validArch elf elf' pd
-
+  
   -- Implicit parameters for the LLVM memory model
   let ?memOpts = CLM.laxPointerMemOptions
 
   eval <- CMT.lift (MS.withArchEval traceVals sym pure)
   mvar <- CMT.lift (MT.mkMemTraceVar @arch ha)
   bvar <- CMT.lift (CC.freshGlobalVar ha (T.pack "block_end") W4.knownRepr)
-  undefops <- liftIO $ MT.mkAnnotatedPtrOps sym
+  (undefops, ptrAsserts) <- liftIO $ MT.mkAnnotatedPtrOps sym
 
   -- PC values are assumed to be absolute
   pcRegion <- liftIO $ W4.natLit sym 0
@@ -201,16 +217,40 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
   ePairCache <- liftIO $ freshBlockCache
   statsVar <- liftIO $ MVar.newMVar mempty
+  
 
   -- compute function entry pairs from the input PatchData
   upData <- unpackPatchData contexts pd
   -- include the process entry point, if configured to do so
-  pPairs' <- if PC.cfgPairMain vcfg then
-               do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
-                  let mainP = PMC.binEntry . PPa.pPatched $ contexts
-                  return (PPa.PatchPair mainO mainP : unpackedPairs upData)
-              else
-                return (unpackedPairs upData)
+
+  entryPoint <- case PC.cfgStartSymbol vcfg of
+    Just s -> do
+      mstartO <- liftIO $ findFunctionByName s (PPa.pOriginal contexts)
+      mstartP <- liftIO $ findFunctionByName s (PPa.pPatched contexts)
+      case (mstartO,mstartP) of
+        (Just startO, Just startP) -> return $ (PPa.PatchPair startO startP)
+        _ -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
+    Nothing ->
+      do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
+         let mainP = PMC.binEntry . PPa.pPatched $ contexts
+         return (PPa.PatchPair mainO mainP)
+
+  PA.SomeValidArch archData <- return validArch
+  let defaultInit = PA.validArchInitAbs archData
+
+  -- inject an override for the initial abstract state
+  contexts1 <- PPa.forBins $ \get -> do
+    let
+      pfm = PMC.parsedFunctionMap (get contexts)
+      blk = get entryPoint
+      mem = MBL.memoryImage (PMC.binary (get contexts))
+    
+    let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
+    let ov = M.singleton (PB.functionSegAddr blk) initAbs
+    pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm ov
+    return $ (get contexts) { PMC.parsedFunctionMap = pfm' }
+    
+  let pPairs' = entryPoint : (unpackedPairs upData)
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   let
@@ -222,10 +262,26 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   
   (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder (PA.ValidRepr sym validArch) (PC.cfgTraceTree vcfg)
 
+  satCache <- liftIO $ IO.newIORef SetF.empty
+  unsatCache <- liftIO $ IO.newIORef SetF.empty
+
+  let targetRegsRaw = PC.cfgTargetEquivRegs vcfg
+
+  targetRegs <- fmap S.fromList $ mapM (\r_raw -> case PA.readRegister @arch r_raw of
+           Just r -> return r
+           Nothing -> CME.throwError $ PEE.loaderError $ PEE.ConfigError $ "Unknown register: " ++ r_raw) targetRegsRaw
+
+  -- TODO: this can be made more configurable
+  let
+    condFns :: M.Map (PB.FunPair arch) (Some (PL.Location sym arch) -> Bool)
+    condFns = M.singleton entryPoint (\(Some loc) -> case loc of
+                                             PL.Register r -> S.member (Some r) targetRegs
+                                             _ -> False)
+  
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
           { PMC.handles = ha
-          , PMC.binCtxs = contexts
+          , PMC.binCtxs = contexts1
           , PMC.stackRegion = stackRegion
           , PMC.globalRegion = globalRegion
           , PMC._currentFunc = error "No function under analysis at startup"
@@ -249,10 +305,12 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envValidSym = PS.Sym symNonce sym bak
           , envStartTime = startedAt
           , envCurrentFrame = mempty
+          , envPathCondition = mempty
           , envNonceGenerator = gen
           , envParentNonce = Some topNonce
           , envUndefPointerOps = undefops
           , envParentBlocks = mempty
+          , envEqCondFns = condFns
           , envExitPairsCache = ePairCache
           , envStatistics = statsVar
           , envOverrides = \ovCfg -> M.fromList [ (n, ov)
@@ -261,6 +319,10 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                                                 , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
                                                 ]
           , envTreeBuilder = treeBuilder
+          , envSatCacheRef = satCache
+          , envUnsatCacheRef = unsatCache
+          , envTargetEquivRegs = targetRegs
+          , envPtrAssertions = ptrAsserts
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each
@@ -292,6 +354,7 @@ unpackBlockData ctxt (PC.Address w) =
       return PB.FunctionEntry { PB.functionSegAddr = segAddr
                               , PB.functionSymbol = Nothing
                               , PB.functionBinRepr = W4.knownRepr
+                              , PB.functionIgnored = False
                               }
     Nothing -> CME.throwError (PEE.equivalenceError @arch (PEE.LookupNotAtFunctionStart callStack caddr))
   where

@@ -5,6 +5,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.AArch32 (
     SA.AArch32
@@ -29,7 +31,6 @@ import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
 import qualified Data.Map as Map
-
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.CFGSlice as MCS
@@ -48,6 +49,7 @@ import           Data.Macaw.AArch32.Symbolic ()
 import qualified Language.ASL.Globals as ASL
 
 import qualified Pate.Arch as PA
+import qualified Pate.Block as PB
 import qualified Pate.Discovery.PLT as PLT
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -74,11 +76,13 @@ hackyExtractBlockPrecond
   -> Either String (MC.ArchBlockPrecond SA.AArch32)
 hackyExtractBlockPrecond _ absState =
   case absState ^. MA.absRegState . MC.boundValue (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) of
+    -- FIXME: always set the PSTATE_T flag to true
+    --_ -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = True })
     MA.FinSet (Set.toList -> [bi]) -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = bi == 1 })
-    MA.FinSet {} -> Left "Multiple FinSet values for PSTATE_T"
+    MA.FinSet s -> Left ("Multiple FinSet values for PSTATE_T" ++ (show s))
     MA.StridedInterval {} -> Left "StridedInterval where PSTATE_T expected"
     MA.SubValue {} -> Left "SubValue where PSTATE_T expected"
-    MA.TopV -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False })
+    MA.TopV -> Left "TopV where PSTATE_T expected" {- Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False }) -}
 
 -- | A modified version of the AArch32 code discovery configuration
 --
@@ -98,7 +102,19 @@ instance PA.ValidArch SA.AArch32 where
   displayRegister = display
   argumentNameFrom = argumentNameFrom
   binArchInfo = const hacky_arm_linux_info
-
+  discoveryRegister reg =
+       Some reg == (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")))
+  readRegister = \case
+    "r0" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
+    "r1" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
+    "r2" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
+    "r3" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
+    "r4" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")
+    -- TODO
+    "sp" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R13")
+    "r13" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R13")
+    "pc" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_PC")
+    _ -> Nothing
 
 argumentNameFrom
   :: [T.Text]
@@ -189,12 +205,52 @@ argumentMapping =
                       }
 
 stubOverrides :: PA.ArchStubOverrides SA.AArch32
-stubOverrides = PA.ArchStubOverrides $
-  Map.fromList
-    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
-    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 ) $
+  Map.fromList $ map (\(nm,v) -> (BSC.pack nm, v)) $
+    [ ("malloc", PA.mkMallocOverride r0 r0)
+    -- FIXME: arguments are interpreted differently for calloc
+    , ("calloc", PA.mkMallocOverride r0 r0)
+    , ("clock", PA.mkClockOverride r0)
+    , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
+    -- FIXME: fixup arguments for fwrite
+    , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
+    , ("printf", PA.mkObservableOverride "printf" r0 r1)
+    -- FIXME: default stubs below here
+    ] ++
+    (map mkDefault $
+      [ "getopt"
+      , "fprintf"
+      , "open"
+      , "atoi"
+      , "openat"
+      , "__errno_location"
+      , "ioctl"
+      , "fopen"
+      , "ERR_print_errors_fp"
+      , "RAND_bytes"
+      , "close"
+      , "fclose"
+      , "puts"
+      , "lseek"
+      , "strcpy"
+      , "sleep"
+      , "socket"
+      , "setsockopt"
+      , "bind"
+      , "select"
+      , "free"
+      , "sigfillset"
+      , "sigaction"
+      , "setitimer"
+      , "read"
+      ])
   where
+    mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
+    
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
+    r1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
+    r2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
+    --r3 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
 
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
   archTermCase = \case
@@ -216,6 +272,11 @@ archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
                                  , PA.validArchPatchedExtraSymbols =
                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
                                  , PA.validArchStubOverrides = stubOverrides
+                                 -- FIXME: override the PSTATE_T flag to 1 by default
+                                 -- this ignores the heuristic from macaw's arch definition
+                                 -- that uses the address low bit to set this flag
+                                 , PA.validArchInitAbs = PB.defaultMkInitialAbsState
+                                 --, PA.validArchInitAbs = PB.MkInitialAbsState (\_ _ -> MapF.singleton (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) (MA.FinSet (Set.singleton 1)))
                                  }
       in Right (Some (PA.SomeValidArch vad))
     _ -> Left (PEE.UnsupportedArchitecture em)

@@ -62,6 +62,7 @@ import qualified SemMC.Architecture.PPC as SP
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
+import qualified Pate.Block as PBl
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEM
@@ -156,6 +157,9 @@ instance PA.ValidArch PPC.PPC32 where
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
   binArchInfo = const PPC.ppc32_linux_info
+  discoveryRegister = const False
+  -- FIXME: TODO
+  readRegister _ = Nothing
 
 instance PA.ValidArch PPC.PPC64 where
   rawBVReg r = case r of
@@ -168,6 +172,9 @@ instance PA.ValidArch PPC.PPC64 where
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
   binArchInfo = PPC.ppc64_linux_info
+  discoveryRegister = const False
+  -- FIXME: TODO
+  readRegister _ = Nothing
 
 -- | Determine the argument name for the argument held in the given register.
 --
@@ -233,7 +240,7 @@ argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
 stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
-stubOverrides = PA.ArchStubOverrides $
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0) $
   Map.fromList
     [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
     , (BSC.pack "clock", PA.mkClockOverride r0)  ]
@@ -257,6 +264,7 @@ archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
+                                 , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
                                  }
       in Right (Some (PA.SomeValidArch vad))
     (EEP.EM_PPC64, _) ->
@@ -267,6 +275,7 @@ archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
                                  , PA.validArchOrigExtraSymbols = mempty
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
+                                 , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
                                  }
       in Right (Some (PA.SomeValidArch vad))
 

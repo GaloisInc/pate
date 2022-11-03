@@ -9,6 +9,8 @@ RUN apt install -y curl zlibc zlib1g zlib1g-dev git zip \
   locale-gen en_US.UTF-8 && \
   pip3 install toml
 
+RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
+
 ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US:en
 ENV LC_ALL en_US.UTF-8
@@ -44,34 +46,52 @@ RUN mkdir -p /home/cvc4/src; \
      make -j4 && \
      make install)
 
-RUN curl -L https://downloads.haskell.org/~ghcup/0.1.13/x86_64-linux-ghcup-0.1.13 -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
-RUN mkdir -p /root/.ghcup && ghcup --version && ghcup install cabal && ghcup install ghc 8.10.4 && ghcup set ghc 8.10.4
+RUN curl -L https://downloads.haskell.org/~ghcup/0.1.16/x86_64-linux-ghcup-0.1.16 -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
+RUN mkdir -p /root/.ghcup && ghcup --version && ghcup install cabal && ghcup install ghc 8.10.7 && ghcup set ghc 8.10.7
 
 ######################################################################
 ENV PATH="/root/.ghcup/bin:${PATH}"
 RUN cabal update
 RUN mkdir -p /home/src
-COPY . /home/src
+
+COPY ./cabal.project.dist /home/src/cabal.project.dist
+COPY ./pate.cabal /home/src/pate.cabal
+COPY ./submodules /home/src/submodules
+
 WORKDIR /home/src
-RUN ln -sf cabal.project.dist cabal.project
-RUN cabal configure pkg:pate -w ghc-8.10.4 && \
-  cabal build pkg:pate -j5
 
-RUN cp $(cabal exec -- which pate) /usr/local/bin/pate
+RUN cp cabal.project.dist cabal.project
+RUN cabal v2-configure --keep-going --ghc-options="-fno-safe-haskell"
 
-FROM ubuntu:20.04
-RUN apt update && apt install -y zlibc zlib1g libgmp10 libantlr3c-3.4-0 locales && locale-gen en_US.UTF-8
+RUN cabal v2-build --only-dependencies dismantle-arm-xml
+RUN cabal v2-build dismantle-arm-xml
+RUN cabal v2-build --only-dependencies macaw-aarch32
+RUN cabal v2-build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
+RUN cabal v2-build semmc-ppc
+RUN cabal v2-build lib:semmc-aarch32
+RUN cabal v2-build macaw-ppc
+RUN cabal v2-build macaw-ppc-symbolic
+RUN cabal v2-build macaw-aarch32-symbolic
+RUN cabal v2-build macaw-loader-aarch32
 
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
+RUN cabal v2-build --only-dependencies lib:pate
 
-COPY --from=0 /usr/local/bin/pate \
-              /usr/local/bin/cvc4 \
-              /usr/local/bin/z3 \
-              /usr/local/bin/yices \
-              /usr/local/bin/yices-smt2 \
-              /usr/local/bin/
-EXPOSE 5000
-ENV ADDR=0.0.0.0
-ENTRYPOINT ["/usr/local/bin/pate"]
+COPY ./src /home/src/src
+
+COPY ./tools/pate/ /home/src/tools/pate
+
+RUN cabal v2-build lib:pate
+
+COPY ./arch /home/src/arch
+COPY ./tools /home/src/tools
+COPY ./*.ghci /home/src/
+
+RUN cabal v2-build pate-repl-base
+
+COPY ./pate.sh /home/src/pate.sh
+
+## FROM ubuntu:20.04
+
+ENV PATH="/home/src/:/root/.ghcup/bin:${PATH}"
+
+ENTRYPOINT ["/home/src/pate.sh"]

@@ -24,6 +24,7 @@ module Pate.AssumptionSet (
   , toPred
   , apply
   , isAssumedPred
+  , mux
   ) where
 
 import           Control.Monad ( forM )
@@ -347,6 +348,20 @@ toPred sym asm = do
     assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> m [W4.Pred sym]
     assumeBinds (MapF.Pair eSrc eTgts) = forM (SetF.toList eTgts) $ \eTgt ->
       IO.liftIO $ W4.isEq sym eSrc eTgt
+
+mux ::
+  W4.IsSymExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  W4.Pred sym ->
+  AssumptionSet sym ->
+  AssumptionSet sym ->
+  m (AssumptionSet sym)  
+mux sym p asmT asmF = do
+  asmT_pred <- toPred sym asmT
+  asmF_pred <- toPred sym asmF
+  ite <- IO.liftIO $ W4.baseTypeIte sym p asmT_pred asmF_pred
+  return $ fromPred ite
 
 isAssumedPred ::
   forall sym.

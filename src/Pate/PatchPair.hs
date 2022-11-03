@@ -9,9 +9,12 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Pate.PatchPair (
     PatchPair(..)
   , patchPairRepr
+  , mkPair
   , PatchPairC(..)
   , toPatchPairC
   , mergePatchPairCs
@@ -20,6 +23,7 @@ module Pate.PatchPair (
   , ppPatchPairEq
   , ppPatchPairC
   , ppPatchPair
+  , ppPatchPair'
   , get
   , forBins
   , forBins'
@@ -28,6 +32,7 @@ module Pate.PatchPair (
   , getPair'
   , setPair
   , ppEq
+  , forBinsL
   ) where
 
 import           Data.Functor.Const ( Const(..) )
@@ -59,14 +64,22 @@ get = getPair' knownRepr
 patchPairRepr :: PatchPair PB.WhichBinaryRepr
 patchPairRepr = PatchPair PB.OriginalRepr PB.PatchedRepr
 
+mkPair :: PB.WhichBinaryRepr bin -> tp bin -> tp (PB.OtherBinary bin) -> PatchPair tp
+mkPair bin b1 b2 = case bin of
+  PB.OriginalRepr -> PatchPair b1 b2
+  PB.PatchedRepr -> PatchPair b2 b1
+
 forBins :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m (f bin)) -> m (PatchPair f)
 forBins f = PatchPair <$> f (get @PB.Original) <*> f (get @PB.Patched)
 
-forBins' :: Applicative m => (forall bin. PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
+forBins' :: Applicative m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
 forBins' f = PatchPair <$> f PB.OriginalRepr <*> f PB.PatchedRepr
 
 forBinsC :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m f) -> m (f, f)
 forBinsC f = (,) <$> f (get @PB.Original) <*> f (get @PB.Patched)
+
+forBinsL :: Applicative m => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m [f bin]) -> m ([f PB.Original], [f PB.Patched])
+forBinsL f = (,) <$> f (get @PB.Original)  <*> f (get @PB.Patched)
 
 catBins :: Applicative m => Semigroup w => (forall bin. PB.KnownBinary bin => (forall tp. PatchPair tp -> tp bin) -> m w) -> m w
 catBins f = (<>) <$> f (get @PB.Original) <*> f (get @PB.Patched)
@@ -137,7 +150,8 @@ instance ShowF tp => Show (PatchPair tp) where
 instance (forall bin. PP.Pretty (f bin)) => PP.Pretty (PatchPair f) where
   pretty = ppPatchPairEq ppEq PP.pretty
 
-
+ppPatchPair' :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
+ppPatchPair' f pPair = ppPatchPairEq (\x y -> show (f x) == show (f y)) f pPair
 
 
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a

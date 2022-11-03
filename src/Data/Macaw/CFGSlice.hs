@@ -32,6 +32,7 @@ module Data.Macaw.CFGSlice
   , initBlockEnd
   , termStmtToBlockEnd
   , blockEndSliceFns
+  , copyBlockEnd
   ) where
 
 import           Control.Monad
@@ -174,6 +175,20 @@ blockEndReturn :: forall sym arch proxy
                -> (C.RegValue sym (C.MaybeType (MM.LLVMPointerType (M.ArchAddrWidth arch))))
 blockEndReturn _ (_ Ctx.:> _ Ctx.:> C.RV mret) = mret
 
+
+-- Copy a block end condition, conditionally replacing the return value
+copyBlockEnd :: forall sym arch proxy
+             . IsSymInterface sym
+            => proxy arch
+            -> sym
+            -> MM.LLVMPtr sym (M.ArchAddrWidth arch)
+            -> (C.RegValue sym (MacawBlockEndType arch))
+            -> IO (C.RegValue sym (MacawBlockEndType arch))
+copyBlockEnd _ _sym ret_ptr from@(Ctx.Empty Ctx.:> C.RV blendK Ctx.:> C.RV ret)  = do
+  case ret of
+    Unassigned -> return from
+    PE p _ -> return $ (Ctx.empty Ctx.:> C.RV blendK Ctx.:> C.RV (PE p ret_ptr))
+
 initBlockEnd :: forall sym arch proxy
               . IsSymInterface sym
              => proxy arch
@@ -182,6 +197,7 @@ initBlockEnd :: forall sym arch proxy
 initBlockEnd _ sym = do
   blendK <- bvLit sym (knownNat @8) (BV.mkBV (knownNat @8) (toInteger $ fromEnum MacawBlockEndReturn))
   return $ (Ctx.empty Ctx.:> C.RV blendK Ctx.:> C.RV Unassigned)
+
 
 termStmtToBlockEnd :: forall arch ids. HasArchEndCase arch => M.ParsedTermStmt arch ids -> MacawBlockEnd arch
 termStmtToBlockEnd tm0 =

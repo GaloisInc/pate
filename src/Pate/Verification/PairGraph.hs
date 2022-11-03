@@ -33,6 +33,15 @@ module Pate.Verification.PairGraph
   , TotalityCounterexample(..)
   , ObservableCounterexample(..)
   , ppProgramDomains
+  , getOrphanedReturns
+  , addExtraEdge
+  , getExtraEdges
+  , addTerminalNode
+  , emptyReturnVector
+  , getEquivCondition
+  , setEquivCondition
+  , dropDomain
+  , markEdge
   ) where
 
 import           Prettyprinter
@@ -63,15 +72,17 @@ import qualified Pate.Event as Event
 import           Pate.Monad
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, rootEntry )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, rootEntry, nodeBlocks, rootReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
+import           Pate.TraceTree
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -169,6 +180,20 @@ data PairGraph sym arch =
     --   arise from things like incompleteness of the SMT solvers, or other unexpected situations
     --   that may impact the soundness of the analysis.
   , pairGraphMiscAnalysisErrors :: !(Map (GraphNode arch) [PEE.EquivalenceError])
+
+    -- | Extra edges to follow when processing a node. These arise from analysis failures
+    --   when we can't determine how a function exits, but still want to continue analyzing
+    --   past all of its call sites.
+  , pairGraphExtraEdges :: !(Map (NodeEntry arch) (Set (GraphNode arch)))
+    -- | Avoid adding extra edges to these nodes, as we expect these functions
+    --   may not actually return on any path (i.e. they end in an abort or exit)
+  , pairGraphTerminalNodes :: !(Set (NodeReturn arch))
+  , pairGraphEquivConditions :: !(Map (GraphNode arch) (PEC.EquivConditionSpec sym arch))
+    -- | Any edges that have been followed at any point (which may later become infeasible
+    -- due to further analysis)
+  , pairGraphEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
+    -- | Reverse map of the above (from descendants to ancestors)
+  , pairGraphBackEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
   }
 
 ppProgramDomains ::
@@ -201,6 +226,11 @@ emptyPairGraph =
   , pairGraphDesyncReports = mempty
   , pairGraphGasExhausted = mempty
   , pairGraphMiscAnalysisErrors = mempty
+  , pairGraphExtraEdges = mempty
+  , pairGraphTerminalNodes = mempty
+  , pairGraphEquivConditions = mempty
+  , pairGraphEdges = mempty
+  , pairGraphBackEdges = mempty
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -218,6 +248,68 @@ getCurrentDomain ::
   GraphNode arch ->
   Maybe (AbstractDomainSpec sym arch)
 getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
+
+getEdgesFrom ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Set (GraphNode arch)
+getEdgesFrom pg nd = case Map.lookup nd (pairGraphEdges pg) of
+  Just s -> s
+  Nothing -> Set.empty
+
+getBackEdgesFrom ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Set (GraphNode arch)
+getBackEdgesFrom pg nd = case Map.lookup nd (pairGraphBackEdges pg) of
+  Just s -> s
+  Nothing -> Set.empty
+
+-- | Delete the abstract domain for the given node, following
+--   any reachable edges and discarding those domains as well
+--   This is necessary if a domain is "narrowed": i.e. it moves
+--   from assuming fewer equalities to assuming more equalities.
+--   Marks any ancestors as requiring re-analysis
+dropDomain ::
+  GraphNode arch -> 
+  PairGraph sym arch ->
+  PairGraph sym arch 
+dropDomain nd pg = case getCurrentDomain pg nd of
+  Just{}->
+    let
+      -- clear this domain and all descendant domains
+      pg' = case Set.null (getBackEdgesFrom pg nd) of
+        -- don't drop the domain for a toplevel entrypoint, but mark it for
+        -- re-analysis
+        True -> pg { pairGraphWorklist = Set.insert nd (pairGraphWorklist pg) }
+        False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), pairGraphWorklist = Set.delete nd (pairGraphWorklist pg) }
+      pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
+      -- mark all ancestors as requiring re-processing
+    in addAncestors Set.empty pg'' nd
+  Nothing -> pg
+  where
+    addAncestors :: Set (GraphNode arch) -> PairGraph sym arch -> GraphNode arch -> PairGraph sym arch
+    addAncestors considered pg_ nd_ = case Set.member nd_ considered of
+      True -> pg_
+      False -> case addToWorkList nd_ pg_ of
+        Just pg' -> pg'
+        -- if this node has no defined domain (i.e it was dropped as part of the previous
+        -- step) then we consider further ancestors
+        Nothing -> Set.foldl' (addAncestors (Set.insert nd_ considered)) pg_ (getBackEdgesFrom pg_ nd_)
+
+
+getEquivCondition ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Maybe (PEC.EquivConditionSpec sym arch)
+getEquivCondition pg nd = Map.lookup nd (pairGraphEquivConditions pg)
+  
+setEquivCondition ::
+  GraphNode arch ->
+  PEC.EquivConditionSpec sym arch ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+setEquivCondition nd cond pg = pg { pairGraphEquivConditions = Map.insert nd cond (pairGraphEquivConditions pg) }
 
 -- | If an observable counterexample has not already been found
 --   for this block pair, run the given action to check if there
@@ -241,6 +333,8 @@ considerObservableEvent gr bPair action =
 --   for this block pair, run the given action to check if there
 --   currently is one.
 considerDesyncEvent :: Monad m =>
+  IsTreeBuilder '(sym, arch) PEE.EquivalenceError m =>
+  PA.ValidArch arch =>
   PairGraph sym arch ->
   NodeEntry arch ->
   (m (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
@@ -248,12 +342,18 @@ considerDesyncEvent :: Monad m =>
 considerDesyncEvent gr bPair action =
   case Map.lookup bPair (pairGraphDesyncReports gr) of
     -- we have already found observable event differences at this location, so skip the check
-    Just _ -> return gr
+    Just cex -> do
+      withTracing @"totalityce" cex $ 
+        emitTraceWarning $ PEE.equivalenceError $ PEE.NonTotalBlockExits (nodeBlocks bPair)
+      return gr
     Nothing ->
       do (mcex, gr') <- action
          case mcex of
            Nothing  -> return gr'
-           Just cex -> return gr'{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
+           Just cex -> do
+             withTracing @"totalityce" cex $ 
+               emitTraceWarning $ PEE.equivalenceError $ PEE.NonTotalBlockExits (nodeBlocks bPair)
+             return gr'{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
 
 -- | Record an error that occured during analysis that doesn't fall into one of the
 --   other, more structured, types of errors.
@@ -345,7 +445,8 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
                -- FIXME: compute this from the global and stack regions
                return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
              return $ idom' { PAD.absDomVals = vals' }
-           return (freshDomain gr node rootDom)
+           let gr1 = freshDomain gr node rootDom
+           return $ emptyReturnVector gr1 (rootReturn fnPair)
 
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the
@@ -364,7 +465,6 @@ chooseWorkItem gr =
         Nothing -> panic Verifier "choseWorkItem" ["Could not find domain corresponding to block pair", show nd]
         Just d  -> Just (gr{ pairGraphWorklist = wl }, nd, d)
 
-
 -- | Update the abstract domain for the target graph node,
 --   decreasing the gas parameter as necessary.
 --   If we have run out of Gas, return a `Left` value.
@@ -378,14 +478,16 @@ updateDomain ::
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   Either (PairGraph sym arch) (PairGraph sym arch)
 updateDomain gr pFrom pTo d
-  | g > 0 = Right gr
+  | g > 0 = Right $ markEdge pFrom pTo $ gr
             { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
             , pairGraphGas      = Map.insert (pFrom,pTo) (Gas (g-1)) (pairGraphGas gr)
             , pairGraphWorklist = Set.insert pTo (pairGraphWorklist gr)
+            , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
+            , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
             }
 
   | otherwise =
-            Left gr
+            Left $ markEdge pFrom pTo $ gr
             { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
             }
 
@@ -394,7 +496,16 @@ updateDomain gr pFrom pTo d
      -- if it is not in the map
       Gas g = fromMaybe initialGas (Map.lookup (pFrom,pTo) (pairGraphGas gr))
 
-
+emptyReturnVector ::
+  PairGraph sym arch ->
+  NodeReturn arch ->
+  PairGraph sym arch
+emptyReturnVector gr ret = gr{ pairGraphReturnVectors = rvs }
+  where
+    rvs = Map.alter f ret (pairGraphReturnVectors gr)
+    f Nothing  = Just (Set.empty)
+    f (Just s) = Just s
+                 
 -- | When we encounter a function call, record where the function
 --   returns to so that we can correctly propagate abstract domain
 --   information from function returns to their call sites.
@@ -436,6 +547,15 @@ addReturnVector gr funPair retPair =
 
     wl = Set.insert (ReturnNode funPair) (pairGraphWorklist gr)
 
+-- | Add a node back to the worklist to be re-analyzed if there is
+--   an existing abstract domain for it. Otherwise return Nothing.
+addToWorkList ::
+  GraphNode arch ->
+  PairGraph sym arch ->
+  Maybe (PairGraph sym arch)
+addToWorkList nd gr = case getCurrentDomain gr nd of
+  Just{} -> Just $ gr { pairGraphWorklist = Set.insert nd (pairGraphWorklist gr) }
+  Nothing -> Nothing
 
 -- | Add an initial abstract domain value to a graph node, and
 --   record it in the worklist to be visited.
@@ -448,6 +568,57 @@ freshDomain gr pTo d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
     , pairGraphWorklist = Set.insert pTo (pairGraphWorklist gr)
     }
+
+markEdge ::
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+markEdge from to gr =
+  gr { pairGraphEdges = Map.insertWith Set.union from (Set.singleton to) (pairGraphEdges gr)
+     , pairGraphBackEdges = Map.insertWith Set.union to (Set.singleton from) (pairGraphBackEdges gr)}
+
+addExtraEdge ::
+  PairGraph sym arch ->
+  NodeEntry arch ->
+  GraphNode arch ->
+  PairGraph sym arch
+addExtraEdge gr from to = markEdge (GraphNode from) to $
+  gr { pairGraphExtraEdges = Map.insertWith Set.union from (Set.singleton to) ( pairGraphExtraEdges gr)
+     }
+
+
+getExtraEdges ::
+  PairGraph sym arch ->
+  NodeEntry arch ->
+  Set (GraphNode arch)
+getExtraEdges gr e = case Map.lookup e (pairGraphExtraEdges gr) of
+  Just es -> es
+  Nothing -> Set.empty
+
+-- | Mark a return node for a function as terminal, indicating that it
+--   might not have any valid return paths.
+--   A non-terminal function with no return paths is considered an analysis error, since
+--   we can't continue analyzing past any of its call sites.
+addTerminalNode ::
+  PairGraph sym arch ->
+  NodeReturn arch ->
+  PairGraph sym arch
+addTerminalNode gr nd = gr { pairGraphTerminalNodes = Set.insert nd (pairGraphTerminalNodes gr) }
+
+-- | Return the set of "orphaned" nodes in the current graph. An orphaned
+--   node is a return node for a function where no return path was found
+--   (i.e. we have a set of call sites for the function, but no post-equivalence
+--   domain). This usually indicates some sort of analysis failure.
+--   We exclude any terminal nodes here, since it is expected that a terminal
+--   node might not have any return paths.
+getOrphanedReturns ::
+  PairGraph sym arch ->
+  Set (NodeReturn arch)
+getOrphanedReturns gr = do
+  let rets = (Map.keysSet (pairGraphReturnVectors gr)) Set.\\ (pairGraphTerminalNodes gr)  
+  Set.filter (\ret -> not (Map.member (ReturnNode ret) (pairGraphDomains gr))) rets
+
 
 -- | After computing the dataflow fixpoint, examine the generated
 --   error reports to determine an overall verdict for the programs.

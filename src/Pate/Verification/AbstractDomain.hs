@@ -34,6 +34,7 @@ module Pate.Verification.AbstractDomain
   , absDomainValsToPostCond
   , ppAbstractDomain
   , noAbsVal
+  , domainValsToAbsState
   ) where
 
 import qualified Prettyprinter as PP
@@ -54,6 +55,7 @@ import           Data.Parameterized.Classes
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
+import           Data.Proxy
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.GroundEval as W4G
@@ -72,8 +74,11 @@ import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
+import qualified Pate.Block as PBl
+import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Location as PL
 import qualified Pate.MemCell as PMC
@@ -103,6 +108,9 @@ data AbstractDomain sym arch (v :: PS.VarScope) where
     , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
       -- ^ specifies independent constraints on the values for the original and patched programs
     } -> AbstractDomain sym arch v
+
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomain sym arch bin) where
+  traverseLocation sym x f = PL.witherLocation sym x (\loc p -> Just <$> f loc p)
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomain sym arch bin) where
   witherLocation sym (AbstractDomain a b) f = AbstractDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f
@@ -472,6 +480,40 @@ applyAbsRange sym e rng = case rng of
   AbsBoolConstant False -> return $ PAS.exprBinding e (W4.falsePred sym)
   AbsUnconstrained{} -> return mempty
 
+macawAbsValueToAbsValue ::
+  PA.ValidArch arch =>
+  f arch ->
+  MT.TypeRepr tp ->
+  MacawAbstractValue sym tp ->
+  MAS.AbsValue (MM.ArchAddrWidth arch) tp
+macawAbsValueToAbsValue _ repr (MacawAbstractValue absVal) = case repr of
+  MT.BVTypeRepr{} | (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs) <- absVal ->
+    case (regAbs, offsetAbs) of
+      (AbsIntConstant 0, AbsBVConstant _w i) -> MAS.FinSet (S.singleton (BV.asUnsigned i))
+      -- FIXME: add StackOffset and CodePointers here
+      _ -> MAS.TopV
+  MT.BoolTypeRepr | (Ctx.Empty Ctx.:> bAbs) <- absVal ->
+    case bAbs of
+      AbsBoolConstant b -> MAS.BoolConst b
+      _ -> MAS.TopV
+  _ -> MAS.TopV
+
+
+domainValsToAbsState ::
+  forall sym arch bin.
+  PA.ValidArch arch =>
+  AbstractDomainVals sym arch bin ->
+  PBl.AbsStateOverride arch
+domainValsToAbsState d =
+  MapF.mapMaybeWithKey  (\r _ ->
+    let
+      macawVal = (absRegVals d) ^. MM.boundValue r
+    in case macawAbsValueToAbsValue (Proxy @arch) (MT.typeRepr r) macawVal of
+      MAS.TopV -> Nothing
+      v | PA.discoveryRegister r -> Just v
+      _ -> Nothing
+    ) (MM.archRegSet @(MM.ArchReg arch))
+
 absDomainValToAsm ::
   W4.IsSymExprBuilder sym =>
   sym ->
@@ -563,7 +605,7 @@ absDomainValsToPostCond sym eqCtx st absBlockSt vals = PE.eqCtxConstraints eqCtx
     Const <$> absDomainValToAsm sym eqCtx val mAbsVal absVal
 
   maxRegionCond <- applyAbsRange sym (PS.unSE (PS.simMaxRegion st)) (absMaxRegion vals)
-  return $ PE.StatePostCondition (PE.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond
+  return $ PE.StatePostCondition (PEC.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond
   where
     stackRegion = PE.eqCtxStackRegion eqCtx
 
@@ -672,7 +714,7 @@ ppAbstractDomain ::
 ppAbstractDomain ppPred d =
   PP.vsep $
   [ "== Equivalence Domain =="
-  , PED.ppEquivalenceDomain ppPred (absDomEq d)
+  , PED.ppEquivalenceDomain ppPred (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq d)
   , "== Original Value Constraints =="
   , ppAbstractDomainVals (PPa.pOriginal $ absDomVals d)
   , "== Patched Value Constraints =="
@@ -690,13 +732,29 @@ data DomainKind = Predomain | Postdomain | ExternalPostDomain
 ppDomainKind ::
   DomainKind -> PP.Doc a
 ppDomainKind = \case
-  Predomain -> "Node predomain"
-  Postdomain -> "Computed postdomain"
-  ExternalPostDomain -> "Postdomain after variable abstraction"
+  Predomain -> "Predomain"
+  Postdomain -> "Intermediate postdomain"
+  ExternalPostDomain -> "Postdomain"
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
   type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)
   type TraceNodeLabel "domain" = DomainKind
   
   prettyNode lbl (Some absDom) = PP.pretty (show lbl) PP.<+> ppAbstractDomain (\_ -> "") absDom
-  nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl), ("symbolic", \_ _ -> "<TODO: domain symbolic summary>")]
+  nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl),
+              (Simplified, \lbl _ -> ppDomainKind lbl),
+              ("symbolic", \_ _ -> "<TODO: domain symbolic summary>")]
+
+-- simplified variant of domain trace node
+-- currently only displays equivalence domain
+instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "simpledomain" where
+  type TraceNodeType '(sym,arch) "simpledomain" = Some (AbstractDomain sym arch)
+  type TraceNodeLabel "simpledomain" = DomainKind
+  
+  prettyNode lbl (Some absDom) =
+    PP.vsep
+      [ PP.pretty (show lbl)
+      , PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom)
+      ]
+  nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl),
+              (Simplified, \lbl _ -> ppDomainKind lbl)]

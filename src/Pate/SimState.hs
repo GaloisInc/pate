@@ -55,6 +55,7 @@ module Pate.SimState
   , liftScope2
   , concreteScope
   , SimSpec
+  , mkSimSpec
   , freshSimSpec
   , forSpec
   , viewSpec
@@ -78,6 +79,7 @@ module Pate.SimState
   , getScopeCoercion
   , applyScopeCoercion
   , bundleOutVars
+  , bundleInVars
   ) where
 
 import           GHC.Stack ( HasCallStack )
@@ -124,6 +126,8 @@ import           What4.ExprHelpers
 import           Pate.AssumptionSet
 import           Pate.TraceTree
 
+import           Data.Coerce ( coerce ) 
+
 ------------------------------------
 -- Crucible inputs and outputs
 
@@ -145,12 +149,14 @@ simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
   PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
 simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
 
+
 data SimInput sym arch v bin = SimInput
   {
     simInState :: SimState sym arch v bin
   , simInBlock :: PB.ConcreteBlock arch bin
   , simInAbsState :: MAS.AbsBlockState (MM.ArchReg arch)
   }
+
 
 
 simInMem ::
@@ -217,6 +223,9 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
       _specScope :: SimScope sym arch v
     , _specBody :: f v
     }
+
+mkSimSpec :: SimScope sym arch v -> f v -> SimSpec sym arch f
+mkSimSpec scope body = SimSpec scope body
 
 data SimScope sym arch v =
   SimScope
@@ -297,6 +306,10 @@ data SimBundle sym arch v = SimBundle
   , simOut :: PPa.PatchPair (SimOutput sym arch v)
   }
 
+
+instance Scoped (SimBundle sym arch) where
+  unsafeCoerceScope bundle = coerce bundle
+
 instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "bundle" where
   type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
   prettyNode () (Some _bundle) = "<TODO: pretty bundle>"
@@ -305,6 +318,9 @@ instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTrac
 
 bundleOutVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
 bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
+
+bundleInVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
+bundleInVars bundle = TF.fmapF (SimVars . simInState) (simIn bundle)
 
 simInO :: SimBundle sym arch v -> SimInput sym arch v PBi.Original
 simInO = PPa.pOriginal . simIn

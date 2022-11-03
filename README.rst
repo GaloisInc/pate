@@ -16,9 +16,8 @@ First, build the Docker image with the command::
 
 Next, run the verifier on an example from the test suite::
 
-  docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe --interactive
+  docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe
 
-Visit http://localhost:5000 to view the interactive proof explorer.
 
 Command Line Options
 --------------------
@@ -29,23 +28,42 @@ The verifier accepts the following command line arguments::
   -o,--original EXE        Original binary
   -p,--patched EXE         Patched binary
   -b,--blockinfo FILENAME  Block information relating binaries
-  -i,--interactive         Start a web server providing an interactive view of results
-  --original-source FILE   The source file for the original program
-  --patched-source FILE    The source file for the patched program
-  --log-file FILE          Record logs in the given file
-  --discard-logs           Discard all logging information
-  -m,--ignoremain          Don't add the main entry points to the set of function equivalence checks.
-  -d,--nodiscovery         Don't dynamically discover function pairs based on calls.
-  --noproofs               Don't print structured proofs after checking.
-  --try-simple-frames      Attempt simple frame propagation first, falling back to heuristic analysis upon failure.
-  --solver ARG             The SMT solver to use to solve verification conditions. One of CVC4, Yices, or Z3 (default: Yices)
-  --goal-timeout ARG       The timeout for verifying individual goals in seconds (default: 300)
-  --heuristic-timeout ARG  The timeout for verifying heuristic goals in seconds (default: 10)
-  --anvill-hints ARG       Parse an Anvill specification for code discovery hints
-  --probabilistic-hints ARG
-                           Parse a JSON file containing probabilistic function name/address hints
-  --csv-function-hints ARG Parse a CSV file containing function name/address hints
-  --no-dwarf-hints         Disable extraction of hints from the unpatched DWARF binary
+  -s,--startsymbol ARG     Start analysis from the function with this symbol,
+                           otherwise start at the program entrypoint
+  -d,--nodiscovery         Don't dynamically discover function pairs based on
+                           calls.
+  --solver ARG             The SMT solver to use to solve verification
+                           conditions. One of CVC4, Yices, or Z3
+                           (default: Yices)
+  --goal-timeout ARG       The timeout for verifying individual goals in seconds
+                           (default: 300)
+  --heuristic-timeout ARG  The timeout for verifying heuristic goals in seconds
+                           (default: 10)
+  --original-anvill-hints ARG
+                           Parse an Anvill specification for code discovery
+                           hints
+  --patched-anvill-hints ARG
+                           Parse an Anvill specification for code discovery
+                           hints
+  --original-probabilistic-hints ARG
+                           Parse a JSON file containing probabilistic function
+                           name/address hints
+  --patched-probabilistic-hints ARG
+                           Parse a JSON file containing probabilistic function
+                           name/address hints
+  --original-csv-function-hints ARG
+                           Parse a CSV file containing function name/address
+                           hints
+  --patched-csv-function-hints ARG
+                           Parse a CSV file containing function name/address
+                           hints
+  --original-bsi-hints ARG Parse a JSON file containing function name/address
+                           hints
+  --patched-bsi-hints ARG  Parse a JSON file containing function name/address
+                           hints
+  --no-dwarf-hints         Do not extract metadata from the DWARF information in
+                           the binaries
+  -V,--verbosity ARG       The verbosity of logging output (default: Info)
   --save-macaw-cfgs DIR    Save macaw CFGs to the provided directory
   --solver-interaction-file FILE
                            Save interactions with the SMT solver during symbolic
@@ -54,6 +72,8 @@ The verifier accepts the following command line arguments::
                            A file to save interesting proof results to in JSON
                            format
   --log-file FILE          A file to save debug logs to
+  -e,--errormode ARG       Verifier error handling mode
+                           (default: ThrowOnAnyFailure)
 
 Extended Examples
 -----------------

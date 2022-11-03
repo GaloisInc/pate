@@ -1,4 +1,11 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 -- | Events that can be reported from the verifier
 module Pate.Event (
   Blocks(..),
@@ -22,6 +29,7 @@ import           Data.Word ( Word64 )
 import qualified GHC.Stack as GS
 import qualified What4.Expr as WE
 import qualified What4.Interface as WI
+import qualified Prettyprinter as PP
 
 import qualified Pate.Arch as PArch
 import qualified Pate.AssumptionSet as PAS
@@ -31,6 +39,7 @@ import qualified Pate.Block as PB
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Hints.BSI as PHB
 import qualified Pate.Proof as PF
 import qualified Pate.Proof.Instances as PFI
 import qualified Pate.SimState as PS
@@ -41,6 +50,8 @@ import qualified Pate.Equivalence.Statistics as PES
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Verification.PairGraph.Node as PVPN
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
+
+import           Pate.TraceTree
 
 -- | The macaw blocks relevant for a given code address
 data Blocks arch bin where
@@ -55,6 +66,11 @@ data EquivalenceResult arch = Equivalent
 data BlockTargetResult = Reachable
                        | InconclusiveTarget
                        | Unreachable
+  deriving (Eq, Ord, Show)
+
+instance IsTraceNode k "blocktargetresult" where
+  type TraceNodeType k "blocktargetresult" = BlockTargetResult
+  prettyNode () result = PP.pretty (show result)
 
 data BranchCompletenessResult arch = BranchesComplete
                                    | InconclusiveBranches
@@ -90,6 +106,7 @@ data Event arch where
   HintErrorsCSV :: DLN.NonEmpty PHC.CSVParseError -> Event arch
   HintErrorsJSON :: DLN.NonEmpty PHJ.JSONError -> Event arch
   HintErrorsDWARF :: DLN.NonEmpty PHD.DWARFError -> Event arch
+  HintErrorsBSI :: DLN.NonEmpty PHB.JSONError -> Event arch
   -- | A very low-level event generated during the proof construction or evaluation
   --
   -- It records a pair of block addresses and a message that describes the state

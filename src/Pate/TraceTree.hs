@@ -63,6 +63,7 @@ module Pate.TraceTree (
   , getNodeStatus
   , getTreeStatus
   , MonadTreeBuilder(..)
+  , IsTreeBuilder
   , NodeBuilderT
   , TreeBuilderT
   , startSomeTreeBuilder
@@ -81,6 +82,8 @@ module Pate.TraceTree (
   , finalizeTree
   , withTracing
   , withTracingLabel
+  , withNoTracing
+  , mkTags
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -108,6 +111,7 @@ import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSy
 data TraceTag =
     Summary
   | Full
+  | Simplified
   | Custom String
   deriving (Eq, Ord)
 
@@ -272,6 +276,9 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
   nodeTags :: [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
   nodeTags = [(Summary, prettyNode @l @k @nm)]
 
+mkTags :: forall k nm a. IsTraceNode k nm => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
+mkTags tags = map (\tag -> (tag, prettyNode @_ @k @nm)) tags
+
 prettySummary ::
   forall k nm a.
   IsTraceNode k nm =>
@@ -398,7 +405,14 @@ instance Eq SomeSymRepr where
 instance IsTraceNode k "subtree" where
   type TraceNodeType k "subtree" = String
   type TraceNodeLabel "subtree" = SomeSymRepr
-  prettyNode (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (symbolRepr lbl) <> "]"
+  prettyNode lbl nm = prettyTree lbl nm
+  nodeTags = [(Summary, prettyTree), (Simplified, \_ nm -> PP.pretty nm) ]
+
+prettyTree ::
+  SomeSymRepr ->
+  String ->
+  PP.Doc a
+prettyTree (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (symbolRepr lbl) <> "]"
 
 -- ad-hoc messages
 instance IsTraceNode k "message" where
@@ -406,6 +420,16 @@ instance IsTraceNode k "message" where
   prettyNode () msg = PP.pretty msg
   nodeTags = [("message", \_ msg -> PP.pretty msg)]
 
+
+instance forall k. IsTraceNode k "simplemessage" where
+  type TraceNodeType k "simplemessage" = String
+  prettyNode () msg = PP.pretty msg
+  nodeTags = mkTags @k @"simplemessage" [Summary, Simplified]
+
+instance IsTraceNode k "bool" where
+  type TraceNodeType k "bool" = Bool
+  type TraceNodeLabel "bool" = String
+  prettyNode msg b = PP.pretty msg <> ":" PP.<+> PP.pretty b
 
 class Monad m => MonadTreeBuilder k m | m -> k where
   getTreeBuilder :: m (TreeBuilder k)
@@ -686,3 +710,11 @@ emitTrace ::
   TraceNodeType k nm ->
   m ()
 emitTrace v = emitTraceLabel @nm def v
+
+-- | Squelch tracing in this subcomputation
+withNoTracing ::
+  forall k e m a.
+  IsTreeBuilder k e m =>
+  m a ->
+  m a
+withNoTracing f = withTreeBuilder noTreeBuilder f

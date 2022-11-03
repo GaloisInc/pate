@@ -89,6 +89,7 @@ library
                        Pate.Verification,
                        Pate.Verification.AbstractDomain,
                        Pate.Verification.Concretize,
+                       Pate.Verification.ConditionalEquiv,
                        Pate.Verification.DemandDiscovery,
                        Pate.Verification.Domain,
                        Pate.Verification.ExternalCall,
@@ -111,6 +112,7 @@ library
                        Pate.Ground,
                        Pate.Hints,
                        Pate.Hints.CSV,
+                       Pate.Hints.BSI,
                        Pate.Hints.JSON,
                        Pate.Hints.DWARF,
                        Pate.Location,
@@ -141,6 +143,7 @@ library
                        Data.Parameterized.SetF,
                        Pate.SimState,
                        Pate.Equivalence,
+                       Pate.Equivalence.Condition,
                        Pate.Equivalence.Error,
                        Pate.Equivalence.MemoryDomain,
                        Pate.Equivalence.RegisterDomain,
@@ -277,33 +280,27 @@ common toplevel
                        macaw-aarch32,
                        macaw-aarch32-symbolic,
                        asl-translator
-  
 
-executable pate-repl
+library pate-repl-base
   import:              shared-exec, shared, toplevel
-  main-is:             Repl.hs
-  ghc-options: -fobject-code -fno-warn-type-defaults -ghci-script initdebug.ghci -threaded -rtsopts "-with-rtsopts=-N -A16M -c"
-  default-language: Haskell2010
-  hs-source-dirs:      tools/pate, arch
-  other-modules:       Pate.PPC,
-                       Pate.AArch32,
-                       Pate.ArchLoader,
-                       Main,
-                       ReplHelper
-                       JSONReport
-  build-depends:       template-haskell
-  exposed-modules:     Repl
+  hs-source-dirs:      tools/pate-repl-base
+  exposed-modules:     ReplBase
+  build-depends:       pate-base, template-haskell
 
-
-
-executable pate
+library pate-base
   import:              shared-exec, shared, toplevel
-  main-is:             Main.hs
-  other-modules:       Pate.PPC,
+  exposed-modules:     Main,
+                       Pate.PPC,
                        Pate.AArch32,
                        Pate.ArchLoader,
                        JSONReport
   hs-source-dirs:      tools/pate tools arch
+
+executable pate
+  import:              shared-exec, shared, toplevel
+  build-depends:       pate-base
+  main-is:             Main.hs
+  hs-source-dirs:      tools/pate
   default-language: Haskell2010
   -- Bake in RTS options to use multiple threads and to control the GC
   --

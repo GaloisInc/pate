@@ -27,6 +27,7 @@ module Pate.Monad
   , EquivM
   , EquivM_
   , ValidSymArch
+  , ExprLabel(..)
   , runEquivM
   , SimBundle(..)
   , withBinary
@@ -46,6 +47,7 @@ module Pate.Monad
   , emitEvent
   , emitWarning
   , emitError
+  , emitError'
   , getBinCtx
   , getBinCtx'
   , ifConfig
@@ -55,23 +57,29 @@ module Pate.Monad
   , SymGroundEvalFn(..)
   , execGroundFn
   , withGroundEvalFn
+  , wrapGroundEvalFn
+  , extractBindings
   , getFootprints
   -- sat helpers
   , checkSatisfiableWithModel
   , goalSat
   , heuristicSat
   , isPredSat
+  , isPredSat'
   , isPredTrue'
   , concretePred
   -- working under a 'SimSpec' context
   , withSimSpec
   , withFreshVars
+  , withFreshScope
   -- assumption management
   , validateAssumptions
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
+  , withPathCondition
   , applyCurrentAsms
+  , applyCurrentAsmsExpr
   , currentAsm
   -- nonces
   , freshNonce
@@ -90,6 +98,8 @@ module Pate.Monad
   , withSubTraces
   , subTrace
   , subTree
+  , getWrappedSolver
+  , catchInIO
   )
   where
 
@@ -102,11 +112,14 @@ import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try, finally )
 import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
+import           Control.Monad.Reader ( asks )
 import           Control.Monad.Except
 
+import           Data.Maybe ( fromMaybe )
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
+import qualified Data.IORef as IO
 import qualified Data.Text as T
 import qualified Data.Time as TM
 import           Data.Kind ( Type )
@@ -118,8 +131,10 @@ import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Nonce as N
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import qualified Data.Parameterized.TraversableF as TF
@@ -250,11 +265,14 @@ emitWarning innererr = do
 
 -- | Emit an event declaring that an error has been raised, but only throw
 -- the error if it is not recoverable (according to 'PEE.isRecoverable')
-emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch PEE.EquivalenceError
-emitError err = withValid $ do
+emitError' :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch PEE.EquivalenceError
+emitError' err = withValid $ do
   Left err' <- manifestError (throwHere err >> return ())
   emitEvent (\_ -> PE.ErrorRaised err')
   return err'
+
+emitError :: HasCallStack => PEE.InnerEquivalenceError arch -> EquivM_ sym arch ()
+emitError err = void $ emitError' err
 
 emitEvent :: (TM.NominalDiffTime -> PE.Event arch) -> EquivM sym arch ()
 emitEvent evt = do
@@ -455,6 +473,17 @@ lookupArgumentNames pp = do
 currentAsm :: EquivM sym arch (AssumptionSet sym)
 currentAsm = CMR.asks envCurrentFrame
 
+withFreshScope ::
+  forall sym arch f.
+  Scoped f =>
+  PB.BlockPair arch ->
+  (forall v. SimScope sym arch v -> EquivM sym arch (f v)) ->
+  EquivM sym arch (SimSpec sym arch f)
+withFreshScope bPair f = do
+  dummy_spec <- withFreshVars @sym @arch @(WithScope ()) bPair $ \_ -> do
+    return (mempty, WithScope ())
+  forSpec dummy_spec $ \scope _ -> f scope
+
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
 -- in the resulting 'SimSpec'.
@@ -462,7 +491,7 @@ withFreshVars ::
   forall sym arch f.
   Scoped f =>
   PB.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym, (f v))) ->
+  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym,(f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   argNames <- lookupArgumentNames blocks
@@ -481,7 +510,57 @@ withFreshVars blocks f = do
       W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
 
   freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
-  
+
+-- should we clear this between nodes?
+withFreshSatCache ::
+  EquivM_ sym arch f ->
+  EquivM sym arch f
+withFreshSatCache f = do
+  unsatCacheRef <- asks envUnsatCacheRef
+  unsatCache <- liftIO $ IO.readIORef unsatCacheRef
+  satCache <- asks envSatCacheRef
+  -- preserve any known unsat results
+  freshUnsatCacheRef <- liftIO $ IO.newIORef unsatCache
+  -- discard any known sat results
+  freshSatCacheRef <- liftIO $ IO.newIORef SetF.empty
+  result <- CMR.local (\env -> env { envUnsatCacheRef = freshUnsatCacheRef, envSatCacheRef = freshSatCacheRef }) f
+  -- preserve learned sat results
+  newSatResults <- liftIO $ IO.readIORef freshSatCacheRef
+  liftIO $ IO.modifyIORef satCache (SetF.union newSatResults)
+  return result
+
+markPredSat ::
+  W4.Pred sym ->
+  EquivM sym arch ()
+markPredSat p = do
+  satCache <- asks envSatCacheRef
+  liftIO $ IO.modifyIORef satCache (SetF.insert p)
+
+markPredUnsat ::
+  W4.Pred sym ->
+  EquivM sym arch ()
+markPredUnsat p = do
+  unsatCache <- asks envUnsatCacheRef
+  liftIO $ IO.modifyIORef unsatCache (SetF.insert p)
+
+-- | Mark the result as sat or unsat as appropriate
+processSatResult ::
+  W4.Pred sym ->
+  W4R.SatResult a b ->
+  EquivM sym arch ()
+processSatResult p r =
+  void $ W4R.traverseSatResult (\a -> markPredSat p >> return a) (\b -> markPredUnsat p >> return b) r
+
+-- | Evaluate the given function in an assumption context augmented with the given
+-- 'AssumptionSet', which is also added to the current path condition.
+-- Returns 'Nothing' of the assumption is not satisfiable (i.e. the path is infeasible)
+withPathCondition ::
+  HasCallStack =>
+  AssumptionSet sym ->
+  EquivM_ sym arch f ->
+  EquivM sym arch (Maybe f)
+withPathCondition asm f = CMR.local (\env -> env { envPathCondition = (asm <> (envPathCondition env)) }) $ withSatAssumption asm f
+
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
@@ -494,14 +573,15 @@ withAssumptionSet asm f = withSym $ \sym -> do
   p <- liftIO $ PAS.toPred sym asm
   case PAS.isAssumedPred curAsm p of
     True -> f
-    _ -> CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
-      (frame, st) <- withOnlineBackend $ \bak ->  do
-        st <- liftIO $ LCB.saveAssumptionState bak
-        frame <- liftIO $ LCB.pushAssumptionFrame bak
-        safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
-          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-        return (frame, st)
-      f `finally` safePop frame st
+    _ ->
+        CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
+        (frame, st) <- withOnlineBackend $ \bak ->  do
+          st <- liftIO $ LCB.saveAssumptionState bak
+          frame <- liftIO $ LCB.pushAssumptionFrame bak
+          safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
+            LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+          return (frame, st)
+        (validateAssumptions curAsm asm >> withFreshSatCache f) `finally` safePop frame st
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -526,15 +606,15 @@ validateAssumptions ::
   AssumptionSet sym {- ^ recently pushed assumption set -} ->
   EquivM sym arch ()
 validateAssumptions oldAsm newAsm = withSym $ \sym -> do
-  let
+  {- let
     simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
     simp e = resolveConcreteLookups sym (pure . W4.asConstantPred) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
 
   oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
-  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm  
+  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm -}
   goalSat "validateAssumptions" (W4.truePred sym) $ \res -> case res of
-    W4R.Unsat _ -> throwHere $ PEE.AssumedFalse oldAsm' newAsm'
-    W4R.Unknown -> throwHere $ PEE.AssumedFalse oldAsm' newAsm'
+    W4R.Unsat _ -> throwHere $ PEE.AssumedFalse oldAsm newAsm
+    W4R.Unknown -> throwHere $ PEE.AssumedFalse oldAsm newAsm
     W4R.Sat{} -> return ()
 
 -- | Evaluate the given function in an assumption context augmented with the given
@@ -546,7 +626,7 @@ withAssumption ::
   EquivM sym arch f
 withAssumption asm f = withAssumptionSet (PAS.fromPred asm) f
 
--- | Rewrite the given 'f' with any bindings in the current 'AssumptionSet'
+-- | Rewrite the given 'f' with any in bindings the current 'AssumptionSet'
 -- (set when evaluating under 'withAssumptionSet' and 'withAssumption').
 applyCurrentAsms ::
   forall sym arch f.
@@ -557,6 +637,14 @@ applyCurrentAsms f = withSym $ \sym -> do
   asm <- currentAsm
   PAS.apply sym asm f
 
+
+applyCurrentAsmsExpr ::
+  forall sym arch tp.
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+applyCurrentAsmsExpr e = withSym $ \sym -> do
+  PEM.SymExprMappable aEM <- return $ PEM.symExprMappable sym
+  aEM @tp $ applyCurrentAsms e
 
 -- | First check if an assumption is satisfiable before assuming it. If it is not
 -- satisfiable, return Nothing.
@@ -570,7 +658,7 @@ withSatAssumption asm f = withSym $ \sym -> do
   case W4.asConstantPred p of
     Just False -> return Nothing
     Just True -> Just <$> f
-    _ -> do
+    _ ->  do
       curAsm <- currentAsm
       CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
         mst <- withOnlineBackend $ \bak -> do
@@ -584,7 +672,7 @@ withSatAssumption asm f = withSym $ \sym -> do
         case mst of
           Just (frame, st) ->
             (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
-              W4R.Sat{} -> Just <$> f
+              W4R.Sat{} -> Just <$> (withFreshSatCache f)
               -- on an inconclusive result we can't safely return 'Nothing' since
               -- that may unsoundly exclude viable paths
               W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
@@ -614,10 +702,13 @@ goalSat ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
 goalSat desc p k = do
-  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  checkSatisfiableWithModel goalTimeout desc p k >>= \case
-    Left _err -> k W4R.Unknown
-    Right a -> return a
+  isPredSat_cache p >>= \case
+    Just False -> k (W4R.Unsat ())
+    _ -> do
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      checkSatisfiableWithModel goalTimeout desc p k >>= \case
+        Left _err -> k W4R.Unknown
+        Right a -> return a
 
 -- | Check satisfiability of the given predicate in the current assumption sate
 -- Any thrown exceptions are captured and passed to the continuation as an
@@ -630,11 +721,29 @@ heuristicSat ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
 heuristicSat desc p k = do
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  checkSatisfiableWithModel heuristicTimeout desc p k >>= \case
-    Left _err -> k W4R.Unknown
-    Right a -> return a
+  isPredSat_cache p >>= \case
+    Just False -> k (W4R.Unsat ())
+    _ -> do
+      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+      checkSatisfiableWithModel heuristicTimeout desc p k >>= \case
+        Left _err -> k W4R.Unknown
+        Right a -> return a
 
+getWrappedSolver ::
+  EquivM sym arch (PVC.WrappedSolver sym IO)
+getWrappedSolver = withSym $ \sym -> do
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+  IO.withRunInIO $ \inIO -> return $ PVC.WrappedSolver sym $ \_desc p k -> inIO $ do
+    isPredSat_cache p >>= \case
+      Just False -> liftIO $ (k (W4R.Unsat ()))
+      _ -> do
+        r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO' -> do
+          res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO' (execGroundFn r' e'))) pure res
+          k res'
+        case r of
+          Left _err -> liftIO $ k W4R.Unknown
+          Right a -> return a
+  
 
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::
@@ -644,12 +753,15 @@ concretizeWithSolver e = withSym $ \sym -> do
   
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
-        r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
-          res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
-          inIO (k res')
-        case r of
-          Left _err -> k W4R.Unknown
-          Right a -> return a
+        isPredSat_cache p >>= \case
+          Just False -> (k (W4R.Unsat ()))
+          _ -> do
+            r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
+              res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
+              inIO (k res')
+            case r of
+              Left _err -> k W4R.Unknown
+              Right a -> return a
 
   PVC.resolveSingletonSymbolicAsDefault wsolver e
 
@@ -685,6 +797,7 @@ checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
         liftIO $ LCBO.restoreSolverState bak st
         return $ Left err
     Right res -> withOnlineBackend $ \bak -> withSolverProcess $ \sp -> do
+      processSatResult p res
       fmap Right $ k res `finally`
         catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (WPO.pop sp))
           (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
@@ -727,9 +840,36 @@ isPredSat ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch Bool
-isPredSat timeout p = case W4.asConstantPred p of
-  Just b -> return b
-  Nothing -> either (const False) id <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
+isPredSat timeout p = fromMaybe False <$> isPredSat' timeout p
+
+isPredSat' ::
+  forall sym arch .
+  HasCallStack =>
+  PT.Timeout ->
+  W4.Pred sym ->
+  EquivM sym arch (Maybe Bool)
+isPredSat' timeout p = isPredSat_cache p >>= \case
+  Just b -> return $ Just b
+  Nothing -> 
+    either (const Nothing) Just <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
+
+-- | Do we have a cached result for this predicate?
+isPredSat_cache :: 
+  W4.Pred sym ->
+  EquivM sym arch (Maybe Bool)
+isPredSat_cache p = case W4.asConstantPred p of
+  Just b -> return $ Just b
+  Nothing -> do
+    satCacheRef <- asks envSatCacheRef
+    satCache <- liftIO $ IO.readIORef satCacheRef
+
+    unSatCacheRef <- asks envUnsatCacheRef
+    unSatCache <- liftIO $ IO.readIORef unSatCacheRef
+    case SetF.member p satCache of
+      True -> return $ Just True
+      False -> case SetF.member p unSatCache of
+        True -> return $ Just False
+        False -> return Nothing
 
 -- | Convert a 'W4R.Sat' result to True, and other results to False
 asSat :: Monad m => W4R.SatResult mdl core -> m Bool
@@ -753,11 +893,10 @@ isPredTrue' timeout p = case W4.asConstantPred p of
       True -> return True
       False -> do
         notp <- withSymIO $ \sym -> W4.notPred sym p
-        -- Convert exceptions into False because we can't prove that it is true
-        res <- checkSatisfiableWithModel timeout "isPredTrue'" notp (\x -> asProve x)
-        case res of
-          Left _ex -> return False -- TODO!!! This swallows the exception!
-          Right x -> return x
+        isPredSat' timeout notp >>= \case
+          Just True -> return False
+          Just False -> return True
+          Nothing -> return False -- TODO!!! This swallows the exception!
 
 concretePred ::
   HasCallStack =>
@@ -769,37 +908,22 @@ concretePred timeout p = case W4.asConstantPred p of
   _ -> do
     
     notp <- withSymIO $ \sym -> W4.notPred sym p
-    r <- checkSatisfiableWithModel timeout "concretePred" notp $ \res ->
-      case res of
-        W4R.Sat{} -> return $ Just False
-        W4R.Unsat{} -> return $ Just True
-        W4R.Unknown -> return $ Nothing
+    
+    r <- isPredSat' timeout notp >>= \case
+      Just True -> return $ Just False
+      Just False -> return $ Just True
+      Nothing -> return Nothing
     case r of
-      Left _ex -> return Nothing
-      Right (Just True) -> return $ Just True
-      Right Nothing -> return Nothing
+      Nothing -> return Nothing
+      Just True -> return $ Just True
       -- the predicate is maybe false, but not necessarily false
-      Right (Just False) -> do
-        r' <- checkSatisfiableWithModel timeout "concretePred" p $ \res ->
-          case res of
-            -- p can be true or false
-            W4R.Sat{} -> return Nothing
-            -- p is necessarily false
-            W4R.Unsat{} -> return $ Just False
-            W4R.Unknown -> return $ Nothing
-        case r' of
-          Left _ex -> return Nothing
-          Right x -> return x
-
--- | Convert a 'W4R.Unsat' result into True
---
--- Other SAT results become False
-asProve :: Monad m => W4R.SatResult mdl core -> m Bool
-asProve satRes =
-  case satRes of
-    W4R.Sat _ -> return False
-    W4R.Unsat _ -> return True
-    W4R.Unknown -> return False
+      Just False -> do
+        isPredSat' timeout p >>= \case
+          -- p can be true or false
+          Just True -> return Nothing
+          -- p is necessarily false
+          Just False -> return $ Just False
+          Nothing -> return Nothing
 
 instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   present m = IO.withRunInIO $ \runInIO -> Par.present (runInIO m)
@@ -808,6 +932,129 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
   joinFuture future = withValid $ catchInIO $ Par.joinFuture future
   forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
+
+{-
+data SolverOutput sym where  
+  SolverOutput :: WSat.SatResult (SymGroundEvalFn sym) () -> SolverOutput sym
+  SolverErr :: String -> SolverOutput sym
+
+data SolverInput sym where
+  SolverInput :: PT.Timeout -> W4.Pred sym -> SolverInput sym
+  -- solver thread that picked up this input
+  SolverQueued :: IO.MVar (SolverOutput sym) -> SolverInput sym
+
+data ForkedSolver sym where
+  ForkedSolver ::
+    IO.ThreadId ->
+    IO.MVar (SolverOutput sym) ->
+    ForkedSolver sym
+
+data ForkedSolverPool sym where
+  ForkedSolverPool ::
+    IO.MVar (SolverInput sym) -> [ForkedSolver sym] -> ForkedSolverPool sym
+
+forkedSat ::
+  PT.Timeout ->
+  W4.Pred sym ->
+  ForkedSolverPool sym ->
+  EquivM sym arch (IO (WSat.SatResult (SymGroundEvalFn sym) ()))
+forkedSat timeout p (ForkedSolverPool inVar _) = do
+  IO.putMVar inVar (SolverInput timeout p)
+  -- TODO: is putMVar blocking until a thread picks it up?
+  st <- IO.takeMVar inVar
+  case st of
+    SolverInput{} -> fail "Nobody picked up"
+    SolverQueued outVar -> return $ do
+      result <- IO.takeMVar outVar
+      case result of
+        SolverOutput r -> return r
+        SolverErr msg -> fail msg
+
+forkSolverPool :: Integer -> EquivM sym arch (ForkedSolverPool sym)
+forkSolverPool i = do
+  inVar <- IO.newEmptyVar
+  solvers <- mapM (\_ -> forkSolver inVar) [0..i-1]
+  return $ ForkedSolverPool inVar solvers
+  
+forkSolver ::
+  IO.MVar (SolverInput sym) ->
+  EquivM sym arch (ForkedSolver sym)
+forkSolver inVar = do
+  st <- withOnlineBackend $ \bak -> liftIO $ LCB.saveAssumptionState bak
+  IO.withRunInIO $ \runinIO -> do
+    outVar <- IO.newEmptyVar
+    let
+      f :: IO ()
+      f = do
+        
+        lastInput <- IO.modifyMVarMasked stVar $ \case
+          SolverInput timeout goal -> do
+            _ <- IO.tryTakeMVar outVar
+            return $ (SolverQueued outVar, SolverInput timeout goal)
+          SolverQueued outVar' -> return $ (SolverQueued outVar', SolverQueued outVar')
+          
+        case lastInput of
+          SolverQueued{} -> f
+          SolverInput timeout goal -> runinIO $ do
+            out <- withSolverProcess $ \sp -> do
+              mres <- liftIO $ do
+                WPO.pop sp
+                WPI.push sp
+                W4.assume (WPO.solverConn sp) p
+                tryJust filterAsync $ do
+                  res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
+                  W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
+              case mres of
+                Left err -> withOnlineBackend $ \bak -> do
+                  _ <- liftIO $ tryJust filterAsync (LCBO.restoreSolverState bak st)
+                    withSolverProcess $ \sp -> do
+                      liftIO $ LCBO.restoreSolverState bak st
+                      WPI.push sp
+                      return $ SolverErr (show err)
+                Right r -> return $ SolverOutput r
+        IO.putMVar outVar out
+        f
+    thistid <- IO.myThreadId
+    tid <- IO.forkFinally (runInIO (withSolverProcess $ \sp -> WPI.push sp) >> f) \case
+      Left _ -> IO.putMVar outVar (SolverErr "Thread Killed") >> return ()
+      Right _ -> IO.putMVar outVar (SolverErr "Thread Killed") >> return ()
+-}
+
+wrapGroundEvalFn ::
+  SymGroundEvalFn sym ->
+  Set (Some (W4.SymExpr sym)) ->
+  EquivM sym arch (SymGroundEvalFn sym)
+wrapGroundEvalFn fn@(SymGroundEvalFn gfn) es = withSym $ \sym -> do
+  binds <- extractBindings fn es
+  let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= (W4G.groundEval gfn)))
+  return $ SymGroundEvalFn fn'
+
+{-
+-- | Modified grounding that first applies some manual rewrites
+safeGroundEvalFn ::
+  SymGroundEvalFn sym ->
+  W4.SymExpr sym tp ->
+  (forall t st fs. sym ~ WE.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
+  EquivM sym arch a  
+safeGroundEvalFn fn e f = withSym $ \sym -> do
+  binds <- extractBindings fn e
+  IO.withRunInIO $ \runInIO -> do
+    let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= \e'' -> runInIO (emitTraceLabel @"expr" "safeGroundInput" (Some e'') >> execGroundFn fn e'')))
+    f fn'
+-}
+
+extractBindings ::
+  SymGroundEvalFn sym ->
+  Set (Some (W4.SymExpr sym)) ->
+  EquivM sym arch (ExprBindings sym)
+extractBindings fn e = withSym $ \sym -> do
+  vars <- (S.toList . S.unions) <$> mapM (\(Some e') -> liftIO $ boundVars e') (S.toList e)
+  fmap MapF.fromList $ mapM (\(Some var) -> do
+    let varE = W4.varExpr sym var
+    gv <- execGroundFn fn varE
+    val <- liftIO $ PVC.symbolicFromConcrete sym gv varE
+    return $ MapF.Pair varE val) vars
+  
 
 withGroundEvalFn ::
   SymGroundEvalFn sym ->
@@ -831,7 +1078,7 @@ execGroundFn (SymGroundEvalFn fn) e = do
     ]
   case result of
     Just a -> return a
-    Nothing -> throwHere PEE.InvalidSMTModel
+    Nothing -> throwHere $ PEE.FailedToGroundExpr (PEE.SomeExpr @_ @sym e)
 
 getFootprints ::
   SimBundle sym arch v ->

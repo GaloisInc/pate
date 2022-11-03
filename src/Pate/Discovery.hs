@@ -21,7 +21,8 @@ module Pate.Discovery (
   associateFrames,
   matchingExits,
   isMatchingCall,
-  concreteToLLVM
+  concreteToLLVM,
+  nextBlock
   ) where
 
 import           Control.Lens ( (^.) )
@@ -29,6 +30,8 @@ import           Control.Monad (forM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO, MonadIO )
+import qualified Data.IORef as IO
+import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString as BS
@@ -42,6 +45,7 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import           Data.Parameterized.WithRepr
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -91,6 +95,8 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.SymbolTable as PSym
 import qualified What4.ExprHelpers as WEH
 
+import           Pate.TraceTree
+
 --------------------------------------------------------
 -- Block pair matching
 
@@ -98,13 +104,46 @@ import qualified What4.ExprHelpers as WEH
 discoverPairs ::
   forall sym arch v.
   SimBundle sym arch v ->
+  Maybe (Some PB.WhichBinaryRepr) ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-discoverPairs bundle = withSym $ \sym -> do
+discoverPairs bundle frozen = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty
-  blksO <- getSubBlocks (PSS.simInBlock $ PSS.simInO $ bundle)
-  blksP <- getSubBlocks (PSS.simInBlock $ PSS.simInP $ bundle)
+  cache <- IO.liftIO $ IO.newIORef (Map.empty :: Map.Map (Some (PB.BlockTarget arch)) Bool)
+  let
+    -- quickly filter out unreachable block exits
+    checkSat :: forall bin. PB.KnownBinary bin => PB.BlockTarget arch bin -> EquivM_ sym arch Bool
+    checkSat blkt = do
+      matches <- (matchesBlockTargetOne bundle blkt >>= PAS.toPred sym)
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      result <- isPredSat' goalTimeout matches >>= \case
+        Just True -> return True
+        Just False -> return False
+        Nothing -> throwHere PEE.InconclusiveSAT
+      IO.liftIO $ IO.modifyIORef cache (Map.insert (Some blkt) result)
+      return result
+
+  (blksO, blksP) <- PPa.forBinsL $ \get -> do
+    let repr = get PPa.patchPairRepr
+    case Just (Some repr) == frozen of
+      True -> do
+        let blks = PB.syntheticTargets (get pPair)
+        subTree @"blocktarget1" "Synthetic Targets" $ do
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
+        subTree @"blocktarget1" "Synthetic Sat Targets" $ do
+          blks' <- CMR.lift $ CMR.filterM checkSat blks
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
+          return blks'
+      False -> do
+        blks <- getSubBlocks (get pPair)
+        subTree @"blocktarget1" "Real Targets" $ do
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
+        subTree @"blocktarget1" "Real Sat Targets" $ do
+          blks' <- CMR.lift $ CMR.filterM checkSat blks
+          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
+          return blks'
+        
 
   let
     allCalls = [ PPa.PatchPair blkO blkP
@@ -112,41 +151,48 @@ discoverPairs bundle = withSym $ \sym -> do
                , blkP <- blksP
                , compatibleTargets blkO blkP]
   blocks <- getBlocks $ PSS.simPair bundle
+  
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
+  subTree @"blocktarget" "Cached Pairs" $
+    mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
 
-  result <- forM newCalls $ \blkts -> startTimer $ do
-    let emit r = emitEvent (PE.DiscoverBlockPair blocks blkts r)
-    matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
-    case WI.asConstantPred matches of
-      Just True -> do
-        emit PE.Reachable
-        return $ Just $ blkts
-      Just False -> do
-        emit PE.Unreachable
-        return $ Nothing
-      _ ->  do
-        goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-        er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
-          case satRes of
-            WR.Sat _ -> do
-              emit PE.Reachable
-              return $ Just $ blkts
-            WR.Unsat _ -> do
-              emit PE.Unreachable
-              return Nothing
-            WR.Unknown -> do
+
+
+  result <-
+    subTree @"blocktarget" "Discovered Pairs" $ 
+    forM newCalls $ \blkts -> subTrace blkts $ startTimer $ do
+      let emit r = (emitEvent (PE.DiscoverBlockPair blocks blkts r) >> emitTrace @"blocktargetresult" r)
+      matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
+      case WI.asConstantPred matches of
+        Just True -> do
+          emit PE.Reachable
+          return $ Just $ blkts
+        Just False -> do
+          emit PE.Unreachable
+          return $ Nothing
+        _ ->  do
+          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+          er <- checkSatisfiableWithModel goalTimeout "discoverPairs" matches $ \satRes -> do
+            case satRes of
+              WR.Sat _ -> do
+                emit PE.Reachable
+                return $ Just $ blkts
+              WR.Unsat _ -> do
+                emit PE.Unreachable
+                return Nothing
+              WR.Unknown -> do
+                emit PE.InconclusiveTarget
+                throwHere PEE.InconclusiveSAT
+          case er of
+            Left _err -> do
               emit PE.InconclusiveTarget
               throwHere PEE.InconclusiveSAT
-        case er of
-          Left _err -> do
-            emit PE.InconclusiveTarget
-            throwHere PEE.InconclusiveSAT
-          Right r -> return r
+            Right r -> return r
   let resultSet = Set.fromList (catMaybes result)
   modifyBlockCache envExitPairsCache pPair Set.union resultSet
   return $ Set.toList (Set.union resultSet cachedTargets)
   where
-    pPair = PSS.simPair bundle
+  pPair = PSS.simPair bundle
 
 matchingExits ::
   forall sym arch v.
@@ -215,29 +261,37 @@ exactEquivalence inO inP = withSym $ \sym -> do
 
   liftIO $ WI.andPred sym regsEq memEq
 
+matchesBlockTargetOne ::
+  forall sym arch bin v.
+  PB.KnownBinary bin =>
+  SimBundle sym arch v ->
+  PB.BlockTarget arch bin ->
+  EquivM sym arch (PAS.AssumptionSet sym)
+matchesBlockTargetOne bundle blkt = withSym $ \sym -> do
+    -- true when the resulting IPs call the given block targets
+   let
+     regs = PSS.simOutRegs $ PPa.get @bin (PSS.simOut bundle)
+     ip = regs ^. MC.curIP
+     endCase = PSS.simOutBlockEnd $ PPa.get @bin (PSS.simOut bundle)
+     ret = MCS.blockEndReturn (Proxy @arch) endCase
+
+   callPtr <- concreteToLLVM (PB.targetCall blkt)
+   let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
+
+   targetRet <- targetReturnPtr blkt
+   eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
+   MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
+   let eqCase = PAS.exprBinding e1 e2
+   return $ eqCall <> eqRet <> eqCase
+  
+
 matchesBlockTarget ::
   forall sym arch v.
   SimBundle sym arch v ->
   PPa.PatchPair (PB.BlockTarget arch) ->
   EquivM sym arch (PAS.AssumptionSet sym)
-matchesBlockTarget bundle blktPair = withSym $ \sym -> do
-  -- true when the resulting IPs call the given block targets
-  PPa.catBins $ \get -> do
-    let
-      blkt = get blktPair
-      regs = PSS.simOutRegs $ get (PSS.simOut bundle)
-      ip = regs ^. MC.curIP
-      endCase = PSS.simOutBlockEnd $ get (PSS.simOut bundle)
-      ret = MCS.blockEndReturn (Proxy @arch) endCase
-
-    callPtr <- concreteToLLVM (PB.targetCall blkt)
-    let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
-
-    targetRet <- targetReturnPtr blkt
-    eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
-    MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
-    let eqCase = PAS.exprBinding e1 e2
-    return $ eqCall <> eqRet <> eqCase
+matchesBlockTarget bundle blktPair =
+  PPa.catBins $ \get -> matchesBlockTargetOne bundle (get blktPair)
 
 
 -- | Compute an 'PAS.AssumptionSet' that assumes the association between
@@ -258,7 +312,7 @@ associateFrames ::
   MCS.MacawBlockEndCase ->
   Bool ->
   EquivM sym arch (SimBundle sym arch v)
-associateFrames bundle exitCase isPLT = do
+associateFrames bundle exitCase isStub = do
   (asm :: PAS.AssumptionSet sym) <- PPa.catBins $ \get -> do
     let
       st_pre = PSS.simInState $ get $ simIn bundle
@@ -269,9 +323,9 @@ associateFrames bundle exitCase isPLT = do
     case exitCase of
       -- a backjump does not modify the frame
       MCS.MacawBlockEndJump -> return $ PAS.exprBinding frame_post frame_pre
-      -- PLT stubs are treated specially and do not create return nodes, so
+      -- Stubs are treated specially and do not create return nodes, so
       -- the pre and post frames are the same
-      MCS.MacawBlockEndCall | isPLT -> return $ PAS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndCall | isStub -> return $ PAS.exprBinding frame_post frame_pre
       -- For a function call the post-state frame is the frame for the
       -- target function, and so we represent that by asserting that it is
       -- equal to the value of the stack pointer at the call site
@@ -345,16 +399,14 @@ getSubBlocks b = withBinary @bin $
 -- | Find the abstract domain for a given starting point
 getAbsDomain ::
   forall sym arch bin.
-  PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (MAS.AbsBlockState (MC.ArchReg arch))
-getAbsDomain b = withBinary @bin $ do
-  let addr = PB.concreteAddress b
+getAbsDomain b = withRepr (PB.blockBinRepr b) $ withBinary @bin $ do
   pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
   mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
   case mtgt of
-    Just (Some pb) -> return $ MD.blockAbstractState pb
-    Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
+    Right (Some pb) -> return $ MD.blockAbstractState pb
+    Left err -> throwHere $ PEE.MissingParsedBlockEntry err b
 
 getStackOffset ::
   forall sym arch bin.
@@ -474,19 +526,29 @@ callTargets ::
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
     EquivM sym arch [PB.BlockTarget arch bin]
-callTargets from next_ips ret = do
-   let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) ret
+callTargets from next_ips mret = do
    binCtx <- getBinCtx @bin
    let mem = MBL.memoryImage (PMC.binary binCtx)
-   forM next_ips $ \next -> do
-     let nextMem = PA.addrToMemAddr next
-     let Just segoff = MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem)
-     let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
-                               , PB.functionSymbol = Nothing
-                               , PB.functionBinRepr = PC.knownRepr
-                               }
-     let pb = PB.functionEntryToConcreteBlock fe
-     return (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
+   let pfm = PMC.parsedFunctionMap binCtx
+   fmap catMaybes $ forM next_ips $ \next -> do
+     let nextMem = PA.addrToMemAddr next  
+     case MM.resolveRegionOff mem (MM.addrBase nextMem) (MM.addrOffset nextMem) of
+       Just segoff -> do
+         let fe = PB.FunctionEntry { PB.functionSegAddr = segoff
+                                   , PB.functionSymbol = Nothing
+                                   , PB.functionBinRepr = PC.knownRepr
+                                   , PB.functionIgnored = False
+                                   }
+         fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
+         let pb = PB.functionEntryToConcreteBlock fe'
+         let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) mret
+         return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
+       Nothing -> do
+         -- this isn't necessarily an error, since we always double check
+         -- the call targets anyways, if this is an actual possible call target
+         -- we'll find it when checking for totality
+         -- _ <- emitError $ PEE.MissingRegionOffset (MM.addrBase nextMem) (MM.addrOffset nextMem)
+         return Nothing                                        
 
 -------------------------------------------------------
 -- Driving macaw to generate the initial block map
@@ -567,16 +629,20 @@ runDiscovery ::
 runDiscovery mCFGDir repr extraSyms elf hints pd = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
-  addrSyms <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
+  addrSyms' <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
+  addrSyms <- F.foldlM (addElfFunction) addrSyms' (DLN.toList entries)
+  
   let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
   pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
   let startEntry = DLN.head entries
+  
   let startEntry' = PB.FunctionEntry { PB.functionSegAddr = startEntry
                                      , PB.functionSymbol = Nothing
                                      , PB.functionBinRepr = repr
+                                     , PB.functionIgnored = False
                                      }
   let abortFnEntry = do
         fnDesc <- lookup abortFnName (PH.functionEntries hints)
@@ -584,6 +650,7 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
         return PB.FunctionEntry { PB.functionSegAddr = abortFnAddr
                                 , PB.functionSymbol = Just (TE.encodeUtf8 abortFnName)
                                 , PB.functionBinRepr = repr
+                                , PB.functionIgnored = False
                                 }
 
   let symTab = buildSymbolTable hints extraSyms
@@ -593,6 +660,12 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin
+
+    addElfFunction m segOff = do
+      let addr = MM.segoffAddr segOff
+      case MBL.symbolFor bin addr of
+        Right nm -> return $ Map.insert segOff nm m
+        Left (_e :: CMC.SomeException) -> return m
 
     addFunctionEntryHint m (_, fd) =
       let addrWord = PH.functionAddress fd
@@ -664,6 +737,29 @@ lookupBlocks b = do
           binRep = PC.knownRepr
       CME.throwError $ PEE.equivalenceErrorFor binRep ierr
     Right blocks -> return blocks
+
+-- | From a 'PB.ConcreteBlock', if it corresponds to the start of a
+--   block, find a 'PB.ConcreteBlock' immediately following
+--   the end of the corresponding 'MD.ParsedBlock'
+nextBlock ::
+  forall sym arch bin.
+  HasCallStack =>
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (Maybe (PB.ConcreteBlock arch bin))
+nextBlock b = do
+  let
+    go :: forall ids. [MD.ParsedBlock arch ids] -> Maybe (PB.ConcreteBlock arch bin)
+    go [] = Nothing
+    go [_pb] = Nothing
+    go (pb : pbNext : pbs) = case PA.segOffToAddr (MD.pblockAddr pb) == PB.concreteAddress b of
+      True -> Just (PB.ConcreteBlock (PA.segOffToAddr (MD.pblockAddr pbNext)) PB.BlockEntryJump WI.knownRepr (PB.blockFunctionEntry b))
+      False -> go (pbNext : pbs)
+  binCtx <- getBinCtx @bin
+  ebs <- liftIO $ lookupBlocks' binCtx b
+  case ebs of
+    Left _ -> return Nothing
+    Right (PDP.ParsedBlocks blocks) -> return $ go blocks
 
 -- | Construct a symbolic pointer for the given 'ConcreteBlock'
 --

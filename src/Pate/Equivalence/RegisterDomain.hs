@@ -9,6 +9,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
+{-# LANGUAGE TypeApplications   #-}
 
 module Pate.Equivalence.RegisterDomain (
     RegisterDomain
@@ -95,22 +96,7 @@ mkDomain ::
   WI.IsExprBuilder sym =>
   Map (Some (MM.ArchReg arch)) (WI.Pred sym) ->
   RegisterDomain sym arch
-mkDomain dom = dropFalseRegisters $ RegisterDomain dom
-
--- | Drop entries with false conditions.
-dropFalseRegisters ::
-  forall sym arch.
-  WI.IsExprBuilder sym =>
-  RegisterDomain sym arch ->
-  RegisterDomain sym arch
-dropFalseRegisters (RegisterDomain dom) = RegisterDomain $ Map.mapMaybe dropFalse dom
-  where
-    dropFalse ::
-      WI.Pred sym ->
-      Maybe (WI.Pred sym)
-    dropFalse p = case WI.asConstantPred p of
-      Just False -> Nothing
-      _ -> Just p
+mkDomain dom = RegisterDomain dom
 
 -- | Register domain that contains all registers
 universal ::
@@ -203,16 +189,26 @@ ppRegisterDomain ::
   , ShowF (MM.ArchReg arch)
   ) =>
   (WI.Pred sym -> PP.Doc a) ->
+  (forall tp. MM.ArchReg arch tp -> Maybe (PP.Doc a)) ->
   RegisterDomain sym arch ->
   PP.Doc a
-ppRegisterDomain showCond dom =
+ppRegisterDomain showCond showReg dom =
   PP.vsep
-   [ PP.pretty (showF reg) <> PP.line <> (PP.indent 2 (showCond p))
-   | (Some reg, p) <- toList dom
-   , WI.asConstantPred p /= Just True
+   [ PP.vsep ([reg_s] ++
+      case (registerInDomain' reg dom) of
+        Nothing -> []
+        Just p | Just False <- WI.asConstantPred p -> []
+        Just p -> [PP.indent 2 (showCond p)]
+             )
+   | (MapF.Pair reg _) <- MapF.toList (MM.archRegSet @(MM.ArchReg arch))
+   , Just reg_s <- [showReg reg]
+   -- FIXME: should we always exclude these from printing?
+   , (Some reg) /= (Some (MM.sp_reg @(MM.ArchReg arch)))
+   , (Some reg) /= (Some (MM.ip_reg @(MM.ArchReg arch)))
+   , (fmap WI.asConstantPred (registerInDomain' reg dom)) /= (Just (Just True))
    ]
 
 instance
   (MM.RegisterInfo (MM.ArchReg arch), WI.IsExprBuilder sym) =>
   PP.Pretty (RegisterDomain sym arch) where
-  pretty = ppRegisterDomain WI.printSymExpr
+  pretty = ppRegisterDomain WI.printSymExpr (\r -> Just (PP.pretty (showF r)))

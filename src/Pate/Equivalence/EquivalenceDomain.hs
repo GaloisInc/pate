@@ -7,6 +7,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Pate.Equivalence.EquivalenceDomain (
     EquivalenceDomain(..)
@@ -41,6 +42,9 @@ data EquivalenceDomain sym arch where
     , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
     }  -> EquivalenceDomain sym arch
 
+instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationTraversable sym arch (EquivalenceDomain sym arch) where
+  traverseLocation sym x f = PL.witherLocation sym x (\loc p -> Just <$> f loc p)
+
 instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationWitherable sym arch (EquivalenceDomain sym arch) where
   witherLocation sym (EquivalenceDomain a b c) f = EquivalenceDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f <*> PL.witherLocation sym c f
 
@@ -54,12 +58,15 @@ ppEquivalenceDomain ::
   -- | Called when a cell is in the domain conditionally, with
   -- a non-trivial condition
   (WI.Pred sym -> PP.Doc a) ->
+   -- FIXME: can't use displayRegister from Arch due to import cycle
+  (forall tp. MM.ArchReg arch tp -> Maybe (PP.Doc a)) ->
   EquivalenceDomain sym arch ->
   PP.Doc a
-ppEquivalenceDomain showCond dom =
+ppEquivalenceDomain showCond showReg dom =
   PP.vsep
   [ "== Registers =="
-  , PER.ppRegisterDomain showCond (eqDomainRegisters dom)
+ 
+  , PER.ppRegisterDomain showCond showReg (eqDomainRegisters dom)
   , "== Stack =="
   , PEM.ppMemoryDomainEntries showCond (eqDomainStackMemory dom)
   , "== Globals =="

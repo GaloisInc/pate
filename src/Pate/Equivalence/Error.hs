@@ -5,9 +5,11 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
+{-# LANGUAGE AllowAmbiguousTypes   #-}
 
 module Pate.Equivalence.Error (
     InnerEquivalenceError(..)
+  , SomeExpr(..)
   , LoadError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
@@ -48,6 +50,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
+import qualified Pate.Hints.BSI as PHB
 import           Pate.TraceTree
 
 data InequivalenceReason =
@@ -104,6 +107,23 @@ data InnerEquivalenceError arch
   | UnknownPLTStub BS.ByteString
   | NotImplementedYet String
   | UnexpectedTailCallEntry (PB.FunPair arch)
+  | forall w. MissingRegionOffset Int (MM.MemWord w)
+  | BlockHasNoExit (PB.BlockPair arch)
+  | CallReturnsToFunctionEntry (PB.BlockPair arch)
+  | NonTotalBlockExits (PB.BlockPair arch)
+  | forall bin. MissingParsedBlockEntry String (PB.ConcreteBlock arch bin)
+  | OrphanedFunctionReturns
+  | MissingDomainForBlock (PB.BlockPair arch)
+  | MissingDomainForFun (PB.FunPair arch)
+  | SkippedInequivalentBlocks (PB.BlockPair arch)
+  | SymbolicExecutionError String
+  | UnsatisfiableEquivalenceCondition (SomeExpr W4.BaseBoolType)
+  | forall tp. FailedToGroundExpr (SomeExpr tp)
+
+data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
+
+instance Show (SomeExpr tp) where
+  show (SomeExpr e) = show (W4.printSymExpr e)
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
@@ -125,6 +145,10 @@ isRecoverable' e = case e of
   RescopingFailure{} -> True
   WideningError{} -> True
   NotImplementedYet{} -> True
+  MissingRegionOffset{} -> True
+  BlockHasNoExit{} -> True
+  OrphanedFunctionReturns{} -> True
+  CallReturnsToFunctionEntry{} -> True
   _ -> False
 
 -- | When an error is raised as a warning, this determines if it should be displayed
@@ -148,7 +172,7 @@ data SimpResult = forall sym tp. W4.IsExpr (W4.SymExpr sym) =>
   SimpResult (Proxy sym) (W4.SymExpr sym tp) (W4.SymExpr sym tp)
 
 instance PP.Pretty SimpResult where
-  pretty (SimpResult _ e1 e2) = W4.printSymExpr e1 <+> W4.printSymExpr e2
+  pretty (SimpResult _ e1 e2) = PP.vsep [W4.printSymExpr e1, W4.printSymExpr e2]
 
 instance Show SimpResult where
   show r = show (PP.pretty r)
@@ -165,7 +189,9 @@ data LoadError where
   JSONParseError :: FilePath -> PHJ.JSONError -> LoadError
   CSVParseError :: FilePath -> PHC.CSVParseError -> LoadError
   DWARFError :: FilePath -> PHD.DWARFError -> LoadError
+  BSIParseError :: FilePath -> PHB.JSONError -> LoadError
   ElfParseError :: DEE.ElfParseError -> LoadError
+  ConfigError :: String -> LoadError
 deriving instance Show LoadError
 
 

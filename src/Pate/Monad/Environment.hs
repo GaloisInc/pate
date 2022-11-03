@@ -30,11 +30,15 @@ import qualified Data.Time as TM
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some
 
+import qualified Data.IORef as IO
+import qualified Data.Parameterized.SetF as SetF
+
 import qualified Lumberjack as LJ
 
 import qualified Data.Macaw.Memory as DMM
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFGSlice as MCS
+import qualified Data.Macaw.CFG as MC
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as CS
 
@@ -50,6 +54,7 @@ import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Location as PL
 import qualified Pate.Proof as PF
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
@@ -79,12 +84,16 @@ data EquivEnv sym arch where
     -- ^ start checkpoint for timed events - see 'startTimer' and 'emitEvent'
     , envCurrentFrame :: PAS.AssumptionSet sym
     -- ^ the current assumption frame, accumulated as assumptions are added
+    , envPathCondition :: PAS.AssumptionSet sym
+    -- ^ assumptions specific to a particular path (subsumed by envCurrentFrame)
     , envNonceGenerator :: N.NonceGenerator IO (PF.SymScope sym)
     , envParentNonce :: Some (PF.ProofNonce sym)
     -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
     , envParentBlocks :: [PB.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel
+    , envEqCondFns :: Map (PB.FunPair arch) (Some (PL.Location sym arch) -> Bool)
+    -- ^ functions that should be considered for generating equivalence conditions
     , envExitPairsCache :: ExitPairCache arch
     -- ^ cache for intermediate proof results
     , envStatistics :: MVar.MVar PES.EquivalenceStatistics
@@ -95,7 +104,23 @@ data EquivEnv sym arch where
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     , envTreeBuilder :: TreeBuilder '(sym, arch)
+    , envUnsatCacheRef :: IO.IORef (SolverCache sym)
+    , envSatCacheRef :: IO.IORef (SolverCache sym)
+    , envTargetEquivRegs :: Set.Set (Some (MC.ArchReg arch))
+    , envPtrAssertions :: MT.PtrAssertions sym
     } -> EquivEnv sym arch
+
+-- pushing assumption contexts should:
+--    preserve the Unsat cache from the outer context into the inner context
+--    (i.e. adding assumptions cannot make an unsatsfiable predicate satisfiable)
+--    discard the Sat cache from the outer context
+--    (i.e. previously satisfiable predicate may become unsatisfiable with more assumpionts)
+-- popping assumption contexts should
+--    discard any discovered Unsat results from inner context
+--    (i.e. relaxing assumptions may cause previously unsatsfiable results to now be satisfiable)
+--    preserve any learned Sat results from inner context
+--    (i.e. relaxing assumptions cannot may a satsifiable result unsatisfiable)
+type SolverCache sym = SetF.SetF (W4.SymExpr sym) W4.BaseBoolType
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
 

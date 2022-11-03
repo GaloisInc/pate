@@ -53,7 +53,17 @@ data BinaryContext arch (bin :: PBi.WhichBinary) = BinaryContext
   -- Note that this table has more entries than the 'functionHintIndex', as it
   -- also includes entries from the dynamic symbol table representing the
   -- addresses of PLT stubs that call out to shared library functions
+  -- , dataSymbols :: Map.Map (PA.ConcreteAddress arch) DataSymbol
+  -- ^ Map addresses to global symbol names
   }
+
+{-
+data DataSymbol =
+  DataSymbol { symbolSize :: Word32
+             , symbolName :: T.Text
+             }
+  deriving (Read, Show, Ord, Eq)
+-}
 
 data EquivalenceContext sym arch where
   EquivalenceContext ::
@@ -71,6 +81,7 @@ data EquivalenceContext sym arch where
     } -> EquivalenceContext sym arch
 
 $(L.makeLenses ''EquivalenceContext)
+
 
 {- Note [Ignored Functions]
 
