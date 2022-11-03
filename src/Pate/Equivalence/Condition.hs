@@ -13,6 +13,8 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Equivalence.Condition (
     EquivalenceCondition(..)
   , RegisterCondition(..)
@@ -25,15 +27,10 @@ module Pate.Equivalence.Condition (
   ) where
 
 import           Control.Lens ( (^.), (&), (.~) )
-import           Control.Monad ( forM )
 import qualified Control.Monad.IO.Class as IO
-import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Classes
 import           Data.Functor.Const
 import           Data.Parameterized.Some ( Some(..) )
-import           Data.Set (Set)
-import qualified Data.Set as S
-import           GHC.TypeNats
 import qualified What4.Interface as W4
 
 import qualified Prettyprinter as PP
@@ -43,17 +40,13 @@ import qualified Data.Macaw.CFG as MM
 
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
-import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.MemCell as PMC
-import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.SimState as PS
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.Location as PL
 import qualified What4.PredMap as WPM
-import qualified Pate.Solver as PSo
 
-import qualified Pate.ExprMappable as PEM
 import           Pate.TraceTree
 ---------------------------------------------
 -- Equivalence Condition
@@ -149,8 +142,8 @@ trueRegCond ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
-  RegisterCondition  sym arch v
-trueRegCond sym = RegisterCondition (MM.mkRegState (\_ -> mempty))
+  RegisterCondition sym arch v
+trueRegCond _sym = RegisterCondition (MM.mkRegState (\_ -> mempty))
 
 instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
   traverseLocation sym body f = RegisterCondition <$>

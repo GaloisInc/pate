@@ -21,13 +21,9 @@
 module Main ( main, runMain, cliOptions ) where
   
 
-import           Control.Applicative ( (<|>) )
 import qualified Control.Concurrent as CC
 import qualified Control.Concurrent.Async as CCA
-import           Control.Monad ( join )
 import qualified Data.Foldable as F
-import qualified Data.Traversable as T
-import qualified Language.C as LC
 import qualified Lumberjack as LJ
 import           Numeric ( showHex )
 import qualified Options.Applicative as OA

@@ -76,6 +76,7 @@ module What4.ExprHelpers (
   , HasIntegerToNat(..)
   , stripAnnotations
   , assertPositiveNat
+  , printAtoms
   ) where
 
 import           GHC.TypeNats
@@ -92,7 +93,6 @@ import           Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import qualified System.IO as IO
 
 import qualified Prettyprinter as PP
-import           Prettyprinter ( (<+>) )
 
 import           Data.Foldable (foldlM, foldrM)
 import qualified Data.BitVector.Sized as BVS
@@ -861,16 +861,6 @@ resolveConcreteLookups ::
 resolveConcreteLookups sym check e_outer = do
   cache <- W4B.newIdxCache
   let
-    andPred ::
-      forall (tp' :: W4.BaseType).
-      Const (Maybe Bool) tp' ->
-      Maybe Bool ->
-      Maybe Bool
-    andPred (Const p) (Just b) = case p of
-      Just b' -> Just (b && b')
-      Nothing -> Nothing
-    andPred _ Nothing = Nothing
-
     resolveArr ::
       forall idx idx1 idx2 tp'.
       idx ~ (idx1 Ctx.::> idx2) =>
@@ -1137,12 +1127,12 @@ simplifyBVOpInner ::
   forall sym t solver fs tp.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   sym ->
-  SimpCheck sym IO {- ^ double-check simplification step -} ->
+  SimpCheck sym IO {- ^ double-check simplification step (unused currently) -} ->
   -- | Recursive call to outer simplification function
   (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) ->
   W4B.App (W4B.Expr t) tp ->
   Maybe (IO (W4.SymExpr sym tp))
-simplifyBVOpInner sym simp_check go app = case app of
+simplifyBVOpInner sym _simp_check go app = case app of
   W4B.BVConcat w u v -> do
       W4B.BVSelect upper n bv <- W4B.asApp u
       W4B.BVSelect lower n' bv' <- W4B.asApp v

@@ -22,7 +22,6 @@ import           Control.Lens ( (^?), (^.) )
 import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
-import qualified Data.Parameterized.Map as MapF
 import           Data.Proxy ( Proxy(..) )
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.ByteString.Char8 as BSC

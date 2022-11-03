@@ -87,7 +87,7 @@ graphNodeCases (ReturnNode (NodeReturn _ funs)) = Right funs
 -- | Additional context used to distinguish function calls
 --   "Freezing" one binary in a node indicates that it should not continue
 --   execution until the other binary has returned
-data CallingContext arch = CallingContext { ctxAncestors :: [PB.BlockPair arch], ctxFrozen :: FrozenContext arch }
+data CallingContext arch = CallingContext { _ctxAncestors :: [PB.BlockPair arch], ctxFrozen :: FrozenContext arch }
   deriving (Eq, Ord)
 
 data FrozenContext arch where

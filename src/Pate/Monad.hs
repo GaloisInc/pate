@@ -115,9 +115,6 @@ import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Reader ( asks )
 import           Control.Monad.Except
 
-
-import qualified Control.Concurrent.MVar as IO
-
 import           Data.Maybe ( fromMaybe )
 import qualified Data.Map as M
 import           Data.Set (Set)
@@ -928,16 +925,6 @@ concretePred timeout p = case W4.asConstantPred p of
           Just False -> return $ Just False
           Nothing -> return Nothing
 
--- | Convert a 'W4R.Unsat' result into True
---
--- Other SAT results become False
-asProve :: Monad m => W4R.SatResult mdl core -> m Bool
-asProve satRes =
-  case satRes of
-    W4R.Sat _ -> return False
-    W4R.Unsat _ -> return True
-    W4R.Unknown -> return False
-
 instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   present m = IO.withRunInIO $ \runInIO -> Par.present (runInIO m)
   -- here we can implement scheduling of IOFutures, which can be tracked
@@ -1039,9 +1026,8 @@ wrapGroundEvalFn ::
   EquivM sym arch (SymGroundEvalFn sym)
 wrapGroundEvalFn fn@(SymGroundEvalFn gfn) es = withSym $ \sym -> do
   binds <- extractBindings fn es
-  IO.withRunInIO $ \runInIO -> do
-    let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= (W4G.groundEval gfn)))
-    return $ SymGroundEvalFn fn'
+  let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= (W4G.groundEval gfn)))
+  return $ SymGroundEvalFn fn'
 
 {-
 -- | Modified grounding that first applies some manual rewrites

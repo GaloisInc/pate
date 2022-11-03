@@ -203,7 +203,7 @@ getSimplifier = withSym $ \sym -> do
       emitTraceLabel @"expr" "input" (Some e)
       e1 <- WEH.resolveConcreteLookups sym concPred e
       emitIfChanged "resolveConcreteLookups" e e1
-      valid <- liftIO $ W4.isEq sym e e1
+      -- valid <- liftIO $ W4.isEq sym e e1
       e2 <- WEH.simplifyBVOps sym e1
       emitIfChanged "simplifyBVOps" e1 e2
       e3 <- liftIO $ WEH.fixMux sym e2

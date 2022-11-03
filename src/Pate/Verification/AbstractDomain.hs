@@ -42,8 +42,7 @@ import qualified Prettyprinter as PP
 import           Control.Monad ( forM, unless )
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Writer as CMW
-import           Control.Monad.Identity ( runIdentity )
-import           Control.Lens ( (^.), (.~), (&) )
+import           Control.Lens ( (^.) )
 
 import           Data.Functor.Const
 import qualified Data.Set as S

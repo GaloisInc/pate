@@ -98,21 +98,6 @@ mkDomain ::
   RegisterDomain sym arch
 mkDomain dom = RegisterDomain dom
 
--- | Drop entries with false conditions.
-dropFalseRegisters ::
-  forall sym arch.
-  WI.IsExprBuilder sym =>
-  RegisterDomain sym arch ->
-  RegisterDomain sym arch
-dropFalseRegisters (RegisterDomain dom) = RegisterDomain $ Map.mapMaybe dropFalse dom
-  where
-    dropFalse ::
-      WI.Pred sym ->
-      Maybe (WI.Pred sym)
-    dropFalse p = case WI.asConstantPred p of
-      Just False -> Nothing
-      _ -> Just p
-
 -- | Register domain that contains all registers
 universal ::
   MM.RegisterInfo (MM.ArchReg arch) =>

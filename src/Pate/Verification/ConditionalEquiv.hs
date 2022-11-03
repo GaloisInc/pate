@@ -18,50 +18,29 @@ module Pate.Verification.ConditionalEquiv (
   computeEqCondition
   ) where
 
-import           Control.Lens ( (^.), (&), (.~) )
-import           Control.Monad ( forM, join)
+import           Control.Monad ( join)
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad.IO.Class ( liftIO )
 
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
-import           Data.Maybe (catMaybes)
 import qualified Data.BitVector.Sized as BVS
-import           Data.Parameterized.Classes
 import           Data.Functor.Const
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           GHC.TypeNats
 
 import qualified What4.SatResult as W4R
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
-import qualified What4.Expr.GroundEval as W4G
 
-import qualified Prettyprinter as PP
-
-import qualified Data.Macaw.CFG as MM
-
-
-import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Config as PC
-import qualified Pate.Verification.Concretize as PVC
-import qualified Pate.Equivalence.RegisterDomain as PER
-import qualified Pate.ExprMappable as PEM
-import qualified Pate.MemCell as PMC
-import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.SimState as PS
-import qualified Pate.Register.Traversal as PRt
 import qualified Pate.Verification.Simplify as PSi
-import qualified Pate.Location as PL
-import qualified What4.PredMap as WPM
-import qualified Pate.Solver as PSo
 import           Pate.Monad
 
-import qualified Pate.ExprMappable as PEM
 import qualified What4.PathCondition as WPC
 import qualified What4.ExprHelpers as WEH
 import           Pate.TraceTree
@@ -118,16 +97,14 @@ computeEqCondition ::
   -- | expressions to extract path conditions from
   Set (Some (W4.SymExpr sym)) ->
   EquivM sym arch (W4.Pred sym)
-computeEqCondition bundle eqPred vals = withTracing @"function_name" "computeEqCondition" $ withSym $ \sym -> do
+computeEqCondition _bundle eqPred vals = withTracing @"function_name" "computeEqCondition" $ withSym $ \sym -> do
   cond <- go (W4.truePred sym) (W4.truePred sym) computeEqConditionGas
   PSi.simplifyPred cond
   where
     go :: W4.Pred sym -> W4.Pred sym -> Int -> EquivM sym arch (W4.Pred sym)
-    go asms pathCond 0 = do
-      return pathCond
+    go _asms pathCond 0 = return pathCond
     go asms pathCond gas = withTracingLabel @"expr" "step" (Some pathCond) $ withSym $ \sym -> do
       -- can we satisfy equivalence, assuming that none of the given path conditions are taken?
-      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
       check <- IO.liftIO $ W4.notPred sym eqPred
       mresult <- goalSat "computeEqCondition" check $ \case
         W4R.Unsat _ -> return Nothing
@@ -181,23 +158,7 @@ addPathCondition ::
   EquivM_ sym arch (W4.Pred sym)  
 addPathCondition fn isSat p (Some e) = withTracing @"function_name" "addPathCondition" $ withValid $ withSym $ \sym -> do
   emitTraceLabel @"expr" "Path Condition For:" (Some e)
-    {-
-    binds <- extractBindings fn e
-    subTree @"expr" "Bindings" $ do
-       mapM_ (\(MapF.Pair var val) -> subTrace (Some var) $ emitTrace @"expr" (Some val)) (MapF.toList binds)
-    -}
   p' <- withGroundEvalFn fn $ \fn' -> do
-    {-
-    extra <- case W4.exprType e of
-      W4.BaseIntegerRepr -> do
-        zero <- liftIO $ W4.intLit sym 0
-        isZero <- liftIO $ W4.isEq sym e zero
-        (liftIO $ W4G.groundEval fn' isZero) >>= \case
-          True -> return isZero
-          False -> liftIO $ W4.notPred sym isZero
-      _ -> return $ W4.truePred sym
-    pathcond <- WPC.getPathCondition sym fn' isSat e
-    liftIO $ W4.andPred sym extra pathcond -}
     WPC.getPathCondition sym fn' isSat e
   emitTraceLabel @"expr" "Path Condition Result:" (Some p')
   liftIO $ W4.andPred sym p p'  
@@ -252,7 +213,7 @@ weakenEqCondition ::
   -- | expressions to extract path conditions from
   Set (Some (W4.SymExpr sym)) ->
   EquivM sym arch (W4.Pred sym)
-weakenEqCondition bundle pathCond_outer eqPred vals = withSym $ \sym -> do
+weakenEqCondition _bundle pathCond_outer eqPred vals = withSym $ \sym -> do
   let
     go :: W4.Pred sym -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
     go notPathCond pathCond = do
@@ -295,7 +256,7 @@ checkAndMinimizeEqCondition ::
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
-checkAndMinimizeEqCondition bundle cond goal = withValid $ withSym $ \sym -> do
+checkAndMinimizeEqCondition _bundle cond goal = withValid $ withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- this check is not strictly necessary, as the incremental checks should guarantee it
   -- for the moment it's a sanity check on this process as well as the final simplifications

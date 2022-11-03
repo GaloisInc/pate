@@ -41,7 +41,6 @@ import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.Nonce as N
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Proxy ( Proxy(..) )
-import qualified Data.List as L
 import qualified Data.IORef as IO
 import qualified Data.Set as S
 import qualified Data.Text as T

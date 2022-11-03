@@ -20,11 +20,10 @@ module Pate.Discovery.ParsedFunctions (
 
 import           Control.Lens ( (^.), (&), (.~) )
 import qualified Data.ByteString.Char8 as BSC
-import qualified Control.Exception as IO
 import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
-import           Data.Maybe ( mapMaybe, isJust )
+import           Data.Maybe ( mapMaybe )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..), viewSome )
@@ -34,25 +33,21 @@ import qualified Prettyprinter.Render.Text as PPT
 import qualified System.Directory as SD
 import           System.FilePath ( (</>), (<.>) )
 import qualified System.IO as IO
-import qualified System.IO.Unsafe as IO
 
 import qualified Data.Macaw.AbsDomain.AbsState as DMAA
 import qualified Data.Macaw.AbsDomain.JumpBounds as DMAJ
 import qualified Data.Macaw.Architecture.Info as MAI
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Discovery.State as MD
 import qualified Data.Macaw.Discovery.ParsedContents as DMDP
 import qualified What4.Interface as W4
-import           What4.Utils.Process (filterAsync)
 
 import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Memory as PM
-import qualified Pate.Register.Traversal as PRt
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -291,10 +286,9 @@ parsedFunctionContaining ::
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
-parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir pd) = do
+parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd) = do
   let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
   st <- IORef.readIORef pfmRef
-  let ds0 = discoveryState st
   ignoredAddresses <- getIgnoredFns pfm
 
   -- First, check if we have a cached set of blocks for this state

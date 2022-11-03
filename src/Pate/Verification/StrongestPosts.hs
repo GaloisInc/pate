@@ -27,12 +27,10 @@ import           GHC.Stack ( HasCallStack )
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM)
-import           Control.Monad.Identity ( runIdentity )
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (asks, local)
-import           Control.Monad.Except (catchError, throwError)
+import           Control.Monad.Except (catchError)
 import           Control.Monad.Trans (lift)
-import           System.IO as IO
 import           Numeric (showHex)
 import           Prettyprinter
 
@@ -57,7 +55,6 @@ import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.WithRepr
 
 import qualified What4.Expr as W4
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import           What4.SatResult (SatResult(..))
 
@@ -67,11 +64,9 @@ import qualified Lang.Crucible.Simulator.RegValue as LCS
 import           Lang.Crucible.Simulator.SymSequence
 import qualified Lang.Crucible.Utils.MuxTree as MT
 
-import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
-import qualified Data.Macaw.Discovery as MD
 
 import qualified Pate.Abort as PAb
 import qualified Pate.AssumptionSet as PAS
@@ -103,11 +98,9 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, nodeFuns, graphNodeBlocks, getFrozen, isThisFrozen, applyFreeze, FrozenContext(..), frozenRepr, unfreezeReturn, freezeNodeFn, freezeNode, returnOfEntry)
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, getFrozen, isThisFrozen, applyFreeze, FrozenContext(..), frozenRepr, unfreezeReturn, freezeNodeFn, freezeNode, returnOfEntry)
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
-import qualified Pate.ExprMappable as PEM
-import           What4.ExprHelpers
 
 -- Overall module notes/thoughts
 --
@@ -368,7 +361,7 @@ getFunctionAbs node d gr = do
       -- the function entry point
       let fnPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks node)  
       case getCurrentDomain gr (GraphNode node) of
-        Just preSpec -> PS.viewSpec preSpec $ \scope d' -> PPa.forBins $ \get -> do
+        Just preSpec -> PS.viewSpec preSpec $ \_ d' -> PPa.forBins $ \get -> do
           let
             vals = get (PAD.absDomVals d')
             absSt = PAD.domainValsToAbsState vals
@@ -386,7 +379,6 @@ withAbsDomain ::
   EquivM sym arch a
 withAbsDomain node d gr f = do
   PA.SomeValidArch archData <- asks envValidArch
-  let pPair = nodeBlocks node
   ovPair <- getFunctionAbs node d gr  
   binCtxPair <- PPa.forBins $ \get -> do
     binCtx <- getBinCtx
@@ -495,7 +487,6 @@ withSimBundle ::
   (SimBundle sym arch v -> EquivM_ sym arch a) ->
   EquivM sym arch a
 withSimBundle vars node f = do
-  let bPair = nodeBlocks node
   bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle node vars
   simplifier <- PSi.getSimplifier
   bundle1 <- PSi.applySimplifier simplifier bundle0
@@ -531,7 +522,6 @@ checkParsedBlocks ::
 checkParsedBlocks pPair = PPa.catBins $ \get -> do
   pfm <- PMC.parsedFunctionMap <$> getBinCtx
   let blk = get pPair
-  let fnEntryBlk = PB.functionEntryToConcreteBlock (PB.blockFunctionEntry blk)
   (liftIO $ PD.parsedFunctionContaining blk pfm) >>= \case
     Just{} -> return ()
     Nothing -> throwHere $ PEE.MissingParsedBlockEntry "checkParsedBlocks" blk
@@ -1589,12 +1579,14 @@ mergeStubOverrides validArch
     (Just nm1, Just nm2) | nm1 == nm2 -> ov1'
     _ -> combineOverrides ov1' ov2' 
 
+-- FIXME: re-evaluate how safe inlining is
+{-
 bothDefinedOverrides ::
   PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) ->
   Bool
 bothDefinedOverrides (PPa.PatchPair (Const (Just{})) (Const (Just{}))) = True
 bothDefinedOverrides _ = False
-
+-}
 
 -- | If we have a mismatch in our stub semantics, we need to create
 --   a freeze node for whichever binary hit the stub
@@ -1611,28 +1603,6 @@ freezeMismatchedStubs stubs = case viewStubPair stubs of
   -- stub symbol in this case
   (Nothing, Nothing) -> Nothing
 
-
-
-transportStub ::
-  StubPair ->
-  NodeEntry arch ->
-  PPa.PatchPair (PB.ConcreteBlock arch) {- ^ jump target -} ->
-  PPa.PatchPair (PB.ConcreteBlock arch){- ^ return target -} ->
-  NodeEntry arch
-transportStub stubs currBlock pPair pRetPair = runIdentity $ do
-  blks <- PPa.forBins $ \get -> do
-    case get stubs of
-      -- for an abort stub, we should jump back to the entry point
-      -- that caused this
-      -- FIXME: this is an approximation that allows us to
-      -- continue in the case of divergent control flow,
-      -- but is not exactly semantically correct
-      Const (Just nm) | isAbortStub nm -> return $ get (nodeBlocks currBlock)
-      -- for a normal stub, jump to the return
-      Const (Just{}) ->  return $ get pRetPair
-      -- otherwise, jump to the actual target
-      Const Nothing -> return $ get pPair
-  return $ mkNodeEntry currBlock blks
 
 handleStub ::
   HasCallStack =>
@@ -1666,12 +1636,14 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
           parents <- asks envParentBlocks
           case (elem pRetPair parents) of
             -- FIXME: evaluate how safe inlining is
+            {-
             False | bothDefinedOverrides ovPair, False -> do
               --  inline the next blocks
               vars <- PPa.forBins $ \get -> return $ PS.SimVars $ PS.simOutState (get outputs)
 
               withPair pRetPair $ withSimBundle vars currBlock $ \nextBundle -> withPair (nodeBlocks currBlock) $ do
                 processBundle scope currBlock nextBundle d gr0
+            -}
             _ -> do
               -- for previously-accessed nodes or undefined stubs, we treat it
               -- like a jump

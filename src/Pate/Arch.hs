@@ -49,14 +49,12 @@ import qualified Data.Text as T
 import           Data.Typeable ( Typeable )
 import           GHC.TypeLits ( type (<=) )
 import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Context as Ctx
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
 import qualified Data.ElfEdit as E
-import qualified Data.Macaw.AbsDomain.AbsState as DMAA
 import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
@@ -282,7 +280,7 @@ mkObservableOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r0 -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r1 -} ->
   StubOverride arch
-mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym wsolver -> do
+mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "written") (W4.BaseBVRepr w_mem)
   return $ StateTransformer $ \st -> do

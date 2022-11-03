@@ -30,7 +30,6 @@ import           Control.Monad (forM)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO, MonadIO )
-import           System.IO as IO
 import qualified Data.IORef as IO
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Reader as CMR
@@ -39,7 +38,6 @@ import qualified Data.ByteString as BS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
 import           Data.Int
-import qualified Data.List as L
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
 import           Data.Maybe ( catMaybes )
@@ -404,7 +402,6 @@ getAbsDomain ::
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (MAS.AbsBlockState (MC.ArchReg arch))
 getAbsDomain b = withRepr (PB.blockBinRepr b) $ withBinary @bin $ do
-  let addr = PB.concreteAddress b
   pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
   mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
   case mtgt of

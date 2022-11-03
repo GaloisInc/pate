@@ -54,7 +54,6 @@ import qualified Data.Macaw.Types as MT
 
 import           Pate.Panic
 import qualified Pate.Binary as PBi
-import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
@@ -68,7 +67,6 @@ import qualified Pate.Proof.Operations as PP
 import qualified Pate.Proof.CounterExample as PP
 import qualified Pate.Proof.Instances ()
 import qualified Pate.ExprMappable as PEM
-import qualified Pate.Register as PR
 import qualified Pate.Solver as PSo
 
 import           Pate.Monad
@@ -80,7 +78,6 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
 
 import           Pate.Verification.PairGraph
-import qualified Pate.Verification.Simplify as PSi
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases, nodeFuns )
@@ -123,7 +120,7 @@ getEquivPostCondition ::
   GraphNode arch {- ^ target -} ->
   PairGraph sym arch ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-getEquivPostCondition scope bundle to gr = withSym $ \sym -> do
+getEquivPostCondition scope _bundle to gr = withSym $ \sym -> do
   case getEquivCondition gr to of
     Just condSpec -> do
       -- FIXME: what to do with asm?
@@ -147,7 +144,7 @@ computeEquivCondition ::
   AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
   (forall l. PL.Location sym arch l -> Bool) {- ^ filter for locations to force equal -} ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
+computeEquivCondition _scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
   (regsO, regsP) <- PPa.forBinsC $ \get -> return $ PS.simOutRegs (get (PS.simOut bundle))
@@ -196,20 +193,15 @@ computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "
           --let values = Set.singleton (Some eqPred')
           withAssumptionSet ptrAsms $ do
             cond1 <- PVC.computeEqCondition bundle eqPred' values
-
             emitTraceLabel @"expr" "computeEqCondition" (Some cond1)
-            _ <- PVC.checkAndMinimizeEqCondition bundle cond1 eqPred'
-
             cond2 <- PVC.weakenEqCondition bundle cond1 eqPred' values
             emitTraceLabel @"expr" "weakenEqCondition" (Some cond2)
-            let cond3 = cond2
-            --cond3 <- liftIO $ W4.andPred sym cond2 extraCond
-            cond4 <- PVC.checkAndMinimizeEqCondition bundle cond3 eqPred
-            emitTraceLabel @"expr" "checkAndMinimizeEqCondition" (Some cond4)
-            goalSat "computeEquivCondition" cond4 $ \case
-              Sat{} -> return cond4
+            cond3 <- PVC.checkAndMinimizeEqCondition bundle cond2 eqPred
+            emitTraceLabel @"expr" "checkAndMinimizeEqCondition" (Some cond3)
+            goalSat "computeEquivCondition" cond3 $ \case
+              Sat{} -> return cond3
               _ -> do
-                emitError $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond4)
+                emitError $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond3)
                 return $ W4.truePred sym
 
 -- | After widening an edge, insert an equivalence condition
