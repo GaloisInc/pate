@@ -104,9 +104,8 @@ import           Pate.TraceTree
 discoverPairs ::
   forall sym arch v.
   SimBundle sym arch v ->
-  Maybe (Some PB.WhichBinaryRepr) ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-discoverPairs bundle frozen = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
+discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty
@@ -124,32 +123,24 @@ discoverPairs bundle frozen = withTracing @"function_name" "discoverPairs" $ wit
       IO.liftIO $ IO.modifyIORef cache (Map.insert (Some blkt) result)
       return result
 
-  (blksO, blksP) <- PPa.forBinsL $ \get -> do
-    let repr = get PPa.patchPairRepr
-    case Just (Some repr) == frozen of
-      True -> do
-        let blks = PB.syntheticTargets (get pPair)
-        subTree @"blocktarget1" "Synthetic Targets" $ do
-          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
-        subTree @"blocktarget1" "Synthetic Sat Targets" $ do
-          blks' <- CMR.lift $ CMR.filterM checkSat blks
-          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
-          return blks'
-      False -> do
-        blks <- getSubBlocks (get pPair)
-        subTree @"blocktarget1" "Real Targets" $ do
-          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
-        subTree @"blocktarget1" "Real Sat Targets" $ do
-          blks' <- CMR.lift $ CMR.filterM checkSat blks
-          mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
-          return blks'
-        
+  blkTs <- PPa.forBinsF $ \bin -> do
+    blk <- PPa.get bin pPair
+    blks <- getSubBlocks blk
+    subTree @"blocktarget1" "Targets" $ do
+      mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
+    subTree @"blocktarget1" "Sat Targets" $ do
+      blks' <- CMR.lift $ CMR.filterM checkSat blks
+      mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
+      return blks'
 
   let
-    allCalls = [ PPa.PatchPair blkO blkP
-               | blkO <- blksO
-               , blkP <- blksP
-               , compatibleTargets blkO blkP]
+    allCalls = case blkTs of
+      PPa.PatchPairF blksO blksP ->
+        [ PPa.PatchPair blkO blkP
+          | blkO <- blksO
+          , blkP <- blksP
+          , compatibleTargets blkO blkP]
+      PPa.PatchPairSingle _ (PPa.LiftF blks) -> map PPa.mkSingle blks
   blocks <- getBlocks $ PSS.simPair bundle
   
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
@@ -269,10 +260,11 @@ matchesBlockTargetOne ::
   EquivM sym arch (PAS.AssumptionSet sym)
 matchesBlockTargetOne bundle blkt = withSym $ \sym -> do
     -- true when the resulting IPs call the given block targets
+   let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
+   regs <- PSS.simOutRegs <$> PPa.get bin (PSS.simOut bundle)
+   endCase <- PSS.simOutBlockEnd <$> PPa.get bin (PSS.simOut bundle)
    let
-     regs = PSS.simOutRegs $ PPa.get @bin (PSS.simOut bundle)
      ip = regs ^. MC.curIP
-     endCase = PSS.simOutBlockEnd $ PPa.get @bin (PSS.simOut bundle)
      ret = MCS.blockEndReturn (Proxy @arch) endCase
 
    callPtr <- concreteToLLVM (PB.targetCall blkt)
@@ -291,7 +283,9 @@ matchesBlockTarget ::
   PPa.PatchPair (PB.BlockTarget arch) ->
   EquivM sym arch (PAS.AssumptionSet sym)
 matchesBlockTarget bundle blktPair =
-  PPa.catBins $ \get -> matchesBlockTargetOne bundle (get blktPair)
+  PPa.catBins $ \bin -> do
+    blkt <- PPa.get bin blktPair
+    matchesBlockTargetOne bundle blkt
 
 
 -- | Compute an 'PAS.AssumptionSet' that assumes the association between
@@ -313,10 +307,12 @@ associateFrames ::
   Bool ->
   EquivM sym arch (SimBundle sym arch v)
 associateFrames bundle exitCase isStub = do
-  (asm :: PAS.AssumptionSet sym) <- PPa.catBins $ \get -> do
+  (asm :: PAS.AssumptionSet sym) <- PPa.catBins $ \bin -> do
+    input <- PPa.get bin $ simIn bundle
+    output <- PPa.get bin $ simOut bundle
     let
-      st_pre = PSS.simInState $ get $ simIn bundle
-      st_post = PSS.simOutState $ get $ simOut bundle
+      st_pre = PSS.simInState input
+      st_post = PSS.simOutState output
       frame_pre = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_pre
       frame_post = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_post
       CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post

@@ -108,6 +108,7 @@ data EquivEnv sym arch where
     , envSatCacheRef :: IO.IORef (SolverCache sym)
     , envTargetEquivRegs :: Set.Set (Some (MC.ArchReg arch))
     , envPtrAssertions :: MT.PtrAssertions sym
+    , envPatchPairRepr :: PPa.PatchPair PBi.WhichBinaryRepr
     } -> EquivEnv sym arch
 
 -- pushing assumption contexts should:

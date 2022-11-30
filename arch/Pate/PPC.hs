@@ -28,6 +28,7 @@ where
 import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
+import           Control.Monad.Trans ( lift )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit.Prim as EEP
@@ -101,10 +102,12 @@ getCurrentTOC
   => PMC.EquivalenceContext sym PPC.PPC64
   -> PB.WhichBinaryRepr bin
   -> IO (W.W 64)
-getCurrentTOC ctx binRepr = do
-  PE.Blocks _ _ (pblk:_) <- PPa.getPair' binRepr <$> PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+getCurrentTOC ctx binRepr = PPa.withPatchPairT (PMC.binCtxs ctx) $ do
+  blks <- lift $ PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+  PE.Blocks _ _ (pblk:_) <- PPa.get binRepr blks
+  ctx' <- PPa.get binRepr (PMC.binCtxs ctx)
   let
-    toc = TOC.getTOC (PMC.binary $ PPa.getPair' binRepr (PMC.binCtxs ctx))
+    toc = TOC.getTOC (PMC.binary ctx')
     addr = MD.pblockAddr pblk
   case TOC.lookupTOC toc addr of
     Just w -> return w

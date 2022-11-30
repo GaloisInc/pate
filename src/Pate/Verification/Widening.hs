@@ -36,6 +36,7 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
 import qualified Data.Map as Map
+import           Data.Monoid (All(..))
 import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
@@ -147,8 +148,8 @@ computeEquivCondition ::
 computeEquivCondition _scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
-  (regsO, regsP) <- PPa.forBinsC $ \get -> return $ PS.simOutRegs (get (PS.simOut bundle))
-  (memO, memP) <- PPa.forBinsC $ \get -> return $ PS.simOutMem (get (PS.simOut bundle))
+  PPa.PatchPairC regsO regsP <- PPa.forBinsC $ \bin -> PS.simOutRegs <$> PPa.get bin (PS.simOut bundle)
+  PPa.PatchPairC memO memP <- PPa.forBinsC $ \bin -> PS.simOutMem <$> PPa.get bin (PS.simOut bundle)
   postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case f loc of
     False -> return (loc, p)
     -- modify postdomain to unconditionally include target locations
@@ -518,8 +519,10 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
           simpleStackOffset bin se = do
             W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
             Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
-            let preFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin (PS.scopeVars scope_pre))
-            let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+            pre_vars <- PPa.get bin (PS.scopeVars scope_pre)
+            post_vars <- PPa.get bin postVars
+            let preFrame = PS.unSB $ PS.simStackBase $ PS.simVarState pre_vars
+            let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState post_vars
 
             -- se = preFrame + off1
             Just (se_base, W4C.ConcreteBV _ se_off) <- return $ WEH.asConstantOffset sym (PS.unSE se)
@@ -541,7 +544,8 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
             W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
             Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
             -- se[v]
-            let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState $ (PPa.getPair' bin postVars)
+            post_vars <- PPa.get bin postVars
+            let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState post_vars
 
             off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
             -- asFrameOffset := frame[post] + off
@@ -579,8 +583,9 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
               -- TODO: We could do better by picking the strategy based on the term shape,
               -- but it's not strictly necessary.
 
-            asStackOffsetStrats <- PPa.catBins $ \get -> do
-              let stackbase = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState $ (get (PS.scopeVars scope_pre))
+            asStackOffsetStrats <- PPa.catBins $ \bin -> do
+              scope_vars_pre <- PPa.get bin (PS.scopeVars scope_pre)
+              let stackbase = PS.unSE $ PS.unSB $ PS.simStackBase $ PS.simVarState scope_vars_pre
               sbVars <- IO.liftIO $ WEH.boundVars stackbase
               seVars <- IO.liftIO $ WEH.boundVars (PS.unSE se)
 
@@ -588,10 +593,8 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
               -- terms which contain memory accesses (i.e. depend on
               -- the memory variable somehow), since we don't have any support for
               -- indirect reads
-              mvars <- lift $ memVars (get (PS.scopeVars scope_pre))
+              mvars <- lift $ memVars scope_vars_pre
               let noMem = Set.null (Set.intersection seVars mvars)
-
-              let bin = get PPa.patchPairRepr
 
               case Set.isSubsetOf sbVars seVars && noMem of
                 True -> return $ [("asStackOffset (" ++ show bin ++ ")", asStackOffset bin se)]
@@ -806,11 +809,11 @@ widenPostcondition bundle preD postD0 =
      NodeBuilderT '(sym,arch) "domain" (EquivM_ sym arch) (WidenResult sym arch v)
    widenLoop sym (Gas i) eqCtx postD mPrevRes = subTraceLabel' PAD.Postdomain  (Some postD) $ \unlift ->
      do
-        (valPostO, valPostP) <- liftIO $ PPa.forBinsC $ \get -> do
-          let
-            vals = get (PAD.absDomVals postD)
-            st = PS.simOutState $ get (PS.simOut bundle)
-          PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
+        PPa.PatchPairC valPostO valPostP <- PPa.forBinsC $ \bin -> do
+          vals <- PPa.get bin (PAD.absDomVals postD)
+          output <- PPa.get bin $ PS.simOut bundle
+          let st = PS.simOutState output
+          liftIO $ PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
 
         res1 <- PL.foldLocation @sym @arch sym valPostO (Left postD) (widenOnce (Gas i) WidenValue (Just (Some PBi.OriginalRepr)))
         res2 <- PL.foldLocation @sym @arch sym valPostP res1 (widenOnce (Gas i) WidenValue (Just (Some PBi.PatchedRepr)))
@@ -927,10 +930,12 @@ widenValues sym evalFn bundle postD = do
   (postD', mlocs) <- PAD.widenAbsDomainVals sym postD getRange bundle
   case mlocs of
     Just (WidenLocs regLocs memLocs) -> do
-      (mrUnchangedO, mrUnchangedP) <- PPa.forBinsC $ \get ->
-        return $ PAD.absMaxRegion (get (PAD.absDomVals postD)) == PAD.absMaxRegion (get (PAD.absDomVals postD'))
+      mrUnchanged <- PPa.catBins $ \bin -> fmap All $ do
+        vals <- PPa.get bin $ PAD.absDomVals postD
+        vals' <- PPa.get bin $ PAD.absDomVals postD'
+        return $ PAD.absMaxRegion vals == PAD.absMaxRegion vals'
 
-      if regLocs == mempty && memLocs == mempty && mrUnchangedO && mrUnchangedP then
+      if regLocs == mempty && memLocs == mempty && (getAll mrUnchanged) then
         return NoWideningRequired
       else
         return $ Widen WidenValue (WidenLocs regLocs memLocs) postD'
@@ -948,8 +953,8 @@ dropValueLoc ::
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
 dropValueLoc wb loc postD = do
+  vals <- PPa.get wb (PAD.absDomVals postD)
   let
-    vals = PPa.getPair' wb (PAD.absDomVals postD)
     v = case loc of
       PL.Cell c -> vals { PAD.absMemVals = MapF.delete c (PAD.absMemVals vals) }
       PL.Register r ->
@@ -959,7 +964,7 @@ dropValueLoc wb loc postD = do
       PL.Cell c -> WidenLocs Set.empty (Set.singleton (Some c))
       PL.Register r -> WidenLocs (Set.singleton (Some r)) Set.empty
       PL.NoLoc -> WidenLocs Set.empty Set.empty
-    vals' = PPa.setPair wb v (PAD.absDomVals postD)
+  vals' <- PPa.set wb (PAD.absDomVals postD) v
   return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 
 widenCells ::

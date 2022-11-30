@@ -192,6 +192,7 @@ data LoadError where
   BSIParseError :: FilePath -> PHB.JSONError -> LoadError
   ElfParseError :: DEE.ElfParseError -> LoadError
   ConfigError :: String -> LoadError
+  InconsistentPatchPairAccess :: LoadError
 deriving instance Show LoadError
 
 

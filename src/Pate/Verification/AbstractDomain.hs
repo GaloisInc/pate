@@ -39,6 +39,7 @@ module Pate.Verification.AbstractDomain
 
 import qualified Prettyprinter as PP
 
+import           Control.Monad.Trans ( lift )
 import           Control.Monad ( forM, unless )
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Writer as CMW
@@ -655,14 +656,12 @@ absDomainToPrecond ::
 absDomainToPrecond sym eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
   eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqCtx eqInputs
-  valsPred <- do
-    (predO, predP) <- PPa.forBinsC $ \get -> do
-      let absBlockState = PS.simInAbsState (get $ PS.simIn bundle)
-      absDomainValsToAsm sym eqCtx (PS.simInState $ get $ PS.simIn bundle) (Just absBlockState) (get $ absDomVals d)
-    return $ (predO <> predP)
+  valsPred <- PPa.withPatchPairT (PS.simIn bundle) $ PPa.catBins $ \bin -> do
+    input <- PPa.get bin (PS.simIn bundle)
+    let absBlockState = PS.simInAbsState input
+    absDomVals' <- PPa.get bin (absDomVals d)
+    lift $ absDomainValsToAsm sym eqCtx (PS.simInState input) (Just absBlockState) absDomVals'
   return $ (eqInputsPred <> valsPred)
-  --PAS.augment sym eqInputsPred valsPred
-
 
 instance PEM.ExprMappable sym (AbstractDomainVals sym arch bin) where
   mapExpr sym f (AbstractDomainVals regVals memVals mr) = do

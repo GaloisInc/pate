@@ -64,6 +64,7 @@ module Pate.Proof
   , emptyCondEqResult
   ) where
 
+import           Data.Functor.Const
 import           Control.Monad.Identity
 import           Control.Monad.Writer.Strict as CMW
 import qualified Data.Kind as DK
@@ -73,6 +74,7 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
@@ -425,7 +427,7 @@ data BlockSliceRegOp sym tp where
 
 instance PEM.ExprMappable sym (BlockSliceRegOp sym tp) where
   mapExpr sym f regOp = BlockSliceRegOp
-    <$> traverse (PEM.mapExpr sym f) (slRegOpValues regOp)
+    <$> TF.traverseF (PEM.mapExpr sym f) (slRegOpValues regOp)
     <*> pure (slRegOpRepr regOp)
     <*> f (slRegOpEquiv regOp)
 
@@ -444,7 +446,7 @@ data BlockSliceMemOp sym w where
 
 instance PEM.ExprMappable sym (BlockSliceMemOp sym w) where
   mapExpr sym f memOp = BlockSliceMemOp
-    <$> traverse (W4H.mapExprPtr sym f) (slMemOpValues memOp)
+    <$> TF.traverseF (\(Const x) -> Const <$> W4H.mapExprPtr sym f x) (slMemOpValues memOp)
     <*> f (slMemOpEquiv memOp)
     <*> f (slMemOpCond memOp)
 

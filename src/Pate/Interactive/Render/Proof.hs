@@ -12,6 +12,7 @@ import           Control.Monad ( guard )
 import qualified Data.Aeson as JSON
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
+import           Data.Functor.Const
 import qualified Data.HashMap.Strict as HMS
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.List as DL
@@ -22,6 +23,7 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Parameterized.TraversableF as TF
 import           Data.Proxy (Proxy(..))
 import qualified Data.Text as T
 import qualified Data.Vector as DV
@@ -280,7 +282,7 @@ renderRegVal domain reg regOp =
           | otherwise -> Just prettySlotVal
     _ -> Just prettySlotVal
   where
-    vals = fmap PFI.groundMacawValue $ PPr.slRegOpValues regOp
+    vals = TF.fmapF (\(Const x) -> Const $ PFI.groundMacawValue x) $ PPr.slRegOpValues regOp
 
     ppDom =
       case PFI.regInGroundDomain (PED.eqDomainRegisters domain) reg of
@@ -328,7 +330,7 @@ renderMemCellVal
   -> Maybe (PP.Doc a)
 renderMemCellVal domain cell memOp = do
   guard (PG.groundValue $ PPr.slMemOpCond memOp)
-  let vals = fmap PFI.groundBV $ PPr.slMemOpValues memOp
+  let vals = TF.fmapF (\(Const x) -> Const $ PFI.groundBV x) $ PPr.slMemOpValues memOp
   let ppDom = case PFI.cellInGroundDomain domain cell of
         True -> PP.emptyDoc
         False -> PP.pretty "| Excluded"
@@ -359,7 +361,7 @@ renderIPs st
   | (PG.groundValue $ PPr.slRegOpEquiv pcRegs) = PP.pretty (PPa.pcOriginal vals)
   | otherwise = PPa.ppPatchPairC PP.pretty vals
   where
-    vals = fmap PFI.groundMacawValue (PPr.slRegOpValues pcRegs)
+    vals = TF.fmapF (\(Const x) -> Const $ PFI.groundMacawValue x) (PPr.slRegOpValues pcRegs)
     pcRegs = PPr.slRegState st ^. MC.curIP
 
 renderReturn
@@ -378,7 +380,7 @@ renderCounterexample
   -> TP.UI TP.Element
 renderCounterexample ineqRes' = PPr.withIneqResult ineqRes' $ \ineqRes ->
   let
-    groundEnd = fmap (PFI.groundBlockEnd (Proxy @arch)) $ PPr.slBlockExitCase (PPr.ineqSlice ineqRes)
+    groundEnd = TF.fmapF (\(Const x) -> Const $ (PFI.groundBlockEnd (Proxy @arch)) x) $ PPr.slBlockExitCase (PPr.ineqSlice ineqRes)
     renderInequalityReason rsn =
       case rsn of
         PEE.InequivalentRegisters ->
@@ -391,11 +393,11 @@ renderCounterexample ineqRes' = PPr.withIneqResult ineqRes' $ \ineqRes ->
           TP.string "The original and patched programs have generated invalid post states"
 
     renderedContinuation = TP.column (catMaybes [ Just (text (PP.pretty "Next IP: " <> renderIPs (PPr.slBlockPostState (PPr.ineqSlice ineqRes))))
-                                                , renderReturn (fmap PFI.grndBlockReturn groundEnd)
+                                                , renderReturn (TF.fmapF (\(Const x) -> Const $ PFI.grndBlockReturn x) groundEnd)
                                                 ])
     in
     TP.grid [ [ renderInequalityReason (PPr.ineqReason ineqRes) ]
-          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (fmap PFI.grndBlockCase groundEnd)) ]
+          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (TF.fmapF (\(Const x) -> Const $ PFI.grndBlockCase x) groundEnd)) ]
           , [ TP.h2 #+ [TP.string "Initial states"] ]
           , [ renderRegisterState (PPr.ineqPre ineqRes) (PPr.slRegState (PPr.slBlockPreState (PPr.ineqSlice ineqRes)))
             , renderMemoryState (PPr.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPreState (PPr.ineqSlice ineqRes)))

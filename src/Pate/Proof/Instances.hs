@@ -62,6 +62,7 @@ import           Numeric.Natural ( Natural )
 import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.TraversableF as TF
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Context as Ctx
@@ -406,7 +407,7 @@ ppBlockSliceTransition ::
   PF.BlockSliceTransition grnd arch ->
   PP.Doc a
 ppBlockSliceTransition pre post bs = PP.vsep $
-  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (fmap grndBlockCase groundEnd)
+  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (TF.fmapF (\(Const x) -> Const $ grndBlockCase x) groundEnd)
   ,  "Initial register state:"
   , ppRegs pre (PF.slRegState $ PF.slBlockPreState bs)
   , "Initial memory state:"
@@ -416,13 +417,13 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , "Final memory state:"
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
   , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
-  , case fmap grndBlockReturn groundEnd of
+  , case TF.fmapF (\(Const x) -> Const $ grndBlockReturn x) groundEnd of
       PPa.PatchPairC (Just cont1) (Just cont2) ->
         "Function Continue Address:" <+> PPa.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PPa.PatchPairC cont1 cont2)
       _ -> PP.emptyDoc
   ]
   where
-    groundEnd = fmap (groundBlockEnd (Proxy @arch)) $ PF.slBlockExitCase bs
+    groundEnd = TF.fmapF (\(Const x) -> Const $ groundBlockEnd (Proxy @arch) x) $ PF.slBlockExitCase bs
 
 ppIPs ::
   PA.ValidArch arch =>
@@ -432,7 +433,7 @@ ppIPs ::
 ppIPs st  =
   let
     pcRegs = (PF.slRegState st) ^. MM.curIP
-    vals = fmap groundMacawValue (PF.slRegOpValues pcRegs)
+    vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) (PF.slRegOpValues pcRegs)
   in case PG.groundValue $ PF.slRegOpEquiv pcRegs of
     True -> PP.pretty $ PPa.pcOriginal vals
     False -> PPa.ppPatchPairC PP.pretty vals
@@ -540,15 +541,13 @@ ppRegVal ::
   PF.BlockSliceRegOp grnd tp ->
   Maybe (PP.Doc a)
 ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
-  CLM.LLVMPointerRepr _ ->
-    let
-      PPa.PatchPairC (GroundMacawValue obv) (GroundMacawValue pbv) = vals
-    in case isGroundBVZero obv && isGroundBVZero pbv of
+  CLM.LLVMPointerRepr _ | PPa.PatchPairC (GroundMacawValue obv) (GroundMacawValue pbv) <- vals ->
+    case isGroundBVZero obv && isGroundBVZero pbv of
          True -> Nothing
          False -> Just $ ppSlotVal
   _ -> Just $ ppSlotVal
   where
-    vals = fmap groundMacawValue $ PF.slRegOpValues regOp
+    vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) $ PF.slRegOpValues regOp
     ppSlotVal = PP.pretty (showF reg) <> ":" <+> ppVals <+> ppDom
 
     ppDom = case regInGroundDomain dom reg of
@@ -581,7 +580,7 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
     True -> Just $ ppSlotVal
     False -> Nothing
   where
-    vals = fmap groundBV $ PF.slMemOpValues memOp
+    vals = TF.fmapF (\(Const x) -> Const $ groundBV x) $ PF.slMemOpValues memOp
     ppSlotVal = ppGroundCell cell <> ":" <+> ppVals <+> ppDom
 
     ppDom = case cellInGroundDomain dom cell of

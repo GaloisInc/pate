@@ -440,8 +440,8 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
            -- point is some intermediate program point), then this value domain will simply
            -- be overridden as a result of widening
            rootDom <- PS.forSpec idom $ \_ idom' -> do
-             vals' <- PPa.forBins $ \get -> do
-               let vals = get (PAD.absDomVals idom')
+             vals' <- PPa.forBins $ \bin -> do
+               vals <- PPa.get bin (PAD.absDomVals idom')
                -- FIXME: compute this from the global and stack regions
                return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
              return $ idom' { PAD.absDomVals = vals' }

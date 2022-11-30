@@ -89,7 +89,7 @@ import           Data.Proxy
 import qualified Control.Monad.IO.Class as IO
 import           Control.Lens ( (^.) )
 import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
-
+import           Control.Monad.Trans ( lift )
 
 import qualified Prettyprinter as PP
 
@@ -238,8 +238,8 @@ scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
-  forall sym arch f m.
-  Monad m =>
+  forall sym arch f e m.
+  PPa.PatchPairM e m =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   -- | These must all be fresh variables
   (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
@@ -253,7 +253,7 @@ freshSimSpec ::
   (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym, (f v))) ->
   m (SimSpec sym arch f)
 freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
-  vars <- PPa.forBins' $ \bin -> do
+  vars <- PPa.forBins $ \bin -> do
     regs <- MM.mkRegStateM (mkReg bin)
     mem <- mkMem bin
     sb <- mkStackBase bin
@@ -571,10 +571,11 @@ getScopeCoercion ::
   IO (ScopeCoercion sym v1 v2)
 getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
-  (bindsO, bindsP) <- PPa.forBinsC $ \get -> do
-    let st = simVarState $ get vals
-    mkVarBinds sym (get vars) (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simMaxRegion st)
-  asScopeCoercion $ bindsO <> bindsP
+  binds <- PPa.withPatchPairT vars $ PPa.catBins $ \bin -> do
+    st <- simVarState <$> PPa.get bin vals
+    vars' <- PPa.get bin vars
+    lift $ mkVarBinds sym vars' (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simMaxRegion st)
+  asScopeCoercion $ binds
 
 bindSpec ::
   forall sym arch s st fs f v.

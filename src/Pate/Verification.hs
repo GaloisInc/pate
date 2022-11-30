@@ -239,16 +239,18 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   let defaultInit = PA.validArchInitAbs archData
 
   -- inject an override for the initial abstract state
-  contexts1 <- PPa.forBins $ \get -> do
+  contexts1 <- PPa.withPatchPairT contexts $ PPa.forBins $ \bin -> do  
+    context' <- PPa.get bin contexts
+    blk <- PPa.get bin entryPoint
     let
-      pfm = PMC.parsedFunctionMap (get contexts)
-      blk = get entryPoint
-      mem = MBL.memoryImage (PMC.binary (get contexts))
+      pfm = PMC.parsedFunctionMap context'
+      mem = MBL.memoryImage (PMC.binary context')
     
     let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
     let ov = M.singleton (PB.functionSegAddr blk) initAbs
     pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm ov
-    return $ (get contexts) { PMC.parsedFunctionMap = pfm' }
+    
+    return $ context' { PMC.parsedFunctionMap = pfm' }
     
   let pPairs' = entryPoint : (unpackedPairs upData)
   let solver = PC.cfgSolver vcfg

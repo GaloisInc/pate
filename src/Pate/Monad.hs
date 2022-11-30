@@ -296,6 +296,12 @@ instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
   getTreeBuilder = CMR.asks envTreeBuilder
   withTreeBuilder treeBuilder f = CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f
 
+instance PPa.PatchPairError PEE.EquivalenceError where
+  patchPairErr = PEE.loaderError PEE.InconsistentPatchPairAccess
+
+instance PPa.PatchPairM PEE.EquivalenceError (EquivM_ sym arch) where
+  getPairRepr = CMR.asks envPatchPairRepr
+
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
 type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
 
@@ -346,7 +352,7 @@ getBinCtx = getBinCtx' knownRepr
 getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
   EquivM sym arch (PMC.BinaryContext arch bin)
-getBinCtx' repr = PPa.getPair' repr <$> CMR.asks (PMC.binCtxs . envCtx)
+getBinCtx' repr = PPa.get repr =<< (CMR.asks (PMC.binCtxs . envCtx))
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->
