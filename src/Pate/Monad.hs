@@ -296,15 +296,14 @@ instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
   getTreeBuilder = CMR.asks envTreeBuilder
   withTreeBuilder treeBuilder f = CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f
 
-instance PPa.PatchPairError PEE.EquivalenceError where
-  patchPairErr = PEE.loaderError PEE.InconsistentPatchPairAccess
-
-instance PPa.PatchPairM PEE.EquivalenceError (EquivM_ sym arch) where
-  getPairRepr = CMR.asks envPatchPairRepr
+instance PPa.PatchPairM (EquivM_ sym arch) where
+  throwPairErr = throwHere $ PEE.InconsistentPatchPairAccess
+  catchPairErr a b = catchError a (\e -> case PEE.errEquivError e of
+                                      Left (PEE.SomeInnerError PEE.InconsistentPatchPairAccess) -> b
+                                      _ -> throwError e)
 
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
 type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
-
 
 
 newtype ExprLabel = ExprLabel String

@@ -656,7 +656,7 @@ absDomainToPrecond ::
 absDomainToPrecond sym eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
   eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqCtx eqInputs
-  valsPred <- PPa.withPatchPairT (PS.simIn bundle) $ PPa.catBins $ \bin -> do
+  valsPred <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
     input <- PPa.get bin (PS.simIn bundle)
     let absBlockState = PS.simInAbsState input
     absDomVals' <- PPa.get bin (absDomVals d)

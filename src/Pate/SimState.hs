@@ -238,8 +238,8 @@ scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
-  forall sym arch f e m.
-  PPa.PatchPairM e m =>
+  forall sym arch f m.
+  PPa.PatchPairM m =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   -- | These must all be fresh variables
   (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
@@ -571,7 +571,7 @@ getScopeCoercion ::
   IO (ScopeCoercion sym v1 v2)
 getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
-  binds <- PPa.withPatchPairT vars $ PPa.catBins $ \bin -> do
+  binds <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
     st <- simVarState <$> PPa.get bin vals
     vars' <- PPa.get bin vars
     lift $ mkVarBinds sym vars' (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simMaxRegion st)

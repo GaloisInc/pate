@@ -239,7 +239,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   let defaultInit = PA.validArchInitAbs archData
 
   -- inject an override for the initial abstract state
-  contexts1 <- PPa.withPatchPairT contexts $ PPa.forBins $ \bin -> do  
+  contexts1 <- PPa.runPatchPairT $ PPa.forBins $ \bin -> do  
     context' <- PPa.get bin contexts
     blk <- PPa.get bin entryPoint
     let

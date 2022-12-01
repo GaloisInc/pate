@@ -21,12 +21,12 @@ module Pate.PatchPair (
     PatchPair
   , pattern PatchPair
   , pattern PatchPairSingle
-  , PatchPairError(..)
   , PatchPairM(..)
   , PatchPairT
   , PatchPairC
   , pattern PatchPairC
-  , withPatchPairT
+  , runPatchPairT
+  , runPatchPairT'
   , pOriginal
   , pPatched
   , pcOriginal
@@ -49,7 +49,6 @@ module Pate.PatchPair (
   , PatchPairF
   , pattern PatchPairF
   , forBinsF
-  
   ) where
 
 import           Control.Monad.Trans.Maybe
@@ -121,63 +120,63 @@ setPair PB.PatchedRepr pPair a = case pPair of
   PatchPairOriginal _ -> Nothing
 
 
-class PatchPairError e where
-  patchPairErr :: e
+class Monad m => PatchPairM m where
+  -- | Called when an invalid patch pair access occurs (i.e. some 'get' or 'set' operation
+  -- was performed on a 'PatchPair' that did not have a value for the given binary)
+  throwPairErr :: m a
+  -- | Run the first function, falling through to the second function if
+  --   any 'throwPairErr' calls are made.
+  catchPairErr :: m a -> m a -> m a
 
--- | The 'PatchPairM' class defines how a monad should handle mismatched 'PatchPair' values.
---   Specifically there is always a background 'PatchPair PB.WhichBinaryRepr' that controls
---   the shape of all new 'PatchPair' values.
-class (PatchPairError e, MonadError e m) => PatchPairM e m | m -> e where
-  getPairRepr :: m (PatchPair PB.WhichBinaryRepr)
-  -- ^ controls how all 'PatchPair' values are traversed and the shape of all new 'PatchPair'
-  --   values (i.e. if this is a singleton "original" 'PatchPair' then all traversals will be
-  --   limited to "original" values and all new 'PatchPair' values will be "original" singletons)
+instance PatchPairM Maybe where
+  throwPairErr = Nothing
+  catchPairErr a b = catchError a (\_ -> b)
 
-instance PatchPairError () where
-  patchPairErr = ()
+instance Monad m => PatchPairM (MaybeT m) where
+  throwPairErr = fail ""
+  catchPairErr (MaybeT a) (MaybeT b) = MaybeT $ a >>= \case
+    Just ra -> return $ Just ra
+    Nothing -> b
 
-instance PatchPairM () Maybe where
-  getPairRepr = return patchPairRepr
-
-instance PatchPairM e m => PatchPairM e (MaybeT m) where
-  getPairRepr = CMT.lift getPairRepr
-
-liftPairErr :: PatchPairM e m => Maybe a -> m a
+liftPairErr :: PatchPairM m => Maybe a -> m a
 liftPairErr (Just a) = return a
-liftPairErr Nothing = throwError patchPairErr
+liftPairErr Nothing = throwPairErr
 
 -- | Select the value from the 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
-get :: PatchPairM e m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> m (tp bin))
+get :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> m (tp bin))
 get repr pPair = liftPairErr (getPair repr pPair)
 
 -- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
-set :: PatchPairM e m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
+set :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
 set repr pPair a = liftPairErr (setPair repr pPair a)
+
+data InconsistentPatchPairAccess = InconsistentPatchPairAccess
+  deriving (Show)
 
 -- | Simple monadic transformer for giving a default 'PatchPairM' implementation
 --   to any monad.
-newtype PatchPairT m a = PatchPairT (CMR.ReaderT (PatchPair PB.WhichBinaryRepr) m a)
-  deriving (Functor, Applicative, Monad, CMR.MonadReader (PatchPair PB.WhichBinaryRepr), CMR.MonadTrans)
+newtype PatchPairT m a = PatchPairT (MaybeT m a)
+  deriving (Functor, Applicative, Monad, CMT.MonadTrans)
 
+deriving instance Monad m => PatchPairM (PatchPairT m)
 deriving instance MonadError e m => MonadError e (PatchPairT m)
 deriving instance MonadThrow m => MonadThrow (PatchPairT m)
 deriving instance MonadIO m => MonadIO (PatchPairT m)
 deriving instance MonadFail m => MonadFail (PatchPairT m)
 
-instance PatchPairError IOException where
-  patchPairErr = userError "PatchPair: unexpected incompatible binaries in PatchPair combination"
-
-instance (PatchPairError e, MonadError e m) => PatchPairM e (PatchPairT m) where
-  getPairRepr = CMR.ask
-
 -- | Run a 'PatchPairT' computation, using the given 'PatchPair' as the basis
 --  for the underlying 'getPairRepr'.
 --  NOTE: 'PatchPairT' only satisfies 'PatchPairM' if the monad 'm' is a
 --  'MonadError' with an error that has a 'PatchPairError' instance
-withPatchPairT :: PatchPair x -> PatchPairT m a -> m a
-withPatchPairT pPair (PatchPairT m) = CMR.runReaderT m (toPatchPairRepr pPair)
+runPatchPairT' :: PatchPairT m a -> m (Maybe a)
+runPatchPairT' (PatchPairT m) = runMaybeT m
+
+runPatchPairT :: MonadFail m => PatchPairT m a -> m a
+runPatchPairT m = runPatchPairT' m >>= \case
+  Just a -> return a
+  Nothing -> fail "PatchPair: inconsistent patch pair access pattern"
 
 patchPairRepr :: PatchPair PB.WhichBinaryRepr
 patchPairRepr = PatchPair PB.OriginalRepr PB.PatchedRepr
@@ -196,22 +195,22 @@ mkSingle :: PB.KnownBinary bin => tp bin -> PatchPair tp
 mkSingle a = PatchPairSingle knownRepr a
 
 -- | Create a 'PatchPair' with a shape according to 'getPairRepr'.
---   The provided function is run once for each value in the 'PatchPair' (i.e. twice for a full
---   'PatchPair' or once for a singleton).
---    Note: in the case where 'getPairRepr' is a singleton, the default error for 'PatchPairM' will
---    be raised if the getter or setter is applied to a singleton 'PatchPair' for the opposite binary.
-forBins :: PatchPairM e m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
-forBins f = getPairRepr >>= \case
-  PatchPair{} -> PatchPair
-    <$> (f PB.OriginalRepr)
-    <*> (f PB.PatchedRepr)
-  PatchPairOriginal{} -> PatchPairOriginal <$> (f PB.OriginalRepr)
-  PatchPairPatched{} -> PatchPairPatched <$> (f PB.PatchedRepr)
-
-{-
-forBins :: PatchPairM m => (forall bin. PB.KnownBinary bin => PairGetter bin m -> PairSetter bin m -> m (f bin)) -> m (PatchPair f)
-forBins f = forBins_ $ \bin -> f (getPair bin) (setPair bin)
--}
+--   The provided function execution for both the original and patched binaries
+--   (i.e. given 'PB.OriginalRepr' and 'PB.PatchedRepr'), but may fail early
+--   if 'get' or 'set' is called on a 'PatchPair' that is missing a value for the corresponding binary.
+--   In other words, calling 'get' or 'set' on any singleton 'PatchPair' values in the given
+--   function will cause the returned 'PatchPair' to be a singleton for the same binary.
+--   In the case of an inconsistent access pattern (i.e. two mismatched singletons are given)
+--   then 'throwPairErr' will be called instead of returning a result.
+forBins :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
+forBins f = do
+  omResult <- catchPairErr (Just <$> (f PB.OriginalRepr)) (return Nothing)
+  pmResult <- catchPairErr (Just <$> (f PB.PatchedRepr)) (return Nothing)
+  case (omResult, pmResult) of
+    (Just oResult, Just pResult) -> return $ PatchPair oResult pResult
+    (Just oResult, Nothing) -> return $ PatchPairOriginal oResult
+    (Nothing, Just pResult) -> return $ PatchPairPatched pResult
+    (Nothing, Nothing) -> throwPairErr
 
 -- | Specialization of 'PatchPair' to types which are not indexed on 'PB.WhichBinary'
 type PatchPairC tp = PatchPair (Const tp)
@@ -229,7 +228,7 @@ pcPatched = getConst . pPatched
 
 -- | The same as 'forBins' but specialized to 'PatchPairC' (i.e. when type in the 'PatchPair' is not
 --   indexed by 'PB.WhichBinary')
-forBinsC :: PatchPairM e m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m f) -> m (PatchPairC f)
+forBinsC :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m f) -> m (PatchPairC f)
 forBinsC f = forBins $ \bin -> Const <$> f bin
 
 newtype LiftF (t :: l -> DK.Type) (f :: k -> l) (tp :: k) = LiftF { unLiftF :: (t (f tp)) }
@@ -242,12 +241,15 @@ pattern PatchPairF a b = PatchPairCtor (LiftF a) (LiftF b)
 
 {-# COMPLETE PatchPairF, PatchPairSingle #-}
 
-forBinsF :: PatchPairM e m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (t (f bin))) -> m (PatchPairF t f)
+forBinsF :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (t (f bin))) -> m (PatchPairF t f)
 forBinsF f = forBins $ \bin -> LiftF <$> f bin
 
--- | Run the given function once for each value in the current 'getPairRepr', and then concatenate the result.
---   For singleton 'PatchPair' values this is just the result of running the function once.
-catBins :: PatchPairM e m => Semigroup w => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m w) -> m w
+-- | Run the given function once for each binary, and then concatenate the result.
+--   If any singleton 'PatchPair' values are accessed, the return value will be the
+--   result of running the function once on the corresponding binary.
+--   As in 'forBins', accessing mismatched 'PatchPair' values will result in calling 'throwError'
+--   instead of returning a result.
+catBins :: PatchPairM m => Semigroup w => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m w) -> m w
 catBins f = forBinsC f >>= \case
   PatchPair (Const a) (Const b) -> pure (a <> b)
   PatchPairSingle _ (Const a) -> pure a

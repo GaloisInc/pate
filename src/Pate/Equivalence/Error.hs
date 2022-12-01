@@ -14,6 +14,7 @@ module Pate.Equivalence.Error (
   , InequivalenceReason(..)
   , EquivalenceError(..)
   , SimpResult(..)
+  , SomeInnerError(..)
   , equivalenceError
   , equivalenceErrorFor
   , isRecoverable
@@ -118,6 +119,7 @@ data InnerEquivalenceError arch
   | SkippedInequivalentBlocks (PB.BlockPair arch)
   | SymbolicExecutionError String
   | UnsatisfiableEquivalenceCondition (SomeExpr W4.BaseBoolType)
+  | InconsistentPatchPairAccess
   | forall tp. FailedToGroundExpr (SomeExpr tp)
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
@@ -192,7 +194,6 @@ data LoadError where
   BSIParseError :: FilePath -> PHB.JSONError -> LoadError
   ElfParseError :: DEE.ElfParseError -> LoadError
   ConfigError :: String -> LoadError
-  InconsistentPatchPairAccess :: LoadError
 deriving instance Show LoadError
 
 

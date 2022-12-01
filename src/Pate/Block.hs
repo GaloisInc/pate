@@ -310,11 +310,11 @@ matchEquatedAddress
   -> (PA.ConcreteAddress arch, PA.ConcreteAddress arch)
   -- ^ Equated function pair
   -> Bool
-matchEquatedAddress pPair (origAddr, patchedAddr) =
-  and [ origAddr == concreteAddress (PPa.pOriginal pPair)
-      , patchedAddr == concreteAddress (PPa.pPatched pPair)
+matchEquatedAddress (PPa.PatchPair blkO blkP) (origAddr, patchedAddr) =
+  and [ origAddr == concreteAddress blkO
+      , patchedAddr == concreteAddress blkP
       ]
-
+matchEquatedAddress _ _ = False
 
 -- FIXME: put this somewhere more sensible
 
