@@ -34,12 +34,9 @@ module Pate.Verification.PairGraph.Node (
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 
-import           Data.Parameterized.Classes
-import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
-import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.PatchPair as PPa
 import           Pate.TraceTree

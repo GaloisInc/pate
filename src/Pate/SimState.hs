@@ -67,10 +67,6 @@ module Pate.SimState
   , simOutMem
   , simOutRegs
   , simPair
-  , simInO
-  , simInP
-  , simOutO
-  , simOutP
   , simSP
   -- variable binding
   , SimVars(..)
@@ -321,19 +317,6 @@ bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
 
 bundleInVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
 bundleInVars bundle = TF.fmapF (SimVars . simInState) (simIn bundle)
-
-simInO :: SimBundle sym arch v -> SimInput sym arch v PBi.Original
-simInO = PPa.pOriginal . simIn
-
-simInP :: SimBundle sym arch v -> SimInput sym arch v PBi.Patched
-simInP = PPa.pPatched . simIn
-
-simOutO :: SimBundle sym arch v -> SimOutput sym arch v PBi.Original
-simOutO = PPa.pOriginal . simOut
-
-simOutP :: SimBundle sym arch v -> SimOutput sym arch v PBi.Patched
-simOutP = PPa.pPatched . simOut
-
 
 simPair :: SimBundle sym arch v -> PB.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)

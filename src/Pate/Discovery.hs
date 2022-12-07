@@ -190,10 +190,9 @@ matchingExits ::
   SimBundle sym arch v ->
   MCS.MacawBlockEndCase ->
   EquivM sym arch (WI.Pred sym)
-matchingExits bundle ecase = withSym $ \sym -> do
-  case1 <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutO bundle) ecase
-  case2 <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (PSS.simOutBlockEnd $ PSS.simOutP bundle) ecase
-  liftIO $ WI.andPred sym case1 case2
+matchingExits bundle ecase = withSym $ \sym -> andPatchPred $ \bin ->  do
+  blkend <- PSS.simOutBlockEnd <$> PPa.get bin (PSS.simOut bundle)
+  liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend ecase
 
 -- | True when both the patched and original program necessarily end with
 -- a call to the same function, assuming exact initial equivalence.
@@ -202,19 +201,20 @@ isMatchingCall ::
   SimBundle sym arch v ->
   EquivM sym arch Bool
 isMatchingCall bundle = withSym $ \sym -> do
-  eqIPs <- liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue ipO) (PSR.macawRegValue ipP)
+  eqIPs <- PPa.defaultPair (return $ WI.truePred sym) (PSS.simOut bundle) $ \outO outP -> do
+    let
+      ipO = (PSS.simOutRegs outO) ^. MC.curIP
+      ipP = (PSS.simOutRegs outP) ^. MC.curIP
+    liftIO $ MT.llvmPtrEq sym (PSR.macawRegValue ipO) (PSR.macawRegValue ipP)
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- TODO: Why are some of the calls being classified as Arch exits?
   isCall <- matchingExits bundle MCS.MacawBlockEndCall
   isArch <- matchingExits bundle MCS.MacawBlockEndArch
   isExpectedExit <- liftIO $ WI.orPred sym isArch isCall
   goal <- liftIO $ WI.andPred sym eqIPs isExpectedExit
-  asm <- exactEquivalence (PSS.simInO bundle) (PSS.simInP bundle)
+  asm <- exactEquivalence (PSS.simIn bundle)
   withAssumption asm $
     isPredTrue' goalTimeout goal
-  where
-    ipO = (PSS.simOutRegs $ PSS.simOutO bundle) ^. MC.curIP
-    ipP = (PSS.simOutRegs $ PSS.simOutP bundle) ^. MC.curIP
 
 -- | True for a pair of original and patched block targets that represent a valid pair of
 -- jumps
@@ -230,27 +230,27 @@ compatibleTargets blkt1 blkt2 = (PB.targetEndCase blkt1 == PB.targetEndCase blkt
     _ -> False
 
 exactEquivalence ::
-  PSS.SimInput sym arch v PB.Original ->
-  PSS.SimInput sym arch v PB.Patched ->
+  PPa.PatchPair (PSS.SimInput sym arch v) ->
   EquivM sym arch (WI.Pred sym)
-exactEquivalence inO inP = withSym $ \sym -> do
-  eqCtx <- equivalenceContext
-  regsEqs <- liftIO $ PRt.zipWithRegStatesM (PSS.simInRegs inO) (PSS.simInRegs inP) $ \r v1 v2 ->
-    Const <$> PEq.registerValuesEqual sym eqCtx r v1 v2
+exactEquivalence input = withSym $ \sym ->
+  PPa.defaultPair (return $ WI.truePred sym) input $ \inO inP -> do
+    eqCtx <- equivalenceContext
+    regsEqs <- liftIO $ PRt.zipWithRegStatesM (PSS.simInRegs inO) (PSS.simInRegs inP) $ \r v1 v2 ->
+      Const <$> PEq.registerValuesEqual sym eqCtx r v1 v2
 
-  regsEq <- liftIO $ WEH.allPreds sym (map snd $ PRt.assocs regsEqs)
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  isPredSat heuristicTimeout regsEq >>= \case
-    True -> return ()
-    False -> CME.fail "exactEquivalence: regsEq: assumed false"
+    regsEq <- liftIO $ WEH.allPreds sym (map snd $ PRt.assocs regsEqs)
+    heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+    isPredSat heuristicTimeout regsEq >>= \case
+      True -> return ()
+      False -> CME.fail "exactEquivalence: regsEq: assumed false"
 
-  memEq <- liftIO $ MT.memEqExact sym (MT.memState $ PSS.simInMem inO) (MT.memState $ PSS.simInMem inP)
+    memEq <- liftIO $ MT.memEqExact sym (MT.memState $ PSS.simInMem inO) (MT.memState $ PSS.simInMem inP)
 
-  isPredSat heuristicTimeout memEq >>= \case
-    True -> return ()
-    False -> CME.fail "exactEquivalence: memEq: assumed false"
+    isPredSat heuristicTimeout memEq >>= \case
+      True -> return ()
+      False -> CME.fail "exactEquivalence: memEq: assumed false"
 
-  liftIO $ WI.andPred sym regsEq memEq
+    liftIO $ WI.andPred sym regsEq memEq
 
 matchesBlockTargetOne ::
   forall sym arch bin v.
@@ -671,41 +671,36 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
              let addr = PA.segOffToAddr segoff
              in Map.insert addr fd m
 
+getBlocksSingle
+  :: forall bin arch sym m
+   . (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m, PB.KnownBinary bin)
+  => PMC.EquivalenceContext sym arch
+  -> PB.ConcreteBlock arch bin
+  -> m (PE.Blocks arch bin)
+getBlocksSingle ctx blk = do
+  let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
+  ctx' <- PPa.get bin (PMC.binCtxs ctx)
+  (liftIO $ lookupBlocks' ctx' blk) >>= \case
+    Right (PDP.ParsedBlocks pbs) -> return $! PE.Blocks PC.knownRepr blk pbs
+    Left err -> CMC.throwM err
+
 getBlocks'
-  :: (CMC.MonadThrow m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m)
+  :: (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m)
   => PMC.EquivalenceContext sym arch
   -> PB.BlockPair arch
   -> m (PE.BlocksPair arch)
-getBlocks' ctx pPair = do
-  bs1 <- liftIO $ lookupBlocks' ctxO blkO
-  bs2 <- liftIO $ lookupBlocks' ctxP blkP
-  case (bs1, bs2) of
-    (Right (PDP.ParsedBlocks opbs), Right (PDP.ParsedBlocks ppbs)) -> do
-      let oBlocks = PE.Blocks PC.knownRepr blkO opbs
-      let pBlocks = PE.Blocks PC.knownRepr blkP ppbs
-      return $! PPa.PatchPair oBlocks pBlocks
-    (Left err, _) -> CMC.throwM err
-    (_, Left err) -> CMC.throwM err
-  where
-    binCtxs = PMC.binCtxs ctx
-    ctxO = PPa.pOriginal binCtxs
-    ctxP = PPa.pPatched binCtxs
-    blkO = PPa.pOriginal pPair
-    blkP = PPa.pPatched pPair
+getBlocks' ctx pPair = PPa.forBins $ \bin -> do
+  blk <- PPa.get bin pPair
+  getBlocksSingle ctx blk
 
 getBlocks ::
   HasCallStack =>
   PB.BlockPair arch ->
   EquivM sym arch (PE.BlocksPair arch)
-getBlocks pPair = do
-  PDP.ParsedBlocks opbs <- lookupBlocks blkO
-  let oBlocks = PE.Blocks PC.knownRepr blkO opbs
-  PDP.ParsedBlocks ppbs <- lookupBlocks blkP
-  let pBlocks = PE.Blocks PC.knownRepr blkP ppbs
-  return $ PPa.PatchPair oBlocks pBlocks
-  where
-    blkO = PPa.pOriginal pPair
-    blkP = PPa.pPatched pPair
+getBlocks pPair = PPa.forBins $ \bin -> do
+  blk <- PPa.get bin pPair
+  PDP.ParsedBlocks pbs <- lookupBlocks blk
+  return $! PE.Blocks PC.knownRepr blk pbs
 
 lookupBlocks'
   :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, PB.KnownBinary bin)

@@ -53,7 +53,6 @@ import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
 import qualified Data.Parameterized.Context as Ctx
-import           Data.Parameterized.WithRepr
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -69,7 +68,7 @@ import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
 
-import qualified Pate.Abort as PAb
+--import qualified Pate.Abort as PAb
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Address as PAd
 import qualified Pate.Arch as PA
@@ -99,7 +98,7 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks , returnOfEntry)
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 
@@ -343,6 +342,9 @@ validAbsValues block var = do
 asFunctionPair ::
   PB.BlockPair arch ->
   Maybe (PB.FunPair arch)
+asFunctionPair (PPa.PatchPairSingle bin blk) = case PB.asFunctionEntry blk of
+  Just fn -> Just (PPa.PatchPairSingle bin fn)
+  Nothing -> Nothing
 asFunctionPair (PPa.PatchPair blkO blkP) = case (PB.asFunctionEntry blkO, PB.asFunctionEntry blkP) of
   (Just fnO, Just fnP) -> Just (PPa.PatchPair fnO fnP)
   _ -> Nothing
@@ -477,14 +479,16 @@ withValidInit ::
   EquivM_ sym arch a ->
   EquivM sym arch a
 withValidInit scope bPair f = withPair bPair $ do
-  let vars = PS.scopeVars scope
-  validInit <- PVV.validInitState (Just bPair) (PS.simVarState $ PPa.pOriginal vars) (PS.simVarState $ PPa.pPatched vars)
+  let
+    vars = PS.scopeVars scope
+    varsSt = TF.fmapF PS.simVarState vars
+
+  validInit <- PVV.validInitState (Just bPair) varsSt
   validAbs <- PPa.catBins $ \bin -> do
     blk <- PPa.get bin bPair
     vars' <- PPa.get bin vars
     validAbsValues blk vars'
   withAssumptionSet (validInit <> validAbs) $ f  
-
 
 
 withSimBundle ::
@@ -587,8 +591,10 @@ visitNode scope (ReturnNode fPair) d gr0 = do
    -- using the ordinary widening machinery.
   
    processReturn gr node@(nodeBlocks -> ret) = withPair ret $ do
-     let vars = PS.scopeVars scope
-     validState <- PVV.validInitState (Just ret) (PS.simVarState (PPa.pOriginal vars)) (PS.simVarState (PPa.pPatched vars))
+     let
+      vars = PS.scopeVars scope
+      varsSt = TF.fmapF PS.simVarState vars
+     validState <- PVV.validInitState (Just ret) varsSt
      withAssumptionSet validState $
        do (asm, bundle) <- returnSiteBundle vars d ret
           withAssumptionSet asm $ withPredomain bundle d $ do
@@ -727,10 +733,11 @@ doCheckObservables :: forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   EquivM sym arch (ObservableCheckResult sym (MM.ArchAddrWidth arch))
-doCheckObservables bundle _preD =
-  withSym $ \sym ->
-    do let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
-       let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
+doCheckObservables bundle _preD = case PS.simOut bundle of
+  PPa.PatchPairSingle _ _ -> PPa.handleSingletonStub
+  PPa.PatchPair outO outP -> withSym $ \sym -> do
+       let oMem = PS.simMem (PS.simOutState outO)
+       let pMem = PS.simMem (PS.simOutState outP)
 
        stackRegion <- asks (PMC.stackRegion . envCtx)
 
@@ -1035,18 +1042,22 @@ doCheckTotality bundle _preD exits =
        -- from the triple verifier.
        isReturn <- do
          bothReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
+         {-
+         -- FIXME: add this back in when we are handling non-trivial abort cases
          outO <- PPa.get PBi.OriginalRepr (simOut bundle)
          abortO <- PAb.isAbortedStatePred outO
          returnP <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym (PS.simOutBlockEnd $ PS.simOutP bundle) MCS.MacawBlockEndReturn
          abortCase <- liftIO $ W4.andPred sym abortO returnP
          liftIO $ W4.orPred sym bothReturn abortCase
+         -}
+         return bothReturn
 
        asm <- liftIO $ (forM (isReturn:cases) (W4.notPred sym) >>= (foldM (W4.andPred sym) (W4.truePred sym)))
 
        goalSat "doCheckTotality" asm $ \res -> case res of
          Unsat _ -> return CasesTotal
          Unknown -> return (TotalityCheckingError "UNKNOWN result when checking totality")
-         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn ->
+         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
            -- We found an execution that does not correspond to one of the
            -- executions listed above, so compute the counterexample.
            --
@@ -1054,33 +1065,27 @@ doCheckTotality bundle _preD exits =
            -- information about the calling context) the solver will invent nonsense addresses for
            -- the location.  It might be better to only report concrete values for exit address
            -- if it is unique.
-           do let oRegs  = PS.simRegs (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
-              let pRegs  = PS.simRegs (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
-              let oIPReg = oRegs ^. MM.curIP
-              let pIPReg = pRegs ^. MM.curIP
-              let oBlockEnd = PS.simOutBlockEnd (PPa.pOriginal (PS.simOut bundle))
-              let pBlockEnd = PS.simOutBlockEnd (PPa.pPatched  (PS.simOut bundle))
-
-              let oMem = PS.simMem (PS.simOutState (PPa.pOriginal (PS.simOut bundle)))
-              let pMem = PS.simMem (PS.simOutState (PPa.pPatched  (PS.simOut bundle)))
-
-              oBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn oBlockEnd
-              pBlockEndCase <- groundBlockEndCase sym (Proxy @arch) evalFn pBlockEnd
-
-              oIPV <- groundIPValue sym evalFn oIPReg
-              pIPV <- groundIPValue sym evalFn pIPReg
-
-              oInstr <- groundMuxTree sym evalFn (MT.memCurrentInstr oMem)
-              pInstr <- groundMuxTree sym evalFn (MT.memCurrentInstr pMem)
-
-              case (oIPV, pIPV) of
-                (Just oval, Just pval) ->
-                   return (TotalityCheckCounterexample
-                     (TotalityCounterexample (oval,oBlockEndCase,oInstr) (pval,pBlockEndCase,pInstr)))
-                (Nothing, _) ->
-                  return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr oIPReg)))
-                (_, Nothing) ->
-                  return (TotalityCheckingError ("IP register had unexpected type: " ++ show (PSR.macawRegRepr pIPReg)))
+              result <- PPa.runPatchPairT $ PPa.forBinsC $ \bin -> do
+                out <- PPa.get bin (PS.simOut bundle)
+                let regs  = PS.simRegs (PS.simOutState out)
+                let iPReg = regs ^. MM.curIP
+                let blockEnd = PS.simOutBlockEnd out
+                let mem = PS.simMem (PS.simOutState out)
+                blockEndCase <- lift $ groundBlockEndCase sym (Proxy @arch) evalFn blockEnd
+                iPV <- lift $ groundIPValue sym evalFn iPReg
+                instr <- lift $ groundMuxTree sym evalFn (MT.memCurrentInstr mem)
+                case iPV of
+                  Just val -> return $ (Just (val, blockEndCase, instr))
+                  Nothing -> return $ Nothing
+              case result of
+                PPa.PatchPairC (Just ores) (Just pres) ->
+                  return (TotalityCheckCounterexample
+                    (TotalityCounterexample ores pres))
+                PPa.PatchPairSingle _ (Const (Just r)) ->
+                  --FIXME: update the type to use PatchPairC
+                  return (TotalityCheckCounterexample
+                    (TotalityCounterexample r r))
+                _ -> return (TotalityCheckingError ("IP register had unexpected type"))
 
 groundIPValue ::
   (sym ~ W4.ExprBuilder t st fs, LCB.IsSymInterface sym) =>
@@ -1231,6 +1236,8 @@ viewStubPair ::
   StubPair ->
   (Maybe BS.ByteString, Maybe BS.ByteString)
 viewStubPair (PPa.PatchPairC sO sP) = (sO,sP)
+viewStubPair (PPa.PatchPairOriginal (Const s)) = (s, Nothing)
+viewStubPair (PPa.PatchPairPatched (Const p)) = (Nothing, p)
 
 -- | Return the name of a function if we want to replace its call with
 --   stub semantics
@@ -1286,6 +1293,7 @@ triageBlockTarget ::
   PairGraph sym arch ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
+triageBlockTarget _ _ _ _ _ (PPa.PatchPairSingle{}) = PPa.handleSingletonStub
 triageBlockTarget scope bundle' currBlock d gr blkts@(PPa.PatchPair blktO blktP) =
   do let
         blkO = PB.targetCall blktO
@@ -1444,9 +1452,9 @@ handleTailFunCall ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
 handleTailFunCall scope bundle currBlock d gr pPair =
-  case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
-    (Just oFun, Just pFun) -> do
-      emitTraceLabel @"funcall" PB.TailFunCall (PPa.PatchPair oFun pFun)
+  case asFunctionPair pPair of
+    Just fnPair -> do
+      emitTraceLabel @"funcall" PB.TailFunCall fnPair
       currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
         PCfg.SharedFunctionAbstractDomains -> return currBlock
         PCfg.DistinctFunctionAbstractDomains -> return $ addContext pPair currBlock
@@ -1457,7 +1465,7 @@ handleTailFunCall scope bundle currBlock d gr pPair =
       -- node representing the return sites of the caller
       let
         callerFunNode = mkNodeReturn currBlock funEntry
-        tailCallFunNode = mkNodeReturn currBlock' (PPa.PatchPair oFun pFun)
+        tailCallFunNode = mkNodeReturn currBlock' fnPair
         tailCallNode = mkNodeEntry currBlock' pPair
         callers = getReturnVectors gr callerFunNode
         gr' = Set.foldl' (\gr'' caller -> addReturnVector gr'' tailCallFunNode caller) gr callers
@@ -1485,16 +1493,16 @@ handleOrdinaryFunCall ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   EquivM sym arch (PairGraph sym arch)
 handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
-   case (PB.asFunctionEntry (PPa.pOriginal pPair), PB.asFunctionEntry (PPa.pPatched pPair)) of
-     (Just oFun, Just pFun) ->
+   case asFunctionPair pPair of
+     Just fnPair ->
        do
-          emitTraceLabel @"funcall" PB.NormalFunCall (PPa.PatchPair oFun pFun)
+          emitTraceLabel @"funcall" PB.NormalFunCall fnPair
           -- augmenting this block with the return point as its calling context
           currBlock' <- asks (PCfg.cfgContextSensitivity . envConfig) >>= \case
             PCfg.SharedFunctionAbstractDomains -> return currBlock
             PCfg.DistinctFunctionAbstractDomains -> return $ addContext pRetPair currBlock
           let
-            funNode = mkNodeReturn currBlock' (PPa.PatchPair oFun pFun)
+            funNode = mkNodeReturn currBlock' fnPair
             returnSite = mkNodeEntry currBlock pRetPair
             callNode = mkNodeEntry currBlock' pPair
             gr' = addReturnVector gr funNode returnSite
@@ -1594,7 +1602,7 @@ mergeStubOverrides validArch
   in case (sym1,sym2) of
     (Just nm1, Just nm2) | nm1 == nm2 -> ov1'
     _ -> combineOverrides ov1' ov2' 
-
+mergeStubOverrides _ _ _ = PPa.handleSingletonStub
 -- FIXME: re-evaluate how safe inlining is
 {-
 bothDefinedOverrides ::
@@ -1603,22 +1611,6 @@ bothDefinedOverrides ::
 bothDefinedOverrides (PPa.PatchPair (Const (Just{})) (Const (Just{}))) = True
 bothDefinedOverrides _ = False
 -}
-
--- | If we have a mismatch in our stub semantics, we need to create
---   a freeze node for whichever binary hit the stub
---   TODO: this is only one case of how we might handle divergent control
---   flow
-freezeMismatchedStubs ::
-  StubPair ->
-  Maybe (Some PBi.WhichBinaryRepr)
-freezeMismatchedStubs stubs = case viewStubPair stubs of
-  (Just{}, Just{}) -> Nothing
-  (Nothing, Just{}) -> Just (Some PBi.PatchedRepr)
-  (Just{}, Nothing) -> Just (Some PBi.OriginalRepr)
-  -- shouldn't happen when handling stubs, since we have no
-  -- stub symbol in this case
-  (Nothing, Nothing) -> Nothing
-
 
 handleStub ::
   HasCallStack =>
@@ -1687,7 +1679,6 @@ handleReturn ::
 handleReturn scope bundle currBlock d gr =
  do let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks currBlock)
     let ret = mkNodeReturn currBlock fPair
-    let vecs = getReturnVectors gr ret        
     let next = ReturnNode ret
     withTracing @"node" next $ 
       widenAlongEdge scope bundle (GraphNode currBlock) d gr next
@@ -1703,50 +1694,19 @@ handleJump ::
 handleJump scope bundle currBlock d gr nextNode =
   widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode nextNode)
 
-
--- | A no-op transition that matches the exit of the given output
-noTransition ::
-  forall sym arch v bin.
-  PS.SimInput sym arch v bin ->
-  PS.SimOutput sym arch v (PBi.OtherBinary bin) ->
-  EquivM sym arch (PS.SimOutput sym arch v bin)
-noTransition simIn_ otherSimOut = withSym $ \sym -> do
-  ptr <- PD.concreteToLLVM (PS.simInBlock simIn_)
-  blkEnd <- liftIO $ MCS.copyBlockEnd (Proxy @arch) sym ptr (PS.simOutBlockEnd otherSimOut)
-  stackBase <- liftIO $ PS.freshStackBase sym (Proxy @arch)
-  return $ PS.SimOutput ((PS.simInState simIn_) { PS.simStackBase = stackBase }) blkEnd
-
-mkSimBundleOne ::
-  PB.ConcreteBlock arch bin ->
-  PS.SimVars sym arch v bin ->
-  EquivM sym arch (PS.SimInput sym arch v bin, PS.SimOutput sym arch v bin)
-mkSimBundleOne blk vars = do
-  let varState = PS.simVarState vars
-  absState <- PD.getAbsDomain blk
-  let simIn_ = PS.SimInput varState blk absState
-  (_asmO, simOut_) <- withRepr (PB.blockBinRepr blk) $ PVSy.simulate simIn_
-  return (simIn_, simOut_)
-
-
 mkSimBundle ::
   NodeEntry arch ->
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   EquivM sym arch (SimBundle sym arch v)
 mkSimBundle node vars = do
   let pPair = nodeBlocks node
-  let oVarState = PS.simVarState (PPa.pOriginal vars)
-  let pVarState = PS.simVarState (PPa.pPatched vars)
-  oAbsState <- PD.getAbsDomain (PPa.pOriginal pPair)
-  pAbsState <- PD.getAbsDomain (PPa.pPatched pPair)
-
-  let simInO    = PS.SimInput oVarState (PPa.pOriginal pPair) oAbsState
-  let simInP    = PS.SimInput pVarState (PPa.pPatched pPair) pAbsState
-
-  traceBlockPair pPair "Simulating original blocks"
-  (_asmO, simOutO_) <- PVSy.simulate simInO
-  traceBlockPair pPair "Simulating patched blocks"
-  (_asmP, simOutP_) <- PVSy.simulate simInP
-  traceBlockPair pPair "Finished simulating blocks"
-
-  let bnd = SimBundle (PPa.PatchPair simInO simInP) (PPa.PatchPair simOutO_ simOutP_)
-  return bnd
+  (simIn_, simOut_) <- fmap PPa.unzipPatchPair2 $ PPa.forBins $ \bin -> do
+    blk <- PPa.get bin pPair
+    vars' <- PPa.get bin vars
+    let varState = PS.simVarState vars'
+    absState <- PD.getAbsDomain blk
+    let simIn_ = PS.SimInput varState blk absState
+    traceBlockPair pPair ("Simulating " ++ show bin ++ " blocks")
+    (_asm, simOut_) <- PVSy.simulate simIn_
+    return $ PPa.PairF simIn_ simOut_
+  return $ SimBundle simIn_ simOut_

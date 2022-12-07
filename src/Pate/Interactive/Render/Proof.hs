@@ -2,6 +2,9 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+
+{-# OPTIONS_GHC -fno-warn-deprecations #-}
+
 module Pate.Interactive.Render.Proof (
     renderProof
   , renderProofApp
@@ -112,6 +115,7 @@ nodeLabel
   -> PE.BlocksPair arch
   -> PPr.ProofNonceExpr sym arch tp
   -> T.Text
+nodeLabel _ (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
 nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks _ ob _) (PE.Blocks _ pb _)) expr =
   pp (mconcat [ ppAppTag proofTreeNodes expr
               , PP.line
@@ -280,6 +284,7 @@ renderRegVal domain reg regOp =
         PPa.PatchPairC (PFI.GroundMacawValue obv) (PFI.GroundMacawValue pbv)
           | PFI.isGroundBVZero obv && PFI.isGroundBVZero pbv -> Nothing
           | otherwise -> Just prettySlotVal
+        PPa.PatchPairSingle{} -> Just prettySlotVal
     _ -> Just prettySlotVal
   where
     vals = TF.fmapF (\(Const x) -> Const $ PFI.groundMacawValue x) $ PPr.slRegOpValues regOp
@@ -291,7 +296,7 @@ renderRegVal domain reg regOp =
 
     ppVals =
       case PG.groundValue $ PPr.slRegOpEquiv regOp of
-        True -> PP.pretty (PPa.pcOriginal vals)
+        True -> PP.pretty (PPa.someC vals)
         False -> PPa.ppPatchPairC PP.pretty vals
 
     -- Use 'PAr.displayRegister' to find the display name of the register, while
@@ -335,7 +340,7 @@ renderMemCellVal domain cell memOp = do
         True -> PP.emptyDoc
         False -> PP.pretty "| Excluded"
   let ppVals = case PG.groundValue $ PPr.slMemOpEquiv memOp of
-        True -> PP.viaShow (PPa.pcOriginal vals)
+        True -> PP.viaShow (PPa.someC vals)
         False -> PPa.ppPatchPairC PP.viaShow vals
   return (PFI.ppGroundCell cell <> PP.pretty ": " <> ppVals PP.<+> ppDom)
 
@@ -358,7 +363,7 @@ renderIPs
   => PPr.BlockSliceState grnd arch
   -> PP.Doc ann
 renderIPs st
-  | (PG.groundValue $ PPr.slRegOpEquiv pcRegs) = PP.pretty (PPa.pcOriginal vals)
+  | (PG.groundValue $ PPr.slRegOpEquiv pcRegs) = PP.pretty (PPa.someC vals)
   | otherwise = PPa.ppPatchPairC PP.pretty vals
   where
     vals = TF.fmapF (\(Const x) -> Const $ PFI.groundMacawValue x) (PPr.slRegOpValues pcRegs)
@@ -439,6 +444,7 @@ renderInlinedCall
   :: PPa.PatchPair (PB.ConcreteBlock arch)
   -> Either String (PVM.WriteSummary sym (MC.ArchAddrWidth arch))
   -> TP.UI TP.Element
+renderInlinedCall (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
 renderInlinedCall (PPa.PatchPair ob pb) results =
   case results of
     Left err -> TP.column [ TP.string (T.unpack renderBlocks)

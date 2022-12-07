@@ -104,7 +104,7 @@ getCurrentTOC
   -> IO (W.W 64)
 getCurrentTOC ctx binRepr = PPa.runPatchPairT $ do
   ctx' <- PPa.get binRepr (PMC.binCtxs ctx)
-  blks <- lift $ PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+  blks <- PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
   PE.Blocks _ _ (pblk:_) <- PPa.get binRepr blks
   let
     toc = TOC.getTOC (PMC.binary ctx')

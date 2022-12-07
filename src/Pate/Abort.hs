@@ -60,7 +60,11 @@ proveAbortValid ::
   WI.Pred sym ->
   EquivM sym arch Bool
 proveAbortValid bundle condEq = withSym $ \sym -> do
-  oAbort <- isAbortedStatePred (PPa.pOriginal . PSS.simOut $ bundle)
+  outO <- case PSS.simOut bundle of
+    PPa.PatchPair outO _ -> return outO
+    PPa.PatchPairOriginal outO -> return outO
+    _ -> PPa.handleSingletonStub
+  oAbort <- isAbortedStatePred outO
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   traceBundle bundle "Checking conditional equivalence validity"
   -- assuming conditional equivalence does not hold (i.e. the programs may diverge)

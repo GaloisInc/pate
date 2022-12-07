@@ -882,12 +882,13 @@ getInitalAbsDomainVals bundle preDom = withTracing @"function_name" "getInitalAb
       emitTraceLabel @"expr" "output" (Some e'')
       return $ PAD.extractAbsRange sym e''
 
-  let PPa.PatchPair preO preP = PAD.absDomVals preDom
   eqCtx <- equivalenceContext
-  subTree @"expr" "Initial Domain" $ IO.withRunInIO $ \inIO -> do
-    initO <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) (PS.simOutO bundle) preO
-    initP <- PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) (PS.simOutP bundle) preP
-    return $ PPa.PatchPair initO initP
+  subTree @"expr" "Initial Domain" $ do
+    PPa.forBins $ \bin -> do
+      out <- PPa.get bin (PS.simOut bundle)
+      pre <- PPa.get bin (PAD.absDomVals preDom)
+      IO.withRunInIO $ \inIO ->
+        PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) out pre
 
 widenUsingCounterexample ::
   sym ->
@@ -1073,24 +1074,27 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD me
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
+-- TODO: what to do for singletons?
 findUnequalHeapWrites ::
   sym ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalHeapWrites sym evalFn bundle eqCtx =
-  do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+findUnequalHeapWrites sym evalFn bundle eqCtx = case PS.simOut bundle of
+  PPa.PatchPair outO outP -> do
+    let oPostState = PS.simOutState outO
+    let pPostState = PS.simOutState outP
 
-     footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutO bundle)
-     footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutP bundle)
-     let footprints = Set.union footO footP
-     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
-     execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
-          cellEq' <- lift $ execGroundFn evalFn cellEq
-          unless cellEq' (tell [Some cell])
+    footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem outO)
+    footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem outP)
+    let footprints = Set.union footO footP
+    memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
+    execWriterT $ forM_ memWrites $ \(Some cell, cond) -> do
+        cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
+        cellEq' <- lift $ execGroundFn evalFn cellEq
+        unless cellEq' (tell [Some cell])
+  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
@@ -1100,18 +1104,20 @@ findUnequalStackWrites ::
   SimBundle sym arch v ->
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalStackWrites sym evalFn bundle eqCtx =
-  do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+findUnequalStackWrites sym evalFn bundle eqCtx = case PS.simOut bundle of
+  PPa.PatchPair outO outP -> do
+    let oPostState = PS.simOutState outO
+    let pPostState = PS.simOutState outP
 
-     footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutO bundle)
-     footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem $ PS.simOutP bundle)
-     let footprints = Set.union footO footP
-     memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
-     execWriterT $ forM_ memWrites $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
-          cellEq' <- lift $ execGroundFn evalFn cellEq
-          unless cellEq' (tell [Some cell])
+    footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem outO)
+    footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem outP)
+    let footprints = Set.union footO footP
+    memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
+    execWriterT $ forM_ memWrites $ \(Some cell, cond) -> do
+      cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
+      cellEq' <- lift $ execGroundFn evalFn cellEq
+      unless cellEq' (tell [Some cell])
+  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
@@ -1122,15 +1128,17 @@ findUnequalHeapMemCells ::
   EquivContext sym arch ->
   AbstractDomain sym arch v ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalHeapMemCells sym evalFn bundle eqCtx preD =
-  do let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PAD.absDomEq preD))
-     let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+findUnequalHeapMemCells sym evalFn bundle eqCtx preD = case PS.simOut bundle of
+  PPa.PatchPair outO outP -> do
+    let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PAD.absDomEq preD))
+    let oPostState = PS.simOutState outO
+    let pPostState = PS.simOutState outP
 
-     execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
-          cellEq' <- lift $ execGroundFn evalFn cellEq
-          unless cellEq' (tell [Some cell])
+    execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) -> do
+      cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
+      cellEq' <- lift $ execGroundFn evalFn cellEq
+      unless cellEq' (tell [Some cell])
+  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
@@ -1141,15 +1149,17 @@ findUnequalStackMemCells ::
   EquivContext sym arch ->
   AbstractDomain sym arch v ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalStackMemCells sym evalFn bundle eqCtx preD =
-  do let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PAD.absDomEq preD))
-     let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+findUnequalStackMemCells sym evalFn bundle eqCtx preD = case PS.simOut bundle of
+  PPa.PatchPair outO outP -> do
+    let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PAD.absDomEq preD))
+    let oPostState = PS.simOutState outO
+    let pPostState = PS.simOutState outP
 
-     execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) ->
-       do cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
-          cellEq' <- lift $ execGroundFn evalFn cellEq
-          unless cellEq' (tell [Some cell])
+    execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) -> do
+        cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
+        cellEq' <- lift $ execGroundFn evalFn cellEq
+        unless cellEq' (tell [Some cell])
+  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
 
 widenRegisters ::
   sym ->
@@ -1160,29 +1170,31 @@ widenRegisters ::
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
-widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD =
-  do let oPostState = PS.simOutState (PPa.pOriginal (PS.simOut bundle))
-     let pPostState = PS.simOutState (PPa.pPatched  (PS.simOut bundle))
+widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD = case PS.simOut bundle of
+  PPa.PatchPair outO outP -> do
+    let oPostState = PS.simOutState outO
+    let pPostState = PS.simOutState outP
 
-     newRegs <- findUnequalRegs sym evalFn eqCtx
-                   (PEE.eqDomainRegisters postCondStatePred)
-                   (PS.simRegs oPostState)
-                   (PS.simRegs pPostState)
+    newRegs <- findUnequalRegs sym evalFn eqCtx
+                  (PEE.eqDomainRegisters postCondStatePred)
+                  (PS.simRegs oPostState)
+                  (PS.simRegs pPostState)
 
-     if null newRegs then
-       return NoWideningRequired
-     else
-       -- TODO, widen less aggressively using the path condition or something?
-       let regs' = foldl
-                     (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
-                     (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
-                     newRegs
-           pred' = (PAD.absDomEq postD)
-                   { PEE.eqDomainRegisters = regs'
-                   }
-           postD' = postD { PAD.absDomEq = pred' }
-           locs = WidenLocs (Set.fromList newRegs) mempty
-        in return (Widen WidenEquality locs postD')
+    if null newRegs then
+      return NoWideningRequired
+    else
+      -- TODO, widen less aggressively using the path condition or something?
+      let regs' = foldl
+                    (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
+                    (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
+                    newRegs
+          pred' = (PAD.absDomEq postD)
+                  { PEE.eqDomainRegisters = regs'
+                  }
+          postD' = postD { PAD.absDomEq = pred' }
+          locs = WidenLocs (Set.fromList newRegs) mempty
+      in return (Widen WidenEquality locs postD')
+  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
 
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time

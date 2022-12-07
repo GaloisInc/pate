@@ -26,6 +26,7 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE ConstraintKinds #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-deprecations #-}
 
 module Pate.Proof.Instances
   ( SomeProofNonceExpr(..)
@@ -174,6 +175,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
        where
          go :: (PB.ConcreteBlock arch bin, PB.ConcreteBlock arch bin) -> PP.Doc a
          go (src, tgt) = PP.parens (PP.pretty (PB.ppBlock src)) <+> "->" <+> (PP.pretty (PB.ppBlock tgt))
+     ppBlockPairTarget _ _ = PPa.handleSingletonStub
  pretty (PF.ProofExpr prf@PF.ProofBlockSlice{}) =
     PP.vsep
       [ PP.pretty (PF.prfBlockSliceTriple prf)
@@ -435,7 +437,7 @@ ppIPs st  =
     pcRegs = (PF.slRegState st) ^. MM.curIP
     vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) (PF.slRegOpValues pcRegs)
   in case PG.groundValue $ PF.slRegOpEquiv pcRegs of
-    True -> PP.pretty $ PPa.pcOriginal vals
+    True -> PP.pretty $ PPa.someC vals
     False -> PPa.ppPatchPairC PP.pretty vals
 
 ppMemCellMap ::
@@ -555,7 +557,7 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
       False -> "| Excluded"
     
     ppVals = case PG.groundValue $ PF.slRegOpEquiv regOp of
-      True -> PP.pretty $ PPa.pcOriginal vals
+      True -> PP.pretty $ PPa.someC vals
       False -> PPa.ppPatchPairC PP.pretty vals
 
 regInGroundDomain ::
@@ -588,7 +590,7 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
       False -> "| Excluded"
  
     ppVals = case PG.groundValue $ PF.slMemOpEquiv memOp of
-      True -> PP.pretty $ show (PPa.pcOriginal vals)
+      True -> PP.pretty $ show (PPa.someC vals)
       False -> PPa.ppPatchPairC (PP.pretty . show) vals
 
 ppGroundCell ::

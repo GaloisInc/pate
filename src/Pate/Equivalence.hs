@@ -54,6 +54,7 @@ import           Control.Lens hiding ( op, pre )
 import           Control.Monad ( foldM )
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
+import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Set as S
 import qualified What4.Interface as W4
 
@@ -70,6 +71,7 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
+import qualified Pate.PatchPair as PPa
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
@@ -185,7 +187,7 @@ getPredomain ::
   PED.EquivalenceDomain sym arch ->
   IO (StatePreCondition sym arch v)
 getPredomain sym bundle eqCtx eqDom =
-  eqDomPre sym (simInO bundle) (simInP bundle) eqCtx eqDom
+  eqDomPre sym (simIn bundle) eqCtx eqDom
 
 -- | True if the first precondition implies the second
 impliesPredomain ::
@@ -193,15 +195,14 @@ impliesPredomain ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimInput sym arch v PBi.Original ->
-  SimInput sym arch v PBi.Patched ->
+  PPa.PatchPair (SimInput sym arch v) ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)  
-impliesPredomain sym inO inP eqCtx domAsm domConcl = do
-  asm <- eqDomPre sym inO inP eqCtx domAsm >>= preCondAssumption sym inO inP eqCtx >>= toPred sym
-  concl <- eqDomPre sym inO inP eqCtx domConcl >>= preCondAssumption sym inO inP eqCtx >>= toPred sym
+impliesPredomain sym input eqCtx domAsm domConcl = do
+  asm <- eqDomPre sym input eqCtx domAsm >>= preCondAssumption sym input eqCtx >>= toPred sym
+  concl <- eqDomPre sym input eqCtx domConcl >>= preCondAssumption sym input eqCtx >>= toPred sym
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate into a structured precondition.
@@ -222,7 +223,7 @@ getPostdomain ::
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StatePostCondition sym arch v)
 getPostdomain sym bundle eqCtx domPre domPost =
-  eqDomPost sym (simOutO bundle) (simOutP bundle) eqCtx domPre domPost
+  eqDomPost sym (simOut bundle) eqCtx domPre domPost
 
 -- | Flatten a structured 'MemoryCondition' representing a memory post-condition into
 -- a single predicate.
@@ -250,12 +251,12 @@ memDomPost ::
   PA.ValidArch arch =>
   sym ->
   MemRegionEquality sym arch ->
-  SimOutput sym arch v PBi.Original ->
-  SimOutput sym arch v PBi.Patched ->
+  PPa.PatchPair (SimOutput sym arch v) ->
   PEM.MemoryDomain sym arch {- ^ pre-domain for this slice -} ->
   PEM.MemoryDomain sym arch {- ^ target post-domain -} ->
   IO (MemoryCondition sym arch)
-memDomPost sym memEqRegion outO outP domPre domPost = do
+memDomPost _ _ (PPa.PatchPairSingle{}) _ _ = PPa.handleSingletonStub
+memDomPost sym memEqRegion (PPa.PatchPair outO outP) domPre domPost = do
   footO <- MT.traceFootprint sym memO
   footP <- MT.traceFootprint sym memP
   let foot = S.union footO footP
@@ -371,11 +372,11 @@ memPreCondToPred ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   MemRegionEquality sym arch ->
-  SimInput sym arch v PBi.Original ->
-  SimInput sym arch v PBi.Patched ->
+  PPa.PatchPair (SimInput sym arch v) ->
   PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
-memPreCondToPred sym memEqRegion inO inP memDom  = do
+memPreCondToPred _ _ (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
+memPreCondToPred sym memEqRegion (PPa.PatchPair inO inP) memDom  = do
   let cells = PEM.toList memDom
   mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) cells
   getRegionEquality sym memEqRegion mem' (MT.memState memP)
@@ -426,11 +427,11 @@ regDomRel ::
   PA.ValidArch arch =>
   PA.HasDedicatedRegister arch ->
   sym ->
-  SimState sym arch v PBi.Original ->
-  SimState sym arch v PBi.Patched ->
+  PPa.PatchPair (SimState sym arch v) ->
   PER.RegisterDomain sym arch ->
   IO (PEC.RegisterCondition sym arch v)
-regDomRel hdr sym stO stP regDom  = PEC.RegisterCondition <$> do
+regDomRel _ _ (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
+regDomRel hdr sym (PPa.PatchPair stO stP) regDom  = PEC.RegisterCondition <$> do
   PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> Const <$> do
     let p = PER.registerInDomain sym r regDom
     registerValuesEqual' hdr sym r p vO vP
@@ -481,23 +482,24 @@ eqDomPre ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimInput sym arch v PBi.Original ->
-  SimInput sym arch v PBi.Patched ->
+  PPa.PatchPair (SimInput sym arch v) ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StatePreCondition sym arch v)
-eqDomPre sym inO inP (eqCtxHDR -> hdr) eqDom  = do
+eqDomPre sym input (eqCtxHDR -> hdr) eqDom  = do
   let
-    stO = simInState inO
-    stP = simInState inP
+    st = TF.fmapF simInState input
+    maxRegion = TF.fmapF (\st' -> Const $ unSE $ simMaxRegion st') st
     
-  regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
+    stackBase = TF.fmapF (\st' -> Const $ unSE $ unSB $ simStackBase st') st
+
+  regsEq <- regDomRel hdr sym st (PED.eqDomainRegisters eqDom)
   -- TODO: we haven't included this in the domain, and therefore we're simply
   -- requiring that the number of allocations for each program always match
   -- this will cause a widening error if this isn't the case
-  let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
+  let maxRegionsEq = bindExprPair maxRegion
   let stackBaseEq = case W4.asConstantPred (PER.registerInDomain sym MM.sp_reg (PED.eqDomainRegisters eqDom)) of
-        Just True -> exprBinding (unSE $ unSB $ simStackBase stO) (unSE $ unSB $ simStackBase stP)
+        Just True -> bindExprPair stackBase
         _ -> mempty
   return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) (maxRegionsEq <> stackBaseEq)
 
@@ -505,26 +507,25 @@ eqDomPost ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
-  SimOutput sym arch v PBi.Original ->
-  SimOutput sym arch v PBi.Patched ->
+  PPa.PatchPair (SimOutput sym arch v) ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StatePostCondition sym arch v)
-eqDomPost sym outO outP eqCtx domPre domPost = do
+eqDomPost sym output eqCtx domPre domPost = do
   let
     hdr = eqCtxHDR eqCtx
     stackRegion = eqCtxStackRegion eqCtx
-    stO = simOutState outO
-    stP = simOutState outP
+    st = TF.fmapF simOutState output
+    maxRegion = TF.fmapF (\st' -> Const $ unSE $ simMaxRegion st') st
     
-  regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
-  stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) outO outP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
-  memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) outO outP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
+  regsEq <- regDomRel hdr sym st (PED.eqDomainRegisters domPost)
+  stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) output (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
+  memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) output (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
   -- TODO: we haven't included this in the domain, and therefore we're simply
   -- requiring that the number of allocations for each program always match
   -- this will cause a widening error if this isn't the case
-  let maxRegionsEq = exprBinding (unSE $ simMaxRegion stO) (unSE $ simMaxRegion stP)
+  let maxRegionsEq = bindExprPair maxRegion
   return $ StatePostCondition regsEq stacksEq memEq maxRegionsEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
@@ -533,15 +534,14 @@ preCondAssumption ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  SimInput sym arch v PBi.Original ->
-  SimInput sym arch v PBi.Patched ->
+  PPa.PatchPair (SimInput sym arch v) ->
   EquivContext sym arch ->
   StatePreCondition sym arch v ->
   IO (AssumptionSet sym)
-preCondAssumption sym inO inP (eqCtxStackRegion -> stackRegion) stCond = do
+preCondAssumption sym input (eqCtxStackRegion -> stackRegion) stCond = do
   regsPred <- regCondToAsm sym (stRegPreCond stCond)
-  stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) inO inP (stStackPreDom stCond)
-  memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) inO inP (stMemPreDom stCond)
+  stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) input (stStackPreDom stCond)
+  memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) input (stMemPreDom stCond)
   return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred <> stExtraPreCond stCond
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into

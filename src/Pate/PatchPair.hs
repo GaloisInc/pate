@@ -21,16 +21,15 @@ module Pate.PatchPair (
     PatchPair
   , pattern PatchPair
   , pattern PatchPairSingle
+  , pattern PatchPairOriginal
+  , pattern PatchPairPatched
   , PatchPairM(..)
   , PatchPairT
   , PatchPairC
   , pattern PatchPairC
   , runPatchPairT
   , runPatchPairT'
-  , pOriginal
-  , pPatched
-  , pcOriginal
-  , pcPatched
+  , handleSingletonStub
   , patchPairRepr
   , mkPair
   , mkSingle
@@ -48,17 +47,23 @@ module Pate.PatchPair (
   , LiftF(..)
   , PatchPairF
   , pattern PatchPairF
+  , PairF(..)
+  , PatchPair2
+  , pattern PatchPair2
+  , forBins2
   , forBinsF
-  ) where
+  , oneBin
+  , some
+  , someC
+  , getC
+  , catBinsPure
+  , defaultPair, unzipPatchPair2) where
 
+import           GHC.Stack (HasCallStack)
 import           Control.Monad.Trans.Maybe
-import           Control.Monad.Error
+import           Control.Monad.Except
 import           Control.Monad.Catch
-import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT
-import qualified Control.Monad.Trans.Except as CME
-import           Control.Exception
-import           Control.Monad.IO.Class
 
 import           Data.Functor.Const ( Const(..) )
 import qualified Data.Kind as DK
@@ -68,8 +73,10 @@ import qualified Prettyprinter as PP
 
 import qualified Pate.Binary as PB
 import qualified Pate.ExprMappable as PEM
+import Data.Parameterized (Some(..))
+import Control.Monad.Identity
+import Pate.TraceTree
 
-{-# DEPRECATED PatchPairCtor,pOriginal,pPatched,pcOriginal,pcPatched  "Use accessors" #-}
 -- | A pair of values indexed based on which binary they are associated with (either the
 --   original binary or the patched binary).
 --   A 'PatchPair' may also be a singleton (i.e. only containing a value for either the original
@@ -78,8 +85,8 @@ import qualified Pate.ExprMappable as PEM
 --   to handle cases where the control flow between the binaries has diverged and the verifier
 --   needs to handle each one independently.
 data PatchPair (tp :: PB.WhichBinary -> DK.Type) = PatchPairCtor
-  { pOriginal :: tp PB.Original
-  , pPatched :: tp PB.Patched
+  { _pOriginal :: tp PB.Original
+  , _pPatched :: tp PB.Patched
   }
   | forall bin. PB.KnownBinary bin => PatchPairSingle (PB.WhichBinaryRepr bin) (tp bin)
 
@@ -119,6 +126,9 @@ setPair PB.PatchedRepr pPair a = case pPair of
   PatchPairPatched _ -> Just $ PatchPairPatched a
   PatchPairOriginal _ -> Nothing
 
+-- {-# DEPRECATED handleSingletonStub "Missing implementation for handling singleton PatchPair values" #-}
+handleSingletonStub :: HasCallStack => a
+handleSingletonStub = error "Missing implementation for handling singleton PatchPair values"
 
 class Monad m => PatchPairM m where
   -- | Called when an invalid patch pair access occurs (i.e. some 'get' or 'set' operation
@@ -147,6 +157,9 @@ liftPairErr Nothing = throwPairErr
 get :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> m (tp bin))
 get repr pPair = liftPairErr (getPair repr pPair)
 
+getC :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairC tp -> m tp)
+getC repr pPair = getConst <$> liftPairErr (getPair repr pPair)
+
 -- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
 set :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
@@ -166,6 +179,12 @@ deriving instance MonadThrow m => MonadThrow (PatchPairT m)
 deriving instance MonadIO m => MonadIO (PatchPairT m)
 deriving instance MonadFail m => MonadFail (PatchPairT m)
 
+instance PatchPairM m => PatchPairM (NodeBuilderT k nm m) where
+  throwPairErr = lift $ throwPairErr
+  catchPairErr f g = do
+    nb <- getNodeBuilder
+    lift $ catchPairErr (runNodeBuilderT f nb) (runNodeBuilderT g nb)
+
 -- | Run a 'PatchPairT' computation, using the given 'PatchPair' as the basis
 --  for the underlying 'getPairRepr'.
 --  NOTE: 'PatchPairT' only satisfies 'PatchPairM' if the monad 'm' is a
@@ -180,11 +199,6 @@ runPatchPairT m = runPatchPairT' m >>= \case
 
 patchPairRepr :: PatchPair PB.WhichBinaryRepr
 patchPairRepr = PatchPair PB.OriginalRepr PB.PatchedRepr
-
-toPatchPairRepr :: PatchPair x -> PatchPair PB.WhichBinaryRepr
-toPatchPairRepr = \case
-  PatchPair{} -> patchPairRepr
-  PatchPairSingle bin _ -> PatchPairSingle bin bin
 
 mkPair :: PB.WhichBinaryRepr bin -> tp bin -> tp (PB.OtherBinary bin) -> PatchPair tp
 mkPair bin b1 b2 = case bin of
@@ -219,12 +233,7 @@ pattern PatchPairC :: tp -> tp -> PatchPair (Const tp)
 pattern PatchPairC a b = PatchPairCtor (Const a) (Const b)
 
 {-# COMPLETE PatchPairC, PatchPairSingle #-}
-
-pcOriginal :: PatchPairC tp -> tp
-pcOriginal = getConst . pOriginal
-
-pcPatched :: PatchPairC tp -> tp
-pcPatched = getConst . pPatched
+{-# COMPLETE PatchPairC, PatchPairOriginal, PatchPairPatched #-}
 
 -- | The same as 'forBins' but specialized to 'PatchPairC' (i.e. when type in the 'PatchPair' is not
 --   indexed by 'PB.WhichBinary')
@@ -240,6 +249,8 @@ pattern PatchPairF :: t (tp PB.Original) -> t (tp PB.Patched) -> PatchPair (Lift
 pattern PatchPairF a b = PatchPairCtor (LiftF a) (LiftF b)
 
 {-# COMPLETE PatchPairF, PatchPairSingle #-}
+{-# COMPLETE PatchPairF, PatchPairOriginal, PatchPairPatched #-}
+
 
 forBinsF :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (t (f bin))) -> m (PatchPairF t f)
 forBinsF f = forBins $ \bin -> LiftF <$> f bin
@@ -253,6 +264,70 @@ catBins :: PatchPairM m => Semigroup w => (forall bin. PB.KnownBinary bin => PB.
 catBins f = forBinsC f >>= \case
   PatchPair (Const a) (Const b) -> pure (a <> b)
   PatchPairSingle _ (Const a) -> pure a
+
+catBinsPure :: Monoid w => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> (PatchPairT Identity) w) -> w
+catBinsPure f = runIdentity $
+  runPatchPairT' (catBins f) >>= \case
+    Just w -> return w
+    Nothing -> return mempty
+
+-- | Execute the given function on exactly one binary. Attempts the "Original" binary first,
+--   and then uses the "Patched" binary as a fallback.
+oneBin :: PatchPairM m =>
+  (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m a) ->
+  m a
+oneBin f = do
+  omResult <- catchPairErr (Just <$> (f PB.OriginalRepr)) (return Nothing)
+  case omResult of
+    Just oResult -> return oResult
+    Nothing -> f PB.PatchedRepr
+
+-- | Returns the given default value if the given 'PatchPair' is a singleton,
+--   otherwise runs the given function on the value pair.
+defaultPair ::
+  a ->
+  PatchPair tp ->
+  (tp PB.Original -> tp PB.Patched -> a) ->
+  a
+defaultPair _default (PatchPairSingle{}) _ = _default
+defaultPair _default (PatchPair po pp) f = f po pp
+
+
+-- | Return some element of the 'PatchPair'. Prefers the "Original" entry
+--   if it exists.
+some :: PatchPair tp -> (Some tp)
+some (PatchPair a _) = Some a
+some (PatchPairSingle _ a) = Some a
+
+-- | Return some element of the 'PatchPairC'. Prefers the "Original" entry
+--   if it exists.
+someC :: PatchPairC tp -> tp
+someC (PatchPairC a _) = a
+someC (PatchPairSingle _ (Const a)) = a
+
+data PairF a b tp = PairF { fstF :: (a tp), sndF :: (b tp) }
+
+type PatchPair2 tp1 tp2 = PatchPair (PairF tp1 tp2)
+
+pattern PatchPair2 ::
+  tp1 PB.Original ->
+  tp2 PB.Original ->
+  tp1 PB.Patched ->
+  tp2 PB.Patched ->
+  PatchPair (PairF tp1 tp2)
+pattern PatchPair2 a b c d = PatchPairCtor (PairF a b) (PairF c d)
+
+{-# COMPLETE PatchPair2, PatchPairSingle #-}
+
+unzipPatchPair2 ::
+  PatchPair2 tp1 tp2 -> (PatchPair tp1, PatchPair tp2)
+unzipPatchPair2 (PatchPair2 a b c d) = (PatchPair a c, PatchPair b d)
+unzipPatchPair2 (PatchPairSingle bin (PairF a b)) = (PatchPairSingle bin a, PatchPairSingle bin b)
+
+forBins2 :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (tp1 bin, tp2 bin)) -> m (PatchPair tp1, PatchPair tp2)
+forBins2 f = fmap unzipPatchPair2 $ forBins $ \bin -> do
+  (a, b) <- f bin
+  return $ PairF a b
 
 -- | True if the two given values would be printed identically
 ppEq :: PP.Pretty x => PP.Pretty y => x -> y -> Bool

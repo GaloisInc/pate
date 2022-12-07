@@ -1,5 +1,6 @@
 cabal.project.local
 dist-newstyle/
+dist-profile/
 *.i
 /docs/user-manual/auto/
 /docs/user-manual/user-manual.aux
@@ -7,3 +8,10 @@ dist-newstyle/
 /docs/user-manual/user-manual.fls
 /docs/user-manual/user-manual.log
 /docs/user-manual/user-manual.toc
+*.cfg
+*.o
+*.s
+*.dump
+*.local
+*.log
+*.hi

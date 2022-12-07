@@ -14,6 +14,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE PolyKinds #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -76,7 +77,6 @@ import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PBl
-import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.Condition as PEC
@@ -446,23 +446,29 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
         unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs (S.singleton (Some reg)) mempty)
         return absValCombined
 
+
+
 widenAbsDomainVals ::
   forall sym arch v m.
   Monad m =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
+  PPa.PatchPairM m =>
   sym ->
   AbstractDomain sym arch v {- ^ existing abstract domain that this is augmenting -} ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
   PS.SimBundle sym arch v ->
   m (AbstractDomain sym arch v, Maybe (WidenLocs sym arch))
 widenAbsDomainVals sym prev f bundle = do
-  let (PPa.PatchPair absValsO absValsP) = absDomVals prev
-  (absValsO', locsO) <- widenAbsDomainVals' sym absValsO f (PS.simOutO bundle)
-  (absValsP', locsP) <- widenAbsDomainVals' sym absValsP f (PS.simOutP bundle)
-  return $ (prev { absDomVals = PPa.PatchPair absValsO' absValsP' }, Just $ locsO <> locsP)
+  (absVals', locs) <- PPa.forBins2 $ \bin -> do
+    absVals <- PPa.get bin $ absDomVals prev
+    out <- PPa.get bin $ PS.simOut bundle
+    (absVals', locs) <- widenAbsDomainVals' sym absVals f out
+    return $ (absVals', Const locs)
 
+  locs' <- PPa.catBins $ \bin -> getConst <$> PPa.get bin locs
+  return $ (prev {absDomVals = absVals'}, Just locs')
 
 applyAbsRange ::
   W4.IsSymExprBuilder sym =>
@@ -655,7 +661,7 @@ absDomainToPrecond ::
   IO (PAS.AssumptionSet sym)
 absDomainToPrecond sym eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
   eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
-  eqInputsPred <- PE.preCondAssumption sym (PS.simInO bundle) (PS.simInP bundle) eqCtx eqInputs
+  eqInputsPred <- PE.preCondAssumption sym (PS.simIn bundle) eqCtx eqInputs
   valsPred <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
     input <- PPa.get bin (PS.simIn bundle)
     let absBlockState = PS.simInAbsState input
@@ -714,12 +720,11 @@ ppAbstractDomain ppPred d =
   PP.vsep $
   [ "== Equivalence Domain =="
   , PED.ppEquivalenceDomain ppPred (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq d)
-  , "== Original Value Constraints =="
-  , ppAbstractDomainVals (PPa.pOriginal $ absDomVals d)
-  , "== Patched Value Constraints =="
-  , ppAbstractDomainVals (PPa.pPatched $ absDomVals d)
-  ]
-
+  ] ++
+  (PPa.catBinsPure $ \bin -> do
+    vals <- PPa.get bin (absDomVals d)
+    let header = "==" PP.<+> PP.pretty bin PP.<+> "Value Constraints" PP.<+> "=="
+    return $ [header, ppAbstractDomainVals vals])
 
 instance (PA.ValidArch arch, W4.IsSymExprBuilder sym) => Show (AbstractDomain sym arch v) where
   show a = show (ppAbstractDomain (\_ -> "") a)

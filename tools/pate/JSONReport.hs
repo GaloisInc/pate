@@ -30,6 +30,7 @@ import qualified Data.Macaw.Memory as DMM
 
 import qualified Pate.Address as PA
 import qualified Pate.Block as PB
+import qualified Pate.Binary as PBi
 import qualified Pate.Event as PE
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
@@ -96,6 +97,18 @@ blockAddress (PE.Blocks w cb _) =
   where
     memAddr = PA.addrToMemAddr (PB.concreteAddress cb)
 
+-- FIXME: update this code to support singletons PatchPair values?
+pOriginal :: PPa.PatchPair tp -> tp PBi.Original
+pOriginal (PPa.PatchPair o _) = o
+pOriginal (PPa.PatchPairOriginal o) = o
+pOriginal (PPa.PatchPairPatched _) = PPa.handleSingletonStub
+
+pPatched :: PPa.PatchPair tp -> tp PBi.Patched
+pPatched (PPa.PatchPair _ p) = p
+pPatched (PPa.PatchPairPatched p) = p
+pPatched (PPa.PatchPairOriginal _) = PPa.handleSingletonStub
+
+
 toJSON :: SomeProofEvent arch -> Maybe JSON.Value
 toJSON (SomeProofEvent blks proofSym) = do
   PFI.SomeProofNonceExpr (sym@PS.Sym {}) (PF.ProofNonceExpr _ _ app) <- return proofSym
@@ -103,16 +116,16 @@ toJSON (SomeProofEvent blks proofSym) = do
     PF.ProofInlinedCall _blks (Right inlineResult) -> do
       let w = inlineResult ^. PVM.pointerWidth
       let idx = PVM.indexWriteAddresses w (inlineResult ^. PVM.differingGlobalMemoryLocations)
-      let node = InlineResultNode { inlineOriginalFunctionAddress = blockAddress (PPa.pOriginal blks)
-                                  , inlinePatchedFunctionAddress = blockAddress (PPa.pPatched blks)
+      let node = InlineResultNode { inlineOriginalFunctionAddress = blockAddress (pOriginal blks)
+                                  , inlinePatchedFunctionAddress = blockAddress (pPatched blks)
                                   , differingGlobalMemoryLocations = [ (Address w lo, Address w hi)
                                                                      | DII.ClosedInterval lo hi <- idx
                                                                      ]
                                   }
       return (JSON.toJSON node)
     PF.ProofInlinedCall _blks (Left err) -> do
-      let node = InlineErrorNode { inlineOriginalErrorAddress = blockAddress (PPa.pOriginal blks)
-                                 , inlinePatchedErrorAddress = blockAddress (PPa.pPatched blks)
+      let node = InlineErrorNode { inlineOriginalErrorAddress = blockAddress (pOriginal blks)
+                                 , inlinePatchedErrorAddress = blockAddress (pPatched blks)
                                  , inlineCallError = err
                                  }
       return (JSON.toJSON node)
@@ -125,8 +138,8 @@ toJSON (SomeProofEvent blks proofSym) = do
                                                 , conditionalModel = [ (show (WI.printSymExpr loc), printGroundValue sym loc gv)
                                                                      | MapF.Pair loc gv <- MapF.toList (PF.condEqExample condEqRes)
                                                                      ]
-                                                , differentialSummaryOriginal = blockAddress (PPa.pOriginal blks)
-                                                , differentialSummaryPatched = blockAddress (PPa.pPatched blks)
+                                                , differentialSummaryOriginal = blockAddress (pOriginal blks)
+                                                , differentialSummaryPatched = blockAddress (pPatched blks)
                                                 }
           return (JSON.toJSON node)
     _ -> Nothing

@@ -224,16 +224,12 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   -- include the process entry point, if configured to do so
 
   entryPoint <- case PC.cfgStartSymbol vcfg of
-    Just s -> do
-      mstartO <- liftIO $ findFunctionByName s (PPa.pOriginal contexts)
-      mstartP <- liftIO $ findFunctionByName s (PPa.pPatched contexts)
-      case (mstartO,mstartP) of
-        (Just startO, Just startP) -> return $ (PPa.PatchPair startO startP)
-        _ -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
-    Nothing ->
-      do let mainO = PMC.binEntry . PPa.pOriginal $ contexts
-         let mainP = PMC.binEntry . PPa.pPatched $ contexts
-         return (PPa.PatchPair mainO mainP)
+    Just s -> PPa.runPatchPairT $ PPa.forBins $ \bin -> do
+      ctx <- PPa.get bin contexts
+      (liftIO $ findFunctionByName s ctx) >>= \case
+        Just start -> return start
+        Nothing -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
+    Nothing -> PPa.runPatchPairT $ PPa.forBins $ \bin -> PMC.binEntry <$> PPa.get bin contexts
 
   PA.SomeValidArch archData <- return validArch
   let defaultInit = PA.validArchInitAbs archData
@@ -379,10 +375,13 @@ unpackPatchData :: forall arch.
   CME.ExceptT PEE.EquivalenceError IO (UnpackedPatchData arch)
 unpackPatchData contexts pd =
    do pairs' <-
-         DT.forM (PC.patchPairs pd) $ \(PC.BlockAlignment { PC.originalBlockStart = bd, PC.patchedBlockStart = bd' }) ->
-            PPa.PatchPair
-              <$> unpackBlockData (PPa.pOriginal contexts) bd
-              <*> unpackBlockData (PPa.pPatched contexts) bd'
+         DT.forM (PC.patchPairs pd) $
+           \(PC.BlockAlignment { PC.originalBlockStart = bd, PC.patchedBlockStart = bd' }) -> PPa.runPatchPairT $ do
+            let bdPair = PPa.PatchPairC bd bd'
+            PPa.forBins $ \bin -> do
+              ctx <- PPa.get bin contexts
+              bd_ <- PPa.getC bin bdPair
+              CME.lift $ unpackBlockData ctx bd_
 
       let f (PC.Address w) = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
       let g (PC.GlobalPointerAllocation { PC.pointerAddress = PC.Address loc, PC.blockSize = len}) = (MM.memWord (fromIntegral loc), toInteger len)

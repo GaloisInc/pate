@@ -5,21 +5,13 @@ module Pate.Hints.BSI (
   parseSymbolSpecHints
   ) where
 
-import           Control.Applicative ( (<|>) )
-import           Control.Monad ( guard )
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
-import           Data.Function ( on )
 import qualified Data.HashMap.Strict as HMS
-import qualified Data.List as L
-import           Data.Maybe ( fromMaybe, mapMaybe )
+import           Data.Maybe ( fromMaybe )
 import qualified Data.Scientific as DS
 import qualified Data.Text as T
-import           Data.Word ( Word32, Word64 )
-import qualified Text.Megaparsec as MP
-import qualified Text.Megaparsec.Char as MPC
-import qualified Text.Megaparsec.Char.Lexer as MPCL
 
 import qualified Pate.Hints as PH
 

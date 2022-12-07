@@ -100,7 +100,7 @@ module Pate.Monad
   , subTree
   , getWrappedSolver
   , catchInIO
-  )
+  , andPatchPred)
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -185,6 +185,7 @@ import qualified Pate.Solver as PSo
 import qualified Pate.Timeout as PT
 import qualified Pate.Verification.Concretize as PVC
 import           Pate.TraceTree
+import Data.Functor.Const (Const(..))
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -301,6 +302,13 @@ instance PPa.PatchPairM (EquivM_ sym arch) where
   catchPairErr a b = catchError a (\e -> case PEE.errEquivError e of
                                       Left (PEE.SomeInnerError PEE.InconsistentPatchPairAccess) -> b
                                       _ -> throwError e)
+
+andPatchPred ::
+  (forall bin. PBi.KnownBinary bin => PBi.WhichBinaryRepr bin -> EquivM_ sym arch (W4.Pred sym)) ->
+  EquivM sym arch (W4.Pred sym)
+andPatchPred f = (PPa.forBinsC f) >>= \case
+  PPa.PatchPairC a b -> withSym $ \sym -> liftIO $ W4.andPred sym a b
+  PPa.PatchPairSingle _ (Const a) -> return a
 
 type ValidSymArch (sym :: Type) (arch :: Type) = (PSo.ValidSym sym, PA.ValidArch arch)
 type EquivM sym arch a = ValidSymArch sym arch => EquivM_ sym arch a
@@ -448,21 +456,27 @@ withSimSpec blocks spec f = withSym $ \sym -> do
   forSpec spec_fresh $ \scope body ->
     withAssumptionSet (scopeAsm scope) (f scope body)
 
+lookupArgumentNamesSingle
+  :: PBi.WhichBinaryRepr bin
+  -> PB.ConcreteBlock arch bin
+  -> EquivM sym arch [T.Text]
+lookupArgumentNamesSingle bin blk = do
+  let addr = PB.concreteAddress blk
+  ctx <- CMR.asks envCtx
+  binCtx <- PPa.get bin (PMC.binCtxs ctx)
+  let funcHintIdx = PMC.functionHintIndex binCtx
+  case M.lookup addr funcHintIdx of
+    Nothing -> return []
+    Just fd -> return (PH.functionArguments fd)
+
 -- | Look up the arguments for this block slice if it is a function entry point
 -- (and there are sufficient metadata hints)
 lookupArgumentNames
   :: PB.BlockPair arch
   -> EquivM sym arch [T.Text]
-lookupArgumentNames pp = do
-  let origEntryAddr = PB.concreteAddress (PPa.pOriginal pp)
-
-  ctx <- CMR.asks envCtx
-  let origCtx = PPa.pOriginal (PMC.binCtxs ctx)
-  let funcHintIdx = PMC.functionHintIndex origCtx
-
-  case M.lookup origEntryAddr funcHintIdx of
-    Nothing -> return []
-    Just fd -> return (PH.functionArguments fd)
+lookupArgumentNames pp = PPa.oneBin $ \bin -> do
+  blk <- PPa.get bin pp
+  lookupArgumentNamesSingle bin blk
 
 -- Although 'AssumptionSet' has a scope parameter, the current interface doesn't have a
 -- good mechanism for enforcing the fact that we are only pushing assumptions that
@@ -1088,10 +1102,9 @@ execGroundFn (SymGroundEvalFn fn) e = do
 getFootprints ::
   SimBundle sym arch v ->
   EquivM sym arch (Set (MT.MemFootprint sym (MM.ArchAddrWidth arch)))
-getFootprints bundle = withSym $ \sym -> do
-  footO <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutO bundle)
-  footP <- liftIO $ MT.traceFootprint sym (simOutMem $ simOutP bundle)
-  return $ S.union footO footP
+getFootprints bundle = withSym $ \sym -> PPa.catBins $ \bin -> do
+  mem <- simOutMem <$> PPa.get bin (simOut bundle)
+  liftIO $ MT.traceFootprint sym mem
 
 -- | Update 'envCurrentFunc' if the given pair is a function entry point
 withPair :: PB.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
@@ -1110,10 +1123,7 @@ traceBlockPair
   -> String
   -> EquivM sym arch ()
 traceBlockPair bp msg =
-  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
-  where
-    origAddr = PB.concreteAddress (PPa.pOriginal bp)
-    patchedAddr = PB.concreteAddress (PPa.pPatched bp)
+  emitEvent (PE.ProofTraceEvent callStack (TF.fmapF (Const . PB.concreteAddress) bp) (T.pack msg))
 
 -- | Emit a trace event to the frontend
 --
@@ -1123,11 +1133,9 @@ traceBundle
   => SimBundle sym arch v
   -> String
   -> EquivM sym arch ()
-traceBundle bundle msg =
-  emitEvent (PE.ProofTraceEvent callStack origAddr patchedAddr (T.pack msg))
-  where
-    origAddr = PB.concreteAddress (simInBlock (simInO bundle))
-    patchedAddr = PB.concreteAddress (simInBlock (simInP bundle))
+traceBundle bundle msg = do
+  let bp = TF.fmapF (Const . PB.concreteAddress . simInBlock) (simIn bundle)
+  emitEvent (PE.ProofTraceEvent callStack bp (T.pack msg))
 
 --------------------------------------
 -- UnliftIO
