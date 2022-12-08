@@ -302,7 +302,9 @@ type BlockPair arch = PPa.PatchPair (ConcreteBlock arch)
 type FunPair arch = PPa.PatchPair (FunctionEntry arch)
 
 -- | Returns 'True' if the equated function pair (specified by address) matches
--- the current call target
+-- the current call target.
+--   For singleton 'BlockPair' values this always returns false, since there
+--   it cannot match an equated function pair.
 matchEquatedAddress
   :: BlockPair arch
   -- ^ Addresses of the call targets in the original and patched binaries (in

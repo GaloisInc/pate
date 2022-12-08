@@ -387,7 +387,7 @@ withAbsDomain node d gr f = do
   ovPair <- getFunctionAbs node d gr  
   binCtxPair <- PPa.forBins $ \bin -> do
     binCtx <- getBinCtx
-    Const absSt <- PPa.get bin ovPair
+    absSt <- PPa.getC bin ovPair
     let
       pfm = PMC.parsedFunctionMap binCtx
       defaultInit = PA.validArchInitAbs archData
@@ -1566,29 +1566,30 @@ getStubOverrideOne blk mstubSymbol = do
       return Nothing
       
 combineOverrides ::
-  PA.StubOverride arch ->
-  PA.StubOverride arch ->
+  PPa.PatchPairC (PA.StubOverride arch) ->
   PA.StubOverride arch
-combineOverrides (PA.StubOverride f1) (PA.StubOverride f2) = PA.StubOverride $ \sym wsolver -> do
+combineOverrides (PPa.PatchPairSingle _ (Const f)) = f
+combineOverrides (PPa.PatchPairC (PA.StubOverride f1) (PA.StubOverride f2)) = PA.StubOverride $ \sym wsolver -> do
   f1' <- f1 sym wsolver
   f2' <- f2 sym wsolver
-  let fnPair = PPa.PatchPair (Const f1') (Const f2')
+  let fnPair = PPa.PatchPairC f1' f2'
   return $ PA.StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
     let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
-    Just (Const (PA.StateTransformer fn)) <- return $ PPa.get bin fnPair
+    Just (PA.StateTransformer fn) <- return $ PPa.getC bin fnPair
     fn st
 
 -- We need to make sure that we only "merge" stubs
 -- if we have mismatched stubs, otherwise we will
 -- break the stub semantics
 mergeStubOverrides ::
+  PPa.PatchPairM m =>
   PA.ValidArchData arch ->
   StubPair ->
-  PPa.PatchPair (Const (Maybe (PA.StubOverride arch))) ->
-  PA.StubOverride arch
+  PPa.PatchPairC (Maybe (PA.StubOverride arch)) ->
+  m (PA.StubOverride arch)
 mergeStubOverrides validArch
-  (PPa.PatchPair (Const sym1) (Const sym2))
-  (PPa.PatchPair (Const mov1) (Const mov2)) =
+  (PPa.PatchPairC sym1 sym2)
+  (PPa.PatchPairC mov1 mov2) =
   let
     ov1' = case (sym1, mov1) of
         (Just{}, Just ov1) -> ov1
@@ -1600,9 +1601,13 @@ mergeStubOverrides validArch
         (Nothing,_) -> PA.idStubOverride
 
   in case (sym1,sym2) of
-    (Just nm1, Just nm2) | nm1 == nm2 -> ov1'
-    _ -> combineOverrides ov1' ov2' 
-mergeStubOverrides _ _ _ = PPa.handleSingletonStub
+    (Just nm1, Just nm2) | nm1 == nm2 -> return ov1'
+    _ -> return $ combineOverrides (PPa.PatchPairC ov1' ov2')
+mergeStubOverrides validArch _ (PPa.PatchPairSingle _ (Const mov)) = case mov of
+  Just ov -> return ov
+  Nothing -> return $ PA.defaultStubOverride validArch
+mergeStubOverrides _ (PPa.PatchPairSingle{}) (PPa.PatchPair{}) = PPa.throwPairErr
+
 -- FIXME: re-evaluate how safe inlining is
 {-
 bothDefinedOverrides ::
@@ -1635,7 +1640,7 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
         blk <- PPa.get bin pPair
         Const stub <- PPa.get bin stubPair
         Const <$> getStubOverrideOne blk stub
-      let ov = mergeStubOverrides archData stubPair ovPair
+      ov <- mergeStubOverrides archData stubPair ovPair
       wsolver <- getWrappedSolver
 
       outputs <- IO.withRunInIO $ \runInIO ->
@@ -1700,7 +1705,7 @@ mkSimBundle ::
   EquivM sym arch (SimBundle sym arch v)
 mkSimBundle node vars = do
   let pPair = nodeBlocks node
-  (simIn_, simOut_) <- fmap PPa.unzipPatchPair2 $ PPa.forBins $ \bin -> do
+  (simIn_, simOut_) <- PPa.forBins2 $ \bin -> do
     blk <- PPa.get bin pPair
     vars' <- PPa.get bin vars
     let varState = PS.simVarState vars'
@@ -1708,5 +1713,5 @@ mkSimBundle node vars = do
     let simIn_ = PS.SimInput varState blk absState
     traceBlockPair pPair ("Simulating " ++ show bin ++ " blocks")
     (_asm, simOut_) <- PVSy.simulate simIn_
-    return $ PPa.PairF simIn_ simOut_
+    return $ (simIn_, simOut_)
   return $ SimBundle simIn_ simOut_

@@ -26,7 +26,6 @@ Instantiations for the leaves of the proof types
 {-# LANGUAGE ConstraintKinds #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# OPTIONS_GHC -fno-warn-deprecations #-}
 
 module Pate.Proof.Instances
   ( SomeProofNonceExpr(..)

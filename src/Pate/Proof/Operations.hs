@@ -16,8 +16,6 @@ Functions for creating and operating with equivalence proofs
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
 
-{-# OPTIONS_GHC -fno-warn-deprecations #-}
-
 module Pate.Proof.Operations
   ( simBundleToSlice
   , noTransition
@@ -77,7 +75,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Binary as PBi
 
 
--- FIXME: These were originally define in SimState.hs but were moved here
+-- FIXME: These were originally defined in SimState.hs but were moved here
 -- since this code is largely deprecated
 simInO :: SimBundle sym arch v -> PS.SimInput sym arch v PBi.Original
 simInO bundle = case simIn bundle of

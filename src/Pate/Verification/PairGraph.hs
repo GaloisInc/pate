@@ -9,7 +9,8 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE PatternSynonyms #-}
+
 
 module Pate.Verification.PairGraph
   ( Gas(..)
@@ -77,7 +78,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, graphNodeCases, rootEntry, nodeBlocks, rootReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -407,11 +408,11 @@ initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec (graphNodeCases -> Left blocks) =
+initialDomainSpec (GraphNodeEntry blocks) =
   withFreshVars blocks $ \_vars -> do
     dom <- initialDomain
     return (mempty, dom)
-initialDomainSpec (graphNodeCases -> Right fPair) = do
+initialDomainSpec (GraphNodeReturn fPair) = do
   let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
   withFreshVars blocks $ \_vars -> do
     dom <- initialDomain

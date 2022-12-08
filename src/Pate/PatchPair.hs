@@ -47,9 +47,6 @@ module Pate.PatchPair (
   , LiftF(..)
   , PatchPairF
   , pattern PatchPairF
-  , PairF(..)
-  , PatchPair2
-  , pattern PatchPair2
   , forBins2
   , forBinsF
   , oneBin
@@ -57,7 +54,8 @@ module Pate.PatchPair (
   , someC
   , getC
   , catBinsPure
-  , defaultPair, unzipPatchPair2) where
+  , defaultPair
+  , joinPatchPred) where
 
 import           GHC.Stack (HasCallStack)
 import           Control.Monad.Trans.Maybe
@@ -265,6 +263,8 @@ catBins f = forBinsC f >>= \case
   PatchPair (Const a) (Const b) -> pure (a <> b)
   PatchPairSingle _ (Const a) -> pure a
 
+-- | Like 'catBins', but a pure function. If the 'PatchPair' combination is inconsistent, the result is
+--   the empty 'w' (rather than throwing an error).
 catBinsPure :: Monoid w => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> (PatchPairT Identity) w) -> w
 catBinsPure f = runIdentity $
   runPatchPairT' (catBins f) >>= \case
@@ -292,6 +292,18 @@ defaultPair ::
 defaultPair _default (PatchPairSingle{}) _ = _default
 defaultPair _default (PatchPair po pp) f = f po pp
 
+-- | Run a monadic function for 'Original' and 'Patched' binaries
+--   and then combine the result.
+--   If one of the function executions fails due to a missing 'PatchPair' field
+--   then the result of the other execution is given for both arguments
+--   to the combination function.
+joinPatchPred :: PatchPairM m =>
+  (a -> a -> m b) ->
+  (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m a) ->
+  m b
+joinPatchPred g f = (forBinsC f) >>= \case
+  PatchPairC a b -> g a b
+  PatchPairSingle _ (Const a) -> g a a
 
 -- | Return some element of the 'PatchPair'. Prefers the "Original" entry
 --   if it exists.
@@ -305,23 +317,11 @@ someC :: PatchPairC tp -> tp
 someC (PatchPairC a _) = a
 someC (PatchPairSingle _ (Const a)) = a
 
-data PairF a b tp = PairF { fstF :: (a tp), sndF :: (b tp) }
-
-type PatchPair2 tp1 tp2 = PatchPair (PairF tp1 tp2)
-
-pattern PatchPair2 ::
-  tp1 PB.Original ->
-  tp2 PB.Original ->
-  tp1 PB.Patched ->
-  tp2 PB.Patched ->
-  PatchPair (PairF tp1 tp2)
-pattern PatchPair2 a b c d = PatchPairCtor (PairF a b) (PairF c d)
-
-{-# COMPLETE PatchPair2, PatchPairSingle #-}
+data PairF a b tp = PairF { _fstF :: (a tp), _sndF :: (b tp) }
 
 unzipPatchPair2 ::
-  PatchPair2 tp1 tp2 -> (PatchPair tp1, PatchPair tp2)
-unzipPatchPair2 (PatchPair2 a b c d) = (PatchPair a c, PatchPair b d)
+  PatchPair (PairF tp1 tp2) -> (PatchPair tp1, PatchPair tp2)
+unzipPatchPair2 (PatchPair (PairF a b) (PairF c d)) = (PatchPair a c, PatchPair b d)
 unzipPatchPair2 (PatchPairSingle bin (PairF a b)) = (PatchPairSingle bin a, PatchPairSingle bin b)
 
 forBins2 :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (tp1 bin, tp2 bin)) -> m (PatchPair tp1, PatchPair tp2)

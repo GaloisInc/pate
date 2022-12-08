@@ -28,7 +28,6 @@ where
 import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as CMC
-import           Control.Monad.Trans ( lift )
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit.Prim as EEP

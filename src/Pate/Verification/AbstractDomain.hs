@@ -467,7 +467,7 @@ widenAbsDomainVals sym prev f bundle = do
     (absVals', locs) <- widenAbsDomainVals' sym absVals f out
     return $ (absVals', Const locs)
 
-  locs' <- PPa.catBins $ \bin -> getConst <$> PPa.get bin locs
+  locs' <- PPa.catBins $ \bin -> PPa.getC bin locs
   return $ (prev {absDomVals = absVals'}, Just locs')
 
 applyAbsRange ::

@@ -190,7 +190,7 @@ matchingExits ::
   SimBundle sym arch v ->
   MCS.MacawBlockEndCase ->
   EquivM sym arch (WI.Pred sym)
-matchingExits bundle ecase = withSym $ \sym -> andPatchPred $ \bin ->  do
+matchingExits bundle ecase = withSym $ \sym -> PPa.joinPatchPred (\x y -> liftIO $ WI.andPred sym x y) $ \bin ->  do
   blkend <- PSS.simOutBlockEnd <$> PPa.get bin (PSS.simOut bundle)
   liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend ecase
 

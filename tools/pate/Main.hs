@@ -51,7 +51,6 @@ import qualified Pate.Solver as PS
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
-import qualified Pate.PatchPair as PPa
 
 import qualified Pate.ArchLoader as PAL
 

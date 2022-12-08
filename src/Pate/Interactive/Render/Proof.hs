@@ -3,8 +3,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-{-# OPTIONS_GHC -fno-warn-deprecations #-}
-
 module Pate.Interactive.Render.Proof (
     renderProof
   , renderProofApp

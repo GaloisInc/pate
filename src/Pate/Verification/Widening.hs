@@ -13,6 +13,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -81,7 +82,7 @@ import qualified Pate.Config as PC
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), graphNodeCases, nodeFuns )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns )
 import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
@@ -100,14 +101,14 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
 makeFreshAbstractDomain _scope bundle preDom from _to = do
-  case graphNodeCases from of
+  case from of
     -- graph node
-    Left{} -> startTimer $ do
+    GraphNodeEntry{} -> startTimer $ do
       initDom <- initialDomain
       vals <- getInitalAbsDomainVals bundle preDom
       return $ initDom { PAD.absDomVals = vals }
     -- return node
-    Right{} -> do
+    GraphNodeReturn{} -> do
       initDom <- initialDomain
       -- as a small optimization, we know that the return nodes leave the values
       -- unmodified, and therefore any previously-established value constraints
@@ -726,11 +727,12 @@ widenPostcondition bundle preD postD0 =
      Right (WideningError{}) -> return prevState
      _ -> startTimer $ withSym $ \sym -> do
        eqCtx <- equivalenceContext
-       let (prevLocs, postD) = case prevState of
-             Left prevDom -> (mempty, prevDom)
+       (prevLocs, postD) <- case prevState of
+             Left prevDom -> return (mempty, prevDom)
              --FIXME: we're dropping the widening Kind now since we're
              --potentially doing multiple widenings in one iteration
-             Right (Widen _ locs prevDom) -> (locs, prevDom)
+             Right (Widen _ locs prevDom) -> return (locs, prevDom)
+             -- NOTE: spurious missing case on some ghc versions
        curAsms <- currentAsm
        let emit r =
              withValid @() $ emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)

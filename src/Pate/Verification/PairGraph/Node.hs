@@ -8,6 +8,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -18,7 +19,8 @@ module Pate.Verification.PairGraph.Node (
   , NodeEntry
   , NodeReturn
   , CallingContext
-  , graphNodeCases
+  , pattern GraphNodeEntry
+  , pattern GraphNodeReturn
   , graphNodeBlocks
   , mkNodeEntry
   , addContext
@@ -69,9 +71,14 @@ graphNodeBlocks :: GraphNode arch -> PB.BlockPair arch
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
 graphNodeBlocks (ReturnNode ret) = TF.fmapF PB.functionEntryToConcreteBlock (nodeFuns ret)
 
-graphNodeCases :: GraphNode arch -> Either (PB.BlockPair arch) (PB.FunPair arch)
-graphNodeCases (GraphNode (NodeEntry _ blks)) = Left blks
-graphNodeCases (ReturnNode (NodeReturn _ funs)) = Right funs
+
+pattern GraphNodeEntry :: PB.BlockPair arch -> GraphNode arch
+pattern GraphNodeEntry blks <- (GraphNode (NodeEntry _ blks))
+
+pattern GraphNodeReturn :: PB.FunPair arch -> GraphNode arch
+pattern GraphNodeReturn blks <- (ReturnNode (NodeReturn _ blks))
+
+{-# COMPLETE GraphNodeEntry, GraphNodeReturn #-}
 
 -- | Additional context used to distinguish function calls
 --   "Freezing" one binary in a node indicates that it should not continue

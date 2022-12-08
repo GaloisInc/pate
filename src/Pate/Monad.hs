@@ -99,8 +99,7 @@ module Pate.Monad
   , subTrace
   , subTree
   , getWrappedSolver
-  , catchInIO
-  , andPatchPred)
+  , catchInIO, joinPatchPred)
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -303,10 +302,10 @@ instance PPa.PatchPairM (EquivM_ sym arch) where
                                       Left (PEE.SomeInnerError PEE.InconsistentPatchPairAccess) -> b
                                       _ -> throwError e)
 
-andPatchPred ::
+joinPatchPred ::
   (forall bin. PBi.KnownBinary bin => PBi.WhichBinaryRepr bin -> EquivM_ sym arch (W4.Pred sym)) ->
   EquivM sym arch (W4.Pred sym)
-andPatchPred f = (PPa.forBinsC f) >>= \case
+joinPatchPred f = (PPa.forBinsC f) >>= \case
   PPa.PatchPairC a b -> withSym $ \sym -> liftIO $ W4.andPred sym a b
   PPa.PatchPairSingle _ (Const a) -> return a
 
