@@ -43,6 +43,7 @@ import qualified What4.Interface as W4
 import qualified What4.PredMap as WPM
 
 import           Pate.TraceTree
+import qualified Data.Parameterized.TraversableF as TF
 
 -- | Generalized location-based traversals
 
@@ -164,4 +165,4 @@ instance (LocationTraversable sym arch a, LocationTraversable sym arch b) =>
 
 instance (forall bin. (LocationWitherable sym arch (f bin))) =>
   LocationWitherable sym arch (PPa.PatchPair f) where
-  witherLocation sym (PPa.PatchPair a b) f = PPa.PatchPair <$> witherLocation sym a f <*> witherLocation sym b f
+  witherLocation sym pp f = TF.traverseF (\x -> witherLocation sym x f) pp

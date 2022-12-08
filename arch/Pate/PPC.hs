@@ -101,10 +101,12 @@ getCurrentTOC
   => PMC.EquivalenceContext sym PPC.PPC64
   -> PB.WhichBinaryRepr bin
   -> IO (W.W 64)
-getCurrentTOC ctx binRepr = do
-  PE.Blocks _ _ (pblk:_) <- PPa.getPair' binRepr <$> PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+getCurrentTOC ctx binRepr = PPa.runPatchPairT $ do
+  ctx' <- PPa.get binRepr (PMC.binCtxs ctx)
+  blks <- PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+  PE.Blocks _ _ (pblk:_) <- PPa.get binRepr blks
   let
-    toc = TOC.getTOC (PMC.binary $ PPa.getPair' binRepr (PMC.binCtxs ctx))
+    toc = TOC.getTOC (PMC.binary ctx')
     addr = MD.pblockAddr pblk
   case TOC.lookupTOC toc addr of
     Just w -> return w

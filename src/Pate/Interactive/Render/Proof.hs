@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+
 module Pate.Interactive.Render.Proof (
     renderProof
   , renderProofApp
@@ -12,6 +13,7 @@ import           Control.Monad ( guard )
 import qualified Data.Aeson as JSON
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
+import           Data.Functor.Const
 import qualified Data.HashMap.Strict as HMS
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.List as DL
@@ -22,6 +24,7 @@ import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
+import qualified Data.Parameterized.TraversableF as TF
 import           Data.Proxy (Proxy(..))
 import qualified Data.Text as T
 import qualified Data.Vector as DV
@@ -110,6 +113,7 @@ nodeLabel
   -> PE.BlocksPair arch
   -> PPr.ProofNonceExpr sym arch tp
   -> T.Text
+nodeLabel _ (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
 nodeLabel proofTreeNodes (PPa.PatchPair (PE.Blocks _ ob _) (PE.Blocks _ pb _)) expr =
   pp (mconcat [ ppAppTag proofTreeNodes expr
               , PP.line
@@ -278,9 +282,10 @@ renderRegVal domain reg regOp =
         PPa.PatchPairC (PFI.GroundMacawValue obv) (PFI.GroundMacawValue pbv)
           | PFI.isGroundBVZero obv && PFI.isGroundBVZero pbv -> Nothing
           | otherwise -> Just prettySlotVal
+        PPa.PatchPairSingle{} -> Just prettySlotVal
     _ -> Just prettySlotVal
   where
-    vals = fmap PFI.groundMacawValue $ PPr.slRegOpValues regOp
+    vals = TF.fmapF (\(Const x) -> Const $ PFI.groundMacawValue x) $ PPr.slRegOpValues regOp
 
     ppDom =
       case PFI.regInGroundDomain (PED.eqDomainRegisters domain) reg of
@@ -289,7 +294,7 @@ renderRegVal domain reg regOp =
 
     ppVals =
       case PG.groundValue $ PPr.slRegOpEquiv regOp of
-        True -> PP.pretty (PPa.pcOriginal vals)
+        True -> PP.pretty (PPa.someC vals)
         False -> PPa.ppPatchPairC PP.pretty vals
 
     -- Use 'PAr.displayRegister' to find the display name of the register, while
@@ -328,12 +333,12 @@ renderMemCellVal
   -> Maybe (PP.Doc a)
 renderMemCellVal domain cell memOp = do
   guard (PG.groundValue $ PPr.slMemOpCond memOp)
-  let vals = fmap PFI.groundBV $ PPr.slMemOpValues memOp
+  let vals = TF.fmapF (\(Const x) -> Const $ PFI.groundBV x) $ PPr.slMemOpValues memOp
   let ppDom = case PFI.cellInGroundDomain domain cell of
         True -> PP.emptyDoc
         False -> PP.pretty "| Excluded"
   let ppVals = case PG.groundValue $ PPr.slMemOpEquiv memOp of
-        True -> PP.viaShow (PPa.pcOriginal vals)
+        True -> PP.viaShow (PPa.someC vals)
         False -> PPa.ppPatchPairC PP.viaShow vals
   return (PFI.ppGroundCell cell <> PP.pretty ": " <> ppVals PP.<+> ppDom)
 
@@ -356,10 +361,10 @@ renderIPs
   => PPr.BlockSliceState grnd arch
   -> PP.Doc ann
 renderIPs st
-  | (PG.groundValue $ PPr.slRegOpEquiv pcRegs) = PP.pretty (PPa.pcOriginal vals)
+  | (PG.groundValue $ PPr.slRegOpEquiv pcRegs) = PP.pretty (PPa.someC vals)
   | otherwise = PPa.ppPatchPairC PP.pretty vals
   where
-    vals = fmap PFI.groundMacawValue (PPr.slRegOpValues pcRegs)
+    vals = TF.fmapF (\(Const x) -> Const $ PFI.groundMacawValue x) (PPr.slRegOpValues pcRegs)
     pcRegs = PPr.slRegState st ^. MC.curIP
 
 renderReturn
@@ -378,7 +383,7 @@ renderCounterexample
   -> TP.UI TP.Element
 renderCounterexample ineqRes' = PPr.withIneqResult ineqRes' $ \ineqRes ->
   let
-    groundEnd = fmap (PFI.groundBlockEnd (Proxy @arch)) $ PPr.slBlockExitCase (PPr.ineqSlice ineqRes)
+    groundEnd = TF.fmapF (\(Const x) -> Const $ (PFI.groundBlockEnd (Proxy @arch)) x) $ PPr.slBlockExitCase (PPr.ineqSlice ineqRes)
     renderInequalityReason rsn =
       case rsn of
         PEE.InequivalentRegisters ->
@@ -391,11 +396,11 @@ renderCounterexample ineqRes' = PPr.withIneqResult ineqRes' $ \ineqRes ->
           TP.string "The original and patched programs have generated invalid post states"
 
     renderedContinuation = TP.column (catMaybes [ Just (text (PP.pretty "Next IP: " <> renderIPs (PPr.slBlockPostState (PPr.ineqSlice ineqRes))))
-                                                , renderReturn (fmap PFI.grndBlockReturn groundEnd)
+                                                , renderReturn (TF.fmapF (\(Const x) -> Const $ PFI.grndBlockReturn x) groundEnd)
                                                 ])
     in
     TP.grid [ [ renderInequalityReason (PPr.ineqReason ineqRes) ]
-          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (fmap PFI.grndBlockCase groundEnd)) ]
+          , [ text (PPa.ppPatchPairCEq (PP.pretty . PFI.ppExitCase) (TF.fmapF (\(Const x) -> Const $ PFI.grndBlockCase x) groundEnd)) ]
           , [ TP.h2 #+ [TP.string "Initial states"] ]
           , [ renderRegisterState (PPr.ineqPre ineqRes) (PPr.slRegState (PPr.slBlockPreState (PPr.ineqSlice ineqRes)))
             , renderMemoryState (PPr.ineqPre ineqRes) (PPr.slMemState (PPr.slBlockPreState (PPr.ineqSlice ineqRes)))
@@ -437,6 +442,7 @@ renderInlinedCall
   :: PPa.PatchPair (PB.ConcreteBlock arch)
   -> Either String (PVM.WriteSummary sym (MC.ArchAddrWidth arch))
   -> TP.UI TP.Element
+renderInlinedCall (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
 renderInlinedCall (PPa.PatchPair ob pb) results =
   case results of
     Left err -> TP.column [ TP.string (T.unpack renderBlocks)

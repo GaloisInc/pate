@@ -31,6 +31,7 @@ import qualified Pate.Event as PE
 import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.PatchPair as PPa
 
 data TestConfig where
   TestConfig ::
@@ -146,10 +147,10 @@ doTest mwb cfg sv fp = do
               PE.Warning err -> do
                 addLogMsg $ "WARNING: " ++ show err
               PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
-              PE.ProofTraceEvent _ oAddr pAddr msg _ -> do
-                let addr = case oAddr == pAddr of
-                      True -> show oAddr
-                      False -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
+              PE.ProofTraceEvent _ addrPair msg _ -> do
+                let addr = case addrPair of
+                      PPa.PatchPairC oAddr pAddr | oAddr == pAddr -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
+                      _ -> show (PPa.some addrPair)
                 addLogMsg $ addr ++ ":" ++ show msg
               PE.StrongestPostDesync pPair _ ->
                 addLogMsg $ "Desync at: " ++ show pPair

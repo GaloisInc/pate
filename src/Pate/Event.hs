@@ -114,7 +114,7 @@ data Event arch where
   --
   -- This is useful for debugging, but probably should not be shown/collected
   -- unless explicitly asked for.
-  ProofTraceEvent :: GS.CallStack -> PA.ConcreteAddress arch -> PA.ConcreteAddress arch -> T.Text -> TM.NominalDiffTime -> Event arch
+  ProofTraceEvent :: GS.CallStack -> PPa.PatchPairC (PA.ConcreteAddress arch) -> T.Text -> TM.NominalDiffTime -> Event arch
   -- | A low-level trace event that contains a formula that should be displayed
   -- to the user in some structured way, when possible
   --

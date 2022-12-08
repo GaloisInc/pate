@@ -52,6 +52,8 @@ import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.PatchPair as PPa
+import Data.Functor.Const (Const(..))
 
 -- | Return a Crucible run-time repr for the architecture-specific register file
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
@@ -231,6 +233,7 @@ simulate ::
   PS.SimInput sym arch v bin ->
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch v bin)
 simulate simInput = withBinary @bin $ do
+  let (bin :: PBi.WhichBinaryRepr bin) = CC.knownRepr
   CC.SomeCFG cfg <- do
     PDP.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)
 
@@ -240,7 +243,7 @@ simulate simInput = withBinary @bin $ do
     let (terminal, nonTerminal) = DL.partition isTerminalBlock (sbiReachableBlocks sbi)
     let killEdges = sbiBackEdges sbi ++ sbiExitEdges sbi
 
-    emitEvent (PE.ProofTraceEvent callStack entryAddr entryAddr (T.pack ("Discarding edges: " ++ show killEdges)))
+    emitEvent (PE.ProofTraceEvent callStack (PPa.PatchPairSingle bin (Const entryAddr)) (T.pack ("Discarding edges: " ++ show killEdges)))
 
     fns <- archFuns
     ha <- CMR.asks (PMC.handles . envCtx)

@@ -72,6 +72,34 @@ import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Binary as PBi
+
+
+-- FIXME: These were originally defined in SimState.hs but were moved here
+-- since this code is largely deprecated
+simInO :: SimBundle sym arch v -> PS.SimInput sym arch v PBi.Original
+simInO bundle = case simIn bundle of
+  PPa.PatchPair o _ -> o
+  PPa.PatchPairOriginal o -> o
+  _ -> PPa.handleSingletonStub
+
+simInP :: SimBundle sym arch v -> PS.SimInput sym arch v PBi.Patched
+simInP bundle = case simIn bundle of
+  PPa.PatchPair _ p -> p
+  PPa.PatchPairPatched p -> p
+  _ -> PPa.handleSingletonStub
+
+simOutO :: SimBundle sym arch v -> PS.SimOutput sym arch v PBi.Original
+simOutO bundle = case simOut bundle of
+  PPa.PatchPair o _ -> o
+  PPa.PatchPairOriginal o -> o
+  _ -> PPa.handleSingletonStub
+
+simOutP :: SimBundle sym arch v -> PS.SimOutput sym arch v PBi.Patched
+simOutP bundle = case simOut bundle of
+  PPa.PatchPair _ p -> p
+  PPa.PatchPairPatched p -> p
+  _ -> PPa.handleSingletonStub
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
@@ -80,8 +108,8 @@ simBundleToSlice ::
   EquivM sym arch (PF.BlockSliceTransition sym arch)
 simBundleToSlice bundle = withSym $ \sym -> do
   let
-    ecaseO = PS.simOutBlockEnd $ PS.simOutO $ bundle
-    ecaseP = PS.simOutBlockEnd $ PS.simOutP $ bundle
+    ecaseO = PS.simOutBlockEnd $ simOutO $ bundle
+    ecaseP = PS.simOutBlockEnd $ simOutP $ bundle
   footprints <- getFootprints bundle
   memReads <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Read) footprints))
   memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Write) footprints))
@@ -89,8 +117,8 @@ simBundleToSlice bundle = withSym $ \sym -> do
   preMem <- MapF.fromList <$> mapM (\x -> memCellToOp initState x) memReads
   postMem <- MapF.fromList <$> mapM (\x -> memCellToOp finState x) memWrites
 
-  preRegs <- PRt.zipWithRegStatesM (PS.simInRegs $ PS.simInO bundle) (PS.simInRegs $ PS.simInP bundle) (\r vo vp -> getReg r vo vp)
-  postRegs <- PRt.zipWithRegStatesM (PS.simOutRegs $ PS.simOutO bundle) (PS.simOutRegs $ PS.simOutP bundle) (\r vo vp -> getReg r vo vp)
+  preRegs <- PRt.zipWithRegStatesM (PS.simInRegs $ simInO bundle) (PS.simInRegs $ simInP bundle) (\r vo vp -> getReg r vo vp)
+  postRegs <- PRt.zipWithRegStatesM (PS.simOutRegs $ simOutO bundle) (PS.simOutRegs $ simOutP bundle) (\r vo vp -> getReg r vo vp)
   
   let
     preState = PF.BlockSliceState preMem preRegs
@@ -117,6 +145,7 @@ simBundleToSlice bundle = withSym $ \sym -> do
       PPa.PatchPair (PS.SimState sym arch v) ->
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp sym))
+    memCellToOp (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
     memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
       valO <- liftIO $ PMC.readMemCell sym (PS.simMem stO) cell
       valP <- liftIO $ PMC.readMemCell sym (PS.simMem stP) cell

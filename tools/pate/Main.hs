@@ -338,8 +338,8 @@ terminalFormatEvent evt =
     PE.FunctionsDiscoveredFromHints _ extraAddrs ->
       layout ("Additional functions discovered based on hits: " <> PP.line
              <> PP.vcat (map PP.viaShow extraAddrs) <> PP.line)
-    PE.ProofTraceEvent _stack origAddr _patchedAddr msg _tm ->
-      layout (PP.pretty origAddr <> ": " <> PP.pretty msg <> PP.line)
+    PE.ProofTraceEvent _stack addrPair msg _tm ->
+      layout (PPa.ppPatchPairC PP.pretty addrPair <> ": " <> PP.pretty msg <> PP.line)
     PE.ProofTraceFormulaEvent _stk origAddr _patchedAddr _sym expr _tm ->
       layout (PP.pretty origAddr <> ": " <> WI.printSymExpr expr <> PP.line)
     PE.StrongestPostOverallResult status _ ->

@@ -47,14 +47,14 @@ import qualified What4.ExprHelpers as WEH
 
 validInitState ::
   Maybe (PB.BlockPair arch) ->
-  SimState sym arch v PB.Original ->
-  SimState sym arch v PB.Patched ->
+  PPa.PatchPair (SimState sym arch v) ->
   EquivM sym arch (AssumptionSet sym)
-validInitState mpPair stO stP = do
-  fmap PRt.collapse $ PRt.zipWithRegStatesM (simRegs stO) (simRegs stP) $ \r vO vP -> do
-    validO <- validRegister (fmap PPa.pOriginal mpPair) vO r
-    validP <- validRegister (fmap PPa.pPatched mpPair) vP r
-    return $ Const $ validO <> validP
+validInitState mpPair stPair = PPa.catBins $ \bin -> do
+  mblk <- case mpPair of
+    Just pPair -> Just <$> PPa.get bin pPair
+    Nothing -> return Nothing
+  regs <- simRegs <$> PPa.get bin stPair
+  fmap PRt.collapse $ MM.traverseRegsWith (\r v -> Const <$> validRegister mblk v r) regs
 
 validRegister ::
   forall bin sym arch tp.

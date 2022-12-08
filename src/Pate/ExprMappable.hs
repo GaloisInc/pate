@@ -17,6 +17,8 @@
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
+{-# OPTIONS_GHC -fno-warn-simplifiable-class-constraints #-}
+
 module Pate.ExprMappable (
     ExprMappable(..)
   , ExprFoldable(..)

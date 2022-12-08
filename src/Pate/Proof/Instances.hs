@@ -62,6 +62,7 @@ import           Numeric.Natural ( Natural )
 import qualified Data.Set as Set
 import qualified Data.BitVector.Sized as BVS
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.TraversableF as TF
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.Context as Ctx
@@ -173,6 +174,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
        where
          go :: (PB.ConcreteBlock arch bin, PB.ConcreteBlock arch bin) -> PP.Doc a
          go (src, tgt) = PP.parens (PP.pretty (PB.ppBlock src)) <+> "->" <+> (PP.pretty (PB.ppBlock tgt))
+     ppBlockPairTarget _ _ = PPa.handleSingletonStub
  pretty (PF.ProofExpr prf@PF.ProofBlockSlice{}) =
     PP.vsep
       [ PP.pretty (PF.prfBlockSliceTriple prf)
@@ -406,7 +408,7 @@ ppBlockSliceTransition ::
   PF.BlockSliceTransition grnd arch ->
   PP.Doc a
 ppBlockSliceTransition pre post bs = PP.vsep $
-  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (fmap grndBlockCase groundEnd)
+  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (TF.fmapF (\(Const x) -> Const $ grndBlockCase x) groundEnd)
   ,  "Initial register state:"
   , ppRegs pre (PF.slRegState $ PF.slBlockPreState bs)
   , "Initial memory state:"
@@ -416,13 +418,13 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , "Final memory state:"
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
   , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
-  , case fmap grndBlockReturn groundEnd of
+  , case TF.fmapF (\(Const x) -> Const $ grndBlockReturn x) groundEnd of
       PPa.PatchPairC (Just cont1) (Just cont2) ->
         "Function Continue Address:" <+> PPa.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PPa.PatchPairC cont1 cont2)
       _ -> PP.emptyDoc
   ]
   where
-    groundEnd = fmap (groundBlockEnd (Proxy @arch)) $ PF.slBlockExitCase bs
+    groundEnd = TF.fmapF (\(Const x) -> Const $ groundBlockEnd (Proxy @arch) x) $ PF.slBlockExitCase bs
 
 ppIPs ::
   PA.ValidArch arch =>
@@ -432,9 +434,9 @@ ppIPs ::
 ppIPs st  =
   let
     pcRegs = (PF.slRegState st) ^. MM.curIP
-    vals = fmap groundMacawValue (PF.slRegOpValues pcRegs)
+    vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) (PF.slRegOpValues pcRegs)
   in case PG.groundValue $ PF.slRegOpEquiv pcRegs of
-    True -> PP.pretty $ PPa.pcOriginal vals
+    True -> PP.pretty $ PPa.someC vals
     False -> PPa.ppPatchPairC PP.pretty vals
 
 ppMemCellMap ::
@@ -540,15 +542,13 @@ ppRegVal ::
   PF.BlockSliceRegOp grnd tp ->
   Maybe (PP.Doc a)
 ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
-  CLM.LLVMPointerRepr _ ->
-    let
-      PPa.PatchPairC (GroundMacawValue obv) (GroundMacawValue pbv) = vals
-    in case isGroundBVZero obv && isGroundBVZero pbv of
+  CLM.LLVMPointerRepr _ | PPa.PatchPairC (GroundMacawValue obv) (GroundMacawValue pbv) <- vals ->
+    case isGroundBVZero obv && isGroundBVZero pbv of
          True -> Nothing
          False -> Just $ ppSlotVal
   _ -> Just $ ppSlotVal
   where
-    vals = fmap groundMacawValue $ PF.slRegOpValues regOp
+    vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) $ PF.slRegOpValues regOp
     ppSlotVal = PP.pretty (showF reg) <> ":" <+> ppVals <+> ppDom
 
     ppDom = case regInGroundDomain dom reg of
@@ -556,7 +556,7 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
       False -> "| Excluded"
     
     ppVals = case PG.groundValue $ PF.slRegOpEquiv regOp of
-      True -> PP.pretty $ PPa.pcOriginal vals
+      True -> PP.pretty $ PPa.someC vals
       False -> PPa.ppPatchPairC PP.pretty vals
 
 regInGroundDomain ::
@@ -581,7 +581,7 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
     True -> Just $ ppSlotVal
     False -> Nothing
   where
-    vals = fmap groundBV $ PF.slMemOpValues memOp
+    vals = TF.fmapF (\(Const x) -> Const $ groundBV x) $ PF.slMemOpValues memOp
     ppSlotVal = ppGroundCell cell <> ":" <+> ppVals <+> ppDom
 
     ppDom = case cellInGroundDomain dom cell of
@@ -589,7 +589,7 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
       False -> "| Excluded"
  
     ppVals = case PG.groundValue $ PF.slMemOpEquiv memOp of
-      True -> PP.pretty $ show (PPa.pcOriginal vals)
+      True -> PP.pretty $ show (PPa.someC vals)
       False -> PPa.ppPatchPairC (PP.pretty . show) vals
 
 ppGroundCell ::

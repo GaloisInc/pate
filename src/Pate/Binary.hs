@@ -81,6 +81,9 @@ instance Show (WhichBinaryRepr bin) where
   show OriginalRepr = "Original"
   show PatchedRepr = "Patched"
 
+instance PP.Pretty (WhichBinaryRepr bin) where
+  pretty = PP.viaShow
+
 instance KnownRepr WhichBinaryRepr Original where
   knownRepr = OriginalRepr
 

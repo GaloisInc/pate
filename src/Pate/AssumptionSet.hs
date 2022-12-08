@@ -17,6 +17,7 @@ module Pate.AssumptionSet (
   , augment
   , fromExprBindings
   , exprBinding
+  , bindExprPair
   , natBinding
   , ptrBinding
   , macawRegBinding
@@ -52,6 +53,7 @@ import           Data.Parameterized.SetF ( SetF )
 import qualified Data.Parameterized.SetF as SetF
 import qualified Pate.SimulatorRegisters as PSR
 import           Pate.Panic
+import qualified Pate.PatchPair as PPa
 import qualified What4.ExprHelpers as WEH
 import           What4.ExprHelpers ( ExprSet, VarBindCache, ExprBindings, ppExprSet )
 import qualified Pate.ExprMappable as PEM
@@ -171,6 +173,16 @@ exprBinding ::
 exprBinding eSrc eTgt = case testEquality eSrc eTgt of
   Just Refl -> mempty
   _ -> mempty { asmBinds = (MapF.singleton eSrc (SetF.singleton eTgt)) }
+
+-- | Equates an original and patched assumption (binds the original to the patched)
+--   Has no effect for singleton 'PatchPair' values
+bindExprPair ::
+  forall sym tp.
+  W4.IsSymExprBuilder sym =>
+  PPa.PatchPairC (W4.SymExpr sym tp) ->
+  AssumptionSet sym
+bindExprPair (PPa.PatchPairC src tgt) = exprBinding src tgt
+bindExprPair _ = mempty
 
 natBinding ::
   forall sym.

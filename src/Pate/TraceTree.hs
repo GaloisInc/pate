@@ -84,6 +84,8 @@ module Pate.TraceTree (
   , withTracingLabel
   , withNoTracing
   , mkTags
+  , runNodeBuilderT
+  , getNodeBuilder
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -208,7 +210,7 @@ addTreeDependency treeBuilder nodeBuilder =
         False -> updateNodeStatus nodeBuilder st
   in nodeBuilder { updateNodeStatus = finish }
 
-startTree :: forall k nm. IO (TraceTree k, TreeBuilder k)
+startTree :: forall k. IO (TraceTree k, TreeBuilder k)
 startTree  = do
   l <- emptyIOList
   let builder = TreeBuilder (\st -> propagateIOListStatus st l) (startNode' @k) (\node -> addIOList (Some node) l) 

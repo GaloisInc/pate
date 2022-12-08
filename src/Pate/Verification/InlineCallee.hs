@@ -490,14 +490,15 @@ inlineCallee
   => PEE.EquivalenceDomain sym arch
   -> PB.BlockPair arch
   -> EquivM sym arch (PEE.EquivalenceDomain sym arch, PFO.LazyProof sym arch PF.ProofBlockSliceType)
-inlineCallee contPre pPair = withValid $ withSym $ \sym -> do
+inlineCallee _ (PPa.PatchPairSingle{}) = PPa.handleSingletonStub
+inlineCallee contPre pPair@(PPa.PatchPair blkO blkP) = withValid $ withSym $ \sym -> do
   -- Normally we would like to treat errors leniently and continue on in a degraded state
   --
   -- However, if the user has specifically asked for two functions to be equated
   -- and we can't find them, we will just call that a fail-stop error (i.e.,
   -- 'functionFor' can throw an exception).
-  Some oDFI <- functionFor @PBi.Original (PPa.pOriginal pPair)
-  Some pDFI <- functionFor @PBi.Patched (PPa.pPatched pPair)
+  Some oDFI <- functionFor @PBi.Original blkO
+  Some pDFI <- functionFor @PBi.Patched blkP
 
   origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
   patchedBinary <- PMC.binary <$> getBinCtx' PBi.PatchedRepr
