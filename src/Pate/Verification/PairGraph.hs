@@ -43,6 +43,8 @@ module Pate.Verification.PairGraph
   , setEquivCondition
   , dropDomain
   , markEdge
+  , addSyncPoint
+  , getSyncPoint
   ) where
 
 import           Prettyprinter
@@ -53,7 +55,7 @@ import           Control.Monad.IO.Class
 import qualified Data.Foldable as F
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (fromMaybe)
+import           Data.Maybe (fromMaybe, catMaybes)
 import           Data.Parameterized.Classes
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -78,12 +80,13 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, graphNodeBlocks, nodeFuns, asSingleReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
+import qualified Pate.Binary as PB
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -195,6 +198,10 @@ data PairGraph sym arch =
   , pairGraphEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
     -- | Reverse map of the above (from descendants to ancestors)
   , pairGraphBackEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
+    -- | Mapping from singleton nodes to their "synchronization" point, representing
+    --   the case where two independent program analysis steps have occurred and now
+    --   their control-flows have re-synchronized
+  , pairGraphSyncPoint :: !(Map (NodeReturn arch) (Set (NodeReturn arch)))
   }
 
 ppProgramDomains ::
@@ -232,6 +239,7 @@ emptyPairGraph =
   , pairGraphEquivConditions = mempty
   , pairGraphEdges = mempty
   , pairGraphBackEdges = mempty
+  , pairGraphSyncPoint = mempty
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -240,8 +248,7 @@ getReturnVectors ::
   PairGraph sym arch ->
   NodeReturn arch ->
   Set (NodeEntry arch)
-getReturnVectors gr fPair =
-  fromMaybe mempty (Map.lookup fPair (pairGraphReturnVectors gr))
+getReturnVectors gr fPair = fromMaybe mempty (Map.lookup fPair (pairGraphReturnVectors gr))
 
 -- | Look up the current abstract domain for the given graph node.
 getCurrentDomain ::
@@ -399,10 +406,11 @@ reportAnalysisErrors logAction gr =
 
 
 initialDomain :: EquivM sym arch (PAD.AbstractDomain sym arch v)
-initialDomain = withSym $ \sym -> return $ PAD.AbstractDomain (PVD.universalDomain sym) (PPa.PatchPair PAD.emptyDomainVals PAD.emptyDomainVals)
-
-
-
+initialDomain = withSym $ \sym -> 
+  PAD.AbstractDomain 
+  <$> pure (PVD.universalDomain sym)
+  <*> (PPa.forBins $ \_ -> return $ PAD.emptyDomainVals)
+  <*> (PPa.forBins $ \_ -> PAD.emptyEvents sym)
 
 initialDomainSpec ::
   forall sym arch.
@@ -461,10 +469,9 @@ chooseWorkItem gr =
   -- heuristic.  Perhaps we should do something more clever.
   case Set.minView (pairGraphWorklist gr) of
     Nothing -> Nothing
-    Just (nd, wl) ->
-      case Map.lookup nd (pairGraphDomains gr) of
-        Nothing -> panic Verifier "choseWorkItem" ["Could not find domain corresponding to block pair", show nd]
-        Just d  -> Just (gr{ pairGraphWorklist = wl }, nd, d)
+    Just (nd, wl) -> case Map.lookup nd (pairGraphDomains gr) of
+      Nothing -> panic Verifier "choseoWorkItem" ["Could not find domain corresponding to block pair", show nd]
+      Just d  -> Just (gr{ pairGraphWorklist = wl }, nd, d)
 
 -- | Update the abstract domain for the target graph node,
 --   decreasing the gas parameter as necessary.
@@ -547,6 +554,23 @@ addReturnVector gr funPair retPair =
     f (Just s) = Just (Set.insert retPair s)
 
     wl = Set.insert (ReturnNode funPair) (pairGraphWorklist gr)
+
+getSyncPoint ::
+  PairGraph sym arch ->
+  NodeReturn arch ->
+  Maybe (Set (NodeReturn arch))
+getSyncPoint gr nd = Map.lookup nd (pairGraphSyncPoint gr)
+
+addSyncPoint ::
+  PairGraph sym arch ->
+  NodeReturn arch {- ^ The singleton node, just before synchronization -}  ->
+  NodeReturn arch {- ^ The pair node, after synchronization -} ->
+  PairGraph sym arch
+addSyncPoint gr from to 
+  | PPa.PatchPairSingle{} <- nodeFuns from
+  , PPa.PatchPair{} <- nodeFuns to = 
+    gr { pairGraphSyncPoint = Map.insertWith Set.union from (Set.singleton to) (pairGraphSyncPoint gr) }
+addSyncPoint _ _ _ = error "addSyncPoint: unexpected PatchPair shape"
 
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.

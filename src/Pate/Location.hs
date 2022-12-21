@@ -26,6 +26,7 @@ import qualified Control.Monad.IO.Class as IO
 import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans.State ( StateT, get, put, execStateT )
 import           Control.Monad.Trans ( lift )
+import qualified Data.Kind as DK
 
 import qualified Prettyprinter as PP
 
@@ -44,38 +45,42 @@ import qualified What4.PredMap as WPM
 
 import           Pate.TraceTree
 import qualified Data.Parameterized.TraversableF as TF
+import Lang.Crucible.Simulator.SymSequence
+import What4.Partial
 
 -- | Generalized location-based traversals
 
 data LocK =
     RegK MT.Type
   | CellK Nat
-  | NoLocK
+  | NoLocK DK.Type
 
 
 data Location sym arch l where
   Register :: MM.ArchReg arch tp -> Location sym arch ('RegK tp)
   Cell :: 1 <= w => PMC.MemCell sym arch w -> Location sym arch ('CellK w)
-  NoLoc :: Location sym arch 'NoLocK
+  NoLoc :: (PEM.ExprMappable sym tp, PP.Pretty tp) => tp -> Location sym arch ('NoLocK tp)
 
+{-
 instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => TestEquality (Location sym arch) where
   testEquality loc1 loc2 = case (loc1, loc2) of
     (Register r1, Register r2) | Just Refl <- testEquality r1 r2 -> Just Refl
     (Cell c1, Cell c2) | Just Refl <- testEquality c1 c2 -> Just Refl
     (NoLoc, NoLoc) -> Just Refl
     _ -> Nothing
+-}
 
 instance PEM.ExprMappable sym (Location sym arch l) where
   mapExpr sym f loc = case loc of
     Register r -> return $ Register r
     Cell cell -> Cell <$> PEM.mapExpr sym f cell
-    NoLoc -> return NoLoc
+    NoLoc x -> NoLoc <$> PEM.mapExpr sym f x
 
 instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PP.Pretty (Location sym arch l) where
   pretty loc = case loc of
     Register r -> PP.pretty (showF r)
     Cell c -> PMC.ppCell c
-    NoLoc -> "<None>"
+    NoLoc x -> PP.pretty x
 
 instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "loc" where
   type TraceNodeType '(sym,arch) "loc" = Some (Location sym arch)
@@ -166,3 +171,4 @@ instance (LocationTraversable sym arch a, LocationTraversable sym arch b) =>
 instance (forall bin. (LocationWitherable sym arch (f bin))) =>
   LocationWitherable sym arch (PPa.PatchPair f) where
   witherLocation sym pp f = TF.traverseF (\x -> witherLocation sym x f) pp
+

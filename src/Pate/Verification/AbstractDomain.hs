@@ -25,6 +25,8 @@ module Pate.Verification.AbstractDomain
   , AbstractDomainVals(..)
   , WidenLocs(..)
   , DomainKind(..)
+  , EventSequence(..)
+  , emptyEvents
   , emptyDomainVals
   , groundToAbsRange
   , extractAbsRange
@@ -36,6 +38,8 @@ module Pate.Verification.AbstractDomain
   , ppAbstractDomain
   , noAbsVal
   , domainValsToAbsState
+  , singletonDomain
+  , zipSingletonDomains
   ) where
 
 import qualified Prettyprinter as PP
@@ -66,6 +70,7 @@ import qualified What4.Concrete as W4C
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Types as CT
 import           Lang.Crucible.Backend (IsSymInterface)
+import           Lang.Crucible.Simulator.SymSequence (SymSequence, traverseSymSequence, nilSymSequence)
 
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.CFG as MM
@@ -94,6 +99,7 @@ import           Pate.Panic
 import           Pate.TraceTree
 
 import qualified What4.PredMap as WPM
+import qualified What4.Partial as PE
 
 -- | Defining abstract domains which propagate forwards during strongest
 -- postcondition analysis.
@@ -108,14 +114,80 @@ data AbstractDomain sym arch (v :: PS.VarScope) where
       -- ^ specifies which locations are equal between the original vs. patched programs
     , absDomVals :: PPa.PatchPair (AbstractDomainVals sym arch)
       -- ^ specifies independent constraints on the values for the original and patched programs
+    , absDomEvents :: PPa.PatchPair (EventSequence sym arch)
+      -- ^ events that have been accumulated as part of single-sided analysis
+      --   should be emptied at synchronization points when the original and patched
+      --   sequences are compared for equality
     } -> AbstractDomain sym arch v
+
+-- | Restrict an abstract domain to a single binary.
+singletonDomain ::
+  PPa.PatchPairM m =>
+  PB.WhichBinaryRepr bin ->
+  AbstractDomain sym arch v ->
+  m (AbstractDomain sym arch v)
+singletonDomain bin d = do
+  vals <- PPa.asSingleton bin (absDomVals d)
+  evs <- PPa.asSingleton bin (absDomEvents d)
+  -- NOTE: the equivalence domain is not separated by patched vs. original entries,
+  -- and so we pass it through here unmodified. However it now may contain unbound variables, since
+  -- we will have dropped them from the scope.
+  -- It's not immediately clear what extra information about these values we would need to propagate.
+  return $ AbstractDomain (absDomEq d) vals evs
+
+-- | Zip a pair of abstract domains (original and patched, in any order) into a
+--   pair domain.
+zipSingletonDomains ::
+  PPa.PatchPairM m =>
+  CMW.MonadIO m =>
+  PA.ValidArch arch =>
+  PSo.ValidSym sym =>
+  sym ->
+  AbstractDomain sym arch v ->
+  AbstractDomain sym arch v ->
+  m (AbstractDomain sym arch v)
+zipSingletonDomains sym d1 d2 = do
+  -- resulting equivalence domain is the "intersection" of the input domains
+  -- (i.e. the smallest set of values now known to be equivalent)
+  d <- CMW.liftIO $ PED.intersect sym (absDomEq d1) (absDomEq d2)
+  vals <- PPa.zip (absDomVals d1) (absDomVals d2)
+  evs <- PPa.zip (absDomEvents d1) (absDomEvents d2)
+  return $ AbstractDomain d vals evs
+
+data EventSequence sym arch (bin :: PB.WhichBinary) =
+    EventSequence (SymSequence sym (MT.MemEvent sym (MM.ArchAddrWidth arch)))
+  -- ^ partial sequence to handle expressions which could not be re-scoped
+
+
+instance PEM.ExprMappable sym (EventSequence sym arch bin) where
+  mapExpr sym f (EventSequence s) = EventSequence <$> PEM.mapExpr sym f s
+
+emptyEvents :: 
+  IO.MonadIO m =>
+  sym ->
+  m (EventSequence sym arch bin)
+emptyEvents sym = EventSequence <$> (IO.liftIO $ nilSymSequence sym)
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => PL.LocationWitherable sym arch (EventSequence sym arch bin) where
+  witherLocation sym (EventSequence s) f =
+      EventSequence <$> (PEM.updateFilterSeq sym $ \x -> do
+        f (PL.NoLoc x) (W4.truePred sym) >>= \case
+          Just (PL.NoLoc x', p') -> return $ (Just x', p')
+          Nothing -> return $ (Nothing, W4.falsePred sym)) s
+{-
+instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomain sym arch bin) where
+  witherLocation sym evs f = case evs of
+    NoDeferredEvents -> return NoDeferredEvents
+    DeferredEventSequence bin seq -> 
+    AbstractDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f
+
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationTraversable sym arch (AbstractDomain sym arch bin) where
   traverseLocation sym x f = PL.witherLocation sym x (\loc p -> Just <$> f loc p)
 
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomain sym arch bin) where
   witherLocation sym (AbstractDomain a b) f = AbstractDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f
-
+-}
 
 -- | An 'AbstractDomain' that is closed under a symbolic machine state via
 -- 'SimSpec'.
@@ -144,7 +216,7 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.
 type AbstractDomainSpec sym arch = PS.SimSpec sym arch (AbstractDomain sym arch)
 
 instance PS.Scoped (AbstractDomain sym arch) where
-  unsafeCoerceScope (AbstractDomain a b) = AbstractDomain a b
+  unsafeCoerceScope (AbstractDomain a b c) = AbstractDomain a b c
 
 -- | Defining the known range for a given location. Currently this is either a constant
 -- value or an unconstrained value.
@@ -680,7 +752,8 @@ instance PEM.ExprMappable sym (AbstractDomain sym arch v) where
   mapExpr sym f d = do
     domEq <- PEM.mapExpr sym f (absDomEq d)
     vals <- PEM.mapExpr sym f (absDomVals d)
-    return $ AbstractDomain domEq vals
+    events <- PEM.mapExpr sym f (absDomEvents d)
+    return $ AbstractDomain domEq vals events
 
 ppAbstractDomainVals ::
   forall sym arch bin a.

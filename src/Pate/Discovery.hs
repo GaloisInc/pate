@@ -140,7 +140,7 @@ discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ 
           | blkO <- blksO
           , blkP <- blksP
           , compatibleTargets blkO blkP]
-      PPa.PatchPairSingle _ (PPa.LiftF blks) -> map PPa.mkSingle blks
+      PPa.PatchPairSingle bin (PPa.LiftF blks) -> map (PPa.mkSingle bin) blks
   blocks <- getBlocks $ PSS.simPair bundle
   
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)

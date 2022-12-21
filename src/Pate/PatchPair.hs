@@ -43,20 +43,29 @@ module Pate.PatchPair (
   , catBins
   , get
   , set
+  , view
   , ppEq
   , LiftF(..)
   , PatchPairF
   , pattern PatchPairF
+  , PatchPairMaybeCases(..)
+  , toMaybeCases
   , forBins2
   , forBinsF
   , oneBin
   , some
   , someC
   , getC
+  , getF
   , catBinsPure
   , defaultPair
-  , joinPatchPred) where
+  , joinPatchPred
+  , collapse
+  , asSingleton
+  , zip
+  ) where
 
+import           Prelude hiding (zip)
 import           GHC.Stack (HasCallStack)
 import           Control.Monad.Trans.Maybe
 import           Control.Monad.Except
@@ -86,7 +95,7 @@ data PatchPair (tp :: PB.WhichBinary -> DK.Type) = PatchPairCtor
   { _pOriginal :: tp PB.Original
   , _pPatched :: tp PB.Patched
   }
-  | forall bin. PB.KnownBinary bin => PatchPairSingle (PB.WhichBinaryRepr bin) (tp bin)
+  | forall bin. PatchPairSingle (PB.WhichBinaryRepr bin) (tp bin)
 
 pattern PatchPair :: (tp PB.Original) -> (tp PB.Patched) -> PatchPair tp
 pattern PatchPair a b = PatchPairCtor a b
@@ -158,10 +167,22 @@ get repr pPair = liftPairErr (getPair repr pPair)
 getC :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairC tp -> m tp)
 getC repr pPair = getConst <$> liftPairErr (getPair repr pPair)
 
+getF :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairF t tp -> m (t (tp bin)))
+getF repr pPair = unLiftF <$> liftPairErr (getPair repr pPair)
+
+
+-- | Project out a value from a 'PatchPair'.
+--   Returns the same value twice for singletons
+view :: (forall bin. tp bin -> x) -> PatchPair tp -> (x, x)
+view f pPair = case pPair of
+  PatchPair v1 v2 -> (f v1, f v2)
+  PatchPairSingle _ v -> (f v, f v)
+
 -- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
 set :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
 set repr pPair a = liftPairErr (setPair repr pPair a)
+
 
 data InconsistentPatchPairAccess = InconsistentPatchPairAccess
   deriving (Show)
@@ -203,8 +224,28 @@ mkPair bin b1 b2 = case bin of
   PB.OriginalRepr -> PatchPair b1 b2
   PB.PatchedRepr -> PatchPair b2 b1
 
-mkSingle :: PB.KnownBinary bin => tp bin -> PatchPair tp
-mkSingle a = PatchPairSingle knownRepr a
+-- | Zip two PatchPairs together, where at least one is a singleton. Throws
+--   with 'throwPairErr' otherwise.
+zip :: PatchPairM m => PatchPair tp -> PatchPair tp -> m (PatchPair tp)
+zip (PatchPairSingle bin1 v1) pPair = do
+  v2 <- get (PB.flipRepr bin1) pPair
+  return $ mkPair bin1 v1 v2
+zip pPair (PatchPairSingle bin2 v2) = do
+  v1 <- get (PB.flipRepr bin2) pPair
+  return $ mkPair bin2 v2 v1
+zip (PatchPair{}) (PatchPair{}) = throwPairErr
+
+mkSingle :: PB.WhichBinaryRepr bin -> tp bin -> PatchPair tp
+mkSingle bin a = PatchPairSingle bin a
+
+-- | Convert a 'PatchPair' into a singleton containing only
+--   a value for the given binary 'bin'.
+asSingleton ::
+  PatchPairM m =>
+  PB.WhichBinaryRepr bin -> 
+  PatchPair tp ->
+  m (PatchPair tp)
+asSingleton bin pPair = PatchPairSingle bin <$> get bin pPair
 
 -- | Create a 'PatchPair' with a shape according to 'getPairRepr'.
 --   The provided function execution for both the original and patched binaries
@@ -253,6 +294,20 @@ pattern PatchPairF a b = PatchPairCtor (LiftF a) (LiftF b)
 forBinsF :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (t (f bin))) -> m (PatchPairF t f)
 forBinsF f = forBins $ \bin -> LiftF <$> f bin
 
+data PatchPairMaybeCases tp =
+    PatchPairJust (PatchPair tp)
+  | PatchPairNothing
+  | forall bin. PatchPairMismatch (PB.WhichBinaryRepr bin) (tp bin)
+
+toMaybeCases :: PatchPairF Maybe tp -> PatchPairMaybeCases tp
+toMaybeCases = \case
+  PatchPairF (Just a) (Just b) -> PatchPairJust (PatchPair a b)
+  PatchPairSingle bin (LiftF (Just a)) -> PatchPairJust (PatchPairSingle bin a)
+  PatchPairF Nothing Nothing -> PatchPairNothing
+  PatchPairSingle _ (LiftF Nothing) -> PatchPairNothing
+  PatchPairF (Just a) Nothing -> PatchPairMismatch PB.OriginalRepr a
+  PatchPairF Nothing (Just b) -> PatchPairMismatch PB.PatchedRepr b
+
 -- | Run the given function once for each binary, and then concatenate the result.
 --   If any singleton 'PatchPair' values are accessed, the return value will be the
 --   result of running the function once on the corresponding binary.
@@ -270,6 +325,11 @@ catBinsPure f = runIdentity $
   runPatchPairT' (catBins f) >>= \case
     Just w -> return w
     Nothing -> return mempty
+
+collapse :: Semigroup w =>  (forall bin. PB.KnownBinary bin => tp bin -> w) -> PatchPair tp -> w
+collapse f (PatchPair a b) = f @PB.Original a <> f @PB.Patched b
+collapse f (PatchPairOriginal a) = f @PB.Original a
+collapse f (PatchPairPatched a) = f @PB.Patched a
 
 -- | Execute the given function on exactly one binary. Attempts the "Original" binary first,
 --   and then uses the "Patched" binary as a fallback.
@@ -364,7 +424,11 @@ instance TF.TraversableF PatchPair where
 
 
 instance ShowF tp => Show (PatchPair tp) where
-  show (PatchPair a1 a2) = showF a1 ++ " vs. " ++ showF a2
+  show (PatchPair a1 a2) = 
+    let
+      s1 = showF a1
+      s2 = showF a2
+    in if s1 == s2 then s1 else s1 ++ " vs. " ++ s2
   show (PatchPairOriginal a1) = showF a1 ++ " (original)"
   show (PatchPairPatched a1) = showF a1 ++ " (patched)"
 

@@ -140,7 +140,7 @@ import Lang.Crucible.Types
 import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface hiding ( integerToNat )
-
+import qualified What4.Partial as WP
 
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
@@ -1775,6 +1775,26 @@ traceFootprint sym mem = do
                     Just False -> []
       return $ Set.fromList xs
 
+filterEvent ::
+  IsExprBuilder sym =>
+  sym ->
+  (MemOp sym ptrW -> IO (Pred sym)) ->
+  MemEvent sym ptrW ->
+  IO (Maybe (MemEvent sym ptrW), Pred sym)
+filterEvent sym f x = case x of
+    -- always include system call events
+    SyscallEvent{} -> return $ (Nothing, truePred sym)
+    -- always include external call events
+    ExternalCallEvent{} -> return $ (Nothing, truePred sym)
+    
+    -- Include memory operations only if they acutally
+    -- happen (their condition is true) and if they are
+    -- deemed observable by the given filtering function.
+    MemOpEvent op@(MemOp ptr dir cond w val end) -> do
+      opObservable <- f op
+      p <- andPred sym opObservable (getCond sym cond)
+      let x' = MemOpEvent (MemOp ptr dir Unconditional w val end)
+      return $ (Just x', p)
 
 -- | Filter the memory event traces to leave just the observable
 --   events.  This currently includes all system call events,
@@ -1787,39 +1807,8 @@ observableEvents ::
   (MemOp sym ptrW -> IO (Pred sym)) ->
   MemTraceImpl sym ptrW ->
   IO (SymSequence sym (MemEvent sym ptrW))
-observableEvents sym opIsObservable mem = evalWithFreshCache f (memSeq mem)
-  where
-   filterEvent x xs =
-     case x of
-       -- always include system call events
-       SyscallEvent{} -> consSymSequence sym x xs
-       -- always include external call events
-       ExternalCallEvent{} -> consSymSequence sym x xs
-       
-       -- Include memory operations only if they acutally
-       -- happen (their condition is true) and if they are
-       -- deemed observable by the given filtering function.
-       MemOpEvent op@(MemOp ptr dir cond w val end) ->
-         do opObservable <- opIsObservable op
-            p <- andPred sym opObservable (getCond sym cond)
-            let x' = MemOpEvent (MemOp ptr dir Unconditional w val end)
-            iteM muxSymSequence sym p (consSymSequence sym x' xs) (return xs)
-
-   f _rec SymSequenceNil = nilSymSequence sym
-
-   f rec (SymSequenceCons _ x xs) =
-     do xs' <- rec xs
-        filterEvent x xs'
-
-   f rec (SymSequenceAppend _ xs ys) =
-     do xs' <- rec xs
-        ys' <- rec ys
-        appendSymSequence sym xs' ys'
-
-   f rec (SymSequenceMerge _ p xs ys) =
-     do xs' <- rec xs
-        ys' <- rec ys
-        muxSymSequence sym p xs' ys'
+observableEvents sym opIsObservable mem = 
+  PEM.updateFilterSeq sym (filterEvent sym opIsObservable) (memSeq mem)
 
 
 llvmPtrEq ::
@@ -1913,8 +1902,12 @@ instance PEM.ExprMappable sym (MemOp sym w) where
 instance PEM.ExprMappable sym (MemEvent sym w) where
   mapExpr sym f = \case
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
-    SyscallEvent i arg -> SyscallEvent i <$> f arg -- TODO? rewrite the mux tree?
+    SyscallEvent i arg -> SyscallEvent i <$> f arg
+    -- ^ MuxTree is unmodified since it has no symbolic expressions
     ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr sym f) vs
+
+instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
+  pretty ev = prettyMemEvent ev
 
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
   mapExpr sym f = evalWithFreshCache $ \rec -> \case
@@ -1936,6 +1929,7 @@ instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) wher
             xs' <- rec xs
             ys' <- rec ys
             IO.liftIO $ muxSymSequence sym p' xs' ys'
+
 
 instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do

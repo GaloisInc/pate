@@ -12,6 +12,7 @@
 module Pate.Equivalence.EquivalenceDomain (
     EquivalenceDomain(..)
   , mux
+  , intersect
   , ppEquivalenceDomain
   ) where
 
@@ -47,6 +48,7 @@ instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchR
 
 instance (WI.IsExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationWitherable sym arch (EquivalenceDomain sym arch) where
   witherLocation sym (EquivalenceDomain a b c) f = EquivalenceDomain <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f <*> PL.witherLocation sym c f
+
 
 
 ppEquivalenceDomain ::
@@ -90,6 +92,20 @@ mux sym p domT domF = case WI.asConstantPred p of
     stack <- PEM.mux sym p (eqDomainStackMemory domT) (eqDomainStackMemory domF)
     mem <- PEM.mux sym p (eqDomainGlobalMemory domT) (eqDomainGlobalMemory domF)
     return $ EquivalenceDomain regs stack mem
+
+intersect ::
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  PS.ValidSym sym =>
+  sym ->
+  EquivalenceDomain sym arch ->
+  EquivalenceDomain sym arch ->
+  IO (EquivalenceDomain sym arch)
+intersect sym dom1 dom2 = do
+  regs <- PER.intersect sym (eqDomainRegisters dom1) (eqDomainRegisters dom2)
+  stack <- PEM.intersect sym (eqDomainStackMemory dom1) (eqDomainStackMemory dom2)
+  mem <- PEM.intersect sym (eqDomainGlobalMemory dom1) (eqDomainGlobalMemory dom2)
+  return $ EquivalenceDomain regs stack mem
+
 
 
 instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where

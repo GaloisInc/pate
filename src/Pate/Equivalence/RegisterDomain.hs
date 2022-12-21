@@ -14,6 +14,7 @@
 module Pate.Equivalence.RegisterDomain (
     RegisterDomain
   , mux
+  , intersect
   , universal
   , empty
   , update
@@ -137,6 +138,30 @@ toList ::
   [(Some (MM.ArchReg arch), WI.Pred sym)]
 toList (RegisterDomain regs) = Map.toList regs
 
+dropFalse ::
+  PS.ValidSym sym =>
+  RegisterDomain sym arch ->
+  RegisterDomain sym arch
+dropFalse (RegisterDomain d) = mkDomain $ 
+  Map.filter (\p -> case WI.asConstantPred p of Just False -> False; _ -> True) d
+
+-- | Combine two 'RegisterDomain' values, where a register is
+-- in the resulting domain iff it is in both of the input domains
+-- (intersection)
+intersect ::
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  PS.ValidSym sym =>
+  sym ->
+  RegisterDomain sym arch ->
+  RegisterDomain sym arch ->
+  IO (RegisterDomain sym arch)
+intersect sym (RegisterDomain domA) (RegisterDomain domB) = (dropFalse . mkDomain) <$> do
+  Map.mergeA
+    (Map.traverseMissing (\_ _ -> return $ WI.falsePred sym ))
+    (Map.traverseMissing (\_ _ -> return $ WI.falsePred sym))
+    (Map.zipWithAMatched (\_ pA pB -> WI.andPred sym pA pB))
+    domA
+    domB 
 
 mux ::
   MM.RegisterInfo (MM.ArchReg arch) =>

@@ -97,7 +97,7 @@ instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => 
   traverseLocation sym cond f = PL.witherLocation sym cond (\loc p -> Just <$> f loc p)
 
 instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (EquivalenceCondition sym arch v) where
-  witherLocation sym (EquivalenceCondition a b c) f = EquivalenceCondition <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f <*> ((f PL.NoLoc c) >>= \case
+  witherLocation sym (EquivalenceCondition a b c) f = EquivalenceCondition <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f <*> ((f (PL.NoLoc ()) c) >>= \case
     Just (_, p') -> pure p'
     Nothing -> pure $ W4.truePred sym)
 
@@ -190,7 +190,7 @@ addCondition sym loc p cond = case loc of
     let e = WPM.singleton WPM.PredConjRepr (Some cell) p
     memCond' <- IO.liftIO $ WPM.merge sym (eqCondMem cond) e
     return $ cond { eqCondMem = memCond' }
-  PL.NoLoc -> do
+  PL.NoLoc{}-> do
     auxCond <- IO.liftIO $ W4.andPred sym (eqCondAux cond) p
     return $ cond { eqCondAux = auxCond }
 

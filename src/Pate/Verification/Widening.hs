@@ -20,11 +20,12 @@
 module Pate.Verification.Widening
   ( widenAlongEdge
   , WidenLocs(..)
+  , getObservableEvents
   ) where
 
 import           GHC.Stack
 import           Control.Lens ( (.~), (&), (^.) )
-import           Control.Monad (when, forM_, unless, filterM)
+import           Control.Monad (when, forM_, unless, filterM, foldM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Writer (tell, execWriterT)
@@ -88,6 +89,9 @@ import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 import           Pate.TraceTree
 import qualified What4.ExprHelpers as WEH
+import Lang.Crucible.Simulator.SymSequence
+import qualified Pate.Monad.Context as PMC
+import Data.Functor.Const (Const(..))
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -100,20 +104,23 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
-makeFreshAbstractDomain _scope bundle preDom from _to = do
+makeFreshAbstractDomain scope bundle preDom from _to = do
   case from of
     -- graph node
     GraphNodeEntry{} -> startTimer $ do
       initDom <- initialDomain
       vals <- getInitalAbsDomainVals bundle preDom
-      return $ initDom { PAD.absDomVals = vals }
+      evSeq <- getEventSequence scope bundle preDom
+      return $ initDom { PAD.absDomVals = vals, PAD.absDomEvents = evSeq }
     -- return node
     GraphNodeReturn{} -> do
       initDom <- initialDomain
       -- as a small optimization, we know that the return nodes leave the values
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
-      return $ initDom { PAD.absDomVals = PAD.absDomVals preDom }
+      -- similarly the set of observable events is the same
+      return $ initDom { PAD.absDomVals = PAD.absDomVals preDom
+                       , PAD.absDomEvents = PAD.absDomEvents preDom }
 
 
 getEquivPostCondition ::
@@ -187,7 +194,7 @@ computeEquivCondition _scope bundle preD postD f = withTracing @"function_name" 
               valO <- liftIO $ PMc.readMemCell sym memO c
               valP <- liftIO $ PMc.readMemCell sym memP c
               return $ extractPtrs valO valP
-            PL.NoLoc -> return $ [Some eqPred]
+            PL.NoLoc{} -> return $ [Some eqPred]
 
           values <- Set.fromList <$> mapM (\(Some e) -> Some <$> ((liftIO (WEH.stripAnnotations sym e)) >>= (\x -> applyCurrentAsmsExpr x))) values_
 
@@ -646,11 +653,66 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domVals) $ \loc se ->
           subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
 
-        let dom = PAD.AbstractDomain eq_post val_post
+        -- For any dual sequences, we assume that the events will have been checked for
+        -- equality during verification, and so we 
+        let evSeq = PAD.absDomEvents postResult
+        --nextSeq <- 
+        evSeq_post <- subTree "events" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre evSeq) $ \loc se ->
+          subTrace @"expr" (Some (PS.unSE se)) $ do
+            doRescope loc se >>= \case
+              JustF se' -> return $ Just se'
+              NothingF -> do
+                curAsms <- currentAsm
+                _ <- emitError $ PEE.RescopingFailure curAsms se se
+                return Nothing
+
+        let dom = PAD.AbstractDomain eq_post val_post evSeq_post
         emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
         return dom
 
+-- | Accumulate any observable events during single-sided analysis.
+--   Returns empty sequences for two-sided analysis, since those are checked
+--   for equality at each verification step.
+getEventSequence ::
+  PS.SimScope sym arch v  ->
+  SimBundle sym arch v ->
+  PAD.AbstractDomain sym arch v ->
+  EquivM sym arch (PPa.PatchPair (PAD.EventSequence sym arch))
+getEventSequence _scope bundle preDom = withSym $ \sym -> do
+  case PS.simOut bundle of
+    PPa.PatchPair{} -> PPa.PatchPair <$> PAD.emptyEvents sym <*> PAD.emptyEvents sym
+    PPa.PatchPairSingle bin out -> do
+      PAD.EventSequence prev_seq <- PPa.get bin (PAD.absDomEvents preDom)
+      next_seq <- getObservableEvents out
+      -- observable events produced by this step
+      is_nil <- liftIO $ isNilSymSequence sym next_seq
+      case W4.asConstantPred is_nil of
+        -- no new events, just return the previous event sequence
+        Just True -> return $ PPa.PatchPairSingle bin (PAD.EventSequence prev_seq)
+        _ -> do
+          -- otherwise, append new events onto the previous ones
+          fin_seq <- liftIO $ appendSymSequence sym next_seq prev_seq
+          return $ PPa.PatchPairSingle bin (PAD.EventSequence fin_seq)
 
+-- | Extract the sequence of observable events for the given 
+--   symbolic execution step
+getObservableEvents ::
+  PS.SimOutput sym arch bin v ->
+  EquivM sym arch (SymSequence sym (MT.MemEvent sym (MM.ArchAddrWidth arch)))
+getObservableEvents out = withSym $ \sym -> do
+  let mem = PS.simMem (PS.simOutState out)
+  stackRegion <- CMR.asks (PMC.stackRegion . envCtx)
+  obsMem <- CMR.asks (PMC.observableMemory . envCtx)
+
+  let filterObservableMemOps op@(MT.MemOp (CLM.LLVMPointer blk _off) _dir _cond _w _val _end) = do
+        notStk <- W4.notPred sym =<< W4.natEq sym blk stackRegion
+        inRng <- sequence
+                  [ MT.memOpOverlapsRegion sym op addr len
+                  | (addr, len) <- obsMem
+                  ]
+        inRng' <- foldM (W4.orPred sym) (W4.falsePred sym) inRng
+        W4.andPred sym notStk inRng'
+  liftIO (MT.observableEvents sym filterObservableMemOps mem)
 
 -- | Classifying what kind of widening has occurred
 data WidenKind =
@@ -713,16 +775,17 @@ widenPostcondition bundle preD postD0 =
     subTree @"domain" "Widening Steps" $
       widenLoop sym localWideningGas eqCtx postD0 Nothing
 
+
  where
    widenOnce ::
-     Gas ->
      WidenKind ->
+     Gas ->
      Maybe (Some (PBi.WhichBinaryRepr)) ->
      WidenState sym arch v ->
      PL.Location sym arch l ->
      W4.Pred sym ->
      EquivM_ sym arch (WidenState sym arch v)
-   widenOnce (Gas i) widenK mwb prevState loc goal = case prevState of
+   widenOnce widenK (Gas i) mwb prevState loc goal = case prevState of
      Right NoWideningRequired -> return prevState
      Right (WideningError{}) -> return prevState
      _ -> startTimer $ withSym $ \sym -> do
@@ -759,7 +822,7 @@ widenPostcondition bundle preD postD0 =
                case loc of
                  PL.Cell c -> Right <$> widenCells [Some c] postD
                  PL.Register r -> Right <$> widenRegs [Some r] postD
-                 PL.NoLoc -> return $ Right $ WideningError msg prevLocs postD
+                 PL.NoLoc{} -> return $ Right $ WideningError msg prevLocs postD
              _ -> panic Verifier "widenPostcondition" [ "Unexpected widening case"]
          Sat evalFn -> do
            emit PE.SolverFailure
@@ -791,7 +854,7 @@ widenPostcondition bundle preD postD0 =
                    return $ Right $ WideningError msg prevLocs postD
                  Right{} -> return prevState
                _ -> return $ Right res
-
+   
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
    --
@@ -811,16 +874,25 @@ widenPostcondition bundle preD postD0 =
      NodeBuilderT '(sym,arch) "domain" (EquivM_ sym arch) (WidenResult sym arch v)
    widenLoop sym (Gas i) eqCtx postD mPrevRes = subTraceLabel' PAD.Postdomain  (Some postD) $ \unlift ->
      do
-        PPa.PatchPairC valPostO valPostP <- PPa.forBinsC $ \bin -> do
+        postVals <- PPa.forBinsC $ \bin -> do
           vals <- PPa.get bin (PAD.absDomVals postD)
           output <- PPa.get bin $ PS.simOut bundle
           let st = PS.simOutState output
           liftIO $ PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
 
-        res1 <- PL.foldLocation @sym @arch sym valPostO (Left postD) (widenOnce (Gas i) WidenValue (Just (Some PBi.OriginalRepr)))
-        res2 <- PL.foldLocation @sym @arch sym valPostP res1 (widenOnce (Gas i) WidenValue (Just (Some PBi.PatchedRepr)))
+        res2 <- case postVals of
+          PPa.PatchPairSingle bin (Const valPost) -> 
+            PL.foldLocation @sym @arch sym valPost (Left postD) (widenOnce WidenValue (Gas i) (Just (Some bin)))
+          PPa.PatchPairC valPostO valPostP -> do
+            res1 <- PL.foldLocation @sym @arch sym valPostO (Left postD) (widenOnce WidenValue (Gas i) (Just (Some PBi.OriginalRepr)))
+            PL.foldLocation @sym @arch sym valPostP res1 (widenOnce WidenValue (Gas i) (Just (Some PBi.PatchedRepr)))
+        
+        -- for single-sided verification the equality condition is that the updated value is equal to the
+        -- input value.
+        -- for two-sided verification, the equality condition is that the update original value is equal
+        -- to the updated patched value.
         eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
-        res <- PL.foldLocation @sym @arch sym eqPost_eq res2 (widenOnce (Gas i) WidenEquality Nothing)
+        res <- PL.foldLocation @sym @arch sym eqPost_eq res2 (widenOnce WidenEquality (Gas i) Nothing)
 
         -- Re-enter the widening loop if we had to widen at this step.
         --
@@ -962,11 +1034,11 @@ dropValueLoc wb loc postD = do
       PL.Cell c -> vals { PAD.absMemVals = MapF.delete c (PAD.absMemVals vals) }
       PL.Register r ->
         vals { PAD.absRegVals = (PAD.absRegVals vals) & (MM.boundValue r) .~ (PAD.noAbsVal (MT.typeRepr r)) }
-      PL.NoLoc -> vals
+      PL.NoLoc{} -> vals
     locs = case loc of
       PL.Cell c -> WidenLocs Set.empty (Set.singleton (Some c))
       PL.Register r -> WidenLocs (Set.singleton (Some r)) Set.empty
-      PL.NoLoc -> WidenLocs Set.empty Set.empty
+      PL.NoLoc{} -> WidenLocs Set.empty Set.empty
   vals' <- PPa.set wb (PAD.absDomVals postD) v
   return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 

@@ -76,7 +76,7 @@ module Pate.SimState
   , applyScopeCoercion
   , bundleOutVars
   , bundleInVars
-  ) where
+  , singletonScope) where
 
 import           GHC.Stack ( HasCallStack )
 import qualified Data.Kind as DK
@@ -231,6 +231,16 @@ data SimScope sym arch v =
 
 scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
 scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
+
+singletonScope ::
+  PPa.PatchPairM m =>
+  PBi.WhichBinaryRepr bin ->
+  SimScope sym arch v ->
+  m (SimScope sym arch v)
+singletonScope bin (SimScope vars asm) = 
+  -- NB: 'asm' may contain assumptions about both binaries, but they
+  -- will simply be redundant in the singleton case
+  SimScope <$> PPa.asSingleton bin vars <*> pure asm
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
