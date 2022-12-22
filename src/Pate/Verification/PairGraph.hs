@@ -416,11 +416,11 @@ initialDomainSpec ::
   forall sym arch.
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec (GraphNodeEntry blocks) =
+initialDomainSpec (GraphNodeEntry blocks) = withTracing @"function_name" "initialDomainSpec" $ 
   withFreshVars blocks $ \_vars -> do
     dom <- initialDomain
     return (mempty, dom)
-initialDomainSpec (GraphNodeReturn fPair) = do
+initialDomainSpec (GraphNodeReturn fPair) = withTracing @"function_name" "initialDomainSpec" $ do
   let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
   withFreshVars blocks $ \_vars -> do
     dom <- initialDomain

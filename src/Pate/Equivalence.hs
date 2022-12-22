@@ -48,6 +48,7 @@ module Pate.Equivalence
   , postCondPredicate
   , memPreCondToPred
   , memPostCondToPred
+  , asStatePair
   ) where
 
 import           Control.Lens hiding ( op, pre )
@@ -182,12 +183,14 @@ getPredomain ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
+  SimScope sym arch v ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StatePreCondition sym arch v)
-getPredomain sym bundle eqCtx eqDom =
-  eqDomPre sym (simIn bundle) eqCtx eqDom
+getPredomain sym scope bundle eqCtx eqDom = do
+  let (stO, stP) = asStatePair scope (simIn bundle) simInState
+  eqDomPre sym stO stP eqCtx eqDom
 
 -- | True if the first precondition implies the second
 impliesPredomain ::
@@ -195,14 +198,16 @@ impliesPredomain ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
+  SimScope sym arch v ->
   PPa.PatchPair (SimInput sym arch v) ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (W4.Pred sym)  
-impliesPredomain sym input eqCtx domAsm domConcl = do
-  asm <- eqDomPre sym input eqCtx domAsm >>= preCondAssumption sym input eqCtx >>= toPred sym
-  concl <- eqDomPre sym input eqCtx domConcl >>= preCondAssumption sym input eqCtx >>= toPred sym
+impliesPredomain sym scope input eqCtx domAsm domConcl = do
+  let (stO, stP) = asStatePair scope input simInState
+  asm <- eqDomPre sym stO stP eqCtx domAsm >>= preCondAssumption sym scope input eqCtx >>= toPred sym
+  concl <- eqDomPre sym stO stP eqCtx domConcl >>= preCondAssumption sym scope input eqCtx >>= toPred sym
   W4.impliesPred sym asm concl
 
 -- | Resolve a domain predicate into a structured precondition.
@@ -217,13 +222,15 @@ getPostdomain ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
+  SimScope sym arch v ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StatePostCondition sym arch v)
-getPostdomain sym bundle eqCtx domPre domPost =
-  eqDomPost sym bundle eqCtx domPre domPost
+getPostdomain sym scope bundle eqCtx domPre domPost = do
+  let (stO, stP) = asStatePair scope (simOut bundle) simOutState
+  eqDomPost sym stO stP eqCtx domPre domPost
 
 -- | Flatten a structured 'MemoryCondition' representing a memory post-condition into
 -- a single predicate.
@@ -251,13 +258,21 @@ memDomPost ::
   PA.ValidArch arch =>
   sym ->
   MemRegionEquality sym arch ->
-  SimBundle sym arch v ->
+  -- explicitly not a 'PatchPair' because we are always comparing two states
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PEM.MemoryDomain sym arch {- ^ pre-domain for this slice -} ->
   PEM.MemoryDomain sym arch {- ^ target post-domain -} ->
   IO (MemoryCondition sym arch)
-memDomPost sym memEqRegion bundle domPre domPost = do
-  (Some stO, Some stP) <- asOutStates bundle
-  let
+memDomPost sym memEqRegion stO stP domPre domPost = do
+  footO <- MT.traceFootprint sym memO
+  footP <- MT.traceFootprint sym memP
+  let foot = S.union footO footP
+  footCells <- PEM.toList <$> PEM.excludeFootPrints sym (S.filter (MT.isDir MT.Write) foot) domPre
+  condPredList <- mapM (\(Some cell, p) -> resolveCell cell p >>= \p' -> return (Some cell, p')) footCells
+  condPred <- WPM.fromList sym WPM.PredConjRepr condPredList
+  return $ MemoryCondition condPred
+  where
     memO = simMem stO
     memP = simMem stP
     -- | Cell equivalence that is conditional on whether or not this
@@ -270,19 +285,7 @@ memDomPost sym memEqRegion bundle domPre domPost = do
       IO (W4.Pred sym)
     resolveCell cell cond = do
       impM sym (PEM.mayContainCell sym domPost cell) $
-        resolveCellEquiv sym memEqRegion (Some stO, Some stP) cell cond
-
-  footO <- MT.traceFootprint sym memO
-  footP <- MT.traceFootprint sym memP
-  let foot = S.union footO footP
-  footCells <- PEM.toList <$> PEM.excludeFootPrints sym (S.filter (MT.isDir MT.Write) foot) domPre
-  condPredList <- mapM (\(Some cell, p) -> resolveCell cell p >>= \p' -> return (Some cell, p')) footCells
-  condPred <- WPM.fromList sym WPM.PredConjRepr condPredList
-  return $ MemoryCondition condPred
-  where
-
-
-
+        resolveCellEquiv sym memEqRegion stO stP cell cond
 
 -- | Compute a predicate that is true if the area of memory covered by the
 -- given 'PMC.MemCell' is equivalent on the two given states.
@@ -298,11 +301,13 @@ resolveCellEquiv ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
   MemRegionEquality sym arch ->
-  (Some (SimState sym arch v), Some (SimState sym arch v)) ->
+  -- explicitly not a 'PatchPair' because we are always comparing two states
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PMC.MemCell sym arch w ->
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
-resolveCellEquiv sym memEqRegion (Some stO, Some stP) cell cond = do
+resolveCellEquiv sym memEqRegion stO stP cell cond = do
   val1 <- PMC.readMemCell sym (simMem stO) cell
   val2 <- PMC.readMemCell sym (simMem stP) cell
   let CLM.LLVMPointer cellRegion _ = PMC.cellPtr cell
@@ -326,7 +331,7 @@ resolveCellEquivMem ::
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
 resolveCellEquivMem sym eqCtx stO stP cell cond = do
-  resolveCellEquiv sym (MemEqOutsideRegion (eqCtxStackRegion eqCtx)) (Some stO, Some stP) cell cond
+  resolveCellEquiv sym (MemEqOutsideRegion (eqCtxStackRegion eqCtx)) stO stP cell cond
 
 -- | Compute a predicate that is true if the area of memory covered by the
 -- given 'PMC.MemCell' is equivalent on the two given states.
@@ -343,7 +348,7 @@ resolveCellEquivStack ::
   W4.Pred sym {- ^ Additional pre-condition for the predicate -} ->
   IO (W4.Pred sym)
 resolveCellEquivStack sym eqCtx stO stP cell cond =
-  resolveCellEquiv sym (MemEqAtRegion (eqCtxStackRegion eqCtx)) (Some stO, Some stP) cell cond
+  resolveCellEquiv sym (MemEqAtRegion (eqCtxStackRegion eqCtx)) stO stP cell cond
 
 
 -- | Structurally equivalent to a 'PEM.MemoryDomain', however the predicates
@@ -370,19 +375,16 @@ memPreCondToPred ::
   IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ->
+  SimScope sym arch v ->
   MemRegionEquality sym arch ->
   PPa.PatchPair (SimInput sym arch v) ->
   PEM.MemoryDomain sym arch ->
   IO (W4.Pred sym)
-memPreCondToPred _ _ (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
-memPreCondToPred sym memEqRegion (PPa.PatchPair inO inP) memDom  = do
-  let cells = PEM.toList memDom
-  mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) cells
-  getRegionEquality sym memEqRegion mem' (MT.memState memP)
-  where  
-    memO = simInMem inO
-    memP = simInMem inP
-
+memPreCondToPred sym scope memEqRegion input memDom  = do
+  let 
+    (stO, stP) = asStatePair scope input simInState
+    memO = simMem stO
+    memP = simMem stP
     -- | Conditionally write a fresh value to the given memory location
     -- FIXME: update for when memory model supports regions
     freshWrite ::
@@ -398,6 +400,10 @@ memPreCondToPred sym memEqRegion (PPa.PatchPair inO inP) memDom  = do
           --CLM.LLVMPointer _ original <- MT.readMemArr sym memO ptr repr
           --val <- W4.baseTypeIte sym cond fresh original
           PMC.writeMemCell sym cond mem cell fresh
+  let cells = PEM.toList memDom
+  mem' <- foldM (\mem' (Some cell, cond) -> freshWrite cell cond mem') (MT.memState memO) cells
+  getRegionEquality sym memEqRegion mem' (MT.memState memP)
+
 
 -- | Compute a predicate that is true if the two memory states are exactly equal with respect to the given
 -- type of region equality
@@ -426,24 +432,33 @@ regDomRel ::
   PA.ValidArch arch =>
   PA.HasDedicatedRegister arch ->
   sym ->
-  (Some (SimState sym arch v), Some (SimState sym arch v)) ->
+  -- explicitly not a 'PatchPair' because we are always comparing two states
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   PER.RegisterDomain sym arch ->
   IO (PEC.RegisterCondition sym arch v)
-regDomRel hdr sym (Some st1, Some st2) regDom  = PEC.RegisterCondition <$> do
+regDomRel hdr sym st1 st2 regDom  = PEC.RegisterCondition <$> do
   PRt.zipWithRegStatesM (simRegs st1) (simRegs st2) $ \r vO vP -> Const <$> do
     let p = PER.registerInDomain sym r regDom
     registerValuesEqual' hdr sym r p vO vP
 
-
-asOutStates ::
-  SimBundle sym arch v ->
-  IO (Some (SimState sym arch v), Some (SimState sym arch v))
-asOutStates bundle = do
-  case (TF.fmapF simOutState $ simOut bundle) of
-    PPa.PatchPair stO stP -> return $ (Some stO, Some stP)
-    PPa.PatchPairSingle bin st_out -> PPa.runPatchPairT $ do
-      st_in <- simInState <$> PPa.get bin (simIn bundle)
-      return $ (Some st_out, Some st_in)
+-- | Return a pair of states to perform an equality check.
+--   Usually there are two input/output states (original vs. patched) that we are comparing for
+--   equality. For single-sided analysis, however, we instead compare the input/output state
+--   against a fully-symbolic alternate state (taken from the scope), which is unchanged 
+--   during any transition.
+asStatePair ::
+  SimScope sym arch v ->
+  PPa.PatchPair x ->
+  (forall bin. x bin -> SimState sym arch v bin) ->
+  (SimState sym arch v PBi.Original, SimState sym arch v PBi.Patched)
+asStatePair scope pPair f = do
+  case pPair of
+    PPa.PatchPair stO stP -> (f stO, f stP)
+    PPa.PatchPairOriginal stO -> (f stO, simVarState varsP)
+    PPa.PatchPairPatched stP -> (simVarState varsO, f stP)
+  where
+    (varsO, varsP) = scopeVarsPair scope
 
 regCondToAsm ::
   W4.IsSymExprBuilder sym =>
@@ -490,18 +505,19 @@ eqDomPre ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
-  PPa.PatchPair (SimInput sym arch v) ->
+  -- explicitly not a 'PatchPair' because we are always comparing two states
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch ->
   IO (StatePreCondition sym arch v)
-eqDomPre _sym (PPa.PatchPairSingle{}) _ _  = PPa.handleSingletonStub
-eqDomPre sym input@(PPa.PatchPair inO inP) (eqCtxHDR -> hdr) eqDom  = do
+eqDomPre sym stO stP (eqCtxHDR -> hdr) eqDom  = do
   let
-    st = TF.fmapF simInState input
+    st = PPa.PatchPair stO stP
     maxRegion = TF.fmapF (\st' -> Const $ unSE $ simMaxRegion st') st
     stackBase = TF.fmapF (\st' -> Const $ unSE $ unSB $ simStackBase st') st
 
-  regsEq <- regDomRel hdr sym (Some (simInState inO), Some (simInState inP)) (PED.eqDomainRegisters eqDom)
+  regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
   -- TODO: we haven't included this in the domain, and therefore we're simply
   -- requiring that the number of allocations for each program always match
   -- this will cause a widening error if this isn't the case
@@ -515,23 +531,23 @@ eqDomPost ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
-  SimBundle sym arch v ->
+  -- explicitly not a 'PatchPair' because we are always comparing two states
+  SimState sym arch v PBi.Original ->
+  SimState sym arch v PBi.Patched ->
   EquivContext sym arch ->
   PED.EquivalenceDomain sym arch {- ^ pre-domain for this slice -} ->
   PED.EquivalenceDomain sym arch {- ^ target post-domain -} ->
   IO (StatePostCondition sym arch v)
-eqDomPost sym bundle eqCtx domPre domPost = do
+eqDomPost sym stO stP eqCtx domPre domPost = do
   let
+    st = PPa.PatchPair stO stP
     hdr = eqCtxHDR eqCtx
     stackRegion = eqCtxStackRegion eqCtx
-    output = simOut bundle
-    st = TF.fmapF simOutState output
     maxRegion = TF.fmapF (\st' -> Const $ unSE $ simMaxRegion st') st
   
-  outStates <- asOutStates bundle
-  regsEq <- regDomRel hdr sym outStates (PED.eqDomainRegisters domPost)
-  stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) bundle (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
-  memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) bundle (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
+  regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
+  stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) stO stP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
+  memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) stO stP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
   -- TODO: we haven't included this in the domain, and therefore we're simply
   -- requiring that the number of allocations for each program always match
   -- this will cause a widening error if this isn't the case
@@ -544,14 +560,15 @@ preCondAssumption ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
+  SimScope sym arch v ->
   PPa.PatchPair (SimInput sym arch v) ->
   EquivContext sym arch ->
   StatePreCondition sym arch v ->
   IO (AssumptionSet sym)
-preCondAssumption sym input (eqCtxStackRegion -> stackRegion) stCond = do
+preCondAssumption sym scope input (eqCtxStackRegion -> stackRegion) stCond = do
   regsPred <- regCondToAsm sym (stRegPreCond stCond)
-  stackPred <- memPreCondToPred sym (MemEqAtRegion stackRegion) input (stStackPreDom stCond)
-  memPred <- memPreCondToPred sym (MemEqOutsideRegion stackRegion) input (stMemPreDom stCond)
+  stackPred <- memPreCondToPred sym scope (MemEqAtRegion stackRegion) input (stStackPreDom stCond)
+  memPred <- memPreCondToPred sym scope (MemEqOutsideRegion stackRegion) input (stMemPreDom stCond)
   return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred <> stExtraPreCond stCond
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into

@@ -126,9 +126,9 @@ discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ 
   blkTs <- PPa.forBinsF $ \bin -> do
     blk <- PPa.get bin pPair
     blks <- getSubBlocks blk
-    subTree @"blocktarget1" "Targets" $ do
+    subTree @"blocktarget1" ("Targets (" ++ show bin ++ ")") $ do
       mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
-    subTree @"blocktarget1" "Sat Targets" $ do
+    subTree @"blocktarget1" ("Sat Targets (" ++ show bin ++ ")") $ do
       blks' <- CMR.lift $ CMR.filterM checkSat blks
       mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
       return blks'

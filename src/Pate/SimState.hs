@@ -44,6 +44,7 @@ module Pate.SimState
   , SimScope
   , scopeAsm
   , scopeVars
+  , scopeVarsPair
   , Scoped(..)
   , ScopedExpr
   , unSE
@@ -76,7 +77,7 @@ module Pate.SimState
   , applyScopeCoercion
   , bundleOutVars
   , bundleInVars
-  , singletonScope) where
+  ) where
 
 import           GHC.Stack ( HasCallStack )
 import qualified Data.Kind as DK
@@ -225,27 +226,29 @@ mkSimSpec scope body = SimSpec scope body
 
 data SimScope sym arch v =
   SimScope
-    { scopeBoundVars :: PPa.PatchPair (SimBoundVars sym arch v)
+    { -- NOTE: explicitly not a 'PatchPair' because the scope always has
+      -- variables for both binaries
+      scopeBoundVarsO :: SimBoundVars sym arch v PBi.Original
+    , scopeBoundVarsP :: SimBoundVars sym arch v PBi.Patched
     , scopeAsm :: AssumptionSet sym
     }
+
+scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
+scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
 
 scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
 scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
 
-singletonScope ::
-  PPa.PatchPairM m =>
-  PBi.WhichBinaryRepr bin ->
-  SimScope sym arch v ->
-  m (SimScope sym arch v)
-singletonScope bin (SimScope vars asm) = 
-  -- NB: 'asm' may contain assumptions about both binaries, but they
-  -- will simply be redundant in the singleton case
-  SimScope <$> PPa.asSingleton bin vars <*> pure asm
+-- | A 'SimScope' always has variables defined for both the original and patched binaries,
+--   and so we can return a normal tuple of 'SimVars'.
+scopeVarsPair :: SimScope sym arch v -> (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched)
+scopeVarsPair scope = (boundVarsAsFree $ scopeBoundVarsO scope, boundVarsAsFree $ scopeBoundVarsP scope)
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
   forall sym arch f m.
   PPa.PatchPairM m =>
+  HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   -- | These must all be fresh variables
   (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
@@ -266,8 +269,9 @@ freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
     mr <- mkMaxregion bin
     return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb mr)
   (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
-  return $ SimSpec (SimScope vars asm) body
-
+  case vars of
+    PPa.PatchPair varsO varsP -> return $ SimSpec (SimScope varsO varsP asm) body
+    PPa.PatchPairSingle{} -> PPa.throwPairErr
 
 -- | Project out the body with an arbitrary scope.
 viewSpecBody ::
@@ -580,7 +584,7 @@ bindSpec ::
   PPa.PatchPair (SimVars sym arch v) ->
   SimSpec sym arch f ->
   IO (AssumptionSet sym, f v)
-bindSpec sym vals (SimSpec scope@(SimScope _ asm) (body :: f v')) = do
+bindSpec sym vals (SimSpec scope@(SimScope _ _ asm) (body :: f v')) = do
   rew <- getScopeCoercion sym scope vals
   body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
   asm' <- unWS <$> scopedExprMap sym (WithScope @_ @v' asm) (applyScopeCoercion sym rew)

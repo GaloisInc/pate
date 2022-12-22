@@ -104,7 +104,7 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
-makeFreshAbstractDomain scope bundle preDom from _to = do
+makeFreshAbstractDomain scope bundle preDom from _to = withTracing @"function_name" "makeFreshAbstractDomain" $ do
   case from of
     -- graph node
     GraphNodeEntry{} -> startTimer $ do
@@ -153,7 +153,7 @@ computeEquivCondition ::
   AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
   (forall l. PL.Location sym arch l -> Bool) {- ^ filter for locations to force equal -} ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-computeEquivCondition _scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
+computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
   PPa.PatchPairC regsO regsP <- PPa.forBinsC $ \bin -> PS.simOutRegs <$> PPa.get bin (PS.simOut bundle)
@@ -164,7 +164,7 @@ computeEquivCondition _scope bundle preD postD f = withTracing @"function_name" 
     True -> return $ (loc, W4.truePred sym)
   
   
-  eqCond <- liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) postD_eq'
+  eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
   eqCond' <- applyCurrentAsms eqCond
   
   subTree @"loc" "Locations" $
@@ -329,6 +329,7 @@ propagateCondition scope bundle from to gr = withSym $ \sym -> do
 --   widen as much as we can, and report an error.
 widenAlongEdge ::
   forall sym arch v.
+  HasCallStack =>
   PS.SimScope sym arch v ->
   SimBundle sym arch v {- ^ results of symbolic execution for this block -} ->
   GraphNode arch {- ^ source node -} ->
@@ -363,7 +364,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
               -- initial state of the pair graph: choose the universal domain that equates as much as possible
               d' <- makeFreshAbstractDomain scope bundle d from to
               postSpec <- initialDomainSpec to
-              md <- widenPostcondition bundle d d'
+              md <- widenPostcondition scope bundle d d'
               case md of
                 NoWideningRequired -> do
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
@@ -396,7 +397,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
             -- from the current scope and can be stored as the updated domain in the 'PairGraph'
             (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
             withAssumptionSet asm $ do
-              md <- widenPostcondition bundle d d'
+              md <- widenPostcondition scope bundle d d'
               case md of
                 NoWideningRequired ->
                   do traceBundle bundle "Did not need to widen"
@@ -460,6 +461,7 @@ memVars vars = do
 -- accesses
 abstractOverVars ::
   forall sym arch pre.
+  HasCallStack =>
   PS.SimScope sym arch pre  ->
   SimBundle sym arch pre ->
   GraphNode arch {- ^ source node -} ->
@@ -678,7 +680,7 @@ getEventSequence ::
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v ->
   EquivM sym arch (PPa.PatchPair (PAD.EventSequence sym arch))
-getEventSequence _scope bundle preDom = withSym $ \sym -> do
+getEventSequence _scope bundle preDom = withTracing @"function_name" "getEventSequence" $ withSym $ \sym -> do
   case PS.simOut bundle of
     PPa.PatchPair{} -> PPa.PatchPair <$> PAD.emptyEvents sym <*> PAD.emptyEvents sym
     PPa.PatchPairSingle bin out -> do
@@ -764,11 +766,13 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "widenresult" where
 
 widenPostcondition ::
   forall sym arch v.
+  HasCallStack =>
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v {- ^ predomain -} ->
   AbstractDomain sym arch v {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch v)
-widenPostcondition bundle preD postD0 =
+widenPostcondition scope bundle preD postD0 =
   withTracing @"function_name" "widenPostcondition" $ withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
@@ -839,7 +843,7 @@ widenPostcondition bundle preD postD0 =
              -- a counterexample.
              -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
              -- out still
-             res <- widenUsingCounterexample sym evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postD) preD prevLocs postD
+             res <- widenUsingCounterexample sym scope evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postD) preD prevLocs postD
              case res of
                -- this location was made equivalent by a previous widening in this same loop
                NoWideningRequired -> case prevState of
@@ -891,7 +895,7 @@ widenPostcondition bundle preD postD0 =
         -- input value.
         -- for two-sided verification, the equality condition is that the update original value is equal
         -- to the updated patched value.
-        eqPost_eq <- (liftIO $ PEq.getPostdomain sym bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
+        eqPost_eq <- (liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD))
         res <- PL.foldLocation @sym @arch sym eqPost_eq res2 (widenOnce WidenEquality (Gas i) Nothing)
 
         -- Re-enter the widening loop if we had to widen at this step.
@@ -966,6 +970,7 @@ getInitalAbsDomainVals bundle preDom = withTracing @"function_name" "getInitalAb
 
 widenUsingCounterexample ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
@@ -975,21 +980,21 @@ widenUsingCounterexample ::
   WidenLocs sym arch {- ^ previous widening -}   ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
-widenUsingCounterexample sym evalFn bundle eqCtx postCondAsm postCondStatePred preD _prevLocs postD =
+widenUsingCounterexample sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD _prevLocs postD =
   tryWidenings
     [ -- First check for any disagreement in the constant values
       widenValues sym evalFn bundle postD
 
-    , widenRegisters sym evalFn bundle eqCtx postCondAsm postCondStatePred postD
+    , widenRegisters sym scope evalFn bundle eqCtx postCondAsm postCondStatePred postD
 
       -- We first attempt to widen using writes that occured in the current CFAR/slice
       -- as these are most likely to be relevant.
-    , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
-    , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
+    , widenStack sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
+    , widenHeap sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD postD LocalChunkWrite
 
       -- After that, we check for widenings relating to the precondition, i.e., frame conditions.
-    , widenStack sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
-    , widenHeap sym evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
+    , widenStack sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
+    , widenHeap sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD postD PreDomainCell
     ]
 
 data MemCellSource = LocalChunkWrite | PreDomainCell
@@ -1077,6 +1082,7 @@ widenRegs newRegs postD = withSym $ \sym -> do
 --  should we find some generalization?
 widenHeap ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
@@ -1087,10 +1093,10 @@ widenHeap ::
   MemCellSource ->
   EquivM sym arch (WidenResult sym arch v)
 -- TODO? should we be using postCondAsm and postConstStatePred?
-widenHeap sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
+widenHeap sym scope evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
   do xs <- case memCellSource of
-             LocalChunkWrite -> findUnequalHeapWrites sym evalFn bundle eqCtx
-             PreDomainCell   -> findUnequalHeapMemCells sym evalFn bundle eqCtx preD
+             LocalChunkWrite -> findUnequalHeapWrites sym scope evalFn bundle eqCtx
+             PreDomainCell   -> findUnequalHeapMemCells sym scope evalFn bundle eqCtx preD
      zs <- filterCells sym evalFn (PEE.eqDomainGlobalMemory (PAD.absDomEq postD)) xs
 
      if null zs then
@@ -1119,6 +1125,7 @@ filterCells sym evalFn memDom xs = filterM filterCell xs
 
 widenStack ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
@@ -1129,10 +1136,10 @@ widenStack ::
   MemCellSource ->
   EquivM sym arch (WidenResult sym arch v)
 -- TODO? should we be using postCondAsm and postConstStatePred?
-widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
+widenStack sym scope evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD memCellSource =
   do xs <- case memCellSource of
-             LocalChunkWrite -> findUnequalStackWrites sym evalFn bundle eqCtx
-             PreDomainCell   -> findUnequalStackMemCells sym evalFn bundle eqCtx preD
+             LocalChunkWrite -> findUnequalStackWrites sym scope evalFn bundle eqCtx
+             PreDomainCell   -> findUnequalStackMemCells sym scope evalFn bundle eqCtx preD
      zs <- filterCells sym evalFn (PEE.eqDomainStackMemory (PAD.absDomEq postD)) xs
      if null zs then
        return NoWideningRequired
@@ -1151,92 +1158,85 @@ widenStack sym evalFn bundle eqCtx _postCondAsm _postCondStatePred preD postD me
 -- TODO: what to do for singletons?
 findUnequalHeapWrites ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalHeapWrites sym evalFn bundle eqCtx = case PS.simOut bundle of
-  PPa.PatchPair outO outP -> do
-    let oPostState = PS.simOutState outO
-    let pPostState = PS.simOutState outP
+findUnequalHeapWrites sym scope evalFn bundle eqCtx = do
+  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
 
-    footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem outO)
-    footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem outP)
-    let footprints = Set.union footO footP
-    memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
-    execWriterT $ forM_ memWrites $ \(Some cell, cond) -> do
-        cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
-        cellEq' <- lift $ execGroundFn evalFn cellEq
-        unless cellEq' (tell [Some cell])
-  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
+  footO <- liftIO $ MT.traceFootprint sym (PS.simMem oPostState)
+  footP <- liftIO $ MT.traceFootprint sym (PS.simMem pPostState)
+  let footprints = Set.union footO footP
+  memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
+  execWriterT $ forM_ memWrites $ \(Some cell, cond) -> do
+      cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
+      cellEq' <- lift $ execGroundFn evalFn cellEq
+      unless cellEq' (tell [Some cell])
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalStackWrites ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalStackWrites sym evalFn bundle eqCtx = case PS.simOut bundle of
-  PPa.PatchPair outO outP -> do
-    let oPostState = PS.simOutState outO
-    let pPostState = PS.simOutState outP
+findUnequalStackWrites sym scope evalFn bundle eqCtx = do
+  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
 
-    footO <- liftIO $ MT.traceFootprint sym (PS.simOutMem outO)
-    footP <- liftIO $ MT.traceFootprint sym (PS.simOutMem outP)
-    let footprints = Set.union footO footP
-    memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
-    execWriterT $ forM_ memWrites $ \(Some cell, cond) -> do
-      cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
-      cellEq' <- lift $ execGroundFn evalFn cellEq
-      unless cellEq' (tell [Some cell])
-  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
+  footO <- liftIO $ MT.traceFootprint sym (PS.simMem oPostState)
+  footP <- liftIO $ MT.traceFootprint sym (PS.simMem pPostState)
+  let footprints = Set.union footO footP
+  memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (Set.filter (MT.isDir MT.Write) footprints))
+  execWriterT $ forM_ memWrites $ \(Some cell, cond) -> do
+    cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
+    cellEq' <- lift $ execGroundFn evalFn cellEq
+    unless cellEq' (tell [Some cell])
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalHeapMemCells ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   AbstractDomain sym arch v ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalHeapMemCells sym evalFn bundle eqCtx preD = case PS.simOut bundle of
-  PPa.PatchPair outO outP -> do
-    let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PAD.absDomEq preD))
-    let oPostState = PS.simOutState outO
-    let pPostState = PS.simOutState outP
+findUnequalHeapMemCells sym scope evalFn bundle eqCtx preD = do
+  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PAD.absDomEq preD))
 
-    execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) -> do
-      cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
-      cellEq' <- lift $ execGroundFn evalFn cellEq
-      unless cellEq' (tell [Some cell])
-  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
+  execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) -> do
+    cellEq <- liftIO $ resolveCellEquivMem sym eqCtx oPostState pPostState cell cond
+    cellEq' <- lift $ execGroundFn evalFn cellEq
+    unless cellEq' (tell [Some cell])
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
 -- behavior of `WriterT` with lists
 findUnequalStackMemCells ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
   AbstractDomain sym arch v ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
-findUnequalStackMemCells sym evalFn bundle eqCtx preD = case PS.simOut bundle of
-  PPa.PatchPair outO outP -> do
-    let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PAD.absDomEq preD))
-    let oPostState = PS.simOutState outO
-    let pPostState = PS.simOutState outP
+findUnequalStackMemCells sym scope evalFn bundle eqCtx preD = do
+  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PAD.absDomEq preD))
 
-    execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) -> do
-        cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
-        cellEq' <- lift $ execGroundFn evalFn cellEq
-        unless cellEq' (tell [Some cell])
-  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
+  execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) -> do
+      cellEq <- liftIO $ resolveCellEquivStack sym eqCtx oPostState pPostState cell cond
+      cellEq' <- lift $ execGroundFn evalFn cellEq
+      unless cellEq' (tell [Some cell])
 
 widenRegisters ::
   sym ->
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
   EquivContext sym arch ->
@@ -1244,31 +1244,28 @@ widenRegisters ::
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
-widenRegisters sym evalFn bundle eqCtx _postCondAsm postCondStatePred postD = case PS.simOut bundle of
-  PPa.PatchPair outO outP -> do
-    let oPostState = PS.simOutState outO
-    let pPostState = PS.simOutState outP
+widenRegisters sym scope evalFn bundle eqCtx _postCondAsm postCondStatePred postD = do
+  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
 
-    newRegs <- findUnequalRegs sym evalFn eqCtx
-                  (PEE.eqDomainRegisters postCondStatePred)
-                  (PS.simRegs oPostState)
-                  (PS.simRegs pPostState)
+  newRegs <- findUnequalRegs sym evalFn eqCtx
+                (PEE.eqDomainRegisters postCondStatePred)
+                (PS.simRegs oPostState)
+                (PS.simRegs pPostState)
 
-    if null newRegs then
-      return NoWideningRequired
-    else
-      -- TODO, widen less aggressively using the path condition or something?
-      let regs' = foldl
-                    (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
-                    (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
-                    newRegs
-          pred' = (PAD.absDomEq postD)
-                  { PEE.eqDomainRegisters = regs'
-                  }
-          postD' = postD { PAD.absDomEq = pred' }
-          locs = WidenLocs (Set.fromList newRegs) mempty
-      in return (Widen WidenEquality locs postD')
-  PPa.PatchPairSingle{} -> PPa.handleSingletonStub
+  if null newRegs then
+    return NoWideningRequired
+  else
+    -- TODO, widen less aggressively using the path condition or something?
+    let regs' = foldl
+                  (\m (Some r) -> PER.update sym (\ _ -> W4.falsePred sym) r m)
+                  (PEE.eqDomainRegisters (PAD.absDomEq $ postD))
+                  newRegs
+        pred' = (PAD.absDomEq postD)
+                { PEE.eqDomainRegisters = regs'
+                }
+        postD' = postD { PAD.absDomEq = pred' }
+        locs = WidenLocs (Set.fromList newRegs) mempty
+    in return (Widen WidenEquality locs postD')
 
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time

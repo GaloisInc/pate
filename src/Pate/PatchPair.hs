@@ -39,6 +39,7 @@ module Pate.PatchPair (
   , ppPatchPair
   , ppPatchPair'
   , forBins
+  , update
   , forBinsC
   , catBins
   , get
@@ -140,10 +141,11 @@ handleSingletonStub = error "Missing implementation for handling singleton Patch
 class Monad m => PatchPairM m where
   -- | Called when an invalid patch pair access occurs (i.e. some 'get' or 'set' operation
   -- was performed on a 'PatchPair' that did not have a value for the given binary)
-  throwPairErr :: m a
+  throwPairErr :: HasCallStack => m a
   -- | Run the first function, falling through to the second function if
   --   any 'throwPairErr' calls are made.
   catchPairErr :: m a -> m a -> m a
+
 
 instance PatchPairM Maybe where
   throwPairErr = Nothing
@@ -161,13 +163,13 @@ liftPairErr Nothing = throwPairErr
 
 -- | Select the value from the 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
-get :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> m (tp bin))
+get :: HasCallStack => PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> m (tp bin))
 get repr pPair = liftPairErr (getPair repr pPair)
 
-getC :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairC tp -> m tp)
+getC :: HasCallStack => PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairC tp -> m tp)
 getC repr pPair = getConst <$> liftPairErr (getPair repr pPair)
 
-getF :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairF t tp -> m (t (tp bin)))
+getF :: HasCallStack => PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPairF t tp -> m (t (tp bin)))
 getF repr pPair = unLiftF <$> liftPairErr (getPair repr pPair)
 
 
@@ -180,9 +182,8 @@ view f pPair = case pPair of
 
 -- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
-set :: PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
+set :: HasCallStack => PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
 set repr pPair a = liftPairErr (setPair repr pPair a)
-
 
 data InconsistentPatchPairAccess = InconsistentPatchPairAccess
   deriving (Show)
@@ -211,7 +212,7 @@ instance PatchPairM m => PatchPairM (NodeBuilderT k nm m) where
 runPatchPairT' :: PatchPairT m a -> m (Maybe a)
 runPatchPairT' (PatchPairT m) = runMaybeT m
 
-runPatchPairT :: MonadFail m => PatchPairT m a -> m a
+runPatchPairT :: HasCallStack => MonadFail m => PatchPairT m a -> m a
 runPatchPairT m = runPatchPairT' m >>= \case
   Just a -> return a
   Nothing -> fail "PatchPair: inconsistent patch pair access pattern"
@@ -255,7 +256,7 @@ asSingleton bin pPair = PatchPairSingle bin <$> get bin pPair
 --   function will cause the returned 'PatchPair' to be a singleton for the same binary.
 --   In the case of an inconsistent access pattern (i.e. two mismatched singletons are given)
 --   then 'throwPairErr' will be called instead of returning a result.
-forBins :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
+forBins :: HasCallStack => PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
 forBins f = do
   omResult <- catchPairErr (Just <$> (f PB.OriginalRepr)) (return Nothing)
   pmResult <- catchPairErr (Just <$> (f PB.PatchedRepr)) (return Nothing)
@@ -264,6 +265,21 @@ forBins f = do
     (Just oResult, Nothing) -> return $ PatchPairOriginal oResult
     (Nothing, Just pResult) -> return $ PatchPairPatched pResult
     (Nothing, Nothing) -> throwPairErr
+
+-- | Update the elements of a given 'PatchPair', leaving elements unmodified
+--   if the given function is undefined for the corresponding binary.
+--   NOTE: This may promote a singleton 'PatchPair' by providing a value for a previously-undefined entry.
+update :: PatchPairM m => PatchPair f -> (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (f bin)) -> m (PatchPair f)
+update src f = do
+  tgt <- forBins f
+  case (src, tgt) of
+    (_, PatchPair{}) -> return tgt
+    (PatchPairOriginal{}, PatchPairOriginal{}) -> return tgt
+    (PatchPairPatched{}, PatchPairPatched{}) -> return tgt
+    (PatchPairPatched a, PatchPairOriginal b) -> return $ PatchPair b a
+    (PatchPairOriginal a, PatchPairPatched b) -> return $ PatchPair a b
+    (PatchPair _ b, PatchPairOriginal a) -> return $ PatchPair a b
+    (PatchPair a _, PatchPairPatched b) -> return $ PatchPair a b
 
 -- | Specialization of 'PatchPair' to types which are not indexed on 'PB.WhichBinary'
 type PatchPairC tp = PatchPair (Const tp)

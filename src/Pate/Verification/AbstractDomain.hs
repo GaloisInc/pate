@@ -727,13 +727,14 @@ absDomainToPrecond ::
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
+  PS.SimScope sym arch v ->
   PE.EquivContext sym arch ->
   PS.SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   IO (PAS.AssumptionSet sym)
-absDomainToPrecond sym eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
-  eqInputs <- PE.getPredomain sym bundle eqCtx (absDomEq d)
-  eqInputsPred <- PE.preCondAssumption sym (PS.simIn bundle) eqCtx eqInputs
+absDomainToPrecond sym scope eqCtx bundle d = PE.eqCtxConstraints eqCtx $ do
+  eqInputs <- PE.getPredomain sym scope bundle eqCtx (absDomEq d)
+  eqInputsPred <- PE.preCondAssumption sym scope (PS.simIn bundle) eqCtx eqInputs
   valsPred <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
     input <- PPa.get bin (PS.simIn bundle)
     let absBlockState = PS.simInAbsState input

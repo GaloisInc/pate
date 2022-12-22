@@ -270,12 +270,16 @@ applyWithCache ::
   m f
 applyWithCache sym cache asm f = do
   let
-    doRebind :: forall tp. ExprSet sym tp -> W4.SymExpr sym tp -> m (W4.SymExpr sym tp)
-    doRebind ancestors e = do
+    -- FIXME: This hangs in some cases. Maybe some rewrite loop
+    -- causes some monotonic increase in expression size rather than a loop?
+    _doRebind :: forall tp. ExprSet sym tp -> W4.SymExpr sym tp -> m (W4.SymExpr sym tp)
+    _doRebind ancestors e = do
       e' <- rebindWithFrame' sym cache asm e
       case SetF.member e' ancestors of
         True -> return e'
         False -> doRebind (SetF.insert e' ancestors) e'
+    doRebind :: forall tp. ExprSet sym tp -> W4.SymExpr sym tp -> m (W4.SymExpr sym tp)
+    doRebind _ancestors e = rebindWithFrame' sym cache asm e
   PEM.mapExpr sym (doRebind mempty) f
 
 -- | Augment an assumption set by first rewriting its entries with the given

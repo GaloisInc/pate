@@ -188,8 +188,8 @@ shouldProcessNode ::
   GraphNode arch ->
   EquivM sym arch Bool
 shouldProcessNode node = do
-  let PPa.PatchPair blkO blkP = graphNodeBlocks node
-  case PB.concreteAddress blkO == PB.concreteAddress blkP of
+  let (addrO, addrP) = PPa.view PB.concreteAddress (graphNodeBlocks node)
+  case addrO == addrP of
     True -> return True
     False -> not <$> asks (PCfg.cfgIgnoreDivergedControlFlow . envConfig)
 
@@ -435,16 +435,17 @@ withAbsDomain ::
   EquivM sym arch a
 withAbsDomain node d gr f = do
   PA.SomeValidArch archData <- asks envValidArch
-  ovPair <- getFunctionAbs node d gr  
-  binCtxPair <- PPa.forBins $ \bin -> do
-    binCtx <- getBinCtx
+  ovPair <- getFunctionAbs node d gr
+  binCtxPair <- asks (PMC.binCtxs . envCtx)
+  binCtxPair' <- PPa.update binCtxPair $ \bin -> do
+    binCtx <- PPa.get bin binCtxPair
     absSt <- PPa.getC bin ovPair
     let
       pfm = PMC.parsedFunctionMap binCtx
       defaultInit = PA.validArchInitAbs archData
     pfm' <- liftIO $ PD.addOverrides defaultInit pfm absSt
     return $ binCtx { PMC.parsedFunctionMap = pfm' }
-  local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair } }) $ do
+  local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair' } }) $ do
     let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
     PPa.catBins $ \bin -> do
       pfm <- PMC.parsedFunctionMap <$> getBinCtx
@@ -565,7 +566,7 @@ handleExtraEdge ::
   EquivM sym arch (PairGraph sym arch)  
 handleExtraEdge scope node target d gr = do
   bundle <- orphanReturnBundle scope (nodeBlocks node)
-  withPredomain bundle d $ 
+  withPredomain scope bundle d $ 
     widenAlongEdge scope bundle (GraphNode node) d gr target
 
 updateExtraEdges ::
@@ -574,7 +575,7 @@ updateExtraEdges ::
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)   
-updateExtraEdges scope node d gr = withTracing @"function_name" "updateExtraEdges" $ do
+updateExtraEdges scope node d gr = fnTrace "updateExtraEdges" $ do
   let extra = getExtraEdges gr node
   foldM (\gr' tgt -> handleExtraEdge scope node tgt d gr') gr (Set.toList extra)
 
@@ -621,7 +622,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withAbsDomain nod
   withValidInit scope bPair $ do
     gr1 <- updateExtraEdges scope node d gr0
     let vars = PS.scopeVars scope
-    withSimBundle vars node $ \bundle -> withPredomain bundle d $ processBundle scope node bundle d gr1
+    withSimBundle vars node $ \bundle -> 
+      withPredomain scope bundle d $ processBundle scope node bundle d gr1
 
 visitNode scope (ReturnNode fPair) d gr0 = do
   -- propagate the abstract domain of the return node to
@@ -648,7 +650,7 @@ visitNode scope (ReturnNode fPair) d gr0 = do
      validState <- PVV.validInitState (Just ret) varsSt
      withAssumptionSet validState $
        do (asm, bundle) <- returnSiteBundle vars d ret
-          withAssumptionSet asm $ withPredomain bundle d $ do
+          withAssumptionSet asm $ withPredomain scope bundle d $ do
             traceBundle bundle "Processing return edge"
     --        traceBundle bundle "== bundle asm =="
     --        traceBundle bundle (show (W4.printSymExpr asm))
@@ -713,13 +715,14 @@ returnSiteBundle vars _preD pPair = withSym $ \sym -> do
 -- bundle.
 withPredomain ::
   forall sym arch v a.
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   EquivM sym arch a ->
   EquivM sym arch a
-withPredomain bundle preD f = withSym $ \sym -> do
+withPredomain scope bundle preD f = withSym $ \sym -> do
   eqCtx <- equivalenceContext
-  precond <- liftIO $ PAD.absDomainToPrecond sym eqCtx bundle preD
+  precond <- liftIO $ PAD.absDomainToPrecond sym scope eqCtx bundle preD
   withAssumptionSet precond $ f
 
 data ObservableCheckResult sym ptrW
@@ -1196,7 +1199,7 @@ followExit ::
   (Integer, PPa.PatchPair (PB.BlockTarget arch)) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
 followExit scope bundle currBlock d gr (idx, pPair) = 
-  do traceBundle bundle ("Handling proof case " ++ show idx)
+  do traceBundle bundle ("Handling proof case " ++ show idx) 
      res <- manifestError (triageBlockTarget scope bundle currBlock d gr pPair)
      case res of
        Left err ->
@@ -1305,7 +1308,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts =
      let
         pPair = TF.fmapF PB.targetCall blkts
         nextNode = mkNodeEntry currBlock pPair
-
+      
      stubPair <- getFunctionStubPair nextNode
      traceBundle bundle' ("  targetCall: " ++ show pPair)
      matches <- PD.matchesBlockTarget bundle' blkts
@@ -1331,6 +1334,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts =
 
         PPa.PatchPairNothing ->
            do traceBundle bundle "No return target identified"
+              emitTrace @"message" "No return target identified"
               -- exits without returns need to either be a jump, branch or tail calls
               -- we consider those cases here (having already assumed a specific
               -- block exit condition)
@@ -1338,8 +1342,8 @@ triageBlockTarget scope bundle' currBlock d gr blkts =
                 MCS.MacawBlockEndCall | hasStub stubPair ->
                   handleStub scope bundle currBlock d gr pPair Nothing stubPair
                 MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
-                MCS.MacawBlockEndJump -> handleJump scope bundle currBlock d gr nextNode
-                MCS.MacawBlockEndBranch -> handleJump scope bundle currBlock d gr nextNode
+                MCS.MacawBlockEndJump -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
+                MCS.MacawBlockEndBranch -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
                 _ -> throwHere $ PEE.BlockExitMismatch
         PPa.PatchPairMismatch{} -> throwHere $ PEE.BlockExitMismatch
 
@@ -1411,7 +1415,7 @@ handleArchStmt ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleArchStmt scope bundle currBlock d gr endCase pPair mpRetPair = case endCase of
+handleArchStmt scope bundle currBlock d gr endCase pPair mpRetPair = fnTrace "handleArchStmt" $ case endCase of
   -- this is the jump case for returns, if we return *with* a return site, then
   -- this is actually a normal jump
   MCS.MacawBlockEndReturn | Just pRetPair <- mpRetPair, pPair == pRetPair ->
@@ -1442,7 +1446,7 @@ handleInlineCallee ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair = do
+handleInlineCallee _scope _bundle _currBlock _d gr _pPair _pRetPair = fnTrace "handleInlineCallee" $ do
   _ <- emitError $ PEE.NotImplementedYet "handleInlineCallee"
   return gr -- TODO!
 
@@ -1457,7 +1461,7 @@ handleTailFunCall ::
   PairGraph sym arch ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleTailFunCall scope bundle currBlock d gr pPair =
+handleTailFunCall scope bundle currBlock d gr pPair = fnTrace "handleTailFunCall" $
   case asFunctionPair pPair of
     Just fnPair -> do
       emitTraceLabel @"funcall" PB.TailFunCall fnPair
@@ -1498,7 +1502,7 @@ handleOrdinaryFunCall ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ return point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair =
+handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair = fnTrace "handleOrdinaryFunCall" $
    case asFunctionPair pPair of
      Just fnPair ->
        do
@@ -1656,7 +1660,7 @@ handleStub ::
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point, Nothing for tail calls -} ->
   StubPair {- ^ stub names -} ->
   EquivM sym arch (PairGraph sym arch)
-handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \sym -> do   
+handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "handleStub" $ withSym $ \sym -> do   
   gr0 <- case hasTerminalStub stubPair of
     True -> handleTerminalFunction currBlock gr0_
     False -> return gr0_
@@ -1684,6 +1688,7 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
             -- programs diverge: handle each one separately by
             -- splitting into singleton 'PatchPair' values
             True -> do
+              emitTrace @"message" "mismatched stubs"
               -- we need to add in a synchronization edge, which essentially
               -- says that when the parent function returns on both branches,
               -- computation is assumed to now be synchronized again
@@ -1691,24 +1696,23 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = withSym $ \s
               let outerReturn = returnOfEntry currBlock
 
               -- handle Original case
-              gr3 <- do
-                currBlockO <- singletonNodeEntry PBi.OriginalRepr currBlock
+              currBlockO <- singletonNodeEntry PBi.OriginalRepr currBlock
+              gr3 <- withTracing @"node" (GraphNode currBlockO) $  do
                 let gr2 = addSyncPoint gr1 (returnOfEntry currBlockO) outerReturn
                 bundleO <- singletonBundle PBi.OriginalRepr bundle'
                 dO <- PAD.singletonDomain PBi.OriginalRepr d
                 processBundle scope currBlockO bundleO dO gr2
               -- handle Patched case
-              gr5 <- do
-                currBlockP <- singletonNodeEntry PBi.PatchedRepr currBlock
+              currBlockP <- singletonNodeEntry PBi.PatchedRepr currBlock
+              gr5 <- withTracing @"node" (GraphNode currBlockP) $ do
                 let gr4 = addSyncPoint gr3 (returnOfEntry currBlockP) outerReturn
                 bundleP <- singletonBundle PBi.PatchedRepr bundle'
                 dP <- PAD.singletonDomain PBi.PatchedRepr d
                 processBundle scope currBlockP bundleP dP gr4
               return gr5
-            False ->
-              handleJump scope bundle' currBlock d gr1 (mkNodeEntry currBlock pRetPair)
+            False -> handleJump scope bundle' currBlock d gr1 (mkNodeEntry currBlock pRetPair)
         -- unclear what to do here?
-        Nothing ->
+        Nothing -> fnTrace "handeReturn" $
           handleReturn scope bundle' currBlock d gr0
 
 handleReturn ::
@@ -1726,6 +1730,7 @@ handleReturn scope bundle currBlock d gr =
       widenAlongEdge scope bundle (GraphNode currBlock) d gr next
 
 handleJump ::
+  HasCallStack =>
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   NodeEntry arch {- ^ current entry point -} ->
