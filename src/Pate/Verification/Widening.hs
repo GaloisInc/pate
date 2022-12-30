@@ -38,7 +38,6 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import           Data.Monoid (All(..))
 import           Data.List (foldl')
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr

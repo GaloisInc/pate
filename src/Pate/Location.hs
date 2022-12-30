@@ -60,14 +60,13 @@ import           Control.Monad.Trans.Except ( throwE, runExceptT )
 import           Control.Monad.Trans.State ( StateT, get, put, execStateT )
 import           Control.Monad.Trans ( lift )
 import qualified Data.Kind as DK
-import           Data.Type.Equality
 
 import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Some ( Some(..) )
 import           Data.Parameterized.Classes
 import           Data.Parameterized.HasRepr ( typeRepr )
-import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSym(..), SymbolRepr )
+import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SymbolRepr )
 
 import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFG as MM

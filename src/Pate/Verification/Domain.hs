@@ -34,7 +34,6 @@ import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSi
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Solver as PS
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Location as PL
 

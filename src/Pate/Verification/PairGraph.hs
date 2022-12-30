@@ -55,7 +55,7 @@ import           Control.Monad.IO.Class
 import qualified Data.Foldable as F
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (fromMaybe, catMaybes)
+import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Classes
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -80,13 +80,12 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, graphNodeBlocks, nodeFuns, asSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
-import qualified Pate.Binary as PB
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time

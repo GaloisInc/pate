@@ -65,7 +65,6 @@ import qualified Pate.Binary as PB
 import qualified Pate.Block as PBl
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE

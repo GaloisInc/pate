@@ -51,7 +51,6 @@ import qualified What4.PredMap as WPM
 
 import           Pate.TraceTree
 import qualified Data.Kind as DK
-import Data.Parameterized (knownSymbol)
 ---------------------------------------------
 -- Equivalence Condition
 

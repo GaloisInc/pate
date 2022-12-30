@@ -67,7 +67,6 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
 import           Data.Proxy
-import qualified Data.Kind as DK
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.GroundEval as W4G
@@ -76,7 +75,7 @@ import qualified What4.Concrete as W4C
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Types as CT
 import           Lang.Crucible.Backend (IsSymInterface)
-import           Lang.Crucible.Simulator.SymSequence (SymSequence, traverseSymSequence, nilSymSequence)
+import           Lang.Crucible.Simulator.SymSequence (SymSequence, nilSymSequence)
 
 import qualified Data.Macaw.CFG.Core as MC
 import qualified Data.Macaw.CFG as MM
@@ -105,7 +104,6 @@ import           Pate.Panic
 import           Pate.TraceTree
 
 import qualified What4.PredMap as WPM
-import qualified What4.Partial as PE
 import Data.Parameterized (knownSymbol)
 
 type instance PL.LocationK "memevent" = ()

@@ -52,7 +52,6 @@ import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Discovery.PLT as PLT
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Panic as PP

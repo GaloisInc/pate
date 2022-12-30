@@ -73,34 +73,6 @@ import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Binary as PBi
-import Data.Functor.Const (Const(..))
-
-
--- FIXME: These were originally defined in SimState.hs but were moved here
--- since this code is largely deprecated
-simInO :: SimBundle sym arch v -> PS.SimInput sym arch v PBi.Original
-simInO bundle = case simIn bundle of
-  PPa.PatchPair o _ -> o
-  PPa.PatchPairOriginal o -> o
-  _ -> PPa.handleSingletonStub
-
-simInP :: SimBundle sym arch v -> PS.SimInput sym arch v PBi.Patched
-simInP bundle = case simIn bundle of
-  PPa.PatchPair _ p -> p
-  PPa.PatchPairPatched p -> p
-  _ -> PPa.handleSingletonStub
-
-simOutO :: SimBundle sym arch v -> PS.SimOutput sym arch v PBi.Original
-simOutO bundle = case simOut bundle of
-  PPa.PatchPair o _ -> o
-  PPa.PatchPairOriginal o -> o
-  _ -> PPa.handleSingletonStub
-
-simOutP :: SimBundle sym arch v -> PS.SimOutput sym arch v PBi.Patched
-simOutP bundle = case simOut bundle of
-  PPa.PatchPair _ p -> p
-  PPa.PatchPairPatched p -> p
-  _ -> PPa.handleSingletonStub
 
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
