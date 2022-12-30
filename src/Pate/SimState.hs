@@ -444,6 +444,9 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 data ScopedExpr sym (v :: VarScope) tp =
   ScopedExpr { unSE :: W4.SymExpr sym tp }
 
+instance PEM.ExprMappable sym (ScopedExpr sym v tp) where
+  mapExpr _sym f (ScopedExpr e) = ScopedExpr <$> f e
+
 instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
   pretty (ScopedExpr e) = W4.printSymExpr e
 
@@ -481,13 +484,13 @@ scopedLocWither ::
   PL.LocationWitherable sym arch (f v1) =>
   sym ->
   f v1 ->
-  (forall tp l. PL.Location sym arch l -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
+  (forall tp nm k. PL.Location sym arch nm k -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
   m (f v2)
 scopedLocWither sym body f = do
   fmap unsafeCoerceScope $ PL.witherLocation sym body $ \loc p -> runMaybeT $ do
     ScopedExpr p' <- (MaybeT $ f loc (ScopedExpr p))
     loc' <- PEM.mapExpr sym (\e' -> unSE @sym <$> (MaybeT (f loc (ScopedExpr e')))) loc
-    return (loc', p')
+    return (PL.getLoc loc', p')
 
 --- FIXME: cludge for scopes missing from inner types
 -- | Tag any type with a scope type parameter
@@ -709,6 +712,12 @@ both programs, as the access to the stack variable
 -- for changes to the stack pointer when moving between scopes.
 newtype StackBase sym arch v =
   StackBase { unSB :: ScopedExpr sym v (W4.BaseBVType (MM.ArchAddrWidth arch)) }
+
+instance PEM.ExprMappable sym (StackBase sym arch v) where
+  mapExpr sym f (StackBase e) = StackBase <$> PEM.mapExpr sym f e
+
+instance TestEquality (W4.SymExpr sym) => Eq (StackBase sym arch v) where
+  (StackBase a) == (StackBase b) = a == b
 
 freshStackBase ::
   forall sym arch v.

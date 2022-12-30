@@ -271,8 +271,8 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
 
   -- TODO: this can be made more configurable
   let
-    condFns :: M.Map (PB.FunPair arch) (Some (PL.Location sym arch) -> Bool)
-    condFns = M.singleton entryPoint (\(Some loc) -> case loc of
+    condFns :: M.Map (PB.FunPair arch) (PL.SomeLocation sym arch -> Bool)
+    condFns = M.singleton entryPoint (\(PL.SomeLocation loc) -> case loc of
                                              PL.Register r -> S.member (Some r) targetRegs
                                              _ -> False)
   

@@ -12,8 +12,10 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Equivalence.Condition (
     EquivalenceCondition(..)
@@ -48,6 +50,8 @@ import qualified Pate.Location as PL
 import qualified What4.PredMap as WPM
 
 import           Pate.TraceTree
+import qualified Data.Kind as DK
+import Data.Parameterized (knownSymbol)
 ---------------------------------------------
 -- Equivalence Condition
 
@@ -66,8 +70,9 @@ mux ::
 mux sym p condT condF = do
   mem <- WPM.mux sym p (eqCondMem condT) (eqCondMem condF)
   regs <- muxRegCond sym p (eqCondRegs condT) (eqCondRegs condF)
-  aux <- IO.liftIO $ W4.baseTypeIte sym p (eqCondAux condT) (eqCondAux condF)
-  return $ EquivalenceCondition mem regs aux
+  let (PAS.NamedAsms mrT, PAS.NamedAsms mrF) = (eqCondMaxRegion condT, eqCondMaxRegion condF)
+  mrCond <- PAS.NamedAsms <$> PAS.mux sym p mrT mrF
+  return $ EquivalenceCondition mem regs mrCond
 
 -- | Preconditions for graph nodes. These represent additional conditions
 --   that must be true for the equivalence domain of the node to be considered
@@ -78,17 +83,15 @@ data EquivalenceCondition sym arch (v :: PS.VarScope) =
     EquivalenceCondition
       { eqCondMem :: PMC.MemCellPred sym arch WPM.PredConjT
       , eqCondRegs :: RegisterCondition sym arch v
-      , eqCondAux :: W4.Pred sym
-      -- ^ additional conditions. Unclear if necessary?
+      , eqCondMaxRegion :: PAS.NamedAsms sym "maxRegion"
       }
-
 
 
 instance PEM.ExprMappable sym (EquivalenceCondition sym arch v) where
   mapExpr sym f (EquivalenceCondition a b c) = EquivalenceCondition
     <$> PEM.mapExpr sym f a
     <*> PEM.mapExpr sym f b
-    <*> f c
+    <*> PEM.mapExpr sym f c
 
 instance PS.Scoped (EquivalenceCondition sym arch) where
   unsafeCoerceScope (EquivalenceCondition a b c) = EquivalenceCondition a (PS.unsafeCoerceScope b) c
@@ -97,11 +100,13 @@ instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => 
   traverseLocation sym cond f = PL.witherLocation sym cond (\loc p -> Just <$> f loc p)
 
 instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (EquivalenceCondition sym arch v) where
-  witherLocation sym (EquivalenceCondition a b c) f = EquivalenceCondition <$> PL.witherLocation sym a f <*> PL.witherLocation sym b f <*> ((f (PL.NoLoc ()) c) >>= \case
-    Just (_, p') -> pure p'
-    Nothing -> pure $ W4.truePred sym)
+  witherLocation sym (EquivalenceCondition a b c) f = 
+    EquivalenceCondition 
+    <$> PL.witherLocation sym a f 
+    <*> PL.witherLocation sym b f
+    <*> PL.witherLocation sym c f
 
-instance forall sym arch. IsTraceNode '(sym,arch) "eqcond" where
+instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond" where
   type TraceNodeType '(sym,arch) "eqcond" = Some (EquivalenceCondition sym arch)
   type TraceNodeLabel "eqcond" = String
   prettyNode msg _eqCond = PP.pretty msg
@@ -145,18 +150,18 @@ trueRegCond ::
   RegisterCondition sym arch v
 trueRegCond _sym = RegisterCondition (MM.mkRegState (\_ -> mempty))
 
-instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
+instance (MM.RegisterInfo (MM.ArchReg arch), W4.IsSymExprBuilder sym) => PL.LocationTraversable sym arch (RegisterCondition sym arch v) where
   traverseLocation sym body f = RegisterCondition <$>
     MM.traverseRegsWith (\r (Const asm) -> do
       p <- PAS.toPred sym asm
-      f (PL.Register r) p >>= \ (_, p') -> return $ (Const (PAS.fromPred p'))
+      f (PL.Location @"register" r) p >>= \ (_, p') -> return $ (Const (PAS.fromPred p'))
       ) (regCondPreds body)
 
-instance W4.IsSymExprBuilder sym => PL.LocationWitherable sym arch (RegisterCondition sym arch v) where
+instance (MM.RegisterInfo (MM.ArchReg arch), W4.IsSymExprBuilder sym) => PL.LocationWitherable sym arch (RegisterCondition sym arch v) where
   witherLocation sym body f = RegisterCondition <$>
     MM.traverseRegsWith (\r (Const asm) -> do
       p <- PAS.toPred sym asm
-      f (PL.Register r) p >>= \case
+      f (PL.Location @"register" r) p >>= \case
         Just (_, p') -> return $ Const (PAS.fromPred p')
         Nothing -> return $ Const mempty
       ) (regCondPreds body)
@@ -167,20 +172,21 @@ universal ::
   PA.ValidArch arch =>
   sym ->
   EquivalenceCondition sym arch v
-universal sym = EquivalenceCondition (WPM.empty WPM.PredConjRepr) (trueRegCond sym) (W4.truePred sym)
+universal sym = EquivalenceCondition (WPM.empty WPM.PredConjRepr) (trueRegCond sym) (mempty)
 
 
 addCondition ::
+  forall nm v k sym arch m.
   W4.IsSymExprBuilder sym =>
   IO.MonadIO m =>
   PA.ValidArch arch =>
   sym -> 
-  PL.Location sym arch l ->
+  PL.Location sym arch nm (k :: PL.LocationK nm) ->
   W4.Pred sym ->
   EquivalenceCondition sym arch v ->
   m (EquivalenceCondition sym arch v)
-addCondition sym loc p cond = case loc of
-  PL.Register r -> do
+addCondition sym l p cond = case l of
+  PL.Register r  -> do
     let regPreds = regCondPreds (eqCondRegs cond)
     let Const asm = regPreds ^. MM.boundValue r
     
@@ -190,9 +196,11 @@ addCondition sym loc p cond = case loc of
     let e = WPM.singleton WPM.PredConjRepr (Some cell) p
     memCond' <- IO.liftIO $ WPM.merge sym (eqCondMem cond) e
     return $ cond { eqCondMem = memCond' }
-  PL.NoLoc{}-> do
-    auxCond <- IO.liftIO $ W4.andPred sym (eqCondAux cond) p
-    return $ cond { eqCondAux = auxCond }
+  PL.Named (PL.concreteSymbol @"maxRegion" -> Just Refl) -> do
+    return $ cond { eqCondMaxRegion = (eqCondMaxRegion cond) <> (PAS.NamedAsms (PAS.fromPred p)) }
+  -- no support for stack base conditions
+  PL.Named (PL.concreteSymbol @"stackBase" -> Just Refl) -> return $ cond
+  _ -> IO.liftIO $ fail ("addCondition: unsupported location: " ++ PL.showLoc l)
 
 toPred ::
   forall sym arch v m.
@@ -212,6 +220,6 @@ fromLocationTraversable ::
   IO.MonadIO m =>
   sym ->
   f ->
-  (forall l. PL.Location sym arch l -> W4.Pred sym -> m (W4.Pred sym)) ->
+  (forall nm k. PL.Location sym arch nm k -> W4.Pred sym -> m (W4.Pred sym)) ->
   m (EquivalenceCondition sym arch v)
 fromLocationTraversable sym a f = PL.foldLocation sym a (universal sym) (\cond loc p -> f loc p >>= \p' -> addCondition sym loc p' cond)

@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs   #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE RankNTypes #-}
@@ -9,6 +10,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE DataKinds   #-}
+{-# LANGUAGE LambdaCase   #-}
+
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -26,7 +29,10 @@ module Pate.AssumptionSet (
   , apply
   , isAssumedPred
   , mux
+  , NamedAsms(..)
   ) where
+
+import           GHC.TypeLits
 
 import           Control.Monad ( forM )
 import qualified Control.Monad.IO.Class as IO
@@ -58,6 +64,7 @@ import qualified What4.ExprHelpers as WEH
 import           What4.ExprHelpers ( ExprSet, VarBindCache, ExprBindings, ppExprSet )
 import qualified Pate.ExprMappable as PEM
 import           Pate.TraceTree
+import qualified Pate.Location as PL
 
 -- | A structured collection of predicates intended to represent an assumption state.
 --   Logically it is simply a set of predicates that can be added to the solver's
@@ -118,6 +125,28 @@ instance W4.IsExpr (W4.SymExpr sym) => Show (AssumptionSet sym) where
 
 instance OrdF (W4.SymExpr sym) => Monoid (AssumptionSet sym) where
   mempty = AssumptionSet mempty MapF.empty
+
+data NamedAsms sym (nm :: Symbol) =
+  KnownSymbol nm => NamedAsms { namedAsms :: AssumptionSet sym }
+
+instance PEM.ExprMappable sym (NamedAsms sym nm) where
+  mapExpr sym f (NamedAsms asm) = NamedAsms <$> PEM.mapExpr sym f asm
+
+instance OrdF (W4.SymExpr sym) => Semigroup (NamedAsms sym nm) where
+  (NamedAsms a) <> (NamedAsms b) = NamedAsms (a <> b)
+
+instance (OrdF (W4.SymExpr sym), KnownSymbol nm) => Monoid (NamedAsms sym nm) where
+  mempty = NamedAsms mempty
+
+instance forall sym arch nm. (W4.IsSymExprBuilder sym) => PL.LocationWitherable sym arch (NamedAsms sym nm) where
+  witherLocation sym (NamedAsms asms) f = do
+    p <- toPred sym asms
+    f (PL.Named (CT.knownSymbol @nm)) p >>= \case
+      Just (_, p') -> return $ (NamedAsms (fromPred p'))
+      Nothing -> return $ (NamedAsms mempty)
+
+instance forall sym arch nm. (W4.IsSymExprBuilder sym) => PL.LocationTraversable sym arch (NamedAsms sym nm) where
+  traverseLocation sym nasms f = PL.witherLocation sym nasms (\l p -> Just <$> f l p)
 
 mergeExprSetFMap ::
   OrdF (W4.SymExpr sym) =>

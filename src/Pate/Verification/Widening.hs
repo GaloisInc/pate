@@ -92,6 +92,7 @@ import qualified What4.ExprHelpers as WEH
 import Lang.Crucible.Simulator.SymSequence
 import qualified Pate.Monad.Context as PMC
 import Data.Functor.Const (Const(..))
+import Pate.Verification.Concretize (symbolicFromConcrete)
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -118,9 +119,10 @@ makeFreshAbstractDomain scope bundle preDom from _to = withTracing @"function_na
       -- as a small optimization, we know that the return nodes leave the values
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
-      -- similarly the set of observable events is the same
+      evSeq <- getEventSequence scope bundle preDom
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom
-                       , PAD.absDomEvents = PAD.absDomEvents preDom }
+                       , PAD.absDomEvents = evSeq
+                       }
 
 
 getEquivPostCondition ::
@@ -151,7 +153,7 @@ computeEquivCondition ::
   SimBundle sym arch v ->
   AbstractDomain sym arch v {- ^ incoming predomain -} ->
   AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
-  (forall l. PL.Location sym arch l -> Bool) {- ^ filter for locations to force equal -} ->
+  (forall nm k. PL.Location sym arch nm k -> Bool) {- ^ filter for locations to force equal -} ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
 computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
@@ -159,10 +161,9 @@ computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "
   PPa.PatchPairC regsO regsP <- PPa.forBinsC $ \bin -> PS.simOutRegs <$> PPa.get bin (PS.simOut bundle)
   PPa.PatchPairC memO memP <- PPa.forBinsC $ \bin -> PS.simOutMem <$> PPa.get bin (PS.simOut bundle)
   postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case f loc of
-    False -> return (loc, p)
+    False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
-    True -> return $ (loc, W4.truePred sym)
-  
+    True -> return $ (PL.getLoc loc, W4.truePred sym)
   
   eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
   eqCond' <- applyCurrentAsms eqCond
@@ -171,7 +172,7 @@ computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "
     PEC.fromLocationTraversable @sym @arch sym eqCond' $ \loc eqPred -> case f loc of
     -- irrelevant location
     False -> return $ W4.truePred sym
-    True -> subTrace (Some loc) $ do
+    True -> subTrace (PL.SomeLocation loc) $ do
       goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
       emitTraceLabel @"expr" "input" (Some eqPred)
       isPredTrue' goalTimeout eqPred >>= \case
@@ -194,7 +195,8 @@ computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "
               valO <- liftIO $ PMc.readMemCell sym memO c
               valP <- liftIO $ PMc.readMemCell sym memP c
               return $ extractPtrs valO valP
-            PL.NoLoc{} -> return $ [Some eqPred]
+            PL.Unit -> return $ [Some eqPred]
+            _ -> throwHere $ PEE.UnsupportedLocation 
 
           values <- Set.fromList <$> mapM (\(Some e) -> Some <$> ((liftIO (WEH.stripAnnotations sym e)) >>= (\x -> applyCurrentAsmsExpr x))) values_
 
@@ -232,7 +234,7 @@ initializeCondition scope bundle preD postD from to@(ReturnNode ret) gr = withSy
       eqCondFns <- CMR.asks envEqCondFns
       case Map.lookup (nodeFuns ret) eqCondFns of
         Just locFilter -> do
-          eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (Some l))
+          eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
           pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
           eqCond' <- PEC.mux sym pathCond eqCond (PEC.universal sym)
           let gr1 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr
@@ -281,7 +283,7 @@ propagateCondition scope bundle from to gr = withSym $ \sym -> do
       preCond_pred <- PEC.toPred sym preCond
       cond' <- withAssumption preCond_pred $ subTree @"loc" "Propagate Condition" $ do
         -- TODO: could do a scoped wither here just for clarity
-        PL.witherLocation @sym @arch sym cond $ \loc postCond_pred -> subTrace (Some loc) $ do
+        PL.witherLocation @sym @arch sym cond $ \loc postCond_pred -> subTrace (PL.SomeLocation loc) $ do
           emitTraceLabel @"expr" "input" (Some postCond_pred)
           isPredTrue' goalTimeout postCond_pred >>= \case
             -- pre-condition is already sufficient to imply the target post-condition, so
@@ -293,7 +295,7 @@ propagateCondition scope bundle from to gr = withSym $ \sym -> do
             -- pre-condition is insufficient, so propagation is required
             False -> do
               emitTraceLabel @"bool" "Propagated" True
-              return $ Just (loc, postCond_pred)
+              return $ Just (PL.getLoc loc, postCond_pred)
       cond_pred <- PEC.toPred sym cond'
       case W4.asConstantPred cond_pred of
         -- nothing propagated, so no changes to the graph required
@@ -584,7 +586,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
             True <- lift $ isPredTrue' heuristicTimeout (PS.unSE asm)
             return se'
 
-          doRescope :: forall tp l. PL.Location sym arch l -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
+          doRescope :: forall tp nm k. PL.Location sym arch nm k -> PS.ScopedExpr sym pre tp -> EquivM_ sym arch (MaybeF (PS.ScopedExpr sym post) tp)
           doRescope _loc se = W4B.idxCacheEval cache (PS.unSE se) $ runMaybeTF $ do
               -- The decision of ordering here is only for efficiency: we expect only
               -- one strategy to succeed.
@@ -633,7 +635,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         --domEq_simplified <- PSi.applySimplifier simplifier (PAD.absDomEq postResult)
         let domEq = PAD.absDomEq postResult
         eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domEq) $ \loc (se :: PS.ScopedExpr sym pre tp) ->
-           subTrace @"loc" (Some loc) $ do
+           subTrace @"loc" (PL.SomeLocation loc) $ do
             emitTraceLabel @"expr" "input" (Some (PS.unSE se))
             doRescope loc se >>= \case
               JustF se' -> do
@@ -641,6 +643,20 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
                 return $ Just se'
               NothingF -> do
                 -- failed to rescope, emit a recoverable error and drop this entry
+                se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+                e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
+                curAsms <- currentAsm
+                _ <- emitError $ PEE.RescopingFailure curAsms se e''
+                return Nothing
+
+        let evSeq = PAD.absDomEvents postResult
+        --nextSeq <- 
+        evSeq_post <- subTree "events" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre evSeq) $ \loc se ->
+          subTrace @"loc" (PL.SomeLocation loc) $ do
+            emitTraceLabel @"expr" "input" (Some (PS.unSE se))
+            doRescope loc se >>= \case
+              JustF se' -> return $ Just se'
+              NothingF -> do
                 se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
                 e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
                 curAsms <- currentAsm
@@ -655,18 +671,6 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domVals) $ \loc se ->
           subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
 
-        -- For any dual sequences, we assume that the events will have been checked for
-        -- equality during verification, and so we 
-        let evSeq = PAD.absDomEvents postResult
-        --nextSeq <- 
-        evSeq_post <- subTree "events" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre evSeq) $ \loc se ->
-          subTrace @"expr" (Some (PS.unSE se)) $ do
-            doRescope loc se >>= \case
-              JustF se' -> return $ Just se'
-              NothingF -> do
-                curAsms <- currentAsm
-                _ <- emitError $ PEE.RescopingFailure curAsms se se
-                return Nothing
 
         let dom = PAD.AbstractDomain eq_post val_post evSeq_post
         emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
@@ -758,11 +762,11 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "widenresult" where
   prettyNode () (Some wr) = case wr of
     NoWideningRequired -> "No Widening Required"
     WideningError msg _ _ -> "Error while widening:\n" <+> pretty msg
-    Widen _wk (WidenLocs _regs _cells) d -> "Widened domain:" <+> PAD.ppAbstractDomain (\_ -> "") d
+    Widen _wk (WidenLocs _locs) d -> "Widened domain:" <+> PAD.ppAbstractDomain (\_ -> "") d
   nodeTags = [(Summary, \() (Some wr) -> case wr of
                 NoWideningRequired -> "No Widening Required"
                 WideningError{} -> "Error while widening"
-                Widen _wk (WidenLocs regs cells) _ -> ("Widened:" <+> pretty (Set.size regs) <+> "registers and" <+> pretty (Set.size cells) <+> "memory cells"))]
+                Widen _wk locs _ | (regs, cells) <- PAD.locsToRegsCells locs -> ("Widened:" <+> pretty (Set.size regs) <+> "registers and" <+> pretty (Set.size cells) <+> "memory cells"))]
 
 widenPostcondition ::
   forall sym arch v.
@@ -786,7 +790,7 @@ widenPostcondition scope bundle preD postD0 =
      Gas ->
      Maybe (Some (PBi.WhichBinaryRepr)) ->
      WidenState sym arch v ->
-     PL.Location sym arch l ->
+     PL.Location sym arch nm k ->
      W4.Pred sym ->
      EquivM_ sym arch (WidenState sym arch v)
    widenOnce widenK (Gas i) mwb prevState loc goal = case prevState of
@@ -808,7 +812,7 @@ widenPostcondition scope bundle preD postD0 =
        not_goal <- liftIO $ W4.notPred sym goal
        
        --(not_goal', ptrAsms) <- PVV.collectPointerAssertions not_goal
-
+       emitTraceLabel @"expr" "goal" (Some goal)
        goalSat "prove postcondition" not_goal $ \case
          Unsat _ -> do
            emit PE.SolverSuccess
@@ -826,13 +830,14 @@ widenPostcondition scope bundle preD postD0 =
                case loc of
                  PL.Cell c -> Right <$> widenCells [Some c] postD
                  PL.Register r -> Right <$> widenRegs [Some r] postD
-                 PL.NoLoc{} -> return $ Right $ WideningError msg prevLocs postD
+                 PL.Unit -> return $ Right $ WideningError msg prevLocs postD
+                 _ -> throwHere $ PEE.UnsupportedLocation
              _ -> panic Verifier "widenPostcondition" [ "Unexpected widening case"]
          Sat evalFn -> do
            emit PE.SolverFailure
            if i <= 0 then
              -- we ran out of gas
-             do slice <- PP.simBundleToSlice bundle
+             do slice <- PP.simBundleToSlice scope bundle
                 ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
                 let msg = unlines [ "Ran out of gas performing local widenings"
                                   , show (pretty ineqRes)
@@ -849,12 +854,14 @@ widenPostcondition scope bundle preD postD0 =
                NoWideningRequired -> case prevState of
                  Left{} ->  do
                    -- if we haven't performed any widenings yet, then this is an error
-                   slice <- PP.simBundleToSlice bundle
+                   slice <- PP.simBundleToSlice scope bundle
                    ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
                                    (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
                    let msg = unlines [ "Could not find any values to widen!"
+                                     , show (pretty loc)
                                      , show (pretty ineqRes)
                                      ]
+                   
                    return $ Right $ WideningError msg prevLocs postD
                  Right{} -> return prevState
                _ -> return $ Right res
@@ -965,6 +972,7 @@ getInitalAbsDomainVals bundle preDom = withTracing @"function_name" "getInitalAb
     PPa.forBins $ \bin -> do
       out <- PPa.get bin (PS.simOut bundle)
       pre <- PPa.get bin (PAD.absDomVals preDom)
+
       IO.withRunInIO $ \inIO ->
         PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) out pre
 
@@ -984,6 +992,8 @@ widenUsingCounterexample sym scope evalFn bundle eqCtx postCondAsm postCondState
   tryWidenings
     [ -- First check for any disagreement in the constant values
       widenValues sym evalFn bundle postD
+      -- Check for disagreement in metadata
+    , widenMetaData sym scope evalFn bundle postD
 
     , widenRegisters sym scope evalFn bundle eqCtx postCondAsm postCondStatePred postD
 
@@ -1009,16 +1019,11 @@ widenValues ::
 widenValues sym evalFn bundle postD = do
   (postD', mlocs) <- PAD.widenAbsDomainVals sym postD getRange bundle
   case mlocs of
-    Just (WidenLocs regLocs memLocs) -> do
-      mrUnchanged <- PPa.catBins $ \bin -> fmap All $ do
-        vals <- PPa.get bin $ PAD.absDomVals postD
-        vals' <- PPa.get bin $ PAD.absDomVals postD'
-        return $ PAD.absMaxRegion vals == PAD.absMaxRegion vals'
-
-      if regLocs == mempty && memLocs == mempty && (getAll mrUnchanged) then
+    Just (WidenLocs locs) -> do
+      if Set.null locs then
         return NoWideningRequired
       else
-        return $ Widen WidenValue (WidenLocs regLocs memLocs) postD'
+        return $ Widen WidenValue (WidenLocs locs) postD'
     Nothing -> return $ WideningError "widenValues" mempty postD
   where
      getRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
@@ -1026,10 +1031,33 @@ widenValues sym evalFn bundle postD = do
        g <- execGroundFn evalFn e
        return $ PAD.groundToAbsRange (W4.exprType e) g
 
+widenMetaData ::
+  forall sym arch v.
+  sym ->
+  PS.SimScope sym arch v ->
+  SymGroundEvalFn sym ->
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenResult sym arch v)
+widenMetaData sym scope evalFn bundle postD = do
+  (postD', mlocs) <- PAD.widenAbsDomainEqMetaData sym scope postD concretize bundle
+  case mlocs of
+    Just (WidenLocs locs) -> do
+      if Set.null locs then
+        return NoWideningRequired
+      else
+        return $ Widen WidenEquality (WidenLocs locs) postD'
+    Nothing -> return $ WideningError "widenMetaData" mempty postD
+  where
+     concretize :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+     concretize e = do
+       g <- execGroundFn evalFn e
+       liftIO $ symbolicFromConcrete sym g e
+
 dropValueLoc ::
-  forall arch sym v l bin.
+  forall arch sym v nm k bin.
   PBi.WhichBinaryRepr bin ->
-  PL.Location sym arch l ->
+  PL.Location sym arch nm k ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
 dropValueLoc wb loc postD = do
@@ -1039,11 +1067,9 @@ dropValueLoc wb loc postD = do
       PL.Cell c -> vals { PAD.absMemVals = MapF.delete c (PAD.absMemVals vals) }
       PL.Register r ->
         vals { PAD.absRegVals = (PAD.absRegVals vals) & (MM.boundValue r) .~ (PAD.noAbsVal (MT.typeRepr r)) }
-      PL.NoLoc{} -> vals
-    locs = case loc of
-      PL.Cell c -> WidenLocs Set.empty (Set.singleton (Some c))
-      PL.Register r -> WidenLocs (Set.singleton (Some r)) Set.empty
-      PL.NoLoc{} -> WidenLocs Set.empty Set.empty
+      PL.Unit -> vals
+      _ -> error "unsupported location"
+    locs = WidenLocs (Set.singleton (PL.SomeLocation loc))
   vals' <- PPa.set wb (PAD.absDomVals postD) v
   return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 
@@ -1061,7 +1087,8 @@ widenCells cells postD = withSym $ \sym -> do
   stackDom' <- liftIO $ PEM.intersect sym stackDom newCells
   let pred' = (PAD.absDomEq postD){ PEE.eqDomainGlobalMemory = heapDom', PEE.eqDomainStackMemory = stackDom' }
   let postD' = postD { PAD.absDomEq = pred' }
-  return (Widen WidenEquality (WidenLocs mempty (Set.fromList cells)) postD')
+  let cellsLocs = map (\(Some c) -> PL.SomeLocation (PL.Cell c)) cells
+  return (Widen WidenEquality (WidenLocs (Set.fromList cellsLocs)) postD')
 
 widenRegs ::
   [Some (MM.ArchReg arch)] ->
@@ -1075,7 +1102,8 @@ widenRegs newRegs postD = withSym $ \sym -> do
                  newRegs
     pred' = (PAD.absDomEq postD) { PEE.eqDomainRegisters = regs' }
     postD' = postD { PAD.absDomEq = pred' }
-    locs = WidenLocs (Set.fromList newRegs) mempty
+    newRegsLocs = map (\(Some r) -> PL.SomeLocation (PL.Register r)) newRegs
+    locs = WidenLocs (Set.fromList newRegsLocs)
   return (Widen WidenEquality locs postD')
 
 -- TODO, lots of code duplication between the stack and heap cases.
@@ -1108,7 +1136,8 @@ widenHeap sym scope evalFn bundle eqCtx _postCondAsm _postCondStatePred preD pos
           heapDom' <- liftIO $ PEM.intersect sym heapDom newCells
           let pred' = (PAD.absDomEq postD){ PEE.eqDomainGlobalMemory = heapDom' }
           let postD' = postD { PAD.absDomEq = pred' }
-          return (Widen WidenEquality (WidenLocs mempty (Set.fromList zs)) postD')
+          let cellsLocs = map (\(Some c) -> PL.SomeLocation (PL.Cell c)) zs
+          return (Widen WidenEquality (WidenLocs (Set.fromList cellsLocs)) postD')
 
 
 -- | Only return those cells not already excluded by the postdomain
@@ -1150,7 +1179,8 @@ widenStack sym scope evalFn bundle eqCtx _postCondAsm _postCondStatePred preD po
           stackDom' <- liftIO $ PEM.intersect sym stackDom newCells
           let pred' = (PAD.absDomEq $ postD){ PEE.eqDomainStackMemory = stackDom' }
           let postD' = postD { PAD.absDomEq = pred' }
-          return (Widen WidenEquality (WidenLocs mempty (Set.fromList zs)) postD')
+          let cellsLocs = map (\(Some c) -> PL.SomeLocation (PL.Cell c)) zs
+          return (Widen WidenEquality (WidenLocs (Set.fromList cellsLocs)) postD')
 
 
 -- TODO, may be worth using Seq instead of lists to avoid the quadratic time
@@ -1264,7 +1294,8 @@ widenRegisters sym scope evalFn bundle eqCtx _postCondAsm postCondStatePred post
                 { PEE.eqDomainRegisters = regs'
                 }
         postD' = postD { PAD.absDomEq = pred' }
-        locs = WidenLocs (Set.fromList newRegs) mempty
+        newRegsLocs = map (\(Some r) -> PL.SomeLocation (PL.Register r)) newRegs
+        locs = WidenLocs (Set.fromList newRegsLocs)
     in return (Widen WidenEquality locs postD')
 
 

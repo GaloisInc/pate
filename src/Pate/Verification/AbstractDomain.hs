@@ -15,6 +15,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -24,6 +27,7 @@ module Pate.Verification.AbstractDomain
   , AbsRange(..)
   , AbstractDomainVals(..)
   , WidenLocs(..)
+  , locsToRegsCells
   , DomainKind(..)
   , EventSequence(..)
   , emptyEvents
@@ -40,6 +44,7 @@ module Pate.Verification.AbstractDomain
   , domainValsToAbsState
   , singletonDomain
   , zipSingletonDomains
+  , widenAbsDomainEqMetaData
   ) where
 
 import qualified Prettyprinter as PP
@@ -62,6 +67,7 @@ import qualified Data.BitVector.Sized as BV
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.List as PL
 import           Data.Proxy
+import qualified Data.Kind as DK
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.GroundEval as W4G
@@ -100,6 +106,14 @@ import           Pate.TraceTree
 
 import qualified What4.PredMap as WPM
 import qualified What4.Partial as PE
+import Data.Parameterized (knownSymbol)
+
+type instance PL.LocationK "memevent" = ()
+type instance PL.LocationK "absrange" = W4.BaseType
+-- workaround for type families bug
+$(return [])
+type instance PL.AsK "absrange" tp1 = tp1
+type instance PL.AsK "memevent" tp1 = tp1
 
 -- | Defining abstract domains which propagate forwards during strongest
 -- postcondition analysis.
@@ -168,12 +182,7 @@ emptyEvents ::
   m (EventSequence sym arch bin)
 emptyEvents sym = EventSequence <$> (IO.liftIO $ nilSymSequence sym)
 
-instance (PSo.ValidSym sym, PA.ValidArch arch) => PL.LocationWitherable sym arch (EventSequence sym arch bin) where
-  witherLocation sym (EventSequence s) f =
-      EventSequence <$> (PEM.updateFilterSeq sym $ \x -> do
-        f (PL.NoLoc x) (W4.truePred sym) >>= \case
-          Just (PL.NoLoc x', p') -> return $ (Just x', p')
-          Nothing -> return $ (Nothing, W4.falsePred sym)) s
+
 {-
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.LocationWitherable sym arch (AbstractDomain sym arch bin) where
   witherLocation sym evs f = case evs of
@@ -253,18 +262,28 @@ instance Show (AbsRange tp) where
   show ab = show (PP.pretty ab)
 
 instance TestEquality AbsRange where
-  testEquality r1 r2 = case (r1, r2) of
-    (AbsIntConstant i1, AbsIntConstant i2) | i1 == i2 -> Just Refl
-    (AbsBVConstant w1 bv1, AbsBVConstant w2 bv2)
-      | Just Refl <- testEquality w1 w2, bv1 == bv2 -> Just Refl
-    (AbsBoolConstant b1, AbsBoolConstant b2) | b1 == b2 -> Just Refl
-    (AbsUnconstrained repr1, AbsUnconstrained repr2) -> testEquality repr1 repr2
+  testEquality r1 r2 = case compareF r1 r2 of
+    EQF -> Just Refl
     _ -> Nothing
 
 instance Eq (AbsRange tp) where
   r1 == r2 = case testEquality r1 r2 of
     Just Refl -> True
     Nothing -> False
+
+instance OrdF AbsRange where
+  compareF r1 r2 = case (r1, r2) of
+    (AbsIntConstant i1, AbsIntConstant i2) -> fromOrdering $ compare i1 i2
+    (AbsBVConstant w1 bv1, AbsBVConstant w2 bv2) ->
+      lexCompareF w1 w2 $ (fromOrdering $ compare bv1 bv2)
+    (AbsBoolConstant b1, AbsBoolConstant b2) -> fromOrdering $ compare b1 b2
+    (AbsUnconstrained repr1, AbsUnconstrained repr2) -> compareF repr1 repr2
+    (AbsUnconstrained{}, _) -> GTF
+    (_, AbsUnconstrained{}) -> LTF
+    _ -> compareF (absRangeRepr r1) (absRangeRepr r2)
+
+instance Ord (AbsRange tp) where
+  compare r1 r2 = toOrdering $ compareF r1 r2
 
 -- | Find an 'AbsRange' that represents the intersection of two ranges.
 -- In the case where the ranges don't intersect (e.g. they represent two different
@@ -319,11 +338,10 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => PL.
                            Nothing -> return $ noAbsVal (MT.typeRepr r)) (absRegVals vals)
      ms <- forM (MapF.toList (absMemVals vals)) $ \(MapF.Pair (cell@PMC.MemCell{}) v) -> do
        f (PL.Cell cell) (W4.truePred sym) >>= \case
-         Just (PL.Cell cell', _) -> return $ MapF.singleton cell' v
+         Just (cell', _) -> return $ MapF.singleton cell' v
          Nothing -> return $ MapF.empty
      let ms' = foldr mergeMemValMaps MapF.empty ms
      return $ AbstractDomainVals rs ms' (absMaxRegion vals)
-
 
 emptyDomainVals :: PA.ValidArch arch => AbstractDomainVals sym arch bin
 emptyDomainVals = AbstractDomainVals
@@ -382,11 +400,18 @@ getAbsVal _sym f e = case PSR.macawRegRepr e of
 -- TOOD: add scope
 data WidenLocs sym arch =
   WidenLocs
-    (Set (Some (MM.ArchReg arch)))
-    (Set (Some (PMC.MemCell sym arch)))
+    (Set (PL.SomeLocation sym arch))
+
+locsToRegsCells :: (W4.IsSymExprBuilder sym, PA.ValidArch arch) => WidenLocs sym arch -> (Set (Some (MM.ArchReg arch)), Set (Some (PMC.MemCell sym arch)))
+locsToRegsCells (WidenLocs locsSet) = 
+  let 
+    locs = S.toList locsSet
+    regs = [ Some r | PL.SomeLocation l <- locs, PL.Register r <- [l] ]
+    cells = [ Some c | PL.SomeLocation l <- locs, PL.Cell c <- [l] ]
+  in (S.fromList regs, S.fromList cells)
 
 instance (W4.IsSymExprBuilder sym, PA.ValidArch arch) => Show (WidenLocs sym arch) where
-  show (WidenLocs regs cells) =
+  show (locsToRegsCells -> (regs, cells)) =
     unlines $
       [ unwords (map show (S.toList regs)) ] ++
       [ show (PMC.ppCell c)
@@ -394,10 +419,10 @@ instance (W4.IsSymExprBuilder sym, PA.ValidArch arch) => Show (WidenLocs sym arc
       ]
 
 instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym arch) where
-  (WidenLocs r1 m1) <> (WidenLocs r2 m2) = WidenLocs (r1 <> r2) (m1 <> m2)
+  (WidenLocs locs1) <> (WidenLocs locs2) = WidenLocs (locs1 <> locs2)
 
 instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
-  mempty = WidenLocs mempty mempty
+  mempty = WidenLocs mempty
 
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
@@ -481,8 +506,9 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
   memVals <- MapF.traverseMaybeWithKey relaxMemVal (absMemVals prev)
   regVals <- PRt.zipWithRegStatesM (absRegVals prev) (PS.simOutRegs stOut) relaxRegVal
   mr' <- CMW.lift $ f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
-  return $ AbstractDomainVals regVals memVals (combineAbsRanges (absMaxRegion prev) mr')
-
+  let maxRegioncombined = combineAbsRanges (absMaxRegion prev) mr'
+  unless (maxRegioncombined == (absMaxRegion prev)) $ addLoc (PL.Named (knownSymbol @"maxRegion"))
+  return $ AbstractDomainVals regVals memVals maxRegioncombined
   where
     getMemAbsVal ::
       PMC.MemCell sym arch w ->
@@ -500,7 +526,7 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
       False -> do
         MemAbstractValue absValNew <- CMW.lift $ getMemAbsVal cell
         let absValCombined = combineAbsVals absValNew absValPrev
-        unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs mempty (S.singleton (Some cell)))
+        unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs (S.singleton (PL.SomeLocation (PL.Cell cell))))
         case isUnconstrained absValCombined of
           True -> return Nothing
           False -> return $ Just $ MemAbstractValue absValCombined
@@ -515,7 +541,7 @@ widenAbsDomainVals' sym prev f stOut = CMW.runWriterT $ do
       False -> do
         absValNew <- CMW.lift $ getAbsVal sym f v
         let absValCombined = combineAbsVals absValNew absValPrev
-        unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs (S.singleton (Some reg)) mempty)
+        unless (absValCombined == absValPrev) $ CMW.tell (WidenLocs (S.singleton (PL.SomeLocation (PL.Register reg))))
         return absValCombined
 
 
@@ -540,7 +566,43 @@ widenAbsDomainVals sym prev f bundle = do
     return $ (absVals', Const locs)
 
   locs' <- PPa.catBins $ \bin -> PPa.getC bin locs
+
   return $ (prev {absDomVals = absVals'}, Just locs')
+
+addLoc :: (PA.ValidArch arch, W4.IsSymExprBuilder sym, Monad m) => PL.Location sym arch nm k -> CMW.WriterT (WidenLocs sym arch) m ()
+addLoc l = CMW.tell (WidenLocs (S.singleton (PL.SomeLocation l)))
+
+widenAbsDomainEqMetaData ::
+  forall sym arch v m.
+  Monad m =>
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  PPa.PatchPairM m =>
+  sym ->
+  PS.SimScope sym arch v ->
+  AbstractDomain sym arch v {- ^ existing abstract domain that this is augmenting -} ->
+  (forall tp. W4.SymExpr sym tp -> m (W4.SymExpr sym tp)) {- grounding -} ->
+  PS.SimBundle sym arch v ->
+  m (AbstractDomain sym arch v, Maybe (WidenLocs sym arch))
+widenAbsDomainEqMetaData sym scope prev f bundle = do
+  let (oPostState, pPostState) = PE.asStatePair scope (PS.simOut bundle) PS.simOutState
+  mrO <- PEM.mapExpr sym f (PS.simMaxRegion oPostState)
+  mrP <- PEM.mapExpr sym f (PS.simMaxRegion pPostState)
+
+  let initAbsEq = absDomEq prev
+  mrInDom <- PL.namedPred sym =<< (PEM.mapExpr sym f (PED.eqDomainMaxRegion initAbsEq))
+  
+  (absEq', locs) <- CMW.runWriterT $ do
+    case (mrO == mrP) of
+      True -> return initAbsEq
+      -- max region is not in the domain in this counter-example, so 
+      -- this can't be the source of an inequality
+      False | Just False <- W4.asConstantPred mrInDom -> return initAbsEq
+      False -> do
+        addLoc $ PL.namedPredLoc (PED.eqDomainMaxRegion initAbsEq)
+        return $ initAbsEq { PED.eqDomainMaxRegion = PL.knownNamedPred (W4.falsePred sym) }
+  return $ (prev { absDomEq = absEq' }, Just locs)
 
 applyAbsRange ::
   W4.IsSymExprBuilder sym =>
@@ -683,8 +745,11 @@ absDomainValsToPostCond sym eqCtx st absBlockSt vals = PE.eqCtxConstraints eqCtx
       Nothing -> return Nothing
     Const <$> absDomainValToAsm sym eqCtx val mAbsVal absVal
 
-  maxRegionCond <- applyAbsRange sym (PS.unSE (PS.simMaxRegion st)) (absMaxRegion vals)
-  return $ PE.StatePostCondition (PEC.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond
+  maxRegionCond <- PAS.NamedAsms <$> applyAbsRange sym (PS.unSE (PS.simMaxRegion st)) (absMaxRegion vals)
+  -- No value assumptions about the stack base
+  stackBaseCond <- return $ PAS.NamedAsms mempty
+
+  return $ PE.StatePostCondition (PEC.RegisterCondition regFrame) (PE.MemoryCondition stackCond) (PE.MemoryCondition memCond) maxRegionCond stackBaseCond
   where
     stackRegion = PE.eqCtxStackRegion eqCtx
 
@@ -836,3 +901,31 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "simpl
       ]
   nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl),
               (Simplified, \lbl _ -> ppDomainKind lbl)]
+
+
+-- MemEvent location (should be moved to MemTrace)
+instance PL.IsLocation sym arch "memevent" where
+  type LocationType sym arch "memevent" = Const (MT.MemEvent sym (MM.ArchAddrWidth arch))
+  type Valid sym arch "memevent" = (PSo.ValidSym sym, PA.ValidArch arch)
+  mapLocExpr sym f r = PEM.mapExpr sym f r
+  prettyLoc (Const r) = MT.prettyMemEvent r
+  ordFLoc a@(Const x) b@(Const y) = PL.withUnitEq a b $ fromOrdering (compare x y)
+
+pattern MemEvent :: 
+  forall sym arch nm k. () => (PL.Valid sym arch nm, nm ~ "memevent") => 
+  MT.MemEvent sym (MM.ArchAddrWidth arch) -> 
+  PL.Location sym arch nm (k :: (PL.LocationK nm))
+pattern MemEvent r <- ((\l -> PL.asProof @"memevent" l) -> PL.LocPrf (Const r))
+  where
+    MemEvent r = PL.Location @"memevent" (Const r)
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => PL.LocationWitherable sym arch (EventSequence sym arch bin) where
+  witherLocation sym (EventSequence s) f =
+      EventSequence <$> (PEM.updateFilterSeq sym $ \x -> do
+        f (MemEvent x) (W4.truePred sym) >>= \case
+          Just ((Const x'), p') -> return $ (Just x', p')
+          Nothing -> return $ (Nothing, W4.falsePred sym)) s
+
+
+
+

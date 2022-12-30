@@ -30,6 +30,7 @@ Sets over a types with a parameteric type parameter
 
 module Data.Parameterized.SetF
   ( SetF
+  , AsOrd(..)
   , empty
   , singleton
   , insert

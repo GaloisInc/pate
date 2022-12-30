@@ -22,10 +22,13 @@ module What4.PredMap (
   , type PredConjT
   , PredMap
   , PredOpRepr(..)
+  , predOpRepr
   , applyPredOp
+  , mulPredOp
   , empty
   , singleton
   , merge
+  , intersect
   , dropUnit
   , traverse
   , alter
@@ -34,6 +37,7 @@ module What4.PredMap (
   , toList
   , fromList
   , mux
+  , collapse
   , predOpUnit
   , isPredOpUnit
   ) where
@@ -92,6 +96,7 @@ singleton ::
   PredMap sym f k
 singleton r f p = PredMap r (Map.singleton f p)
 
+-- | Operation where 'predOpUnit' is the unit element (i.e. a + unit = a, a + dualUnit = dualUnit)
 applyPredOp ::
   IO.MonadIO m =>
   W4.IsExprBuilder sym =>
@@ -102,6 +107,18 @@ applyPredOp ::
   m (W4.Pred sym)
 applyPredOp sym PredConjRepr p1 p2 = IO.liftIO $ W4.andPred sym p1 p2
 applyPredOp sym PredDisjRepr p1 p2 = IO.liftIO $ W4.orPred sym p1 p2
+
+-- | Dual of 'applyPredOp' (i.e. a * unit = unit, a * dualUnit = a)
+mulPredOp ::
+  IO.MonadIO m =>
+  W4.IsExprBuilder sym =>
+  sym ->
+  PredOpRepr k ->
+  W4.Pred sym ->
+  W4.Pred sym ->
+  m (W4.Pred sym)
+mulPredOp sym PredConjRepr p1 p2 = IO.liftIO $ W4.orPred sym p1 p2
+mulPredOp sym PredDisjRepr p1 p2 = IO.liftIO $ W4.andPred sym p1 p2
 
 predOpUnit ::
   W4.IsExprBuilder sym =>
@@ -122,6 +139,7 @@ isPredOpUnit _ r p = case (W4.asConstantPred p, r) of
   (Just False, PredDisjRepr) -> True
   _ -> False
 
+-- | Union (elements are joined with (+)), missing elements are preserved
 merge ::
   IO.MonadIO m =>
   W4.IsExprBuilder sym =>
@@ -135,6 +153,23 @@ merge sym pm1 pm2 = PredMap <$> pure (typeRepr pm1) <*>
       MapM.preserveMissing
       MapM.preserveMissing
       (MapM.zipWithAMatched (\_ p1' p2' -> applyPredOp sym (typeRepr pm1) p1' p2'))
+      (predMap pm1)
+      (predMap pm2)
+
+-- | Union (elements are joined with (+))
+intersect ::
+  IO.MonadIO m =>
+  W4.IsExprBuilder sym =>
+  Ord f =>
+  sym ->
+  PredMap sym f k ->
+  PredMap sym f k ->
+  m (PredMap sym f k)
+intersect sym pm1 pm2 = PredMap <$> pure (typeRepr pm1) <*>
+    MapM.mergeA
+       MapM.dropMissing
+       MapM.dropMissing
+      (MapM.zipWithAMatched (\_ p1' p2' -> mulPredOp sym (typeRepr pm1) p1' p2'))
       (predMap pm1)
       (predMap pm2)
 
@@ -235,6 +270,19 @@ toList ::
   PredMap sym f k ->
   [(f, W4.Pred sym)]
 toList pm = Map.toList (predMap pm)
+
+-- | Fold the entries of the map together using (+) and the given operation
+collapse :: 
+  IO.MonadIO m =>
+  W4.IsExprBuilder sym =>
+  sym ->
+  (f -> f -> m f) ->
+  f ->
+  PredMap sym f k -> 
+  m (f, W4.Pred sym)
+collapse sym f v_init pm = do
+  let repr = predOpRepr pm
+  foldM (\(v1, p1) (v2, p2) -> (,) <$> f v1 v2 <*> applyPredOp sym repr p1 p2) (v_init, predOpUnit sym repr) (toList pm)
 
 -- | Convert a list of key-predicate pairs into a 'PredMap', merging duplicate
 -- entries according to the corresponding predicate operation indicated by

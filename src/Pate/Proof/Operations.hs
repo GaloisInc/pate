@@ -73,6 +73,7 @@ import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Binary as PBi
+import Data.Functor.Const (Const(..))
 
 
 -- FIXME: These were originally defined in SimState.hs but were moved here
@@ -104,30 +105,30 @@ simOutP bundle = case simOut bundle of
 -- | Convert the result of symbolic execution into a structured slice
 -- representation
 simBundleToSlice ::
+  PS.SimScope sym arch v ->
   PS.SimBundle sym arch v ->
   EquivM sym arch (PF.BlockSliceTransition sym arch)
-simBundleToSlice bundle = withSym $ \sym -> do
-  let
-    ecaseO = PS.simOutBlockEnd $ simOutO $ bundle
-    ecaseP = PS.simOutBlockEnd $ simOutP $ bundle
+simBundleToSlice scope bundle = withSym $ \sym -> do
+  let 
+    (ecaseO, ecaseP) = PPa.view PS.simOutBlockEnd (simOut bundle) 
+    (inO, inP) = PE.asStatePair scope (PS.simIn bundle) PS.simInState
+    (outO, outP) = PE.asStatePair scope (PS.simOut bundle) PS.simOutState
+
   footprints <- getFootprints bundle
   memReads <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Read) footprints))
   memWrites <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Write) footprints))
 
-  preMem <- MapF.fromList <$> mapM (\x -> memCellToOp initState x) memReads
-  postMem <- MapF.fromList <$> mapM (\x -> memCellToOp finState x) memWrites
+  preMem <- MapF.fromList <$> mapM (\x -> memCellToOp inO inP x) memReads
+  postMem <- MapF.fromList <$> mapM (\x -> memCellToOp outO outP x) memWrites
 
-  preRegs <- PRt.zipWithRegStatesM (PS.simInRegs $ simInO bundle) (PS.simInRegs $ simInP bundle) (\r vo vp -> getReg r vo vp)
-  postRegs <- PRt.zipWithRegStatesM (PS.simOutRegs $ simOutO bundle) (PS.simOutRegs $ simOutP bundle) (\r vo vp -> getReg r vo vp)
+  preRegs <- PRt.zipWithRegStatesM (PS.simRegs inO) (PS.simRegs inP) (\r vo vp -> getReg r vo vp)
+  postRegs <- PRt.zipWithRegStatesM (PS.simRegs outO) (PS.simRegs outP) (\r vo vp -> getReg r vo vp)
   
   let
     preState = PF.BlockSliceState preMem preRegs
     postState = PF.BlockSliceState postMem postRegs
   return $ PF.BlockSliceTransition preState postState (PPa.PatchPairC ecaseO ecaseP)
   where
-    initState = TF.fmapF PS.simInState (PS.simIn bundle)
-    finState = TF.fmapF PS.simOutState (PS.simOut bundle)
-
     getReg ::
       MM.ArchReg arch tp ->
       PSR.MacawRegEntry sym tp ->
@@ -142,11 +143,11 @@ simBundleToSlice bundle = withSym $ \sym -> do
         isEquiv
     
     memCellToOp ::
-      PPa.PatchPair (PS.SimState sym arch v) ->
+      PS.SimState sym arch v PBi.Original ->
+      PS.SimState sym arch v PBi.Patched ->
       (Some (PMC.MemCell sym arch), W4.Pred sym) ->
       EquivM sym arch (MapF.Pair (PMC.MemCell sym arch) (PF.BlockSliceMemOp sym))
-    memCellToOp (PPa.PatchPairSingle{}) _ = PPa.handleSingletonStub
-    memCellToOp (PPa.PatchPair stO stP) (Some cell, cond) = withSym $ \sym -> do
+    memCellToOp stO stP (Some cell, cond) = withSym $ \sym -> do
       valO <- liftIO $ PMC.readMemCell sym (PS.simMem stO) cell
       valP <- liftIO $ PMC.readMemCell sym (PS.simMem stP) cell
       isEquiv <- liftIO $ MT.llvmPtrEq sym valO valP
@@ -184,14 +185,15 @@ proofResult e = foldr merge PF.VerificationSuccess statuses
     go _ = []
 
 noTransition ::
+  PS.SimScope sym arch v ->
   PPa.PatchPair (PS.SimInput sym arch v) ->
   CS.RegValue sym (MCS.MacawBlockEndType arch) ->
   EquivM sym arch (PF.BlockSliceTransition sym arch)
-noTransition stIn blockEnd = do
+noTransition scope stIn blockEnd = do
   let
     stOut = TF.fmapF (\st -> PS.SimOutput (PS.simInState st) blockEnd) stIn
     bundle = PS.SimBundle stIn stOut
-  simBundleToSlice bundle
+  simBundleToSlice scope bundle
 
 domainToProof ::
   PED.EquivalenceDomain sym arch ->

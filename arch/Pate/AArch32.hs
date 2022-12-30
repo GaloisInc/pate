@@ -58,6 +58,7 @@ import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Panic as PP
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
+import qualified Pate.Verification.Domain as PD
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -154,10 +155,7 @@ handleSystemCall = PVE.ExternalDomain $ \sym -> do
         , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R5")), WI.truePred sym)
         , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R7")), WI.truePred sym)
         ]
-  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
-                                 , PED.eqDomainStackMemory = PEM.universal sym
-                                 , PED.eqDomainGlobalMemory = PEM.universal sym
-                                 }
+  return $ (PD.universalDomain sym){ PED.eqDomainRegisters = regDomain }
 
 -- | The Linux calling convention uses r0-r3 for arguments
 --
@@ -177,10 +175,7 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
         , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")), WI.truePred sym)
         , (Some (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")), WI.truePred sym)
         ]
-  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
-                                 , PED.eqDomainStackMemory = PEM.universal sym
-                                 , PED.eqDomainGlobalMemory = PEM.universal sym
-                                 }
+  return $ (PD.universalDomain sym){ PED.eqDomainRegisters = regDomain }
 
 argumentMapping :: PVO.ArgumentMapping SA.AArch32
 argumentMapping =

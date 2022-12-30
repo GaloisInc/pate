@@ -643,7 +643,7 @@ visitNode scope (ReturnNode fPair) d gr0 = do
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
    -- using the ordinary widening machinery.
   
-   processReturn gr node@(nodeBlocks -> ret) = withPair ret $ do
+   processReturn gr0' node@(nodeBlocks -> ret) = withPair ret $ do
      let
       vars = PS.scopeVars scope
       varsSt = TF.fmapF PS.simVarState vars
@@ -652,9 +652,17 @@ visitNode scope (ReturnNode fPair) d gr0 = do
        do (asm, bundle) <- returnSiteBundle vars d ret
           withAssumptionSet asm $ withPredomain scope bundle d $ do
             traceBundle bundle "Processing return edge"
+            -- observable events may occur in return nodes specifically
+            -- when they are a synchronization point, since the abstract
+            -- domain may now contain traces of deferred observable events for both programs
+            --
+            -- TODO: formally we could just check the event sequence once for the return node
+            -- (rather than once for each return edge)
+            -- but it would require some refactoring to make the types match up correctly
+            gr1' <- checkObservables node bundle d gr0'
     --        traceBundle bundle "== bundle asm =="
     --        traceBundle bundle (show (W4.printSymExpr asm))
-            widenAlongEdge scope bundle (ReturnNode fPair) d gr (GraphNode node)
+            widenAlongEdge scope bundle (ReturnNode fPair) d gr1' (GraphNode node)
 
 
 -- | Construct a "dummy" simulation bundle that basically just
@@ -801,7 +809,7 @@ doCheckObservables bundle preD = case PS.simOut bundle of
        PPa.PatchPair (PAD.EventSequence eventsO) (PAD.EventSequence eventsP) <- 
         return $ (PAD.absDomEvents preD)
        oSeq' <- IO.liftIO $ appendSymSequence sym oSeq eventsO
-       pSeq' <- IO.liftIO $ appendSymSequence sym oSeq eventsP
+       pSeq' <- IO.liftIO $ appendSymSequence sym pSeq eventsP
 
        eqSeq <- equivalentSequences oSeq' pSeq'
 
@@ -823,8 +831,8 @@ doCheckObservables bundle preD = case PS.simOut bundle of
          Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
            -- NB, observable sequences are stored in reverse order, so we reverse them here to
            -- display the counterexample in a more natural program order
-           oSeq'' <- reverse <$> groundObservableSequence sym evalFn oSeq -- (MT.memSeq oMem)
-           pSeq'' <- reverse <$> groundObservableSequence sym evalFn pSeq -- (MT.memSeq pMem)
+           oSeq'' <- reverse <$> groundObservableSequence sym evalFn oSeq' -- (MT.memSeq oMem)
+           pSeq'' <- reverse <$> groundObservableSequence sym evalFn pSeq' -- (MT.memSeq pMem)
            return (ObservableCheckCounterexample (ObservableCounterexample oSeq'' pSeq''))
 
 -- | Right now, this requires the pointer and written value to be exactly equal.
@@ -1660,60 +1668,60 @@ handleStub ::
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point, Nothing for tail calls -} ->
   StubPair {- ^ stub names -} ->
   EquivM sym arch (PairGraph sym arch)
-handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "handleStub" $ withSym $ \sym -> do   
-  gr0 <- case hasTerminalStub stubPair of
-    True -> handleTerminalFunction currBlock gr0_
-    False -> return gr0_
-  case bothTerminalStub stubPair of
-    True -> return gr0
-    False -> do  
-      PA.SomeValidArch archData <- asks envValidArch
-      ovPair <- PPa.forBins $ \bin -> do
-        blk <- PPa.get bin pPair
-        Const stub <- PPa.get bin stubPair
-        Const <$> getStubOverrideOne blk stub
-      ov <- mergeStubOverrides archData stubPair ovPair
-      wsolver <- getWrappedSolver
+handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "handleStub" $ withSym $ \sym -> do 
+  case isMismatchedStubs stubPair of
+    True -> do
+      -- for mismatched stubs we don't apply the override yet, since we defer
+      -- this to each independent single-step analysis
+      emitTrace @"message" "mismatched stubs"
+      -- we need to add in a synchronization edge, which essentially
+      -- says that when the parent function returns on both branches,
+      -- computation is assumed to now be synchronized again
+      -- (with a resulting weakened equivalence domain for any
+      -- effects that occured on each side independently)
+      let outerReturn = returnOfEntry currBlock
 
-      outputs <- IO.withRunInIO $ \runInIO ->
-        PA.withStubOverride sym wsolver ov $ \f -> runInIO $ PPa.forBins $ \bin -> do
-          output <- PPa.get bin $ PS.simOut bundle
-          nextSt <- liftIO $ f (PS.simOutState output)
-          return $ output { PS.simOutState = nextSt }
-      let bundle' = bundle { PS.simOut = outputs }
-      case mpRetPair of
-        Just pRetPair -> do
+      -- handle Original case
+      currBlockO <- singletonNodeEntry PBi.OriginalRepr currBlock
+      gr2 <- withTracing @"node" (GraphNode currBlockO) $  do
+        let gr1 = addSyncPoint gr0_ (returnOfEntry currBlockO) outerReturn
+        bundleO <- singletonBundle PBi.OriginalRepr bundle
+        dO <- PAD.singletonDomain PBi.OriginalRepr d
+        processBundle scope currBlockO bundleO dO gr1
+      -- handle Patched case
+      currBlockP <- singletonNodeEntry PBi.PatchedRepr currBlock
+      gr4 <- withTracing @"node" (GraphNode currBlockP) $ do
+        let gr3 = addSyncPoint gr2 (returnOfEntry currBlockP) outerReturn
+        bundleP <- singletonBundle PBi.PatchedRepr bundle
+        dP <- PAD.singletonDomain PBi.PatchedRepr d
+        processBundle scope currBlockP bundleP dP gr3
+      return gr4
+    False -> do
+      gr0 <- case hasTerminalStub stubPair of
+        True -> handleTerminalFunction currBlock gr0_
+        False -> return gr0_
+      case bothTerminalStub stubPair of
+        True -> return gr0
+        False -> do
+          PA.SomeValidArch archData <- asks envValidArch
+          ovPair <- PPa.forBins $ \bin -> do
+            blk <- PPa.get bin pPair
+            Const stub <- PPa.get bin stubPair
+            Const <$> getStubOverrideOne blk stub
+          ov <- mergeStubOverrides archData stubPair ovPair
+          wsolver <- getWrappedSolver
+
+          outputs <- IO.withRunInIO $ \runInIO ->
+            PA.withStubOverride sym wsolver ov $ \f -> runInIO $ PPa.forBins $ \bin -> do
+              output <- PPa.get bin $ PS.simOut bundle
+              nextSt <- liftIO $ f (PS.simOutState output)
+              return $ output { PS.simOutState = nextSt }
+          let bundle' = bundle { PS.simOut = outputs }
           gr1 <- checkObservables currBlock bundle' d gr0
-          case isMismatchedStubs stubPair of
-            -- programs diverge: handle each one separately by
-            -- splitting into singleton 'PatchPair' values
-            True -> do
-              emitTrace @"message" "mismatched stubs"
-              -- we need to add in a synchronization edge, which essentially
-              -- says that when the parent function returns on both branches,
-              -- computation is assumed to now be synchronized again
-
-              let outerReturn = returnOfEntry currBlock
-
-              -- handle Original case
-              currBlockO <- singletonNodeEntry PBi.OriginalRepr currBlock
-              gr3 <- withTracing @"node" (GraphNode currBlockO) $  do
-                let gr2 = addSyncPoint gr1 (returnOfEntry currBlockO) outerReturn
-                bundleO <- singletonBundle PBi.OriginalRepr bundle'
-                dO <- PAD.singletonDomain PBi.OriginalRepr d
-                processBundle scope currBlockO bundleO dO gr2
-              -- handle Patched case
-              currBlockP <- singletonNodeEntry PBi.PatchedRepr currBlock
-              gr5 <- withTracing @"node" (GraphNode currBlockP) $ do
-                let gr4 = addSyncPoint gr3 (returnOfEntry currBlockP) outerReturn
-                bundleP <- singletonBundle PBi.PatchedRepr bundle'
-                dP <- PAD.singletonDomain PBi.PatchedRepr d
-                processBundle scope currBlockP bundleP dP gr4
-              return gr5
-            False -> handleJump scope bundle' currBlock d gr1 (mkNodeEntry currBlock pRetPair)
-        -- unclear what to do here?
-        Nothing -> fnTrace "handeReturn" $
-          handleReturn scope bundle' currBlock d gr0
+          case mpRetPair of
+            Just pRetPair -> handleJump scope bundle' currBlock d gr1 (mkNodeEntry currBlock pRetPair)
+            -- FIXME: unclear what to do here?
+            Nothing -> fnTrace "handeReturn" $ handleReturn scope bundle' currBlock d gr1
 
 handleReturn ::
   PS.SimScope sym arch v ->

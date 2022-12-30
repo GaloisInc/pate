@@ -323,9 +323,9 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
         --FIXME: ignores regions
         mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' fd_bv Ctx.:> PMT.SymBV' val_bv) mem
         return $ st { PS.simMem = mem' }
-      _ ->
+      _ -> fail "Unhandled symbolic write length"
         -- FIXME: what to do for non-concrete write lengths?
-        return st
+        --return st
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     

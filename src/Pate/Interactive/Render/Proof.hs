@@ -255,7 +255,7 @@ renderDomain
      )
   => PED.EquivalenceDomain sym arch
   -> TP.UI TP.Element
-renderDomain (PED.EquivalenceDomain regs stack mem) =
+renderDomain (PED.EquivalenceDomain regs stack mem _) =
   TP.column [ TP.h4 #+ [TP.string "Registers"]
             , TP.column (mapMaybe (renderProofRegisterDomain (Proxy @sym)) (PER.toList regs))
             , TP.h4 #+ [TP.string "Stack Memory"]

@@ -140,7 +140,7 @@ import Lang.Crucible.Types
 import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface hiding ( integerToNat )
-import qualified What4.Partial as WP
+import           Data.Parameterized.SetF (AsOrd(..))
 
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
@@ -176,6 +176,17 @@ data UndefinedPtrOps sym =
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
+
+instance OrdF (SymExpr sym) => TestEquality (SymBV' sym) where
+  testEquality a b = case compareF a b of
+    EQF -> Just Refl
+    _ -> Nothing
+
+instance OrdF (SymExpr sym) => OrdF (SymBV' sym) where
+  compareF (SymBV' a) (SymBV' b) = case compareF a b of
+    EQF -> EQF
+    LTF -> LTF
+    GTF -> GTF
 
 instance PEM.ExprMappable sym (SymBV' sym w) where
   mapExpr _sym f (SymBV' bv) = SymBV' <$> f bv
@@ -698,8 +709,6 @@ instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
         (toOrdering $ compareF vo1 vo2) <>
         compare end1 end2
 
-
-
 data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
   SyscallEvent :: forall sym ptrW w.
@@ -714,6 +723,30 @@ data MemEvent sym ptrW where
     Ctx.Assignment (SymBV' sym) ctx
       {- ^ relevant data for this visible call -} ->
     MemEvent sym ptrW
+
+instance OrdF (SymExpr sym) => Eq (MemEvent sym ptrW) where
+  a == b = case compare a b of
+    EQ -> True
+    _ -> False
+
+compareTrees :: OrdF (SymExpr sym) => Ord tp => MuxTree sym tp -> MuxTree sym tp -> Ordering
+compareTrees mt1 mt2 = 
+  let 
+    es1 = map (\(x, p) -> (x, AsOrd p)) $ viewMuxTree mt1
+    es2 = map (\(x, p) -> (x, AsOrd p)) $ viewMuxTree mt2
+  in compare es1 es2
+
+instance OrdF (SymExpr sym) => Ord (MemEvent sym ptrW) where
+  compare a b = case (a,b) of
+    (MemOpEvent op1, MemOpEvent op2) -> compare op1 op2
+    (SyscallEvent mt1 bv1, SyscallEvent mt2 bv2) -> compareTrees mt1 mt2 <> (toOrdering $ compareF bv1 bv2)
+    (ExternalCallEvent nm1 vs1, ExternalCallEvent nm2 vs2) -> 
+      compare nm1 nm2 <> (toOrdering $ (compareF vs1 vs2))
+    (MemOpEvent{}, _) -> GT
+    (SyscallEvent{}, ExternalCallEvent{}) -> GT
+    (ExternalCallEvent{}, _) -> LT
+    (SyscallEvent{}, MemOpEvent{}) -> LT
+
 
 addExternalCallEvent ::
   IsExprBuilder sym =>

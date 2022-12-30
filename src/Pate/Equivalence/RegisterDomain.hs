@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -70,7 +71,7 @@ traverseWithReg (RegisterDomain dom) f =
 
 instance (WI.IsExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationWitherable sym arch (RegisterDomain sym arch) where
   witherLocation _sym (RegisterDomain d) f = do
-    d' <- Map.traverseMaybeWithKey (\(Some r) p -> f (PL.Register r) p >>= \case
+    d' <- Map.traverseMaybeWithKey (\(Some r) p -> f (PL.Location @"register" r) p >>= \case
             Just (_, p') -> return (Just p')
             Nothing -> return Nothing) d
     return $ RegisterDomain d'

@@ -472,9 +472,8 @@ data StatePreCondition sym arch v = StatePreCondition
   { stRegPreCond :: PEC.RegisterCondition sym arch v
   , stStackPreDom :: PEM.MemoryDomain sym arch
   , stMemPreDom :: PEM.MemoryDomain sym arch
-  , stExtraPreCond :: AssumptionSet sym
-  -- ^ assumptions about meta-state (i.e. 'simMaxRegion' and 'simStackBase')
- 
+  , stMaxRegionPreCond :: NamedAsms sym "maxRegion"
+  , stStackBasePreCond :: NamedAsms sym "stackBase"
   }
 
 -- | A structured post condition
@@ -487,21 +486,28 @@ data StatePostCondition sym arch v = StatePostCondition
   { stRegPostCond :: PEC.RegisterCondition sym arch v
   , stStackPostCond :: MemoryCondition sym arch
   , stMemPostCond :: MemoryCondition sym arch
-  , stExtraPostCond :: AssumptionSet sym
+  , stMaxRegionPostCond :: NamedAsms sym "maxRegion"
+  , stStackBasePostCond :: NamedAsms sym "stackBase"
   -- ^ conditions on meta-state (i.e. 'simMaxRegion' and 'simStackBase')
   }
 
 
-instance W4.IsSymExprBuilder sym => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
-  traverseLocation sym (StatePostCondition a b c asm) f =
-    StatePostCondition <$> PL.traverseLocation sym a f <*> PL.traverseLocation sym b f <*> PL.traverseLocation sym c f <*> ((fromPred . snd) <$> (toPred sym asm >>= \p -> f (PL.NoLoc ()) p))
+instance (MM.RegisterInfo (MM.ArchReg arch), W4.IsSymExprBuilder sym) => PL.LocationTraversable sym arch (StatePostCondition sym arch v) where
+  traverseLocation sym (StatePostCondition a b c d e) f =
+    StatePostCondition 
+    <$> PL.traverseLocation sym a f 
+    <*> PL.traverseLocation sym b f 
+    <*> PL.traverseLocation sym c f
+    <*> PL.traverseLocation sym d f
+    <*> PL.traverseLocation sym e f
 
 instance W4.IsSymExprBuilder sym => PEM.ExprMappable sym (StatePostCondition sym arch v) where
-  mapExpr sym f (StatePostCondition a b c asm) =
-    StatePostCondition <$> PEM.mapExpr sym f a <*> PEM.mapExpr sym f b <*> PEM.mapExpr sym f c <*>  PEM.mapExpr sym f asm
+  mapExpr sym f (StatePostCondition a b c d e) =
+    StatePostCondition <$> PEM.mapExpr sym f a <*> PEM.mapExpr sym f b <*> PEM.mapExpr sym f c <*> PEM.mapExpr sym f d <*>  PEM.mapExpr sym f e
 
 
 eqDomPre ::
+  forall sym arch v.
   IsSymInterface sym =>
   PA.ValidArch arch =>
   sym ->
@@ -518,16 +524,24 @@ eqDomPre sym stO stP (eqCtxHDR -> hdr) eqDom  = do
     stackBase = TF.fmapF (\st' -> Const $ unSE $ unSB $ simStackBase st') st
 
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
-  -- TODO: we haven't included this in the domain, and therefore we're simply
-  -- requiring that the number of allocations for each program always match
-  -- this will cause a widening error if this isn't the case
-  let maxRegionsEq = bindExprPair maxRegion
-  let stackBaseEq = case W4.asConstantPred (PER.registerInDomain sym MM.sp_reg (PED.eqDomainRegisters eqDom)) of
-        Just True -> bindExprPair stackBase
-        _ -> mempty
-  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) (maxRegionsEq <> stackBaseEq)
+  maxRegionsEq <- mkNamedAsm sym (PED.eqDomainMaxRegion eqDom) (bindExprPair maxRegion)
+  -- stack base equality is implied by stack register equality, so we don't need an explicit entry
+  -- for it in the domain
+  stackBaseEq <-  mkNamedAsm sym (PL.knownNamedPred (PER.registerInDomain sym MM.sp_reg (PED.eqDomainRegisters eqDom))) (bindExprPair stackBase)
+  return $ StatePreCondition regsEq (PED.eqDomainStackMemory eqDom) (PED.eqDomainGlobalMemory eqDom) maxRegionsEq stackBaseEq
+
+mkNamedAsm :: W4.IsSymExprBuilder sym => sym -> PL.NamedPred sym WPM.PredDisjT nm -> AssumptionSet sym -> IO (NamedAsms sym nm)
+mkNamedAsm sym (PL.NamedPred pm) asms = do
+  ((), p) <- WPM.collapse sym (\_ -> return) () pm
+  case W4.asConstantPred p of
+    Just True -> return $ NamedAsms asms
+    Just False -> return $ NamedAsms mempty
+    Nothing -> do
+      asmsP <- toPred sym asms
+      (NamedAsms . fromPred) <$> W4.impliesPred sym p asmsP
 
 eqDomPost ::
+  forall sym arch v.
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
   sym ->
@@ -548,11 +562,12 @@ eqDomPost sym stO stP eqCtx domPre domPost = do
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters domPost)
   stacksEq <- memDomPost sym (MemEqAtRegion stackRegion) stO stP (PED.eqDomainStackMemory domPre) (PED.eqDomainStackMemory domPost)
   memEq <- memDomPost sym (MemEqOutsideRegion stackRegion) stO stP (PED.eqDomainGlobalMemory domPre) (PED.eqDomainGlobalMemory domPost)
-  -- TODO: we haven't included this in the domain, and therefore we're simply
-  -- requiring that the number of allocations for each program always match
-  -- this will cause a widening error if this isn't the case
-  let maxRegionsEq = bindExprPair maxRegion
-  return $ StatePostCondition regsEq stacksEq memEq maxRegionsEq
+  maxRegionsEq <- mkNamedAsm sym (PED.eqDomainMaxRegion domPost) (bindExprPair maxRegion)
+
+  -- post condition does not care about the stack base, as it is derived
+  -- from the stack pointer
+  stackBaseEq <- mkNamedAsm sym (PL.knownNamedPred (W4.falsePred sym)) mempty
+  return $ StatePostCondition regsEq stacksEq memEq maxRegionsEq stackBaseEq
 
 -- | Flatten a structured 'StateCondition' representing a pre-condition into
 -- a single 'AssumptionSet'.
@@ -569,7 +584,7 @@ preCondAssumption sym scope input (eqCtxStackRegion -> stackRegion) stCond = do
   regsPred <- regCondToAsm sym (stRegPreCond stCond)
   stackPred <- memPreCondToPred sym scope (MemEqAtRegion stackRegion) input (stStackPreDom stCond)
   memPred <- memPreCondToPred sym scope (MemEqOutsideRegion stackRegion) input (stMemPreDom stCond)
-  return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred <> stExtraPreCond stCond
+  return $ (fromPred memPred) <> (fromPred stackPred) <> regsPred <> (namedAsms (stMaxRegionPreCond stCond)) <> (namedAsms (stStackBasePreCond stCond))
 
 -- | Flatten a structured 'StateCondition' representing a post-condition into
 -- a single predicate.
@@ -584,5 +599,6 @@ postCondPredicate sym stCond = do
   regsPred <- toPred sym regsAsm
   stackPred <- memPostCondToPred sym (stStackPostCond stCond)
   memPred <- memPostCondToPred sym (stMemPostCond stCond)
-  extraPred <- toPred sym (stExtraPostCond stCond)
-  W4.andPred sym regsPred stackPred >>= W4.andPred sym memPred >>= W4.andPred sym extraPred
+  maxRegionPred <- toPred sym (namedAsms (stMaxRegionPostCond stCond))
+  stackBasePred <- toPred sym (namedAsms (stStackBasePostCond stCond))
+  allPreds sym [regsPred, stackPred, memPred, maxRegionPred, stackBasePred]
