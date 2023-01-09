@@ -1936,7 +1936,7 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
   mapExpr sym f = \case
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
     SyscallEvent i arg -> SyscallEvent i <$> f arg
-    -- ^ MuxTree is unmodified since it has no symbolic expressions
+    -- MuxTree is unmodified since it has no symbolic expressions
     ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr sym f) vs
 
 instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
