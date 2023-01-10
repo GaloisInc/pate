@@ -51,8 +51,6 @@ import qualified What4.Expr.Builder as W4B
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Interface as W4
 import qualified What4.Expr.BoolMap as BM
-import qualified What4.SemiRing as SR
-import qualified What4.Expr.WeightedSum as WSum
 
 -- | Compute a predicate representing the path condition of the
 -- expression according to its internal mux structure.
@@ -229,7 +227,7 @@ isSat ::
   W4.Pred sym ->
   PathM sym (Maybe Bool)
 isSat p = do
-  PathMEnv _ _ f _ _ _ <- CMR.ask
+  PathMEnv _ _ _f _ _ _ <- CMR.ask
   return $ W4.asConstantPred p
   {- groundEval p >>= \case
     True -> return $ Just True
@@ -293,7 +291,7 @@ altBVOp ::
 altBVOp f_signed e1 e2 = withSym $ \sym -> forMuxes2 e1 e2 $ \e1' e2' -> do
   e1'' <- withPathCond e1'
   e2'' <- withPathCond e2'
-  f_signed e1'' e2''
+  _ <- f_signed e1'' e2''
   unsigned1 <- liftIO $ isUnsigned sym e1''
   unsigned2 <- liftIO $ isUnsigned sym e2''
   
@@ -398,13 +396,13 @@ getPredCase pol_outer e_outer = do
         (\e1' e2' -> liftBinOp f e1' e2' >>= applyPolarity pol)
         e1 e2 
 
-    intOp ::
+    _intOp ::
       BM.Polarity ->
       (sym -> W4.SymInteger sym -> W4.SymInteger sym -> IO (W4.Pred sym)) ->
       W4.SymInteger sym ->
       W4.SymInteger sym ->
       PathM sym (W4.Pred sym)      
-    intOp pol f e1 e2 =
+    _intOp pol f e1 e2 =
       altIntOp
         (\e1' e2' -> liftBinOp f e1' e2' >>= applyPolarity pol)
         e1 e2 
@@ -526,7 +524,7 @@ withPathCond e_outer = withValid $ do
             case Set.member (Some var) bvars of
               True -> return $ ExprAsms e (W4.truePred sym)
               False -> case W4.exprType e of
-                W4.BaseBVRepr w -> watch $  withBVar var $ do
+                W4.BaseBVRepr _w -> watch $  withBVar var $ do
                   unsigned <- liftIO $ isUnsigned sym e
                   ((do
                       getPredCase BM.Positive unsigned  

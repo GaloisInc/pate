@@ -162,7 +162,7 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
-ppCell :: (WI.IsSymExprBuilder sym) => MemCell sym arch w -> PP.Doc a
+ppCell :: (WI.IsExprBuilder sym) => MemCell sym arch w -> PP.Doc a
 ppCell cell =
   let CLM.LLVMPointer reg off = cellPtr cell
   in WI.printSymNat reg <> "+" <> WI.printSymExpr off

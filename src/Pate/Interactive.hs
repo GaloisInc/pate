@@ -31,6 +31,7 @@ import qualified Graphics.UI.Threepenny as TP
 import           System.FilePath ( (</>) )
 import qualified System.IO as IO
 import qualified System.IO.Temp as SIT
+import           TH.RelativePaths
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
@@ -49,28 +50,28 @@ import           Pate.Interactive.State
 
 -- | Embed the CSS we need into the Haskell to ensure that binaries can be relocatable
 cssContent :: BS.ByteString
-cssContent = $(DFE.embedFile "tools/pate/static/pate.css")
+cssContent = $(DFE.embedFile =<< (pathRelativeToCabalPackage "tools/pate/static/pate.css"))
 
 -- | This is our custom JS with extra functions called via JS FFI
 jsContent :: BS.ByteString
-jsContent = $(DFE.embedFile "tools/pate/static/pate.js")
+jsContent = $(DFE.embedFile =<< (pathRelativeToCabalPackage "tools/pate/static/pate.js"))
 
 -- | This is the full cytoscape library
 cytoscape :: BS.ByteString
-cytoscape = $(DFE.embedFile "tools/pate/static/cytoscape.js/dist/cytoscape.umd.js")
+cytoscape = $(DFE.embedFile =<< (pathRelativeToCabalPackage "tools/pate/static/cytoscape.js/dist/cytoscape.umd.js"))
 
 -- | This is an extension to cytoscape that enables labels to contain arbitrary
 -- HTML (which we need for multi-line labels)
 cytoscapeHtml :: BS.ByteString
-cytoscapeHtml = $(DFE.embedFile "tools/pate/static/cytoscape-node-html-label/dist/cytoscape-node-html-label.js")
+cytoscapeHtml = $(DFE.embedFile =<< (pathRelativeToCabalPackage "tools/pate/static/cytoscape-node-html-label/dist/cytoscape-node-html-label.js"))
 
 -- | The dagre graph layout library
 dagre :: BS.ByteString
-dagre = $(DFE.embedFile "tools/pate/static/dagre/dist/dagre.js")
+dagre = $(DFE.embedFile =<< (pathRelativeToCabalPackage "tools/pate/static/dagre/dist/dagre.js"))
 
 -- | An adapter to use dagre as a layout engine in cytoscape
 cytoscapeDagre :: BS.ByteString
-cytoscapeDagre = $(DFE.embedFile "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js")
+cytoscapeDagre = $(DFE.embedFile =<< (pathRelativeToCabalPackage "tools/pate/static/cytoscape.js-dagre/cytoscape-dagre.js"))
 
 consumeEvents
   :: (MM.MemWidth (MC.ArchAddrWidth arch))

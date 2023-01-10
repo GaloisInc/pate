@@ -92,7 +92,7 @@ data EquivEnv sym arch where
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
     , envParentBlocks :: [PB.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel
-    , envEqCondFns :: Map (PB.FunPair arch) (Some (PL.Location sym arch) -> Bool)
+    , envEqCondFns :: Map (PB.FunPair arch) (PL.SomeLocation sym arch -> Bool)
     -- ^ functions that should be considered for generating equivalence conditions
     , envExitPairsCache :: ExitPairCache arch
     -- ^ cache for intermediate proof results

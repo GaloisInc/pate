@@ -34,8 +34,8 @@ import qualified Pate.Register as PRe
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSi
 import qualified Pate.SimulatorRegisters as PSR
-import qualified Pate.Solver as PS
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Location as PL
 
 equateRegisters ::
   PER.RegisterDomain sym arch ->
@@ -74,7 +74,7 @@ equateInitialStates bundle = withSym $ \sym -> do
 universalDomain ::
   forall sym arch.
   MM.RegisterInfo (MM.ArchReg arch) =>
-  PS.ValidSym sym =>
+  W4.IsExprBuilder sym =>
   sym ->
   PED.EquivalenceDomain sym arch
 universalDomain sym =
@@ -87,6 +87,7 @@ universalDomain sym =
       PED.eqDomainRegisters = regDomain
     , PED.eqDomainStackMemory = PEM.universal sym
     , PED.eqDomainGlobalMemory = PEM.universal sym
+    , PED.eqDomainMaxRegion = PL.knownNamedPred (W4.truePred sym)
     }
 
 {- Note [Names for Inputs]

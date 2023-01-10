@@ -5,6 +5,9 @@ all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(a
 ./unequal:
 	mkdir -p $@
 
+./dumps:
+	mkdir -p $@
+
 ./build/%.i: ../src/%.c
 	$(CC) -fno-stack-protector -nostdlib $< -E -o $@
 
@@ -27,7 +30,7 @@ malloc-%.exe: ./build/malloc-%.s ./build/link.ld
 	cp $< ../src/$*.patched.c
 	cp $< ../src/$*.patched-bad.c
 
-%.test: %.original.exe %.patched.exe ./unequal/%.patched.exe
+%.test: %.original.exe %.patched.exe ./unequal/%.patched.exe | ./dumps
 	$(OD) -d $(basename $@).original.exe > ./dumps/$(basename $@).original.dump
 	$(OD) -d $(basename $@).patched.exe > ./dumps/$(basename $@).patched.dump
 	$(OD) -d ./unequal/$(basename $@).patched.exe > ./dumps/$(basename $@).patched-bad.dump
@@ -37,8 +40,9 @@ malloc-%.exe: ./build/malloc-%.s ./build/link.ld
 .PRECIOUS: ./build/%.s ./build/%.i %.exe malloc-%.exe ./unequal/%.original.exe ./unequal/%.patched.exe
 
 clean:
-	-rm ./build/*.s ./build/*.i
+	-rm -f ./build/*.s 
+	-rm -f ./build/*.i
 
 realclean: clean
-	-rm *.exe
-	-rm ./unequal/*.exe
+	-rm -f *.exe
+	-rm -f ./unequal/*.exe

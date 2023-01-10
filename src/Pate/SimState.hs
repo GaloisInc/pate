@@ -44,6 +44,7 @@ module Pate.SimState
   , SimScope
   , scopeAsm
   , scopeVars
+  , scopeVarsPair
   , Scoped(..)
   , ScopedExpr
   , unSE
@@ -225,17 +226,29 @@ mkSimSpec scope body = SimSpec scope body
 
 data SimScope sym arch v =
   SimScope
-    { scopeBoundVars :: PPa.PatchPair (SimBoundVars sym arch v)
+    { -- NOTE: explicitly not a 'PatchPair' because the scope always has
+      -- variables for both binaries
+      scopeBoundVarsO :: SimBoundVars sym arch v PBi.Original
+    , scopeBoundVarsP :: SimBoundVars sym arch v PBi.Patched
     , scopeAsm :: AssumptionSet sym
     }
 
+scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
+scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
+
 scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
 scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
+
+-- | A 'SimScope' always has variables defined for both the original and patched binaries,
+--   and so we can return a normal tuple of 'SimVars'.
+scopeVarsPair :: SimScope sym arch v -> (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched)
+scopeVarsPair scope = (boundVarsAsFree $ scopeBoundVarsO scope, boundVarsAsFree $ scopeBoundVarsP scope)
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
   forall sym arch f m.
   PPa.PatchPairM m =>
+  HasCallStack =>
   MM.RegisterInfo (MM.ArchReg arch) =>
   -- | These must all be fresh variables
   (forall bin tp. PBi.WhichBinaryRepr bin -> MM.ArchReg arch tp -> m (PSR.MacawRegVar sym tp)) ->
@@ -256,8 +269,9 @@ freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
     mr <- mkMaxregion bin
     return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb mr)
   (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
-  return $ SimSpec (SimScope vars asm) body
-
+  case vars of
+    PPa.PatchPair varsO varsP -> return $ SimSpec (SimScope varsO varsP asm) body
+    PPa.PatchPairSingle{} -> PPa.throwPairErr
 
 -- | Project out the body with an arbitrary scope.
 viewSpecBody ::
@@ -430,6 +444,9 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 data ScopedExpr sym (v :: VarScope) tp =
   ScopedExpr { unSE :: W4.SymExpr sym tp }
 
+instance PEM.ExprMappable sym (ScopedExpr sym v tp) where
+  mapExpr _sym f (ScopedExpr e) = ScopedExpr <$> f e
+
 instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
   pretty (ScopedExpr e) = W4.printSymExpr e
 
@@ -467,13 +484,13 @@ scopedLocWither ::
   PL.LocationWitherable sym arch (f v1) =>
   sym ->
   f v1 ->
-  (forall tp l. PL.Location sym arch l -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
+  (forall tp nm k. PL.Location sym arch nm k -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
   m (f v2)
 scopedLocWither sym body f = do
   fmap unsafeCoerceScope $ PL.witherLocation sym body $ \loc p -> runMaybeT $ do
     ScopedExpr p' <- (MaybeT $ f loc (ScopedExpr p))
     loc' <- PEM.mapExpr sym (\e' -> unSE @sym <$> (MaybeT (f loc (ScopedExpr e')))) loc
-    return (loc', p')
+    return (PL.getLoc loc', p')
 
 --- FIXME: cludge for scopes missing from inner types
 -- | Tag any type with a scope type parameter
@@ -570,7 +587,7 @@ bindSpec ::
   PPa.PatchPair (SimVars sym arch v) ->
   SimSpec sym arch f ->
   IO (AssumptionSet sym, f v)
-bindSpec sym vals (SimSpec scope@(SimScope _ asm) (body :: f v')) = do
+bindSpec sym vals (SimSpec scope@(SimScope _ _ asm) (body :: f v')) = do
   rew <- getScopeCoercion sym scope vals
   body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
   asm' <- unWS <$> scopedExprMap sym (WithScope @_ @v' asm) (applyScopeCoercion sym rew)
@@ -695,6 +712,12 @@ both programs, as the access to the stack variable
 -- for changes to the stack pointer when moving between scopes.
 newtype StackBase sym arch v =
   StackBase { unSB :: ScopedExpr sym v (W4.BaseBVType (MM.ArchAddrWidth arch)) }
+
+instance PEM.ExprMappable sym (StackBase sym arch v) where
+  mapExpr sym f (StackBase e) = StackBase <$> PEM.mapExpr sym f e
+
+instance TestEquality (W4.SymExpr sym) => Eq (StackBase sym arch v) where
+  (StackBase a) == (StackBase b) = a == b
 
 freshStackBase ::
   forall sym arch v.

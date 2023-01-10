@@ -65,7 +65,6 @@ import qualified Pate.Binary as PB
 import qualified Pate.Block as PBl
 import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
@@ -74,6 +73,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
+import qualified Pate.Verification.Domain as PD
 
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where
@@ -212,10 +212,7 @@ handleSystemCall = PVE.ExternalDomain $ \sym -> do
         , (Some (gpr 8), WI.truePred sym)
         , (Some (gpr 9), WI.truePred sym) -- FIXME: Only on PPC32
         ]
-  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
-                                 , PED.eqDomainStackMemory = PEM.universal sym
-                                 , PED.eqDomainGlobalMemory = PEM.universal sym
-                                 }
+  return $ (PD.universalDomain sym){ PED.eqDomainRegisters = regDomain }
 
 -- | PowerPC passes arguments in r3-r10
 --
@@ -233,10 +230,7 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
         , (Some (gpr 9), WI.truePred sym)
         , (Some (gpr 10), WI.truePred sym)
         ]
-  return $ PED.EquivalenceDomain { PED.eqDomainRegisters = regDomain
-                                 , PED.eqDomainStackMemory = PEM.universal sym
-                                 , PED.eqDomainGlobalMemory = PEM.universal sym
-                                 }
+  return $ (PD.universalDomain sym) { PED.eqDomainRegisters = regDomain }
 
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined

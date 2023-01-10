@@ -98,8 +98,11 @@ module Pate.Monad
   , withSubTraces
   , subTrace
   , subTree
+  , fnTrace
   , getWrappedSolver
-  , catchInIO, joinPatchPred)
+  , catchInIO
+  , joinPatchPred
+  )
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -297,6 +300,7 @@ instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
   withTreeBuilder treeBuilder f = CMR.local (\env -> env { envTreeBuilder = treeBuilder }) f
 
 instance PPa.PatchPairM (EquivM_ sym arch) where
+  throwPairErr :: HasCallStack => EquivM_ sym arch a
   throwPairErr = throwHere $ PEE.InconsistentPatchPairAccess
   catchPairErr a b = catchError a (\e -> case PEE.errEquivError e of
                                       Left (PEE.SomeInnerError PEE.InconsistentPatchPairAccess) -> b
@@ -1135,6 +1139,9 @@ traceBundle
 traceBundle bundle msg = do
   let bp = TF.fmapF (Const . PB.concreteAddress . simInBlock) (simIn bundle)
   emitEvent (PE.ProofTraceEvent callStack bp (T.pack msg))
+
+fnTrace :: String -> EquivM_ sym arch a -> EquivM_ sym arch a
+fnTrace nm f = withTracing @"function_name" nm f
 
 --------------------------------------
 -- UnliftIO

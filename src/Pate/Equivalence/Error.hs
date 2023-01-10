@@ -120,6 +120,8 @@ data InnerEquivalenceError arch
   | SymbolicExecutionError String
   | UnsatisfiableEquivalenceCondition (SomeExpr W4.BaseBoolType)
   | InconsistentPatchPairAccess
+  | OutOfGas
+  | UnsupportedLocation 
   | forall tp. FailedToGroundExpr (SomeExpr tp)
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)

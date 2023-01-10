@@ -32,6 +32,7 @@ module Pate.Verification.PairGraph.Node (
   , returnToEntry
   , functionEntryOf
   , returnOfEntry
+  , asSingleReturn
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -42,6 +43,7 @@ import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.PatchPair as PPa
 import           Pate.TraceTree
+import qualified Pate.Binary as PB
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -108,6 +110,12 @@ mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
 
 mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
 mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
+
+-- | Project the given 'NodeReturn' into a singleton node for the given binary
+asSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeReturn arch -> m (NodeReturn arch)
+asSingleReturn bin (NodeReturn ctx fPair) = do
+  fPair' <- PPa.asSingleton bin fPair
+  return $ NodeReturn ctx fPair'
 
 -- | Get the node corresponding to the entry point for the function
 returnToEntry :: NodeReturn arch -> NodeEntry arch

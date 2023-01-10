@@ -14,6 +14,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -26,6 +27,11 @@ module Pate.ExprMappable (
   , ToExprMappable(..)
   , SymExprMappable(..)
   , symExprMappable
+  , mapPartExpr
+  , mapExprPartial
+  , PartialF(..)
+  , toPartialSeq
+  , updateFilterSeq
   ) where
 
 import qualified Control.Monad.IO.Class as IO
@@ -49,6 +55,8 @@ import qualified What4.PredMap as WPM
 import qualified Pate.Parallel as Par
 
 import Unsafe.Coerce(unsafeCoerce)
+import Lang.Crucible.Simulator.SymSequence
+import Data.Maybe (fromMaybe)
 
 -- Expression binding
 
@@ -252,3 +260,95 @@ symExprMappable _sym =
   unsafeCoerce r
   where r :: SymExprMappable sym (ToExprMappable sym)
         r = SymExprMappable (\a -> a)
+
+
+mapPartExpr :: 
+  (IO.MonadIO m, WI.IsSymExprBuilder sym) =>
+  ExprMappable sym f =>
+  sym ->
+  (forall tp. WI.SymExpr sym tp -> m (WI.SymExpr sym tp)) ->
+  WP.PartExpr (WI.Pred sym) f ->
+  m (WP.PartExpr (WI.Pred sym) f)
+mapPartExpr sym f = \case
+  WP.Unassigned -> pure WP.Unassigned
+  WP.PE p v -> WP.PE <$> f p <*> (mapExpr sym f v)
+
+-- | Lifting a functor to partial values (i.e. values with an associated predicate)
+data PartialF sym t f = PartialF (t (WP.PartExpr (WI.Pred sym) f))
+
+mapExprPartial ::
+  (IO.MonadIO m, WI.IsSymExprBuilder sym) =>
+  ExprMappable sym f =>
+  sym ->
+  (forall tp. WI.SymExpr sym tp -> m (WI.SymExpr sym tp)) ->
+  (forall x. (x -> m x) -> t x -> m (t x)) ->
+  PartialF sym t f ->
+  m (PartialF sym t f)
+mapExprPartial sym f trav (PartialF e) = PartialF <$> trav (mapPartExpr sym f) e
+
+{-
+instance 
+  (ExprMappable sym f, Traversable t) =>
+  ExprMappable sym (PartialF sym t f) where
+    mapExpr sym f e = mapExprPartial sym f traverse e
+-}
+
+instance (ExprMappable sym f) => ExprMappable sym (PartialF sym (SymSequence sym) f) where
+  mapExpr sym f e = mapExprPartial sym f (traverseSymSequence sym) e
+
+toPartialSeq :: 
+  IO.MonadIO m =>
+  WI.IsExprBuilder sym =>
+  sym -> 
+  SymSequence sym a -> 
+  m (PartialF sym (SymSequence sym) a)
+toPartialSeq sym s = PartialF <$> traverseSymSequence sym (\x -> pure $ WP.PE (WI.truePred sym) x) s
+
+-- | Map the given function over a sequence, filtering elements according to
+--   the resulting predicate. Additionally if the result of the function includes
+--   a 'Just x' result, the resulting value will be used in place in the resulting sequence.
+updateFilterSeq ::
+  WI.IsExprBuilder sym =>
+  OrdF (W4B.SymExpr sym) =>
+  IO.MonadIO m =>
+  sym ->
+  (x -> m (Maybe x, WI.Pred sym)) ->
+  SymSequence sym x ->
+  m (SymSequence sym x)
+updateFilterSeq sym f_ s_ = evalWithFreshCache f s_
+  where
+    f _rec SymSequenceNil = IO.liftIO $ nilSymSequence sym
+
+    f rec s@(SymSequenceCons _ x xs) = do
+      xs' <- rec xs
+      (mx, p) <- f_ x
+      let x' = fromMaybe x mx
+      -- Try not to rebuild the sequence if we don't need to
+      let get_seq = case xs == xs' && not (isJust mx) of
+            True -> return s
+            False -> IO.liftIO $ consSymSequence sym x' xs'
+      
+      case WI.asConstantPred p of
+        Just True -> get_seq
+        Just False -> return xs'
+        _ -> do
+          s' <- get_seq
+          IO.liftIO $ muxSymSequence sym p s' xs'
+
+    f rec s@(SymSequenceAppend _ xs ys) = do
+      xs' <- rec xs
+      ys' <- rec ys
+      case xs' == xs && ys' == ys of
+        True -> return s
+        False -> IO.liftIO $ appendSymSequence sym xs' ys'
+
+    f rec s@(SymSequenceMerge _ p xs ys) = do
+      xs' <- rec xs
+      ys' <- rec ys
+      case xs' == xs && ys' == ys of
+        True -> return s
+        False -> IO.liftIO $ muxSymSequence sym p xs' ys'
+
+
+instance ExprMappable sym () where
+  mapExpr _sym _f _e = pure ()
