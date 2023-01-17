@@ -261,7 +261,7 @@ pairGraphComputeFixpoint gr0 = do
             True -> handleSyncPoint gr' nd preSpec >>= \case
               Just gr'' -> return gr''
               Nothing -> PS.viewSpec preSpec $ \scope d -> do
-                emitTraceLabel @"simpledomain" PAD.Predomain (Some d)
+                emitTraceLabel @"domain" PAD.Predomain (Some d)
                 withAssumptionSet (PS.scopeAsm scope) $ do
                   gr'' <- visitNode scope nd d gr'
                   emitEvent $ PE.VisitedNode nd

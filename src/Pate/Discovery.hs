@@ -384,7 +384,7 @@ getSubBlocks ::
 getSubBlocks b = withBinary @bin $
   do let addr = PB.concreteAddress b
      pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
-     mtgt <- liftIO $ PDP.parsedBlocksContaining b pfm
+     mtgt <- PDP.parsedBlocksContaining b pfm
      tgts <- case mtgt of
        Just (PDP.ParsedBlocks pbs) ->
          concat <$> mapM (\x -> concreteJumpTargets b x) pbs
@@ -672,20 +672,20 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
              in Map.insert addr fd m
 
 getBlocksSingle
-  :: forall bin arch sym m
-   . (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m, PB.KnownBinary bin)
+  :: forall bin arch sym m e
+   . (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m, PB.KnownBinary bin, IsTreeBuilder '(sym,arch) e m)
   => PMC.EquivalenceContext sym arch
   -> PB.ConcreteBlock arch bin
   -> m (PE.Blocks arch bin)
 getBlocksSingle ctx blk = do
   let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
   ctx' <- PPa.get bin (PMC.binCtxs ctx)
-  (liftIO $ lookupBlocks' ctx' blk) >>= \case
+  (lookupBlocks' ctx' blk) >>= \case
     Right (PDP.ParsedBlocks pbs) -> return $! PE.Blocks PC.knownRepr blk pbs
     Left err -> CMC.throwM err
 
 getBlocks'
-  :: (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m)
+  :: (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, IsTreeBuilder '(sym,arch) e m)
   => PMC.EquivalenceContext sym arch
   -> PB.BlockPair arch
   -> m (PE.BlocksPair arch)
@@ -703,10 +703,10 @@ getBlocks pPair = PPa.forBins $ \bin -> do
   return $! PE.Blocks PC.knownRepr blk pbs
 
 lookupBlocks'
-  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, PB.KnownBinary bin)
+  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, PB.KnownBinary bin, IsTreeBuilder '(sym,arch) e m)
   => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
-  -> IO (Either (PEE.InnerEquivalenceError arch) (PDP.ParsedBlocks arch))
+  -> m (Either (PEE.InnerEquivalenceError arch) (PDP.ParsedBlocks arch))
 lookupBlocks' binCtx b = do
   mfn <- PDP.parsedBlocksContaining b (PMC.parsedFunctionMap binCtx)
   case mfn of
@@ -721,7 +721,7 @@ lookupBlocks ::
   EquivM sym arch (PDP.ParsedBlocks arch)
 lookupBlocks b = do
   binCtx <- getBinCtx @bin
-  ebs <- liftIO $ lookupBlocks' binCtx b
+  ebs <- lookupBlocks' binCtx b
   case ebs of
     Left ierr -> do
       let binRep :: PB.WhichBinaryRepr bin
@@ -747,7 +747,7 @@ nextBlock b = do
       True -> Just (PB.ConcreteBlock (PA.segOffToAddr (MD.pblockAddr pbNext)) PB.BlockEntryJump WI.knownRepr (PB.blockFunctionEntry b))
       False -> go (pbNext : pbs)
   binCtx <- getBinCtx @bin
-  ebs <- liftIO $ lookupBlocks' binCtx b
+  ebs <- lookupBlocks' binCtx b
   case ebs of
     Left _ -> return Nothing
     Right (PDP.ParsedBlocks blocks) -> return $ go blocks

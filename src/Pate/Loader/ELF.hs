@@ -37,6 +37,7 @@ import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.BinaryLoader as MBL
 
 import qualified Pate.Arch as PA
+import qualified Pate.Config as PC
 import qualified Pate.Equivalence.Error as PEE
 import           Pate.Panic
 import qualified Pate.Hints as PH
@@ -106,14 +107,15 @@ data LoadedElfPair arch =
 
 loadELFs ::
   PA.ArchLoader PEE.LoadError ->
+  PC.PatchData ->
   LoadPaths ->
   LoadPaths ->
   Bool {- ^ use dwarf hints -} ->
   LoaderM (Some LoadedElfPair)
-loadELFs archLoader origPaths patchedPaths useDwarf = do
+loadELFs archLoader pd origPaths patchedPaths useDwarf = do
   let fpOrig = binPath origPaths
   let fpPatched = binPath patchedPaths
-  (IO.liftIO $ archToProxy archLoader fpOrig fpPatched) >>= \case
+  (IO.liftIO $ archToProxy archLoader pd fpOrig fpPatched) >>= \case
     Left err -> CME.throwError err
     Right (elfErrs, Some proxy) -> do
       CMW.tell (fmap PEE.ElfParseError elfErrs)
@@ -124,8 +126,8 @@ loadELFs archLoader origPaths patchedPaths useDwarf = do
       return $ Some (LoadedElfPair proxy (PH.Hinted origHints elfOrig) (PH.Hinted patchedHints elfPatched))
 
 -- | Examine the input files to determine the architecture
-archToProxy :: PA.ArchLoader PEE.LoadError -> FilePath -> FilePath -> IO (Either PEE.LoadError ([DEE.ElfParseError], Some PA.SomeValidArch))
-archToProxy (PA.ArchLoader machineToProxy) origBinaryPath patchedBinaryPath = do
+archToProxy :: PA.ArchLoader PEE.LoadError -> PC.PatchData -> FilePath -> FilePath -> IO (Either PEE.LoadError ([DEE.ElfParseError], Some PA.SomeValidArch))
+archToProxy (PA.ArchLoader machineToProxy) pd origBinaryPath patchedBinaryPath = do
   origBin <- BS.readFile origBinaryPath
   patchedBin <- BS.readFile patchedBinaryPath
   case (EEP.decodeElfHeaderInfo origBin, EEP.decodeElfHeaderInfo patchedBin) of
@@ -135,7 +137,7 @@ archToProxy (PA.ArchLoader machineToProxy) origBinaryPath patchedBinaryPath = do
         let (origParseErrors, _origElf) = DEE.getElf origHdr
             (patchedParseErrors, _patchedElf) = DEE.getElf patchedHdr
             origMachine = DEE.headerMachine (DEE.header origHdr)
-        in return (fmap (origParseErrors ++ patchedParseErrors,) (machineToProxy origMachine origHdr patchedHdr))
+        in return (fmap (origParseErrors ++ patchedParseErrors,) (machineToProxy pd origMachine origHdr patchedHdr))
     (Left (off, msg), _) -> return (Left (PEE.ElfHeaderParseError origBinaryPath off msg))
     (_, Left (off, msg)) -> return (Left (PEE.ElfHeaderParseError patchedBinaryPath off msg))
     _ -> return (Left (PEE.ElfArchitectureMismatch origBinaryPath patchedBinaryPath))

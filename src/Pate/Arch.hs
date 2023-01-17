@@ -80,6 +80,7 @@ import qualified Pate.Verification.Concretize as PVC
 import qualified What4.Interface as W4 hiding ( integerToNat )
 import qualified What4.Concrete as W4
 import qualified What4.ExprHelpers as W4 ( integerToNat )
+import Pate.Config (PatchData)
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -139,6 +140,8 @@ class
   , 16 <= MC.ArchAddrWidth arch
   , MCS.HasArchEndCase arch
   ) => ValidArch arch where
+  
+  type ArchConfigOpts arch
   -- | Registers which are used for "raw" bitvectors (i.e. they are not
   -- used for pointers). These are assumed to always have region 0.
   rawBVReg :: forall tp. MC.ArchReg arch tp -> Bool
@@ -362,6 +365,7 @@ data ValidRepr (k :: (DK.Type, DK.Type)) where
 -- | Create a 'PA.SomeValidArch' from parsed ELF files
 data ArchLoader err =
   ArchLoader (forall w.
+              PatchData ->
               E.ElfMachine ->
               E.ElfHeaderInfo w ->
               E.ElfHeaderInfo w ->
@@ -376,9 +380,9 @@ instance (ValidArch arch, PSo.ValidSym sym, rv ~ MC.ArchReg arch) => MC.PrettyRe
 -- | Merge loaders by taking the first successful result (if it exists)
 mergeLoaders ::
   ArchLoader err -> ArchLoader err -> ArchLoader err
-mergeLoaders (ArchLoader l1) (ArchLoader l2) = ArchLoader $ \m i1 i2 ->
-  case l1 m i1 i2 of
-    Left _ -> l2 m i1 i2
+mergeLoaders (ArchLoader l1) (ArchLoader l2) = ArchLoader $ \pd m i1 i2 ->
+  case l1 pd m i1 i2 of
+    Left _ -> l2 pd m i1 i2
     Right a -> Right a
 
 

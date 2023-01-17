@@ -10,6 +10,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.AArch32 (
     SA.AArch32
+  , AArch32Opts(..)
   , handleSystemCall
   , handleExternalCall
   , hasDedicatedRegister
@@ -58,6 +59,9 @@ import qualified Pate.Panic as PP
 import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Domain as PD
+import Data.List (nub)
+import Pate.Config
+import qualified Data.Parameterized.Map as MapF
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -97,6 +101,7 @@ hacky_arm_linux_info =
   ARM.arm_linux_info { MAI.extractBlockPrecond = hackyExtractBlockPrecond }
 
 instance PA.ValidArch SA.AArch32 where
+  type ArchConfigOpts SA.AArch32 = AArch32Opts SA.AArch32
   -- FIXME: define these
   rawBVReg _r = False
   displayRegister = display
@@ -115,6 +120,9 @@ instance PA.ValidArch SA.AArch32 where
     "r13" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R13")
     "pc" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_PC")
     _ -> Nothing
+
+
+data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 
 argumentNameFrom
   :: [T.Text]
@@ -204,6 +212,8 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     [ ("malloc", PA.mkMallocOverride r0 r0)
     -- FIXME: arguments are interpreted differently for calloc
     , ("calloc", PA.mkMallocOverride r0 r0)
+    -- FIXME: arguments are interpreted differently for reallolc
+    , ("realloc", PA.mkMallocOverride r0 r0)
     , ("clock", PA.mkClockOverride r0)
     , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
     -- FIXME: fixup arguments for fwrite
@@ -253,26 +263,32 @@ instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
     MAA.CallIf{} -> MCS.MacawBlockEndCall
     MAA.CallIfNot{} -> MCS.MacawBlockEndCall
 
+getArchOpts :: PatchData -> Maybe (AArch32Opts SA.AArch32)
+getArchOpts pd = case nub (archOpts pd) of
+  ["thumb"] -> Just (AArch32Opts True)
+  [] -> Just (AArch32Opts False)
+  _ -> Nothing
+
 archLoader :: PA.ArchLoader PEE.LoadError
-archLoader = PA.ArchLoader $ \em origHdr patchedHdr ->
+archLoader = PA.ArchLoader $ \pd em origHdr patchedHdr ->
   case (em, EEP.headerClass (EEP.header origHdr)) of
-    (EEP.EM_ARM, EEP.ELFCLASS32) ->
-      let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
-                                 , PA.validArchFunctionDomain = handleExternalCall
-                                 , PA.validArchDedicatedRegisters = hasDedicatedRegister
-                                 , PA.validArchArgumentMapping = argumentMapping
-                                 , PA.validArchOrigExtraSymbols =
-                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
-                                 , PA.validArchPatchedExtraSymbols =
-                                     PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
-                                 , PA.validArchStubOverrides = stubOverrides
-                                 -- FIXME: override the PSTATE_T flag to 1 by default
-                                 -- this ignores the heuristic from macaw's arch definition
-                                 -- that uses the address low bit to set this flag
-                                 , PA.validArchInitAbs = PB.defaultMkInitialAbsState
-                                 --, PA.validArchInitAbs = PB.MkInitialAbsState (\_ _ -> MapF.singleton (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) (MA.FinSet (Set.singleton 1)))
-                                 }
-      in Right (Some (PA.SomeValidArch vad))
+    (EEP.EM_ARM, EEP.ELFCLASS32) -> case getArchOpts pd of
+      Just opts -> 
+        let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
+                                  , PA.validArchFunctionDomain = handleExternalCall
+                                  , PA.validArchDedicatedRegisters = hasDedicatedRegister
+                                  , PA.validArchArgumentMapping = argumentMapping
+                                  , PA.validArchOrigExtraSymbols =
+                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
+                                  , PA.validArchPatchedExtraSymbols =
+                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                  , PA.validArchStubOverrides = stubOverrides
+                                  , PA.validArchInitAbs = case thumbMode opts of
+                                      False -> PB.defaultMkInitialAbsState
+                                      True -> PB.MkInitialAbsState (\_ _ -> MapF.singleton (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) (MA.FinSet (Set.singleton 1)))
+                                  }
+        in Right (Some (PA.SomeValidArch vad))
+      Nothing -> Left (PEE.InvalidArchOpts (archOpts pd))
     _ -> Left (PEE.UnsupportedArchitecture em)
 
 {- Note [Thumb Code Discovery Hacks]

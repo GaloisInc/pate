@@ -189,6 +189,7 @@ data LoadError where
   ElfHeaderParseError :: FilePath -> DB.ByteOffset -> String -> LoadError
   ElfArchitectureMismatch :: FilePath -> FilePath -> LoadError
   UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
+  InvalidArchOpts :: [String] -> LoadError
   BadPatchInfo :: FilePath -> PC.PatchDataParseError -> LoadError
   JSONParseError :: FilePath -> PHJ.JSONError -> LoadError
   CSVParseError :: FilePath -> PHC.CSVParseError -> LoadError

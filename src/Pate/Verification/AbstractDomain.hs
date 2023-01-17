@@ -425,11 +425,12 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arc
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
 initAbsDomainVals ::
-  forall sym arch bin v m.
+  forall sym arch e bin v m.
   Monad m =>
   IO.MonadIO m =>
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>
+  IsTreeBuilder '(sym, arch) e m =>
   sym ->
   PE.EquivContext sym arch ->
   (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
@@ -443,12 +444,13 @@ initAbsDomainVals sym eqCtx f stOut preVals = do
   -- slice
   let prevCells = map fstPair $ filter (\(MapF.Pair _ (MemAbstractValue v)) -> not (isUnconstrained v)) (MapF.toList (absMemVals preVals))
   let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
-  memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
-    absVal <- getMemAbsVal cell
-    return (MapF.Pair cell absVal)
-  regVals <- MM.traverseRegsWith getRegAbsVal (PS.simOutRegs stOut)
-  mr <- f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
-  return (AbstractDomainVals regVals memVals mr)
+  subTree @"loc" "Initial Domain" $ do
+    regVals <- MM.traverseRegsWith (\r v -> subTrace (PL.SomeLocation (PL.Register r)) $ getRegAbsVal r v) (PS.simOutRegs stOut)
+    memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
+      absVal <- subTrace (PL.SomeLocation (PL.Cell cell)) $ getMemAbsVal cell
+      return (MapF.Pair cell absVal)
+    mr <- subTrace (PL.SomeLocation (PL.Named (knownSymbol @"maxRegion"))) $ f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
+    return (AbstractDomainVals regVals memVals mr)
   where
     getMemAbsVal ::
       PMC.MemCell sym arch w ->

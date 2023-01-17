@@ -147,15 +147,17 @@ data PatchData =
             --   considered observable. This can be used to specify memory-mapped
             --   I/O regions, or simply to place a focus on regions of memory
             --   that are considered of inteterest to the user.
+
+            , archOpts :: [String]
             }
   deriving (Show)
 
 instance Semigroup PatchData where
-  (PatchData a b c d e f g) <> (PatchData a' b' c' d' e' f' g')
-   = (PatchData (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g'))
+  (PatchData a b c d e f g h) <> (PatchData a' b' c' d' e' f' g' h')
+   = (PatchData (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g') (h <> h'))
 
 instance Monoid PatchData where
-  mempty = PatchData [] [] [] [] [] [] []
+  mempty = PatchData [] [] [] [] [] [] [] []
 
 _Address :: Toml.TomlBiMap Address Toml.AnyValue
 _Address = Toml._Coerce Toml._Natural
@@ -187,6 +189,7 @@ patchDataCodec = PatchData
   <*> optionalArrayOf _Address "ignore-original-functions" .= ignoreOriginalFunctions
   <*> optionalArrayOf _Address "ignore-patched-functions" .= ignorePatchedFunctions
   <*> Toml.list memRegionCodec "observable-memory" .= observableMemory
+  <*> optionalArrayOf Toml._String "arch-opts" .= archOpts
 
 data PatchDataParseError = UnicodeError DTEE.UnicodeException
                          | TOMLError [Toml.TomlDecodeError]

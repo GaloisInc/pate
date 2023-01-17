@@ -146,6 +146,9 @@ class Monad m => PatchPairM m where
   --   any 'throwPairErr' calls are made.
   catchPairErr :: m a -> m a -> m a
 
+instance PatchPairM m => PatchPairM (NoTreeBuilder k m) where
+  throwPairErr = noTracing $ throwPairErr
+  catchPairErr (NoTreeBuilder f) (NoTreeBuilder g) = NoTreeBuilder (catchPairErr f g)
 
 instance PatchPairM Maybe where
   throwPairErr = Nothing

@@ -143,8 +143,9 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
       , PC.ignoreOriginalFunctions = PC.ignoreOriginalFunctions pd
       , PC.ignorePatchedFunctions = PC.ignoreOriginalFunctions pd
       , PC.observableMemory = PC.observableMemory pd
+      , PC.archOpts = PC.archOpts pd
       }
-  (Some (PLE.LoadedElfPair proxy bin _), errs) <- CMW.listen $ PLE.loadELFs (archLoader cfg) path path (useDwarfHints cfg)
+  (Some (PLE.LoadedElfPair proxy bin _), errs) <- CMW.listen $ PLE.loadELFs (archLoader cfg) pd' path path (useDwarfHints cfg)
   logger' <- IO.liftIO $ logger cfg proxy
   IO.liftIO $ runEquivVerification proxy errs logger' pd' (verificationCfg cfg) bin bin
 
@@ -160,6 +161,6 @@ runEquivConfig cfg = liftToEquivStatus $ do
         Right r -> return (r <> patchData cfg)
     Nothing -> return $ patchData cfg
   (Some (PLE.LoadedElfPair proxy original patched), errs) <-
-    CMW.listen $ PLE.loadELFs (archLoader cfg) (origPaths cfg) (patchedPaths cfg) (useDwarfHints cfg)
+    CMW.listen $ PLE.loadELFs (archLoader cfg) pdata (origPaths cfg) (patchedPaths cfg) (useDwarfHints cfg)
   logger' <- IO.liftIO $ logger cfg proxy
   IO.liftIO $ runEquivVerification proxy errs logger' pdata (verificationCfg cfg) original patched

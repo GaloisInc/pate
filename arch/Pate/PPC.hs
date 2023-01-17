@@ -75,6 +75,8 @@ import qualified Pate.Verification.ExternalCall as PVE
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Domain as PD
 
+import           Pate.TraceTree
+
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where
   -- | The Table of Contents register; note that we capture that it is a 64 bit
@@ -103,7 +105,7 @@ getCurrentTOC
   -> IO (W.W 64)
 getCurrentTOC ctx binRepr = PPa.runPatchPairT $ do
   ctx' <- PPa.get binRepr (PMC.binCtxs ctx)
-  blks <- PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
+  blks <- noTracing $ PD.getBlocks' ctx (ctx ^. PMC.currentFunc)
   PE.Blocks _ _ (pblk:_) <- PPa.get binRepr blks
   let
     toc = TOC.getTOC (PMC.binary ctx')
@@ -149,6 +151,7 @@ ppc32HasDedicatedRegister =
                           }
 
 instance PA.ValidArch PPC.PPC32 where
+  type ArchConfigOpts PPC.PPC32 = ()
   rawBVReg r = case r of
     PPC.PPC_FR _ -> True
     PPC.PPC_CR -> True
@@ -164,6 +167,7 @@ instance PA.ValidArch PPC.PPC32 where
   readRegister _ = Nothing
 
 instance PA.ValidArch PPC.PPC64 where
+  type ArchConfigOpts PPC.PPC64 = ()
   rawBVReg r = case r of
     PPC.PPC_FR _ -> True
     PPC.PPC_CR -> True
@@ -250,7 +254,7 @@ instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
 
 
 archLoader :: PA.ArchLoader PEE.LoadError
-archLoader = PA.ArchLoader $ \em origHdr _patchedHdr ->
+archLoader = PA.ArchLoader $ \_pd em origHdr _patchedHdr ->
   case (em, EEP.headerClass (EEP.header origHdr)) of
     (EEP.EM_PPC, _) ->
       let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall

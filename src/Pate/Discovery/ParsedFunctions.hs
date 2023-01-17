@@ -4,6 +4,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Discovery.ParsedFunctions (
     ParsedFunctionMap
   , newParsedFunctionMap
@@ -48,6 +56,9 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Memory as PM
+
+import           Pate.TraceTree
+import Control.Monad.IO.Class (liftIO)
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -352,16 +363,40 @@ resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _) = do
     Just nm -> return $ fe { PB.functionSymbol = Just nm, PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses }
     Nothing -> return fe
 
+instance MM.ArchConstraints arch => IsTraceNode '(sym,arch) "parsedblock" where
+  type TraceNodeType '(sym,arch) "parsedblock" = Some (MD.ParsedBlock arch)
+  prettyNode () (Some pb) = PP.pretty pb
+  nodeTags = [(Summary, \() (Some pb) -> PP.viaShow (MD.pblockAddr pb))]
+
 -- | Similar to 'parsedFunctionContaining', except that it constructs the
 -- 'ParsedBlocks' structure used in most of the verifier.
 parsedBlocksContaining ::
-  forall bin arch .
+  forall bin arch sym e m.
   (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  IsTreeBuilder '(sym,arch) e m =>
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
-  IO (Maybe (ParsedBlocks arch))
-parsedBlocksContaining blk pfm =
-  fmap (viewSome buildParsedBlocks) <$> parsedFunctionContaining blk pfm
+  m (Maybe (ParsedBlocks arch))
+parsedBlocksContaining blk pfm = (liftIO $ parsedFunctionContaining blk pfm) >>= \case
+  Just (Some pbs) -> Just <$> do
+    ParsedBlocks pbs' <- return $ buildParsedBlocks pbs
+    subTree @"parsedblock" "parsedBlocksContaining" $ do
+      ParsedBlocks <$> mapM (\pb -> subTrace (Some pb) $ go pb) pbs'
+  Nothing -> return Nothing
+
+
+  where
+    go :: MD.ParsedBlock arch ids -> m (MD.ParsedBlock arch ids)
+    go pb = return pb
+
+dropErrorBlocks ::
+  ParsedBlocks arch -> ParsedBlocks arch
+dropErrorBlocks (ParsedBlocks pbs) = ParsedBlocks (filter isValidBlock pbs)
+  where
+    isValidBlock :: MD.ParsedBlock arch ids -> Bool
+    isValidBlock pb' = case MD.pblockTermStmt pb' of
+      MD.ParsedTranslateError{} -> False
+      _ -> True
 
 findFunctionByName ::
   (PBi.KnownBinary bin, MM.ArchConstraints arch) =>

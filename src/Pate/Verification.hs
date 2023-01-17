@@ -217,7 +217,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
   ePairCache <- liftIO $ freshBlockCache
   statsVar <- liftIO $ MVar.newMVar mempty
-  
+
 
   -- compute function entry pairs from the input PatchData
   upData <- unpackPatchData contexts pd

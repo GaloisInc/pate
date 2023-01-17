@@ -63,6 +63,7 @@ module Pate.TraceTree (
   , getNodeStatus
   , getTreeStatus
   , MonadTreeBuilder(..)
+  , NoTreeBuilder(..)
   , IsTreeBuilder
   , NodeBuilderT
   , TreeBuilderT
@@ -86,6 +87,7 @@ module Pate.TraceTree (
   , mkTags
   , runNodeBuilderT
   , getNodeBuilder
+  , noTracing
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -109,6 +111,7 @@ import qualified Prettyprinter as PP
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSym(..), SymbolRepr )
+import Control.Exception (IOException)
 
 data TraceTag =
     Summary
@@ -121,6 +124,8 @@ data TraceTag =
 class Show e => IsNodeError e where
   propagateErr :: e -> Bool
 
+instance IsNodeError IOException where
+  propagateErr _ = True
 
 data NodeStatusLevel =
     StatusSuccess
@@ -437,6 +442,19 @@ class Monad m => MonadTreeBuilder k m | m -> k where
   getTreeBuilder :: m (TreeBuilder k)
   withTreeBuilder :: forall a. TreeBuilder k -> m a -> m a
 
+newtype NoTreeBuilder k m a = NoTreeBuilder (m a)
+  deriving (Applicative, Functor, Monad, MonadIO, MonadThrow)
+
+instance Monad m => MonadTreeBuilder k (NoTreeBuilder k m) where
+  getTreeBuilder = return $ noTreeBuilder
+  withTreeBuilder _ = id
+
+noTracing :: NoTreeBuilder k m a -> m a
+noTracing (NoTreeBuilder f) = f
+
+instance MonadError e m => MonadError e (NoTreeBuilder k m) where
+  throwError e = NoTreeBuilder $ throwError e
+  catchError (NoTreeBuilder f) g = NoTreeBuilder $ catchError f (\e -> noTracing (g e))
 
 startSomeTreeBuilder ::
   forall k m tp.
@@ -557,7 +575,6 @@ getNodeBuilder = NodeBuilderT $ CMR.ask
 
 type IsTreeBuilder k e m =
   (IO.MonadIO m, MonadError e m, IsNodeError e, MonadTreeBuilder k m)
-
 
 withSubTraces ::
   forall nm k m e a.

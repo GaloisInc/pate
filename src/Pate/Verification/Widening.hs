@@ -473,7 +473,7 @@ abstractOverVars ::
 abstractOverVars scope_pre bundle _from _to postSpec postResult = do
   result <- withTracing @"function_name" "abstractOverVars" $ go
   PS.viewSpec result $ \_ d -> do
-    emitTraceLabel @"simpledomain" PAD.ExternalPostDomain (Some d)
+    emitTraceLabel @"domain" PAD.ExternalPostDomain (Some d)
   return result
   where
     go :: EquivM sym arch (PAD.AbstractDomainSpec sym arch)
@@ -668,8 +668,13 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         --domVals_simplified <- PSi.applySimplifier simplifier (PAD.absDomVals postResult)
         let domVals = PAD.absDomVals postResult
         val_post <- subTree "value" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domVals) $ \loc se ->
-          subTrace @"expr" (Some (PS.unSE se)) $ toMaybe <$> doRescope loc se
-
+          subTrace @"loc" (PL.SomeLocation loc) $ do
+            emitTraceLabel @"expr" "input" (Some (PS.unSE se))
+            doRescope loc se >>= \case
+              JustF se' -> do
+                emitTraceLabel @"expr" "output" (Some (PS.unSE se'))
+                return $ Just se'
+              NothingF -> return Nothing
 
         let dom = PAD.AbstractDomain eq_post val_post evSeq_post
         emitTraceLabel @"domain" PAD.ExternalPostDomain (Some dom)
@@ -967,13 +972,10 @@ getInitalAbsDomainVals bundle preDom = withTracing @"function_name" "getInitalAb
       return $ PAD.extractAbsRange sym e''
 
   eqCtx <- equivalenceContext
-  subTree @"expr" "Initial Domain" $ do
-    PPa.forBins $ \bin -> do
-      out <- PPa.get bin (PS.simOut bundle)
-      pre <- PPa.get bin (PAD.absDomVals preDom)
-
-      IO.withRunInIO $ \inIO ->
-        PAD.initAbsDomainVals sym eqCtx (\e -> inIO (subTrace (Some e) $ getConcreteRange e)) out pre
+  PPa.forBins $ \bin -> do
+    out <- PPa.get bin (PS.simOut bundle)
+    pre <- PPa.get bin (PAD.absDomVals preDom)
+    PAD.initAbsDomainVals sym eqCtx getConcreteRange out pre
 
 widenUsingCounterexample ::
   sym ->
