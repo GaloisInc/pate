@@ -103,6 +103,7 @@ import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
 import Data.Maybe (fromMaybe)
+import qualified System.IO as IO
 
 -- Overall module notes/thoughts
 --
@@ -203,6 +204,16 @@ handleSyncPoint ::
   EquivM sym arch (Maybe (PairGraph sym arch))
 handleSyncPoint _ (GraphNode{}) _ = return Nothing
 handleSyncPoint pg (ReturnNode nd) spec = case nodeFuns nd of
+  PPa.PatchPair{} | isTargetSyncPoint pg nd -> do
+    ndO <- asSingleReturn PBi.OriginalRepr nd
+    ndP <- asSingleReturn PBi.PatchedRepr nd
+    -- if both single-sided cases have finished processing, then we can process
+    -- the return as usual
+    case (getCurrentDomain pg (ReturnNode ndO), getCurrentDomain pg (ReturnNode ndP)) of
+      (Just{}, Just{}) -> return Nothing
+      -- if either single-sided is not finished, we pop this return from the work
+      -- list under the assumption that it will be handled later
+      _ -> return $ Just pg
   PPa.PatchPair{} -> return Nothing
   PPa.PatchPairSingle bin _ -> case getSyncPoint pg nd of
     Just syncs -> do
@@ -227,13 +238,14 @@ mergeDualNodes ::
   NodeReturn arch {- ^ sync node -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-mergeDualNodes nd1 spec1 nd2 spec2 syncNode gr = withSym $ \sym -> do
+mergeDualNodes nd1 spec1 nd2 spec2 syncNode gr = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
   fnPair <- PPa.zip (nodeFuns nd1) (nodeFuns nd2)
   let blkPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
   merged_dom <- withFreshVars blkPair $ \vars -> do
     (asm1, body1) <- liftIO $ PS.bindSpec sym vars spec1
     (asm2, body2) <- liftIO $ PS.bindSpec sym vars spec2
     body <- PAD.zipSingletonDomains sym body1 body2
+    emitTraceLabel @"domain" PAD.ExternalPostDomain (Some body)
     return $ (asm1 <> asm2, body)
   -- model this as a "jump" from the singleton node to the sync node
   case updateDomain gr (ReturnNode nd1) (ReturnNode syncNode) merged_dom of
@@ -253,7 +265,7 @@ pairGraphComputeFixpoint gr0 = do
     go (gr :: PairGraph sym arch) = case chooseWorkItem gr of
       Nothing -> return gr
       Just (gr', nd, preSpec) -> do
-        gr'' <- subTrace @"node" nd $ startTimer $
+        gr'' <- subTrace @"node" nd $ startTimer $ do
           shouldProcessNode nd >>= \case
             False -> do
               emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)

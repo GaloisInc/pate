@@ -389,15 +389,6 @@ parsedBlocksContaining blk pfm = (liftIO $ parsedFunctionContaining blk pfm) >>=
     go :: MD.ParsedBlock arch ids -> m (MD.ParsedBlock arch ids)
     go pb = return pb
 
-dropErrorBlocks ::
-  ParsedBlocks arch -> ParsedBlocks arch
-dropErrorBlocks (ParsedBlocks pbs) = ParsedBlocks (filter isValidBlock pbs)
-  where
-    isValidBlock :: MD.ParsedBlock arch ids -> Bool
-    isValidBlock pb' = case MD.pblockTermStmt pb' of
-      MD.ParsedTranslateError{} -> False
-      _ -> True
-
 findFunctionByName ::
   (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
   String ->

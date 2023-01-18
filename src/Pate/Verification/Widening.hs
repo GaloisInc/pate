@@ -368,14 +368,17 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
               md <- widenPostcondition scope bundle d d'
               case md of
                 NoWideningRequired -> do
+                  emitTraceLabel @"domain" PAD.Postdomain (Some d')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
-                  return (freshDomain gr to postSpec')
+                  let gr1 = freshDomain gr to postSpec'
+                  initializeCondition scope bundle d d' from to gr1
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
                      return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
                 Widen _ _ d'' -> do
+                  emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
                   let gr1 = freshDomain gr to postSpec'
                   initializeCondition scope bundle d d'' from to gr1
@@ -402,7 +405,8 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
               case md of
                 NoWideningRequired ->
                   do traceBundle bundle "Did not need to widen"
-                     return gr
+                     emitTraceLabel @"domain" PAD.Postdomain (Some d')
+                     initializeCondition scope bundle d d' from to gr
 
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
@@ -415,12 +419,13 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                        Right gr' -> return $ recordMiscAnalysisError gr' to err
 
                 Widen _ _ d'' -> do
+                  emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
                   case updateDomain gr from to postSpec' of
-                    Left gr' ->
+                    Left gr' -> do
                       do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                         return gr'
-                    Right gr' -> return gr'
+                         initializeCondition scope bundle d d'' from to gr'
+                    Right gr' -> initializeCondition scope bundle d d'' from to gr'
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp
@@ -640,13 +645,15 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
               JustF se' -> do
                 emitTraceLabel @"expr" "output" (Some (PS.unSE se'))
                 return $ Just se'
-              NothingF -> do
-                -- failed to rescope, emit a recoverable error and drop this entry
-                se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
-                e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
-                curAsms <- currentAsm
-                _ <- emitError $ PEE.RescopingFailure curAsms se e''
-                return Nothing
+              NothingF -> CMR.asks (PC.cfgRescopingFailureMode . envConfig) >>= \case
+                PC.ThrowOnEqRescopeFailure -> do
+                  -- failed to rescope, emit a recoverable error and drop this entry
+                  se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+                  e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
+                  curAsms <- currentAsm
+                  _ <- emitError $ PEE.RescopingFailure curAsms se e''
+                  return Nothing
+                PC.AllowEqRescopeFailure -> return Nothing
 
         let evSeq = PAD.absDomEvents postResult
         --nextSeq <- 
@@ -655,12 +662,14 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
             emitTraceLabel @"expr" "input" (Some (PS.unSE se))
             doRescope loc se >>= \case
               JustF se' -> return $ Just se'
-              NothingF -> do
-                se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
-                e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
-                curAsms <- currentAsm
-                _ <- emitError $ PEE.RescopingFailure curAsms se e''
-                return Nothing
+              NothingF -> CMR.asks (PC.cfgRescopingFailureMode . envConfig) >>= \case
+                PC.ThrowOnEqRescopeFailure -> do
+                  se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
+                  e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
+                  curAsms <- currentAsm
+                  _ <- emitError $ PEE.RescopingFailure curAsms se e''
+                  return Nothing
+                PC.AllowEqRescopeFailure -> return Nothing
 
         -- Now traverse the value domain and rescope its entries. In this case
         -- failing to rescope is not an error, as it is simply weakening the resulting

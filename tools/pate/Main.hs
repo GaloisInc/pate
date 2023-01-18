@@ -116,6 +116,7 @@ runMain traceTree opts = do
         , PC.cfgIgnoreUnnamedFunctions = skipUnnamedFns opts
         , PC.cfgIgnoreDivergedControlFlow = skipDivergedControl opts
         , PC.cfgTargetEquivRegs = targetEquivRegs opts
+        , PC.cfgRescopingFailureMode = rerrMode opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = PAL.archLoader
@@ -160,6 +161,7 @@ data CLIOptions = CLIOptions
   , logFile :: Maybe FilePath
   -- ^ The path to store trace information to (logs will be discarded if not provided)
   , errMode :: PC.VerificationFailureMode
+  , rerrMode :: PC.RescopingFailureMode
   , skipUnnamedFns :: Bool
   , skipDivergedControl :: Bool
   , targetEquivRegs :: [String]
@@ -400,6 +402,13 @@ modeParser = OA.option OA.auto (OA.long "errormode"
                                 <> OA.value PC.ThrowOnAnyFailure
                                 <> OA.showDefault)
 
+rescopeModeParser :: OA.Parser PC.RescopingFailureMode
+rescopeModeParser = OA.option OA.auto (OA.long "rescopemode"
+                                <> OA.help "Variable rescoping failure handling mode"
+                                <> OA.short 'r'
+                                <> OA.value PC.ThrowOnEqRescopeFailure
+                                <> OA.showDefault)
+
 cliOptions :: OA.ParserInfo CLIOptions
 cliOptions = OA.info (OA.helper <*> parser)
   (  OA.fullDesc
@@ -512,6 +521,7 @@ cliOptions = OA.info (OA.helper <*> parser)
         <> OA.help "A file to save debug logs to"
         ))
    <*> modeParser
+   <*> rescopeModeParser
    <*> OA.switch
        (  OA.long "skip-unnamed-functions"
        <> OA.help "Skip analysis of functions without symbols"

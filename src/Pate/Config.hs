@@ -15,7 +15,8 @@ module Pate.Config (
   VerificationConfig(..),
   defaultVerificationCfg,
   VerificationFailureMode(..),
-  ContextSensitivity(..)
+  ContextSensitivity(..),
+  RescopingFailureMode(..)
   ) where
 
 import qualified Control.Monad.Except as CME
@@ -212,6 +213,13 @@ data VerificationFailureMode =
   | ContinueAfterRecoverableFailures
   deriving (Eq, Ord, Show, Read)
 
+
+data RescopingFailureMode =
+    ThrowOnEqRescopeFailure
+  | AllowEqRescopeFailure
+  deriving (Eq, Ord, Show, Read)
+
+
 -- | Controls how abstract domains are shared between function call nodes in the pairgraph.
 data ContextSensitivity =
     -- | All calls to any given function share the same abstract domain, i.e.
@@ -267,6 +275,7 @@ data VerificationConfig validRepr =
     , cfgTargetEquivRegs :: [String]
     -- ^ registers to be asserted equal during conditional equivalence analysis
     --   (no conditional equivalence analysis is done if empty)
+    , cfgRescopingFailureMode :: RescopingFailureMode
     }
 
 
@@ -288,4 +297,5 @@ defaultVerificationCfg =
                      , cfgIgnoreUnnamedFunctions = True
                      , cfgIgnoreDivergedControlFlow = True
                      , cfgTargetEquivRegs = []
+                     , cfgRescopingFailureMode = ThrowOnEqRescopeFailure
                      }

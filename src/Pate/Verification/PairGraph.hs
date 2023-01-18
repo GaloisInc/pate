@@ -45,6 +45,7 @@ module Pate.Verification.PairGraph
   , markEdge
   , addSyncPoint
   , getSyncPoint
+  , isTargetSyncPoint
   ) where
 
 import           Prettyprinter
@@ -80,12 +81,13 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, asSingleReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
+import qualified Pate.Binary as PBi
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -559,6 +561,17 @@ getSyncPoint ::
   NodeReturn arch ->
   Maybe (Set (NodeReturn arch))
 getSyncPoint gr nd = Map.lookup nd (pairGraphSyncPoint gr)
+
+isTargetSyncPoint ::
+  PairGraph sym arch ->
+  NodeReturn arch ->
+  Bool
+isTargetSyncPoint gr nd |
+    Just ndO <- asSingleReturn PBi.OriginalRepr nd
+  , Just ndP <- asSingleReturn PBi.PatchedRepr nd = 
+    Set.member nd (fromMaybe Set.empty (getSyncPoint gr ndO)) &&
+    Set.member nd (fromMaybe Set.empty (getSyncPoint gr ndP))
+isTargetSyncPoint _ _ = False
 
 addSyncPoint ::
   PairGraph sym arch ->

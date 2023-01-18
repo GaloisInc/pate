@@ -1,2 +1,3 @@
 ignore-original-functions = [ 0x138e70 ]
 ignore-patched-functions = [ 0x138e70 ]
+arch-opts = [ "thumb" ]
