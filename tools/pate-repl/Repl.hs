@@ -263,6 +263,7 @@ isSubTreeNode ::
   TraceNode sym arch nm -> Bool
 isSubTreeNode (TraceNode{}) = case symbolRepr (knownSymbol @nm) of
   "subtree" -> True
+  "choiceTree" -> True
   "function_name" -> True
   _ -> False
 
@@ -305,7 +306,7 @@ withNode ::
 withNode nd f = do
   oldst <- get
   modify $ \st -> st {replNesting = (replNesting st) + 1}
-  loadTraceNode nd
+  loadTraceNode' nd
   a <- f
   put oldst
   return a
@@ -502,9 +503,8 @@ withCurrentNode f = do
   Some (node@TraceNode{}) <- currentNode
   f node
 
-
-loadTraceNode :: TraceNode sym arch nm -> ReplM sym arch ()
-loadTraceNode node = do
+loadTraceNode' :: TraceNode sym arch nm -> ReplM sym arch ()
+loadTraceNode' node = do
   modify $ \st -> st
     { replNode = Some node
     , replNextTags = []
@@ -512,6 +512,15 @@ loadTraceNode node = do
     , replLastOptsPrinted = ""
     }
   updateNextNodes
+
+loadTraceNode :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch ()
+loadTraceNode (node@(TraceNode _ v _)) = do
+  case testEquality (knownSymbol @nm) (knownSymbol @"choice")  of
+    Just Refl -> do
+      SomeChoice c <- return v
+      IO.liftIO $ choicePick c
+    Nothing -> return ()
+  loadTraceNode' node
 
 goto_err'' :: [Some (TraceNode sym arch)] -> ReplM sym arch ()
 goto_err'' (Some node@(TraceNode _ _ subtree) : xs) = (IO.liftIO $ getTreeStatus subtree) >>= \case
