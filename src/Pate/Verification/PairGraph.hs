@@ -21,6 +21,8 @@ module Pate.Verification.PairGraph
   , initialDomainSpec
   , initializePairGraph
   , chooseWorkItem
+  , pairGraphWorklist
+  , popWorkItem
   , updateDomain
   , addReturnVector
   , getReturnVectors
@@ -458,6 +460,18 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
            let gr1 = freshDomain gr node rootDom
            return $ emptyReturnVector gr1 (rootReturn fnPair)
 
+
+popWorkItem ::
+  PA.ValidArch arch =>
+  PairGraph sym arch ->
+  GraphNode arch ->
+  (PairGraph sym arch, GraphNode arch, AbstractDomainSpec sym arch)
+popWorkItem gr nd = case Map.lookup nd (pairGraphDomains gr) of
+  Nothing -> panic Verifier "popWorkItem" ["Could not find domain corresponding to block pair", show nd]
+  Just d  -> 
+    let wl = Set.delete nd (pairGraphWorklist gr)
+    in (gr{ pairGraphWorklist = wl }, nd, d)
+
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the
 --   work list is empty, return Nothing, indicating that we are done.
@@ -471,7 +485,7 @@ chooseWorkItem gr =
   case Set.minView (pairGraphWorklist gr) of
     Nothing -> Nothing
     Just (nd, wl) -> case Map.lookup nd (pairGraphDomains gr) of
-      Nothing -> panic Verifier "choseoWorkItem" ["Could not find domain corresponding to block pair", show nd]
+      Nothing -> panic Verifier "chooseWorkItem" ["Could not find domain corresponding to block pair", show nd]
       Just d  -> Just (gr{ pairGraphWorklist = wl }, nd, d)
 
 -- | Update the abstract domain for the target graph node,

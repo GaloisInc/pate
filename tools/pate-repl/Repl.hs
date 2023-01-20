@@ -287,7 +287,7 @@ addNextNodes node = isTraceNode node $ do
   nextTrees <- case nesting > 0 of
     True -> truncateSubNodes nextTrees'
     False -> return $ nextTrees'
-  case nodeShownAt @'(sym,arch) @nm tags of
+  (IO.liftIO $ nodeShownAt tags node) >>= \case
     True -> do
       nextSubs <- fmap concat $ forM nextTrees $ \(n, Some nextNode) -> do
         next <- maybeSubNodes nextNode (return []) (gets replNext)
@@ -306,7 +306,7 @@ withNode ::
 withNode nd f = do
   oldst <- get
   modify $ \st -> st {replNesting = (replNesting st) + 1}
-  loadTraceNode' nd
+  loadTraceNode nd
   a <- f
   put oldst
   return a
@@ -426,14 +426,16 @@ stop = do
     SomeReplState tid _ -> IO.killThread tid
 
 up :: IO ()
-up = execReplM $ do
+up = execReplM $ (up' >> ls')
+
+up' :: ReplM sym arch ()
+up' = do
   prevNodes <- gets replPrev
   case prevNodes of
     [] -> IO.liftIO $ IO.putStrLn "<<At top level>>"
     (Some popped:prevNodes') -> do
       loadTraceNode popped
       modify $ \st -> st { replPrev = prevNodes' }
-  ls'
 
 top :: IO ()
 top = execReplM $ do
@@ -503,8 +505,8 @@ withCurrentNode f = do
   Some (node@TraceNode{}) <- currentNode
   f node
 
-loadTraceNode' :: TraceNode sym arch nm -> ReplM sym arch ()
-loadTraceNode' node = do
+loadTraceNode :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch ()
+loadTraceNode node = do
   modify $ \st -> st
     { replNode = Some node
     , replNextTags = []
@@ -513,14 +515,27 @@ loadTraceNode' node = do
     }
   updateNextNodes
 
-loadTraceNode :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch ()
-loadTraceNode (node@(TraceNode _ v _)) = do
-  case testEquality (knownSymbol @nm) (knownSymbol @"choice")  of
-    Just Refl -> do
-      SomeChoice c <- return v
-      IO.liftIO $ choicePick c
-    Nothing -> return ()
-  loadTraceNode' node
+isBlockingNode :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch Bool
+isBlockingNode node = asChoiceTree node >>= \case
+  Just (SomeChoiceHeader c) -> IO.liftIO $ (not <$> choiceReady c)
+  Nothing -> asChoice node >>= \case
+    Just (SomeChoice c) -> IO.liftIO $ (not <$> choiceReady (choiceHeader c))
+    Nothing -> return False
+
+isBlocked :: forall sym arch. ReplM sym arch Bool
+isBlocked = gets replNext >>= \case
+  [] -> return False
+  next | (_, Some node) <- last next -> isBlockingNode node
+
+asChoice :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch (Maybe (SomeChoice '(sym,arch)))
+asChoice (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (knownSymbol @"choice")  of
+  Just Refl -> return $ Just v
+  Nothing -> return Nothing
+
+asChoiceTree :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch (Maybe (SomeChoiceHeader '(sym,arch)))
+asChoiceTree (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (knownSymbol @"choiceTree")  of
+  Just Refl -> return $ Just v
+  Nothing -> return Nothing
 
 goto_err'' :: [Some (TraceNode sym arch)] -> ReplM sym arch ()
 goto_err'' (Some node@(TraceNode _ _ subtree) : xs) = (IO.liftIO $ getTreeStatus subtree) >>= \case
@@ -550,15 +565,23 @@ goto_node' nextNode = do
   lastNode <- currentNode
   loadTraceNode nextNode
   modify $ \st -> st { replPrev = lastNode : (replPrev st) }
-  
-       
+
 goto' :: Int -> ReplM sym arch (Maybe (Some (TraceNode sym arch)))
 goto' idx = do
   fetchNode idx >>= \case
-    Just (Some nextNode) -> do
-      goto_node' nextNode
-      ls'
-      return $ Just (Some nextNode)
+    Just (Some nextNode) -> asChoice nextNode >>= \case
+      Just (SomeChoice c) -> do
+        IO.liftIO $ choicePick c
+        Some curNode <- currentNode
+        asChoiceTree curNode >>= \case
+          Just{} -> up'
+          Nothing -> return ()
+        IO.liftIO $ wait
+        (Just <$> currentNode)
+      Nothing -> do
+        goto_node' nextNode
+        ls'
+        return $ Just (Some nextNode)
     Nothing -> return Nothing
 
 finishedPrefix :: ReplM sym arch (Int)
@@ -577,7 +600,7 @@ waitRepl lastShown = do
         IO.liftIO $ IO.putStrLn ""
         prettyNextNodes lastShown False >>= printPrettyLn   
       False -> do
-        Some (TraceNode _ _ t) <- gets replNode
+        Some (node@(TraceNode _ _ t)) <- gets replNode
         st <- IO.liftIO $ getTreeStatus t
         case isFinished st of
           True -> IO.liftIO $ IO.putStrLn "No such option" >> return ()
@@ -588,7 +611,9 @@ waitRepl lastShown = do
               prettyNextNodes lastShown True >>= printPretty
             else
               IO.liftIO (IO.putStr ".")
-            ((IO.liftIO $ IO.threadDelay 1000000) >> waitRepl n)
+            isBlocked >>= \case
+              True -> IO.liftIO (IO.putStrLn "") >> return ()
+              False -> ((IO.liftIO $ IO.threadDelay 1000000) >> waitRepl n)
 
 tryKillWaitThread :: IO ()
 tryKillWaitThread = do
@@ -640,11 +665,6 @@ gotoIndex idx = (goto' (fromIntegral idx)) >>= \case
     return $ show (prettyNode @_ @'(sym, arch) @nm lbl v)
   Nothing -> return "No such option"
 
-gotoIndexPure :: Integer -> String
-gotoIndexPure idx = IO.unsafePerformIO $ 
-  runReplM (gotoIndex idx) >>= \case
-    Just s -> return s
-    Nothing -> return "No tree loaded"
 -- Hacks to export the arch and sym parameters to the toplevel
 
 coerceValidRepr ::

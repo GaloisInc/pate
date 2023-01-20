@@ -104,6 +104,7 @@ import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
 import Data.Maybe (fromMaybe)
 import qualified System.IO as IO
+import Control.Monad (forM_)
 
 -- Overall module notes/thoughts
 --
@@ -252,6 +253,19 @@ mergeDualNodes nd1 spec1 nd2 spec2 syncNode gr = fnTrace "mergeDualNodes" $ with
       Left{} -> throwHere $ PEE.OutOfGas
       Right gr' -> return gr'
 
+-- | Choose some work item (optionally interactively)
+chooseWorkItemM ::
+  PA.ValidArch arch =>
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch))
+chooseWorkItemM gr = do
+  let nodes = Set.toList $ pairGraphWorklist gr
+  case nodes of
+    [] -> return Nothing
+    [node] -> return (Just $ popWorkItem gr node)
+    _ -> choose @"node" "chooseWorkItem" $ \choice -> forM_ nodes $ \nd -> 
+      choice "" nd $ return (Just $ popWorkItem gr nd)
+
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
 --   to all reachable positions in the program graph and we reach stability,
@@ -262,7 +276,7 @@ pairGraphComputeFixpoint ::
   forall sym arch. PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
 pairGraphComputeFixpoint gr0 = do
   let
-    go (gr :: PairGraph sym arch) = case chooseWorkItem gr of
+    go (gr :: PairGraph sym arch) = (lift $ chooseWorkItemM gr) >>= \case
       Nothing -> return gr
       Just (gr', nd, preSpec) -> do
         gr'' <- subTrace @"node" nd $ startTimer $ do

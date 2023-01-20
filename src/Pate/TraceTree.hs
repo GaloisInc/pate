@@ -88,6 +88,7 @@ module Pate.TraceTree (
   , runNodeBuilderT
   , getNodeBuilder
   , noTracing
+  , chooseLabel
   , choose
   , ChoiceHeader(..)
   , SomeChoiceHeader(..)
@@ -318,12 +319,31 @@ prettyNodeAt tags lbl v = case getNodePrinter @k @nm tags of
   Just pp -> Just (pp lbl v)
   Nothing -> Nothing
 
-nodeShownAt ::
+nodeKindShownAt ::
   forall k nm.
   IsTraceNode k nm =>
   [TraceTag] ->
   Bool
-nodeShownAt tags = isJust (getNodePrinter @k @nm tags)
+nodeKindShownAt tags = isJust (getNodePrinter @k @nm tags)
+
+nodeShownAt ::
+  forall k nm.
+  [TraceTag] ->
+  TraceTreeNode k nm ->
+  IO Bool
+nodeShownAt tags node@(TraceTreeNode{}) = case nodeKindShownAt @k @nm tags of
+  True -> case testEquality (knownSymbol @"choiceTree") (knownSymbol @nm) of
+    Just Refl -> viewTraceTreeNode node >>= \case
+      [((SomeChoiceHeader header, _), _)] -> choiceReady header >>= \case
+        -- once a choice has been made, don't display the tree
+        True -> return False
+        -- if the choice has been made, we need to display the
+        -- tree so a decision can be made
+        False -> return True
+      _ -> return True
+    Nothing -> return True
+  False -> return False
+
 
 tagsMap ::
   forall k nm a.
@@ -451,31 +471,32 @@ instance IsTraceNode k "bool" where
   type TraceNodeLabel "bool" = String
   prettyNode msg b = PP.pretty msg <> ":" PP.<+> PP.pretty b
 
-data ChoiceHeader k (nm_choice :: Symbol) (nm_ret :: Symbol) = 
-  (IsTraceNode k nm_choice, IsTraceNode k nm_ret) =>
+data ChoiceHeader k (nm_choice :: Symbol) a = 
+  (IsTraceNode k nm_choice) =>
     ChoiceHeader { choiceType :: SymbolRepr nm_choice
-                 , choiceReturn :: SymbolRepr nm_ret
                  , choiceSelected :: IO ()
                  -- ^ run to unblock the ready check
                  , waitForChoice :: IO ()
                  -- ^ blocks until some choice has been made
-                 }
+                 , choiceReady :: IO Bool
+                 -- ^ true if a choice has been made
+                 } 
 
 data SomeChoiceHeader k = forall nm_choice nm_ret. SomeChoiceHeader (ChoiceHeader k nm_choice nm_ret)
 
 instance IsTraceNode k "choiceTree" where
   type TraceNodeType k "choiceTree" = SomeChoiceHeader k
   type TraceNodeLabel "choiceTree" = String
-  prettyNode lbl (SomeChoiceHeader (ChoiceHeader nm_choice _nm_ret _ _)) = prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl
+  prettyNode lbl (SomeChoiceHeader (ChoiceHeader nm_choice _ _ _)) = prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl
   nodeTags = 
-    [(Summary, \lbl ((SomeChoiceHeader (ChoiceHeader nm_choice _nm_ret _ _))) -> prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl)
+    [(Summary, \lbl ((SomeChoiceHeader (ChoiceHeader nm_choice _ _ _))) -> prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl)
     , (Simplified, \nm _ -> PP.pretty nm) ]
 
-data Choice k (nm_choice :: Symbol) (nm_ret :: Symbol) = 
-  Choice { choiceHeader :: ChoiceHeader k nm_choice nm_ret
+data Choice k (nm_choice :: Symbol) a = 
+  Choice { choiceHeader :: ChoiceHeader k nm_choice a
          , choiceLabel :: TraceNodeLabel nm_choice
          , choiceLabelValue ::  TraceNodeType k nm_choice
-         , choiceValue :: IO (TraceNodeType k nm_ret)
+         , choiceValue :: IO (a)
          , choicePick :: IO ()
          -- ^ executed by some interactive client to indicate
          -- this is the desired choice
@@ -495,34 +516,34 @@ instance IsTraceNode k "choice" where
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
 
 choose_ ::
-  forall nm_choice nm_ret k m e.
+  forall nm_choice a k m e.
   IsTreeBuilder k e m =>
   IsTraceNode k nm_choice =>
-  IsTraceNode k nm_ret =>
   String ->
-  (ChoiceHeader k nm_choice nm_ret -> NodeBuilderT k "choice" m ()) ->
-  m (ChoiceHeader k nm_choice nm_ret)
+  (ChoiceHeader k nm_choice a -> NodeBuilderT k "choice" m ()) ->
+  m (ChoiceHeader k nm_choice a)
 choose_ treenm f = do
   builder <- getTreeBuilder
-  (header :: ChoiceHeader k nm_choice nm_ret) <- case interactionMode builder of
+  (header :: ChoiceHeader k nm_choice a) <- case interactionMode builder of
     Interactive -> do
       c <- liftIO $ newEmptyMVar
-      return $ ChoiceHeader knownSymbol knownSymbol (tryPutMVar c () >> return ()) (readMVar c)
-    DefaultChoice -> return $ ChoiceHeader knownSymbol knownSymbol (return ()) (return ())
+      let isReady = not <$> isEmptyMVar c
+      return $ ChoiceHeader knownSymbol (tryPutMVar c () >> return ()) (readMVar c) isReady
+    DefaultChoice -> return $ ChoiceHeader knownSymbol (return ()) (return ()) (return True)
 
   withSubTraces $
     subTraceLabel @"choiceTree" @k @m treenm (SomeChoiceHeader header)
       $ withSubTraces @"choice" @k (f header >> return header)
 
 mkChoice ::
-  forall nm_choice nm_ret k m.
+  forall nm_choice a k m.
   MonadTreeBuilder k m =>
   IO.MonadUnliftIO m =>
-  ChoiceHeader k nm_choice nm_ret ->
+  ChoiceHeader k nm_choice a ->
   TraceNodeLabel nm_choice ->
   TraceNodeType k nm_choice ->
-  m (TraceNodeType k nm_ret) ->
-  m (Choice k nm_choice nm_ret)
+  m a ->
+  m (Choice k nm_choice a)
 mkChoice header label labelV f = do
   builder <- getTreeBuilder
   case interactionMode builder of
@@ -535,17 +556,16 @@ mkChoice header label labelV f = do
       return $ Choice header label labelV (inIO f) (choiceSelected header >> return ()) (return True)
 
 choice_ ::
-  forall nm_choice nm_ret k m e.
+  forall nm_choice a k m e.
   IO.MonadUnliftIO m =>
   IsTreeBuilder k e m =>
   IsTraceNode k nm_choice =>
-  IsTraceNode k nm_ret =>
-  ChoiceHeader k nm_choice nm_ret ->
+  ChoiceHeader k nm_choice a ->
   String ->
   TraceNodeLabel nm_choice ->
   TraceNodeType k nm_choice ->
-  m (TraceNodeType k nm_ret) ->
-  NodeBuilderT k "choice" (WriterT [Choice k nm_choice nm_ret] m) ()
+  m a ->
+  NodeBuilderT k "choice" (WriterT [Choice k nm_choice a] m) ()
 choice_ header name label v f = do
   c <- lift $ lift $ mkChoice header label v f
   subTraceLabel name (SomeChoice c) (return ())
@@ -553,32 +573,46 @@ choice_ header name label v f = do
   return ()
 
 getChoice ::
-  ChoiceHeader k nm_choice nm_ret ->
-  [Choice k nm_choice nm_ret] ->
-  IO (TraceNodeType k nm_ret)
+  forall k e m nm_choice a.
+  IsTreeBuilder k e m =>
+  ChoiceHeader k nm_choice a ->
+  [Choice k nm_choice a] ->
+  m a
 getChoice header choices = do
-  () <- waitForChoice header
+  () <- liftIO $ waitForChoice header
   go choices
   where
-    go [] = fail "No choices"
-    go (c : choices') = choiceChosen c >>= \case
-      True -> choiceValue c
+    go :: [Choice k nm_choice a] -> m a
+    go [] = liftIO $ fail "No choices"
+    go (c : choices') = (liftIO $ choiceChosen c) >>= \case
+      True  -> (liftIO $ choiceValue c)
       False -> go choices'
 
 -- | Interactively select one result from a list of choices
-choose ::
-  forall nm_choice nm_ret k m e.
+chooseLabel ::
+  forall nm_choice a k m e.
   IsTreeBuilder k e m =>
   IO.MonadUnliftIO m =>
   IsTraceNode k nm_choice =>
-  IsTraceNode k nm_ret =>
   String ->
-  (forall m'. Monad m' => (String -> TraceNodeLabel nm_choice -> TraceNodeType k nm_choice -> m (TraceNodeType k nm_ret) -> m' ()) ->
+  (forall m'. Monad m' => (String -> TraceNodeLabel nm_choice -> TraceNodeType k nm_choice -> m a -> m' ()) ->
     m' ()) ->
-  m (TraceNodeType k nm_ret)
-choose treenm f = do
-  (header, choices) <- runWriterT (choose_ @nm_choice @nm_ret @k treenm (\header -> f (choice_ header)))
-  liftIO $ getChoice header choices
+  m a
+chooseLabel treenm f = do
+  (header, choices) <- runWriterT (choose_ @nm_choice @a @k treenm (\header -> f (choice_ header)))
+  getChoice header choices
+
+choose ::
+  forall nm_choice a k m e.
+  IsTreeBuilder k e m =>
+  IO.MonadUnliftIO m =>
+  IsTraceNode k nm_choice =>
+  Default (TraceNodeLabel nm_choice) =>
+  String ->
+  (forall m'. Monad m' => (String -> TraceNodeType k nm_choice -> m a -> m' ()) ->
+    m' ()) ->
+  m a
+choose treenm f = chooseLabel @nm_choice treenm (\choice -> f (\nm v g -> choice nm def v g))
 
 class Monad m => MonadTreeBuilder k m | m -> k where
   getTreeBuilder :: m (TreeBuilder k)
