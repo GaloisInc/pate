@@ -45,9 +45,13 @@ module Pate.Verification.PairGraph
   , setEquivCondition
   , dropDomain
   , markEdge
-  , addSyncPoint
   , getSyncPoint
-  , isTargetSyncPoint
+  , getBackEdgesFrom
+  , setSyncPoint
+  , getCombinedSyncPoint
+  , addToWorkList
+  , SyncPoint(..)
+  , singleNodeRepr
   ) where
 
 import           Prettyprinter
@@ -83,13 +87,15 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, asSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
 import qualified Pate.Binary as PBi
+import Data.Parameterized (Some(..))
+import Control.Applicative (Const(..))
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -204,8 +210,11 @@ data PairGraph sym arch =
     -- | Mapping from singleton nodes to their "synchronization" point, representing
     --   the case where two independent program analysis steps have occurred and now
     --   their control-flows have re-synchronized
-  , pairGraphSyncPoint :: !(Map (NodeReturn arch) (Set (NodeReturn arch)))
+  , pairGraphSyncPoints :: !(Map (GraphNode arch) (SyncPoint arch))
   }
+
+data SyncPoint arch =
+  SyncPoint (PPa.PatchPairC (GraphNode arch))
 
 ppProgramDomains ::
   forall sym arch a.
@@ -242,7 +251,7 @@ emptyPairGraph =
   , pairGraphEquivConditions = mempty
   , pairGraphEdges = mempty
   , pairGraphBackEdges = mempty
-  , pairGraphSyncPoint = mempty
+  , pairGraphSyncPoints = mempty
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -570,33 +579,71 @@ addReturnVector gr funPair retPair =
 
     wl = Set.insert (ReturnNode funPair) (pairGraphWorklist gr)
 
+
 getSyncPoint ::
   PairGraph sym arch ->
-  NodeReturn arch ->
-  Maybe (Set (NodeReturn arch))
-getSyncPoint gr nd = Map.lookup nd (pairGraphSyncPoint gr)
+  PBi.WhichBinaryRepr bin ->
+  GraphNode arch ->
+  Maybe (GraphNode arch)
+getSyncPoint gr bin nd = case Map.lookup nd (pairGraphSyncPoints gr) of
+  Just (SyncPoint syncPair) -> PPa.getC bin syncPair
+  Nothing -> Nothing
 
-isTargetSyncPoint ::
+-- | If both sides of the sync point are defined, returns
+--   the merged node for them
+getCombinedSyncPoint ::
   PairGraph sym arch ->
-  NodeReturn arch ->
-  Bool
-isTargetSyncPoint gr nd |
-    Just ndO <- asSingleReturn PBi.OriginalRepr nd
-  , Just ndP <- asSingleReturn PBi.PatchedRepr nd = 
-    Set.member nd (fromMaybe Set.empty (getSyncPoint gr ndO)) &&
-    Set.member nd (fromMaybe Set.empty (getSyncPoint gr ndP))
-isTargetSyncPoint _ _ = False
+  GraphNode arch ->
+  Maybe (GraphNode arch)
+getCombinedSyncPoint gr ndDiv = do
+  (SyncPoint sync) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
+  case sync of
+    PPa.PatchPairSingle{} -> Nothing
+    PPa.PatchPairC ndO ndP -> combineNodes ndO ndP
 
-addSyncPoint ::
+-- | Compute a merged node for two diverging nodes
+-- FIXME: do we need to support mismatched node kinds here?
+combineNodes :: GraphNode arch -> GraphNode arch -> Maybe (GraphNode arch)
+combineNodes node1 node2 = do
+  (nodeO, nodeP) <- case PPa.get PBi.OriginalRepr (graphNodeBlocks node1) of
+    Just{} -> return (node1, node2)
+    Nothing -> return (node2, node1)
+  case (nodeO, nodeP) of
+    (GraphNode nodeO', GraphNode nodeP') -> do
+      blocksO <- PPa.get PBi.OriginalRepr (nodeBlocks nodeO')
+      blocksP <- PPa.get PBi.PatchedRepr (nodeBlocks nodeP')
+      -- FIXME: retain calling context?
+      return $ GraphNode $ rootEntry (PPa.PatchPair blocksO blocksP)
+    (ReturnNode nodeO', ReturnNode nodeP') -> do
+      fnsO <- PPa.get PBi.OriginalRepr (nodeFuns nodeO')
+      fnsP <- PPa.get PBi.PatchedRepr (nodeFuns nodeP')
+      -- FIXME: retain calling context?
+      return $ ReturnNode $ rootReturn (PPa.PatchPair fnsO fnsP)
+    _ -> Nothing
+
+singleNodeRepr :: GraphNode arch -> Maybe (Some (PBi.WhichBinaryRepr))
+singleNodeRepr nd = case graphNodeBlocks nd of
+  PPa.PatchPairSingle bin _ -> return $ Some bin
+  PPa.PatchPair{} -> Nothing
+
+setSyncPoint ::
   PairGraph sym arch ->
-  NodeReturn arch {- ^ The singleton node, just before synchronization -}  ->
-  NodeReturn arch {- ^ The pair node, after synchronization -} ->
-  PairGraph sym arch
-addSyncPoint gr from to 
-  | PPa.PatchPairSingle{} <- nodeFuns from
-  , PPa.PatchPair{} <- nodeFuns to = 
-    gr { pairGraphSyncPoint = Map.insertWith Set.union from (Set.singleton to) (pairGraphSyncPoint gr) }
-addSyncPoint _ _ _ = error "addSyncPoint: unexpected PatchPair shape"
+  GraphNode arch {- ^ The divergent node -}  ->
+  GraphNode arch {- ^ The sync node -} ->
+  Maybe (PairGraph sym arch)
+setSyncPoint pg ndDiv ndSync = do
+  fmap PPa.someC $ PPa.forBinsC $ \bin -> do
+    -- check which binary these nodes are for
+    _ <- PPa.get bin (graphNodeBlocks ndDiv)
+    _ <- PPa.get bin (graphNodeBlocks ndSync)
+    let ndSync' = PPa.PatchPairSingle bin (Const ndSync)
+    case Map.lookup ndDiv (pairGraphSyncPoints pg) of
+      Just (SyncPoint sp) -> do
+        sp' <- PPa.update sp $ \bin' -> PPa.get bin' ndSync'
+        return $ pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp') (pairGraphSyncPoints pg) }
+      Nothing -> do
+        let sp = PPa.mkSingle bin (Const ndSync)
+        return $ pg {pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp) (pairGraphSyncPoints pg) }
 
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.

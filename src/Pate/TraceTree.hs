@@ -512,7 +512,9 @@ prettyChoice c = (\(ChoiceHeader{}) -> prettyNode @_ @k @nm_choice (choiceLabel 
 instance IsTraceNode k "choice" where
   type TraceNodeType k "choice" = SomeChoice k
   type TraceNodeLabel "choice" = String
-  prettyNode nm (SomeChoice c) = PP.pretty nm <> ":" PP.<+> prettyChoice c
+  prettyNode nm (SomeChoice c) = case nm of
+    "" -> prettyChoice c
+    _ -> PP.pretty nm <> ":" PP.<+> prettyChoice c
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
 
 choose_ ::

@@ -98,13 +98,15 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry' )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import qualified System.IO as IO
 import Control.Monad (forM_)
+import qualified Data.Macaw.Discovery as MD
+import Data.Foldable (foldl')
 
 -- Overall module notes/thoughts
 --
@@ -195,6 +197,7 @@ shouldProcessNode node = do
     True -> return True
     False -> not <$> asks (PCfg.cfgIgnoreDivergedControlFlow . envConfig)
 
+
 -- If the given 'GraphNode' is a synchronization point (i.e. it has
 -- a corresponding synchronization edge), then we need to pop it from
 -- the worklist and instead enqueue the corresponding biprogram nodes
@@ -203,9 +206,74 @@ handleSyncPoint ::
   GraphNode arch ->
   PAD.AbstractDomainSpec sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
+handleSyncPoint pg nd _spec = case getDivergePoint nd of
+  -- not a diverging node
+  Nothing -> return Nothing
+  Just divergeNode -> do
+    Just (Some bin) <- return $ singleNodeRepr nd
+    case getSyncPoint pg bin divergeNode of
+      Just sync | sync == nd -> Just <$> updateCombinedSyncPoint divergeNode pg
+      -- We have a sync node but it hasn't been processed yet, so continue execution
+      Just{} -> return Nothing
+      Nothing -> do
+        pg1 <- chooseSyncPoint divergeNode pg
+        Just <$> updateCombinedSyncPoint divergeNode pg1
+
+-- | Given a source divergent node, pick a synchronization point where
+--   control flow should again match between the two binaries
+chooseSyncPoint :: 
+  GraphNode arch -> 
+  PairGraph sym arch -> 
+  EquivM sym arch (PairGraph sym arch)
+chooseSyncPoint nd pg = do
+  syncP <- pickSyncPoint PPa.PatchedRepr nd pg
+  choose @"bool" "Use same PC for original binary?" $ \choice -> do
+    choice "" True $ do
+      
+    choice "" False $ return False
+
+  let blks = graphNodeBlocks nd
+
+  -- pick the patched binary first, since it likely
+  -- extra blocks that we may want to use as sync points
+  blkP <- PPa.get PPa.PatchedRepr blks
+
+  syncNodes <- PPa.catBins $ \bin -> 
+    Just{} -> return []
+    Nothing -> do
+      blk <- PPa.get bin blks
+      PD.ParsedBlocks pblks <- PD.lookupBlocks blk
+      retSingle <- asSingleReturn bin ret
+
+  return $ foldl' (\pg_ sync -> fromJust $ setSyncPoint pg_ nd sync) pg syncNodes
+
+pickSyncPoint ::
+  PBi.WhichBinaryRepr bin ->
+  GraphNode arch -> 
+  PairGraph sym arch -> 
+  EquivM sym arch (GraphNode arch)
+pickSyncPoint bin nd pg = case getSyncPoint pg bin nd of
+  Just sync -> return sync
+  Nothing -> do
+    let ret = case nd of
+          GraphNode ne -> returnOfEntry ne
+          ReturnNode nr -> nr
+    blk <- PPa.get bin (graphNodeBlocks nd)
+    PD.ParsedBlocks pblks <- PD.lookupBlocks blk
+    retSingle <- asSingleReturn bin ret
+    choose @"node" "Choose a synchronization point:" $ \choice -> do
+      forM_ pblks $ \pblk -> do
+        -- FIXME: block entry kind is unused at the moment?
+        let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump (MD.pblockAddr pblk)
+        let node = mkNodeEntry' nd (PPa.mkSingle bin concBlk)
+        choice "" (GraphNode node) $ return (GraphNode node)
+      choice "" (ReturnNode retSingle) $ return (ReturnNode retSingle)
+
+
+{-
 handleSyncPoint _ (GraphNode{}) _ = return Nothing
 handleSyncPoint pg (ReturnNode nd) spec = case nodeFuns nd of
-  PPa.PatchPair{} | isTargetSyncPoint pg nd -> do
+  PPa.PatchPair{} -> do
     ndO <- asSingleReturn PBi.OriginalRepr nd
     ndP <- asSingleReturn PBi.PatchedRepr nd
     -- if both single-sided cases have finished processing, then we can process
@@ -222,36 +290,58 @@ handleSyncPoint pg (ReturnNode nd) spec = case nodeFuns nd of
             Just nd_other -> case getCurrentDomain pg (ReturnNode nd_other) of
               -- dual node has a spec, so we can merge them and add the result to the graph
               -- as the sync point
-              Just spec_other -> mergeDualNodes nd spec nd_other spec_other nd' gr'
+              Just{} | PPa.PatchPairC ndO ndP <- PPa.mkPair bin (Const nd) (Const nd') -> 
+                chooseSyncPoint (ReturnNode ndO) (ReturnNode ndP) pg
               -- if the dual node is not present in the graph, we assume it will
               -- be handled when the dual case is pushed through the verifier, so
               -- we drop it here
-              Nothing -> return gr'
+              _ -> return gr'
             Nothing -> PPa.throwPairErr
       Just <$> foldM go pg (Set.elems syncs)
     Nothing -> return Nothing
+-}
 
-mergeDualNodes ::
-  NodeReturn arch {- ^ first node to merge -} ->
-  PAD.AbstractDomainSpec sym arch {- ^ first node domain -} ->
-  NodeReturn arch {- ^ second node to merge -} ->
-  PAD.AbstractDomainSpec sym arch  {- ^ second node domain -} ->
-  NodeReturn arch {- ^ sync node -} ->
+
+-- FIXME: this is pretty brittle, as it makes a bunch of assumptions about
+-- the graph state
+updateCombinedSyncPoint ::
+  GraphNode arch {- ^ diverging node -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-mergeDualNodes nd1 spec1 nd2 spec2 syncNode gr = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
-  fnPair <- PPa.zip (nodeFuns nd1) (nodeFuns nd2)
-  let blkPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
+updateCombinedSyncPoint divergeNode pg = case getCombinedSyncPoint pg divergeNode of
+  Nothing -> return pg
+  Just combinedNode -> do
+    PPa.PatchPairC (syncO, mdomO) (syncP, mdomP) <-
+      PPa.forBinsC $ \bin -> do
+        Just sync <- return $ getSyncPoint pg bin divergeNode
+        mdom <- return $ getCurrentDomain pg sync
+        return $ (sync, mdom)
+    case (mdomO, mdomP) of
+      (Just domO, Just domP) -> mergeDualNodes syncO syncP domO domP combinedNode pg
+      -- one of the single-sided analysis steps has not finished
+      _ -> return pg
+
+mergeDualNodes ::
+  GraphNode arch {- ^ first program node -} ->
+  GraphNode arch {- ^ second program node -} ->
+  PAD.AbstractDomainSpec sym arch {- ^ first node domain -} ->
+  PAD.AbstractDomainSpec sym arch  {- ^ second node domain -} ->
+  GraphNode arch {- ^ sync node -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+mergeDualNodes in1 in2 spec1 spec2 syncNode gr = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
+  let blkPair = graphNodeBlocks syncNode
   merged_dom <- withFreshVars blkPair $ \vars -> do
     (asm1, body1) <- liftIO $ PS.bindSpec sym vars spec1
     (asm2, body2) <- liftIO $ PS.bindSpec sym vars spec2
     body <- PAD.zipSingletonDomains sym body1 body2
     emitTraceLabel @"domain" PAD.ExternalPostDomain (Some body)
     return $ (asm1 <> asm2, body)
-  -- model this as a "jump" from the singleton node to the sync node
-  case updateDomain gr (ReturnNode nd1) (ReturnNode syncNode) merged_dom of
-      Left{} -> throwHere $ PEE.OutOfGas
-      Right gr' -> return gr'
+  -- model this as a "jump" from either singleton node to the sync node
+  Right gr' <- return $ updateDomain gr in1 syncNode merged_dom
+  Right gr'' <- return $ updateDomain gr' in2 syncNode merged_dom
+  return gr''
+
 
 -- | Choose some work item (optionally interactively)
 chooseWorkItemM ::
@@ -263,8 +353,10 @@ chooseWorkItemM gr = do
   case nodes of
     [] -> return Nothing
     [node] -> return (Just $ popWorkItem gr node)
+    _ -> return $ chooseWorkItem gr
     _ -> choose @"node" "chooseWorkItem" $ \choice -> forM_ nodes $ \nd -> 
       choice "" nd $ return (Just $ popWorkItem gr nd)
+
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -571,12 +663,13 @@ withValidInit scope bPair f = withPair bPair $ do
 
 withSimBundle ::
   forall sym arch v a.
+  PairGraph sym arch ->
   PPa.PatchPair (PS.SimVars sym arch v) ->
   NodeEntry arch ->
   (SimBundle sym arch v -> EquivM_ sym arch a) ->
   EquivM sym arch a
-withSimBundle vars node f = do
-  bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle node vars
+withSimBundle pg vars node f = do
+  bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle pg node vars
   simplifier <- PSi.getSimplifier
   bundle1 <- PSi.applySimplifier simplifier bundle0
   bundle <- applyCurrentAsms bundle1
@@ -648,7 +741,7 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withAbsDomain nod
   withValidInit scope bPair $ do
     gr1 <- updateExtraEdges scope node d gr0
     let vars = PS.scopeVars scope
-    withSimBundle vars node $ \bundle -> 
+    withSimBundle gr1 vars node $ \bundle -> 
       withPredomain scope bundle d $ processBundle scope node bundle d gr1
 
 visitNode scope (ReturnNode fPair) d gr0 = do
@@ -1676,13 +1769,6 @@ singletonBundle ::
 singletonBundle bin (SimBundle in_ out_) = 
   SimBundle <$> PPa.asSingleton bin in_ <*> PPa.asSingleton bin out_
 
-singletonNodeEntry::
-  PBi.WhichBinaryRepr bin ->
-  NodeEntry arch ->
-  EquivM sym arch (NodeEntry arch)
-singletonNodeEntry bin entry = 
-  mkNodeEntry entry <$> PPa.asSingleton bin (nodeBlocks entry)
-
 handleStub ::
   HasCallStack =>
   PS.SimScope sym arch v ->
@@ -1705,23 +1791,30 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
       -- computation is assumed to now be synchronized again
       -- (with a resulting weakened equivalence domain for any
       -- effects that occured on each side independently)
-      let outerReturn = returnOfEntry currBlock
 
       -- handle Original case
-      currBlockO <- singletonNodeEntry PBi.OriginalRepr currBlock
+      currBlockO <- asSingleNode PBi.OriginalRepr currBlock
+      currBlockP <- asSingleNode PBi.PatchedRepr currBlock
+      let gr1 = gr0_
+      Just spec <- return $ getCurrentDomain gr1 (GraphNode currBlock)
+
       gr2 <- withTracing @"node" (GraphNode currBlockO) $  do
-        let gr1 = addSyncPoint gr0_ (returnOfEntry currBlockO) outerReturn
-        bundleO <- singletonBundle PBi.OriginalRepr bundle
-        dO <- PAD.singletonDomain PBi.OriginalRepr d
-        processBundle scope currBlockO bundleO dO gr1
+        --bundleO <- singletonBundle PBi.OriginalRepr bundle
+        --dO <- PAD.singletonDomain PBi.OriginalRepr d
+        specO <- PS.forSpec spec (\_ -> PAD.singletonDomain PBi.OriginalRepr)
+        Right gr1' <- return $ updateDomain gr1 (GraphNode currBlock) (GraphNode currBlockO) specO
+        return $ gr1'
+        --processBundle scope currBlockO bundleO dO gr1'
       -- handle Patched case
-      currBlockP <- singletonNodeEntry PBi.PatchedRepr currBlock
-      gr4 <- withTracing @"node" (GraphNode currBlockP) $ do
-        let gr3 = addSyncPoint gr2 (returnOfEntry currBlockP) outerReturn
-        bundleP <- singletonBundle PBi.PatchedRepr bundle
-        dP <- PAD.singletonDomain PBi.PatchedRepr d
-        processBundle scope currBlockP bundleP dP gr3
-      return gr4
+      
+      gr3 <- withTracing @"node" (GraphNode currBlockP) $ do
+        --bundleP <- singletonBundle PBi.PatchedRepr bundle
+        --dP <- PAD.singletonDomain PBi.PatchedRepr d
+        specP <- PS.forSpec spec (\_ -> PAD.singletonDomain PBi.PatchedRepr)
+        Right gr2' <- return $ updateDomain gr2 (GraphNode currBlock) (GraphNode currBlockP) specP
+        return gr2'
+        --processBundle scope currBlockP bundleP dP gr2'
+      return gr3
     False -> do
       gr0 <- case hasTerminalStub stubPair of
         True -> handleTerminalFunction currBlock gr0_
@@ -1776,10 +1869,12 @@ handleJump scope bundle currBlock d gr nextNode =
   widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode nextNode)
 
 mkSimBundle ::
+  forall sym arch v.
+  PairGraph sym arch ->
   NodeEntry arch ->
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   EquivM sym arch (SimBundle sym arch v)
-mkSimBundle node vars = do
+mkSimBundle pg node vars = do
   let pPair = nodeBlocks node
   (simIn_, simOut_) <- PPa.forBins2 $ \bin -> do
     blk <- PPa.get bin pPair
@@ -1788,6 +1883,13 @@ mkSimBundle node vars = do
     absState <- PD.getAbsDomain blk
     let simIn_ = PS.SimInput varState blk absState
     traceBlockPair pPair ("Simulating " ++ show bin ++ " blocks")
-    (_asm, simOut_) <- PVSy.simulate simIn_
+    msync <- case getSyncPoint pg bin (GraphNode node) of
+      Just sync -> (Just . PB.concreteAddress) <$> PPa.get bin (graphNodeBlocks sync)
+      Nothing -> return Nothing
+    let 
+      isKilled :: forall ids. MD.ParsedBlock arch ids -> Bool
+      isKilled pblk = 
+        Just (PAd.segOffToAddr (MD.pblockAddr pblk)) == msync
+    (_asm, simOut_) <- PVSy.simulate simIn_ isKilled
     return $ (simIn_, simOut_)
   return $ SimBundle simIn_ simOut_

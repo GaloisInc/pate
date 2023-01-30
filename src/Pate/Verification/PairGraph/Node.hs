@@ -23,6 +23,7 @@ module Pate.Verification.PairGraph.Node (
   , pattern GraphNodeReturn
   , graphNodeBlocks
   , mkNodeEntry
+  , mkNodeEntry'
   , addContext
   , mkNodeReturn
   , rootEntry
@@ -33,6 +34,9 @@ module Pate.Verification.PairGraph.Node (
   , functionEntryOf
   , returnOfEntry
   , asSingleReturn
+  , asSingleNode
+  , splitGraphNode
+  , getDivergePoint
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -85,37 +89,63 @@ pattern GraphNodeReturn blks <- (ReturnNode (NodeReturn _ blks))
 -- | Additional context used to distinguish function calls
 --   "Freezing" one binary in a node indicates that it should not continue
 --   execution until the other binary has returned
-data CallingContext arch = CallingContext { _ctxAncestors :: [PB.BlockPair arch] }
+data CallingContext arch = CallingContext { _ctxAncestors :: [PB.BlockPair arch], divergePoint :: Maybe (GraphNode arch) }
   deriving (Eq, Ord)
 
 
 instance PA.ValidArch arch => Pretty (CallingContext arch) where
-  pretty (CallingContext bps) =
+  pretty (CallingContext bps _) =
     let
       bs = [ pretty bp | bp <- bps ]
     in sep ((zipWith (<+>) ( "via:" : repeat "<-") bs))
 
 
+getDivergePoint :: GraphNode arch -> Maybe (GraphNode arch)
+getDivergePoint nd = case nd of
+  GraphNode (NodeEntry ctx _) -> divergePoint ctx
+  ReturnNode (NodeReturn ctx _) -> divergePoint ctx
+
 rootEntry :: PB.BlockPair arch -> NodeEntry arch
-rootEntry pPair = NodeEntry (CallingContext []) pPair
+rootEntry pPair = NodeEntry (CallingContext [] Nothing) pPair
 
 rootReturn :: PB.FunPair arch -> NodeReturn arch
-rootReturn pPair = NodeReturn (CallingContext []) pPair
+rootReturn pPair = NodeReturn (CallingContext [] Nothing) pPair
 
 addContext :: PB.BlockPair arch -> NodeEntry arch -> NodeEntry arch
-addContext newCtx (NodeEntry (CallingContext ctx) blks) = NodeEntry (CallingContext (newCtx:ctx)) blks
+addContext newCtx (NodeEntry (CallingContext ctx d) blks) = NodeEntry (CallingContext (newCtx:ctx) d) blks
 
 mkNodeEntry :: NodeEntry arch -> PB.BlockPair arch -> NodeEntry arch
 mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
+
+mkNodeEntry' :: GraphNode arch -> PB.BlockPair arch -> NodeEntry arch
+mkNodeEntry' (GraphNode node) pPair = NodeEntry (graphNodeContext node) pPair
+mkNodeEntry' (ReturnNode node) pPair = NodeEntry (returnNodeContext node) pPair
 
 mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
 mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
 
 -- | Project the given 'NodeReturn' into a singleton node for the given binary
 asSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeReturn arch -> m (NodeReturn arch)
-asSingleReturn bin (NodeReturn ctx fPair) = do
+asSingleReturn bin node@(NodeReturn ctx fPair) = do
   fPair' <- PPa.asSingleton bin fPair
-  return $ NodeReturn ctx fPair'
+  return $ NodeReturn (ctx {divergePoint = Just (ReturnNode node)}) fPair'
+
+-- | Project the given 'NodeEntry' into a singleton node for the given binary
+asSingleNode:: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeEntry arch -> m (NodeEntry arch)
+asSingleNode bin node@(NodeEntry ctx bPair) = do
+  fPair' <- PPa.asSingleton bin bPair
+  return $ NodeEntry (ctx {divergePoint = Just (GraphNode node)}) fPair'
+
+-- | Split a graph node into two single-sided nodes (original, patched)
+--   The input node is marked as the diverge point in the two resulting nodes.
+splitGraphNode :: PPa.PatchPairM m => GraphNode arch -> m (GraphNode arch, GraphNode arch)
+splitGraphNode nd = do
+  nodes <- PPa.forBinsC $ \bin -> case nd of
+    GraphNode ne -> GraphNode <$> asSingleNode bin ne
+    ReturnNode nr -> ReturnNode <$> asSingleReturn bin nr
+  nodeO <- PPa.getC PB.OriginalRepr nodes
+  nodeP <- PPa.getC PB.PatchedRepr nodes
+  return (nodeO, nodeP)
 
 -- | Get the node corresponding to the entry point for the function
 returnToEntry :: NodeReturn arch -> NodeEntry arch
@@ -139,14 +169,14 @@ instance PA.ValidArch arch => Show (NodeEntry arch) where
 instance PA.ValidArch arch => Pretty (NodeEntry arch) where
   pretty e = case functionEntryOf e == e of
     True -> case graphNodeContext e of
-      CallingContext [] -> pretty (nodeBlocks e)
+      CallingContext [] _ -> pretty (nodeBlocks e)
       _ -> pretty (nodeBlocks e) <+> "[" <+> pretty (graphNodeContext e) <+> "]"
     False -> PPa.ppPatchPair' PB.ppBlockAddr (nodeBlocks e)
       <+> "[" <+> pretty (graphNodeContext (addContext (nodeBlocks (functionEntryOf e)) e)) <+> "]"
 
 instance PA.ValidArch arch => Pretty (NodeReturn arch) where
   pretty e = case returnNodeContext e of
-    CallingContext [] -> pretty (nodeFuns e)
+    CallingContext [] _ -> pretty (nodeFuns e)
     _ -> pretty (nodeFuns e) <+> "[" <+> pretty (returnNodeContext e) <+> "]"
 
 instance PA.ValidArch arch => Show (NodeReturn arch) where

@@ -66,6 +66,7 @@ collectProbabilisticMappings (mapping, errs) (textAddr, val) =
           let fd = PH.FunctionDescriptor { PH.functionSymbol = name
                                          , PH.functionAddress = addr
                                          , PH.functionArguments = []
+                                         , PH.functionEnd = Nothing
                                          }
           in ((name, fd) : mapping, errs)
 
@@ -136,6 +137,7 @@ collectAnvillFunctions addrSymMap (fnSpecs, errs) v =
         let fd = PH.FunctionDescriptor { PH.functionSymbol = fnName
                                        , PH.functionAddress = fnAddr
                                        , PH.functionArguments = []
+                                       , PH.functionEnd = Nothing
                                        }
         in ((fnName, fd) : fnSpecs, errs)
     _ -> (fnSpecs, UnexpectedTopLevel "Function" v : errs)

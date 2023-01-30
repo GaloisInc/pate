@@ -64,6 +64,7 @@ data FunctionDescriptor =
                      -- ^ Names of function arguments; FIXME: Will eventually
                      -- need type annotations. For now, assume all arguments are
                      -- ints
+                     , functionEnd :: Maybe Word64
                      }
   deriving (Read, Show, Generic, Eq, Ord)
 

@@ -438,7 +438,10 @@ up' = do
       modify $ \st -> st { replPrev = prevNodes' }
 
 top :: IO ()
-top = execReplM $ do
+top = execReplM $ (top' >> ls')
+
+top' :: ReplM sym arch ()
+top' = do
   prevNodes <- gets replPrev
   case prevNodes of
     [] -> IO.liftIO $ IO.putStrLn "<<At top level>>"
@@ -446,7 +449,6 @@ top = execReplM $ do
       Some init <- return $ last prevNodes
       loadTraceNode init
       modify $ \st -> st { replPrev = [] }
-  ls'
 
 status' :: Maybe Int -> IO ()
 status' mlimit = do
@@ -573,9 +575,7 @@ goto' idx = do
       Just (SomeChoice c) -> do
         IO.liftIO $ choicePick c
         Some curNode <- currentNode
-        asChoiceTree curNode >>= \case
-          Just{} -> up'
-          Nothing -> return ()
+        top'
         IO.liftIO $ wait
         (Just <$> currentNode)
       Nothing -> do

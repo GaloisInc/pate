@@ -235,6 +235,8 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 , functionBinRepr :: PB.WhichBinaryRepr bin
                 , functionIgnored :: Bool
                 -- ^ does our toplevel configuration tell us to ignore this function?
+                , functionEnd :: Maybe (MM.ArchSegmentOff arch)
+                -- ^ we might know the bounds of this function
                 }
 
 data FunCallKind = NormalFunCall | TailFunCall
@@ -271,25 +273,25 @@ instance MM.MemWidth (MM.ArchAddrWidth arch) => PC.ShowF (FunctionEntry arch) wh
   showF fe = show fe
 
 instance PC.TestEquality (FunctionEntry arch) where
-  testEquality (FunctionEntry segAddr1 _s1 binrepr1 _ign1) (FunctionEntry segAddr2 _s2 binrepr2 _ign2) =
+  testEquality (FunctionEntry segAddr1 _s1 binrepr1 _ign1 segEnd1) (FunctionEntry segAddr2 _s2 binrepr2 _ign2 segEnd2) =
     case PC.testEquality binrepr1 binrepr2 of
-      Just PC.Refl | segAddr1 == segAddr2 -> Just PC.Refl
+      Just PC.Refl | segAddr1 == segAddr2, segEnd1 == segEnd2 -> Just PC.Refl
       _ -> Nothing
 
 instance Eq (FunctionEntry arch bin) where
   fe1 == fe2 = PC.isJust $ PC.testEquality fe1 fe2
 
 instance PC.OrdF (FunctionEntry arch) where
-  compareF (FunctionEntry segAddr1 _s1 binrepr1 _ign1) (FunctionEntry segAddr2 _s2 binrepr2 _ign2) =
+  compareF (FunctionEntry segAddr1 _s1 binrepr1 _ign1 segEnd1) (FunctionEntry segAddr2 _s2 binrepr2 _ign2 segEnd2) =
     PC.lexCompareF binrepr1 binrepr2 $ PC.fromOrdering $
-      compare segAddr1 segAddr2
+      (compare segAddr1 segAddr2 <> compare segEnd1 segEnd2)
 
 
 instance Ord (FunctionEntry arch bin) where
   compare fe1 fe2 = PC.toOrdering $ PC.compareF fe1 fe2
 
 functionEntryToConcreteBlock :: FunctionEntry arch bin -> ConcreteBlock arch bin
-functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr _ign) =
+functionEntryToConcreteBlock fe@(FunctionEntry segAddr _s binRepr _ign _segEnd) =
   ConcreteBlock
   { concreteAddress    = PA.segOffToAddr segAddr
   , concreteBlockEntry = BlockEntryInitFunction

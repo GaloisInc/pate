@@ -534,6 +534,7 @@ callTargets from next_ips mret = do
                                    , PB.functionSymbol = Nothing
                                    , PB.functionBinRepr = PC.knownRepr
                                    , PB.functionIgnored = False
+                                   , PB.functionEnd = Nothing
                                    }
          fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
          let pb = PB.functionEntryToConcreteBlock fe'
@@ -579,6 +580,22 @@ addAddrSym mem m funcDesc = do
   case PM.resolveAbsoluteAddress mem (fromIntegral addr0) of
     Just segoff -> return (Map.insert segoff symbol m)
     Nothing -> return m
+
+type AddrEndMap w = Map.Map (MM.MemSegmentOff w) (MM.MemSegmentOff w)
+
+addFnEnd
+  :: (MM.MemWidth w, HasCallStack)
+  => MM.Memory w
+  -> AddrEndMap w
+  -> PH.FunctionDescriptor
+  -> CME.ExceptT PEE.EquivalenceError IO (AddrEndMap w)
+addFnEnd mem m funcDesc = case PH.functionEnd funcDesc of
+  Just fnEnd -> do
+    let addr0 = PH.functionAddress funcDesc
+    case (PM.resolveAbsoluteAddress mem (fromIntegral addr0), PM.resolveAbsoluteAddress mem (fromIntegral fnEnd)) of
+      (Just segoff, Just segoffEnd) -> return (Map.insert segoff segoffEnd m)
+      _ -> return m
+  Nothing -> return m
 
 -- | Build a symbol table used to support invoking overrides in the "inline
 -- callee" feature using traditional symbolic execution
@@ -627,10 +644,11 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
   entries <- MBL.entryPoints bin
   addrSyms' <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
   addrSyms <- F.foldlM (addElfFunction) addrSyms' (DLN.toList entries)
-  
+
   let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
-  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd
+  addrEnds <- F.foldlM (addFnEnd mem) mempty (fmap snd (PH.functionEntries hints))
+  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
   let startEntry = DLN.head entries
@@ -639,7 +657,9 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
                                      , PB.functionSymbol = Nothing
                                      , PB.functionBinRepr = repr
                                      , PB.functionIgnored = False
+                                     , PB.functionEnd = Nothing
                                      }
+  startEntry'' <- liftIO $ PDP.resolveFunctionEntry startEntry' pfm
   let abortFnEntry = do
         fnDesc <- lookup abortFnName (PH.functionEntries hints)
         abortFnAddr <- PM.resolveAbsoluteAddress mem (MM.memWord (PH.functionAddress fnDesc))
@@ -647,12 +667,13 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
                                 , PB.functionSymbol = Just (TE.encodeUtf8 abortFnName)
                                 , PB.functionBinRepr = repr
                                 , PB.functionIgnored = False
+                                , PB.functionEnd = Nothing
                                 }
 
   let symTab = buildSymbolTable hints extraSyms
 
   -- FIXME: Fill in the symbol table based on the hints and the dynamic symbol table
-  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry' hints idx abortFnEntry symTab)
+  return $ (invalidHints, PMC.BinaryContext bin pfm startEntry'' hints idx abortFnEntry symTab)
   where
     bin = PLE.loadedBinary elf
     mem = MBL.memoryImage bin

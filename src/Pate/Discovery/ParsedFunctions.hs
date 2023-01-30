@@ -65,6 +65,7 @@ data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 data ParsedFunctionState arch bin =
   ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (Some (MD.DiscoveryFunInfo arch))
                       , discoveryState :: MD.DiscoveryState arch
+                      , pfmCacheExtraTargets :: Map.Map (PB.FunctionEntry arch bin) [MM.ArchSegmentOff arch]
                       }
 
 
@@ -84,7 +85,20 @@ data ParsedFunctionMap arch bin =
                     -- The information we use out of this is a list of functions
                     -- that the analysis should ignore. See Note [Ignored
                     -- Functions] for details.
+                    , pfmEndMap :: Map.Map (MM.ArchSegmentOff arch) (MM.ArchSegmentOff arch)
                     }
+
+-- | Add an extra intra-procedural target that should appear within this function body
+--   NOTE: This is a bit clumsy to do after some blocks have already been produced
+addExtraTarget ::
+  ParsedFunctionMap arch bin ->
+  PB.FunctionEntry arch bin ->
+  MM.ArchSegmentOff arch ->
+  IO ()
+addExtraTarget pfm fe tgt = do
+  IORef.modifyIORef' (parsedStateRef pfm) $ \st -> 
+    st { pfmCacheExtraTargets = Map.insertWith (++) fe [tgt] (pfmCacheExtraTargets st) }
+
 
 addOverrides ::
   forall arch bin.
@@ -106,7 +120,11 @@ addOverrides defaultInit pfm ovs = do
           let ov = PB.mkInitAbs defaultInit mem segOff
           in applyOverride ov initAbsSt
   let archInfo' = archInfo { MAI.mkInitialAbsState = mkInit }
-  newParsedFunctionMap  (MD.memory ds_old) (MD.symbolNames ds_old) archInfo' (persistenceDir pfm) (patchData pfm)
+  let extras = pfmCacheExtraTargets st
+  pfm' <- newParsedFunctionMap  (MD.memory ds_old) (MD.symbolNames ds_old) archInfo' (persistenceDir pfm) (patchData pfm) (pfmEndMap pfm)
+  IORef.modifyIORef' (parsedStateRef pfm') $ \st_ -> 
+    st_ { pfmCacheExtraTargets = extras }
+  return pfm'
 
 -- | Allocate a new empty 'ParsedFunctionMap'
 newParsedFunctionMap
@@ -121,8 +139,10 @@ newParsedFunctionMap
   -- ^ The path to save discovered CFGs to, if present
   -> PC.PatchData
   -- ^ User-provided guidance about the patch structure and verification strategy
+  -> Map.Map (MM.ArchSegmentOff arch) (MM.ArchSegmentOff arch)
+  -- ^ mapping from function entry points to potential end points
   -> IO (ParsedFunctionMap arch bin)
-newParsedFunctionMap mem syms archInfo mCFGDir pd = do
+newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap = do
   let ds0 = MD.emptyDiscoveryState mem syms archInfo
   let s0 = ParsedFunctionState { parsedFunctionCache = mempty
                                , discoveryState = ds0
@@ -131,19 +151,22 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd = do
   return ParsedFunctionMap { parsedStateRef = ref
                            , persistenceDir = mCFGDir
                            , patchData = pd
+                           , pfmEndMap = fnEndMap
                            }
 
 funInfoToFunEntry ::
   PBi.WhichBinaryRepr bin ->
   MD.DiscoveryFunInfo arch ids ->
+  ParsedFunctionMap arch bin ->
   Set.Set (MM.MemSegmentOff (MM.ArchAddrWidth arch)) ->
   PB.FunctionEntry arch bin
-funInfoToFunEntry binRepr dfi ignoredAddrs =
+funInfoToFunEntry binRepr dfi pfm ignoredAddrs =
   PB.FunctionEntry
   { PB.functionSegAddr = MD.discoveredFunAddr dfi
   , PB.functionSymbol  = MD.discoveredFunSymbol dfi
   , PB.functionBinRepr = binRepr
   , PB.functionIgnored = Set.member (MD.discoveredFunAddr dfi) ignoredAddrs
+  , PB.functionEnd = Map.lookup (MD.discoveredFunAddr dfi) (pfmEndMap pfm)
   }
 
 buildParsedBlocks :: MD.DiscoveryFunInfo arch ids -> ParsedBlocks arch
@@ -272,7 +295,7 @@ getIgnoredFns ::
   MM.ArchConstraints arch =>
   ParsedFunctionMap arch bin ->
   IO (Set.Set (MM.MemSegmentOff (MM.ArchAddrWidth arch)))
-getIgnoredFns (ParsedFunctionMap pfmRef _ pd) = do
+getIgnoredFns (ParsedFunctionMap pfmRef _ pd _) = do
   st <- IORef.readIORef pfmRef
   let ds0 = discoveryState st
   let mem = MD.memory ds0
@@ -297,7 +320,7 @@ parsedFunctionContaining ::
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
-parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd) = do
+parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _) = do
   let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
   st <- IORef.readIORef pfmRef
   ignoredAddresses <- getIgnoredFns pfm
@@ -343,7 +366,7 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd) = do
         let rsn = MD.CallTarget faddr
         in case MD.analyzeFunction faddr rsn (discoveryState st) of
              (ds2, Some dfi) ->
-               let entry = funInfoToFunEntry W4.knownRepr dfi ignoredAddressSet 
+               let entry = funInfoToFunEntry W4.knownRepr dfi pfm ignoredAddressSet 
                in (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
                       , discoveryState = ds2
                       }, Some dfi)
@@ -354,14 +377,16 @@ resolveFunctionEntry ::
   PB.FunctionEntry arch bin ->
   ParsedFunctionMap arch bin ->
   IO (PB.FunctionEntry arch bin)
-resolveFunctionEntry fe _ | Just{} <- PB.functionSymbol fe = return fe
-resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _) = do
+resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap) = do
   st <- IORef.readIORef pfmRef
   let syms = MD.symbolNames (discoveryState st)
   ignoredAddresses <- getIgnoredFns pfm
   case Map.lookup (PB.functionSegAddr fe) syms of
-    Just nm -> return $ fe { PB.functionSymbol = Just nm, PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses }
-    Nothing -> return fe
+    Just nm -> return $ fe { PB.functionSymbol = Just nm
+                           , PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses 
+                           , PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap
+                           }
+    Nothing -> return fe { PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap }
 
 instance MM.ArchConstraints arch => IsTraceNode '(sym,arch) "parsedblock" where
   type TraceNodeType '(sym,arch) "parsedblock" = Some (MD.ParsedBlock arch)
@@ -399,7 +424,7 @@ findFunctionByName nm pfm = do
   let syms = Map.toList $ MD.symbolNames (discoveryState st)
   case F.find (\(_addr,nm_) -> BSC.pack nm == nm_) syms of
     Just (addr,nm_) -> do
-      let fe = PB.FunctionEntry addr (Just nm_) W4.knownRepr False
+      let fe = PB.FunctionEntry addr (Just nm_) W4.knownRepr False Nothing
       Just <$> resolveFunctionEntry fe pfm
     Nothing -> return Nothing
 

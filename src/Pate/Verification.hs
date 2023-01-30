@@ -353,6 +353,7 @@ unpackBlockData ctxt (PC.Address w) =
                               , PB.functionSymbol = Nothing
                               , PB.functionBinRepr = W4.knownRepr
                               , PB.functionIgnored = False
+                              , PB.functionEnd = Nothing
                               }
     Nothing -> CME.throwError (PEE.equivalenceError @arch (PEE.LookupNotAtFunctionStart callStack caddr))
   where

@@ -29,19 +29,25 @@ parseAddress = MP.parseMaybe parseCodeHex
       _ <- MPC.string (T.pack "code:")
       MPCL.hexadecimal
 
+
+
 parseFunctionEntry
   :: ([(T.Text, PH.FunctionDescriptor)], [CSVParseError])
   -> [T.Text]
   -> ([(T.Text, PH.FunctionDescriptor)], [CSVParseError])
 parseFunctionEntry (items, errs) row =
   case row of
-    [name, addr] ->
+    (name : addr : row') ->
       case parseAddress addr of
         Nothing -> (items, AddressParseError addr : errs)
         Just a ->
-          let fd = PH.FunctionDescriptor { PH.functionSymbol = name
+          let addrEnd = case row' of
+                [addrEnd_] -> parseAddress addrEnd_
+                _ -> Nothing 
+              fd = PH.FunctionDescriptor { PH.functionSymbol = name
                                          , PH.functionAddress = a
                                          , PH.functionArguments = []
+                                         , PH.functionEnd = addrEnd
                                          }
           in ((name, fd) : items, errs)
     _ -> (items, UnexpectedRowShape row : errs)

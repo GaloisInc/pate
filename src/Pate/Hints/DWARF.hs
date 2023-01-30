@@ -151,6 +151,7 @@ subprogramHints children attrs =
           let fd = PH.FunctionDescriptor { PH.functionSymbol = name
                                          , PH.functionAddress = fromIntegral addr
                                          , PH.functionArguments = subprogramArguments children
+                                         , PH.functionEnd = Nothing
                                          }
               entry = (name, fd)
           in (mempty { PH.functionEntries = [entry] }, [])

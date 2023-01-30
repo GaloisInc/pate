@@ -55,6 +55,8 @@ collectFunctions (fnSpecs, errs) v =
           fd = PH.FunctionDescriptor { PH.functionSymbol = fnName
                                      , PH.functionAddress = fnAddr
                                      , PH.functionArguments = []
+                                     -- FIXME: BSI format has function endings
+                                     , PH.functionEnd = Nothing
                                      }
         in ((fnName, fd) : fnSpecs, errs)
     JSON.Object o | Just _ <- HMS.lookup (T.pack "source_match") o ->

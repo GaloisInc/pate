@@ -220,6 +220,7 @@ ppAbortedResult (CS.AbortedExit code) = show code
 ppAbortedResult (CS.AbortedBranch loc _ t f) =
   "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
 
+
 -- | Symbolically execute a chunk of code under the preconditions determined by
 -- the compositional analysis
 --
@@ -231,17 +232,25 @@ simulate ::
   forall sym arch v bin.
   (HasCallStack, PBi.KnownBinary bin) =>
   PS.SimInput sym arch v bin ->
+  (forall ids. MD.ParsedBlock arch ids -> Bool) {- ^ extra predicate for deciding if blocks should be considered external -} ->
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch v bin)
-simulate simInput = withBinary @bin $ do
+simulate simInput killBlock = withBinary @bin $ do
   let (bin :: PBi.WhichBinaryRepr bin) = CC.knownRepr
   CC.SomeCFG cfg <- do
     PDP.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)
-
     let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
+    let fe = PB.blockFunctionEntry (PS.simInBlock simInput)
+    let bounds = case PB.functionEnd fe of
+          Just fnEnd -> Just (entryAddr, PA.segOffToAddr @arch fnEnd)
+          Nothing -> Nothing
 
-    let (pb,sbi) = computeSliceBodyInfo entryAddr pbs_
+    let (pb,sbi) = computeSliceBodyInfo entryAddr pbs_ bounds
+    let extraKilledEdges = 
+          [ (MD.pblockAddr blk1, MD.pblockAddr blk2) | blk1 <- sbiReachableBlocks sbi, blk2 <- sbiReachableBlocks sbi
+            , killBlock blk2 ]
+
     let (terminal, nonTerminal) = DL.partition isTerminalBlock (sbiReachableBlocks sbi)
-    let killEdges = sbiBackEdges sbi ++ sbiExitEdges sbi
+    let killEdges = sbiBackEdges sbi ++ sbiExitEdges sbi ++ extraKilledEdges
 
     emitEvent (PE.ProofTraceEvent callStack (PPa.PatchPairSingle bin (Const entryAddr)) (T.pack ("Discarding edges: " ++ show killEdges)))
 
@@ -287,8 +296,9 @@ data SliceBodyInfo arch ids =
 computeSliceBodyInfo :: forall arch ids.
   PA.ConcreteAddress arch ->
   [ MD.ParsedBlock arch ids ] ->
+  Maybe (PA.ConcreteAddress arch, PA.ConcreteAddress arch) {- ^ lower/upper bound on included edges -} ->
   ( MD.ParsedBlock arch ids, SliceBodyInfo arch ids)
-computeSliceBodyInfo entryAddr blks =
+computeSliceBodyInfo entryAddr blks bounds =
    case Map.lookup entryAddr blkmap of
      Nothing -> error $ unlines ["Could not find entry point in block map:"
                                 , show entryAddr
@@ -310,7 +320,15 @@ computeSliceBodyInfo entryAddr blks =
               rblks      = pb : sbiReachableBlocks sbi'
           in sbi'{ sbiReachableAddrs = raddrs, sbiReachableBlocks = rblks }
 
+    inRange a = case bounds of
+      Just (lo, hi) -> lo <= a && a <= hi
+      Nothing -> True
+
     visit_edge ancestors from sbi to
+      -- TODO: distinguish back and exit edges?
+      | not (inRange (PA.segOffToAddr from)) = sbi{ sbiExitEdges = (from,to) : sbiExitEdges sbi }
+      -- | not (inRange (PA.segOffToAddr to)) = sbi{ sbiExitEdges = (from,to) : sbiExitEdges sbi }
+
         -- back edge case
       | Set.member to ancestors = sbi{ sbiBackEdges = (from,to):sbiBackEdges sbi }
 
@@ -320,6 +338,7 @@ computeSliceBodyInfo entryAddr blks =
         -- tree edge
       | otherwise =
           case Map.lookup (PA.segOffToAddr to) blkmap of
-            Nothing -> sbi{ sbiExitEdges = (from,to) : sbiExitEdges sbi }
             Just pb -> dfs ancestors pb sbi
+            _ -> sbi{ sbiExitEdges = (from,to) : sbiExitEdges sbi }
+            
 

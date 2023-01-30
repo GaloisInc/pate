@@ -288,6 +288,13 @@ library pate-repl-base
   exposed-modules:     ReplBase
   build-depends:       pate-base, template-haskell
 
+library pate-repl-base-helper
+  import:              shared-exec, shared, toplevel
+  build-depends:       template-haskell
+  hs-source-dirs:      tools/pate-repl, tools/pate
+  exposed-modules:     Repl, ReplHelper
+  build-depends:       pate-repl-base
+
 library pate-base
   import:              shared-exec, shared, toplevel
   exposed-modules:     Main,
