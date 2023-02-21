@@ -50,6 +50,7 @@ module Pate.Monad
   , emitError'
   , getBinCtx
   , getBinCtx'
+  , blockToSegOff
   , ifConfig
   , traceBundle
   , traceBlockPair
@@ -164,6 +165,7 @@ import           What4.ExprHelpers
 import           What4.ProgramLoc
 
 import qualified Pate.Arch as PA
+import qualified Pate.Address as PB
 import           Pate.AssumptionSet ( AssumptionSet )
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PBi
@@ -363,6 +365,16 @@ getBinCtx' ::
   PBi.WhichBinaryRepr bin ->
   EquivM sym arch (PMC.BinaryContext arch bin)
 getBinCtx' repr = PPa.get repr =<< (CMR.asks (PMC.binCtxs . envCtx))
+
+blockToSegOff ::
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (MM.ArchSegmentOff arch)
+blockToSegOff blk = do
+  binCtx <- getBinCtx' (PB.blockBinRepr blk)
+  let mem = MBL.memoryImage $ PMC.binary binCtx
+  case PB.addrAsSegOff mem (PB.concreteAddress blk) of
+    Just segOff -> return segOff
+    Nothing -> throwHere $ PEE.InvalidBlockAddress blk
 
 withValid :: forall a sym arch.
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs, PA.ValidArch arch, PSo.ValidSym sym) => EquivM sym arch a) ->

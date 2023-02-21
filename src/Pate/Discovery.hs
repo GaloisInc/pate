@@ -724,7 +724,7 @@ getBlocks pPair = PPa.forBins $ \bin -> do
   return $! PE.Blocks PC.knownRepr blk pbs
 
 lookupBlocks'
-  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, PB.KnownBinary bin, IsTreeBuilder '(sym,arch) e m)
+  :: (MS.SymArchConstraints arch, Typeable arch, HasCallStack, IsTreeBuilder '(sym,arch) e m)
   => PMC.BinaryContext arch bin
   -> PB.ConcreteBlock arch bin
   -> m (Either (PEE.InnerEquivalenceError arch) (PDP.ParsedBlocks arch))
@@ -737,17 +737,15 @@ lookupBlocks' binCtx b = do
 lookupBlocks ::
   forall sym arch bin.
   HasCallStack =>
-  PB.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (PDP.ParsedBlocks arch)
 lookupBlocks b = do
-  binCtx <- getBinCtx @bin
+  let repr = PB.blockBinRepr b
+  binCtx <- getBinCtx' repr
   ebs <- lookupBlocks' binCtx b
   case ebs of
     Left ierr -> do
-      let binRep :: PB.WhichBinaryRepr bin
-          binRep = PC.knownRepr
-      CME.throwError $ PEE.equivalenceErrorFor binRep ierr
+      CME.throwError $ PEE.equivalenceErrorFor repr ierr
     Right blocks -> return blocks
 
 -- | From a 'PB.ConcreteBlock', if it corresponds to the start of a

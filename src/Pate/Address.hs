@@ -6,6 +6,7 @@ module Pate.Address (
   , memAddrToAddr
   , addrToMemAddr
   , addOffset
+  , addrAsSegOff
   ) where
 
 import qualified Prettyprinter as PP
@@ -38,3 +39,10 @@ addrToMemAddr ::
   ConcreteAddress arch ->
   MM.MemAddr (MM.ArchAddrWidth arch)
 addrToMemAddr (ConcreteAddress a) = a
+
+addrAsSegOff ::
+  MM.Memory (MM.ArchAddrWidth arch) ->
+  ConcreteAddress arch ->
+  Maybe (MM.ArchSegmentOff arch)
+addrAsSegOff mem (ConcreteAddress (MM.MemAddr base offset)) = 
+  MM.resolveRegionOff mem base offset

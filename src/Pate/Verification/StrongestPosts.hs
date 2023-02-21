@@ -98,7 +98,7 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry' )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry', asSingleGraphNode )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -212,12 +212,37 @@ handleSyncPoint pg nd _spec = case getDivergePoint nd of
   Just divergeNode -> do
     Just (Some bin) <- return $ singleNodeRepr nd
     case getSyncPoint pg bin divergeNode of
-      Just sync | sync == nd -> Just <$> updateCombinedSyncPoint divergeNode pg
-      -- We have a sync node but it hasn't been processed yet, so continue execution
-      Just{} -> return Nothing
+      Just sync  -> do
+        case nd == sync of
+          True -> Just <$> updateCombinedSyncPoint divergeNode pg
+           -- We have a sync node but it hasn't been processed yet, so continue execution
+          False -> return Nothing
       Nothing -> do
         pg1 <- chooseSyncPoint divergeNode pg
         Just <$> updateCombinedSyncPoint divergeNode pg1
+
+addressOfNode ::
+  GraphNode arch ->
+  EquivM sym arch (PPa.PatchPairC (MM.ArchSegmentOff arch))
+addressOfNode nd = PPa.forBinsC $ \bin -> do
+  blk <- PPa.get bin (graphNodeBlocks nd)
+  blockToSegOff blk
+
+addIntraBlockCut ::
+  forall bin sym arch.
+  MM.ArchSegmentOff arch ->
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (PB.ConcreteBlock arch bin)
+addIntraBlockCut segOff blk = fnTrace "addIntraBlockCut" $ do
+  let repr = PB.blockBinRepr blk
+  binCtx <- getBinCtx' repr
+  let pfm = PMC.parsedFunctionMap binCtx
+  liftIO $ PD.addExtraTarget pfm segOff
+  PD.ParsedBlocks pblks <- PD.lookupBlocks blk
+  forM_ pblks $ \pblk -> emitTrace @"parsedblock" (Some pblk)
+  case [ pblk | pblk <- pblks, (MD.pblockAddr pblk) == segOff ] of
+    [pblk] -> return $ PB.mkConcreteBlock blk PB.BlockEntryJump (MD.pblockAddr pblk)
+    _ -> throwHere $ PEE.MissingBlockAtAddress segOff
 
 -- | Given a source divergent node, pick a synchronization point where
 --   control flow should again match between the two binaries
@@ -225,31 +250,30 @@ chooseSyncPoint ::
   GraphNode arch -> 
   PairGraph sym arch -> 
   EquivM sym arch (PairGraph sym arch)
-chooseSyncPoint nd pg = do
-  syncP <- pickSyncPoint PPa.PatchedRepr nd pg
-  choose @"bool" "Use same PC for original binary?" $ \choice -> do
-    choice "" True $ do
-      
+chooseSyncPoint nd pg0 = do
+  syncP <- pickSyncPoint PBi.PatchedRepr nd pg0
+  pg1 <- setSyncPoint pg0 nd syncP
+
+  samePC <- choose @"bool" "Use same PC for original binary?" $ \choice -> do
+    choice "" True $ return True
     choice "" False $ return False
+  -- FIXME: unclear if nested choices are problematic
+  syncO <- case samePC of
+    True -> do
+      syncPAddr <- PPa.getC PBi.PatchedRepr =<< addressOfNode syncP
+      blk <- PPa.get PBi.OriginalRepr (graphNodeBlocks nd)
+      divergeSingle <- asSingleGraphNode PBi.OriginalRepr nd
+      syncBlkO <- addIntraBlockCut syncPAddr blk
+      let syncO = mkNodeEntry' divergeSingle (PPa.mkSingle PBi.OriginalRepr syncBlkO)
+      return (GraphNode syncO)
+    False -> pickSyncPoint PBi.OriginalRepr nd pg1
+  setSyncPoint pg1 nd syncO
 
-  let blks = graphNodeBlocks nd
 
-  -- pick the patched binary first, since it likely
-  -- extra blocks that we may want to use as sync points
-  blkP <- PPa.get PPa.PatchedRepr blks
-
-  syncNodes <- PPa.catBins $ \bin -> 
-    Just{} -> return []
-    Nothing -> do
-      blk <- PPa.get bin blks
-      PD.ParsedBlocks pblks <- PD.lookupBlocks blk
-      retSingle <- asSingleReturn bin ret
-
-  return $ foldl' (\pg_ sync -> fromJust $ setSyncPoint pg_ nd sync) pg syncNodes
 
 pickSyncPoint ::
   PBi.WhichBinaryRepr bin ->
-  GraphNode arch -> 
+  GraphNode arch {- divergence point -} -> 
   PairGraph sym arch -> 
   EquivM sym arch (GraphNode arch)
 pickSyncPoint bin nd pg = case getSyncPoint pg bin nd of
@@ -261,12 +285,16 @@ pickSyncPoint bin nd pg = case getSyncPoint pg bin nd of
     blk <- PPa.get bin (graphNodeBlocks nd)
     PD.ParsedBlocks pblks <- PD.lookupBlocks blk
     retSingle <- asSingleReturn bin ret
+    divergeSingle <- asSingleGraphNode bin nd
     choose @"node" "Choose a synchronization point:" $ \choice -> do
       forM_ pblks $ \pblk -> do
         -- FIXME: block entry kind is unused at the moment?
         let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump (MD.pblockAddr pblk)
-        let node = mkNodeEntry' nd (PPa.mkSingle bin concBlk)
-        choice "" (GraphNode node) $ return (GraphNode node)
+        let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
+        choice "" (GraphNode node) $ do
+          pfm <- PMC.parsedFunctionMap <$> getBinCtx' bin
+          liftIO $ PD.addExtraTarget pfm (MD.pblockAddr pblk)
+          return (GraphNode node)
       choice "" (ReturnNode retSingle) $ return (ReturnNode retSingle)
 
 
@@ -318,8 +346,19 @@ updateCombinedSyncPoint divergeNode pg = case getCombinedSyncPoint pg divergeNod
         return $ (sync, mdom)
     case (mdomO, mdomP) of
       (Just domO, Just domP) -> mergeDualNodes syncO syncP domO domP combinedNode pg
-      -- one of the single-sided analysis steps has not finished
-      _ -> return pg
+      _ -> do
+        pg1 <- case mdomO of
+          Nothing -> do
+            divergeNodeO <- asSingleGraphNode PBi.OriginalRepr divergeNode
+            Just pg1 <- return $ addToWorkList divergeNodeO pg
+            return pg1
+          Just{} -> return pg
+        case mdomP of
+          Nothing -> do
+            divergeNodeP <- asSingleGraphNode PBi.PatchedRepr divergeNode
+            Just pg2 <- return $ addToWorkList divergeNodeP pg1
+            return pg2
+          Just{} -> return pg1
 
 mergeDualNodes ::
   GraphNode arch {- ^ first program node -} ->
@@ -1883,13 +1922,12 @@ mkSimBundle pg node vars = do
     absState <- PD.getAbsDomain blk
     let simIn_ = PS.SimInput varState blk absState
     traceBlockPair pPair ("Simulating " ++ show bin ++ " blocks")
-    msync <- case getSyncPoint pg bin (GraphNode node) of
-      Just sync -> (Just . PB.concreteAddress) <$> PPa.get bin (graphNodeBlocks sync)
-      Nothing -> return Nothing
+    binCtx <- getBinCtx' bin
+    let pfm = PMC.parsedFunctionMap binCtx
+    isKilledAddr <- liftIO $ PD.isExtraTarget pfm
     let 
       isKilled :: forall ids. MD.ParsedBlock arch ids -> Bool
-      isKilled pblk = 
-        Just (PAd.segOffToAddr (MD.pblockAddr pblk)) == msync
+      isKilled pblk = isKilledAddr (MD.pblockAddr pblk)
     (_asm, simOut_) <- PVSy.simulate simIn_ isKilled
     return $ (simIn_, simOut_)
   return $ SimBundle simIn_ simOut_

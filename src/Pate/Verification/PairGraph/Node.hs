@@ -35,6 +35,7 @@ module Pate.Verification.PairGraph.Node (
   , returnOfEntry
   , asSingleReturn
   , asSingleNode
+  , asSingleGraphNode
   , splitGraphNode
   , getDivergePoint
   ) where
@@ -94,11 +95,13 @@ data CallingContext arch = CallingContext { _ctxAncestors :: [PB.BlockPair arch]
 
 
 instance PA.ValidArch arch => Pretty (CallingContext arch) where
-  pretty (CallingContext bps _) =
+  pretty (CallingContext bps mdivisionPoint) =
     let
       bs = [ pretty bp | bp <- bps ]
-    in sep ((zipWith (<+>) ( "via:" : repeat "<-") bs))
-
+      divP = case mdivisionPoint of
+        Just p -> ["Diverged at:", pretty p]
+        Nothing -> []
+    in sep (((zipWith (<+>) ( "via:" : repeat "<-") bs)) ++ divP)
 
 getDivergePoint :: GraphNode arch -> Maybe (GraphNode arch)
 getDivergePoint nd = case nd of
@@ -136,13 +139,16 @@ asSingleNode bin node@(NodeEntry ctx bPair) = do
   fPair' <- PPa.asSingleton bin bPair
   return $ NodeEntry (ctx {divergePoint = Just (GraphNode node)}) fPair'
 
+asSingleGraphNode :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> m (GraphNode arch)
+asSingleGraphNode bin node = case node of
+  GraphNode ne -> GraphNode <$> asSingleNode bin ne
+  ReturnNode nr -> ReturnNode <$> asSingleReturn bin nr  
+
 -- | Split a graph node into two single-sided nodes (original, patched)
 --   The input node is marked as the diverge point in the two resulting nodes.
 splitGraphNode :: PPa.PatchPairM m => GraphNode arch -> m (GraphNode arch, GraphNode arch)
 splitGraphNode nd = do
-  nodes <- PPa.forBinsC $ \bin -> case nd of
-    GraphNode ne -> GraphNode <$> asSingleNode bin ne
-    ReturnNode nr -> ReturnNode <$> asSingleReturn bin nr
+  nodes <- PPa.forBinsC $ \bin -> asSingleGraphNode bin nd
   nodeO <- PPa.getC PB.OriginalRepr nodes
   nodeP <- PPa.getC PB.PatchedRepr nodes
   return (nodeO, nodeP)

@@ -23,6 +23,8 @@ module Pate.Discovery.ParsedFunctions (
   , resolveFunctionEntry
   , ParsedBlocks(..)
   , addOverrides
+  , addExtraTarget
+  , isExtraTarget
   ) where
 
 
@@ -31,7 +33,8 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
-import           Data.Maybe ( mapMaybe )
+import qualified Data.Map.Merge.Strict as Map
+import           Data.Maybe ( mapMaybe, listToMaybe )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..), viewSome )
@@ -59,13 +62,16 @@ import qualified Pate.Memory as PM
 
 import           Pate.TraceTree
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad (forM)
+
+import Debug.Trace
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
 data ParsedFunctionState arch bin =
   ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (Some (MD.DiscoveryFunInfo arch))
                       , discoveryState :: MD.DiscoveryState arch
-                      , pfmCacheExtraTargets :: Map.Map (PB.FunctionEntry arch bin) [MM.ArchSegmentOff arch]
+                      , extraTargets :: Set.Set (MM.ArchSegmentOff arch)
                       }
 
 
@@ -86,19 +92,63 @@ data ParsedFunctionMap arch bin =
                     -- that the analysis should ignore. See Note [Ignored
                     -- Functions] for details.
                     , pfmEndMap :: Map.Map (MM.ArchSegmentOff arch) (MM.ArchSegmentOff arch)
+                    , initDiscoveryState :: MAI.ArchitectureInfo arch -> MD.DiscoveryState arch
+                    , absStateOverrides :: Map.Map (MM.ArchSegmentOff arch) (PB.AbsStateOverride arch)
+                    , defaultInitState :: PB.MkInitialAbsState arch
                     }
 
 -- | Add an extra intra-procedural target that should appear within this function body
 --   NOTE: This is a bit clumsy to do after some blocks have already been produced
 addExtraTarget ::
+  MM.ArchConstraints arch =>
   ParsedFunctionMap arch bin ->
-  PB.FunctionEntry arch bin ->
   MM.ArchSegmentOff arch ->
   IO ()
-addExtraTarget pfm fe tgt = do
-  IORef.modifyIORef' (parsedStateRef pfm) $ \st -> 
-    st { pfmCacheExtraTargets = Map.insertWith (++) fe [tgt] (pfmCacheExtraTargets st) }
+addExtraTarget pfm tgt = do
+  isTgt <- isExtraTarget pfm
+  case isTgt tgt of
+    True -> return ()
+    False -> do
+      IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
+        st' { extraTargets = Set.insert tgt (extraTargets st')}
+      flushCache pfm
 
+isExtraTarget ::
+  ParsedFunctionMap arch bin ->
+  IO (MM.ArchSegmentOff arch -> Bool)
+isExtraTarget pfm = do
+  st <- IORef.readIORef (parsedStateRef pfm)
+  return $ \segOff -> Set.member segOff (extraTargets st)
+
+flushCache ::
+  MM.ArchConstraints arch =>
+  ParsedFunctionMap arch bin ->
+  IO ()
+flushCache pfm = do
+  st <- IORef.readIORef (parsedStateRef pfm)
+  let ainfo = MD.archInfo (discoveryState st)
+  IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
+    st' { parsedFunctionCache = mempty, discoveryState = initDiscoveryState pfm ainfo }
+
+overrideDisassembler ::
+  MM.ArchConstraints arch =>
+  MM.ArchSegmentOff arch ->
+  MAI.ArchitectureInfo arch ->
+  MAI.ArchitectureInfo arch
+overrideDisassembler tgt ainfo = ainfo { 
+  MAI.disassembleFn = \nonceGen start initSt offset -> case MM.diffSegmentOff tgt start of
+    Just offset' | start <= tgt, offset' <= fromIntegral offset ->
+      MAI.disassembleFn ainfo nonceGen start initSt (fromIntegral offset' - 1)
+    _ -> MAI.disassembleFn ainfo nonceGen start initSt offset
+  }
+
+-- FIXME: throw error on clashes? Currently this just arbitrarily picks one
+mergeOverrides ::
+  MM.ArchConstraints arch =>
+  PB.AbsStateOverride arch ->
+  PB.AbsStateOverride arch ->
+  PB.AbsStateOverride arch
+mergeOverrides l r = MapF.mergeWithKey (\_ l' _r' -> (Just l')) id id l r 
 
 addOverrides ::
   forall arch bin.
@@ -108,23 +158,37 @@ addOverrides ::
   Map.Map (MM.ArchSegmentOff arch) (PB.AbsStateOverride arch) ->
   IO (ParsedFunctionMap arch bin)
 addOverrides defaultInit pfm ovs = do
+  let new_ovs = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (mergeOverrides l r))) ovs (absStateOverrides pfm)
+  let new_init = PB.MkInitialAbsState $ \mem segOff -> mergeOverrides (PB.mkInitAbs defaultInit mem segOff) (PB.mkInitAbs (defaultInitState pfm) mem segOff) 
+  return $ pfm { absStateOverrides = new_ovs, defaultInitState = new_init }
+
+-- | Apply the various overrides to the architecture definition before returning the discovery state
+getDiscoveryState ::
+  forall arch bin.
+  MM.ArchConstraints arch =>
+  ParsedFunctionMap arch bin ->
+  ParsedFunctionState arch bin ->
+  MD.DiscoveryState arch
+getDiscoveryState pfm st = let
+  ainfo = MD.archInfo (discoveryState st)
+  ainfo' = foldr overrideDisassembler ainfo (extraTargets st)
+  ainfo'' = ainfo' { MAI.mkInitialAbsState = \mem segOff -> let 
+    initAbsSt = MAI.mkInitialAbsState ainfo' mem segOff
+    in case Map.lookup segOff (absStateOverrides pfm) of
+      Just ov -> applyOverride ov initAbsSt
+      Nothing -> applyOverride (PB.mkInitAbs (defaultInitState pfm) mem segOff) initAbsSt
+  }
+  in initDiscoveryState pfm ainfo''
+
+getParsedFunctionState ::
+  forall arch bin.
+  MM.ArchConstraints arch =>
+  ParsedFunctionMap arch bin ->
+  IO (ParsedFunctionState arch bin)
+getParsedFunctionState pfm = do
   st <- IORef.readIORef (parsedStateRef pfm)
-  let ds_old = discoveryState st
-  let archInfo = MD.archInfo ds_old
-  let
-    mkInit mem segOff = let
-      initAbsSt = MAI.mkInitialAbsState archInfo mem segOff 
-      in case Map.lookup segOff ovs of
-        Just ov -> applyOverride ov initAbsSt
-        Nothing ->
-          let ov = PB.mkInitAbs defaultInit mem segOff
-          in applyOverride ov initAbsSt
-  let archInfo' = archInfo { MAI.mkInitialAbsState = mkInit }
-  let extras = pfmCacheExtraTargets st
-  pfm' <- newParsedFunctionMap  (MD.memory ds_old) (MD.symbolNames ds_old) archInfo' (persistenceDir pfm) (patchData pfm) (pfmEndMap pfm)
-  IORef.modifyIORef' (parsedStateRef pfm') $ \st_ -> 
-    st_ { pfmCacheExtraTargets = extras }
-  return pfm'
+  let dst = getDiscoveryState pfm st
+  return $ st { discoveryState = dst }
 
 -- | Allocate a new empty 'ParsedFunctionMap'
 newParsedFunctionMap
@@ -146,12 +210,16 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap = do
   let ds0 = MD.emptyDiscoveryState mem syms archInfo
   let s0 = ParsedFunctionState { parsedFunctionCache = mempty
                                , discoveryState = ds0
+                               , extraTargets = mempty
                                }
   ref <- IORef.newIORef s0
   return ParsedFunctionMap { parsedStateRef = ref
                            , persistenceDir = mCFGDir
                            , patchData = pd
                            , pfmEndMap = fnEndMap
+                           , initDiscoveryState = MD.emptyDiscoveryState mem syms
+                           , absStateOverrides = mempty
+                           , defaultInitState = PB.defaultMkInitialAbsState
                            }
 
 funInfoToFunEntry ::
@@ -291,16 +359,16 @@ setAbstractState defaultInit fnEntry absSt (ParsedFunctionMap pfmRef _ _ ovRef i
 
 getIgnoredFns ::
   forall arch bin.
-  PBi.KnownBinary bin =>
   MM.ArchConstraints arch =>
+  PBi.WhichBinaryRepr bin ->
   ParsedFunctionMap arch bin ->
   IO (Set.Set (MM.MemSegmentOff (MM.ArchAddrWidth arch)))
-getIgnoredFns (ParsedFunctionMap pfmRef _ pd _) = do
+getIgnoredFns repr (ParsedFunctionMap pfmRef _ pd _ _ _ _) = do
   st <- IORef.readIORef pfmRef
   let ds0 = discoveryState st
   let mem = MD.memory ds0
   return $
-    Set.fromList $ case PC.knownRepr :: PBi.WhichBinaryRepr bin of
+    Set.fromList $ case repr of
       PBi.OriginalRepr -> mapMaybe (segoffAddrsFor mem) (PC.ignoreOriginalFunctions pd)
       PBi.PatchedRepr -> mapMaybe (segoffAddrsFor mem) (PC.ignorePatchedFunctions pd)
 
@@ -316,14 +384,14 @@ getIgnoredFns (ParsedFunctionMap pfmRef _ pd _) = do
 -- macaw translation error.
 parsedFunctionContaining ::
   forall bin arch .
-  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  (MM.ArchConstraints arch) =>
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
-parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _) = do
+parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _) = do
   let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
-  st <- IORef.readIORef pfmRef
-  ignoredAddresses <- getIgnoredFns pfm
+  st <- getParsedFunctionState pfm
+  ignoredAddresses <- getIgnoredFns (PB.blockBinRepr blk) pfm
 
   -- First, check if we have a cached set of blocks for this state
   case Map.lookup (PB.blockFunctionEntry blk) (parsedFunctionCache st) of
@@ -340,10 +408,8 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _) = do
       -- contention. If that becomes a problem, we may want to change this
       -- to an MVar where we fully evaluate each result before updating it.
       (pfm', Some dfi) <- return $ atomicAnalysis ignoredAddresses faddr st
-      let binRep :: PBi.WhichBinaryRepr bin
-          binRep = PC.knownRepr
       IORef.writeIORef pfmRef pfm'
-      saveCFG mCFGDir binRep dfi
+      saveCFG mCFGDir (PB.blockBinRepr blk) dfi
       return (Just (Some dfi))
           
   where
@@ -366,21 +432,21 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _) = do
         let rsn = MD.CallTarget faddr
         in case MD.analyzeFunction faddr rsn (discoveryState st) of
              (ds2, Some dfi) ->
-               let entry = funInfoToFunEntry W4.knownRepr dfi pfm ignoredAddressSet 
+               let entry = funInfoToFunEntry (PB.blockBinRepr blk) dfi pfm ignoredAddressSet 
                in (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
                       , discoveryState = ds2
                       }, Some dfi)
 
 resolveFunctionEntry ::
   forall bin arch .
-  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  (MM.ArchConstraints arch) =>
   PB.FunctionEntry arch bin ->
   ParsedFunctionMap arch bin ->
   IO (PB.FunctionEntry arch bin)
-resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap) = do
+resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _) = do
   st <- IORef.readIORef pfmRef
   let syms = MD.symbolNames (discoveryState st)
-  ignoredAddresses <- getIgnoredFns pfm
+  ignoredAddresses <- getIgnoredFns (PB.functionBinRepr fe) pfm
   case Map.lookup (PB.functionSegAddr fe) syms of
     Just nm -> return $ fe { PB.functionSymbol = Just nm
                            , PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses 
@@ -397,7 +463,7 @@ instance MM.ArchConstraints arch => IsTraceNode '(sym,arch) "parsedblock" where
 -- 'ParsedBlocks' structure used in most of the verifier.
 parsedBlocksContaining ::
   forall bin arch sym e m.
-  (PBi.KnownBinary bin, MM.ArchConstraints arch) =>
+  (MM.ArchConstraints arch) =>
   IsTreeBuilder '(sym,arch) e m =>
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->

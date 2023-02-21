@@ -599,7 +599,9 @@ getCombinedSyncPoint gr ndDiv = do
   (SyncPoint sync) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
   case sync of
     PPa.PatchPairSingle{} -> Nothing
-    PPa.PatchPairC ndO ndP -> combineNodes ndO ndP
+    PPa.PatchPairC ndO ndP -> case combineNodes ndO ndP of
+      Just pg -> Just pg
+      Nothing -> panic Verifier "getCombinedSyncPoint" ["Unexpected sync nodes"]
 
 -- | Compute a merged node for two diverging nodes
 -- FIXME: do we need to support mismatched node kinds here?
@@ -627,10 +629,11 @@ singleNodeRepr nd = case graphNodeBlocks nd of
   PPa.PatchPair{} -> Nothing
 
 setSyncPoint ::
+  PPa.PatchPairM m =>
   PairGraph sym arch ->
   GraphNode arch {- ^ The divergent node -}  ->
   GraphNode arch {- ^ The sync node -} ->
-  Maybe (PairGraph sym arch)
+  m (PairGraph sym arch)
 setSyncPoint pg ndDiv ndSync = do
   fmap PPa.someC $ PPa.forBinsC $ \bin -> do
     -- check which binary these nodes are for
