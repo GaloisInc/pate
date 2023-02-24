@@ -59,6 +59,8 @@ module Pate.TraceTree (
   , noTraceTree
   , viewSomeTraceTree
   , NodeStatus(..)
+  , isBlockedStatus
+  , BlockedStatus(..)
   , NodeStatusLevel(..)
   , getNodeStatus
   , getTreeStatus
@@ -90,6 +92,7 @@ module Pate.TraceTree (
   , noTracing
   , chooseLabel
   , choose
+  , chooseBool
   , ChoiceHeader(..)
   , SomeChoiceHeader(..)
   , Choice(..)
@@ -120,6 +123,9 @@ import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSy
 import Control.Exception (IOException)
 import Control.Monad.Trans.Writer
 import Control.Concurrent.MVar
+import qualified Data.Set as Set
+import Data.Set (Set)
+import GHC.IO (unsafePerformIO)
 
 data TraceTag =
     Summary
@@ -135,19 +141,44 @@ class Show e => IsNodeError e where
 instance IsNodeError IOException where
   propagateErr _ = True
 
+newtype ChoiceIdent = ChoiceIdent Int
+  deriving (Eq, Ord, Show)
+
+data BlockedStatus = BlockedStatus { _blockedChoices :: Set ChoiceIdent, _unBlockedChoices :: Set ChoiceIdent }
+
+instance Eq BlockedStatus where
+  (BlockedStatus a b) == (BlockedStatus a_ b_) = a == a_ && b == b_
+
+instance Monoid BlockedStatus where
+  mempty = BlockedStatus mempty mempty
+
+instance Semigroup BlockedStatus where
+  BlockedStatus st1 st2 <> BlockedStatus st1_ st2_ = BlockedStatus (st1 <> st1_) (st2 <> st2_)
+
+isUnblocked' :: BlockedStatus -> Bool
+isUnblocked' (BlockedStatus blocked unblocked) = Set.isSubsetOf blocked unblocked
+
 data NodeStatusLevel =
     StatusSuccess
   | forall e. IsNodeError e => StatusWarning e
   | forall e. IsNodeError e => StatusError e
 
-isHigherStatusLevel :: NodeStatusLevel -> NodeStatusLevel -> Bool
-isHigherStatusLevel (StatusWarning _) StatusSuccess = True
-isHigherStatusLevel (StatusError _) (StatusWarning _) = True
-isHigherStatusLevel (StatusError _) StatusSuccess = True
-isHigherStatusLevel _ _ = False
+-- TODO: I think this discards errors from blocked siblings
+joinStatusLevels ::
+  NodeStatusLevel -> NodeStatusLevel -> Maybe NodeStatusLevel
+joinStatusLevels lvlHi lvlLo = case (lvlHi, lvlLo) of
+  (StatusWarning{}, StatusSuccess) -> Just lvlHi
+  (StatusError{}, StatusWarning{}) -> Just lvlHi
+  (StatusError{}, StatusSuccess) -> Just lvlHi
+  _ -> Nothing
 
 -- TODO: We could expose the error type here with some plumbing
-data NodeStatus = NodeStatus { nodeStatusLevel :: NodeStatusLevel, isFinished :: Bool }
+data NodeStatus = NodeStatus { nodeStatusLevel :: NodeStatusLevel, 
+  isFinished :: Bool, blockStatus :: BlockedStatus }
+
+-- | A blocked node means that it (or a subnode) is waiting for input
+isBlockedStatus :: NodeStatus -> Bool
+isBlockedStatus st = not (isUnblocked' (blockStatus st))
 
 shouldPropagate :: NodeStatusLevel -> Bool
 shouldPropagate StatusSuccess = False
@@ -178,20 +209,21 @@ modifyIOListStatus f (IOList ref) = IO.modifyIORef ref (\(IOList' as st) -> IOLi
 propagateIOListStatus :: NodeStatus -> IOList a -> IO ()
 propagateIOListStatus st l = modifyIOListStatus (propagateStatus st) l
 
-
 propagateStatus :: NodeStatus -> NodeStatus -> NodeStatus
-propagateStatus stNew stOld = case isFinished stOld of
-  True -> stOld
-  False -> case isHigherStatusLevel (nodeStatusLevel stNew) (nodeStatusLevel stOld) of
-    True -> stNew
-    False -> stOld { isFinished = isFinished stNew }
+propagateStatus stNew stOld = 
+  let stNew' = case isFinished stOld of
+        True -> stOld 
+        False -> case joinStatusLevels (nodeStatusLevel stNew) (nodeStatusLevel stOld) of
+          Just stLvlMerged -> stNew { nodeStatusLevel = stLvlMerged }
+          Nothing -> stOld { isFinished = isFinished stNew }
+  in stNew' { blockStatus = (blockStatus stOld) <> (blockStatus stNew) }
 
 getIOListStatus :: IOList a -> IO NodeStatus
 getIOListStatus l = ioListStatus <$> evalIOList' l
 
 emptyIOList :: IO (IOList a)
 emptyIOList = do
-  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess False))
+  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess False mempty))
   return $ IOList r
 
 data NodeBuilder k nm where
@@ -201,7 +233,7 @@ data NodeBuilder k nm where
     } -> NodeBuilder k nm
 
 data InteractionMode = 
-    Interactive
+    Interactive (IO ChoiceIdent)
   | DefaultChoice
 
 data TreeBuilder k where
@@ -213,26 +245,36 @@ data TreeBuilder k where
     -- ^ true if this treeBuilder can supply choices
     } -> TreeBuilder k
 
+asBlockedStatus :: NodeStatus -> NodeStatus
+asBlockedStatus st = NodeStatus StatusSuccess False (blockStatus st)
+
 addNodeDependency :: NodeBuilder k nm -> TreeBuilder k -> TreeBuilder k
 addNodeDependency nodeBuilder treeBuilder =
   let finish st = case shouldPropagate (nodeStatusLevel st) of
         -- importantly, we don't propagate regular status updates to ancestors,
         -- otherwise finalizing a child would cause all parents to finalize
         True -> updateNodeStatus nodeBuilder st >> updateTreeStatus treeBuilder st
-        False -> updateTreeStatus treeBuilder st
+        False -> updateNodeStatus nodeBuilder (asBlockedStatus st) >> updateTreeStatus treeBuilder st
+        -- _ -> updateTreeStatus treeBuilder st
   in treeBuilder { updateTreeStatus = finish } 
 
 addTreeDependency :: TreeBuilder k -> NodeBuilder k nm -> NodeBuilder k nm
 addTreeDependency treeBuilder nodeBuilder =
   let finish st = case shouldPropagate (nodeStatusLevel st) of
         True -> updateTreeStatus treeBuilder st >> updateNodeStatus nodeBuilder st
-        False -> updateNodeStatus nodeBuilder st
+        False -> updateTreeStatus treeBuilder (asBlockedStatus st) >> updateNodeStatus nodeBuilder st
+        -- _ -> updateNodeStatus nodeBuilder st
   in nodeBuilder { updateNodeStatus = finish }
+
+
+globalChoiceNonce :: MVar ChoiceIdent
+globalChoiceNonce = unsafePerformIO (newMVar (ChoiceIdent 0))
 
 startTree :: forall k. IO (TraceTree k, TreeBuilder k)
 startTree  = do
   l <- emptyIOList
-  let builder = TreeBuilder (\st -> propagateIOListStatus st l) (startNode' @k) (\node -> addIOList (Some node) l) Interactive 
+  let nextChoice = modifyMVar globalChoiceNonce (\(ChoiceIdent i) -> return (ChoiceIdent (i + 1), ChoiceIdent i))
+  let builder = TreeBuilder (\st -> propagateIOListStatus st l) (startNode' @k) (\node -> addIOList (Some node) l) (Interactive nextChoice) 
   return (TraceTree l, builder)
 
 startNode' :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
@@ -251,7 +293,7 @@ singleNode ::
 singleNode lbl v = do
   l <- emptyIOList
   t <- emptyIOList
-  modifyIOListStatus (\_ -> NodeStatus StatusSuccess True) t
+  modifyIOListStatus (\_ -> NodeStatus StatusSuccess True mempty) t
   addIOList ((v, lbl), TraceTree t) l
   return $ TraceTreeNode l
 
@@ -517,25 +559,48 @@ instance IsTraceNode k "choice" where
     _ -> PP.pretty nm <> ":" PP.<+> prettyChoice c
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
 
-choose_ ::
+-- | Returns the unblocking action
+setBlockedStatus ::
+  IsTreeBuilder k e m =>
+  m (IO ())
+setBlockedStatus = do
+  builder <- getTreeBuilder
+  case interactionMode builder of
+    Interactive nextChoiceIdent -> do
+      newChoiceIdent <- liftIO $ nextChoiceIdent
+      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
+      liftIO $ updateTreeStatus builder status
+      let statusFinal = NodeStatus StatusSuccess True (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      return $ updateTreeStatus builder statusFinal
+    DefaultChoice -> return (return ())
+
+addStatusBlocker ::
+  IsTreeBuilder k e m =>
+  ChoiceHeader k nm_choice a ->
+  m (ChoiceHeader k nm_choice a)
+addStatusBlocker header = do
+  unblock <- setBlockedStatus
+  return $ header { choiceSelected = choiceSelected header >> unblock }
+
+chooseHeader ::
   forall nm_choice a k m e.
   IsTreeBuilder k e m =>
   IsTraceNode k nm_choice =>
   String ->
   (ChoiceHeader k nm_choice a -> NodeBuilderT k "choice" m ()) ->
   m (ChoiceHeader k nm_choice a)
-choose_ treenm f = do
+chooseHeader treenm f = do
   builder <- getTreeBuilder
   (header :: ChoiceHeader k nm_choice a) <- case interactionMode builder of
-    Interactive -> do
+    Interactive _ -> do
       c <- liftIO $ newEmptyMVar
       let isReady = not <$> isEmptyMVar c
       return $ ChoiceHeader knownSymbol (tryPutMVar c () >> return ()) (readMVar c) isReady
     DefaultChoice -> return $ ChoiceHeader knownSymbol (return ()) (return ()) (return True)
-
   withSubTraces $
-    subTraceLabel @"choiceTree" @k @m treenm (SomeChoiceHeader header)
-      $ withSubTraces @"choice" @k (f header >> return header)
+    subTraceLabel @"choiceTree" @k @m treenm (SomeChoiceHeader header) $ do
+      header' <- addStatusBlocker header
+      withSubTraces @"choice" @k (f header' >> return header')
 
 mkChoice ::
   forall nm_choice a k m.
@@ -549,7 +614,7 @@ mkChoice ::
 mkChoice header label labelV f = do
   builder <- getTreeBuilder
   case interactionMode builder of
-    Interactive -> do
+    Interactive _ -> do
       inIO <- IO.askRunInIO
       c <- liftIO $ newMVar False
       return $ Choice header label labelV (inIO f) (swapMVar c True >> choiceSelected header) (readMVar c)
@@ -601,7 +666,7 @@ chooseLabel ::
     m' ()) ->
   m a
 chooseLabel treenm f = do
-  (header, choices) <- runWriterT (choose_ @nm_choice @a @k treenm (\header -> f (choice_ header)))
+  (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k treenm (\header -> f (choice_ header)))
   getChoice header choices
 
 choose ::
@@ -615,6 +680,16 @@ choose ::
     m' ()) ->
   m a
 choose treenm f = chooseLabel @nm_choice treenm (\choice -> f (\nm v g -> choice nm def v g))
+
+chooseBool ::
+  forall k m e.
+  IsTreeBuilder k e m =>
+  IO.MonadUnliftIO m =>
+  String ->
+  m Bool
+chooseBool treenm = choose @"bool" treenm $ \choice -> do
+  choice "" True $ return True
+  choice "" False $ return False
 
 class Monad m => MonadTreeBuilder k m | m -> k where
   getTreeBuilder :: m (TreeBuilder k)
@@ -697,7 +772,7 @@ runTreeBuilderT (TreeBuilderT f) treeBuilder  = CMR.runReaderT f treeBuilder
 deriving instance MonadError e m => MonadError e (TreeBuilderT k m)
 
 newtype NodeBuilderT k nm m a = NodeBuilderT (CMR.ReaderT (NodeBuilder k nm) m a)
-  deriving (Functor, Applicative, Monad, IO.MonadIO, CMR.MonadTrans)
+  deriving (Functor, Applicative, Monad, IO.MonadIO, CMR.MonadTrans, CMR.MonadReader (NodeBuilder k nm))
 
 deriving instance Alternative m => Alternative (NodeBuilderT k nm m)
 
@@ -771,8 +846,8 @@ withSubTraces f = do
   let nodeBuilder = addTreeDependency treeBuilder nodeBuilder'
   IO.liftIO $ addNode treeBuilder node  
   r <- catchError
-        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus StatusSuccess True)) >> return r)
-        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus (StatusError e) True)) >> throwError e)
+        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus StatusSuccess True mempty)) >> return r)
+        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus (StatusError e) True mempty)) >> throwError e)
   return r
 
 subTraceLabel' ::
@@ -789,8 +864,8 @@ subTraceLabel' lbl v f = do
   IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
   r <- catchError
         (liftTreeBuilder treeBuilder (f (\g -> runNodeBuilderT g nodeBuilder))
-          >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus StatusSuccess True)) >> return r)
-        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) True)) >> throwError e)
+          >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus StatusSuccess True mempty)) >> return r)
+        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) True mempty)) >> throwError e)
   return r
 
 subTraceLabel ::
@@ -810,7 +885,7 @@ emitTraceWarning ::
   m ()
 emitTraceWarning e = do
   treeBuilder <- getTreeBuilder
-  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusWarning e) False)
+  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusWarning e) False mempty)
 
 -- | Tag the current sub-computation as having raised an error
 emitTraceError ::
@@ -820,12 +895,12 @@ emitTraceError ::
   m ()
 emitTraceError e = do
   treeBuilder <- getTreeBuilder
-  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) False)
+  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) False mempty)
 
 finalizeTree ::
   TreeBuilder k ->
   IO ()
-finalizeTree treeBuilder = updateTreeStatus treeBuilder (NodeStatus StatusSuccess True)
+finalizeTree treeBuilder = updateTreeStatus treeBuilder (NodeStatus StatusSuccess True mempty)
 
 traceAlternatives' ::
   IsTreeBuilder k e m =>

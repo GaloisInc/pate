@@ -78,11 +78,14 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence.RegisterDomain as PER
+import qualified Pate.Equivalence.EquivalenceDomain as PEq
 import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.Location as PL
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
@@ -254,9 +257,7 @@ chooseSyncPoint nd pg0 = do
   syncP <- pickSyncPoint PBi.PatchedRepr nd pg0
   pg1 <- setSyncPoint pg0 nd syncP
 
-  samePC <- choose @"bool" "Use same PC for original binary?" $ \choice -> do
-    choice "" True $ return True
-    choice "" False $ return False
+  samePC <- chooseBool "Use same PC for original binary?"
   -- FIXME: unclear if nested choices are problematic
   syncO <- case samePC of
     True -> do
@@ -328,6 +329,7 @@ handleSyncPoint pg (ReturnNode nd) spec = case nodeFuns nd of
       Just <$> foldM go pg (Set.elems syncs)
     Nothing -> return Nothing
 -}
+
 
 
 -- FIXME: this is pretty brittle, as it makes a bunch of assumptions about

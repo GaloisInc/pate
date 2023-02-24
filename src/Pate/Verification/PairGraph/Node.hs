@@ -99,7 +99,7 @@ instance PA.ValidArch arch => Pretty (CallingContext arch) where
     let
       bs = [ pretty bp | bp <- bps ]
       divP = case mdivisionPoint of
-        Just p -> ["Diverged at:", pretty p]
+        Just _p -> [] -- ["Diverged at:", pretty p] -- too noisy
         Nothing -> []
     in sep (((zipWith (<+>) ( "via:" : repeat "<-") bs)) ++ divP)
 

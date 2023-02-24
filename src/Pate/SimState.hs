@@ -300,7 +300,6 @@ forSpec ::
   m (SimSpec sym arch g)
 forSpec (SimSpec scope body) f = SimSpec <$> pure scope <*> f scope body
 
-
 -- | Unsafely coerce the body of a spec to have any scope.
 -- After this is used, the variables in the resulting 'f' should
 -- be rebound to actually be properly scoped to 'v'.

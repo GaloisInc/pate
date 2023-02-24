@@ -338,12 +338,13 @@ addSuffix nesting pp s nm = do
 
 ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
 ppStatusTag st = case st of
-  NodeStatus StatusSuccess False -> Just "*"
-  NodeStatus (StatusWarning _) False -> Just "!*"
-  NodeStatus (StatusWarning _) True -> Just "!"
-  NodeStatus (StatusError _) False -> Just "*x"
-  NodeStatus (StatusError _) True -> Just "x"
-  NodeStatus StatusSuccess True -> Nothing
+  _ | isBlockedStatus st -> Just "?"
+  NodeStatus StatusSuccess False _ -> Just "*"
+  NodeStatus (StatusWarning _) False _ -> Just "!*"
+  NodeStatus (StatusWarning _) True _ -> Just "!"
+  NodeStatus (StatusError _) False _ -> Just "*x"
+  NodeStatus (StatusError _) True _ -> Just "x"
+  NodeStatus StatusSuccess True _ -> Nothing
 
 maybeSubNodes ::
   forall sym arch nm a.
@@ -464,10 +465,11 @@ status' mlimit = do
       (Some (TraceNode _ _ t))  <- gets replNode
       st <- IO.liftIO $ getTreeStatus t
       case st of
-        NodeStatus (StatusWarning e) _ -> IO.liftIO $  IO.putStrLn $ "Warning: \n" ++ (chopMsg mlimit (show e))
-        NodeStatus (StatusError e) _ ->  IO.liftIO $  IO.putStrLn $ "Error: \n" ++ (chopMsg mlimit (show e))
-        NodeStatus StatusSuccess False ->  IO.liftIO $ IO.putStrLn $ "In progress.."
-        NodeStatus StatusSuccess True -> IO.liftIO $ IO.putStrLn "Finalized"
+        _ | isBlockedStatus st -> IO.liftIO $ IO.putStrLn $ "Waiting for input.."
+        NodeStatus (StatusWarning e) _ _ -> IO.liftIO $  IO.putStrLn $ "Warning: \n" ++ (chopMsg mlimit (show e))
+        NodeStatus (StatusError e) _ _ ->  IO.liftIO $  IO.putStrLn $ "Error: \n" ++ (chopMsg mlimit (show e))
+        NodeStatus StatusSuccess False _ ->  IO.liftIO $ IO.putStrLn $ "In progress.."
+        NodeStatus StatusSuccess True _ -> IO.liftIO $ IO.putStrLn "Finalized"
       prevNodes <- gets replPrev
       fin <- IO.liftIO $ IO.readIORef finalResult
       case (prevNodes, fin) of
@@ -517,17 +519,11 @@ loadTraceNode node = do
     }
   updateNextNodes
 
-isBlockingNode :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch Bool
-isBlockingNode node = asChoiceTree node >>= \case
-  Just (SomeChoiceHeader c) -> IO.liftIO $ (not <$> choiceReady c)
-  Nothing -> asChoice node >>= \case
-    Just (SomeChoice c) -> IO.liftIO $ (not <$> choiceReady (choiceHeader c))
-    Nothing -> return False
-
 isBlocked :: forall sym arch. ReplM sym arch Bool
-isBlocked = gets replNext >>= \case
-  [] -> return False
-  next | (_, Some node) <- last next -> isBlockingNode node
+isBlocked = do
+  (Some (node@(TraceNode _ _ subtree))) <- gets replNode
+  st <- IO.liftIO $ getTreeStatus subtree
+  return $ isBlockedStatus st
 
 asChoice :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch (Maybe (SomeChoice '(sym,arch)))
 asChoice (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (knownSymbol @"choice")  of
@@ -539,22 +535,28 @@ asChoiceTree (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (kno
   Just Refl -> return $ Just v
   Nothing -> return Nothing
 
-goto_err'' :: [Some (TraceNode sym arch)] -> ReplM sym arch ()
-goto_err'' (Some node@(TraceNode _ _ subtree) : xs) = (IO.liftIO $ getTreeStatus subtree) >>= \case
-  NodeStatus StatusSuccess True -> goto_err'' xs
-  NodeStatus _ False -> goto_err'' xs
-  _ -> goto_node' node >> goto_err'
-goto_err'' [] = return ()
+goto_status'' :: (NodeStatus -> Bool) -> [Some (TraceNode sym arch)] -> ReplM sym arch ()
+goto_status'' f (Some node@(TraceNode _ _ subtree) : xs) = do
+  st <- IO.liftIO $ getTreeStatus subtree
+  case f st of
+    True -> goto_node' node >> (goto_status' f)
+    False -> goto_status'' f xs
+goto_status'' f [] = return ()
 
-goto_err' :: ReplM sym arch ()
-goto_err' = do
+goto_status' :: (NodeStatus -> Bool) -> ReplM sym arch ()
+goto_status' f = do
   updateNextNodes
   nextNodes <- gets replNext
-  goto_err'' (map snd $ reverse nextNodes)
-  
+  goto_status'' f (map snd $ reverse nextNodes)
+
+isErrStatus :: NodeStatus -> Bool
+isErrStatus = \case
+  NodeStatus StatusSuccess True _ -> False
+  NodeStatus _ False _ -> False
+  _ -> True
 
 goto_err :: IO ()
-goto_err = execReplM (goto_err' >> ls')
+goto_err = execReplM (goto_status' isErrStatus >> ls')
 
 next :: IO ()
 next = execReplM $ do
@@ -612,7 +614,7 @@ waitRepl lastShown = do
             else
               IO.liftIO (IO.putStr ".")
             isBlocked >>= \case
-              True -> IO.liftIO (IO.putStrLn "") >> return ()
+              True -> IO.liftIO (IO.putStrLn "") >> goto_status' isBlockedStatus >> ls'
               False -> ((IO.liftIO $ IO.threadDelay 1000000) >> waitRepl n)
 
 tryKillWaitThread :: IO ()
@@ -651,7 +653,6 @@ wait = do
     Left _ -> killWaitThread
     Right _ -> (getPrompt >>= IO.putStr) >> killWaitThread    
   IO.writeIORef waitThread (WaitThread (Just (tid)) 2)
-
 
 goto :: Int -> IO ()
 goto idx = execReplM $ do

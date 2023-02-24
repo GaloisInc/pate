@@ -11,11 +11,15 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE TypeApplications   #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Equivalence.RegisterDomain (
     RegisterDomain
   , mux
   , intersect
+  , union
   , universal
   , empty
   , update
@@ -46,6 +50,7 @@ import qualified Prettyprinter as PP
 import qualified Pate.Location as PL
 import qualified Pate.Solver as PS
 import qualified Pate.ExprMappable as PEM
+import           Pate.TraceTree
 
 ---------------------------------------------
 -- Register domain
@@ -161,6 +166,21 @@ intersect sym (RegisterDomain domA) (RegisterDomain domB) = (dropFalse . mkDomai
     (Map.traverseMissing (\_ _ -> return $ WI.falsePred sym ))
     (Map.traverseMissing (\_ _ -> return $ WI.falsePred sym))
     (Map.zipWithAMatched (\_ pA pB -> WI.andPred sym pA pB))
+    domA
+    domB 
+
+union ::
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  PS.ValidSym sym =>
+  sym ->
+  RegisterDomain sym arch ->
+  RegisterDomain sym arch ->
+  IO (RegisterDomain sym arch)
+union sym (RegisterDomain domA) (RegisterDomain domB) = mkDomain <$> do
+  Map.mergeA
+    Map.preserveMissing
+    Map.preserveMissing
+    (Map.zipWithAMatched (\_ pA pB -> WI.orPred sym pA pB))
     domA
     domB 
 

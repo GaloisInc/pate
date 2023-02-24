@@ -92,6 +92,7 @@ import Lang.Crucible.Simulator.SymSequence
 import qualified Pate.Monad.Context as PMC
 import Data.Functor.Const (Const(..))
 import Pate.Verification.Concretize (symbolicFromConcrete)
+import qualified Pate.Arch as PA
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -157,8 +158,12 @@ computeEquivCondition ::
 computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
-  PPa.PatchPairC regsO regsP <- PPa.forBinsC $ \bin -> PS.simOutRegs <$> PPa.get bin (PS.simOut bundle)
-  PPa.PatchPairC memO memP <- PPa.forBinsC $ \bin -> PS.simOutMem <$> PPa.get bin (PS.simOut bundle)
+  let 
+    (stO, stP) = asStatePair scope (PS.simOut bundle) PS.simOutState
+    regsO = PS.simRegs stO
+    regsP = PS.simRegs stP
+    memO = PS.simMem stO
+    memP = PS.simMem stP
   postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case f loc of
     False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
@@ -225,13 +230,22 @@ initializeCondition ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-initializeCondition _ _ _ _ _ (GraphNode _) gr = return gr
-initializeCondition scope bundle preD postD from to@(ReturnNode ret) gr = withSym $ \sym -> do
+initializeCondition scope bundle preD postD from to gr = withSym $ \sym -> do
   case getEquivCondition gr to of
     Just{} -> return gr
     Nothing -> do
       eqCondFns <- CMR.asks envEqCondFns
-      case Map.lookup (nodeFuns ret) eqCondFns of
+      mlocFilter <- if
+        | isSyncPoint gr to -> do
+          emitTraceLabel @"domain" PAD.ExternalPostDomain (Some postD)
+          chooseBool "Continue analysis after resynchronization?" >>= \case
+            True -> return Nothing
+            False -> Just <$> refineEquivalenceDomain postD
+        | ReturnNode ret <- to
+        , Just locFilter <- Map.lookup (nodeFuns ret) eqCondFns -> 
+            return $ Just locFilter
+        | otherwise -> return Nothing
+      case mlocFilter of
         Just locFilter -> do
           eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
           pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
@@ -239,6 +253,63 @@ initializeCondition scope bundle preD postD from to@(ReturnNode ret) gr = withSy
           let gr1 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr
           return $ dropDomain to (markEdge from to gr1)
         Nothing -> return gr
+
+data RegisterPickChoice arch = 
+    forall tp. PickRegister (MM.ArchReg arch tp)
+  | IncludeRemaining
+  | ExcludeRemaining
+
+instance PA.ValidArch arch => IsTraceNode '(sym,arch) "registerChoice" where
+  type TraceNodeType '(sym,arch) "registerChoice" = RegisterPickChoice arch
+  prettyNode () = \case
+    PickRegister r -> case fmap pretty (PA.fromRegisterDisplay (PA.displayRegister r)) of
+      Just s -> s
+      Nothing -> pretty $ MapF.showF r
+    IncludeRemaining -> "Include Remaining Registers"
+    ExcludeRemaining -> "Exclude Remaining Registers"
+  nodeTags = mkTags @'(sym,arch) @"registerChoice" [Summary, Simplified]
+
+pickRegisters ::
+  [Some (MM.ArchReg arch)] ->
+  EquivM sym arch [Some (MM.ArchReg arch)] 
+pickRegisters excludedRegs = go [] excludedRegs
+  where 
+    go :: 
+      [Some (MM.ArchReg arch)] ->
+      [Some (MM.ArchReg arch)] ->
+      EquivM sym arch [Some (MM.ArchReg arch)]
+    go acc [] = return acc
+    go acc remaining = do
+      (acc', remaining') <- choose @"registerChoice" "Include Register:" $ \choice -> do
+        forM_ (zip [0..] remaining) $ \(idx, Some r) ->
+          case PA.fromRegisterDisplay (PA.displayRegister r) of
+            Just{} -> choice "" (PickRegister r) $ do
+              let (hd_,(_:tl_)) = splitAt idx remaining
+              return $ (Some r:acc, hd_++tl_)
+            -- in general we can include any register, but it likely
+            -- makes sense to only consider registers that we have
+            -- defined a pretty display for
+            Nothing -> return ()
+
+        choice "" IncludeRemaining $ return $ (acc ++ remaining, [])
+        choice "" ExcludeRemaining $ return $ (acc, [])
+      go acc' remaining'
+
+-- | Interactive refinement of an equivalence domain
+--   (i.e. manually specifying locations as equal)
+refineEquivalenceDomain ::
+  forall sym arch v.
+  AbstractDomain sym arch v ->
+  EquivM sym arch (PL.SomeLocation sym arch -> Bool)
+refineEquivalenceDomain dom = withSym $ \sym -> do
+  let regDom = PEE.eqDomainRegisters (PAD.absDomEq dom)
+  let allRegs = map fst $ PER.toList (PER.universal sym)
+  let excluded = filter (\(Some r) -> not (W4.asConstantPred (PER.registerInDomain sym r regDom) == Just True)) allRegs
+  added <- Set.fromList <$> pickRegisters excluded
+  return $ \(PL.SomeLocation loc) ->
+    case loc of
+      PL.Register r -> Set.member (Some r) added
+      _ -> False
 
 -- | Push an equivalence condition back up the graph.
 --   Returns 'Nothing' if there is nothing to do (i.e. no condition or

@@ -46,6 +46,7 @@ module Pate.Verification.PairGraph
   , dropDomain
   , markEdge
   , getSyncPoint
+  , isSyncPoint
   , getBackEdgesFrom
   , setSyncPoint
   , getCombinedSyncPoint
@@ -87,7 +88,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -588,6 +589,19 @@ getSyncPoint ::
 getSyncPoint gr bin nd = case Map.lookup nd (pairGraphSyncPoints gr) of
   Just (SyncPoint syncPair) -> PPa.getC bin syncPair
   Nothing -> Nothing
+
+isSyncPoint ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  Bool
+isSyncPoint pg nd = fromMaybe False go
+  where
+    go :: Maybe Bool
+    go = do
+      divergeNode <- getDivergePoint nd
+      Some bin <- singleNodeRepr nd
+      sync <- getSyncPoint pg bin divergeNode
+      return $ nd == sync
 
 -- | If both sides of the sync point are defined, returns
 --   the merged node for them
