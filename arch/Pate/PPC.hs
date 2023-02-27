@@ -8,6 +8,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -239,13 +240,72 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
+-- FIXME: clagged directly from ARM, registers may not be correct
 stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
-stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0) $
-  Map.fromList
-    [ (BSC.pack "malloc", PA.mkMallocOverride r0 r0)
-    , (BSC.pack "clock", PA.mkClockOverride r0)  ]
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 ) $
+  Map.fromList $ map (\(nm,v) -> (BSC.pack nm, v)) $
+    [ ("malloc", PA.mkMallocOverride r0 r0)
+    -- FIXME: arguments are interpreted differently for calloc
+    , ("calloc", PA.mkMallocOverride r0 r0)
+    -- FIXME: arguments are interpreted differently for reallolc
+    , ("realloc", PA.mkMallocOverride r0 r0)
+    , ("clock", PA.mkClockOverride r0)
+    , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
+    -- FIXME: fixup arguments for fwrite
+    , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
+    , ("printf", PA.mkObservableOverride "printf" r0 r1)
+    -- FIXME: default stubs below here
+    ] ++
+    (map mkDefault $
+      [ "getopt"
+      , "fprintf"
+      , "open"
+      , "atoi"
+      , "openat"
+      , "__errno_location"
+      , "ioctl"
+      , "fopen"
+      , "ERR_print_errors_fp"
+      , "RAND_bytes"
+      , "close"
+      , "fclose"
+      , "puts"
+      , "lseek"
+      , "strcpy"
+      , "sleep"
+      , "socket"
+      , "setsockopt"
+      , "bind"
+      , "select"
+      , "free"
+      , "sigfillset"
+      , "sigaction"
+      , "setitimer"
+      , "read"
+      , "memcpy" -- FIXME: needs implementation
+      , "__floatsidf" -- FIXME: lets us ignore float operations
+      , "__extendsfdf2" -- FIXME: lets us ignore float operations 
+      , "__gtdf2" -- FIXME: lets us ignore float operations
+      , "ceil" -- FIXME: more floating point hacks
+      , "FLEXCAN_DRV_Send" -- FIXME: IO stub
+      ]
+    ) ++
+    (map mkNOPStub $ [
+        "console_debugln"
+      , "console_debugf"
+      , "console_printf" -- FIXME: observable?
+      , "console_printf_data" -- FIXME: observable?
+      , "console_println" -- FIXME: observable?
+      , "console_error" -- FIXME: observable?
+      , "console_print" -- FIXME: observable?
+      ])
   where
+    mkNOPStub nm = (nm, PA.mkNOPStub nm)
+    mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
+    
     r0 = gpr 0
+    r1 = gpr 1
+    r2 = gpr 2
 
 instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case

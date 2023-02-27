@@ -31,6 +31,7 @@ module Pate.Arch (
   mkClockOverride,
   mkWriteOverride,
   mkDefaultStubOverride,
+  mkNOPStub,
   mkObservableOverride,
   lookupStubOverride,
   defaultStubOverride,
@@ -349,6 +350,14 @@ mkDefaultStubOverride nm rOut = StubOverride $ \sym _ -> do
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+
+-- | No-op stub
+mkNOPStub ::
+  forall arch.
+  MS.SymArchConstraints arch =>
+  String ->
+  StubOverride arch
+mkNOPStub _nm = StubOverride $ \_sym _ -> return $ StateTransformer $ \st -> return st
 
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier
