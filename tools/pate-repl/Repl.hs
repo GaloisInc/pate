@@ -558,6 +558,9 @@ isErrStatus = \case
 goto_err :: IO ()
 goto_err = execReplM (goto_status' isErrStatus >> ls')
 
+goto_prompt :: IO ()
+goto_prompt = execReplM (goto_status' isBlockedStatus >> ls')
+
 next :: IO ()
 next = execReplM $ do
   nextNodes <- gets replNext
