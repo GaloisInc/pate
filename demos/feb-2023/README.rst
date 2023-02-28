@@ -56,7 +56,7 @@ Running PATE on challenge 9
 
 Run the following command from the project root to 
 analyze the modified challenge 9 binaries::
-  docker run --rm --it -v `pwd`/demos/feb-2023/challenge09:/challenge09 pate \
+  docker run --rm -it -v `pwd`/demos/feb-2023/challenge09:/challenge09 pate \
              --original /challenge09/challenge09.original.exe \
              --patched /challenge09/challenge09.patched.exe \
              -b /challenge09/challenge09.toml \
@@ -184,8 +184,64 @@ up to the synchronization point (i.e. following the control flow through
 the trampoline) and has determined that these registers may be unequal 
 between the original and patched binaries at the synchronization point.
 
-Select r7 by entering `10`.
+Select r7 by entering `10`. This tells the verifier to enforce the property
+that GPR 7 has the same value in the original and patched binaries at the 
+beginning of the instruction at `0x11d66`. This is enforced by computing
+a sufficient *equivalence condition* and propagating this backwards
+to the beginning of the function (i.e. the entry point to `transport_handler`).
 
 
+Step 2: Generate an equivalence condition
+^^^^^^^^^^^
+
+Currently the verifier is unable to generate a sufficient equivalence condition
+to satisfy the refined equivalence domain from Step 1. 
+At the moment, an error is therefore raised and the verifier stops its analysis.
+
+This is a known limitation with the equivalence condition propagation and we
+are working to address it in the following ways:
+  1. Refine the equivalence condition propagation to support threading 
+    restricted equivalence domains.
+  2. Allow users to provide an equivalence condition: either
+    as a refinement of an automatically-derived condition or manually
+    derived.
+
+We are prioritizing point 2 to mitigate the risk of point 1 taking more
+time than the evaluation would allow.
+
+Step 3: Verify local equivalence given the condition
+^^^^^^^^^^^
+
+Once the mitigation in Step 2 is complete we will update this section to
+include instructions for how to run the verifier with that equivalence condition
+assumed. The expected result is that, given a sufficient equivalence condition,
+the verifier will be able to establish *local* equivalence of the `transport_handler`
+function.
 
 
+Step 4: Verify global equivalence given the condition
+^^^^^^^^^^^
+
+Using the result from Step 3, the verifier will then be able to expand the
+equivalence analysis to the entire program (i.e. starting from `main`).
+It will verify that the original and patched binaries are *observably* equivalent,
+under the assumption that the equivalence condition established in Step 2 always
+holds when `transport_handler` is called.
+
+Similar to Step 3, we will update this section to include instructions for how
+to run the verifier in order to perform this global analysis.
+
+Interactive Verification of Challenge 10
+-----------
+
+Run the following command from the project root to 
+analyze the modified challenge 10 binaries::
+  docker run --rm -it -v `pwd`/demos/feb-2023/challenge10:/challenge10 pate \
+             --original /challenge10/challenge10.original.exe \
+             --patched /challenge10/challenge10.patched.exe \
+             -s transport_handler
+
+The analysis will proceed similar to challenge 9, however the user will need to
+interactively provide an alternative synchronization point that depends on the specific
+implementation of the supplied patch (see Step 1 for challenge 9 where `0x11d66` was provided
+as the synchronization point).

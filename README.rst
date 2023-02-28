@@ -16,7 +16,7 @@ First, build the Docker image with the command::
 
 Next, run the verifier on an example from the test suite::
 
-  docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/conditional/test-signed-equiv.original.exe --patched /tests/aarch32/conditional/test-signed-equiv.patched.exe
+  docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/const-args.original.exe --patched /tests/aarch32/const-args.patched.exe
 
 
 Command Line Options
@@ -74,6 +74,9 @@ The verifier accepts the following command line arguments::
   --log-file FILE          A file to save debug logs to
   -e,--errormode ARG       Verifier error handling mode
                            (default: ThrowOnAnyFailure)
+  -r,--rescopemode ARG     Variable rescoping failure handling mode
+                           (default: ThrowOnEqRescopeFailure)
+  --skip-unnamed-functions Skip analysis of functions without symbols
 
 Extended Examples
 -----------------
@@ -111,22 +114,16 @@ This command will run the verifier on the two binaries and produce three outputs
 Controlling the Verifier Entry Point
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-By default, the verifier starts verifying from the formal program entry point. This is often not very useful (and can be problematic for complex binaries with a large ``_start`` that causes problem for our code discovery).  Additionally, for changes with a known (or at least expected) scope of impact, analyzing just the affected functions is significantly faster.  Customizing the analysis entry point has two steps: 1) passing the ``--ignoremain --blockinfo <config>`` options, 2) providing the configuration file.  Configuration files are in the TOML format. For example, with a configuration file called ``config.toml`` with the following contents::
+By default, the verifier starts verifying from the formal program entry point. This is often not very useful (and can be problematic for complex binaries with a large ``_start`` that causes problem for our code discovery).  Additionally, for changes with a known (or at least expected) scope of impact, analyzing just the affected functions is significantly faster. To instead specify an analysis entry point, passing the ``-s <function_symbol>`` option will start the analysis
+from the function corresponding to the given symbol. Note that this requires function symbols to be provided for the binaries (either as embedded debug
+symbols or separately in one of the hint formats)::
 
-  patch-pairs = [ { original-block-address = <OriginalEntryPoint>, patched-block-address = <PatchedEntryPoint> }
-                ]
-
-one would invoke the verifier with the command::
-
-  mkdir VerifierData
-  cp original.exe patched.exe config.toml VerifierData/
-  docker run --rm -it -v `pwd`/VerifierData`:/VerifierData pate \
-             --original /VerifierData/original.exe \
-             --patched /VerifierData/patched.exe \
-             --proof-summary-json /VerifierData/report.json \
-             --log-file /VerifierData/pate.log \
-             --save-macaw-cfgs /VerifierData/cfgs \
-             --ignoremain --blockinfo /VerifierData/config.toml
+  docker run --rm -it -v `pwd`/tests:/tests/hints pate \
+             --original /tests/01.elf \
+             --patched /tests/01.elf \
+             --original-anvill-hints /tests/01.anvill.json \
+             --patched-anvill-hints /tests/01.anvill.json \
+             -s main
 
 Treating Functions As No-Ops
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
