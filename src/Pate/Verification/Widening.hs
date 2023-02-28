@@ -235,24 +235,31 @@ initializeCondition scope bundle preD postD from to gr = withSym $ \sym -> do
     Just{} -> return gr
     Nothing -> do
       eqCondFns <- CMR.asks envEqCondFns
-      mlocFilter <- if
-        | isSyncPoint gr to -> do
-          emitTraceLabel @"domain" PAD.ExternalPostDomain (Some postD)
-          chooseBool "Continue analysis after resynchronization?" >>= \case
-            True -> return Nothing
-            False -> Just <$> refineEquivalenceDomain postD
+      (mlocFilter, gr1) <- if
+        | Just sync <- asSyncPoint gr to -> case syncTerminal sync of
+            Just True -> do
+              locFilter <- refineEquivalenceDomain postD
+              return (Just locFilter, gr)
+            Just False -> return (Nothing, gr)
+            Nothing -> do
+              emitTraceLabel @"domain" PAD.ExternalPostDomain (Some postD)
+              chooseBool "Continue analysis after resynchronization?" >>= \case
+                True -> return (Nothing, updateSyncPoint gr to (\sync' -> sync'{syncTerminal = Just False}))
+                False -> do
+                  locFilter <- refineEquivalenceDomain postD
+                  return (Just locFilter, updateSyncPoint gr to (\sync' -> sync'{syncTerminal = Just True}))
         | ReturnNode ret <- to
         , Just locFilter <- Map.lookup (nodeFuns ret) eqCondFns -> 
-            return $ Just locFilter
-        | otherwise -> return Nothing
+            return $ (Just locFilter, gr)
+        | otherwise -> return (Nothing, gr)
       case mlocFilter of
         Just locFilter -> do
           eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
           pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
           eqCond' <- PEC.mux sym pathCond eqCond (PEC.universal sym)
-          let gr1 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr
-          return $ dropDomain to (markEdge from to gr1)
-        Nothing -> return gr
+          let gr2 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr1
+          return $ dropDomain to (markEdge from to gr2)
+        Nothing -> return gr1
 
 data RegisterPickChoice arch = 
     forall tp. PickRegister (MM.ArchReg arch tp)

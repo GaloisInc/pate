@@ -46,12 +46,13 @@ module Pate.Verification.PairGraph
   , dropDomain
   , markEdge
   , getSyncPoint
-  , isSyncPoint
+  , asSyncPoint
   , getBackEdgesFrom
   , setSyncPoint
   , getCombinedSyncPoint
   , addToWorkList
   , SyncPoint(..)
+  , updateSyncPoint
   , singleNodeRepr
   ) where
 
@@ -215,7 +216,7 @@ data PairGraph sym arch =
   }
 
 data SyncPoint arch =
-  SyncPoint (PPa.PatchPairC (GraphNode arch))
+  SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch), syncTerminal :: Maybe Bool }
 
 ppProgramDomains ::
   forall sym arch a.
@@ -587,34 +588,44 @@ getSyncPoint ::
   GraphNode arch ->
   Maybe (GraphNode arch)
 getSyncPoint gr bin nd = case Map.lookup nd (pairGraphSyncPoints gr) of
-  Just (SyncPoint syncPair) -> PPa.getC bin syncPair
+  Just (SyncPoint syncPair _) -> PPa.getC bin syncPair
   Nothing -> Nothing
 
-isSyncPoint ::
+updateSyncPoint ::
+  PairGraph sym arch ->
+  GraphNode arch -> 
+  (SyncPoint arch -> SyncPoint arch) ->
+  PairGraph sym arch
+updateSyncPoint pg nd f = case getDivergePoint nd of
+  Just divergePoint | Just sync <- asSyncPoint pg nd -> 
+    pg { pairGraphSyncPoints = Map.insert divergePoint (f sync) (pairGraphSyncPoints pg)}
+  _ -> pg
+
+asSyncPoint ::
   PairGraph sym arch ->
   GraphNode arch ->
-  Bool
-isSyncPoint pg nd = fromMaybe False go
-  where
-    go :: Maybe Bool
-    go = do
-      divergeNode <- getDivergePoint nd
-      Some bin <- singleNodeRepr nd
-      sync <- getSyncPoint pg bin divergeNode
-      return $ nd == sync
+  Maybe (SyncPoint arch)
+asSyncPoint pg nd = do
+  divergeNode <- getDivergePoint nd
+  Some bin <- singleNodeRepr nd
+  sync@(SyncPoint syncPair _) <- Map.lookup divergeNode (pairGraphSyncPoints pg)
+  nd' <- PPa.getC bin syncPair
+  case nd == nd' of
+    True -> return sync
+    False -> Nothing
 
 -- | If both sides of the sync point are defined, returns
 --   the merged node for them
 getCombinedSyncPoint ::
   PairGraph sym arch ->
   GraphNode arch ->
-  Maybe (GraphNode arch)
+  Maybe (GraphNode arch, SyncPoint arch)
 getCombinedSyncPoint gr ndDiv = do
-  (SyncPoint sync) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
-  case sync of
+  sync@(SyncPoint syncPair _) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
+  case syncPair of
     PPa.PatchPairSingle{} -> Nothing
     PPa.PatchPairC ndO ndP -> case combineNodes ndO ndP of
-      Just pg -> Just pg
+      Just mergedNode -> Just (mergedNode, sync)
       Nothing -> panic Verifier "getCombinedSyncPoint" ["Unexpected sync nodes"]
 
 -- | Compute a merged node for two diverging nodes
@@ -655,12 +666,12 @@ setSyncPoint pg ndDiv ndSync = do
     _ <- PPa.get bin (graphNodeBlocks ndSync)
     let ndSync' = PPa.PatchPairSingle bin (Const ndSync)
     case Map.lookup ndDiv (pairGraphSyncPoints pg) of
-      Just (SyncPoint sp) -> do
+      Just (SyncPoint sp b) -> do
         sp' <- PPa.update sp $ \bin' -> PPa.get bin' ndSync'
-        return $ pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp') (pairGraphSyncPoints pg) }
+        return $ pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp' b) (pairGraphSyncPoints pg) }
       Nothing -> do
         let sp = PPa.mkSingle bin (Const ndSync)
-        return $ pg {pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp) (pairGraphSyncPoints pg) }
+        return $ pg {pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp Nothing) (pairGraphSyncPoints pg) }
 
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.

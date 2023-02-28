@@ -340,14 +340,23 @@ updateCombinedSyncPoint ::
   EquivM sym arch (PairGraph sym arch)
 updateCombinedSyncPoint divergeNode pg = case getCombinedSyncPoint pg divergeNode of
   Nothing -> return pg
-  Just combinedNode -> do
+  Just (combinedNode, syncPoint) -> do
     PPa.PatchPairC (syncO, mdomO) (syncP, mdomP) <-
       PPa.forBinsC $ \bin -> do
         Just sync <- return $ getSyncPoint pg bin divergeNode
         mdom <- return $ getCurrentDomain pg sync
         return $ (sync, mdom)
     case (mdomO, mdomP) of
-      (Just domO, Just domP) -> mergeDualNodes syncO syncP domO domP combinedNode pg
+      (Just domO, Just domP) -> case syncTerminal syncPoint of
+        -- if this is a terminal sync point (i.e. we're not analyzing past here),
+        -- then we don't need to actually create the combined sync point node
+        Just True -> return pg
+        -- in practice this shouldn't ever be 'Nothing' at this point, but
+        -- we can always just emit the merged node, even if it's ununsed
+        -- TODO: if we retained enough information in the merged node,
+        -- we could make this determination when we try to process it,
+        -- rather than here
+        _ -> mergeDualNodes syncO syncP domO domP combinedNode pg
       _ -> do
         pg1 <- case mdomO of
           Nothing -> do
