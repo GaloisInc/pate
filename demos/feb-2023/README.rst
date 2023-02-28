@@ -115,7 +115,7 @@ starting at `0x11d60`. To address this, the analysis has been split to
 independently consider the original and patched binaries. This is just
 prior to the jump that was inserted for the patch.
 
-The verifier now asking at which block the control flow should converge again.
+The verifier is now asking at which block the control flow should converge again.
 Go to the prompt by executing `goto_prompt` to see the list of blocks to select from::
   ?>goto_prompt
   Choose a synchronization point:::[node]
@@ -195,7 +195,8 @@ up to the synchronization point (i.e. following the control flow through
 the trampoline) and has determined that these registers may be unequal 
 between the original and patched binaries at the synchronization point.
 
-Select r7 by entering `10`. This tells the verifier to enforce the property
+Select r7 by entering `10`, then select option `11` to not include any additional registers. 
+This tells the verifier to enforce the property
 that GPR 7 has the same value in the original and patched binaries at the 
 beginning of the instruction at `0x11d66`. This is enforced by computing
 a sufficient *equivalence condition* and propagating this backwards
