@@ -4,10 +4,21 @@ February 2023 Evaluation
 Modified Challenge Binaries
 ------------
 
-This directory contains modified binaries for challenges 9 and 10 for the purposes
+This directory contains modified patches for challenges 9 and 10 for the purposes
 of demonstrating the PATE verification tool. These modifications were necessary
 to remove instructions that are not yet supported, as the verifier currently
 does not have the ability to analyze binaries that contain unrecognized instructions.
+
+Generate patched binaries
+^^^^^^^^^^^
+Set the environment variable `CHALLENGE_DIR` to the root directory of the challenge problems repo::
+  export CHALLENGE_DIR=/path/to/Challenge-Problems
+
+Apply binary patches to challenges 9 and 10::
+  cd demos/feb-2023/challenge9
+  make
+  cd ../challenge10
+  make
 
 Challenge 9 Modifications
 ^^^^^^^^^^^
