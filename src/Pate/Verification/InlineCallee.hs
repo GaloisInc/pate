@@ -387,7 +387,6 @@ symbolicallyExecute archVals bak binRepr loadedBin dfi ignPtrs initRegs (sp, ini
 
 
   let globals = LCSG.insertGlobal memVar initMem' LCS.emptyGlobals
-  let globalMap = DMSM.mapRegionPointers memPtrTbl
 
   pfm <- PMC.parsedFunctionMap <$> getBinCtx' binRepr
   symtab <- PMC.symbolTable <$> getBinCtx' binRepr
@@ -402,7 +401,12 @@ symbolicallyExecute archVals bak binRepr loadedBin dfi ignPtrs initRegs (sp, ini
 
   DMS.withArchEval archVals sym $ \archEvalFn -> do
     let doLookup = PVD.lookupFunction bak argMap overrides symtab pfm archVals loadedBin
-    let extImpl = PVS.hookedMacawExtensions bak archEvalFn memVar globalMap doLookup (DMS.unsupportedSyscalls "pate-inline-call") validityCheck
+    let mmConf = (DMSM.memModelConfig bak memPtrTbl)
+                   { DMS.lookupFunctionHandle = doLookup
+                   , DMS.lookupSyscallHandle = DMS.unsupportedSyscalls "pate-inline-call"
+                   , DMS.mkGlobalPointerValidityAssertion = validityCheck
+                   }
+    let extImpl = PVS.hookedMacawExtensions bak archEvalFn memVar mmConf
     -- We start with no handles bound for crucible; we'll add them dynamically
     -- as we find callees via lookupHandle
     --
