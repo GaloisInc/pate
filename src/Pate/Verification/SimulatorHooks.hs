@@ -312,18 +312,11 @@ hookedMacawExtensions
   -> LCS.GlobalVar LCLM.Mem
   -- ^ The Crucible global variable containing the current state of the memory
   -- model
-  -> DMS.GlobalMap sym LCLM.Mem (DMC.ArchAddrWidth arch)
-  -- ^ A function that maps bitvectors to valid memory model pointers
-  -> DMS.LookupFunctionHandle p sym arch
-  -- ^ A function to translate virtual addresses into function handles
-  -- dynamically during symbolic execution
-  -> DMS.LookupSyscallHandle p sym arch
-  -- ^ A function to examine the machine state to determine which system call
-  -- should be invoked; returns the function handle to invoke
-  -> DMS.MkGlobalPointerValidityAssertion sym (DMC.ArchAddrWidth arch)
-  -- ^ A function to make memory validity predicates (see 'MkGlobalPointerValidityAssertion' for details)
+  -> DMS.MemModelConfig p sym arch LCLM.Mem
+  -- ^ Configuration options for the memory model
   -> LCS.ExtensionImpl p sym (DMS.MacawExt arch)
-hookedMacawExtensions bak f mvar globs lookupH lookupSyscall toMemPred =
+hookedMacawExtensions bak f mvar mmConf =
   baseExtension { LCS.extensionExec = statementWrapper mvar globs bak baseExtension }
   where
-    baseExtension = DMS.macawExtensions f mvar globs lookupH lookupSyscall toMemPred
+    baseExtension = DMS.macawExtensions f mvar mmConf
+    globs = DMS.globalMemMap mmConf
