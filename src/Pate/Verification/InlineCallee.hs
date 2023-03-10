@@ -212,9 +212,15 @@ populateRelocation
      , LCLM.HasPtrWidth w
      )
   => bak
+  -> DMC.Memory w
+  -- ^ The region of memory in which the relocation is defined
+  -> DMC.MemSegment w
+  -- ^ The segment of memory in which the relocation is defined
+  -> DMC.MemAddr w
+  -- ^ The address of the relocation
   -> DMC.Relocation w
   -> IO [WI.SymExpr sym (WI.BaseBVType 8)]
-populateRelocation bak _reloc =
+populateRelocation bak _mem _seg _addr _reloc =
   replicateM nBytes (WI.freshConstant sym (WS.safeSymbol "reloc_byte") byteRep)
   where
     sym = LCB.backendGetSym bak
