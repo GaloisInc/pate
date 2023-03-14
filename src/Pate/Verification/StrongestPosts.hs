@@ -40,6 +40,8 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import           Data.List (findIndex)
+import           Data.Maybe (mapMaybe)
 import           Data.Proxy
 import           Data.Functor.Const
 import           Data.IORef ( IORef, newIORef, readIORef, modifyIORef )
@@ -270,7 +272,32 @@ chooseSyncPoint nd pg0 = do
     False -> pickSyncPoint PBi.OriginalRepr nd pg1
   setSyncPoint pg1 nd syncO
 
+{-
+guessDivergence ::
+  GraphNode arch {- divergence point -} -> 
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (GraphNode arch))
+guessDivergence nd pg = do
+  (instrsO,instrsP) <- fmap (PPa.view getConst) $ PPa.forBinsC $ \bin -> do
+    blk <- PPa.get bin (graphNodeBlocks nd)
+    PD.ParsedBlocks pblks <- PD.lookupBlocks blk
+    return $ concat $
+      map (\pblk -> 
+         mapMaybe (\case { MM.InstructionStart addr txt -> Just (addr, txt, Some pblk); _ -> Nothing }) (MD.pblockStmts pblk)) pblks
+  let instrs = zip instrsO instrsP
+  let midxDesync = findIndex (\((addrO,txtO,_), (addrP,txtP,_)) -> addrO /= addrP || txtO /= txtP) instrs
+  case midxDesync of
+    Nothing -> return Nothing
+    Just idxDesync -> do
+      let (_,(desyncO, desyncP):rest) = splitAt idxDesync instrs
+      let midxSync = findIndex (\((_,txtO), (_,txtP)) -> txtO == txtP) rest
+      case midxSync of
+        Nothing -> return Nothing
+        Just idxSync -> return Nothing
 
+
+  return Nothing
+-}
 
 pickSyncPoint ::
   PBi.WhichBinaryRepr bin ->
@@ -434,7 +461,7 @@ pairGraphComputeFixpoint gr0 = do
                   gr'' <- visitNode scope nd d gr'
                   emitEvent $ PE.VisitedNode nd
                   return gr''
-        go gr''      
+        go gr''
 
     -- Orphaned returns can appear when we never find a return branch for
     -- a function (e.g. possibly due to a code analysis failure)

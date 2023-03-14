@@ -10,7 +10,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE PatternSynonyms #-}
-
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
@@ -24,6 +24,7 @@ module Pate.Verification.PairGraph
   , pairGraphWorklist
   , popWorkItem
   , updateDomain
+  , modifyDomain
   , addReturnVector
   , getReturnVectors
   , freshDomain
@@ -54,6 +55,10 @@ module Pate.Verification.PairGraph
   , SyncPoint(..)
   , updateSyncPoint
   , singleNodeRepr
+  , queuePendingAction
+  , runPendingActions
+  , addLazyAction
+  , VerifierResult(..)
   ) where
 
 import           Prettyprinter
@@ -89,6 +94,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
+
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
@@ -98,6 +104,7 @@ import           Pate.TraceTree
 import qualified Pate.Binary as PBi
 import Data.Parameterized (Some(..))
 import Control.Applicative (Const(..))
+import qualified Control.Monad.IO.Unlift as IO
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -213,7 +220,74 @@ data PairGraph sym arch =
     --   the case where two independent program analysis steps have occurred and now
     --   their control-flows have re-synchronized
   , pairGraphSyncPoints :: !(Map (GraphNode arch) (SyncPoint arch))
+  , pairGraphPendingActs :: PendingActions sym arch
   }
+
+-- Final result of verifier after widening for a particular edge
+data VerifierResult sym arch = forall v.
+    VerifierResult 
+      { resultScope :: PS.SimScope sym arch v 
+      , resultBundle :: PS.SimBundle sym arch v
+      , resultPredomain :: AbstractDomain sym arch v
+      , resultPostdomain :: AbstractDomain sym arch v
+      }
+
+data PendingActions sym arch =
+  PendingActions (Map (GraphNode arch, GraphNode arch) [(Int, (VerifierResult sym arch -> PairGraph sym arch -> IO (Maybe (PairGraph sym arch))))]) Int
+
+dropActId' ::
+  Int ->
+  PendingActions sym arch ->
+  PendingActions sym arch
+dropActId' actId (PendingActions acts nextActId) = PendingActions (fmap (filter (\(actId',_) -> actId /= actId')) acts) nextActId
+
+dropActId ::
+  Int ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropActId actId pg = pg { pairGraphPendingActs = dropActId' actId (pairGraphPendingActs pg) }
+
+addLazyAction ::
+  IsTreeBuilder k e m =>
+  IO.MonadUnliftIO m =>
+  (GraphNode arch, GraphNode arch) ->
+  PairGraph sym arch ->
+  String ->
+  (forall m'. Monad m' => ((String -> (VerifierResult sym arch -> PairGraph sym arch -> m (PairGraph sym arch)) -> m' ())) -> m' ()) ->
+  m (PairGraph sym arch)  
+addLazyAction edge pg actNm f = do
+  pendingAct <- chooseLazy @"()" actNm (\choice -> f (\nm act -> choice nm () (\(result,pg') -> act result pg')))
+  queuePendingAction edge (\result pg' -> pendingAct (result,pg')) pg
+
+queuePendingAction ::
+  IO.MonadUnliftIO m =>
+  (GraphNode arch, GraphNode arch) ->
+  (VerifierResult sym arch -> PairGraph sym arch -> m (Maybe (PairGraph sym arch))) ->
+  PairGraph sym arch ->
+  m (PairGraph sym arch)
+queuePendingAction edge act pg = do
+  inIO <- IO.askRunInIO
+  let PendingActions actMap nextActId = pairGraphPendingActs pg
+  let act' = (nextActId, (\result pg' -> inIO (act result (dropActId nextActId pg'))))
+  return $ pg { pairGraphPendingActs = PendingActions (Map.insertWith (++) edge [act'] actMap) (nextActId + 1) }
+
+runPendingActions ::
+  forall sym arch m.
+  IO.MonadIO m =>
+  (GraphNode arch, GraphNode arch) ->
+  VerifierResult sym arch ->
+  PairGraph sym arch ->
+  m (PairGraph sym arch)
+runPendingActions edge result pg = do
+  let PendingActions actMap _ = pairGraphPendingActs pg
+  let actList = fromMaybe [] (Map.lookup edge actMap)
+  go (map snd actList) pg
+  where 
+    go :: [(VerifierResult sym arch -> PairGraph sym arch -> IO (Maybe (PairGraph sym arch)))] -> PairGraph sym arch -> m (PairGraph sym arch)
+    go [] pg' = return pg'
+    go (act:acts) pg' = (liftIO $ act result pg') >>= \case
+      Just pg'' -> go acts pg''
+      Nothing -> go acts pg'
 
 data SyncPoint arch =
   SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch), syncTerminal :: Maybe Bool }
@@ -254,6 +328,7 @@ emptyPairGraph =
   , pairGraphEdges = mempty
   , pairGraphBackEdges = mempty
   , pairGraphSyncPoints = mempty
+  , pairGraphPendingActs = PendingActions Map.empty 0
   }
 
 -- | Given a pair graph and a function pair, return the set of all
@@ -529,6 +604,18 @@ updateDomain gr pFrom pTo d
      -- Lookup the amount of remaining gas.  Initialize to a fresh value
      -- if it is not in the map
       Gas g = fromMaybe initialGas (Map.lookup (pFrom,pTo) (pairGraphGas gr))
+
+modifyDomain ::
+  Monad m =>
+  GraphNode arch ->
+  PairGraph sym arch ->
+  (forall scope. PS.SimScope sym arch scope -> AbstractDomain sym arch scope -> m (AbstractDomain sym arch scope, PEC.EquivalenceCondition sym arch scope)) ->
+  m (PairGraph sym arch)
+modifyDomain nd pg f  = case Map.lookup nd (pairGraphDomains pg) of
+  Just domSpec -> do
+    (domSpec', eqSpec') <- PS.forSpec2 domSpec f
+    return $ (pg { pairGraphDomains = Map.insert nd domSpec' (pairGraphDomains pg), pairGraphEquivConditions = Map.insert nd eqSpec' (pairGraphEquivConditions pg) })
+  Nothing -> return pg
 
 emptyReturnVector ::
   PairGraph sym arch ->

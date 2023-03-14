@@ -219,6 +219,43 @@ computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "
                 emitError $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond3)
                 return $ W4.truePred sym
 
+
+updateEquivCondition ::
+  PS.SimScope sym arch v ->
+  GraphNode arch ->
+  PEC.EquivalenceCondition sym arch v ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)  
+updateEquivCondition scope nd cond gr = withSym $ \sym -> do
+  pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
+  case getEquivCondition  gr nd of
+    Just eqCondSpec -> do
+      (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      eqCond' <- PEC.mux sym pathCond cond eqCond
+      return $ setEquivCondition nd (PS.mkSimSpec scope eqCond') gr
+    Nothing -> return $ setEquivCondition nd (PS.mkSimSpec scope cond) gr
+
+refineEqDomainForEdge ::
+  (GraphNode arch,GraphNode arch) ->
+  VerifierResult sym arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+refineEqDomainForEdge (from,to) (VerifierResult scope bundle preD postD) gr1 = withSym $ \_sym -> do
+  locFilter <- refineEquivalenceDomain postD
+  eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
+  gr2 <- updateEquivCondition scope to eqCond gr1
+  return $ dropDomain to (markEdge from to gr2)
+
+pruneEdgeForEquality ::
+  (GraphNode arch,GraphNode arch) ->
+  VerifierResult sym arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+pruneEdgeForEquality (from,to) (VerifierResult scope _bundle _preD _postD) gr1 = withSym $ \sym -> do
+  gr2 <- updateEquivCondition scope to (PEC.falseEqCondition sym) gr1
+  return $ dropDomain to (markEdge from to gr2)
+
+{-
 -- | After widening an edge, insert an equivalence condition
 --   into the pairgraph for candidate functions
 initializeCondition ::
@@ -230,10 +267,12 @@ initializeCondition ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-initializeCondition scope bundle preD postD from to gr = withSym $ \sym -> do
-  case getEquivCondition gr to of
-    Just{} -> return gr
-    Nothing -> do
+initializeCondition scope bundle preD postD from to gr = do
+  let edge = (from,to)
+  addLazyAction edge gr "Post-process equivalence domain?" $ \choice ->
+    choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
+
+
       eqCondFns <- CMR.asks envEqCondFns
       (mlocFilter, gr1) <- if
         | Just sync <- asSyncPoint gr to -> case syncTerminal sync of
@@ -260,6 +299,7 @@ initializeCondition scope bundle preD postD from to gr = withSym $ \sym -> do
           let gr2 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr1
           return $ dropDomain to (markEdge from to gr2)
         Nothing -> return gr1
+-}
 
 data RegisterPickChoice arch = 
     forall tp. PickRegister (MM.ArchReg arch tp)
@@ -449,7 +489,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
                   let gr1 = freshDomain gr to postSpec'
-                  initializeCondition scope bundle d d' from to gr1
+                  finalizeGraphEdge scope bundle d d' from to gr1
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
@@ -459,7 +499,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
                   let gr1 = freshDomain gr to postSpec'
-                  initializeCondition scope bundle d d'' from to gr1
+                  finalizeGraphEdge scope bundle d d'' from to gr1
 
           -- have visited this location at least once before
           Just postSpec -> do
@@ -484,7 +524,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                 NoWideningRequired ->
                   do traceBundle bundle "Did not need to widen"
                      emitTraceLabel @"domain" PAD.Postdomain (Some d')
-                     initializeCondition scope bundle d d' from to gr
+                     finalizeGraphEdge scope bundle d d' from to gr
 
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
@@ -502,8 +542,24 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                   case updateDomain gr from to postSpec' of
                     Left gr' -> do
                       do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                         initializeCondition scope bundle d d'' from to gr'
-                    Right gr' -> initializeCondition scope bundle d d'' from to gr'
+                         finalizeGraphEdge scope bundle d d'' from to gr'
+                    Right gr' -> finalizeGraphEdge scope bundle d d'' from to gr'
+
+finalizeGraphEdge ::
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ incoming source predomain -} ->
+  AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+finalizeGraphEdge scope bundle preD postD from to gr = do
+  gr' <- runPendingActions (from,to) (VerifierResult scope bundle preD postD) gr
+  let edge = (from,to)
+  addLazyAction edge gr' "Post-process equivalence domain?" $ \choice -> do
+    choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
+    choice "Prune branch for equivalence condition" (\x y -> pruneEdgeForEquality edge x y)
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp

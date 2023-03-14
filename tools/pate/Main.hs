@@ -528,9 +528,9 @@ cliOptions = OA.info (OA.helper <*> parser)
        )
    <*> OA.switch
        (  OA.long "skip-divergent-control-flow"
-       <> OA.help "Skip node processing for "
+       <> OA.help "<DEPRECATED>"
        )
     <*> OA.many (OA.strOption
         ( OA.long "target-equiv-regs"
-        <> OA.help "Compute an equivalence condition sufficient to establish equality on the given registers after the toplevel entrypoint returns"
+        <> OA.help "Compute an equivalence condition sufficient to establish equality on the given registers after the toplevel entrypoint returns. <DEPRECATED>"
         ))

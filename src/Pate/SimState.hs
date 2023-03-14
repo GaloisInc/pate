@@ -59,6 +59,7 @@ module Pate.SimState
   , mkSimSpec
   , freshSimSpec
   , forSpec
+  , forSpec2
   , viewSpec
   , viewSpecBody
   , unsafeCoerceSpecBody
@@ -299,6 +300,15 @@ forSpec ::
   (forall v. SimScope sym arch v -> f v -> m (g v)) ->
   m (SimSpec sym arch g)
 forSpec (SimSpec scope body) f = SimSpec <$> pure scope <*> f scope body
+
+forSpec2 ::
+  Monad m =>
+  SimSpec sym arch f ->
+  (forall v. SimScope sym arch v -> f v -> m (g v, h v)) ->
+  m (SimSpec sym arch g, SimSpec sym arch h)
+forSpec2 (SimSpec scope body) f = do
+  (g,h) <- f scope body
+  return $ (SimSpec scope g, SimSpec scope h)
 
 -- | Unsafely coerce the body of a spec to have any scope.
 -- After this is used, the variables in the resulting 'f' should

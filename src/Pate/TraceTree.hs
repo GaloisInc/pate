@@ -91,6 +91,7 @@ module Pate.TraceTree (
   , getNodeBuilder
   , noTracing
   , chooseLabel
+  , chooseLazy
   , choose
   , chooseBool
   , ChoiceHeader(..)
@@ -559,6 +560,12 @@ instance IsTraceNode k "choice" where
     _ -> PP.pretty nm <> ":" PP.<+> prettyChoice c
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
 
+instance IsTraceNode k "()" where
+  type TraceNodeType k "()" = ()
+  type TraceNodeLabel "()" = ()
+  prettyNode () () = PP.emptyDoc
+  nodeTags = mkTags @k @"()" [Summary, Simplified]
+
 -- | Returns the unblocking action
 setBlockedStatus ::
   IsTreeBuilder k e m =>
@@ -586,10 +593,11 @@ chooseHeader ::
   forall nm_choice a k m e.
   IsTreeBuilder k e m =>
   IsTraceNode k nm_choice =>
+  Bool ->
   String ->
   (ChoiceHeader k nm_choice a -> NodeBuilderT k "choice" m ()) ->
   m (ChoiceHeader k nm_choice a)
-chooseHeader treenm f = do
+chooseHeader blocking treenm f = do
   builder <- getTreeBuilder
   (header :: ChoiceHeader k nm_choice a) <- case interactionMode builder of
     Interactive _ -> do
@@ -599,7 +607,7 @@ chooseHeader treenm f = do
     DefaultChoice -> return $ ChoiceHeader knownSymbol (return ()) (return ()) (return True)
   withSubTraces $
     subTraceLabel @"choiceTree" @k @m treenm (SomeChoiceHeader header) $ do
-      header' <- addStatusBlocker header
+      header' <- if blocking then addStatusBlocker header else return header
       withSubTraces @"choice" @k (f header' >> return header')
 
 mkChoice ::
@@ -642,17 +650,14 @@ choice_ header name label v f = do
 getChoice ::
   forall k e m nm_choice a.
   IsTreeBuilder k e m =>
-  ChoiceHeader k nm_choice a ->
   [Choice k nm_choice a] ->
-  m a
-getChoice header choices = do
-  () <- liftIO $ waitForChoice header
-  go choices
+  m (Maybe a)
+getChoice choices = go choices
   where
-    go :: [Choice k nm_choice a] -> m a
-    go [] = liftIO $ fail "No choices"
+    go :: [Choice k nm_choice a] -> m (Maybe a)
+    go [] = return Nothing
     go (c : choices') = (liftIO $ choiceChosen c) >>= \case
-      True  -> (liftIO $ choiceValue c)
+      True  -> Just <$> (liftIO $ choiceValue c)
       False -> go choices'
 
 -- | Interactively select one result from a list of choices
@@ -666,8 +671,42 @@ chooseLabel ::
     m' ()) ->
   m a
 chooseLabel treenm f = do
-  (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k treenm (\header -> f (choice_ header)))
-  getChoice header choices
+  (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k True treenm (\header -> f (choice_ header)))
+  () <- liftIO $ waitForChoice header
+  getChoice choices >>= \case
+    Just a -> return a
+    Nothing -> liftIO $ fail "choose: no value available"
+
+-- | A non-blocking variant of 'choose', that instead lets the caller decide
+--   how to handle a choice being made.
+--   TODO: Once we have a result we're currently re-running the corresponding action
+--   each time this is queried, so it's up to the caller to discard the continuation
+--   once it has a result.
+chooseLazy ::
+  forall nm_choice a b k m e.
+  IsTreeBuilder k e m =>
+  IO.MonadUnliftIO m =>
+  IsTraceNode k nm_choice =>
+  Default (TraceNodeLabel nm_choice) =>
+  String ->
+  (forall m'. Monad m' => (String -> TraceNodeType k nm_choice -> (b -> m a) -> m' ()) ->
+    m' ()) ->
+  m (b -> m (Maybe a))
+chooseLazy treenm f = do
+  builder <- getTreeBuilder
+  -- TODO: this is a bit gross, but easiest to implement
+  -- in general maybe choices should always take input
+  inputVar <- liftIO $ newEmptyMVar
+  case interactionMode builder of
+    Interactive{} -> do
+      (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k False treenm (\header -> f (\nm v g -> choice_ header nm def v ((liftIO $ readMVar inputVar) >>= g))))
+      return $ \inputVal -> do
+        (liftIO $ choiceReady header) >>= \case
+          True -> do
+            liftIO $ putMVar inputVar inputVal
+            getChoice choices
+          False -> return Nothing
+    DefaultChoice -> return $ \_ -> return Nothing
 
 choose ::
   forall nm_choice a k m e.

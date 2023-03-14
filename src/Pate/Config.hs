@@ -292,10 +292,10 @@ defaultVerificationCfg =
                      , cfgFailureMode = ThrowOnAnyFailure
                      , cfgContextSensitivity = DistinctFunctionAbstractDomains
                      , cfgTraceTree = noTraceTree
-                     , cfgAddOrphanEdges = True
+                     , cfgAddOrphanEdges = False
                      , cfgCheckSimplifier = False
-                     , cfgIgnoreUnnamedFunctions = True
-                     , cfgIgnoreDivergedControlFlow = True
+                     , cfgIgnoreUnnamedFunctions = False
+                     , cfgIgnoreDivergedControlFlow = False
                      , cfgTargetEquivRegs = []
                      , cfgRescopingFailureMode = ThrowOnEqRescopeFailure
                      }
