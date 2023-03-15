@@ -226,7 +226,7 @@ run rawOpts = do
           IO.writeIORef finalResult (Just (Left msg))
         Right a -> IO.writeIORef finalResult (Just (Right a))
       IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
-      wait
+      wait_verbosity False
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn
@@ -290,8 +290,10 @@ addNextNodes node = isTraceNode node $ do
   (IO.liftIO $ nodeShownAt tags node) >>= \case
     True -> do
       nextSubs <- fmap concat $ forM nextTrees $ \(n, Some nextNode) -> do
+        prevNodes <- gets replPrev
         next <- maybeSubNodes nextNode (return []) (gets replNext)
         case (isSubTreeNode nextNode, next) of
+
           (True, []) -> return []
           _ -> return $ [(n, Some nextNode)] ++ next
       modify (\st -> st { replNext = (replNext st) ++ nextSubs })
@@ -353,14 +355,15 @@ maybeSubNodes ::
   ReplM sym arch a ->
   ReplM sym arch a
 maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
+  prevNodes <- gets replPrev
   case isSubTreeNode nd of
     True -> withNode nd $ f
     False -> do
       mr <- withNode nd $ do
         nextNodes <- gets replNext
         case length nextNodes == 1 of
-          True -> Just <$> f
-          False -> return Nothing
+          True | (not (null prevNodes)) -> Just <$> f
+          _ -> return Nothing
       case mr of
         Just a -> return a
         Nothing -> g
@@ -411,7 +414,8 @@ ls' = do
   p <- prettyNextNodes 0 False
   nextNodes <- gets replNext
   (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) <- gets replNode
-  let thisPretty = prettyNode @_ @'(sym, arch) @nm lbl v
+  tags <- gets replTags
+  let thisPretty = prettyDetailAt @'(sym, arch) @nm tags lbl v
   case nextNodes of
     [] -> printPrettyLn thisPretty
     _ -> printPrettyLn (PP.vsep [thisPretty,p])
@@ -601,6 +605,7 @@ waitRepl lastShown = do
     (Some (TraceNode _ _ t))  <- gets replNode
     st <- IO.liftIO $ getTreeStatus t
     case isFinished st of
+      True | lastShown == -1 -> return ()
       True -> do
         IO.liftIO $ IO.putStrLn ""
         prettyNextNodes lastShown False >>= printPrettyLn   
@@ -610,8 +615,10 @@ waitRepl lastShown = do
         case isFinished st of
           True -> IO.liftIO $ IO.putStrLn "No such option" >> return ()
           False -> do
-            n <- finishedPrefix            
-            if n > lastShown then do
+            n <- case lastShown >= 0 of
+              True -> finishedPrefix
+              False -> return lastShown
+            if n > lastShown && lastShown >= 0 then do
               IO.liftIO $ IO.putStrLn ""
               prettyNextNodes lastShown True >>= printPretty
             else
@@ -634,8 +641,9 @@ killWaitThread = do
     Just tid -> IO.killThread tid
     Nothing -> return ()
 
-waitIO :: IO ()
-waitIO = do
+waitIO :: Bool -> IO ()
+waitIO verbose = do
+  let n :: Int = if verbose then 0 else (-1)
   execReplM (return ())
   t <- IO.readIORef ref
   case t of
@@ -646,13 +654,16 @@ waitIO = do
         Just (Right r) -> IO.putStrLn (show r)
         Nothing -> do
           IO.putStrLn "Verifier is starting..."
-          IO.threadDelay 1000000 >> waitIO
-    SomeReplState{} -> execReplM $ waitRepl 0
+          IO.threadDelay 1000000 >> (waitIO verbose)
+    SomeReplState{} -> execReplM $ waitRepl n
 
 wait :: IO ()
-wait = do
+wait = wait_verbosity True
+
+wait_verbosity :: Bool -> IO ()
+wait_verbosity verbose = do
   killWaitThread
-  tid <- IO.forkFinally waitIO $ \case
+  tid <- IO.forkFinally (waitIO verbose) $ \case
     Left _ -> killWaitThread
     Right _ -> (getPrompt >>= IO.putStr) >> killWaitThread    
   IO.writeIORef waitThread (WaitThread (Just (tid)) 2)
@@ -665,8 +676,9 @@ goto idx = execReplM $ do
 
 gotoIndex :: forall sym arch. Integer -> ReplM sym arch String
 gotoIndex idx = (goto' (fromIntegral idx)) >>= \case
-  Just (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) ->
-    return $ show (prettyNode @_ @'(sym, arch) @nm lbl v)
+  Just (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) -> do
+    tags <- gets replTags
+    return $ show (prettyDetailAt @'(sym, arch) @nm tags lbl v)
   Nothing -> return "No such option"
 
 -- Hacks to export the arch and sym parameters to the toplevel

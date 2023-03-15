@@ -40,6 +40,7 @@ module Pate.TraceTree (
   , IsTraceNode(..)
   , isTraceNode
   , prettyNodeAt
+  , prettyDetailAt
   , nodeShownAt
   , TraceTag(..)
   , viewTraceTreeNode
@@ -70,6 +71,7 @@ module Pate.TraceTree (
   , NodeBuilderT
   , TreeBuilderT
   , startSomeTreeBuilder
+  , resetSomeTreeBuilder
   , runTreeBuilderT
   , withSubTraces
   , subTraceLabel
@@ -132,6 +134,7 @@ data TraceTag =
     Summary
   | Full
   | Simplified
+  | Simplified_Detail
   | Custom String
   deriving (Eq, Ord)
 
@@ -226,6 +229,9 @@ emptyIOList :: IO (IOList a)
 emptyIOList = do
   r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess False mempty))
   return $ IOList r
+
+resetIOList :: IOList a -> IO ()
+resetIOList (IOList r) = IO.modifyIORef' r (\_ -> IOList' [] (NodeStatus StatusSuccess False mempty))
 
 data NodeBuilder k nm where
   NodeBuilder ::
@@ -351,6 +357,19 @@ prettySummary ::
   Maybe (PP.Doc a)
 prettySummary lbl v = prettyNodeAt @k @nm [Summary] lbl v
 
+prettyDetailAt ::
+  forall k nm a.
+  IsTraceNode k nm =>
+  [TraceTag] ->
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  PP.Doc a
+prettyDetailAt tags lbl v = case elem Simplified tags of
+  True -> case getNodePrinter @k @nm [Simplified_Detail] of
+    Just pp -> pp lbl v
+    Nothing -> prettyNode @_ @k @nm lbl v
+  False -> prettyNode @_ @k @nm lbl v
+
 prettyNodeAt ::
   forall k nm a.
   IsTraceNode k nm =>
@@ -361,6 +380,28 @@ prettyNodeAt ::
 prettyNodeAt tags lbl v = case getNodePrinter @k @nm tags of
   Just pp -> Just (pp lbl v)
   Nothing -> Nothing
+
+{-
+prettyNodeAtIO ::
+  forall k nm a.
+  IsTraceNode k nm =>
+  [TraceTag] ->
+  TraceNodeLabel nm ->
+  TraceNodeType k nm ->
+  IO (Maybe (PP.Doc a))
+prettyNodeAtIO tags lbl v = case getNodePrinter @k @nm tags of
+  Just pp -> case testEquality (knownSymbol @"choice") (knownSymbol @nm) of
+    Just Refl -> do
+      b <- case v of
+        SomeChoice choice -> choiceReady (choiceHeader choice) >>= \case
+          True -> choiceChosen choice
+          False -> return True
+      case b of
+        True -> return $ Just (pp lbl v)
+        False -> return Nothing
+    Nothing -> return $ Just (pp lbl v)
+  Nothing -> return Nothing
+-}
 
 nodeKindShownAt ::
   forall k nm.
@@ -378,8 +419,11 @@ nodeShownAt tags node@(TraceTreeNode{}) = case nodeKindShownAt @k @nm tags of
   True -> case testEquality (knownSymbol @"choiceTree") (knownSymbol @nm) of
     Just Refl -> viewTraceTreeNode node >>= \case
       [((SomeChoiceHeader header, _), _)] -> choiceReady header >>= \case
-        -- once a choice has been made, don't display the tree
-        True -> return False
+        -- once a choice has been made, don't display the tree, unless
+        -- there are more decisions to be made
+        True -> do
+          st <- getNodeStatus node
+          return $ isBlockedStatus st
         -- if the choice has been made, we need to display the
         -- tree so a decision can be made
         False -> return True
@@ -392,7 +436,7 @@ tagsMap ::
   forall k nm a.
   IsTraceNode k nm =>
   Map TraceTag (TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)
-tagsMap = Map.fromList ((Full, prettyNode @_ @k @nm):nodeTags @_ @k @nm)
+tagsMap = Map.fromList (nodeTags @_ @k @nm)
 
 getNodePrinter ::
   forall k nm a.
@@ -400,6 +444,9 @@ getNodePrinter ::
   [TraceTag] ->
   Maybe (TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)
 getNodePrinter [] = Nothing
+getNodePrinter (Full : _) = case Map.lookup Simplified_Detail (tagsMap @k @nm) of
+  Just f -> Just f
+  Nothing -> Just (prettyNode @_ @k @nm)
 getNodePrinter (t : tags) = case Map.lookup t (tagsMap @k @nm) of
   Just f -> Just f
   Nothing -> getNodePrinter @k @nm tags
@@ -503,6 +550,10 @@ instance IsTraceNode k "message" where
   prettyNode () msg = PP.pretty msg
   nodeTags = [("message", \_ msg -> PP.pretty msg)]
 
+instance IsTraceNode k "debug" where
+  type TraceNodeType k "debug" = String
+  prettyNode () msg = PP.pretty msg
+  nodeTags = [("debug", \_ msg -> PP.pretty msg)]
 
 instance forall k. IsTraceNode k "simplemessage" where
   type TraceNodeType k "simplemessage" = String
@@ -557,7 +608,7 @@ instance IsTraceNode k "choice" where
   type TraceNodeLabel "choice" = String
   prettyNode nm (SomeChoice c) = case nm of
     "" -> prettyChoice c
-    _ -> PP.pretty nm <> ":" PP.<+> prettyChoice c
+    _ -> PP.pretty nm PP.<+> prettyChoice c
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
 
 instance IsTraceNode k "()" where
@@ -648,8 +699,9 @@ choice_ header name label v f = do
   return ()
 
 getChoice ::
-  forall k e m nm_choice a.
-  IsTreeBuilder k e m =>
+  forall k m nm_choice a.
+  MonadIO m =>
+  --IsTreeBuilder k e m =>
   [Choice k nm_choice a] ->
   m (Maybe a)
 getChoice choices = go choices
@@ -672,10 +724,13 @@ chooseLabel ::
   m a
 chooseLabel treenm f = do
   (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k True treenm (\header -> f (choice_ header)))
-  () <- liftIO $ waitForChoice header
-  getChoice choices >>= \case
-    Just a -> return a
-    Nothing -> liftIO $ fail "choose: no value available"
+  case null choices of
+    True -> liftIO $ fail $ "choose: at least one option required (" ++ treenm ++ ")"
+    False -> do
+      () <- liftIO $ waitForChoice header
+      getChoice choices >>= \case
+        Just a -> return a
+        Nothing -> liftIO $ fail $ "choose: no value available (" ++ treenm ++ ")"
 
 -- | A non-blocking variant of 'choose', that instead lets the caller decide
 --   how to handle a choice being made.
@@ -685,13 +740,13 @@ chooseLabel treenm f = do
 chooseLazy ::
   forall nm_choice a b k m e.
   IsTreeBuilder k e m =>
-  IO.MonadUnliftIO m =>
   IsTraceNode k nm_choice =>
+  IO.MonadUnliftIO m =>
   Default (TraceNodeLabel nm_choice) =>
   String ->
-  (forall m'. Monad m' => (String -> TraceNodeType k nm_choice -> (b -> m a) -> m' ()) ->
+  (forall m'. Monad m' => (String -> TraceNodeType k nm_choice -> (b -> IO a) -> m' ()) ->
     m' ()) ->
-  m (b -> m (Maybe a))
+  m (b -> IO (Maybe a))
 chooseLazy treenm f = do
   builder <- getTreeBuilder
   -- TODO: this is a bit gross, but easiest to implement
@@ -699,7 +754,7 @@ chooseLazy treenm f = do
   inputVar <- liftIO $ newEmptyMVar
   case interactionMode builder of
     Interactive{} -> do
-      (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k False treenm (\header -> f (\nm v g -> choice_ header nm def v ((liftIO $ readMVar inputVar) >>= g))))
+      (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k False treenm (\header -> f (\nm v g -> choice_ header nm def v (liftIO $ (readMVar inputVar) >>= g))))
       return $ \inputVal -> do
         (liftIO $ choiceReady header) >>= \case
           True -> do
@@ -747,6 +802,16 @@ noTracing (NoTreeBuilder f) = f
 instance MonadError e m => MonadError e (NoTreeBuilder k m) where
   throwError e = NoTreeBuilder $ throwError e
   catchError (NoTreeBuilder f) g = NoTreeBuilder $ catchError f (\e -> noTracing (g e))
+
+resetSomeTreeBuilder ::
+  forall k m tp.
+  IO.MonadIO m =>
+  SomeTraceTree tp ->
+  m ()
+resetSomeTreeBuilder NoTreeBuild = return ()
+resetSomeTreeBuilder (SomeTraceTree ref) = (IO.liftIO $ IO.readIORef ref) >>= \case
+  StartTree -> return ()
+  SomeTraceTree' _ _ (TraceTree l) -> liftIO $ resetIOList l
 
 startSomeTreeBuilder ::
   forall k m tp.

@@ -105,7 +105,7 @@ discoverPairs ::
   forall sym arch v.
   SimBundle sym arch v ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ \sym -> do
+discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> do
   cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
     Just pairs -> return pairs
     Nothing -> return Set.empty
@@ -144,9 +144,10 @@ discoverPairs bundle = withTracing @"function_name" "discoverPairs" $ withSym $ 
   blocks <- getBlocks $ PSS.simPair bundle
   
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
+  
+  
   subTree @"blocktarget" "Cached Pairs" $
     mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
-
 
 
   result <-

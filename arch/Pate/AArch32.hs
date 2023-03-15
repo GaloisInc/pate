@@ -219,6 +219,7 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     -- FIXME: fixup arguments for fwrite
     , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
     , ("printf", PA.mkObservableOverride "printf" r0 r1)
+    , ("puts", PA.mkObservableOverride "puts" r0 r0)
     -- FIXME: default stubs below here
     ] ++
     (map mkDefault $
@@ -234,7 +235,6 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
       , "RAND_bytes"
       , "close"
       , "fclose"
-      , "puts"
       , "lseek"
       , "strcpy"
       , "sleep"

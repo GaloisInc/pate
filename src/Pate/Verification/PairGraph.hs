@@ -11,6 +11,8 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
@@ -22,12 +24,15 @@ module Pate.Verification.PairGraph
   , initializePairGraph
   , chooseWorkItem
   , pairGraphWorklist
+  , pairGraphObservableReports
   , popWorkItem
   , updateDomain
   , modifyDomain
   , addReturnVector
   , getReturnVectors
+  , getEdgesFrom
   , freshDomain
+  , initDomain
   , pairGraphComputeVerdict
   , getCurrentDomain
   , considerObservableEvent
@@ -52,12 +57,15 @@ module Pate.Verification.PairGraph
   , setSyncPoint
   , getCombinedSyncPoint
   , addToWorkList
+  , emptyWorkList
   , SyncPoint(..)
   , updateSyncPoint
   , singleNodeRepr
   , queuePendingAction
   , runPendingActions
   , addLazyAction
+  , getAllNodes
+  , emptyPairGraph
   , VerifierResult(..)
   ) where
 
@@ -105,6 +113,8 @@ import qualified Pate.Binary as PBi
 import Data.Parameterized (Some(..))
 import Control.Applicative (Const(..))
 import qualified Control.Monad.IO.Unlift as IO
+import Pate.Solver (ValidSym)
+import Control.Monad.Reader (local, MonadReader (ask))
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -233,7 +243,7 @@ data VerifierResult sym arch = forall v.
       }
 
 data PendingActions sym arch =
-  PendingActions (Map (GraphNode arch, GraphNode arch) [(Int, (VerifierResult sym arch -> PairGraph sym arch -> IO (Maybe (PairGraph sym arch))))]) Int
+  PendingActions (Map (GraphNode arch, GraphNode arch) [(Int, (EquivEnv sym arch -> VerifierResult sym arch -> PairGraph sym arch -> IO (PairGraph sym arch)))]) Int
 
 dropActId' ::
   Int ->
@@ -248,46 +258,41 @@ dropActId ::
 dropActId actId pg = pg { pairGraphPendingActs = dropActId' actId (pairGraphPendingActs pg) }
 
 addLazyAction ::
-  IsTreeBuilder k e m =>
-  IO.MonadUnliftIO m =>
   (GraphNode arch, GraphNode arch) ->
   PairGraph sym arch ->
   String ->
-  (forall m'. Monad m' => ((String -> (VerifierResult sym arch -> PairGraph sym arch -> m (PairGraph sym arch)) -> m' ())) -> m' ()) ->
-  m (PairGraph sym arch)  
+  (forall m'. Monad m' => ((String -> (VerifierResult sym arch -> PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> m' ())) -> m' ()) ->
+  EquivM sym arch (PairGraph sym arch)  
 addLazyAction edge pg actNm f = do
-  pendingAct <- chooseLazy @"()" actNm (\choice -> f (\nm act -> choice nm () (\(result,pg') -> act result pg')))
-  queuePendingAction edge (\result pg' -> pendingAct (result,pg')) pg
+  inIO <- IO.askRunInIO
+  let pendingAct (env, result, pg') = inIO $ local (\_ -> env) $ do
+        choose @"()"  actNm $ \choice -> f (\nm act -> choice nm () $ act result pg')
+  liftIO $ queuePendingAction edge (\env result pg' -> (pendingAct (env, result,pg'))) pg
 
 queuePendingAction ::
-  IO.MonadUnliftIO m =>
   (GraphNode arch, GraphNode arch) ->
-  (VerifierResult sym arch -> PairGraph sym arch -> m (Maybe (PairGraph sym arch))) ->
+  (EquivEnv sym arch -> VerifierResult sym arch -> PairGraph sym arch -> IO (PairGraph sym arch)) ->
   PairGraph sym arch ->
-  m (PairGraph sym arch)
+  IO (PairGraph sym arch)
 queuePendingAction edge act pg = do
-  inIO <- IO.askRunInIO
   let PendingActions actMap nextActId = pairGraphPendingActs pg
-  let act' = (nextActId, (\result pg' -> inIO (act result (dropActId nextActId pg'))))
+  let act' = (nextActId, (\env result pg' -> act env result (dropActId nextActId pg')))
   return $ pg { pairGraphPendingActs = PendingActions (Map.insertWith (++) edge [act'] actMap) (nextActId + 1) }
 
 runPendingActions ::
-  forall sym arch m.
-  IO.MonadIO m =>
+  forall sym arch.
   (GraphNode arch, GraphNode arch) ->
   VerifierResult sym arch ->
   PairGraph sym arch ->
-  m (PairGraph sym arch)
+  EquivM sym arch (PairGraph sym arch)
 runPendingActions edge result pg = do
   let PendingActions actMap _ = pairGraphPendingActs pg
   let actList = fromMaybe [] (Map.lookup edge actMap)
-  go (map snd actList) pg
-  where 
-    go :: [(VerifierResult sym arch -> PairGraph sym arch -> IO (Maybe (PairGraph sym arch)))] -> PairGraph sym arch -> m (PairGraph sym arch)
-    go [] pg' = return pg'
-    go (act:acts) pg' = (liftIO $ act result pg') >>= \case
-      Just pg'' -> go acts pg''
-      Nothing -> go acts pg'
+  env <- ask
+  let go :: [(EquivEnv sym arch -> VerifierResult sym arch -> PairGraph sym arch -> IO (PairGraph sym arch))] -> PairGraph sym arch -> IO (PairGraph sym arch)
+      go [] pg' = return pg'
+      go (act:acts) pg' = (act env result pg') >>= \pg'' -> go acts pg''
+  liftIO $ go (map snd actList) pg
 
 data SyncPoint arch =
   SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch), syncTerminal :: Maybe Bool }
@@ -331,6 +336,9 @@ emptyPairGraph =
   , pairGraphPendingActs = PendingActions Map.empty 0
   }
 
+getAllNodes :: PairGraph sym arch -> [GraphNode arch]
+getAllNodes pg = Map.keys (pairGraphDomains pg)
+
 -- | Given a pair graph and a function pair, return the set of all
 --   the sites we have encountered so far where this function may return to.
 getReturnVectors ::
@@ -362,6 +370,13 @@ getBackEdgesFrom pg nd = case Map.lookup nd (pairGraphBackEdges pg) of
   Just s -> s
   Nothing -> Set.empty
 
+dropObservableReports ::
+  GraphNode arch ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropObservableReports (GraphNode ne) pg = pg { pairGraphObservableReports = Map.delete ne (pairGraphObservableReports pg) }
+dropObservableReports (ReturnNode{}) pg = pg
+
 -- | Delete the abstract domain for the given node, following
 --   any reachable edges and discarding those domains as well
 --   This is necessary if a domain is "narrowed": i.e. it moves
@@ -379,8 +394,10 @@ dropDomain nd pg = case getCurrentDomain pg nd of
         -- don't drop the domain for a toplevel entrypoint, but mark it for
         -- re-analysis
         True -> pg { pairGraphWorklist = Set.insert nd (pairGraphWorklist pg) }
-        False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), pairGraphWorklist = Set.delete nd (pairGraphWorklist pg) }
-      pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
+        False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), 
+                      pairGraphWorklist = Set.delete nd (pairGraphWorklist pg)
+                    }
+      pg'' = Set.foldl' (\pg_ nd' -> dropObservableReports nd' $ dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
       -- mark all ancestors as requiring re-processing
     in addAncestors Set.empty pg'' nd
   Nothing -> pg
@@ -770,6 +787,9 @@ addToWorkList nd gr = case getCurrentDomain gr nd of
   Just{} -> Just $ gr { pairGraphWorklist = Set.insert nd (pairGraphWorklist gr) }
   Nothing -> Nothing
 
+emptyWorkList :: PairGraph sym arch -> PairGraph sym arch
+emptyWorkList pg = pg { pairGraphWorklist = Set.empty }
+
 -- | Add an initial abstract domain value to a graph node, and
 --   record it in the worklist to be visited.
 freshDomain ::
@@ -781,6 +801,14 @@ freshDomain gr pTo d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
     , pairGraphWorklist = Set.insert pTo (pairGraphWorklist gr)
     }
+
+initDomain ::
+  PairGraph sym arch {- ^ pair graph to update -} ->
+  GraphNode arch {- ^ point pair we are jumping from -} ->
+  GraphNode arch {- ^ point pair we are jumping to -} ->
+  AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
+  PairGraph sym arch  
+initDomain gr pFrom pTo d = markEdge pFrom pTo (freshDomain gr pTo d)
 
 markEdge ::
   GraphNode arch {- ^ from -} ->
@@ -842,6 +870,8 @@ pairGraphComputeVerdict gr =
   if Map.null (pairGraphObservableReports gr) &&
      Map.null (pairGraphDesyncReports gr) &&
      Set.null (pairGraphGasExhausted gr) then
-    return PE.Equivalent
+    case Map.null (pairGraphEquivConditions gr) of
+      True -> return PE.Equivalent
+      False -> return PE.ConditionallyEquivalent
   else
     return PE.Inequivalent

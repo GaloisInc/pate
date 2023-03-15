@@ -104,7 +104,7 @@ runMain traceTree opts = do
   let
     verificationCfg =
       PC.defaultVerificationCfg
-        { PC.cfgStartSymbol = startSymbol opts
+        { PC.cfgStartSymbols = startSymbols opts
         , PC.cfgDiscoverFuns = not $ noDiscoverFuns opts
         , PC.cfgSolver = solver opts
         , PC.cfgHeuristicTimeout = heuristicTimeout opts
@@ -140,7 +140,7 @@ data CLIOptions = CLIOptions
   , patchedBinary :: FilePath
   , blockInfo :: Maybe FilePath
   -- , interactiveConfig :: Maybe InteractiveConfig
-  , startSymbol :: Maybe String
+  , startSymbols :: [String]
   , noDiscoverFuns :: Bool
   , solver :: PS.Solver
   , goalTimeout :: PTi.Timeout
@@ -434,10 +434,10 @@ cliOptions = OA.info (OA.helper <*> parser)
       <> OA.help "Block information relating binaries"
       )))
     -- <*> logParser
-    <*> (OA.optional (OA.strOption
+    <*> (OA.many (OA.strOption
       (  OA.long "startsymbol"
       <> OA.short 's'
-      <> OA.help "Start analysis from the function with this symbol, otherwise start at the program entrypoint"
+      <> OA.help "Start analysis from the function with this symbol"
       )))
     <*> (OA.switch
       (  OA.long "nodiscovery"

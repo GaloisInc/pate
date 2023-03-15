@@ -886,6 +886,11 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domai
   prettyNode lbl (Some absDom) = ppDomainKind lbl PP.<> PP.line PP.<> ppAbstractDomain (\_ -> "") absDom
   nodeTags = [(Summary, \lbl _ -> ppDomainKind lbl),
               (Simplified, \lbl _ -> ppDomainKind lbl),
+              (Simplified_Detail, \lbl (Some absDom) -> 
+                    PP.vsep
+                      [ ppDomainKind lbl
+                      , PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom)
+                      ]),
               ("symbolic", \_ _ -> "<TODO: domain symbolic summary>")]
 
 -- simplified variant of domain trace node

@@ -21,6 +21,9 @@ module Pate.Verification.Widening
   ( widenAlongEdge
   , WidenLocs(..)
   , getObservableEvents
+  -- TODO move these?
+  , refineEqDomainForEdge
+  , pruneEdgeForEquality
   ) where
 
 import           GHC.Stack
@@ -105,7 +108,7 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
-makeFreshAbstractDomain scope bundle preDom from _to = withTracing @"function_name" "makeFreshAbstractDomain" $ do
+makeFreshAbstractDomain scope bundle preDom from _to = withTracing @"debug" "makeFreshAbstractDomain" $ do
   case from of
     -- graph node
     GraphNodeEntry{} -> startTimer $ do
@@ -155,7 +158,7 @@ computeEquivCondition ::
   AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
   (forall nm k. PL.Location sym arch nm k -> Bool) {- ^ filter for locations to force equal -} ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-computeEquivCondition scope bundle preD postD f = withTracing @"function_name" "computeEquivCondition" $ withSym $ \sym -> do
+computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
   let 
@@ -358,6 +361,20 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
       PL.Register r -> Set.member (Some r) added
       _ -> False
 
+-- | FIXME: we're disabling equivalence condition propagation for the moment, since we
+-- don't have a good way to control where it should stop
+-- TODO: since this is part of the formal specification, we may consider instead making this
+-- propagation step an interactive choice
+propagateCondition ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+propagateCondition _scope _bundle _from _to _gr = return Nothing
+
 -- | Push an equivalence condition back up the graph.
 --   Returns 'Nothing' if there is nothing to do (i.e. no condition or
 --   existing condition is already implied)
@@ -370,7 +387,7 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
 --   invalidating any subsequent nodes, since we now may be propagating
 --   stronger equivalence domains
 
-propagateCondition ::
+_propagateCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -378,7 +395,7 @@ propagateCondition ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
-propagateCondition scope bundle from to gr = withSym $ \sym -> do
+_propagateCondition scope bundle from to gr = withSym $ \sym -> do
   pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   preCond <- case getEquivCondition gr from of
@@ -488,17 +505,17 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                 NoWideningRequired -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
-                  let gr1 = freshDomain gr to postSpec'
+                  let gr1 = initDomain gr from to postSpec'
                   finalizeGraphEdge scope bundle d d' from to gr1
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     return $ recordMiscAnalysisError (freshDomain gr to postSpec') to err
+                     return $ recordMiscAnalysisError (initDomain gr from to postSpec') to err
                 Widen _ _ d'' -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  let gr1 = freshDomain gr to postSpec'
+                  let gr1 = initDomain gr from to postSpec'
                   finalizeGraphEdge scope bundle d d'' from to gr1
 
           -- have visited this location at least once before
@@ -545,6 +562,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
                          finalizeGraphEdge scope bundle d d'' from to gr'
                     Right gr' -> finalizeGraphEdge scope bundle d d'' from to gr'
 
+
 finalizeGraphEdge ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -555,11 +573,13 @@ finalizeGraphEdge ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 finalizeGraphEdge scope bundle preD postD from to gr = do
-  gr' <- runPendingActions (from,to) (VerifierResult scope bundle preD postD) gr
+  runPendingActions (from,to) (VerifierResult scope bundle preD postD) gr
+  {-
   let edge = (from,to)
   addLazyAction edge gr' "Post-process equivalence domain?" $ \choice -> do
     choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
     choice "Prune branch for equivalence condition" (\x y -> pruneEdgeForEquality edge x y)
+  -}
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp
@@ -610,7 +630,7 @@ abstractOverVars ::
   PAD.AbstractDomain sym arch pre {- ^ computed post-domain (with variables from the initial 'pre' scope) -} ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 abstractOverVars scope_pre bundle _from _to postSpec postResult = do
-  result <- withTracing @"function_name" "abstractOverVars" $ go
+  result <- withTracing @"debug" "abstractOverVars" $ go
   PS.viewSpec result $ \_ d -> do
     emitTraceLabel @"domain" PAD.ExternalPostDomain (Some d)
   return result
@@ -924,7 +944,7 @@ widenPostcondition ::
   AbstractDomain sym arch v {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch v)
 widenPostcondition scope bundle preD postD0 =
-  withTracing @"function_name" "widenPostcondition" $ withSym $ \sym -> do
+  withTracing @"debug" "widenPostcondition" $ withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
     subTree @"domain" "Widening Steps" $
@@ -1104,7 +1124,7 @@ getInitalAbsDomainVals ::
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
-getInitalAbsDomainVals bundle preDom = withTracing @"function_name" "getInitalAbsDomainVals" $ withSym $ \sym -> do
+getInitalAbsDomainVals bundle preDom = withTracing @"debug" "getInitalAbsDomainVals" $ withSym $ \sym -> do
   PEM.SymExprMappable asEM <- return $ PEM.symExprMappable sym
   let
     getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)

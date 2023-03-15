@@ -24,6 +24,7 @@ import           Prettyprinter ( (<+>) )
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.TraceTree
 import qualified Pate.Proof.Instances as PPI
+import qualified Pate.Solver as PSo
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents

@@ -103,7 +103,7 @@ import qualified Pate.Verification.SymbolicExecution as PVSy
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry', asSingleGraphNode )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry', asSingleGraphNode, functionEntryOf )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -152,16 +152,18 @@ runVerificationLoop env pPairs = do
     Right r -> return r
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
-   doVerify = do
-          pg0 <- initializePairGraph pPairs
+   doVerify = do 
+          pg0 <- chooseEntryPoint pPairs emptyPairGraph
           result <- catchError (do
             -- Do the main work of computing the dataflow fixpoint
-            pg <- pairGraphComputeFixpoint pg0
+            pg <- pairGraphComputeFixpoint pPairs pg0
             -- Report a summary of any errors we found during analysis
             reportAnalysisErrors (envLogger env) pg
             pairGraphComputeVerdict pg) (pure . PE.Errored)
 
           emitEvent (PE.StrongestPostOverallResult result)
+
+          
 
           -- TODO, does reporting these kind of statistics make sense for this verification method?
           -- Currently, we only really do this to make the types fit at the call site.
@@ -169,6 +171,85 @@ runVerificationLoop env pPairs = do
           stats <- liftIO $ MVar.readMVar statVar
 
           return (result, stats)
+
+asEntry :: PB.FunPair arch -> NodeEntry arch
+asEntry fnPair = 
+  let 
+  bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
+  in (rootEntry bPair)
+
+asRootEntry :: GraphNode arch -> Maybe (PB.FunPair arch )
+asRootEntry (GraphNode ne) = Just (TF.fmapF PB.blockFunctionEntry (nodeBlocks ne))
+asRootEntry (ReturnNode{}) = Nothing
+
+-- FIXME: clagged from initializePairGraph
+chooseEntryPoint ::
+  [PB.FunPair arch] ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+chooseEntryPoint entries pg0 = choose @"node" "Choose Entry Point" $ \choice -> do
+  let knownRoots = Set.fromList (mapMaybe asRootEntry (getAllNodes pg0))
+  let roots = Set.fromList (mapMaybe (\n -> case n of GraphNode ne -> Just (functionEntryOf ne); _ -> Nothing) (getAllNodes pg0))
+  let entries' = Set.fromList (map asEntry $ filter (\e -> not (Set.member e knownRoots)) entries)
+  -- avoid introducing new top-level entries for functions we've already analyzed
+  -- this is a bit clunky and could be done better
+  forM_ (Set.union roots entries') $ \nodeEntry -> do
+    let node = GraphNode nodeEntry
+    choice "" node $ do
+      let pg1 = emptyWorkList $ dropDomain node pg0
+      idom <- initialDomainSpec node
+      rootDom <- PS.forSpec idom $ \_ idom' -> do
+        vals' <- PPa.forBins $ \bin -> do
+          vals <- PPa.get bin (PAD.absDomVals idom')
+          -- FIXME: compute this from the global and stack regions
+          return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
+        return $ idom' { PAD.absDomVals = vals' }
+      let pg2 = freshDomain pg1 node rootDom
+      let fnPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks nodeEntry)
+      let pg3 = emptyReturnVector pg2 (rootReturn fnPair)
+      return pg3
+
+-- | Returns a 'Just' result if we should restart verification after performing
+--   some interactive modifications
+refineFinalResult ::
+  [PB.FunPair arch] ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+refineFinalResult entries pg = withTracing @"simplemessage" "Final Result" $ do
+  choose @"()" "Continue verification?" $ \choice_outer -> do
+    choice_outer "Finish and view final result" () $ return Nothing
+    choice_outer "Restart from entry point" () $ fmap Just $ do
+      pg' <- chooseEntryPoint entries pg
+      (asks envResetTraceTree >>= liftIO)
+      return pg'
+    choice_outer "Refine equivalence domain" () $ fmap Just $
+      choose @"node" "Refine equivalence domain: From" $ \choice_from -> 
+        forM_ (getAllNodes pg) $ \from -> do
+          let edges = getEdgesFrom pg from
+          case null edges of
+            True -> return ()
+            False -> choice_from "" from $
+              choose @"node" "Refine equivalence domain: To" $ \choice_to ->
+                forM_ edges $ \to ->
+                  choice_to "" to $ do
+                    let edge = (from,to)
+                    pg' <- addLazyAction edge pg "Refine equivalence domain" $ \choice_act -> do
+                      choice_act "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
+                      choice_act "Prune branch for equivalence condition" (\x y -> pruneEdgeForEquality edge x y)
+                    Just pg'' <- return $ addToWorkList from pg'
+                    return pg''
+{-
+
+  choose @"node" "Refine " $ \choice -> do
+
+    forM_ entries $ \fnPair -> do
+      let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
+      let nd = GraphNode (rootEntry bPair)
+      choice "" nd $ case getCurrentDomain pg nd of
+        Just{} -> return $ addToWorkList nd pg 
+        Nothing -> Just <$> initializePairGraph [fnPair]
+-}    
+  
 
 {-
 resolveNode ::
@@ -442,8 +523,8 @@ chooseWorkItemM gr = do
 --
 --   TODO, could also imagine putting timeouts/compute time limits here.
 pairGraphComputeFixpoint ::
-  forall sym arch. PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
-pairGraphComputeFixpoint gr0 = do
+  forall sym arch. [PB.FunPair arch] -> PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
+pairGraphComputeFixpoint entries gr0 = do
   let
     go (gr :: PairGraph sym arch) = (lift $ chooseWorkItemM gr) >>= \case
       Nothing -> return gr
@@ -486,16 +567,40 @@ pairGraphComputeFixpoint gr0 = do
               Just preSpec -> PS.viewSpec preSpec $ \scope d -> withValidInit scope (nodeBlocks fnEntry) $ updateExtraEdges scope fnEntry d gr1
               Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnEntry)
           go gr2 >>= go_orphans
+    
+    go_outer :: PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)
+    go_outer gr = do
+      gr2 <- withSubTraces $ do
+        gr1 <- go gr
+        (lift $ asks (PCfg.cfgAddOrphanEdges . envConfig)) >>= \case
+          True -> go_orphans gr1
+          False -> return gr1
+      refineFinalResult entries gr2 >>= \case
+        Just gr3 -> go_outer gr3
+        Nothing -> showFinalResult gr2 >> return gr2
+  go_outer gr0
 
-      
-  withSubTraces $ do
-    gr1 <- go gr0
-    (lift $ asks (PCfg.cfgAddOrphanEdges . envConfig)) >>= \case
-      True -> go_orphans gr1
-      False -> return gr1
 
-
-
+showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
+showFinalResult pg = do
+  subTree @"node" "Observable Counter-examples" $ do
+    forM_ (Map.toList (pairGraphObservableReports pg)) $ \(nd,report) -> 
+      subTrace (GraphNode nd) $ 
+        emitTrace @"observable_result" (ObservableCheckCounterexample report)
+  subTree @"node" "Assumed Equivalence Conditions" $ do
+    forM_ (getAllNodes pg) $ \nd -> do
+       case getEquivCondition pg nd of
+        Just eqCondSpec -> subTrace nd $ do 
+          _ <- PS.forSpec eqCondSpec $ \_scope eqCond -> do
+            () <- withSym $ \sym -> do
+              eqCondPred <- PEC.toPred sym eqCond
+              emitTraceLabel @"eqcond" (show (W4.printSymExpr eqCondPred)) (Some eqCond)
+              return ()
+            return eqCond
+          return ()
+        Nothing -> return ()
+  result <- pairGraphComputeVerdict pg
+  emitTrace @"equivalence_result" result
 
 -- | For an orphan return, we treat it the same as an undefined PLT stub,
 --   since we effectively have no way to characterize the function behavior.

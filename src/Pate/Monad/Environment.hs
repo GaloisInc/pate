@@ -104,6 +104,7 @@ data EquivEnv sym arch where
                    -> M.Map PSym.Symbol (PVO.SomeOverride arch sym)
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     , envTreeBuilder :: TreeBuilder '(sym, arch)
+    , envResetTraceTree :: IO ()
     , envUnsatCacheRef :: IO.IORef (SolverCache sym)
     , envSatCacheRef :: IO.IORef (SolverCache sym)
     , envTargetEquivRegs :: Set.Set (Some (MC.ArchReg arch))

@@ -26,9 +26,11 @@ Definitions for equality over crucible input and output states.
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Equivalence
   ( EquivalenceStatus(..)
@@ -85,6 +87,8 @@ import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified What4.PredMap as WPM
 import qualified Pate.ExprMappable as PEM
 
+import           Pate.TraceTree
+
 data EquivalenceStatus =
     Equivalent
   | Inequivalent
@@ -105,7 +109,14 @@ instance Semigroup EquivalenceStatus where
 instance Monoid EquivalenceStatus where
   mempty = Equivalent
 
-
+instance IsTraceNode k "equivalence_result" where
+  type TraceNodeType k "equivalence_result" = EquivalenceStatus
+  prettyNode () = \case
+    Equivalent -> "Binaries are observably equivalent"
+    Inequivalent -> "Binaries are not observably equivalent"
+    ConditionallyEquivalent -> "Binaries are conditionally, observably equivalent"
+    Errored{} -> "Analysis failure due to error"
+  nodeTags = mkTags @k @"equivalence_result" [Summary, Simplified]
 
 ---------------------------------------
 

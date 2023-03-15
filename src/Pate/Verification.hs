@@ -222,14 +222,18 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   -- compute function entry pairs from the input PatchData
   upData <- unpackPatchData contexts pd
   -- include the process entry point, if configured to do so
-
-  entryPoint <- case PC.cfgStartSymbol vcfg of
-    Just s -> PPa.runPatchPairT $ PPa.forBins $ \bin -> do
+  
+  entryPoints' <- DT.forM (PC.cfgStartSymbols vcfg) $ \s -> do
+    PPa.runPatchPairT $ PPa.forBins $ \bin -> do
       ctx <- PPa.get bin contexts
       (liftIO $ findFunctionByName s ctx) >>= \case
         Just start -> return start
         Nothing -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
-    Nothing -> PPa.runPatchPairT $ PPa.forBins $ \bin -> PMC.binEntry <$> PPa.get bin contexts
+  
+  topEntryPoint <- PPa.runPatchPairT $ PPa.forBins $ \bin -> do
+    ctx <- PPa.get bin contexts
+    liftIO $ PD.resolveFunctionEntry (PMC.binEntry ctx) (PMC.parsedFunctionMap ctx)
+  let entryPoints = (topEntryPoint : entryPoints')
 
   PA.SomeValidArch archData <- return validArch
   let defaultInit = PA.validArchInitAbs archData
@@ -237,18 +241,18 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   -- inject an override for the initial abstract state
   contexts1 <- PPa.runPatchPairT $ PPa.forBins $ \bin -> do  
     context' <- PPa.get bin contexts
-    blk <- PPa.get bin entryPoint
     let
       pfm = PMC.parsedFunctionMap context'
       mem = MBL.memoryImage (PMC.binary context')
     
-    let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
-    let ov = M.singleton (PB.functionSegAddr blk) initAbs
-    pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm ov
+    CME.foldM (\ctx entryPoint -> do
+      blk <- PPa.get bin entryPoint
+      let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
+      let ov = M.singleton (PB.functionSegAddr blk) initAbs
+      pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm ov
+      return $ ctx { PMC.parsedFunctionMap = pfm' }) context' entryPoints
     
-    return $ context' { PMC.parsedFunctionMap = pfm' }
-    
-  let pPairs' = entryPoint : (unpackedPairs upData)
+  let pPairs' = entryPoints ++ (unpackedPairs upData)
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   let
@@ -268,13 +272,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   targetRegs <- fmap S.fromList $ mapM (\r_raw -> case PA.readRegister @arch r_raw of
            Just r -> return r
            Nothing -> CME.throwError $ PEE.loaderError $ PEE.ConfigError $ "Unknown register: " ++ r_raw) targetRegsRaw
-
-  -- TODO: this can be made more configurable
-  let
-    condFns :: M.Map (PB.FunPair arch) (PL.SomeLocation sym arch -> Bool)
-    condFns = M.singleton entryPoint (\(PL.SomeLocation loc) -> case loc of
-                                             PL.Register r -> S.member (Some r) targetRegs
-                                             _ -> False)
   
   liftIO $ PS.withOnlineSolver solver saveInteraction sym $ \bak -> do
     let ctxt = PMC.EquivalenceContext
@@ -308,7 +305,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envParentNonce = Some topNonce
           , envUndefPointerOps = undefops
           , envParentBlocks = mempty
-          , envEqCondFns = condFns
+          , envEqCondFns = mempty
           , envExitPairsCache = ePairCache
           , envStatistics = statsVar
           , envOverrides = \ovCfg -> M.fromList [ (n, ov)
@@ -317,6 +314,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                                                 , n <- [PSym.LocalSymbol txtName, PSym.PLTSymbol txtName]
                                                 ]
           , envTreeBuilder = treeBuilder
+          , envResetTraceTree = resetSomeTreeBuilder (PC.cfgTraceTree vcfg)
           , envSatCacheRef = satCache
           , envUnsatCacheRef = unsatCache
           , envTargetEquivRegs = targetRegs

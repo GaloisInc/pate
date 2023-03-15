@@ -238,7 +238,7 @@ data ContextSensitivity =
 -- TODO: 'validRepr' is parameterized here just to break a module import loop
 data VerificationConfig validRepr =
   VerificationConfig
-    { cfgStartSymbol :: Maybe String
+    { cfgStartSymbols :: [String]
     -- ^ start by pairing the entry points of the binaries
     , cfgDiscoverFuns :: Bool
     -- ^ discover additional functions pairs during analysis
@@ -281,7 +281,7 @@ data VerificationConfig validRepr =
 
 defaultVerificationCfg :: VerificationConfig validRepr
 defaultVerificationCfg =
-  VerificationConfig { cfgStartSymbol = Nothing
+  VerificationConfig { cfgStartSymbols = []
                      , cfgDiscoverFuns = True
                      , cfgSolver = PS.Yices
                      , cfgHeuristicTimeout = PT.Seconds 10
