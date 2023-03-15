@@ -536,7 +536,9 @@ instance IsTraceNode k "subtree" where
   type TraceNodeType k "subtree" = String
   type TraceNodeLabel "subtree" = SomeSymRepr
   prettyNode lbl nm = prettyTree lbl nm
-  nodeTags = [(Summary, prettyTree), (Simplified, \_ nm -> PP.pretty nm) ]
+  nodeTags = [(Summary, prettyTree),
+              (Simplified_Detail, \_ nm -> PP.pretty nm),
+              (Simplified, \_ nm -> PP.pretty nm) ]
 
 prettyTree ::
   SomeSymRepr ->
@@ -584,7 +586,8 @@ instance IsTraceNode k "choiceTree" where
   prettyNode lbl (SomeChoiceHeader (ChoiceHeader nm_choice _ _ _)) = prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl
   nodeTags = 
     [(Summary, \lbl ((SomeChoiceHeader (ChoiceHeader nm_choice _ _ _))) -> prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl)
-    , (Simplified, \nm _ -> PP.pretty nm) ]
+    ,(Simplified_Detail, \nm _ -> PP.pretty nm)
+    ,(Simplified, \nm _ -> PP.pretty nm) ]
 
 data Choice k (nm_choice :: Symbol) a = 
   Choice { choiceHeader :: ChoiceHeader k nm_choice a

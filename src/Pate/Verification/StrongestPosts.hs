@@ -220,6 +220,7 @@ refineFinalResult entries pg = withTracing @"simplemessage" "Final Result" $ do
     choice_outer "Finish and view final result" () $ return Nothing
     choice_outer "Restart from entry point" () $ fmap Just $ do
       pg' <- chooseEntryPoint entries pg
+      resetBlockCache envExitPairsCache
       (asks envResetTraceTree >>= liftIO)
       return pg'
     choice_outer "Refine equivalence domain" () $ fmap Just $
@@ -915,7 +916,7 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = withAbsDomain nod
     Just eqCondSpec -> withSym $ \sym -> do
       (_asm, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
       eqCond_pred <- PEC.toPred sym eqCond
-      emitTraceLabel @"eqcond" ("Equivalence Condition: \n" ++ show (W4.printSymExpr eqCond_pred)) (Some eqCond)
+      emitTraceLabel @"eqcond" (show (W4.printSymExpr eqCond_pred)) (Some eqCond)
     Nothing -> return ()
  
   
@@ -933,7 +934,7 @@ visitNode scope (ReturnNode fPair) d gr0 = do
     Just eqCondSpec -> withSym $ \sym -> do
       (_asm, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
       eqCond_pred <- PEC.toPred sym eqCond
-      emitTraceLabel @"eqcond" ("Equivalence Condition: \n" ++ show (W4.printSymExpr eqCond_pred)) (Some eqCond)
+      emitTraceLabel @"eqcond" (show (W4.printSymExpr eqCond_pred)) (Some eqCond)
     Nothing -> return ()
 
   subTree @"entrynode" "Block Returns" $

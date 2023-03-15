@@ -583,6 +583,7 @@ goto' idx = do
     Just (Some nextNode) -> asChoice nextNode >>= \case
       Just (SomeChoice c) -> do
         IO.liftIO $ choicePick c
+        (IO.liftIO $ IO.threadDelay 100)
         Some curNode <- currentNode
         top'
         IO.liftIO $ wait

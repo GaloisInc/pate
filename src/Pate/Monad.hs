@@ -89,6 +89,7 @@ module Pate.Monad
   , BlockCache
   , lookupBlockCache
   , modifyBlockCache
+  , resetBlockCache
   , freshBlockCache
   -- equivalence
   , equivalenceContext
@@ -201,6 +202,13 @@ lookupBlockCache f pPair = do
   case M.lookup pPair cache' of
     Just r -> return $ Just r
     Nothing -> return Nothing
+
+resetBlockCache :: 
+  (EquivEnv sym arch -> BlockCache arch a) ->
+  EquivM sym arch ()
+resetBlockCache f = do
+  BlockCache cache <- CMR.asks f
+  liftIO $ IO.modifyMVar_ cache (\_ -> return M.empty)
 
 modifyBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
