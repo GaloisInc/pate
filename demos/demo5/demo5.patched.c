@@ -16,6 +16,6 @@ void demo5(int x, int y){
 
 int main(int argc, char *argv[]) {
   int x = atoi(argv[1]);
-  int y = atoi(argv[2]); asm("nop"); asm("nop"); // needed to force alignment
+  int y = atoi(argv[2]);
   demo5(x,y);
 }

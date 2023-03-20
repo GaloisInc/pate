@@ -100,6 +100,7 @@ module Pate.TraceTree (
   , SomeChoiceHeader(..)
   , Choice(..)
   , SomeChoice(..)
+  , LazyIOAction(..)
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -735,6 +736,8 @@ chooseLabel treenm f = do
         Just a -> return a
         Nothing -> liftIO $ fail $ "choose: no value available (" ++ treenm ++ ")"
 
+data LazyIOAction b a = LazyIOAction { lazyActionReady :: IO Bool, runLazyAction :: b -> IO (Maybe a) }
+
 -- | A non-blocking variant of 'choose', that instead lets the caller decide
 --   how to handle a choice being made.
 --   TODO: Once we have a result we're currently re-running the corresponding action
@@ -749,7 +752,7 @@ chooseLazy ::
   String ->
   (forall m'. Monad m' => (String -> TraceNodeType k nm_choice -> (b -> IO a) -> m' ()) ->
     m' ()) ->
-  m (b -> IO (Maybe a))
+  m (LazyIOAction b a)
 chooseLazy treenm f = do
   builder <- getTreeBuilder
   -- TODO: this is a bit gross, but easiest to implement
@@ -758,13 +761,13 @@ chooseLazy treenm f = do
   case interactionMode builder of
     Interactive{} -> do
       (header, choices) <- runWriterT (chooseHeader @nm_choice @a @k False treenm (\header -> f (\nm v g -> choice_ header nm def v (liftIO $ (readMVar inputVar) >>= g))))
-      return $ \inputVal -> do
+      return $ LazyIOAction (liftIO $ choiceReady header) $ \inputVal -> do
         (liftIO $ choiceReady header) >>= \case
           True -> do
             liftIO $ putMVar inputVar inputVal
             getChoice choices
           False -> return Nothing
-    DefaultChoice -> return $ \_ -> return Nothing
+    DefaultChoice -> return $ LazyIOAction (return False) (\_ -> return Nothing)
 
 choose ::
   forall nm_choice a k m e.

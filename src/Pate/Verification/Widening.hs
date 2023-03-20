@@ -41,7 +41,7 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import           Data.List (foldl')
+import           Data.List (foldl', (\\))
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -355,7 +355,7 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
   let regDom = PEE.eqDomainRegisters (PAD.absDomEq dom)
   let allRegs = map fst $ PER.toList (PER.universal sym)
   let excluded = filter (\(Some r) -> not (W4.asConstantPred (PER.registerInDomain sym r regDom) == Just True)) allRegs
-  added <- Set.fromList <$> pickRegisters excluded
+  added <- Set.fromList <$> pickRegisters (excluded \\ [(Some (MM.sp_reg @(MM.ArchReg arch))), (Some (MM.ip_reg @(MM.ArchReg arch)))])
   return $ \(PL.SomeLocation loc) ->
     case loc of
       PL.Register r -> Set.member (Some r) added
@@ -573,13 +573,11 @@ finalizeGraphEdge ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 finalizeGraphEdge scope bundle preD postD from to gr = do
-  runPendingActions (from,to) (VerifierResult scope bundle preD postD) gr
-  {-
+  gr' <- runPendingActions (from,to) (VerifierResult scope bundle preD postD) gr
   let edge = (from,to)
   addLazyAction edge gr' "Post-process equivalence domain?" $ \choice -> do
     choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
     choice "Prune branch for equivalence condition" (\x y -> pruneEdgeForEquality edge x y)
-  -}
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp

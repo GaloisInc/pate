@@ -125,7 +125,7 @@ data Event arch where
   -- | The strongest postcondition verifier has completed with the given status
   StrongestPostOverallResult :: PE.EquivalenceStatus -> TM.NominalDiffTime -> Event arch
   -- | The strongest postcondition verifier discovered an observable difference in behavior (reported as a counterexample)
-  StrongestPostObservable :: (PArch.ValidArch arch, WI.IsExprBuilder sym) => PVPN.NodeEntry arch -> PVSC.ObservableCounterexample sym (DMC.ArchAddrWidth arch) -> Event arch
+  StrongestPostObservable :: (PArch.ValidArch arch, WI.IsExprBuilder sym) => PVPN.NodeEntry arch -> PVSC.ObservableCounterexample sym arch -> Event arch
   -- | The strongest postcondition verifier has discovered a desynchronization in the control flow of the programs
   StrongestPostDesync :: (PArch.ValidArch arch) => PVPN.NodeEntry arch -> PVSC.TotalityCounterexample (DMC.ArchAddrWidth arch) -> Event arch
   -- | The strongest postcondition analysis ran out of gas when analyzing the given pair

@@ -62,7 +62,9 @@ ptrEquality _ _ = Nothing
 instance WI.IsSymExprBuilder sym => Eq (MacawRegEntry sym tp) where
   (MacawRegEntry repr v1) == (MacawRegEntry _ v2) = case repr of
     CLM.LLVMPointerRepr{} | Just PC.Refl <- ptrEquality v1 v2 -> True
+    CLM.LLVMPointerRepr{} | Nothing <- ptrEquality v1 v2 -> False
     CT.BoolRepr | Just PC.Refl <- WI.testEquality v1 v2 -> True
+    CT.BoolRepr | Nothing <- WI.testEquality v1 v2 -> False
     CT.StructRepr Ctx.Empty -> True
     _ -> error "MacawRegEntry: unexpected type for equality comparison"
 
@@ -74,7 +76,7 @@ data MacawRegVar sym (tp :: MT.Type) where
 
 instance (WI.IsExpr (WI.SymExpr sym), PC.ShowF (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of
-    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ ":" ++ PC.showF bv
+    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ "+" ++ PC.showF bv
     CT.BoolRepr -> PC.showF v
     CT.StructRepr Ctx.Empty -> "()"
     _ -> "macawRegEntry: unsupported"

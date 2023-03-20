@@ -14,6 +14,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -97,6 +98,7 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Register.Traversal as PRt
+
 import           Pate.TraceTree
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
@@ -112,6 +114,8 @@ import qualified System.IO as IO
 import Control.Monad (forM_)
 import qualified Data.Macaw.Discovery as MD
 import Data.Foldable (foldl')
+import qualified Pate.ExprMappable as PEM
+import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), prettyRegsCE)
 
 -- Overall module notes/thoughts
 --
@@ -206,7 +210,7 @@ chooseEntryPoint entries pg0 = choose @"node" "Choose Entry Point" $ \choice -> 
         return $ idom' { PAD.absDomVals = vals' }
       let pg2 = freshDomain pg1 node rootDom
       let fnPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks nodeEntry)
-      let pg3 = emptyReturnVector pg2 (rootReturn fnPair)
+      let pg3 = emptyReturnVector (dropReturns (returnOfEntry nodeEntry) pg2) (rootReturn fnPair)
       return pg3
 
 -- | Returns a 'Just' result if we should restart verification after performing
@@ -223,7 +227,8 @@ refineFinalResult entries pg = withTracing @"simplemessage" "Final Result" $ do
       resetBlockCache envExitPairsCache
       (asks envResetTraceTree >>= liftIO)
       return pg'
-    choice_outer "Refine equivalence domain" () $ fmap Just $
+    choice_outer "Handle pending refinements" () $ Just <$> (liftIO $ (queuePendingNodes pg))
+      {-
       choose @"node" "Refine equivalence domain: From" $ \choice_from -> 
         forM_ (getAllNodes pg) $ \from -> do
           let edges = getEdgesFrom pg from
@@ -239,6 +244,7 @@ refineFinalResult entries pg = withTracing @"simplemessage" "Final Result" $ do
                       choice_act "Prune branch for equivalence condition" (\x y -> pruneEdgeForEquality edge x y)
                     Just pg'' <- return $ addToWorkList from pg'
                     return pg''
+      -}
 {-
 
   choose @"node" "Refine " $ \choice -> do
@@ -507,15 +513,16 @@ chooseWorkItemM ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch))
-chooseWorkItemM gr = do
+chooseWorkItemM gr = return $ chooseWorkItem gr
+{-
   let nodes = Set.toList $ pairGraphWorklist gr
   case nodes of
     [] -> return Nothing
     [node] -> return (Just $ popWorkItem gr node)
-    _ -> return $ chooseWorkItem gr
+    _ -> 
     _ -> choose @"node" "chooseWorkItem" $ \choice -> forM_ nodes $ \nd -> 
       choice "" nd $ return (Just $ popWorkItem gr nd)
-
+-}
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -1035,17 +1042,22 @@ withPredomain scope bundle preD f = withSym $ \sym -> do
   precond <- liftIO $ PAD.absDomainToPrecond sym scope eqCtx bundle preD
   withAssumptionSet precond $ f
 
-data ObservableCheckResult sym ptrW
+
+data ObservableCheckResult sym arch
   = ObservableCheckEq
-  | ObservableCheckCounterexample (ObservableCounterexample sym ptrW)
+  | ObservableCheckCounterexample
+    (ObservableCounterexample sym arch)
   | ObservableCheckError String
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "observable_result" where
-  type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym (MM.ArchAddrWidth arch)
+  type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym arch
   prettyNode () = \case
     ObservableCheckEq -> "Observably Equivalent"
-    ObservableCheckCounterexample (ObservableCounterexample oSeq pSeq) -> PP.vsep $ 
+    ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq pSeq) -> PP.vsep $ 
        ["Observable Inequivalence Detected:"
+       -- FIXME: this is useful but needs better presentation
+       -- , "== Registers =="
+       -- , prettyRegsCE regsCE
        , "== Original sequence =="
        ] ++ (map MT.prettyMemEvent oSeq) ++
        [ "== Patched sequence ==" ]
@@ -1084,7 +1096,7 @@ checkObservables bPair bundle preD gr =
              do let msg' = ("Error checking observables: " ++ msg)
                 err <- emitError' (PEE.ObservabilityError msg')
                 return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
-           ObservableCheckCounterexample cex@(ObservableCounterexample oSeq pSeq) -> do
+           ObservableCheckCounterexample cex@(ObservableCounterexample _ oSeq pSeq) -> do
              do traceBundle bundle ("Obserables disagree!")
                 traceBundle bundle ("== Original sequence ==")
                 traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
@@ -1093,10 +1105,14 @@ checkObservables bPair bundle preD gr =
                 emitWarning $ PEE.ObservableDifferenceFound
                 return (Just cex, gr)
 
+instance (forall tp. PEM.ExprMappable sym (f tp)) => 
+  PEM.ExprMappable sym (MM.RegState r f) where
+  mapExpr sym f r = MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) r
+
 doCheckObservables :: forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
-  EquivM sym arch (ObservableCheckResult sym (MM.ArchAddrWidth arch))
+  EquivM sym arch (ObservableCheckResult sym arch)
 doCheckObservables bundle preD = case PS.simOut bundle of
   -- for singleton cases, we consider all events to be trivially
   -- observably equivalent, as we are collecting observable events
@@ -1130,12 +1146,19 @@ doCheckObservables bundle preD = case PS.simOut bundle of
        goalSat "checkObservableSequences" not_goal $ \res -> case res of
          Unsat _ -> return ObservableCheckEq
          Unknown -> return (ObservableCheckError "UNKNOWN result when checking observable sequences")
-         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
+         Sat evalFn' -> do
+          regsO <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outO)
+          regsP <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outP)
+          withGroundEvalFn evalFn' $ \evalFn -> do
            -- NB, observable sequences are stored in reverse order, so we reverse them here to
            -- display the counterexample in a more natural program order
            oSeq'' <- reverse <$> groundObservableSequence sym evalFn oSeq' -- (MT.memSeq oMem)
            pSeq'' <- reverse <$> groundObservableSequence sym evalFn pSeq' -- (MT.memSeq pMem)
-           return (ObservableCheckCounterexample (ObservableCounterexample oSeq'' pSeq''))
+
+
+           let regsCE = RegsCounterExample regsO regsP
+
+           return (ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq'' pSeq''))
 
 -- | Right now, this requires the pointer and written value to be exactly equal.
 --   At some point, we may want to relax this in some way, but it's not immediately

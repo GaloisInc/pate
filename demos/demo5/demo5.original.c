@@ -1,13 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-unsigned int mymax(unsigned int i, unsigned int j) {
-  if (i > j) { return i; }
+int mymax(int i, int j) {
+  if ((unsigned int) i > (unsigned int) j) { return i; }
   return j;
 }
 
-void demo5(unsigned int x, unsigned int y){
-  unsigned int z = mymax(x,y);
+void demo5(int x, int y){
+  int z = mymax(x,y);
   // 0x827c
   if (z == x) { puts("First"); /* 0x8298 */ }
   else if (z == y) { puts("Second"); /* 0x82b4 */ }
@@ -17,5 +17,5 @@ void demo5(unsigned int x, unsigned int y){
 int main(int argc, char *argv[]) {
   int x = atoi(argv[1]);
   int y = atoi(argv[2]);
-  demo5((unsigned int)x,(unsigned int)y);
+  demo5(x,y);
 }

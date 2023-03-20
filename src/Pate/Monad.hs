@@ -95,6 +95,7 @@ module Pate.Monad
   , equivalenceContext
   , safeIO
   , concretizeWithSolver
+  , concretizeWithModel
   , emitTrace
   , emitTraceLabel
   , withSubTraces
@@ -786,6 +787,14 @@ getWrappedSolver = withSym $ \sym -> do
           Left _err -> liftIO $ k W4R.Unknown
           Right a -> return a
   
+
+concretizeWithModel ::
+  SymGroundEvalFn sym ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch (W4.SymExpr sym tp)
+concretizeWithModel fn e = withSym $ \sym -> do
+  grnd <- execGroundFn fn e
+  liftIO $ PVC.symbolicFromConcrete sym grnd e
 
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::

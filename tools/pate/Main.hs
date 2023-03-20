@@ -350,7 +350,7 @@ terminalFormatEvent evt =
       layoutLn (PP.pretty pPair PP.<+> "analysis failed to converge (i.e., ran out of gas)")
     PE.StrongestPostMiscError pPair msg ->
       layoutLn ("Error at " <> PP.pretty pPair <> ":" PP.<+> PP.pretty msg)
-    PE.StrongestPostObservable pPair (PVSC.ObservableCounterexample oEvs pEvs) ->
+    PE.StrongestPostObservable pPair (PVSC.ObservableCounterexample _ oEvs pEvs) ->
       layout ( PP.vcat (concat [ [ PP.pretty pPair PP.<+> "observable sequences disagree"
                                  , "Original sequence:"
                                  ]

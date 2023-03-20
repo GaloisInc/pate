@@ -77,6 +77,7 @@ library
   import:              shared
   hs-source-dirs:      src
   exposed-modules:     Data.Macaw.CFGSlice,
+                       Data.RevMap,
                        Pate.Abort,
                        Pate.Address,
                        Pate.AssumptionSet,
