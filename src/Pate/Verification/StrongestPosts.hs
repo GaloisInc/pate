@@ -227,7 +227,8 @@ refineFinalResult entries pg = withTracing @"simplemessage" "Final Result" $ do
       resetBlockCache envExitPairsCache
       (asks envResetTraceTree >>= liftIO)
       return pg'
-    choice_outer "Handle pending refinements" () $ Just <$> (liftIO $ (queuePendingNodes pg))
+    choice_outer "Handle pending refinements" () $ do
+      Just <$> (liftIO $ (queuePendingNodes pg))
       {-
       choose @"node" "Refine equivalence domain: From" $ \choice_from -> 
         forM_ (getAllNodes pg) $ \from -> do
@@ -513,7 +514,16 @@ chooseWorkItemM ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch))
-chooseWorkItemM gr = return $ chooseWorkItem gr
+chooseWorkItemM gr0 = case chooseWorkItem gr0 of
+  Nothing -> return Nothing
+  Just (gr1,nd,spec) -> do
+    gr2 <- PS.viewSpec spec $ \scope d ->
+      runPendingActions refineActions nd (TupleF2 scope d) gr1
+    case getCurrentDomain gr2 nd of
+      Just spec' -> return $ Just (gr2, nd, spec')
+      -- refinement dropped this node, so pick something else
+      Nothing -> chooseWorkItemM gr2
+
 {-
   let nodes = Set.toList $ pairGraphWorklist gr
   case nodes of
@@ -532,25 +542,26 @@ chooseWorkItemM gr = return $ chooseWorkItem gr
 --   TODO, could also imagine putting timeouts/compute time limits here.
 pairGraphComputeFixpoint ::
   forall sym arch. [PB.FunPair arch] -> PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
-pairGraphComputeFixpoint entries gr0 = do
+pairGraphComputeFixpoint entries gr_init = do
   let
-    go (gr :: PairGraph sym arch) = (lift $ chooseWorkItemM gr) >>= \case
-      Nothing -> return gr
-      Just (gr', nd, preSpec) -> do
-        gr'' <- subTrace @"node" nd $ startTimer $ do
+    go (gr0 :: PairGraph sym arch) = (lift $ chooseWorkItemM gr0) >>= \case
+      Nothing -> return gr0
+      Just (gr1, nd, preSpec) -> do
+        gr4 <- subTrace @"node" nd $ startTimer $ do
           shouldProcessNode nd >>= \case
             False -> do
               emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
-              return gr'
-            True -> handleSyncPoint gr' nd preSpec >>= \case
-              Just gr'' -> return gr''
+              return gr1
+            True -> handleSyncPoint gr1 nd preSpec >>= \case
+              Just gr2 -> return gr2
               Nothing -> PS.viewSpec preSpec $ \scope d -> do
                 emitTraceLabel @"domain" PAD.Predomain (Some d)
                 withAssumptionSet (PS.scopeAsm scope) $ do
-                  gr'' <- visitNode scope nd d gr'
+                  gr2 <- addRefinementChoice nd gr1
+                  gr3 <- visitNode scope nd d gr2
                   emitEvent $ PE.VisitedNode nd
-                  return gr''
-        go gr''
+                  return gr3
+        go gr4
 
     -- Orphaned returns can appear when we never find a return branch for
     -- a function (e.g. possibly due to a code analysis failure)
@@ -586,7 +597,7 @@ pairGraphComputeFixpoint entries gr0 = do
       refineFinalResult entries gr2 >>= \case
         Just gr3 -> go_outer gr3
         Nothing -> showFinalResult gr2 >> return gr2
-  go_outer gr0
+  go_outer gr_init
 
 
 showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
@@ -796,41 +807,52 @@ processBundle ::
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-processBundle scope node bundle d gr0 = do
-  exitPairs <- PD.discoverPairs bundle
+processBundle scope node bundle d gr0 = withSym $ \sym -> do
 
-  gr1 <- checkObservables node bundle d gr0
+  p <- case getEquivCondition gr0 (GraphNode node) of
+    Just eqCondSpec -> do
+      (_asm, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      PEC.toPred sym eqCond
+    Nothing -> return $ W4.truePred sym
+  
+  mgr_final <- withSatAssumption (PAS.fromPred p) $ do
+    exitPairs <- PD.discoverPairs bundle
 
-  gr2 <- checkTotality node bundle d exitPairs gr1
+    gr1 <- checkObservables node bundle d gr0
 
-  mgr3 <- updateReturnNode scope node bundle d gr2
-  gr3 <- case mgr3 of
-    Just gr3 -> return gr3
-    Nothing ->
-      case exitPairs of
-      -- if we find a busy loop, try to continue the analysis assuming we
-      -- break out of the loop, even if the semantics say it can't happen
-      -- TODO: ideally we should handle this as an "extra" edge rather than
-      -- directly handling the widening here.
-      [PPa.PatchPair (PB.BlockTarget tgtO Nothing _) (PB.BlockTarget tgtP Nothing _)] |
-         PPa.PatchPair tgtO tgtP == (PS.simPair bundle) ->
-        asks (PCfg.cfgAddOrphanEdges . envConfig) >>= \case
-           True -> do
-             emitWarning $ PEE.BlockHasNoExit (PS.simPair bundle)
-             nextBlocks <- PPa.forBins $ \bin -> do
-               blk <- PPa.get bin (PS.simPair bundle)
-               PD.nextBlock blk >>= \case
-                 Just nb -> return nb
-                 Nothing -> throwHere $ PEE.MissingParsedBlockEntry "processBundle" blk
-             bundle' <- PD.associateFrames bundle MCS.MacawBlockEndJump False
-             widenAlongEdge scope bundle' (GraphNode node) d gr2 (GraphNode (mkNodeEntry node nextBlocks))
-           False -> return gr2
-      _ -> return gr2
+    gr2 <- checkTotality node bundle d exitPairs gr1
 
-  -- Follow all the exit pairs we found
-  subTree @"blocktarget" "Block Exits" $
-    foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
+    mgr3 <- updateReturnNode scope node bundle d gr2
+    gr3 <- case mgr3 of
+      Just gr3 -> return gr3
+      Nothing ->
+        case exitPairs of
+        -- if we find a busy loop, try to continue the analysis assuming we
+        -- break out of the loop, even if the semantics say it can't happen
+        -- TODO: ideally we should handle this as an "extra" edge rather than
+        -- directly handling the widening here.
+        [PPa.PatchPair (PB.BlockTarget tgtO Nothing _) (PB.BlockTarget tgtP Nothing _)] |
+          PPa.PatchPair tgtO tgtP == (PS.simPair bundle) ->
+          asks (PCfg.cfgAddOrphanEdges . envConfig) >>= \case
+            True -> do
+              emitWarning $ PEE.BlockHasNoExit (PS.simPair bundle)
+              nextBlocks <- PPa.forBins $ \bin -> do
+                blk <- PPa.get bin (PS.simPair bundle)
+                PD.nextBlock blk >>= \case
+                  Just nb -> return nb
+                  Nothing -> throwHere $ PEE.MissingParsedBlockEntry "processBundle" blk
+              bundle' <- PD.associateFrames bundle MCS.MacawBlockEndJump False
+              widenAlongEdge scope bundle' (GraphNode node) d gr2 (GraphNode (mkNodeEntry node nextBlocks))
+            False -> return gr2
+        _ -> return gr2
 
+    -- Follow all the exit pairs we found
+    subTree @"blocktarget" "Block Exits" $
+      foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) gr3 (zip [0 ..] exitPairs)
+  case mgr_final of
+    Just gr_final -> return gr_final
+    Nothing -> throwHere $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym p)
+  
 withValidInit ::
   forall sym arch v a.
   HasCallStack =>
@@ -1042,6 +1064,18 @@ withPredomain scope bundle preD f = withSym $ \sym -> do
   precond <- liftIO $ PAD.absDomainToPrecond sym scope eqCtx bundle preD
   withAssumptionSet precond $ f
 
+-- | Deferred decision about whether or not the domain for this node should be refined
+addRefinementChoice ::
+  GraphNode arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+addRefinementChoice nd gr0 = do
+  addLazyAction refineActions nd gr0 "Post-process equivalence domain?" $ \choice -> do
+    choice "Refine and generate equivalence condition" $ \(TupleF2 _ preD) gr1 -> do
+      locFilter <- refineEquivalenceDomain preD
+      return $ addDomainRefinement nd (LocationRefinement locFilter) gr1
+    choice "Prune branch for equivalence condition" $ \_ gr1 ->
+      return $ addDomainRefinement nd PruneBranch gr1
 
 data ObservableCheckResult sym arch
   = ObservableCheckEq

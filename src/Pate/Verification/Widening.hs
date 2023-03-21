@@ -22,8 +22,7 @@ module Pate.Verification.Widening
   , WidenLocs(..)
   , getObservableEvents
   -- TODO move these?
-  , refineEqDomainForEdge
-  , pruneEdgeForEquality
+  , refineEquivalenceDomain
   ) where
 
 import           GHC.Stack
@@ -96,6 +95,7 @@ import qualified Pate.Monad.Context as PMC
 import Data.Functor.Const (Const(..))
 import Pate.Verification.Concretize (symbolicFromConcrete)
 import qualified Pate.Arch as PA
+import Data.Parameterized (Pair(..))
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -134,11 +134,15 @@ getEquivPostCondition ::
   GraphNode arch {- ^ target -} ->
   PairGraph sym arch ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-getEquivPostCondition scope _bundle to gr = withSym $ \sym -> do
+getEquivPostCondition _scope bundle to gr = withSym $ \sym -> do
+  -- this is the equivalence condition that this outgoing node is going to assume
+  -- on its pre-state, so we can assume it for our post-state
+  -- FIXME: as part of the propagation strategy we need to make sure that
+  -- this condition is *implied* by the 'from' equivalence condition and equivalence domain
+  let outVars = PS.bundleOutVars bundle
   case getEquivCondition gr to of
     Just condSpec -> do
-      -- FIXME: what to do with asm?
-      (_asm, cond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) condSpec
+      (_asm, cond) <- liftIO $ PS.bindSpec sym outVars condSpec
       return cond
     Nothing -> return $ PEC.universal sym
 
@@ -238,25 +242,63 @@ updateEquivCondition scope nd cond gr = withSym $ \sym -> do
       return $ setEquivCondition nd (PS.mkSimSpec scope eqCond') gr
     Nothing -> return $ setEquivCondition nd (PS.mkSimSpec scope cond) gr
 
-refineEqDomainForEdge ::
-  (GraphNode arch,GraphNode arch) ->
-  VerifierResult sym arch ->
+addToEquivCondition ::
+  PS.SimScope sym arch v ->
+  GraphNode arch ->
+  W4.Pred sym {- predicate must adhere to this scope -} ->
   PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-refineEqDomainForEdge (from,to) (VerifierResult scope bundle preD postD) gr1 = withSym $ \_sym -> do
-  locFilter <- refineEquivalenceDomain postD
-  eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
-  gr2 <- updateEquivCondition scope to eqCond gr1
-  return $ dropDomain to (markEdge from to gr2)
+  EquivM sym arch (PairGraph sym arch)    
+addToEquivCondition scope nd condPred gr = withSym $ \sym -> do
+  let eqCond = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred condPred}
+  case getEquivCondition  gr nd of
+    Just eqCondSpec -> do
+      (_, eqCond') <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      eqCond'' <- PEC.merge sym eqCond eqCond'
+      return $ setEquivCondition nd (PS.mkSimSpec scope eqCond'') gr
+    Nothing -> return $ setEquivCondition nd (PS.mkSimSpec scope eqCond) gr
 
-pruneEdgeForEquality ::
+applyDomainRefinements ::
+  PS.SimScope sym arch v ->
   (GraphNode arch,GraphNode arch) ->
-  VerifierResult sym arch ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ pre-domain -} ->
+  AbstractDomain sym arch v {- ^ post-domain -} ->
   PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-pruneEdgeForEquality (from,to) (VerifierResult scope _bundle _preD _postD) gr1 = withSym $ \sym -> do
-  gr2 <- updateEquivCondition scope to (PEC.falseEqCondition sym) gr1
-  return $ dropDomain to (markEdge from to gr2)
+  EquivM sym arch (PairGraph sym arch)   
+applyDomainRefinements scope (from,to) bundle preD postD gr1 = withSym $ \sym -> do
+  case getDomainRefinement to gr1 of
+    Nothing -> return gr1
+    Just PruneBranch -> do
+      pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
+      notPath <- liftIO $ W4.notPred sym pathCond
+      gr2 <- addToEquivCondition scope from notPath gr1
+      let gr3 = dropPostDomains from (markEdge from to gr2)
+      Just gr4 <- return $ addToWorkListPriority from gr3
+      resetBlockCache envExitPairsCache
+      return gr4
+    Just (LocationRefinement refine) -> do
+      -- check if our refinement holds on the computed post-domain
+      mr <- PL.firstLocation sym (PAD.absDomEq postD) $ \l p -> case (refine (PL.SomeLocation l), W4.asConstantPred p) of
+        -- refinement requested here, but location is included in domain
+        (True, Just True) -> return Nothing
+        -- no refinement requested
+        (False, _) -> return Nothing
+        -- refinement requested, but domain has non-trivial entry, the equivalence condition
+        -- of the predecessor node therefore requires refinement
+        (True, _) -> return $ Just ()
+      case mr of
+        Nothing -> return gr1
+        Just () -> do
+          -- refine the domain of the predecessor node and drop this domain
+          eqCond <- computeEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
+          gr2 <- updateEquivCondition scope from eqCond gr1
+          resetBlockCache envExitPairsCache
+          -- since its equivalence condition has been modified, we need to re-examine
+          -- all outgoing edges from the predecessor node
+          let gr3 = dropPostDomains from (markEdge from to gr2)
+          -- prioritize re-examining the predecessor node
+          Just gr4 <- return $ addToWorkListPriority from gr3
+          return gr4
 
 {-
 -- | After widening an edge, insert an equivalence condition
@@ -572,12 +614,13 @@ finalizeGraphEdge ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-finalizeGraphEdge scope bundle preD postD from to gr = do
-  gr' <- runPendingActions (from,to) (VerifierResult scope bundle preD postD) gr
-  let edge = (from,to)
-  addLazyAction edge gr' "Post-process equivalence domain?" $ \choice -> do
-    choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
-    choice "Prune branch for equivalence condition" (\x y -> pruneEdgeForEquality edge x y)
+finalizeGraphEdge scope bundle preD postD from to gr0 = do
+  gr1 <- runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr0
+  -- if the computed domain doesn't agree with any requested domain refinements,
+  -- we need to propagate this backwards by dropping the entry for 'to',
+  -- augmenting the equivalence condition for 'from' and re-processing it
+  applyDomainRefinements scope (from,to) bundle preD postD gr1
+
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp

@@ -26,7 +26,9 @@ module Pate.Equivalence.Condition (
   , universal
   , toPred
   , mux
+  , merge
   , falseEqCondition
+  , mergeRegCond
   ) where
 
 import           Control.Lens ( (^.), (&), (.~) )
@@ -52,6 +54,7 @@ import qualified What4.PredMap as WPM
 
 import           Pate.TraceTree
 import qualified Data.Kind as DK
+import Control.Monad.Identity
 ---------------------------------------------
 -- Equivalence Condition
 
@@ -74,6 +77,23 @@ mux sym p condT condF = do
   mrCond <- PAS.NamedAsms <$> PAS.mux sym p mrT mrF
   let (PAS.NamedAsms pcT, PAS.NamedAsms pcF) = (eqCondExtraCond condT, eqCondExtraCond condF)
   pcond <- PAS.NamedAsms <$> PAS.mux sym p pcT pcF
+  return $ EquivalenceCondition mem regs mrCond pcond
+
+merge ::
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  IO.MonadIO m => 
+  sym ->
+  EquivalenceCondition sym arch v ->
+  EquivalenceCondition sym arch v ->
+  m (EquivalenceCondition sym arch v)  
+merge sym cond1 cond2 = do
+  mem <- WPM.merge sym (eqCondMem cond1) (eqCondMem cond2)
+  let regs = mergeRegCond (eqCondRegs cond1) (eqCondRegs cond2)
+  let (PAS.NamedAsms mr1, PAS.NamedAsms mr2) = (eqCondMaxRegion cond1, eqCondMaxRegion cond2)
+  let mrCond = PAS.NamedAsms $ mr1 <> mr2
+  let (PAS.NamedAsms pc1, PAS.NamedAsms pc2) = (eqCondExtraCond cond1, eqCondExtraCond cond2)
+  let pcond = PAS.NamedAsms $ pc1 <> pc2
   return $ EquivalenceCondition mem regs mrCond pcond
 
 
@@ -148,6 +168,15 @@ muxRegCond sym p condT condF = do
   regCond <- PRt.zipWithRegStatesM (regCondPreds condT) (regCondPreds condF) $ \_ (Const asmT) (Const asmF) -> Const <$> PAS.mux sym p asmT asmF
   return $ RegisterCondition regCond
 
+mergeRegCond ::
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  RegisterCondition sym arch v ->
+  RegisterCondition sym arch v ->
+  RegisterCondition sym arch v
+mergeRegCond cond1 cond2 = runIdentity $ do
+  regCond <- PRt.zipWithRegStatesM (regCondPreds cond1) (regCondPreds cond2) $ \_ (Const asm1) (Const asm2) -> Const <$> (return $ asm1 <> asm2)
+  return $ RegisterCondition regCond
 
 instance PS.Scoped (RegisterCondition sym arch) where
   unsafeCoerceScope (RegisterCondition cond) = RegisterCondition cond

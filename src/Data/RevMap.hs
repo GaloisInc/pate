@@ -46,10 +46,10 @@ minView m@(RevMap a_to_b _) = case Set.minView (Map.keysSet a_to_b) of
 -- | Return a pair such that 'b' is the smallest value in the map codomain,
 --   and 'a' is the smallest value that maps to 'b'
 minView_value :: (Ord a, Ord b) => RevMap a b -> Maybe (a, b, RevMap a b)
-minView_value m@(RevMap _ b_to_as) = case Set.minView (Map.keysSet b_to_as) of
+minView_value m@(RevMap a_to_b b_to_as) = case Set.minView (Map.keysSet b_to_as) of
   Just (b, _) -> case Set.minView (reverseLookup b m) of
     Just (a, _) -> Just (a, b, delete a m)
-    Nothing -> Nothing
+    Nothing -> minView_value (RevMap a_to_b (Map.delete b b_to_as))
   Nothing -> Nothing
 
 
@@ -75,7 +75,7 @@ alter :: (Ord a, Ord b) => (Maybe b -> Maybe b) -> a -> RevMap a b -> RevMap a b
 alter f a m@(RevMap a_to_b b_to_as) = case Map.lookup a a_to_b of
   Just b -> case f (Just b) of
     Just b' -> reverseAdjust b' (Set.insert a) $ 
-      reverseAdjust b (Set.delete a) m
+      reverseAdjust b (Set.delete a) (RevMap (Map.insert a b' a_to_b) b_to_as)
     Nothing -> delete a m
   Nothing -> case f Nothing of
     Just b -> 

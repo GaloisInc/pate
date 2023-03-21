@@ -13,6 +13,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
@@ -51,6 +52,7 @@ module Pate.Verification.PairGraph
   , setEquivCondition
   , dropDomain
   , dropReturns
+  , dropPostDomains
   , markEdge
   , getSyncPoint
   , asSyncPoint
@@ -58,6 +60,7 @@ module Pate.Verification.PairGraph
   , setSyncPoint
   , getCombinedSyncPoint
   , addToWorkList
+  , addToWorkListPriority
   , emptyWorkList
   , SyncPoint(..)
   , updateSyncPoint
@@ -65,16 +68,30 @@ module Pate.Verification.PairGraph
   , queuePendingAction
   , runPendingActions
   , queuePendingNodes
+  --- FIXME: move this
+  , TupleF
+  , pattern TupleF2
+  , pattern TupleF3
+  , pattern TupleF4
+  --
   , addLazyAction
+  , edgeActions
+  , nodeActions
+  , refineActions
   , getAllNodes
   , emptyPairGraph
-  , VerifierResult(..)
+  , DomainRefinement(..)
+  , addDomainRefinement
+  , getDomainRefinement
   ) where
 
 import           Prettyprinter
 
 import           Control.Monad (foldM)
 import           Control.Monad.IO.Class
+import qualified Control.Lens as L
+import           Control.Lens ( (&), (.~), (^.), (%~) )
+import           Data.Kind (Type)
 
 import qualified Data.Foldable as F
 import           Data.Map (Map)
@@ -114,11 +131,13 @@ import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
 import qualified Pate.Binary as PBi
-import Data.Parameterized (Some(..))
+import Data.Parameterized (Some(..), Pair (..))
 import Control.Applicative (Const(..))
 import qualified Control.Monad.IO.Unlift as IO
 import Pate.Solver (ValidSym)
 import Control.Monad.Reader (local, MonadReader (ask))
+import SemMC.Formula.Env (SomeSome(..))
+import qualified Pate.Location as PL
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -231,92 +250,71 @@ data PairGraph sym arch =
     --   the case where two independent program analysis steps have occurred and now
     --   their control-flows have re-synchronized
   , pairGraphSyncPoints :: !(Map (GraphNode arch) (SyncPoint arch))
-  , pairGraphPendingActs :: PendingActions sym arch
+  , pairGraphPendingActs :: ActionQueue sym arch
+  , pairGraphDomainRefinements ::
+      !(Map (GraphNode arch) (DomainRefinement sym arch))
   }
 
--- Final result of verifier after widening for a particular edge
-data VerifierResult sym arch = forall v.
-    VerifierResult 
-      { resultScope :: PS.SimScope sym arch v 
-      , resultBundle :: PS.SimBundle sym arch v
-      , resultPredomain :: AbstractDomain sym arch v
-      , resultPostdomain :: AbstractDomain sym arch v
-      }
+data DomainRefinement sym arch =
+    LocationRefinement (PL.SomeLocation sym arch -> Bool)
+  | PruneBranch
 
-data PendingActions sym arch =
-  PendingActions (Map (GraphNode arch, GraphNode arch)
-    [(Int, LazyIOAction (EquivEnv sym arch, VerifierResult sym arch, PairGraph sym arch) (PairGraph sym arch))])
-    Int
+combineRefinements ::
+  DomainRefinement sym arch -> DomainRefinement sym arch -> DomainRefinement sym arch
+combineRefinements (LocationRefinement f) (LocationRefinement g) = LocationRefinement $ \l -> f l || g l
+combineRefinements PruneBranch _ = PruneBranch
+combineRefinements _ PruneBranch = PruneBranch
 
-dropActId' ::
-  Int ->
-  PendingActions sym arch ->
-  PendingActions sym arch
-dropActId' actId (PendingActions acts nextActId) = PendingActions (fmap (filter (\(actId',_) -> actId /= actId')) acts) nextActId
-
-dropActId ::
-  Int ->
+addDomainRefinement ::
+  GraphNode arch ->
+  DomainRefinement sym arch ->
   PairGraph sym arch ->
   PairGraph sym arch
-dropActId actId pg = pg { pairGraphPendingActs = dropActId' actId (pairGraphPendingActs pg) }
+addDomainRefinement nd f pg0 = 
+  let
+    pg1 = pg0 { pairGraphDomainRefinements = Map.insertWith combineRefinements nd f (pairGraphDomainRefinements pg0) }
+  -- we need to re-process any nodes that have an outgoing edge here, since
+  -- those are the domains we need to refine
+  in Set.foldl' (\pg_ nd' -> case addToWorkListPriority nd' pg_ of
+    Just pg__ -> pg__
+    Nothing -> pg_) pg1 (getBackEdgesFrom pg1 nd)
 
-addLazyAction ::
-  (GraphNode arch, GraphNode arch) ->
+getDomainRefinement ::
+  GraphNode arch ->
   PairGraph sym arch ->
-  String ->
-  (forall m'. Monad m' => ((String -> (VerifierResult sym arch -> PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> m' ())) -> m' ()) ->
-  EquivM sym arch (PairGraph sym arch)  
-addLazyAction edge pg actNm f = do
-  inIO <- IO.askRunInIO
-  pendingAct <-
-    chooseLazy @"()"  actNm $ \choice -> f (\nm act -> choice nm () (\(env, result, pg') -> inIO $ local (\_ -> env) $ act result pg'))
-  liftIO $ queuePendingAction edge pendingAct pg
-
-queuePendingAction ::
-  (GraphNode arch, GraphNode arch) ->
-  (LazyIOAction (EquivEnv sym arch, VerifierResult sym arch, PairGraph sym arch) (PairGraph sym arch)) ->
-  PairGraph sym arch ->
-  IO (PairGraph sym arch)
-queuePendingAction edge (LazyIOAction actReady fn) pg = do
-  let PendingActions actMap nextActId = pairGraphPendingActs pg
-  let act' = (nextActId, LazyIOAction actReady (\(env, result, pg') -> fn (env, result, dropActId nextActId pg')))
-  return $ pg { pairGraphPendingActs = PendingActions (Map.insertWith (++) edge [act'] actMap) (nextActId + 1) }
+  Maybe (DomainRefinement sym arch)
+getDomainRefinement nd pg = Map.lookup nd (pairGraphDomainRefinements pg)
 
 
--- | For any edges with pending actions, we need to ensure that the 'from' node is
---   queued so that the action is processed.
-queuePendingNodes ::
-  PairGraph sym arch ->
-  IO (PairGraph sym arch)
-queuePendingNodes pg = do
-  let 
-    PendingActions actMap _ = pairGraphPendingActs pg
-  foldM (\pg_ ((from,_),act) -> someActionReady (map snd act) >>= \case
-    True | Just pg__ <- addToWorkListPriority from pg_ -> return pg__
-    _ -> return pg_) pg (Map.toList actMap)
-  where
-    someActionReady :: forall a b. [LazyIOAction a b] -> IO Bool
-    someActionReady [] = return False
-    someActionReady (act:acts) = lazyActionReady act >>= \case
-      True -> return True
-      False-> someActionReady acts
+-- FIXME: move this 
+data PairF tp1 tp2 k = PairF (tp1 k) (tp2 k)
 
-runPendingActions ::
-  forall sym arch.
-  (GraphNode arch, GraphNode arch) ->
-  VerifierResult sym arch ->
-  PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-runPendingActions edge result pg = do
-  let PendingActions actMap _ = pairGraphPendingActs pg
-  let actList = fromMaybe [] (Map.lookup edge actMap)
-  env <- ask
-  let go :: [LazyIOAction (EquivEnv sym arch, VerifierResult sym arch, PairGraph sym arch) (PairGraph sym arch) ] -> PairGraph sym arch -> IO (PairGraph sym arch)
-      go [] pg' = return pg'
-      go (act:acts) pg' = runLazyAction act (env, result, pg') >>= \case
-        Just pg'' -> go acts pg''
-        Nothing -> go acts pg'
-  liftIO $ go (map snd actList) pg
+type family TupleF (t :: l) :: (k -> Type)
+type instance TupleF '(a,b) = PairF a b
+type instance TupleF '(a,b,c) = PairF a (PairF b c)
+type instance TupleF '(a,b,c,d) = PairF a (PairF b (PairF c d))
+
+pattern TupleF2 :: a k -> b k -> TupleF '(a,b) k
+pattern TupleF2 a b = PairF a b
+
+pattern TupleF3 :: a k -> b k -> c k -> TupleF '(a,b,c) k
+pattern TupleF3 a b c = PairF a (PairF b c)
+
+pattern TupleF4 :: a k -> b k -> c k -> d k -> TupleF '(a,b,c,d) k
+pattern TupleF4 a b c d = PairF a (PairF b (PairF c d))
+
+data PendingAction sym arch (f :: PS.VarScope -> Type) = 
+  PendingAction { pactIdent :: Int, _pactAction :: LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)}
+
+-- TODO: After some refactoring I'm not sure if we actually need edge actions anymore, so this potentially can be simplified
+data ActionQueue sym arch =
+  ActionQueue 
+    { _edgeActions :: Map (GraphNode arch, GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, PS.SimBundle sym arch, AbstractDomain sym arch, AbstractDomain sym arch))]
+    , _nodeActions :: Map (GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, PS.SimBundle sym arch, AbstractDomain sym arch))]
+    , _refineActions :: Map (GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, AbstractDomain sym arch))]
+    , _latestPendingId :: Int
+    }
+
 
 data SyncPoint arch =
   SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch), syncTerminal :: Maybe Bool }
@@ -357,7 +355,8 @@ emptyPairGraph =
   , pairGraphEdges = mempty
   , pairGraphBackEdges = mempty
   , pairGraphSyncPoints = mempty
-  , pairGraphPendingActs = PendingActions Map.empty 0
+  , pairGraphPendingActs = ActionQueue Map.empty Map.empty Map.empty 0
+  , pairGraphDomainRefinements = mempty
   }
 
 getAllNodes :: PairGraph sym arch -> [GraphNode arch]
@@ -406,6 +405,12 @@ dropReturns ::
   PairGraph sym arch ->
   PairGraph sym arch
 dropReturns nr pg = pg { pairGraphReturnVectors = Map.delete nr (pairGraphReturnVectors pg) }
+
+dropPostDomains ::
+  GraphNode arch -> 
+  PairGraph sym arch ->
+  PairGraph sym arch   
+dropPostDomains nd pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropObservableReports nd' $ dropDomain nd' pg_) pg (getEdgesFrom pg nd)
 
 -- | Delete the abstract domain for the given node, following
 --   any reachable edges and discarding those domains as well
@@ -914,3 +919,102 @@ pairGraphComputeVerdict gr =
       False -> return PE.ConditionallyEquivalent
   else
     return PE.Inequivalent
+
+
+$(L.makeLenses ''ActionQueue)
+
+dropActId' ::
+  Int ->
+  ActionQueue sym arch ->
+  ActionQueue sym arch
+dropActId' actId (ActionQueue edgeActs nodeActs refineActs nextActId) = 
+   ActionQueue 
+    (fmap (filter (\pact -> actId /= (pactIdent pact))) edgeActs) 
+    (fmap (filter (\pact -> actId /= (pactIdent pact))) nodeActs) 
+    (fmap (filter (\pact -> actId /= (pactIdent pact))) refineActs) 
+    nextActId
+
+dropActId ::
+  Int ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropActId actId pg = pg { pairGraphPendingActs = dropActId' actId (pairGraphPendingActs pg) }
+
+addLazyAction ::
+  Ord k =>
+  L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch f]) ->
+  k ->
+  PairGraph sym arch ->
+  String ->
+  (forall m'. Monad m' => ((String -> (forall v. (f v -> PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch))) -> m' ())) -> m' ()) ->
+  EquivM sym arch (PairGraph sym arch)  
+addLazyAction lens edge pg actNm f = do
+  inIO <- IO.askRunInIO
+  pendingAct <-
+    chooseLazy @"()"  actNm $ \choice -> f (\nm act -> choice nm () (\(env, Some result, pg') -> inIO $ local (\_ -> env) $ act result pg'))
+  liftIO $ queuePendingAction lens edge pendingAct pg
+
+queuePendingAction ::
+  Ord k =>
+  L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch f]) ->
+  k ->
+  (LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)) ->
+  PairGraph sym arch ->
+  IO (PairGraph sym arch)
+queuePendingAction lens edge (LazyIOAction actReady fn) pg = do
+  let 
+    actMap = (pairGraphPendingActs pg) ^. lens
+    nextActId = (pairGraphPendingActs pg) ^. latestPendingId
+    act' = PendingAction nextActId (LazyIOAction actReady (\(env, result, pg') -> fn (env, result, dropActId nextActId pg')))
+    actMap' = Map.insertWith (++) edge [act'] actMap
+    pendingActs = (pairGraphPendingActs pg) & lens .~ actMap'
+
+  return $ pg { pairGraphPendingActs = (pendingActs & latestPendingId %~ (+ 1)) }
+
+
+-- | For any edges with pending actions, we need to ensure that the 'from' node is
+--   queued so that the action is processed.
+queuePendingNodes ::
+  PairGraph sym arch ->
+  IO (PairGraph sym arch)
+queuePendingNodes pg = do
+  let 
+    edgeActs = (pairGraphPendingActs pg) ^. edgeActions
+    nodeActs = (pairGraphPendingActs pg) ^. nodeActions
+    refineActs = (pairGraphPendingActs pg) ^. refineActions
+    nodeActs' = 
+      (map (\((from,_),acts) -> (from, map asSomeAct acts)) (Map.toList edgeActs))
+      ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList nodeActs))
+      ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList refineActs))
+
+  foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
+    True | Just pg__ <- addToWorkListPriority from pg_ -> return pg__
+    _ -> return pg_) pg nodeActs'
+  where
+    asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction
+    asSomeAct (PendingAction _ act) = SomeSome act
+
+    someActionReady :: [SomeSome LazyIOAction] -> IO Bool
+    someActionReady [] = return False
+    someActionReady (SomeSome act:acts) = lazyActionReady act >>= \case
+      True -> return True
+      False-> someActionReady acts
+
+runPendingActions ::
+  forall sym arch k f v.
+  Ord k =>
+  L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch f]) ->
+  k ->
+  f v ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+runPendingActions lens edge result pg = do
+  let actMap = (pairGraphPendingActs pg) ^. lens
+  let actList = fromMaybe [] (Map.lookup edge actMap)
+  env <- ask
+  let go :: [PendingAction sym arch f] -> PairGraph sym arch -> IO (PairGraph sym arch)
+      go [] pg' = return pg'
+      go (PendingAction _ act:acts) pg' = runLazyAction act (env, Some result, pg') >>= \case
+        Just pg'' -> go acts pg''
+        Nothing -> go acts pg'
+  liftIO $ go actList pg
