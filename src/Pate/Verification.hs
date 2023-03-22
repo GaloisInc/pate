@@ -118,7 +118,7 @@ runDiscovery logAction mCFGDir (PA.SomeValidArch archData) elf elf' pd = do
   liftIO $ LJ.writeLog logAction (PE.LoadedBinaries (PH.hinted elf) (PH.hinted elf'))
   return $ PPa.PatchPair binCtxO binCtxP
   where
-    discover mdir repr extra e h = PD.runDiscovery mdir repr extra e h pd
+    discover mdir repr extra e h = PD.runDiscovery archData mdir repr extra e h pd
 
     discoverCheckingHints repr extra e = do
       if | PH.hints e == mempty -> do

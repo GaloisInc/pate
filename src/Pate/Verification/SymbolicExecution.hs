@@ -2,6 +2,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 -- | This module provides the interface to the symbolic execution engine used by the pate verifier
 --
 -- It performs all of the setup and extraction of results, along with logic for
@@ -41,6 +42,7 @@ import qualified Lang.Crucible.Simulator as CS
 import qualified Lang.Crucible.Simulator.GlobalState as CGS
 
 import qualified Pate.Address as PA
+import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Discovery as PD
@@ -54,6 +56,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.PatchPair as PPa
 import Data.Functor.Const (Const(..))
+import Control.Monad.Error
 
 -- | Return a Crucible run-time repr for the architecture-specific register file
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
@@ -221,6 +224,22 @@ ppAbortedResult (CS.AbortedBranch loc _ t f) =
   "branch (@" ++ show loc ++ ") (t: " ++ ppAbortedResult t ++ ") (f: " ++ ppAbortedResult f ++ ")"
 
 
+stripUninterpretedStmts ::
+  PA.ValidArch arch =>
+  [MM.Stmt arch ids] ->
+  [MM.Stmt arch ids]
+stripUninterpretedStmts stmts = 
+  filter (\case {MM.ExecArchStmt astmt -> not (PA.uninterpretedArchStmt astmt); _ -> True}) stmts
+
+-- | Symbolic execution can't handle uninterpreted instructions.
+--   As a very bad initial approximation, we simply drop these uninterpreted
+--   instructions just so we can get some result.
+stripUninterpreted ::
+  PA.ValidArch arch =>
+  [MD.ParsedBlock arch ids] ->
+  [MD.ParsedBlock arch ids]
+stripUninterpreted pbs = map (\pb -> pb { MD.pblockStmts = stripUninterpretedStmts (MD.pblockStmts pb) } ) pbs
+
 -- | Symbolically execute a chunk of code under the preconditions determined by
 -- the compositional analysis
 --
@@ -230,14 +249,31 @@ ppAbortedResult (CS.AbortedBranch loc _ t f) =
 -- 2. The captured post-state
 simulate ::
   forall sym arch v bin.
-  (HasCallStack, PBi.KnownBinary bin) =>
+  (HasCallStack, PBi.KnownBinary bin, PA.ValidArch arch) =>
   PS.SimInput sym arch v bin ->
   (forall ids. MD.ParsedBlock arch ids -> Bool) {- ^ extra predicate for deciding if blocks should be considered external -} ->
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch v bin)
 simulate simInput killBlock = withBinary @bin $ do
+  PDP.ParsedBlocks pbs0 <- PD.lookupBlocks (PS.simInBlock simInput)
+  -- attempt simulation, if it fails, retry by stripping out any uninterpreted statements, but
+  -- emit a warning along with the result
+  catchError (simulate' simInput pbs0 killBlock) $ \e -> do
+    let pbs1 = stripUninterpreted pbs0
+    catchError (simulate' simInput pbs1 killBlock >>= \r -> emitWarning PEE.UninterpretedInstruction >> return r)
+      $ \_ -> throwError e
+
+simulate' ::
+  forall sym arch v bin ids.
+  (HasCallStack, PBi.KnownBinary bin, PA.ValidArch arch) =>
+  PS.SimInput sym arch v bin ->
+  [MD.ParsedBlock arch ids] {- ^ blocks to simulate in order -} ->
+  (forall ids'. MD.ParsedBlock arch ids' -> Bool) {- ^ extra predicate for deciding if blocks should be considered external -} ->
+  EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch v bin)
+simulate' simInput pbs_ killBlock = do
   let (bin :: PBi.WhichBinaryRepr bin) = CC.knownRepr
   CC.SomeCFG cfg <- do
-    PDP.ParsedBlocks pbs_ <- PD.lookupBlocks (PS.simInBlock simInput)
+
+
     let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
     let fe = PB.blockFunctionEntry (PS.simInBlock simInput)
     let bounds = case PB.functionEnd fe of
@@ -260,6 +296,7 @@ simulate simInput killBlock = withBinary @bin $ do
     let posFn = W4L.OtherPos . fromString . show
     let sliceFns = MCS.blockEndSliceFns fns be
     liftIO $ MS.mkBlockSliceCFG fns sliceFns ha posFn pb nonTerminal terminal killEdges
+
   let preRegs = PS.simInRegs simInput
   preRegsAsn <- regStateToAsn preRegs
   archRepr <- archStructRepr

@@ -166,6 +166,7 @@ instance PA.ValidArch PPC.PPC32 where
   discoveryRegister = const False
   -- FIXME: TODO
   readRegister _ = Nothing
+  uninterpretedArchStmt _ = False
 
 instance PA.ValidArch PPC.PPC64 where
   type ArchConfigOpts PPC.PPC64 = ()
@@ -182,6 +183,7 @@ instance PA.ValidArch PPC.PPC64 where
   discoveryRegister = const False
   -- FIXME: TODO
   readRegister _ = Nothing
+  uninterpretedArchStmt _ = False
 
 -- | Determine the argument name for the argument held in the given register.
 --
@@ -325,6 +327,7 @@ archLoader = PA.ArchLoader $ \_pd em origHdr _patchedHdr ->
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
                                  , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
+                                 , PA.validArchExtractPrecond = \_ _ _ -> Nothing
                                  }
       in Right (Some (PA.SomeValidArch vad))
     (EEP.EM_PPC64, _) ->
@@ -336,6 +339,7 @@ archLoader = PA.ArchLoader $ \_pd em origHdr _patchedHdr ->
                                  , PA.validArchPatchedExtraSymbols = mempty
                                  , PA.validArchStubOverrides = stubOverrides
                                  , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
+                                 , PA.validArchExtractPrecond = \_ _ _ -> Nothing
                                  }
       in Right (Some (PA.SomeValidArch vad))
 

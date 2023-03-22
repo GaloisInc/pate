@@ -73,12 +73,15 @@ hasDedicatedRegister =
                           , PA.dedicatedRegisterValidity = \_ _ _ _ (NoRegisters v) -> absurd v
                           }
 
-
+-- | Variant of normal extractBlockPrecond that takes the initial value of the PSTATE_T flag from the beginning of
+--   the function instead of the beginning of the block. This captures the assumption that within a function there are
+--   no mode switches, and when function calls return (even if they switch modes) they always restore the PSTATE_T flag
 hackyExtractBlockPrecond
-  :: MC.ArchSegmentOff SA.AArch32
+  :: MA.AbsBlockState (MC.ArchReg SA.AArch32)
+  -> MC.ArchSegmentOff SA.AArch32
   -> MA.AbsBlockState (MC.ArchReg SA.AArch32)
-  -> Either String (MC.ArchBlockPrecond SA.AArch32)
-hackyExtractBlockPrecond _ absState =
+  -> Maybe (Either String (MC.ArchBlockPrecond SA.AArch32))
+hackyExtractBlockPrecond absState _ _ = Just $
   case absState ^. MA.absRegState . MC.boundValue (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) of
     -- FIXME: always set the PSTATE_T flag to true
     --_ -> Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = True })
@@ -88,6 +91,7 @@ hackyExtractBlockPrecond _ absState =
     MA.SubValue {} -> Left "SubValue where PSTATE_T expected"
     MA.TopV -> Left "TopV where PSTATE_T expected" {- Right (MAA.ARMBlockPrecond { MAA.bpPSTATE_T = False }) -}
 
+
 -- | A modified version of the AArch32 code discovery configuration
 --
 -- This is an unfortunate (and hopefully temporary) hack to deal with some
@@ -96,9 +100,10 @@ hackyExtractBlockPrecond _ absState =
 -- as it doesn't issue a mode switch in the middle of a thumb function).
 --
 -- See Note [Thumb Code Discovery Hacks] for details
+-- FIXME: this is subsumed by applying hackyExtractBlockPrecond later in the pipeline (see: 'Pate.Discovery.ParsedFunctions')
 hacky_arm_linux_info :: MAI.ArchitectureInfo SA.AArch32
 hacky_arm_linux_info =
-  ARM.arm_linux_info { MAI.extractBlockPrecond = hackyExtractBlockPrecond }
+  ARM.arm_linux_info
 
 instance PA.ValidArch SA.AArch32 where
   type ArchConfigOpts SA.AArch32 = AArch32Opts SA.AArch32
@@ -120,7 +125,9 @@ instance PA.ValidArch SA.AArch32 where
     "r13" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R13")
     "pc" -> Just $ Some $ ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_PC")
     _ -> Nothing
-
+  -- currently the only arch-specific (non-terminal) statements we have are
+  -- uninterpreted
+  uninterpretedArchStmt _ = True
 
 data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 
@@ -247,6 +254,7 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
       , "sigaction"
       , "setitimer"
       , "read"
+      , "ceilf"
       ])
   where
     mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
@@ -286,6 +294,7 @@ archLoader = PA.ArchLoader $ \pd em origHdr patchedHdr ->
                                   , PA.validArchInitAbs = case thumbMode opts of
                                       False -> PB.defaultMkInitialAbsState
                                       True -> PB.MkInitialAbsState (\_ _ -> MapF.singleton (ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"PSTATE_T")) (MA.FinSet (Set.singleton 1)))
+                                  , PA.validArchExtractPrecond = hackyExtractBlockPrecond
                                   }
         in Right (Some (PA.SomeValidArch vad))
       Nothing -> Left (PEE.InvalidArchOpts (archOpts pd))

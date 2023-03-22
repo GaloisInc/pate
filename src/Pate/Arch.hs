@@ -82,6 +82,7 @@ import qualified What4.Interface as W4 hiding ( integerToNat )
 import qualified What4.Concrete as W4
 import qualified What4.ExprHelpers as W4 ( integerToNat )
 import Pate.Config (PatchData)
+import Data.Macaw.AbsDomain.AbsState (AbsBlockState)
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -166,6 +167,8 @@ class
   -- parsing registers from user input
   readRegister :: String -> Maybe (Some (MC.ArchReg arch))
 
+  uninterpretedArchStmt :: MC.ArchStmt arch v -> Bool
+
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
                 , validArchFunctionDomain :: PVE.ExternalDomain PVE.ExternalCall arch
@@ -180,6 +183,14 @@ data ValidArchData arch =
                 , validArchInitAbs :: PB.MkInitialAbsState arch
                 -- ^ variant of Macaw's mkInitialAbsState that's tuned to
                 -- our override mechanisms
+                , validArchExtractPrecond ::
+                    AbsBlockState (MC.ArchReg arch) {- ^ initial state at function entry point -} ->
+                    MC.ArchSegmentOff arch {- ^ address for this block -} ->
+                    AbsBlockState (MC.ArchReg arch) {- ^ state for this block -} ->
+                    Maybe (Either String (MC.ArchBlockPrecond arch))
+                -- ^ variant of Data.Macaw.Architecture.Info.extractBlockPrecond that
+                --   also takes the initial function state. If this returns a 'Just' result, it is used
+                --   instead of the result of 'extractBlockPrecond'
                 }
 
 -- | A stub is allowed to make arbitrary modifications to the symbolic state

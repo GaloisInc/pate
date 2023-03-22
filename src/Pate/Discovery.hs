@@ -633,6 +633,7 @@ runDiscovery ::
   forall arch bin.
   PB.KnownBinary bin =>
   PA.ValidArch arch =>
+  PA.ValidArchData arch ->
   Maybe FilePath ->
   PB.WhichBinaryRepr bin ->
   Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch)) ->
@@ -640,7 +641,7 @@ runDiscovery ::
   PH.VerificationHints ->
   PC.PatchData ->
   CME.ExceptT PEE.EquivalenceError IO ([Word64], PMC.BinaryContext arch bin)
-runDiscovery mCFGDir repr extraSyms elf hints pd = do
+runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
   let archInfo = PLE.archInfo elf
   entries <- MBL.entryPoints bin
   addrSyms' <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
@@ -649,7 +650,7 @@ runDiscovery mCFGDir repr extraSyms elf hints pd = do
   let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
   addrEnds <- F.foldlM (addFnEnd mem) mempty (fmap snd (PH.functionEntries hints))
-  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds
+  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds (PA.validArchExtractPrecond aData)
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
   let startEntry = DLN.head entries
