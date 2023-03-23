@@ -87,6 +87,7 @@ import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
+import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Location as PL
 import           Pate.Monad
@@ -116,6 +117,7 @@ import qualified Data.Macaw.Discovery as MD
 import Data.Foldable (foldl')
 import qualified Pate.ExprMappable as PEM
 import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), prettyRegsCE)
+import qualified Data.Macaw.BinaryLoader as MBL
 
 -- Overall module notes/thoughts
 --
@@ -1607,7 +1609,7 @@ getFunctionStub ::
   EquivM sym arch (Maybe BS.ByteString)
 getFunctionStub blk = do
   PA.SomeValidArch archData <- asks envValidArch
-  findPLTSymbol blk >>= \case
+  PD.findPLTSymbol blk >>= \case
     Just nm -> return $ Just nm
     Nothing | Just fnEntry <- PB.asFunctionEntry blk -> do
       let mnm = PB.functionSymbol fnEntry
@@ -1676,7 +1678,7 @@ triageBlockTarget scope bundle' currBlock d gr blkts =
         pPair = TF.fmapF PB.targetCall blkts
         nextNode = mkNodeEntry currBlock pPair
       
-     stubPair <- getFunctionStubPair nextNode
+     stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair nextNode
      traceBundle bundle' ("  targetCall: " ++ show pPair)
      matches <- PD.matchesBlockTarget bundle' blkts
      maybeUpdate gr $ withPathCondition matches $ do
@@ -1714,27 +1716,6 @@ triageBlockTarget scope bundle' currBlock d gr blkts =
                 _ -> throwHere $ PEE.BlockExitMismatch
         PPa.PatchPairMismatch{} -> throwHere $ PEE.BlockExitMismatch
 
-findPLTSymbol ::
-  forall sym arch bin.
-  PBi.KnownBinary bin =>
-  PB.ConcreteBlock arch bin ->
-  EquivM sym arch (Maybe BS.ByteString)
-findPLTSymbol blk = do
-  let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
-  PA.SomeValidArch archData <- asks envValidArch
-  let
-    extraMapPair = PPa.PatchPair (Const (PA.validArchOrigExtraSymbols archData)) (Const (PA.validArchPatchedExtraSymbols archData))
-  Const extraMap <- PPa.get bin extraMapPair
-  let addr = PAd.addrToMemAddr (PB.concreteAddress blk)
-  case (MM.asAbsoluteAddr addr) of
-    Just mw -> do
-      let syms = [ s | (s,bv) <- Map.toList extraMap
-                 , BV.asUnsigned bv == toInteger (MM.memWordValue mw)
-                 ]
-      case syms of
-        [sym] -> return (Just sym)
-        _ -> return Nothing
-    _ -> return Nothing
 
 {-
 -- | See if the given jump targets correspond to a PLT stub for

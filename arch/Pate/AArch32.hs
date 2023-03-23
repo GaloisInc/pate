@@ -230,7 +230,10 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     -- FIXME: default stubs below here
     ] ++
     (map mkDefault $
-      [ "getopt"
+      [ "memcpy" -- FIXME: needs implementation
+      , "memset" -- FIXME: needs implementation
+      , "gettimeofday" -- FIXME: needs implementation
+      , "getopt"
       , "fprintf"
       , "open"
       , "atoi"

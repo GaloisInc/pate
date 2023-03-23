@@ -14,6 +14,7 @@ import qualified Data.Scientific as DS
 import qualified Data.Text as T
 
 import qualified Pate.Hints as PH
+import Control.Applicative ((<|>))
 
 data JSONError = JSONParseError String
                | UnexpectedTopLevel String JSON.Value
@@ -39,6 +40,17 @@ readSymbolMap val = case val of
 -- TODO: we aren't collecting the clobbered or argument
 -- registers here, but it would certainly be a good idea
 -- as it would make our stubs more accurate
+
+readSourceMatch ::
+  String ->
+  JSON.Object -> 
+  Maybe T.Text
+readSourceMatch elemNm o = do
+  (JSON.String fnName) <- HMS.lookup (T.pack elemNm) o
+  case fnName of
+    "BSI_UNASSIGNED" -> fail ""
+    _ -> return fnName
+
 collectFunctions :: ([(T.Text, PH.FunctionDescriptor)], [JSONError])
                  -> JSON.Value
                  -> ([(T.Text, PH.FunctionDescriptor)], [JSONError])
@@ -47,11 +59,9 @@ collectFunctions (fnSpecs, errs) v =
     JSON.Object o
       | Just (JSON.Number fnAddrS) <- HMS.lookup (T.pack "address") o
       , Just fnAddr <- DS.toBoundedInteger fnAddrS
-      , Just fnSrc <- HMS.lookup (T.pack "source_match") o ->
+      , Just fnName <- (readSourceMatch "source_match" o 
+                       <|> readSourceMatch "candidate_source_match" o) ->
         let
-          fnName = case fnSrc of
-            (JSON.String fnName') -> fnName'
-            _ -> (T.pack $ "_MISSING_" ++ (show (fnAddr)))
           fd = PH.FunctionDescriptor { PH.functionSymbol = fnName
                                      , PH.functionAddress = fnAddr
                                      , PH.functionArguments = []
@@ -59,7 +69,7 @@ collectFunctions (fnSpecs, errs) v =
                                      , PH.functionEnd = Nothing
                                      }
         in ((fnName, fd) : fnSpecs, errs)
-    JSON.Object o | Just _ <- HMS.lookup (T.pack "source_match") o ->
+    JSON.Object o | Just _ <- (HMS.lookup (T.pack "source_match") o <|> HMS.lookup (T.pack "candidate_source_match") o) ->
       (fnSpecs, errs)
     _ -> (fnSpecs, UnexpectedTopLevel "Function" v : errs)
 

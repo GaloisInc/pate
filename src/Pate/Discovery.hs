@@ -7,6 +7,9 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
+
 -- | This module defines an interface to drive macaw code discovery and identify
 -- corresponding blocks in an original and patched binary
 module Pate.Discovery (
@@ -22,7 +25,8 @@ module Pate.Discovery (
   matchingExits,
   isMatchingCall,
   concreteToLLVM,
-  nextBlock
+  nextBlock,
+  findPLTSymbol
   ) where
 
 import           Control.Lens ( (^.) )
@@ -40,7 +44,7 @@ import           Data.Functor.Const
 import           Data.Int
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
-import           Data.Maybe ( catMaybes )
+import           Data.Maybe ( catMaybes, maybeToList, fromJust )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
@@ -54,6 +58,7 @@ import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           Data.Word ( Word64 )
 import           GHC.Stack ( HasCallStack )
+import qualified Lang.Crucible.Utils.MuxTree as MuxTree
 
 import qualified Data.Macaw.AbsDomain.AbsState as MAS
 import qualified Data.Macaw.BinaryLoader as MBL
@@ -67,6 +72,8 @@ import qualified Data.Macaw.Types as MT
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
+import qualified Lang.Crucible.Simulator.RegValue as CS
+
 import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as WI
 import qualified What4.Partial as WP
@@ -93,9 +100,12 @@ import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PSS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.SymbolTable as PSym
+import qualified Pate.Discovery.PLT as PLT
 import qualified What4.ExprHelpers as WEH
 
 import           Pate.TraceTree
+import qualified Control.Monad.IO.Unlift as IO
+import Data.Parameterized.SetF (AsOrd(..))
 
 --------------------------------------------------------
 -- Block pair matching
@@ -253,13 +263,54 @@ exactEquivalence input = withSym $ \sym ->
 
     liftIO $ WI.andPred sym regsEq memEq
 
+-- FIXME: annoying wrapper needed to sort partial pointers
+newtype OrdPartLLVMPtr sym arch = OrdPartLLVMPtr (CS.RegValue sym (CT.MaybeType ( CLM.LLVMPointerType (MD.ArchAddrWidth arch))))
+
+instance WI.IsSymExprBuilder sym => Eq (OrdPartLLVMPtr sym arch) where
+  ptr1 == ptr2 = (compare ptr1 ptr2) == EQ
+
+instance WI.IsSymExprBuilder sym => Ord (OrdPartLLVMPtr sym arch) where
+  compare (OrdPartLLVMPtr ptr1) (OrdPartLLVMPtr ptr2) = case (ptr1,ptr2) of
+    (WP.Unassigned, WP.Unassigned) -> EQ
+    (WP.Unassigned, _) -> LT
+    (_, WP.Unassigned) -> GT
+    (WP.PE p1 (CLM.LLVMPointer r1 o1), WP.PE p2 (CLM.LLVMPointer r2 o2)) -> 
+      (MapF.toOrdering (MapF.compareF p1 p2)) <> (compare r1 r2) <> (MapF.toOrdering (MapF.compareF o1 o2))
+
+nextInstr ::
+  forall sym arch bin v.
+  PSS.SimState sym arch bin v ->
+  EquivM sym arch (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MD.ArchAddrWidth arch))))
+nextInstr st = withSym $ \sym -> do
+  let currInstrMux = (MT.memCurrentInstr $  PSS.simMem st)
+  inIO <- IO.askRunInIO
+  let msegOffToPtr :: Maybe (MC.ArchSegmentOff arch) -> IO (OrdPartLLVMPtr sym arch)
+      msegOffToPtr Nothing = OrdPartLLVMPtr <$> return WP.Unassigned
+      msegOffToPtr (Just segOff) = do
+        ptr <- inIO $ concreteAddrToLLVM (PA.segOffToAddr segOff)
+        OrdPartLLVMPtr <$> (return $ WP.justPartExpr sym ptr)
+
+  nextInstrMux <- liftIO $ MuxTree.muxTreeUnaryOp sym (\x -> msegOffToPtr (nextSegOff x)) currInstrMux
+  (OrdPartLLVMPtr result) <- liftIO $ MuxTree.collapseMuxTree sym (\p (OrdPartLLVMPtr ptr1) (OrdPartLLVMPtr ptr2) ->
+    OrdPartLLVMPtr <$> (WP.mergePartial sym (\p' a' b' -> liftIO (CLM.muxLLVMPtr sym p' a' b')) p ptr1 ptr2)) nextInstrMux
+  return result
+  where
+    nextSegOff :: Maybe (MC.ArchSegmentOff arch,T.Text) -> Maybe (MC.ArchSegmentOff arch)
+    nextSegOff Nothing = Nothing
+    nextSegOff (Just (segOff,_)) = let
+      inc = MM.addrSize (Proxy @(MD.ArchAddrWidth arch))
+      in MM.incSegmentOff segOff (fromIntegral inc)
+
+
+
+
 matchesBlockTargetOne ::
   forall sym arch bin v.
   PB.KnownBinary bin =>
   SimBundle sym arch v ->
   PB.BlockTarget arch bin ->
   EquivM sym arch (PAS.AssumptionSet sym)
-matchesBlockTargetOne bundle blkt = withSym $ \sym -> do
+matchesBlockTargetOne bundle blkt = fnTrace "matchesBlockTargetOne" $ withSym $ \sym -> do
     -- true when the resulting IPs call the given block targets
    let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
    regs <- PSS.simOutRegs <$> PPa.get bin (PSS.simOut bundle)
@@ -270,8 +321,8 @@ matchesBlockTargetOne bundle blkt = withSym $ \sym -> do
 
    callPtr <- concreteToLLVM (PB.targetCall blkt)
    let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
-
    targetRet <- targetReturnPtr blkt
+   
    eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
    MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
    let eqCase = PAS.exprBinding e1 e2
@@ -374,6 +425,14 @@ targetReturnPtr blkt | Just blk <- PB.targetReturn blkt = withSym $ \sym -> do
   return $ WP.justPartExpr sym ptr
 targetReturnPtr _ = withSym $ \sym -> return $ WP.maybePartExpr sym Nothing
 
+-- | mapM that also gives the next element in the list (if it exists)
+mapM2 ::
+  Monad m =>
+  (a -> Maybe a -> m b) ->
+  [a] ->
+  m [b]
+mapM2 _ [] = return []
+mapM2 f as@(_:as') = mapM (\(a1,ma2) -> f a1 ma2) (zip as ((map Just as') ++ [Nothing]))
 
 -- | From the given starting point, find all of the accessible
 -- blocks
@@ -388,7 +447,7 @@ getSubBlocks b = withBinary @bin $
      mtgt <- PDP.parsedBlocksContaining b pfm
      tgts <- case mtgt of
        Just (PDP.ParsedBlocks pbs) ->
-         concat <$> mapM (\x -> concreteJumpTargets b x) pbs
+         concat <$> mapM2 (\x1 x2 -> concreteJumpTargets b x1 x2) pbs
        Nothing -> throwHere $ PEE.UnknownFunctionEntry addr
      mapM_ (\x -> validateBlockTarget x) tgts
      return tgts
@@ -436,23 +495,26 @@ validateBlockTarget tgt = do
 
 concreteNextIPs ::
   PA.ValidArch arch =>
+  MM.Memory (MC.ArchAddrWidth arch) ->
   MC.RegState (MC.ArchReg arch) (MC.Value arch ids) ->
   [PA.ConcreteAddress arch]
-concreteNextIPs st = concreteValueAddress $ st ^. MC.curIP
+concreteNextIPs mem st = concreteValueAddress mem $ st ^. MC.curIP
 
 concreteValueAddress ::
   forall arch ids.
   PA.ValidArch arch =>
+  MM.Memory (MC.ArchAddrWidth arch) ->
   MC.Value arch ids (MT.BVType (MC.ArchAddrWidth arch)) ->
   [PA.ConcreteAddress arch]
-concreteValueAddress = \case
+concreteValueAddress mem = \case
   MC.RelocatableValue _ addr -> [ PA.memAddrToAddr addr ]
   MC.BVValue w bv |
     Just WI.Refl <- WI.testEquality w (MM.memWidthNatRepr @(MC.ArchAddrWidth arch)) ->
-      [ PA.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral bv))) ]
+      maybeToList (fmap PA.segOffToAddr (PM.resolveAbsoluteAddress mem (MM.memWord (fromIntegral bv))))
   MC.AssignedValue (MC.Assignment _ rhs) -> case rhs of
-    MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress b1 ++ concreteValueAddress b2
+    MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress mem b1 ++ concreteValueAddress mem b2
     _ -> []
+  -- MC.ReadMem ptr _ -> error ""
   _ -> []
   -- TODO ^ is this complete?
 
@@ -463,35 +525,39 @@ concreteJumpTargets ::
   PA.ValidArch arch =>
   PB.ConcreteBlock arch bin ->
   MD.ParsedBlock arch ids ->
+  Maybe (MD.ParsedBlock arch ids) ->
   EquivM sym arch [PB.BlockTarget arch bin]
-concreteJumpTargets from pb = case MD.pblockTermStmt pb of
-  MD.ParsedCall st ret ->
-    callTargets from (concreteNextIPs st) ret
+concreteJumpTargets from pb pb_next = do
+  ctx <- getBinCtx @bin
+  let mem = MBL.memoryImage $ PMC.binary ctx
+  case MD.pblockTermStmt pb of
+    MD.ParsedCall st ret -> callTargets from (fmap MD.pblockAddr pb_next) (concreteNextIPs mem st) ret
+    -- | Unfortunately the PLTStub terminal doesn't tell us where we're returning to.
+    --   This results in a bit of a mismatch between the block exit that macaw computes and what we generate here
+    --   (where we assume that the return address is the next block)
+    --   This needs to be addressed in 'matchesBlockTarget', since we need to account for this when examining
+    --   the macaw post-state. 
+    MD.PLTStub _ segOff  _ -> callTargets from (fmap MD.pblockAddr pb_next) [PA.memAddrToAddr $ MM.segoffAddr segOff] Nothing
+    
+    MD.ParsedJump _ tgt ->
+      return [ jumpTarget from tgt ]
 
-  MD.PLTStub st _ _ ->
-    case MapF.lookup (MC.ip_reg @(MC.ArchReg arch)) st of
-      Just addr -> callTargets from (concreteValueAddress addr) Nothing
-      _ -> error "Could not resolve IP register in PLTStub"
+    MD.ParsedBranch _ _ t f ->
+      return [ branchTarget from t, branchTarget from f ]
 
-  MD.ParsedJump _ tgt ->
-    return [ jumpTarget from tgt ]
+    MD.ParsedLookupTable _jt st _ _ ->
+      return [ jumpTarget' from next | next <- concreteNextIPs mem st ]
 
-  MD.ParsedBranch _ _ t f ->
-    return [ branchTarget from t, branchTarget from f ]
+    MD.ParsedArchTermStmt _ st ret -> do
+      let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
+      let MCS.MacawBlockEnd end_case _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
+      return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk end_case
+            | next <- (concreteNextIPs mem st)
+            ]
 
-  MD.ParsedLookupTable _jt st _ _ ->
-    return [ jumpTarget' from next | next <- concreteNextIPs st ]
-
-  MD.ParsedArchTermStmt _ st ret -> do
-    let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
-    let MCS.MacawBlockEnd end_case _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
-    return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk end_case
-           | next <- (concreteNextIPs st)
-           ]
-
-  MD.ParsedReturn{} -> return []
-  MD.ParsedTranslateError{} -> return []
-  MD.ClassifyFailure{} -> return []
+    MD.ParsedReturn{} -> return []
+    MD.ParsedTranslateError{} -> return []
+    MD.ClassifyFailure{} -> return []
 
 jumpTarget ::
     PB.ConcreteBlock arch bin ->
@@ -515,15 +581,92 @@ jumpTarget' ::
 jumpTarget' from to =
   PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
 
+findPLTSymbol ::
+  forall sym arch bin.
+  PB.KnownBinary bin =>
+  PB.ConcreteBlock arch bin ->
+  EquivM sym arch (Maybe BS.ByteString)
+findPLTSymbol blk = fnTrace "findPLTSymbol" $ do
+  let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
+  PA.SomeValidArch archData <- CMR.asks envValidArch
+  let
+    extraMapPair = PPa.PatchPair (Const (PA.validArchOrigExtraSymbols archData)) (Const (PA.validArchPatchedExtraSymbols archData))
+  Const extraMap <- PPa.get bin extraMapPair
+  -- emitTrace @"message" (show extraMap)
+  -- emitTrace @"message" (show (PB.concreteAddress blk))
+  let addr = PA.addrToMemAddr (PB.concreteAddress blk)
+  ctx <- getBinCtx' bin
+  let mem = MBL.memoryImage $ PMC.binary ctx
+  let segOff = fromJust $ MM.asSegmentOff mem addr
+  emitTrace @"message" (show segOff)
+  let extraMap' = map (\(s,bv) -> (s, PM.resolveAbsoluteAddress mem (MM.memWord (fromIntegral (BVS.asUnsigned bv))))) (Map.toList extraMap)
+  emitTrace @"message" (show extraMap)
+  emitTrace @"message" (show extraMap')
+
+  let syms = [ s | (s,bv) <- Map.toList extraMap
+              , mw' <- [MM.memWord (fromIntegral (BVS.asUnsigned bv))]
+              , Just moff <- [PM.resolveAbsoluteAddress mem mw']
+              , segOff == moff
+              ]
+  emitTrace @"message" (show syms)
+  case syms of
+    [sym] -> return (Just sym)
+    _ -> return Nothing
+
+isPLTTarget ::
+  forall bin sym arch.
+  PB.KnownBinary bin =>
+  PB.BlockTarget arch bin ->
+  EquivM sym arch Bool  
+isPLTTarget bt = case PB.asFunctionEntry (PB.targetCall bt) of
+  Just fe -> isPLTFunction fe
+  Nothing -> return False
+
+isPLTFunction ::
+  forall bin sym arch.
+  PB.KnownBinary bin =>
+  PB.FunctionEntry arch bin ->
+  EquivM sym arch Bool
+isPLTFunction fe = case PB.functionSymbol fe of
+  Nothing -> return False
+  Just sym -> do
+    let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
+    PA.SomeValidArch archData <- CMR.asks envValidArch
+    let
+      extraMapPair = PPa.PatchPairC (PA.validArchOrigExtraSymbols archData) (PA.validArchPatchedExtraSymbols archData)
+    extraMap <- PPa.getC bin extraMapPair
+    return $ Map.member sym extraMap
+
+pltStubClassifier ::
+  forall bin arch.
+  PA.ValidArch arch =>
+  PB.WhichBinaryRepr bin ->
+  PA.ValidArchData arch ->
+  MM.Memory (MC.ArchAddrWidth arch) ->
+  MD.AddrSymMap (MD.ArchAddrWidth arch) ->
+  (forall ids. MD.BlockClassifier arch ids)
+pltStubClassifier bin archData mem syms = do
+  let extraMapPair = PPa.PatchPair (Const (PA.validArchOrigExtraSymbols archData)) (Const (PA.validArchPatchedExtraSymbols archData))
+  let mkStub v = do
+        addr <- PA.addrToMemAddr <$> concreteValueAddress mem v
+        Just segOff <- return $ MM.resolveRegionOff mem (MM.addrBase addr) (MM.addrOffset addr) 
+        Just nm <- return $ Map.lookup segOff syms
+        extraMap <- maybeToList (PPa.getC bin extraMapPair)
+        True <- return $ Map.member nm extraMap
+        return $ (segOff, nm)
+  PLT.pltStubClassifier (\v -> case mkStub v of {(a:_) -> Just a; _ -> Nothing})
+
+
 callTargets ::
     forall bin arch sym .
     HasCallStack =>
     PB.KnownBinary bin =>
     PB.ConcreteBlock arch bin ->
+    Maybe (MC.ArchSegmentOff arch) {- ^ subsequent block, if defined -} ->
     [PA.ConcreteAddress arch] ->
     Maybe (MC.ArchSegmentOff arch) ->
     EquivM sym arch [PB.BlockTarget arch bin]
-callTargets from next_ips mret = do
+callTargets from mnext_block_addr next_ips mret = fnTrace "callTargets" $ do
    binCtx <- getBinCtx @bin
    let mem = MBL.memoryImage (PMC.binary binCtx)
    let pfm = PMC.parsedFunctionMap binCtx
@@ -538,8 +681,18 @@ callTargets from next_ips mret = do
                                    , PB.functionEnd = Nothing
                                    }
          fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
+         isPLT <- isPLTFunction fe'
          let pb = PB.functionEntryToConcreteBlock fe'
-         let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostFunction) mret
+
+         
+         ret_blk <- case mret of
+           Just ret -> return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction ret
+           Nothing | isPLT, Just next_block_addr <- mnext_block_addr ->
+             return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction next_block_addr
+           Nothing -> return Nothing
+         emitTrace @"message" (show mnext_block_addr)
+         emitTrace @"message" (show mret)
+         emitTrace @"message" (show ret_blk)
          return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
        Nothing -> do
          -- this isn't necessarily an error, since we always double check
@@ -643,6 +796,7 @@ runDiscovery ::
   CME.ExceptT PEE.EquivalenceError IO ([Word64], PMC.BinaryContext arch bin)
 runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
   let archInfo = PLE.archInfo elf
+  let (which_bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
   entries <- MBL.entryPoints bin
   addrSyms' <- F.foldlM (addAddrSym mem) mempty (fmap snd (PH.functionEntries hints))
   addrSyms <- F.foldlM (addElfFunction) addrSyms' (DLN.toList entries)
@@ -650,7 +804,7 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
   let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
   addrEnds <- F.foldlM (addFnEnd mem) mempty (fmap snd (PH.functionEntries hints))
-  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds (PA.validArchExtractPrecond aData)
+  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds (PA.validArchExtractPrecond aData) (pltStubClassifier which_bin aData mem addrSyms)
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
   let startEntry = DLN.head entries
@@ -791,10 +945,15 @@ nextBlock b = do
 concreteToLLVM ::
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (CLM.LLVMPtr sym (MC.ArchAddrWidth arch))
-concreteToLLVM blk = withSym $ \sym -> do
+concreteToLLVM blk = concreteAddrToLLVM (PB.concreteAddress blk)
+
+concreteAddrToLLVM ::
+  PA.ConcreteAddress arch ->
+  EquivM sym arch (CLM.LLVMPtr sym (MC.ArchAddrWidth arch))
+concreteAddrToLLVM addr = withSym $ \sym -> do
   -- we assume a distinct region for all executable code
   region <- CMR.asks envPCRegion
-  let MM.MemAddr _base offset = PA.addrToMemAddr (PB.concreteAddress blk)
+  let MM.MemAddr _base offset = PA.addrToMemAddr addr
   liftIO $ do
     ptrOffset <- WI.bvLit sym WI.knownRepr (BVS.mkBV WI.knownRepr (toInteger offset))
     pure (CLM.LLVMPointer region ptrOffset)

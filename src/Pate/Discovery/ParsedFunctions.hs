@@ -65,6 +65,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM)
 
 import Debug.Trace
+import Control.Applicative ((<|>))
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -96,6 +97,7 @@ data ParsedFunctionMap arch bin =
                     , absStateOverrides :: Map.Map (MM.ArchSegmentOff arch) (PB.AbsStateOverride arch)
                     , defaultInitState :: PB.MkInitialAbsState arch
                     , pfmExtractBlockPrecond :: ExtractBlockPrecondFn arch
+                    , pfmExtraClassifier :: forall ids . MAI.BlockClassifier arch ids
                     }
 
 -- | copied from 'Pate.Arch' and supplied from the 'ValidArch' instance when initialized
@@ -194,7 +196,10 @@ getDiscoveryState fnaddr pfm st = let
     Just a -> a
     Nothing -> MAI.extractBlockPrecond ainfo2 segOff absSt
   ainfo3 = ainfo2 { MAI.extractBlockPrecond = extractPrecondFn }
-  in initDiscoveryState pfm ainfo3
+
+  ainfo4 = ainfo3 { MAI.archClassifier = {- (pfmExtraClassifier pfm)  <|> -} MAI.archClassifier ainfo3 }
+
+  in initDiscoveryState pfm ainfo4
 
 getParsedFunctionState ::
   forall arch bin.
@@ -224,8 +229,10 @@ newParsedFunctionMap
   -- ^ mapping from function entry points to potential end points
   -> ExtractBlockPrecondFn arch
   -- ^ override for extracing block preconditions
+  -> (forall ids . MAI.BlockClassifier arch ids)
+  -- ^ extra block classifiers
   -> IO (ParsedFunctionMap arch bin)
-newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond = do
+newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond blockClassifiers = do
   let ds0 = MD.emptyDiscoveryState mem syms archInfo
   let s0 = ParsedFunctionState { parsedFunctionCache = mempty
                                , discoveryState = ds0
@@ -240,6 +247,7 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond = do
                            , absStateOverrides = mempty
                            , defaultInitState = PB.defaultMkInitialAbsState
                            , pfmExtractBlockPrecond = fnExtractPrecond
+                           , pfmExtraClassifier = blockClassifiers
                            }
 
 funInfoToFunEntry ::
@@ -383,7 +391,7 @@ getIgnoredFns ::
   PBi.WhichBinaryRepr bin ->
   ParsedFunctionMap arch bin ->
   IO (Set.Set (MM.MemSegmentOff (MM.ArchAddrWidth arch)))
-getIgnoredFns repr (ParsedFunctionMap pfmRef _ pd _ _ _ _ _) = do
+getIgnoredFns repr (ParsedFunctionMap pfmRef _ pd _ _ _ _ _ _) = do
   st <- IORef.readIORef pfmRef
   let ds0 = discoveryState st
   let mem = MD.memory ds0
@@ -408,7 +416,7 @@ parsedFunctionContaining ::
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
-parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _) = do
+parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _ _) = do
   let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
 
   st <- getParsedFunctionState faddr pfm
@@ -464,7 +472,7 @@ resolveFunctionEntry ::
   PB.FunctionEntry arch bin ->
   ParsedFunctionMap arch bin ->
   IO (PB.FunctionEntry arch bin)
-resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _ _) = do
+resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _ _ _) = do
   st <- IORef.readIORef pfmRef
   let syms = MD.symbolNames (discoveryState st)
   ignoredAddresses <- getIgnoredFns (PB.functionBinRepr fe) pfm

@@ -18,7 +18,6 @@ module Pate.Block (
   , ConcreteBlock(..)
   , FunCallKind(..)
   , BlockTarget(..)
-  , syntheticTargets
   , BlockPair
   , FunPair
   , equivBlocks
@@ -178,16 +177,6 @@ data BlockTarget arch bin =
     -- | The expected block exit case when this target is taken
     , targetEndCase :: MCS.MacawBlockEndCase
     } deriving (Eq, Ord)
-
--- | This is a cludge to convince discovery to emit all of
---   the reachable block targets for only one program
-syntheticTargets :: ConcreteBlock arch bin -> [BlockTarget arch bin]
-syntheticTargets blk =
-  [ BlockTarget (blk { concreteBlockEntry = entry_case }) mret case_
-  | entry_case <- [minBound..maxBound]
-  , mret <- [Just blk, Nothing]
-  , case_ <- [minBound..maxBound]
-  ]
 
 instance PC.TestEquality (BlockTarget arch) where
   testEquality e1 e2 = PC.orderingF_refl (PC.compareF e1 e2)

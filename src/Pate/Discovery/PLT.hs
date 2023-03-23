@@ -3,7 +3,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 module Pate.Discovery.PLT (
-  pltStubSymbols
+    pltStubSymbols
+  , pltStubClassifier
   ) where
 
 import           Control.Applicative ( (<|>) )
@@ -15,8 +16,20 @@ import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Foldable as F
 import qualified Data.Map as Map
 import           Data.Maybe ( fromMaybe, listToMaybe )
-import           GHC.TypeLits ( KnownNat )
 import           Data.Word ( Word32 )
+import Data.Macaw.CFG (boundValue, RegisterInfo (ip_reg), ArchAddrWidth, ArchSegmentOff, VersionedSymbol (VerSym), SymbolVersion (UnversionedSymbol), Value)
+import qualified Data.Macaw.Architecture.Info as MAI
+import qualified Control.Monad.RWS as CMR
+import qualified Data.Macaw.Discovery as Parsed
+import qualified Data.Macaw.Discovery.ParsedContents as Parsed
+import qualified Data.Macaw.Architecture.Info as Info
+import Control.Lens ((^.))
+import Data.Macaw.Types
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Macaw.AbsDomain.JumpBounds as Jmp
+import qualified Data.Macaw.Memory as MM
+import Data.Data (Proxy(..))
+import Data.Macaw.Architecture.Info
 
 -- | A wrapper type to make it easier to extract both Rel and Rela entries
 data SomeRel tp where
@@ -119,4 +132,60 @@ PLT stub of an entry is @addrOf(.plt.got) + 16 * (1 + idx)@. The offset of one
 seems to be required because the first entry is some other kind of metadata or
 otherwise ignored.
 
+-}
+
+-- | Classifier for PLT stubs which uses an externally-defined function to determine if a given
+--   macaw value represents an address that jumps to a PLT stub
+pltStubClassifier ::
+  forall arch ids.
+  (Value arch ids (BVType (ArchAddrWidth arch)) -> Maybe (ArchSegmentOff arch, BSC.ByteString)) -> 
+  MAI.BlockClassifier arch ids
+pltStubClassifier f = do
+  stmts <- CMR.asks MAI.classifierStmts
+  ainfo <- CMR.asks (Info.pctxArchInfo . MAI.classifierParseContext)
+  Info.withArchConstraints ainfo $ do
+    finalRegs <- CMR.asks Info.classifierFinalRegState
+    bcc <- CMR.ask
+    startAddr <- CMR.asks (Info.pctxAddr . MAI.classifierParseContext)
+    blkSz <- CMR.asks Info.classifierBlockSize
+    Just ret <- return $ MM.incSegmentOff startAddr (fromIntegral blkSz)
+    v <- pure $ Info.classifierFinalRegState bcc ^. boundValue ip_reg
+    case f v of
+      Just (addr,_) -> do
+        return Parsed.ParsedContents { Parsed.parsedNonterm = F.toList stmts
+                                    , Parsed.parsedTerm = Parsed.ParsedCall finalRegs (Just ret)
+                                    , Parsed.intraJumpTargets = 
+                                        [( ret
+                                         , Info.postCallAbsState ainfo (classifierAbsState bcc) finalRegs ret
+                                         , Jmp.postCallBounds (Info.archCallParams ainfo) (classifierJumpBounds bcc) finalRegs
+                                         )]
+                                    , Parsed.newFunctionAddrs = [addr]
+                                    , Parsed.writtenCodeAddrs = Info.classifierWrittenAddrs bcc
+                                    } 
+      Nothing -> fail "Not a PLT stub"
+
+
+
+{-
+
+  --(cond, callTarget, returnAddr, fallthroughIP, callBranch, stmts') <- MAI.liftClassifier (identifyConditionalCall mem stmts regs)
+  jmpBounds <- CMR.asks MAI.classifierJumpBounds
+  ainfo <- CMR.asks (MAI.pctxArchInfo . MAI.classifierParseContext)
+
+  case Jmp.postBranchBounds jmpBounds regs cond of
+    Jmp.BothFeasibleBranch trueJumpState falseJumpState -> do
+      let abs' = MDC.branchBlockState ainfo absState stmts regs cond (callBranch == CallsOnFalse)
+      let fallthroughTarget = ( fallthroughIP
+                              , abs'
+                              , if callBranch == CallsOnTrue then falseJumpState else trueJumpState
+                              )
+      return Parsed.ParsedContents { Parsed.parsedNonterm = F.toList stmts'
+                                   , Parsed.parsedTerm = Parsed.PLTStub regs addr
+                                   , Parsed.intraJumpTargets = [fallthroughTarget]
+                                   , Parsed.newFunctionAddrs = extractCallTargets mem callTarget
+                                   , Parsed.writtenCodeAddrs = writtenAddrs
+                                   }
+    Jmp.TrueFeasibleBranch _ -> fail "Infeasible false branch"
+    Jmp.FalseFeasibleBranch _ -> fail "Infeasible true branch"
+    Jmp.InfeasibleBranch -> fail "Branch targets are both infeasible"
 -}
