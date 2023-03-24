@@ -211,8 +211,7 @@ chooseEntryPoint entries pg0 = choose @"node" "Choose Entry Point" $ \choice -> 
           return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
         return $ idom' { PAD.absDomVals = vals' }
       let pg2 = freshDomain pg1 node rootDom
-      let fnPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks nodeEntry)
-      let pg3 = emptyReturnVector (dropReturns (returnOfEntry nodeEntry) pg2) (rootReturn fnPair)
+      let pg3 = emptyReturnVector (dropReturns (returnOfEntry nodeEntry) pg2) (returnOfEntry nodeEntry)
       return pg3
 
 -- | Returns a 'Just' result if we should restart verification after performing
@@ -221,16 +220,38 @@ refineFinalResult ::
   [PB.FunPair arch] ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
-refineFinalResult entries pg = withTracing @"simplemessage" "Final Result" $ do
-  choose @"()" "Continue verification?" $ \choice_outer -> do
-    choice_outer "Finish and view final result" () $ return Nothing
-    choice_outer "Restart from entry point" () $ fmap Just $ do
-      pg' <- chooseEntryPoint entries pg
-      resetBlockCache envExitPairsCache
-      (asks envResetTraceTree >>= liftIO)
-      return pg'
-    choice_outer "Handle pending refinements" () $ do
-      Just <$> (liftIO $ (queuePendingNodes pg))
+refineFinalResult entries pg = do
+  shouldAddOrphans <- asks (PCfg.cfgAddOrphanEdges . envConfig)
+  withTracing @"simplemessage" "Final Result" $ do
+    choose @"()" "Continue verification?" $ \choice_outer -> do
+      choice_outer "Finish and view final result" () $ return Nothing
+      choice_outer "Restart from entry point" () $ fmap Just $ do
+        pg' <- chooseEntryPoint entries pg
+        resetBlockCache envExitPairsCache
+        (asks envResetTraceTree >>= liftIO)
+        return pg'
+      choice_outer "Handle pending refinements" () $ do
+        Just <$> (liftIO $ (queuePendingNodes pg))
+      let orphans = getOrphanedReturns pg
+      case Set.toList orphans of
+      -- Orphaned returns can appear when we never find a return branch for
+      -- a function (e.g. possibly due to a code analysis failure)
+      -- Formally, the analysis can't proceed past any call site for a function
+      -- that doesn't return, since we don't know anything about the equivalence post-domain.
+      -- Rather than simply giving up at this point, we make a best-effort to
+      -- invent a reasonable equivalence post-domain (see 'updateExtraEdges') and
+      -- continue the analysis from
+      -- all of the (orphaned) return sites for a non-terminating function
+        (ret :_) | shouldAddOrphans -> choice_outer "Add orphaned return nodes?" () $ fmap Just $ do
+          let
+            fnEntry = returnToEntry ret
+            gr1 = addExtraEdge pg fnEntry (ReturnNode ret)
+          case getCurrentDomain gr1 (GraphNode fnEntry) of
+            Just preSpec -> PS.viewSpec preSpec $ \scope d -> 
+              withValidInit scope (nodeBlocks fnEntry) $ updateExtraEdges scope fnEntry d gr1
+            Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnEntry)
+        _ -> return ()
+
       {-
       choose @"node" "Refine equivalence domain: From" $ \choice_from -> 
         forM_ (getAllNodes pg) $ \from -> do
@@ -566,43 +587,14 @@ pairGraphComputeFixpoint entries gr_init = do
                   emitEvent $ PE.VisitedNode nd
                   return gr3
         go gr4
-
-    -- Orphaned returns can appear when we never find a return branch for
-    -- a function (e.g. possibly due to a code analysis failure)
-    -- Formally, the analysis can't proceed past any call site for a function
-    -- that doesn't return, since we don't know anything about the equivalence post-domain.
-    -- Rather than simply giving up at this point, we make a best-effort to
-    -- invent a reasonable equivalence post-domain (see 'updateExtraEdges') and
-    -- continue the analysis from
-    -- all of the (orphaned) return sites for a non-terminating function
-    go_orphans :: PairGraph sym arch -> NodeBuilderT '(sym,arch) "node" (EquivM_ sym arch) (PairGraph sym arch)
-    go_orphans (gr :: PairGraph sym arch) = do
-      let orphans = getOrphanedReturns gr
-      case Set.toList orphans of
-        [] -> return gr
-        (ret : _) -> do
-          let
-            fnEntry = returnToEntry ret
-            gr1 = addExtraEdge gr fnEntry (ReturnNode ret)
-          gr2 <- subTrace @"node" (GraphNode fnEntry) $ do
-            emitWarning $ PEE.BlockHasNoExit (nodeBlocks fnEntry)
-            case getCurrentDomain gr1 (GraphNode fnEntry) of
-              Just preSpec -> PS.viewSpec preSpec $ \scope d -> withValidInit scope (nodeBlocks fnEntry) $ updateExtraEdges scope fnEntry d gr1
-              Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnEntry)
-          go gr2 >>= go_orphans
     
     go_outer :: PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)
     go_outer gr = do
-      gr2 <- withSubTraces $ do
-        gr1 <- go gr
-        (lift $ asks (PCfg.cfgAddOrphanEdges . envConfig)) >>= \case
-          True -> go_orphans gr1
-          False -> return gr1
-      refineFinalResult entries gr2 >>= \case
-        Just gr3 -> go_outer gr3
-        Nothing -> showFinalResult gr2 >> return gr2
+      gr1 <- withSubTraces $ go gr
+      refineFinalResult entries gr1 >>= \case
+        Just gr2 -> go_outer gr2
+        Nothing -> showFinalResult gr1 >> return gr1
   go_outer gr_init
-
 
 showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
 showFinalResult pg = do
