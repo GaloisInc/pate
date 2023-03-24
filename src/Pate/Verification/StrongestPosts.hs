@@ -583,7 +583,7 @@ pairGraphComputeFixpoint entries gr_init = do
             fnEntry = returnToEntry ret
             gr1 = addExtraEdge gr fnEntry (ReturnNode ret)
           gr2 <- subTrace @"node" (GraphNode fnEntry) $ do
-            emitError $ PEE.BlockHasNoExit (nodeBlocks fnEntry)
+            emitWarning $ PEE.BlockHasNoExit (nodeBlocks fnEntry)
             case getCurrentDomain gr1 (GraphNode fnEntry) of
               Just preSpec -> PS.viewSpec preSpec $ \scope d -> withValidInit scope (nodeBlocks fnEntry) $ updateExtraEdges scope fnEntry d gr1
               Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnEntry)
@@ -843,8 +843,9 @@ processBundle scope node bundle d gr0 = withSym $ \sym -> do
                 PD.nextBlock blk >>= \case
                   Just nb -> return nb
                   Nothing -> throwHere $ PEE.MissingParsedBlockEntry "processBundle" blk
-              bundle' <- PD.associateFrames bundle MCS.MacawBlockEndJump False
-              widenAlongEdge scope bundle' (GraphNode node) d gr2 (GraphNode (mkNodeEntry node nextBlocks))
+              return $ addExtraEdge gr2 node (GraphNode (mkNodeEntry node nextBlocks))
+              --bundle' <- PD.associateFrames bundle MCS.MacawBlockEndJump False
+              --widenAlongEdge scope bundle' (GraphNode node) d gr2 (GraphNode (mkNodeEntry node nextBlocks))
             False -> return gr2
         _ -> return gr2
 

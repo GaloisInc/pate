@@ -242,15 +242,16 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   contexts1 <- PPa.runPatchPairT $ PPa.forBins $ \bin -> do  
     context' <- PPa.get bin contexts
     let
-      pfm = PMC.parsedFunctionMap context'
+
       mem = MBL.memoryImage (PMC.binary context')
     
     CME.foldM (\ctx entryPoint -> do
+      let pfm0 = PMC.parsedFunctionMap ctx
       blk <- PPa.get bin entryPoint
       let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
       let ov = M.singleton (PB.functionSegAddr blk) initAbs
-      pfm' <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm ov
-      return $ ctx { PMC.parsedFunctionMap = pfm' }) context' entryPoints
+      pfm1 <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm0 ov
+      return $ ctx { PMC.parsedFunctionMap = pfm1 }) context' entryPoints
     
   let pPairs' = entryPoints ++ (unpackedPairs upData)
   let solver = PC.cfgSolver vcfg

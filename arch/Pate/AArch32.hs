@@ -258,6 +258,17 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
       , "setitimer"
       , "read"
       , "ceilf"
+      -- PLT Stubs
+      , "EVP_CIPHER_CTX_new"
+      , "EVP_DecryptInit_ex"
+      , "EVP_DecryptUpdate"
+      , "EVP_DecryptFinal_ex"
+      , "EVP_EncryptInit_ex"
+      , "EVP_EncryptUpdate"
+      , "EVP_EncryptFinal_ex"
+      , "EVP_CIPHER_CTX_free"
+      , "EVP_aes_256_cbc"
+      , "BIO_dump_fp"
       ])
   where
     mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)

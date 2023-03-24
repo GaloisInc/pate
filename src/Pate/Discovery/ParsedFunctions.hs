@@ -197,7 +197,9 @@ getDiscoveryState fnaddr pfm st = let
     Nothing -> MAI.extractBlockPrecond ainfo2 segOff absSt
   ainfo3 = ainfo2 { MAI.extractBlockPrecond = extractPrecondFn }
 
-  ainfo4 = ainfo3 { MAI.archClassifier = {- (pfmExtraClassifier pfm)  <|> -} MAI.archClassifier ainfo3 }
+  -- TODO: apply some intelligence here to distinguish direct jumps from tail calls,
+  -- for the moment our infrastructure handles direct jumps better, so we prefer that
+  ainfo4 = ainfo3 { MAI.archClassifier =  MD.directJumpClassifier <|>  (pfmExtraClassifier pfm) <|> MAI.archClassifier ainfo3 }
 
   in initDiscoveryState pfm ainfo4
 
