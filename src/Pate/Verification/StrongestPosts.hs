@@ -347,21 +347,33 @@ chooseSyncPoint ::
   PairGraph sym arch -> 
   EquivM sym arch (PairGraph sym arch)
 chooseSyncPoint nd pg0 = do
-  syncP <- pickSyncPoint PBi.PatchedRepr nd pg0
-  pg1 <- setSyncPoint pg0 nd syncP
+  divergePair@(PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
+    let ret = case nd of
+          GraphNode ne -> returnOfEntry ne
+          ReturnNode nr -> nr
+    blk <- PPa.get bin (graphNodeBlocks nd)
+    pblks <- PD.lookupBlocks blk
+    retSingle <- asSingleReturn bin ret
+    divergeSingle <- asSingleGraphNode bin nd
+    return $ (retSingle, divergeSingle, Some blk, pblks)
+  (sync, Some syncBin) <- pickSyncPoint [divergeO, divergeP]
+  let otherBin = PBi.flipRepr syncBin
+  pg1 <- setSyncPoint pg0 nd sync
 
-  samePC <- chooseBool "Use same PC for original binary?"
+  samePC <- chooseBool $ "Use same PC for " ++ show otherBin ++ " binary?"
   -- FIXME: unclear if nested choices are problematic
-  syncO <- case samePC of
+  syncOther <- case samePC of
     True -> do
-      syncPAddr <- PPa.getC PBi.PatchedRepr =<< addressOfNode syncP
-      blk <- PPa.get PBi.OriginalRepr (graphNodeBlocks nd)
-      divergeSingle <- asSingleGraphNode PBi.OriginalRepr nd
+      syncPAddr <- PPa.getC syncBin =<< addressOfNode sync
+      blk <- PPa.get otherBin (graphNodeBlocks nd)
+      divergeSingle <- asSingleGraphNode otherBin nd
       syncBlkO <- addIntraBlockCut syncPAddr blk
-      let syncO = mkNodeEntry' divergeSingle (PPa.mkSingle PBi.OriginalRepr syncBlkO)
+      let syncO = mkNodeEntry' divergeSingle (PPa.mkSingle otherBin syncBlkO)
       return (GraphNode syncO)
-    False -> pickSyncPoint PBi.OriginalRepr nd pg1
-  setSyncPoint pg1 nd syncO
+    False -> do
+      diverge <- PPa.getC otherBin divergePair
+      fst <$> pickSyncPoint [diverge]
+  setSyncPoint pg1 nd syncOther
 
 {-
 guessDivergence ::
@@ -391,30 +403,20 @@ guessDivergence nd pg = do
 -}
 
 pickSyncPoint ::
-  PBi.WhichBinaryRepr bin ->
-  GraphNode arch {- divergence point -} -> 
-  PairGraph sym arch -> 
-  EquivM sym arch (GraphNode arch)
-pickSyncPoint bin nd pg = case getSyncPoint pg bin nd of
-  Just sync -> return sync
-  Nothing -> do
-    let ret = case nd of
-          GraphNode ne -> returnOfEntry ne
-          ReturnNode nr -> nr
-    blk <- PPa.get bin (graphNodeBlocks nd)
-    PD.ParsedBlocks pblks <- PD.lookupBlocks blk
-    retSingle <- asSingleReturn bin ret
-    divergeSingle <- asSingleGraphNode bin nd
-    choose @"node" "Choose a synchronization point:" $ \choice -> do
-      forM_ pblks $ \pblk -> do
-        -- FIXME: block entry kind is unused at the moment?
-        let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump (MD.pblockAddr pblk)
-        let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
-        choice "" (GraphNode node) $ do
-          pfm <- PMC.parsedFunctionMap <$> getBinCtx' bin
-          liftIO $ PD.addExtraTarget pfm (MD.pblockAddr pblk)
-          return (GraphNode node)
-      choice "" (ReturnNode retSingle) $ return (ReturnNode retSingle)
+  [(NodeReturn arch, GraphNode arch, Some (PB.ConcreteBlock arch), PD.ParsedBlocks arch)] -> 
+  EquivM sym arch (GraphNode arch, Some PBi.WhichBinaryRepr)
+pickSyncPoint inputs = choose @"node" "Choose a synchronization point:" $ \choice -> do
+  forM_ inputs $ \(retSingle, divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
+    let bin = PB.blockBinRepr blk
+    forM_ pblks $ \pblk -> do
+      -- FIXME: block entry kind is unused at the moment?
+      let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump (MD.pblockAddr pblk)
+      let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
+      choice "" (GraphNode node) $ do
+        pfm <- PMC.parsedFunctionMap <$> getBinCtx' bin
+        liftIO $ PD.addExtraTarget pfm (MD.pblockAddr pblk)
+        return (GraphNode node, Some bin)
+    choice "" (ReturnNode retSingle) $ return (ReturnNode retSingle, Some bin)  
 
 
 {-
