@@ -84,6 +84,7 @@ import qualified What4.ExprHelpers as W4 ( integerToNat )
 import Pate.Config (PatchData)
 import Data.Macaw.AbsDomain.AbsState (AbsBlockState)
 import Pate.Address (ConcreteAddress)
+import qualified Data.ElfEdit as EEP
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -142,6 +143,7 @@ class
   , MC.ArchConstraints arch
   , 16 <= MC.ArchAddrWidth arch
   , MCS.HasArchEndCase arch
+  , Integral (EEP.ElfWordType (MC.ArchAddrWidth arch))
   ) => ValidArch arch where
   
   type ArchConfigOpts arch

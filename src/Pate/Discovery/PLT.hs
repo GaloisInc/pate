@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 module Pate.Discovery.PLT (
     pltStubSymbols
   , pltStubClassifier
@@ -36,6 +37,8 @@ import qualified Data.Set as Set
 import Data.Macaw.AbsDomain.AbsState
 import Data.Macaw.CFG
 import Control.Monad (forM)
+import qualified Data.Text as T
+import Data.List (find)
 -- | A wrapper type to make it easier to extract both Rel and Rela entries
 data SomeRel tp where
   SomeRel :: [r tp] -> (r tp -> Word32) -> SomeRel tp
@@ -143,7 +146,10 @@ otherwise ignored.
 
 type ExtraJumps arch = (Map (MM.ArchSegmentOff arch) (Set (MM.ArchSegmentOff arch)))
 
---lastInstructionStart :: [Stmt arch ids] -> Maybe 
+lastInstructionStart :: [Stmt arch ids] -> Maybe (MM.MemWord (MM.ArchAddrWidth arch), T.Text)
+lastInstructionStart stmts = case find (\case {InstructionStart{} -> True; _ -> False}) (reverse stmts) of
+  Just (InstructionStart addr nm) -> Just (addr,nm)
+  _ -> Nothing
 
 extraJumpClassifier :: ExtraJumps arch -> BlockClassifier arch ids
 extraJumpClassifier jumps = classifierName "Extra Jump" $ do
@@ -156,11 +162,12 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
     startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
     -- FIXME: This is not exactly right, but I'm not sure if there's a better way to find the 
     -- address corresponding to this instruction. Maybe examine the statements?
+    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc)) 
 
-    Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral blkSz - 2)
+    Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
     targets <- case Map.lookup final_addr jumps of
       Just targets -> return $ Set.toList targets
-      Nothing -> fail $ "No extra jumps for instruction: " ++ show final_addr
+      Nothing -> fail $ "No extra jumps for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
 
     let abst = finalAbsBlockState (classifierAbsState bcc) (classifierFinalRegState bcc)
     let tgtBnds = Jmp.postJumpBounds (classifierJumpBounds bcc) (classifierFinalRegState bcc)

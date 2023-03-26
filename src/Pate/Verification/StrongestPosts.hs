@@ -1463,9 +1463,17 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
       mresult <- goalSat "resolveClassifierErrors: findTargets" (W4.truePred sym) $ \res -> case res of
         Unsat _ -> return Nothing
         Unknown -> return Nothing
-        Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
-          groundIPValue sym evalFn iPReg >>= \case
-            Just iPV -> return $ PM.resolveAbsoluteAddress mem_image (MM.memWord (fromIntegral iPV))
+        Sat evalFn' -> do
+          mgroundip <- withGroundEvalFn evalFn' $ \evalFn -> 
+            groundIPValue sym evalFn iPReg
+          case mgroundip of
+            Just iPV -> do
+              let ip_raw = MM.memWord (fromIntegral iPV)
+              case PM.resolveAbsoluteAddress mem_image ip_raw of
+                Nothing -> do
+                  emitWarning $ PEE.FailedToResolveAddress ip_raw
+                  return Nothing
+                Just ip_conc -> return $ Just ip_conc
             _ -> return Nothing
       case mresult of
         Nothing -> return previous_results
@@ -2199,6 +2207,7 @@ mkSimOut simIn_ = do
   case Map.null newEdges of
     True -> return $ simOut_
     False -> do
+      emitTrace @"message" ("Retrying with extra edges: " ++ show newEdges)
       liftIO $ PD.addExtraEdges pfm newEdges
       mkSimOut' simIn_
 

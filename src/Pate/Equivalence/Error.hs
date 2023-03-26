@@ -125,6 +125,7 @@ data InnerEquivalenceError arch
   | forall bin. InvalidBlockAddress (PB.ConcreteBlock arch bin)
   | MissingBlockAtAddress (MM.ArchSegmentOff arch)
   | UninterpretedInstruction
+  | FailedToResolveAddress (MM.MemWord (MM.ArchAddrWidth arch))
   | forall tp. FailedToGroundExpr (SomeExpr tp)
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
