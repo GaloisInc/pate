@@ -20,6 +20,7 @@ import qualified Control.Monad.Except as CME
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.IO.Class as IO
 
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Parameterized.Classes as DPC
@@ -45,6 +46,7 @@ import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Hints.BSI as PHB
+import Data.Macaw.Memory.Permissions (execute)
 
 data LoadedELF arch =
   LoadedELF
@@ -69,6 +71,10 @@ simplePaths fp = LoadPaths fp [] Nothing Nothing Nothing
 -- as warnings
 type LoaderM = CMW.WriterT [PEE.LoadError] (CME.ExceptT PEE.LoadError IO)
 
+-- FIXME: make this configurable
+extra_sections :: [String]
+extra_sections = [".debug_info"]
+
 loadELF ::
   forall arch.
   PA.SomeValidArch arch ->
@@ -77,10 +83,20 @@ loadELF ::
 loadELF (PA.SomeValidArch{}) path = do
   bs <- IO.liftIO $ BS.readFile path
   elf <- doParse bs
-  mem <- IO.liftIO $ MBL.loadBinary MME.defaultLoadOptions elf
+  bin <- IO.liftIO $ MBL.loadBinary MME.defaultLoadOptions elf
+  let (_,elf_) = DEE.getElf elf
+  -- add extra memory segments for manually-declared sections we want to include
+  mem_final <- CMW.foldM (\mem secnm -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
+    [sec] -> do
+      let sec_addr = DEE.elfSectionAddr sec
+      segment <- MC.memSegment mempty 0 0 Nothing (fromIntegral sec_addr) execute (DEE.elfSectionData sec) (fromIntegral (DEE.elfSectionSize sec))
+      case MC.insertMemSegment segment (MBL.memoryImage bin) of
+        Left _err -> CME.throwError $ PEE.InvalidArchOpts []
+        Right mem' -> return mem'
+    _ -> return mem) (MBL.memoryImage bin) extra_sections
   return $ LoadedELF
-    { archInfo = PA.binArchInfo mem
-    , loadedBinary = mem
+    { archInfo = PA.binArchInfo bin
+    , loadedBinary = bin { MBL.memoryImage = mem_final }
     , loadedHeader = (DEE.header elf)
     }
   where
