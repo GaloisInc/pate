@@ -62,6 +62,7 @@ import qualified Pate.Verification.Domain as PD
 import Data.List (nub)
 import Pate.Config
 import qualified Data.Parameterized.Map as MapF
+import qualified Pate.Address as PA
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -128,6 +129,8 @@ instance PA.ValidArch SA.AArch32 where
   -- currently the only arch-specific (non-terminal) statements we have are
   -- uninterpreted
   uninterpretedArchStmt _ = True
+
+  alignPC a = PA.memAddrToAddr (MC.clearAddrLeastBit (PA.addrToMemAddr a))
 
 data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 

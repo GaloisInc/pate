@@ -25,8 +25,11 @@ module Pate.Discovery (
   matchingExits,
   isMatchingCall,
   concreteToLLVM,
+  concreteAddrToLLVM,
   nextBlock,
-  findPLTSymbol
+  findPLTSymbol,
+  thisInstr,
+  liftPartialRel
   ) where
 
 import           Control.Lens ( (^.) )
@@ -277,11 +280,11 @@ instance WI.IsSymExprBuilder sym => Ord (OrdPartLLVMPtr sym arch) where
     (WP.PE p1 (CLM.LLVMPointer r1 o1), WP.PE p2 (CLM.LLVMPointer r2 o2)) -> 
       (MapF.toOrdering (MapF.compareF p1 p2)) <> (compare r1 r2) <> (MapF.toOrdering (MapF.compareF o1 o2))
 
-nextInstr ::
+thisInstr ::
   forall sym arch bin v.
   PSS.SimState sym arch bin v ->
   EquivM sym arch (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MD.ArchAddrWidth arch))))
-nextInstr st = withSym $ \sym -> do
+thisInstr st = withSym $ \sym -> do
   let currInstrMux = (MT.memCurrentInstr $  PSS.simMem st)
   inIO <- IO.askRunInIO
   let msegOffToPtr :: Maybe (MC.ArchSegmentOff arch) -> IO (OrdPartLLVMPtr sym arch)
@@ -290,18 +293,10 @@ nextInstr st = withSym $ \sym -> do
         ptr <- inIO $ concreteAddrToLLVM (PA.segOffToAddr segOff)
         OrdPartLLVMPtr <$> (return $ WP.justPartExpr sym ptr)
 
-  nextInstrMux <- liftIO $ MuxTree.muxTreeUnaryOp sym (\x -> msegOffToPtr (nextSegOff x)) currInstrMux
+  thisInstrMux <- liftIO $ MuxTree.muxTreeUnaryOp sym (\x -> msegOffToPtr (fmap fst x)) currInstrMux
   (OrdPartLLVMPtr result) <- liftIO $ MuxTree.collapseMuxTree sym (\p (OrdPartLLVMPtr ptr1) (OrdPartLLVMPtr ptr2) ->
-    OrdPartLLVMPtr <$> (WP.mergePartial sym (\p' a' b' -> liftIO (CLM.muxLLVMPtr sym p' a' b')) p ptr1 ptr2)) nextInstrMux
+    OrdPartLLVMPtr <$> (WP.mergePartial sym (\p' a' b' -> liftIO (CLM.muxLLVMPtr sym p' a' b')) p ptr1 ptr2)) thisInstrMux
   return result
-  where
-    nextSegOff :: Maybe (MC.ArchSegmentOff arch,T.Text) -> Maybe (MC.ArchSegmentOff arch)
-    nextSegOff Nothing = Nothing
-    nextSegOff (Just (segOff,_)) = let
-      inc = MM.addrSize (Proxy @(MD.ArchAddrWidth arch))
-      in MM.incSegmentOff segOff (fromIntegral inc)
-
-
 
 
 matchesBlockTargetOne ::
@@ -319,7 +314,8 @@ matchesBlockTargetOne bundle blkt = fnTrace "matchesBlockTargetOne" $ withSym $ 
      ip = regs ^. MC.curIP
      ret = MCS.blockEndReturn (Proxy @arch) endCase
 
-   callPtr <- concreteToLLVM (PB.targetCall blkt)
+   callPtr <- concreteAddrToLLVM (PB.targetRawPC blkt)
+
    let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
    targetRet <- targetReturnPtr blkt
    
@@ -462,7 +458,11 @@ getAbsDomain b = withRepr (PB.blockBinRepr b) $ withBinary @bin $ do
   mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
   case mtgt of
     Right (Some pb) -> return $ MD.blockAbstractState pb
-    Left err -> throwHere $ PEE.MissingParsedBlockEntry err b
+    Left err -> do
+      let b' = b { PB.concreteAddress = PA.alignPC (PB.concreteAddress b) }
+      (liftIO $ PDP.parsedBlockEntry b' pfm) >>= \case
+        Right (Some pb) -> return $ MD.blockAbstractState pb
+        Left _err -> throwHere $ PEE.MissingParsedBlockEntry err b
 
 getStackOffset ::
   forall sym arch bin.
@@ -551,7 +551,7 @@ concreteJumpTargets from pb pb_next = do
     MD.ParsedArchTermStmt _ st ret -> do
       let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
       let MCS.MacawBlockEnd end_case _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
-      return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk end_case
+      return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk end_case next
             | next <- (concreteNextIPs mem st)
             ]
 
@@ -560,26 +560,31 @@ concreteJumpTargets from pb pb_next = do
     MD.ClassifyFailure{} -> return []
 
 jumpTarget ::
+    forall arch bin.
+    PA.ValidArch arch =>
     PB.ConcreteBlock arch bin ->
     MC.ArchSegmentOff arch ->
     PB.BlockTarget arch bin
 jumpTarget from to =
-  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
+  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump (PA.segOffToAddr to)
 
 branchTarget ::
+    forall arch bin.
+    PA.ValidArch arch =>
     PB.ConcreteBlock arch bin ->
     MC.ArchSegmentOff arch ->
     PB.BlockTarget arch bin
 branchTarget from to =
-  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndBranch
+  PB.BlockTarget (PB.mkConcreteBlock from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndBranch (PA.segOffToAddr to)
 
 
 jumpTarget' ::
+    forall arch bin.
     PB.ConcreteBlock arch bin ->
     PA.ConcreteAddress arch ->
     PB.BlockTarget arch bin
 jumpTarget' from to =
-  PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump
+  PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryJump to) Nothing MCS.MacawBlockEndJump to
 
 findPLTSymbol ::
   forall sym arch bin.
@@ -693,7 +698,7 @@ callTargets from mnext_block_addr next_ips mret = fnTrace "callTargets" $ do
          emitTrace @"message" (show mnext_block_addr)
          emitTrace @"message" (show mret)
          emitTrace @"message" (show ret_blk)
-         return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall)
+         return $ Just (PB.BlockTarget pb ret_blk MCS.MacawBlockEndCall (PA.segOffToAddr segoff))
        Nothing -> do
          -- this isn't necessarily an error, since we always double check
          -- the call targets anyways, if this is an actual possible call target

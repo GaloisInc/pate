@@ -83,6 +83,7 @@ import qualified What4.Concrete as W4
 import qualified What4.ExprHelpers as W4 ( integerToNat )
 import Pate.Config (PatchData)
 import Data.Macaw.AbsDomain.AbsState (AbsBlockState)
+import Pate.Address (ConcreteAddress)
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -168,6 +169,8 @@ class
   readRegister :: String -> Maybe (Some (MC.ArchReg arch))
 
   uninterpretedArchStmt :: MC.ArchStmt arch v -> Bool
+
+  alignPC :: ConcreteAddress arch -> ConcreteAddress arch
 
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch

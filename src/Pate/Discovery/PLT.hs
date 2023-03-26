@@ -5,6 +5,8 @@
 module Pate.Discovery.PLT (
     pltStubSymbols
   , pltStubClassifier
+  , extraJumpClassifier
+  , ExtraJumps
   ) where
 
 import           Control.Applicative ( (<|>) )
@@ -17,20 +19,23 @@ import qualified Data.Foldable as F
 import qualified Data.Map as Map
 import           Data.Maybe ( fromMaybe, listToMaybe )
 import           Data.Word ( Word32 )
-import Data.Macaw.CFG (boundValue, RegisterInfo (ip_reg), ArchAddrWidth, ArchSegmentOff, VersionedSymbol (VerSym), SymbolVersion (UnversionedSymbol), Value)
-import qualified Data.Macaw.Architecture.Info as MAI
+
 import qualified Control.Monad.RWS as CMR
 import qualified Data.Macaw.Discovery as Parsed
 import qualified Data.Macaw.Discovery.ParsedContents as Parsed
 import qualified Data.Macaw.Architecture.Info as Info
-import Control.Lens ((^.))
+import Control.Lens ((^.), (&))
 import Data.Macaw.Types
-import qualified Data.Parameterized.Map as MapF
 import qualified Data.Macaw.AbsDomain.JumpBounds as Jmp
 import qualified Data.Macaw.Memory as MM
-import Data.Data (Proxy(..))
 import Data.Macaw.Architecture.Info
-
+import qualified Data.Macaw.CFG as MM
+import Data.Map (Map)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Macaw.AbsDomain.AbsState
+import Data.Macaw.CFG
+import Control.Monad (forM)
 -- | A wrapper type to make it easier to extract both Rel and Rela entries
 data SomeRel tp where
   SomeRel :: [r tp] -> (r tp -> Word32) -> SomeRel tp
@@ -134,19 +139,67 @@ otherwise ignored.
 
 -}
 
+--FIXME: Move
+
+type ExtraJumps arch = (Map (MM.ArchSegmentOff arch) (Set (MM.ArchSegmentOff arch)))
+
+--lastInstructionStart :: [Stmt arch ids] -> Maybe 
+
+extraJumpClassifier :: ExtraJumps arch -> BlockClassifier arch ids
+extraJumpClassifier jumps = classifierName "Extra Jump" $ do
+  bcc <- CMR.ask
+  let ctx = classifierParseContext bcc
+  let ainfo = pctxArchInfo ctx
+
+  Info.withArchConstraints ainfo $ do
+    blkSz <- CMR.asks Info.classifierBlockSize
+    startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
+    -- FIXME: This is not exactly right, but I'm not sure if there's a better way to find the 
+    -- address corresponding to this instruction. Maybe examine the statements?
+
+    Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral blkSz - 2)
+    targets <- case Map.lookup final_addr jumps of
+      Just targets -> return $ Set.toList targets
+      Nothing -> fail $ "No extra jumps for instruction: " ++ show final_addr
+
+    let abst = finalAbsBlockState (classifierAbsState bcc) (classifierFinalRegState bcc)
+    let tgtBnds = Jmp.postJumpBounds (classifierJumpBounds bcc) (classifierFinalRegState bcc)
+
+    termStmt <- case targets of
+      [oneTarget] -> return $ Parsed.ParsedJump (classifierFinalRegState bcc) oneTarget
+      [target1, target2] -> do
+        -- we don't have a good way to reify the branch condition here, but
+        -- it's not strictly necessary that the ParsedBranch condition be valid, as
+        -- long as the two targets are correct
+        -- ideally we'd just set this to "undefined", but there's no good way to 
+        -- create new macaw terms here
+        return $ Parsed.ParsedBranch (classifierFinalRegState bcc) (MM.CValue (MM.BoolCValue True)) target1 target2
+      _ -> fail $ "Unsupported extra targets: " ++ show targets
+    
+    jumpTargets <- forM targets $ \tgt -> do
+      let abst' = abst & setAbsIP tgt
+      return $ (tgt, abst', tgtBnds)
+
+    pure $ Parsed.ParsedContents { Parsed.parsedNonterm = F.toList (classifierStmts bcc)
+                              , Parsed.parsedTerm  = termStmt
+                              , Parsed.writtenCodeAddrs = classifierWrittenAddrs bcc
+                              , Parsed.intraJumpTargets = jumpTargets
+                              , Parsed.newFunctionAddrs = targets
+                              }
+
 -- | Classifier for PLT stubs which uses an externally-defined function to determine if a given
 --   macaw value represents an address that jumps to a PLT stub
 pltStubClassifier ::
   forall arch ids.
   (Value arch ids (BVType (ArchAddrWidth arch)) -> Maybe (ArchSegmentOff arch, BSC.ByteString)) -> 
-  MAI.BlockClassifier arch ids
-pltStubClassifier f = do
-  stmts <- CMR.asks MAI.classifierStmts
-  ainfo <- CMR.asks (Info.pctxArchInfo . MAI.classifierParseContext)
+  Info.BlockClassifier arch ids
+pltStubClassifier f = classifierName "Extra PLT Stub" $ do
+  stmts <- CMR.asks Info.classifierStmts
+  ainfo <- CMR.asks (Info.pctxArchInfo . Info.classifierParseContext)
   Info.withArchConstraints ainfo $ do
     finalRegs <- CMR.asks Info.classifierFinalRegState
     bcc <- CMR.ask
-    startAddr <- CMR.asks (Info.pctxAddr . MAI.classifierParseContext)
+    startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
     blkSz <- CMR.asks Info.classifierBlockSize
     Just ret <- return $ MM.incSegmentOff startAddr (fromIntegral blkSz)
     v <- pure $ Info.classifierFinalRegState bcc ^. boundValue ip_reg

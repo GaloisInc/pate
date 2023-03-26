@@ -99,6 +99,7 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Register.Traversal as PRt
+import           Pate.Discovery.PLT (extraJumpClassifier, ExtraJumps(..))
 
 import           Pate.TraceTree
 import qualified Pate.Verification.Validity as PVV
@@ -118,6 +119,7 @@ import Data.Foldable (foldl')
 import qualified Pate.ExprMappable as PEM
 import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), prettyRegsCE)
 import qualified Data.Macaw.BinaryLoader as MBL
+import What4.Partial (justPartExpr)
 
 -- Overall module notes/thoughts
 --
@@ -740,6 +742,7 @@ getFunctionAbs node d gr = do
           return $ Const (Map.singleton (PB.functionSegAddr fe) absSt)
         Nothing -> throwHere $ PEE.MissingDomainForFun fnPair
 
+
 -- | Setup a special-purpose ParsedFunctionMap with this block having a special
 --   domain 
 withAbsDomain ::
@@ -749,26 +752,31 @@ withAbsDomain ::
   EquivM_ sym arch a ->
   EquivM sym arch a
 withAbsDomain node d gr f = do
-  PA.SomeValidArch archData <- asks envValidArch
-  ovPair <- getFunctionAbs node d gr
-  binCtxPair <- asks (PMC.binCtxs . envCtx)
-  binCtxPair' <- PPa.update binCtxPair $ \bin -> do
-    binCtx <- PPa.get bin binCtxPair
-    absSt <- PPa.getC bin ovPair
-    let
-      pfm = PMC.parsedFunctionMap binCtx
-      defaultInit = PA.validArchInitAbs archData
-    pfm' <- liftIO $ PD.addOverrides defaultInit pfm absSt
-    return $ binCtx { PMC.parsedFunctionMap = pfm' }
-  local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair' } }) $ do
-    let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
-    PPa.catBins $ \bin -> do
-      pfm <- PMC.parsedFunctionMap <$> getBinCtx
-      fnBlks' <- PPa.get bin fnBlks
-      (liftIO $ PD.parsedFunctionContaining fnBlks' pfm) >>= \case
-        Just{} -> return ()
-        Nothing -> throwHere $ PEE.MissingDomainForBlock fnBlks
-    f
+  case asFunctionPair (nodeBlocks node) of
+    Nothing -> do
+      let fnNode = functionEntryOf node
+      case getCurrentDomain gr (GraphNode fnNode)  of
+        Just d' -> PS.viewSpec d' $ \_ d'' -> withAbsDomain fnNode d'' gr f
+        Nothing -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnNode)
+    Just{} -> do
+      PA.SomeValidArch archData <- asks envValidArch
+      ovPair <- getFunctionAbs node d gr
+      pfm_pair <- PPa.forBins $ \bin -> do
+        binCtx <- getBinCtx' bin
+        absSt <- PPa.getC bin ovPair
+        let
+          pfm = PMC.parsedFunctionMap binCtx
+          defaultInit = PA.validArchInitAbs archData
+        liftIO $ PD.addOverrides defaultInit pfm absSt
+      withParsedFunctionMap pfm_pair $ do
+        let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
+        PPa.catBins $ \bin -> do
+          pfm <- PMC.parsedFunctionMap <$> getBinCtx
+          fnBlks' <- PPa.get bin fnBlks
+          (liftIO $ PD.parsedFunctionContaining fnBlks' pfm) >>= \case
+            Just{} -> return ()
+            Nothing -> throwHere $ PEE.MissingDomainForBlock fnBlks
+        f
         
 
    
@@ -812,6 +820,9 @@ processBundle scope node bundle d gr0 = withSym $ \sym -> do
     Nothing -> return $ W4.truePred sym
   
   mgr_final <- withSatAssumption (PAS.fromPred p) $ do
+
+
+
     exitPairs <- PD.discoverPairs bundle
 
     gr1 <- checkObservables node bundle d gr0
@@ -827,7 +838,7 @@ processBundle scope node bundle d gr0 = withSym $ \sym -> do
         -- break out of the loop, even if the semantics say it can't happen
         -- TODO: ideally we should handle this as an "extra" edge rather than
         -- directly handling the widening here.
-        [PPa.PatchPair (PB.BlockTarget tgtO Nothing _) (PB.BlockTarget tgtP Nothing _)] |
+        [PPa.PatchPair (PB.BlockTarget tgtO Nothing _ _) (PB.BlockTarget tgtP Nothing _ _)] |
           PPa.PatchPair tgtO tgtP == (PS.simPair bundle) ->
           asks (PCfg.cfgAddOrphanEdges . envConfig) >>= \case
             True -> do
@@ -869,6 +880,17 @@ withValidInit scope bPair f = withPair bPair $ do
     validAbsValues blk vars'
   withAssumptionSet (validInit <> validAbs) $ f  
 
+withParsedFunctionMap ::
+  PPa.PatchPair (PD.ParsedFunctionMap arch) ->
+  EquivM_ sym arch a ->
+  EquivM sym arch a  
+withParsedFunctionMap pfm_pair f = do
+  binCtxPair <- asks (PMC.binCtxs . envCtx)
+  binCtxPair' <- PPa.update binCtxPair $ \bin -> do
+    binCtx <- PPa.get bin binCtxPair
+    pfm <- PPa.get bin pfm_pair
+    return $ binCtx { PMC.parsedFunctionMap = pfm }
+  local (\env -> env { envCtx = (envCtx env) { PMC.binCtxs = binCtxPair' }}) f
 
 withSimBundle ::
   forall sym arch v a.
@@ -878,7 +900,7 @@ withSimBundle ::
   (SimBundle sym arch v -> EquivM_ sym arch a) ->
   EquivM sym arch a
 withSimBundle pg vars node f = do
-  bundle0 <- withTracing @"function_name" "mkSimBundle" $ mkSimBundle pg node vars
+  bundle0 <- mkSimBundle pg node vars
   simplifier <- PSi.getSimplifier
   bundle1 <- PSi.applySimplifier simplifier bundle0
   bundle <- applyCurrentAsms bundle1
@@ -1415,6 +1437,68 @@ data TotalityResult ptrW
   = CasesTotal
   | TotalityCheckingError String
   | TotalityCheckCounterexample (TotalityCounterexample ptrW)
+
+
+resolveClassifierErrors ::
+  forall bin sym arch v.
+  PBi.KnownBinary bin =>
+  PS.SimInput sym arch v bin ->
+  PS.SimOutput sym arch v bin ->
+  EquivM sym arch (ExtraJumps arch)
+resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
+  let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
+  let bundle' = PS.SimBundle (PPa.mkSingle bin simIn_) (PPa.mkSingle bin simOut_)
+  ctx <- getBinCtx' bin
+  let mem_image = MBL.memoryImage $ PMC.binary ctx
+  let regs  = PS.simRegs (PS.simOutState simOut_)
+  let iPReg = regs ^. MM.curIP
+  let mem = PS.simMem (PS.simOutState simOut_) 
+
+  
+  -- | is it possible to end in a classification failure? If so, find all of the concrete edges that
+  --   resulted in failure
+  let
+    findTargets :: Set.Set (MM.ArchSegmentOff arch) -> EquivM_ sym arch (Set.Set (MM.ArchSegmentOff arch))
+    findTargets previous_results = do
+      mresult <- goalSat "resolveClassifierErrors: findTargets" (W4.truePred sym) $ \res -> case res of
+        Unsat _ -> return Nothing
+        Unknown -> return Nothing
+        Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
+          groundIPValue sym evalFn iPReg >>= \case
+            Just iPV -> return $ PM.resolveAbsoluteAddress mem_image (MM.memWord (fromIntegral iPV))
+            _ -> return Nothing
+      case mresult of
+        Nothing -> return previous_results
+        Just result -> do
+          let ip_sym = PSR.macawRegValue iPReg
+          ip_conc <- PD.concreteAddrToLLVM (PAd.segOffToAddr result)
+          let eqIPs = PAS.ptrBinding ip_sym ip_conc
+          this_ip <- PAS.toPred sym eqIPs
+          not_this <- PAS.fromPred <$> (liftIO $ W4.notPred sym this_ip)
+          let next_results = Set.insert result previous_results
+          fromMaybe next_results <$> (withSatAssumption not_this $ findTargets next_results)
+
+    findOne :: ExtraJumps arch -> EquivM_ sym arch (ExtraJumps arch)
+    findOne tried = do
+      result <- goalSat "resolveClassifierErrors" (W4.truePred sym) $ \res -> case res of
+        Unsat _ -> return Nothing
+        Unknown -> return Nothing
+        Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn ->
+          fmap fst <$> groundMuxTree sym evalFn (MT.memCurrentInstr mem)
+      case result of
+        Just instr_addr -> do
+          instr_sym <- PD.thisInstr (PS.simOutState simOut_)
+          instr_conc <- justPartExpr sym <$> PD.concreteAddrToLLVM (PAd.segOffToAddr instr_addr)
+          eqInstr <- liftIO $ PD.liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) instr_sym instr_conc
+          is_this_instr <- PAS.toPred sym eqInstr
+          with_targets <- withAssumption is_this_instr $ do
+            targets <- findTargets Set.empty
+            return $ Map.insertWith Set.union instr_addr targets tried
+          not_this_instr <-  PAS.fromPred <$> (liftIO $ W4.notPred sym is_this_instr)
+          fromMaybe with_targets <$> (withSatAssumption not_this_instr $ findOne with_targets)
+        Nothing -> return $ tried
+  isFailure <- PAS.fromPred <$> PD.matchingExits bundle' MCS.MacawBlockEndFail
+  fromMaybe Map.empty <$> (withSatAssumption isFailure $ findOne Map.empty)
 
 doCheckTotality :: forall sym arch v.
   SimBundle sym arch v ->
@@ -2090,21 +2174,60 @@ mkSimBundle ::
   NodeEntry arch ->
   PPa.PatchPair (PS.SimVars sym arch v) {- ^ initial variables -} ->
   EquivM sym arch (SimBundle sym arch v)
-mkSimBundle pg node vars = do
+mkSimBundle _pg node varsPair = fnTrace "mkSimBundle" $ do
+  results_pair <- PPa.forBins $ \bin -> withTracing @"binary" (Some bin) $ do
+    vars <- PPa.get bin varsPair
+    simIn_ <- mkSimIn node vars
+    simOut_ <- mkSimOut simIn_
+    return $ TupleF2 simIn_ simOut_
+  let 
+    simIn_pair = TF.fmapF (\(TupleF2 x _) -> x) results_pair
+    simOut_pair = TF.fmapF (\(TupleF2 _ x) -> x) results_pair
+  return (PS.SimBundle simIn_pair simOut_pair)
+
+mkSimOut ::
+  forall bin sym arch v.
+  PBi.KnownBinary bin =>
+  PS.SimInput sym arch v bin ->
+  EquivM sym arch (PS.SimOutput sym arch v bin)
+mkSimOut simIn_ = do
+  let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
+  binCtx <- getBinCtx' bin
+  let pfm = PMC.parsedFunctionMap binCtx
+  simOut_ <- mkSimOut' simIn_
+  newEdges <- resolveClassifierErrors simIn_ simOut_ 
+  case Map.null newEdges of
+    True -> return $ simOut_
+    False -> do
+      liftIO $ PD.addExtraEdges pfm newEdges
+      mkSimOut' simIn_
+
+mkSimIn ::
+  forall bin sym arch v.
+  PBi.KnownBinary bin =>
+  NodeEntry arch ->
+  PS.SimVars sym arch v bin ->
+  EquivM sym arch (PS.SimInput sym arch v bin)
+mkSimIn node vars = do
+  let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
   let pPair = nodeBlocks node
-  (simIn_, simOut_) <- PPa.forBins2 $ \bin -> do
-    blk <- PPa.get bin pPair
-    vars' <- PPa.get bin vars
-    let varState = PS.simVarState vars'
-    absState <- PD.getAbsDomain blk
-    let simIn_ = PS.SimInput varState blk absState
-    traceBlockPair pPair ("Simulating " ++ show bin ++ " blocks")
-    binCtx <- getBinCtx' bin
-    let pfm = PMC.parsedFunctionMap binCtx
-    isKilledAddr <- liftIO $ PD.isExtraTarget pfm
-    let 
-      isKilled :: forall ids. MD.ParsedBlock arch ids -> Bool
-      isKilled pblk = isKilledAddr (MD.pblockAddr pblk)
-    (_asm, simOut_) <- PVSy.simulate simIn_ isKilled
-    return $ (simIn_, simOut_)
-  return $ SimBundle simIn_ simOut_
+  let varState = PS.simVarState vars
+  blk <- PPa.get bin pPair
+  absState <- PD.getAbsDomain blk
+  return $ PS.SimInput varState blk absState  
+
+mkSimOut' ::
+  forall bin sym arch v.
+  PBi.KnownBinary bin =>
+  PS.SimInput sym arch v bin ->
+  EquivM sym arch (PS.SimOutput sym arch v bin)
+mkSimOut' simIn_ = do
+  let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
+  binCtx <- getBinCtx' bin
+  let pfm = PMC.parsedFunctionMap binCtx
+  isKilledAddr <- liftIO $ PD.isExtraTarget pfm
+  let 
+    isKilled :: forall ids. MD.ParsedBlock arch ids -> Bool
+    isKilled pblk = isKilledAddr (MD.pblockAddr pblk)
+  (_asm, simOut_) <- PVSy.simulate simIn_ isKilled
+  return $ simOut_

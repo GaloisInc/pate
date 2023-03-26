@@ -167,6 +167,7 @@ instance PA.ValidArch PPC.PPC32 where
   -- FIXME: TODO
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
+  alignPC = id
 
 instance PA.ValidArch PPC.PPC64 where
   type ArchConfigOpts PPC.PPC64 = ()
@@ -184,6 +185,7 @@ instance PA.ValidArch PPC.PPC64 where
   -- FIXME: TODO
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
+  alignPC = id
 
 -- | Determine the argument name for the argument held in the given register.
 --

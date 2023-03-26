@@ -280,7 +280,7 @@ simulate' simInput pbs_ killBlock = do
           Just fnEnd -> Just (entryAddr, PA.segOffToAddr @arch fnEnd)
           Nothing -> Nothing
 
-    let (pb,sbi) = computeSliceBodyInfo entryAddr pbs_ bounds
+    (pb,sbi) <- computeSliceBodyInfo entryAddr pbs_ bounds
     let extraKilledEdges = 
           [ (MD.pblockAddr blk1, MD.pblockAddr blk2) | blk1 <- sbiReachableBlocks sbi, blk2 <- sbiReachableBlocks sbi
             , killBlock blk2 ]
@@ -330,20 +330,24 @@ data SliceBodyInfo arch ids =
 --   what edges correspond to jumps outside the collection of blocks we have.
 --   Return a @SliceBodyInfo@ capturing this information, and the parsed block
 --   corresponding to the entry point.
-computeSliceBodyInfo :: forall arch ids.
+computeSliceBodyInfo :: forall sym arch ids.
   PA.ConcreteAddress arch ->
   [ MD.ParsedBlock arch ids ] ->
   Maybe (PA.ConcreteAddress arch, PA.ConcreteAddress arch) {- ^ lower/upper bound on included edges -} ->
-  ( MD.ParsedBlock arch ids, SliceBodyInfo arch ids)
-computeSliceBodyInfo entryAddr blks bounds =
-   case Map.lookup entryAddr blkmap of
-     Nothing -> error $ unlines ["Could not find entry point in block map:"
-                                , show entryAddr
-                                , unwords (map (show . PA.segOffToAddr @arch . MD.pblockAddr) blks)
-                                ]
-     Just eblk -> 
-        let sbi = dfs Set.empty eblk (SliceBodyInfo Set.empty [] [] [])
-         in (eblk, sbi)
+  EquivM sym arch ( MD.ParsedBlock arch ids, SliceBodyInfo arch ids)
+computeSliceBodyInfo entryAddr blks bounds = do
+  eblk <- case Map.lookup entryAddr blkmap of
+    Nothing -> case Map.lookup (PA.alignPC entryAddr) blkmap of
+      Nothing -> 
+        throwHere $ PEE.SymbolicExecutionError
+          $ unlines ["Could not find entry point in block map:"
+                    , show entryAddr
+                    , unwords (map (show . PA.segOffToAddr @arch . MD.pblockAddr) blks)
+                    ]
+      Just eblk -> return eblk
+    Just eblk -> return eblk
+  let sbi = dfs Set.empty eblk (SliceBodyInfo Set.empty [] [] [])
+  return (eblk, sbi)
 
   where
     blkmap = Map.fromList [ (PA.segOffToAddr (MD.pblockAddr blk), blk) | blk <- blks ]

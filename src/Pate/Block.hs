@@ -176,6 +176,8 @@ data BlockTarget arch bin =
     , targetReturn :: Maybe (ConcreteBlock arch bin)
     -- | The expected block exit case when this target is taken
     , targetEndCase :: MCS.MacawBlockEndCase
+    , targetRawPC :: PA.ConcreteAddress arch
+    -- ^ raw PC value used for matching block exits
     } deriving (Eq, Ord)
 
 instance PC.TestEquality (BlockTarget arch) where
@@ -187,7 +189,7 @@ instance PC.OrdF (BlockTarget arch) where
     x -> x
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
-  show (BlockTarget a b _) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
+  show (BlockTarget a b _ _) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => PP.Pretty (BlockTarget arch bin) where
   pretty blkt = PP.pretty (show blkt)
@@ -196,7 +198,7 @@ ppBlockTarget ::
   MM.MemWidth (MM.ArchAddrWidth arch) =>
   BlockTarget arch bin ->
   PP.Doc a
-ppBlockTarget (BlockTarget tgt ret c) = case c of
+ppBlockTarget (BlockTarget tgt ret c _) = case c of
   MCS.MacawBlockEndJump -> "Jump to:" <+> PP.pretty tgt
   MCS.MacawBlockEndBranch -> "Branch to:" <+> PP.pretty tgt
   MCS.MacawBlockEndCall -> case ret of

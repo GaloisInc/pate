@@ -25,6 +25,7 @@ module Pate.Discovery.ParsedFunctions (
   , addOverrides
   , addExtraTarget
   , isExtraTarget
+  , addExtraEdges
   ) where
 
 
@@ -59,6 +60,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Memory as PM
+import           Pate.Discovery.PLT (extraJumpClassifier, ExtraJumps)
 
 import           Pate.TraceTree
 import Control.Monad.IO.Class (liftIO)
@@ -66,6 +68,7 @@ import Control.Monad (forM)
 
 import Debug.Trace
 import Control.Applicative ((<|>))
+import Data.Macaw.Utils.IncComp (incCompResult)
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -73,6 +76,7 @@ data ParsedFunctionState arch bin =
   ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (Some (MD.DiscoveryFunInfo arch))
                       , discoveryState :: MD.DiscoveryState arch
                       , extraTargets :: Set.Set (MM.ArchSegmentOff arch)
+                      , extraEdges :: ExtraJumps arch
                       }
 
 
@@ -173,6 +177,17 @@ addOverrides defaultInit pfm ovs = do
   let new_init = PB.MkInitialAbsState $ \mem segOff -> mergeOverrides (PB.mkInitAbs defaultInit mem segOff) (PB.mkInitAbs (defaultInitState pfm) mem segOff) 
   return $ pfm { absStateOverrides = new_ovs, defaultInitState = new_init }
 
+addExtraEdges ::
+  forall arch bin.
+  MM.ArchConstraints arch =>
+  ParsedFunctionMap arch bin ->
+  ExtraJumps arch ->
+  IO ()
+addExtraEdges pfm es = do
+  mapM_ (\es' -> mapM (addExtraTarget pfm) (Set.toList es')) (Map.elems es)
+  IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
+    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (Set.union l r))) es (extraEdges st')}
+
 -- | Apply the various overrides to the architecture definition before returning the discovery state
 getDiscoveryState ::
   forall arch bin.
@@ -199,7 +214,7 @@ getDiscoveryState fnaddr pfm st = let
 
   -- TODO: apply some intelligence here to distinguish direct jumps from tail calls,
   -- for the moment our infrastructure handles direct jumps better, so we prefer that
-  ainfo4 = ainfo3 { MAI.archClassifier =  MD.directJumpClassifier <|>  (pfmExtraClassifier pfm) <|> MAI.archClassifier ainfo3 }
+  ainfo4 = ainfo3 { MAI.archClassifier =  MD.directJumpClassifier <|>  (pfmExtraClassifier pfm) <|> MAI.archClassifier ainfo3 <|> extraJumpClassifier (extraEdges st) }
 
   in initDiscoveryState pfm ainfo4
 
@@ -213,6 +228,8 @@ getParsedFunctionState fnaddr pfm = do
   st <- IORef.readIORef (parsedStateRef pfm)
   let dst = getDiscoveryState fnaddr pfm st
   return $ st { discoveryState = dst }
+
+
 
 -- | Allocate a new empty 'ParsedFunctionMap'
 newParsedFunctionMap
@@ -239,6 +256,7 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond bloc
   let s0 = ParsedFunctionState { parsedFunctionCache = mempty
                                , discoveryState = ds0
                                , extraTargets = mempty
+                               , extraEdges = mempty
                                }
   ref <- IORef.newIORef s0
   return ParsedFunctionMap { parsedStateRef = ref
@@ -438,8 +456,8 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
       -- IORef that might be evaluated multiple times if there is a lot of
       -- contention. If that becomes a problem, we may want to change this
       -- to an MVar where we fully evaluate each result before updating it.
-      (pfm', Some dfi) <- return $ atomicAnalysis ignoredAddresses faddr st
-      IORef.writeIORef pfmRef pfm'
+      (_, Some dfi) <- return $ atomicAnalysis ignoredAddresses faddr st
+      --IORef.writeIORef pfmRef pfm'
       saveCFG mCFGDir (PB.blockBinRepr blk) dfi
       return (Just (Some dfi))
           
@@ -461,7 +479,7 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
       | Set.member faddr ignoredAddressSet = (st, Some (emptyFunction faddr))
       | otherwise =
         let rsn = MD.CallTarget faddr
-        in case MD.analyzeFunction faddr rsn (discoveryState st) of
+        in case incCompResult (MD.discoverFunction MD.defaultDiscoveryOptions faddr rsn (discoveryState st) []) of
              (ds2, Some dfi) ->
                let entry = funInfoToFunEntry (PB.blockBinRepr blk) dfi pfm ignoredAddressSet 
                in (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
