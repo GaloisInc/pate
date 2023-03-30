@@ -23,6 +23,8 @@ module Pate.Verification.Widening
   , getObservableEvents
   -- TODO move these?
   , refineEquivalenceDomain
+  , maybeUpdate
+  , updateEquivCondition
   ) where
 
 import           GHC.Stack
@@ -226,7 +228,8 @@ computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeE
                 emitError $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond3)
                 return $ W4.truePred sym
 
-
+-- | Updates the equivalence condition for the given node with the
+--   given condition, assuming the current path condition
 updateEquivCondition ::
   PS.SimScope sym arch v ->
   GraphNode arch ->
@@ -234,21 +237,26 @@ updateEquivCondition ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)  
 updateEquivCondition scope nd cond gr = withSym $ \sym -> do
+  resetBlockCache envExitPairsCache
   pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
   case getEquivCondition  gr nd of
     Just eqCondSpec -> do
       (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
       eqCond' <- PEC.mux sym pathCond cond eqCond
       return $ setEquivCondition nd (PS.mkSimSpec scope eqCond') gr
-    Nothing -> return $ setEquivCondition nd (PS.mkSimSpec scope cond) gr
+    Nothing -> do
+      eqCond' <- PEC.mux sym pathCond cond (PEC.universal sym)
+      return $ setEquivCondition nd (PS.mkSimSpec scope eqCond') gr
 
+-- | Adds the given predicate to the equivalence condition for the given node
 addToEquivCondition ::
   PS.SimScope sym arch v ->
   GraphNode arch ->
-  W4.Pred sym {- predicate must adhere to this scope -} ->
+  W4.Pred sym {- predicate must adhere to the 'v' scope -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)    
 addToEquivCondition scope nd condPred gr = withSym $ \sym -> do
+  resetBlockCache envExitPairsCache
   let eqCond = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred condPred}
   case getEquivCondition  gr nd of
     Just eqCondSpec -> do
@@ -256,6 +264,14 @@ addToEquivCondition scope nd condPred gr = withSym $ \sym -> do
       eqCond'' <- PEC.merge sym eqCond eqCond'
       return $ setEquivCondition nd (PS.mkSimSpec scope eqCond'') gr
     Nothing -> return $ setEquivCondition nd (PS.mkSimSpec scope eqCond) gr
+
+maybeUpdate ::
+  PairGraph sym arch -> 
+  EquivM sym arch (Maybe (PairGraph sym arch)) ->
+  EquivM sym arch (PairGraph sym arch)
+maybeUpdate gr f = f >>= \case
+  Just gr' -> return gr'
+  Nothing -> return gr
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->
@@ -272,10 +288,9 @@ applyDomainRefinements scope (from,to) bundle preD postD gr1 = withSym $ \sym ->
       pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
       notPath <- liftIO $ W4.notPred sym pathCond
       gr2 <- addToEquivCondition scope from notPath gr1
-      let gr3 = dropPostDomains from (markEdge from to gr2)
-      Just gr4 <- return $ addToWorkListPriority from gr3
-      resetBlockCache envExitPairsCache
-      return gr4
+      return $ dropPostDomains from (markEdge from to gr2)
+      -- prioritize re-examining the predecessor node
+
     Just (LocationRefinement refine) -> do
       -- check if our refinement holds on the computed post-domain
       mr <- PL.firstLocation sym (PAD.absDomEq postD) $ \l p -> case (refine (PL.SomeLocation l), W4.asConstantPred p) of
@@ -292,13 +307,9 @@ applyDomainRefinements scope (from,to) bundle preD postD gr1 = withSym $ \sym ->
           -- refine the domain of the predecessor node and drop this domain
           eqCond <- computeEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
           gr2 <- updateEquivCondition scope from eqCond gr1
-          resetBlockCache envExitPairsCache
           -- since its equivalence condition has been modified, we need to re-examine
           -- all outgoing edges from the predecessor node
-          let gr3 = dropPostDomains from (markEdge from to gr2)
-          -- prioritize re-examining the predecessor node
-          Just gr4 <- return $ addToWorkListPriority from gr3
-          return gr4
+          return $ dropPostDomains from (markEdge from to gr2)
 
 {-
 -- | After widening an edge, insert an equivalence condition
@@ -403,10 +414,10 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
       PL.Register r -> Set.member (Some r) added
       _ -> False
 
--- | FIXME: we're disabling equivalence condition propagation for the moment, since we
--- don't have a good way to control where it should stop
--- TODO: since this is part of the formal specification, we may consider instead making this
--- propagation step an interactive choice
+-- | Push an equivalence condition back up the graph.
+--   Returns 'Nothing' if there is nothing to do (i.e. no condition or
+--   existing condition is already implied)
+
 propagateCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
@@ -415,73 +426,27 @@ propagateCondition ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
-propagateCondition _scope _bundle _from _to _gr = return Nothing
-
--- | Push an equivalence condition back up the graph.
---   Returns 'Nothing' if there is nothing to do (i.e. no condition or
---   existing condition is already implied)
---
---   FIXME: We may need to re-visit the path condition propagation
---   if we discover we can't satisfy the target constraint as a result
---   of traversing to this node via some new path
---
---   FIXME: Formally, any update to the equivalence condition requires
---   invalidating any subsequent nodes, since we now may be propagating
---   stronger equivalence domains
-
-_propagateCondition ::
-  forall sym arch v.
-  PS.SimScope sym arch v ->
-  SimBundle sym arch v ->
-  GraphNode arch {- ^ from -} ->
-  GraphNode arch {- ^ to -} ->
-  PairGraph sym arch ->
-  EquivM sym arch (Maybe (PairGraph sym arch))
-_propagateCondition scope bundle from to gr = withSym $ \sym -> do
-  pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
-  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  preCond <- case getEquivCondition gr from of
-    Just condSpec -> do
-      -- FIXME: what to do with asm?
-      -- bind the pre-state condition to the initial variables
-       (_asm, cond) <- liftIO $ PS.bindSpec sym (PS.bundleInVars bundle) condSpec
-       return cond
-    Nothing -> return $ PEC.universal sym
+propagateCondition scope bundle from to gr = withSym $ \sym -> do
   case getEquivCondition gr to of
     -- no target equivalence condition, nothing to do
     Nothing -> return Nothing
-    Just condSpec -> withTracing @"function_name" "propagateCondition" $ do
-      -- FIXME: what to do with asm?
-      -- bind the target condition to the result of symbolic execution
-      -- FIXME: need to think harder about how to manage variable scoping,
-      -- this isn't really properly tracking variable dependencies
-      (_asm, cond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) condSpec
-      preCond_pred <- PEC.toPred sym preCond
-      cond' <- withAssumption preCond_pred $ subTree @"loc" "Propagate Condition" $ do
-        -- TODO: could do a scoped wither here just for clarity
-        PL.witherLocation @sym @arch sym cond $ \loc postCond_pred -> subTrace (PL.SomeLocation loc) $ do
-          emitTraceLabel @"expr" "input" (Some postCond_pred)
-          isPredTrue' goalTimeout postCond_pred >>= \case
-            -- pre-condition is already sufficient to imply the target post-condition, so
-            -- nothing further to propagate
-            -- (will also happen for entries that are not in the current path condition)
-            True -> do
-              emitTraceLabel @"bool" "Propagated" False
-              return $ Nothing
-            -- pre-condition is insufficient, so propagation is required
-            False -> do
-              emitTraceLabel @"bool" "Propagated" True
-              return $ Just (PL.getLoc loc, postCond_pred)
-      cond_pred <- PEC.toPred sym cond'
-      case W4.asConstantPred cond_pred of
-        -- nothing propagated, so no changes to the graph required
-        Just True -> return Nothing
-        _ -> do
-          -- predicate the computed condition to only apply to the current path
-          -- note that this condition is still scoped to the initial variables of the slice
-          preCond' <- PEC.mux sym pathCond cond' preCond
-          -- no rescoping required - this is the easy direction for propagation
-          return $ Just $ setEquivCondition from (PS.mkSimSpec scope preCond') gr
+    Just{} -> withTracing @"function_name" "propagateCondition" $ do
+      -- take the condition of the target edge and bind it to
+      -- the output state of the bundle
+      cond <- getEquivPostCondition scope bundle to gr
+      -- check if the "to" condition is already satisifed, otherwise
+      -- we need to update our own condition
+      cond_pred <- PEC.toPred sym cond
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      isPredTrue' goalTimeout cond_pred >>= \case
+        -- equivalence condition for this path holds, we 
+        -- don't need any changes
+        True -> return Nothing
+        -- we need more assumptions for this condition to hold
+        False -> do
+          gr1 <- updateEquivCondition scope from cond gr
+          gr2 <- return $ dropPostDomains from (markEdge from to gr1)
+          Just <$> maybeUpdate gr2 (return $ addToWorkListPriority from gr2)
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -517,7 +482,7 @@ widenAlongEdge ::
   EquivM sym arch (PairGraph sym arch)
 widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
   propagateCondition scope bundle from to gr >>= \case
-    Just gr_ -> do
+    Just gr1 -> do
       -- since this 'to' edge has propagated backwards
       -- an equivalence condition, we need to restart the analysis
       -- for 'from'
@@ -525,7 +490,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
       -- and re-adds ancestors of 'from' to be considered for analysis
       emitTrace @"simplemessage" "Analysis Skipped - Equivalence Domain Propagation"
       
-      return $ dropDomain from (markEdge from to gr_)
+      return $ gr1
       -- if no postcondition propagation is needed, we continue under
       -- the strengthened assumption that the equivalence postcondition
       -- is satisfied (potentially allowing for a stronger equivalence
@@ -615,11 +580,12 @@ finalizeGraphEdge ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 finalizeGraphEdge scope bundle preD postD from to gr0 = do
-  gr1 <- runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr0
+  let gr1 = markEdge from to gr0
+  gr2 <- runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr1
   -- if the computed domain doesn't agree with any requested domain refinements,
   -- we need to propagate this backwards by dropping the entry for 'to',
   -- augmenting the equivalence condition for 'from' and re-processing it
-  applyDomainRefinements scope (from,to) bundle preD postD gr1
+  applyDomainRefinements scope (from,to) bundle preD postD gr2
 
 
 data MaybeF f tp where

@@ -28,6 +28,7 @@ module Pate.Verification.PairGraph
   , pairGraphObservableReports
   , popWorkItem
   , updateDomain
+  , updateDomain'
   , modifyDomain
   , addReturnVector
   , getReturnVectors
@@ -61,6 +62,7 @@ module Pate.Verification.PairGraph
   , getCombinedSyncPoint
   , addToWorkList
   , addToWorkListPriority
+  , addToWorkListLowPriority
   , emptyWorkList
   , SyncPoint(..)
   , updateSyncPoint
@@ -406,11 +408,13 @@ dropReturns ::
   PairGraph sym arch
 dropReturns nr pg = pg { pairGraphReturnVectors = Map.delete nr (pairGraphReturnVectors pg) }
 
+-- | Delete the abstract domain for all outgoing nodes from this node
+--   May potentially delete this node if there are back-edges.
 dropPostDomains ::
   GraphNode arch -> 
   PairGraph sym arch ->
   PairGraph sym arch   
-dropPostDomains nd pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropObservableReports nd' $ dropDomain nd' pg_) pg (getEdgesFrom pg nd)
+dropPostDomains nd pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg (getEdgesFrom pg nd)
 
 -- | Delete the abstract domain for the given node, following
 --   any reachable edges and discarding those domains as well
@@ -430,21 +434,23 @@ dropDomain nd pg = case getCurrentDomain pg nd of
         -- re-analysis
         True -> pg { pairGraphWorklist = RevMap.insertWith (min) nd 0 (pairGraphWorklist pg) }
         False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), 
-                      pairGraphWorklist = RevMap.delete nd (pairGraphWorklist pg)
+                      pairGraphWorklist = RevMap.delete nd (pairGraphWorklist pg),
+                      pairGraphDomainRefinements = Map.delete nd (pairGraphDomainRefinements pg)
                     }
-      pg'' = Set.foldl' (\pg_ nd' -> dropObservableReports nd' $ dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
+      pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
+      pg3 = dropObservableReports nd pg''
       -- mark all ancestors as requiring re-processing
-    in addAncestors Set.empty pg'' nd
+    in addAncestors Set.empty pg3 nd
   Nothing -> pg
-  where
-    addAncestors :: Set (GraphNode arch) -> PairGraph sym arch -> GraphNode arch -> PairGraph sym arch
-    addAncestors considered pg_ nd_ = case Set.member nd_ considered of
-      True -> pg_
-      False -> case addToWorkList nd_ pg_ of
-        Just pg' -> pg'
-        -- if this node has no defined domain (i.e it was dropped as part of the previous
-        -- step) then we consider further ancestors
-        Nothing -> Set.foldl' (addAncestors (Set.insert nd_ considered)) pg_ (getBackEdgesFrom pg_ nd_)
+
+addAncestors :: Set (GraphNode arch) -> PairGraph sym arch -> GraphNode arch -> PairGraph sym arch
+addAncestors considered pg_ nd_ = case Set.member nd_ considered of
+  True -> pg_
+  False -> case addToWorkList nd_ pg_ of
+    Just pg' -> pg'
+    -- if this node has no defined domain (i.e it was dropped as part of the previous
+    -- step) then we consider further ancestors
+    Nothing -> Set.foldl' (addAncestors (Set.insert nd_ considered)) pg_ (getBackEdgesFrom pg_ nd_)
 
 
 getEquivCondition ::
@@ -639,13 +645,9 @@ updateDomain ::
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   Either (PairGraph sym arch) (PairGraph sym arch)
 updateDomain gr pFrom pTo d
-  | g > 0 = Right $ markEdge pFrom pTo $ gr
-            { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-            , pairGraphGas      = Map.insert (pFrom,pTo) (Gas (g-1)) (pairGraphGas gr)
-            , pairGraphWorklist = RevMap.insertWith (min) pTo 0 (pairGraphWorklist gr)
-            , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
-            , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
-            }
+  | g > 0 = Right $ 
+     (updateDomain' gr pFrom pTo d)
+       { pairGraphGas = Map.insert (pFrom,pTo) (Gas (g-1)) (pairGraphGas gr)}
 
   | otherwise =
             Left $ markEdge pFrom pTo $ gr
@@ -656,6 +658,22 @@ updateDomain gr pFrom pTo d
      -- Lookup the amount of remaining gas.  Initialize to a fresh value
      -- if it is not in the map
       Gas g = fromMaybe initialGas (Map.lookup (pFrom,pTo) (pairGraphGas gr))
+
+-- | Update the abstract domain for the target graph node,
+--   ignoring the gas parameter.
+updateDomain' ::
+  PairGraph sym arch {- ^ pair graph to update -} ->
+  GraphNode arch {- ^ point pair we are jumping from -} ->
+  GraphNode arch {- ^ point pair we are jumping to -} ->
+  AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
+  PairGraph sym arch
+updateDomain' gr pFrom pTo d = markEdge pFrom pTo $ gr
+  { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
+  , pairGraphWorklist = RevMap.insertWith (min) pTo 0 (pairGraphWorklist gr)
+  , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
+  , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
+  }
+
 
 modifyDomain ::
   Monad m =>
@@ -829,6 +847,15 @@ addToWorkListPriority ::
   Maybe (PairGraph sym arch)  
 addToWorkListPriority nd gr = case getCurrentDomain gr nd of
   Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd (-1) (pairGraphWorklist gr) }
+  Nothing -> Nothing
+
+-- | Same as 'addToWorkList' but make this a priority to process last
+addToWorkListLowPriority ::
+  GraphNode arch ->
+  PairGraph sym arch ->
+  Maybe (PairGraph sym arch)  
+addToWorkListLowPriority nd gr = case getCurrentDomain gr nd of
+  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd (1) (pairGraphWorklist gr) }
   Nothing -> Nothing
 
 emptyWorkList :: PairGraph sym arch -> PairGraph sym arch

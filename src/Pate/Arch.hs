@@ -170,7 +170,7 @@ class
   -- parsing registers from user input
   readRegister :: String -> Maybe (Some (MC.ArchReg arch))
 
-  uninterpretedArchStmt :: MC.ArchStmt arch v -> Bool
+  uninterpretedArchStmt :: MC.ArchStmt arch (MC.Value arch ids) -> Bool
 
   alignPC :: ConcreteAddress arch -> ConcreteAddress arch
 

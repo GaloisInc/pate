@@ -38,6 +38,7 @@ module Pate.Verification.PairGraph.Node (
   , asSingleGraphNode
   , splitGraphNode
   , getDivergePoint
+  , eqUptoDivergePoint
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -128,10 +129,10 @@ mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
 mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
 
 -- | Project the given 'NodeReturn' into a singleton node for the given binary
-asSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeReturn arch -> m (NodeReturn arch)
-asSingleReturn bin node@(NodeReturn ctx fPair) = do
+asSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> NodeReturn arch -> m (NodeReturn arch)
+asSingleReturn bin divergedAt (NodeReturn ctx fPair) = do
   fPair' <- PPa.asSingleton bin fPair
-  return $ NodeReturn (ctx {divergePoint = Just (ReturnNode node)}) fPair'
+  return $ NodeReturn (ctx {divergePoint = Just divergedAt}) fPair'
 
 -- | Project the given 'NodeEntry' into a singleton node for the given binary
 asSingleNode:: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeEntry arch -> m (NodeEntry arch)
@@ -142,7 +143,22 @@ asSingleNode bin node@(NodeEntry ctx bPair) = do
 asSingleGraphNode :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> m (GraphNode arch)
 asSingleGraphNode bin node = case node of
   GraphNode ne -> GraphNode <$> asSingleNode bin ne
-  ReturnNode nr -> ReturnNode <$> asSingleReturn bin nr  
+  ReturnNode nr -> ReturnNode <$> asSingleReturn bin node nr  
+
+-- | Relaxed node equality that ignores differences in divergence points
+eqUptoDivergePoint ::
+  GraphNode arch ->
+  GraphNode arch ->
+  Bool
+eqUptoDivergePoint (GraphNode (NodeEntry ctx1 blks1)) (GraphNode (NodeEntry ctx2 blks2))
+  | (ctx1{divergePoint = Nothing} == ctx2{divergePoint = Nothing})
+  , blks1 == blks2
+  = True
+eqUptoDivergePoint (ReturnNode (NodeReturn ctx1 blks1)) (ReturnNode (NodeReturn ctx2 blks2))
+  | (ctx1{divergePoint = Nothing} == ctx2{divergePoint = Nothing})
+  , blks1 == blks2
+  = True
+eqUptoDivergePoint _ _ = False
 
 -- | Split a graph node into two single-sided nodes (original, patched)
 --   The input node is marked as the diverge point in the two resulting nodes.

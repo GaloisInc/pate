@@ -9,11 +9,13 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Discovery.ParsedFunctions (
     ParsedFunctionMap
+  , persistenceDir
   , newParsedFunctionMap
   , parsedFunctionContaining
   , parsedBlocksContaining
@@ -26,6 +28,7 @@ module Pate.Discovery.ParsedFunctions (
   , addExtraTarget
   , isExtraTarget
   , addExtraEdges
+  , isUnsupportedErr
   ) where
 
 
@@ -60,7 +63,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Memory as PM
-import           Pate.Discovery.PLT (extraJumpClassifier, ExtraJumps)
+import           Pate.Discovery.PLT (extraJumpClassifier, extraReturnClassifier, ExtraJumps, ExtraJumpTarget(..))
 
 import           Pate.TraceTree
 import Control.Monad.IO.Class (liftIO)
@@ -69,6 +72,7 @@ import Control.Monad (forM)
 import Debug.Trace
 import Control.Applicative ((<|>))
 import Data.Macaw.Utils.IncComp (incCompResult)
+import qualified Data.Text as T
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -145,16 +149,38 @@ flushCache pfm = do
   IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
     st' { parsedFunctionCache = mempty, discoveryState = initDiscoveryState pfm ainfo }
 
+isUnsupportedErr :: T.Text -> Bool
+isUnsupportedErr err = T.isPrefixOf "UnsupportedInstruction" err
+
+addTranslationErrorWrapper ::
+  forall arch.
+  MM.ArchConstraints arch =>
+  MAI.DisassembleFn arch ->
+  MAI.DisassembleFn arch
+addTranslationErrorWrapper f nonceGen start initSt offset  = do
+    (blk,sz) <- f nonceGen start initSt offset
+    case MAI.blockTerm blk of
+      MAI.TranslateError nextSt err -> do
+        next <- case MM.incSegmentOff start ((fromIntegral (sz + MM.addrSize start))) of
+            Just x -> return x
+            Nothing -> error $ show err ++ "\nUnexpected segment end:" ++ (show start) ++ " " ++ show (sz + MM.addrSize start)
+        let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
+        let nextSt' = nextSt & MM.curIP .~ v
+        (blk',sz') <- addTranslationErrorWrapper f nonceGen next nextSt' (offset - sz)
+        return $ (MAI.Block (MAI.blockStmts blk ++ [MM.Comment err] ++ MAI.blockStmts blk') (MAI.blockTerm blk'), sz + sz')
+      _ -> return (blk,sz)
+
 overrideDisassembler ::
   MM.ArchConstraints arch =>
   MM.ArchSegmentOff arch ->
   MAI.ArchitectureInfo arch ->
   MAI.ArchitectureInfo arch
 overrideDisassembler tgt ainfo = ainfo { 
-  MAI.disassembleFn = \nonceGen start initSt offset -> case MM.diffSegmentOff tgt start of
-    Just offset' | start <= tgt, offset' <= fromIntegral offset ->
-      MAI.disassembleFn ainfo nonceGen start initSt (fromIntegral offset' - 1)
-    _ -> MAI.disassembleFn ainfo nonceGen start initSt offset
+  MAI.disassembleFn = \nonceGen start initSt offset -> do
+    case MM.diffSegmentOff tgt start of
+      Just offset' | start <= tgt, offset' <= fromIntegral offset ->
+        MAI.disassembleFn ainfo nonceGen start initSt (fromIntegral offset' - 1)
+      _ -> MAI.disassembleFn ainfo nonceGen start initSt offset
   }
 
 -- FIXME: throw error on clashes? Currently this just arbitrarily picks one
@@ -184,9 +210,9 @@ addExtraEdges ::
   ExtraJumps arch ->
   IO ()
 addExtraEdges pfm es = do
-  mapM_ (\es' -> mapM (addExtraTarget pfm) (Set.toList es')) (Map.elems es)
+  mapM_ (\tgts -> case tgts of {DirectTargets es' -> mapM_ (addExtraTarget pfm) (Set.toList es'); _ -> return ()}) (Map.elems es)
   IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
-    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (Set.union l r))) es (extraEdges st')}
+    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (l <> r))) es (extraEdges st')}
 
 -- | Apply the various overrides to the architecture definition before returning the discovery state
 getDiscoveryState ::
@@ -200,6 +226,7 @@ getDiscoveryState fnaddr pfm st = let
   ainfo0 = MD.archInfo (discoveryState st)
 
   ainfo1 = foldr overrideDisassembler ainfo0 (extraTargets st)
+
   ainfo2 = ainfo1 { MAI.mkInitialAbsState = \mem segOff -> let 
     initAbsSt = MAI.mkInitialAbsState ainfo1 mem segOff
     in case Map.lookup segOff (absStateOverrides pfm) of
@@ -214,9 +241,14 @@ getDiscoveryState fnaddr pfm st = let
 
   -- TODO: apply some intelligence here to distinguish direct jumps from tail calls,
   -- for the moment our infrastructure handles direct jumps better, so we prefer that
-  ainfo4 = ainfo3 { MAI.archClassifier =  MD.directJumpClassifier <|>  (pfmExtraClassifier pfm) <|> MAI.archClassifier ainfo3 <|> extraJumpClassifier (extraEdges st) }
-
-  in initDiscoveryState pfm ainfo4
+  ainfo4 = ainfo3 { MAI.archClassifier =
+        (pfmExtraClassifier pfm) 
+    <|> MAI.archClassifier ainfo3 
+    <|> extraJumpClassifier (extraEdges st) 
+    -- <|> extraReturnClassifier (extraEdges st) 
+    }
+  ainfo5 = ainfo4 { MAI.disassembleFn = addTranslationErrorWrapper (MAI.disassembleFn ainfo4)}
+  in initDiscoveryState pfm ainfo5
 
 getParsedFunctionState ::
   forall arch bin.

@@ -3,6 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- | This module provides the interface to the symbolic execution engine used by the pate verifier
 --
 -- It performs all of the setup and extraction of results, along with logic for
@@ -12,6 +13,11 @@
 module Pate.Verification.SymbolicExecution (
   simulate
   ) where
+
+import qualified System.Directory as SD
+import           System.FilePath ( (</>), (<.>) )
+import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.Text as PPT
 
 import           Control.Lens ( (^.) )
 import           Control.Monad.IO.Class ( liftIO )
@@ -57,6 +63,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.PatchPair as PPa
 import Data.Functor.Const (Const(..))
 import Control.Monad.Error
+import Lang.Crucible.CFG.Expr (PrettyExt)
 
 -- | Return a Crucible run-time repr for the architecture-specific register file
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
@@ -79,6 +86,7 @@ isTerminalBlock pb =
     MCS.MacawBlockEndBranch -> False
     MCS.MacawBlockEndFail -> True
     MCS.MacawBlockEndArch -> True
+    _ -> error $ "Unexpected terminal block case:" ++ show c
 
 -- | Construct an initial 'CS.SimContext' for Crucible
 --
@@ -135,7 +143,8 @@ getGlobals ::
   EquivM sym arch (CS.SymGlobalState sym)
 getGlobals simInput = withValid $ withSym $ \sym -> do
   env <- CMR.ask
-  blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym
+  -- initially the
+  blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym MCS.MacawBlockEndInit
   return $
       CGS.insertGlobal (envMemTraceVar env) (PS.simInMem simInput)
     $ CGS.insertGlobal (envBlockEndVar env) blkend
@@ -240,6 +249,21 @@ stripUninterpreted ::
   [MD.ParsedBlock arch ids]
 stripUninterpreted pbs = map (\pb -> pb { MD.pblockStmts = stripUninterpretedStmts (MD.pblockStmts pb) } ) pbs
 
+-- Slightly different to above, since we can't tell if stripping out these statements
+-- has any effect
+hasUninterpretedStmts ::
+  PA.ValidArch arch =>
+  [MM.Stmt arch ids] ->
+  Bool
+hasUninterpretedStmts stmts = 
+  any (\case {MM.Comment msg -> PDP.isUnsupportedErr msg; _ -> False}) stmts
+
+hasUninterpreted ::
+  PA.ValidArch arch =>
+  [MD.ParsedBlock arch ids] ->
+  Bool
+hasUninterpreted blks = any  (\pb -> hasUninterpretedStmts (MD.pblockStmts pb) ) blks
+
 -- | Symbolically execute a chunk of code under the preconditions determined by
 -- the compositional analysis
 --
@@ -257,10 +281,34 @@ simulate simInput killBlock = withBinary @bin $ do
   PDP.ParsedBlocks pbs0 <- PD.lookupBlocks (PS.simInBlock simInput)
   -- attempt simulation, if it fails, retry by stripping out any uninterpreted statements, but
   -- emit a warning along with the result
+  case hasUninterpreted pbs0 of
+    True -> emitWarning PEE.UninterpretedInstruction
+    False -> return ()
+
   catchError (simulate' simInput pbs0 killBlock) $ \e -> do
     let pbs1 = stripUninterpreted pbs0
     catchError (simulate' simInput pbs1 killBlock >>= \r -> emitWarning PEE.UninterpretedInstruction >> return r)
       $ \_ -> throwError e
+
+
+saveCFG ::
+  forall sym arch v bin ext blocks init ret.
+  PBi.KnownBinary bin =>
+  PrettyExt ext => 
+  PS.SimInput sym arch v bin ->
+  (CC.CFG ext blocks init ret) ->
+  EquivM sym arch ()
+saveCFG simInput cfg = do
+  let (bin :: PBi.WhichBinaryRepr bin) = CC.knownRepr
+  let entryAddr = PB.concreteAddress (PS.simInBlock simInput)
+  pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
+  let mdir = PDP.persistenceDir pfm
+  forM_ mdir $ \cfgDir -> do
+    let baseDir = cfgDir </> show bin </> "Slices"
+    liftIO $ SD.createDirectoryIfMissing True baseDir
+    let fname = baseDir </> show entryAddr <.> "cfg"
+    liftIO $ IO.withFile fname IO.WriteMode $ \hdl -> do
+      PPT.hPutDoc hdl (CC.ppCFG True cfg)
 
 simulate' ::
   forall sym arch v bin ids.
@@ -297,6 +345,8 @@ simulate' simInput pbs_ killBlock = do
     let sliceFns = MCS.blockEndSliceFns fns be
     liftIO $ MS.mkBlockSliceCFG fns sliceFns ha posFn pb nonTerminal terminal killEdges
 
+
+  saveCFG simInput cfg
   let preRegs = PS.simInRegs simInput
   preRegsAsn <- regStateToAsn preRegs
   archRepr <- archStructRepr

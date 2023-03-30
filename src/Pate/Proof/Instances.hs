@@ -642,3 +642,6 @@ ppExitCase ec = case ec of
   MCS.MacawBlockEndBranch -> "branch"
   MCS.MacawBlockEndArch -> "arch-specific"
   MCS.MacawBlockEndFail -> "analysis failure"
+  MCS.MacawBlockEndInfeasible -> "infeasible block ending"
+  MCS.MacawBlockEndInit -> "unexpected initial block state"
+

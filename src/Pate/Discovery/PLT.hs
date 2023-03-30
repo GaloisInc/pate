@@ -3,11 +3,15 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 module Pate.Discovery.PLT (
     pltStubSymbols
   , pltStubClassifier
   , extraJumpClassifier
+  , extraReturnClassifier
   , ExtraJumps
+  , ExtraJumpTarget(..)
   ) where
 
 import           Control.Applicative ( (<|>) )
@@ -144,12 +148,43 @@ otherwise ignored.
 
 --FIXME: Move
 
-type ExtraJumps arch = (Map (MM.ArchSegmentOff arch) (Set (MM.ArchSegmentOff arch)))
+data ExtraJumpTarget arch = 
+    DirectTargets (Set (MM.ArchSegmentOff arch))
+  | ReturnTarget
+  deriving (Eq, Ord)
+
+instance MemWidth (RegAddrWidth (ArchReg arch)) => Show (ExtraJumpTarget arch) where
+  show (DirectTargets es) = show es
+  show ReturnTarget = "{return}"
+
+instance Semigroup (ExtraJumpTarget arch) where
+  (DirectTargets a) <> (DirectTargets b) = DirectTargets (a <> b)
+  _ <> _ = ReturnTarget
+
+type ExtraJumps arch = (Map (MM.ArchSegmentOff arch) (ExtraJumpTarget arch))
 
 lastInstructionStart :: [Stmt arch ids] -> Maybe (MM.MemWord (MM.ArchAddrWidth arch), T.Text)
 lastInstructionStart stmts = case find (\case {InstructionStart{} -> True; _ -> False}) (reverse stmts) of
   Just (InstructionStart addr nm) -> Just (addr,nm)
   _ -> Nothing
+
+extraReturnClassifier :: ExtraJumps arch -> BlockClassifier arch ids
+extraReturnClassifier jumps = classifierName "Extra Return" $ do
+  bcc <- CMR.ask
+  let ainfo = pctxArchInfo (classifierParseContext bcc)
+  Info.withArchConstraints ainfo $ do
+    startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
+    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc)) 
+    Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
+    case Map.lookup final_addr jumps of
+      Just ReturnTarget -> return ()
+      _ -> fail $ "No extra returns for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
+    pure $ Parsed.ParsedContents { Parsed.parsedNonterm = F.toList (classifierStmts bcc)
+                              , Parsed.parsedTerm = Parsed.ParsedReturn (classifierFinalRegState bcc)
+                              , Parsed.writtenCodeAddrs = classifierWrittenAddrs bcc
+                              , Parsed.intraJumpTargets = []
+                              , Parsed.newFunctionAddrs = []
+                              }
 
 extraJumpClassifier :: ExtraJumps arch -> BlockClassifier arch ids
 extraJumpClassifier jumps = classifierName "Extra Jump" $ do
@@ -158,7 +193,6 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
   let ainfo = pctxArchInfo ctx
 
   Info.withArchConstraints ainfo $ do
-    blkSz <- CMR.asks Info.classifierBlockSize
     startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
     -- FIXME: This is not exactly right, but I'm not sure if there's a better way to find the 
     -- address corresponding to this instruction. Maybe examine the statements?
@@ -166,21 +200,22 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
 
     Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
     targets <- case Map.lookup final_addr jumps of
-      Just targets -> return $ Set.toList targets
-      Nothing -> fail $ "No extra jumps for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
+      Just (DirectTargets targets)  -> return $ Set.toList targets
+      _ -> fail $ "No extra jumps for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
 
     let abst = finalAbsBlockState (classifierAbsState bcc) (classifierFinalRegState bcc)
     let tgtBnds = Jmp.postJumpBounds (classifierJumpBounds bcc) (classifierFinalRegState bcc)
 
     termStmt <- case targets of
       [oneTarget] -> return $ Parsed.ParsedJump (classifierFinalRegState bcc) oneTarget
-      [target1, target2] -> do
+      {- [target1, target2] -> do
         -- we don't have a good way to reify the branch condition here, but
         -- it's not strictly necessary that the ParsedBranch condition be valid, as
         -- long as the two targets are correct
         -- ideally we'd just set this to "undefined", but there's no good way to 
         -- create new macaw terms here
         return $ Parsed.ParsedBranch (classifierFinalRegState bcc) (MM.CValue (MM.BoolCValue True)) target1 target2
+      -}
       _ -> fail $ "Unsupported extra targets: " ++ show targets
     
     jumpTargets <- forM targets $ \tgt -> do

@@ -185,7 +185,7 @@ instance PP.Pretty SimpResult where
 instance Show SimpResult where
   show r = show (PP.pretty r)
 
-deriving instance MS.SymArchConstraints arch => Show (InnerEquivalenceError arch)
+deriving instance (MS.SymArchConstraints arch) => Show (InnerEquivalenceError arch)
 instance (Typeable arch, MS.SymArchConstraints arch) => X.Exception (InnerEquivalenceError arch)
 
 
@@ -214,7 +214,7 @@ data EquivalenceError where
       , errEquivError :: Either SomeInnerError LoadError
       } -> EquivalenceError
 
-instance MS.SymArchConstraints arch => PP.Pretty (InnerEquivalenceError arch) where
+instance (MS.SymArchConstraints arch) => PP.Pretty (InnerEquivalenceError arch) where
   pretty = PP.viaShow
 
 
@@ -260,4 +260,6 @@ equivalenceErrorFor repr err =
                    }
 
 instance IsNodeError EquivalenceError where
-  propagateErr _ = True
+  propagateErr err = case errEquivError err of
+    Left (SomeInnerError InconsistentPatchPairAccess) -> False
+    _ -> True

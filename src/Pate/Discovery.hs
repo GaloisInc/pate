@@ -23,6 +23,7 @@ module Pate.Discovery (
   matchesBlockTarget,
   associateFrames,
   matchingExits,
+  matchingExitOne,
   isMatchingCall,
   concreteToLLVM,
   concreteAddrToLLVM,
@@ -152,12 +153,14 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
         [ PPa.PatchPair blkO blkP
           | blkO <- blksO
           , blkP <- blksP
-          , compatibleTargets blkO blkP]
+          ]
       PPa.PatchPairSingle bin (PPa.LiftF blks) -> map (PPa.mkSingle bin) blks
   blocks <- getBlocks $ PSS.simPair bundle
   
   let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
-  
+
+  subTree @"blocktarget" "Tested Pairs" $
+    mapM_ (\blkts -> subTrace blkts $ return ()) newCalls
   
   subTree @"blocktarget" "Cached Pairs" $
     mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
@@ -199,14 +202,49 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
   where
   pPair = PSS.simPair bundle
 
+-- | Weakened property for return that just says any classification error
+--   with a potential null jump target is a return
+--   Formally this is extremely unsound - but we need to track more symbolic
+--   information in order to resolve this when macaw fails
+relaxedReturnCondition ::
+  forall sym arch v.
+  SimBundle sym arch v ->
+  EquivM sym arch (WI.Pred sym)
+relaxedReturnCondition bundle = withSym $ \sym -> PPa.joinPatchPred (\x y -> liftIO $ WI.andPred sym x y) $ \bin -> do
+  out <- PPa.get bin (PSS.simOut bundle)
+  let blkend = PSS.simOutBlockEnd out
+  is_return <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend MCS.MacawBlockEndReturn
+  is_fail <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend MCS.MacawBlockEndFail
+  let regs = PSS.simRegs (PSS.simOutState out)
+  let CLM.LLVMPointer _ ip_value = PSR.macawRegValue (regs ^. MC.curIP)
+  WI.BaseBVRepr w <- return $ WI.exprType ip_value
+  zero <- liftIO $ WI.bvLit sym w (BVS.mkBV w 0)
+  is_zero_ip <- liftIO $ WI.isEq sym ip_value zero
+  mresult <- withSatAssumption (PAS.fromPred is_fail) $ 
+    goalSat "relaxedReturnConditions" is_zero_ip $ \res -> case res of
+      WR.Sat{} -> return True
+      _ -> return False
+  case mresult of
+    Just True -> liftIO $ WI.orPred sym is_return is_fail
+    _ -> return is_return
+
+matchingExitOne ::
+  forall sym arch v bin.
+  PSS.SimOutput sym arch v bin ->
+  MCS.MacawBlockEndCase ->
+  EquivM sym arch (WI.Pred sym)  
+matchingExitOne out ecase = withSym $ \sym -> do
+  let blkend = PSS.simOutBlockEnd out
+  liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend ecase  
+
 matchingExits ::
   forall sym arch v.
   SimBundle sym arch v ->
   MCS.MacawBlockEndCase ->
   EquivM sym arch (WI.Pred sym)
 matchingExits bundle ecase = withSym $ \sym -> PPa.joinPatchPred (\x y -> liftIO $ WI.andPred sym x y) $ \bin ->  do
-  blkend <- PSS.simOutBlockEnd <$> PPa.get bin (PSS.simOut bundle)
-  liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend ecase
+  out <- PPa.get bin (PSS.simOut bundle)
+  matchingExitOne out ecase
 
 -- | True when both the patched and original program necessarily end with
 -- a call to the same function, assuming exact initial equivalence.
@@ -451,9 +489,10 @@ getSubBlocks b = withBinary @bin $
 -- | Find the abstract domain for a given starting point
 getAbsDomain ::
   forall sym arch bin.
+  HasCallStack =>
   PB.ConcreteBlock arch bin ->
   EquivM sym arch (MAS.AbsBlockState (MC.ArchReg arch))
-getAbsDomain b = withRepr (PB.blockBinRepr b) $ withBinary @bin $ do
+getAbsDomain b = fnTrace "getAbsDomain" $ withRepr (PB.blockBinRepr b) $ withBinary @bin $ do
   pfm <- PMC.parsedFunctionMap <$> getBinCtx @bin
   mtgt <- liftIO $ PDP.parsedBlockEntry b pfm
   case mtgt of
@@ -855,7 +894,7 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
 
 getBlocksSingle
   :: forall bin arch sym m e
-   . (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, MonadIO m, PB.KnownBinary bin, IsTreeBuilder '(sym,arch) e m)
+   . (CMC.MonadThrow m, PPa.PatchPairM m, PA.ValidArch arch, Typeable arch, HasCallStack, MonadIO m, PB.KnownBinary bin, IsTreeBuilder '(sym,arch) e m)
   => PMC.EquivalenceContext sym arch
   -> PB.ConcreteBlock arch bin
   -> m (PE.Blocks arch bin)
@@ -867,7 +906,7 @@ getBlocksSingle ctx blk = do
     Left err -> CMC.throwM err
 
 getBlocks'
-  :: (CMC.MonadThrow m, PPa.PatchPairM m, MS.SymArchConstraints arch, Typeable arch, HasCallStack, IsTreeBuilder '(sym,arch) e m)
+  :: (CMC.MonadThrow m, PPa.PatchPairM m, PA.ValidArch arch, Typeable arch, HasCallStack, IsTreeBuilder '(sym,arch) e m)
   => PMC.EquivalenceContext sym arch
   -> PB.BlockPair arch
   -> m (PE.BlocksPair arch)

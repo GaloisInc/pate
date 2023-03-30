@@ -46,7 +46,9 @@ import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Hints.BSI as PHB
-import Data.Macaw.Memory.Permissions (execute)
+import Data.Macaw.Memory.Permissions as MP (execute,read)
+
+import Data.Bits ((.|.), Bits ((.&.)))
 
 data LoadedELF arch =
   LoadedELF
@@ -89,7 +91,7 @@ loadELF (PA.SomeValidArch{}) path = do
   mem_final <- CMW.foldM (\mem secnm -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
     [sec] -> do
       let sec_addr = DEE.elfSectionAddr sec
-      segment <- MC.memSegment mempty 0 0 Nothing (fromIntegral sec_addr) execute (DEE.elfSectionData sec) (fromIntegral (DEE.elfSectionSize sec))
+      segment <- MC.memSegment mempty 100 0 Nothing (fromIntegral sec_addr) (execute .|. MP.read) (DEE.elfSectionData sec) (fromIntegral (DEE.elfSectionSize sec) * 8)
       case MC.insertMemSegment segment (MBL.memoryImage bin) of
         Left _err -> CME.throwError $ PEE.InvalidArchOpts []
         Right mem' -> return mem'
