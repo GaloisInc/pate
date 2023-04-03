@@ -534,7 +534,7 @@ withFreshVars ::
   forall sym arch f.
   Scoped f =>
   PB.BlockPair arch ->
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> EquivM sym arch (AssumptionSet sym,(f v))) ->
+  (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> EquivM sym arch (AssumptionSet sym,(f v))) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   argNames <- lookupArgumentNames blocks

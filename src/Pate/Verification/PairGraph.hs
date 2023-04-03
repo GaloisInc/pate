@@ -60,9 +60,11 @@ module Pate.Verification.PairGraph
   , getBackEdgesFrom
   , setSyncPoint
   , getCombinedSyncPoint
+  , NodePriority(..)
   , addToWorkList
   , addToWorkListPriority
-  , addToWorkListLowPriority
+  , queueAncestors
+  , queueNode
   , emptyWorkList
   , SyncPoint(..)
   , updateSyncPoint
@@ -82,9 +84,10 @@ module Pate.Verification.PairGraph
   , refineActions
   , getAllNodes
   , emptyPairGraph
+  , DomainRefinementKind(..)
   , DomainRefinement(..)
   , addDomainRefinement
-  , getDomainRefinement
+  , getNextDomainRefinement
   ) where
 
 import           Prettyprinter
@@ -200,7 +203,7 @@ data PairGraph sym arch =
     --   be revisited, and here we record all such nodes that must be examinied.
     --
     --   This is a mapping from nodes to their queue priority.
-  , pairGraphWorklist :: !(RevMap (GraphNode arch) Int)
+  , pairGraphWorklist :: !(RevMap (GraphNode arch) NodePriority)
     -- | The set of blocks where this function may return to. Whenever we see a function
     --   call to the given FunPair, we record the program point pair where the function
     --   returns to here. This is used to tell us where we need to propagate abstract domain
@@ -254,18 +257,25 @@ data PairGraph sym arch =
   , pairGraphSyncPoints :: !(Map (GraphNode arch) (SyncPoint arch))
   , pairGraphPendingActs :: ActionQueue sym arch
   , pairGraphDomainRefinements ::
-      !(Map (GraphNode arch) (DomainRefinement sym arch))
+      !(Map (GraphNode arch) [DomainRefinement sym arch])
   }
 
-data DomainRefinement sym arch =
-    LocationRefinement (PL.SomeLocation sym arch -> Bool)
-  | PruneBranch
+-- | Scheduling priority for the worklist
+data NodePriority =
+    UrgentPriority
+  | HighPriority
+  | NormalPriority
+  | LowPriority
+  deriving (Eq, Ord, Show)
 
-combineRefinements ::
-  DomainRefinement sym arch -> DomainRefinement sym arch -> DomainRefinement sym arch
-combineRefinements (LocationRefinement f) (LocationRefinement g) = LocationRefinement $ \l -> f l || g l
-combineRefinements PruneBranch _ = PruneBranch
-combineRefinements _ PruneBranch = PruneBranch
+data DomainRefinementKind =
+    RefineUsingIntraBlockPaths
+  | RefineUsingExactEquality
+
+
+data DomainRefinement sym arch =
+    LocationRefinement DomainRefinementKind (PL.SomeLocation sym arch -> Bool)
+  | PruneBranch
 
 addDomainRefinement ::
   GraphNode arch ->
@@ -274,19 +284,18 @@ addDomainRefinement ::
   PairGraph sym arch
 addDomainRefinement nd f pg0 = 
   let
-    pg1 = pg0 { pairGraphDomainRefinements = Map.insertWith combineRefinements nd f (pairGraphDomainRefinements pg0) }
+    pg1 = pg0 { pairGraphDomainRefinements = Map.insertWith (++) nd [f] (pairGraphDomainRefinements pg0) }
   -- we need to re-process any nodes that have an outgoing edge here, since
   -- those are the domains we need to refine
-  in Set.foldl' (\pg_ nd' -> case addToWorkListPriority nd' pg_ of
-    Just pg__ -> pg__
-    Nothing -> pg_) pg1 (getBackEdgesFrom pg1 nd)
+  in queueAncestors HighPriority nd pg1
 
-getDomainRefinement ::
+getNextDomainRefinement ::
   GraphNode arch ->
   PairGraph sym arch ->
-  Maybe (DomainRefinement sym arch)
-getDomainRefinement nd pg = Map.lookup nd (pairGraphDomainRefinements pg)
-
+  Maybe (DomainRefinement sym arch, PairGraph sym arch)
+getNextDomainRefinement nd pg = case Map.lookup nd (pairGraphDomainRefinements pg) of
+  Just (refine:rest) -> Just (refine, pg {pairGraphDomainRefinements = Map.insert nd rest (pairGraphDomainRefinements pg)})
+  _ -> Nothing
 
 -- FIXME: move this 
 data PairF tp1 tp2 k = PairF (tp1 k) (tp2 k)
@@ -416,6 +425,12 @@ dropPostDomains ::
   PairGraph sym arch   
 dropPostDomains nd pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg (getEdgesFrom pg nd)
 
+dropDomainRefinement ::
+  GraphNode arch -> 
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropDomainRefinement nd pg = pg { pairGraphDomainRefinements = Map.delete nd (pairGraphDomainRefinements pg)}
+
 -- | Delete the abstract domain for the given node, following
 --   any reachable edges and discarding those domains as well
 --   This is necessary if a domain is "narrowed": i.e. it moves
@@ -432,26 +447,33 @@ dropDomain nd pg = case getCurrentDomain pg nd of
       pg' = case Set.null (getBackEdgesFrom pg nd) of
         -- don't drop the domain for a toplevel entrypoint, but mark it for
         -- re-analysis
-        True -> pg { pairGraphWorklist = RevMap.insertWith (min) nd 0 (pairGraphWorklist pg) }
+        True -> pg { pairGraphWorklist = RevMap.insertWith (min) nd NormalPriority (pairGraphWorklist pg) }
         False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), 
-                      pairGraphWorklist = RevMap.delete nd (pairGraphWorklist pg),
-                      pairGraphDomainRefinements = Map.delete nd (pairGraphDomainRefinements pg)
+                      pairGraphWorklist = RevMap.delete nd (pairGraphWorklist pg)
                     }
       pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
       pg3 = dropObservableReports nd pg''
       -- mark all ancestors as requiring re-processing
-    in addAncestors Set.empty pg3 nd
+    in queueNode NormalPriority nd pg3
   Nothing -> pg
 
-addAncestors :: Set (GraphNode arch) -> PairGraph sym arch -> GraphNode arch -> PairGraph sym arch
-addAncestors considered pg_ nd_ = case Set.member nd_ considered of
-  True -> pg_
-  False -> case addToWorkList nd_ pg_ of
-    Just pg' -> pg'
+
+queueAncestors :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
+queueAncestors priority nd pg = snd $ Set.foldr (queueNode' priority) (Set.singleton nd, pg) (getBackEdgesFrom pg nd)
+
+queueNode :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
+queueNode priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
+
+-- | Adds a node to the work list. If it doesn't have a domain, queue its ancestors.
+--   Takes a set of nodes that have already been considerd, and returns all considered nodes
+queueNode' :: NodePriority -> GraphNode arch -> (Set (GraphNode arch), PairGraph sym arch) -> (Set (GraphNode arch), PairGraph sym arch)
+queueNode' priority nd_ (considered, pg_) = case Set.member nd_ considered of
+  True -> (considered, pg_)
+  False -> case addToWorkListPriority nd_ priority pg_ of
+    Just pg' -> (Set.insert nd_ considered, pg')
     -- if this node has no defined domain (i.e it was dropped as part of the previous
     -- step) then we consider further ancestors
-    Nothing -> Set.foldl' (addAncestors (Set.insert nd_ considered)) pg_ (getBackEdgesFrom pg_ nd_)
-
+    Nothing -> Set.foldr' (queueNode' priority) (Set.insert nd_ considered, pg_) (getBackEdgesFrom pg_ nd_)
 
 getEquivCondition ::
   PairGraph sym arch ->
@@ -669,7 +691,7 @@ updateDomain' ::
   PairGraph sym arch
 updateDomain' gr pFrom pTo d = markEdge pFrom pTo $ gr
   { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-  , pairGraphWorklist = RevMap.insertWith (min) pTo 0 (pairGraphWorklist gr)
+  , pairGraphWorklist = RevMap.insertWith (min) pTo NormalPriority (pairGraphWorklist gr)
   , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
   , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
   }
@@ -736,7 +758,7 @@ addReturnVector gr funPair retPair =
     f Nothing  = Just (Set.singleton retPair)
     f (Just s) = Just (Set.insert retPair s)
 
-    wl = RevMap.insertWith (min) (ReturnNode funPair) 0 (pairGraphWorklist gr)
+    wl = RevMap.insertWith (min) (ReturnNode funPair) NormalPriority (pairGraphWorklist gr)
 
 
 getSyncPoint ::
@@ -836,26 +858,16 @@ addToWorkList ::
   GraphNode arch ->
   PairGraph sym arch ->
   Maybe (PairGraph sym arch)
-addToWorkList nd gr = case getCurrentDomain gr nd of
-  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd 0 (pairGraphWorklist gr) }
-  Nothing -> Nothing
+addToWorkList nd gr = addToWorkListPriority nd NormalPriority gr
 
--- | Same as 'addToWorkList' but make this a priority to process first
+-- | Same as 'addToWorkList' but with a configurable priority
 addToWorkListPriority ::
   GraphNode arch ->
+  NodePriority ->
   PairGraph sym arch ->
   Maybe (PairGraph sym arch)  
-addToWorkListPriority nd gr = case getCurrentDomain gr nd of
-  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd (-1) (pairGraphWorklist gr) }
-  Nothing -> Nothing
-
--- | Same as 'addToWorkList' but make this a priority to process last
-addToWorkListLowPriority ::
-  GraphNode arch ->
-  PairGraph sym arch ->
-  Maybe (PairGraph sym arch)  
-addToWorkListLowPriority nd gr = case getCurrentDomain gr nd of
-  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd (1) (pairGraphWorklist gr) }
+addToWorkListPriority nd priority gr = case getCurrentDomain gr nd of
+  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd priority (pairGraphWorklist gr) }
   Nothing -> Nothing
 
 emptyWorkList :: PairGraph sym arch -> PairGraph sym arch
@@ -870,7 +882,7 @@ freshDomain ::
   PairGraph sym arch
 freshDomain gr pTo d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-    , pairGraphWorklist = RevMap.insertWith (min) pTo 0 (pairGraphWorklist gr)
+    , pairGraphWorklist = RevMap.insertWith (min) pTo NormalPriority (pairGraphWorklist gr)
     }
 
 initDomain ::
@@ -1015,7 +1027,7 @@ queuePendingNodes pg = do
       ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList refineActs))
 
   foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
-    True | Just pg__ <- addToWorkListPriority from pg_ -> return pg__
+    True | Just pg__ <- addToWorkListPriority from UrgentPriority pg_ -> return pg__
     _ -> return pg_) pg nodeActs'
   where
     asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction
@@ -1027,6 +1039,8 @@ queuePendingNodes pg = do
       True -> return True
       False-> someActionReady acts
 
+-- | Run any pending actions for the given node or edge. Returns 'Nothing' if
+--   no actions were run.
 runPendingActions ::
   forall sym arch k f v.
   Ord k =>
@@ -1034,14 +1048,17 @@ runPendingActions ::
   k ->
   f v ->
   PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
+  EquivM sym arch (Maybe (PairGraph sym arch))
 runPendingActions lens edge result pg = do
   let actMap = (pairGraphPendingActs pg) ^. lens
   let actList = fromMaybe [] (Map.lookup edge actMap)
   env <- ask
-  let go :: [PendingAction sym arch f] -> PairGraph sym arch -> IO (PairGraph sym arch)
-      go [] pg' = return pg'
+  let go :: [PendingAction sym arch f] -> PairGraph sym arch -> IO (PairGraph sym arch,Bool)
+      go [] _pg' = return (_pg', False)
       go (PendingAction _ act:acts) pg' = runLazyAction act (env, Some result, pg') >>= \case
-        Just pg'' -> go acts pg''
+        Just pg'' -> (go acts pg'' >>= \(pg''',_) -> return (pg''',True))
         Nothing -> go acts pg'
-  liftIO $ go actList pg
+  (pg', didchange) <- liftIO $ go actList pg
+  case didchange of
+    True -> return $ Just pg'
+    False -> return Nothing

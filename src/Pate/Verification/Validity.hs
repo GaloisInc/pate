@@ -49,12 +49,17 @@ validInitState ::
   Maybe (PB.BlockPair arch) ->
   PPa.PatchPair (SimState sym arch v) ->
   EquivM sym arch (AssumptionSet sym)
-validInitState mpPair stPair = PPa.catBins $ \bin -> do
+validInitState mpPair stPair = withSym $ \sym -> PPa.catBins $ \bin -> do
   mblk <- case mpPair of
     Just pPair -> Just <$> PPa.get bin pPair
     Nothing -> return Nothing
   regs <- simRegs <$> PPa.get bin stPair
-  fmap PRt.collapse $ MM.traverseRegsWith (\r v -> Const <$> validRegister mblk v r) regs
+  reg_asms <- fmap PRt.collapse $ MM.traverseRegsWith (\r v -> Const <$> validRegister mblk v r) regs
+  stackBase <- (unSE . unSB . simStackBase) <$> PPa.get bin stPair
+  stackBaseCaller <- (unSE . unSB . simCallerStackBase) <$> PPa.get bin stPair
+  -- current stack base comes after caller
+  stackBaseRel <- liftIO $ W4.bvUle sym stackBase stackBaseCaller 
+  return $ (fromPred stackBaseRel) <> reg_asms
 
 validRegister ::
   forall bin sym arch tp.

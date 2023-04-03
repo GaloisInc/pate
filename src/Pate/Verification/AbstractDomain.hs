@@ -586,7 +586,7 @@ widenAbsDomainEqMetaData ::
   PS.SimBundle sym arch v ->
   m (AbstractDomain sym arch v, Maybe (WidenLocs sym arch))
 widenAbsDomainEqMetaData sym scope prev f bundle = do
-  let (oPostState, pPostState) = PE.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let (oPostState, pPostState) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
   mrO <- PEM.mapExpr sym f (PS.simMaxRegion oPostState)
   mrP <- PEM.mapExpr sym f (PS.simMaxRegion pPostState)
 

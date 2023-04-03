@@ -83,8 +83,8 @@ simBundleToSlice ::
 simBundleToSlice scope bundle = withSym $ \sym -> do
   let 
     (ecaseO, ecaseP) = PPa.view PS.simOutBlockEnd (simOut bundle) 
-    (inO, inP) = PE.asStatePair scope (PS.simIn bundle) PS.simInState
-    (outO, outP) = PE.asStatePair scope (PS.simOut bundle) PS.simOutState
+    (inO, inP) = PS.asStatePair scope (PS.simIn bundle) PS.simInState
+    (outO, outP) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
 
   footprints <- getFootprints bundle
   memReads <- PEM.toList <$> (liftIO $ PEM.fromFootPrints sym (S.filter (MT.isDir MT.Read) footprints))

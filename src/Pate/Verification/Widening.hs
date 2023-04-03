@@ -136,12 +136,12 @@ getEquivPostCondition ::
   GraphNode arch {- ^ target -} ->
   PairGraph sym arch ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-getEquivPostCondition _scope bundle to gr = withSym $ \sym -> do
+getEquivPostCondition scope bundle to gr = withSym $ \sym -> do
   -- this is the equivalence condition that this outgoing node is going to assume
   -- on its pre-state, so we can assume it for our post-state
   -- FIXME: as part of the propagation strategy we need to make sure that
   -- this condition is *implied* by the 'from' equivalence condition and equivalence domain
-  let outVars = PS.bundleOutVars bundle
+  let outVars = PS.bundleOutVars scope bundle
   case getEquivCondition gr to of
     Just condSpec -> do
       (_asm, cond) <- liftIO $ PS.bindSpec sym outVars condSpec
@@ -168,7 +168,7 @@ computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeE
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
   let 
-    (stO, stP) = asStatePair scope (PS.simOut bundle) PS.simOutState
+    (stO, stP) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
     regsO = PS.simRegs stO
     regsP = PS.simRegs stP
     memO = PS.simMem stO
@@ -241,7 +241,7 @@ updateEquivCondition scope nd cond gr = withSym $ \sym -> do
   pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
   case getEquivCondition  gr nd of
     Just eqCondSpec -> do
-      (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
       eqCond' <- PEC.mux sym pathCond cond eqCond
       return $ setEquivCondition nd (PS.mkSimSpec scope eqCond') gr
     Nothing -> do
@@ -260,7 +260,7 @@ addToEquivCondition scope nd condPred gr = withSym $ \sym -> do
   let eqCond = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred condPred}
   case getEquivCondition  gr nd of
     Just eqCondSpec -> do
-      (_, eqCond') <- liftIO $ PS.bindSpec sym (PS.scopeVars scope) eqCondSpec
+      (_, eqCond') <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
       eqCond'' <- PEC.merge sym eqCond eqCond'
       return $ setEquivCondition nd (PS.mkSimSpec scope eqCond'') gr
     Nothing -> return $ setEquivCondition nd (PS.mkSimSpec scope eqCond) gr
@@ -281,35 +281,62 @@ applyDomainRefinements ::
   AbstractDomain sym arch v {- ^ post-domain -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)   
-applyDomainRefinements scope (from,to) bundle preD postD gr1 = withSym $ \sym -> do
-  case getDomainRefinement to gr1 of
-    Nothing -> return gr1
-    Just PruneBranch -> do
+applyDomainRefinements scope (from,to) bundle preD postD gr0 = fnTrace "applyDomainRefinements" $ withSym $ \sym -> do
+  let next = applyDomainRefinements scope (from,to) bundle preD postD
+  case getNextDomainRefinement to gr0 of
+    Nothing -> do
+      emitTrace @"message" "No refinements found"
+      return gr0
+    Just (PruneBranch,gr1) -> withTracing @"message" ("Applying PruneBranch to " ++ show to) $ do
       pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
       notPath <- liftIO $ W4.notPred sym pathCond
       gr2 <- addToEquivCondition scope from notPath gr1
-      return $ dropPostDomains from (markEdge from to gr2)
-      -- prioritize re-examining the predecessor node
+      gr3 <- return $ queueAncestors HighPriority from $ dropPostDomains from (markEdge from to gr2)
+      next gr3
 
-    Just (LocationRefinement refine) -> do
-      -- check if our refinement holds on the computed post-domain
-      mr <- PL.firstLocation sym (PAD.absDomEq postD) $ \l p -> case (refine (PL.SomeLocation l), W4.asConstantPred p) of
-        -- refinement requested here, but location is included in domain
-        (True, Just True) -> return Nothing
-        -- no refinement requested
-        (False, _) -> return Nothing
-        -- refinement requested, but domain has non-trivial entry, the equivalence condition
-        -- of the predecessor node therefore requires refinement
-        (True, _) -> return $ Just ()
-      case mr of
-        Nothing -> return gr1
-        Just () -> do
-          -- refine the domain of the predecessor node and drop this domain
-          eqCond <- computeEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
+    Just (LocationRefinement refineK refine,gr1) ->  withTracing @"message" ("Applying LocationRefinement to " ++ show to) $ do
+      -- refine the domain of the predecessor node and drop this domain
+      eqCond <- case refineK of
+        RefineUsingIntraBlockPaths -> computeEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
+        RefineUsingExactEquality -> domainToEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
+      eqCond_pred <- PEC.toPred sym eqCond
+      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+      emitTraceLabel @"expr" "Generated Condition" (Some eqCond_pred)          
+      isPredTrue' goalTimeout eqCond_pred >>= \case
+        True -> do
+          emitTrace @"message" "Equivalence condition holds, no propagation needed"
+          return gr1
+        False -> do
           gr2 <- updateEquivCondition scope from eqCond gr1
           -- since its equivalence condition has been modified, we need to re-examine
           -- all outgoing edges from the predecessor node
-          return $ dropPostDomains from (markEdge from to gr2)
+          gr3 <- return $ queueAncestors HighPriority from $ dropPostDomains from (markEdge from to gr2)
+          next gr3
+
+
+-- | Unlike 'computeEquivCondition', this simply generates a trivial equivalence condition
+--   that asserts the exact target equivalence domain refinement
+domainToEquivCondition ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v {- ^ pre-domain -} ->
+  AbstractDomain sym arch v {- ^ post-domain -} ->
+  (forall nm k. PL.Location sym arch nm k -> Bool) ->
+  EquivM sym arch (PEC.EquivalenceCondition sym arch v)
+domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
+  postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case refine loc of
+    False -> return (PL.getLoc loc, p)
+    -- modify postdomain to unconditionally include target locations
+    True -> return $ (PL.getLoc loc, W4.truePred sym)
+
+  eqCtx <- equivalenceContext
+  eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
+  eqCond' <- applyCurrentAsms eqCond
+  
+  PEC.fromLocationTraversable @sym @arch sym eqCond' $ \loc eqPred -> case refine loc of
+    False -> return $ W4.truePred sym
+    True -> return eqPred
 
 {-
 -- | After widening an edge, insert an equivalence condition
@@ -426,10 +453,12 @@ propagateCondition ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
-propagateCondition scope bundle from to gr = withSym $ \sym -> do
+propagateCondition scope bundle from to gr = fnTrace "propagateCondition" $ withSym $ \sym -> do
   case getEquivCondition gr to of
     -- no target equivalence condition, nothing to do
-    Nothing -> return Nothing
+    Nothing -> do
+      emitTrace @"message" "No equivalence condition to propagate"
+      return Nothing
     Just{} -> withTracing @"function_name" "propagateCondition" $ do
       -- take the condition of the target edge and bind it to
       -- the output state of the bundle
@@ -441,12 +470,14 @@ propagateCondition scope bundle from to gr = withSym $ \sym -> do
       isPredTrue' goalTimeout cond_pred >>= \case
         -- equivalence condition for this path holds, we 
         -- don't need any changes
-        True -> return Nothing
+        True -> do
+          emitTraceLabel @"expr" "Proven Equivalence Condition" (Some cond_pred) 
+          return Nothing
         -- we need more assumptions for this condition to hold
         False -> do
+          emitTraceLabel @"expr" "Assumed (Propagated) Equivalence Condition" (Some cond_pred)
           gr1 <- updateEquivCondition scope from cond gr
-          gr2 <- return $ dropPostDomains from (markEdge from to gr1)
-          Just <$> maybeUpdate gr2 (return $ addToWorkListPriority from gr2)
+          return $ Just $ queueAncestors HighPriority from $ dropPostDomains from (markEdge from to gr1)
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -541,7 +572,7 @@ widenAlongEdge scope bundle from d gr to = withSym $ \sym -> do
             -- values of the slice again. This is accomplised by 'abstractOverVars', which
             -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
             -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-            (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars bundle) postSpec
+            (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars scope bundle) postSpec
             withAssumptionSet asm $ do
               md <- widenPostcondition scope bundle d d'
               case md of
@@ -581,12 +612,13 @@ finalizeGraphEdge ::
   EquivM sym arch (PairGraph sym arch)
 finalizeGraphEdge scope bundle preD postD from to gr0 = do
   let gr1 = markEdge from to gr0
-  gr2 <- runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr1
-  -- if the computed domain doesn't agree with any requested domain refinements,
-  -- we need to propagate this backwards by dropping the entry for 'to',
-  -- augmenting the equivalence condition for 'from' and re-processing it
-  applyDomainRefinements scope (from,to) bundle preD postD gr2
-
+  runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr1 >>= \case
+    Just gr2 -> return $ queueAncestors HighPriority to gr2
+    Nothing -> 
+      -- if the computed domain doesn't agree with any requested domain refinements,
+      -- we need to propagate this backwards by dropping the entry for 'to',
+      -- augmenting the equivalence condition for 'from' and re-processing it
+      applyDomainRefinements scope (from,to) bundle preD postD gr1
 
 data MaybeF f tp where
   JustF :: f tp -> MaybeF f tp
@@ -646,7 +678,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
     go = withSym $ \sym -> do
       emitTraceLabel @"domain" PAD.Postdomain (Some postResult)
       -- the post-state of the slice phrased over 'pre'
-      let outVars = PS.bundleOutVars bundle
+      let outVars = PS.bundleOutVars scope_pre bundle
 
       curAsm <- currentAsm
       emitTrace @"assumption" curAsm
@@ -655,7 +687,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
 
       withSimSpec (PS.simPair bundle) postSpec $ \(scope_post :: PS.SimScope sym arch post) _body -> do
         -- the variables representing the post-state (i.e. the target scope)
-        let postVars = PS.scopeVars scope_post
+        let postVars = PS.scopeVarsPair scope_post
 
         -- rewrite post-scoped terms into pre-scoped terms that represent
         -- the result of symbolic execution (i.e. formally stating that
@@ -697,7 +729,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
             W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
             Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
             pre_vars <- PPa.get bin (PS.scopeVars scope_pre)
-            post_vars <- PPa.get bin postVars
+            post_vars <- PPa.get bin (PPa.fromTuple postVars)
             let preFrame = PS.unSB $ PS.simStackBase $ PS.simVarState pre_vars
             let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState post_vars
 
@@ -721,7 +753,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
             W4.BaseBVRepr w <- return $ W4.exprType (PS.unSE se)
             Just Refl <- return $ testEquality w (MM.memWidthNatRepr @(MM.ArchAddrWidth arch))
             -- se[v]
-            post_vars <- PPa.get bin postVars
+            post_vars <- PPa.get bin (PPa.fromTuple postVars)
             let postFrame = PS.unSB $ PS.simStackBase $ PS.simVarState post_vars
 
             off <- liftIO $ PS.liftScope0 @post sym (\sym' -> W4.freshConstant sym' (W4.safeSymbol "frame_offset") (W4.BaseBVRepr w))
@@ -1365,7 +1397,7 @@ findUnequalHeapWrites ::
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalHeapWrites sym scope evalFn bundle eqCtx = do
-  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let (oPostState, pPostState) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
 
   footO <- liftIO $ MT.traceFootprint sym (PS.simMem oPostState)
   footP <- liftIO $ MT.traceFootprint sym (PS.simMem pPostState)
@@ -1386,7 +1418,7 @@ findUnequalStackWrites ::
   EquivContext sym arch ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalStackWrites sym scope evalFn bundle eqCtx = do
-  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let (oPostState, pPostState) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
 
   footO <- liftIO $ MT.traceFootprint sym (PS.simMem oPostState)
   footP <- liftIO $ MT.traceFootprint sym (PS.simMem pPostState)
@@ -1408,7 +1440,7 @@ findUnequalHeapMemCells ::
   AbstractDomain sym arch v ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalHeapMemCells sym scope evalFn bundle eqCtx preD = do
-  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let (oPostState, pPostState) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
   let prestateHeapCells = PEM.toList (PEE.eqDomainGlobalMemory (PAD.absDomEq preD))
 
   execWriterT $ forM_ prestateHeapCells $ \(Some cell, cond) -> do
@@ -1427,7 +1459,7 @@ findUnequalStackMemCells ::
   AbstractDomain sym arch v ->
   EquivM sym arch [Some (PMc.MemCell sym arch)]
 findUnequalStackMemCells sym scope evalFn bundle eqCtx preD = do
-  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let (oPostState, pPostState) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
   let prestateStackCells = PEM.toList (PEE.eqDomainStackMemory (PAD.absDomEq preD))
 
   execWriterT $ forM_ prestateStackCells $ \(Some cell, cond) -> do
@@ -1446,7 +1478,7 @@ widenRegisters ::
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
 widenRegisters sym scope evalFn bundle eqCtx _postCondAsm postCondStatePred postD = do
-  let (oPostState, pPostState) = PEq.asStatePair scope (PS.simOut bundle) PS.simOutState
+  let (oPostState, pPostState) = PS.asStatePair scope (PS.simOut bundle) PS.simOutState
 
   newRegs <- findUnequalRegs sym evalFn eqCtx
                 (PEE.eqDomainRegisters postCondStatePred)

@@ -1271,7 +1271,34 @@ simplifyBVOpInner sym _simp_check go app = case app of
       return $ do
         lhs' <- W4.bvSelect sym (W4.knownNat @0) rhs_w lhs
         W4.isEq sym lhs' rhs' >>= go
-      
+    <|> do
+      W4B.BVConcat u_p_v inner_left inner_right <- W4B.asApp lhs
+      W4.BaseBVRepr u <- return $ W4.exprType inner_left
+      W4.BaseBVRepr v <- return $ W4.exprType inner_right
+      W4.LeqProof <- W4.testLeq u u_p_v
+      W4.LeqProof <- W4.testLeq v u_p_v
+      v_p_u <- return $ W4.addNat v u
+      Refl <- testEquality u_p_v v_p_u
+      return $ do
+        rhs1 <- W4.bvSelect sym (W4.knownNat @0) v rhs
+        rhs2 <- W4.bvSelect sym v u rhs
+        eq1 <- W4.isEq sym inner_left rhs2 >>= go 
+        eq2 <- W4.isEq sym inner_right rhs1 >>= go 
+        W4.andPred sym eq1 eq2
+    <|> do
+      W4B.BVConcat u_p_v inner_left inner_right <- W4B.asApp rhs
+      W4.BaseBVRepr u <- return $ W4.exprType inner_left
+      W4.BaseBVRepr v <- return $ W4.exprType inner_right
+      W4.LeqProof <- W4.testLeq u u_p_v
+      W4.LeqProof <- W4.testLeq v u_p_v
+      v_p_u <- return $ W4.addNat v u
+      Refl <- testEquality u_p_v v_p_u
+      return $ do
+        lhs1 <- W4.bvSelect sym (W4.knownNat @0) v lhs
+        lhs2 <- W4.bvSelect sym v u lhs
+        eq1 <- W4.isEq sym lhs2 inner_left >>= go 
+        eq2 <- W4.isEq sym lhs1 inner_right >>= go 
+        W4.andPred sym eq1 eq2
   _ -> Nothing
 
 -- | Deep simplification of bitvector operations by removing redundant

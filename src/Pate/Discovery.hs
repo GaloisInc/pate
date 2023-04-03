@@ -401,25 +401,30 @@ associateFrames bundle exitCase isStub = do
       st_post = PSS.simOutState output
       frame_pre = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_pre
       frame_post = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_post
+      caller_frame_pre = PSS.unSE $ PSS.unSB $ PSS.simCallerStackBase $ st_pre
+      caller_frame_post = PSS.unSE $ PSS.unSB $ PSS.simCallerStackBase $ st_post
+
       CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post
+      frame_noop = (PAS.exprBinding frame_post frame_pre) <> (PAS.exprBinding caller_frame_post caller_frame_pre)
     case exitCase of
       -- a backjump does not modify the frame
-      MCS.MacawBlockEndJump -> return $ PAS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndJump -> return $ frame_noop
       -- Stubs are treated specially and do not create return nodes, so
       -- the pre and post frames are the same
-      MCS.MacawBlockEndCall | isStub -> return $ PAS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndCall | isStub -> return $ frame_noop
       -- For a function call the post-state frame is the frame for the
       -- target function, and so we represent that by asserting that it is
-      -- equal to the value of the stack pointer at the call site
-      MCS.MacawBlockEndCall -> return $ PAS.exprBinding frame_post sp_post
+      -- equal to the value of the stack pointer at the call site.
+      -- Similary, the caller frame in the post-state becomes the frame of the pre-state.
+      MCS.MacawBlockEndCall -> return $ (PAS.exprBinding frame_post sp_post) <> (PAS.exprBinding caller_frame_post frame_pre)
       -- note that a return results in two transitions:
       -- the first transitions to the "Return" graph node and then
       -- the second transitions from that node to any of the call sites (nondeterministically)
       -- this case is only for the first transition, which does not perform
       -- any frame rebinding (as we don't yet know where we are returning to)
-      MCS.MacawBlockEndReturn -> return $ PAS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndReturn -> return $ frame_noop
       -- a branch does not modify the frame
-      MCS.MacawBlockEndBranch -> return $ PAS.exprBinding frame_post frame_pre
+      MCS.MacawBlockEndBranch -> return $ frame_noop
       -- nothing to do on failure
       MCS.MacawBlockEndFail -> return mempty
       -- this likely requires some architecture-specific reasoning

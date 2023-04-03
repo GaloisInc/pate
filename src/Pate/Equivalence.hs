@@ -50,7 +50,6 @@ module Pate.Equivalence
   , postCondPredicate
   , memPreCondToPred
   , memPostCondToPred
-  , asStatePair
   ) where
 
 import           Control.Lens hiding ( op, pre )
@@ -453,23 +452,7 @@ regDomRel hdr sym st1 st2 regDom  = PEC.RegisterCondition <$> do
     let p = PER.registerInDomain sym r regDom
     registerValuesEqual' hdr sym r p vO vP
 
--- | Return a pair of states to perform an equality check.
---   Usually there are two input/output states (original vs. patched) that we are comparing for
---   equality. For single-sided analysis, however, we instead compare the input/output state
---   against a fully-symbolic alternate state (taken from the scope), which is unchanged 
---   during any transition.
-asStatePair ::
-  SimScope sym arch v ->
-  PPa.PatchPair x ->
-  (forall bin. x bin -> SimState sym arch v bin) ->
-  (SimState sym arch v PBi.Original, SimState sym arch v PBi.Patched)
-asStatePair scope pPair f = do
-  case pPair of
-    PPa.PatchPair stO stP -> (f stO, f stP)
-    PPa.PatchPairOriginal stO -> (f stO, simVarState varsP)
-    PPa.PatchPairPatched stP -> (simVarState varsO, f stP)
-  where
-    (varsO, varsP) = scopeVarsPair scope
+
 
 regCondToAsm ::
   W4.IsSymExprBuilder sym =>

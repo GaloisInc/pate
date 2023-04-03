@@ -76,6 +76,7 @@ module Pate.SimState
   , ScopeCoercion
   , getScopeCoercion
   , applyScopeCoercion
+  , asStatePair
   , bundleOutVars
   , bundleInVars
   ) where
@@ -134,7 +135,14 @@ data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   {
     simMem :: MT.MemTraceImpl sym (MM.ArchAddrWidth arch)
   , simRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym)
+  -- | The base of the stack in this scope, where all stack accesses
+  --   (and the value of the stack pointer register) are expressed as offsets to this base.
+  --   Whenever a function call is made, this becomes the the value of the stack pointer
+  --   at the call site.
   , simStackBase :: StackBase sym arch v
+  -- | The base of the caller's stack in this scope. Whenever a function call is made
+  --   this becomes the 'simStackBase' of the caller.
+  , simCallerStackBase :: StackBase sym arch v
   -- | The most recent region allocated by malloc. Ideally this should always be
   --   concrete (i.e. have some concrete constraint in the value domain), but
   --   can be symbolic if the number of calls to @malloc()@ cannot be statically determined.
@@ -237,13 +245,13 @@ data SimScope sym arch v =
 scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
 scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
 
-scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
-scopeVars scope = TF.fmapF boundVarsAsFree (scopeBoundVars scope)
-
--- | A 'SimScope' always has variables defined for both the original and patched binaries,
---   and so we can return a normal tuple of 'SimVars'.
 scopeVarsPair :: SimScope sym arch v -> (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched)
 scopeVarsPair scope = (boundVarsAsFree $ scopeBoundVarsO scope, boundVarsAsFree $ scopeBoundVarsP scope)
+
+scopeVars :: SimScope sym arch v -> PPa.PatchPair (SimVars sym arch v)
+scopeVars scope = 
+  PPa.PatchPair (boundVarsAsFree $ scopeBoundVarsO scope) (boundVarsAsFree $ scopeBoundVarsP scope)
+
 
 -- | Create a 'SimSpec' with "fresh" bound variables
 freshSimSpec ::
@@ -260,19 +268,19 @@ freshSimSpec ::
   -- | Fresh base region
   (forall bin v. PBi.WhichBinaryRepr bin -> m (ScopedExpr sym v W4.BaseIntegerType)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
-  (forall v. PPa.PatchPair (SimVars sym arch v) -> m (AssumptionSet sym, (f v))) ->
+  (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> m (AssumptionSet sym, (f v))) ->
   m (SimSpec sym arch f)
 freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
   vars <- PPa.forBins $ \bin -> do
     regs <- MM.mkRegStateM (mkReg bin)
     mem <- mkMem bin
     sb <- mkStackBase bin
+    scb <- mkStackBase bin
     mr <- mkMaxregion bin
-    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb mr)
-  (asm, body) <- mkBody (TF.fmapF boundVarsAsFree vars)
-  case vars of
-    PPa.PatchPair varsO varsP -> return $ SimSpec (SimScope varsO varsP asm) body
-    PPa.PatchPairSingle{} -> PPa.throwPairErr
+    return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb scb mr)
+  (varsO, varsP) <- PPa.asTuple vars
+  (asm, body) <- mkBody (boundVarsAsFree varsO, boundVarsAsFree varsP)
+  return $ SimSpec (SimScope varsO varsP asm) body
 
 -- | Project out the body with an arbitrary scope.
 viewSpecBody ::
@@ -334,12 +342,29 @@ instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTrac
   prettyNode () (Some _bundle) = "<TODO: pretty bundle>"
   nodeTags = [("symbolic", \_ _ -> "<TODO: pretty bundle>")]
 
+-- | Return a pair of states to perform an equality check.
+--   Usually there are two input/output states (original vs. patched) that we are comparing for
+--   equality. For single-sided analysis, however, we instead compare the input/output state
+--   against a fully-symbolic alternate state (taken from the scope), which is unchanged 
+--   during any transition.
+asStatePair ::
+  SimScope sym arch v ->
+  PPa.PatchPair x ->
+  (forall bin. x bin -> SimState sym arch v bin) ->
+  (SimState sym arch v PBi.Original, SimState sym arch v PBi.Patched)
+asStatePair scope pPair f = do
+  case pPair of
+    PPa.PatchPair stO stP -> (f stO, f stP)
+    PPa.PatchPairOriginal stO -> (f stO, simVarState varsP)
+    PPa.PatchPairPatched stP -> (simVarState varsO, f stP)
+  where
+    (varsO, varsP) = scopeVarsPair scope
 
-bundleOutVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
-bundleOutVars bundle = TF.fmapF (SimVars . simOutState) (simOut bundle)
+bundleOutVars :: SimScope sym arch v -> SimBundle sym arch v -> (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched)
+bundleOutVars scope bundle = let (stO,stP) = asStatePair scope (simOut bundle) simOutState in (SimVars stO, SimVars stP)
 
-bundleInVars :: SimBundle sym arch v -> PPa.PatchPair (SimVars sym arch v)
-bundleInVars bundle = TF.fmapF (SimVars . simInState) (simIn bundle)
+bundleInVars :: SimScope sym arch v -> SimBundle sym arch v -> (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched)
+bundleInVars scope bundle = let (stO,stP) = asStatePair scope (simIn bundle) simInState in (SimVars stO, SimVars stP)
 
 simPair :: SimBundle sym arch v -> PB.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)
@@ -381,15 +406,20 @@ mkVarBinds ::
   SimBoundVars sym arch v bin ->
   MT.MemTraceState sym (MM.ArchAddrWidth arch) ->
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
-  StackBase sym arch v' ->
+  StackBase sym arch v' {- ^ simStackBase -} ->
+  StackBase sym arch v' {- ^ simCallerStackBase -} ->
   ScopedExpr sym v' W4.BaseIntegerType ->
   IO (ExprRewrite sym v v')
-mkVarBinds _sym simVars mem regs sb mr = do
+mkVarBinds _sym simVars mem regs sb scb mr = do
   let
     memVar = MT.memState $ simMem $ simBoundVarState simVars
     regVars = simBoundVarRegs simVars
     stackVar = simStackBase $ simBoundVarState simVars
-    stackBinds = singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
+    stackCallerVar = simCallerStackBase $ simBoundVarState simVars
+
+    stackBinds = 
+      singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
+      <> singleRewrite (unSE $ unSB $ stackCallerVar) (unSE $ unSB $ scb)
 
     maxRegVar = simMaxRegion $ simBoundVarState simVars
     maxRegBinds = singleRewrite (unSE $ maxRegVar) (unSE $ mr)
@@ -576,14 +606,15 @@ getScopeCoercion ::
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
   SimScope sym arch v1 ->
-  PPa.PatchPair (SimVars sym arch v2) ->
+  (SimVars sym arch v2 PBi.Original,
+  SimVars sym arch v2 PBi.Patched) ->
   IO (ScopeCoercion sym v1 v2)
 getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
   binds <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
-    st <- simVarState <$> PPa.get bin vals
+    st <- simVarState <$> PPa.get bin (PPa.fromTuple vals)
     vars' <- PPa.get bin vars
-    lift $ mkVarBinds sym vars' (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simMaxRegion st)
+    lift $ mkVarBinds sym vars' (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simCallerStackBase st) (simMaxRegion st)
   asScopeCoercion $ binds
 
 bindSpec ::
@@ -593,7 +624,8 @@ bindSpec ::
   MM.RegisterInfo (MM.ArchReg arch) =>
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
-  PPa.PatchPair (SimVars sym arch v) ->
+  (SimVars sym arch v PBi.Original,
+  SimVars sym arch v PBi.Patched) ->
   SimSpec sym arch f ->
   IO (AssumptionSet sym, f v)
 bindSpec sym vals (SimSpec scope@(SimScope _ _ asm) (body :: f v')) = do
@@ -746,10 +778,11 @@ freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
 -- since allowing arbitrary modifications can violate the scoping
 -- assumptions
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb)) (ScopedExpr mr)) = SimState
+  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb)) (StackBase (ScopedExpr scb)) (ScopedExpr mr)) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
     <*> ((StackBase . ScopedExpr) <$> f sb)
+    <*> ((StackBase . ScopedExpr) <$> f scb)
     <*> (ScopedExpr <$> f mr)
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where

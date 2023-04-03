@@ -45,6 +45,8 @@ module Pate.PatchPair (
   , get
   , set
   , view
+  , asTuple
+  , fromTuple
   , ppEq
   , LiftF(..)
   , PatchPairF
@@ -182,6 +184,15 @@ view :: (forall bin. tp bin -> x) -> PatchPair tp -> (x, x)
 view f pPair = case pPair of
   PatchPair v1 v2 -> (f v1, f v2)
   PatchPairSingle _ v -> (f v, f v)
+
+asTuple :: PatchPairM m => PatchPair tp -> m (tp PB.Original, tp PB.Patched)
+asTuple pPair = case pPair of
+  PatchPair v1 v2 -> return (v1, v2)
+  PatchPairSingle{} -> throwPairErr
+
+
+fromTuple :: (tp PB.Original, tp PB.Patched) -> PatchPair tp
+fromTuple (vO,vP) = PatchPair vO vP
 
 -- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
