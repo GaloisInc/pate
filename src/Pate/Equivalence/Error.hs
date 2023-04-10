@@ -123,10 +123,11 @@ data InnerEquivalenceError arch
   | OutOfGas
   | UnsupportedLocation 
   | forall bin. InvalidBlockAddress (PB.ConcreteBlock arch bin)
-  | MissingBlockAtAddress (MM.ArchSegmentOff arch)
+  | forall bin. MissingBlockAtAddress (MM.ArchSegmentOff arch) [MM.ArchSegmentOff arch] (PBi.WhichBinaryRepr bin) (PB.ConcreteBlock arch bin)
   | UninterpretedInstruction
   | FailedToResolveAddress (MM.MemWord (MM.ArchAddrWidth arch))
   | forall tp. FailedToGroundExpr (SomeExpr tp)
+  | OrphanedSingletonAnalysis (PB.FunPair arch)
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
 
@@ -157,6 +158,7 @@ isRecoverable' e = case e of
   BlockHasNoExit{} -> True
   OrphanedFunctionReturns{} -> True
   CallReturnsToFunctionEntry{} -> True
+  OrphanedSingletonAnalysis{} -> True
   _ -> False
 
 -- | When an error is raised as a warning, this determines if it should be displayed

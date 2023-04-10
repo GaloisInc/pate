@@ -27,8 +27,10 @@ module Pate.Equivalence.Condition (
   , toPred
   , mux
   , merge
+  , weaken
   , falseEqCondition
   , mergeRegCond
+  , weakenRegCond
   ) where
 
 import           Control.Lens ( (^.), (&), (.~) )
@@ -96,6 +98,23 @@ merge sym cond1 cond2 = do
   let pcond = PAS.NamedAsms $ pc1 <> pc2
   return $ EquivalenceCondition mem regs mrCond pcond
 
+
+weaken ::
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  IO.MonadIO m => 
+  sym ->
+  W4.Pred sym ->
+  EquivalenceCondition sym arch v ->
+  m (EquivalenceCondition sym arch v)  
+weaken sym p cond = do
+  mem <- WPM.weaken sym p (eqCondMem cond)
+  regs <- weakenRegCond sym p (eqCondRegs cond)
+  let (PAS.NamedAsms mr) = (eqCondMaxRegion cond)
+  mrCond <- PAS.NamedAsms <$> PAS.weaken sym p mr
+  let (PAS.NamedAsms pc) = (eqCondExtraCond cond)
+  pcond <- PAS.NamedAsms <$> PAS.weaken sym p pc
+  return $ EquivalenceCondition mem regs mrCond pcond
 
 -- | Preconditions for graph nodes. These represent additional conditions
 --   that must be true for the equivalence domain of the node to be considered
@@ -176,6 +195,18 @@ mergeRegCond ::
   RegisterCondition sym arch v
 mergeRegCond cond1 cond2 = runIdentity $ do
   regCond <- PRt.zipWithRegStatesM (regCondPreds cond1) (regCondPreds cond2) $ \_ (Const asm1) (Const asm2) -> Const <$> (return $ asm1 <> asm2)
+  return $ RegisterCondition regCond
+
+weakenRegCond ::
+  W4.IsSymExprBuilder sym =>
+  PA.ValidArch arch =>
+  IO.MonadIO m =>
+  sym ->
+  W4.Pred sym ->
+  RegisterCondition sym arch v ->
+  m (RegisterCondition sym arch v)
+weakenRegCond sym p cond = IO.liftIO $ do
+  regCond <- MM.traverseRegsWith (\_ (Const asm) -> Const <$> (PAS.weaken sym p asm)) (regCondPreds cond)
   return $ RegisterCondition regCond
 
 instance PS.Scoped (RegisterCondition sym arch) where

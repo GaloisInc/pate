@@ -77,6 +77,7 @@ import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Domain as PD
 
 import           Pate.TraceTree
+import Data.Macaw.CFG.Core
 
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where

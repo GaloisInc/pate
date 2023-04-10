@@ -515,7 +515,7 @@ eqDomPre sym stO stP (eqCtxHDR -> hdr) eqDom  = do
   let
     st = PPa.PatchPair stO stP
     maxRegion = TF.fmapF (\st' -> Const $ unSE $ simMaxRegion st') st
-    stackBase = TF.fmapF (\st' -> Const $ unSE $ unSB $ simStackBase st') st
+    stackBase = TF.fmapF (\st' -> Const $ unSE $ simStackBase st') st
 
   regsEq <- regDomRel hdr sym stO stP (PED.eqDomainRegisters eqDom)
   maxRegionsEq <- mkNamedAsm sym (PED.eqDomainMaxRegion eqDom) (bindExprPair maxRegion)

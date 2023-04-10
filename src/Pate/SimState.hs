@@ -148,7 +148,7 @@ data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
   --   can be symbolic if the number of calls to @malloc()@ cannot be statically determined.
   --   We model a @malloc@ call as simply returning a pointer at offset zero to a fresh
   --   region, and then incrementing this value.
-  , simMaxRegion :: ScopedExpr sym v W4.BaseIntegerType
+  , simMaxRegion :: ScopedExpr sym W4.BaseIntegerType v
   }
 
 simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
@@ -266,7 +266,7 @@ freshSimSpec ::
   -- | Fresh stack base
   (forall bin v. PBi.WhichBinaryRepr bin -> m (StackBase sym arch v)) ->
   -- | Fresh base region
-  (forall bin v. PBi.WhichBinaryRepr bin -> m (ScopedExpr sym v W4.BaseIntegerType)) ->
+  (forall bin v. PBi.WhichBinaryRepr bin -> m (ScopedExpr sym W4.BaseIntegerType v)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
   (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> m (AssumptionSet sym, (f v))) ->
   m (SimSpec sym arch f)
@@ -408,7 +408,7 @@ mkVarBinds ::
   MM.RegState (MM.ArchReg arch) (PSR.MacawRegEntry sym) ->
   StackBase sym arch v' {- ^ simStackBase -} ->
   StackBase sym arch v' {- ^ simCallerStackBase -} ->
-  ScopedExpr sym v' W4.BaseIntegerType ->
+  ScopedExpr sym W4.BaseIntegerType v' ->
   IO (ExprRewrite sym v v')
 mkVarBinds _sym simVars mem regs sb scb mr = do
   let
@@ -418,8 +418,8 @@ mkVarBinds _sym simVars mem regs sb scb mr = do
     stackCallerVar = simCallerStackBase $ simBoundVarState simVars
 
     stackBinds = 
-      singleRewrite (unSE $ unSB $ stackVar) (unSE $ unSB $ sb)
-      <> singleRewrite (unSE $ unSB $ stackCallerVar) (unSE $ unSB $ scb)
+      singleRewrite (unSE $ stackVar) (unSE $ sb)
+      <> singleRewrite (unSE $ stackCallerVar) (unSE $ scb)
 
     maxRegVar = simMaxRegion $ simBoundVarState simVars
     maxRegBinds = singleRewrite (unSE $ maxRegVar) (unSE $ mr)
@@ -480,22 +480,38 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 
 -- | An expr tagged with a scoped parameter (representing the fact that the
 -- expression is valid under the scope 'v')
-data ScopedExpr sym (v :: VarScope) tp =
+data ScopedExpr sym tp (v :: VarScope) =
   ScopedExpr { unSE :: W4.SymExpr sym tp }
 
-instance PEM.ExprMappable sym (ScopedExpr sym v tp) where
+instance PEM.ExprMappable sym (ScopedExpr sym tp v) where
   mapExpr _sym f (ScopedExpr e) = ScopedExpr <$> f e
 
-instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym v tp) where
+instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym tp v) where
   pretty (ScopedExpr e) = W4.printSymExpr e
 
-instance W4.IsExpr (W4.SymExpr sym) => Show (ScopedExpr sym v tp) where
+instance W4.IsExpr (W4.SymExpr sym) => Show (ScopedExpr sym tp v) where
   show e = show (PP.pretty e)
 
-instance TestEquality (W4.SymExpr sym) => Eq (ScopedExpr sym v tp) where
+instance TestEquality (W4.SymExpr sym) => Eq (ScopedExpr sym tp v) where
   e1 == e2 = case testEquality (unSE e1) (unSE e2) of
     Just _ -> True
     Nothing -> False
+
+{-
+newtype ScopedAssertion sym (v :: VarScope) = ScopedAssertion { unSA :: ScopedExpr sym v W4.BaseBoolType }
+
+instance (PEM.ExprMappable sym (ScopedAssertion sym v)) where
+  mapExpr sym f (ScopedAssertion sa) = ScopedAssertion <$> PEM.mapExpr sym f sa
+
+instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedAssertion sym v) where
+  pretty (ScopedAssertion sa) = PP.pretty sa
+
+instance TestEquality (W4.SymExpr sym) => Eq (ScopedAssertion sym v) where
+  ScopedAssertion sa1 == ScopedAssertion sa2 = sa1 == sa2
+
+instance Scoped (ScopedAssertion sym) where
+  unsafeCoerceScope (ScopedAssertion (ScopedExpr e)) = ScopedAssertion (ScopedExpr e)
+-}
 
 -- | Perform a scope-modifying rewrite to an 'PEM.ExprMappable'.
 -- The rewrite is phrased as a 'ScopedExpr' transformation, which obligates
@@ -507,7 +523,7 @@ scopedExprMap ::
   PEM.ExprMappable sym (f v1) =>
   sym ->
   f v1 ->
-  (forall tp. ScopedExpr sym v1 tp -> m (ScopedExpr sym v2 tp)) ->
+  (forall tp. ScopedExpr sym tp v1 -> m (ScopedExpr sym tp v2)) ->
   m (f v2)
 scopedExprMap sym body f = unsafeCoerceScope <$> PEM.mapExpr sym (\e -> unSE <$> f (ScopedExpr e)) body
 
@@ -523,7 +539,7 @@ scopedLocWither ::
   PL.LocationWitherable sym arch (f v1) =>
   sym ->
   f v1 ->
-  (forall tp nm k. PL.Location sym arch nm k -> ScopedExpr sym v1 tp -> m (Maybe (ScopedExpr sym v2 tp))) ->
+  (forall tp nm k. PL.Location sym arch nm k -> ScopedExpr sym tp v1 -> m (Maybe (ScopedExpr sym tp v2))) ->
   m (f v2)
 scopedLocWither sym body f = do
   fmap unsafeCoerceScope $ PL.witherLocation sym body $ \loc p -> runMaybeT $ do
@@ -551,8 +567,8 @@ applyScopeCoercion ::
   sym ~ W4B.ExprBuilder s st fs =>
   sym ->
   ScopeCoercion sym v v' ->
-  ScopedExpr sym v tp ->
-  IO (ScopedExpr sym v' tp)
+  ScopedExpr sym tp v ->
+  IO (ScopedExpr sym tp v')
 applyScopeCoercion sym (ScopeCoercion cache (ExprRewrite binds)) (ScopedExpr e) =
   ScopedExpr <$> applyExprBindings' sym cache binds e
 
@@ -562,17 +578,17 @@ liftScope2 ::
   W4.IsSymExprBuilder sym =>
   sym ->
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> W4.SymExpr sym' tp2 -> IO (W4.SymExpr sym' tp3)) ->
-  ScopedExpr sym v tp1 ->
-  ScopedExpr sym v tp2 ->
-  IO (ScopedExpr sym v tp3)
+  ScopedExpr sym tp1 v ->
+  ScopedExpr sym tp2 v ->
+  IO (ScopedExpr sym tp3 v)
 liftScope2 sym f (ScopedExpr e1) (ScopedExpr e2) = ScopedExpr <$> f sym e1 e2
 
 forScopedExpr ::
   W4.IsSymExprBuilder sym =>
   sym ->
-  ScopedExpr sym v tp1 ->
+  ScopedExpr sym tp1 v ->
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> IO (W4.SymExpr sym' tp2)) ->
-  IO (ScopedExpr sym v tp2)
+  IO (ScopedExpr sym tp2 v)
 forScopedExpr sym (ScopedExpr e1) f = ScopedExpr <$> f sym e1
 
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
@@ -582,7 +598,7 @@ liftScope0 ::
   W4.IsSymExprBuilder sym =>
   sym ->
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> IO (W4.SymExpr sym' tp)) ->
-  IO (ScopedExpr sym v tp)
+  IO (ScopedExpr sym tp v)
 liftScope0 sym f = ScopedExpr <$> f sym
 
 -- | A concrete value is valid in all scopes
@@ -591,7 +607,7 @@ concreteScope ::
   W4.IsSymExprBuilder sym =>
   sym ->
   W4.ConcreteVal tp ->
-  IO (ScopedExpr sym v tp)
+  IO (ScopedExpr sym tp v)
 concreteScope sym c = liftScope0 sym (\sym' -> W4.concreteToSym sym' c)
 
 -- | Produce an 'ScopeCoercion' that binds the terms in the given 'SimVars'
@@ -751,14 +767,8 @@ both programs, as the access to the stack variable
 -- | Points to the base of the stack. In any given context this will always be
 -- "free" as the base of the stack is always abstract, but it is rebound to account
 -- for changes to the stack pointer when moving between scopes.
-newtype StackBase sym arch v =
-  StackBase { unSB :: ScopedExpr sym v (W4.BaseBVType (MM.ArchAddrWidth arch)) }
+type StackBase sym arch = ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch))
 
-instance PEM.ExprMappable sym (StackBase sym arch v) where
-  mapExpr sym f (StackBase e) = StackBase <$> PEM.mapExpr sym f e
-
-instance TestEquality (W4.SymExpr sym) => Eq (StackBase sym arch v) where
-  (StackBase a) == (StackBase b) = a == b
 
 freshStackBase ::
   forall sym arch v.
@@ -767,7 +777,7 @@ freshStackBase ::
   sym ->
   Proxy arch ->
   IO (StackBase sym arch v)
-freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
+freshStackBase sym _arch = liftScope0 sym $ \sym' ->
     W4.freshConstant sym' (W4.safeSymbol "stack_base") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
 
 
@@ -778,12 +788,12 @@ freshStackBase sym _arch = fmap StackBase $ liftScope0 sym $ \sym' ->
 -- since allowing arbitrary modifications can violate the scoping
 -- assumptions
 instance PEM.ExprMappable sym (SimState sym arch v bin) where
-  mapExpr sym f (SimState mem regs (StackBase (ScopedExpr sb)) (StackBase (ScopedExpr scb)) (ScopedExpr mr)) = SimState
+  mapExpr sym f (SimState mem regs sb scb mr) = SimState
     <$> PEM.mapExpr sym f mem
     <*> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) regs
-    <*> ((StackBase . ScopedExpr) <$> f sb)
-    <*> ((StackBase . ScopedExpr) <$> f scb)
-    <*> (ScopedExpr <$> f mr)
+    <*> PEM.mapExpr sym f sb
+    <*> PEM.mapExpr sym f scb
+    <*> PEM.mapExpr sym f mr
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk absSt) = SimInput

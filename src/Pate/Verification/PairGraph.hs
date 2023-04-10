@@ -14,22 +14,26 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
   , initialGas
   , PairGraph
+  , maybeUpdate
   , AbstractDomain
   , initialDomain
   , initialDomainSpec
   , initializePairGraph
   , chooseWorkItem
+  , hasWorkLeft
   , pairGraphWorklist
   , pairGraphObservableReports
   , popWorkItem
   , updateDomain
   , updateDomain'
-  , modifyDomain
+  , dropWorkItem
   , addReturnVector
   , getReturnVectors
   , getEdgesFrom
@@ -49,8 +53,12 @@ module Pate.Verification.PairGraph
   , getExtraEdges
   , addTerminalNode
   , emptyReturnVector
-  , getEquivCondition
-  , setEquivCondition
+  , ConditionKind(..)
+  , getCondition
+  , getScopedCondition
+  , setCondition
+  , dropCondition
+  , nextCondition
   , dropDomain
   , dropReturns
   , dropPostDomains
@@ -60,6 +68,7 @@ module Pate.Verification.PairGraph
   , getBackEdgesFrom
   , setSyncPoint
   , getCombinedSyncPoint
+  , combineNodes
   , NodePriority(..)
   , addToWorkList
   , addToWorkListPriority
@@ -82,6 +91,7 @@ module Pate.Verification.PairGraph
   , edgeActions
   , nodeActions
   , refineActions
+  , queueActions
   , getAllNodes
   , emptyPairGraph
   , DomainRefinementKind(..)
@@ -143,6 +153,7 @@ import Pate.Solver (ValidSym)
 import Control.Monad.Reader (local, MonadReader (ask))
 import SemMC.Formula.Env (SomeSome(..))
 import qualified Pate.Location as PL
+import qualified Pate.ExprMappable as PEM
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -245,7 +256,10 @@ data PairGraph sym arch =
     -- | Avoid adding extra edges to these nodes, as we expect these functions
     --   may not actually return on any path (i.e. they end in an abort or exit)
   , pairGraphTerminalNodes :: !(Set (NodeReturn arch))
-  , pairGraphEquivConditions :: !(Map (GraphNode arch) (PEC.EquivConditionSpec sym arch))
+    -- | These are conditions that are intended to be sufficient to imply
+    --   equality (i.e. to yield a stronger equivalence domain than can be proven),
+    --   or to imply subsequent conditions on descendant nodes.
+  , pairGraphConditions :: !(Map (GraphNode arch, ConditionKind) (PEC.EquivConditionSpec sym arch))
     -- | Any edges that have been followed at any point (which may later become infeasible
     -- due to further analysis)
   , pairGraphEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
@@ -260,11 +274,27 @@ data PairGraph sym arch =
       !(Map (GraphNode arch) [DomainRefinement sym arch])
   }
 
+data ConditionKind = 
+  ConditionAsserted 
+  | ConditionAssumed Bool
+  -- ^ flag is true if this assumption should be propagated to ancestor nodes.
+  --   After propagation, this is set to false so that it only propagates once.
+  --   See 'nextCondition'
+  deriving (Eq, Ord, Show)
+
+nextCondition :: 
+  ConditionKind -> ConditionKind
+nextCondition = \case
+  ConditionAsserted -> ConditionAsserted
+  ConditionAssumed{} -> ConditionAssumed False
+
 -- | Scheduling priority for the worklist
 data NodePriority =
     UrgentPriority
+  | HigherPriority
   | HighPriority
   | NormalPriority
+  | BelowNormalPriority
   | LowPriority
   deriving (Eq, Ord, Show)
 
@@ -273,9 +303,10 @@ data DomainRefinementKind =
   | RefineUsingExactEquality
 
 
+
 data DomainRefinement sym arch =
-    LocationRefinement DomainRefinementKind (PL.SomeLocation sym arch -> Bool)
-  | PruneBranch
+    LocationRefinement ConditionKind DomainRefinementKind (PL.SomeLocation sym arch -> Bool)
+  | PruneBranch ConditionKind
 
 addDomainRefinement ::
   GraphNode arch ->
@@ -323,12 +354,13 @@ data ActionQueue sym arch =
     { _edgeActions :: Map (GraphNode arch, GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, PS.SimBundle sym arch, AbstractDomain sym arch, AbstractDomain sym arch))]
     , _nodeActions :: Map (GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, PS.SimBundle sym arch, AbstractDomain sym arch))]
     , _refineActions :: Map (GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, AbstractDomain sym arch))]
+    , _queueActions :: Map () [PendingAction sym arch (Const ())]
     , _latestPendingId :: Int
     }
 
 
 data SyncPoint arch =
-  SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch), syncTerminal :: Maybe Bool }
+  SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch) }
 
 ppProgramDomains ::
   forall sym arch a.
@@ -362,13 +394,22 @@ emptyPairGraph =
   , pairGraphMiscAnalysisErrors = mempty
   , pairGraphExtraEdges = mempty
   , pairGraphTerminalNodes = mempty
-  , pairGraphEquivConditions = mempty
+  , pairGraphConditions = mempty
   , pairGraphEdges = mempty
   , pairGraphBackEdges = mempty
   , pairGraphSyncPoints = mempty
-  , pairGraphPendingActs = ActionQueue Map.empty Map.empty Map.empty 0
+  , pairGraphPendingActs = ActionQueue Map.empty Map.empty Map.empty Map.empty 0
   , pairGraphDomainRefinements = mempty
   }
+
+maybeUpdate ::
+  Monad m =>
+  a -> 
+  m (Maybe a) ->
+  m a
+maybeUpdate gr f = f >>= \case
+  Just gr' -> return gr'
+  Nothing -> return gr
 
 getAllNodes :: PairGraph sym arch -> [GraphNode arch]
 getAllNodes pg = Map.keys (pairGraphDomains pg)
@@ -475,18 +516,40 @@ queueNode' priority nd_ (considered, pg_) = case Set.member nd_ considered of
     -- step) then we consider further ancestors
     Nothing -> Set.foldr' (queueNode' priority) (Set.insert nd_ considered, pg_) (getBackEdgesFrom pg_ nd_)
 
-getEquivCondition ::
+getCondition ::
   PairGraph sym arch ->
   GraphNode arch ->
+  ConditionKind ->
   Maybe (PEC.EquivConditionSpec sym arch)
-getEquivCondition pg nd = Map.lookup nd (pairGraphEquivConditions pg)
-  
-setEquivCondition ::
+getCondition pg nd condK = Map.lookup (nd, condK) (pairGraphConditions pg)
+
+
+getScopedCondition ::
+  PS.SimScope sym arch v ->
+  PairGraph sym arch ->
   GraphNode arch ->
+  ConditionKind ->
+  EquivM sym arch (PEC.EquivalenceCondition sym arch v)
+getScopedCondition scope pg nd condK = withSym $ \sym -> case getCondition pg nd condK of
+  Just condSpec -> do
+    (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
+    return eqCond
+  Nothing -> return $ PEC.universal sym
+
+setCondition :: 
+  GraphNode arch ->
+  ConditionKind ->
   PEC.EquivConditionSpec sym arch ->
   PairGraph sym arch ->
   PairGraph sym arch
-setEquivCondition nd cond pg = pg { pairGraphEquivConditions = Map.insert nd cond (pairGraphEquivConditions pg) }
+setCondition nd condK cond pg = pg { pairGraphConditions = Map.insert (nd,condK) cond (pairGraphConditions pg) }
+
+dropCondition ::
+  GraphNode arch ->
+  ConditionKind ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropCondition nd condK pg = pg { pairGraphConditions = Map.delete (nd,condK) (pairGraphConditions pg) }
 
 -- | If an observable counterexample has not already been found
 --   for this block pair, run the given action to check if there
@@ -638,6 +701,21 @@ popWorkItem gr nd = case Map.lookup nd (pairGraphDomains gr) of
     let wl = RevMap.delete nd (pairGraphWorklist gr)
     in (gr{ pairGraphWorklist = wl }, nd, d)
 
+-- | Drop the given node from the work queue if it is queued.
+--   Otherwise do nothing.
+dropWorkItem ::
+  PA.ValidArch arch =>
+  GraphNode arch ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropWorkItem nd gr = gr { pairGraphWorklist = RevMap.delete nd (pairGraphWorklist gr) }
+
+hasWorkLeft ::
+  PairGraph sym arch -> Bool
+hasWorkLeft pg = case RevMap.minView_value (pairGraphWorklist pg) of
+  Nothing -> False
+  Just{} -> True
+
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the
 --   work list is empty, return Nothing, indicating that we are done.
@@ -697,18 +775,6 @@ updateDomain' gr pFrom pTo d = markEdge pFrom pTo $ gr
   }
 
 
-modifyDomain ::
-  Monad m =>
-  GraphNode arch ->
-  PairGraph sym arch ->
-  (forall scope. PS.SimScope sym arch scope -> AbstractDomain sym arch scope -> m (AbstractDomain sym arch scope, PEC.EquivalenceCondition sym arch scope)) ->
-  m (PairGraph sym arch)
-modifyDomain nd pg f  = case Map.lookup nd (pairGraphDomains pg) of
-  Just domSpec -> do
-    (domSpec', eqSpec') <- PS.forSpec2 domSpec f
-    return $ (pg { pairGraphDomains = Map.insert nd domSpec' (pairGraphDomains pg), pairGraphEquivConditions = Map.insert nd eqSpec' (pairGraphEquivConditions pg) })
-  Nothing -> return pg
-
 emptyReturnVector ::
   PairGraph sym arch ->
   NodeReturn arch ->
@@ -767,7 +833,7 @@ getSyncPoint ::
   GraphNode arch ->
   Maybe (GraphNode arch)
 getSyncPoint gr bin nd = case Map.lookup nd (pairGraphSyncPoints gr) of
-  Just (SyncPoint syncPair _) -> PPa.getC bin syncPair
+  Just (SyncPoint syncPair) -> PPa.getC bin syncPair
   Nothing -> Nothing
 
 updateSyncPoint ::
@@ -787,7 +853,7 @@ asSyncPoint ::
 asSyncPoint pg nd = do
   divergeNode <- getDivergePoint nd
   Some bin <- singleNodeRepr nd
-  sync@(SyncPoint syncPair _) <- Map.lookup divergeNode (pairGraphSyncPoints pg)
+  sync@(SyncPoint syncPair) <- Map.lookup divergeNode (pairGraphSyncPoints pg)
   nd' <- PPa.getC bin syncPair
   case nd == nd' of
     True -> return sync
@@ -800,7 +866,7 @@ getCombinedSyncPoint ::
   GraphNode arch ->
   Maybe (GraphNode arch, SyncPoint arch)
 getCombinedSyncPoint gr ndDiv = do
-  sync@(SyncPoint syncPair _) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
+  sync@(SyncPoint syncPair) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
   case syncPair of
     PPa.PatchPairSingle{} -> Nothing
     PPa.PatchPairC ndO ndP -> case combineNodes ndO ndP of
@@ -845,12 +911,12 @@ setSyncPoint pg ndDiv ndSync = do
     _ <- PPa.get bin (graphNodeBlocks ndSync)
     let ndSync' = PPa.PatchPairSingle bin (Const ndSync)
     case Map.lookup ndDiv (pairGraphSyncPoints pg) of
-      Just (SyncPoint sp b) -> do
+      Just (SyncPoint sp) -> do
         sp' <- PPa.update sp $ \bin' -> PPa.get bin' ndSync'
-        return $ pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp' b) (pairGraphSyncPoints pg) }
+        return $ pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp') (pairGraphSyncPoints pg) }
       Nothing -> do
         let sp = PPa.mkSingle bin (Const ndSync)
-        return $ pg {pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp Nothing) (pairGraphSyncPoints pg) }
+        return $ pg {pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp) (pairGraphSyncPoints pg) }
 
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.
@@ -943,7 +1009,6 @@ getOrphanedReturns gr = do
   let rets = (Map.keysSet (pairGraphReturnVectors gr)) Set.\\ (pairGraphTerminalNodes gr)  
   Set.filter (\ret -> not (Map.member (ReturnNode ret) (pairGraphDomains gr))) rets
 
-
 -- | After computing the dataflow fixpoint, examine the generated
 --   error reports to determine an overall verdict for the programs.
 pairGraphComputeVerdict ::
@@ -953,12 +1018,11 @@ pairGraphComputeVerdict gr =
   if Map.null (pairGraphObservableReports gr) &&
      Map.null (pairGraphDesyncReports gr) &&
      Set.null (pairGraphGasExhausted gr) then
-    case Map.null (pairGraphEquivConditions gr) of
-      True -> return PE.Equivalent
-      False -> return PE.ConditionallyEquivalent
+    case filter (\(_,condK) -> case condK of {ConditionAssumed{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
+      [] -> return PE.Equivalent
+      _ -> return PE.ConditionallyEquivalent
   else
     return PE.Inequivalent
-
 
 $(L.makeLenses ''ActionQueue)
 
@@ -966,11 +1030,12 @@ dropActId' ::
   Int ->
   ActionQueue sym arch ->
   ActionQueue sym arch
-dropActId' actId (ActionQueue edgeActs nodeActs refineActs nextActId) = 
+dropActId' actId (ActionQueue edgeActs nodeActs refineActs queueActs nextActId) = 
    ActionQueue 
     (fmap (filter (\pact -> actId /= (pactIdent pact))) edgeActs) 
     (fmap (filter (\pact -> actId /= (pactIdent pact))) nodeActs) 
-    (fmap (filter (\pact -> actId /= (pactIdent pact))) refineActs) 
+    (fmap (filter (\pact -> actId /= (pactIdent pact))) refineActs)
+    (fmap (filter (\pact -> actId /= (pactIdent pact))) queueActs) 
     nextActId
 
 dropActId ::
@@ -1015,20 +1080,26 @@ queuePendingAction lens edge (LazyIOAction actReady fn) pg = do
 --   queued so that the action is processed.
 queuePendingNodes ::
   PairGraph sym arch ->
-  IO (PairGraph sym arch)
-queuePendingNodes pg = do
+  EquivM sym arch (PairGraph sym arch)
+queuePendingNodes pg0 = do
   let 
-    edgeActs = (pairGraphPendingActs pg) ^. edgeActions
-    nodeActs = (pairGraphPendingActs pg) ^. nodeActions
-    refineActs = (pairGraphPendingActs pg) ^. refineActions
+    edgeActs = (pairGraphPendingActs pg0) ^. edgeActions
+    nodeActs = (pairGraphPendingActs pg0) ^. nodeActions
+    refineActs = (pairGraphPendingActs pg0) ^. refineActions
     nodeActs' = 
       (map (\((from,_),acts) -> (from, map asSomeAct acts)) (Map.toList edgeActs))
       ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList nodeActs))
       ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList refineActs))
+    queueActs = concat $ Map.elems $ (pairGraphPendingActs pg0) ^. queueActions
+  
+  env <- ask
+  liftIO $ do
+    pg1 <- foldM (\pg_ (PendingAction _ act) -> 
+      maybeUpdate pg_ (runLazyAction act (env, Some (Const ()), pg_))) pg0 queueActs
 
-  foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
-    True | Just pg__ <- addToWorkListPriority from UrgentPriority pg_ -> return pg__
-    _ -> return pg_) pg nodeActs'
+    foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
+      True | Just pg__ <- addToWorkListPriority from UrgentPriority pg_ -> return pg__
+      _ -> return pg_) pg1 nodeActs'
   where
     asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction
     asSomeAct (PendingAction _ act) = SomeSome act
@@ -1062,3 +1133,7 @@ runPendingActions lens edge result pg = do
   case didchange of
     True -> return $ Just pg'
     False -> return Nothing
+
+
+
+

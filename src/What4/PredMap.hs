@@ -37,6 +37,7 @@ module What4.PredMap (
   , toList
   , fromList
   , mux
+  , weaken
   , collapse
   , predOpUnit
   , isPredOpUnit
@@ -192,6 +193,21 @@ mux sym p pmT pmF = case W4.asConstantPred p of
       (MapM.zipWithAMatched (\_ pT pF -> W4.baseTypeIte sym p pT pF))
       (predMap pmT)
       (predMap pmF))
+
+weaken ::
+  IO.MonadIO m =>
+  W4.IsExprBuilder sym =>
+  Ord f =>
+  sym ->
+  W4.Pred sym ->
+  PredMap sym f k ->
+  m (PredMap sym f k)
+weaken sym p pm = case W4.asConstantPred p of
+  Just True -> return pm
+  Just False -> return $ empty (predOpRepr pm)
+  _ -> PredMap <$> pure (typeRepr pm) <*>
+    (IO.liftIO $ mapM (\p' -> W4.impliesPred sym p p') (predMap pm))
+
 
 -- | Remove entries from the map that point to the unit element of the
 -- underlying predicate operation.

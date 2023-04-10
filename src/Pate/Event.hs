@@ -143,7 +143,7 @@ data Event arch where
   InitialDomainFound :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> TM.NominalDiffTime -> Event arch
 
   DomainAbstraction :: (PArch.ValidArch arch) => PB.BlockPair arch -> TM.NominalDiffTime -> Event arch
-  ScopeAbstractionResult :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> PS.ScopedExpr sym v tp -> PS.ScopedExpr sym v' tp -> TM.NominalDiffTime -> Event arch
+  ScopeAbstractionResult :: (sym ~ WE.ExprBuilder t st fs) => PB.BlockPair arch -> PS.ScopedExpr sym tp c -> PS.ScopedExpr sym tp v' -> TM.NominalDiffTime -> Event arch
 
 data SolverResultKind =
     SolverStarted

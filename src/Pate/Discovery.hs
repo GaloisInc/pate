@@ -399,10 +399,10 @@ associateFrames bundle exitCase isStub = do
     let
       st_pre = PSS.simInState input
       st_post = PSS.simOutState output
-      frame_pre = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_pre
-      frame_post = PSS.unSE $ PSS.unSB $ PSS.simStackBase $ st_post
-      caller_frame_pre = PSS.unSE $ PSS.unSB $ PSS.simCallerStackBase $ st_pre
-      caller_frame_post = PSS.unSE $ PSS.unSB $ PSS.simCallerStackBase $ st_post
+      frame_pre = PSS.unSE $ PSS.simStackBase $ st_pre
+      frame_post = PSS.unSE $ PSS.simStackBase $ st_post
+      caller_frame_pre = PSS.unSE $ PSS.simCallerStackBase $ st_pre
+      caller_frame_post = PSS.unSE $ PSS.simCallerStackBase $ st_post
 
       CLM.LLVMPointer _ sp_post = PSR.macawRegValue $ PSS.simSP st_post
       frame_noop = (PAS.exprBinding frame_post frame_pre) <> (PAS.exprBinding caller_frame_post caller_frame_pre)
@@ -647,17 +647,17 @@ findPLTSymbol blk = fnTrace "findPLTSymbol" $ do
   ctx <- getBinCtx' bin
   let mem = MBL.memoryImage $ PMC.binary ctx
   let segOff = fromJust $ MM.asSegmentOff mem addr
-  emitTrace @"message" (show segOff)
-  let extraMap' = map (\(s,bv) -> (s, PM.resolveAbsoluteAddress mem (MM.memWord (fromIntegral (BVS.asUnsigned bv))))) (Map.toList extraMap)
-  emitTrace @"message" (show extraMap)
-  emitTrace @"message" (show extraMap')
+  --emitTrace @"message" (show segOff)
+  --let extraMap' = map (\(s,bv) -> (s, PM.resolveAbsoluteAddress mem (MM.memWord (fromIntegral (BVS.asUnsigned bv))))) (Map.toList extraMap)
+  --emitTrace @"message" (show extraMap)
+  --emitTrace @"message" (show extraMap')
 
   let syms = [ s | (s,bv) <- Map.toList extraMap
               , mw' <- [MM.memWord (fromIntegral (BVS.asUnsigned bv))]
               , Just moff <- [PM.resolveAbsoluteAddress mem mw']
               , segOff == moff
               ]
-  emitTrace @"message" (show syms)
+  --emitTrace @"message" (show syms)
   case syms of
     [sym] -> return (Just sym)
     _ -> return Nothing

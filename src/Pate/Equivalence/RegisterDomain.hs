@@ -249,7 +249,7 @@ ppRegisterDomain showCond showReg dom =
    | (MapF.Pair reg _) <- MapF.toList (MM.archRegSet @(MM.ArchReg arch))
    , Just reg_s <- [showReg reg]
    -- FIXME: should we always exclude these from printing?
-   , (Some reg) /= (Some (MM.sp_reg @(MM.ArchReg arch)))
+   -- , (Some reg) /= (Some (MM.sp_reg @(MM.ArchReg arch)))
    , (Some reg) /= (Some (MM.ip_reg @(MM.ArchReg arch)))
    , (fmap WI.asConstantPred (registerInDomain' reg dom)) /= (Just (Just True))
    ]

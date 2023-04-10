@@ -55,8 +55,8 @@ validInitState mpPair stPair = withSym $ \sym -> PPa.catBins $ \bin -> do
     Nothing -> return Nothing
   regs <- simRegs <$> PPa.get bin stPair
   reg_asms <- fmap PRt.collapse $ MM.traverseRegsWith (\r v -> Const <$> validRegister mblk v r) regs
-  stackBase <- (unSE . unSB . simStackBase) <$> PPa.get bin stPair
-  stackBaseCaller <- (unSE . unSB . simCallerStackBase) <$> PPa.get bin stPair
+  stackBase <- (unSE . simStackBase) <$> PPa.get bin stPair
+  stackBaseCaller <- (unSE . simCallerStackBase) <$> PPa.get bin stPair
   -- current stack base comes after caller
   stackBaseRel <- liftIO $ W4.bvUle sym stackBase stackBaseCaller 
   return $ (fromPred stackBaseRel) <> reg_asms

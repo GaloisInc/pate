@@ -31,6 +31,7 @@ module Pate.Arch (
   mkClockOverride,
   mkWriteOverride,
   mkDefaultStubOverride,
+  mkDefaultStubOverrideArg,
   mkNOPStub,
   mkObservableOverride,
   lookupStubOverride,
@@ -81,10 +82,15 @@ import qualified Pate.Verification.Concretize as PVC
 import qualified What4.Interface as W4 hiding ( integerToNat )
 import qualified What4.Concrete as W4
 import qualified What4.ExprHelpers as W4 ( integerToNat )
+import qualified What4.UninterpFns as W4U
+
 import Pate.Config (PatchData)
 import Data.Macaw.AbsDomain.AbsState (AbsBlockState)
 import Pate.Address (ConcreteAddress)
 import qualified Data.ElfEdit as EEP
+import qualified Data.Parameterized.List as P
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.TraversableFC as TFC
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -302,13 +308,17 @@ mkObservableOverride ::
   StubOverride arch
 mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "written") (W4.BaseBVRepr w_mem)
+  let bv_repr = W4.BaseBVRepr w_mem
+
+  -- FIXME: this is wrong, since this value needs to read from memory
+  bv_fn <- W4U.mkUninterpretedSymFn sym ("written_" ++ show nm) (Ctx.empty Ctx.:> bv_repr) (W4.BaseBVRepr w_mem)
   return $ StateTransformer $ \st -> do
     let (CLM.LLVMPointer _ r1_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r1_reg
     let mem = PS.simMem st
     mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' r1_val) mem
     let st' = st { PS.simMem = mem' }
     zero_nat <- W4.natLit sym 0
+    fresh_bv <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> r1_val) 
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue r0_reg) .~ ptr ) })
 
@@ -325,14 +335,14 @@ mkWriteOverride ::
 mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   -- TODO: must be less than len
-  fresh_bv <- W4.freshConstant sym (W4.safeSymbol "written") (W4.BaseBVRepr w_mem)
+  
   return $ StateTransformer $ \st -> do
     let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
 
     let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue flen
     let (CLM.LLVMPointer _ fd_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue fd_reg
     len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
-    st' <- case W4.asConcrete len_bv' of
+    (st',sz) <- case W4.asConcrete len_bv' of
       Just (W4.ConcreteBV _ lenC)
         | Just (Some w) <- W4.someNat (BVS.asUnsigned lenC)
         , Just W4.LeqProof <- W4.isPosNat w -> do
@@ -342,12 +352,15 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
         (CLM.LLVMPointer _ val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
         --FIXME: ignores regions
         mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' fd_bv Ctx.:> PMT.SymBV' val_bv) mem
-        return $ st { PS.simMem = mem' }
+        -- globally-unique
+        bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz") (Ctx.empty Ctx.:> (W4.exprType val_bv)) (W4.BaseBVRepr w_mem)
+        sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> val_bv)
+        return $ (st { PS.simMem = mem' },sz)
       _ -> fail "Unhandled symbolic write length"
         -- FIXME: what to do for non-concrete write lengths?
         --return st
     zero_nat <- W4.natLit sym 0
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat sz)
     
     return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
 
@@ -366,6 +379,42 @@ mkDefaultStubOverride nm rOut = StubOverride $ \sym _ -> do
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+
+-- | Default override returns the same arbitrary value for both binaries, based on the input
+--   registers
+mkDefaultStubOverrideArg ::
+  forall arch.
+  MS.SymArchConstraints arch =>
+  String ->
+  [Some (MC.ArchReg arch)] {- ^ argument registers -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ -> do
+  let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+
+  return $ StateTransformer $ \st -> do
+    zero_nat <- W4.natLit sym 0
+    vals <- mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
+    Some vals_ctx <- return $ Ctx.fromList vals
+    -- globally unique function
+    result_fn <- W4U.mkUninterpretedSymFn sym nm (TFC.fmapFC W4.exprType vals_ctx) (W4.BaseBVRepr w)
+    fresh_bv <- W4.applySymFn sym result_fn vals_ctx
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+  where
+    getType :: 
+      W4.IsExprBuilder sym => 
+      sym -> 
+      PSR.MacawRegEntry sym tp -> 
+      IO (Some (W4.SymExpr sym))
+    getType sym r = case PSR.macawRegRepr r of
+      CLM.LLVMPointerRepr{} -> do
+        let CLM.LLVMPointer reg off = PSR.macawRegValue r
+        let iRegion = W4.natToIntegerPure reg
+        Some <$> W4.mkStruct sym (Ctx.empty Ctx.:> iRegion Ctx.:> off)
+      LCT.BoolRepr -> return $ Some $ PSR.macawRegValue r
+      LCT.StructRepr Ctx.Empty -> Some <$> W4.mkStruct sym Ctx.empty
+      x -> error $ "mkDefaultStubOverrideArg: unsupported type" ++ show x
 
 -- | No-op stub
 mkNOPStub ::

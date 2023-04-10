@@ -18,6 +18,7 @@
 module Pate.AssumptionSet (
     AssumptionSet
   , augment
+  , weaken
   , fromExprBindings
   , exprBinding
   , bindExprPair
@@ -30,6 +31,7 @@ module Pate.AssumptionSet (
   , isAssumedPred
   , mux
   , NamedAsms(..)
+  , IsAssumptionSat(..)
   ) where
 
 import           GHC.TypeLits
@@ -326,6 +328,18 @@ augment sym origAsm newAsm = do
   cache <- IO.liftIO WEH.freshVarBindCache
   origAsm' <- PEM.mapExpr sym (applyWithCache sym cache newAsm) origAsm
   return $ newAsm <> origAsm'
+
+weaken ::
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  W4.Pred sym ->
+  AssumptionSet sym ->
+  m (AssumptionSet sym)
+weaken sym p asms = do
+  asms_pred <- toPred sym asms
+  p' <- IO.liftIO $ W4.impliesPred sym p asms_pred
+  return $ fromPred p'
 
 -- | Retrieve a value that the given expression is bound to in
 --   the given 'AssumptionSet'.

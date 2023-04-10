@@ -337,6 +337,8 @@ instance Default ExprLabel where
 instance IsString ExprLabel where
   fromString str = ExprLabel str
 
+instance Semigroup ExprLabel where
+  (ExprLabel a) <> (ExprLabel b) = ExprLabel (a ++ b)
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "expr" where
   type TraceNodeType '(sym,arch) "expr" = Some (W4.SymExpr sym)
@@ -548,7 +550,7 @@ withFreshVars blocks f = do
     mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
     mkStackBase = withSymIO $ \sym -> freshStackBase sym (Proxy @arch)
 
-    mkMaxRegion :: forall v. EquivM sym arch (ScopedExpr sym v W4.BaseIntegerType)
+    mkMaxRegion :: forall v. EquivM sym arch (ScopedExpr sym W4.BaseIntegerType v)
     mkMaxRegion = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
       W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
 
