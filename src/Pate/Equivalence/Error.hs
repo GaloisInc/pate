@@ -6,10 +6,13 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE AllowAmbiguousTypes   #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Pate.Equivalence.Error (
     InnerEquivalenceError(..)
   , SomeExpr(..)
+  , printSomeExprTruncated
   , LoadError(..)
   , InequivalenceReason(..)
   , EquivalenceError(..)
@@ -20,7 +23,7 @@ module Pate.Equivalence.Error (
   , isRecoverable
   , isTracedWhenWarning
   , loaderError
-  ) where
+  , someExpr) where
 
 import qualified Control.Exception as X
 import           Data.Maybe ( catMaybes )
@@ -131,8 +134,29 @@ data InnerEquivalenceError arch
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
 
+someExpr :: forall sym tp. W4.IsExpr (W4.SymExpr sym) => sym -> W4.SymExpr sym tp -> SomeExpr tp
+someExpr _ e = SomeExpr @_ @sym e
+
+-- Not to be used formally
+instance Eq (SomeExpr tp) where
+  e1 == e2 = show e1 == show e2
+
 instance Show (SomeExpr tp) where
   show (SomeExpr e) = show (W4.printSymExpr e)
+
+instance PP.Pretty (SomeExpr tp) where
+  pretty (SomeExpr e) = W4.printSymExpr e
+
+printSomeExprTruncated ::
+  SomeExpr tp ->
+  PP.Doc a
+printSomeExprTruncated (SomeExpr e) = 
+  let ls = lines (show (W4.printSymExpr e))
+  in case ls of
+    [] -> ""
+    [a] -> PP.pretty a
+    (a:as) -> PP.pretty a <> ".." <> PP.pretty (last as)
+
 
 ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of

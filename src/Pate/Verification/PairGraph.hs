@@ -98,7 +98,7 @@ module Pate.Verification.PairGraph
   , DomainRefinement(..)
   , addDomainRefinement
   , getNextDomainRefinement
-  ) where
+  , conditionPrefix, conditionAction, conditionName, shouldPropagate) where
 
 import           Prettyprinter
 
@@ -275,18 +275,70 @@ data PairGraph sym arch =
   }
 
 data ConditionKind = 
-  ConditionAsserted 
-  | ConditionAssumed Bool
+    ConditionAsserted
+  | ConditionAssumed {_shouldPropagate :: Bool}
   -- ^ flag is true if this assumption should be propagated to ancestor nodes.
   --   After propagation, this is set to false so that it only propagates once.
   --   See 'nextCondition'
-  deriving (Eq, Ord, Show)
+  | ConditionEquiv {_shouldPropagate :: Bool}
+  -- ^ a separate category for equivalence conditions, which should be shown
+  --   to the user once the analysis is complete
+
+shouldPropagate :: ConditionKind -> Bool
+shouldPropagate = \case
+  ConditionAsserted -> True
+  x -> _shouldPropagate x
+
+instance Eq ConditionKind where
+  a == b = compare a b == EQ
+
+instance Ord ConditionKind where
+  compare a b = compare (fromEnum a) (fromEnum b)
+
+instance Enum ConditionKind where
+  fromEnum = \case
+    ConditionAsserted -> 0
+    ConditionAssumed False -> 1
+    ConditionAssumed True -> 2
+    ConditionEquiv False -> 3
+    ConditionEquiv True -> 4
+  toEnum = \case
+    0 -> ConditionAsserted
+    1 -> ConditionAssumed False
+    2 -> ConditionAssumed True
+    3 -> ConditionEquiv False
+    4 -> ConditionEquiv True
+    _ -> error "invalid ConditionKind"
+
+instance Bounded ConditionKind where
+  minBound = ConditionAsserted
+  maxBound = ConditionEquiv True
+
+
+conditionPrefix :: ConditionKind -> String
+conditionPrefix = \case
+  ConditionAsserted{} -> "Asserted"
+  ConditionAssumed{} -> "Assumed"
+  ConditionEquiv{} -> "Equivalence Condition Assumed"
+
+conditionName :: ConditionKind -> String
+conditionName = \case
+  ConditionAsserted{} -> "Assertion"
+  ConditionAssumed{} -> "Assumption"
+  ConditionEquiv{} -> "Equivalence Condition"
+
+conditionAction :: ConditionKind -> String
+conditionAction = \case
+  ConditionAsserted{} -> "Assert"
+  ConditionAssumed{} -> "Assume"
+  ConditionEquiv{} -> "Assume (Equivalence Condition)"
 
 nextCondition :: 
   ConditionKind -> ConditionKind
 nextCondition = \case
   ConditionAsserted -> ConditionAsserted
   ConditionAssumed{} -> ConditionAssumed False
+  ConditionEquiv{} -> ConditionEquiv False
 
 -- | Scheduling priority for the worklist
 data NodePriority =
@@ -1133,6 +1185,9 @@ runPendingActions lens edge result pg = do
   case didchange of
     True -> return $ Just pg'
     False -> return Nothing
+
+
+
 
 
 

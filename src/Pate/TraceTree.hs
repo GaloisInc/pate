@@ -551,17 +551,12 @@ prettyTree (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (
 instance IsTraceNode k "message" where
   type TraceNodeType k "message" = String
   prettyNode () msg = PP.pretty msg
-  nodeTags = [("message", \_ msg -> PP.pretty msg)]
+  nodeTags = mkTags @k @"message" [Summary, Simplified]
 
 instance IsTraceNode k "debug" where
   type TraceNodeType k "debug" = String
   prettyNode () msg = PP.pretty msg
   nodeTags = [("debug", \_ msg -> PP.pretty msg)]
-
-instance forall k. IsTraceNode k "simplemessage" where
-  type TraceNodeType k "simplemessage" = String
-  prettyNode () msg = PP.pretty msg
-  nodeTags = mkTags @k @"simplemessage" [Summary, Simplified]
 
 instance IsTraceNode k "bool" where
   type TraceNodeType k "bool" = Bool

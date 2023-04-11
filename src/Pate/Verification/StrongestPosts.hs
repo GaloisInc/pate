@@ -226,7 +226,7 @@ refineFinalResult ::
   EquivM sym arch (Maybe (PairGraph sym arch))
 refineFinalResult entries pg = do
   shouldAddOrphans <- asks (PCfg.cfgAddOrphanEdges . envConfig)
-  withTracing @"simplemessage" "Final Result" $ do
+  withTracing @"message" "Final Result" $ do
     choose @"()" "Continue verification?" $ \choice_outer -> do
       choice_outer "Finish and view final result" () $ return Nothing
       choice_outer "Restart from entry point" () $ fmap Just $ do
@@ -560,7 +560,7 @@ updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ cas
         return $ (sync, mdom)
     case (mdomO, mdomP) of
       (Just domO, Just domP) -> mergeDualNodes syncO syncP domO domP combinedNode pg
-      _ -> withTracing @"simplemessage" "Missing domain(s) for sync points" $ do
+      _ -> withTracing @"message" "Missing domain(s) for sync points" $ do
         pg1 <- case mdomO of
           Nothing -> do
             divergeNodeO <- asSingleGraphNode PBi.OriginalRepr divergeNode
@@ -679,7 +679,7 @@ pairGraphComputeFixpoint entries gr_init = do
   go_outer gr_init
 
 showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
-showFinalResult pg = do
+showFinalResult pg = withSym $ \sym -> do
   subTree @"node" "Observable Counter-examples" $ do
     forM_ (Map.toList (pairGraphObservableReports pg)) $ \(nd,report) -> 
       subTrace (GraphNode nd) $ 
@@ -689,9 +689,9 @@ showFinalResult pg = do
        case getCondition pg nd (ConditionAssumed False) of
         Just eqCondSpec -> subTrace nd $ do 
           _ <- PS.forSpec eqCondSpec $ \_scope eqCond -> do
-            () <- withSym $ \sym -> do
-              eqCondPred <- PEC.toPred sym eqCond
-              emitTraceLabel @"eqcond" (show (W4.printSymExpr eqCondPred)) (Some eqCond)
+            () <- do
+              eqCondPred <- PEE.someExpr sym <$> PEC.toPred sym eqCond
+              emitTraceLabel @"eqcond" (eqCondPred) (Some eqCond)
               return ()
             return eqCond
           return ()
@@ -931,13 +931,14 @@ withSatConditionAssumed scope nd condK gr0 f = withSym $ \sym -> do
   eqCond_pred <- PEC.toPred sym eqCond
   (withSatAssumption (PAS.fromPred eqCond_pred) f) >>= \case
     Just result -> return result
-    -- for non-propagated assumptions we don't attempt to prune this branch,
-    -- we just do nothing
-    Nothing | ConditionAssumed False <- condK -> return gr0
     -- for propagated assumptions and assertions, we mark this branch as infeasible
-    Nothing -> do
+    Nothing | shouldPropagate condK -> do
       gr1 <- return $ addDomainRefinement nd (PruneBranch (nextCondition condK)) gr0
       return $ queueAncestors LowPriority nd gr1
+    -- for non-propagated assumptions we don't attempt to prune this branch,
+    -- we just do nothing
+    Nothing -> return gr0
+
 
 withConditionsAssumed ::
   PS.SimScope sym arch v ->
@@ -946,10 +947,10 @@ withConditionsAssumed ::
   EquivM_ sym arch (PairGraph sym arch) ->
   EquivM sym arch (PairGraph sym arch)
 withConditionsAssumed scope node gr0 f = do
-  withSatConditionAssumed scope node ConditionAsserted gr0 $
-    withSatConditionAssumed scope node (ConditionAssumed True) gr0 $
-      withSatConditionAssumed scope node (ConditionAssumed False) gr0 $
-        f
+  foldr go f [minBound..maxBound]
+  where 
+    go condK g =
+      withSatConditionAssumed scope node condK gr0 g
 
 processBundle ::
   forall sym arch v.

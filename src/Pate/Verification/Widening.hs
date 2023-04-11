@@ -16,6 +16,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Pate.Verification.Widening
   ( widenAlongEdge
@@ -291,45 +292,45 @@ traceEqCond condK eqCond = withSym $ \sym -> do
   case W4.asConstantPred eqCond_pred of
     Just True -> return ()
     _ -> do
-      let msg = case condK of
-            ConditionAsserted -> "Condition Asserted: "
-            ConditionAssumed{} -> "Condition Assumed: "
-      withTracing @"simplemessage" msg $ do
-        emitTrace @"eqcond" (Some eqCond)
-        emitTrace @"expr" (Some eqCond_pred)
+      let msg = conditionPrefix condK
+      withTracing @"message" msg $ do
+        emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
+
+addEqDomRefinementChoice ::
+  ConditionKind ->
+  GraphNode arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+addEqDomRefinementChoice condK nd gr0 = do
+  addLazyAction refineActions nd gr0 ("Add " ++ conditionName condK) $ \choice -> do
+    let msg = conditionAction condK
+    choice (msg ++ " condition") $ \(TupleF2 _ preD) gr1 -> do
+      locFilter <- refineEquivalenceDomain preD
+      return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality locFilter) gr1
+    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> do
+      locFilter <- refineEquivalenceDomain preD
+      return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
+    choice (msg ++ " that branch is infeasible") $ \_ gr1 ->
+      return $ addDomainRefinement nd (PruneBranch condK) gr1
+  
 
 -- | Deferred decision about whether or not the domain for this node should be refined
 addRefinementChoice ::
   GraphNode arch ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-addRefinementChoice nd gr0 = withTracing @"simplemessage" "Modify Proof Node" $ do
+addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-  gr1 <- addLazyAction refineActions nd gr0 "Post-process equivalence domain?" $ \choice -> do
-    let go condK = do
-          let msg = case condK of
-               ConditionAsserted -> "Assert"
-               ConditionAssumed{} -> "Assume"
-          choice (msg ++ " equivalence condition") $ \(TupleF2 _ preD) gr1 -> do
-            locFilter <- refineEquivalenceDomain preD
-            return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality locFilter) gr1
-          choice (msg ++ " equivalence condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> do
-            locFilter <- refineEquivalenceDomain preD
-            return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
-          choice (msg ++ " branch is infeasible") $ \_ gr1 ->
-            return $ addDomainRefinement nd (PruneBranch condK) gr1
-    go ConditionAsserted
-    go (ConditionAssumed False)
+  -- only assertions are propagated by default
+  gr1 <- foldM (\gr_ condK -> addEqDomRefinementChoice condK nd gr_) gr0 
+    [ConditionAsserted, ConditionAssumed False, ConditionEquiv False]
   gr2 <- addLazyAction nodeActions nd gr1 "Post-process equivalence condition?" $ \choice -> do
-    choice "Simplify equivalence conditions" $ \(TupleF3 scope _bundle _) gr2 -> withSym $ \sym -> do
+    choice "Simplify equivalence conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
-            Just eqCondSpec -> do
-              let msg = case condK of
-                    ConditionAsserted -> "Asserted"
-                    ConditionAssumed{} -> "Assumed"
+            Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
               (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
               eqCond_pred <- PEC.toPred sym eqCond
-              emitTraceLabel @"expr" (msg <> " Equivalence Condition:") (Some eqCond_pred)
+              emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
               meqCond_pred' <- isPredTrue' goalTimeout eqCond_pred >>= \case
                 True -> do
                   emitTrace @"message" "Equivalence Condition Discharged"
@@ -337,8 +338,7 @@ addRefinementChoice nd gr0 = withTracing @"simplemessage" "Modify Proof Node" $ 
                 False -> do
                   simplifier <- PSi.getSimplifier
                   curAsm <- currentAsm
-                  emitTrace @"assumption" curAsm
-                  
+                  emitTrace @"assumption" curAsm           
                   eqCond_pred' <- PSi.applySimplifier simplifier eqCond_pred
                   eqCond_pred'' <- PSi.simplifyPred_deep eqCond_pred'
                   eqCond_pred''' <- applyCurrentAsms eqCond_pred''
@@ -352,7 +352,7 @@ addRefinementChoice nd gr0 = withTracing @"simplemessage" "Modify Proof Node" $ 
             Nothing -> do
               emitTrace @"message" "No Equivalence Condition Found"
               return gr0_
-      go ConditionAsserted gr2 >>= go (ConditionAssumed False) >>= go (ConditionAssumed True)
+      foldM (\gr_ condK -> go condK gr_) gr2 [minBound..maxBound]
 
   addLazyAction queueActions () gr2 "Re-process proof node?" $ \choice -> do
       choice "Propagate assumptions" $ \_ gr3 -> withSym $ \sym -> do
@@ -541,6 +541,8 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
 --   Returns 'Nothing' if there is nothing to do (i.e. no assertion or
 --   existing assertion is already implied)
 
+
+
 propagateCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
@@ -625,7 +627,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
       -- for 'from'
       -- 'dropDomain' clears domains for all nodes following 'from' (including 'to')
       -- and re-adds ancestors of 'from' to be considered for analysis
-      emitTrace @"simplemessage" "Analysis Skipped - Equivalence Domain Propagation"
+      emitTrace @"message" "Analysis Skipped - Equivalence Domain Propagation"
       
       return $ gr1
       -- if no postcondition propagation is needed, we continue under

@@ -57,6 +57,7 @@ import qualified What4.PredMap as WPM
 import           Pate.TraceTree
 import qualified Data.Kind as DK
 import Control.Monad.Identity
+import Pate.Equivalence.Error (SomeExpr, printSomeExprTruncated)
 ---------------------------------------------
 -- Equivalence Condition
 
@@ -160,10 +161,13 @@ instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => 
 
 instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond" where
   type TraceNodeType '(sym,arch) "eqcond" = Some (EquivalenceCondition sym arch)
-  type TraceNodeLabel "eqcond" = String
-  prettyNode msg (Some eqCond) = case eqCond of
-    EquivalenceCondition{} -> "Symbolic Equivalence Condition:" PP.<+> PP.pretty msg
-  nodeTags = mkTags @'(sym,arch) @"eqcond" [Summary, Simplified]
+  -- cludge until we have a proper pretty printer
+  type TraceNodeLabel "eqcond" = SomeExpr W4.BaseBoolType
+  prettyNode someExpr (Some eqCond) = case eqCond of
+    EquivalenceCondition{} -> PP.pretty someExpr
+  nodeTags = [(Summary, \someExpr _ ->  "Equivalence Condition:" PP.<+> printSomeExprTruncated someExpr )
+             ,(Simplified, \someExpr _ -> "Equivalence Condition:" PP.<+> printSomeExprTruncated someExpr)
+             ]
 
 -- | A mapping from registers to a predicate representing an equality condition for
 -- that specific register.

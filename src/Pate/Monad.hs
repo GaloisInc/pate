@@ -104,8 +104,7 @@ module Pate.Monad
   , fnTrace
   , getWrappedSolver
   , catchInIO
-  , joinPatchPred
-  )
+  , joinPatchPred)
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -345,17 +344,28 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "expr" where
   type TraceNodeLabel "expr" = ExprLabel
   
   prettyNode _lbl (Some e) = W4.printSymExpr e
-  nodeTags = [(Summary, \(ExprLabel lbl) (Some e) ->
-                  let pfx = case lbl of
-                        "" -> ""
-                        _ -> "(" <> PP.pretty lbl <> ") "
-                      ls = lines (show (W4.printSymExpr e))
-                  in case ls of
-                    [] -> pfx
-                    [a] -> pfx <> PP.pretty a
-                    (a:as) -> pfx <> PP.pretty a <> ".." <> PP.pretty (last as)
-              )]
+  nodeTags = 
+    [(Summary, printExprTruncated @sym)
+    ,(Simplified, printExprTruncated @sym)
+    -- TODO: how to present simplified view of expressions?
+    ,(Simplified_Detail, prettyNode @_ @'(sym,arch) @"expr")
+    ]
 
+printExprTruncated ::
+  PSo.ValidSym sym =>
+  ExprLabel ->
+  Some (W4.SymExpr sym) ->
+  PP.Doc a
+printExprTruncated (ExprLabel lbl) (Some e) = 
+  let pfx = case lbl of
+        "" -> ""
+        _ -> "(" <> PP.pretty lbl <> ") "
+      ls = lines (show (W4.printSymExpr e))
+  in case ls of
+    [] -> pfx
+    [a] -> pfx <> PP.pretty a
+    (a:as) -> pfx <> PP.pretty a <> ".." <> PP.pretty (last as)
+              
 withBinary ::
   forall bin sym arch a.
   PBi.KnownBinary bin =>
