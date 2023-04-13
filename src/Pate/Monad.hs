@@ -86,11 +86,9 @@ module Pate.Monad
   , freshNonce
   , withProofNonce
   -- caching
-  , BlockCache
   , lookupBlockCache
   , modifyBlockCache
   , resetBlockCache
-  , freshBlockCache
   -- equivalence
   , equivalenceContext
   , safeIO
@@ -104,7 +102,9 @@ module Pate.Monad
   , fnTrace
   , getWrappedSolver
   , catchInIO
-  , joinPatchPred)
+  , joinPatchPred
+  , module PME
+  , atPriority, currentPriority)
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -191,6 +191,16 @@ import qualified Pate.Timeout as PT
 import qualified Pate.Verification.Concretize as PVC
 import           Pate.TraceTree
 import Data.Functor.Const (Const(..))
+
+atPriority :: 
+  NodePriority ->
+  EquivM_ sym arch a ->
+  EquivM sym arch a
+atPriority p f = CMR.local (\env -> env { envCurrentPriority = p }) f
+
+currentPriority ::
+  EquivM sym arch NodePriority
+currentPriority = CMR.asks envCurrentPriority
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->
@@ -451,29 +461,34 @@ archFuns = do
 -- State and assumption management
 
 unconstrainedRegister ::
-  forall sym arch tp.
+  forall sym arch bin tp.
   (HasCallStack, MM.MemWidth (MM.ArchAddrWidth arch)) =>
+  PBi.WhichBinaryRepr bin ->
   [T.Text] ->
   MM.ArchReg arch tp ->
   EquivM sym arch (PSR.MacawRegVar sym tp)
-unconstrainedRegister argNames reg = do
+unconstrainedRegister bin argNames reg = do
   let repr = MM.typeRepr reg
+  let suffix = PBi.short bin
+  let name = case PA.fromRegisterDisplay (PA.displayRegister reg) of
+        Just nm -> nm
+        Nothing -> showF reg
   case repr of
     MM.BVTypeRepr n
       | Just Refl <- testEquality n (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)) -> withSymIO $ \sym -> do
           let margName = PA.argumentNameFrom argNames reg
-          let name = maybe (showF reg) T.unpack margName
-          ptr@(CLM.LLVMPointer region off) <- freshPtr sym name n
+          let name' = maybe name T.unpack margName
+          ptr@(CLM.LLVMPointer region off) <- freshPtr sym (name' ++ suffix) n
           let iRegion = W4.natToIntegerPure region
           return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> iRegion Ctx.:> off)
       | otherwise -> withSymIO $ \sym -> do
           -- For bitvector types that are not pointer width, fix their region number to 0 since they cannot be pointers
-          bits <- W4.freshConstant sym (WS.safeSymbol (showF reg)) (W4.BaseBVRepr n)
+          bits <- W4.freshConstant sym (WS.safeSymbol (name ++ suffix)) (W4.BaseBVRepr n)
           ptr <- CLM.llvmPointer_bv sym bits
           zero <- W4.intLit sym 0
           return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) ptr) (Ctx.empty Ctx.:> zero Ctx.:> bits)
     MM.BoolTypeRepr -> withSymIO $ \sym -> do
-      var <- W4.freshConstant sym (WS.safeSymbol "boolArg") W4.BaseBoolRepr
+      var <- W4.freshConstant sym (WS.safeSymbol (name ++ suffix)) W4.BaseBoolRepr
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) var) (Ctx.empty Ctx.:> var)
     MM.TupleTypeRepr PL.Nil -> do
       return $ PSR.MacawRegVar (PSR.MacawRegEntry (MS.typeToCrucible repr) Ctx.Empty) Ctx.empty
@@ -557,15 +572,15 @@ withFreshVars blocks f = do
       let baseMem = MBL.memoryImage $ PMC.binary binCtx
       withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
-    mkStackBase :: forall v. EquivM sym arch (StackBase sym arch v)
-    mkStackBase = withSymIO $ \sym -> freshStackBase sym (Proxy @arch)
+    mkStackBase :: forall bin v. PBi.WhichBinaryRepr bin -> EquivM_ sym arch (StackBase sym arch v)
+    mkStackBase bin = withSymIO $ \sym -> freshStackBase sym bin (Proxy @arch)
 
-    mkMaxRegion :: forall v. EquivM sym arch (ScopedExpr sym W4.BaseIntegerType v)
-    mkMaxRegion = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
-      W4.freshConstant sym' (W4.safeSymbol "max_region") W4.BaseIntegerRepr
+    mkMaxRegion :: forall bin v. PBi.WhichBinaryRepr bin -> EquivM_ sym arch (ScopedExpr sym W4.BaseIntegerType v)
+    mkMaxRegion bin = withSymIO $ \sym -> liftScope0 sym $ \sym' ->
+      W4.freshConstant sym' (W4.safeSymbol ("max_region" ++ PBi.short bin)) W4.BaseIntegerRepr
 
-  freshSimSpec (\_ r -> unconstrainedRegister argNames r) (\x -> mkMem x) (\_ -> mkStackBase) (\_ -> mkMaxRegion) (\v -> f v)
-
+  freshSimSpec (\bin r -> unconstrainedRegister bin argNames r) (\x -> mkMem x) mkStackBase mkMaxRegion (\v -> f v)
+ 
 -- should we clear this between nodes?
 withFreshSatCache ::
   EquivM_ sym arch f ->

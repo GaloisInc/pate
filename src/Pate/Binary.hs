@@ -30,7 +30,7 @@ module Pate.Binary
   , WhichBinaryRepr(..)
   , OtherBinary
   , flipRepr
-  )
+  , short)
 where
 
 import           Data.Parameterized.WithRepr
@@ -59,6 +59,10 @@ flipRepr :: WhichBinaryRepr bin -> WhichBinaryRepr (OtherBinary bin)
 flipRepr = \case
   OriginalRepr -> PatchedRepr
   PatchedRepr -> OriginalRepr
+
+short :: WhichBinaryRepr bin -> String
+short OriginalRepr = "O"
+short PatchedRepr = "P"
 
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some WhichBinaryRepr

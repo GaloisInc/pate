@@ -359,9 +359,9 @@ simulate' simInput pbs_ killBlock = do
   -- slice. This is handled later in 'Pate.Discovery.associatedFrames' during
   -- the final stage of widening.
   -- see: 'SimStace.StackBase'
-  post_frame <- withSymIO $ \sym -> PS.freshStackBase sym (Proxy @arch)
+  post_frame <- withSymIO $ \sym -> PS.freshStackBase sym bin (Proxy @arch)
   -- Same for the caller frame
-  post_caller_frame <- withSymIO $ \sym -> PS.freshStackBase sym (Proxy @arch)
+  post_caller_frame <- withSymIO $ \sym -> PS.freshStackBase sym bin (Proxy @arch)
   -- Since malloc is handled outside of symbolic execution, it won't be updated
   -- as part of this execution step, and we can therefore return it unmodified here
   let mr = PS.simMaxRegion $ PS.simInState simInput

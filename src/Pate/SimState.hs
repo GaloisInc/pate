@@ -242,6 +242,10 @@ data SimScope sym arch v =
     , scopeAsm :: AssumptionSet sym
     }
 
+instance Scoped (SimScope sym arch) where
+  unsafeCoerceScope scope = coerce scope
+
+
 scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
 scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
 
@@ -771,15 +775,15 @@ type StackBase sym arch = ScopedExpr sym (W4.BaseBVType (MM.ArchAddrWidth arch))
 
 
 freshStackBase ::
-  forall sym arch v.
+  forall sym arch bin v.
   W4.IsSymExprBuilder sym =>
   MM.MemWidth (MM.ArchAddrWidth arch) =>
   sym ->
+  PBi.WhichBinaryRepr bin ->
   Proxy arch ->
   IO (StackBase sym arch v)
-freshStackBase sym _arch = liftScope0 sym $ \sym' ->
-    W4.freshConstant sym' (W4.safeSymbol "stack_base") (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
-
+freshStackBase sym bin _arch = liftScope0 sym $ \sym' ->
+    W4.freshConstant sym' (W4.safeSymbol ("stack_base" ++ PBi.short bin)) (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
 
 ------------------------------------
 -- ExprMappable instances

@@ -54,11 +54,12 @@ module Pate.Verification.PairGraph
   , addTerminalNode
   , emptyReturnVector
   , ConditionKind(..)
+  , PropagateKind(..)
   , getCondition
   , getScopedCondition
   , setCondition
   , dropCondition
-  , nextCondition
+  , nextPropagate
   , dropDomain
   , dropReturns
   , dropPostDomains
@@ -71,7 +72,7 @@ module Pate.Verification.PairGraph
   , combineNodes
   , NodePriority(..)
   , addToWorkList
-  , addToWorkListPriority
+  , getQueuedPriority
   , queueAncestors
   , queueNode
   , emptyWorkList
@@ -98,7 +99,13 @@ module Pate.Verification.PairGraph
   , DomainRefinement(..)
   , addDomainRefinement
   , getNextDomainRefinement
-  , conditionPrefix, conditionAction, conditionName, shouldPropagate) where
+  , conditionPrefix
+  , conditionAction
+  , conditionName
+  , shouldPropagate
+  , maybeUpdate'
+  , hasSomeCondition
+  , propagateOnce, getPropagationKind, propagateAction) where
 
 import           Prettyprinter
 
@@ -259,7 +266,7 @@ data PairGraph sym arch =
     -- | These are conditions that are intended to be sufficient to imply
     --   equality (i.e. to yield a stronger equivalence domain than can be proven),
     --   or to imply subsequent conditions on descendant nodes.
-  , pairGraphConditions :: !(Map (GraphNode arch, ConditionKind) (PEC.EquivConditionSpec sym arch))
+  , pairGraphConditions :: !(Map (GraphNode arch, ConditionKind) (PropagateKind, PEC.EquivConditionSpec sym arch))
     -- | Any edges that have been followed at any point (which may later become infeasible
     -- due to further analysis)
   , pairGraphEdges :: !(Map (GraphNode arch) (Set (GraphNode arch)))
@@ -276,44 +283,47 @@ data PairGraph sym arch =
 
 data ConditionKind = 
     ConditionAsserted
-  | ConditionAssumed {_shouldPropagate :: Bool}
+  | ConditionAssumed
   -- ^ flag is true if this assumption should be propagated to ancestor nodes.
   --   After propagation, this is set to false so that it only propagates once.
   --   See 'nextCondition'
-  | ConditionEquiv {_shouldPropagate :: Bool}
+  | ConditionEquiv
   -- ^ a separate category for equivalence conditions, which should be shown
   --   to the user once the analysis is complete
+  deriving (Eq,Ord, Enum, Bounded)
 
-shouldPropagate :: ConditionKind -> Bool
+data PropagateKind =
+    PropagateFull
+  | PropagateOnce
+  | PropagateNone
+  deriving (Eq,Ord, Enum, Bounded)
+
+propagateAction ::
+  PropagateKind -> String
+propagateAction = \case
+  PropagateFull -> "fully"
+  PropagateOnce -> "once"
+  PropagateNone -> "never"
+
+nextPropagate ::
+  PropagateKind -> PropagateKind
+nextPropagate = \case
+  PropagateFull -> PropagateFull
+  PropagateOnce -> PropagateNone
+  PropagateNone -> PropagateNone
+
+propagateOnce ::
+  PropagateKind -> PropagateKind
+propagateOnce = \case
+  PropagateFull -> PropagateFull
+  PropagateOnce -> PropagateOnce
+  PropagateNone -> PropagateOnce
+
+
+shouldPropagate :: PropagateKind -> Bool
 shouldPropagate = \case
-  ConditionAsserted -> True
-  x -> _shouldPropagate x
-
-instance Eq ConditionKind where
-  a == b = compare a b == EQ
-
-instance Ord ConditionKind where
-  compare a b = compare (fromEnum a) (fromEnum b)
-
-instance Enum ConditionKind where
-  fromEnum = \case
-    ConditionAsserted -> 0
-    ConditionAssumed False -> 1
-    ConditionAssumed True -> 2
-    ConditionEquiv False -> 3
-    ConditionEquiv True -> 4
-  toEnum = \case
-    0 -> ConditionAsserted
-    1 -> ConditionAssumed False
-    2 -> ConditionAssumed True
-    3 -> ConditionEquiv False
-    4 -> ConditionEquiv True
-    _ -> error "invalid ConditionKind"
-
-instance Bounded ConditionKind where
-  minBound = ConditionAsserted
-  maxBound = ConditionEquiv True
-
+  PropagateNone -> False
+  _ -> True
 
 conditionPrefix :: ConditionKind -> String
 conditionPrefix = \case
@@ -333,22 +343,6 @@ conditionAction = \case
   ConditionAssumed{} -> "Assume"
   ConditionEquiv{} -> "Assume (Equivalence Condition)"
 
-nextCondition :: 
-  ConditionKind -> ConditionKind
-nextCondition = \case
-  ConditionAsserted -> ConditionAsserted
-  ConditionAssumed{} -> ConditionAssumed False
-  ConditionEquiv{} -> ConditionEquiv False
-
--- | Scheduling priority for the worklist
-data NodePriority =
-    UrgentPriority
-  | HigherPriority
-  | HighPriority
-  | NormalPriority
-  | BelowNormalPriority
-  | LowPriority
-  deriving (Eq, Ord, Show)
 
 data DomainRefinementKind =
     RefineUsingIntraBlockPaths
@@ -370,7 +364,7 @@ addDomainRefinement nd f pg0 =
     pg1 = pg0 { pairGraphDomainRefinements = Map.insertWith (++) nd [f] (pairGraphDomainRefinements pg0) }
   -- we need to re-process any nodes that have an outgoing edge here, since
   -- those are the domains we need to refine
-  in queueAncestors HighPriority nd pg1
+  in queueAncestors highPriority nd pg1
 
 getNextDomainRefinement ::
   GraphNode arch ->
@@ -463,6 +457,15 @@ maybeUpdate gr f = f >>= \case
   Just gr' -> return gr'
   Nothing -> return gr
 
+maybeUpdate' ::
+  Monad m =>
+  a -> 
+  m (Maybe a) ->
+  m (Bool, a)
+maybeUpdate' gr f = f >>= \case
+  Just gr' -> return (True, gr')
+  Nothing -> return (False, gr)
+
 getAllNodes :: PairGraph sym arch -> [GraphNode arch]
 getAllNodes pg = Map.keys (pairGraphDomains pg)
 
@@ -513,10 +516,11 @@ dropReturns nr pg = pg { pairGraphReturnVectors = Map.delete nr (pairGraphReturn
 -- | Delete the abstract domain for all outgoing nodes from this node
 --   May potentially delete this node if there are back-edges.
 dropPostDomains ::
-  GraphNode arch -> 
+  GraphNode arch ->
+  NodePriority ->
   PairGraph sym arch ->
   PairGraph sym arch   
-dropPostDomains nd pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg (getEdgesFrom pg nd)
+dropPostDomains nd priority pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropDomain nd' priority pg_) pg (getEdgesFrom pg nd)
 
 dropDomainRefinement ::
   GraphNode arch -> 
@@ -530,29 +534,40 @@ dropDomainRefinement nd pg = pg { pairGraphDomainRefinements = Map.delete nd (pa
 --   from assuming fewer equalities to assuming more equalities.
 --   Marks any ancestors as requiring re-analysis
 dropDomain ::
-  GraphNode arch -> 
+  GraphNode arch ->
+  NodePriority ->
   PairGraph sym arch ->
   PairGraph sym arch 
-dropDomain nd pg = case getCurrentDomain pg nd of
+dropDomain nd priority pg = case getCurrentDomain pg nd of
   Just{}->
     let
       -- clear this domain and all descendant domains
       pg' = case Set.null (getBackEdgesFrom pg nd) of
         -- don't drop the domain for a toplevel entrypoint, but mark it for
         -- re-analysis
-        True -> pg { pairGraphWorklist = RevMap.insertWith (min) nd NormalPriority (pairGraphWorklist pg) }
+        True -> pg { pairGraphWorklist = RevMap.insertWith (min) nd priority (pairGraphWorklist pg) }
         False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), 
                       pairGraphWorklist = RevMap.delete nd (pairGraphWorklist pg)
                     }
-      pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' pg_) pg' (getEdgesFrom pg nd)
+      pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' priority pg_) pg' (getEdgesFrom pg nd)
       pg3 = dropObservableReports nd pg''
       -- mark all ancestors as requiring re-processing
-    in queueNode NormalPriority nd pg3
+    in queueNode priority nd pg3
   Nothing -> pg
+
+{-
+queueEntryPoints :: NodePriority -> PairGraph sym arch -> PairGraph sym arch
+queueEntryPoints priority pg = 
+  where
+    go nd = case Set.minView (Map.keysSet (pairGraphDomains pg)) of
+  
+  Just (nd,_) -> 
+-}
 
 
 queueAncestors :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
-queueAncestors priority nd pg = snd $ Set.foldr (queueNode' priority) (Set.singleton nd, pg) (getBackEdgesFrom pg nd)
+queueAncestors priority nd pg = 
+  snd $ Set.foldr (queueNode' priority) (Set.singleton nd, pg) (getBackEdgesFrom pg nd)
 
 queueNode :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
 queueNode priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
@@ -562,7 +577,7 @@ queueNode priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
 queueNode' :: NodePriority -> GraphNode arch -> (Set (GraphNode arch), PairGraph sym arch) -> (Set (GraphNode arch), PairGraph sym arch)
 queueNode' priority nd_ (considered, pg_) = case Set.member nd_ considered of
   True -> (considered, pg_)
-  False -> case addToWorkListPriority nd_ priority pg_ of
+  False -> case addToWorkList nd_ priority pg_ of
     Just pg' -> (Set.insert nd_ considered, pg')
     -- if this node has no defined domain (i.e it was dropped as part of the previous
     -- step) then we consider further ancestors
@@ -573,8 +588,18 @@ getCondition ::
   GraphNode arch ->
   ConditionKind ->
   Maybe (PEC.EquivConditionSpec sym arch)
-getCondition pg nd condK = Map.lookup (nd, condK) (pairGraphConditions pg)
+getCondition pg nd condK = fmap snd $ Map.lookup (nd, condK) (pairGraphConditions pg)
 
+getPropagationKind ::
+  PairGraph sym arch ->
+  GraphNode arch ->
+  ConditionKind ->
+  PropagateKind
+getPropagationKind pg nd condK = 
+  fromMaybe PropagateNone $ fmap fst $ Map.lookup (nd, condK) (pairGraphConditions pg)
+
+hasSomeCondition :: PairGraph sym arch -> GraphNode arch -> Bool
+hasSomeCondition pg nd = any (\condK -> isJust $ getCondition pg nd condK) [minBound..maxBound]
 
 getScopedCondition ::
   PS.SimScope sym arch v ->
@@ -591,10 +616,11 @@ getScopedCondition scope pg nd condK = withSym $ \sym -> case getCondition pg nd
 setCondition :: 
   GraphNode arch ->
   ConditionKind ->
+  PropagateKind ->
   PEC.EquivConditionSpec sym arch ->
   PairGraph sym arch ->
   PairGraph sym arch
-setCondition nd condK cond pg = pg { pairGraphConditions = Map.insert (nd,condK) cond (pairGraphConditions pg) }
+setCondition nd condK propK cond pg = pg { pairGraphConditions = Map.insert (nd,condK) (propK, cond) (pairGraphConditions pg) }
 
 dropCondition ::
   GraphNode arch ->
@@ -738,8 +764,8 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
                -- FIXME: compute this from the global and stack regions
                return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
              return $ idom' { PAD.absDomVals = vals' }
-           let gr1 = freshDomain gr node rootDom
-           return $ emptyReturnVector gr1 (rootReturn fnPair)
+           let gr1 = freshDomain gr node lowPriority rootDom
+           return $ emptyReturnVector gr1 (rootReturn fnPair) 
 
 
 popWorkItem ::
@@ -774,15 +800,15 @@ hasWorkLeft pg = case RevMap.minView_value (pairGraphWorklist pg) of
 chooseWorkItem ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
-  Maybe (PairGraph sym arch, GraphNode arch, AbstractDomainSpec sym arch)
+  Maybe (NodePriority, PairGraph sym arch, GraphNode arch, AbstractDomainSpec sym arch)
 chooseWorkItem gr =
   -- choose the smallest pair from the worklist. This is a pretty brain-dead
   -- heuristic.  Perhaps we should do something more clever.
   case RevMap.minView_value (pairGraphWorklist gr) of
     Nothing -> Nothing
-    Just (nd, _, wl) -> case Map.lookup nd (pairGraphDomains gr) of
+    Just (nd, p, wl) -> case Map.lookup nd (pairGraphDomains gr) of
       Nothing -> panic Verifier "chooseWorkItem" ["Could not find domain corresponding to block pair", show nd]
-      Just d  -> Just (gr{ pairGraphWorklist = wl }, nd, d)
+      Just d  -> Just (p, gr{ pairGraphWorklist = wl }, nd, d)
 
 -- | Update the abstract domain for the target graph node,
 --   decreasing the gas parameter as necessary.
@@ -795,10 +821,11 @@ updateDomain ::
   GraphNode arch {- ^ point pair we are jumping from -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
+  NodePriority {- ^ priority to add 'to' to the worklist -} ->
   Either (PairGraph sym arch) (PairGraph sym arch)
-updateDomain gr pFrom pTo d
+updateDomain gr pFrom pTo d priority
   | g > 0 = Right $ 
-     (updateDomain' gr pFrom pTo d)
+     (updateDomain' gr pFrom pTo d priority)
        { pairGraphGas = Map.insert (pFrom,pTo) (Gas (g-1)) (pairGraphGas gr)}
 
   | otherwise =
@@ -818,10 +845,11 @@ updateDomain' ::
   GraphNode arch {- ^ point pair we are jumping from -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
+  NodePriority {- ^ priority to add 'to' to the worklist -} ->
   PairGraph sym arch
-updateDomain' gr pFrom pTo d = markEdge pFrom pTo $ gr
+updateDomain' gr pFrom pTo d priority = markEdge pFrom pTo $ gr
   { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-  , pairGraphWorklist = RevMap.insertWith (min) pTo NormalPriority (pairGraphWorklist gr)
+  , pairGraphWorklist = RevMap.insertWith (min) pTo priority (pairGraphWorklist gr)
   , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
   , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
   }
@@ -844,8 +872,9 @@ addReturnVector ::
   PairGraph sym arch ->
   NodeReturn arch {- ^ The function being called -}  ->
   NodeEntry arch {- ^ The program point where it returns to -} ->
+  NodePriority {- ^ priority to queue the caller node -} -> 
   PairGraph sym arch
-addReturnVector gr funPair retPair =
+addReturnVector gr funPair retPair priority =
    -- If the domain graph already has a node corresponding to the
    -- return point of the function we are calling, make sure
    -- we explore the return site by adding the function return node
@@ -876,7 +905,7 @@ addReturnVector gr funPair retPair =
     f Nothing  = Just (Set.singleton retPair)
     f (Just s) = Just (Set.insert retPair s)
 
-    wl = RevMap.insertWith (min) (ReturnNode funPair) NormalPriority (pairGraphWorklist gr)
+    wl = RevMap.insertWith (min) (ReturnNode funPair) priority (pairGraphWorklist gr)
 
 
 getSyncPoint ::
@@ -974,19 +1003,16 @@ setSyncPoint pg ndDiv ndSync = do
 --   an existing abstract domain for it. Otherwise return Nothing.
 addToWorkList ::
   GraphNode arch ->
-  PairGraph sym arch ->
-  Maybe (PairGraph sym arch)
-addToWorkList nd gr = addToWorkListPriority nd NormalPriority gr
-
--- | Same as 'addToWorkList' but with a configurable priority
-addToWorkListPriority ::
-  GraphNode arch ->
   NodePriority ->
   PairGraph sym arch ->
   Maybe (PairGraph sym arch)  
-addToWorkListPriority nd priority gr = case getCurrentDomain gr nd of
+addToWorkList nd priority gr = case getCurrentDomain gr nd of
   Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd priority (pairGraphWorklist gr) }
   Nothing -> Nothing
+
+getQueuedPriority ::
+  GraphNode arch -> PairGraph sym arch -> Maybe NodePriority
+getQueuedPriority nd pg = RevMap.lookup nd (pairGraphWorklist pg)
 
 emptyWorkList :: PairGraph sym arch -> PairGraph sym arch
 emptyWorkList pg = pg { pairGraphWorklist = RevMap.empty }
@@ -996,20 +1022,22 @@ emptyWorkList pg = pg { pairGraphWorklist = RevMap.empty }
 freshDomain ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
+  NodePriority {- ^ priority to queue the new node at -}  -> 
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   PairGraph sym arch
-freshDomain gr pTo d =
+freshDomain gr pTo priority d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-    , pairGraphWorklist = RevMap.insertWith (min) pTo NormalPriority (pairGraphWorklist gr)
+    , pairGraphWorklist = RevMap.insertWith (min) pTo priority (pairGraphWorklist gr)
     }
 
 initDomain ::
   PairGraph sym arch {- ^ pair graph to update -} ->
   GraphNode arch {- ^ point pair we are jumping from -} ->
   GraphNode arch {- ^ point pair we are jumping to -} ->
+  NodePriority {- ^ priority to queue the new node at -}  -> 
   AbstractDomainSpec sym arch {- ^ new domain value to insert -} ->
   PairGraph sym arch  
-initDomain gr pFrom pTo d = markEdge pFrom pTo (freshDomain gr pTo d)
+initDomain gr pFrom pTo priority d = markEdge pFrom pTo (freshDomain gr pTo priority d)
 
 markEdge ::
   GraphNode arch {- ^ from -} ->
@@ -1150,7 +1178,7 @@ queuePendingNodes pg0 = do
       maybeUpdate pg_ (runLazyAction act (env, Some (Const ()), pg_))) pg0 queueActs
 
     foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
-      True | Just pg__ <- addToWorkListPriority from UrgentPriority pg_ -> return pg__
+      True | Just pg__ <- addToWorkList from (raisePriority highPriority) pg_ -> return pg__
       _ -> return pg_) pg1 nodeActs'
   where
     asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction

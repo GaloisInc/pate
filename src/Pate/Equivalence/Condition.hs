@@ -165,8 +165,8 @@ instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond"
   type TraceNodeLabel "eqcond" = SomeExpr W4.BaseBoolType
   prettyNode someExpr (Some eqCond) = case eqCond of
     EquivalenceCondition{} -> PP.pretty someExpr
-  nodeTags = [(Summary, \someExpr _ ->  "Equivalence Condition:" PP.<+> printSomeExprTruncated someExpr )
-             ,(Simplified, \someExpr _ -> "Equivalence Condition:" PP.<+> printSomeExprTruncated someExpr)
+  nodeTags = [(Summary, \someExpr _ -> printSomeExprTruncated someExpr )
+             ,(Simplified, \someExpr _ -> printSomeExprTruncated someExpr)
              ]
 
 -- | A mapping from registers to a predicate representing an equality condition for

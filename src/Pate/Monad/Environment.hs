@@ -9,6 +9,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -16,7 +17,11 @@ module Pate.Monad.Environment (
   , BlockCache(..)
   , freshBlockCache
   , ExitPairCache
-  ) where
+  , NodePriority
+  , normalPriority
+  , lowPriority
+  , highPriority
+  , lowerPriority, urgentPriority, raisePriority) where
 
 import qualified Control.Concurrent as IO
 import qualified Control.Concurrent.MVar as MVar
@@ -109,7 +114,30 @@ data EquivEnv sym arch where
     , envSatCacheRef :: IO.IORef (SolverCache sym)
     , envTargetEquivRegs :: Set.Set (Some (MC.ArchReg arch))
     , envPtrAssertions :: MT.PtrAssertions sym
+    , envCurrentPriority :: NodePriority
     } -> EquivEnv sym arch
+
+-- | Scheduling priority for the worklist
+newtype NodePriority = NodePriority Int
+  deriving (Eq, Ord, Show)
+
+normalPriority :: NodePriority
+normalPriority = NodePriority 0
+
+lowPriority :: NodePriority
+lowPriority = NodePriority 10000
+
+highPriority :: NodePriority
+highPriority = NodePriority (-10000)
+
+urgentPriority :: NodePriority
+urgentPriority = NodePriority (-100000)
+
+lowerPriority :: NodePriority -> NodePriority
+lowerPriority (NodePriority x) = NodePriority (x + 1)
+
+raisePriority :: NodePriority -> NodePriority
+raisePriority (NodePriority x) = NodePriority (x - 1)
 
 -- pushing assumption contexts should:
 --    preserve the Unsat cache from the outer context into the inner context

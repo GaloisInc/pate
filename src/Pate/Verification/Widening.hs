@@ -63,6 +63,7 @@ import qualified Data.Macaw.Types as MT
 
 import           Pate.Panic
 import qualified Pate.Binary as PBi
+import qualified Pate.Block as PB
 import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.MemoryDomain as PEM
 import qualified Pate.Equivalence.RegisterDomain as PER
@@ -90,7 +91,7 @@ import qualified Pate.Config as PC
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks )
 import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
@@ -253,7 +254,8 @@ updateEquivCondition scope nd condK cond gr = withSym $ \sym -> do
   eqCond <- getScopedCondition scope gr nd condK
   cond' <- PEC.weaken sym pathCond cond
   eqCond' <- PEC.merge sym cond' eqCond
-  return $ setCondition nd condK (PS.mkSimSpec scope eqCond') gr
+  let propK = getPropagationKind gr nd condK
+  return $ setCondition nd condK (propagateOnce propK) (PS.mkSimSpec scope eqCond') gr
 
 -- | Adds the given predicate to the equivalence condition for the given node
 addToEquivCondition ::
@@ -268,7 +270,8 @@ addToEquivCondition scope nd condK condPred gr = withSym $ \sym -> do
   let eqCond = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred condPred}
   eqCond' <- getScopedCondition scope gr nd condK 
   eqCond'' <- PEC.merge sym eqCond eqCond'
-  return $ setCondition nd condK (PS.mkSimSpec scope eqCond'') gr
+  let propK = getPropagationKind gr nd condK
+  return $ setCondition nd condK (propagateOnce propK) (PS.mkSimSpec scope eqCond'') gr
 
 pruneCurrentBranch ::
   PS.SimScope sym arch v ->
@@ -281,7 +284,8 @@ pruneCurrentBranch scope (from,to) condK gr0 = withSym $ \sym -> do
   pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
   notPath <- liftIO $ W4.notPred sym pathCond
   gr2 <- addToEquivCondition scope from condK notPath gr1
-  return $ queueAncestors NormalPriority from $ dropPostDomains from (markEdge from to gr2)
+  priority <- currentPriority
+  return $ queueAncestors priority from $ dropPostDomains from normalPriority (markEdge from to gr2)
 
 traceEqCond ::
   ConditionKind -> 
@@ -312,7 +316,26 @@ addEqDomRefinementChoice condK nd gr0 = do
       return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
     choice (msg ++ " that branch is infeasible") $ \_ gr1 ->
       return $ addDomainRefinement nd (PruneBranch condK) gr1
-  
+
+addPropagationChoice ::
+  ConditionKind ->
+  GraphNode arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+addPropagationChoice condK nd gr0 = do
+  addLazyAction queueActions () gr0 ("Propagate " ++ (conditionName condK) ++ "s") $ \choice -> do
+    let go propK = do
+          choice ("Propagate " ++ (propagateAction propK)) $ \_ gr3 -> withSym $ \sym -> do
+            case getCondition gr3 nd condK of
+              Just eqCondSpec -> PS.viewSpec eqCondSpec $ \scope eqCond -> do
+                eqCond_propagate <- getScopedCondition scope gr3 nd condK
+                eqCond' <- PEC.merge sym eqCond eqCond_propagate
+                gr4 <- return $ setCondition nd condK propK (PS.mkSimSpec scope eqCond') gr3
+                return $ queueAncestors urgentPriority nd gr4
+              Nothing -> do
+                emitTrace @"message" ("No " ++  conditionName condK ++ " found")
+                return gr3
+    mapM_ go [PropagateOnce,PropagateFull]
 
 -- | Deferred decision about whether or not the domain for this node should be refined
 addRefinementChoice ::
@@ -323,7 +346,7 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- only assertions are propagated by default
   gr1 <- foldM (\gr_ condK -> addEqDomRefinementChoice condK nd gr_) gr0 
-    [ConditionAsserted, ConditionAssumed False, ConditionEquiv False]
+    [minBound..maxBound]
   gr2 <- addLazyAction nodeActions nd gr1 "Post-process equivalence condition?" $ \choice -> do
     choice "Simplify equivalence conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
@@ -333,7 +356,7 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
               emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
               meqCond_pred' <- isPredTrue' goalTimeout eqCond_pred >>= \case
                 True -> do
-                  emitTrace @"message" "Equivalence Condition Discharged"
+                  emitTrace @"message" (conditionName condK ++ " Discharged")
                   return Nothing
                 False -> do
                   simplifier <- PSi.getSimplifier
@@ -342,34 +365,30 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
                   eqCond_pred' <- PSi.applySimplifier simplifier eqCond_pred
                   eqCond_pred'' <- PSi.simplifyPred_deep eqCond_pred'
                   eqCond_pred''' <- applyCurrentAsms eqCond_pred''
-                  emitTraceLabel @"expr" "Simplified Equivalence Condition:" (Some eqCond_pred''')
+                  emitTraceLabel @"expr" (ExprLabel $ "Simplified " ++ conditionName condK) (Some eqCond_pred''')
                   return $ Just eqCond_pred''
               case meqCond_pred' of
                 Nothing -> return $ dropCondition nd condK gr0_
                 Just eqCond_pred' -> do
                   let eqCond' = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred eqCond_pred'}
-                  return $ queueAncestors NormalPriority nd $ setCondition nd condK (PS.mkSimSpec scope eqCond') gr0_
+                  priority <- currentPriority
+                  let propK = getPropagationKind gr0_ nd condK
+                  return $ queueAncestors priority nd $ setCondition nd condK (propagateOnce propK) (PS.mkSimSpec scope eqCond') gr0_
             Nothing -> do
-              emitTrace @"message" "No Equivalence Condition Found"
+              emitTrace @"message" ("No " ++  conditionName condK ++ " found")
               return gr0_
       foldM (\gr_ condK -> go condK gr_) gr2 [minBound..maxBound]
 
-  addLazyAction queueActions () gr2 "Re-process proof node?" $ \choice -> do
-      choice "Propagate assumptions" $ \_ gr3 -> withSym $ \sym -> do
-        case getCondition gr3 nd (ConditionAssumed False) of
-          Just eqCondSpec -> PS.viewSpec eqCondSpec $ \scope eqCond -> do
-            eqCond_propagate <- getScopedCondition scope gr3 nd (ConditionAssumed True)
-            eqCond' <- PEC.merge sym eqCond eqCond_propagate
-            gr4 <- return $ setCondition nd (ConditionAssumed True) (PS.mkSimSpec scope eqCond') gr3
-            gr5 <- return $ dropCondition nd (ConditionAssumed False) gr4
-            return $ queueAncestors HighPriority nd gr5
-          Nothing -> do
-            emitTrace @"message" "No Equivalence Condition Found"
-            return gr3
-      choice "Re-check node" $ \_ gr3 ->
-        return $ queueNode UrgentPriority nd gr3
-      choice "Drop and re-compute equivalence domain" $ \_ gr3 ->
-        return $ queueAncestors HighPriority nd $ dropDomain nd gr3
+  gr3 <- foldM (\gr_ condK -> addPropagationChoice condK nd gr_) gr2
+    [ConditionAssumed,ConditionEquiv]
+
+  addLazyAction queueActions () gr3 "Re-process proof node?" $ \choice -> do
+      choice "Re-check node" $ \_ gr4 ->
+        return $ queueNode urgentPriority nd gr4
+      choice "Drop and re-compute equivalence domain" $ \_ gr4 ->
+        return $ queueAncestors urgentPriority nd $ dropDomain nd highPriority gr4
+      choice "Clear work list (unsafe!)" $ \_ gr4 ->
+        return $ emptyWorkList gr4
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->
@@ -383,13 +402,13 @@ applyDomainRefinements scope (from,to) bundle preD postD gr0 = fnTrace "applyDom
   let next = applyDomainRefinements scope (from,to) bundle preD postD
   case getNextDomainRefinement to gr0 of
     Nothing -> do
-      emitTrace @"message" "No refinements found"
+      emitTrace @"debug" "No refinements found"
       return gr0
-    Just (PruneBranch condK,gr1) -> withTracing @"message" ("Applying PruneBranch to " ++ show to) $ do
+    Just (PruneBranch condK,gr1) -> withTracing @"debug" ("Applying PruneBranch to " ++ show to) $ do
       gr2 <- pruneCurrentBranch scope (from,to) condK gr1
       next gr2
 
-    Just (LocationRefinement condK refineK refine,gr1) ->  withTracing @"message" ("Applying LocationRefinement to " ++ show to) $ do
+    Just (LocationRefinement condK refineK refine,gr1) ->  withTracing @"debug" ("Applying LocationRefinement to " ++ show to) $ do
       -- refine the domain of the predecessor node and drop this domain
       eqCond <- case refineK of
         RefineUsingIntraBlockPaths -> computeEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
@@ -399,13 +418,14 @@ applyDomainRefinements scope (from,to) bundle preD postD gr0 = fnTrace "applyDom
       emitTraceLabel @"expr" "Generated Condition" (Some eqCond_pred)          
       isPredTrue' goalTimeout eqCond_pred >>= \case
         True -> do
-          emitTrace @"message" "Equivalence condition holds, no propagation needed"
+          emitTrace @"debug" "Equivalence condition holds, no propagation needed"
           return gr1
         False -> do
           gr2 <- updateEquivCondition scope from condK eqCond gr1
           -- since its equivalence condition has been modified, we need to re-examine
           -- all outgoing edges from the predecessor node
-          gr3 <- return $ queueAncestors HighPriority from $ dropPostDomains from (markEdge from to gr2)
+          priority <- currentPriority
+          gr3 <- return $ queueAncestors (raisePriority priority) from $ dropPostDomains from normalPriority (markEdge from to gr2)
           next gr3
 
 
@@ -537,10 +557,36 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
       PL.Register r -> Set.member (Some r) added
       _ -> False
 
+-- | True if the satisfiability of the predicate only depends on
+--   variables from the given binary
+isEqCondSingleSided ::
+  forall sym arch bin v.
+  PS.SimScope sym arch v ->
+  PB.BlockPair arch ->
+  PBi.WhichBinaryRepr bin ->
+  PEC.EquivalenceCondition sym arch v ->
+  EquivM sym arch Bool
+isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  -- rewrite the free variables for the other binary into arbitrary (free) terms and
+  -- determine if the resulting predicate is equal to the original
+  fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blks $ \(scope2 :: PS.SimScope sym arch v2) -> do
+    (this_vars :: PS.SimVars sym arch v2 bin) <- PPa.get bin (PS.scopeVars (PS.unsafeCoerceScope scope))
+    (vars2 :: PS.SimVars sym arch v2 (PBi.OtherBinary bin)) <- PPa.get (PBi.flipRepr bin) (PS.scopeVars scope2)
+
+    PPa.PatchPair vars2O vars2P <- return $ PPa.mkPair bin this_vars vars2
+    outer_to_inner <- liftIO $ PS.getScopeCoercion sym scope (vars2O,vars2P)
+    eqCond2 <- liftIO $ PS.scopedExprMap sym eqCond (PS.applyScopeCoercion sym outer_to_inner)
+    eqCond_pred <- PEC.toPred sym eqCond
+    eqCond2_pred <- PEC.toPred sym eqCond2
+    conds_eq <- liftIO $ W4.isEq sym eqCond_pred eqCond2_pred
+    PS.WithScope <$> isPredTrue' goalTimeout conds_eq
+
+
+
 -- | Push an assertion back up the graph.
 --   Returns 'Nothing' if there is nothing to do (i.e. no assertion or
 --   existing assertion is already implied)
-
 
 
 propagateCondition ::
@@ -551,23 +597,41 @@ propagateCondition ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
-propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ 
-  go ConditionAsserted gr0_ >>= \case
-    Just gr1 -> go (ConditionAssumed True) gr1 >>= \case
-      Just gr2 -> return $ Just gr2
-      Nothing -> return $ Just gr1
-    Nothing -> go (ConditionAssumed True) gr0_
+propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
+  (upd1, gr1) <- maybeUpdate' gr0_ $ go ConditionAsserted gr0_
+  (upd2, gr2) <- maybeUpdate' gr1 $ go ConditionAssumed gr1
+  (upd3, gr3) <- maybeUpdate' gr2 $ go ConditionEquiv gr2
+  case upd1 || upd2 || upd3 of
+    False -> return Nothing
+    True -> return $ Just gr3
   where
     go condK gr = withSym $ \sym -> do
       case getCondition gr to condK of
         -- no target equivalence condition, nothing to do
         Nothing -> do
-          emitTrace @"message" "No equivalence condition to propagate"
+          emitTrace @"debug" "No condition to propagate"
           return Nothing
-        Just{} -> withTracing @"function_name" "propagateCondition" $ do
+        _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
+          emitTrace @"debug" "Condition not propagated"
+          return Nothing
+        Just{} -> do
           -- take the condition of the target edge and bind it to
           -- the output state of the bundle
           cond <- getEquivPostCondition scope bundle to condK gr
+{-
+          let blks = graphNodeBlocks from
+          skip <- case (blks, graphNodeBlocks to) of
+            -- this is a synchronization edge, so we attempt to filter the equivalence condition
+            -- based on whether or not it has variables scoped to only the other side of the analysis
+            -- FIXME: we can likely do better than this and formally separate the conditions, but
+            -- this is sufficient for now, and avoids the obvious case
+            (PPa.PatchPairSingle bin _,PPa.PatchPair{}) -> isEqCondSingleSided scope blks (PBi.flipRepr bin) cond
+            _ -> return False
+          case skip of
+            True -> do
+              emitTrace @"message"
+              return Nothing
+-}
           -- check if the "to" condition is already satisifed, otherwise
           -- we need to update our own condition
           cond_pred <- PEC.toPred sym cond
@@ -581,9 +645,10 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $
               return Nothing
             -- we need more assumptions for this condition to hold
             Just True -> do
+              priority <- currentPriority
               emitTraceLabel @"expr" "Propagated Equivalence Condition" (Some cond_pred)
-              gr1 <- updateEquivCondition scope from (nextCondition condK) cond gr
-              return $ Just $ queueAncestors HighPriority from $ queueNode HigherPriority from $ dropPostDomains from (markEdge from to gr1)
+              gr1 <- updateEquivCondition scope from condK cond gr
+              return $ Just $ queueAncestors (raisePriority priority) from $ queueNode (raisePriority (raisePriority priority)) from $ dropPostDomains from normalPriority (markEdge from to gr1)
             Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
@@ -620,6 +685,7 @@ widenAlongEdge ::
   EquivM sym arch (PairGraph sym arch)
 widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
   gr <- addRefinementChoice to gr0
+  priority <- currentPriority
   propagateCondition scope bundle from to gr >>= \case
     Just gr1 -> do
       -- since this 'to' edge has propagated backwards
@@ -635,10 +701,10 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
       -- is satisfied (potentially allowing for a stronger equivalence
       -- domain to be established)
     Nothing -> do
-      postCond_assume1 <- getEquivPostCondition scope bundle to (ConditionAssumed False) gr
-      postCond_assume2 <- getEquivPostCondition scope bundle to (ConditionAssumed True) gr
+      postCond_assume1 <- getEquivPostCondition scope bundle to ConditionAssumed gr
+      postCond_assume2 <- getEquivPostCondition scope bundle to ConditionEquiv gr
       postCond_assume <- liftIO $ PEC.merge sym postCond_assume1 postCond_assume2 >>= PEC.toPred sym
-      emitTraceLabel @"expr" "Assumed Postcondition" (Some postCond_assume)
+      withTracing @"debug" "Assumed Postcondition" $ emitTrace @"expr" (Some postCond_assume)
       
       withAssumption postCond_assume $ do  
         case getCurrentDomain gr to of
@@ -653,17 +719,17 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                 NoWideningRequired -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
-                  let gr1 = initDomain gr from to postSpec'
+                  let gr1 = initDomain gr from to priority postSpec'
                   finalizeGraphEdge scope bundle d d' from to gr1
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     return $ recordMiscAnalysisError (initDomain gr from to postSpec') to err
+                     return $ recordMiscAnalysisError (initDomain gr from to priority postSpec') to err
                 Widen _ _ d'' -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  let gr1 = initDomain gr from to postSpec'
+                  let gr1 = initDomain gr from to priority postSpec'
                   finalizeGraphEdge scope bundle d d'' from to gr1
 
           -- have visited this location at least once before
@@ -695,7 +761,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     case updateDomain gr from to postSpec' of
+                     case updateDomain gr from to postSpec' priority of
                        Left gr' ->
                          do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
                             return $ recordMiscAnalysisError gr' to err
@@ -704,7 +770,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                 Widen _ _ d'' -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  case updateDomain gr from to postSpec' of
+                  case updateDomain gr from to postSpec' priority of
                     Left gr' -> do
                       do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
                          finalizeGraphEdge scope bundle d d'' from to gr'
@@ -723,7 +789,9 @@ finalizeGraphEdge ::
 finalizeGraphEdge scope bundle preD postD from to gr0 = do
   let gr1 = markEdge from to gr0
   runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr1 >>= \case
-    Just gr2 -> return $ queueAncestors HighPriority to gr2
+    Just gr2 -> do
+      priority <- currentPriority
+      return $ queueAncestors priority to gr2
     Nothing -> 
       -- if the computed domain doesn't agree with any requested domain refinements,
       -- we need to propagate this backwards by dropping the entry for 'to',

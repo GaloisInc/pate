@@ -26,7 +26,7 @@ module Pate.Discovery.ParsedFunctions (
   , ParsedBlocks(..)
   , addOverrides
   , addExtraTarget
-  , isExtraTarget
+  , getExtraTargets
   , addExtraEdges
   , isUnsupportedErr
   ) where
@@ -124,20 +124,20 @@ addExtraTarget ::
   MM.ArchSegmentOff arch ->
   IO ()
 addExtraTarget pfm tgt = do
-  isTgt <- isExtraTarget pfm
-  case isTgt tgt of
+  tgts <- getExtraTargets pfm
+  case Set.member tgt tgts of
     True -> return ()
     False -> do
       IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
         st' { extraTargets = Set.insert tgt (extraTargets st')}
       flushCache pfm
 
-isExtraTarget ::
+getExtraTargets ::
   ParsedFunctionMap arch bin ->
-  IO (MM.ArchSegmentOff arch -> Bool)
-isExtraTarget pfm = do
+  IO (Set.Set (MM.ArchSegmentOff arch))
+getExtraTargets pfm = do
   st <- IORef.readIORef (parsedStateRef pfm)
-  return $ \segOff -> Set.member segOff (extraTargets st)
+  return $ extraTargets st
 
 flushCache ::
   MM.ArchConstraints arch =>
