@@ -320,7 +320,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envUnsatCacheRef = unsatCache
           , envTargetEquivRegs = targetRegs
           , envPtrAssertions = ptrAsserts
-          , envCurrentPriority = normalPriority
+          , envCurrentPriority = normalPriority PriorityUserRequest
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each

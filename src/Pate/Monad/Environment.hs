@@ -11,17 +11,24 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE LambdaCase #-}
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Pate.Monad.Environment (
     EquivEnv(..)
   , envCtxL
   , BlockCache(..)
   , freshBlockCache
   , ExitPairCache
-  , NodePriority
+  , NodePriorityK(..)
+  , mkPriority
   , normalPriority
-  , lowPriority
-  , highPriority
-  , lowerPriority, urgentPriority, raisePriority) where
+  , NodePriority
+  , lowerPriority
+  , raisePriority
+  , printPriorityKind
+  , tagPriority
+  , priorityTag
+  ) where
 
 import qualified Control.Concurrent as IO
 import qualified Control.Concurrent.MVar as MVar
@@ -66,6 +73,7 @@ import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
 import           Pate.TraceTree
+import qualified Prettyprinter as PP
 
 data EquivEnv sym arch where
   EquivEnv ::
@@ -118,26 +126,59 @@ data EquivEnv sym arch where
     } -> EquivEnv sym arch
 
 -- | Scheduling priority for the worklist
-newtype NodePriority = NodePriority Int
-  deriving (Eq, Ord, Show)
+data NodePriorityK = 
+    PriorityUserRequest
+  | PriorityHandleActions
+  | PriorityHandleDesync
+  | PriorityNodeRecheck
+  | PriorityPropagation
+  | PriorityWidening
+  | PriorityDomainRefresh
+  | PriorityHandleReturn
+  | PriorityMiscCleanup
+  | PriorityDeferred
+  deriving (Eq, Ord)
 
-normalPriority :: NodePriority
-normalPriority = NodePriority 0
+data NodePriority = NodePriority {_priorityK :: NodePriorityK, priorityInt :: Int, priorityTag :: String }
+  deriving (Eq, Ord)
 
-lowPriority :: NodePriority
-lowPriority = NodePriority 10000
+printPriorityKind ::
+  NodePriority -> String
+printPriorityKind (NodePriority pk _ _ ) = case pk of
+  PriorityUserRequest -> "User Request"
+  PriorityHandleActions -> "Handling Domain Refinements"
+  PriorityHandleDesync -> "Handling Control Flow Desynchronization"
+  PriorityNodeRecheck -> "Re-checking Block Exits"
+  PriorityPropagation -> "Propagating Conditions"
+  PriorityWidening -> "Widening Equivalence Domains"
+  PriorityDomainRefresh -> "Re-checking Equivalence Domains"
+  PriorityHandleReturn -> "Handling Function Return"
+  PriorityMiscCleanup -> "Proof Cleanup"
+  PriorityDeferred -> "Handling Deferred Decisions"
 
-highPriority :: NodePriority
-highPriority = NodePriority (-10000)
+instance IsTraceNode k "priority" where
+  type TraceNodeType k "priority" = NodePriority
+  prettyNode () p = 
+    (PP.pretty (printPriorityKind p))
+    PP.<+> PP.parens (PP.pretty (priorityTag p)) 
+    PP.<+> PP.pretty (priorityInt p)
 
-urgentPriority :: NodePriority
-urgentPriority = NodePriority (-100000)
+  nodeTags = [(Simplified,\_ -> PP.pretty . printPriorityKind) , (Simplified,\_ -> PP.pretty . printPriorityKind) ]
+
+normalPriority :: NodePriorityK -> NodePriority
+normalPriority pk = NodePriority pk 0 ""
+
+mkPriority :: NodePriorityK -> NodePriority -> NodePriority
+mkPriority pk (NodePriority _ x msg) = NodePriority pk x msg
+
+tagPriority :: String -> NodePriority -> NodePriority
+tagPriority msg (NodePriority pk x _) = NodePriority pk x msg
 
 lowerPriority :: NodePriority -> NodePriority
-lowerPriority (NodePriority x) = NodePriority (x + 1)
+lowerPriority (NodePriority pK x msg) = (NodePriority pK (x+1) msg)
 
 raisePriority :: NodePriority -> NodePriority
-raisePriority (NodePriority x) = NodePriority (x - 1)
+raisePriority (NodePriority pK x msg) = (NodePriority pK (x-1) msg)
 
 -- pushing assumption contexts should:
 --    preserve the Unsat cache from the outer context into the inner context

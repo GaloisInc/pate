@@ -566,6 +566,12 @@ instance IsTraceNode k "bool" where
   type TraceNodeLabel "bool" = String
   prettyNode msg b = PP.pretty msg <> ":" PP.<+> PP.pretty b
 
+-- | Dummy trace node to hold the final result of the analysis
+instance IsTraceNode k "final_result" where
+  type TraceNodeType k "final_result" = ()
+  prettyNode _lbl _msg = "Final Result"
+  nodeTags = mkTags @k @"final_result" [Summary, Simplified]
+
 data ChoiceHeader k (nm_choice :: Symbol) a = 
   (IsTraceNode k nm_choice) =>
     ChoiceHeader { choiceType :: SymbolRepr nm_choice

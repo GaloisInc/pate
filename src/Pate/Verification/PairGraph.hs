@@ -364,7 +364,7 @@ addDomainRefinement nd f pg0 =
     pg1 = pg0 { pairGraphDomainRefinements = Map.insertWith (++) nd [f] (pairGraphDomainRefinements pg0) }
   -- we need to re-process any nodes that have an outgoing edge here, since
   -- those are the domains we need to refine
-  in queueAncestors highPriority nd pg1
+  in queueAncestors (normalPriority PriorityUserRequest) nd pg1
 
 getNextDomainRefinement ::
   GraphNode arch ->
@@ -595,6 +595,7 @@ getPropagationKind ::
   GraphNode arch ->
   ConditionKind ->
   PropagateKind
+getPropagationKind _ _ ConditionAsserted = PropagateFull
 getPropagationKind pg nd condK = 
   fromMaybe PropagateNone $ fmap fst $ Map.lookup (nd, condK) (pairGraphConditions pg)
 
@@ -764,7 +765,7 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
                -- FIXME: compute this from the global and stack regions
                return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
              return $ idom' { PAD.absDomVals = vals' }
-           let gr1 = freshDomain gr node lowPriority rootDom
+           let gr1 = freshDomain gr node (normalPriority PriorityUserRequest) rootDom
            return $ emptyReturnVector gr1 (rootReturn fnPair) 
 
 
@@ -1098,7 +1099,7 @@ pairGraphComputeVerdict gr =
   if Map.null (pairGraphObservableReports gr) &&
      Map.null (pairGraphDesyncReports gr) &&
      Set.null (pairGraphGasExhausted gr) then
-    case filter (\(_,condK) -> case condK of {ConditionAssumed{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
+    case filter (\(_,condK) -> case condK of {ConditionEquiv{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
       [] -> return PE.Equivalent
       _ -> return PE.ConditionallyEquivalent
   else
@@ -1162,6 +1163,7 @@ queuePendingNodes ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 queuePendingNodes pg0 = do
+  priority <- currentPriority
   let 
     edgeActs = (pairGraphPendingActs pg0) ^. edgeActions
     nodeActs = (pairGraphPendingActs pg0) ^. nodeActions
@@ -1178,7 +1180,7 @@ queuePendingNodes pg0 = do
       maybeUpdate pg_ (runLazyAction act (env, Some (Const ()), pg_))) pg0 queueActs
 
     foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
-      True | Just pg__ <- addToWorkList from (raisePriority highPriority) pg_ -> return pg__
+      True | Just pg__ <- addToWorkList from (mkPriority PriorityHandleActions priority) pg_ -> return pg__
       _ -> return pg_) pg1 nodeActs'
   where
     asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction

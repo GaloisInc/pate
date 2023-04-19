@@ -245,17 +245,20 @@ updateEquivCondition ::
   PS.SimScope sym arch v ->
   GraphNode arch ->
   ConditionKind ->
+  Maybe PropagateKind ->
   PEC.EquivalenceCondition sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)  
-updateEquivCondition scope nd condK cond gr = withSym $ \sym -> do
+updateEquivCondition scope nd condK mpropK cond gr = withSym $ \sym -> do
   resetBlockCache envExitPairsCache
   pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
   eqCond <- getScopedCondition scope gr nd condK
   cond' <- PEC.weaken sym pathCond cond
   eqCond' <- PEC.merge sym cond' eqCond
-  let propK = getPropagationKind gr nd condK
-  return $ setCondition nd condK (propagateOnce propK) (PS.mkSimSpec scope eqCond') gr
+  let propK = case mpropK of
+        Just _propK -> _propK
+        Nothing -> getPropagationKind gr nd condK
+  return $ setCondition nd condK propK (PS.mkSimSpec scope eqCond') gr
 
 -- | Adds the given predicate to the equivalence condition for the given node
 addToEquivCondition ::
@@ -271,7 +274,7 @@ addToEquivCondition scope nd condK condPred gr = withSym $ \sym -> do
   eqCond' <- getScopedCondition scope gr nd condK 
   eqCond'' <- PEC.merge sym eqCond eqCond'
   let propK = getPropagationKind gr nd condK
-  return $ setCondition nd condK (propagateOnce propK) (PS.mkSimSpec scope eqCond'') gr
+  return $ setCondition nd condK propK (PS.mkSimSpec scope eqCond'') gr
 
 pruneCurrentBranch ::
   PS.SimScope sym arch v ->
@@ -280,12 +283,18 @@ pruneCurrentBranch ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)     
 pruneCurrentBranch scope (from,to) condK gr0 = withSym $ \sym -> do
+  priority <- thisPriority
   let gr1 = gr0
   pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
   notPath <- liftIO $ W4.notPred sym pathCond
   gr2 <- addToEquivCondition scope from condK notPath gr1
-  priority <- currentPriority
-  return $ queueAncestors priority from $ dropPostDomains from normalPriority (markEdge from to gr2)
+  let propK = getPropagationKind gr1 from condK
+  case shouldPropagate propK of
+    True -> do
+      return $ queueAncestors (priority PriorityPropagation) from $ 
+        dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr2)
+    False -> return $ queueNode (priority PriorityNodeRecheck) from $
+      dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr2)
 
 traceEqCond ::
   ConditionKind -> 
@@ -317,6 +326,8 @@ addEqDomRefinementChoice condK nd gr0 = do
     choice (msg ++ " that branch is infeasible") $ \_ gr1 ->
       return $ addDomainRefinement nd (PruneBranch condK) gr1
 
+
+
 addPropagationChoice ::
   ConditionKind ->
   GraphNode arch ->
@@ -326,12 +337,13 @@ addPropagationChoice condK nd gr0 = do
   addLazyAction queueActions () gr0 ("Propagate " ++ (conditionName condK) ++ "s") $ \choice -> do
     let go propK = do
           choice ("Propagate " ++ (propagateAction propK)) $ \_ gr3 -> withSym $ \sym -> do
+            priority <- thisPriority
             case getCondition gr3 nd condK of
               Just eqCondSpec -> PS.viewSpec eqCondSpec $ \scope eqCond -> do
                 eqCond_propagate <- getScopedCondition scope gr3 nd condK
                 eqCond' <- PEC.merge sym eqCond eqCond_propagate
                 gr4 <- return $ setCondition nd condK propK (PS.mkSimSpec scope eqCond') gr3
-                return $ queueAncestors urgentPriority nd gr4
+                return $ queueAncestors (priority PriorityUserRequest) nd gr4
               Nothing -> do
                 emitTrace @"message" ("No " ++  conditionName condK ++ " found")
                 return gr3
@@ -371,9 +383,9 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
                 Nothing -> return $ dropCondition nd condK gr0_
                 Just eqCond_pred' -> do
                   let eqCond' = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred eqCond_pred'}
-                  priority <- currentPriority
+                  priority <- thisPriority
                   let propK = getPropagationKind gr0_ nd condK
-                  return $ queueAncestors priority nd $ setCondition nd condK (propagateOnce propK) (PS.mkSimSpec scope eqCond') gr0_
+                  return $ queueAncestors (priority PriorityPropagation) nd $ setCondition nd condK propK (PS.mkSimSpec scope eqCond') gr0_
             Nothing -> do
               emitTrace @"message" ("No " ++  conditionName condK ++ " found")
               return gr0_
@@ -383,10 +395,12 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
     [ConditionAssumed,ConditionEquiv]
 
   addLazyAction queueActions () gr3 "Re-process proof node?" $ \choice -> do
-      choice "Re-check node" $ \_ gr4 ->
-        return $ queueNode urgentPriority nd gr4
-      choice "Drop and re-compute equivalence domain" $ \_ gr4 ->
-        return $ queueAncestors urgentPriority nd $ dropDomain nd highPriority gr4
+      choice "Re-check node" $ \_ gr4 -> do
+        priority <- thisPriority
+        return $ queueNode (priority PriorityUserRequest) nd gr4
+      choice "Drop and re-compute equivalence domain" $ \_ gr4 -> do
+        priority <- thisPriority
+        return $ queueAncestors (priority PriorityUserRequest) nd $ dropDomain nd (priority PriorityDomainRefresh) gr4
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
 
@@ -421,11 +435,12 @@ applyDomainRefinements scope (from,to) bundle preD postD gr0 = fnTrace "applyDom
           emitTrace @"debug" "Equivalence condition holds, no propagation needed"
           return gr1
         False -> do
-          gr2 <- updateEquivCondition scope from condK eqCond gr1
+          gr2 <- updateEquivCondition scope from condK Nothing eqCond gr1
           -- since its equivalence condition has been modified, we need to re-examine
           -- all outgoing edges from the predecessor node
-          priority <- currentPriority
-          gr3 <- return $ queueAncestors (raisePriority priority) from $ dropPostDomains from normalPriority (markEdge from to gr2)
+          priority <- thisPriority
+          gr3 <- return $ queueAncestors (priority PriorityPropagation) from $ 
+            dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr2)
           next gr3
 
 
@@ -629,11 +644,12 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
             _ -> return False
           case skip of
             True -> do
-              emitTrace @"message"
+              emitTrace @"message" "Skipping single-sided propagation"
               return Nothing
+            False -> do
 -}
-          -- check if the "to" condition is already satisifed, otherwise
-          -- we need to update our own condition
+              -- check if the "to" condition is already satisifed, otherwise
+              -- we need to update our own condition
           cond_pred <- PEC.toPred sym cond
           goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
           not_cond <- liftIO $ W4.notPred sym cond_pred
@@ -645,10 +661,13 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
               return Nothing
             -- we need more assumptions for this condition to hold
             Just True -> do
-              priority <- currentPriority
+              priority <- thisPriority
               emitTraceLabel @"expr" "Propagated Equivalence Condition" (Some cond_pred)
-              gr1 <- updateEquivCondition scope from condK cond gr
-              return $ Just $ queueAncestors (raisePriority priority) from $ queueNode (raisePriority (raisePriority priority)) from $ dropPostDomains from normalPriority (markEdge from to gr1)
+              let propK = getPropagationKind gr to condK
+              gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
+              return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
+                queueNode (priority PriorityNodeRecheck) from $ 
+                dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
             Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
@@ -685,7 +704,7 @@ widenAlongEdge ::
   EquivM sym arch (PairGraph sym arch)
 widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
   gr <- addRefinementChoice to gr0
-  priority <- currentPriority
+  priority <- thisPriority
   propagateCondition scope bundle from to gr >>= \case
     Just gr1 -> do
       -- since this 'to' edge has propagated backwards
@@ -719,17 +738,17 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                 NoWideningRequired -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
-                  let gr1 = initDomain gr from to priority postSpec'
+                  let gr1 = initDomain gr from to (priority PriorityWidening) postSpec'
                   finalizeGraphEdge scope bundle d d' from to gr1
                 WideningError msg _ d'' ->
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     return $ recordMiscAnalysisError (initDomain gr from to priority postSpec') to err
+                     return $ recordMiscAnalysisError (initDomain gr from to (priority PriorityWidening) postSpec') to err
                 Widen _ _ d'' -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  let gr1 = initDomain gr from to priority postSpec'
+                  let gr1 = initDomain gr from to (priority PriorityWidening) postSpec'
                   finalizeGraphEdge scope bundle d d'' from to gr1
 
           -- have visited this location at least once before
@@ -761,7 +780,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                   do let msg' = ("Error during widening: " ++ msg)
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     case updateDomain gr from to postSpec' priority of
+                     case updateDomain gr from to postSpec' (priority PriorityWidening) of
                        Left gr' ->
                          do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
                             return $ recordMiscAnalysisError gr' to err
@@ -770,7 +789,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                 Widen _ _ d'' -> do
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  case updateDomain gr from to postSpec' priority of
+                  case updateDomain gr from to postSpec' (priority PriorityWidening) of
                     Left gr' -> do
                       do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
                          finalizeGraphEdge scope bundle d d'' from to gr'
@@ -790,8 +809,8 @@ finalizeGraphEdge scope bundle preD postD from to gr0 = do
   let gr1 = markEdge from to gr0
   runPendingActions edgeActions (from,to) (TupleF4 scope bundle preD postD) gr1 >>= \case
     Just gr2 -> do
-      priority <- currentPriority
-      return $ queueAncestors priority to gr2
+      priority <- thisPriority
+      return $ queueAncestors (priority PriorityHandleActions) to gr2
     Nothing -> 
       -- if the computed domain doesn't agree with any requested domain refinements,
       -- we need to propagate this backwards by dropping the entry for 'to',

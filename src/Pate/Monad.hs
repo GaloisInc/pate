@@ -104,7 +104,7 @@ module Pate.Monad
   , catchInIO
   , joinPatchPred
   , module PME
-  , atPriority, currentPriority)
+  , atPriority, currentPriority, thisPriority)
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -194,13 +194,21 @@ import Data.Functor.Const (Const(..))
 
 atPriority :: 
   NodePriority ->
+  Maybe String ->
   EquivM_ sym arch a ->
   EquivM sym arch a
-atPriority p f = CMR.local (\env -> env { envCurrentPriority = p }) f
+atPriority p Nothing f = CMR.local (\env -> env { envCurrentPriority = p }) f
+atPriority p (Just msg) f = CMR.local (\env -> env { envCurrentPriority = (tagPriority msg p) }) f
 
 currentPriority ::
   EquivM sym arch NodePriority
 currentPriority = CMR.asks envCurrentPriority
+
+thisPriority ::
+  EquivM sym arch (NodePriorityK -> NodePriority)
+thisPriority = do
+  priority <- currentPriority
+  return $ (\pK -> mkPriority pK priority)
 
 lookupBlockCache ::
   (EquivEnv sym arch -> BlockCache arch a) ->

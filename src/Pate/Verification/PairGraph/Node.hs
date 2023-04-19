@@ -50,6 +50,7 @@ import qualified Pate.Block as PB
 import qualified Pate.PatchPair as PPa
 import           Pate.TraceTree
 import qualified Pate.Binary as PB
+import qualified Prettyprinter as PP
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -212,16 +213,21 @@ instance PA.ValidArch arch => Show (GraphNode arch) where
   show e = show (pretty e)
 
 tracePrettyNode ::
-  PA.ValidArch arch => GraphNode arch -> Doc a
-tracePrettyNode nd = case nd of
-  GraphNode e -> case functionEntryOf e == e of
-    True -> "Function Entry" <+> pretty e
-    False -> pretty e
-  ReturnNode ret -> "Return" <+> pretty ret
+  PA.ValidArch arch => GraphNode arch -> String -> Doc a
+tracePrettyNode nd msg = case nd of
+  GraphNode e -> case (functionEntryOf e == e,msg) of
+    (True,"") -> "Function Entry" <+> pretty e
+    (True,_) -> "Function Entry" <+> pretty e <+> PP.parens (pretty msg)
+    (False,"") -> pretty e
+    (False,_) -> pretty e <+> PP.parens (pretty msg)
+  ReturnNode ret -> case msg of
+    "" -> "Return" <+> pretty ret
+    _ -> "Return" <+> pretty ret <+> PP.parens (pretty msg)
 
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
   type TraceNodeType '(sym, arch) "node" = GraphNode arch
-  prettyNode () nd = tracePrettyNode nd
+  type TraceNodeLabel "node" = String
+  prettyNode msg nd = tracePrettyNode nd msg
   nodeTags = mkTags @'(sym,arch) @"node" [Simplified, Summary]
 
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
