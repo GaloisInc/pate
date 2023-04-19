@@ -78,20 +78,6 @@ data MacawBlockEndCase =
   -- | An otherwise-unclassified arch exit. Some arch exits may end up being classified
   -- as either calls or returns, according to 'archTermCase'
   | MacawBlockEndArch
-  -- | This represents an infeasible branch with respect to our slicing semantics.
-  --   It allows us to discard spurious models where we somehow capture multiple function
-  --   calls or returns, which should not be possible since the slice should end on
-  --   any call or return.
-  --   This is distinct from 'MacawBlockEndFail', which represents a case where macaw has
-  --   actually be unable to properly classify a terminal block statement. A block ending in
-  --   classification error is still a valid model (usually resulting in an error that we report).
-  --   In contrast, we *assume* that infeasible block ends don't occur in order to avoid following
-  --   spurious analysis paths.
-  | MacawBlockEndInfeasible
-  --  | The default initial vault for the block ending. It is an error if a block ends
-  --    and this is its block end case, since macaw should have assigned it something else at
-  --    that point.
-  | MacawBlockEndInit
   deriving (Eq, Enum, Bounded, Ord, Show)
 
 
@@ -113,23 +99,10 @@ type MacawBlockEndType arch = C.StructType (Ctx.EmptyCtx Ctx.::> C.BVType 8 Ctx.
 -- than relying on encoding/decoding
 blockEndAtom :: forall arch ids s
               . MS.MacawSymbolicArchFunctions arch
-             -> CR.Atom s (MacawBlockEndType arch)
              -> MacawBlockEnd arch
              -> MSB.CrucGen arch ids s (CR.Atom s (MacawBlockEndType arch))
-blockEndAtom archFns prev_blkend (MacawBlockEnd blendK mret) = MSB.crucGenArchConstraints archFns $ do
-    prev_blkend' <- MSB.appAtom $ C.GetStruct prev_blkend Ctx.i1of2 knownRepr
-    return_end <- MSB.bvLit knownNat (toInteger $ fromEnum MacawBlockEndReturn)
-    call_end <- MSB.bvLit knownNat (toInteger $ fromEnum MacawBlockEndCall)
-    infeasible_end <- MSB.bvLit knownNat (toInteger $ fromEnum MacawBlockEndInfeasible)
-    -- did we already set the block ending to a return, call or infeasible?
-    is_return <- MSB.appAtom $ C.BaseIsEq knownRepr prev_blkend' return_end
-    is_call <- MSB.appAtom $ C.BaseIsEq knownRepr prev_blkend' call_end
-    is_infeasible <- MSB.appAtom $ C.BaseIsEq knownRepr prev_blkend' infeasible_end
-    is_invalid_prev1 <- MSB.appAtom $ C.Or is_return is_call
-    cond <- MSB.appAtom $ C.Or is_invalid_prev1 is_infeasible
-    -- if the block ending is invalid, set it to infeasible
-    blendK_ <- MSB.bvLit knownNat (toInteger $ fromEnum blendK)
-    blendK' <- MSB.appAtom $ C.BaseIte knownRepr cond infeasible_end blendK_
+blockEndAtom archFns (MacawBlockEnd blendK mret) = MSB.crucGenArchConstraints archFns $ do
+    blendK' <- MSB.bvLit knownNat (toInteger $ fromEnum blendK)
     let
       memWidthNatRepr = M.memWidthNatRepr @(M.ArchAddrWidth arch)
       ptrRepr = MM.LLVMPointerRepr memWidthNatRepr
@@ -154,8 +127,7 @@ assignBlockEnd :: forall arch ids s.
                -> MSB.CrucGen arch ids s ()
 assignBlockEnd archFns blendVar stmt = MSB.crucGenArchConstraints archFns $ do
   let blend = termStmtToBlockEnd stmt
-  prev_blkend <- MSB.evalAtom (CR.ReadGlobal blendVar)
-  blend' <- blockEndAtom archFns prev_blkend blend
+  blend' <- blockEndAtom archFns blend
   MSB.addStmt $ CR.WriteGlobal blendVar blend'
 
 -- | Return a pair of expressions '(e, c)' where the 'e' represents
@@ -192,7 +164,7 @@ blockEndCase :: forall sym arch proxy
              -> C.RegValue sym (MacawBlockEndType arch)
              -> IO (C.MuxTree sym MacawBlockEndCase)
 blockEndCase arch sym blend = do
-  foldM addCase (C.toMuxTree sym MacawBlockEndInit) [minBound..maxBound]
+  foldM addCase (C.toMuxTree sym MacawBlockEndFail) [minBound..maxBound]
   where
     addCase mt blendC = do
       p <- isBlockEndCase arch sym blend blendC

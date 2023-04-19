@@ -144,7 +144,7 @@ getGlobals ::
 getGlobals simInput = withValid $ withSym $ \sym -> do
   env <- CMR.ask
   -- initially the
-  blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym MCS.MacawBlockEndInit
+  blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym MCS.MacawBlockEndReturn
   return $
       CGS.insertGlobal (envMemTraceVar env) (PS.simInMem simInput)
     $ CGS.insertGlobal (envBlockEndVar env) blkend

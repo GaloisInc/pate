@@ -1739,12 +1739,7 @@ doCheckTotality bundle _preD exits =
          -}
          return bothReturn
 
-       -- we ignore the case where either program ends in an infeasible path
-       isEitherInfeasible <- PPa.joinPatchPred (\x y -> liftIO $ W4.orPred sym x y) $ \bin -> do
-         out <- PPa.get bin (PS.simOut bundle)
-         PD.matchingExitOne out MCS.MacawBlockEndInfeasible
-
-       asm <- liftIO $ (forM (isEitherInfeasible:isReturn:cases) (W4.notPred sym) >>= (foldM (W4.andPred sym) (W4.truePred sym)))
+       asm <- liftIO $ (forM (isReturn:cases) (W4.notPred sym) >>= (foldM (W4.andPred sym) (W4.truePred sym)))
 
        goalSat "doCheckTotality" asm $ \res -> case res of
          Unsat _ -> return CasesTotal
