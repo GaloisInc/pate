@@ -579,22 +579,30 @@ updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ cas
         mdom <- return $ getCurrentDomain pg sync
         return $ (sync, mdom)
     case (mdomO, mdomP) of
-      (Just domO, Just domP) -> mergeDualNodes syncO syncP domO domP combinedNode pg
+      -- if we have finished analyzing the original program up to the sync point,
+      -- then we need to attach this to the divergence point of the patched program
+      (Just{}, Nothing) -> do
+        priority <- thisPriority
+        case getCurrentDomain pg divergeNode of
+          Nothing -> return $ queueNode (priority PriorityHandleDesync) divergeNode pg 
+          Just dom_spec -> do
+            fmap (\x -> PS.viewSpecBody x PS.unWS) $ PS.forSpec dom_spec $ \scope dom -> fmap PS.WithScope $ do
+              domP <- PAD.singletonDomain PBi.PatchedRepr dom
+              divergeNodeP <- asSingleGraphNode PBi.PatchedRepr divergeNode
+              bundle <- noopBundle scope (graphNodeBlocks divergeNodeP)
+              pg1 <- case getCurrentDomain pg divergeNodeP of
+                Nothing -> return $ updateDomain' pg syncO divergeNodeP (PS.mkSimSpec scope domP) (priority PriorityWidening)
+                Just{} -> return pg
+              withPredomain scope bundle domP $ withConditionsAssumed scope syncO pg1 $
+                widenAlongEdge scope bundle syncO domP pg1 divergeNodeP
+      (Just domO_spec, Just domP_spec) -> do
+      -- similarly if we've finished analyzing the patched program, then by convention
+      -- we connect the post-domain of the to the merged sync point
+        mergeDualNodes syncO syncP domO_spec domP_spec combinedNode pg
       _ -> withTracing @"message" "Missing domain(s) for sync points" $ do
         priority <- thisPriority
-        pg1 <- case mdomO of
-          Nothing -> do
-            divergeNodeO <- asSingleGraphNode PBi.OriginalRepr divergeNode
-            return $ queueNode (priority PriorityDomainRefresh) divergeNodeO $ queueAncestors (priority PriorityHandleDesync) syncO pg
-          Just{} -> return pg
-        pg2 <- case mdomP of
-          Nothing -> do
-            divergeNodeP <- asSingleGraphNode PBi.PatchedRepr divergeNode
-            return $ queueNode (priority PriorityDomainRefresh) divergeNodeP $ queueAncestors (priority PriorityHandleDesync) syncP pg1
-          Just{} -> return pg1
-        case addToWorkList combinedNode (priority PriorityDomainRefresh) pg2 of
-          Just pg3 -> return pg3
-          Nothing -> return pg2
+        divergeNodeO <- asSingleGraphNode PBi.OriginalRepr divergeNode
+        return $ queueNode (priority PriorityDomainRefresh) divergeNodeO $ queueAncestors (priority PriorityHandleDesync) syncO pg
 
 {-
 -- | Connect two nodes with a no-op
@@ -631,45 +639,26 @@ mergeDualNodes ::
   GraphNode arch {- ^ first program node -} ->
   GraphNode arch {- ^ second program node -} ->
   PAD.AbstractDomainSpec sym arch {- ^ first node domain -} ->
-  PAD.AbstractDomainSpec sym arch  {- ^ second node domain -} ->
-  GraphNode arch {- ^ sync node -} ->
+  PAD.AbstractDomainSpec sym arch {- ^ second node domain -} ->
+  GraphNode arch {- ^  combined sync node -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 mergeDualNodes in1 in2 spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
-  priority <- thisPriority
-  -- ensure we queue up any ancestors to handle condition propagation
-  gr1 <- return $ dropWorkItem in1 $ dropWorkItem in2 gr0
+  let gr2 = gr0
 
-  gr2 <- case hasSomeCondition gr1 syncNode of
-    True -> return $ queueAncestors (priority PriorityPropagation) in2 $ queueAncestors (priority PriorityPropagation) in1 gr1
-    False -> return gr1
-  
   let blkPair1 = graphNodeBlocks in1
   let blkPair2 = graphNodeBlocks in2
+
   fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope (graphNodeBlocks syncNode) $ \scope -> fmap PS.WithScope $ 
     withValidInit scope blkPair1 $ withValidInit scope blkPair2 $ do
       (_, dom1) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec1
       (_, dom2) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec2
       dom <- PAD.zipSingletonDomains sym dom1 dom2
-      gr3 <- case getCurrentDomain gr2 syncNode of
-        Just{} -> return gr2
-        Nothing -> do
-          gr2_ <- return $ updateDomain' gr2 in1 syncNode (PS.mkSimSpec scope dom) (priority PriorityWidening)
-          return $ updateDomain' gr2_ in2 syncNode (PS.mkSimSpec scope dom) (priority PriorityWidening)
-
-      bundle1 <- noopBundle scope blkPair1
-      bundle2 <- noopBundle scope blkPair2
-      Just divergeNode <- return $ getDivergePoint in1
-
-      atPriority (raisePriority (priority PriorityHandleDesync)) (Just (show divergeNode)) $ do
-        withPredomain scope bundle1 dom $ withPredomain scope bundle2 dom $
-          withConditionsAssumed scope in1 gr3 $ withConditionsAssumed scope in2 gr3 $ do
-            gr4 <- withTracing @"node" in1 $ do
-              emitTraceLabel @"domain" PAD.Predomain (Some dom1)
-              widenAlongEdge scope bundle1 in1 dom gr3 syncNode
-            withTracing @"node" in2 $ do
-              emitTraceLabel @"domain" PAD.Predomain (Some dom2)
-              widenAlongEdge scope bundle2 in2 dom gr4 syncNode
+      bundle <- noopBundle scope (graphNodeBlocks syncNode)
+      withPredomain scope bundle dom $ withConditionsAssumed scope in2 gr2 $ do
+        withTracing @"node" in2 $ do
+          emitTraceLabel @"domain" PAD.Predomain (Some dom)
+          widenAlongEdge scope bundle in2 dom gr2 syncNode
 
 -- | Choose some work item (optionally interactively)
 chooseWorkItemM ::
@@ -2311,54 +2300,15 @@ handleDivergingPaths scope currBlock mchoice dom gr0 = fnTrace "handleDivergingP
   case (getSyncPoint gr0 PBi.OriginalRepr (GraphNode currBlock), getSyncPoint gr0 PBi.PatchedRepr (GraphNode currBlock)) of
     (Just{},Just{}) -> do
       bundleO <- noopBundle scope (nodeBlocks currBlockO)
-      bundleP <- noopBundle scope (nodeBlocks currBlockP)
 
       atPriority (raisePriority (priority PriorityHandleDesync)) Nothing $ do
-        domO <- PAD.singletonDomain PBi.OriginalRepr dom
+        -- we arbitrarily pick the original program to perform the first step of
+        -- the analysis
+        -- by convention, we define the sync point of the original program to
+        -- connect to the divergence point of the patched program
         gr1 <- withTracing @"node" (GraphNode currBlockO) $ 
-          widenAlongEdge scope bundleO (GraphNode currBlock) domO gr0 (GraphNode currBlockO)
-
-        domP <- PAD.singletonDomain PBi.PatchedRepr dom
-        gr2 <- withTracing @"node" (GraphNode currBlockP) $ 
-          widenAlongEdge scope bundleP (GraphNode currBlock) domP gr1 (GraphNode currBlockP)
-        return (gr2,mchoice)
-
-      {-
-      -- if either diverging node has an equivalence condition then
-      -- we need to join them and add it to this condition
-      let currBlockPair = PPa.PatchPairC currBlockO currBlockP
-
-      let mergeConds condK (didupdate, gr0_) = do
-            conds <- PPa.forBinsC $ \bin -> do
-              singletonBlock <- PPa.getC bin currBlockPair
-              getScopedCondition scope gr0_ (GraphNode singletonBlock) condK
-            let (condO, condP) = PPa.view getConst conds
-            cond_merged <- PEC.merge sym condO condP
-            cond_pred <- PEC.toPred sym cond_merged
-            goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
-
-            isPredTrue' goalTimeout cond_pred >>= \case
-              False -> do
-                gr1 <- updateEquivCondition scope (GraphNode currBlock) (nextCondition condK) cond_merged gr0_
-                return $ (True, queueAncestors NormalPriority (GraphNode currBlock) $ dropPostDomains (GraphNode currBlock) gr1)
-              True -> return (didupdate, gr0_)
-      
-      -- we only merge propagated assumptions
-      (didupdate, gr1) <- mergeConds ConditionAsserted (False, gr0) >>= mergeConds (ConditionAssumed True)
-      case didupdate of
-        True -> return (gr1, mchoice)
-        False -> do
-          Just spec <- return $ getCurrentDomain gr0 (GraphNode currBlock)
-
-          gr2 <- withTracing @"node" (GraphNode currBlockO) $  do
-            specO <- PS.forSpec spec (\_ -> PAD.singletonDomain PBi.OriginalRepr)
-            return $ updateDomain' gr1 (GraphNode currBlock) (GraphNode currBlockO) specO
-          
-          gr3 <- withTracing @"node" (GraphNode currBlockP) $ do
-            specP <- PS.forSpec spec (\_ -> PAD.singletonDomain PBi.PatchedRepr)
-            return $ updateDomain' gr2 (GraphNode currBlock) (GraphNode currBlockP) specP
-          return (gr3, mchoice)
-          -}
+          widenAlongEdge scope bundleO (GraphNode currBlock) dom gr0 (GraphNode currBlockO)
+        return (gr1, mchoice)
     _ -> do
       let divergeNode = GraphNode currBlock
       let pg = gr0

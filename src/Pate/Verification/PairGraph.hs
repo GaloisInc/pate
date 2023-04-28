@@ -1180,7 +1180,7 @@ queuePendingNodes pg0 = do
       maybeUpdate pg_ (runLazyAction act (env, Some (Const ()), pg_))) pg0 queueActs
 
     foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
-      True | Just pg__ <- addToWorkList from (mkPriority PriorityHandleActions priority) pg_ -> return pg__
+      True -> return $ queueNode (mkPriority PriorityHandleActions priority) from pg_
       _ -> return pg_) pg1 nodeActs'
   where
     asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction

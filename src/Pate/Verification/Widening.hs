@@ -657,12 +657,12 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
             -- equivalence condition for this path holds, we 
             -- don't need any changes
             Just False -> do
-              emitTraceLabel @"expr" "Proven Equivalence Condition" (Some cond_pred) 
+              emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
               return Nothing
             -- we need more assumptions for this condition to hold
             Just True -> do
               priority <- thisPriority
-              emitTraceLabel @"expr" "Propagated Equivalence Condition" (Some cond_pred)
+              emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
               let propK = getPropagationKind gr to condK
               gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
               return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
@@ -1288,10 +1288,11 @@ widenPostcondition scope bundle preD postD0 =
      NodeBuilderT '(sym,arch) "domain" (EquivM_ sym arch) (WidenResult sym arch v)
    widenLoop sym (Gas i) eqCtx postD mPrevRes = subTraceLabel' PAD.Postdomain  (Some postD) $ \unlift ->
      do
+        let (stO, stP) = PS.asStatePair scope (simOut bundle) PS.simOutState
+        
         postVals <- PPa.forBinsC $ \bin -> do
           vals <- PPa.get bin (PAD.absDomVals postD)
-          output <- PPa.get bin $ PS.simOut bundle
-          let st = PS.simOutState output
+          st <- PPa.get bin $ PPa.PatchPair stO stP
           liftIO $ PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
 
         res2 <- case postVals of
