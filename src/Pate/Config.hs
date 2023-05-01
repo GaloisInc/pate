@@ -276,6 +276,9 @@ data VerificationConfig validRepr =
     -- ^ registers to be asserted equal during conditional equivalence analysis
     --   (no conditional equivalence analysis is done if empty)
     , cfgRescopingFailureMode :: RescopingFailureMode
+    , cfgStackScopeAssume :: Bool
+    -- ^ true if out-of-scope stack slots should always be considered equal once
+    -- returning from a function (i.e. differences in these slots are implicitly ignored)
     }
 
 
@@ -298,4 +301,5 @@ defaultVerificationCfg =
                      , cfgIgnoreDivergedControlFlow = False
                      , cfgTargetEquivRegs = []
                      , cfgRescopingFailureMode = ThrowOnEqRescopeFailure
+                     , cfgStackScopeAssume = True
                      }

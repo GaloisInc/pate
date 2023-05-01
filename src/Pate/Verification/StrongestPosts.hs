@@ -83,11 +83,13 @@ import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PEq
+import qualified Pate.Equivalence.MemoryDomain as PEm
 import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.Statistics as PESt
 import qualified Pate.Event as PE
 import qualified Pate.Memory as PM
+import qualified Pate.MemCell as PMc
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Location as PL
 import           Pate.Monad
@@ -708,10 +710,12 @@ pairGraphComputeFixpoint entries gr_init = do
                 handleSyncPoint gr1 nd preSpec >>= \case
                   Just gr2 -> return gr2
                   Nothing -> PS.viewSpec preSpec $ \scope d -> do
-                    emitTraceLabel @"domain" PAD.Predomain (Some d)
+                    d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
+                      True -> strengthenStackDomain scope d
+                      False -> return d
                     withAssumptionSet (PS.scopeAsm scope) $ do
                       gr2 <- addRefinementChoice nd gr1
-                      gr3 <- visitNode scope nd d gr2
+                      gr3 <- visitNode scope nd d' gr2
                       emitEvent $ PE.VisitedNode nd
                       return gr3
         go gr4
@@ -1147,6 +1151,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
   withAbsDomain node d gr0 $ do
     checkParsedBlocks bPair
     withValidInit scope bPair $ do
+      d' <- applyCurrentAsms d
+      emitTraceLabel @"domain" PAD.Predomain (Some d')
       gr2 <- updateExtraEdges scope node d gr0
       let vars = PS.scopeVars scope
       withSimBundle gr2 vars node $ \bundle -> 
@@ -1250,6 +1256,28 @@ returnSiteBundle scope vars _preD pPair = withSym $ \sym -> do
   return (asms, bundle)
 
 
+-- | Strengthen the stack domain by implicitly assuming that out-of-scope
+-- slots (i.e. past the current stack pointer) are equivalent.
+-- Notably the stack slots must be past *both* the original and patched
+-- stack pointers to be assumed equivalent.
+strengthenStackDomain ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (AbstractDomain sym arch v)
+strengthenStackDomain scope dom = withSym $ \sym -> do
+  let stackDom = PEq.eqDomainStackMemory $ PAD.absDomEq dom
+  stackDom' <- PEm.traverseWithCell stackDom $ \cell p ->  do
+    stack_scope <- PPa.joinPatchPred (\x y -> liftIO $ W4.andPred sym x y ) $ \bin -> do
+      regs <- (PS.simRegs . PS.simVarState) <$> PPa.get bin (PS.scopeVars scope)
+      let sp = regs ^. MM.boundValue (MM.sp_reg @(MM.ArchReg arch))
+      let CLM.LLVMPointer _ cell_off = PMc.cellPtr cell
+      let CLM.LLVMPointer _ sp_off = PSR.macawRegValue sp
+      liftIO $ PMc.viewCell cell $ W4.bvSge sym cell_off sp_off
+    liftIO $ W4.andPred sym p stack_scope
+
+  return $ dom { PAD.absDomEq = (PAD.absDomEq dom) 
+    { PEq.eqDomainStackMemory = stackDom' } }
 
 -- | Run the given function a context where the
 -- given abstract domain is assumed to hold on the pre-state of the given

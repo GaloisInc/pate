@@ -44,8 +44,10 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Memory.MemTrace as MT
 
 import qualified What4.ExprHelpers as WEH
+import qualified Data.BitVector.Sized as BV
 
 validInitState ::
+  forall sym arch v.
   Maybe (PB.BlockPair arch) ->
   PPa.PatchPair (SimState sym arch v) ->
   EquivM sym arch (AssumptionSet sym)
@@ -58,8 +60,16 @@ validInitState mpPair stPair = withSym $ \sym -> PPa.catBins $ \bin -> do
   stackBase <- (unSE . simStackBase) <$> PPa.get bin stPair
   stackBaseCaller <- (unSE . simCallerStackBase) <$> PPa.get bin stPair
   -- current stack base comes after caller
-  stackBaseRel <- liftIO $ W4.bvUle sym stackBase stackBaseCaller 
-  return $ (fromPred stackBaseRel) <> reg_asms
+  stackBaseRel <- liftIO $ W4.bvSle sym stackBase stackBaseCaller
+  let w = MM.memWidthNatRepr @(MM.ArchAddrWidth arch)
+  -- assume that we have at least 1000 stack slots available
+  -- this is a bit arbitrary, but it avoids spurious counter-examples
+  -- where the stack wraps around
+  maxoff <- liftIO $ W4.bvLit sym w (BV.mkBV w (-1000))
+  stackBaseBottom <- liftIO $ W4.bvAdd sym stackBase maxoff
+  stackBaseValid <- liftIO $ W4.bvSlt sym stackBaseBottom stackBase
+
+  return $ (fromPred stackBaseValid) <> (fromPred stackBaseRel) <> reg_asms
 
 validRegister ::
   forall bin sym arch tp.
