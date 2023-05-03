@@ -3,6 +3,7 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE KindSignatures #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
 
@@ -16,16 +17,22 @@ module ReplBase
   , Arch
   ) where
 
+import           Data.Kind (Type)
 import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
 import qualified System.IO as IO
 
 import qualified Pate.Arch as PA
 import qualified Pate.Solver as PS
+import           What4.Expr.Builder as W4B
 
 data SomePrintFn = SomePrintFn (forall a. ((PS.ValidSym Sym, PA.ValidArch Arch) => Show a) => a -> IO ())
 
-data Sym
+data T
+data Solver :: Type -> Type
+data Fs
+
+type Sym = W4B.ExprBuilder T Solver Fs
 data Arch
 
 

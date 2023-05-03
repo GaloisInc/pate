@@ -60,6 +60,7 @@ import qualified ReplBase
 import           ReplBase ( Sym, Arch )
 
 import           Pate.TraceTree
+import           What4.Expr.Builder as W4B
 
 import Unsafe.Coerce(unsafeCoerce)
 

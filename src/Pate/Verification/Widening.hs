@@ -28,6 +28,7 @@ module Pate.Verification.Widening
   , pruneCurrentBranch
   , addRefinementChoice
   , traceEqCond
+  , InteractiveBundle(..)
   ) where
 
 import           GHC.Stack
@@ -46,6 +47,7 @@ import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 import           Data.List (foldl', (\\))
+import           Data.Maybe (mapMaybe)
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -349,6 +351,22 @@ addPropagationChoice condK nd gr0 = do
                 return gr3
     mapM_ go [PropagateOnce,PropagateFull]
 
+data InteractiveBundle sym arch =
+  forall v. InteractiveBundle 
+    { iScope :: PS.SimScope sym arch v
+    , iBundle :: PS.SimBundle sym arch v
+    , iNode :: GraphNode arch
+    , iPairGraph :: PairGraph sym arch
+    , iDom :: PAD.AbstractDomain sym arch v
+    , iCond :: Map.Map ConditionKind (PEC.EquivalenceCondition sym arch v)
+    , iEnv :: EquivEnv sym arch
+    }
+
+instance PA.ValidArch arch => IsTraceNode '(sym :: Type,arch :: Type) "interactiveBundle" where
+  type TraceNodeType '(sym,arch) "interactiveBundle" = InteractiveBundle sym arch
+  prettyNode () b = "Interactive Bundle For: " <> pretty (iNode b)
+  nodeTags = mkTags @'(sym,arch) @"interactiveBundle" [Summary, Simplified]
+
 -- | Deferred decision about whether or not the domain for this node should be refined
 addRefinementChoice ::
   GraphNode arch ->
@@ -359,8 +377,17 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
   -- only assertions are propagated by default
   gr1 <- foldM (\gr_ condK -> addEqDomRefinementChoice condK nd gr_) gr0 
     [minBound..maxBound]
-  gr2 <- addLazyAction nodeActions nd gr1 "Post-process equivalence condition?" $ \choice -> do
-    choice "Simplify equivalence conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
+  gr2 <- addLazyAction nodeActions nd gr1 "Post-process conditions?" $ \choice -> do
+    choice "Interactive" $ \(TupleF3 scope bundle d) gr2 -> withSym $ \sym -> do
+      env <- CMR.ask
+      let conds = Map.fromList $ mapMaybe (\condK -> case getCondition gr2 nd condK of {Just eqSpec -> Just (condK, eqSpec); Nothing -> Nothing}) [minBound..maxBound]
+
+      conds' <- mapM (\spec -> snd <$> (liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec)) conds
+      let b = InteractiveBundle scope bundle nd gr2 d conds' env
+      -- TODO: allow updates here
+      emitTrace @"interactiveBundle" b
+      return gr2
+    choice "Simplify conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
               (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
