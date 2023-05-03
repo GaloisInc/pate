@@ -117,6 +117,7 @@ library
                        Pate.Hints.BSI,
                        Pate.Hints.JSON,
                        Pate.Hints.DWARF,
+                       Pate.IOReplay,
                        Pate.Location,
                        Pate.Monad,
                        Pate.Monad.Context,
