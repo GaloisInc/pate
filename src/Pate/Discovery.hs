@@ -30,7 +30,8 @@ module Pate.Discovery (
   nextBlock,
   findPLTSymbol,
   thisInstr,
-  liftPartialRel
+  liftPartialRel,
+  isAbortStub
   ) where
 
 import           Control.Lens ( (^.) )
@@ -48,7 +49,7 @@ import           Data.Functor.Const
 import           Data.Int
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
-import           Data.Maybe ( catMaybes, maybeToList, fromJust )
+import           Data.Maybe ( catMaybes, maybeToList, fromJust, fromMaybe )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
@@ -110,6 +111,7 @@ import qualified What4.ExprHelpers as WEH
 import           Pate.TraceTree
 import qualified Control.Monad.IO.Unlift as IO
 import Data.Parameterized.SetF (AsOrd(..))
+import qualified Data.ByteString.Char8 as BSC
 
 --------------------------------------------------------
 -- Block pair matching
@@ -686,6 +688,13 @@ isPLTFunction fe = case PB.functionSymbol fe of
     extraMap <- PPa.getC bin extraMapPair
     return $ Map.member sym extraMap
 
+-- FIXME: defined by the architecture?
+abortStubs :: Set.Set (BS.ByteString)
+abortStubs = Set.fromList $ map BSC.pack ["abort","err","perror","exit"]
+
+isAbortStub :: BS.ByteString -> Bool
+isAbortStub nm = Set.member nm abortStubs
+
 pltStubClassifier ::
   forall bin arch.
   PA.ValidArch arch =>
@@ -731,12 +740,13 @@ callTargets from mnext_block_addr next_ips mret = fnTrace "callTargets" $ do
                                    }
          fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
          isPLT <- isPLTFunction fe'
+         let isAbortPLT = fromMaybe False $ fmap isAbortStub (PB.functionSymbol fe')
          let pb = PB.functionEntryToConcreteBlock fe'
 
          
          ret_blk <- case mret of
            Just ret -> return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction ret
-           Nothing | isPLT, Just next_block_addr <- mnext_block_addr ->
+           Nothing | isPLT, not isAbortPLT, Just next_block_addr <- mnext_block_addr ->
              return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction next_block_addr
            Nothing -> return Nothing
          emitTrace @"message" (show mnext_block_addr)

@@ -1922,7 +1922,7 @@ getFunctionStub blk = do
       let mnm = PB.functionSymbol fnEntry
       case mnm of
         Just nm | Just{} <- PA.lookupStubOverride archData nm -> return $ Just nm
-        Just nm | Set.member nm abortStubs -> return $ Just nm
+        Just nm | PD.isAbortStub nm -> return $ Just nm
         Just nm | PB.functionIgnored fnEntry -> return $ Just nm
         Nothing | PB.functionIgnored fnEntry -> return $ Just skippedFnName
         Nothing -> asks (PCfg.cfgIgnoreUnnamedFunctions . envConfig) >>= \case
@@ -1947,10 +1947,10 @@ hasStub stubPair = getAny $ PPa.collapse (Any . isJust . getConst) stubPair
 
 -- | True if either stub has an abort symbol
 hasTerminalStub :: StubPair -> Bool
-hasTerminalStub stubPair = getAny $ PPa.collapse (Any . fromMaybe False . fmap isAbortStub . getConst) stubPair
+hasTerminalStub stubPair = getAny $ PPa.collapse (Any . fromMaybe False . fmap PD.isAbortStub . getConst) stubPair
  
 bothTerminalStub :: StubPair -> Bool
-bothTerminalStub stubPair = getAll $ PPa.collapse (All . fromMaybe False . fmap isAbortStub . getConst) stubPair
+bothTerminalStub stubPair = getAll $ PPa.collapse (All . fromMaybe False . fmap PD.isAbortStub . getConst) stubPair
 
 isIgnoredBlock :: PB.ConcreteBlock arch bin -> Bool
 isIgnoredBlock blk = case PB.asFunctionEntry blk of
@@ -1962,12 +1962,9 @@ isIgnoredBlockPair :: PPa.PatchPair (PB.ConcreteBlock arch) -> Bool
 isIgnoredBlockPair blks = isIgnoredBlock (PPa.pOriginal blks) (PPa.pPatched blks)
 -}
 
--- FIXME: defined by the architecture?
-abortStubs :: Set.Set (BS.ByteString)
-abortStubs = Set.fromList $ map BSC.pack ["abort","err","perror","exit"]
 
-isAbortStub :: BS.ByteString -> Bool
-isAbortStub nm = Set.member nm abortStubs
+
+
 
 combineCases :: MCS.MacawBlockEndCase -> MCS.MacawBlockEndCase -> Maybe MCS.MacawBlockEndCase
 combineCases c1 c2 = case (c1,c2) of
