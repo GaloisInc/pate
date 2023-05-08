@@ -103,6 +103,7 @@ module Pate.Verification.PairGraph
   , conditionAction
   , conditionName
   , shouldPropagate
+  , shouldAddPathCond
   , maybeUpdate'
   , hasSomeCondition
   , propagateOnce, getPropagationKind, propagateAction) where
@@ -294,6 +295,7 @@ data ConditionKind =
 
 data PropagateKind =
     PropagateFull
+  | PropagateFullNoPaths
   | PropagateOnce
   | PropagateNone
   deriving (Eq,Ord, Enum, Bounded)
@@ -302,6 +304,7 @@ propagateAction ::
   PropagateKind -> String
 propagateAction = \case
   PropagateFull -> "fully"
+  PropagateFullNoPaths -> "fully (no path conditions)"
   PropagateOnce -> "once"
   PropagateNone -> "never"
 
@@ -309,6 +312,7 @@ nextPropagate ::
   PropagateKind -> PropagateKind
 nextPropagate = \case
   PropagateFull -> PropagateFull
+  PropagateFullNoPaths -> PropagateFullNoPaths
   PropagateOnce -> PropagateNone
   PropagateNone -> PropagateNone
 
@@ -316,9 +320,15 @@ propagateOnce ::
   PropagateKind -> PropagateKind
 propagateOnce = \case
   PropagateFull -> PropagateFull
+  PropagateFullNoPaths -> PropagateFullNoPaths
   PropagateOnce -> PropagateOnce
   PropagateNone -> PropagateOnce
 
+
+shouldAddPathCond :: PropagateKind -> Bool
+shouldAddPathCond = \case
+  PropagateFullNoPaths -> False
+  _ -> True
 
 shouldPropagate :: PropagateKind -> Bool
 shouldPropagate = \case

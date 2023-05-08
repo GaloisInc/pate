@@ -253,13 +253,16 @@ updateEquivCondition ::
   EquivM sym arch (PairGraph sym arch)  
 updateEquivCondition scope nd condK mpropK cond gr = withSym $ \sym -> do
   resetBlockCache envExitPairsCache
-  pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
-  eqCond <- getScopedCondition scope gr nd condK
-  cond' <- PEC.weaken sym pathCond cond
-  eqCond' <- PEC.merge sym cond' eqCond
   let propK = case mpropK of
         Just _propK -> _propK
         Nothing -> getPropagationKind gr nd condK
+  cond' <- case shouldAddPathCond propK of
+    True -> do
+      pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
+      PEC.weaken sym pathCond cond
+    False -> return cond
+  eqCond <- getScopedCondition scope gr nd condK
+  eqCond' <- PEC.merge sym cond' eqCond
   return $ setCondition nd condK propK (PS.mkSimSpec scope eqCond') gr
 
 -- | Adds the given predicate to the equivalence condition for the given node
@@ -349,7 +352,7 @@ addPropagationChoice condK nd gr0 = do
               Nothing -> do
                 emitTrace @"message" ("No " ++  conditionName condK ++ " found")
                 return gr3
-    mapM_ go [PropagateOnce,PropagateFull]
+    mapM_ go [PropagateOnce,PropagateFull,PropagateFullNoPaths]
 
 data InteractiveBundle sym arch =
   forall v. InteractiveBundle 
