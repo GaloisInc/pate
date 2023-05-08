@@ -561,6 +561,12 @@ instance IsTraceNode k "debug" where
     _ -> PP.vsep [PP.pretty lbl, PP.pretty msg]
   nodeTags = [("debug", \lbl msg -> case lbl of {"" -> PP.pretty msg; _ -> PP.pretty lbl})]
 
+instance IsTraceNode k "debug_tree" where
+  type TraceNodeType k "debug_tree" = String
+  prettyNode () msg = PP.pretty msg
+  nodeTags = mkTags @k @"debug_tree" ["debug"]
+
+
 instance IsTraceNode k "bool" where
   type TraceNodeType k "bool" = Bool
   type TraceNodeLabel "bool" = String

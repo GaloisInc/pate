@@ -266,6 +266,7 @@ isSubTreeNode (TraceNode{}) = case symbolRepr (knownSymbol @nm) of
   "subtree" -> True
   "choiceTree" -> True
   "function_name" -> True
+  "debug_tree" -> True
   _ -> False
 
 truncateSubNodes :: [(Int, Some (TraceNode sym arch))] -> ReplM sym arch [(Int, Some (TraceNode sym arch))]
