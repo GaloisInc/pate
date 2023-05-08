@@ -150,7 +150,19 @@ flushCache pfm = do
     st' { parsedFunctionCache = mempty, discoveryState = initDiscoveryState pfm ainfo }
 
 isUnsupportedErr :: T.Text -> Bool
-isUnsupportedErr err = T.isPrefixOf "UnsupportedInstruction" err
+isUnsupportedErr err = 
+     T.isPrefixOf "UnsupportedInstruction" err 
+  || T.isPrefixOf "TranslationError" err
+  || T.isPrefixOf "DecodeError" err
+
+incrementInstrStart ::
+  MM.ArchConstraints arch => 
+  MM.ArchAddrWord arch -> 
+  MM.Stmt arch ids -> 
+  MM.Stmt arch ids
+incrementInstrStart off = \case
+  MM.InstructionStart wd txt -> MM.InstructionStart (wd + off) txt
+  x -> x
 
 addTranslationErrorWrapper ::
   forall arch.
@@ -167,7 +179,8 @@ addTranslationErrorWrapper f nonceGen start initSt offset  = do
         let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
         let nextSt' = nextSt & MM.curIP .~ v
         (blk',sz') <- addTranslationErrorWrapper f nonceGen next nextSt' (offset - sz)
-        return $ (MAI.Block (MAI.blockStmts blk ++ [MM.Comment err] ++ MAI.blockStmts blk') (MAI.blockTerm blk'), sz + sz')
+        let stmts' = map (incrementInstrStart (fromIntegral (sz + MM.addrSize start))) (MAI.blockStmts blk')
+        return $ (MAI.Block (MAI.blockStmts blk ++ [MM.Comment err] ++ stmts') (MAI.blockTerm blk'), sz + sz')
       _ -> return (blk,sz)
 
 overrideDisassembler ::

@@ -237,8 +237,11 @@ stripUninterpretedStmts ::
   PA.ValidArch arch =>
   [MM.Stmt arch ids] ->
   [MM.Stmt arch ids]
-stripUninterpretedStmts stmts = 
-  filter (\case {MM.ExecArchStmt astmt -> not (PA.uninterpretedArchStmt astmt); _ -> True}) stmts
+stripUninterpretedStmts = \case
+  (MM.Comment msg:stmts) | PDP.isUnsupportedErr msg -> stripUninterpretedStmts stmts
+  (MM.ExecArchStmt astmt:stmts) | PA.uninterpretedArchStmt astmt -> stripUninterpretedStmts stmts
+  (stmt:stmts) -> stmt: stripUninterpretedStmts stmts
+  [] -> []
 
 -- | Symbolic execution can't handle uninterpreted instructions.
 --   As a very bad initial approximation, we simply drop these uninterpreted
@@ -249,20 +252,25 @@ stripUninterpreted ::
   [MD.ParsedBlock arch ids]
 stripUninterpreted pbs = map (\pb -> pb { MD.pblockStmts = stripUninterpretedStmts (MD.pblockStmts pb) } ) pbs
 
--- Slightly different to above, since we can't tell if stripping out these statements
--- has any effect
-hasUninterpretedStmts ::
-  PA.ValidArch arch =>
+warnOnUninterpretedStmts ::
+  forall sym arch ids.
+  MM.ArchSegmentOff arch ->
+  MM.ArchAddrWord arch ->
   [MM.Stmt arch ids] ->
-  Bool
-hasUninterpretedStmts stmts = 
-  any (\case {MM.Comment msg -> PDP.isUnsupportedErr msg; _ -> False}) stmts
-
-hasUninterpreted ::
-  PA.ValidArch arch =>
-  [MD.ParsedBlock arch ids] ->
-  Bool
-hasUninterpreted blks = any  (\pb -> hasUninterpretedStmts (MD.pblockStmts pb) ) blks
+  EquivM sym arch ()
+warnOnUninterpretedStmts _ _ [] = return ()
+warnOnUninterpretedStmts blockStart off (stmt:stmts) = case stmt of
+  MM.InstructionStart wd _ -> warnOnUninterpretedStmts blockStart wd stmts
+  MM.Comment msg | PDP.isUnsupportedErr msg -> go
+  MM.ExecArchStmt astmt | PA.uninterpretedArchStmt astmt -> go
+  _ -> warnOnUninterpretedStmts blockStart off stmts
+  where
+    go :: EquivM sym arch ()
+    go = do
+      let addr = MM.incAddr (fromIntegral $ (fromIntegral off) + MM.addrSize blockStart) (MM.segoffAddr blockStart)
+      withTracing @"debug" (show addr) $ 
+        emitWarning $ PEE.UninterpretedInstruction
+      warnOnUninterpretedStmts blockStart off stmts
 
 -- | Symbolically execute a chunk of code under the preconditions determined by
 -- the compositional analysis
@@ -279,16 +287,14 @@ simulate ::
   EquivM sym arch (W4.Pred sym, PS.SimOutput sym arch v bin)
 simulate simInput killBlock = withBinary @bin $ do
   PDP.ParsedBlocks pbs0 <- PD.lookupBlocks (PS.simInBlock simInput)
-  -- attempt simulation, if it fails, retry by stripping out any uninterpreted statements, but
-  -- emit a warning along with the result
-  case hasUninterpreted pbs0 of
-    True -> emitWarning PEE.UninterpretedInstruction
-    False -> return ()
 
-  catchError (simulate' simInput pbs0 killBlock) $ \e -> do
-    let pbs1 = stripUninterpreted pbs0
-    catchError (simulate' simInput pbs1 killBlock >>= \r -> emitWarning PEE.UninterpretedInstruction >> return r)
-      $ \_ -> throwError e
+  case PB.asFunctionEntry (PS.simInBlock simInput) of
+    Just{} -> withTracing @"debug" "Uninterpreted Instructions" $ forM_ pbs0 $ \pb -> do
+      warnOnUninterpretedStmts (MD.pblockAddr pb) (fromIntegral (0 :: Int)) (MD.pblockStmts pb)
+    Nothing -> return ()
+
+  let pbs1 = stripUninterpreted pbs0
+  simulate' simInput pbs1 killBlock
 
 
 saveCFG ::
