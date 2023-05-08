@@ -4,6 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
 -- | This module provides the interface to the symbolic execution engine used by the pate verifier
 --
 -- It performs all of the setup and extraction of results, along with logic for
@@ -64,6 +65,7 @@ import qualified Pate.PatchPair as PPa
 import Data.Functor.Const (Const(..))
 import Control.Monad.Error
 import Lang.Crucible.CFG.Expr (PrettyExt)
+import Pate.TraceTree
 
 -- | Return a Crucible run-time repr for the architecture-specific register file
 archStructRepr :: forall sym arch. EquivM sym arch (CC.TypeRepr (MS.ArchRegStruct arch))
