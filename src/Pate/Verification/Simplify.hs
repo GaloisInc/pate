@@ -37,6 +37,8 @@ import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
 import           Pate.TraceTree
+import qualified Data.Set as Set
+import Pate.AssumptionSet
 
 -- | Under the current assumptions, attempt to collapse a predicate
 -- into either trivially true or false
@@ -103,15 +105,7 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
   pcache <- W4B.newIdxCache
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let
-    simpCheck :: WEH.SimpCheck sym (EquivM_ sym arch)
-    simpCheck = WEH.SimpCheck $ \e_orig e_simp -> do
-      valid <- liftIO $ W4.isEq sym e_orig e_simp
-      isPredTrue' heuristicTimeout valid >>= \case
-        True -> return e_simp
-        False ->
-          --TODO: raise warning if simplifier performs
-          --inconsistent step
-          return e_orig
+
     checkPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
     checkPred p' = fmap (getConst) $ W4B.idxCacheEval pcache p' $
       Const <$> concretePred heuristicTimeout p'
@@ -119,10 +113,46 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
     doSimp :: forall tp. W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)
     doSimp e = W4B.idxCacheEval ecache e $ do
       e1 <- WEH.resolveConcreteLookups sym checkPred e
-      e2 <- WEH.simplifyBVOps' sym simpCheck e1
-      WEH.runSimpCheck simpCheck e e2
+      e2 <- WEH.simplifyBVOps' sym tracedSimpCheck e1
+      WEH.runSimpCheck tracedSimpCheck e e2
 
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (doSimp e)) a
+
+tracedSimpCheck :: forall sym arch. WEH.SimpCheck sym (EquivM_ sym arch)
+tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -> do
+  not_valid <- liftIO $ (W4.isEq sym e_orig e_simp >>= W4.notPred sym)
+  goalSat "tracedSimpCheck" not_valid $ \case
+    W4R.Unsat{} -> return e_simp
+    W4R.Unknown{} -> do
+      withTracing @"debug" "Unknown Simplifier Check Result" $ do
+        emitTraceLabel @"expr" "original" (Some e_orig)
+        emitTraceLabel @"expr" "simplified" (Some e_simp)
+        emitError $ PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e_orig e_simp)
+        return e_orig
+    W4R.Sat fn -> do
+      withTracing @"debug" "Invalid Simplifier Check Result" $ do
+        emitTraceLabel @"expr" "original" (Some e_orig)
+        emitTraceLabel @"expr" "simplified" (Some e_simp)
+        e_orig_conc <- concretizeWithModel fn e_orig
+        e_simp_conc <- concretizeWithModel fn e_simp
+        vars <- fmap Set.toList $ liftIO $ WEH.boundVars e_orig
+        binds <- CMR.foldM (\asms (Some var) -> do
+          conc <- concretizeWithModel fn (W4.varExpr sym var)
+          return $ asms <> (exprBinding @sym (W4.varExpr sym var) conc)) mempty vars
+        withTracing @"debug" "Counterexample" $ do
+          emitTraceLabel @"expr" "original concrete" (Some e_orig_conc)
+          emitTraceLabel @"expr" "simplified concrete" (Some e_simp_conc)
+          emitTrace @"assumption" binds
+        emitError $ PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e_orig e_simp)
+        return e_orig
+
+getSimpCheck :: EquivM sym arch (WEH.SimpCheck sym (EquivM_ sym arch))
+getSimpCheck = do
+  shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
+  case shouldCheck of
+    True -> return tracedSimpCheck
+    False -> return WEH.noSimpCheck
+
 
 -- | Simplify a predicate by considering the
 -- logical necessity of each atomic sub-predicate under the current set of assumptions.
@@ -181,44 +211,55 @@ applySimplifier ::
   Simplifier sym arch ->
   v ->
   EquivM sym arch v
-applySimplifier simplifier v = withSym $ \sym -> PEM.mapExpr sym (runSimplifier simplifier) v
+applySimplifier simplifier v = withSym $ \sym -> do
+  shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
+  case shouldCheck of
+    True -> withTracing @"debug_tree" "Simplifier" $ PEM.mapExpr sym (runSimplifier simplifier) v
+    False -> withNoTracing $ PEM.mapExpr sym (runSimplifier simplifier) v
 
 getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 getSimplifier = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   conccache <- W4B.newIdxCache
   ecache <- W4B.newIdxCache
+  
   let
     concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
+    concPred p | Just b <- W4.asConstantPred p = return $ Just b
     concPred p = getConst <$> (W4B.idxCacheEval conccache p $ do
                                   emitTraceLabel @"expr" "concPred_input" (Some p)
                                   concretePred heuristicTimeout p >>= \case
                                     Just b -> (emitTrace @"message" "concrete" >> return (Const (Just b)))
                                     Nothing -> (emitTrace @"message" "abstract" >> return (Const Nothing))
                                )
+    simp_wrapped :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+    simp_wrapped e = W4B.idxCacheEval ecache e $ do
+      e' <- withNoTracing $ simp WEH.noSimpCheck e
+      shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
+      case shouldCheck of
+        True -> withTracing @"debug_tree" "Simplifier Check" $ do
+          e'' <- WEH.runSimpCheck tracedSimpCheck e e'
+          case W4.testEquality e' e'' of
+            Just W4.Refl -> return e''
+            Nothing -> do
+              -- re-run the simplifier with tracing enabled
+              _ <- simp tracedSimpCheck e
+              return e
+        False -> return e'
 
-    simp :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
-    simp e = W4B.idxCacheEval ecache e $ do
+    simp :: forall tp. WEH.SimpCheck sym (EquivM_ sym arch) -> W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+    simp _ e | Just{} <- W4.asConcrete e = return e
+    simp simpCheck e = do
       -- TODO: clean up this tracing a bit
-      emitTraceLabel @"expr" "input" (Some e)
       e1 <- WEH.resolveConcreteLookups sym concPred e
       emitIfChanged "resolveConcreteLookups" e e1
       -- valid <- liftIO $ W4.isEq sym e e1
-      e2 <- WEH.simplifyBVOps sym e1
+      e2 <- WEH.simplifyBVOps' sym simpCheck e1
       emitIfChanged "simplifyBVOps" e1 e2
       e3 <- liftIO $ WEH.fixMux sym e2
       emitIfChanged "fixMux" e2 e3
-
-      shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
-      case shouldCheck of
-        True -> do
-          valid <- liftIO $ W4.isEq sym e e3
-          concPred valid >>= \case
-            Just True -> return e3
-            _ -> throwHere $ PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e e3)
-        False -> return e3
-  return $ Simplifier $ \v -> withNoTracing $ PEM.mapExpr sym simp v
-
+      return e3
+  return $ Simplifier $ \v -> PEM.mapExpr sym simp_wrapped v
 
 emitIfChanged ::
   ExprLabel ->

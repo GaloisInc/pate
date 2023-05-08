@@ -81,6 +81,7 @@ module What4.ExprHelpers (
 
 import           GHC.TypeNats
 import           Unsafe.Coerce ( unsafeCoerce ) -- for mulMono axiom
+import           Control.Lens ( (.~), (&), (^.) )
 
 import           Control.Applicative
 import           Control.Monad.Except
@@ -129,6 +130,7 @@ import qualified What4.Utils.AbstractDomains as W4AD
 
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
+import Data.Maybe (fromMaybe)
 
 -- | Sets the abstract domain of the given integer to assume
 --   that it is positive. 
@@ -1132,7 +1134,7 @@ simplifyBVOpInner ::
   (forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')) ->
   W4B.App (W4B.Expr t) tp ->
   Maybe (IO (W4.SymExpr sym tp))
-simplifyBVOpInner sym _simp_check go app = case app of
+simplifyBVOpInner sym simp_check go app = case app of
   W4B.BVConcat w u v -> do
       W4B.BVSelect upper n bv <- W4B.asApp u
       W4B.BVSelect lower n' bv' <- W4B.asApp v
@@ -1167,6 +1169,20 @@ simplifyBVOpInner sym _simp_check go app = case app of
     zlead <- return $ leadingZeros bv'
     True <- return $ BVS.asUnsigned cshift <= zlead
     return $ go bv'
+  -- simplify the operands of a shift if either can be simplified
+
+  -- unclear if this is a good idea in general, but bubbling conditionals
+  -- up tends to expose simplifications that are otherwise not possible
+  W4B.BVShl _ bv shift -> do
+    W4B.BaseIte _ _ cond t f <- W4B.asApp bv
+    -- we restrict this to constant shifts to avoid duplicating
+    -- complicated shift terms
+    W4C.ConcreteBV{} <- W4.asConcrete shift
+    return $ do
+      t_shift <- W4.bvShl sym t shift >>= go
+      f_shift <- W4.bvShl sym f shift >>= go
+      W4.baseTypeIte sym cond t_shift f_shift >>= go
+
 
   W4B.BVZext w_outer bv -> do
     W4B.BVZext _ bv' <- W4B.asApp bv
@@ -1212,23 +1228,26 @@ simplifyBVOpInner sym _simp_check go app = case app of
         doConst c = W4.bvLit sym w c >>= W4.bvSelect sym idx n
 
       return $ WSum.evalM doAdd doMul doConst s
-     -- push selection into sums
+    
     <|> do
       W4B.SemiRingSum s <- W4B.asApp bv
       SR.SemiRingBVRepr SR.BVArithRepr w <- return $ WSum.sumRepr s
-      let
-        doAdd bv1 bv2 = do
-          bv1' <- go bv1
-          bv2' <- go bv2
-          W4.bvAdd sym bv1' bv2'
-
-        doMul coef bv' = do
-          coef_bv <- W4.bvLit sym w coef
-          bv'' <- go bv'
-          W4.bvMul sym coef_bv bv''
-
-        doConst c = W4.bvLit sym w c
-      return $ (WSum.evalM doAdd doMul doConst s >>= W4.bvSelect sym idx n)
+      let zero = BVS.mkBV w 0
+      Refl <- testEquality idx (W4.knownNat @0)
+      (terms, offset) <- asSimpleSum sym w s
+      (count :: Integer) <- case offset == zero of
+        True -> return $ fromIntegral (length terms)
+        False -> return $ fromIntegral (length terms) + 1
+      -- do we have enough outer bits to contain all possible overflows
+      -- from the inner sums without overflowing the outer bitvector?
+      True <- return $ ((W4.intValue w - W4.intValue n) + 1) >= count
+      -- if so, we can push the slice into the individual terms, since we
+      -- are necessarily slicing off any overflow bits
+      return $ do
+        offsetLit <- W4.bvLit sym w offset >>= W4.bvSelect sym idx n
+        result <- foldM (\r term -> W4.bvSelect sym idx n term >>= go >>= \term' -> W4.bvAdd sym term' r) offsetLit terms
+        originalExpr <- W4B.sbMakeExpr sym app
+        runSimpCheck simp_check originalExpr result
     <|> do
       W4B.BVOrBits _ s <- W4B.asApp bv
       (b:bs) <- return $ W4B.bvOrToList s
@@ -1299,6 +1318,32 @@ simplifyBVOpInner sym _simp_check go app = case app of
         eq1 <- W4.isEq sym lhs2 inner_left >>= go 
         eq2 <- W4.isEq sym lhs1 inner_right >>= go 
         W4.andPred sym eq1 eq2
+    <|> do
+      -- t1 + (t2 xor 0xff..ff) + 1 --> t1 == t2
+      W4C.ConcreteBV w lhs_c <- W4.asConcrete lhs
+      True <- return $ lhs_c == BVS.zero w
+      W4B.SemiRingSum s <- W4B.asApp rhs
+      SR.SemiRingBVRepr SR.BVArithRepr _ <- return $ WSum.sumRepr s
+      ([t2, t1],offset) <- asSimpleSum sym w s
+      True <- return $ offset == BVS.one w
+      W4B.SemiRingSum t2_s <- W4B.asApp t2
+      SR.SemiRingBVRepr SR.BVBitsRepr _ <- return $ WSum.sumRepr t2_s
+      ([t3],t2_s_offset) <- asSimpleSum sym w t2_s
+      True <- return $ BVS.maxUnsigned w == t2_s_offset
+      return $ W4.isEq sym t1 t3 >>= go
+    <|> do
+      W4C.ConcreteBV w lhs_c <- W4.asConcrete lhs
+      True <- return $ lhs_c == BVS.zero w
+      W4B.BVShl _ bv shift <- W4B.asApp rhs
+      W4C.ConcreteBV _ shift_c <- W4.asConcrete shift
+      -- as long as we are only shifting off leading zeros, the
+      -- result is unchanged by the shift
+      True <- return $ (BVS.asUnsigned shift_c) <= (leadingZeros bv)
+      return $ do
+        zero <- W4.bvLit sym w (BVS.zero w)
+        W4.isEq sym zero bv >>= go
+
+
   _ -> Nothing
 
 -- | Deep simplification of bitvector operations by removing redundant
@@ -1337,6 +1382,29 @@ simplifyBVOps' sym simp_check outer = do
       go e = W4B.idxCacheEval cache1 e $ simplifyApp sym cache2 simp_check f e
 
     inIO (go outer)
+
+
+asSimpleSum :: 
+  forall sym sr w.
+  sym ->
+  W4.NatRepr w ->
+  WSum.WeightedSum (W4.SymExpr sym) (SR.SemiRingBV sr w) -> 
+  Maybe ([W4.SymBV sym w], BVS.BV w)
+asSimpleSum _ _ ws = do
+  terms <- WSum.evalM 
+    (\x y -> return $ x ++ y)
+    (\c e -> case c == one of {True -> return [e]; False -> fail ""})
+    (\c -> case c == zero of { True -> return []; False -> fail ""})
+    (ws & WSum.sumOffset .~ zero)
+  return $ (terms, ws ^. WSum.sumOffset )
+  where
+    one :: BVS.BV w
+    one = SR.one (WSum.sumRepr ws)
+
+    zero :: BVS.BV w
+    zero = SR.zero (WSum.sumRepr ws)
+  
+
 
 -- | An action for validating a simplification step.
 -- After a step is taken, this function is given the original expression as the
