@@ -825,6 +825,7 @@ addFnEnd mem m funcDesc = case PH.functionEnd funcDesc of
 buildSymbolTable
   :: forall arch
    . (MT.KnownNat (MC.ArchAddrWidth arch))
+  => PA.ValidArch arch
   => PH.VerificationHints
   -> Map.Map BS.ByteString (BVS.BV (MC.ArchAddrWidth arch))
   -> PSym.SymbolTable arch
@@ -896,7 +897,7 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
     addElfFunction m segOff = do
       let addr = MM.segoffAddr segOff
       case MBL.symbolFor bin addr of
-        Right nm -> return $ Map.insert segOff nm m
+        Right nm -> return $ Map.insert (PA.alignPC_raw (Proxy @arch) segOff) nm $ Map.insert segOff nm m
         Left (_e :: CMC.SomeException) -> return m
 
     addFunctionEntryHint m (_, fd) =

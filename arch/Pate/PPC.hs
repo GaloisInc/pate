@@ -169,6 +169,7 @@ instance PA.ValidArch PPC.PPC32 where
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
   alignPC = id
+  alignPC_raw _ = id
 
 instance PA.ValidArch PPC.PPC64 where
   type ArchConfigOpts PPC.PPC64 = ()
@@ -187,6 +188,7 @@ instance PA.ValidArch PPC.PPC64 where
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
   alignPC = id
+  alignPC_raw _ = id
 
 -- | Determine the argument name for the argument held in the given register.
 --

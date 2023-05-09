@@ -131,6 +131,7 @@ instance PA.ValidArch SA.AArch32 where
   uninterpretedArchStmt _ = True
 
   alignPC a = PA.memAddrToAddr (MC.clearAddrLeastBit (PA.addrToMemAddr a))
+  alignPC_raw _ = MC.clearSegmentOffLeastBit
 
 data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 

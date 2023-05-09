@@ -91,6 +91,7 @@ import qualified Data.ElfEdit as EEP
 import qualified Data.Parameterized.List as P
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
+import Data.Proxy
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -179,6 +180,7 @@ class
   uninterpretedArchStmt :: MC.ArchStmt arch (MC.Value arch ids) -> Bool
 
   alignPC :: ConcreteAddress arch -> ConcreteAddress arch
+  alignPC_raw :: Proxy arch -> MC.ArchSegmentOff arch -> MC.ArchSegmentOff arch
 
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
