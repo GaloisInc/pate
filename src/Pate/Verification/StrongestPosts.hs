@@ -1175,7 +1175,7 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
    -- using the ordinary widening machinery.
   
-   processReturn gr0' node@(nodeBlocks -> ret) = withPair ret $ do
+   processReturn gr0' node@(nodeBlocks -> ret) = withPair ret $ withAbsDomain node d gr0 $ do
      let
       vars = PS.scopeVars scope
       varsSt = TF.fmapF PS.simVarState vars
