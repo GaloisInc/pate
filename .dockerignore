@@ -5,6 +5,17 @@ cabal.project.local*
 .git/
 .github/
 .gitmodules
+.tags
+TAGS
+hie.yaml
 submodules/*/.git/
 submodules/*/.github/
 submodules/*/.gitmodules
+submodules/*/dist-newstyle/
+submodules/*/.tags
+submodules/*/TAGS
+submodules/*/hie.yaml
+submodules/*/*/hie.yaml
+submodules/*/cabal.project
+submodules/macaw/deps/
+submodules/crucible/dependencies/
