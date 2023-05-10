@@ -35,9 +35,10 @@ import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
-import           Pate.Loader.ELF ( LoaderM )
+import           Pate.Loader.ELF ( LoaderM, ElfLoaderConfig  )
 import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
+import qualified Control.Monad.Reader as CMR
 
 data RunConfig =
   RunConfig
@@ -49,6 +50,7 @@ data RunConfig =
     , verificationCfg :: PC.VerificationConfig PA.ValidRepr
     , archLoader :: PA.ArchLoader PEE.LoadError
     , useDwarfHints :: Bool
+    , elfLoaderConfig :: ElfLoaderConfig
     }
 
 data Logger arch =
@@ -101,10 +103,11 @@ runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct con
   return st
 
 liftToEquivStatus ::
+  RunConfig ->
   LoaderM (PEq.EquivalenceStatus) ->
   IO (PEq.EquivalenceStatus)
-liftToEquivStatus f = do
-  v <- CME.runExceptT (CMW.runWriterT f)
+liftToEquivStatus cfg f = do
+  v <- CME.runExceptT (CMW.runWriterT (CMR.runReaderT f (elfLoaderConfig cfg)))
   case v of
     Left err -> return $ PEq.Errored (PEE.loaderError err)
     Right (b, _) -> return b
@@ -116,7 +119,7 @@ runSelfEquivConfig :: forall bin.
   RunConfig ->
   PB.WhichBinaryRepr bin ->
   IO (PEq.EquivalenceStatus)
-runSelfEquivConfig cfg wb = liftToEquivStatus $ do
+runSelfEquivConfig cfg wb = liftToEquivStatus cfg $ do
   pd <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- IO.liftIO $ BS.readFile fp
@@ -152,7 +155,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus $ do
 runEquivConfig ::
   RunConfig ->
   IO (PEq.EquivalenceStatus)
-runEquivConfig cfg = liftToEquivStatus $ do
+runEquivConfig cfg = liftToEquivStatus cfg $ do
   pdata <- case patchInfoPath cfg of
     Just fp -> do
       bytes <- IO.liftIO $ BS.readFile fp

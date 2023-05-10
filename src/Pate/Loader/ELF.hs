@@ -10,6 +10,8 @@ module Pate.Loader.ELF (
     LoadedELF(..)
   , LoadedElfPair(..)
   , LoadPaths(..)
+  , ElfLoaderConfig(..)
+  , defaultElfLoaderConfig
   , simplePaths
   , LoaderM
   , loadELF
@@ -49,6 +51,7 @@ import qualified Pate.Hints.BSI as PHB
 import Data.Macaw.Memory.Permissions as MP (execute,read)
 
 import Data.Bits ((.|.), Bits ((.&.)))
+import qualified Control.Monad.Reader as CMR
 
 data LoadedELF arch =
   LoadedELF
@@ -69,13 +72,15 @@ data LoadPaths = LoadPaths
 simplePaths :: FilePath -> LoadPaths
 simplePaths fp = LoadPaths fp [] Nothing Nothing Nothing
 
+data ElfLoaderConfig = ElfLoaderConfig { ignoreSegments :: [Int], extraSections :: [(String,Int,Integer)] }
+
+defaultElfLoaderConfig :: ElfLoaderConfig
+defaultElfLoaderConfig = ElfLoaderConfig [] []
+
 -- a LoadError exception is unrecoverable, while written results should just be raised
 -- as warnings
-type LoaderM = CMW.WriterT [PEE.LoadError] (CME.ExceptT PEE.LoadError IO)
+type LoaderM = CMR.ReaderT ElfLoaderConfig (CMW.WriterT [PEE.LoadError] (CME.ExceptT PEE.LoadError IO))
 
--- FIXME: make this configurable
-extra_sections :: [String]
-extra_sections = [".debug_info"]
 
 loadELF ::
   forall arch.
@@ -85,17 +90,18 @@ loadELF ::
 loadELF (PA.SomeValidArch{}) path = do
   bs <- IO.liftIO $ BS.readFile path
   elf <- doParse bs
-  bin <- IO.liftIO $ MBL.loadBinary MME.defaultLoadOptions elf
+  cfg <- CMR.ask
+  bin <- IO.liftIO $ MBL.loadBinary (MME.defaultLoadOptions { MME.ignoreSegments = ignoreSegments cfg}) elf
   let (_,elf_) = DEE.getElf elf
   -- add extra memory segments for manually-declared sections we want to include
-  mem_final <- CMW.foldM (\mem secnm -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
+  mem_final <- CMW.foldM (\mem (secnm,secIndex,secOffset) -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
     [sec] -> do
       let sec_addr = DEE.elfSectionAddr sec
-      segment <- MC.memSegment mempty 100 0 Nothing (fromIntegral sec_addr) (execute .|. MP.read) (DEE.elfSectionData sec) (fromIntegral (DEE.elfSectionSize sec) * 8)
+      segment <- MC.memSegment mempty secIndex secOffset Nothing (fromIntegral sec_addr) (execute .|. MP.read) (DEE.elfSectionData sec) (fromIntegral (DEE.elfSectionSize sec) * 8)
       case MC.insertMemSegment segment (MBL.memoryImage bin) of
         Left _err -> CME.throwError $ PEE.InvalidArchOpts []
         Right mem' -> return mem'
-    _ -> return mem) (MBL.memoryImage bin) extra_sections
+    _ -> return mem) (MBL.memoryImage bin) (extraSections cfg)
   return $ LoadedELF
     { archInfo = PA.binArchInfo bin
     , loadedBinary = bin { MBL.memoryImage = mem_final }

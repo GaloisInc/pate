@@ -127,6 +127,7 @@ runMain traceTree opts = do
         , PL.logger = mklogger
         , PL.verificationCfg = verificationCfg
         , PL.useDwarfHints = not $ noDwarfHints opts
+        , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig { PLE.ignoreSegments = ignoreSegments opts }
         }
 
   PL.runEquivConfig cfg
@@ -165,6 +166,7 @@ data CLIOptions = CLIOptions
   , skipUnnamedFns :: Bool
   , skipDivergedControl :: Bool
   , targetEquivRegs :: [String]
+  , ignoreSegments :: [Int]
   } deriving (Eq, Ord, Show)
 
 {-
@@ -533,4 +535,8 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.many (OA.strOption
         ( OA.long "target-equiv-regs"
         <> OA.help "Compute an equivalence condition sufficient to establish equality on the given registers after the toplevel entrypoint returns. <DEPRECATED>"
+        ))
+    <*> OA.many (OA.option OA.auto
+        ( OA.long "ignore-segments"
+        <> OA.help "Skip segments (0-indexed) when loading ELF"
         ))
