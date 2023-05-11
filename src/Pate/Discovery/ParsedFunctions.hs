@@ -257,7 +257,7 @@ getDiscoveryState fnaddr pfm st = let
   ainfo4 = ainfo3 { MAI.archClassifier =
         (pfmExtraClassifier pfm) 
     <|> extraJumpClassifier (extraEdges st) 
-    -- <|> extraReturnClassifier (extraEdges st) 
+    <|> extraReturnClassifier (extraEdges st) 
     }
   ainfo5 = ainfo4 { MAI.disassembleFn = addTranslationErrorWrapper (MAI.disassembleFn ainfo4)}
   in initDiscoveryState pfm ainfo5
