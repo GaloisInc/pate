@@ -1021,7 +1021,10 @@ processBundle scope node bundle d gr0 = do
 
   gr2 <- checkTotality node bundle d exitPairs gr1
 
-  mgr3 <- updateReturnNode scope node bundle d gr2
+  gr3 <- return gr2
+  -- disable this check for now as we refactor the treatment
+  -- for "return" block exits
+  {-
   gr3 <- case mgr3 of
     Just gr3 -> return gr3
     Nothing ->
@@ -1045,7 +1048,7 @@ processBundle scope node bundle d gr0 = do
             --widenAlongEdge scope bundle' (GraphNode node) d gr2 (GraphNode (mkNodeEntry node nextBlocks))
           False -> return gr2
       _ -> return gr2
-
+   -}
   -- Follow all the exit pairs we found
   fmap fst $ subTree @"blocktarget" "Block Exits" $
     foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) (gr3, Nothing) (zip [0 ..] exitPairs)
@@ -1890,21 +1893,6 @@ followExit scope bundle currBlock d (gr, mchoice) (idx, pPair) = do
       return (recordMiscAnalysisError gr (GraphNode currBlock) err, mchoice)
     Right gr' -> return gr'
 
--- Update the return summary node for the current function if this
---  sim bundle might return.
-updateReturnNode ::
-  PS.SimScope sym arch v ->
-  NodeEntry arch ->
-  SimBundle sym arch v ->
-  AbstractDomain sym arch v ->
-  PairGraph sym arch ->
-  EquivM sym arch (Maybe (PairGraph sym arch))
-updateReturnNode scope bPair bundle preD gr = do
-  isReturn <- PD.matchingExits bundle MCS.MacawBlockEndReturn
-  
-  withPathCondition (PAS.fromPred isReturn) $ do
-    bundle' <- PD.associateFrames bundle MCS.MacawBlockEndReturn False
-    handleReturn scope bundle' bPair preD gr
 
 skippedFnName :: BS.ByteString
 skippedFnName = BSC.pack "__pate_skipped"
@@ -1936,11 +1924,13 @@ type StubPair = PPa.PatchPairC (Maybe BS.ByteString)
 -- | Return the name of a function if we want to replace its call with
 --   stub semantics
 getFunctionStubPair ::
-  NodeEntry arch ->
+  PPa.PatchPair (PB.BlockTarget arch) ->
   EquivM sym arch StubPair
-getFunctionStubPair node = PPa.forBins $ \bin -> do
-  blks <- PPa.get bin $ nodeBlocks node
-  Const <$> getFunctionStub blks
+getFunctionStubPair blkts = PPa.forBins $ \bin -> do
+  blkt <- PPa.get bin blkts
+  case blkt of 
+    PB.BlockTarget{} -> Const <$> getFunctionStub (PB.targetCall blkt)
+    PB.BlockTargetReturn{} -> return $ Const Nothing
 
 hasStub :: StubPair -> Bool
 hasStub stubPair = getAny $ PPa.collapse (Any . isJust . getConst) stubPair
@@ -1988,12 +1978,7 @@ triageBlockTarget ::
   EquivM sym arch (PairGraph sym arch, Maybe DesyncChoice)
 triageBlockTarget scope bundle' currBlock mchoice d gr blkts =
   do
-     let
-        pPair = TF.fmapF PB.targetCall blkts
-        nextNode = mkNodeEntry currBlock pPair
-      
-     stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair nextNode
-     traceBundle bundle' ("  targetCall: " ++ show pPair)
+     stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
      matches <- PD.matchesBlockTarget bundle' blkts
      maybeUpdate (gr,mchoice) $ withPathCondition matches $ do
       let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
@@ -2004,6 +1989,7 @@ triageBlockTarget scope bundle' currBlock mchoice d gr blkts =
         (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope currBlock mchoice d gr
         _ | isMismatchedStubs stubPair -> handleDivergingPaths scope currBlock mchoice d gr
         (Just ecase, PPa.PatchPairJust rets) -> fmap (\x -> (x,Nothing)) $ do
+          let pPair = TF.fmapF PB.targetCall blkts
           bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
           traceBundle bundle ("  Return target " ++ show rets)
           isPreArch <- case (PPa.view PB.concreteBlockEntry pPair) of
@@ -2019,19 +2005,25 @@ triageBlockTarget scope bundle' currBlock mchoice d gr blkts =
              | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair rets
 
         (Just ecase, PPa.PatchPairNothing) -> fmap (\x -> (x,Nothing)) $ do
-          bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)          
-          traceBundle bundle "No return target identified"
-          emitTrace @"message" "No return target identified"
-          -- exits without returns need to either be a jump, branch or tail calls
-          -- we consider those cases here (having already assumed a specific
-          -- block exit condition)
+          bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
           case ecase of
-            MCS.MacawBlockEndCall | hasStub stubPair ->
-              handleStub scope bundle currBlock d gr pPair Nothing stubPair
-            MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
-            MCS.MacawBlockEndJump -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
-            MCS.MacawBlockEndBranch -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
-            _ -> throwHere $ PEE.BlockExitMismatch
+            MCS.MacawBlockEndReturn -> handleReturn scope bundle currBlock d gr
+            _ -> do
+              let
+                pPair = TF.fmapF PB.targetCall blkts
+                nextNode = mkNodeEntry currBlock pPair
+              traceBundle bundle "No return target identified"
+              emitTrace @"message" "No return target identified"
+              -- exits without returns need to either be a jump, branch or tail calls
+              -- we consider those cases here (having already assumed a specific
+              -- block exit condition)
+              case ecase of
+                MCS.MacawBlockEndCall | hasStub stubPair ->
+                  handleStub scope bundle currBlock d gr pPair Nothing stubPair
+                MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
+                MCS.MacawBlockEndJump -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
+                MCS.MacawBlockEndBranch -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
+                _ -> throwHere $ PEE.BlockExitMismatch
 
 
 {-

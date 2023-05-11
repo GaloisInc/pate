@@ -18,6 +18,9 @@ module Pate.Block (
   , ConcreteBlock(..)
   , FunCallKind(..)
   , BlockTarget(..)
+  , targetBinRepr
+  , targetEndCase
+  , targetReturn
   , BlockPair
   , FunPair
   , equivBlocks
@@ -173,23 +176,38 @@ instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch 
 data BlockTarget arch bin =
   BlockTarget
     { targetCall :: ConcreteBlock arch bin
-    , targetReturn :: Maybe (ConcreteBlock arch bin)
+    , _targetReturn :: Maybe (ConcreteBlock arch bin)
     -- | The expected block exit case when this target is taken
-    , targetEndCase :: MCS.MacawBlockEndCase
+    , _targetEndCase :: MCS.MacawBlockEndCase
     , targetRawPC :: PA.ConcreteAddress arch
     -- ^ raw PC value used for matching block exits
-    } deriving (Eq, Ord)
+    }
+  | BlockTargetReturn { _targetBinRepr :: PB.WhichBinaryRepr bin }
+   deriving (Eq, Ord)
+
+targetReturn :: BlockTarget arch bin -> Maybe (ConcreteBlock arch bin)
+targetReturn BlockTargetReturn{} = Nothing
+targetReturn tgt@BlockTarget{} = _targetReturn tgt
+
+targetBinRepr :: BlockTarget arch bin -> PB.WhichBinaryRepr bin
+targetBinRepr tgt@BlockTargetReturn{} = _targetBinRepr tgt
+targetBinRepr tgt@BlockTarget{} = blockBinRepr $ targetCall tgt
+
+targetEndCase :: BlockTarget arch bin -> MCS.MacawBlockEndCase
+targetEndCase tgt@BlockTarget{} = _targetEndCase tgt
+targetEndCase BlockTargetReturn{} = MCS.MacawBlockEndReturn
 
 instance PC.TestEquality (BlockTarget arch) where
   testEquality e1 e2 = PC.orderingF_refl (PC.compareF e1 e2)
 
 instance PC.OrdF (BlockTarget arch) where
-  compareF e1 e2 = case PC.compareF (blockBinRepr $ targetCall e1) (blockBinRepr $ targetCall e2) of
+  compareF e1 e2 = case PC.compareF (targetBinRepr e1) (targetBinRepr e2) of
     PC.EQF -> PC.fromOrdering (compare e1 e2)
     x -> x
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (BlockTarget arch bin) where
   show (BlockTarget a b _ _) = "BlockTarget (" ++ show a ++ ") " ++ "(" ++ show b ++ ")"
+  show (BlockTargetReturn{}) = "BlockTargetReturn"
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => PP.Pretty (BlockTarget arch bin) where
   pretty blkt = PP.pretty (show blkt)
@@ -198,6 +216,7 @@ ppBlockTarget ::
   MM.MemWidth (MM.ArchAddrWidth arch) =>
   BlockTarget arch bin ->
   PP.Doc a
+ppBlockTarget (BlockTargetReturn{}) = "Return"
 ppBlockTarget (BlockTarget tgt ret c _) = case c of
   MCS.MacawBlockEndJump -> "Jump to:" <+> PP.pretty tgt
   MCS.MacawBlockEndBranch -> "Branch to:" <+> PP.pretty tgt

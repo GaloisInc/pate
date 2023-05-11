@@ -112,6 +112,8 @@ import           Pate.TraceTree
 import qualified Control.Monad.IO.Unlift as IO
 import Data.Parameterized.SetF (AsOrd(..))
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.Macaw.Architecture.Info as MAI
+import Control.Applicative
 
 --------------------------------------------------------
 -- Block pair matching
@@ -145,7 +147,7 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
     subTree @"blocktarget1" ("Targets (" ++ show bin ++ ")") $ do
       mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
     subTree @"blocktarget1" ("Sat Targets (" ++ show bin ++ ")") $ do
-      blks' <- CMR.lift $ CMR.filterM checkSat blks
+      blks' <- CMR.lift $ CMR.filterM checkSat (PB.BlockTargetReturn bin:blks)
       mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
       return blks'
 
@@ -348,22 +350,26 @@ matchesBlockTargetOne ::
 matchesBlockTargetOne bundle blkt = fnTrace "matchesBlockTargetOne" $ withSym $ \sym -> do
     -- true when the resulting IPs call the given block targets
    let (bin :: PB.WhichBinaryRepr bin) = WI.knownRepr
-   regs <- PSS.simOutRegs <$> PPa.get bin (PSS.simOut bundle)
    endCase <- PSS.simOutBlockEnd <$> PPa.get bin (PSS.simOut bundle)
-   let
-     ip = regs ^. MC.curIP
-     ret = MCS.blockEndReturn (Proxy @arch) endCase
-
-   callPtr <- concreteAddrToLLVM (PB.targetRawPC blkt)
-
-   let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
-   targetRet <- targetReturnPtr blkt
-   
-   eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
    MapF.Pair e1 e2 <- liftIO $ MCS.blockEndCaseEq (Proxy @arch) sym endCase (PB.targetEndCase blkt)
    let eqCase = PAS.exprBinding e1 e2
-   return $ eqCall <> eqRet <> eqCase
-  
+   case blkt of
+     PB.BlockTargetReturn{} -> return eqCase
+     PB.BlockTarget{} -> do
+      regs <- PSS.simOutRegs <$> PPa.get bin (PSS.simOut bundle)
+      let
+        ip = regs ^. MC.curIP
+        ret = MCS.blockEndReturn (Proxy @arch) endCase
+
+      callPtr <- concreteAddrToLLVM (PB.targetRawPC blkt)
+
+      let eqCall = PAS.ptrBinding (PSR.macawRegValue ip) callPtr
+      targetRet <- targetReturnPtr blkt
+      
+      eqRet <- liftIO $ liftPartialRel sym (\p1 p2 -> return $ PAS.ptrBinding p1 p2) ret targetRet
+
+      return $ eqCall <> eqRet <> eqCase
+
 
 matchesBlockTarget ::
   forall sym arch v.
@@ -461,7 +467,7 @@ liftPartialRel sym _ (WP.PE p1 _) WP.Unassigned = PAS.fromPred <$> WI.notPred sy
 targetReturnPtr ::
   PB.BlockTarget arch bin ->
   EquivM sym arch (CS.RegValue sym (CT.MaybeType (CLM.LLVMPointerType (MC.ArchAddrWidth arch))))
-targetReturnPtr blkt | Just blk <- PB.targetReturn blkt = withSym $ \sym -> do
+targetReturnPtr blkt@PB.BlockTarget{} | Just blk <- PB.targetReturn blkt = withSym $ \sym -> do
   ptr <- concreteToLLVM blk
   return $ WP.justPartExpr sym ptr
 targetReturnPtr _ = withSym $ \sym -> return $ WP.maybePartExpr sym Nothing
@@ -864,7 +870,10 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
   let (invalidHints, _hintedEntries) = F.foldr (addFunctionEntryHints (Proxy @arch) mem) ([], F.toList entries) (PH.functionEntries hints)
 
   addrEnds <- F.foldlM (addFnEnd mem) mempty (fmap snd (PH.functionEntries hints))
-  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds (PA.validArchExtractPrecond aData) (pltStubClassifier which_bin aData mem addrSyms)
+
+  pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds (PA.validArchExtractPrecond aData) $
+    (pltStubClassifier which_bin aData mem addrSyms) <|> case PA.archClassifierOverride @arch of {Just x -> x; Nothing -> MAI.archClassifier archInfo}
+
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
   let startEntry = DLN.head entries

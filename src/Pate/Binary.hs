@@ -74,12 +74,19 @@ instance TestEquality WhichBinaryRepr where
     (PatchedRepr, PatchedRepr) -> Just Refl
     _ -> Nothing
 
+instance Eq (WhichBinaryRepr bin) where
+  repr1 == repr2 | Just Refl <- testEquality repr1 repr2 = True
+  _ == _ = False
+
 instance OrdF WhichBinaryRepr where
   compareF repr1 repr2 = case (repr1, repr2) of
     (OriginalRepr, OriginalRepr) -> EQF
     (PatchedRepr, PatchedRepr) -> EQF
     (OriginalRepr, PatchedRepr) -> LTF
     (PatchedRepr, OriginalRepr) -> GTF
+
+instance Ord (WhichBinaryRepr bin) where
+  compare repr1 repr2 = toOrdering (compareF repr1 repr2)
 
 instance Show (WhichBinaryRepr bin) where
   show OriginalRepr = "Original"
