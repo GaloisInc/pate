@@ -67,6 +67,7 @@ short PatchedRepr = "P"
 instance IsTraceNode (k :: l) "binary" where
   type TraceNodeType k "binary" = Some WhichBinaryRepr
   prettyNode () (Some wb) = PP.pretty (show wb)
+  nodeTags = mkTags @k @"binary" [Summary, Simplified]
 
 instance TestEquality WhichBinaryRepr where
   testEquality repr1 repr2 = case (repr1, repr2) of
@@ -89,8 +90,8 @@ instance Ord (WhichBinaryRepr bin) where
   compare repr1 repr2 = toOrdering (compareF repr1 repr2)
 
 instance Show (WhichBinaryRepr bin) where
-  show OriginalRepr = "Original"
-  show PatchedRepr = "Patched"
+  show OriginalRepr = "original"
+  show PatchedRepr = "patched"
 
 instance PP.Pretty (WhichBinaryRepr bin) where
   pretty = PP.viaShow
