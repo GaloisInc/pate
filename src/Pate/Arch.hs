@@ -182,6 +182,10 @@ class
   alignPC :: ConcreteAddress arch -> ConcreteAddress arch
   alignPC_raw :: Proxy arch -> MC.ArchSegmentOff arch -> MC.ArchSegmentOff arch
 
+  -- overrides the default block classifier for the architecture
+  archClassifierOverride :: (forall ids. Maybe (MI.BlockClassifier arch ids))
+  archClassifierOverride = Nothing
+
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
                 , validArchFunctionDomain :: PVE.ExternalDomain PVE.ExternalCall arch

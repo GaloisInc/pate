@@ -256,7 +256,6 @@ getDiscoveryState fnaddr pfm st = let
   -- for the moment our infrastructure handles direct jumps better, so we prefer that
   ainfo4 = ainfo3 { MAI.archClassifier =
         (pfmExtraClassifier pfm) 
-    <|> MAI.archClassifier ainfo3 
     <|> extraJumpClassifier (extraEdges st) 
     -- <|> extraReturnClassifier (extraEdges st) 
     }

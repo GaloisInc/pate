@@ -63,6 +63,9 @@ import Data.List (nub)
 import Pate.Config
 import qualified Data.Parameterized.Map as MapF
 import qualified Pate.Address as PA
+import Data.Macaw.ARM.Identify (conditionalCallClassifier, conditionalReturnClassifier)
+import Control.Applicative
+import qualified Data.Macaw.Discovery as MD
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -132,6 +135,18 @@ instance PA.ValidArch SA.AArch32 where
 
   alignPC a = PA.memAddrToAddr (MC.clearAddrLeastBit (PA.addrToMemAddr a))
   alignPC_raw _ = MC.clearSegmentOffLeastBit
+
+  archClassifierOverride = Just $
+        conditionalCallClassifier 
+    <|> conditionalReturnClassifier 
+    <|> MD.branchClassifier
+    <|> MD.noreturnCallClassifier
+    <|> MD.callClassifier
+    <|> MD.returnClassifier
+    <|> MD.jumpTableClassifier
+    <|> MD.pltStubClassifier
+    <|> MD.directJumpClassifier
+    <|> MD.tailCallClassifier
 
 data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 
