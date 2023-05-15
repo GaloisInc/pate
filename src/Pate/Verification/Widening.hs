@@ -33,7 +33,7 @@ module Pate.Verification.Widening
 
 import           GHC.Stack
 import           Control.Lens ( (.~), (&), (^.) )
-import           Control.Monad (when, forM_, unless, filterM, foldM)
+import           Control.Monad (when, forM_, unless, filterM, foldM, void)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Writer (tell, execWriterT)
@@ -75,6 +75,7 @@ import           Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import qualified Pate.Equivalence.Error as PEE
+import qualified Pate.Equivalence.MemoryDomain as PEMd
 import qualified Pate.Proof.Operations as PP
 import qualified Pate.Proof.CounterExample as PP
 import qualified Pate.Proof.Instances ()
@@ -545,45 +546,74 @@ initializeCondition scope bundle preD postD from to gr = do
         Nothing -> return gr1
 -}
 
-data RegisterPickChoice arch = 
+data PickManyChoice sym arch =
     forall tp. PickRegister (MM.ArchReg arch tp)
-  | IncludeRemaining
-  | ExcludeRemaining
+  | forall w. PickStack (PMc.MemCell sym arch w)
+  | forall w. PickGlobal (PMc.MemCell sym arch w)
+  | PickIncludeAllRegisters
+  | PickIncludeAll
+  | PickFinish
 
-instance PA.ValidArch arch => IsTraceNode '(sym,arch) "registerChoice" where
-  type TraceNodeType '(sym,arch) "registerChoice" = RegisterPickChoice arch
+data PickChoices sym arch = PickChoices
+  { pickRegs :: [Some (MM.ArchReg arch)] 
+  , pickStack :: [Some (PMc.MemCell sym arch)]
+  , pickGlobal :: [Some (PMc.MemCell sym arch)]
+  }
+
+instance Semigroup (PickChoices sym arch) where
+  (PickChoices a b c) <> (PickChoices a' b' c') = PickChoices (a <> a') (b <> b') (c <> c')
+
+instance Monoid (PickChoices sym arch) where
+  mempty = PickChoices [] [] []
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "pickManyChoice" where
+  type TraceNodeType '(sym,arch) "pickManyChoice" = PickManyChoice sym arch
   prettyNode () = \case
     PickRegister r -> case fmap pretty (PA.fromRegisterDisplay (PA.displayRegister r)) of
       Just s -> s
       Nothing -> pretty $ MapF.showF r
-    IncludeRemaining -> "Include Remaining Registers"
-    ExcludeRemaining -> "Exclude Remaining Registers"
-  nodeTags = mkTags @'(sym,arch) @"registerChoice" [Summary, Simplified]
+    PickStack c -> pretty c
+    PickGlobal c -> pretty c
+    PickIncludeAllRegisters -> "Include All Registers"
+    PickIncludeAll -> "Include All Locations"
+    PickFinish -> "Finish"
+  nodeTags = mkTags @'(sym,arch) @"pickManyChoice" [Summary, Simplified]
 
-pickRegisters ::
-  [Some (MM.ArchReg arch)] ->
-  EquivM sym arch [Some (MM.ArchReg arch)] 
-pickRegisters excludedRegs = go [] excludedRegs
-  where 
+pickMany ::
+  PickChoices sym arch ->
+  EquivM sym arch (PickChoices sym arch)
+pickMany pickIn = go mempty pickIn
+  where
+
     go :: 
-      [Some (MM.ArchReg arch)] ->
-      [Some (MM.ArchReg arch)] ->
-      EquivM sym arch [Some (MM.ArchReg arch)]
-    go acc [] = return acc
+      PickChoices sym arch ->
+      PickChoices sym arch ->
+      EquivM sym arch (PickChoices sym arch)
+    go acc (PickChoices [] [] []) = return acc
     go acc remaining = do
-      (acc', remaining') <- choose @"registerChoice" "Include Register:" $ \choice -> do
-        forM_ (zip [0..] remaining) $ \(idx, Some r) ->
+      (acc', remaining') <- choose @"pickManyChoice" "Include Location:" $ \choice -> do
+        choice "" PickIncludeAllRegisters $ return $ (acc <> (remaining { pickStack = [], pickGlobal = []}), mempty)
+        choice "" PickIncludeAll $ return $ (acc <> remaining, mempty)
+        choice "" PickFinish $ return $ (acc, mempty)
+
+        forM_ (zip [0..] (pickRegs remaining)) $ \(idx, Some r) ->
           case PA.displayRegister r of
             PA.Normal{} -> choice "" (PickRegister r) $ do
-              let (hd_,(_:tl_)) = splitAt idx remaining
-              return $ (Some r:acc, hd_++tl_)
+              let (hd_,(_:tl_)) = splitAt idx (pickRegs remaining)
+              return $ (mempty { pickRegs = [Some r] } <> acc, remaining { pickRegs = hd_++tl_ })
             -- in general we can include any register, but it likely
             -- makes sense to only consider registers that we have
             -- defined a pretty display for
             _ -> return ()
+        forM_ (zip [0..] (pickStack remaining)) $ \(idx, Some c) -> do
+          choice "" (PickStack c) $ do
+            let (hd_,(_:tl_)) = splitAt idx (pickStack remaining)
+            return $ (mempty { pickStack = [Some c] } <> acc, remaining { pickStack = hd_++tl_ })
+        forM_ (zip [0..] (pickGlobal remaining)) $ \(idx, Some c) -> do
+          choice "" (PickGlobal c) $ do
+            let (hd_,(_:tl_)) = splitAt idx (pickGlobal remaining)
+            return $ (mempty { pickGlobal = [Some c] } <> acc, remaining { pickGlobal = hd_++tl_ })
 
-        choice "" IncludeRemaining $ return $ (acc ++ remaining, [])
-        choice "" ExcludeRemaining $ return $ (acc, [])
       go acc' remaining'
 
 -- | Interactive refinement of an equivalence domain
@@ -597,11 +627,21 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
   let allRegs = map fst $ PER.toList (PER.universal sym)
   let abnormal = filter (\(Some r) -> case PA.displayRegister r of PA.Normal{} -> False; _ -> True) allRegs
   let excluded = filter (\(Some r) -> not (W4.asConstantPred (PER.registerInDomain sym r regDom) == Just True)) allRegs
-  added <- Set.fromList <$> pickRegisters (excluded \\ (abnormal ++ [(Some (MM.ip_reg @(MM.ArchReg arch)))]))
+
+  let excludedStack = map fst $ PEMd.toList $ PEE.eqDomainStackMemory (PAD.absDomEq dom)
+  let excludedGlobal = map fst $ PEMd.toList $ PEE.eqDomainGlobalMemory (PAD.absDomEq dom)
+  let pickIn = PickChoices
+        { pickRegs = excluded \\ (abnormal ++ [(Some (MM.ip_reg @(MM.ArchReg arch)))])
+        , pickStack = excludedStack
+        , pickGlobal = excludedGlobal
+        }
+
+  picked <- pickMany pickIn
 
   return $ \(PL.SomeLocation loc) ->
     case loc of
-      PL.Register r -> Set.member (Some r) added
+      PL.Register r -> elem (Some r) (pickRegs picked)
+      PL.Cell c -> elem (Some c) (pickStack picked) || elem (Some c) (pickGlobal picked)
       _ -> False
 
 -- | True if the satisfiability of the predicate only depends on

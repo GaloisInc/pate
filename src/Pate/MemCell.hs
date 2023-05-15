@@ -166,3 +166,6 @@ ppCell :: (WI.IsExprBuilder sym) => MemCell sym arch w -> PP.Doc a
 ppCell cell =
   let CLM.LLVMPointer reg off = cellPtr cell
   in WI.printSymNat reg <> "+" <> WI.printSymExpr off
+
+instance WI.IsExprBuilder sym => PP.Pretty (MemCell sym arch w) where
+  pretty cell = ppCell cell

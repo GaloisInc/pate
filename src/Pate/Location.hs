@@ -256,6 +256,9 @@ instance forall sym arch nm k. PEM.ExprMappable sym (Location sym arch nm k) whe
 instance forall sym arch nm k. PP.Pretty (Location sym arch nm k) where
   pretty (Location l) = prettyLoc @sym @arch @nm l
 
+instance forall sym arch nm k. Show (Location sym arch nm k) where
+  show l = show (PP.pretty l)
+
 -- We need a wrapper to define TestEquality and OrdF in order to relax
 -- the constraint on the type parameter
 data Location_ (sym :: DK.Type) (arch :: DK.Type) (nm :: Symbol) (tp :: k) where
