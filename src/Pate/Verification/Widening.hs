@@ -166,6 +166,44 @@ extractPtrs ::
 extractPtrs (CLM.LLVMPointer region1 off1) (CLM.LLVMPointer region2 off2) =
   [Some (W4.natToIntegerPure region1), Some off1, Some (W4.natToIntegerPure region2), Some off2]
 
+-- Compute a stronger condition that implies the current one using
+-- intra-expression analysis
+strengthenCondition ::
+  forall sym arch v.
+  PEC.EquivalenceCondition sym arch v ->
+  EquivM sym arch (PEC.EquivalenceCondition sym arch v)
+strengthenCondition cond = withSym $ \sym -> do
+  PL.traverseLocation @sym @arch sym cond $ \loc p -> do
+    p' <- strengthenPredicate [Some p] p
+    return $ (PL.getLoc loc, p')
+
+strengthenPredicate ::
+  forall sym arch.
+  [Some (W4.SymExpr sym)] ->
+  W4.Pred sym ->
+  EquivM sym arch (W4.Pred sym)
+strengthenPredicate values_ eqPred = withSym $ \sym -> do
+  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+  emitTraceLabel @"expr" "input" (Some eqPred)
+  isPredTrue' goalTimeout eqPred >>= \case
+    True -> return $ W4.truePred sym
+    False -> do
+      values <- Set.fromList <$> mapM (\(Some e) -> Some <$> ((liftIO (WEH.stripAnnotations sym e)) >>= (\x -> applyCurrentAsmsExpr x))) values_
+      (eqPred', ptrAsms) <- PVV.collectPointerAssertions eqPred
+      --let values = Set.singleton (Some eqPred')
+      withAssumptionSet ptrAsms $ do
+        cond1 <- PVC.computeEqCondition eqPred' values
+        emitTraceLabel @"expr" "computeEqCondition" (Some cond1)
+        cond2 <- PVC.weakenEqCondition cond1 eqPred' values
+        emitTraceLabel @"expr" "weakenEqCondition" (Some cond2)
+        cond3 <- PVC.checkAndMinimizeEqCondition cond2 eqPred
+        emitTraceLabel @"expr" "checkAndMinimizeEqCondition" (Some cond3)
+        goalSat "computeEquivCondition" cond3 $ \case
+          Sat{} -> return cond3
+          _ -> do
+            emitWarning $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond3)
+            return $ W4.truePred sym
+
 computeEquivCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
@@ -198,50 +236,29 @@ computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeE
     -- irrelevant location
     False -> return $ W4.truePred sym
     True -> subTrace (PL.SomeLocation loc) $ do
-      goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-      emitTraceLabel @"expr" "input" (Some eqPred)
-      isPredTrue' goalTimeout eqPred >>= \case
-        True -> return $ W4.truePred sym
-        False -> do      
-          -- eqPred is the predicate asserting equality
-          -- on this location, which already includes accesses to
-          -- the relevant state elements. We only have to inspect this
-          -- predicate in order to compute a sufficient predicate that
-          -- implies it
-          values_ <- case loc of
-            PL.Register r -> do
-              valO <- return $ PSR.macawRegValue (regsO ^. (MM.boundValue r))
-              valP <- return $ PSR.macawRegValue (regsP ^. (MM.boundValue r))
-              case PSR.macawRegRepr (regsO ^. (MM.boundValue r)) of
-                CLM.LLVMPointerRepr{} -> return $ extractPtrs valO valP
-                CT.BoolRepr -> return $ [Some valO, Some valP]
-                _ -> return $ [Some eqPred]
-            PL.Cell c -> do
-              valO <- liftIO $ PMc.readMemCell sym memO c
-              valP <- liftIO $ PMc.readMemCell sym memP c
-              return $ extractPtrs valO valP
-            PL.Unit -> return $ [Some eqPred]
-            _ -> throwHere $ PEE.UnsupportedLocation 
+      -- eqPred is the predicate asserting equality
+      -- on this location, which already includes accesses to
+      -- the relevant state elements. We only have to inspect this
+      -- predicate in order to compute a sufficient predicate that
+      -- implies it
+      values_ <- case loc of
+        PL.Register r -> do
+          valO <- return $ PSR.macawRegValue (regsO ^. (MM.boundValue r))
+          valP <- return $ PSR.macawRegValue (regsP ^. (MM.boundValue r))
+          case PSR.macawRegRepr (regsO ^. (MM.boundValue r)) of
+            CLM.LLVMPointerRepr{} -> return $ extractPtrs valO valP
+            CT.BoolRepr -> return $ [Some valO, Some valP]
+            _ -> return $ [Some eqPred]
+        PL.Cell c -> do
+          valO <- liftIO $ PMc.readMemCell sym memO c
+          valP <- liftIO $ PMc.readMemCell sym memP c
+          return $ extractPtrs valO valP
+        PL.Unit -> return $ [Some eqPred]
+        _ -> throwHere $ PEE.UnsupportedLocation 
 
-          values <- Set.fromList <$> mapM (\(Some e) -> Some <$> ((liftIO (WEH.stripAnnotations sym e)) >>= (\x -> applyCurrentAsmsExpr x))) values_
+      values <- mapM (\(Some e) -> Some <$> ((liftIO (WEH.stripAnnotations sym e)) >>= (\x -> applyCurrentAsmsExpr x))) values_
 
-          (eqPred', ptrAsms) <- PVV.collectPointerAssertions eqPred
-          --let values = Set.singleton (Some eqPred')
-          withAssumptionSet ptrAsms $ do
-            cond1 <- PVC.computeEqCondition bundle eqPred' values
-            emitTraceLabel @"expr" "computeEqCondition" (Some cond1)
-            cond2 <- PVC.weakenEqCondition bundle cond1 eqPred' values
-            emitTraceLabel @"expr" "weakenEqCondition" (Some cond2)
-            cond3 <- PVC.checkAndMinimizeEqCondition bundle cond2 eqPred
-            emitTraceLabel @"expr" "checkAndMinimizeEqCondition" (Some cond3)
-            goalSat "computeEquivCondition" cond3 $ \case
-              Sat{} -> return cond3
-              _ -> do
-                emitError $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond3)
-                return $ W4.truePred sym
-
-
-
+      strengthenPredicate values eqPred
 
 
 -- | Updates the equivalence condition for the given node with the
@@ -393,6 +410,17 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
       -- TODO: allow updates here
       emitTrace @"interactiveBundle" b
       return gr2
+    choice "Strengthen conditions" $ \(TupleF3 scope bundle d) gr2 -> withSym $ \sym -> do
+      let go condK gr0_ = case getCondition gr0_ nd condK of
+            Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
+              (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
+              eqCond' <- strengthenCondition eqCond
+              priority <- thisPriority
+              let propK = getPropagationKind gr0_ nd condK
+              return $ queueAncestors (priority PriorityPropagation) nd $ setCondition nd condK propK (PS.mkSimSpec scope eqCond') gr0_
+            Nothing -> return gr0_
+      foldM (\gr_ condK -> go condK gr_) gr2 [minBound..maxBound]
+
     choice "Simplify conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
