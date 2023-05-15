@@ -1108,14 +1108,18 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
                 emitTraceLabel @"expr" "output" (Some (PS.unSE se'))
                 return $ Just se'
               NothingF -> CMR.asks (PC.cfgRescopingFailureMode . envConfig) >>= \case
-                PC.ThrowOnEqRescopeFailure -> do
+                PC.AllowEqRescopeFailure -> return Nothing
+                x -> do
                   -- failed to rescope, emit a recoverable error and drop this entry
                   se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
                   e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
                   curAsms <- currentAsm
-                  _ <- emitError $ PEE.RescopingFailure curAsms se e''
+                  case x of
+                    PC.ThrowOnEqRescopeFailure -> do
+                      void $ emitError $ PEE.RescopingFailure curAsms se e''
+                    PC.WarnOnEqRescopeFailure -> do
+                      void $ emitWarning $ PEE.RescopingFailure curAsms se e''
                   return Nothing
-                PC.AllowEqRescopeFailure -> return Nothing
 
         let evSeq = PAD.absDomEvents postResult
         --nextSeq <- 

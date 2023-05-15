@@ -183,6 +183,7 @@ isRecoverable' e = case e of
   OrphanedFunctionReturns{} -> True
   CallReturnsToFunctionEntry{} -> True
   OrphanedSingletonAnalysis{} -> True
+  UnsatisfiableEquivalenceCondition{} -> True
   _ -> False
 
 -- | When an error is raised as a warning, this determines if it should be displayed

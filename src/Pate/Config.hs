@@ -217,6 +217,7 @@ data VerificationFailureMode =
 data RescopingFailureMode =
     ThrowOnEqRescopeFailure
   | AllowEqRescopeFailure
+  | WarnOnEqRescopeFailure
   deriving (Eq, Ord, Show, Read)
 
 
