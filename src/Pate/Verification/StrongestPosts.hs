@@ -1169,40 +1169,56 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
 visitNode scope (ReturnNode fPair) d gr0 =  do
   -- propagate the abstract domain of the return node to
   -- all of the known call sites of this function.
+  let rets = getReturnVectors gr0 fPair
 
-  subTree @"entrynode" "Block Returns" $
-    foldM (\gr node -> subTrace node $ processReturn gr node) gr0 (getReturnVectors gr0 fPair)
-
+  case null rets of
+    False -> subTree @"entrynode" "Block Returns" $
+      foldM (\gr node -> subTrace node $ processReturn gr node) gr0 (getReturnVectors gr0 fPair)
+    True -> processFinalReturn gr0
  where
+  -- cleanup for a return node that returns nowhere (likely a toplevel return)
+  processFinalReturn gr0' = do
+    bundle <- noopBundle scope (graphNodeBlocks (ReturnNode fPair))
+    emitTraceLabel @"domain" PAD.ExternalPostDomain (Some d)
+    withPredomain scope bundle d $ do
+      runPendingActions nodeActions (ReturnNode fPair) (TupleF3 scope bundle d) gr0' >>= \case
+        Just gr1 -> do
+          priority <- thisPriority
+          return $ queueNode (priority PriorityHandleActions) (ReturnNode fPair) gr1      
+        Nothing -> withTracing @"message" "Toplevel Return" $ do
+          withConditionsAssumed scope (ReturnNode fPair) gr0' $ 
+            return gr0'
+
    -- Here, we're using a bit of a trick to propagate abstract domain information to call sites.
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
    -- using the ordinary widening machinery.
-  
-   processReturn gr0' node@(nodeBlocks -> ret) = withPair ret $ withAbsDomain node d gr0 $ do
-     let
+
+
+  processReturn gr0' node@(nodeBlocks -> ret) = withPair ret $ withAbsDomain node d gr0 $ do
+    let
       vars = PS.scopeVars scope
       varsSt = TF.fmapF PS.simVarState vars
-     validState <- PVV.validInitState (Just ret) varsSt
-     withAssumptionSet validState $
-       do (asm, bundle) <- returnSiteBundle scope vars d ret
-          withAssumptionSet asm $ withPredomain scope bundle d $ do
-            runPendingActions nodeActions (ReturnNode fPair) (TupleF3 scope bundle d) gr0' >>= \case
-              Just gr1 -> do
-                priority <- thisPriority
-                return $ queueNode (priority PriorityHandleActions) (ReturnNode fPair) gr1
-              Nothing -> withConditionsAssumed scope (ReturnNode fPair) gr0 $ do
-                traceBundle bundle "Processing return edge"
-                -- observable events may occur in return nodes specifically
-                -- when they are a synchronization point, since the abstract
-                -- domain may now contain traces of deferred observable events for both programs
-                --
-                -- TODO: formally we could just check the event sequence once for the return node
-                -- (rather than once for each return edge)
-                -- but it would require some refactoring to make the types match up correctly
-                gr1' <- checkObservables node bundle d gr0'
-        --        traceBundle bundle "== bundle asm =="
-        --        traceBundle bundle (show (W4.printSymExpr asm))
-                widenAlongEdge scope bundle (ReturnNode fPair) d gr1' (GraphNode node)
+    validState <- PVV.validInitState (Just ret) varsSt
+    withAssumptionSet validState $ do
+      (asm, bundle) <- returnSiteBundle scope vars d ret
+      withAssumptionSet asm $ withPredomain scope bundle d $ do
+        runPendingActions nodeActions (ReturnNode fPair) (TupleF3 scope bundle d) gr0' >>= \case
+          Just gr1 -> do
+            priority <- thisPriority
+            return $ queueNode (priority PriorityHandleActions) (ReturnNode fPair) gr1
+          Nothing -> withConditionsAssumed scope (ReturnNode fPair) gr0 $ do
+            traceBundle bundle "Processing return edge"
+            -- observable events may occur in return nodes specifically
+            -- when they are a synchronization point, since the abstract
+            -- domain may now contain traces of deferred observable events for both programs
+            --
+            -- TODO: formally we could just check the event sequence once for the return node
+            -- (rather than once for each return edge)
+            -- but it would require some refactoring to make the types match up correctly
+            gr1' <- checkObservables node bundle d gr0'
+    --        traceBundle bundle "== bundle asm =="
+    --        traceBundle bundle (show (W4.printSymExpr asm))
+            widenAlongEdge scope bundle (ReturnNode fPair) d gr1' (GraphNode node)
 
 
 -- | Construct a "dummy" simulation bundle that basically just

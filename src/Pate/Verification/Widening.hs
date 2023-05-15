@@ -186,7 +186,9 @@ computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeE
   postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case f loc of
     False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
-    True -> return $ (PL.getLoc loc, W4.truePred sym)
+    True -> case loc of
+      PL.Cell{} -> return $ (PL.getLoc loc, W4.falsePred sym)
+      _ -> return $ (PL.getLoc loc, W4.truePred sym)
   
   eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
   eqCond' <- applyCurrentAsms eqCond
@@ -491,7 +493,10 @@ domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
   postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case refine loc of
     False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
-    True -> return $ (PL.getLoc loc, W4.truePred sym)
+    True -> do
+      case loc of
+        PL.Cell{} -> return $ (PL.getLoc loc, W4.falsePred sym)
+        _ -> return $ (PL.getLoc loc, W4.falsePred sym)
 
   eqCtx <- equivalenceContext
   eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
