@@ -90,14 +90,13 @@ computeEqConditionGas = 200
 -- conditional equivalence condition (and will flag it as an unconditional
 -- failure)
 computeEqCondition ::
-  forall sym arch v.
-  PS.SimBundle sym arch v ->
+  forall sym arch.
   -- | target equivalence predicate
   W4.Pred sym ->
   -- | expressions to extract path conditions from
   Set (Some (W4.SymExpr sym)) ->
   EquivM sym arch (W4.Pred sym)
-computeEqCondition _bundle eqPred vals = withTracing @"function_name" "computeEqCondition" $ withSym $ \sym -> do
+computeEqCondition eqPred vals = withTracing @"function_name" "computeEqCondition" $ withSym $ \sym -> do
   cond <- go (W4.truePred sym) (W4.truePred sym) computeEqConditionGas
   PSi.simplifyPred cond
   where
@@ -120,9 +119,8 @@ computeEqCondition _bundle eqPred vals = withTracing @"function_name" "computeEq
           subTree @"expr" "Bindings" $ do
             mapM_ (\(MapF.Pair var val) -> subTrace (Some var) $ emitTrace @"expr" (Some val)) (MapF.toList binds)
           
-          -- FIXME: this is a hack to force more simple path conditions
-          -- for the demo
-          pathCond' <- getPathCondition fn (S.fromList varsE)
+
+          pathCond' <- getPathCondition fn vals
           emitTraceLabel @"expr" "Assumptions" (Some asms)
           emitTraceLabel @"expr" "Path Condition" (Some pathCond')
           --isSat <- getSatIO
@@ -204,8 +202,7 @@ getSatIO = withValid $ do
 -- Similar to computing a sufficient condition, this process necessarily terminates, as
 -- eventually the given predicate will cover all possible paths through the slice.
 weakenEqCondition ::
-  forall sym arch v.
-  PS.SimBundle sym arch v ->
+  forall sym arch.
   -- | path conditions that (should) induce equivalence
   W4.Pred sym ->
   -- | goal equivalence predicate
@@ -213,7 +210,7 @@ weakenEqCondition ::
   -- | expressions to extract path conditions from
   Set (Some (W4.SymExpr sym)) ->
   EquivM sym arch (W4.Pred sym)
-weakenEqCondition _bundle pathCond_outer eqPred vals = withSym $ \sym -> do
+weakenEqCondition pathCond_outer eqPred vals = withSym $ \sym -> do
   let
     go :: W4.Pred sym -> W4.Pred sym -> EquivM sym arch (W4.Pred sym)
     go notPathCond pathCond = do
@@ -249,14 +246,13 @@ weakenEqCondition _bundle pathCond_outer eqPred vals = withSym $ \sym -> do
 --
 -- The resulting predicate is simplified under the current set of assumptions.
 checkAndMinimizeEqCondition ::
-  forall sym arch v.
-  PS.SimBundle sym arch v ->
+  forall sym arch.
   -- | path condition that is assumed to imply equivalence
   W4.Pred sym ->
   -- | goal equivalence predicate
   W4.Pred sym ->
   EquivM sym arch (W4.Pred sym)
-checkAndMinimizeEqCondition _bundle cond goal = withValid $ withSym $ \sym -> do
+checkAndMinimizeEqCondition cond goal = fnTrace "checkAndMinimizeEqCondition" $ withValid $ withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- this check is not strictly necessary, as the incremental checks should guarantee it
   -- for the moment it's a sanity check on this process as well as the final simplifications
