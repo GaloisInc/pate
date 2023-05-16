@@ -1019,39 +1019,12 @@ processBundle scope node bundle d gr0 = do
 
   gr1 <- checkObservables node bundle d gr0
 
-  gr2 <- checkTotality node bundle d exitPairs gr1
-
-  gr3 <- return gr2
-  -- disable this check for now as we refactor the treatment
-  -- for "return" block exits
-  {-
-  gr3 <- case mgr3 of
-    Just gr3 -> return gr3
-    Nothing ->
-      case exitPairs of
-      -- if we find a busy loop, try to continue the analysis assuming we
-      -- break out of the loop, even if the semantics say it can't happen
-      -- TODO: ideally we should handle this as an "extra" edge rather than
-      -- directly handling the widening here.
-      [PPa.PatchPair (PB.BlockTarget tgtO Nothing _ _) (PB.BlockTarget tgtP Nothing _ _)] |
-        PPa.PatchPair tgtO tgtP == (PS.simPair bundle) ->
-        asks (PCfg.cfgAddOrphanEdges . envConfig) >>= \case
-          True -> do
-            emitWarning $ PEE.BlockHasNoExit (PS.simPair bundle)
-            nextBlocks <- PPa.forBins $ \bin -> do
-              blk <- PPa.get bin (PS.simPair bundle)
-              PD.nextBlock blk >>= \case
-                Just nb -> return nb
-                Nothing -> throwHere $ PEE.MissingParsedBlockEntry "processBundle" blk
-            return $ addExtraEdge gr2 node (GraphNode (mkNodeEntry node nextBlocks))
-            --bundle' <- PD.associateFrames bundle MCS.MacawBlockEndJump False
-            --widenAlongEdge scope bundle' (GraphNode node) d gr2 (GraphNode (mkNodeEntry node nextBlocks))
-          False -> return gr2
-      _ -> return gr2
-   -}
   -- Follow all the exit pairs we found
-  fmap fst $ subTree @"blocktarget" "Block Exits" $
-    foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) (gr3, Nothing) (zip [0 ..] exitPairs)
+  let initBranchState = BranchState { branchGraph = gr1, branchDesyncChoice = Nothing, branchHandled = []}
+  st <- subTree @"blocktarget" "Block Exits" $
+    foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) initBranchState (zip [0 ..] exitPairs)
+  -- confirm that all handled exits cover the set of possible exits
+  checkTotality node bundle d (branchHandled st) (branchGraph st)
 
 withValidInit ::
   forall sym arch v a.
@@ -1889,26 +1862,37 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
       do b <- W4.groundEval evalFn p
          if b then return x else return y
 
+data BranchState sym arch =
+  BranchState 
+    { branchGraph :: PairGraph sym arch
+    , branchDesyncChoice :: Maybe DesyncChoice
+    , branchHandled :: [PPa.PatchPair (PB.BlockTarget arch)]
+    }
+
+updateBranchGraph :: BranchState sym arch -> PPa.PatchPair (PB.BlockTarget arch) -> PairGraph sym arch -> BranchState sym arch
+updateBranchGraph st blkt pg = st {branchGraph = pg, branchHandled = blkt : branchHandled st }
+
 followExit ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
-  (PairGraph sym arch, Maybe DesyncChoice) ->
+  BranchState sym arch ->
   (Integer, PPa.PatchPair (PB.BlockTarget arch)) {- ^ next entry point -} ->
-  EquivM sym arch (PairGraph sym arch, Maybe DesyncChoice)
-followExit scope bundle currBlock d (gr, mchoice) (idx, pPair) = do
+  EquivM sym arch (BranchState sym arch)
+followExit scope bundle currBlock d st (idx, pPair) = do
+  let gr = branchGraph st
   traceBundle bundle ("Handling proof case " ++ show idx) 
   res <- manifestError $
     case getQueuedPriority (GraphNode currBlock) gr of
       Just{} -> do
         emitTrace @"message" "Node was re-queued, skipping analysis"
-        return (gr,mchoice)
-      Nothing -> triageBlockTarget scope bundle currBlock mchoice d gr pPair
+        return st
+      Nothing -> triageBlockTarget scope bundle currBlock st d pPair
   case res of
     Left err -> do
       emitEvent $ PE.ErrorEmitted err
-      return (recordMiscAnalysisError gr (GraphNode currBlock) err, mchoice)
+      return $ st {branchGraph = recordMiscAnalysisError gr (GraphNode currBlock) err }
     Right gr' -> return gr'
 
 
@@ -1989,60 +1973,58 @@ triageBlockTarget ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   NodeEntry arch {- ^ current entry point -} ->
-  Maybe DesyncChoice ->
+  BranchState sym arch ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
-  PairGraph sym arch ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
-  EquivM sym arch (PairGraph sym arch, Maybe DesyncChoice)
-triageBlockTarget scope bundle' currBlock mchoice d gr blkts =
-  do
-     stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
-     matches <- PD.matchesBlockTarget bundle' blkts
-     maybeUpdate (gr,mchoice) $ withPathCondition matches $ do
-      let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
-      mrets <- PPa.toMaybeCases <$> 
-        PPa.forBinsF (\bin -> PB.targetReturn <$> PPa.get bin blkts)
-      case (combineCases ecase1 ecase2,mrets) of
-        (Nothing,_) -> handleDivergingPaths scope currBlock mchoice d gr
-        (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope currBlock mchoice d gr
-        _ | isMismatchedStubs stubPair -> handleDivergingPaths scope currBlock mchoice d gr
-        (Just ecase, PPa.PatchPairJust rets) -> fmap (\x -> (x,Nothing)) $ do
-          let pPair = TF.fmapF PB.targetCall blkts
-          bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
-          traceBundle bundle ("  Return target " ++ show rets)
-          isPreArch <- case (PPa.view PB.concreteBlockEntry pPair) of
-            (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
-            (entryO, entryP) | entryO == entryP -> return False
-            _ -> throwHere $ PEE.BlockExitMismatch
-          ctx <- view PME.envCtxL
-          let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
+  EquivM sym arch (BranchState sym arch)
+triageBlockTarget scope bundle' currBlock st d blkts = do
+  let gr = branchGraph st
+  stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
+  matches <- PD.matchesBlockTarget bundle' blkts
+  fmap (fromMaybe st) $ withPathCondition matches $ do
+    let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
+    mrets <- PPa.toMaybeCases <$> 
+      PPa.forBinsF (\bin -> PB.targetReturn <$> PPa.get bin blkts)
+    case (combineCases ecase1 ecase2,mrets) of
+      (Nothing,_) -> handleDivergingPaths scope currBlock st d blkts
+      (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope currBlock st d blkts
+      _ | isMismatchedStubs stubPair -> handleDivergingPaths scope currBlock st d blkts
+      (Just ecase, PPa.PatchPairJust rets) -> fmap (updateBranchGraph st blkts) $ do
+        let pPair = TF.fmapF PB.targetCall blkts
+        bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
+        traceBundle bundle ("  Return target " ++ show rets)
+        isPreArch <- case (PPa.view PB.concreteBlockEntry pPair) of
+          (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
+          (entryO, entryP) | entryO == entryP -> return False
+          _ -> throwHere $ PEE.BlockExitMismatch
+        ctx <- view PME.envCtxL
+        let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
-          if | isPreArch -> handleArchStmt scope bundle currBlock d gr ecase pPair (Just rets)
-             | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair rets
-             | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just rets) stubPair
-             | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair rets
+        if | isPreArch -> handleArchStmt scope bundle currBlock d gr ecase pPair (Just rets)
+            | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair rets
+            | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just rets) stubPair
+            | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair rets
 
-        (Just ecase, PPa.PatchPairNothing) -> fmap (\x -> (x,Nothing)) $ do
-          bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
-          case ecase of
-            MCS.MacawBlockEndReturn -> handleReturn scope bundle currBlock d gr
-            _ -> do
-              let
-                pPair = TF.fmapF PB.targetCall blkts
-                nextNode = mkNodeEntry currBlock pPair
-              traceBundle bundle "No return target identified"
-              emitTrace @"message" "No return target identified"
-              -- exits without returns need to either be a jump, branch or tail calls
-              -- we consider those cases here (having already assumed a specific
-              -- block exit condition)
-              case ecase of
-                MCS.MacawBlockEndCall | hasStub stubPair ->
-                  handleStub scope bundle currBlock d gr pPair Nothing stubPair
-                MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
-                MCS.MacawBlockEndJump -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
-                MCS.MacawBlockEndBranch -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
-                _ -> throwHere $ PEE.BlockExitMismatch
-
+      (Just ecase, PPa.PatchPairNothing) -> fmap (updateBranchGraph st blkts) $ do
+        bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
+        case ecase of
+          MCS.MacawBlockEndReturn -> handleReturn scope bundle currBlock d gr
+          _ -> do
+            let
+              pPair = TF.fmapF PB.targetCall blkts
+              nextNode = mkNodeEntry currBlock pPair
+            traceBundle bundle "No return target identified"
+            emitTrace @"message" "No return target identified"
+            -- exits without returns need to either be a jump, branch or tail calls
+            -- we consider those cases here (having already assumed a specific
+            -- block exit condition)
+            case ecase of
+              MCS.MacawBlockEndCall | hasStub stubPair ->
+                handleStub scope bundle currBlock d gr pPair Nothing stubPair
+              MCS.MacawBlockEndCall -> handleTailFunCall scope bundle currBlock d gr pPair
+              MCS.MacawBlockEndJump -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
+              MCS.MacawBlockEndBranch -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
+              _ -> throwHere $ PEE.BlockExitMismatch
 
 {-
 -- | See if the given jump targets correspond to a PLT stub for
@@ -2323,11 +2305,13 @@ handleDivergingPaths ::
   HasCallStack =>
   PS.SimScope sym arch v ->
   NodeEntry arch {- ^ current entry point -} ->
-  Maybe DesyncChoice {- ^ previous choice for how to handle desync -} -> 
-  AbstractDomain sym arch v {- ^ current abstract domain -}  -> 
-  PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch, Maybe DesyncChoice)  
-handleDivergingPaths scope currBlock mchoice dom gr0 = fnTrace "handleDivergingPaths" $ do
+  BranchState sym arch ->
+  AbstractDomain sym arch v {- ^ current abstract domain -}  ->
+  PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
+  EquivM sym arch (BranchState sym arch)  
+handleDivergingPaths scope currBlock st dom blkt = fnTrace "handleDivergingPaths" $ do
+  let gr0 = branchGraph st
+  let mchoice = branchDesyncChoice st
   priority <- thisPriority
   currBlockO <- asSingleNode PBi.OriginalRepr currBlock
   currBlockP <- asSingleNode PBi.PatchedRepr currBlock
@@ -2343,7 +2327,7 @@ handleDivergingPaths scope currBlock mchoice dom gr0 = fnTrace "handleDivergingP
         -- connect to the divergence point of the patched program
         gr1 <- withTracing @"node" (GraphNode currBlockO) $ 
           widenAlongEdge scope bundleO (GraphNode currBlock) dom gr0 (GraphNode currBlockO)
-        return (gr1, mchoice)
+        return $ updateBranchGraph st blkt gr1
     _ -> do
       let divergeNode = GraphNode currBlock
       let pg = gr0
@@ -2352,31 +2336,36 @@ handleDivergingPaths scope currBlock mchoice dom gr0 = fnTrace "handleDivergingP
         Just DeferDecision -> return DeferDecision
         Just ChooseSyncPoint -> return DeferDecision
         _ -> choose @"()" msg $ \choice -> do
-          choice "Choose synchronization points" () $ return ChooseSyncPoint
+          -- default choice
+          choice "Ignore divergence (admit a non-total result)" () $ return AdmitNonTotal
+
           choice "Assert divergence is infeasible" () $ return (IsInfeasible ConditionAsserted)
           choice "Assume divergence is infeasible" () $ return (IsInfeasible ConditionAssumed)
           choice "Remove divergence in equivalence condition" () $ return (IsInfeasible ConditionEquiv)
+          choice "Choose synchronization points" () $ return ChooseSyncPoint
           choice "Defer decision" () $ return DeferDecision
-
-
+      
+      let st' = st { branchDesyncChoice = Just a }
       case a of
+        -- leave block exit as unhandled
+        AdmitNonTotal -> return st'
         ChooseSyncPoint -> do
           pg1 <- chooseSyncPoint divergeNode pg
           pg2 <- updateCombinedSyncPoint divergeNode pg1
-          handleDivergingPaths scope currBlock (Just a) dom pg2
+          handleDivergingPaths scope currBlock (st'{ branchGraph = pg2 }) dom blkt
         IsInfeasible condK -> do
           gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
           gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
-          return (gr3, Just a)
+          return $ updateBranchGraph st blkt gr3
         DeferDecision -> do
           -- add this back to the work list at a low priority
           -- this allows, for example, the analysis to determine
           -- that this is unreachable (potentially after refinements) and therefore
           -- doesn't need synchronization
           Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
-          return $ (pg1, Just a)
+          return $ updateBranchGraph st blkt pg1
 
-data DesyncChoice = ChooseSyncPoint | IsInfeasible ConditionKind | DeferDecision
+data DesyncChoice = ChooseSyncPoint | AdmitNonTotal | IsInfeasible ConditionKind | DeferDecision
   deriving Eq
 
 handleStub ::
