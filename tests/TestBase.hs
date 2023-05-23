@@ -140,7 +140,15 @@ doTest mwb cfg sv fp = do
       , PL.patchData = defaultPatchData cfg
       , PL.origPaths = PLE.simplePaths (fp <.> "original" <.> "exe")
       , PL.patchedPaths = PLE.simplePaths (fp <.> "patched" <.> "exe")
-      , PL.verificationCfg = PC.defaultVerificationCfg { PC.cfgFailureMode = PC.ThrowOnAnyFailure, PC.cfgAddOrphanEdges = False, PC.cfgCheckSimplifier = True, PC.cfgIgnoreUnnamedFunctions = False, PC.cfgIgnoreDivergedControlFlow = False}
+      , PL.verificationCfg = 
+          PC.defaultVerificationCfg 
+            { PC.cfgFailureMode = PC.ThrowOnAnyFailure
+            , PC.cfgAddOrphanEdges = False
+            , PC.cfgCheckSimplifier = True
+            , PC.cfgIgnoreUnnamedFunctions = False
+            , PC.cfgIgnoreDivergedControlFlow = False
+            , PC.cfgStackScopeAssume = False
+            }
       , PL.logger = \(PA.SomeValidArch{}) -> do
           let
             act = LJ.LogAction $ \e -> case e of
@@ -162,6 +170,7 @@ doTest mwb cfg sv fp = do
           return $ PL.Logger act []
       , PL.archLoader = testArchLoader cfg
       , PL.useDwarfHints = False
+      , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig
       }
   result <- case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb
