@@ -237,6 +237,7 @@ resetIOList (IOList r) = IO.modifyIORef' r (\_ -> IOList' [] (NodeStatus StatusS
 data NodeBuilder k nm where
   NodeBuilder ::
     { updateNodeStatus :: NodeStatus -> IO ()
+    , startTreeFromNode :: IO (TraceTree k, TreeBuilder k)
     , addNodeValue :: TraceNodeLabel nm -> TraceNodeType k nm -> TraceTree k -> IO ()
     } -> NodeBuilder k nm
 
@@ -288,7 +289,7 @@ startTree  = do
 startNode' :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
 startNode' = do
   l <- emptyIOList
-  let builder = NodeBuilder (\st -> propagateIOListStatus st l) $ \lbl v subtree ->
+  let builder = NodeBuilder (\st -> propagateIOListStatus st l) startTree $ \lbl v subtree ->
         addIOList ((v, lbl), subtree) l
   return (TraceTreeNode l, builder)
 
@@ -505,11 +506,20 @@ noTraceTree = NoTreeBuild
 noTreeBuilder :: TreeBuilder k
 noTreeBuilder = TreeBuilder (\_ -> return ()) noNodeBuilder (\_ -> return ()) DefaultChoice
 
+emptyTraceTree :: IO (TraceTree k)
+emptyTraceTree = do
+  l <- emptyIOList
+  return $ TraceTree l
+
+
 noNodeBuilder :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
 noNodeBuilder = do
   -- todo: add constructor for IOList that is always empty?
   l <- emptyIOList
-  let builder = NodeBuilder (\_ -> return ()) (\_ _ _ -> return ())
+  let noStart = do
+        t <- emptyTraceTree
+        return (t, noTreeBuilder)
+  let builder = NodeBuilder (\_ -> return ()) noStart (\_ _ _ -> return ())
   return $ (TraceTreeNode l, builder)
 
 viewSomeTraceTree ::
@@ -741,10 +751,16 @@ chooseLabel treenm f = do
   case null choices of
     True -> liftIO $ fail $ "choose: at least one option required (" ++ treenm ++ ")"
     False -> do
-      () <- liftIO $ waitForChoice header
-      getChoice choices >>= \case
-        Just a -> return a
-        Nothing -> liftIO $ fail $ "choose: no value available (" ++ treenm ++ ")"
+      builder <- getTreeBuilder
+      case interactionMode builder of
+        Interactive _ -> do
+          () <- liftIO $ waitForChoice header
+          getChoice choices >>= \case
+            Just a -> return a
+            Nothing -> liftIO $ fail $ "choose: no value available (" ++ treenm ++ ")"
+        -- default choice is simply the first one
+        DefaultChoice -> do
+          (liftIO $ choiceValue (head choices))
 
 data LazyIOAction b a = LazyIOAction { lazyActionReady :: IO Bool, runLazyAction :: b -> IO (Maybe a) }
 
@@ -979,7 +995,7 @@ subTraceLabel' ::
   NodeBuilderT k nm m a
 subTraceLabel' lbl v f = do
   nodeBuilder <- getNodeBuilder @k @nm @m
-  (subtree, treeBuilder') <- IO.liftIO $ startTree @k
+  (subtree, treeBuilder') <- IO.liftIO $ startTreeFromNode nodeBuilder
   let treeBuilder = addNodeDependency nodeBuilder treeBuilder'
   IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
   r <- catchError
