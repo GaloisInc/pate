@@ -26,6 +26,7 @@ import qualified What4.Solver as WS
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
+import Data.Data (Typeable)
 
 -- | The solvers supported by the pate verifier
 --

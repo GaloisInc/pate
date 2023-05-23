@@ -27,6 +27,8 @@ module Pate.AssumptionSet (
   , macawRegBinding
   , fromPred
   , toPred
+  , toPredList
+  , toAtomList
   , apply
   , isAssumedPred
   , mux
@@ -192,6 +194,46 @@ fromPred ::
   W4.Pred sym ->
   AssumptionSet sym
 fromPred p = AssumptionSet (SetF.singleton p) MapF.empty
+
+toPredList ::
+  forall m sym.
+  W4.IsSymExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  AssumptionSet sym ->
+  m [W4.Pred sym]
+toPredList sym asms = do
+  bindPreds <- concat <$> mapM assumeBinds (MapF.toList (asmBinds asms))
+  return $ bindPreds ++ (SetF.toList (asmPreds asms))
+  where
+    assumeBinds :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> m [W4.Pred sym]
+    assumeBinds (MapF.Pair eSrc eTgts) = forM (SetF.toList eTgts) $ \eTgt ->
+      IO.liftIO $ W4.isEq sym eSrc eTgt
+
+-- | Decompose an 'AssumptionSet' into "atomic" assumptions (i.e. each
+--   containing a single bind or predicate)
+toAtomList ::
+  forall sym.
+  W4.IsSymExprBuilder sym =>
+  AssumptionSet sym ->
+  [AssumptionSet sym]
+toAtomList asms = bindingAtoms <> predAtoms
+  where
+    predAtoms :: [AssumptionSet sym]
+    predAtoms = do
+      p <- SetF.toList (asmPreds asms)
+      return $ fromPred p      
+
+    bindingAtoms :: [AssumptionSet sym]
+    bindingAtoms = do
+      bindPair <- MapF.toList (asmBinds asms)
+      MapF.Pair src tgt <- assumeBind bindPair
+      return $ exprBinding src tgt
+
+    assumeBind :: MapF.Pair (W4.SymExpr sym) (ExprSet sym) -> [MapF.Pair (W4.SymExpr sym) (W4.SymExpr sym)]
+    assumeBind (MapF.Pair eSrc eTgts) = do
+      eTgt <- SetF.toList eTgts
+      return $ MapF.Pair eSrc eTgt
 
 exprBinding ::
   forall sym tp.

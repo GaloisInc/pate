@@ -21,6 +21,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pate.Monad
   ( EquivEnv(..)
@@ -74,7 +76,6 @@ module Pate.Monad
   , withFreshVars
   , withFreshScope
   -- assumption management
-  , validateAssumptions
   , withAssumption
   , withSatAssumption
   , withAssumptionSet
@@ -191,6 +192,9 @@ import qualified Pate.Timeout as PT
 import qualified Pate.Verification.Concretize as PVC
 import           Pate.TraceTree
 import Data.Functor.Const (Const(..))
+import Unsafe.Coerce (unsafeCoerce)
+import Debug.Trace
+import Data.List
 
 atPriority :: 
   NodePriority ->
@@ -607,6 +611,15 @@ withFreshSatCache f = do
   liftIO $ IO.modifyIORef satCache (SetF.union newSatResults)
   return result
 
+withNoSatCache ::
+  EquivM_ sym arch f ->
+  EquivM sym arch f
+withNoSatCache f = do
+  freshUnsatCacheRef <- liftIO $ IO.newIORef SetF.empty
+  freshSatCacheRef <- liftIO $ IO.newIORef SetF.empty
+  CMR.local (\env -> env { envUnsatCacheRef = freshUnsatCacheRef, envSatCacheRef = freshSatCacheRef }) f
+
+
 markPredSat ::
   W4.Pred sym ->
   EquivM sym arch ()
@@ -643,6 +656,7 @@ withPathCondition asm f = CMR.local (\env -> env { envPathCondition = (asm <> (e
 -- 'AssumptionSet'.
 withAssumptionSet ::
   HasCallStack =>
+  forall sym arch f.
   AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch f
@@ -656,10 +670,128 @@ withAssumptionSet asm f = withSym $ \sym -> do
         (frame, st) <- withOnlineBackend $ \bak ->  do
           st <- liftIO $ LCB.saveAssumptionState bak
           frame <- liftIO $ LCB.pushAssumptionFrame bak
-          safeIO (\_ -> PEE.AssumedFalse curAsm asm) $
+          safeAssumedFalseIO mempty asm $ 
             LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
           return (frame, st)
-        (validateAssumptions curAsm asm >> withFreshSatCache f) `finally` safePop frame st
+        withFreshSatCache $ do
+          result <- goalSat "validateAssumptions" (W4.truePred sym) $ return
+          case result of
+            W4R.Sat{} -> return ()
+            W4R.Unknown{} -> return ()
+            W4R.Unsat{} -> withNoSatCache $ do
+              safePop frame st
+              asm' <- getUnsatAsm asm
+              throwAssumeFalse mempty asm'
+          propagateAssumeFalse asm (safePop frame st) f
+
+safeAssumedFalseIO ::
+  forall sym arch a.
+  HasCallStack =>
+  PAS.AssumptionSet sym ->
+  PAS.AssumptionSet sym ->
+  IO a ->
+  EquivM sym arch a 
+safeAssumedFalseIO context asm f = safeIO (\_ -> PEE.InnerSymEquivalenceError (PEE.AssumedFalse context asm)) f
+
+
+throwAssumeFalse ::
+  HasCallStack =>
+  PAS.AssumptionSet sym ->
+  PAS.AssumptionSet sym ->
+  EquivM sym arch a
+throwAssumeFalse context asm = throwHere $ PEE.InnerSymEquivalenceError (PEE.AssumedFalse context asm)
+
+-- | This attempts to refine any inner 'AssumedFalse' exceptions thrown by the
+--   given function, by determining which of the most recently added assumptions were
+--   necessary for the predicate in the exception to be unsatisfiable
+--   This is a rough approximation of computing an unsatisfiable core, but without
+--   relying on solver support for it.
+propagateAssumeFalse ::
+  HasCallStack =>
+  AssumptionSet sym {- ^ most recently pushed assumption -} ->
+  EquivM_ sym arch () {- ^ function that pops this assumption from the stack -} ->
+  EquivM_ sym arch a {- ^ inner computation that may throw 'PEE.AssumedFalse' -} ->
+  EquivM sym arch a
+propagateAssumeFalse asm doPop f = withSym $ \sym -> do
+
+  catchError (f >>= \a -> doPop >> return a)
+    (\e -> case PEE.errEquivError e of 
+      Left (PEE.SomeInnerError (PEE.InnerSymEquivalenceError (PEE.AssumedFalse asm_context badasm))) -> do
+        -- an inner computation assumed false and returned the offending
+        -- predicate
+        -- check if any individual assumption we just pushed was the cause
+        -- of the error
+
+        -- this is a sanity check that the predicate from the exception
+        -- is unsatisfiable in the current assumption context (plus any additional context
+        -- it has accumulated)
+        bad_pred_total <- PAS.toPred sym (asm_context <> badasm)
+
+        heuristicSat "validateIndividualAsms" bad_pred_total $ \case
+          W4R.Sat{} -> 
+            -- if the predicate is satisfiable here, then something has gone wrong
+            -- with our assumption stack management
+            throwHere PEE.SolverStackMisalignment
+          _ -> return ()
+
+        doPop
+        -- we need to avoid clobbering the cache after popping, since
+        -- we're now in a different satisfiability context
+        withNoSatCache $ do
+          -- after popping this assumption, we see if the previously-unsatisfiable
+          -- predicate is now satisfiable
+          -- if it still isn't, then 'asm' has no effect on the satisfiability of
+          -- the predicate, and we don't need to add anything to the context
+          asm' <- fmap (fromMaybe mempty) $ withSatAssumption (asm_context <> badasm) $ do
+            -- if 'badasm' is now satisfiable without 'asms' being assumed, then
+            -- we know that there is some incompatibility between them, and we
+            -- want to refine this to exactly the subset of assumptions from
+            -- 'asm' that are needed to cause unsatisfiability
+            p <- PAS.toPred sym asm
+            result <- heuristicSat "validateIndividualAsms" p return
+            case result of
+              W4R.Sat{} -> 
+                -- another sanity check, 'asms' should now be unsatisfiable
+                -- if our assumption stack is wellformed
+                throwHere PEE.SolverStackMisalignment
+              -- finally, we can refine 'asm' to exactly the subset
+              -- of assumptions that are now unsatisfiable
+              _ -> getUnsatAsm asm
+          
+          throwAssumeFalse (asm_context <> asm') badasm
+      _ -> do
+        doPop
+        throwError e)
+
+getUnsatAsm ::
+  forall sym arch. 
+  HasCallStack =>
+  AssumptionSet sym  ->
+  EquivM sym arch (AssumptionSet sym)
+getUnsatAsm asms = do
+  let atoms = PAS.toAtomList asms
+  atoms' <- go_fix atoms
+  return $ mconcat atoms'
+  where
+    -- continue sweeping the list of assumptions until
+    -- no change is made
+    go_fix :: [AssumptionSet sym] -> EquivM_ sym arch [AssumptionSet sym]
+    go_fix asms_list = do
+      asms_list' <- go 0 asms_list
+      case (length asms_list == length asms_list') of
+        True -> return asms_list
+        False -> go_fix asms_list'
+    -- prune the list down to exactly what's necessary for unsatisfiability
+    go :: Int -> [AssumptionSet sym] -> EquivM_ sym arch [AssumptionSet sym]
+    go idx asms_list = withSym $ \sym -> case splitAt idx asms_list of
+      (_,[]) -> return asms_list
+      (hd,_:tl) -> do
+        let asm' = (mconcat hd) <> (mconcat tl)
+        p <- PAS.toPred sym asm'
+        res <- checkSatisfiableWithModel (PT.Seconds 5) "getUnsat" p return
+        case res of
+          Right (W4R.Unsat{}) -> go idx (hd++tl)
+          _ -> go (idx+1) asms_list
 
 -- | try to pop the assumption frame, but restore the solver state
 --   if this fails
@@ -669,31 +801,9 @@ safePop ::
   EquivM sym arch ()
 safePop frame st = withOnlineBackend $ \bak -> 
   catchError
-    (safeIO (\_ -> PEE.SolverStackMisalignment) (LCB.popAssumptionFrame bak frame >> return ()))
+    (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame))
     (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))   
 
--- | Validates the current set of assumptions by checking that some model exists
--- under the current assumption context.
--- Takes the original assumption set and the recently-pushed assumption set, which
--- is used for reporting in the case that the resulting assumption state is found to
--- be inconsistent.
-validateAssumptions ::
-  forall sym arch. 
-  HasCallStack =>
-  AssumptionSet sym {- ^ original assumption set -} ->
-  AssumptionSet sym {- ^ recently pushed assumption set -} ->
-  EquivM sym arch ()
-validateAssumptions oldAsm newAsm = withSym $ \sym -> do
-  {- let
-    simp :: forall tp. W4.SymExpr sym tp -> IO (W4.SymExpr sym tp)
-    simp e = resolveConcreteLookups sym (pure . W4.asConstantPred) e  >>= simplifyBVOps sym >>= expandMuxEquality sym
-
-  oldAsm' <- liftIO $ PEM.mapExpr sym simp oldAsm
-  newAsm' <- liftIO $ PEM.mapExpr sym simp newAsm -}
-  goalSat "validateAssumptions" (W4.truePred sym) $ \res -> case res of
-    W4R.Unsat _ -> throwHere $ PEE.AssumedFalse oldAsm newAsm
-    W4R.Unknown -> throwHere $ PEE.AssumedFalse oldAsm newAsm
-    W4R.Sat{} -> return ()
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.
@@ -742,20 +852,23 @@ withSatAssumption asm f = withSym $ \sym -> do
         mst <- withOnlineBackend $ \bak -> do
           st <- liftIO $ LCB.saveAssumptionState bak
           frame <- liftIO $  LCB.pushAssumptionFrame bak
-          catchError (safeIO (\_ -> PEE.AssumedFalse curAsm asm)
-            (do
-                LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-                return $ Just (frame, st)))
-            (\_ -> (liftIO $ LCB.popAssumptionFrame bak frame) >> return Nothing)
+          catchError
+            (safeAssumedFalseIO mempty asm $ do
+              LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+              return $ Just (frame, st))
+            (\_ -> (safeIO (\_ -> PEE.SolverStackMisalignment) (LCB.popAssumptionFrame bak frame)) >> return Nothing)
         case mst of
-          Just (frame, st) ->
-            (goalSat "check assumptions" (W4.truePred sym) $ \res -> case res of
-              W4R.Sat{} -> Just <$> (withFreshSatCache f)
+          Just (frame, st) -> do
+            -- it's critical that we don't execute the inner action inside
+            -- the 'goalSat' continuation, since we're popping the outer frame
+            -- after it's finished (or on an error result)
+            res <- goalSat "check assumptions" (W4.truePred sym) return
+            case res of
+              W4R.Sat{} -> Just <$> propagateAssumeFalse asm (safePop frame st) (withFreshSatCache f)
               -- on an inconclusive result we can't safely return 'Nothing' since
               -- that may unsoundly exclude viable paths
-              W4R.Unknown -> throwHere $ PEE.InconclusiveSAT
-              W4R.Unsat{} -> return Nothing)
-                `finally` safePop frame st
+              W4R.Unknown -> safePop frame st >> throwHere PEE.InconclusiveSAT
+              W4R.Unsat{} -> safePop frame st >> return Nothing
           -- crucible failed to push the assumption, so we double check that
           -- it is not satisfiable
           Nothing -> goalSat "check assumptions" p $ \case
@@ -868,9 +981,11 @@ checkSatisfiableWithModel ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch (Either SomeException a)
 checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
-  st <- withOnlineBackend $ \bak -> liftIO $ LCB.saveAssumptionState bak
+  (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
+    st <- LCB.saveAssumptionState bak
+    frame <- LCB.pushAssumptionFrame bak
+    return (frame, st)
   mres <- withSolverProcess $ \sp -> liftIO $ do
-    WPO.push sp
     W4.assume (WPO.solverConn sp) p
     tryJust filterAsync $ do
       res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
@@ -882,10 +997,10 @@ checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
       withSolverProcess $ \_ -> do
         liftIO $ LCBO.restoreSolverState bak st
         return $ Left err
-    Right res -> withOnlineBackend $ \bak -> withSolverProcess $ \sp -> do
+    Right res -> withOnlineBackend $ \bak -> do
       processSatResult p res
       fmap Right $ k res `finally`
-        catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (WPO.pop sp))
+        catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame))
           (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
 
 -- | Check the satisfiability of a predicate, returning with the result (including model,

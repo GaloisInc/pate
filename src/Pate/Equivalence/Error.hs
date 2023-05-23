@@ -8,9 +8,13 @@
 {-# LANGUAGE AllowAmbiguousTypes   #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pate.Equivalence.Error (
     InnerEquivalenceError(..)
+  , InnerSymEquivalenceError(..)
+  , pattern InnerSymEquivalenceError
   , SomeExpr(..)
   , printSomeExprTruncated
   , LoadError(..)
@@ -31,7 +35,7 @@ import qualified Data.Binary.Get as DB
 import qualified Data.ByteString as BS
 import qualified Data.ElfEdit as DEE
 import           Data.Parameterized.Some ( Some(..) )
-import           Data.Typeable ( Typeable )
+import           Data.Typeable ( Typeable, eqT )
 import           Data.Proxy
 import           GHC.Stack ( HasCallStack, CallStack, prettyCallStack, callStack )
 import qualified What4.Interface as W4
@@ -56,6 +60,7 @@ import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Hints.BSI as PHB
 import           Pate.TraceTree
+import Unsafe.Coerce (unsafeCoerce)
 
 data InequivalenceReason =
     InequivalentRegisters
@@ -64,8 +69,27 @@ data InequivalenceReason =
   | InvalidPostState
   deriving (Eq, Ord, Show)
 
+data InnerSymEquivalenceError sym arch =
+  forall tp pre post. RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
+  | AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)
+
+deriving instance W4.IsExprBuilder sym => Show (InnerSymEquivalenceError sym arch)
+
+pattern InnerSymEquivalenceError :: (sym ~ sym', arch ~ arch', W4.IsExprBuilder sym', PAr.ValidArch arch') => () => InnerSymEquivalenceError sym arch -> InnerEquivalenceError arch'
+pattern InnerSymEquivalenceError x <- ((\((InnerSymEquivalenceError_ x)) -> (asAnySymArch x) -> Just x))
+  where
+    InnerSymEquivalenceError x = InnerSymEquivalenceError_ x
+
+-- FIXME: we can add a more robust test for 'sym' equality, but we need a reference to the actual
+-- builder.
+asAnySymArch :: forall sym arch sym' arch'. W4.IsExprBuilder sym' => PAr.ValidArch arch' => PAr.ValidArch arch => InnerSymEquivalenceError sym arch -> Maybe (InnerSymEquivalenceError sym' arch')
+asAnySymArch x = case eqT @arch @arch' of
+  Just CT.Refl -> Just (unsafeCoerce x)
+  Nothing -> Nothing
+
 data InnerEquivalenceError arch
-  = BytesNotConsumed { disassemblyAddr :: PA.ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
+  = forall sym. (W4.IsExprBuilder sym) => InnerSymEquivalenceError_ (InnerSymEquivalenceError sym arch)
+  | BytesNotConsumed { disassemblyAddr :: PA.ConcreteAddress arch, bytesRequested :: Int, bytesDisassembled :: Int }
   | UnsupportedRegisterType (Some CT.TypeRepr)
   | SymbolicExecutionFailed String -- TODO: do something better
   | InconclusiveSAT
@@ -85,7 +109,6 @@ data InnerEquivalenceError arch
   | MissingPatchPairResult (PB.BlockPair arch)
   | EquivCheckFailure String -- generic error
   | ImpossibleEquivalence
-  | forall sym. W4.IsExpr (W4.SymExpr sym) => AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)
   | BlockExitMismatch
   | InvalidSMTModel
   | MismatchedAssumptionsPanic
@@ -107,7 +130,6 @@ data InnerEquivalenceError arch
   | ObservabilityError String
   | ObservableDifferenceFound -- only raised as an informative warning
   | TotalityError String
-  | forall sym tp pre post. W4.IsExpr (W4.SymExpr sym) => RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
   | UnknownPLTStub BS.ByteString
   | NotImplementedYet String
   | UnexpectedTailCallEntry (PB.FunPair arch)
@@ -158,9 +180,9 @@ printSomeExprTruncated (SomeExpr e) =
     (a:as) -> PP.pretty a <> ".." <> PP.pretty (last as)
 
 
-ppInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> PP.Doc a
+ppInnerError :: (PAr.ValidArch arch) => InnerEquivalenceError arch -> PP.Doc a
 ppInnerError e = case e of
-  RescopingFailure asms src tgt ->
+  InnerSymEquivalenceError_(RescopingFailure asms src tgt) ->
     PP.vsep
       [ "Unable to rescope:"
       , PP.pretty asms
@@ -175,7 +197,7 @@ ppInnerError e = case e of
 isRecoverable' :: InnerEquivalenceError arch -> Bool
 isRecoverable' e = case e of
   InconsistentSimplificationResult{} -> True
-  RescopingFailure{} -> True
+  InnerSymEquivalenceError_(RescopingFailure{}) -> True
   WideningError{} -> True
   NotImplementedYet{} -> True
   MissingRegionOffset{} -> True
@@ -232,7 +254,7 @@ deriving instance Show LoadError
 
 
 data SomeInnerError where
-  SomeInnerError :: PAr.ValidArch arch => InnerEquivalenceError arch -> SomeInnerError
+  SomeInnerError :: (PAr.ValidArch arch) => InnerEquivalenceError arch -> SomeInnerError
 
 data EquivalenceError where
   EquivalenceError ::
@@ -268,7 +290,7 @@ loaderError err = EquivalenceError
   , errEquivError = Right err
   }
 
-equivalenceError :: (HasCallStack, PAr.ValidArch arch) => InnerEquivalenceError arch -> EquivalenceError
+equivalenceError :: forall arch. (HasCallStack, PAr.ValidArch arch) => InnerEquivalenceError arch -> EquivalenceError
 equivalenceError err = EquivalenceError
   { errWhichBinary = Nothing
   , errStackTrace = Just callStack
@@ -276,7 +298,7 @@ equivalenceError err = EquivalenceError
   }
 
 equivalenceErrorFor
-  :: (HasCallStack, PAr.ValidArch arch)
+  :: forall arch bin. (HasCallStack, PAr.ValidArch arch)
   => PBi.WhichBinaryRepr bin
   -> InnerEquivalenceError arch
   -> EquivalenceError
