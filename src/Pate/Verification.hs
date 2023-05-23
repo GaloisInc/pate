@@ -233,7 +233,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   topEntryPoint <- PPa.runPatchPairT $ PPa.forBins $ \bin -> do
     ctx <- PPa.get bin contexts
     liftIO $ PD.resolveFunctionEntry (PMC.binEntry ctx) (PMC.parsedFunctionMap ctx)
-  let entryPoints = (topEntryPoint : entryPoints')
+  let entryPoints = (entryPoints' ++ [topEntryPoint])
 
   PA.SomeValidArch archData <- return validArch
   let defaultInit = PA.validArchInitAbs archData
@@ -252,8 +252,9 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
       let ov = M.singleton (PB.functionSegAddr blk) initAbs
       pfm1 <- liftIO $ PD.addOverrides PB.defaultMkInitialAbsState pfm0 ov
       return $ ctx { PMC.parsedFunctionMap = pfm1 }) context' entryPoints
-    
-  let pPairs' = entryPoints ++ (unpackedPairs upData)
+  
+  -- ordered by preference for chooseEntryPoint
+  let pPairs' = entryPoints' ++ (unpackedPairs upData) ++ [topEntryPoint]
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   let
