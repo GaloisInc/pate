@@ -1,6 +1,6 @@
 VerificationHints { blockMappings = []
-                  , functionEntries = [ ("UART_RxISR_16BIT", FunctionDescriptor { functionSymbol = "UART_RxISR_16BIT", functionAddress = 0x080000c0, functionArguments = [] })
-                                      , ("frame_dummy", FunctionDescriptor { functionSymbol = "frame_dummy", functionAddress = 0x080000e8, functionArguments = [] })
+                  , functionEntries = [ ("UART_RxISR_16BIT", FunctionDescriptor { functionSymbol = "UART_RxISR_16BIT", functionAddress = 0x080000c0, functionArguments = [], functionEnd = Nothing })
+                                      , ("frame_dummy", FunctionDescriptor { functionSymbol = "frame_dummy", functionAddress = 0x080000e8, functionArguments = [], functionEnd = Nothing })
                                       ]
                   , dataSymbols = []
                   }

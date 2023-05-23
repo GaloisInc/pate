@@ -1,6 +1,6 @@
 VerificationHints { blockMappings = []
-                  , functionEntries = [ ("f1", FunctionDescriptor { functionSymbol = "f1", functionAddress = 0x1000, functionArguments = ["i"] })
-                                      , ("main", FunctionDescriptor { functionSymbol = "main", functionAddress = 0x1017, functionArguments = [] })
+                  , functionEntries = [ ("f1", FunctionDescriptor { functionSymbol = "f1", functionAddress = 0x1000, functionArguments = ["i"], functionEnd = Nothing })
+                                      , ("main", FunctionDescriptor { functionSymbol = "main", functionAddress = 0x1017, functionArguments = [], functionEnd = Nothing })
                                       ]
                   , dataSymbols = [ ("g1", SymbolExtent { symbolLocation = 0x4000, symbolSize = 4} )
                                   , ("g2", SymbolExtent { symbolLocation = 0x4008, symbolSize = 8} )

@@ -1,8 +1,8 @@
 VerificationHints { blockMappings = []
-                  , functionEntries = [ ("thunk_FUN_code_00005d", FunctionDescriptor { functionSymbol = "thunk_FUN_code_00005d", functionAddress = 0x0, functionArguments = [] })
-                                      , ("FUN_code_00005d", FunctionDescriptor { functionSymbol = "FUN_code_00005d", functionAddress = 0x5d, functionArguments = [] })
-                                      , ("FUN_code_0000d6", FunctionDescriptor { functionSymbol = "FUN_code_0000d6", functionAddress = 0xd6, functionArguments = [] })
-                                      , ("__do_clear_bss", FunctionDescriptor { functionSymbol = "__do_clear_bss", functionAddress = 0xdc, functionArguments = [] })
+                  , functionEntries = [ ("thunk_FUN_code_00005d", FunctionDescriptor { functionSymbol = "thunk_FUN_code_00005d", functionAddress = 0x0, functionArguments = [], functionEnd = Nothing })
+                                      , ("FUN_code_00005d", FunctionDescriptor { functionSymbol = "FUN_code_00005d", functionAddress = 0x5d, functionArguments = [], functionEnd = Nothing })
+                                      , ("FUN_code_0000d6", FunctionDescriptor { functionSymbol = "FUN_code_0000d6", functionAddress = 0xd6, functionArguments = [], functionEnd = Nothing })
+                                      , ("__do_clear_bss", FunctionDescriptor { functionSymbol = "__do_clear_bss", functionAddress = 0xdc, functionArguments = [], functionEnd = Nothing })
                                       ]
                   , dataSymbols = []
                   }

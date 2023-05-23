@@ -1,6 +1,6 @@
 VerificationHints { blockMappings = []
-                  , functionEntries = [ ("__do_global_dtors_aux", FunctionDescriptor { functionSymbol = "__do_global_dtors_aux", functionAddress = 0x080000c0, functionArguments = [] })
-                                      , ("frame_dummy", FunctionDescriptor { functionSymbol = "frame_dummy", functionAddress = 0x080000e8, functionArguments = []})
+                  , functionEntries = [ ("__do_global_dtors_aux", FunctionDescriptor { functionSymbol = "__do_global_dtors_aux", functionAddress = 0x080000c0, functionArguments = [], functionEnd = Nothing })
+                                      , ("frame_dummy", FunctionDescriptor { functionSymbol = "frame_dummy", functionAddress = 0x080000e8, functionArguments = [], functionEnd = Nothing})
                                       ]
                   , dataSymbols = []
                   }
