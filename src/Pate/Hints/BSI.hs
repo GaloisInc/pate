@@ -1,5 +1,6 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 module Pate.Hints.BSI (
   JSONError(..),
   parseSymbolSpecHints
@@ -8,7 +9,12 @@ module Pate.Hints.BSI (
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
+#if MIN_VERSION_aeson(2,0,0)
+import qualified Compat.Aeson as HMS
+#else
 import qualified Data.HashMap.Strict as HMS
+#endif
+
 import           Data.Maybe ( fromMaybe )
 import qualified Data.Scientific as DS
 import qualified Data.Text as T

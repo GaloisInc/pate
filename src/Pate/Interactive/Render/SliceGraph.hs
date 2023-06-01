@@ -1,13 +1,18 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE CPP #-}
 module Pate.Interactive.Render.SliceGraph (
   renderSliceGraph
   ) where
 
 import qualified Data.Aeson as JSON
 import qualified Data.Foldable as F
+#if MIN_VERSION_aeson(2,0,0)
+import qualified Compat.Aeson as HMS
+#else
 import qualified Data.HashMap.Strict as HMS
+#endif
 import qualified Data.Map.Strict as Map
 import           Data.Proxy ( Proxy(..) )
 import qualified Data.Text as T

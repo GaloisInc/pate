@@ -1,4 +1,5 @@
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE CPP #-}
 module Pate.Hints.JSON (
   JSONError(..),
   parseProbabilisticHints,
@@ -11,7 +12,11 @@ import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Foldable as F
 import           Data.Function ( on )
+#if MIN_VERSION_aeson(2,0,0)
+import qualified Compat.Aeson as HMS
+#else
 import qualified Data.HashMap.Strict as HMS
+#endif
 import qualified Data.List as L
 import           Data.Maybe ( fromMaybe, mapMaybe )
 import qualified Data.Scientific as DS

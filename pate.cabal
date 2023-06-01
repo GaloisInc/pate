@@ -31,7 +31,6 @@ common shared
                        cassava >= 0.5 && < 0.6,
                        megaparsec >= 8 && < 10,
                        unordered-containers >= 0.2.10 && < 0.3,
-                       aeson >= 1.5 && < 1.6,
                        scientific >= 0.3 && < 0.4,
                        galois-dwarf,
                        parallel >= 3.2 && < 4,
@@ -68,10 +67,15 @@ common shared
                        transformers,
                        time >= 1 && < 2,
                        vector >= 0.10 && < 0.13,
-                       th-utilities >= 0.2 && < 0.3
+                       th-utilities >= 0.2 && < 0.3,
+                       hashable >= 1.3.5
                        
   default-language:    Haskell2010
   ghc-options:         -Wall -Wcompat
+  if impl(ghc >= 9.2.0)
+    build-depends: aeson >= 2
+  else
+    build-depends: aeson >= 1.5 && < 1.6
 
 library
   import:              shared
@@ -163,6 +167,9 @@ library
                        Pate.Interactive.Render.Proof,
                        Pate.Interactive.Render.SliceGraph,
                        Pate.Interactive.State
+  if impl(ghc >= 9.2.0)
+    other-modules: Compat.Aeson
+
 common shared-test
   ghc-options: -Wall -Wcompat
   default-language: Haskell2010
