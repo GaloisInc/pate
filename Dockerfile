@@ -54,18 +54,33 @@ ENV PATH="/root/.ghcup/bin:${PATH}"
 RUN cabal update
 RUN mkdir -p /home/src
 
-COPY ./cabal.project.dist /home/src/cabal.project.dist
-COPY ./pate.cabal /home/src/pate.cabal
-COPY ./submodules /home/src/submodules
+COPY ./cabal.project.dismantle /home/src/cabal.project.dismantle
+COPY ./cabal.GHC-8.10.7.freeze /home/src/cabal.freeze
+COPY ./submodules/arm-asl-parser /home/src/submodules/arm-asl-parser
+COPY ./submodules/asl-translator /home/src/submodules/asl-translator
+COPY ./submodules/crucible /home/src/submodules/crucible
+COPY ./submodules/dismantle /home/src/submodules/dismantle
+COPY ./submodules/dwarf /home/src/submodules/dwarf
+COPY ./submodules/elf-edit /home/src/submodules/elf-edit
+COPY ./submodules/flexdis86 /home/src/submodules/flexdis86
+COPY ./submodules/llvm-pretty /home/src/submodules/llvm-pretty
+COPY ./submodules/parameterized-utils /home/src/submodules/parameterized-utils
+COPY ./submodules/semmc /home/src/submodules/semmc
+COPY ./submodules/what4 /home/src/submodules/what4
+COPY ./submodules/what4-serialize /home/src/submodules/what4-serialize
 
 WORKDIR /home/src
 
-RUN cp cabal.project.dist cabal.project
+RUN cp cabal.project.dismantle cabal.project
 RUN cabal v2-configure --keep-going --ghc-options="-fno-safe-haskell"
-
 RUN cabal v2-build --only-dependencies dismantle-arm-xml
 RUN cabal v2-build dismantle-arm-xml
-RUN cabal v2-build --only-dependencies macaw-aarch32
+
+COPY ./cabal.project.macaw /home/src/cabal.project.macaw
+COPY ./submodules/macaw /home/src/submodules/macaw
+COPY ./submodules/macaw-loader /home/src/submodules/macaw-loader
+
+RUN cp cabal.project.macaw cabal.project
 RUN cabal v2-build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
 RUN cabal v2-build semmc-ppc
 RUN cabal v2-build lib:semmc-aarch32
@@ -73,6 +88,10 @@ RUN cabal v2-build macaw-ppc
 RUN cabal v2-build macaw-ppc-symbolic
 RUN cabal v2-build macaw-aarch32-symbolic
 RUN cabal v2-build macaw-loader-aarch32
+
+COPY ./cabal.project.dist /home/src/cabal.project.dist
+COPY ./pate.cabal /home/src/pate.cabal
+RUN cp cabal.project.dist cabal.project
 
 RUN cabal v2-build --only-dependencies lib:pate
 

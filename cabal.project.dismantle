@@ -1,0 +1,17 @@
+packages: .
+          submodules/llvm-pretty
+          submodules/parameterized-utils
+          submodules/what4/what4
+          submodules/what4-serialize
+          submodules/crucible/crucible
+          submodules/crucible/crucible-symio
+          submodules/crucible/crucible-llvm
+          submodules/arm-asl-parser
+          submodules/asl-translator
+          submodules/elf-edit
+          submodules/dwarf
+          submodules/flexdis86
+          submodules/flexdis86/binary-symbols
+          submodules/dismantle/dismantle-tablegen
+          submodules/dismantle/dismantle-ppc
+          submodules/dismantle/dismantle-arm-xml
