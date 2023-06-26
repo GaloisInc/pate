@@ -2088,6 +2088,11 @@ handleArchStmt scope bundle currBlock d gr endCase pPair mpRetPair = fnTrace "ha
     handleReturn scope bundle currBlock d gr
   MCS.MacawBlockEndReturn | Nothing <- mpRetPair ->
     handleReturn scope bundle currBlock d gr
+  MCS.MacawBlockEndCall | Just retPair <- mpRetPair -> do
+    -- we don't know what to do with arch statements yet, so we just
+    -- ignore them and immediately jump to the return address
+    _ <- emitWarning $ PEE.NotImplementedYet "handleArchStmt"
+    handleJump scope bundle currBlock d gr (mkNodeEntry currBlock retPair)
   _ -> do
     _ <- emitError $ PEE.NotImplementedYet "handleArchStmt"
     return gr
