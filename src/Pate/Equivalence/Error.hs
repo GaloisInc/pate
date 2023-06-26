@@ -76,9 +76,14 @@ data InnerSymEquivalenceError sym arch =
 deriving instance W4.IsExprBuilder sym => Show (InnerSymEquivalenceError sym arch)
 
 pattern InnerSymEquivalenceError :: (sym ~ sym', arch ~ arch', W4.IsExprBuilder sym', PAr.ValidArch arch') => () => InnerSymEquivalenceError sym arch -> InnerEquivalenceError arch'
-pattern InnerSymEquivalenceError x <- ((\((InnerSymEquivalenceError_ x)) -> (asAnySymArch x) -> Just x))
+pattern InnerSymEquivalenceError x <- (asInnerError -> Just x)
   where
     InnerSymEquivalenceError x = InnerSymEquivalenceError_ x
+
+asInnerError :: (W4.IsExprBuilder sym, PAr.ValidArch arch) => InnerEquivalenceError arch -> Maybe (InnerSymEquivalenceError sym arch)
+asInnerError = \case
+  InnerSymEquivalenceError_ x -> asAnySymArch x
+  _ -> Nothing
 
 -- FIXME: we can add a more robust test for 'sym' equality, but we need a reference to the actual
 -- builder.
