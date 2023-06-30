@@ -38,8 +38,8 @@ analyze the original and patched challenge 10 binaries::
              -b /challenge10/challenge10.toml \
              --original-bsi-hints /challenge10/challenge10.json \
              --patched-bsi-hints /challenge10/challenge10.json \
-             --original-csv-function-hints challenge10.csv \
-             --patched-csv-function-hints challenge10.csv \
+             --original-csv-function-hints /challenge10/challenge10.csv \
+             --patched-csv-function-hints /challenge10/challenge10.csv \
              -s transport_handler
 
 The file `challenge10.toml` specifies additional metadata needed for
