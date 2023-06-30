@@ -1,5 +1,7 @@
 cabal.project
 cabal.project.local
+cabal.project.freeze
+dist-newstyle
 dist-newstyle/
 dist-profile/
 *.i
