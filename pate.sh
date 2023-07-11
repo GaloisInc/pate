@@ -5,8 +5,11 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 temp_ghci_cd=$(mktemp)
 temp_ghci=$(mktemp)
+args_sep=$(printf '\\n%q' "$@")
+args_escaped=${args_sep//\\/\\\\}
+
 echo ":cd ${CUR_DIR}" > ${temp_ghci_cd}
-echo ":run \"$@\"" > ${temp_ghci}
+echo ":run \"$args_escaped\"" > ${temp_ghci}
 echo ":cmd checkAlive" >> ${temp_ghci}
 echo "import Pate.Monad" >> ${temp_ghci}
 echo "import qualified What4.ExprHelpers as WEH" >> ${temp_ghci}

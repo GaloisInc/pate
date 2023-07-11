@@ -43,7 +43,7 @@ import           System.Environment
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
-
+import           Data.List.Split (splitOn)
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Terminal as PPRT
@@ -214,7 +214,8 @@ instance IsTraceNode k "toplevel" where
 run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
-  case OA.execParserPure OA.defaultPrefs PM.cliOptions (words rawOpts) of
+  let optsList = filter (\s -> s /= "") $ map (concat . map (\case '\\' -> []; x -> [x])) (splitOn "\\n" rawOpts)
+  case OA.execParserPure OA.defaultPrefs PM.cliOptions optsList of
     OA.Success opts -> do
       topTraceTree <- someTraceTree
       tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
