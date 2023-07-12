@@ -1,12 +1,11 @@
 .PHONY: all run run_docker
+all: challenge10.original.exe challenge10.patched.exe
 
 challenge10.original.exe: $(CHALLENGE_DIR)/Challenge_10/build/program_c.gcc.vuln
 	cp $< $@
 
 challenge10.patched.exe: challenge10.original.exe challenge10.bsdiff
 	bspatch $< $@ challenge10.bsdiff
-
-all: challenge10.original.exe challenge10.patched.exe
 
 run: challenge10.patched.exe
 	../../../pate.sh \
