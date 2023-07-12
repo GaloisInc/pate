@@ -565,8 +565,20 @@ concreteValueAddress mem = \case
       maybeToList (fmap PA.segOffToAddr (PM.resolveAbsoluteAddress mem (MM.memWord (fromIntegral bv))))
   MC.AssignedValue (MC.Assignment _ rhs) -> case rhs of
     MC.EvalApp (MC.Mux _ _ b1 b2) -> concreteValueAddress mem b1 ++ concreteValueAddress mem b2
+    MC.ReadMem ptr memRepr -> maybeToList $ do
+      MC.BVMemRepr sz_bytes endianness <- return memRepr
+      WI.LeqProof <- return $ WI.leqMulPos (WI.knownNat @8) sz_bytes
+      let sz_bits = WI.natMultiply (WI.knownNat @8) sz_bytes
+      bytes <- case ptr of
+        MC.BVValue _w2 bv -> do
+          MT.doStaticRead mem (fromIntegral bv) sz_bits endianness
+        MC.RelocatableValue _ src -> do
+          MT.doStaticReadAddr mem src sz_bits endianness
+        _ -> Nothing
+      absoluteAddr <- PM.resolveAbsoluteAddress mem (MM.memWord (fromIntegral (BVS.asUnsigned bytes)))
+      return $ PA.segOffToAddr absoluteAddr
     _ -> []
-  -- MC.ReadMem ptr _ -> error ""
+
   _ -> []
   -- TODO ^ is this complete?
 

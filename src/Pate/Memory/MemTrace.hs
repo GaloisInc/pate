@@ -69,6 +69,8 @@ module Pate.Memory.MemTrace
 , SymBV'(..)
 , getPtrAssertion
 , PtrAssertions
+, doStaticRead
+, doStaticReadAddr
 ) where
 
 import Unsafe.Coerce
@@ -102,7 +104,7 @@ import Data.Macaw.Memory
            , MemWord, memWordToUnsigned, segmentFlags
            , Memory, emptyMemory, memWord, segoffSegment
            , segoffAddr, readWord8, readWord16be, readWord16le
-           , readWord32le, readWord32be, readWord64le, readWord64be
+           , readWord32le, readWord32be, readWord64le, readWord64be, MemAddr, asSegmentOff
            )
 import qualified Data.Macaw.Memory.Permissions as MMP
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
@@ -1487,26 +1489,37 @@ doStaticRead ::
   NatRepr w ->
   Endianness ->
   Maybe (BV.BV w)
-doStaticRead mem mw w end =
-  case PM.resolveAbsoluteAddress mem mw of
-    Just segoff | MMP.isReadonly $ segmentFlags $ segoffSegment segoff ->
-      let addr = segoffAddr segoff in
-      fmap (BV.mkBV w) $
-      case (intValue w, end) of
-        (8, _) -> liftErr $readWord8 mem addr
-        (16, BigEndian) -> liftErr $ readWord16be mem addr
-        (16, LittleEndian) -> liftErr $ readWord16le mem addr
-        (32, BigEndian) -> liftErr $ readWord32be mem addr
-        (32, LittleEndian) -> liftErr $ readWord32le mem addr
-        (64, BigEndian) -> liftErr $ readWord64be mem addr
-        (64, LittleEndian) -> liftErr $ readWord64le mem addr
-        _ -> Nothing
-    _ -> Nothing
-  where
-    liftErr :: Integral a => Either e a -> Maybe Integer
-    liftErr (Left _) = Nothing
-    liftErr (Right a) = Just (fromIntegral a)
+doStaticRead mem mw w end = do
+  segoff <- PM.resolveAbsoluteAddress mem mw
+  let addr = segoffAddr segoff
+  doStaticReadAddr mem addr w end
 
+doStaticReadAddr ::
+  forall w ptrW.
+  MemWidth ptrW =>
+  Memory ptrW ->
+  MemAddr ptrW ->
+  NatRepr w ->
+  Endianness ->
+  Maybe (BV.BV w)
+doStaticReadAddr mem addr w end = do
+  segOff <- asSegmentOff mem addr
+  True <- return $ MMP.isReadonly (segmentFlags $ segoffSegment segOff)
+  fmap (BV.mkBV w) $
+    case (intValue w, end) of
+      (8, _) -> liftErr $ readWord8 mem addr
+      (16, BigEndian) -> liftErr $ readWord16be mem addr
+      (16, LittleEndian) -> liftErr $ readWord16le mem addr
+      (32, BigEndian) -> liftErr $ readWord32be mem addr
+      (32, LittleEndian) -> liftErr $ readWord32le mem addr
+      (64, BigEndian) -> liftErr $ readWord64be mem addr
+      (64, LittleEndian) -> liftErr $ readWord64le mem addr
+      _ -> Nothing
+
+  where
+    liftErr :: Show e => Integral a => Either e a -> Maybe Integer
+    liftErr (Left _err) = Nothing
+    liftErr (Right a) = Just (fromIntegral a)
 
 -- | Compute the updated memory state resulting from writing a value to the given address, without
 -- accumulating any trace information.
