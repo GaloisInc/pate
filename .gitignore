@@ -18,3 +18,6 @@ dist-profile/
 *.local
 *.log
 *.hi
+/demos/may-2023/challenge10/challenge10.original.exe
+/demos/may-2023/challenge10/challenge10.patched.exe
+/tools/pate/Main
