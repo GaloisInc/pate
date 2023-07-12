@@ -1162,14 +1162,16 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
             doRescope loc se >>= \case
               JustF se' -> return $ Just se'
               NothingF -> CMR.asks (PC.cfgRescopingFailureMode . envConfig) >>= \case
-                PC.ThrowOnEqRescopeFailure -> do
+                PC.AllowEqRescopeFailure -> return Nothing
+                x -> do
                   se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
                   e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
                   curAsms <- currentAsm
-                  _ <- emitError $ PEE.InnerSymEquivalenceError $ PEE.RescopingFailure curAsms se e''
+                  let err = PEE.InnerSymEquivalenceError $ PEE.RescopingFailure curAsms se e''
+                  case x of
+                    PC.ThrowOnEqRescopeFailure -> void $ emitError err
+                    PC.WarnOnEqRescopeFailure -> void $ emitWarning err
                   return Nothing
-                PC.AllowEqRescopeFailure -> return Nothing
-
         -- Now traverse the value domain and rescope its entries. In this case
         -- failing to rescope is not an error, as it is simply weakening the resulting
         -- domain by not asserting any value constraints on that entry.
