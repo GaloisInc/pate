@@ -233,7 +233,7 @@ run rawOpts = do
       IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
       -- give some time for the verifier to start
       IO.threadDelay 100000
-      wait_verbosity False
+      wait_initial
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn
@@ -668,6 +668,11 @@ waitIO verbose = do
 
 wait :: IO ()
 wait = wait_verbosity True
+
+wait_initial :: IO ()
+wait_initial = do
+  tid <- IO.forkFinally (waitIO False) (\_ -> killWaitThread)
+  IO.writeIORef waitThread (WaitThread (Just (tid)) 2)
 
 wait_verbosity :: Bool -> IO ()
 wait_verbosity verbose = do
