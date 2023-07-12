@@ -224,10 +224,15 @@ run rawOpts = do
           let msg = show err
           case msg of
             "thread killed" -> return ()
-            _ -> IO.putStrLn $ "Verifier failed: " ++ show err
+            _ -> do
+              IO.writeIORef ref NoTreeLoaded
+              IO.hPutStrLn IO.stderr (show err)
+              exitFailure
           IO.writeIORef finalResult (Just (Left msg))
         Right a -> IO.writeIORef finalResult (Just (Right a))
       IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
+      -- give some time for the verifier to start
+      IO.threadDelay 100000
       wait_verbosity False
     OA.Failure failure -> do
       progn <- getProgName
