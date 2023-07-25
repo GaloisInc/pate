@@ -156,6 +156,14 @@ RUN cabal v2-build macaw-base macaw-loader
 RUN cabal v2-build macaw-ppc macaw-loader-ppc
 RUN cabal v2-build macaw-aarch32 macaw-loader-aarch32
 
+# This step is a catch-all that builds the rest of the project
+# dependencies.
+# Notably these submodules may be stale in the cache, but
+# the next step ensures everything is brought up to date.
+RUN git submodule update --init
+RUN cp cabal.project.dist cabal.project
+RUN cabal v2-build lib:pate --only-dependencies
+
 # After the cached submodule steps, we now add the dependency on the current pate revision, so
 # any changes to non-cached submodules (or pate itself) are captured.
 ADD https://api.github.com/repos/GaloisInc/pate/git/refs/heads/master version.json
