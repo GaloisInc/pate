@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM --platform=linux/amd64 ubuntu:20.04
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 RUN apt update && apt install -y software-properties-common apt-transport-https ca-certificates wget
@@ -52,43 +52,22 @@ RUN mkdir -p /root/.ghcup && ghcup --version && ghcup install cabal && ghcup ins
 ######################################################################
 ENV PATH="/root/.ghcup/bin:${PATH}"
 RUN cabal update
-RUN mkdir -p /home/src
 
-COPY ./cabal.project.dist /home/src/cabal.project.dist
-COPY ./pate.cabal /home/src/pate.cabal
-COPY ./submodules /home/src/submodules
+# Ensure that submodule remotes use https instead of ssh so we can pull
+# them without setting up ssh credentials
+RUN git config --global url."https://github.com/".insteadOf "git@github.com:"
+RUN git config --global url."https://".insteadOf "git://"
+# Get a fresh repo clone to avoid local changes
+# This ADD is to ensure the cache updates if this repo changes
+ADD https://api.github.com/repos/GaloisInc/pate/git/refs/heads/master version.json
+RUN git clone --depth=1 https://github.com/GaloisInc/pate.git /home/src
 
 WORKDIR /home/src
-
+RUN git submodule update --init
 RUN cp cabal.project.dist cabal.project
-RUN cabal v2-configure --keep-going --ghc-options="-fno-safe-haskell"
-
-RUN cabal v2-build --only-dependencies dismantle-arm-xml
-RUN cabal v2-build dismantle-arm-xml
-RUN cabal v2-build --only-dependencies macaw-aarch32
-RUN cabal v2-build macaw-aarch32 -j1 --ghc-options="+RTS -M5000M"
-RUN cabal v2-build semmc-ppc
-RUN cabal v2-build lib:semmc-aarch32
-RUN cabal v2-build macaw-ppc
-RUN cabal v2-build macaw-ppc-symbolic
-RUN cabal v2-build macaw-aarch32-symbolic
-RUN cabal v2-build macaw-loader-aarch32
-
-RUN cabal v2-build --only-dependencies lib:pate
-
-COPY ./src /home/src/src
-
-COPY ./tools/pate/ /home/src/tools/pate
-
-RUN cabal v2-build lib:pate
-
-COPY ./arch /home/src/arch
-COPY ./tools /home/src/tools
-COPY ./*.ghci /home/src/
-
+RUN cp cabal.GHC-8.10.7.freeze cabal.project.freeze
+RUN cabal v2-configure --ghc-options="-fno-safe-haskell"
 RUN cabal v2-build pate-repl-base
-
-COPY ./pate.sh /home/src/pate.sh
 
 ## FROM ubuntu:20.04
 
