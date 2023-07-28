@@ -1,14 +1,6 @@
 May 2023 Hackathon
 ========
 
-Generate patched binary
-^^^^^^^^^^^
-Set the environment variable `CHALLENGE_DIR` to the root directory of the challenge problems repo::
-  export CHALLENGE_DIR=/path/to/Challenge-Problems
-
-Apply binary patch to challenge 10::
-  cd demos/may-2023/challenge10
-  make
 
 Building the PATE verification tool
 -----------
@@ -94,11 +86,12 @@ this will appear automatically, otherwise if the output was interrupted we can
 navigate to prompt by executing `top` followed by `goto_prompt`.::
   ?>goto_prompt
   Control flow desynchronization found at: GraphNode segment1+0x4114 [ via: "transport_handler" (segment1+0x400c) ]
-  0: Choose synchronization points 
+  0: Ignore divergence (admit a non-total result) 
   1: Assert divergence is infeasible 
   2: Assume divergence is infeasible 
   3: Remove divergence in equivalence condition 
-  4: Defer decision 
+  4: Choose synchronization points 
+  5: Defer decision 
   ?>
 
 We can check the context of this choice by executing `up` then `up` to see the node that
@@ -122,7 +115,7 @@ To handle this, we need to instruct the verifier to perform a single-sided analy
 the point at which control flow re-synchronizes. Specifically, we need to provide instruction addresses for the
 original and patched programs where, if execution reaches these addresses, both programs will resume in lockstep
 (i.e. all possible block exits (function calls) will be equal). We navigate to the prompt with `goto_prompt`
-and select `0: Choose synchronization points`.
+and select `4: Choose synchronization points`.
 
 We are then prompted to provide a pair of program points by selecting from a list of instructions.
 With a separate analysis we can determine that the required synchronization points are `segment1+0x3dd44 (patched)`
@@ -138,11 +131,12 @@ The top-level nodes produced after this are suffixed by `(original)` or `(patche
 which single-step analysis they correspond to. After some analysis, the verifier prompts with another
 control flow desynchronization.::
   Control flow desynchronization found at: GraphNode segment1+0x4128 (original) vs. segment1+0x3dd44 (patched) [ via: "transport_handler" (segment1+0x400c) ]
-  0: Choose synchronization points 
+  0: Ignore divergence (admit a non-total result) 
   1: Assert divergence is infeasible 
   2: Assume divergence is infeasible 
   3: Remove divergence in equivalence condition 
-  4: Defer decision 
+  4: Choose synchronization points 
+  5: Defer decision 
   ?>
 
 This desynchronization correponds to the fact that control flow may still diverge between the original and patched
@@ -159,6 +153,13 @@ we similarly handle by selecting `3` to assert the negation of this path conditi
 
 The analysis then proceeds with this desynchronization omitted (and with a generated equivalence condition asserted
 at the synchronization point).
+
+************************************************************************************
+
+THIS IS THE POINT AT WHICH THE CURRENT DOCKER IMAGE (as of
+7/27/23) throws an error.  So below here is not verified against actual execution.
+
+************************************************************************************
 
 Step 4: Strengthening the equivalence domain
 ^^^^^^^^^^^

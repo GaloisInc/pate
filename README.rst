@@ -105,11 +105,10 @@ To make use of the verifier with Docker, it is useful to map a directory on your
              --log-file /VerifierData/pate.log \
              --save-macaw-cfgs /VerifierData/cfgs
 
-This command will run the verifier on the two binaries and produce three outputs:
+This command will run the verifier on the two binaries and drop you into
+a read-eval-print loop, where you can interactively explore the
+verifier's output.
 
-1. A JSON report summarizing the verifier's findings (``report.json``)
-2. A log file with very detailed output explaining what the verifier examined and concluded (``pate.log``)
-3. Dumped Control Flow Graphs (CFGs) for all functions that the verifier discovered and analyzed (one file per CFG under ``cfgs``)
 
 Controlling the Verifier Entry Point
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -191,7 +190,7 @@ The pate tool is written in Haskell and requires the GHC compiler (version 8.6-8
   git submodule update --init
   cp cabal.project.dist cabal.project
   cabal configure pkg:pate
-  cabal build pkg:pate
+  pate.sh --help
 
 The verifier requires an SMT solver to be available in ``PATH``. The default is ``yices``, but ``z3`` and ``cvc4`` are also supported.
 
