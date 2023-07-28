@@ -1,0 +1,123 @@
+
+\section{Running the PATE Verifier}
+\label{sec:runn-pate-verif}
+
+\subsection{Running From a Docker Container}
+\label{sec:running-from-docker}
+
+If you have a Docker image containing the verifier, load and run it:
+\begin{verbatim}
+  docker load -i /path/to/pate.tar 
+\end{verbatim}
+To run the verifier via Docker after this::
+\begin{verbatim}
+  docker run --rm -it pate --help
+\end{verbatim}
+
+\subsection{Usage}
+\label{sec:usage-examples}
+
+To run the verifier on existing test binaries in the software release.
+From the root directory of the repository:
+\begin{verbatim}
+docker run --rm -it -v `pwd`/demos:/demos pate \
+    -o /demos/challenge09/static/challenge09.original.exe \
+    -p /demos/challenge09/static/challenge09.patched.exe \
+    --original-bsi-hints /demos/challenge09/static/challenge09.json \
+    --patched-bsi-hints /demos/challenge09/static/challenge09.json \
+    -e ContinueAfterFailure \
+    --save-macaw-cfgs /demos/challenge09/static/CFGs/ \
+    -s "main" \
+    -b /demos/challenge09/static/challenge09.toml
+\end{verbatim}
+
+
+%% Stuff below here is outdated?
+
+% To make use of the verifier with Docker, it is useful to map a directory
+% on your local filesystem into the Docker container to be able to save
+% output files. Assuming that your original and patched binaries are
+% \texttt{original.exe} and \texttt{patched.exe}, respectively: 
+
+% \begin{verbatim}
+%   mkdir VerifierData
+%   cp original.exe patched.exe VerifierData/
+%   docker run --rm -it -v `pwd`/VerifierData`:/VerifierData pate \
+%              --original /VerifierData/original.exe \
+%              --patched /VerifierData/patched.exe \
+%              --proof-summary-json /VerifierData/report.json \
+%              --log-file /VerifierData/pate.log \
+%              --save-macaw-cfgs /VerifierData/cfgs
+% \end{verbatim}
+
+% This command will run the verifier on the two binaries and drop you into
+% a read-eval-print loop, where you can interactively explore the
+% verifier's output.
+
+% See below in Section~\ref{sec:demonstr-scen} for how to run the verifier
+% from a docker container to perform a verification on a specific patched
+% binary.
+
+\subsection{Command Line Options}
+The verifier accepts the following command line arguments::
+\begin{verbatim}
+  -h,--help                Show this help text
+  -o,--original EXE        Original binary
+  -p,--patched EXE         Patched binary
+  -b,--blockinfo FILENAME  Block information relating binaries
+  -s,--startsymbol ARG     Start analysis from the function with this symbol,
+                           otherwise start at the program entrypoint
+  -d,--nodiscovery         Don't dynamically discover function pairs based on
+                           calls.
+  --solver ARG             The SMT solver to use to solve verification
+                           conditions. One of CVC4, Yices, or Z3
+                           (default: Yices)
+  --goal-timeout ARG       The timeout for verifying individual goals in seconds
+                           (default: 300)
+  --heuristic-timeout ARG  The timeout for verifying heuristic goals in seconds
+                           (default: 10)
+  --original-anvill-hints ARG
+                           Parse an Anvill specification for code discovery
+                           hints
+  --patched-anvill-hints ARG
+                           Parse an Anvill specification for code discovery
+                           hints
+  --original-probabilistic-hints ARG
+                           Parse a JSON file containing probabilistic function
+                           name/address hints
+  --patched-probabilistic-hints ARG
+                           Parse a JSON file containing probabilistic function
+                           name/address hints
+  --original-csv-function-hints ARG
+                           Parse a CSV file containing function name/address
+                           hints
+  --patched-csv-function-hints ARG
+                           Parse a CSV file containing function name/address
+                           hints
+  --original-bsi-hints ARG Parse a JSON file containing function name/address
+                           hints
+  --patched-bsi-hints ARG  Parse a JSON file containing function name/address
+                           hints
+  --no-dwarf-hints         Do not extract metadata from the DWARF information in
+                           the binaries
+  -V,--verbosity ARG       The verbosity of logging output (default: Info)
+  --save-macaw-cfgs DIR    Save macaw CFGs to the provided directory
+  --solver-interaction-file FILE
+                           Save interactions with the SMT solver during symbolic
+                           execution to this file
+  --proof-summary-json FILE
+                           A file to save interesting proof results to in JSON
+                           format
+  --log-file FILE          A file to save debug logs to
+  -e,--errormode ARG       Verifier error handling mode
+                           (default: ThrowOnAnyFailure)
+  -r,--rescopemode ARG     Variable rescoping failure handling mode
+                           (default: ThrowOnEqRescopeFailure)
+  --skip-unnamed-functions Skip analysis of functions without symbols
+\end{verbatim}
+
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "user-manual"
+%%% End:
