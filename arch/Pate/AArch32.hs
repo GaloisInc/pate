@@ -242,12 +242,14 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     , ("realloc", PA.mkMallocOverride r0 r0)
     , ("clock", PA.mkClockOverride r0)
     , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
-    -- FIXME: fixup arguments for fwrite
-    , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
+    -- FIXME: fixup arguments for fwrite (len = size * nmemb)
+    , ("fwrite", PA.mkWriteOverride "fwrite" r3 r0 r1 r0)
     , ("printf", PA.mkObservableOverride "printf" r0 r1)
     , ("puts", PA.mkObservableOverride "puts" r0 r0)
     -- fixme: double check this
     , ("ceilf", PA.mkDefaultStubOverrideArg "ceilf" [Some v0] r0)
+    -- FIXME: check abi for args
+    , ("fread", PA.mkDefaultStubOverrideArg "fread" [Some r0, Some r1, Some r2, Some r4] r0)
     -- FIXME: default stubs below here
     ] ++
     (map mkDefault $
@@ -296,6 +298,8 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
     r1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
     r2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
+    r3 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
+    r4 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")
 
     v0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V0")
     v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
