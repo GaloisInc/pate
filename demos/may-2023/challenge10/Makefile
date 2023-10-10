@@ -7,6 +7,7 @@ challenge10.original.exe: $(CHALLENGE_DIR)/Challenge_10/build/program_c.gcc.vuln
 challenge10.patched.exe: challenge10.original.exe challenge10.bsdiff
 	bspatch $< $@ challenge10.bsdiff
 
+
 run: challenge10.patched.exe
 	../../../pate.sh \
 	  -o challenge10.original.exe \
@@ -19,4 +20,8 @@ run: challenge10.patched.exe
 		-e ContinueAfterRecoverableFailures \
 		-r AllowEqRescopeFailure \
 		-s transport_handler \
-		--save-macaw-cfgs CFGs
+		--save-macaw-cfgs CFGs \
+        ${EXTRA_FLAGS}
+
+run_json: EXTRA_FLAGS = --json-toplevel
+run_json: run
