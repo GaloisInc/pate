@@ -107,6 +107,7 @@ import Pate.Verification.Concretize (symbolicFromConcrete)
 import qualified Pate.Arch as PA
 import Data.Parameterized (Pair(..))
 import Data.Kind (Type)
+import qualified Data.Aeson as JSON
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -586,6 +587,10 @@ data PickManyChoice sym arch =
   | PickIncludeAllRegisters
   | PickIncludeAll
   | PickFinish
+
+instance forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => JSON.ToJSON (PickManyChoice sym arch) where
+  -- FIXME: Needs more structure
+  toJSON e = JSON.object ["pickManyChoice" JSON..= (show (prettyNode @_ @'(sym,arch) @"pickManyChoice" () e))]
 
 data PickChoices sym arch = PickChoices
   { pickRegs :: [Some (MM.ArchReg arch)] 

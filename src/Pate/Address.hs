@@ -1,5 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Pate.Address (
     ConcreteAddress
   , segOffToAddr
@@ -12,6 +14,7 @@ module Pate.Address (
 import qualified Prettyprinter as PP
 
 import qualified Data.Macaw.CFG as MM
+import qualified Data.Aeson as JSON
 
 newtype ConcreteAddress arch = ConcreteAddress (MM.MemAddr (MM.ArchAddrWidth arch))
   deriving (Eq, Ord)
@@ -21,6 +24,15 @@ instance Show (ConcreteAddress arch) where
 
 instance PP.Pretty (ConcreteAddress arch) where
   pretty (ConcreteAddress addr) = PP.pretty addr
+
+instance JSON.ToJSON (ConcreteAddress arch) where
+  toJSON (ConcreteAddress addr) = JSON.toJSON addr
+
+instance JSON.ToJSON (MM.MemAddr w) where
+  toJSON addr = JSON.object [ "base" JSON..= MM.addrBase addr, "offset" JSON..= show (MM.addrOffset addr)]
+
+instance JSON.ToJSON (MM.MemSegmentOff w) where
+  toJSON addr = JSON.toJSON (MM.segoffAddr addr)
 
 addOffset :: MM.MemWidth (MM.ArchAddrWidth arch) => Integer -> ConcreteAddress arch -> ConcreteAddress arch
 addOffset i (ConcreteAddress addr) = ConcreteAddress (MM.incAddr i addr)

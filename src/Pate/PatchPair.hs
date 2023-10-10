@@ -16,6 +16,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Pate.PatchPair (
     PatchPair
@@ -66,6 +67,7 @@ module Pate.PatchPair (
   , collapse
   , asSingleton
   , zip
+  , jsonPatchPair
   ) where
 
 import           Prelude hiding (zip)
@@ -80,6 +82,8 @@ import qualified Data.Kind as DK
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Prettyprinter as PP
+import qualified Data.Aeson as JSON
+import qualified Compat.Aeson as JSON
 
 import qualified Pate.Binary as PB
 import qualified Pate.ExprMappable as PEM
@@ -470,9 +474,9 @@ ppPatchPair' f pPair = ppPatchPairEq (\x y -> show (f x) == show (f y)) f pPair
 
 
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
-ppPatchPair f (PatchPair a1 a2) = f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
-ppPatchPair f (PatchPairOriginal a1) = f a1 PP.<+> PP.pretty "(original)"
-ppPatchPair f (PatchPairPatched a1) = f a1 PP.<+> PP.pretty "(patched)"
+ppPatchPair f (PatchPair a1 a2) = f a1 PP.<+> "(original) vs." PP.<+> f a2 PP.<+> "(patched)"
+ppPatchPair f (PatchPairOriginal a1) = f a1 PP.<+> "(original)"
+ppPatchPair f (PatchPairPatched a1) = f a1 PP.<+> "(patched)"
 
 ppPatchPairEq ::
   (tp PB.Original -> tp PB.Patched -> Bool) ->
@@ -481,7 +485,7 @@ ppPatchPairEq ::
   PP.Doc a
 ppPatchPairEq test f (PatchPair a1 a2) = case test a1 a2 of
   True -> f a1
-  False -> f a1 PP.<+> PP.pretty "(original) vs." PP.<+> f a2 PP.<+> PP.pretty "(patched)"
+  False -> f a1 PP.<+> "(original) vs." PP.<+> f a2 PP.<+> "(patched)"
 ppPatchPairEq _ f pPair = ppPatchPair f pPair
 
 
@@ -500,8 +504,17 @@ ppPatchPairCEq ::
 ppPatchPairCEq f ppair@(PatchPair (Const o) (Const p)) = case o == p of
   True -> f o
   False -> ppPatchPairC f ppair
-ppPatchPairCEq f (PatchPairOriginal (Const a)) = f a PP.<+> PP.pretty "(original)"
-ppPatchPairCEq f (PatchPairPatched (Const a)) = f a PP.<+> PP.pretty "(patched)"
+ppPatchPairCEq f (PatchPairOriginal (Const a)) = f a PP.<+> "(original)"
+ppPatchPairCEq f (PatchPairPatched (Const a)) = f a PP.<+> "(patched)"
 
 
+jsonPatchPair ::
+  (forall bin. tp bin -> JSON.Value) -> PatchPair tp -> JSON.Value
+jsonPatchPair f ppair = case ppair of
+  PatchPair o p -> JSON.object [ "original" JSON..= (f o), "patched" JSON..= (f p)]
+  PatchPairOriginal o -> JSON.object [ "original" JSON..= (f o) ]
+  PatchPairPatched p -> JSON.object [ "patched" JSON..= (f p) ]
 
+
+instance (forall bin. JSON.ToJSON (tp bin)) => JSON.ToJSON (PatchPair tp) where
+  toJSON p = jsonPatchPair (JSON.toJSON) p
