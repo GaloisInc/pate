@@ -15,6 +15,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 -- | Functions for cutting out sub-graphs from macaw CFGs
 
@@ -35,11 +36,13 @@ module Data.Macaw.CFGSlice
   , copyBlockEnd
   ) where
 
+import qualified GHC.Generics as G
 import           Control.Monad
 
 import           Data.Proxy
 import qualified Data.BitVector.Sized as BV
 import qualified Data.Kind as Kind
+import qualified Data.Aeson as JSON
 
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Map ( Pair(..) )
@@ -78,8 +81,9 @@ data MacawBlockEndCase =
   -- | An otherwise-unclassified arch exit. Some arch exits may end up being classified
   -- as either calls or returns, according to 'archTermCase'
   | MacawBlockEndArch
-  deriving (Eq, Enum, Bounded, Ord, Show)
+  deriving (Eq, Enum, Bounded, Ord, Show, G.Generic)
 
+instance JSON.ToJSON MacawBlockEndCase
 
 class HasArchTermEndCase (f :: (M.Type -> Kind.Type) -> Kind.Type) where
   archTermCase :: f v -> MacawBlockEndCase

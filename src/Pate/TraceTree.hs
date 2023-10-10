@@ -33,6 +33,7 @@ type class with a (distinct) symbol.
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE DefaultSignatures #-}
 
 module Pate.TraceTree (
     TraceTree
@@ -101,6 +102,7 @@ module Pate.TraceTree (
   , Choice(..)
   , SomeChoice(..)
   , LazyIOAction(..)
+  , nodeToJSON
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -121,6 +123,8 @@ import           Control.Applicative
 
 import qualified Prettyprinter as PP
 
+import qualified Data.Aeson as JSON
+import qualified Compat.Aeson as JSON
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSym(..), SymbolRepr )
@@ -342,11 +346,30 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
   --   respect to the 'Full' tag
   prettyNode :: TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a
 
+  jsonNode :: TraceNodeLabel nm -> TraceNodeType k nm -> JSON.Value
+  jsonNode _ _ = case symbolRepr (knownSymbol @nm) of
+    "()" -> JSON.Null
+    x -> JSON.object ["node_kind" JSON..= x ]
+
   -- | Mapping from tracing tags to pretty-printers, allowing the contents
   --   of this node to be presented differently (or not at all) depending
   --   on what kind of printing is requested.
   nodeTags :: [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
   nodeTags = [(Summary, prettyNode @l @k @nm)]
+
+nodeToJSON :: forall k nm. (IsTraceNode k nm, JSON.ToJSON (TraceNodeType k nm), JSON.ToJSON (TraceNodeLabel nm))
+           => TraceNodeLabel nm 
+           -> TraceNodeType k nm 
+           -> JSON.Value
+nodeToJSON lbl v =
+  let i1 = case JSON.toJSON lbl of
+        JSON.String "" -> [] 
+        JSON.Null -> []
+        x -> ["tag" JSON..= x]
+      i2 = case JSON.toJSON v of
+        JSON.Null -> []
+        x -> [ "node" JSON..= x ]
+  in JSON.object $ i1 ++ i2 ++ [ "node_kind" JSON..= symbolRepr (knownSymbol @nm) ]
 
 mkTags :: forall k nm a. IsTraceNode k nm => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
 mkTags tags = map (\tag -> (tag, prettyNode @_ @k @nm)) tags
@@ -622,10 +645,17 @@ data Choice k (nm_choice :: Symbol) a =
          -- ^ returns True if this is the desired choice
          }
 
-data SomeChoice k = forall nm_choice nm_ret. SomeChoice (Choice k nm_choice nm_ret)
+data SomeChoice k = forall nm_choice nm_ret. 
+  IsTraceNode k nm_choice => 
+    SomeChoice (Choice k nm_choice nm_ret)
+
+instance JSON.ToJSON (SomeChoice k) where
+  toJSON (SomeChoice (c :: Choice k nm_choice nm_ret)) = 
+    jsonNode @_ @k @nm_choice (choiceLabel c) (choiceLabelValue c)
 
 prettyChoice :: forall k nm_choice nm_ret a. Choice k nm_choice nm_ret -> PP.Doc a
-prettyChoice c = (\(ChoiceHeader{}) -> prettyNode @_ @k @nm_choice (choiceLabel c) (choiceLabelValue c)) (choiceHeader c)
+prettyChoice c = (\(ChoiceHeader{}) -> 
+  prettyNode @_ @k @nm_choice (choiceLabel c) (choiceLabelValue c)) (choiceHeader c)
 
 instance IsTraceNode k "choice" where
   type TraceNodeType k "choice" = SomeChoice k
@@ -634,6 +664,7 @@ instance IsTraceNode k "choice" where
     "" -> prettyChoice c
     _ -> PP.pretty nm PP.<+> prettyChoice c
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
+  jsonNode = nodeToJSON @k @"choice"
 
 instance IsTraceNode k "()" where
   type TraceNodeType k "()" = ()

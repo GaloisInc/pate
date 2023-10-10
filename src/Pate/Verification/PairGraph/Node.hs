@@ -13,6 +13,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.Verification.PairGraph.Node (
     GraphNode(..)
@@ -42,7 +43,8 @@ module Pate.Verification.PairGraph.Node (
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
-
+import qualified Data.Aeson as JSON
+import qualified Compat.Aeson as HMS
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
@@ -66,6 +68,11 @@ data GraphNode arch
   = GraphNode (NodeEntry arch)
   | ReturnNode (NodeReturn arch)
  deriving (Eq, Ord)
+
+instance PA.ValidArch arch => JSON.ToJSON (GraphNode arch) where
+  toJSON = \case
+    GraphNode nd -> JSON.object [ ("graph_node_type", "entry"), "entry_body" JSON..= nd]
+    ReturnNode nd -> JSON.object [ ("graph_node_type", "return"), "return_body" JSON..= nd]
 
 -- A frozen binary 
 data NodeEntry arch =
@@ -104,6 +111,9 @@ instance PA.ValidArch arch => Pretty (CallingContext arch) where
         Just _p -> [] -- ["Diverged at:", pretty p] -- too noisy
         Nothing -> []
     in sep (((zipWith (<+>) ( "via:" : repeat "<-") bs)) ++ divP)
+
+instance PA.ValidArch arch => JSON.ToJSON (CallingContext arch) where
+  toJSON (CallingContext bps mdivisionPoint) = JSON.object [ "ancestors" JSON..= bps, "divergedAt" JSON..= mdivisionPoint]
 
 getDivergePoint :: GraphNode arch -> Maybe (GraphNode arch)
 getDivergePoint nd = case nd of
@@ -224,13 +234,39 @@ tracePrettyNode nd msg = case nd of
     "" -> "Return" <+> pretty ret
     _ -> "Return" <+> pretty ret <+> PP.parens (pretty msg)
 
+instance PA.ValidArch arch => JSON.ToJSON (NodeEntry arch) where
+  toJSON e = JSON.object 
+    [ "type" JSON..= entryType
+    , "context" JSON..= graphNodeContext e 
+    , "blocks" JSON..= nodeBlocks e
+    ]
+    where
+      entryType :: String
+      entryType = case (functionEntryOf e == e) of
+          True ->  "function_entry"
+          False -> "function_body"
+  
+instance PA.ValidArch arch => JSON.ToJSON (NodeReturn arch) where
+  toJSON e = JSON.object 
+    [ "context" JSON..= returnNodeContext e
+    , "functions" JSON..= nodeFuns e 
+    ]
+  
+  -- HMS.fromList [ ("data", JSON.Object content) ]
+
+
+
+
+
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "node" where
   type TraceNodeType '(sym, arch) "node" = GraphNode arch
   type TraceNodeLabel "node" = String
   prettyNode msg nd = tracePrettyNode nd msg
   nodeTags = mkTags @'(sym,arch) @"node" [Simplified, Summary]
+  jsonNode = nodeToJSON @'(sym,arch) @"node"
 
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
   type TraceNodeType '(sym, arch) "entrynode" = NodeEntry arch
   prettyNode () = pretty
   nodeTags = mkTags @'(sym,arch) @"entrynode" [Simplified, Summary]
+  jsonNode = nodeToJSON @'(sym,arch) @"entrynode"

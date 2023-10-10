@@ -9,6 +9,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -60,6 +61,7 @@ import qualified Pate.Address as PA
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Binary as PB
 import           Pate.TraceTree
+import qualified Data.Aeson as JSON
 
 -- | The way this block is entered dictates the initial equivalence relation we can assume
 data BlockEntryKind arch =
@@ -90,6 +92,9 @@ data ConcreteBlock arch (bin :: PB.WhichBinary) =
                 , blockBinRepr :: PB.WhichBinaryRepr bin
                 , blockFunctionEntry :: FunctionEntry arch bin
                 }
+
+instance JSON.ToJSON (ConcreteBlock arch bin) where
+  toJSON cb = JSON.toJSON (concreteAddress cb)
 
 equivBlocks :: ConcreteBlock arch PB.Original -> ConcreteBlock arch PB.Patched -> Bool
 equivBlocks blkO blkP =
@@ -185,6 +190,14 @@ data BlockTarget arch bin =
   | BlockTargetReturn { _targetBinRepr :: PB.WhichBinaryRepr bin }
    deriving (Eq, Ord)
 
+instance JSON.ToJSON (BlockTarget arch bin) where
+  toJSON bt = JSON.object 
+    [ "target" JSON..= targetCall bt
+    , "return" JSON..= targetReturn bt
+    , "endcase" JSON..= targetEndCase bt
+    , "pc" JSON..= targetRawPC bt
+    ]
+
 targetReturn :: BlockTarget arch bin -> Maybe (ConcreteBlock arch bin)
 targetReturn BlockTargetReturn{} = Nothing
 targetReturn tgt@BlockTarget{} = _targetReturn tgt
@@ -233,11 +246,13 @@ instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(s
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (BlockTarget arch)
   prettyNode () blkts = PPa.ppPatchPair' ppBlockTarget blkts
   nodeTags = mkTags @'(sym,arch) @"blocktarget" [Simplified,Summary]
+  jsonNode = nodeToJSON @'(sym,arch) @"blocktarget"
 
 instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget1" where
   type TraceNodeType '(sym,arch) "blocktarget1" = Some (BlockTarget arch)
   prettyNode () (Some blkt) = ppBlockTarget blkt
   nodeTags = mkTags @'(sym,arch) @"blocktarget1" [Simplified,Summary]
+
 
 data FunctionEntry arch (bin :: PB.WhichBinary) =
   FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch
@@ -248,6 +263,16 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 , functionEnd :: Maybe (MM.ArchSegmentOff arch)
                 -- ^ we might know the bounds of this function
                 }
+
+jsonSegOff :: MM.ArchSegmentOff arch -> JSON.Value
+jsonSegOff addr = JSON.toJSON ()
+
+
+instance forall arch bin. JSON.ToJSON (FunctionEntry arch bin) where
+  toJSON cb = JSON.object 
+    [ "address" JSON..= jsonSegOff @arch (functionSegAddr cb)
+    , "symbol" JSON..= functionSymbol cb
+    ]
 
 data FunCallKind = NormalFunCall | TailFunCall
   deriving (Eq, Ord, Show)

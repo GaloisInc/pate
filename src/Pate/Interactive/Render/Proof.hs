@@ -2,7 +2,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE CPP #-}
 
 module Pate.Interactive.Render.Proof (
     renderProof
@@ -15,11 +14,8 @@ import qualified Data.Aeson as JSON
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Foldable as F
 import           Data.Functor.Const
-#if MIN_VERSION_aeson(2,0,0)
 import qualified Compat.Aeson as HMS
-#else
-import qualified Data.HashMap.Strict as HMS
-#endif
+
 import qualified Data.IntervalMap.Interval as DII
 import qualified Data.List as DL
 import qualified Data.Macaw.CFG as MC
