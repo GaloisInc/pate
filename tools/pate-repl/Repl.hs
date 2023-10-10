@@ -65,6 +65,7 @@ import           What4.Expr.Builder as W4B
 import Unsafe.Coerce(unsafeCoerce)
 
 import qualified Main as PM
+import qualified Output as PO
 
 maxSubEntries :: Int
 maxSubEntries = 5
@@ -84,11 +85,11 @@ printFn a = do
     case readMaybe @Integer str of
       Just i -> goto' (fromIntegral i) >>= \case
         Just{} -> return ()
-        Nothing -> IO.liftIO $ IO.putStrLn "No such options"
-      Nothing -> IO.liftIO $ IO.putStrLn str
+        Nothing -> PO.printErrLn "No such option"
+      Nothing -> PO.printBreak
   case r of
     Just () -> return ()
-    Nothing -> IO.putStrLn "<<No Binary Loaded>>"
+    Nothing -> PO.printMsgLn "<<No Binary Loaded>>"
 
 valid :: ((PS.ValidSym Sym, PA.ValidArch Arch) => IO a) -> IO a
 valid f = do
@@ -165,7 +166,7 @@ execReplM f = runReplM @() f >> return ()
 
 retrieveOldRef :: IO ()
 retrieveOldRef = IO.readIORef PIRH.anyRef >>= \case
-  Nothing -> IO.putStrLn "No old ref"
+  Nothing -> PO.printErr "No old ref"
   Just x -> IO.writeIORef ref (PIRH.fromAnything x)
 
 stashThisRef :: IO ()
@@ -217,6 +218,7 @@ run rawOpts = do
   let optsList = filter (\s -> s /= "") $ map (concat . map (\case '\\' -> []; x -> [x])) (splitOn "\\n" rawOpts)
   case OA.execParserPure OA.defaultPrefs PM.cliOptions optsList of
     OA.Success opts -> do
+      setJSONMode $ PM.jsonToplevel opts
       topTraceTree <- someTraceTree
       tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
         Left err -> do
@@ -238,8 +240,8 @@ run rawOpts = do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn
       case exit of
-        ExitSuccess -> IO.putStrLn msg
-        _           -> IO.hPutStrLn IO.stderr msg
+        ExitSuccess -> PO.printMsgLn (PP.pretty msg)
+        _           -> PO.printErrLn (PP.pretty msg)
     _ -> return ()
 
 -- exit if no tree is loaded
@@ -253,17 +255,9 @@ rerun :: IO ()
 rerun = do
   PIRH.getLastRunCmd >>= \case
     Just rawOpts -> do
-      IO.putStrLn $ ":run \"" ++ rawOpts ++ "\""
+      PO.printMsgLn $ ":run \"" <> PP.pretty rawOpts <> "\""
       run rawOpts
-    Nothing -> IO.putStrLn "No previous run found"
-
-printPretty :: PP.Doc ann -> ReplM_ sym arch ()
-printPretty p = do
-  let s = PP.layoutSmart (PP.defaultLayoutOptions { PP.layoutPageWidth = PP.Unbounded }) p
-  IO.liftIO $ Text.putStr (PPText.renderStrict s)
-
-printPrettyLn :: PP.Doc ann -> ReplM_ sym arch ()
-printPrettyLn p = printPretty (p <> PP.line)
+    Nothing -> PO.printMsgLn "No previous run found"
 
 isSubTreeNode ::
   forall sym arch nm.
@@ -330,21 +324,23 @@ updateNextNodes = do
   modify (\st -> st { replNext = [ ], replNextTags = tags })
   mapM_ (\(Some node) -> addNextNodes node) nodes
 
-addStatusTag :: NodeStatus -> PP.Doc a -> PP.Doc a
-addStatusTag st p = case ppStatusTag st of
-  Just pst -> p <+> "(" <> pst <> ")"
-  Nothing -> p
+mkStatusTag :: NodeStatus -> Maybe (PP.Doc a)
+mkStatusTag st = case ppStatusTag st of
+  Just pst -> Just $ "(" <> pst <> ")"
+  Nothing -> Nothing
 
-addSuffix :: Int -> PP.Doc a -> NodeStatus -> SymbolRepr nm -> ReplM sym arch (PP.Doc a)
-addSuffix nesting pp s nm = do
+ppSuffix :: Int -> NodeStatus -> SymbolRepr nm -> ReplM sym arch (Maybe (PP.Doc a))
+ppSuffix nesting s nm = do
   tags <- gets replTags
-  pp' <- case tags of
-    [Simplified] -> return $ addStatusTag s pp
-    _ -> return $ addStatusTag s pp <+> "(" <> PP.pretty (show nm) <> ")"
+  case tags of
+    [Simplified] -> return $ mkStatusTag s
+    _ | Just s' <- mkStatusTag s -> return $ Just $ s' <+> "(" <> PP.pretty (show nm) <> ")"
+    _ -> return $ Just $ "(" <> PP.pretty (show nm) <> ")"
+  {-
   case nesting < 0 of
     True -> return $ pp' <> PP.line <> "... <more results>"
     False -> return pp'
-
+  -}
 
 ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
 ppStatusTag st = case st of
@@ -376,11 +372,16 @@ maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
         Just a -> return a
         Nothing -> g
 
+
+
+
+
+
 prettyNextNodes ::
-  forall sym arch a.
+  forall sym arch.
   Int ->
   Bool ->
-  ReplM sym arch (PP.Doc a)
+  ReplM sym arch PO.Output
 prettyNextNodes startAt onlyFinished = do
   tags <- gets replNextTags
   nextNodes <- gets replNext
@@ -390,43 +391,61 @@ prettyNextNodes startAt onlyFinished = do
                 b <- IO.liftIO $ getTreeStatus subtree
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
-                    pp' <- addSuffix nesting pp b (knownSymbol @nm)
+                    suf <- ppSuffix nesting b (knownSymbol @nm)
                     let indent = abs(nesting)*2
-                    return $ (isFinished b, PP.indent indent $ pp')
+                    return $ PO.OutputElem 
+                      { PO.outIdx = 0
+                      , PO.outIndent = indent
+                      , PO.outPP = pp
+                      , PO.outFinished = isFinished b
+                      , PO.outSuffix = suf
+                      , PO.outMoreResults = nesting < 0
+                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm lbl v
+                      }
                     {-
                     maybeSubNodes nd ()) $ do
                       subpp <- prettyNextNodes 0 onlyFinished
                       return $ (isFinished b, PP.vsep [pp', PP.indent 2 subpp])
                     -}
-                  Nothing -> return (isFinished b, "<ERROR: Unexpected missing printer>")
-            ) nextNodes
+                  Nothing -> return $ PO.OutputElem 
+                      { PO.outIdx = 0
+                      , PO.outIndent = 0
+                      , PO.outPP = "<ERROR: Unexpected missing printer>"
+                      , PO.outFinished = isFinished b
+                      , PO.outSuffix = Nothing
+                      , PO.outMoreResults = nesting < 0
+                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm lbl v
+                      }
+              ) nextNodes
 
   let ppContents = case onlyFinished of
-        True -> map snd $ takeWhile (\(fin, _) -> fin) ppContents'
-        False -> map snd ppContents'
-  return $ PP.vsep (drop startAt (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents)))
-
+        True -> takeWhile PO.outFinished ppContents'
+        False -> ppContents'
+  return $ PO.outputList (drop startAt (map (\(idx,e) -> e { PO.outIdx = idx }) (zip [0..] ppContents)))
+  -- return $ PP.vsep (drop startAt (map (\((idx :: Int), pp) -> PP.pretty idx <> ":" <+> pp) (zip [0..] ppContents)))
 
 getPrompt :: IO String
-getPrompt = do
-  mst <- runReplM $ do
-    (Some (TraceNode _ _ t))  <- gets replNode
-    IO.liftIO $ getTreeStatus t
-  case mst of
-    Just st | Just pst <- ppStatusTag st -> return $ (show (pst <> ">"))
-    _ -> return ">"
+getPrompt = PO.hasStdOut >>= \case
+  True -> do
+    mst <- runReplM $ do
+      (Some (TraceNode _ _ t))  <- gets replNode
+      IO.liftIO $ getTreeStatus t
+    case mst of
+      Just st | Just pst <- ppStatusTag st -> return $ (show (pst <> ">"))
+      _ -> return ">"
+  False -> return ""
 
 ls' :: forall sym arch. ReplM sym arch ()
 ls' = do
   updateNextNodes
   p <- prettyNextNodes 0 False
-  nextNodes <- gets replNext
   (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) <- gets replNode
   tags <- gets replTags
   let thisPretty = prettyDetailAt @'(sym, arch) @nm tags lbl v
-  case nextNodes of
-    [] -> printPrettyLn thisPretty
-    _ -> printPrettyLn (PP.vsep [thisPretty,p])
+  PO.printOutput $ PO.outputMsg thisPretty
+  PO.printBreak
+  PO.printOutput p
+  PO.printBreak
 
 ls :: IO ()
 ls = execReplM ls'
@@ -445,7 +464,7 @@ up' :: ReplM sym arch ()
 up' = do
   prevNodes <- gets replPrev
   case prevNodes of
-    [] -> IO.liftIO $ IO.putStrLn "<<At top level>>"
+    [] -> PO.printMsgLn "<<At top level>>"
     (Some popped:prevNodes') -> do
       loadTraceNode popped
       modify $ \st -> st { replPrev = prevNodes' }
@@ -457,7 +476,7 @@ top' :: ReplM sym arch ()
 top' = do
   prevNodes <- gets replPrev
   case prevNodes of
-    [] -> IO.liftIO $ IO.putStrLn "<<At top level>>"
+    [] -> PO.printMsgLn "<<At top level>>"
     _ -> do
       Some init <- return $ last prevNodes
       loadTraceNode init
@@ -467,25 +486,25 @@ status' :: Maybe Int -> IO ()
 status' mlimit = do
   tr <- IO.readIORef ref
   case tr of
-    NoTreeLoaded -> IO.putStrLn "No tree loaded"
+    NoTreeLoaded -> PO.printMsgLn "No tree loaded"
     WaitingForToplevel{} -> do
       fin <- IO.liftIO $ IO.readIORef finalResult
       case fin of
-        Just r -> IO.putStrLn (show r)
-        _ -> IO.putStrLn "Waiting for verifier..."
+        Just r -> PO.printMsgLn (PP.pretty (show r))
+        _ -> PO.printMsgLn "Waiting for verifier..."
     SomeReplState {} -> execReplM $ do
       (Some (TraceNode _ _ t))  <- gets replNode
       st <- IO.liftIO $ getTreeStatus t
       case st of
-        _ | isBlockedStatus st -> IO.liftIO $ IO.putStrLn $ "Waiting for input.."
-        NodeStatus (StatusWarning e) _ _ -> IO.liftIO $  IO.putStrLn $ "Warning: \n" ++ (chopMsg mlimit (show e))
-        NodeStatus (StatusError e) _ _ ->  IO.liftIO $  IO.putStrLn $ "Error: \n" ++ (chopMsg mlimit (show e))
-        NodeStatus StatusSuccess False _ ->  IO.liftIO $ IO.putStrLn $ "In progress.."
-        NodeStatus StatusSuccess True _ -> IO.liftIO $ IO.putStrLn "Finalized"
+        _ | isBlockedStatus st -> PO.printMsgLn $ "Waiting for input.."
+        NodeStatus (StatusWarning e) _ _ -> PO.printMsgLn $ "Warning: \n" <> (PP.pretty (chopMsg mlimit (show e)))
+        NodeStatus (StatusError e) _ _ ->  PO.printMsgLn $ "Error: \n" <> (PP.pretty (chopMsg mlimit (show e)))
+        NodeStatus StatusSuccess False _ ->  PO.printMsgLn $ "In progress.."
+        NodeStatus StatusSuccess True _ -> PO.printMsgLn $ "Finalized"
       prevNodes <- gets replPrev
       fin <- IO.liftIO $ IO.readIORef finalResult
       case (prevNodes, fin) of
-        ([], Just r) -> printPrettyLn (PP.viaShow r)
+        ([], Just r) -> PO.printMsgLn (PP.viaShow r)
         _ -> return ()
 
 full_status :: IO ()
@@ -551,7 +570,9 @@ goto_status'' :: (NodeStatus -> Bool) -> [Some (TraceNode sym arch)] -> ReplM sy
 goto_status'' f (Some node@(TraceNode _ _ subtree) : xs) = do
   st <- IO.liftIO $ getTreeStatus subtree
   case f st of
-    True -> goto_node' node >> (goto_status' f)
+    True -> do
+
+      goto_node' node >> (goto_status' f)
     False -> goto_status'' f xs
 goto_status'' f [] = return ()
 
@@ -616,24 +637,24 @@ waitRepl lastShown = do
     case isFinished st of
       True | lastShown == -1 -> return ()
       True -> do
-        IO.liftIO $ IO.putStrLn ""
-        prettyNextNodes lastShown False >>= printPrettyLn   
+        PO.printBreak
+        prettyNextNodes lastShown False >>= PO.printOutputLn   
       False -> do
         Some (node@(TraceNode _ _ t)) <- gets replNode
         st <- IO.liftIO $ getTreeStatus t
         case isFinished st of
-          True -> IO.liftIO $ IO.putStrLn "No such option" >> return ()
+          True -> PO.printErrLn "No such option" >> return ()
           False -> do
             n <- case lastShown >= 0 of
               True -> finishedPrefix
               False -> return lastShown
             if n > lastShown && lastShown >= 0 then do
-              IO.liftIO $ IO.putStrLn ""
-              prettyNextNodes lastShown True >>= printPretty
+              PO.printBreak
+              prettyNextNodes lastShown True >>= PO.printOutput
             else
-              IO.liftIO (IO.putStr ".")
+              PO.printHeartbeat
             isBlocked >>= \case
-              True -> IO.liftIO (IO.putStrLn "") >> goto_status' isBlockedStatus >> ls'
+              True -> PO.printBreak >> goto_status' isBlockedStatus >> ls'
               False -> ((IO.liftIO $ IO.threadDelay 1000000) >> waitRepl n)
 
 tryKillWaitThread :: IO ()
@@ -659,10 +680,10 @@ waitIO verbose = do
     NoTreeLoaded -> return ()
     WaitingForToplevel{} -> do
       IO.readIORef finalResult >>= \case
-        Just (Left msg) -> IO.putStrLn ("Error:\n" ++ msg) >> return ()
-        Just (Right r) -> IO.putStrLn (show r)
+        Just (Left msg) -> PO.printMsgLn ("Error:\n" <> PP.pretty msg) >> return ()
+        Just (Right r) -> PO.printMsgLn (PP.pretty (show r))
         Nothing -> do
-          IO.putStrLn "Verifier is starting..."
+          PO.printMsgLn "Verifier is starting..."
           IO.threadDelay 1000000 >> (waitIO verbose)
     SomeReplState{} -> execReplM $ waitRepl n
 
@@ -679,14 +700,14 @@ wait_verbosity verbose = do
   killWaitThread
   tid <- IO.forkFinally (waitIO verbose) $ \case
     Left _ -> killWaitThread
-    Right _ -> (getPrompt >>= IO.putStr) >> killWaitThread    
+    Right _ -> (getPrompt >>= PO.printPrompt) >> killWaitThread    
   IO.writeIORef waitThread (WaitThread (Just (tid)) 2)
 
 goto :: Int -> IO ()
 goto idx = execReplM $ do
   goto' idx >>= \case
     Just _ -> return ()
-    Nothing -> IO.liftIO $ IO.putStrLn "No such option"
+    Nothing -> PO.printErrLn "No such option"
 
 gotoIndex :: forall sym arch. Integer -> ReplM sym arch String
 gotoIndex idx = (goto' (fromIntegral idx)) >>= \case
@@ -753,3 +774,6 @@ fetchV mi = do
   case testEquality (knownSymbol @nm) (knownSymbol @nm') of
     Just Refl -> return v
     Nothing -> fail "fetchV"
+
+setJSONMode :: Bool -> IO ()
+setJSONMode = PO.setJSONMode
