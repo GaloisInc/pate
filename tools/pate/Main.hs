@@ -18,7 +18,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Main ( main, runMain, cliOptions ) where
+module Main ( main, runMain, cliOptions, CLIOptions(..) ) where
   
 
 import qualified Control.Concurrent as CC
@@ -167,6 +167,7 @@ data CLIOptions = CLIOptions
   , skipDivergedControl :: Bool
   , targetEquivRegs :: [String]
   , ignoreSegments :: [Int]
+  , jsonToplevel :: Bool
   } deriving (Eq, Ord, Show)
 
 {-
@@ -540,3 +541,7 @@ cliOptions = OA.info (OA.helper <*> parser)
         ( OA.long "ignore-segments"
         <> OA.help "Skip segments (0-indexed) when loading ELF"
         ))
+   <*> OA.switch
+       (  OA.long "json-toplevel"
+       <> OA.help "Run toplevel in JSON-output mode (interactive mode only)"
+       )
