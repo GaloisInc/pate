@@ -94,7 +94,11 @@ data ConcreteBlock arch (bin :: PB.WhichBinary) =
                 }
 
 instance JSON.ToJSON (ConcreteBlock arch bin) where
-  toJSON cb = JSON.toJSON (concreteAddress cb)
+  toJSON cb = JSON.object [
+      "address" JSON..= concreteAddress cb
+    , "function" JSON..= blockFunctionEntry cb
+    ]
+
 
 equivBlocks :: ConcreteBlock arch PB.Original -> ConcreteBlock arch PB.Patched -> Bool
 equivBlocks blkO blkP =
@@ -264,13 +268,9 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 -- ^ we might know the bounds of this function
                 }
 
-jsonSegOff :: MM.ArchSegmentOff arch -> JSON.Value
-jsonSegOff addr = JSON.toJSON ()
-
-
 instance forall arch bin. JSON.ToJSON (FunctionEntry arch bin) where
   toJSON cb = JSON.object 
-    [ "address" JSON..= jsonSegOff @arch (functionSegAddr cb)
+    [ "address" JSON..= functionSegAddr cb
     , "symbol" JSON..= functionSymbol cb
     ]
 
