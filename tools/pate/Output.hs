@@ -158,7 +158,7 @@ printOutput o = do
   case jsonOutput o of
     JSON.Null -> return ()
     x -> (IO.liftIO $ IO.readIORef jsonOutputHandle) >>= \case
-      Just jsonout -> IO.liftIO $ BS.hPut jsonout (JSON.encode x)
+      Just jsonout -> IO.liftIO $ BS.hPut jsonout (JSON.encode x) >> IO.putStrLn ""
       Nothing -> return ()
 
 
