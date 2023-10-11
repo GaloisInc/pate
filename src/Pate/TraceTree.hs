@@ -368,8 +368,8 @@ nodeToJSON lbl v =
         x -> ["tag" JSON..= x]
       i2 = case JSON.toJSON v of
         JSON.Null -> []
-        x -> [ "node" JSON..= x ]
-  in JSON.object $ i1 ++ i2 ++ [ "node_kind" JSON..= symbolRepr (knownSymbol @nm) ]
+        x -> [ "trace_node" JSON..= x ]
+  in JSON.object $ i1 ++ i2 ++ [ "trace_node_kind" JSON..= symbolRepr (knownSymbol @nm) ]
 
 mkTags :: forall k nm a. IsTraceNode k nm => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
 mkTags tags = map (\tag -> (tag, prettyNode @_ @k @nm)) tags
