@@ -1,6 +1,8 @@
 .PHONY: all run run_docker
 all: challenge10.original.exe challenge10.patched.exe
 
+.INTERMEDIATE: $(CHALLENGE_DIR)/Challenge_10/build/program_c.gcc.vuln
+
 challenge10.original.exe: $(CHALLENGE_DIR)/Challenge_10/build/program_c.gcc.vuln
 	cp $< $@
 
