@@ -20,6 +20,7 @@ module Output
   , setJSONMode
   , hasStdOut
   , printHeartbeat
+  , tagOutput
   )
  where
 
@@ -50,7 +51,7 @@ data OutputElem =
     -- ^ more results at this nesting level that were omitted
     }
 
-data Output = 
+data Output_ =
     OutputElemList [OutputElem]
   | OutputInfo (PP.Doc ())
   | OutputErr (PP.Doc ())
@@ -58,6 +59,15 @@ data Output =
   | OutputPrompt String
   | OutputHeartbeat
   -- ^ linebreak
+
+data Output = Output
+  { outputC :: Output_
+  , output_this :: Maybe (PP.Doc ())
+  , output_tag :: Maybe (Text.Text)
+  }
+
+output :: Output_ -> Output
+output o = Output o Nothing Nothing
 
 jsonOutputHandle :: IO.IORef (Maybe IO.Handle)
 jsonOutputHandle = IO.unsafePerformIO (IO.newIORef Nothing)
@@ -89,10 +99,10 @@ writeOut p hdl = do
 type HasOutput m = IO.MonadIO m
 
 outputList :: [OutputElem] -> Output
-outputList es = OutputElemList es
+outputList es = output $ OutputElemList es
 
 outputMsg :: PP.Doc () -> Output
-outputMsg msg = OutputInfo msg
+outputMsg msg = output $ OutputInfo msg
 
 printMsg :: HasOutput m => PP.Doc () -> m ()
 printMsg msg = printOutput (outputMsg msg)
@@ -101,7 +111,7 @@ printMsgLn :: HasOutput m => PP.Doc () -> m ()
 printMsgLn msg = printMsg msg >> printBreak
 
 outputErr :: PP.Doc () -> Output
-outputErr msg_er = OutputErr msg_er
+outputErr msg_er = output $ OutputErr msg_er
 
 printErr :: HasOutput m => PP.Doc () -> m ()
 printErr msg = printOutput (outputErr msg)
@@ -110,16 +120,16 @@ printErrLn :: HasOutput m => PP.Doc () -> m ()
 printErrLn msg = printErr msg >> printBreak
 
 outputBreak :: Output
-outputBreak = OutputBreak
+outputBreak = output OutputBreak
 
 printBreak :: HasOutput m => m ()
 printBreak = printOutput outputBreak
 
 printPrompt :: HasOutput m => String -> m ()
-printPrompt msg = printOutput (OutputPrompt msg)
+printPrompt msg = printOutput $ output (OutputPrompt msg)
 
 printHeartbeat :: HasOutput m => m ()
-printHeartbeat = printOutput OutputHeartbeat
+printHeartbeat = printOutput $ output OutputHeartbeat
 
 ppOutputElem :: OutputElem -> PP.Doc ()
 ppOutputElem nd = 
@@ -131,25 +141,40 @@ ppOutputElem nd =
         False -> p
   in PP.pretty (outIdx nd) <> ":" <+> (PP.indent (outIndent nd) p')
 
+tagOutput :: Maybe (PP.Doc ()) -> Maybe (Text.Text) -> Output -> Output
+tagOutput msg tag o = Output (outputC o) msg tag
+
+ppOutput_ :: Output_ -> [PP.Doc ()]
+ppOutput_ (OutputElemList es) = map ppOutputElem es
+ppOutput_ (OutputInfo msg) = [msg]
+ppOutput_ (OutputErr msg) = [msg]
+ppOutput_ OutputBreak = ["\n"]
+ppOutput_ (OutputPrompt str) = [PP.pretty str]
+ppOutput_ OutputHeartbeat = ["."]
+
 ppOutput :: Output -> PP.Doc ()
-ppOutput (OutputElemList es) = PP.vsep (map ppOutputElem es)
-ppOutput (OutputInfo msg) = msg
-ppOutput (OutputErr msg) = msg
-ppOutput OutputBreak = "\n"
-ppOutput (OutputPrompt str) = PP.pretty str
-ppOutput OutputHeartbeat = "."
+ppOutput (Output out_ Nothing _) = PP.vsep $ ppOutput_ out_
+ppOutput (Output out_ (Just this_) _) = PP.vsep $ this_:(ppOutput_ out_)
 
 jsonOutput :: Output -> JSON.Value
-jsonOutput (OutputElemList es) = JSON.toJSON (map outJSON es)
-jsonOutput (OutputInfo msg) = JSON.object ["message" JSON..= show msg]
-jsonOutput (OutputErr msg) = JSON.object ["error" JSON..= show msg]
-jsonOutput OutputBreak = JSON.Null
-jsonOutput OutputPrompt{} = JSON.Null
-jsonOutput OutputHeartbeat = JSON.Null
+jsonOutput (Output out_ this_ tag_) =
+  case out_ of
+    OutputElemList es | Just this__ <- this_ ->
+      JSON.object
+        [ "this" JSON..= show this__
+        , "trace_node_kind" JSON..= tag_
+        , "trace_node_contents" JSON..= map outJSON es
+        ]
+    OutputElemList es -> JSON.toJSON $ map outJSON es
+    OutputInfo msg -> JSON.object ["message" JSON..= show msg]
+    OutputErr msg -> JSON.object ["error" JSON..= show msg]
+    OutputBreak -> JSON.Null
+    OutputPrompt{} -> JSON.Null
+    OutputHeartbeat{} -> JSON.Null
 
 printOutput :: HasOutput m => Output -> m ()
 printOutput o = do
-  mhdl <- case o of
+  mhdl <- case outputC o of
     OutputErr{} -> IO.liftIO $ IO.readIORef errOutputHandle
     _ -> IO.liftIO $ IO.readIORef stdOutputHandle
   case mhdl of
@@ -165,4 +190,4 @@ printOutput o = do
 printOutputLn :: IO.MonadIO m => Output -> m ()
 printOutputLn o = do
   printOutput o
-  printOutput OutputBreak
+  printBreak
