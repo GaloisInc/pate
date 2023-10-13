@@ -442,9 +442,8 @@ ls' = do
   (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) <- gets replNode
   tags <- gets replTags
   let thisPretty = prettyDetailAt @'(sym, arch) @nm tags lbl v
-  PO.printOutput $ PO.outputMsg thisPretty
-  PO.printBreak
-  PO.printOutput p
+  let p' = PO.tagOutput (Just thisPretty) (Just (symbolRepr (knownSymbol @nm))) p
+  PO.printOutput p'
   PO.printBreak
 
 ls :: IO ()
