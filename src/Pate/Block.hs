@@ -189,12 +189,13 @@ data BlockTarget arch bin =
    deriving (Eq, Ord)
 
 instance JSON.ToJSON (BlockTarget arch bin) where
-  toJSON bt = JSON.object 
+  toJSON bt@BlockTarget{} = JSON.object
     [ "target" JSON..= targetCall bt
     , "return" JSON..= targetReturn bt
     , "endcase" JSON..= targetEndCase bt
     , "pc" JSON..= targetRawPC bt
     ]
+  toJSON BlockTargetReturn{} = JSON.String "return_target"
 
 targetReturn :: BlockTarget arch bin -> Maybe (ConcreteBlock arch bin)
 targetReturn BlockTargetReturn{} = Nothing
