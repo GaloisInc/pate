@@ -156,6 +156,33 @@ ppOutput :: Output -> PP.Doc ()
 ppOutput (Output out_ Nothing _) = PP.vsep $ ppOutput_ out_
 ppOutput (Output out_ (Just this_) _) = PP.vsep $ this_:(ppOutput_ out_)
 
+{-
+mkJSON' :: [OutputElem] -> ([JSON.Value], [OutputElem])
+mkJSON' (e1 : e2 : es) = case compare (outIndent e1) (outIndent e2) of
+  -- increasing indent
+  LT ->
+    let
+      (v2, es') = mkJSON' (e2 : es)
+      sub_v2 = JSON.object
+        [ "subnode_header" JSON..= outJSON e1, "subnode" JSON..= JSON.toJSON v2]
+      (vs, es'') = mkJSON' es'
+    in (sub_v2:vs, es'')
+  -- decreasing indent
+  GT -> ([outJSON e1], e2 : es)
+  EQ ->
+    let
+      v1 = outJSON e1
+      (vs, es') = mkJSON' (e2 : es)
+    in (v1 : vs, es')
+mkJSON' [e] = ([outJSON e], [])
+mkJSON' [] = ([],[])
+
+mkJSON :: [OutputElem] -> JSON.Value
+mkJSON es = case mkJSON' es of
+  (vs, []) -> JSON.toJSON vs
+  (_, _es') -> error "Unexpected leftover elemenbts"
+-}
+
 jsonOutput :: Output -> JSON.Value
 jsonOutput (Output out_ this_ tag_) =
   case out_ of
