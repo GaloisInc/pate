@@ -140,6 +140,7 @@ data TraceTag =
   | Full
   | Simplified
   | Simplified_Detail
+  | JSONTrace
   | Custom String
   deriving (Eq, Ord)
 
@@ -572,7 +573,13 @@ instance IsTraceNode k "subtree" where
   prettyNode lbl nm = prettyTree lbl nm
   nodeTags = [(Summary, prettyTree),
               (Simplified_Detail, \_ nm -> PP.pretty nm),
-              (Simplified, \_ nm -> PP.pretty nm) ]
+              (Simplified, \_ nm -> PP.pretty nm),
+              (JSONTrace, \_ nm -> PP.pretty nm)
+              ]
+  jsonNode (SomeSymRepr (SomeSym r)) nm =
+    JSON.object [ "subtree_kind" JSON..=  (show (symbolRepr r))
+                , "message" JSON..= nm
+                ]
 
 prettyTree ::
   SomeSymRepr ->
@@ -631,7 +638,9 @@ instance IsTraceNode k "choiceTree" where
   nodeTags = 
     [(Summary, \lbl ((SomeChoiceHeader (ChoiceHeader nm_choice _ _ _))) -> prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl)
     ,(Simplified_Detail, \nm _ -> PP.pretty nm)
-    ,(Simplified, \nm _ -> PP.pretty nm) ]
+    ,(Simplified, \nm _ -> PP.pretty nm)
+    ,(JSONTrace, \nm _ -> PP.pretty nm)
+    ]
 
 data Choice k (nm_choice :: Symbol) a = 
   Choice { choiceHeader :: ChoiceHeader k nm_choice a
@@ -663,14 +672,14 @@ instance IsTraceNode k "choice" where
   prettyNode nm (SomeChoice c) = case nm of
     "" -> prettyChoice c
     _ -> PP.pretty nm PP.<+> prettyChoice c
-  nodeTags = mkTags @k @"choice" [Summary, Simplified]
+  nodeTags = mkTags @k @"choice" [Summary, Simplified, JSONTrace]
   jsonNode = nodeToJSON @k @"choice"
 
 instance IsTraceNode k "()" where
   type TraceNodeType k "()" = ()
   type TraceNodeLabel "()" = ()
   prettyNode () () = PP.emptyDoc
-  nodeTags = mkTags @k @"()" [Summary, Simplified]
+  nodeTags = mkTags @k @"()" [Summary, Simplified, JSONTrace]
 
 -- | Returns the unblocking action
 setBlockedStatus ::

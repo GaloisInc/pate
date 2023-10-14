@@ -36,6 +36,7 @@ import           Control.Monad.State ( MonadState, StateT, modify, gets, runStat
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
 import qualified Data.Text.IO as Text
+import qualified Data.Text as Text
 import qualified Data.Text.Lazy as TextL
 import           Text.Read (readMaybe)
 import           System.Exit
@@ -129,6 +130,9 @@ data ReplState sym arch where
     , replValidRepr :: ValidSymArchRepr sym arch sym arch
     , replLastOptsPrinted :: String
     , replNesting :: Int
+    , replSubTreeNodes :: [Text.Text]
+    -- which nodes are considered "subtrees" and should have
+    -- their contents displayed by default
     } -> ReplState sym arch
 
 data ValidSymArchRepr sym arch symExt archExt where
@@ -137,10 +141,11 @@ data ValidSymArchRepr sym arch symExt archExt where
 data ReplIOStore =
     NoTreeLoaded
   -- main thread has started but hasn't yet produced a tree
-  | WaitingForToplevel IO.ThreadId (SomeTraceTree PA.ValidRepr)
+  | WaitingForToplevel IO.ThreadId (SomeTraceTree PA.ValidRepr) LoadOpts
   -- we've started navigating the resulting tree
   | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState IO.ThreadId (ReplState sym arch)
 
+data LoadOpts = LoadOpts { loadJSONMode :: Bool }
 
 newtype ReplM_ sym arch a = ReplM_ { unReplM :: (StateT (ReplState sym arch) IO a) }
   deriving ( Functor, Applicative, Monad, MonadState (ReplState sym arch), IO.MonadIO )
@@ -152,7 +157,7 @@ runReplM f = do
   t <- IO.readIORef ref
   case t of
     NoTreeLoaded -> return Nothing
-    WaitingForToplevel tid tree -> loadSomeTree tid tree >>= \case
+    WaitingForToplevel tid tree opts -> loadSomeTree tid tree opts >>= \case
       True -> runReplM f
       False -> return Nothing
     SomeReplState tid (st :: ReplState sym arch) -> do
@@ -189,21 +194,34 @@ waitThread = IO.unsafePerformIO (IO.newIORef (WaitThread Nothing 0))
 finalResult :: IO.IORef (Maybe (Either String PEq.EquivalenceStatus))
 finalResult = IO.unsafePerformIO (IO.newIORef Nothing)
 
+defaultSubTreeNodes :: [Text.Text]
+defaultSubTreeNodes = ["subtree", "choiceTree", "function_name", "debug_tree"]
+
+isSubTreeNode ::
+  forall sym arch nm.
+  TraceNode sym arch nm ->
+  ReplM sym arch Bool
+isSubTreeNode (TraceNode{}) = do
+  strees <- gets replSubTreeNodes
+  return $ symbolRepr (knownSymbol @nm) `elem` strees
 
 loadSomeTree ::
-  IO.ThreadId -> SomeTraceTree PA.ValidRepr -> IO Bool
-loadSomeTree tid topTraceTree = do
+  IO.ThreadId -> SomeTraceTree PA.ValidRepr -> LoadOpts -> IO Bool
+loadSomeTree tid topTraceTree opts = do
   viewSomeTraceTree topTraceTree (return False) $ \(PA.ValidRepr sym arch) (toptree :: TraceTree k) -> do
       let st = ReplState
             { replNode = Some (TraceNode @"toplevel" () () toptree)
-            , replTags = [Simplified]
+            , replTags = dtags
             , replPrev = []
-            , replNextTags = [Simplified]
+            , replNextTags = dtags
             , replNext = []
             , replValidRepr = ValidSymArchRepr sym arch
             , replLastOptsPrinted = ""
             , replNesting = 0
+            , replSubTreeNodes = strees
             }
+          strees = if loadJSONMode opts then [] else defaultSubTreeNodes
+          dtags = if loadJSONMode opts then [JSONTrace] else [Simplified]
       IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
       return True
@@ -211,6 +229,7 @@ loadSomeTree tid topTraceTree = do
 instance IsTraceNode k "toplevel" where
   type TraceNodeType k "toplevel" = ()
   prettyNode () () = "<Toplevel>"
+  nodeTags = mkTags @k @"toplevel" [Simplified,Summary,JSONTrace]
 
 run :: String -> IO ()
 run rawOpts = do
@@ -232,7 +251,7 @@ run rawOpts = do
               exitFailure
           IO.writeIORef finalResult (Just (Left msg))
         Right a -> IO.writeIORef finalResult (Just (Right a))
-      IO.writeIORef ref (WaitingForToplevel tid topTraceTree)
+      IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (PM.jsonToplevel opts)))
       -- give some time for the verifier to start
       IO.threadDelay 100000
       wait_initial
@@ -259,15 +278,7 @@ rerun = do
       run rawOpts
     Nothing -> PO.printMsgLn "No previous run found"
 
-isSubTreeNode ::
-  forall sym arch nm.
-  TraceNode sym arch nm -> Bool
-isSubTreeNode (TraceNode{}) = case symbolRepr (knownSymbol @nm) of
-  "subtree" -> True
-  "choiceTree" -> True
-  "function_name" -> True
-  "debug_tree" -> True
-  _ -> False
+
 
 truncateSubNodes :: [(Int, Some (TraceNode sym arch))] -> ReplM sym arch [(Int, Some (TraceNode sym arch))]
 truncateSubNodes next = do
@@ -294,7 +305,8 @@ addNextNodes node = isTraceNode node $ do
       nextSubs <- fmap concat $ forM nextTrees $ \(n, Some nextNode) -> do
         prevNodes <- gets replPrev
         next <- maybeSubNodes nextNode (return []) (gets replNext)
-        case (isSubTreeNode nextNode, next) of
+        issub <- isSubTreeNode nextNode
+        case (issub, next) of
 
           (True, []) -> return []
           _ -> return $ [(n, Some nextNode)] ++ next
@@ -360,7 +372,7 @@ maybeSubNodes ::
   ReplM sym arch a
 maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
   prevNodes <- gets replPrev
-  case isSubTreeNode nd of
+  isSubTreeNode nd >>= \case
     True -> withNode nd $ f
     False -> do
       mr <- withNode nd $ do
@@ -453,7 +465,7 @@ stop :: IO ()
 stop = do
   IO.readIORef ref >>= \case
     NoTreeLoaded -> return ()
-    WaitingForToplevel tid _ -> IO.killThread tid
+    WaitingForToplevel tid _ _ -> IO.killThread tid
     SomeReplState tid _ -> IO.killThread tid
 
 up :: IO ()
