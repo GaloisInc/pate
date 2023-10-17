@@ -1089,7 +1089,10 @@ traceAlternatives' ((nm, f) : alts) =
 instance IsTraceNode (k :: l) "function_name" where
   type TraceNodeType k "function_name" = String
   prettyNode () st = PP.pretty st
-  nodeTags = [(Summary, \() -> PP.pretty), (Simplified, \() _ -> "------") ]
+  nodeTags = [(Summary, \() -> PP.pretty)
+             , (Simplified, \() _ -> "------")
+             , (JSONTrace, \() _ -> "------")
+             ]
 
 traceAlternatives ::
   IsTreeBuilder k e m =>

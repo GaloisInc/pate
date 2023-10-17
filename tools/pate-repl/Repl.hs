@@ -220,7 +220,7 @@ loadSomeTree tid topTraceTree opts = do
             , replNesting = 0
             , replSubTreeNodes = strees
             }
-          strees = if loadJSONMode opts then [] else defaultSubTreeNodes
+          strees = if loadJSONMode opts then ["function_name"] else defaultSubTreeNodes
           dtags = if loadJSONMode opts then [JSONTrace] else [Simplified]
       IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
