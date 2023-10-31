@@ -1993,17 +1993,12 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
         let pPair = TF.fmapF PB.targetCall blkts
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
         traceBundle bundle ("  Return target " ++ show rets)
-        isPreArch <- case (PPa.view PB.concreteBlockEntry pPair) of
-          (PB.BlockEntryPreArch, PB.BlockEntryPreArch) -> return True
-          (entryO, entryP) | entryO == entryP -> return False
-          _ -> throwHere $ PEE.BlockExitMismatch
         ctx <- view PME.envCtxL
         let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
-        if | isPreArch -> handleArchStmt scope bundle currBlock d gr ecase pPair (Just rets)
-            | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair rets
-            | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just rets) stubPair
-            | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair rets
+        if | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair rets
+           | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just rets) stubPair
+           | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair rets
 
       (Just ecase, PPa.PatchPairNothing) -> fmap (updateBranchGraph st blkts) $ do
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)

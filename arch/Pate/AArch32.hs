@@ -147,6 +147,13 @@ instance PA.ValidArch SA.AArch32 where
     <|> MD.pltStubClassifier
     <|> MD.directJumpClassifier
     <|> MD.tailCallClassifier
+  
+  archExtractArchTerms = \term st mret -> Just $ case term of
+    MAA.CallIf{} -> MD.ParsedCall st mret
+    MAA.CallIfNot{} -> MD.ParsedCall st mret
+    MAA.ReturnIf{} -> MD.ParsedReturn st
+    MAA.ReturnIfNot{} -> MD.ParsedReturn st
+
 
 data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 

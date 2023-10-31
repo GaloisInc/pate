@@ -67,10 +67,6 @@ data BlockEntryKind arch =
     -- ^ block starts a new function
   | BlockEntryPostFunction
     -- ^ block is an intermediate point in a function, after a function call
-  | BlockEntryPostArch
-    -- ^ block is an intermediate point in a function, after an arch function call
-  | BlockEntryPreArch
-    -- ^ block is an intermediate point in a function, about to make an arch function call
   | BlockEntryJump
     -- ^ block was entered by an arbitrary jump
     -- problems
@@ -80,8 +76,6 @@ ppBlockEntry :: BlockEntryKind arch -> String
 ppBlockEntry be = case be of
   BlockEntryInitFunction -> "function entry point"
   BlockEntryPostFunction -> "intermediate function point"
-  BlockEntryPreArch -> "intermediate function point (before syscall)"
-  BlockEntryPostArch -> "intermediate function point (after syscall)"
   BlockEntryJump -> "unknown program point"
 
 data ConcreteBlock arch (bin :: PB.WhichBinary) =

@@ -60,6 +60,7 @@ import qualified Data.ElfEdit as E
 import qualified Data.Macaw.Architecture.Info as MI
 import qualified Data.Macaw.BinaryLoader as MBL
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.Types as MT
 import qualified Data.Macaw.CFGSlice as MCS
@@ -68,6 +69,7 @@ import qualified Lang.Crucible.Types as LCT
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.AssumptionSet as PAS
+import qualified Pate.Address as PAd
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Memory.MemTrace as PMT
@@ -185,6 +187,18 @@ class
   -- overrides the default block classifier for the architecture
   archClassifierOverride :: (forall ids. Maybe (MI.BlockClassifier arch ids))
   archClassifierOverride = Nothing
+
+  -- | Rewrite an architecture-dependent terminal statement into
+  -- an architecture-independent terminal statement,
+  -- which represents an over-approximation of the architecture
+  -- terminator
+  archExtractArchTerms ::
+    forall ids.
+    MC.ArchTermStmt arch (MC.Value arch ids) ->
+    MC.RegState (MC.ArchReg arch) (MC.Value arch ids) ->
+    Maybe (MC.ArchSegmentOff arch) ->
+    Maybe (MD.ParsedTermStmt arch ids)
+  archExtractArchTerms = \ _ _ _ -> Nothing
 
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch

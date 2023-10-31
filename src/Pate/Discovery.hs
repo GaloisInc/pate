@@ -612,12 +612,9 @@ concreteJumpTargets from pb pb_next = do
     MD.ParsedLookupTable _jt st _ _ ->
       return [ jumpTarget' from next | next <- concreteNextIPs mem st ]
 
-    MD.ParsedArchTermStmt _ st ret -> do
-      let ret_blk = fmap (PB.mkConcreteBlock from PB.BlockEntryPostArch) ret
-      let MCS.MacawBlockEnd end_case _ = MCS.termStmtToBlockEnd (MD.pblockTermStmt pb)
-      return [ PB.BlockTarget (PB.mkConcreteBlock' from PB.BlockEntryPreArch next) ret_blk end_case next
-            | next <- (concreteNextIPs mem st)
-            ]
+    MD.ParsedArchTermStmt at st mret -> case PA.archExtractArchTerms at st mret of
+      Just term -> concreteJumpTargets from (pb { MD.pblockTermStmt = term}) pb_next
+      Nothing -> return []
 
     MD.ParsedReturn{} -> return []
     MD.ParsedTranslateError{} -> return []
