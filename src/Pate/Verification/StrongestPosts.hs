@@ -250,7 +250,7 @@ refineFinalResult entries pg = do
       -- invent a reasonable equivalence post-domain (see 'updateExtraEdges') and
       -- continue the analysis from
       -- all of the (orphaned) return sites for a non-terminating function
-        (ret :_) | shouldAddOrphans -> choice_outer "Add orphaned return nodes?" () $ fmap Just $ do
+        (ret :_) | shouldAddOrphans -> choice_outer ("Add orphaned return node: " ++ show (pretty ret)) () $ fmap Just $ do
           let
             fnEntry = returnToEntry ret
             gr1 = addExtraEdge pg fnEntry (ReturnNode ret)
@@ -1024,7 +1024,13 @@ processBundle scope node bundle d gr0 = do
   st <- subTree @"blocktarget" "Block Exits" $
     foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) initBranchState (zip [0 ..] exitPairs)
   -- confirm that all handled exits cover the set of possible exits
-  checkTotality node bundle d (branchHandled st) (branchGraph st)
+  case length (branchHandled st) == length exitPairs of
+    -- we've handled all outstanding block exits, so we should now check
+    -- that the result is total
+    True -> checkTotality node bundle d (branchHandled st) (branchGraph st)
+    -- some block exits have been intentially skipped,
+    -- since we'll be revisiting this node we can skip the totality check as well
+    False -> return $ branchGraph st
 
 withValidInit ::
   forall sym arch v a.
