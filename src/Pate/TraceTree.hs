@@ -591,7 +591,7 @@ prettyTree (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (
 instance IsTraceNode k "message" where
   type TraceNodeType k "message" = String
   prettyNode () msg = PP.pretty msg
-  nodeTags = mkTags @k @"message" [Summary, Simplified]
+  nodeTags = mkTags @k @"message" [Summary, Simplified, JSONTrace]
 
 instance IsTraceNode k "debug" where
   type TraceNodeType k "debug" = String

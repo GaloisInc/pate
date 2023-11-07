@@ -891,7 +891,8 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domai
                     PP.vsep
                       [ ppDomainKind lbl
                       , PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom)
-                      ])
+                      ]),
+              (JSONTrace, \lbl _ -> ppDomainKind lbl)
               ]
 
 -- simplified variant of domain trace node

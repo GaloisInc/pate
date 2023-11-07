@@ -1318,16 +1318,13 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "observable_result" wh
       [ "Error during observability check"
       , PP.pretty msg
       ]
-  nodeTags = [(Summary, \() res -> case res of
+  nodeTags =
+    [ (tag, \() res -> case res of
                   ObservableCheckEq -> "Observably Equivalent"
                   ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
                   ObservableCheckError{} -> "Error during observability check")
-             ] ++
-             [(Simplified, \() res -> case res of
-                  ObservableCheckEq -> "Observably Equivalent"
-                  ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
-                  ObservableCheckError{} -> "Error during observability check")
-             ]
+      | tag <- [Simplified, Summary, JSONTrace]
+    ]
 
 checkObservables :: forall sym arch v.
   NodeEntry arch ->
