@@ -105,7 +105,7 @@ data ParsedFunctionMap arch bin =
                     , absStateOverrides :: Map.Map (MM.ArchSegmentOff arch) (PB.AbsStateOverride arch)
                     , defaultInitState :: PB.MkInitialAbsState arch
                     , pfmExtractBlockPrecond :: ExtractBlockPrecondFn arch
-                    , pfmExtraClassifier :: forall ids . MAI.BlockClassifier arch ids
+                    , pfmWrapClassifier :: forall ids . MAI.BlockClassifier arch ids -> MAI.BlockClassifier arch ids
                     }
 
 -- | copied from 'Pate.Arch' and supplied from the 'ValidArch' instance when initialized
@@ -254,10 +254,8 @@ getDiscoveryState fnaddr pfm st = let
 
   -- TODO: apply some intelligence here to distinguish direct jumps from tail calls,
   -- for the moment our infrastructure handles direct jumps better, so we prefer that
-  ainfo4 = ainfo3 { MAI.archClassifier =
-        (pfmExtraClassifier pfm) 
-    <|> extraJumpClassifier (extraEdges st) 
-    <|> extraReturnClassifier (extraEdges st) 
+  ainfo4 = ainfo3 { MAI.archClassifier = pfmWrapClassifier pfm
+    (extraJumpClassifier (extraEdges st) <|> extraReturnClassifier (extraEdges st))
     }
   ainfo5 = ainfo4 { MAI.disassembleFn = addTranslationErrorWrapper (MAI.disassembleFn ainfo4)}
   in initDiscoveryState pfm ainfo5
@@ -292,8 +290,8 @@ newParsedFunctionMap
   -- ^ mapping from function entry points to potential end points
   -> ExtractBlockPrecondFn arch
   -- ^ override for extracing block preconditions
-  -> (forall ids . MAI.BlockClassifier arch ids)
-  -- ^ extra block classifiers
+  -> (forall ids . MAI.BlockClassifier arch ids -> MAI.BlockClassifier arch ids)
+  -- ^ wrapper for block classifiers
   -> IO (ParsedFunctionMap arch bin)
 newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond blockClassifiers = do
   let ds0 = MD.emptyDiscoveryState mem syms archInfo
@@ -311,7 +309,7 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond bloc
                            , absStateOverrides = mempty
                            , defaultInitState = PB.defaultMkInitialAbsState
                            , pfmExtractBlockPrecond = fnExtractPrecond
-                           , pfmExtraClassifier = blockClassifiers
+                           , pfmWrapClassifier = blockClassifiers
                            }
 
 funInfoToFunEntry ::

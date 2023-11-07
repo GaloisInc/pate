@@ -397,7 +397,7 @@ computeSliceBodyInfo :: forall sym arch ids.
   EquivM sym arch ( MD.ParsedBlock arch ids, SliceBodyInfo arch ids)
 computeSliceBodyInfo entryAddr blks bounds = do
   eblk <- case Map.lookup entryAddr blkmap of
-    Nothing -> case Map.lookup (PA.alignPC entryAddr) blkmap of
+    Nothing -> case Map.lookup entryAddr blkmap of
       Nothing -> 
         throwHere $ PEE.SymbolicExecutionError
           $ unlines ["Could not find entry point in block map:"

@@ -114,6 +114,7 @@ import Data.Parameterized.SetF (AsOrd(..))
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Macaw.Architecture.Info as MAI
 import Control.Applicative
+import qualified Data.Vector as V
 
 --------------------------------------------------------
 -- Block pair matching
@@ -511,8 +512,7 @@ getAbsDomain b = fnTrace "getAbsDomain" $ withRepr (PB.blockBinRepr b) $ withBin
   case mtgt of
     Right (Some pb) -> return $ MD.blockAbstractState pb
     Left err -> do
-      let b' = b { PB.concreteAddress = PA.alignPC (PB.concreteAddress b) }
-      (liftIO $ PDP.parsedBlockEntry b' pfm) >>= \case
+      (liftIO $ PDP.parsedBlockEntry b pfm) >>= \case
         Right (Some pb) -> return $ MD.blockAbstractState pb
         Left _err -> throwHere $ PEE.MissingParsedBlockEntry err b
 
@@ -609,8 +609,8 @@ concreteJumpTargets from pb pb_next = do
     MD.ParsedBranch _ _ t f ->
       return [ branchTarget from t, branchTarget from f ]
 
-    MD.ParsedLookupTable _jt st _ _ ->
-      return [ jumpTarget' from next | next <- concreteNextIPs mem st ]
+    MD.ParsedLookupTable _jt _st _ targets ->
+      return [ jumpTarget' from (PA.memAddrToAddr $ MM.segoffAddr next) | next <- V.toList targets ]
 
     MD.ParsedArchTermStmt at st mret -> case PA.archExtractArchTerms at st mret of
       Just term -> concreteJumpTargets from (pb { MD.pblockTermStmt = term}) pb_next
@@ -881,7 +881,8 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
   addrEnds <- F.foldlM (addFnEnd mem) mempty (fmap snd (PH.functionEntries hints))
 
   pfm <- liftIO $ PDP.newParsedFunctionMap mem addrSyms archInfo mCFGDir pd addrEnds (PA.validArchExtractPrecond aData) $
-    (pltStubClassifier which_bin aData mem addrSyms) <|> case PA.archClassifierOverride @arch of {Just x -> x; Nothing -> MAI.archClassifier archInfo}
+    (\extraClassifiers -> PA.archClassifierWrapper $ 
+      (pltStubClassifier which_bin aData mem addrSyms <|> PA.archClassifier archInfo <|> extraClassifiers))
 
   let idx = F.foldl' addFunctionEntryHint Map.empty (PH.functionEntries hints)
 
@@ -915,7 +916,7 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
     addElfFunction m segOff = do
       let addr = MM.segoffAddr segOff
       case MBL.symbolFor bin addr of
-        Right nm -> return $ Map.insert (PA.alignPC_raw (Proxy @arch) segOff) nm $ Map.insert segOff nm m
+        Right nm -> return $ Map.insert segOff nm m
         Left (_e :: CMC.SomeException) -> return m
 
     addFunctionEntryHint m (_, fd) =

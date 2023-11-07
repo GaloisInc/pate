@@ -63,7 +63,7 @@ import Data.List (nub)
 import Pate.Config
 import qualified Data.Parameterized.Map as MapF
 import qualified Pate.Address as PA
-import Data.Macaw.ARM.Identify (conditionalCallClassifier, conditionalReturnClassifier)
+import Data.Macaw.ARM.Identify (conditionalCallClassifier, conditionalReturnClassifier, wrapClassifierForPstateT)
 import Control.Applicative
 import qualified Data.Macaw.Discovery as MD
 
@@ -133,10 +133,7 @@ instance PA.ValidArch SA.AArch32 where
   -- uninterpreted
   uninterpretedArchStmt _ = True
 
-  alignPC a = PA.memAddrToAddr (MC.clearAddrLeastBit (PA.addrToMemAddr a))
-  alignPC_raw _ = MC.clearSegmentOffLeastBit
-
-  archClassifierOverride = Just $
+  archClassifier _ =
         conditionalCallClassifier 
     <|> conditionalReturnClassifier 
     <|> MD.branchClassifier
@@ -148,6 +145,8 @@ instance PA.ValidArch SA.AArch32 where
     <|> MD.directJumpClassifier
     <|> MD.tailCallClassifier
   
+  archClassifierWrapper = wrapClassifierForPstateT
+
   archExtractArchTerms = \term st mret -> Just $ case term of
     MAA.CallIf{} -> MD.ParsedCall st mret
     MAA.CallIfNot{} -> MD.ParsedCall st mret

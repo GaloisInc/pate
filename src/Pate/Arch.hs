@@ -181,12 +181,12 @@ class
 
   uninterpretedArchStmt :: MC.ArchStmt arch (MC.Value arch ids) -> Bool
 
-  alignPC :: ConcreteAddress arch -> ConcreteAddress arch
-  alignPC_raw :: Proxy arch -> MC.ArchSegmentOff arch -> MC.ArchSegmentOff arch
+  archClassifierWrapper :: forall ids. MI.BlockClassifier arch ids -> MI.BlockClassifier arch ids
+  archClassifierWrapper = id
 
   -- overrides the default block classifier for the architecture
-  archClassifierOverride :: (forall ids. Maybe (MI.BlockClassifier arch ids))
-  archClassifierOverride = Nothing
+  archClassifier :: forall ids. MI.ArchitectureInfo arch -> MI.BlockClassifier arch ids
+  archClassifier = MI.archClassifier
 
   -- | Rewrite an architecture-dependent terminal statement into
   -- an architecture-independent terminal statement,
