@@ -522,10 +522,7 @@ domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
   postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case refine loc of
     False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
-    True -> do
-      case loc of
-        PL.Cell{} -> return $ (PL.getLoc loc, W4.falsePred sym)
-        _ -> return $ (PL.getLoc loc, W4.falsePred sym)
+    True -> return $ (PL.getLoc loc, W4.truePred sym)
 
   eqCtx <- equivalenceContext
   eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
