@@ -115,7 +115,7 @@ instance IsTraceNode k "equivalence_result" where
     Inequivalent -> "Binaries are not observably equivalent"
     ConditionallyEquivalent -> "Binaries are conditionally, observably equivalent"
     Errored{} -> "Analysis failure due to error"
-  nodeTags = mkTags @k @"equivalence_result" [Summary, Simplified]
+  nodeTags = mkTags @k @"equivalence_result" [Summary, Simplified, JSONTrace]
 
 ---------------------------------------
 

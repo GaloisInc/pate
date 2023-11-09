@@ -616,7 +616,7 @@ instance IsTraceNode k "bool" where
 instance IsTraceNode k "final_result" where
   type TraceNodeType k "final_result" = ()
   prettyNode _lbl _msg = "Final Result"
-  nodeTags = mkTags @k @"final_result" [Summary, Simplified]
+  nodeTags = mkTags @k @"final_result" [Summary, Simplified, JSONTrace]
 
 data ChoiceHeader k (nm_choice :: Symbol) a = 
   (IsTraceNode k nm_choice) =>

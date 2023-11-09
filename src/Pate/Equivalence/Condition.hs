@@ -167,7 +167,13 @@ instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond"
     EquivalenceCondition{} -> PP.pretty someExpr
   nodeTags = [(Summary, \someExpr _ -> printSomeExprTruncated someExpr )
              ,(Simplified, \someExpr _ -> printSomeExprTruncated someExpr)
+             ,(JSONTrace, \someExpr _ -> printSomeExprTruncated someExpr)
              ]
+  jsonNode someExpr _ = 
+    JSON.object 
+      [ "trace_node_kind" JSON..= "eqcond"
+      , "trace_node" JSON..= show (PP.pretty someExpr)
+      ]
 
 -- | A mapping from registers to a predicate representing an equality condition for
 -- that specific register.
