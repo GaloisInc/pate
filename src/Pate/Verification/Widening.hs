@@ -587,7 +587,16 @@ data PickManyChoice sym arch =
 
 instance forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => JSON.ToJSON (PickManyChoice sym arch) where
   -- FIXME: Needs more structure
-  toJSON e = JSON.object ["pickManyChoice" JSON..= (show (prettyNode @_ @'(sym,arch) @"pickManyChoice" () e))]
+  toJSON = \case
+    PickRegister r -> JSON.object 
+      [ "register" JSON..= case PA.fromRegisterDisplay (PA.displayRegister r) of
+        Just s -> s
+        Nothing -> MapF.showF r]
+    PickStack s -> JSON.object [ "stack_cell" JSON..= show (pretty s)]
+    PickGlobal s -> JSON.object [ "mem_cell" JSON..= show (pretty s)]
+    PickIncludeAllRegisters -> JSON.String "all_registers"
+    PickIncludeAll -> JSON.String "all"
+    PickFinish -> JSON.String "finish"
 
 data PickChoices sym arch = PickChoices
   { pickRegs :: [Some (MM.ArchReg arch)] 
@@ -612,7 +621,8 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "pickM
     PickIncludeAllRegisters -> "Include All Registers"
     PickIncludeAll -> "Include All Locations"
     PickFinish -> "Finish"
-  nodeTags = mkTags @'(sym,arch) @"pickManyChoice" [Summary, Simplified]
+  nodeTags = mkTags @'(sym,arch) @"pickManyChoice" [Summary, Simplified, JSONTrace]
+  jsonNode = nodeToJSON @'(sym,arch) @"pickManyChoice"
 
 pickMany ::
   PickChoices sym arch ->
