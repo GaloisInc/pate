@@ -43,7 +43,7 @@ import qualified What4.Interface as W4
 import qualified Prettyprinter as PP
 
 import qualified Data.Macaw.CFG as MM
-
+import qualified Data.Aeson as JSON
 
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS
@@ -171,7 +171,7 @@ instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond"
              ]
   jsonNode someExpr _ = 
     JSON.object 
-      [ "trace_node_kind" JSON..= "eqcond"
+      [ "trace_node_kind" JSON..= ("eqcond" :: String)
       , "trace_node" JSON..= show (PP.pretty someExpr)
       ]
 
