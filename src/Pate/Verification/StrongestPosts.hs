@@ -1024,7 +1024,9 @@ processBundle scope node bundle d gr0 = do
   st <- subTree @"blocktarget" "Block Exits" $
     foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) initBranchState (zip [0 ..] exitPairs)
   -- confirm that all handled exits cover the set of possible exits
-  case length (branchHandled st) == length exitPairs of
+  let allHandled = length (branchHandled st) == length exitPairs
+  let anyNonTotal = branchDesyncChoice st == Just AdmitNonTotal
+  case allHandled || anyNonTotal of
     -- we've handled all outstanding block exits, so we should now check
     -- that the result is total
     True -> checkTotality node bundle d (branchHandled st) (branchGraph st)
