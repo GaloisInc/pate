@@ -27,7 +27,7 @@ jobs:
       matrix:
         arch: [ 'ppc' ]
         ghc: ['9.0.2', '9.2.8']
-        cabal: ['3.4.0.0']
+        cabal: ['3.6.0.0']
         os: [self-hosted]
 
     name: GHC ${{ matrix.ghc }} on ${{ matrix.os }} pate-${{ matrix.arch }}
