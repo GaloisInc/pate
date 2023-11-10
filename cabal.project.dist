@@ -12,6 +12,7 @@ packages: .
           submodules/dwarf
           submodules/flexdis86
           submodules/flexdis86/binary-symbols
+          submodules/demangler
           submodules/dismantle/dismantle-tablegen
           submodules/dismantle/dismantle-ppc
           submodules/dismantle/dismantle-arm-xml
@@ -33,3 +34,6 @@ packages: .
           submodules/macaw-loader/macaw-loader-x86
           submodules/macaw-loader/macaw-loader-ppc
           submodules/macaw-loader/macaw-loader-aarch32
+
+allow-newer: what4, IntervalMap, aeson, tasty
+constraints: IntervalMap >= 0.6.2.1
