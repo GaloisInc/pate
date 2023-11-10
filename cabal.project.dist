@@ -12,7 +12,6 @@ packages: .
           submodules/dwarf
           submodules/flexdis86
           submodules/flexdis86/binary-symbols
-          submodules/demangler
           submodules/dismantle/dismantle-tablegen
           submodules/dismantle/dismantle-ppc
           submodules/dismantle/dismantle-arm-xml
