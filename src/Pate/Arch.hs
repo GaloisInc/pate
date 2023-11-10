@@ -185,7 +185,7 @@ class
   archClassifierWrapper = id
 
   -- overrides the default block classifier for the architecture
-  archClassifier :: forall ids. MI.ArchitectureInfo arch -> MI.BlockClassifier arch ids
+  archClassifier :: MI.ArchitectureInfo arch -> (forall ids. MI.BlockClassifier arch ids)
   archClassifier = MI.archClassifier
 
   -- | Rewrite an architecture-dependent terminal statement into
