@@ -168,6 +168,7 @@ data CLIOptions = CLIOptions
   , targetEquivRegs :: [String]
   , ignoreSegments :: [Int]
   , jsonToplevel :: Bool
+  , readOnlySegments :: [Int]
   } deriving (Eq, Ord, Show)
 
 {-
@@ -545,3 +546,7 @@ cliOptions = OA.info (OA.helper <*> parser)
        (  OA.long "json-toplevel"
        <> OA.help "Run toplevel in JSON-output mode (interactive mode only)"
        )
+    <*> OA.many (OA.option OA.auto
+        ( OA.long "read-only-segments"
+        <> OA.help "Mark segments as read-only (0-indexed) when loading ELF"
+        ))

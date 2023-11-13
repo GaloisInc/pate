@@ -72,10 +72,11 @@ data LoadPaths = LoadPaths
 simplePaths :: FilePath -> LoadPaths
 simplePaths fp = LoadPaths fp [] Nothing Nothing Nothing
 
-data ElfLoaderConfig = ElfLoaderConfig { ignoreSegments :: [Int], extraSections :: [(String,Int,Integer)] }
+data ElfLoaderConfig = 
+  ElfLoaderConfig { ignoreSegments :: [Int], extraSections :: [(String,Int,Integer)], readOnlySegments :: [Int] }
 
 defaultElfLoaderConfig :: ElfLoaderConfig
-defaultElfLoaderConfig = ElfLoaderConfig [] []
+defaultElfLoaderConfig = ElfLoaderConfig [] [] []
 
 -- a LoadError exception is unrecoverable, while written results should just be raised
 -- as warnings
@@ -91,7 +92,7 @@ loadELF (PA.SomeValidArch{}) path = do
   bs <- IO.liftIO $ BS.readFile path
   elf <- doParse bs
   cfg <- CMR.ask
-  bin <- IO.liftIO $ MBL.loadBinary (MME.defaultLoadOptions { MME.ignoreSegments = ignoreSegments cfg}) elf
+  bin <- IO.liftIO $ MBL.loadBinary (MME.defaultLoadOptions { MME.ignoreSegments = ignoreSegments cfg, MME.readOnlySegments = readOnlySegments cfg}) elf
   let (_,elf_) = DEE.getElf elf
   -- add extra memory segments for manually-declared sections we want to include
   mem_final <- CMW.foldM (\mem (secnm,secIndex,secOffset) -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
