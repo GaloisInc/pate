@@ -6,7 +6,11 @@ target4.original.exe:
 target4.patched.exe:
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/build/Amp_Chal_IDPS_Patched.ino.elf" $@
 
-target4-self: target4.original.exe
+target4.csv:
+	cp "$(HACKATHON_NOV_2023)/Chal4Amp_Chal_IDPS.ino.elf.sym.csv" $@
+	echo "entry1, code:60001429, code:60001429" >> $@
+
+target4-self: target4.original.exe target4.csv
 	../../pate.sh \
 	  --ignore-segments 1 \
 	  --read-only-segments 3 \
