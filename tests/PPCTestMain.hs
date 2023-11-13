@@ -12,6 +12,8 @@ main = do
             [ "stack-struct", "unequal/stack-struct"
             -- https://github.com/GaloisInc/pate/issues/327
             , "malloc-simple", "unequal/malloc-simple"
+            -- missing interactive test support
+            , "desync-defer", "desync-simple"
             ]
         , testExpectSelfEquivalenceFailure = [
             -- https://github.com/GaloisInc/pate/issues/327

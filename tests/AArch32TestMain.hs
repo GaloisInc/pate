@@ -9,7 +9,9 @@ main = do
         { testArchName = "aarch32"
         , testArchLoader = AArch32.archLoader
         , testExpectEquivalenceFailure =
-            [ "stack-struct", "unequal/stack-struct", "max-signed"
+            [ "stack-struct", "unequal/stack-struct", "max-signed",
+              -- missing interactive test support
+              "desync-defer", "desync-simple"
             ]
         , testExpectSelfEquivalenceFailure = []
         -- TODO: we should define a section name here and read its address
