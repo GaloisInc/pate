@@ -148,7 +148,7 @@ otherwise ignored.
 
 --FIXME: Move
 
-data ExtraJumpTarget arch = 
+data ExtraJumpTarget arch =
     DirectTargets (Set (MM.ArchSegmentOff arch))
   | ReturnTarget
   deriving (Eq, Ord)
@@ -174,7 +174,7 @@ extraReturnClassifier jumps = classifierName "Extra Return" $ do
   let ainfo = pctxArchInfo (classifierParseContext bcc)
   Info.withArchConstraints ainfo $ do
     startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
-    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc)) 
+    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc))
     Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
     case Map.lookup final_addr jumps of
       Just ReturnTarget -> return ()
@@ -194,9 +194,9 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
 
   Info.withArchConstraints ainfo $ do
     startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
-    -- FIXME: This is not exactly right, but I'm not sure if there's a better way to find the 
+    -- FIXME: This is not exactly right, but I'm not sure if there's a better way to find the
     -- address corresponding to this instruction. Maybe examine the statements?
-    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc)) 
+    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc))
 
     Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
     targets <- case Map.lookup final_addr jumps of
@@ -212,12 +212,12 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
         -- we don't have a good way to reify the branch condition here, but
         -- it's not strictly necessary that the ParsedBranch condition be valid, as
         -- long as the two targets are correct
-        -- ideally we'd just set this to "undefined", but there's no good way to 
+        -- ideally we'd just set this to "undefined", but there's no good way to
         -- create new macaw terms here
         return $ Parsed.ParsedBranch (classifierFinalRegState bcc) (MM.CValue (MM.BoolCValue True)) target1 target2
       -}
       _ -> fail $ "Unsupported extra targets: " ++ show targets
-    
+
     jumpTargets <- forM targets $ \tgt -> do
       let abst' = abst & setAbsIP tgt
       return $ (tgt, abst', tgtBnds)
@@ -233,7 +233,7 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
 --   macaw value represents an address that jumps to a PLT stub
 pltStubClassifier ::
   forall arch ids.
-  (Value arch ids (BVType (ArchAddrWidth arch)) -> Maybe (ArchSegmentOff arch, BSC.ByteString)) -> 
+  (Value arch ids (BVType (ArchAddrWidth arch)) -> Maybe (ArchSegmentOff arch, BSC.ByteString)) ->
   Info.BlockClassifier arch ids
 pltStubClassifier f = classifierName "Extra PLT Stub" $ do
   stmts <- CMR.asks Info.classifierStmts
@@ -249,14 +249,14 @@ pltStubClassifier f = classifierName "Extra PLT Stub" $ do
       Just (addr,_) -> do
         return Parsed.ParsedContents { Parsed.parsedNonterm = F.toList stmts
                                     , Parsed.parsedTerm = Parsed.ParsedCall finalRegs (Just ret)
-                                    , Parsed.intraJumpTargets = 
+                                    , Parsed.intraJumpTargets =
                                         [( ret
                                          , Info.postCallAbsState ainfo (classifierAbsState bcc) finalRegs ret
                                          , Jmp.postCallBounds (Info.archCallParams ainfo) (classifierJumpBounds bcc) finalRegs
                                          )]
                                     , Parsed.newFunctionAddrs = [addr]
                                     , Parsed.writtenCodeAddrs = Info.classifierWrittenAddrs bcc
-                                    } 
+                                    }
       Nothing -> fail "Not a PLT stub"
 
 
