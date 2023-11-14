@@ -10,13 +10,8 @@ main = do
         , testArchLoader = PPC.archLoader
         , testExpectEquivalenceFailure =
             [ "stack-struct", "unequal/stack-struct"
-            -- https://github.com/GaloisInc/pate/issues/327
-            , "malloc-simple", "unequal/malloc-simple"
             ]
-        , testExpectSelfEquivalenceFailure = [
-            -- https://github.com/GaloisInc/pate/issues/327
-            "malloc-simple"
-            ]
+        , testExpectSelfEquivalenceFailure = []
         -- TODO: we should define a section name here and read its address
         -- from the ELF
         -- see: https://github.com/GaloisInc/pate/issues/294
