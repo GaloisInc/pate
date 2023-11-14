@@ -23,7 +23,6 @@ import           Control.Lens ( (^?), (^.) )
 import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
-import           Data.Proxy ( Proxy(..) )
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit.Prim as EEP
@@ -38,6 +37,7 @@ import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Architecture.Info as MAI
 import qualified Data.Macaw.AArch32.Symbolic as DMAS
 import           Data.Macaw.BinaryLoader.AArch32 ()
+import qualified Data.Macaw.Memory.LoadCommon as MML
 import qualified Lang.Crucible.LLVM.MemModel as LCLM
 import qualified Lang.Crucible.Simulator as LCS
 import qualified Lang.Crucible.Types as LCT
@@ -325,6 +325,18 @@ getArchOpts pd = case nub (archOpts pd) of
   [] -> Just (AArch32Opts False)
   _ -> Nothing
 
+-- | PLT stub information for ARM32 relocation types.
+--
+-- When we bump the macaw submodule to bring in the changes from
+-- https://github.com/GaloisInc/macaw/pull/320, we can delete the code below and
+-- import it from macaw-aarch32 instead.
+armPLTStubInfo :: PLT.PLTStubInfo EEP.ARM32_RelocationType
+armPLTStubInfo = PLT.PLTStubInfo
+  { PLT.pltFunSize     = 20
+  , PLT.pltStubSize    = 12
+  , PLT.pltGotStubSize = error "Unexpected .plt.got section in ARM32 binary"
+  }
+
 archLoader :: PA.ArchLoader PEE.LoadError
 archLoader = PA.ArchLoader $ \pd em origHdr patchedHdr ->
   case (em, EEP.headerClass (EEP.header origHdr)) of
@@ -335,9 +347,9 @@ archLoader = PA.ArchLoader $ \pd em origHdr patchedHdr ->
                                   , PA.validArchDedicatedRegisters = hasDedicatedRegister
                                   , PA.validArchArgumentMapping = argumentMapping
                                   , PA.validArchOrigExtraSymbols =
-                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) origHdr
+                                      PLT.pltStubSymbols' armPLTStubInfo MML.defaultLoadOptions origHdr
                                   , PA.validArchPatchedExtraSymbols =
-                                      PLT.pltStubSymbols (Proxy @SA.AArch32) (Proxy @EEP.ARM32_RelocationType) patchedHdr
+                                      PLT.pltStubSymbols' armPLTStubInfo MML.defaultLoadOptions patchedHdr
                                   , PA.validArchStubOverrides = stubOverrides
                                   , PA.validArchInitAbs = case thumbMode opts of
                                       False -> PB.defaultMkInitialAbsState
