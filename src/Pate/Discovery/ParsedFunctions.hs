@@ -169,19 +169,23 @@ addTranslationErrorWrapper ::
   MM.ArchConstraints arch =>
   MAI.DisassembleFn arch ->
   MAI.DisassembleFn arch
-addTranslationErrorWrapper f nonceGen start initSt offset  = do
-    (blk,sz) <- f nonceGen start initSt offset
-    case MAI.blockTerm blk of
-      MAI.TranslateError nextSt err -> do
-        next <- case MM.incSegmentOff start ((fromIntegral (sz + MM.addrSize start))) of
-            Just x -> return x
-            Nothing -> error $ show err ++ "\nUnexpected segment end:" ++ (show start) ++ " " ++ show (sz + MM.addrSize start)
-        let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
-        let nextSt' = nextSt & MM.curIP .~ v
-        (blk',sz') <- addTranslationErrorWrapper f nonceGen next nextSt' (offset - sz)
-        let stmts' = map (incrementInstrStart (fromIntegral (sz + MM.addrSize start))) (MAI.blockStmts blk')
-        return $ (MAI.Block (MAI.blockStmts blk ++ [MM.Comment err] ++ stmts') (MAI.blockTerm blk'), sz + sz')
-      _ -> return (blk,sz)
+addTranslationErrorWrapper f nonceGen start_ initSt_ offset_ = go 5 start_ initSt_ offset_
+  where
+    -- hop over at most 5 instructions trying to skip over a translation error
+    go (0::Int) _start _initSt _offset = f nonceGen start_ initSt_ offset_
+    go maxDepth start initSt offset = do
+      (blk,sz) <- f nonceGen start initSt offset
+      case MAI.blockTerm blk of
+        MAI.TranslateError nextSt err -> do
+          next <- case MM.incSegmentOff start ((fromIntegral (sz + MM.addrSize start))) of
+              Just x -> return x
+              Nothing -> error $ show err ++ "\nUnexpected segment end:" ++ (show start) ++ " " ++ show (sz + MM.addrSize start)
+          let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr next) (MM.segoffAddr next))
+          let nextSt' = nextSt & MM.curIP .~ v
+          (blk',sz') <- go (maxDepth-1) next nextSt' (offset - sz)
+          let stmts' = map (incrementInstrStart (fromIntegral (sz + MM.addrSize start))) (MAI.blockStmts blk')
+          return $ (MAI.Block (MAI.blockStmts blk ++ [MM.Comment err] ++ stmts') (MAI.blockTerm blk'), sz + sz')
+        _ -> return (blk,sz)
 
 overrideDisassembler ::
   MM.ArchConstraints arch =>
