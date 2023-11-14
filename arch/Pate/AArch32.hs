@@ -134,8 +134,8 @@ instance PA.ValidArch SA.AArch32 where
   uninterpretedArchStmt _ = True
 
   archClassifier _ =
-        conditionalCallClassifier 
-    <|> conditionalReturnClassifier 
+        conditionalCallClassifier
+    <|> conditionalReturnClassifier
     <|> MD.branchClassifier
     <|> MD.noreturnCallClassifier
     <|> MD.callClassifier
@@ -144,7 +144,7 @@ instance PA.ValidArch SA.AArch32 where
     <|> MD.pltStubClassifier
     <|> MD.directJumpClassifier
     <|> MD.tailCallClassifier
-  
+
   archClassifierWrapper = wrapClassifierForPstateT
 
   archExtractArchTerms = \term st mret -> Just $ case term of
@@ -300,7 +300,7 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
       ])
   where
     mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
-    
+
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")
     r1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R1")
     r2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R2")
@@ -329,7 +329,7 @@ archLoader :: PA.ArchLoader PEE.LoadError
 archLoader = PA.ArchLoader $ \pd em origHdr patchedHdr ->
   case (em, EEP.headerClass (EEP.header origHdr)) of
     (EEP.EM_ARM, EEP.ELFCLASS32) -> case getArchOpts pd of
-      Just opts -> 
+      Just opts ->
         let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
                                   , PA.validArchFunctionDomain = handleExternalCall
                                   , PA.validArchDedicatedRegisters = hasDedicatedRegister

@@ -287,7 +287,7 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
       , "read"
       , "memcpy" -- FIXME: needs implementation
       , "__floatsidf" -- FIXME: lets us ignore float operations
-      , "__extendsfdf2" -- FIXME: lets us ignore float operations 
+      , "__extendsfdf2" -- FIXME: lets us ignore float operations
       , "__gtdf2" -- FIXME: lets us ignore float operations
       , "ceil" -- FIXME: more floating point hacks
       , "FLEXCAN_DRV_Send" -- FIXME: IO stub
@@ -305,7 +305,7 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
   where
     mkNOPStub nm = (nm, PA.mkNOPStub nm)
     mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
-    
+
     r0 = gpr 0
     r1 = gpr 1
     r2 = gpr 2
