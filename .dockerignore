@@ -2,7 +2,6 @@ dist-newstyle/
 dist/
 Dockerfile*
 cabal.project.local*
-.git/
 .github/
 .gitmodules
 .tags
