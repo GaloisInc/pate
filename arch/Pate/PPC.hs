@@ -50,6 +50,7 @@ import qualified Data.Macaw.PPC as PPC
 import           Data.Macaw.PPC.PPCReg ()
 import           Data.Macaw.PPC.Symbolic ()
 import qualified Data.Macaw.Memory as MM
+import qualified Data.Macaw.Memory.LoadCommon as MML
 import qualified Data.Macaw.Symbolic as MS
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Macaw.Types as MT
@@ -65,6 +66,7 @@ import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PBl
 import qualified Pate.Discovery as PD
+import qualified Pate.Discovery.PLT as PLT
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -315,17 +317,32 @@ instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
     PPC.PPCSyscall -> MCS.MacawBlockEndCall
     _ -> MCS.MacawBlockEndArch
 
+-- | PLT stub information for PPC32 relocation types.
+--
+-- WARNING: These heuristics are based on the layout of a particular demo
+-- binary's @.plt@ section, and as such, these heuristics are unlikely to work
+-- for other binaries. In particular, @gcc@ generates @.plt@ sections without
+-- a function named @.plt@, and it generates stubs that are 4 bytes in size,
+-- so these heuristics won't work at all for ordinary @gcc@-compiled binaries.
+ppc32PLTStubInfo :: PLT.PLTStubInfo EEP.PPC32_RelocationType
+ppc32PLTStubInfo = PLT.PLTStubInfo
+  { PLT.pltFunSize     = 72
+  , PLT.pltStubSize    = 8
+  , PLT.pltGotStubSize = error "Unexpected .plt.got section in PPC32 binary"
+  }
 
 archLoader :: PA.ArchLoader PEE.LoadError
-archLoader = PA.ArchLoader $ \_pd em origHdr _patchedHdr ->
+archLoader = PA.ArchLoader $ \_pd em origHdr patchedHdr ->
   case (em, EEP.headerClass (EEP.header origHdr)) of
-    (EEP.EM_PPC, _) ->
+    (EEP.EM_PPC, EEP.ELFCLASS32) ->
       let vad = PA.ValidArchData { PA.validArchSyscallDomain = handleSystemCall
                                  , PA.validArchFunctionDomain = handleExternalCall
                                  , PA.validArchDedicatedRegisters = ppc32HasDedicatedRegister
                                  , PA.validArchArgumentMapping = argumentMapping
-                                 , PA.validArchOrigExtraSymbols = mempty
-                                 , PA.validArchPatchedExtraSymbols = mempty
+                                 , PA.validArchOrigExtraSymbols =
+                                      PLT.pltStubSymbols' ppc32PLTStubInfo MML.defaultLoadOptions origHdr
+                                 , PA.validArchPatchedExtraSymbols =
+                                      PLT.pltStubSymbols' ppc32PLTStubInfo MML.defaultLoadOptions patchedHdr
                                  , PA.validArchStubOverrides = stubOverrides
                                  , PA.validArchInitAbs = PBl.defaultMkInitialAbsState
                                  , PA.validArchExtractPrecond = \_ _ _ -> Nothing
