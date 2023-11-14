@@ -20,6 +20,8 @@ target4-self: target4.original.exe target4.csv
 		-e ContinueAfterRecoverableFailures \
 		-r AllowEqRescopeFailure \
 		-s entry1 \
+		-s FUN_00000138 \
+		-s FUN_00000f38 \
 		--original-csv-function-hints target4.csv \
 		--patched-csv-function-hints target4.csv \
 		--save-macaw-cfgs target4_CFGs
@@ -34,6 +36,10 @@ target4: target4.original.exe target4.patched.exe
 		-e ContinueAfterRecoverableFailures \
 		-r AllowEqRescopeFailure \
 		-s entry1 \
+		-s FUN_00000138 \
+		-s FUN_00000f38 \
+		-s FUN_00002178 \
+		-s FUN_00000e40 \
 		--original-csv-function-hints target4.csv \
 		--patched-csv-function-hints target4.csv \
 		--save-macaw-cfgs target4_CFGs
@@ -43,7 +49,6 @@ target1.original.exe:
 
 target1-self: target1.original.exe
 	../../pate.sh \
-	  --ignore-segments 1 \
 	  -o target1.original.exe \
 		-p target1.original.exe \
 		-e ContinueAfterRecoverableFailures \
