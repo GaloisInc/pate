@@ -174,6 +174,10 @@ RUN cabal v2-build macaw-ppc macaw-loader-ppc
 RUN cabal v2-build macaw-x86 macaw-loader-x86
 RUN cabal v2-build macaw-aarch32 macaw-loader-aarch32
 
+# demangler
+COPY --from=gitbase /home/src/submodules/demangler /home/src/submodules/demangler
+RUN cabal v2-build demangler
+
 # This step is a catch-all that builds the rest of the project
 # dependencies.
 # Notably these submodules may be stale in the cache, but
