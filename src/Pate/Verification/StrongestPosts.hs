@@ -1901,32 +1901,32 @@ followExit scope bundle currBlock d st (idx, pPair) = do
     Right gr' -> return gr'
 
 
-skippedFnName :: BS.ByteString
-skippedFnName = BSC.pack "__pate_skipped"
+skippedFnSym :: PB.FunctionSymbol
+skippedFnSym = PB.mkFunctionSymbol $ BSC.pack "__pate_skipped"
 
 getFunctionStub ::
   forall sym arch bin.
   PBi.KnownBinary bin =>
   PB.ConcreteBlock arch bin ->
-  EquivM sym arch (Maybe BS.ByteString)
+  EquivM sym arch (Maybe PB.FunctionSymbol)
 getFunctionStub blk = do
   PA.SomeValidArch archData <- asks envValidArch
   PD.findPLTSymbol blk >>= \case
-    Just nm -> return $ Just nm
+    Just nm -> return $ Just $ PB.mkFunctionSymbol nm
     Nothing | Just fnEntry <- PB.asFunctionEntry blk -> do
       let mnm = PB.functionSymbol fnEntry
       case mnm of
         Just nm | Just{} <- PA.lookupStubOverride archData nm -> return $ Just nm
         Just nm | PD.isAbortStub nm -> return $ Just nm
         Just nm | PB.functionIgnored fnEntry -> return $ Just nm
-        Nothing | PB.functionIgnored fnEntry -> return $ Just skippedFnName
+        Nothing | PB.functionIgnored fnEntry -> return $ Just skippedFnSym
         Nothing -> asks (PCfg.cfgIgnoreUnnamedFunctions . envConfig) >>= \case
-          True -> return $ Just skippedFnName
+          True -> return $ Just skippedFnSym
           False -> return Nothing
         _ -> return Nothing
     Nothing -> return Nothing
 
-type StubPair = PPa.PatchPairC (Maybe BS.ByteString)
+type StubPair = PPa.PatchPairC (Maybe PB.FunctionSymbol)
 
 -- | Return the name of a function if we want to replace its call with
 --   stub semantics
@@ -2218,12 +2218,12 @@ handleTerminalFunction node gr = do
 
 getStubOverrideOne ::
   PB.ConcreteBlock arch bin ->
-  Maybe BS.ByteString ->
+  Maybe PB.FunctionSymbol ->
   EquivM sym arch (Maybe (PA.StubOverride arch))
 getStubOverrideOne blk mstubSymbol = do
   PA.SomeValidArch archData <- asks envValidArch
   case mstubSymbol of       
-    Just stubSymbol | stubSymbol == skippedFnName -> do
+    Just stubSymbol | stubSymbol == skippedFnSym -> do
       emitTraceLabel @"fnstub" SkippedFn ""
       return Nothing
     Just stubSymbol | isIgnoredBlock blk -> do
@@ -2233,7 +2233,7 @@ getStubOverrideOne blk mstubSymbol = do
       emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
       return $ Just f
     Nothing | isIgnoredBlock blk -> do
-      emitTraceLabel @"fnstub" IgnoredFn (show skippedFnName)
+      emitTraceLabel @"fnstub" IgnoredFn (show skippedFnSym)
       return $ Nothing
     _ -> do
       emitTraceLabel @"fnstub" DivergedJump (show (PP.pretty blk))

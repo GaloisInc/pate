@@ -12,6 +12,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.Block (
   -- * Block data
@@ -44,9 +45,15 @@ module Pate.Block (
   , AbsStateOverride
   , MkInitialAbsState(..)
   , defaultMkInitialAbsState
+  , mkFunctionSymbol
+  , FunctionSymbol
+  , fnSymBytes
+  , fnSymBase
   ) where
 
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
@@ -54,6 +61,8 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Macaw.AbsDomain.AbsState as DMAA
 
+import qualified Demangler as Demangler
+import qualified Text.Sayable as Say
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 
@@ -62,6 +71,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Binary as PB
 import           Pate.TraceTree
 import qualified Data.Aeson as JSON
+import Data.List.NonEmpty (NonEmpty(..))
 
 -- | The way this block is entered dictates the initial equivalence relation we can assume
 data BlockEntryKind arch =
@@ -172,7 +182,7 @@ instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (ConcreteBlock arch 
   pretty cb =
     PP.hsep $ [      
       case functionSymbol (blockFunctionEntry cb) of
-        Just s -> PP.viaShow s <+> "(" <> PP.viaShow (concreteAddress cb) <> ")"
+        Just s -> PP.viaShow (fnSymBase s) <+> "(" <> PP.viaShow (concreteAddress cb) <> ")"
         Nothing -> PP.viaShow (concreteAddress cb)
       ]
 
@@ -252,10 +262,41 @@ instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(s
   prettyNode () (Some blkt) = ppBlockTarget blkt
   nodeTags = mkTags @'(sym,arch) @"blocktarget1" [Simplified,Summary, JSONTrace]
 
+data FunctionSymbol = FunctionSymbol 
+  { fnSymBytes :: BSC.ByteString
+  -- ^ raw representation of the symbol
+  , fnSymPlain :: String
+  -- ^ readable representation of the symbol
+  , fnSymBase :: String
+  -- ^ base symbol name. This is what is matched against
+  -- when looking up stub definitions
+  }
+
+instance Eq FunctionSymbol where
+  (FunctionSymbol a _ _) == (FunctionSymbol b _ _) = a == b
+
+-- FIXME: cases where the demangler fails
+demanglerOverrides :: BSC.ByteString -> Maybe (String,String)
+demanglerOverrides = \case
+  "_ZN5boost9function4IvRKNS_10shared_ptrIN3ros10ConnectionEEERKNS_12shared_arrayIhEEjbEC2INS_3_bi6bind_tIvNS_4_mfi3mf4IvNS2_22TransportPublisherLinkES6_SA_jbEENSD_5list5INSD_5valueIPSH_EENS_3argILi1EEENSN_ILi2EEENSN_ILi3EEENSN_ILi4EEEEEEEEET_NS_10enable_if_IXntsrNS_11is_integralISU_EE5valueEiE4typeE"
+    -- FIXME: it's unclear if this is just "bind" or something more interesting
+    -> Just ("function4","boost::function4<void, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>::function4<boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > > >(boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > >, boost::enable_if_<!boost::is_integral<boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > > >::value, int>::type)")
+  _ -> Nothing
+
+mkFunctionSymbol :: BSC.ByteString -> FunctionSymbol
+mkFunctionSymbol bytes = 
+  let result = Demangler.demangle1 str
+  in case Demangler.functionName result of
+    _ | Just (basenm, fullnm) <- demanglerOverrides bytes -> FunctionSymbol bytes fullnm basenm
+    Just (base_name :| _) -> FunctionSymbol bytes (Say.sez_ @"normal" result) (Text.unpack base_name)
+    Nothing -> FunctionSymbol bytes (Text.unpack str) (Text.unpack str)
+  where
+    str :: Text.Text
+    str = Text.decodeUtf8 bytes
 
 data FunctionEntry arch (bin :: PB.WhichBinary) =
   FunctionEntry { functionSegAddr :: MM.ArchSegmentOff arch
-                , functionSymbol  :: Maybe BSC.ByteString
+                , functionSymbol  :: Maybe FunctionSymbol
                 , functionBinRepr :: PB.WhichBinaryRepr bin
                 , functionIgnored :: Bool
                 -- ^ does our toplevel configuration tell us to ignore this function?
@@ -263,22 +304,45 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 -- ^ we might know the bounds of this function
                 }
 
+ppFnEntry :: (FunctionSymbol -> PP.Doc a) -> FunctionEntry arch bin -> PP.Doc a
+ppFnEntry ppsym fe = case functionSymbol fe of
+  Just s -> ppsym s <+> "(" <> PP.viaShow (functionAddress fe) <> ")"
+  Nothing -> PP.viaShow (functionAddress fe)
+
+ppFullFnSymbol :: FunctionSymbol -> PP.Doc a
+ppFullFnSymbol fs = PP.viaShow $ fnSymPlain fs
+
+ppBaseFnSymbol :: FunctionSymbol -> PP.Doc a
+ppBaseFnSymbol fs = PP.viaShow $ fnSymBase fs
+
+instance Show FunctionSymbol where
+  show = fnSymPlain
+
 instance forall arch bin. JSON.ToJSON (FunctionEntry arch bin) where
   toJSON cb = JSON.object 
     [ "address" JSON..= functionSegAddr cb
-    , "symbol" JSON..= functionSymbol cb
+    , "symbol" JSON..= fmap fnSymBase (functionSymbol cb)
+    , "full_symbol" JSON..= fmap fnSymPlain (functionSymbol cb)
     ]
 
 data FunCallKind = NormalFunCall | TailFunCall
   deriving (Eq, Ord, Show)
 
+ppFnEntryCall :: 
+  (forall bin. FunctionEntry arch bin -> PP.Doc a) -> 
+  FunCallKind ->
+  PPa.PatchPair (FunctionEntry arch) ->
+  PP.Doc a
+ppFnEntryCall ppfe k funs = case k of
+  NormalFunCall -> PPa.ppPatchPair ppfe funs
+  TailFunCall -> "Tail Call:" PP.<+> PPa.ppPatchPair ppfe funs
+
 instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "funcall" where
   type TraceNodeType '(sym,arch) "funcall" = PPa.PatchPair (FunctionEntry arch)
   type TraceNodeLabel "funcall" = FunCallKind
-  prettyNode k funs = case k of
-    NormalFunCall -> PP.pretty funs
-    TailFunCall -> "Tail Call:" PP.<+> PP.pretty funs
-  nodeTags = mkTags @'(sym,arch) @"funcall" [Summary, Simplified]
+  prettyNode k funs = ppFnEntryCall (ppFnEntry ppFullFnSymbol) k funs
+  nodeTags = 
+    [ (tag, ppFnEntryCall (ppFnEntry ppBaseFnSymbol)) | tag <- [Summary, Simplified] ]
 
 equivFuns :: FunctionEntry arch PB.Original -> FunctionEntry arch PB.Patched -> Bool
 equivFuns fn1 fn2 =
@@ -293,7 +357,7 @@ ppFunctionEntry fe = show (functionAddress fe)
 
 instance (MM.MemWidth (MM.ArchAddrWidth arch)) => PP.Pretty (FunctionEntry arch bin) where
   pretty fe = case functionSymbol fe of
-    Just s -> PP.viaShow s <+> "(" <> PP.viaShow (functionAddress fe) <> ")"
+    Just s -> PP.viaShow (fnSymBase s) <+> "(" <> PP.viaShow (functionAddress fe) <> ")"
     Nothing -> PP.viaShow (functionAddress fe)
 
 instance MM.MemWidth (MM.ArchAddrWidth arch) => Show (FunctionEntry arch bin) where

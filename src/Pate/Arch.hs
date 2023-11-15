@@ -260,12 +260,12 @@ withStubOverride sym wsolver (StubOverride ov) f = do
 
 
 data ArchStubOverrides arch =
-  ArchStubOverrides (StubOverride arch) (Map.Map BS.ByteString (StubOverride arch))
+  ArchStubOverrides (StubOverride arch) (PB.FunctionSymbol -> Maybe (StubOverride arch))
 
 lookupStubOverride ::
-  ValidArchData arch -> BS.ByteString -> Maybe (StubOverride arch)
+  ValidArchData arch -> PB.FunctionSymbol -> Maybe (StubOverride arch)
 lookupStubOverride va nm = let ArchStubOverrides _ ov = validArchStubOverrides va in
-  Map.lookup nm ov
+  ov nm
 
 defaultStubOverride ::
   ValidArchData arch -> StubOverride arch

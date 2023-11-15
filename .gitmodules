@@ -55,3 +55,6 @@
 [submodule "tools/pate/static/cytoscape.js-dagre"]
 	path = tools/pate/static/cytoscape.js-dagre
 	url = git@github.com:cytoscape/cytoscape.js-dagre.git
+[submodule "submodules/demangler"]
+	path = submodules/demangler
+	url = git@github.com:GaloisInc/demangler.git

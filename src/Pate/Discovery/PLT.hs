@@ -561,7 +561,8 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
 --   macaw value represents an address that jumps to a PLT stub
 pltStubClassifier ::
   forall arch ids.
-  (Value arch ids (BVType (ArchAddrWidth arch)) -> Maybe (ArchSegmentOff arch, BSC.ByteString)) ->
+  -- (function address, stub name, true if stub can return)
+  (Value arch ids (BVType (ArchAddrWidth arch)) -> Maybe (ArchSegmentOff arch, BSC.ByteString, Bool)) -> 
   Info.BlockClassifier arch ids
 pltStubClassifier f = classifierName "Extra PLT Stub" $ do
   stmts <- CMR.asks Info.classifierStmts
@@ -571,10 +572,11 @@ pltStubClassifier f = classifierName "Extra PLT Stub" $ do
     bcc <- CMR.ask
     startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
     blkSz <- CMR.asks Info.classifierBlockSize
-    Just ret <- return $ MM.incSegmentOff startAddr (fromIntegral blkSz)
+    
     v <- pure $ Info.classifierFinalRegState bcc ^. boundValue ip_reg
     case f v of
-      Just (addr,_) -> do
+      Just (addr,_, True) -> do
+        Just ret <- return $ MM.incSegmentOff startAddr (fromIntegral blkSz)
         return Parsed.ParsedContents { Parsed.parsedNonterm = F.toList stmts
                                     , Parsed.parsedTerm = Parsed.ParsedCall finalRegs (Just ret)
                                     , Parsed.intraJumpTargets =
@@ -584,10 +586,15 @@ pltStubClassifier f = classifierName "Extra PLT Stub" $ do
                                          )]
                                     , Parsed.newFunctionAddrs = [addr]
                                     , Parsed.writtenCodeAddrs = Info.classifierWrittenAddrs bcc
-                                    }
+                                    } 
+      Just (addr, _, False) -> do
+        return Parsed.ParsedContents { Parsed.parsedNonterm = F.toList stmts
+                                    , Parsed.parsedTerm = Parsed.ParsedCall finalRegs Nothing
+                                    , Parsed.intraJumpTargets = []
+                                    , Parsed.newFunctionAddrs = [addr]
+                                    , Parsed.writtenCodeAddrs = Info.classifierWrittenAddrs bcc
+                                    } 
       Nothing -> fail "Not a PLT stub"
-
-
 
 {-
 

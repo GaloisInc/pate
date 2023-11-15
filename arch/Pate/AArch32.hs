@@ -239,66 +239,72 @@ argumentMapping =
                       }
 
 stubOverrides :: PA.ArchStubOverrides SA.AArch32
-stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 ) $
-  Map.fromList $ map (\(nm,v) -> (BSC.pack nm, v)) $
-    [ ("malloc", PA.mkMallocOverride r0 r0)
-    -- FIXME: arguments are interpreted differently for calloc
-    , ("calloc", PA.mkMallocOverride r0 r0)
-    -- FIXME: arguments are interpreted differently for reallolc
-    , ("realloc", PA.mkMallocOverride r0 r0)
-    , ("clock", PA.mkClockOverride r0)
-    , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
-    -- FIXME: fixup arguments for fwrite (len = size * nmemb)
-    , ("fwrite", PA.mkWriteOverride "fwrite" r3 r0 r1 r0)
-    , ("printf", PA.mkObservableOverride "printf" r0 r1)
-    , ("puts", PA.mkObservableOverride "puts" r0 r0)
-    -- fixme: double check this
-    , ("ceilf", PA.mkDefaultStubOverrideArg "ceilf" [Some v0] r0)
-    -- FIXME: check abi for args
-    , ("fread", PA.mkDefaultStubOverrideArg "fread" [Some r0, Some r1, Some r2, Some r4] r0)
-    -- FIXME: default stubs below here
-    ] ++
-    (map mkDefault $
-      [ "memcpy" -- FIXME: needs implementation
-      , "memset" -- FIXME: needs implementation
-      , "gettimeofday" -- FIXME: needs implementation
-      , "getopt"
-      , "fprintf"
-      , "open"
-      , "atoi"
-      , "openat"
-      , "__errno_location"
-      , "ioctl"
-      , "fopen"
-      , "ERR_print_errors_fp"
-      , "RAND_bytes"
-      , "close"
-      , "fclose"
-      , "lseek"
-      , "strcpy"
-      , "sleep"
-      , "socket"
-      , "setsockopt"
-      , "bind"
-      , "select"
-      , "free"
-      , "sigfillset"
-      , "sigaction"
-      , "setitimer"
-      , "read"
-      -- PLT Stubs
-      , "EVP_CIPHER_CTX_new"
-      , "EVP_DecryptInit_ex"
-      , "EVP_DecryptUpdate"
-      , "EVP_DecryptFinal_ex"
-      , "EVP_EncryptInit_ex"
-      , "EVP_EncryptUpdate"
-      , "EVP_EncryptFinal_ex"
-      , "EVP_CIPHER_CTX_free"
-      , "EVP_aes_256_cbc"
-      , "BIO_dump_fp"
-      ])
+stubOverrides = 
+  PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 ) $ \fs ->
+    case PB.fnSymBase fs of
+      -- FIXME: multiple variants of this constructor
+      "basic_string" -> Just $ PA.mkDefaultStubOverride "basic_string" r0
+      "print" -> Just $ PA.mkObservableOverride "print" r0 r1
+      _ -> lookup (PB.fnSymBase fs) override_list
   where
+    override_list =
+      [ ("malloc", PA.mkMallocOverride r0 r0)
+      -- FIXME: arguments are interpreted differently for calloc
+      , ("calloc", PA.mkMallocOverride r0 r0)
+      -- FIXME: arguments are interpreted differently for reallolc
+      , ("realloc", PA.mkMallocOverride r0 r0)
+      , ("clock", PA.mkClockOverride r0)
+      , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
+      -- FIXME: fixup arguments for fwrite (len = size * nmemb)
+      , ("fwrite", PA.mkWriteOverride "fwrite" r3 r0 r1 r0)
+      , ("printf", PA.mkObservableOverride "printf" r0 r1)
+      , ("puts", PA.mkObservableOverride "puts" r0 r0)
+      -- fixme: double check this
+      , ("ceilf", PA.mkDefaultStubOverrideArg "ceilf" [Some v0] r0)
+      -- FIXME: check abi for args
+      , ("fread", PA.mkDefaultStubOverrideArg "fread" [Some r0, Some r1, Some r2, Some r4] r0)
+      -- FIXME: default stubs below here
+      ] ++
+      (map mkDefault $
+        [ "memcpy" -- FIXME: needs implementation
+        , "memset" -- FIXME: needs implementation
+        , "gettimeofday" -- FIXME: needs implementation
+        , "getopt"
+        , "fprintf"
+        , "open"
+        , "atoi"
+        , "openat"
+        , "__errno_location"
+        , "ioctl"
+        , "fopen"
+        , "ERR_print_errors_fp"
+        , "RAND_bytes"
+        , "close"
+        , "fclose"
+        , "lseek"
+        , "strcpy"
+        , "sleep"
+        , "socket"
+        , "setsockopt"
+        , "bind"
+        , "select"
+        , "free"
+        , "sigfillset"
+        , "sigaction"
+        , "setitimer"
+        , "read"
+        -- PLT Stubs
+        , "EVP_CIPHER_CTX_new"
+        , "EVP_DecryptInit_ex"
+        , "EVP_DecryptUpdate"
+        , "EVP_DecryptFinal_ex"
+        , "EVP_EncryptInit_ex"
+        , "EVP_EncryptUpdate"
+        , "EVP_EncryptFinal_ex"
+        , "EVP_CIPHER_CTX_free"
+        , "EVP_aes_256_cbc"
+        , "BIO_dump_fp"
+        ])
     mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
 
     r0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R0")

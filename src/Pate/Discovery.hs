@@ -49,7 +49,7 @@ import           Data.Functor.Const
 import           Data.Int
 import qualified Data.List.NonEmpty as DLN
 import qualified Data.Map.Strict as Map
-import           Data.Maybe ( catMaybes, maybeToList, fromJust, fromMaybe )
+import           Data.Maybe ( catMaybes, maybeToList, fromJust, fromMaybe, isJust )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.NatRepr as PN
@@ -115,6 +115,7 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Macaw.Architecture.Info as MAI
 import Control.Applicative
 import qualified Data.Vector as V
+import qualified Data.Macaw.Discovery.ParsedContents as Parsed
 
 --------------------------------------------------------
 -- Block pair matching
@@ -701,14 +702,14 @@ isPLTFunction fe = case PB.functionSymbol fe of
     let
       extraMapPair = PPa.PatchPairC (PA.validArchOrigExtraSymbols archData) (PA.validArchPatchedExtraSymbols archData)
     extraMap <- PPa.getC bin extraMapPair
-    return $ Map.member sym extraMap
+    return $ Map.member (PB.fnSymBytes sym) extraMap
 
 -- FIXME: defined by the architecture?
 abortStubs :: Set.Set (BS.ByteString)
-abortStubs = Set.fromList $ map BSC.pack ["abort","err","perror","exit"]
+abortStubs = Set.fromList $ map BSC.pack ["abort","err","perror","exit", "__stack_chk_fail"]
 
-isAbortStub :: BS.ByteString -> Bool
-isAbortStub nm = Set.member nm abortStubs
+isAbortStub :: PB.FunctionSymbol -> Bool
+isAbortStub fs = Set.member (PB.fnSymBytes fs) abortStubs
 
 pltStubClassifier ::
   forall bin arch.
@@ -753,13 +754,18 @@ callTargets from mnext_block_addr next_ips mret = fnTrace "callTargets" $ do
                                    , PB.functionIgnored = False
                                    , PB.functionEnd = Nothing
                                    }
-         fe' <- liftIO $ PDP.resolveFunctionEntry fe pfm
-         isPLT <- isPLTFunction fe'
+         msym <- findPLTSymbol (PB.functionEntryToConcreteBlock fe)
+         fe' <- case msym of
+           Just pltsym -> return $ fe { PB.functionSymbol = Just $ PB.mkFunctionSymbol pltsym}
+           Nothing -> liftIO $ PDP.resolveFunctionEntry fe pfm
+         
+         let isPLT = isJust msym
          let isAbortPLT = fromMaybe False $ fmap isAbortStub (PB.functionSymbol fe')
          let pb = PB.functionEntryToConcreteBlock fe'
-
          
          ret_blk <- case mret of
+           -- abort PLTs don't have return locations
+           _ | isAbortPLT -> return Nothing
            Just ret -> return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction ret
            Nothing | isPLT, not isAbortPLT, Just next_block_addr <- mnext_block_addr ->
              return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction next_block_addr
@@ -899,7 +905,7 @@ runDiscovery aData mCFGDir repr extraSyms elf hints pd = do
         fnDesc <- lookup abortFnName (PH.functionEntries hints)
         abortFnAddr <- PM.resolveAbsoluteAddress mem (MM.memWord (PH.functionAddress fnDesc))
         return PB.FunctionEntry { PB.functionSegAddr = abortFnAddr
-                                , PB.functionSymbol = Just (TE.encodeUtf8 abortFnName)
+                                , PB.functionSymbol = Just (PB.mkFunctionSymbol $ TE.encodeUtf8 abortFnName)
                                 , PB.functionBinRepr = repr
                                 , PB.functionIgnored = False
                                 , PB.functionEnd = Nothing

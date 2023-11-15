@@ -325,7 +325,7 @@ funInfoToFunEntry ::
 funInfoToFunEntry binRepr dfi pfm ignoredAddrs =
   PB.FunctionEntry
   { PB.functionSegAddr = MD.discoveredFunAddr dfi
-  , PB.functionSymbol  = MD.discoveredFunSymbol dfi
+  , PB.functionSymbol  = fmap PB.mkFunctionSymbol (MD.discoveredFunSymbol dfi)
   , PB.functionBinRepr = binRepr
   , PB.functionIgnored = Set.member (MD.discoveredFunAddr dfi) ignoredAddrs
   , PB.functionEnd = Map.lookup (MD.discoveredFunAddr dfi) (pfmEndMap pfm)
@@ -543,7 +543,7 @@ resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _ _ _) = 
   let syms = MD.symbolNames (discoveryState st)
   ignoredAddresses <- getIgnoredFns (PB.functionBinRepr fe) pfm
   case Map.lookup (PB.functionSegAddr fe) syms of
-    Just nm -> return $ fe { PB.functionSymbol = Just nm
+    Just nm -> return $ fe { PB.functionSymbol = Just (PB.mkFunctionSymbol nm)
                            , PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses 
                            , PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap
                            }
@@ -585,7 +585,7 @@ findFunctionByName nm pfm = do
   let syms = Map.toList $ MD.symbolNames (discoveryState st)
   case F.find (\(_addr,nm_) -> BSC.pack nm == nm_) syms of
     Just (addr,nm_) -> do
-      let fe = PB.FunctionEntry addr (Just nm_) W4.knownRepr False Nothing
+      let fe = PB.FunctionEntry addr (Just (PB.mkFunctionSymbol nm_)) W4.knownRepr False Nothing
       Just <$> resolveFunctionEntry fe pfm
     Nothing -> return Nothing
 
