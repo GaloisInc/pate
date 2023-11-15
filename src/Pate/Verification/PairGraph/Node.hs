@@ -127,7 +127,11 @@ rootReturn :: PB.FunPair arch -> NodeReturn arch
 rootReturn pPair = NodeReturn (CallingContext [] Nothing) pPair
 
 addContext :: PB.BlockPair arch -> NodeEntry arch -> NodeEntry arch
-addContext newCtx (NodeEntry (CallingContext ctx d) blks) = NodeEntry (CallingContext (newCtx:ctx) d) blks
+addContext newCtx ne@(NodeEntry (CallingContext ctx d) blks) = 
+  case elem newCtx ctx of
+    -- avoid recursive loops
+    True -> ne
+    False -> NodeEntry (CallingContext (newCtx:ctx) d) blks
 
 mkNodeEntry :: NodeEntry arch -> PB.BlockPair arch -> NodeEntry arch
 mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
