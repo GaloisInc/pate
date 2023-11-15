@@ -727,7 +727,7 @@ pltStubClassifier bin archData mem syms = do
         Just nm <- return $ Map.lookup segOff syms
         extraMap <- maybeToList (PPa.getC bin extraMapPair)
         True <- return $ Map.member nm extraMap
-        return $ (segOff, nm)
+        return $ (segOff, nm, not (Set.member nm abortStubs))
   PLT.pltStubClassifier (\v -> case mkStub v of {(a:_) -> Just a; _ -> Nothing})
 
 
