@@ -29,6 +29,7 @@ module Pate.Verification.Widening
   , addRefinementChoice
   , traceEqCond
   , InteractiveBundle(..)
+  , getCounterExample
   ) where
 
 import           GHC.Stack
@@ -95,6 +96,8 @@ import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
 import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks )
+import qualified Pate.Verification.StrongestPosts.CounterExample as CE
+
 import qualified Pate.AssumptionSet as PAs
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
@@ -108,6 +111,8 @@ import qualified Pate.Arch as PA
 import Data.Parameterized (Pair(..))
 import Data.Kind (Type)
 import qualified Data.Aeson as JSON
+import qualified Prettyprinter as PP
+import qualified What4.Expr.GroundEval as W4
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -467,6 +472,32 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
         return $ queueAncestors (priority PriorityUserRequest) nd $ dropDomain nd (priority PriorityDomainRefresh) gr4
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
+
+
+-- | Compute a counter-example for a given predicate
+getCounterExample ::
+  SimBundle sym arch v ->
+  W4.Pred sym -> 
+  EquivM sym arch (CE.ObservableCheckResult sym arch)
+getCounterExample bundle p = withSym $ \sym -> do
+  evs <- PPa.forBinsC $ \bin -> do
+    out <- PPa.get bin (PS.simOut bundle)
+    let mem = PS.simOutMem out
+    liftIO (MT.observableEvents sym (\_ -> return $ W4.truePred sym) mem)
+  not_p <- liftIO $ W4.notPred sym p
+  goalSat "getCounterExample" not_p $ \res -> case res of
+    Unsat _ -> return CE.ObservableCheckEq
+    Unknown -> return (CE.ObservableCheckError "UNKNOWN result when checking observable sequences")
+    Sat evalFn' -> CE.ObservableCheckCounterexample <$> do
+      -- FIXME: counter-example should use patchpair
+      let join_ce (r,s) (r',s') =
+            return $ ObservableCounterexample (CE.RegsCounterExample r r') s s'
+      PPa.joinPatchPred join_ce $ \bin -> do
+        in_ <- PPa.get bin (PS.simIn bundle)
+        sym_seq <- PPa.getC bin evs
+        ground_regs <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simInRegs in_)
+        ground_seq <- withGroundEvalFn evalFn' $ \evalFn -> reverse <$> CE.groundObservableSequence sym evalFn sym_seq
+        return (ground_regs, ground_seq)
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->
@@ -1304,14 +1335,23 @@ widenPostcondition ::
   AbstractDomain sym arch v {- ^ predomain -} ->
   AbstractDomain sym arch v {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch v)
-widenPostcondition scope bundle preD postD0 =
-  withTracing @"debug" "widenPostcondition" $ withSym $ \sym -> do
+widenPostcondition scope bundle preD postD0 = do
+  r <- withTracing @"debug" "widenPostcondition" $ withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
     subTree @"domain" "Widening Steps" $
       widenLoop sym localWideningGas eqCtx postD0 Nothing
-
-
+  case r of
+    -- since widening was required, we show why it was needed
+    Widen _ _ _postD1 -> withSym $ \sym -> do
+      eqCtx <- equivalenceContext
+      eqPost <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD0)
+      eqPost_pred <- liftIO $ postCondPredicate sym eqPost
+      withTracing @"message" "Equivalence Counter-example" $ do
+        res <- getCounterExample bundle eqPost_pred
+        emitTrace @"observable_result" res
+        return r
+    _ -> return r
  where
    widenOnce ::
      WidenKind ->

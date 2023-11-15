@@ -100,6 +100,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
+import qualified Pate.Verification.StrongestPosts.CounterExample as CE
 import qualified Pate.Register.Traversal as PRt
 import           Pate.Discovery.PLT (extraJumpClassifier, ExtraJumps(..), ExtraJumpTarget(..))
 
@@ -734,7 +735,7 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
   subTree @"node" "Observable Counter-examples" $ do
     forM_ (Map.toList (pairGraphObservableReports pg)) $ \(nd,report) -> 
       subTrace (GraphNode nd) $ 
-        emitTrace @"observable_result" (ObservableCheckCounterexample report)
+        emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
   subTree @"node" "Assumed Equivalence Conditions" $ do
     forM_ (getAllNodes pg) $ \nd -> do
        case getCondition pg nd ConditionEquiv of
@@ -1295,39 +1296,6 @@ withPredomain scope bundle preD f = withSym $ \sym -> do
   withAssumptionSet precond $ f
 
 
-
-data ObservableCheckResult sym arch
-  = ObservableCheckEq
-  | ObservableCheckCounterexample
-    (ObservableCounterexample sym arch)
-  | ObservableCheckError String
-
-instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "observable_result" where
-  type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym arch
-  prettyNode () = \case
-    ObservableCheckEq -> "Observably Equivalent"
-    ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq pSeq) -> PP.vsep $ 
-       ["Observable Inequivalence Detected:"
-       -- FIXME: this is useful but needs better presentation
-       , "== Diverging Registers =="
-       , prettyRegsCE regsCE
-       , "== Original sequence =="
-       ] ++ (map MT.prettyMemEvent oSeq) ++
-       [ "== Patched sequence ==" ]
-       ++ (map MT.prettyMemEvent pSeq)
-
-    ObservableCheckError msg -> PP.vsep $
-      [ "Error during observability check"
-      , PP.pretty msg
-      ]
-  nodeTags =
-    [ (tag, \() res -> case res of
-                  ObservableCheckEq -> "Observably Equivalent"
-                  ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
-                  ObservableCheckError{} -> "Error during observability check")
-      | tag <- [Simplified, Summary, JSONTrace]
-    ]
-
 checkObservables :: forall sym arch v.
   NodeEntry arch ->
   SimBundle sym arch v ->
@@ -1339,14 +1307,14 @@ checkObservables bPair bundle preD gr =
     do res <- doCheckObservables bundle preD
        withTracing @"observable_result" res $
          case res of
-           ObservableCheckEq ->
+           CE.ObservableCheckEq ->
              do traceBundle bundle "Observables agree"
                 return (Nothing, gr)
-           ObservableCheckError msg ->
+           CE.ObservableCheckError msg ->
              do let msg' = ("Error checking observables: " ++ msg)
                 err <- emitError' (PEE.ObservabilityError msg')
                 return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
-           ObservableCheckCounterexample cex@(ObservableCounterexample _ oSeq pSeq) -> do
+           CE.ObservableCheckCounterexample cex@(ObservableCounterexample _ oSeq pSeq) -> do
              do traceBundle bundle ("Obserables disagree!")
                 traceBundle bundle ("== Original sequence ==")
                 traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
@@ -1362,12 +1330,12 @@ instance (forall tp. PEM.ExprMappable sym (f tp)) =>
 doCheckObservables :: forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
-  EquivM sym arch (ObservableCheckResult sym arch)
+  EquivM sym arch (CE.ObservableCheckResult sym arch)
 doCheckObservables bundle preD = case PS.simOut bundle of
   -- for singleton cases, we consider all events to be trivially
   -- observably equivalent, as we are collecting observable events
   -- for future analysis in the domain
-  PPa.PatchPairSingle _ _ -> return ObservableCheckEq
+  PPa.PatchPairSingle _ _ -> return CE.ObservableCheckEq
   PPa.PatchPair outO outP -> withSym $ \sym -> do
 
        oSeq <- getObservableEvents outO
@@ -1394,21 +1362,21 @@ doCheckObservables bundle preD = case PS.simOut bundle of
 -}
        not_goal <- liftIO $ W4.notPred sym eqSeq
        goalSat "checkObservableSequences" not_goal $ \res -> case res of
-         Unsat _ -> return ObservableCheckEq
-         Unknown -> return (ObservableCheckError "UNKNOWN result when checking observable sequences")
+         Unsat _ -> return CE.ObservableCheckEq
+         Unknown -> return (CE.ObservableCheckError "UNKNOWN result when checking observable sequences")
          Sat evalFn' -> do
           regsO <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outO)
           regsP <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outP)
           withGroundEvalFn evalFn' $ \evalFn -> do
            -- NB, observable sequences are stored in reverse order, so we reverse them here to
            -- display the counterexample in a more natural program order
-           oSeq'' <- reverse <$> groundObservableSequence sym evalFn oSeq' -- (MT.memSeq oMem)
-           pSeq'' <- reverse <$> groundObservableSequence sym evalFn pSeq' -- (MT.memSeq pMem)
+           oSeq'' <- reverse <$> CE.groundObservableSequence sym evalFn oSeq' -- (MT.memSeq oMem)
+           pSeq'' <- reverse <$> CE.groundObservableSequence sym evalFn pSeq' -- (MT.memSeq pMem)
 
 
            let regsCE = RegsCounterExample regsO regsP
 
-           return (ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq'' pSeq''))
+           return (CE.ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq'' pSeq''))
 
 -- | Right now, this requires the pointer and written value to be exactly equal.
 --   At some point, we may want to relax this in some way, but it's not immediately
@@ -1708,7 +1676,7 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
         Unsat _ -> return Nothing
         Unknown -> return Nothing
         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn ->
-          fmap fst <$> groundMuxTree sym evalFn (MT.memCurrentInstr mem)
+          fmap fst <$> CE.groundMuxTree sym evalFn (MT.memCurrentInstr mem)
       case result of
         Just instr_addr -> do
           instr_sym <- PD.thisInstr (PS.simOutState simOut_)
@@ -1776,7 +1744,7 @@ doCheckTotality bundle _preD exits =
                 let mem = PS.simMem (PS.simOutState out)
                 blockEndCase <- lift $ groundBlockEndCase sym (Proxy @arch) evalFn blockEnd
                 iPV <- lift $ groundIPValue sym evalFn iPReg
-                instr <- lift $ groundMuxTree sym evalFn (MT.memCurrentInstr mem)
+                instr <- lift $ CE.groundMuxTree sym evalFn (MT.memCurrentInstr mem)
                 case iPV of
                   Just val -> return $ (Just (val, blockEndCase, instr))
                   Nothing -> return $ Nothing
@@ -1811,61 +1779,8 @@ groundBlockEndCase ::
   IO MCS.MacawBlockEndCase
 groundBlockEndCase sym prx evalFn v =
   do mt <- MCS.blockEndCase prx sym v
-     groundMuxTree sym evalFn mt
+     CE.groundMuxTree sym evalFn mt
 
-groundObservableSequence ::
-  (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
-  sym ->
-  W4.GroundEvalFn t ->
-  MT.MemTraceSeq sym ptrW ->
-  IO [ MT.MemEvent sym ptrW ]
-groundObservableSequence sym evalFn =
-  concreteizeSymSequence (\p -> W4.groundEval evalFn p) (groundMemEvent sym evalFn)
-
-groundMemEvent ::
-  (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
-  sym ->
-  W4.GroundEvalFn t ->
-  MT.MemEvent sym ptrW ->
-  IO (MT.MemEvent sym ptrW)
-groundMemEvent sym evalFn (MT.MemOpEvent op) =
-  MT.MemOpEvent <$> groundMemOp sym evalFn op
-groundMemEvent sym evalFn (MT.SyscallEvent i x) =
-  do i' <- MT.toMuxTree sym <$> groundMuxTree sym evalFn i
-     x' <- W4.bvLit sym (W4.bvWidth x) =<< W4.groundEval evalFn x
-     return (MT.SyscallEvent i' x')
-groundMemEvent sym evalFn (MT.ExternalCallEvent nm xs) =
-  do xs' <- TFC.traverseFC (\(MT.SymBV' x) ->
-                              case W4.exprType x of
-                                W4.BaseBVRepr w ->
-                                  MT.SymBV' <$> (W4.groundEval evalFn x >>= W4.bvLit sym w)) xs
-     return (MT.ExternalCallEvent nm xs')
-
-groundMemOp ::
-  (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
-  sym ->
-  W4.GroundEvalFn t ->
-  MT.MemOp sym ptrW ->
-  IO (MT.MemOp sym ptrW)
-groundMemOp sym evalFn (MT.MemOp ptr dir cond w val end) =
-  do LeqProof <- return (leqMulPos (knownNat @8) w)
-     ptr' <- CLM.concPtr sym (\x -> W4.groundEval evalFn x) ptr
-     b <- W4.groundEval evalFn (MT.getCond sym cond)
-     let cond' = if b then MT.Unconditional else MT.Conditional (W4.falsePred sym)
-     val' <- CLM.concPtr sym (\x -> W4.groundEval evalFn x) val
-     return (MT.MemOp ptr' dir cond' w val' end)
-
-groundMuxTree ::
-  (sym ~ W4.ExprBuilder t st fs) =>
-  sym ->
-  W4.GroundEvalFn t ->
-  MT.MuxTree sym a ->
-  IO a
-groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
-  where
-    ite p x y =
-      do b <- W4.groundEval evalFn p
-         if b then return x else return y
 
 data BranchState sym arch =
   BranchState 
