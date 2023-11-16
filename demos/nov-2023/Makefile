@@ -61,6 +61,28 @@ target1-self: target1.original.exe
 		-s main \
 		--save-macaw-cfgs $(DEMOS)/target1_CFGs
 
+target1: target1.original.exe target1.patched.exe
+	$(PATE) \
+	  -o $(DEMOS)/target1.original.exe \
+		-p $(DEMOS)/target1.patched.exe \
+		-e ContinueAfterRecoverableFailures \
+		-r AllowEqRescopeFailure \
+		-s main \
+		--save-macaw-cfgs $(DEMOS)/target1_CFGs
+
+target1.original.so:
+	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/cf/rr.so" $@
+
+target1-so-self: target1.original.so
+	$(PATE) \
+	  -o $(DEMOS)/target1.original.so \
+		-p $(DEMOS)/target1.original.so \
+		-e ContinueAfterRecoverableFailures \
+		-r AllowEqRescopeFailure \
+		-s RR_Init \
+		-s RR_ReadTlmInput \
+		--save-macaw-cfgs $(DEMOS)/target1_CFGs
+
 target3.original.so:
 	cp "$(HACKATHON_NOV_2023)/Target 3 - MRZR Vehicle Interface Controller (BBB)/bin/libroscpp.so" $@
 
