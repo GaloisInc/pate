@@ -355,14 +355,18 @@ mkWriteOverride ::
 mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   -- TODO: must be less than len
-  
+  zero_nat <- W4.natLit sym 0
+  let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  sym_write_bv <- W4.freshConstant sym (W4.safeSymbol "sym_write") (W4.BaseBVRepr w_mem)
+  let sym_ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat sym_write_bv)
+
   return $ StateTransformer $ \st -> do
     let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
 
     let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue flen
     let (CLM.LLVMPointer _ fd_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue fd_reg
     len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
-    (st',sz) <- case W4.asConcrete len_bv' of
+    (st',msz) <- case W4.asConcrete len_bv' of
       Just (W4.ConcreteBV _ lenC)
         | Just (Some w) <- W4.someNat (BVS.asUnsigned lenC)
         , Just W4.LeqProof <- W4.isPosNat w -> do
@@ -375,14 +379,19 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
         -- globally-unique
         bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz") (Ctx.empty Ctx.:> (W4.exprType val_bv)) (W4.BaseBVRepr w_mem)
         sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> val_bv)
-        return $ (st { PS.simMem = mem' },sz)
-      _ -> fail "Unhandled symbolic write length"
+        return $ (st { PS.simMem = mem' },Just sz)
+      _ -> do
+        putStrLn "Unhandled symbolic write length"
+        return (st, Nothing)
         -- FIXME: what to do for non-concrete write lengths?
         --return st
-    zero_nat <- W4.natLit sym 0
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat sz)
-    
-    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
+    case msz of
+      Just sz -> do
+        let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat sz)
+        return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
+      Nothing -> return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ sym_ptr ) })
+
+
 
 
 -- | Default override returns the same arbitrary value for both binaries
