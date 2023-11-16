@@ -6,14 +6,21 @@ PATE=../../pate.sh
 DEMOS=.
 #DEMOS=/demos
 
-target4.original.exe:
+main: $(HACKATHON_NOV_2023)/.git/HEAD
+	cd "$(HACKATHON_NOV_2023)" && git fetch && git checkout main
+	cat $(HACKATHON_NOV_2023)/.git/HEAD > main
+
+room_1011_dendy: $(HACKATHON_NOV_2023)/.git/HEAD
+	cd "$(HACKATHON_NOV_2023)" && git fetch && git checkout room_1011_dendy
+	cat $(HACKATHON_NOV_2023)/.git/HEAD > room_1011_dendy
+
+target4.original.exe: main
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/build/Amp_Chal_IDPS_Unpatched.ino.elf" $@
 
-target4-master:
+target4-master: main
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/build/Amp_Chal_IDPS_Patched.ino.elf" target4.patched.exe
 
-target4-room_1011_dendy:
-	cd "$(HACKATHON_NOV_2023)" && git fetch && git checkout room_1011_dendy
+target4-room_1011_dendy: room_1011_dendy
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/Amp_Chal_IDPS_Ghidra_patched_r3.ino.elf" target4.patched.exe
 
 target4-self: target4.original.exe target4.csv
@@ -49,7 +56,7 @@ target4.diff: target4.original.exe target4.patched.exe
 	arm-none-eabi-objdump -M force-thumb-mode -d target4.patched.exe > target4.patched.dump
 	diff target4.original.dump target4.patched.dump > target4.diff
 
-target1.original.exe:
+target1.original.exe: main
 	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/core-cpu1" $@
 
 target1-self: target1.original.exe
@@ -70,7 +77,7 @@ target1: target1.original.exe target1.patched.exe
 		-s main \
 		--save-macaw-cfgs $(DEMOS)/target1_CFGs
 
-target1.original.so:
+target1.original.so: main
 	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/cf/rr.so" $@
 
 target1-so-self: target1.original.so
@@ -83,14 +90,13 @@ target1-so-self: target1.original.so
 		-s RR_ReadTlmInput \
 		--save-macaw-cfgs $(DEMOS)/target1_CFGs
 
-target3.original.so:
+target3.original.so: main
 	cp "$(HACKATHON_NOV_2023)/Target 3 - MRZR Vehicle Interface Controller (BBB)/bin/libroscpp.so" $@
 
-target3-patched-master:
+target3-patched-master: main
 	cp "$(HACKATHON_NOV_2023)/Target 3 - MRZR Vehicle Interface Controller (BBB)/bin/libroscpp_manually_patched.so" target3.patched.so
 
-target3-room_1011_dendy:
-	cd "$(HACKATHON_NOV_2023)" && git fetch && git checkout room_1011_dendy
+target3-room_1011_dendy: room_1011_dendy
 	cp "$(HACKATHON_NOV_2023)/Target 3 - MRZR Vehicle Interface Controller (BBB)/patched_target3_irene_patcherex" target3.patched.so
 
 target3-self: target3.original.so
