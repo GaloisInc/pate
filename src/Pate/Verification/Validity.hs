@@ -45,6 +45,7 @@ import qualified Pate.Memory.MemTrace as MT
 
 import qualified What4.ExprHelpers as WEH
 import qualified Data.BitVector.Sized as BV
+import qualified Pate.ExprMappable as PEM
 
 validInitState ::
   forall sym arch v.
@@ -112,9 +113,10 @@ validRegister mblockStart entry r = withSym $ \sym -> do
 
 
 collectPointerAssertions ::
-  forall sym arch tp.
-  W4.SymExpr sym tp ->
-  EquivM sym arch (W4.SymExpr sym tp, AssumptionSet sym)
+  forall sym arch f.
+  PEM.ExprMappable sym f =>
+  f ->
+  EquivM sym arch (f, AssumptionSet sym)
 collectPointerAssertions outer = withSym $ \sym -> do
   ptrAsserts <- CMR.asks envPtrAssertions
   cache <- W4B.newIdxCache
@@ -135,4 +137,4 @@ collectPointerAssertions outer = withSym $ \sym -> do
           if (W4B.nonceExprApp a0) == a0' then return e'
           else (liftIO $ W4B.sbNonceExpr sym a0')
         _ -> return e'
-  runWriterT $ go outer
+  runWriterT $ PEM.mapExpr sym go outer

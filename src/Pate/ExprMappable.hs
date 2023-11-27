@@ -32,6 +32,8 @@ module Pate.ExprMappable (
   , PartialF(..)
   , toPartialSeq
   , updateFilterSeq
+  , ExprMapFElems(..)
+
   ) where
 
 import qualified Control.Monad.IO.Class as IO
@@ -57,6 +59,11 @@ import qualified Pate.Parallel as Par
 import Unsafe.Coerce(unsafeCoerce)
 import Lang.Crucible.Simulator.SymSequence
 import Data.Maybe (fromMaybe)
+import qualified Lang.Crucible.Utils.MuxTree as MT
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.TraversableF as TF
+import Data.Text
+import Control.Monad (forM)
 
 -- Expression binding
 
@@ -352,3 +359,26 @@ updateFilterSeq sym f_ s_ = evalWithFreshCache f s_
 
 instance ExprMappable sym () where
   mapExpr _sym _f _e = pure ()
+
+instance ExprMappable sym Text where
+  mapExpr _ _ = return
+
+instance (Ord f, ExprMappable sym f) => ExprMappable sym (MT.MuxTree sym f) where
+  mapExpr sym (f :: forall tp. WI.SymExpr sym tp -> m (WI.SymExpr sym tp)) mt = do
+    go (MT.viewMuxTree @sym mt)
+    where
+      go :: WI.IsExprBuilder sym => [(f, WI.Pred sym)] -> m (MT.MuxTree sym f)
+      go [] = error "Unexpected empty Mux Tree"
+      go [(a,_p)] = MT.toMuxTree sym <$> mapExpr sym f a
+      go ((a, p):xs) = do
+        a' <- MT.toMuxTree sym <$> mapExpr sym f a
+        x <- go xs
+        p' <- f p
+        IO.liftIO $ MT.mergeMuxTree sym p' a' x
+
+-- | Wrapper for 'MapF' indicating that only the elements of the map should be
+--   traversed with 'mapExpr'
+newtype ExprMapFElems a b = ExprMapFElems { unExprMapFElems :: (MapF a b) }
+
+instance (forall tp. ExprMappable sym (f tp)) => ExprMappable sym (ExprMapFElems a f) where
+  mapExpr sym f (ExprMapFElems m) = ExprMapFElems <$> TF.traverseF (mapExpr sym f) m

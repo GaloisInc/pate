@@ -40,6 +40,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
 import qualified What4.ExprHelpers as WEH
 import qualified What4.PredMap as WPM
+import Data.Data (Typeable)
 
 -- | A pointer with an attached width, representing the size of the "cell" in bytes.
 -- It represents a discrete read or write, used as the key when forming a 'Pate.Equivalence.MemPred'
@@ -144,8 +145,10 @@ readMemCell sym mem cell@(MemCell{}) = do
 
 -- FIXME: this currently drops the region due to weaknesses in the memory model
 writeMemCell ::
+  forall sym arch w.
   IsSymInterface sym =>
   MC.RegisterInfo (MC.ArchReg arch) =>
+  Typeable arch =>
   sym ->
   -- | write condition
   WI.Pred sym ->
@@ -155,7 +158,7 @@ writeMemCell ::
   IO (PMT.MemTraceState sym (MC.ArchAddrWidth arch))
 writeMemCell sym cond mem cell@(MemCell{}) valPtr = do
   let repr = MC.BVMemRepr (cellWidth cell) (cellEndian cell)
-  PMT.writeMemState sym cond mem (cellPtr cell) repr valPtr
+  PMT.writeMemState @_ @arch sym cond mem (cellPtr cell) repr valPtr
 
 instance PEM.ExprMappable sym (MemCell sym arch w) where
   mapExpr sym f (MemCell ptr w end) = do

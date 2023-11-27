@@ -6,10 +6,11 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeApplications #-}
-
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Pate.Verification.StrongestPosts.CounterExample
   ( TotalityCounterexample(..)
@@ -20,6 +21,11 @@ module Pate.Verification.StrongestPosts.CounterExample
   , groundObservableSequence
   , groundMuxTree
   , groundMemEvent
+  , ppTraceEvents
+  , TraceEvents(..)
+  , groundTraceEvent
+  , groundTraceEventSequence
+  , groundRegOp
   ) where
 
 
@@ -49,6 +55,12 @@ import qualified What4.Interface as W4
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Simulator.SymSequence
+import qualified Lang.Crucible.Types as CT
+import qualified Data.Parameterized.TraversableF as TF
+import qualified What4.Concrete as W4
+import Data.Functor.Const
+import qualified Data.Parameterized.Map as MapF
+import Data.Maybe (mapMaybe)
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -115,16 +127,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "obser
   type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym arch
   prettyNode () = \case
     ObservableCheckEq -> "Observably Equivalent"
-    ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq pSeq) -> PP.vsep $ 
-       ["Observable Inequivalence Detected:"
-       -- FIXME: this is useful but needs better presentation
-       , "== Diverging Registers =="
-       , prettyRegsCE regsCE
-       , "== Original sequence =="
-       ] ++ (map MT.prettyMemEvent oSeq) ++
-       [ "== Patched sequence ==" ]
-       ++ (map MT.prettyMemEvent pSeq)
-
+    ObservableCheckCounterexample ocex -> ppObservableCounterexample ocex 
     ObservableCheckError msg -> PP.vsep $
       [ "Error during observability check"
       , PP.pretty msg
@@ -136,6 +139,25 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "obser
                   ObservableCheckError{} -> "Error during observability check")
       | tag <- [Simplified, Summary, JSONTrace]
     ]
+
+ppObservableCounterexample ::
+  PA.ValidArch arch =>
+  PSo.ValidSym sym =>
+  ObservableCounterexample sym arch ->
+  PP.Doc a
+ppObservableCounterexample (ObservableCounterexample regsCE oSeq pSeq) = PP.vsep $ 
+  ["Observable Inequivalence Detected:"
+  -- FIXME: this is useful but needs better presentation
+  , "== Diverging Registers =="
+  , prettyRegsCE regsCE
+  , "== Original sequence =="
+  ] ++ (map MT.prettyMemEvent oSeq) ++
+  [ "== Patched sequence ==" ]
+  ++ (map MT.prettyMemEvent pSeq)
+
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (ObservableCounterexample sym arch) where
+  pretty = ppObservableCounterexample
 
 groundObservableSequence ::
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
@@ -190,3 +212,155 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
     ite p x y =
       do b <- W4.groundEval evalFn p
          if b then return x else return y
+
+data TraceEvents sym arch =
+  TraceEvents (PPa.PatchPairC (MT.RegOp sym arch, [TraceEventGroup sym arch]))
+
+data TraceEventGroup sym arch =
+  TraceEventGroup (Maybe (MM.ArchSegmentOff arch)) [MT.TraceEvent sym arch]
+
+ppRegOp :: forall sym arch ann. (PA.ValidArch arch, PSo.ValidSym sym) => MT.RegOp sym arch -> [PP.Doc ann]
+ppRegOp (MT.RegOp m) = mapMaybe (\(MapF.Pair r v) -> 
+  case PA.displayRegister r of
+  PA.Normal pr -> Just $ PP.pretty pr <+> "<-" <+> (prettyVal v)
+  _ | Just Refl <- testEquality MM.ip_reg r -> Just $ "pc" <+> "<-" <+> (prettyVal v)
+  _ -> Nothing) (MapF.toList m)
+  where
+    prettyVal :: forall tp. PSR.MacawRegEntry sym tp -> PP.Doc ann
+    prettyVal r = case PSR.macawRegRepr r of
+      CLM.LLVMPointerRepr{} -> MT.ppPtr' (PSR.macawRegValue r)
+      _ -> PP.pretty $ show r
+
+
+ppTraceEvent :: (PA.ValidArch arch, PSo.ValidSym sym) => MT.TraceEvent sym arch -> [PP.Doc ann]
+ppTraceEvent ev = case ev of
+  MT.RegOpEvent _ rop -> ppRegOp rop
+  MT.TraceMemEvent _ mev -> [MT.prettyMemEvent mev]
+
+ppTraceEventGroup ::
+  PA.ValidArch arch =>
+  PSo.ValidSym sym =>
+  TraceEventGroup sym arch ->
+  Maybe (PP.Doc a)  
+ppTraceEventGroup evg = case evg of
+  (TraceEventGroup (Just addr) evs) -> Just $ case concat (map ppTraceEvent evs) of
+    [] -> PP.parens (PP.viaShow addr)
+    [pretty_ev] -> PP.parens (PP.viaShow addr) <+> pretty_ev
+    pretty_evs -> PP.parens (PP.viaShow addr) <> PP.line <> PP.indent 2 (PP.vsep pretty_evs)
+  (TraceEventGroup Nothing evs) -> case concat (map ppTraceEvent evs) of
+    [] -> Nothing
+    [pretty_ev] -> Just pretty_ev
+    pretty_evs -> Just $ PP.indent 2 (PP.vsep pretty_evs)
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace_events" where
+  type TraceNodeType '(sym,arch) "trace_events" = TraceEvents sym arch
+  prettyNode () = ppTraceEvents
+  nodeTags = 
+    map (\tag -> (tag, \_ (TraceEvents evs) -> 
+      "Event Trace:" PP.<+> PPa.ppPatchPair' (\(Const (_init_regs, s)) -> 
+        ppTraceEventSummary s) evs))
+    [Summary, Simplified]
+
+ppTraceEventSummary ::
+  forall sym arch a.
+  PA.ValidArch arch =>
+  [TraceEventGroup sym arch] -> 
+  PP.Doc a
+ppTraceEventSummary [] = ""
+ppTraceEventSummary (t:tr) = case (t, last tr) of
+  (TraceEventGroup Nothing _, _) -> ppTraceEventSummary tr
+  (TraceEventGroup (Just addr_head) _, TraceEventGroup (Just addr_last) _) ->
+    PP.viaShow addr_head PP.<+> ".." <+> PP.viaShow addr_last
+  _ -> ""
+
+ppTraceEvents ::
+  PA.ValidArch arch =>
+  PSo.ValidSym sym =>
+  TraceEvents sym arch ->
+  PP.Doc a
+ppTraceEvents (TraceEvents tr) = case tr of
+  PPa.PatchPairOriginal (Const (init_regsO, trO)) -> 
+    PP.vsep $ [ "== Initial Registers ==" ] ++ ppRegOp init_regsO ++ mapMaybe ppTraceEventGroup trO
+  PPa.PatchPairPatched (Const (init_regsP, trP)) -> 
+    PP.vsep $ [ "== Initial Registers ==" ] ++ ppRegOp init_regsP ++ mapMaybe ppTraceEventGroup trP
+  PPa.PatchPairC (init_regsO, trO) (init_regsP, trP) -> PP.vsep $ 
+       [ "== Initial Original Registers ==" ]
+    ++ ppRegOp init_regsO
+    ++ [ "== Original sequence ==" ]
+    ++ mapMaybe ppTraceEventGroup trO
+    ++ [ "== Initial Patched Registers ==" ]
+    ++ ppRegOp init_regsP
+    ++ [ "== Patched sequence ==" ]
+    ++ mapMaybe ppTraceEventGroup trP
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (TraceEvents sym arch) where
+  pretty = ppTraceEvents
+
+groundRegOp ::
+  (sym ~ W4.ExprBuilder t st fs) =>
+  1 <= MM.ArchAddrWidth arch =>
+  sym ->
+  W4.GroundEvalFn t ->
+  MT.RegOp sym arch ->
+  IO (MT.RegOp sym arch)
+groundRegOp sym evalFn (MT.RegOp m) = 
+  MT.RegOp <$> TF.traverseF (groundRegEntry sym evalFn) m
+
+groundRegEntry :: 
+  (sym ~ W4.ExprBuilder t st fs) =>
+  sym ->
+  W4.GroundEvalFn t ->
+  PSR.MacawRegEntry sym tp ->
+  IO (PSR.MacawRegEntry sym tp)  
+groundRegEntry sym evalFn (PSR.MacawRegEntry repr v) = PSR.MacawRegEntry repr <$> case repr of
+  CLM.LLVMPointerRepr{} -> CLM.concPtr sym (\x -> W4.groundEval evalFn x) v
+  CT.BoolRepr -> W4.groundEval evalFn v >>= (W4.concreteToSym sym . W4.ConcreteBool)
+  _ -> return v
+
+groundTraceEvent ::
+  (sym ~ W4.ExprBuilder t st fs) =>
+  1 <= MM.ArchAddrWidth arch =>
+  sym ->
+  W4.GroundEvalFn t ->
+  MT.TraceEvent sym arch ->
+  IO (MT.TraceEvent sym arch)
+groundTraceEvent sym evalFn = \case
+  MT.RegOpEvent i rop -> MT.RegOpEvent <$> (MT.toMuxTree sym <$> groundMuxTree sym evalFn i) <*> groundRegOp sym evalFn rop
+  MT.TraceMemEvent i mop -> MT.TraceMemEvent <$> (MT.toMuxTree sym <$> groundMuxTree sym evalFn i)  <*> groundMemEvent sym evalFn mop
+
+
+dropPCReg :: PA.ValidArch arch => MT.TraceEvent sym arch -> MT.TraceEvent sym arch
+dropPCReg = \case
+  MT.RegOpEvent i (MT.RegOp m) -> MT.RegOpEvent i (MT.RegOp (MapF.delete (MM.ip_reg) m))
+  x -> x
+
+-- NB: events are reversed in the ground list so they appear in the natural order 
+-- (i.e. first event is the head of the list)
+groundTraceEventSequence ::
+  forall sym arch t st fs. 
+  (sym ~ W4.ExprBuilder t st fs) =>
+  PA.ValidArch arch =>
+  sym ->
+  W4.GroundEvalFn t ->
+  SymSequence sym (MT.TraceEvent sym arch) ->
+  IO [TraceEventGroup sym arch]
+groundTraceEventSequence sym evalFn s = do
+  l <- reverse <$> concreteizeSymSequence (\p -> W4.groundEval evalFn p) return s
+  go Nothing [] l
+  where
+    go :: Maybe (MM.ArchSegmentOff arch) -> [MT.TraceEvent sym arch] -> [MT.TraceEvent sym arch] -> IO [TraceEventGroup sym arch]
+    go last_instr ground_evs [] = return $ [TraceEventGroup last_instr (reverse ground_evs)]
+    go last_instr ground_evs (e1 : evs) = do
+      e1_instr <- fmap fst <$> groundMuxTree sym evalFn (MT.traceInstr e1)
+      e1_ground <- groundTraceEvent sym evalFn e1
+      case last_instr == e1_instr of
+        True -> go last_instr (e1_ground : ground_evs) evs
+        False -> do
+          evs' <- go e1_instr [e1_ground] evs
+          case ground_evs of
+            [] -> return evs'
+            _ -> do
+              let ground_evs' = case evs' of
+                    (_ : _) | Just{} <- e1_instr -> map dropPCReg ground_evs
+                    _ -> ground_evs
+              return $ (TraceEventGroup last_instr (reverse ground_evs') : evs')

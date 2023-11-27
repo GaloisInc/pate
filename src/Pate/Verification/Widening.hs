@@ -29,7 +29,8 @@ module Pate.Verification.Widening
   , addRefinementChoice
   , traceEqCond
   , InteractiveBundle(..)
-  , getCounterExample
+  , getSomeGroundTrace
+  , getTraceFromModel
   ) where
 
 import           GHC.Stack
@@ -113,6 +114,7 @@ import Data.Kind (Type)
 import qualified Data.Aeson as JSON
 import qualified Prettyprinter as PP
 import qualified What4.Expr.GroundEval as W4
+import qualified Lang.Crucible.Utils.MuxTree as MT
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -473,31 +475,51 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
 
+getSomeGroundTrace ::
+  SimBundle sym arch v ->
+  EquivM sym arch (CE.TraceEvents sym arch)
+getSomeGroundTrace bundle = withSym $ \sym -> do
+  (_, ptrAsserts) <- PVV.collectPointerAssertions bundle
+  
+  -- try to ground the model with a zero stack base, so calculated stack offsets
+  -- are the same as stack slots
+  stacks_zero <- PPa.catBins $ \bin -> do
+    in_ <- PPa.get bin (PS.simIn bundle)
+    let stackbase = PS.unSE $ PS.simStackBase (PS.simInState in_) 
+    zero <- liftIO $ W4.bvLit sym CT.knownRepr (BVS.mkBV CT.knownRepr 0)
+    PAs.fromPred <$> (liftIO $ W4.isEq sym zero stackbase)
+  
+  ptrAsserts_pred <- PAs.toPred sym (stacks_zero <> ptrAsserts)
+  -- first we try to see if we can make a model that doesn't
+  -- involve any invalid pointer operations
+  mevs <- goalSat "getCounterExample" ptrAsserts_pred $ \res -> case res of
+    Unsat _ -> emitWarning PEE.RequiresInvalidPointerOps >> return Nothing
+    Unknown -> emitWarning PEE.RequiresInvalidPointerOps >> return Nothing
+    Sat evalFn -> Just <$> getTraceFromModel evalFn bundle
+  case mevs of
+    Just evs -> return evs
+    -- otherwise, just try to get any model
+    Nothing -> goalSat "getCounterExample" (W4.truePred sym) $ \res -> case res of
+      Unsat _ -> throwHere PEE.InvalidSMTModel
+      Unknown -> throwHere PEE.InconclusiveSAT
+      Sat evalFn -> getTraceFromModel evalFn bundle
 
 -- | Compute a counter-example for a given predicate
-getCounterExample ::
+getTraceFromModel ::
+  forall sym arch v.
+  SymGroundEvalFn sym ->
   SimBundle sym arch v ->
-  W4.Pred sym -> 
-  EquivM sym arch (CE.ObservableCheckResult sym arch)
-getCounterExample bundle p = withSym $ \sym -> do
-  evs <- PPa.forBinsC $ \bin -> do
-    out <- PPa.get bin (PS.simOut bundle)
-    let mem = PS.simOutMem out
-    liftIO (MT.observableEvents sym (\_ -> return $ W4.truePred sym) mem)
-  not_p <- liftIO $ W4.notPred sym p
-  goalSat "getCounterExample" not_p $ \res -> case res of
-    Unsat _ -> return CE.ObservableCheckEq
-    Unknown -> return (CE.ObservableCheckError "UNKNOWN result when checking observable sequences")
-    Sat evalFn' -> CE.ObservableCheckCounterexample <$> do
-      -- FIXME: counter-example should use patchpair
-      let join_ce (r,s) (r',s') =
-            return $ ObservableCounterexample (CE.RegsCounterExample r r') s s'
-      PPa.joinPatchPred join_ce $ \bin -> do
-        in_ <- PPa.get bin (PS.simIn bundle)
-        sym_seq <- PPa.getC bin evs
-        ground_regs <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simInRegs in_)
-        ground_seq <- withGroundEvalFn evalFn' $ \evalFn -> reverse <$> CE.groundObservableSequence sym evalFn sym_seq
-        return (ground_regs, ground_seq)
+  EquivM sym arch (CE.TraceEvents sym arch)
+getTraceFromModel evalFn' bundle = fmap CE.TraceEvents $ withSym $ \sym -> PPa.forBinsC $ \bin -> do
+  out <- PPa.get bin (PS.simOut bundle)
+  in_ <- PPa.get bin (PS.simIn bundle)
+  let mem = PS.simOutMem out
+  withGroundEvalFn evalFn' $ \evalFn -> do
+    evs <- CE.groundTraceEventSequence sym evalFn (MT.memFullSeq @_ @arch mem)
+    let in_regs = PS.simInRegs in_
+    ground_rop <- CE.groundRegOp sym evalFn (MT.RegOp (MM.regStateMap in_regs))
+    -- create a dummy initial register op representing the initial values
+    return (ground_rop, evs)
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->
@@ -1348,8 +1370,13 @@ widenPostcondition scope bundle preD postD0 = do
       eqPost <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD0)
       eqPost_pred <- liftIO $ postCondPredicate sym eqPost
       withTracing @"message" "Equivalence Counter-example" $ do
-        res <- getCounterExample bundle eqPost_pred
-        emitTrace @"observable_result" res
+        not_eqPost_pred <- liftIO $ W4.notPred sym eqPost_pred
+        mres <- withSatAssumption (PAs.fromPred not_eqPost_pred) $ do
+          res <- getSomeGroundTrace bundle
+          emitTrace @"trace_events" res
+        case mres of
+          Just () -> return ()
+          Nothing -> emitWarning (PEE.WideningError "Couldn't find widening counter-example")
         return r
     _ -> return r
  where

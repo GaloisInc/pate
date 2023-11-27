@@ -157,6 +157,7 @@ import qualified Data.Macaw.BinaryLoader as MBL
 
 import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
+import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
 import qualified What4.Symbol as WS
@@ -582,7 +583,7 @@ withFreshVars blocks f = do
     mkMem bin = do
       binCtx <- getBinCtx' bin
       let baseMem = MBL.memoryImage $ PMC.binary binCtx
-      withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+      withSymIO $ \sym -> MT.initMemTrace @_ @arch sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
     mkStackBase :: forall bin v. PBi.WhichBinaryRepr bin -> EquivM_ sym arch (StackBase sym arch v)
     mkStackBase bin = withSymIO $ \sym -> freshStackBase sym bin (Proxy @arch)

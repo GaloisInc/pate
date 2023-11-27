@@ -74,10 +74,10 @@ data MacawRegVar sym (tp :: MT.Type) where
     , macawVarBVs :: Ctx.Assignment (WI.SymExpr sym) (CrucBaseTypes (MS.ToCrucibleType tp))
     } -> MacawRegVar sym tp
 
-instance (WI.IsExpr (WI.SymExpr sym), PC.ShowF (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
+instance (WI.IsExpr (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of
-    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ "+" ++ PC.showF bv
-    CT.BoolRepr -> PC.showF v
+    CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ "+" ++ show (WI.printSymExpr bv)
+    CT.BoolRepr -> show (WI.printSymExpr v)
     CT.StructRepr Ctx.Empty -> "()"
     _ -> "macawRegEntry: unsupported"
 

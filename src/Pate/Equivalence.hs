@@ -87,6 +87,7 @@ import qualified What4.PredMap as WPM
 import qualified Pate.ExprMappable as PEM
 
 import           Pate.TraceTree
+import Data.Data (Typeable)
 
 data EquivalenceStatus =
     Equivalent
@@ -384,6 +385,7 @@ memPreCondToPred ::
   forall sym arch v.
   IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
+  Typeable arch =>
   sym ->
   SimScope sym arch v ->
   MemRegionEquality sym arch ->

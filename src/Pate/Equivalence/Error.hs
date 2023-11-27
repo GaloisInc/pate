@@ -158,6 +158,7 @@ data InnerEquivalenceError arch
   | FailedToResolveAddress (MM.MemWord (MM.ArchAddrWidth arch))
   | forall tp. FailedToGroundExpr (SomeExpr tp)
   | OrphanedSingletonAnalysis (PB.FunPair arch)
+  | RequiresInvalidPointerOps
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
 

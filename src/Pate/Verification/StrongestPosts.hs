@@ -1552,14 +1552,16 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
        liftIO $ W4.andPred sym eq1 eq2
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "totality" where
-  type TraceNodeType '(sym,arch) "totality" = TotalityResult (MM.ArchAddrWidth arch)
+  type TraceNodeType '(sym,arch) "totality" = TotalityResult sym arch
   prettyNode () r = case r of
     CasesTotal -> "Cases total"
     TotalityCheckingError msg -> "Error:" <+> PP.pretty msg
-    TotalityCheckCounterexample (TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) -> PP.vsep $
+    TotalityCheckCounterexample ocex (TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) -> PP.vsep $
       ["Found extra exit while checking totality:"
       , PP.pretty (showHex oIP "") <+> PP.pretty (PPI.ppExitCase oEnd) <+> PP.pretty (show oInstr)
       , PP.pretty (showHex pIP "") <+> PP.pretty (PPI.ppExitCase pEnd) <+> PP.pretty (show pInstr)
+      , ""
+      , PP.pretty ocex
       ]
   nodeTags = [(Summary, \_ r -> case r of
                    CasesTotal -> "Total"
@@ -1589,7 +1591,7 @@ checkTotality bPair bundle preD exits gr =
            do let msg' = ("Error while checking totality! " ++ msg)
               err <- emitError' (PEE.TotalityError msg')
               return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
-         TotalityCheckCounterexample cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
+         TotalityCheckCounterexample _ cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
            do traceBundle bundle $ unlines
                 ["Found extra exit while checking totality:"
                 , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
@@ -1598,10 +1600,10 @@ checkTotality bPair bundle preD exits gr =
               
               return (Just cex, gr)
 
-data TotalityResult ptrW
+data TotalityResult sym arch
   = CasesTotal
   | TotalityCheckingError String
-  | TotalityCheckCounterexample (TotalityCounterexample ptrW)
+  | TotalityCheckCounterexample (CE.TraceEvents sym arch) (TotalityCounterexample (MM.ArchAddrWidth arch))
 
 {-
 -- TODO: use solver to resolve classifier errors by comparing
@@ -1701,7 +1703,7 @@ doCheckTotality :: forall sym arch v.
   SimBundle sym arch v ->
   AbstractDomain sym arch v -> 
   [PPa.PatchPair (PB.BlockTarget arch)] ->
-  EquivM sym arch (TotalityResult (MM.ArchAddrWidth arch))
+  EquivM sym arch (TotalityResult sym arch)
 doCheckTotality bundle _preD exits =
   withSym $ \sym ->
     do
@@ -1728,7 +1730,9 @@ doCheckTotality bundle _preD exits =
        goalSat "doCheckTotality" asm $ \res -> case res of
          Unsat _ -> return CasesTotal
          Unknown -> return (TotalityCheckingError "UNKNOWN result when checking totality")
-         Sat evalFn' -> withGroundEvalFn evalFn' $ \evalFn -> do
+         Sat evalFn' -> do
+           ocex <- getTraceFromModel evalFn' bundle
+           withGroundEvalFn evalFn' $ \evalFn -> do
            -- We found an execution that does not correspond to one of the
            -- executions listed above, so compute the counterexample.
            --
@@ -1748,13 +1752,14 @@ doCheckTotality bundle _preD exits =
                 case iPV of
                   Just val -> return $ (Just (val, blockEndCase, instr))
                   Nothing -> return $ Nothing
+              
               case result of
                 PPa.PatchPairC (Just ores) (Just pres) ->
-                  return (TotalityCheckCounterexample
+                  return (TotalityCheckCounterexample ocex
                     (TotalityCounterexample ores pres))
                 PPa.PatchPairSingle _ (Const (Just r)) ->
                   --FIXME: update the type to use PatchPairC
-                  return (TotalityCheckCounterexample
+                  return (TotalityCheckCounterexample ocex
                     (TotalityCounterexample r r))
                 _ -> return (TotalityCheckingError ("IP register had unexpected type"))
 
@@ -1906,12 +1911,13 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
     mrets <- PPa.toMaybeCases <$> 
       PPa.forBinsF (\bin -> PB.targetReturn <$> PPa.get bin blkts)
     case (combineCases ecase1 ecase2,mrets) of
-      (Nothing,_) -> handleDivergingPaths scope currBlock st d blkts
-      (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope currBlock st d blkts
-      _ | isMismatchedStubs stubPair -> handleDivergingPaths scope currBlock st d blkts
+      (Nothing,_) -> handleDivergingPaths scope bundle' currBlock st d blkts
+      (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope bundle' currBlock st d blkts
+      _ | isMismatchedStubs stubPair -> handleDivergingPaths scope bundle' currBlock st d blkts
       (Just ecase, PPa.PatchPairJust rets) -> fmap (updateBranchGraph st blkts) $ do
         let pPair = TF.fmapF PB.targetCall blkts
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
+        getSomeGroundTrace bundle >>= emitTrace @"trace_events"
         traceBundle bundle ("  Return target " ++ show rets)
         ctx <- view PME.envCtxL
         let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
@@ -1922,6 +1928,7 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
 
       (Just ecase, PPa.PatchPairNothing) -> fmap (updateBranchGraph st blkts) $ do
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
+        getSomeGroundTrace bundle >>= emitTrace @"trace_events"
         case ecase of
           MCS.MacawBlockEndReturn -> handleReturn scope bundle currBlock d gr
           _ -> do
@@ -2224,12 +2231,13 @@ singletonBundle bin (SimBundle in_ out_) =
 handleDivergingPaths ::
   HasCallStack =>
   PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
   NodeEntry arch {- ^ current entry point -} ->
   BranchState sym arch ->
   AbstractDomain sym arch v {- ^ current abstract domain -}  ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (BranchState sym arch)  
-handleDivergingPaths scope currBlock st dom blkt = fnTrace "handleDivergingPaths" $ do
+handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergingPaths" $ do
   let gr0 = branchGraph st
   let mchoice = branchDesyncChoice st
   priority <- thisPriority
@@ -2255,15 +2263,21 @@ handleDivergingPaths scope currBlock st dom blkt = fnTrace "handleDivergingPaths
       a <- case mchoice of
         Just DeferDecision -> return DeferDecision
         Just ChooseSyncPoint -> return DeferDecision
-        _ -> choose @"()" msg $ \choice -> do
-          -- default choice
-          choice "Ignore divergence (admit a non-total result)" () $ return AdmitNonTotal
+        _ -> do
+          () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
+            -- we've already introduced the path condition here, so we just want to see how we got here
+            res <- getSomeGroundTrace bundle
+            emitTrace @"trace_events" res
+            return ()
+          choose @"()" msg $ \choice -> do
+            -- default choice
+            choice "Ignore divergence (admit a non-total result)" () $ return AdmitNonTotal
 
-          choice "Assert divergence is infeasible" () $ return (IsInfeasible ConditionAsserted)
-          choice "Assume divergence is infeasible" () $ return (IsInfeasible ConditionAssumed)
-          choice "Remove divergence in equivalence condition" () $ return (IsInfeasible ConditionEquiv)
-          choice "Choose synchronization points" () $ return ChooseSyncPoint
-          choice "Defer decision" () $ return DeferDecision
+            choice "Assert divergence is infeasible" () $ return (IsInfeasible ConditionAsserted)
+            choice "Assume divergence is infeasible" () $ return (IsInfeasible ConditionAssumed)
+            choice "Remove divergence in equivalence condition" () $ return (IsInfeasible ConditionEquiv)
+            choice "Choose synchronization points" () $ return ChooseSyncPoint
+            choice "Defer decision" () $ return DeferDecision
       
       let st' = st { branchDesyncChoice = Just a }
       case a of
@@ -2272,7 +2286,7 @@ handleDivergingPaths scope currBlock st dom blkt = fnTrace "handleDivergingPaths
         ChooseSyncPoint -> do
           pg1 <- chooseSyncPoint divergeNode pg
           pg2 <- updateCombinedSyncPoint divergeNode pg1
-          handleDivergingPaths scope currBlock (st'{ branchGraph = pg2 }) dom blkt
+          handleDivergingPaths scope bundle currBlock (st'{ branchGraph = pg2 }) dom blkt
         IsInfeasible condK -> do
           gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
           gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
