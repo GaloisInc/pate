@@ -102,17 +102,17 @@ instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym) where
     binds = mergeExprSetFMap (Proxy @sym) (asmBinds asm1) (asmBinds asm2)
     in AssumptionSet preds binds
 
-instance OrdF (W4.SymExpr sym) => PEM.ExprMappable sym (AssumptionSet sym) where
-  mapExpr sym f (AssumptionSet ps bs) | PEM.SymExprMappable aEM <- PEM.symExprMappable sym = do
-    ps' <- aEM @W4.BaseBoolType $ PEM.mapExpr sym f ps
-    bs' <- forM (MapF.toList bs) $ \(MapF.Pair k (v :: ExprSet sym tp)) -> do
+instance PEM.ExprMappable2 sym1 sym2 (AssumptionSet sym1) (AssumptionSet sym2) where
+  mapExpr2 sym1 sym2 f (AssumptionSet ps bs) | PEM.SymExprMappable2 aEM <- PEM.symExprMappable2 sym1 sym2 = do
+    ps' <- aEM @W4.BaseBoolType $ PEM.mapExpr2 sym1 sym2 f ps
+    bs' <- forM (MapF.toList bs) $ \(MapF.Pair k (v :: ExprSet sym1 tp)) -> do
       k' <- f k
-      v' <- SetF.filter (\e' -> case testEquality e' k' of Just Refl -> False; Nothing -> True) <$> (aEM @tp $ PEM.mapExpr sym f v)
+      v' <- SetF.filter (\e' -> case testEquality e' k' of Just Refl -> False; Nothing -> True) <$> (aEM @tp $ PEM.mapExpr2 sym1 sym2 f v)
       if SetF.null v' then
         return $ MapF.empty
       else
         return $ MapF.singleton k' v'
-    return $ AssumptionSet ps' (foldr (mergeExprSetFMap (Proxy @sym)) MapF.empty bs')
+    return $ AssumptionSet ps' (foldr (mergeExprSetFMap (Proxy @sym2)) MapF.empty bs')
 
 
 instance forall sym. W4.IsExpr (W4.SymExpr sym) => PP.Pretty (AssumptionSet sym) where
@@ -135,6 +135,9 @@ data NamedAsms sym (nm :: Symbol) =
 
 instance PEM.ExprMappable sym (NamedAsms sym nm) where
   mapExpr sym f (NamedAsms asm) = NamedAsms <$> PEM.mapExpr sym f asm
+
+instance PEM.ExprMappable2 sym1 sym2 (NamedAsms sym1 nm) (NamedAsms sym2 nm) where
+  mapExpr2 sym1 sym2 f (NamedAsms asm) = NamedAsms <$> PEM.mapExpr2 sym1 sym2 f asm
 
 instance OrdF (W4.SymExpr sym) => Semigroup (NamedAsms sym nm) where
   (NamedAsms a) <> (NamedAsms b) = NamedAsms (a <> b)

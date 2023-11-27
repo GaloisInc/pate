@@ -249,9 +249,8 @@ data Location (sym :: DK.Type) (arch :: DK.Type) (nm :: Symbol) (tp :: LocationK
     LocationType sym arch nm k -> Location sym arch nm k
 
 
-
-instance forall sym arch nm k. PEM.ExprMappable sym (Location sym arch nm k) where
-  mapExpr sym f (Location l) = Location <$> mapLocExpr  @sym @arch @nm sym f l
+instance forall sym arch nm k. PEM.ExprMappable2 sym sym (Location sym arch nm k) (Location sym arch nm k) where
+  mapExpr2 sym _ f (Location l) = Location <$> mapLocExpr  @sym @arch @nm sym f l
 
 instance forall sym arch nm k. PP.Pretty (Location sym arch nm k) where
   pretty (Location l) = prettyLoc @sym @arch @nm l
@@ -303,8 +302,8 @@ namedPredLoc (NamedPred _) = Named knownRepr
 knownNamedPred :: forall nm k sym. (KnownRepr WPM.PredOpRepr k, KnownSymbol nm) => W4.Pred sym -> NamedPred sym k nm
 knownNamedPred p = NamedPred (WPM.singleton knownRepr () p)
 
-instance PEM.ExprMappable sym (NamedPred sym k nm) where
-  mapExpr _sym f (NamedPred p) = NamedPred <$> WPM.traverse p (\() -> f)
+instance PEM.ExprMappable2 sym1 sym2 (NamedPred sym1 k nm) (NamedPred sym2 k nm) where
+  mapExpr2 _sym1 _sym2 f (NamedPred p) = NamedPred <$> WPM.traverse p (\() -> f)
 
 instance forall sym arch nm k. (W4.IsSymExprBuilder sym) => LocationWitherable sym arch (NamedPred sym k nm) where
   witherLocation sym np@(NamedPred pm) f = do

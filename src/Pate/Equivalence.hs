@@ -87,6 +87,7 @@ import qualified What4.PredMap as WPM
 import qualified Pate.ExprMappable as PEM
 
 import           Pate.TraceTree
+import Data.Data (Typeable)
 
 data EquivalenceStatus =
     Equivalent
@@ -372,8 +373,8 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable
     dom' <- PL.traverseLocation sym (memCondPred mcond) f
     return $ mcond { memCondPred = dom' }
 
-instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PEM.ExprMappable sym (MemoryCondition sym arch) where
-  mapExpr sym f (MemoryCondition cond) = MemoryCondition <$> PEM.mapExpr sym f cond
+instance PEM.ExprMappable2 sym1 sym2 (MemoryCondition sym1 arch) (MemoryCondition sym2 arch) where
+  mapExpr2 sym1 sym2 f (MemoryCondition cond) = MemoryCondition <$> PEM.mapExpr2 sym1 sym2 f cond
 
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
@@ -384,6 +385,7 @@ memPreCondToPred ::
   forall sym arch v.
   IsSymInterface sym =>
   MM.RegisterInfo (MM.ArchReg arch) =>
+  Typeable arch =>
   sym ->
   SimScope sym arch v ->
   MemRegionEquality sym arch ->
@@ -495,9 +497,9 @@ instance (MM.RegisterInfo (MM.ArchReg arch), W4.IsSymExprBuilder sym) => PL.Loca
     <*> PL.traverseLocation sym d f
     <*> PL.traverseLocation sym e f
 
-instance W4.IsSymExprBuilder sym => PEM.ExprMappable sym (StatePostCondition sym arch v) where
-  mapExpr sym f (StatePostCondition a b c d e) =
-    StatePostCondition <$> PEM.mapExpr sym f a <*> PEM.mapExpr sym f b <*> PEM.mapExpr sym f c <*> PEM.mapExpr sym f d <*>  PEM.mapExpr sym f e
+instance PEM.ExprMappable2 sym1 sym2 (StatePostCondition sym1 arch v) (StatePostCondition sym2 arch v)  where
+  mapExpr2 sym1 sym2 f (StatePostCondition a b c d e) =
+    StatePostCondition <$> PEM.mapExpr2 sym1 sym2 f a <*> PEM.mapExpr2 sym1 sym2 f b <*> PEM.mapExpr2 sym1 sym2 f c <*> PEM.mapExpr2 sym1 sym2 f d <*>  PEM.mapExpr2 sym1 sym2 f e
 
 
 eqDomPre ::

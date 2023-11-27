@@ -6,10 +6,12 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeApplications #-}
-
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Pate.Verification.StrongestPosts.CounterExample
   ( TotalityCounterexample(..)
@@ -19,7 +21,6 @@ module Pate.Verification.StrongestPosts.CounterExample
   , ObservableCheckResult(..)
   , groundObservableSequence
   , groundMuxTree
-  , groundMemEvent
   ) where
 
 
@@ -49,6 +50,8 @@ import qualified What4.Interface as W4
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Simulator.SymSequence
+import qualified Control.Monad.IO.Class as IO
+import qualified Pate.Ground as PG
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -115,16 +118,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "obser
   type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym arch
   prettyNode () = \case
     ObservableCheckEq -> "Observably Equivalent"
-    ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq pSeq) -> PP.vsep $ 
-       ["Observable Inequivalence Detected:"
-       -- FIXME: this is useful but needs better presentation
-       , "== Diverging Registers =="
-       , prettyRegsCE regsCE
-       , "== Original sequence =="
-       ] ++ (map MT.prettyMemEvent oSeq) ++
-       [ "== Patched sequence ==" ]
-       ++ (map MT.prettyMemEvent pSeq)
-
+    ObservableCheckCounterexample ocex -> ppObservableCounterexample ocex 
     ObservableCheckError msg -> PP.vsep $
       [ "Error during observability check"
       , PP.pretty msg
@@ -137,6 +131,25 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "obser
       | tag <- [Simplified, Summary, JSONTrace]
     ]
 
+ppObservableCounterexample ::
+  PA.ValidArch arch =>
+  PSo.ValidSym sym =>
+  ObservableCounterexample sym arch ->
+  PP.Doc a
+ppObservableCounterexample (ObservableCounterexample regsCE oSeq pSeq) = PP.vsep $ 
+  ["Observable Inequivalence Detected:"
+  -- FIXME: this is useful but needs better presentation
+  , "== Diverging Registers =="
+  , prettyRegsCE regsCE
+  , "== Original sequence =="
+  ] ++ (map MT.prettyMemEvent oSeq) ++
+  [ "== Patched sequence ==" ]
+  ++ (map MT.prettyMemEvent pSeq)
+
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (ObservableCounterexample sym arch) where
+  pretty = ppObservableCounterexample
+
 groundObservableSequence ::
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
   sym ->
@@ -146,14 +159,34 @@ groundObservableSequence ::
 groundObservableSequence sym evalFn =
   concreteizeSymSequence (\p -> W4.groundEval evalFn p) (groundMemEvent sym evalFn)
 
+data GroundedFullSeq arch = forall sym. PG.IsGroundSym sym MT.GroundInfo => GroundedFullSeq (SymSequence sym (MT.TraceEvent sym arch))
+
+groundFullSeq ::
+  forall sym arch m.
+  IO.MonadIO m =>
+  PSo.ValidSym sym =>
+  PA.ValidArch arch =>
+  sym ->
+  PG.SymGroundEvalFn sym ->
+  MT.MemTraceImpl sym (MM.ArchAddrWidth arch) ->
+  m (GroundedFullSeq arch)
+groundFullSeq sym evalFn mem = do
+  PG.ground sym evalFn (MT.memFullSeq @sym @arch mem) GroundedFullSeq
+   
+{-  case viewMuxTree i of
+  [(Just (addr, _dis), _)] -> "(" <> viaShow addr <> ")" <+> prettyMemOp op
+  _ ->  
+i' <- MT.toMuxTree sym <$> groundMuxTree sym evalFn i
+    -}
+
+
 groundMemEvent ::
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
   sym ->
   W4.GroundEvalFn t ->
   MT.MemEvent sym ptrW ->
   IO (MT.MemEvent sym ptrW)
-groundMemEvent sym evalFn (MT.MemOpEvent op) =
-  MT.MemOpEvent <$> groundMemOp sym evalFn op
+groundMemEvent sym evalFn (MT.MemOpEvent op) = MT.MemOpEvent <$> groundMemOp sym evalFn op
 groundMemEvent sym evalFn (MT.SyscallEvent i x) =
   do i' <- MT.toMuxTree sym <$> groundMuxTree sym evalFn i
      x' <- W4.bvLit sym (W4.bvWidth x) =<< W4.groundEval evalFn x

@@ -121,3 +121,12 @@ instance PEM.ExprMappable sym (EquivalenceDomain sym arch) where
     mem <- PEM.mapExpr sym f (eqDomainGlobalMemory dom)
     mr <- PEM.mapExpr sym f (eqDomainMaxRegion dom)
     return $ EquivalenceDomain regs stack mem mr
+
+
+instance PEM.ExprMappable2 sym1 sym2 (EquivalenceDomain sym1 arch) (EquivalenceDomain sym2 arch) where
+  mapExpr2 sym1 sym2 f dom = do
+    regs <- PEM.mapExpr2 sym1 sym2 f (eqDomainRegisters dom)
+    stack <- PEM.mapExpr2 sym1 sym2 f (eqDomainStackMemory dom)
+    mem <- PEM.mapExpr2 sym1 sym2 f (eqDomainGlobalMemory dom)
+    mr <- PEM.mapExpr2 sym1 sym2 f (eqDomainMaxRegion dom)
+    return $ EquivalenceDomain regs stack mem mr

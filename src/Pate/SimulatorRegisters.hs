@@ -91,17 +91,17 @@ ptrToEntry ::
 ptrToEntry ptr@(CLM.LLVMPointer _ bv) = case WI.exprType bv of
   WI.BaseBVRepr w -> MacawRegEntry (CLM.LLVMPointerRepr w) ptr
 
-instance PEM.ExprMappable sym (MacawRegEntry sym tp) where
-  mapExpr sym f entry = do
-    case macawRegRepr entry of
+instance PEM.ExprMappable2 sym1 sym2 (MacawRegEntry sym1 tp) (MacawRegEntry sym2 tp) where
+  mapExpr2 sym1 sym2 f (MacawRegEntry repr val) = do
+    case repr of
       CLM.LLVMPointerRepr{} -> do
-        val' <- WEH.mapExprPtr sym f $ macawRegValue entry
-        return $ entry { macawRegValue = val' }
+        val' <- WEH.mapExprPtr2 sym1 sym2 f val
+        return $ MacawRegEntry repr val'
       CT.BoolRepr -> do
-        val' <- f (macawRegValue entry)
-        return $ entry { macawRegValue = val' }
+        val' <- f val
+        return $ MacawRegEntry repr val'
       CT.StructRepr Ctx.Empty -> do
         -- In this case, we have a Unit value and there is no transformation
         -- possible (an it isn't even a base type)
-        return entry
+        return $ MacawRegEntry repr Ctx.empty
       rep -> error ("mapExpr: unsupported macaw type " ++ show rep)

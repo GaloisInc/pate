@@ -71,6 +71,10 @@ module Pate.Memory.MemTrace
 , PtrAssertions
 , doStaticRead
 , doStaticReadAddr
+, TraceEvent(..)
+, RegOp(..)
+, memFullSeq
+, GroundInfo(..)
 ) where
 
 import Unsafe.Coerce
@@ -96,7 +100,7 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Context as Ctx
 
 import qualified Data.Macaw.Types as MT
-import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..))
+import Data.Macaw.CFG.AssignRhs (ArchAddrWidth, MemRepr(..), ArchReg)
 import Data.Macaw.Memory
            (AddrWidthRepr(..), Endianness(..), MemWidth
            , addrWidthClass, addrWidthRepr, addrWidthNatRepr, memWidthNatRepr
@@ -149,6 +153,9 @@ import qualified Pate.ExprMappable as PEM
 import           What4.ExprHelpers ( integerToNat )
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Memory as PM
+import Data.Macaw.CFG (ArchSegmentOff, RegisterInfo)
+import qualified Pate.SimulatorRegisters as PSr
+import Data.Data (Typeable, eqT)
 
 ------
 -- * Undefined pointers
@@ -190,8 +197,8 @@ instance OrdF (SymExpr sym) => OrdF (SymBV' sym) where
     LTF -> LTF
     GTF -> GTF
 
-instance PEM.ExprMappable sym (SymBV' sym w) where
-  mapExpr _sym f (SymBV' bv) = SymBV' <$> f bv
+instance PEM.ExprMappable2 sym1 sym2 (SymBV' sym w) (SymBV' sym2 w) where
+  mapExpr2 _sym1 _sym2 f (SymBV' bv) = SymBV' <$> f bv
 
 instance IsExpr (SymExpr sym) => Pretty (SymBV' sym w) where
   pretty (SymBV' bv) = printSymExpr bv
@@ -633,10 +640,17 @@ data MemOp sym ptrW where
     Endianness ->
     MemOp sym ptrW
 
+ppPtr' :: IsExpr (SymExpr sym) => LLVMPtr sym arch -> Doc ann
+ppPtr' ptr@(LLVMPointer r off) 
+  | BaseBVRepr w <- exprType off
+  = case (asNat r, asBV off) of
+  (Just 1, Just off') -> "Stack Slot:" <+> viaShow (BV.asSigned w off')
+  _ -> ppPtr ptr
+
 prettyMemOp :: IsExpr (SymExpr sym) => MemOp sym ptrW -> Doc ann
 prettyMemOp (MemOp ptr dir cond _sz val _end) =
   viaShow dir <+>
-  ppPtr ptr <+>
+  ppPtr' ptr <+>
   (case dir of Read -> "->" ; Write -> "<-") <+>
   ppPtr val <+>
   case cond of
@@ -711,6 +725,19 @@ instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
         (toOrdering $ compareF vo1 vo2) <>
         compare end1 end2
 
+data RegOp sym arch =
+  RegOp (MapF.MapF (ArchReg arch) (PSr.MacawRegEntry sym))
+
+-- | Used for presenting counter-examples that contain all register updates
+data TraceEvent sym arch =
+    RegOpEvent { traceInstr :: MuxTree sym (Maybe (ArchSegmentOff arch, Text)), _traceRegOp :: RegOp sym arch }
+  | TraceMemEvent { traceInstr :: MuxTree sym (Maybe (ArchSegmentOff arch, Text)), _traceMemEvent :: MemEvent sym (ArchAddrWidth arch)}
+
+data GroundInfo tp = 
+  GroundInfo {groundTags :: UndefPtrOpTags, groundIsStackRegion :: Bool }
+
+-- instance PG.SymCoercable sym1 sym2 (TraceEvent sym1 arch)
+
 data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
   SyscallEvent :: forall sym ptrW w.
@@ -775,7 +802,8 @@ prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+>
 prettyMemTraceSeq :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemTraceSeq sym ptrW -> Doc ann
 prettyMemTraceSeq = prettySymSequence prettyMemEvent
 
-data MemTraceImpl sym ptrW = MemTraceImpl
+-- FIXME: existentially-quantified
+data MemTraceImpl sym ptrW = MemTraceImpl 
   { memSeq :: MemTraceSeq sym ptrW
   -- ^ The sequence of memory operations in reverse execution order;
   --   later events appear closer to the front of the sequence.
@@ -787,6 +815,9 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   -- ^ The "base" memory loaded with the binary. We use this to directly service concrete
   --   reads from read-only memory. INVARIANT: we only mux together memories that were
   --   derived from the same initial memory, so we can assume the base memories are identical.
+  , memFullSeq_ :: MemTraceFullSeq sym ptrW
+  -- ^ Full sequence of register and memory operations since the start of the block
+
   }
 
 data MemTraceState sym ptrW = MemTraceState
@@ -795,6 +826,33 @@ data MemTraceState sym ptrW = MemTraceState
   }
 
 type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
+
+--   FIXME: existentially-quantified 'arch' parameter is a workaround for the
+--   fact that only 'ptrW' is available in 'MemTraceImpl'
+data MemTraceFullSeq sym ptrW = 
+  forall arch. (Typeable arch, ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => 
+    MemTraceFullSeq (Proxy arch) (SymSequence sym (TraceEvent sym arch)) 
+
+memFullSeq ::
+  forall sym arch.
+  Typeable arch =>
+  MemTraceImpl sym (ArchAddrWidth arch) -> 
+  SymSequence sym (TraceEvent sym arch)
+memFullSeq mem | MemTraceFullSeq (_ :: Proxy arch2) s <- memFullSeq_ mem =
+  case eqT @arch @arch2 of
+    Just Refl -> s
+    Nothing -> error "memFullSeq: unexpected architecture"
+
+muxFullSeq :: 
+  sym ->
+  Pred sym ->
+  MemTraceFullSeq sym ptrW ->
+  MemTraceFullSeq sym ptrW ->
+  IO (MemTraceFullSeq sym ptrW)
+muxFullSeq sym p (MemTraceFullSeq (px :: Proxy arch1) a) (MemTraceFullSeq (_ :: Proxy arch2) b) = 
+  case eqT @arch1 @arch2 of
+    Just Refl -> MemTraceFullSeq px <$> muxSymSequence sym p a b
+    Nothing -> fail "muxFullSeq: incompatible architectures"
 
 -- | A map from pointers (a region integer combined with a pointer-width bitvector)
 -- to bytes, representing the contents of memory at the given pointer.
@@ -827,7 +885,9 @@ mkMemTraceVar ::
 mkMemTraceVar ha = freshGlobalVar ha (pack "llvm_memory_trace") knownRepr
 
 initMemTrace ::
-  forall sym ptrW.
+  forall sym arch ptrW.
+  ptrW ~ ArchAddrWidth arch =>
+  (Typeable arch, SymArchConstraints arch) =>
   IsSymExprBuilder sym =>
   sym ->
   Memory ptrW ->
@@ -837,12 +897,14 @@ initMemTrace sym baseMem Addr32 = do
   arrBytes <- ioFreshConstant sym "InitMemBytes" knownRepr
   arrRegions <- ioFreshConstant sym "InitMemRegions" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem
+  fullsq <- MemTraceFullSeq (Proxy @arch) <$> nilSymSequence sym
+  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem fullsq
 initMemTrace sym baseMem Addr64 = do
   arrBytes <- ioFreshConstant sym "InitMemBytes" knownRepr
   arrRegions <- ioFreshConstant sym "InitMemRegions" knownRepr
   sq <- nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem
+  fullsq <- MemTraceFullSeq (Proxy @arch) <$> nilSymSequence sym
+  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem fullsq
 
 
 mkMemoryBinding ::
@@ -870,10 +932,10 @@ instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
     memArrBytes'   <- baseTypeIte sym p (memArrBytes $ memState t) (memArrBytes $ memState f)
     memArrRegions'   <- baseTypeIte sym p (memArrRegions $ memState t) (memArrRegions $ memState f)
     memInstr' <- mergeMuxTree sym p (memCurrentInstr t) (memCurrentInstr f)
-
+    memFullSeq' <- muxFullSeq sym p (memFullSeq_ t) (memFullSeq_ f)
     -- NB, we assume that the "base" memories are always the same, so we can arbitrarily choose
     -- one to use.
-    return $ MemTraceImpl memSeq' (MemTraceState memArrBytes' memArrRegions') memInstr' (memBaseMemory t)
+    return $ MemTraceImpl memSeq' (MemTraceState memArrBytes' memArrRegions') memInstr' (memBaseMemory t) memFullSeq'
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -1524,6 +1586,9 @@ doStaticReadAddr mem addr w end = do
 -- | Compute the updated memory state resulting from writing a value to the given address, without
 -- accumulating any trace information.
 writeMemState ::
+  forall sym arch ptrW ty.
+  ptrW ~ ArchAddrWidth arch =>
+  (Typeable arch, RegisterInfo (ArchReg arch)) =>
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
@@ -1535,8 +1600,9 @@ writeMemState ::
   IO (MemTraceState sym ptrW)
 writeMemState sym cond memSt ptr repr val = do
   sq <- nilSymSequence sym
-  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing) (emptyMemory (addrWidthRepr Proxy))
-  MemTraceImpl _ memSt' _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
+  fullsq <- MemTraceFullSeq (Proxy @arch) <$> nilSymSequence sym
+  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing) (emptyMemory (addrWidthRepr Proxy)) fullsq
+  MemTraceImpl _ memSt' _ _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
 -- | Write to the memory array and set the dirty bits on
@@ -1932,68 +1998,65 @@ memEqExact sym mem1 mem2 = do
   regionsEq <- isEq sym (memArrRegions mem1) (memArrRegions mem2)
   andPred sym bytesEq regionsEq
 
-instance PEM.ExprMappable sym (MemOpCondition sym) where
-  mapExpr _sym f = \case
+instance PEM.ExprMappable2 sym1 sym2 (MemOpCondition sym1) (MemOpCondition sym2) where
+  mapExpr2 _sym1 _sym2 f = \case
     Conditional p -> Conditional <$> f p
     Unconditional -> return Unconditional
 
-instance PEM.ExprMappable sym (MemOp sym w) where
-  mapExpr sym f = \case
+instance PEM.ExprMappable2 sym1 sym2 (MemOp sym1 w) (MemOp sym2 w) where
+  mapExpr2 sym1 sym2 f = \case
     MemOp ptr dir cond w val endian -> do
-      ptr' <- WEH.mapExprPtr sym f ptr
-      val' <- WEH.mapExprPtr sym f val
-      cond' <- PEM.mapExpr sym f cond
+      ptr' <- WEH.mapExprPtr2 sym1 sym2 f ptr
+      val' <- WEH.mapExprPtr2 sym1 sym2 f val
+      cond' <- PEM.mapExpr2 sym1 sym2 f cond
       return $ MemOp ptr' dir cond' w val' endian
 
-instance PEM.ExprMappable sym (MemEvent sym w) where
-  mapExpr sym f = \case
-    MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
+instance PEM.ExprMappable2 sym1 sym2 (MemEvent sym1 w) (MemEvent sym2 w) where
+  mapExpr2 sym1 sym2 f = \case
+    MemOpEvent op -> MemOpEvent <$> PEM.mapExpr2 sym1 sym2 f op
     SyscallEvent i arg -> SyscallEvent i <$> f arg
     -- MuxTree is unmodified since it has no symbolic expressions
-    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr sym f) vs
+    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr2 sym1 sym2 f) vs
 
 instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
   pretty ev = prettyMemEvent ev
 
-instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
-  mapExpr sym f = evalWithFreshCache $ \rec -> \case
-    SymSequenceNil -> IO.liftIO $ nilSymSequence sym
-    SymSequenceCons _ x xs ->
-      do x'  <- PEM.mapExpr sym f x
-         xs' <- rec xs
-         IO.liftIO $ consSymSequence sym x' xs'
-    SymSequenceAppend _ xs ys ->
-     do xs' <- rec xs
-        ys' <- rec ys
-        IO.liftIO $ appendSymSequence sym xs' ys'
-    SymSequenceMerge _ p xs ys ->
-     do p' <- f p
-        case asConstantPred p' of
-          Just True -> rec xs
-          Just False -> rec ys
-          Nothing -> do
-            xs' <- rec xs
-            ys' <- rec ys
-            IO.liftIO $ muxSymSequence sym p' xs' ys'
 
 
-instance PEM.ExprMappable sym (MemTraceImpl sym w) where
-  mapExpr sym f mem = do
-    memSeq' <- PEM.mapExpr sym f (memSeq mem)
-    memState' <- PEM.mapExpr sym f $ memState mem
-    let memInstr' =  memCurrentInstr mem -- TODO? rewrite the mux tree?
-                                         -- I expect it to basically never be interesting
-                                         -- to do this...
-    return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem)
+instance PEM.ExprMappable2 sym1 sym2 (MemTraceFullSeq sym1 ptrW) (MemTraceFullSeq sym2 ptrW) where
+  mapExpr2 sym1 sym2 f (MemTraceFullSeq px s) = MemTraceFullSeq px <$> PEM.mapExpr2 sym1 sym2 f s
 
-instance PEM.ExprMappable sym (MemTraceState sym w) where
-  mapExpr _sym f memSt = do
+instance PEM.ExprMappable2 sym1 sym2 (MemTraceImpl sym1 w) (MemTraceImpl sym2 w) where
+  mapExpr2 sym1 sym2 f mem = do
+    memSeq' <- PEM.mapExpr2 sym1 sym2 f (memSeq mem)
+    memState' <- PEM.mapExpr2 sym1 sym2 f $ memState mem
+    memInstr' <- PEM.mapExpr2 sym1 sym2 f $ memCurrentInstr mem
+    memFullSeq' <- PEM.mapExpr2 sym1 sym2 f (memFullSeq_ mem)
+    return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem) memFullSeq'
+
+instance PEM.ExprMappable2 sym1 sym2 (MemTraceState sym1 w) (MemTraceState sym2 w) where
+  mapExpr2 _sym1 _sym2 f memSt = do
     memArrBytes' <- f $ memArrBytes memSt
     memArrRegions' <- f $ memArrRegions memSt
     return $ MemTraceState memArrBytes' memArrRegions'
 
-instance PEM.ExprMappable sym (MemFootprint sym arch) where
-  mapExpr sym f (MemFootprint ptr w dir cond end) = do
-    ptr' <- WEH.mapExprPtr sym f ptr
-    cond' <- PEM.mapExpr sym f cond
+instance PEM.ExprMappable2 sym1 sym2 (MemFootprint sym1 arch) (MemFootprint sym2 arch) where
+  mapExpr2 sym1 sym2 f (MemFootprint ptr w dir cond end) = do
+    ptr' <- WEH.mapExprPtr2 sym1 sym2 f ptr
+    cond' <- PEM.mapExpr2 sym1 sym2 f cond
     return $ MemFootprint ptr' w dir cond' end
+
+instance RegisterInfo (ArchReg arch) => PEM.ExprMappable2 sym1 sym2 (RegOp sym1 arch) (RegOp sym2 arch) where
+  mapExpr2 sym1 sym2 f (RegOp rm) = 
+    (RegOp . PEM.unExprMapFElems) <$> PEM.mapExpr2 sym1 sym2 f (PEM.ExprMapFElems rm)
+
+instance PEM.ExprMappable2 sym1 sym2 (MemSegmentOff arch) (MemSegmentOff arch) where
+  mapExpr2 _ _ _ = return 
+
+instance PEM.ExprMappable2 sym1 sym2 Text Text where
+  mapExpr2 _ _ _ = return 
+
+instance RegisterInfo (ArchReg arch) => PEM.ExprMappable2 sym1 sym2 (TraceEvent sym1 arch) (TraceEvent sym2 arch) where
+  mapExpr2 sym1 sym2 f ev = case ev of
+    RegOpEvent i rop -> RegOpEvent <$> PEM.mapExpr2 sym1 sym2 f i <*> PEM.mapExpr2 sym1 sym2 f rop
+    TraceMemEvent i mev -> TraceMemEvent <$> PEM.mapExpr2 sym1 sym2 f i <*> PEM.mapExpr2 sym1 sym2 f mev

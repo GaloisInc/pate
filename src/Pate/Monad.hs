@@ -157,6 +157,7 @@ import qualified Data.Macaw.BinaryLoader as MBL
 
 import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
+import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
 import qualified What4.Symbol as WS
@@ -177,6 +178,7 @@ import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.ExprMappable as PEM
+import           Pate.Ground (SymGroundEvalFn(..))
 import qualified Pate.Hints as PH
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
@@ -195,6 +197,10 @@ import Data.Functor.Const (Const(..))
 import Unsafe.Coerce (unsafeCoerce)
 import Debug.Trace
 import Data.List
+import qualified Pate.Ground as PG
+import qualified Data.Parameterized.TraversableFC as TFC
+import qualified What4.ExprHelpers as WEH
+import qualified Data.Set as Set
 
 atPriority :: 
   NodePriority ->
@@ -582,7 +588,7 @@ withFreshVars blocks f = do
     mkMem bin = do
       binCtx <- getBinCtx' bin
       let baseMem = MBL.memoryImage $ PMC.binary binCtx
-      withSymIO $ \sym -> MT.initMemTrace sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
+      withSymIO $ \sym -> MT.initMemTrace @_ @arch sym baseMem (MM.addrWidthRepr (Proxy @(MM.ArchAddrWidth arch)))
 
     mkStackBase :: forall bin v. PBi.WhichBinaryRepr bin -> EquivM_ sym arch (StackBase sym arch v)
     mkStackBase bin = withSymIO $ \sym -> freshStackBase sym bin (Proxy @arch)
@@ -879,8 +885,6 @@ withSatAssumption asm f = withSym $ \sym -> do
 --------------------------------------
 -- Sat helpers
 
-data SymGroundEvalFn sym where
-  SymGroundEvalFn :: W4G.GroundEvalFn scope -> SymGroundEvalFn (WE.ExprBuilder scope solver fs)
 
 -- | Check satisfiability of the given predicate in the current assumption sate
 -- Any thrown exceptions are captured and passed to the continuation as an
@@ -890,7 +894,7 @@ goalSat ::
   HasCallStack =>
   String ->
   W4.Pred sym ->
-  (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
+  (W4R.SatResult (SymGroundEvalFn sym MT.GroundInfo) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
 goalSat desc p k = do
   isPredSat_cache p >>= \case
@@ -909,7 +913,7 @@ heuristicSat ::
   HasCallStack =>
   String ->
   W4.Pred sym ->
-  (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
+  (W4R.SatResult (SymGroundEvalFn sym MT.GroundInfo) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
 heuristicSat desc p k = do
   isPredSat_cache p >>= \case
@@ -937,7 +941,7 @@ getWrappedSolver = withSym $ \sym -> do
   
 
 concretizeWithModel ::
-  SymGroundEvalFn sym ->
+  SymGroundEvalFn sym k ->
   W4.SymExpr sym tp ->
   EquivM sym arch (W4.SymExpr sym tp)
 concretizeWithModel fn e = withSym $ \sym -> do
@@ -964,6 +968,49 @@ concretizeWithSolver e = withSym $ \sym -> do
 
   PVC.resolveSingletonSymbolicAsDefault wsolver e
 
+-- | Wrap a 'W4G.GroundEvalFn' in a classifier that collects extra meta-data
+mkSymGroundEvalFn ::
+  forall sym arch t st fs.
+  (sym ~ WE.ExprBuilder t st fs) =>
+  W4G.GroundEvalFn t ->
+  EquivM sym arch (SymGroundEvalFn sym MT.GroundInfo)
+mkSymGroundEvalFn fn  = withSym $ \sym -> do
+  undefPtrOps <- asks envUndefPointerOps
+  stack_region <- asks (PMC.stackRegion . envCtx)
+  let classify = MT.undefPtrClassify undefPtrOps
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> IO MT.UndefPtrOpTags
+    go e = fmap getConst $ W4B.idxCacheEval cache e $ case e of
+      WE.BoundVarExpr _ -> Const <$> (IO.liftIO $ MT.classifyExpr classify e)
+      WE.AppExpr a0 -> case WE.appExprApp a0 of
+        WE.BaseIte _ _ cond eT eF -> fmap Const $ do
+          cond_tags <- go cond
+          branch_tags <- W4G.groundEval fn cond >>= \case
+            True -> go eT
+            False -> go eF
+          return $ cond_tags <> branch_tags
+        app -> TFC.foldrMFC (\e' tags -> acc e' tags) mempty app
+      WE.NonceAppExpr a0 -> TFC.foldrMFC (\e' tags -> acc e' tags) mempty (WE.nonceExprApp a0)
+      _ -> return mempty
+
+    acc :: forall tp1 tp2. W4.SymExpr sym tp1 -> Const (MT.UndefPtrOpTags) tp2 -> IO (Const (MT.UndefPtrOpTags) tp2)
+    acc e (Const tags) = do
+      tags' <- go e
+      return $ Const $ tags <> tags'
+  
+  stack_regionC <- IO.liftIO $ W4G.groundEval fn (W4.natToIntegerPure stack_region)
+  
+  return $ SymGroundEvalFn fn $ \(e :: W4.SymExpr sym tp) c -> do
+    e' <- WEH.resolveConcreteLookups sym (\p -> Just <$> W4G.groundEval fn p) e
+    tags <- go e'
+    let stack_region_proof = case W4.exprType e of
+          W4.BaseIntegerRepr | c == stack_regionC -> True
+          _ -> False
+    case (Set.null tags, stack_region_proof) of
+      (True, False) -> return Nothing
+      _ -> return $ Just $ MT.GroundInfo tags stack_region_proof 
+
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --
 -- This function wraps some lower-level functions and invokes the SMT solver in
@@ -978,18 +1025,17 @@ checkSatisfiableWithModel ::
   PT.Timeout ->
   String ->
   W4.Pred sym ->
-  (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
+  (W4R.SatResult (SymGroundEvalFn sym MT.GroundInfo) () -> EquivM_ sym arch a) ->
   EquivM sym arch (Either SomeException a)
-checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
-  (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
+checkSatisfiableWithModel timeout desc p k = withSym $ \(sym :: W4B.ExprBuilder t st fs) -> do
+  (frame :: LCB.FrameIdentifier, st :: LCB.AssumptionState sym) <- withOnlineBackend $ \bak -> liftIO $ do
     st <- LCB.saveAssumptionState bak
     frame <- LCB.pushAssumptionFrame bak
     return (frame, st)
-  mres <- withSolverProcess $ \sp -> liftIO $ do
+  (mres :: Either SomeException (W4R.SatResult (W4G.GroundEvalFn t) ())) <- withSolverProcess $ \sp -> liftIO $ do
     W4.assume (WPO.solverConn sp) p
     tryJust filterAsync $ do
-      res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
-      W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
+      checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
   case mres of
     Left err -> withOnlineBackend $ \bak -> do
       --FIXME: for some reason the first attempt sometimes fails and we need to try again
@@ -999,7 +1045,8 @@ checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
         return $ Left err
     Right res -> withOnlineBackend $ \bak -> do
       processSatResult p res
-      fmap Right $ k res `finally`
+      res' <- W4R.traverseSatResult (\r' -> mkSymGroundEvalFn r') pure res
+      fmap Right $ k res' `finally`
         catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame))
           (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
 
@@ -1222,13 +1269,13 @@ forkSolver inVar = do
 -}
 
 wrapGroundEvalFn ::
-  SymGroundEvalFn sym ->
+  SymGroundEvalFn sym k ->
   Set (Some (W4.SymExpr sym)) ->
-  EquivM sym arch (SymGroundEvalFn sym)
-wrapGroundEvalFn fn@(SymGroundEvalFn gfn) es = withSym $ \sym -> do
+  EquivM sym arch (SymGroundEvalFn sym k)
+wrapGroundEvalFn fn@(SymGroundEvalFn gfn mkinfo) es = withSym $ \sym -> do
   binds <- extractBindings fn es
   let fn' = W4G.GroundEvalFn (\e' -> (stripAnnotations sym e' >>= applyExprBindings sym binds >>= (W4G.groundEval gfn)))
-  return $ SymGroundEvalFn fn'
+  return $ SymGroundEvalFn fn' mkinfo
 
 {-
 -- | Modified grounding that first applies some manual rewrites
@@ -1245,7 +1292,7 @@ safeGroundEvalFn fn e f = withSym $ \sym -> do
 -}
 
 extractBindings ::
-  SymGroundEvalFn sym ->
+  SymGroundEvalFn sym k ->
   Set (Some (W4.SymExpr sym)) ->
   EquivM sym arch (ExprBindings sym)
 extractBindings fn e = withSym $ \sym -> do
@@ -1258,19 +1305,19 @@ extractBindings fn e = withSym $ \sym -> do
   
 
 withGroundEvalFn ::
-  SymGroundEvalFn sym ->
+  SymGroundEvalFn sym k ->
   (forall t st fs. sym ~ WE.ExprBuilder t st fs => W4G.GroundEvalFn t -> IO a) ->
   EquivM sym arch a
 withGroundEvalFn fn f = withValid $
   IO.withRunInIO $ \runInIO -> f $ W4G.GroundEvalFn (\e -> runInIO (execGroundFn fn e))
 
 execGroundFn ::
-  forall sym arch tp.
+  forall sym arch k tp.
   HasCallStack =>
-  SymGroundEvalFn sym  ->
+  SymGroundEvalFn sym k ->
   W4.SymExpr sym tp ->
   EquivM_ sym arch (W4G.GroundValue tp)
-execGroundFn (SymGroundEvalFn fn) e = do
+execGroundFn (SymGroundEvalFn fn _) e = do
   groundTimeout <- CMR.asks (PC.cfgGroundTimeout . envConfig)
   result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`
     [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)

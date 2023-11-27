@@ -448,8 +448,9 @@ instance TF.FunctorF PatchPair where
 instance TF.FoldableF PatchPair where
   foldMapF = TF.foldMapFDefault
 
-instance (forall bin. PEM.ExprMappable sym (f bin)) => PEM.ExprMappable sym (PatchPair f) where
-  mapExpr sym f pp = TF.traverseF (PEM.mapExpr sym f) pp
+instance (forall bin. PEM.ExprMappable2 sym1 sym2 (f bin) (g bin)) => 
+  PEM.ExprMappable2 sym1 sym2 (PatchPair f) (PatchPair g) where
+    mapExpr2 sym1 sym2 f pp = TF.traverseF (PEM.mapExpr2 sym1 sym2 f) pp
 
 instance TF.TraversableF PatchPair where
   traverseF f pp = case pp of

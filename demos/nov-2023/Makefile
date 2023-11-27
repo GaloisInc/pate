@@ -80,10 +80,23 @@ target1: target1.original.exe target1.patched.exe
 target1.original.so: main
 	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/cf/rr.so" $@
 
+target1.patched.so: main
+	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/cf/rr-gsfcpatch1.so" $@
+
 target1-so-self: target1.original.so
 	$(PATE) \
 	  -o $(DEMOS)/target1.original.so \
 		-p $(DEMOS)/target1.original.so \
+		-e ContinueAfterRecoverableFailures \
+		-r AllowEqRescopeFailure \
+		-s RR_Init \
+		-s RR_ReadTlmInput \
+		--save-macaw-cfgs $(DEMOS)/target1_CFGs
+
+target1-so: target1.original.so target1.patched.so
+	$(PATE) \
+	  -o $(DEMOS)/target1.original.so \
+		-p $(DEMOS)/target1.patched.so \
 		-e ContinueAfterRecoverableFailures \
 		-r AllowEqRescopeFailure \
 		-s RR_Init \
@@ -98,6 +111,11 @@ target3-patched-master: main
 
 target3-room_1011_dendy: room_1011_dendy
 	cp "$(HACKATHON_NOV_2023)/Target 3 - MRZR Vehicle Interface Controller (BBB)/patched_target3_irene_patcherex" target3.patched.so
+
+target3-draper:
+	cp libroscpp_draper_patched.so target3.patched.so
+	cp "$(HACKATHON_NOV_2023)/Target 3 - MRZR Vehicle Interface Controller (BBB)/patched_target3_irene_patcherex" target3.patched.so
+
 
 target3-self: target3.original.so
 	$(PATE) \

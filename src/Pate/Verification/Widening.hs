@@ -30,6 +30,7 @@ module Pate.Verification.Widening
   , traceEqCond
   , InteractiveBundle(..)
   , getCounterExample
+  , getCounterExample'
   ) where
 
 import           GHC.Stack
@@ -473,31 +474,36 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
 
-
--- | Compute a counter-example for a given predicate
 getCounterExample ::
   SimBundle sym arch v ->
-  W4.Pred sym -> 
+  W4.Pred sym ->
   EquivM sym arch (CE.ObservableCheckResult sym arch)
 getCounterExample bundle p = withSym $ \sym -> do
-  evs <- PPa.forBinsC $ \bin -> do
-    out <- PPa.get bin (PS.simOut bundle)
-    let mem = PS.simOutMem out
-    liftIO (MT.observableEvents sym (\_ -> return $ W4.truePred sym) mem)
   not_p <- liftIO $ W4.notPred sym p
   goalSat "getCounterExample" not_p $ \res -> case res of
     Unsat _ -> return CE.ObservableCheckEq
     Unknown -> return (CE.ObservableCheckError "UNKNOWN result when checking observable sequences")
-    Sat evalFn' -> CE.ObservableCheckCounterexample <$> do
-      -- FIXME: counter-example should use patchpair
-      let join_ce (r,s) (r',s') =
-            return $ ObservableCounterexample (CE.RegsCounterExample r r') s s'
-      PPa.joinPatchPred join_ce $ \bin -> do
-        in_ <- PPa.get bin (PS.simIn bundle)
-        sym_seq <- PPa.getC bin evs
-        ground_regs <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simInRegs in_)
-        ground_seq <- withGroundEvalFn evalFn' $ \evalFn -> reverse <$> CE.groundObservableSequence sym evalFn sym_seq
-        return (ground_regs, ground_seq)
+    Sat evalFn -> CE.ObservableCheckCounterexample <$> getCounterExample' evalFn bundle
+
+-- | Compute a counter-example for a given predicate
+getCounterExample' ::
+  SymGroundEvalFn sym ->
+  SimBundle sym arch v ->
+  EquivM sym arch (CE.ObservableCounterexample sym arch)
+getCounterExample' evalFn' bundle = withSym $ \sym -> do
+  evs <- PPa.forBinsC $ \bin -> do
+    out <- PPa.get bin (PS.simOut bundle)
+    let mem = PS.simOutMem out
+    liftIO (MT.observableEvents sym (\_ -> return $ W4.truePred sym) mem)
+    -- FIXME: counter-example should use patchpair
+  let join_ce (r,s) (r',s') =
+        return $ ObservableCounterexample (CE.RegsCounterExample r r') s s'
+  PPa.joinPatchPred join_ce $ \bin -> do
+    in_ <- PPa.get bin (PS.simIn bundle)
+    sym_seq <- PPa.getC bin evs
+    ground_regs <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simInRegs in_)
+    ground_seq <- withGroundEvalFn evalFn' $ \evalFn -> reverse <$> CE.groundObservableSequence sym evalFn sym_seq
+    return (ground_regs, ground_seq)
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->

@@ -400,7 +400,7 @@ instance PA.ValidArch arch => PP.Pretty (PF.InequivalenceResult arch) where
 ppBlockSliceTransition ::
   forall grnd arch a.
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   -- | pre-domain
   PED.EquivalenceDomain grnd arch ->
   -- | post-domain
@@ -428,7 +428,7 @@ ppBlockSliceTransition pre post bs = PP.vsep $
 
 ppIPs ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PF.BlockSliceState grnd arch ->
   PP.Doc a
 ppIPs st  =
@@ -441,7 +441,7 @@ ppIPs st  =
 
 ppMemCellMap ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PED.EquivalenceDomain grnd arch ->
   MapF.MapF (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) ->
   PP.Doc a
@@ -453,7 +453,7 @@ ppMemCellMap dom cells = let
 -- | True if the two cells represent the same value when grounded
 eqGroundCells ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PMC.MemCell grnd arch tp1 ->
   PMC.MemCell grnd arch tp2 ->
   Bool
@@ -464,7 +464,7 @@ eqGroundCells cell1 cell2 = case testEquality (PMC.cellWidth cell1) (PMC.cellWid
 
 ppRegs ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   -- | domain that this register set was checked for equivalence under
   PED.EquivalenceDomain grnd arch ->
   MM.RegState (MM.ArchReg arch) (PF.BlockSliceRegOp grnd) ->
@@ -483,33 +483,38 @@ isGroundBVZero _ = False
 
 
 groundLLVMPointer :: forall sym w.
-  PG.IsGroundSym sym =>
+  PG.IsGroundSym sym MT.GroundInfo =>
   CLM.LLVMPtr sym w ->
   GroundLLVMPointer w
 groundLLVMPointer ptr = groundBVAsPointer $ groundBV ptr
 
 isStackCell :: forall grnd arch w.
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PMC.MemCell grnd arch w ->
   Bool
-isStackCell cell =
-  let CLM.LLVMPointer reg _ = PMC.cellPtr cell
-  in PG.isStackRegion reg
+isStackCell cell |
+    CLM.LLVMPointer reg _ <- PMC.cellPtr cell
+  , (Just info, _) <- PG.groundInfoNat reg
+  = MT.groundIsStackRegion info
+
+groundPtrTag :: Maybe (MT.GroundInfo tp) -> MT.UndefPtrOpTags 
+groundPtrTag (Just gi) = MT.groundTags gi
+groundPtrTag Nothing = mempty
 
 groundBV ::
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   CLM.LLVMPtr grnd w ->
   GroundBV w
 groundBV (CLM.LLVMPointer reg off)
   | W4.BaseBVRepr w <- W4.exprType off =
   let
-    (regTags, groundReg) = PG.groundInfoNat reg
+    (regInfo, groundReg) = PG.groundInfoNat reg
     offInfo = PG.groundInfo off
-    tags = regTags <> (PG.groundPtrTag offInfo)
-  in mkGroundBV w tags groundReg (PG.groundVal offInfo)
+    tags = groundPtrTag regInfo <> (groundPtrTag offInfo)
+  in mkGroundBV w tags groundReg (PG.groundValue off)
 
 groundMacawValue ::
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PSR.MacawRegEntry grnd tp ->
   GroundMacawValue tp
 groundMacawValue e
@@ -524,7 +529,7 @@ groundMacawValue e
 
 groundBlockEnd ::
   forall grnd arch.
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   Proxy arch ->
   CS.RegValue grnd (MCS.MacawBlockEndType arch) ->
   GroundBlockExit arch
@@ -536,7 +541,7 @@ groundBlockEnd arch blkend =
   
 ppRegVal ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PER.RegisterDomain grnd arch ->
   MM.ArchReg arch tp ->
   PF.BlockSliceRegOp grnd tp ->
@@ -561,7 +566,7 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
 
 regInGroundDomain ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PER.RegisterDomain grnd arch ->
   MM.ArchReg arch tp ->
   Bool
@@ -572,7 +577,7 @@ regInGroundDomain dom r = case PER.registerInDomain' r dom of
 
 ppCellVal ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PED.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   PF.BlockSliceMemOp grnd tp ->
@@ -594,14 +599,14 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
 
 ppGroundCell ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PMC.MemCell grnd arch n ->
   PP.Doc a
 ppGroundCell cell = PP.pretty $ (show $ groundLLVMPointer (PMC.cellPtr cell))
 
 
 eqGroundMemCells ::
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PMC.MemCell grnd arch n1 ->
   PMC.MemCell grnd arch n2 ->
   Bool  
@@ -617,7 +622,7 @@ eqGroundMemCells cell1 cell2 =
 
 cellInMemDomain ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PEM.MemoryDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool
@@ -626,7 +631,7 @@ cellInMemDomain dom cell = foldr (\(Some cell', p) p' -> p' && (not (eqGroundMem
 
 cellInGroundDomain ::
   PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
+  PG.IsGroundSym grnd MT.GroundInfo =>
   PED.EquivalenceDomain grnd arch ->
   PMC.MemCell grnd arch n ->
   Bool

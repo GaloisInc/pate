@@ -189,11 +189,11 @@ excludeFootPrints ::
   IO (MemoryDomain sym arch)
 excludeFootPrints sym foots memDom = do
   memDom' <- fromFootPrints sym foots
-  memLocs' <- WPM.merge sym (memDomainPred memDom) (memDomainPred memDom')
+  memLocs' <- WPM.asHasPredOps sym $ WPM.merge sym (memDomainPred memDom) (memDomainPred memDom')
   return $ memDom { memDomainPred = memLocs' }
 
-instance PEM.ExprMappable sym (MemoryDomain sym arch) where
-  mapExpr sym f memDom = MemoryDomain <$>  PEM.mapExpr sym f (memDomainPred memDom)
+instance PEM.ExprMappable2 sym1 sym2 (MemoryDomain sym1 arch) (MemoryDomain sym2 arch) where
+  mapExpr2 sym1 sym2 f memDom = MemoryDomain <$> PEM.mapExpr2 sym1 sym2 f (memDomainPred memDom)
 
 ppMemoryDomainEntries ::
   forall sym arch a.

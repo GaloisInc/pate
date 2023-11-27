@@ -13,6 +13,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE ImpredicativeTypes #-}
 
 module Pate.Arch (
   SomeValidArch(..),
@@ -72,6 +73,7 @@ import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Address as PAd
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
+import qualified Pate.Ground as PG
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.SimulatorRegisters as PSR

@@ -225,6 +225,9 @@ instance PS.Scoped (RegisterCondition sym arch) where
 instance PEM.ExprMappable sym (RegisterCondition sym arch v) where
   mapExpr sym f (RegisterCondition cond) = RegisterCondition <$> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) cond
 
+instance PEM.ExprMappable2 sym1 sym2 (RegisterCondition sym1 arch v) (RegisterCondition sym2 arch v) where
+  mapExpr2 sym1 sym2 f (RegisterCondition cond) = RegisterCondition <$> MM.traverseRegsWith (\_ -> PEM.mapExpr2 sym1 sym2 f) cond
+
 trueRegCond ::
   W4.IsSymExprBuilder sym =>
   PA.ValidArch arch =>

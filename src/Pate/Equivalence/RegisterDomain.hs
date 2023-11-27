@@ -100,7 +100,6 @@ update sym f reg (RegisterDomain dom) = RegisterDomain $ Map.alter f' (Some reg)
 
 mkDomain ::
   forall sym arch.
-  WI.IsExprBuilder sym =>
   Map (Some (MM.ArchReg arch)) (WI.Pred sym) ->
   RegisterDomain sym arch
 mkDomain dom = RegisterDomain dom
@@ -227,6 +226,9 @@ registerInDomain sym reg dom = case registerInDomain' reg dom of
 
 instance PEM.ExprMappable sym (RegisterDomain sym arch) where
   mapExpr _sym f (RegisterDomain dom) = mkDomain <$> traverse f dom
+
+instance PEM.ExprMappable2 sym1 sym2 (RegisterDomain sym1 arch) (RegisterDomain sym2 arch) where
+  mapExpr2 _sym1 _sym2 f (RegisterDomain dom) = mkDomain <$> traverse f dom
 
 ppRegisterDomain ::
   forall sym arch a.

@@ -58,7 +58,7 @@ module Pate.Proof
   , type SymScope
   -- leaves
   , InequivalenceResultSym(..)
-  , InequivalenceResult
+  , InequivalenceResult(..)
   , withIneqResult
   , CondEquivalenceResult(..)
   , emptyCondEqResult
@@ -95,6 +95,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.MemCell as PMC
+import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.SimulatorRegisters as PSR
 
 import qualified What4.ExprHelpers as W4H
@@ -121,30 +122,33 @@ type ProofStatusType = 'ProofStatusType
 
 -- | A (possibly symbolic) inequivalence result, representing a snapshot of
 -- an attempted equivalence proof.
-data InequivalenceResultSym arch sym where
+data InequivalenceResultSym sym arch where
   InequivalenceResultSym :: PA.ValidArch arch =>
     { ineqSlice :: BlockSliceTransition sym arch
     , ineqPre :: PED.EquivalenceDomain sym arch
     , ineqPost :: PED.EquivalenceDomain sym arch
     , ineqReason :: PEE.InequivalenceReason
-    } -> InequivalenceResultSym arch sym
+    } -> InequivalenceResultSym sym arch
 
-instance PEM.ExprMappable sym (InequivalenceResultSym arch sym) where
-  mapExpr sym f (InequivalenceResultSym a1 a2 a3 a4) = InequivalenceResultSym
-    <$> PEM.mapExpr sym f a1
-    <*> PEM.mapExpr sym f a2
-    <*> PEM.mapExpr sym f a3
+instance PEM.ExprMappable2 sym1 sym2 (InequivalenceResultSym sym1 arch) (InequivalenceResultSym sym2 arch) where
+  mapExpr2 sym1 sym2 f (InequivalenceResultSym a1 a2 a3 a4) = InequivalenceResultSym
+    <$> PEM.mapExpr2 sym1 sym2 f a1
+    <*> PEM.mapExpr2 sym1 sym2 f a2
+    <*> PEM.mapExpr2 sym1 sym2 f a3
     <*> pure a4
 
 -- | An 'InequivalenceResultSym' once it has been grounded to a particular
 -- model (representing the counter-example for an inequivalence proof)
-type InequivalenceResult arch = PG.Grounded (InequivalenceResultSym arch)
+data InequivalenceResult arch = PA.ValidArch arch => InequivalenceResult (InequivalenceResultSym (PG.GroundSym PMT.GroundInfo) arch)
+
+instance PEM.ExprMappable sym (InequivalenceResult arch) where
+  mapExpr _ _ = return
 
 withIneqResult ::
   InequivalenceResult arch ->
-  (forall grnd. PA.ValidArch arch => PG.IsGroundSym grnd => InequivalenceResultSym arch grnd -> a) ->
+  (PA.ValidArch arch => InequivalenceResultSym (PG.GroundSym PMT.GroundInfo) arch -> a) ->
   a
-withIneqResult ineq f = PG.withGroundSym ineq $ \ineq'@InequivalenceResultSym{} -> f ineq'
+withIneqResult (InequivalenceResult x) f = f x
 
 data CondEquivalenceResult sym arch where
   CondEquivalenceResult :: PA.ValidArch arch =>
@@ -388,12 +392,12 @@ data BlockSliceTransition sym arch where
     , slBlockExitCase :: PPa.PatchPairC (CS.RegValue sym (MCS.MacawBlockEndType arch))
     } -> BlockSliceTransition sym arch
 
-instance PEM.ExprMappable sym (BlockSliceTransition sym arch) where
-  mapExpr sym f (BlockSliceTransition a1 a2 a3) = 
+instance PEM.ExprMappable2 sym1 sym2 (BlockSliceTransition sym1 arch) (BlockSliceTransition sym2 arch) where
+  mapExpr2 sym1 sym2 f (BlockSliceTransition a1 a2 a3) = 
      BlockSliceTransition
-       <$> PEM.mapExpr sym f a1
-       <*> PEM.mapExpr sym f a2
-       <*> PEM.mapExpr sym f a3
+       <$> PEM.mapExpr2 sym1 sym2 f a1
+       <*> PEM.mapExpr2 sym1 sym2 f a2
+       <*> PEM.mapExpr2 sym1 sym2 f a3
 
 -- | The machine state of two block slices: original and patched.
 data BlockSliceState sym arch where
