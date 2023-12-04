@@ -35,7 +35,9 @@ module Pate.Discovery (
   ) where
 
 import           Control.Lens ( (^.) )
-import           Control.Monad (forM)
+import           Control.Monad (forM,filterM)
+import           Control.Monad.Fail (fail)
+import           Control.Monad.Trans (lift)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO, MonadIO )
@@ -149,7 +151,7 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
     subTree @"blocktarget1" ("Targets (" ++ show bin ++ ")") $ do
       mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks
     subTree @"blocktarget1" ("Sat Targets (" ++ show bin ++ ")") $ do
-      blks' <- CMR.lift $ CMR.filterM checkSat (PB.BlockTargetReturn bin:blks)
+      blks' <- lift $ filterM checkSat (PB.BlockTargetReturn bin:blks)
       mapM_ (\blkts -> subTrace (Some blkts) $ return ()) blks'
       return blks'
 
@@ -300,13 +302,13 @@ exactEquivalence input = withSym $ \sym ->
     heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
     isPredSat heuristicTimeout regsEq >>= \case
       True -> return ()
-      False -> CME.fail "exactEquivalence: regsEq: assumed false"
+      False -> fail "exactEquivalence: regsEq: assumed false"
 
     memEq <- liftIO $ MT.memEqExact sym (MT.memState $ PSS.simInMem inO) (MT.memState $ PSS.simInMem inP)
 
     isPredSat heuristicTimeout memEq >>= \case
       True -> return ()
-      False -> CME.fail "exactEquivalence: memEq: assumed false"
+      False -> fail "exactEquivalence: memEq: assumed false"
 
     liftIO $ WI.andPred sym regsEq memEq
 

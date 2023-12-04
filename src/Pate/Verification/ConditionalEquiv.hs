@@ -18,7 +18,7 @@ module Pate.Verification.ConditionalEquiv (
   computeEqCondition
   ) where
 
-import           Control.Monad ( join)
+import           Control.Monad ( join, foldM )
 import qualified Control.Monad.IO.Class as IO
 import           Control.Monad.IO.Class ( liftIO )
 
@@ -168,7 +168,7 @@ getPathCondition ::
   EquivM sym arch (W4.Pred sym)
 getPathCondition fn exprs = withSym $ \sym -> do
   isSat <- getSatIO
-  CMR.foldM (addPathCondition fn isSat) (W4.truePred sym) (S.toList exprs)
+  foldM (addPathCondition fn isSat) (W4.truePred sym) (S.toList exprs)
 
 
 -- | Return a function for deciding predicate satisfiability based on the current

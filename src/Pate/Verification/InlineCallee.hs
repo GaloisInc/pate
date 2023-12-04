@@ -15,6 +15,7 @@ import           Control.Monad ( foldM, replicateM )
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
+import           Control.Monad.Trans ( lift )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Data.BitVector.Sized as BVS
@@ -291,7 +292,7 @@ getFinalGlobalValue mergeBranches global execResult = CME.runExceptT $ do
         LCS.PartialRes _ cond gp abortedRes -> do
           let value = getValue global gp
           onAbort <- handleAbortedResult abortedRes
-          CME.lift $ mergeBranches cond value onAbort
+          lift $ mergeBranches cond value onAbort
     LCS.TimeoutResult {} -> CME.throwError Timeout
   where
     handleAbortedResult res =
@@ -300,7 +301,7 @@ getFinalGlobalValue mergeBranches global execResult = CME.runExceptT $ do
         LCS.AbortedBranch _ cond onOK onAbort -> do
           okVal <- handleAbortedResult onOK
           abortVal <- handleAbortedResult onAbort
-          CME.lift $ mergeBranches cond okVal abortVal
+          lift $ mergeBranches cond okVal abortVal
         LCS.AbortedExit {} -> CME.throwError AbortedExit
     getValue glob gp =
       case LCSG.lookupGlobal glob (gp ^. LCS.gpGlobals) of

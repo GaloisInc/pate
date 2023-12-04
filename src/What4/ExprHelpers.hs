@@ -84,12 +84,15 @@ import           Unsafe.Coerce ( unsafeCoerce ) -- for mulMono axiom
 import           Control.Lens ( (.~), (&), (^.) )
 
 import           Control.Applicative
+import           Control.Monad (foldM)
 import           Control.Monad.Except
+import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.State as CMS
+import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import qualified System.IO as IO
 
@@ -1504,7 +1507,7 @@ minimalPredAtoms sym provable p_outer = do
               False -> return p'
 
   atoms <- liftIO $ getPredAtoms sym p_outer
-  CMS.foldM applyAtom p_outer (SetF.toList atoms)
+  foldM applyAtom p_outer (SetF.toList atoms)
 
 data ConjunctFoldDir = ConjunctFoldRight | ConjunctFoldLeft
 

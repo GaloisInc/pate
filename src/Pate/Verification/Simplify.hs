@@ -19,6 +19,7 @@ module Pate.Verification.Simplify (
   , getSimplifier
   ) where
 
+import           Control.Monad (foldM)
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Monad.Reader as CMR
@@ -136,7 +137,7 @@ tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -
         e_orig_conc <- concretizeWithModel fn e_orig
         e_simp_conc <- concretizeWithModel fn e_simp
         vars <- fmap Set.toList $ liftIO $ WEH.boundVars e_orig
-        binds <- CMR.foldM (\asms (Some var) -> do
+        binds <- foldM (\asms (Some var) -> do
           conc <- concretizeWithModel fn (W4.varExpr sym var)
           return $ asms <> (exprBinding @sym (W4.varExpr sym var) conc)) mempty vars
         withTracing @"debug" "Counterexample" $ do

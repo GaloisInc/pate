@@ -177,6 +177,7 @@ concretizingWrite
      , LCLM.HasPtrWidth ptrW
      , LCLM.HasLLVMAnn sym
      , ptrW ~ DMC.ArchAddrWidth arch
+     , ?memOpts :: LCLM.MemOptions
      , HasCallStack
      )
   => LCS.GlobalVar LCLM.Mem

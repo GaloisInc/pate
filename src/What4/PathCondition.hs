@@ -36,6 +36,8 @@ module What4.PathCondition
 
 import           Control.Applicative
 import           Control.Monad.Except
+import           Control.Monad.Plus
+import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.State as CMS

@@ -29,11 +29,12 @@ module Pate.Verification
   ) where
 
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Monad ( unless )
+import           Control.Monad ( unless, foldM )
 import qualified Control.Monad.Except as CME
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.IO.Unlift as IO
 import           System.IO as IO
+import           Control.Monad.Trans ( lift )
 import qualified Control.Monad.Trans as CMT
 import qualified Data.ElfEdit as DEE
 import qualified Data.Map as M
@@ -245,7 +246,7 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
 
       mem = MBL.memoryImage (PMC.binary context')
     
-    CME.foldM (\ctx entryPoint -> do
+    foldM (\ctx entryPoint -> do
       let pfm0 = PMC.parsedFunctionMap ctx
       blk <- PPa.get bin entryPoint
       let initAbs = PB.mkInitAbs defaultInit mem (PB.functionSegAddr blk)
@@ -383,7 +384,7 @@ unpackPatchData contexts pd =
             PPa.forBins $ \bin -> do
               ctx <- PPa.get bin contexts
               bd_ <- PPa.getC bin bdPair
-              CME.lift $ unpackBlockData ctx bd_
+              lift $ unpackBlockData ctx bd_
 
       let f (PC.Address w) = PAd.memAddrToAddr (MM.absoluteAddr (MM.memWord (fromIntegral w)))
       let g (PC.GlobalPointerAllocation { PC.pointerAddress = PC.Address loc, PC.blockSize = len}) = (MM.memWord (fromIntegral loc), toInteger len)
