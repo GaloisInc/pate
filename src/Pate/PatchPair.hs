@@ -72,10 +72,12 @@ module Pate.PatchPair (
 
 import           Prelude hiding (zip)
 import           GHC.Stack (HasCallStack)
+import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
 import           Control.Monad.Except
 import           Control.Monad.Catch
 import qualified Control.Monad.Trans as CMT
+import           Control.Monad.IO.Class (MonadIO)
 
 import           Data.Functor.Const ( Const(..) )
 import qualified Data.Kind as DK

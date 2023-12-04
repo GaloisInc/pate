@@ -18,6 +18,7 @@ module Pate.Loader.ELF (
   , loadELFs
   ) where
 
+import           Control.Monad ( foldM )
 import qualified Control.Monad.Except as CME
 import qualified Control.Monad.Writer as CMW
 import qualified Control.Monad.IO.Class as IO
@@ -95,7 +96,7 @@ loadELF (PA.SomeValidArch{}) path = do
   bin <- IO.liftIO $ MBL.loadBinary (MME.defaultLoadOptions { MME.ignoreSegments = ignoreSegments cfg, MME.readOnlySegments = readOnlySegments cfg}) elf
   let (_,elf_) = DEE.getElf elf
   -- add extra memory segments for manually-declared sections we want to include
-  mem_final <- CMW.foldM (\mem (secnm,secIndex,secOffset) -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
+  mem_final <- foldM (\mem (secnm,secIndex,secOffset) -> case DEE.findSectionByName (BSC.pack secnm) elf_ of
     [sec] -> do
       let sec_addr = DEE.elfSectionAddr sec
       segment <- MC.memSegment mempty secIndex secOffset Nothing (fromIntegral sec_addr) (execute .|. MP.read) (DEE.elfSectionData sec) (fromIntegral (DEE.elfSectionSize sec) * 8)

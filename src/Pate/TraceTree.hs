@@ -107,6 +107,7 @@ module Pate.TraceTree (
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
 import           Data.Kind ( Type )
+import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Data.IORef as IO
@@ -114,6 +115,7 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
+import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT

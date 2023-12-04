@@ -245,7 +245,7 @@ exprBinding ::
   AssumptionSet sym
 exprBinding eSrc eTgt = case testEquality eSrc eTgt of
   Just Refl -> mempty
-  _ -> mempty { asmBinds = (MapF.singleton eSrc (SetF.singleton eTgt)) }
+  _ -> (mempty :: AssumptionSet sym) { asmBinds = (MapF.singleton eSrc (SetF.singleton eTgt)) }
 
 -- | Equates an original and patched assumption (binds the original to the patched)
 --   Has no effect for singleton 'PatchPair' values

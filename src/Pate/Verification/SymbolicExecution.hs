@@ -21,6 +21,7 @@ import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 
 import           Control.Lens ( (^.) )
+import           Control.Monad ( forM_ )
 import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.List as DL
@@ -63,7 +64,7 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.PatchPair as PPa
 import Data.Functor.Const (Const(..))
-import Control.Monad.Error
+import Control.Monad.Except
 import Lang.Crucible.CFG.Expr (PrettyExt)
 import Pate.TraceTree
 
