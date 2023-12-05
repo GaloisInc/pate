@@ -45,7 +45,7 @@ withEqEnv _px f = do
   unsatCache <- IO.newIORef SetF.empty
   symNonce <- N.freshNonce N.globalNonceGenerator
 
-  let vcfg = PC.defaultVerificationCfg { PC.cfgGoalTimeout = PT.Microseconds 100 }
+  let vcfg = PC.defaultVerificationCfg
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder (PA.ValidRepr sym validArch) (PC.cfgTraceTree vcfg)
@@ -94,11 +94,35 @@ inEquivM px f = do
     Left err -> fail (show err)
     Right a -> return a
 
+inEquivM' :: PA.ValidArch arch => Proxy arch -> (forall sym. PM.EquivEnv sym arch -> PM.EquivEnv sym arch) -> (forall sym. PM.EquivM sym arch a) -> IO a
+inEquivM' px g f = do
+  mx <- withEqEnv px (\eenv -> PM.runEquivM (g eenv) f)
+  case mx of
+    Left err -> fail (show err)
+    Right a -> return a
+
 main :: IO ()
 main = do
   let tests = TT.testGroup "SolverTests" $ [
-          TT.testGroup "Timeout" $
-            [ TT.expectFail $ TTH.testCase "timeout_then_check" $ inEquivM (Proxy @AArch32) $ PM.withSym $ \sym -> do
+          TT.testGroup "Assumptions" $ 
+            [ TTH.testCase "negation_impossible" $ inEquivM (Proxy @AArch32) $ PM.withSym $ \sym -> do
+                x1 <- liftIO $ W4.freshConstant sym W4.emptySymbol W4.BaseIntegerRepr
+                x2 <- liftIO $ W4.freshConstant sym W4.emptySymbol W4.BaseIntegerRepr
+                x1_eq_x2 <- liftIO $ W4.isEq sym x1 x2
+                not_x1_eq_x2 <- liftIO $ W4.notPred sym x1_eq_x2
+                PM.withAssumption x1_eq_x2 $ do
+                  PM.goalSat "test" not_x1_eq_x2 $ \case
+                    W4.Sat{} -> liftIO $ TTH.assertFailure "Unexpected Sat"
+                    W4.Unsat{} -> return ()
+                    W4.Unknown{} -> liftIO $ TTH.assertFailure "Unexpected Timeout"
+                PM.goalSat "test" not_x1_eq_x2 $ \case
+                  W4.Sat{} -> return ()
+                  W4.Unsat{} -> liftIO $ TTH.assertFailure "Unexpected Unsat"
+                  W4.Unknown{} -> liftIO $ TTH.assertFailure "Unexpected Timeout"                
+            ]
+          , TT.testGroup "Timeout" $
+            [ TTH.testCase "timeout_then_check" $ inEquivM' (Proxy @AArch32) 
+                (\eenv -> eenv { PM.envConfig = (PM.envConfig eenv){PC.cfgGoalTimeout = PT.Microseconds 100}}) $ PM.withSym $ \sym -> do
                 asm1 <- manyDistinctVars 10
                 PM.withAssumptionSet asm1 $ do
                   asm2 <- manyDistinctVars 10
@@ -106,12 +130,12 @@ main = do
                     goal <- manyDistinctVars 100 >>= PAs.toPred sym
                     liftIO $ putStrLn "check sat"
                     PM.goalSat "test" goal $ \case
-                      W4.Sat _ -> return ()
-                      W4.Unsat{} -> liftIO $ TTH.assertFailure "Unsat"
+                      W4.Sat _ -> liftIO $ TTH.assertFailure "Expected Timeout"
+                      W4.Unsat{} -> liftIO $ TTH.assertFailure "Unexpected Unsat"
                       W4.Unknown{} -> return ()
                   goal <- manyDistinctVars 100 >>= PAs.toPred sym
                   PM.goalSat "test" goal $ \case
-                    W4.Sat{} -> return ()
+                    W4.Sat{} -> liftIO $ TTH.assertFailure "Expected Timeout"
                     W4.Unsat{} -> liftIO $ TTH.assertFailure "Unsat"
                     W4.Unknown{} -> return ()
             ]

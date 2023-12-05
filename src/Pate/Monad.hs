@@ -804,9 +804,8 @@ safePop ::
   EquivM sym arch ()
 safePop frame st = withOnlineBackend $ \bak -> 
   catchError
-    (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame))
-    (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))   
-
+    (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame)) $ \_ -> do 
+      void $ liftIO $ tryJust filterAsync $ LCBO.restoreSolverState bak st
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.
@@ -994,17 +993,12 @@ checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
       res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
       W4R.traverseSatResult (\r' -> pure $ SymGroundEvalFn r') pure res
   case mres of
-    Left err -> withOnlineBackend $ \bak -> do
-      --FIXME: for some reason the first attempt sometimes fails and we need to try again
-      _ <- liftIO $ tryJust filterAsync (LCBO.restoreSolverState bak st)
-      withSolverProcess $ \_ -> do
-        liftIO $ LCBO.restoreSolverState bak st
-        return $ Left err
-    Right res -> withOnlineBackend $ \bak -> do
+    Left err -> do
+      safePop frame st
+      return $ Left err
+    Right res -> do
       processSatResult p res
-      fmap Right $ k res `finally`
-        catchError (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame))
-          (\_ -> safeIO (\_ -> PEE.SolverStackMisalignment) (LCBO.restoreSolverState bak st))
+      fmap Right $ k res `finally` (safePop frame st)
 
 -- | Check the satisfiability of a predicate, returning with the result (including model,
 -- if applicable). This function implements all of the
