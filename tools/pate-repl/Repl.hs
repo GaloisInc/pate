@@ -32,7 +32,8 @@ import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
 import qualified Data.IORef as IO
 import qualified Control.Concurrent as IO
-import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT, get, put, forM )
+import           Control.Monad ( forM )
+import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT, get, put )
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
 import qualified Data.Text.IO as Text
