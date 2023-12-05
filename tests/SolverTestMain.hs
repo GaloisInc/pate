@@ -122,7 +122,7 @@ main = do
             ]
           , TT.testGroup "Timeout" $
             [ TTH.testCase "timeout_then_check" $ inEquivM' (Proxy @AArch32) 
-                (\eenv -> eenv { PM.envConfig = (PM.envConfig eenv){PC.cfgGoalTimeout = PT.Microseconds 100}}) $ PM.withSym $ \sym -> do
+                (\eenv -> eenv { PM.envConfig = (PM.envConfig eenv){PC.cfgGoalTimeout = PT.Microseconds 1}}) $ PM.withSym $ \sym -> do
                 asm1 <- manyDistinctVars 10
                 PM.withAssumptionSet asm1 $ do
                   asm2 <- manyDistinctVars 10
