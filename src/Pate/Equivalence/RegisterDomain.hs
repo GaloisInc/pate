@@ -51,6 +51,7 @@ import qualified Pate.Location as PL
 import qualified Pate.Solver as PS
 import qualified Pate.ExprMappable as PEM
 import           Pate.TraceTree
+import qualified What4.JSON as W4S
 
 ---------------------------------------------
 -- Register domain
@@ -60,6 +61,10 @@ import           Pate.TraceTree
 
 newtype RegisterDomain sym arch =
   RegisterDomain { _unRD :: Map (Some (MM.ArchReg arch)) (WI.Pred sym) }
+
+instance (W4S.W4Serializable sym (WI.Pred sym), W4S.W4SerializableF sym (MM.ArchReg arch)) => 
+  W4S.W4Serializable sym (RegisterDomain sym arch) where
+    w4Serialize (RegisterDomain rd) = W4S.w4Serialize rd
 
 traverseWithReg ::
   forall m sym arch.

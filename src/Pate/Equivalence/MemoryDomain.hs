@@ -45,6 +45,7 @@ import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Location as PL
 import qualified What4.PredMap as WPM
+import qualified What4.JSON as W4S
 
 ---------------------------------------------
 -- Memory domain
@@ -58,6 +59,9 @@ data MemoryDomain sym arch =
       { memDomainPred :: PMC.MemCellPred sym arch WPM.PredDisjT
       -- ^ The locations excluded by this 'MemoryDomain' 
       }
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemoryDomain sym arch) where
+  w4Serialize (MemoryDomain x) = W4S.w4Serialize x
 
 -- | Map the internal 'PMC.MemCell' entries representing the locations of a 'MemoryDomain'. Predicates which are concretely false are dropped from in resulting internal 'PMC.MemCellPred' (this has no effect on the interpretation of the domain). Supports parallel traversal if the 'future' parameter is instantiated to 'Par.Future'.
 traverseWithCell ::

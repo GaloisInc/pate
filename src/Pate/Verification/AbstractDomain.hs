@@ -18,6 +18,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ImpredicativeTypes #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -105,6 +106,9 @@ import           Pate.TraceTree
 
 import qualified What4.PredMap as WPM
 import Data.Parameterized (knownSymbol)
+import qualified What4.JSON as W4S
+import           Data.Aeson ( (.=) )
+import qualified Data.Aeson as JSON
 
 type instance PL.LocationK "memevent" = ()
 type instance PL.LocationK "absrange" = W4.BaseType
@@ -131,6 +135,11 @@ data AbstractDomain sym arch (v :: PS.VarScope) where
       --   should be emptied at synchronization points when the original and patched
       --   sequences are compared for equality
     } -> AbstractDomain sym arch v
+
+instance forall sym arch v. (PSo.ValidSym sym, PA.ValidArch arch) => W4S.W4Serializable sym (AbstractDomain sym arch v) where
+  w4Serialize abs_dom = do
+    eq_dom <- W4S.w4Serialize (absDomEq abs_dom)
+    return $ JSON.object [ "eq_domain" .= eq_dom, "val_domain" .= JSON.String "TODO" ]
 
 -- | Restrict an abstract domain to a single binary.
 singletonDomain ::
@@ -892,8 +901,11 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domai
                       [ ppDomainKind lbl
                       , PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom)
                       ]),
-              (JSONTrace, \lbl _ -> ppDomainKind lbl)
+              (JSONTrace, \_lbl (Some absDom) -> PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom))
               ]
+  jsonNode lbl (Some abs_dom) = 
+    let abs_dom_json = W4S.w4ToJSON @sym abs_dom
+    in JSON.object [ "abstract_domain" .= abs_dom_json, "kind" .= (show lbl) ]
 
 -- simplified variant of domain trace node
 -- currently only displays equivalence domain

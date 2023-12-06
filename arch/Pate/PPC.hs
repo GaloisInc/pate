@@ -9,6 +9,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -80,6 +81,7 @@ import qualified Pate.Verification.Domain as PD
 
 import           Pate.TraceTree
 import Data.Macaw.CFG.Core
+import qualified What4.JSON as W4S
 
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where
@@ -153,6 +155,14 @@ ppc32HasDedicatedRegister =
   PA.HasDedicatedRegister { PA.asDedicatedRegister = const Nothing
                           , PA.dedicatedRegisterValidity = \_ _ _ _ (NoRegisters v) -> absurd v
                           }
+
+instance forall v sym tp. SP.KnownVariant v => W4S.W4Serializable sym (PPC.PPCReg v tp) where
+  w4Serialize = case SP.knownVariant @v of
+    PPC.V32Repr -> PA.serializeRegister
+    PPC.V64Repr -> PA.serializeRegister
+
+instance SP.KnownVariant v => W4S.W4SerializableF sym (PPC.PPCReg v) where
+instance SP.KnownVariant v => W4S.W4SerializableFC (PPC.PPCReg v) where
 
 instance PA.ValidArch PPC.PPC32 where
   type ArchConfigOpts PPC.PPC32 = ()

@@ -27,6 +27,7 @@ import qualified What4.Solver as WS
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
 import Data.Data (Typeable)
+import qualified What4.JSON as W4S
 
 -- | The solvers supported by the pate verifier
 --
@@ -87,6 +88,7 @@ type ValidSym sym =
   ( WI.IsExprBuilder sym
   , CB.IsSymInterface sym
   , ShowF (WI.SymExpr sym)
+  , W4S.W4SerializableF sym (WI.SymExpr sym)
   )
 
 -- | A wrapper around the symbolic backend (a 'WE.ExprBuilder') that captures

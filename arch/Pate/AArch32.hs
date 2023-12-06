@@ -6,8 +6,13 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 module Pate.AArch32 (
     SA.AArch32
   , AArch32Opts(..)
@@ -66,6 +71,7 @@ import qualified Pate.Address as PA
 import Data.Macaw.ARM.Identify (conditionalCallClassifier, conditionalReturnClassifier, wrapClassifierForPstateT)
 import Control.Applicative
 import qualified Data.Macaw.Discovery as MD
+import qualified What4.JSON as W4S
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -108,6 +114,12 @@ hackyExtractBlockPrecond absState _ _ = Just $
 hacky_arm_linux_info :: MAI.ArchitectureInfo SA.AArch32
 hacky_arm_linux_info =
   ARM.arm_linux_info
+
+instance W4S.W4Serializable sym (ARMReg.ARMReg tp) where
+  w4Serialize = PA.serializeRegister
+
+instance W4S.W4SerializableF sym ARMReg.ARMReg where
+instance (W4S.W4SerializableFC ARMReg.ARMReg) where
 
 instance PA.ValidArch SA.AArch32 where
   type ArchConfigOpts SA.AArch32 = AArch32Opts SA.AArch32

@@ -11,6 +11,9 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE KindSignatures   #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.MemCell (
     MemCell(..)
@@ -29,18 +32,22 @@ import qualified Data.Macaw.Memory as MM
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PNR
-import           GHC.TypeLits ( type (<=) )
+import           GHC.TypeLits ( type (<=), Nat )
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import           Lang.Crucible.Backend (IsSymInterface)
 import qualified What4.Interface as WI
-
+import Data.Proxy
 import qualified Prettyprinter as PP
 
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Memory.MemTrace as PMT
 import qualified What4.ExprHelpers as WEH
 import qualified What4.PredMap as WPM
+import qualified What4.JSON as W4S
 import Data.Data (Typeable)
+import Data.UnwrapType
+import           Data.Aeson ( (.=) )
+import qualified Data.Aeson as JSON
 
 -- | A pointer with an attached width, representing the size of the "cell" in bytes.
 -- It represents a discrete read or write, used as the key when forming a 'Pate.Equivalence.MemPred'
@@ -55,6 +62,25 @@ data MemCell sym arch w where
     , cellWidth :: PNR.NatRepr w
     , cellEndian :: MM.Endianness
     } -> MemCell sym arch w
+
+newtype Pointer sym w = Pointer (CLM.LLVMPtr sym w)
+type instance UnwrapType (Pointer sym w) = CLM.LLVMPtr sym w
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (Pointer sym w) where
+  w4Serialize (Pointer (CLM.LLVMPointer reg off)) = do
+    reg_v <- W4S.w4SerializeF (WI.natToIntegerPure reg)
+    off_v <- W4S.w4SerializeF off
+    return $ JSON.object ["region" .= reg_v, "offset" .= off_v]
+
+instance forall sym arch w. W4S.SerializableExprs sym => W4S.W4Serializable sym (MemCell sym arch w) where
+  w4Serialize (MemCell ptr w end) = 
+    unwrapClass @(W4S.W4Serializable sym) @(Pointer sym (MC.ArchAddrWidth arch)) $ do
+      ptr_v <- W4S.w4Serialize ptr
+      width_v <- W4S.w4Serialize (PNR.intValue w)
+      end_v <- W4S.w4Serialize (show end)
+      return $ JSON.object [ "ptr" .= ptr_v, "width" .= width_v, "endianness" .= end_v ]
+
+instance forall sym arch. W4S.SerializableExprs sym => W4S.W4SerializableF sym (MemCell sym arch) where
 
 viewCell :: MemCell sym arch w -> ((1 <= w, 1 <= (8 WI.* w)) => a) -> a
 viewCell (mc@MemCell{}) f =

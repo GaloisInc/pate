@@ -9,6 +9,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Pate.Equivalence.EquivalenceDomain (
     EquivalenceDomain(..)
@@ -20,6 +21,7 @@ module Pate.Equivalence.EquivalenceDomain (
 import qualified What4.Interface as WI
 import qualified Prettyprinter as PP
 import           Data.Parameterized.Classes
+import           Data.Proxy
 
 import qualified Data.Macaw.CFG as MM
 
@@ -29,6 +31,9 @@ import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Location as PL
 import qualified What4.PredMap as WPM
+import qualified What4.JSON as W4S
+import qualified Data.Aeson as JSON
+import           Data.Aeson ( (.=) )
 ---------------------------------------------
 -- Equivalence domain
 
@@ -44,6 +49,13 @@ data EquivalenceDomain sym arch where
     , eqDomainGlobalMemory :: PEM.MemoryDomain sym arch
     , eqDomainMaxRegion :: PL.NamedPred sym WPM.PredDisjT "maxRegion"
     }  -> EquivalenceDomain sym arch
+
+instance forall sym arch. (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4Serializable sym (EquivalenceDomain sym arch) where
+  w4Serialize (EquivalenceDomain regs stack globs _) = W4S.withSerializable (Proxy @sym) (Proxy @(WI.SymExpr sym)) (Proxy @WI.BaseBoolType) $ do
+    regs_v <- W4S.w4Serialize regs
+    stack_v <- W4S.w4Serialize stack
+    globs_v <- W4S.w4Serialize globs
+    return $ JSON.object [ "registers" .= regs_v, "stack_slots" .= stack_v, "pointers" .= globs_v]
 
 instance (WI.IsSymExprBuilder sym, OrdF (WI.SymExpr sym), MM.RegisterInfo (MM.ArchReg arch)) => PL.LocationTraversable sym arch (EquivalenceDomain sym arch) where
   traverseLocation sym x f = PL.witherLocation sym x (\loc p -> Just <$> f loc p)

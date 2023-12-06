@@ -12,6 +12,9 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -39,7 +42,8 @@ module Pate.Arch (
   defaultStubOverride,
   withStubOverride,
   mergeLoaders,
-  idStubOverride
+  idStubOverride,
+  serializeRegister
   ) where
 
 import           Control.Lens ( (&), (.~), (^.) )
@@ -86,6 +90,7 @@ import qualified What4.Interface as W4 hiding ( integerToNat )
 import qualified What4.Concrete as W4
 import qualified What4.ExprHelpers as W4 ( integerToNat )
 import qualified What4.UninterpFns as W4U
+import qualified What4.JSON as W4S
 
 import Pate.Config (PatchData)
 import Data.Macaw.AbsDomain.AbsState (AbsBlockState)
@@ -95,6 +100,10 @@ import qualified Data.Parameterized.List as P
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
 import Data.Proxy
+import Data.Witness
+import qualified Data.Aeson as JSON
+import           Data.Aeson ( (.=) )
+import Data.Parameterized.Classes (ShowF(..))
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -145,6 +154,8 @@ fromRegisterDisplay rd =
     Architectural a -> Just a
     Hidden -> Nothing
 
+
+
 class
   ( Typeable arch
   , MBL.BinaryLoader arch (E.ElfHeaderInfo (MC.ArchAddrWidth arch))
@@ -154,6 +165,7 @@ class
   , 16 <= MC.ArchAddrWidth arch
   , MCS.HasArchEndCase arch
   , Integral (EEP.ElfWordType (MC.ArchAddrWidth arch))
+  , W4S.W4SerializableFC (MC.ArchReg arch)
   ) => ValidArch arch where
   
   type ArchConfigOpts arch
@@ -200,6 +212,13 @@ class
     Maybe (MC.ArchSegmentOff arch) ->
     Maybe (MD.ParsedTermStmt arch ids)
   archExtractArchTerms = \ _ _ _ -> Nothing
+
+serializeRegister :: ValidArch arch => MC.ArchReg arch tp -> W4S.W4S sym JSON.Value
+serializeRegister r = case displayRegister r of
+  Normal r_n -> return $ JSON.object [ "reg" .= r_n ]
+  Architectural r_a -> return $ JSON.object [ "arch_reg" .= r_a ]
+  Hidden -> return $ JSON.object [ "hidden_reg" .= showF r ]
+
 
 data ValidArchData arch =
   ValidArchData { validArchSyscallDomain :: PVE.ExternalDomain PVE.SystemCall arch
@@ -478,7 +497,7 @@ data ArchLoader err =
 
 instance (ValidArch arch, PSo.ValidSym sym, rv ~ MC.ArchReg arch) => MC.PrettyRegValue rv (PSR.MacawRegEntry sym) where
   ppValueEq r tp = case fromRegisterDisplay (displayRegister r) of
-    Just r_str -> Just (PP.pretty r_str <> PP.pretty ":" <+> PP.pretty (show tp))
+    Just r_str -> Just (PP.pretty r_str <> ":" <+> PP.pretty (show tp))
     Nothing -> Nothing
 
 -- | Merge loaders by taking the first successful result (if it exists)
