@@ -5,7 +5,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-
+{-# LANGUAGE DataKinds #-}
 
 module Data.UnwrapType ( UnwrapType, unwrapClass ) where
 
