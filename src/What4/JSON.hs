@@ -90,7 +90,7 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
           Just (W4.ConcreteBool b) -> return $ JSON.toJSON b
           Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e)))
           _ -> do
-            let sexpr = W4S.serializeExpr e
+            let sexpr = W4S.resSExpr $ W4S.serializeExprWithConfig (W4S.Config True True) e
             return $ JSON.object [ "symbolic" .= JSON.String (W4D.printSExpr mempty sexpr) ]
         modify $ \(ExprCache s') -> ExprCache (Map.insert (Some e) v s')
         return v
