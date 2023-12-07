@@ -33,6 +33,8 @@ packages: .
           submodules/macaw-loader/macaw-loader-x86
           submodules/macaw-loader/macaw-loader-ppc
           submodules/macaw-loader/macaw-loader-aarch32
+          
+optional-packages: tools/
 
 allow-newer: what4, IntervalMap, aeson, tasty
 constraints: IntervalMap >= 0.6.2.1

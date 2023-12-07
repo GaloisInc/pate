@@ -1,0 +1,58 @@
+cabal-version:       2.2
+name:                pate-repl
+version:             0.9.0
+
+library
+  hs-source-dirs:      pate-repl, pate-repl-base, pate, ../arch
+  default-language:    Haskell2010
+  exposed-modules:     Repl, 
+                       ReplHelper,
+                       ReplBase,
+                       Main,
+                       JSONReport,
+                       Output,
+                       Pate.ArchLoader,
+                       Pate.AArch32,
+                       Pate.PPC
+
+  build-depends:       base >= 4.10 && < 5,
+                       pate,
+                       what4,
+                       template-haskell,
+                       text,
+                       prettyprinter,
+                       prettyprinter-ansi-terminal,
+                       parameterized-utils,
+                       ansi-terminal,
+                       optparse-applicative,
+                       mtl,
+                       split,
+                       aeson,
+                       bytestring,
+                       macaw-base,
+                       containers,
+                       IntervalMap,
+                       lens,
+                       async,
+                       bv-sized,
+                       lumberjack,
+                       semmc-aarch32,
+                       macaw-loader-aarch32,
+                       elf-edit,
+                       crucible,
+                       crucible-llvm,
+                       dismantle-ppc,
+                       dismantle-tablegen,
+                       macaw-ppc-symbolic,
+                       macaw-ppc,
+                       macaw-loader-ppc,
+                       semmc-ppc,
+                       macaw-symbolic,
+                       exceptions,
+                       macaw-aarch32,
+                       asl-translator,
+                       macaw-aarch32,
+                       macaw-aarch32-symbolic,
+                       macaw-aarch32,
+                       dismantle-arm-xml
+                       
