@@ -99,8 +99,6 @@ import qualified Data.ElfEdit as EEP
 import qualified Data.Parameterized.List as P
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
-import Data.Proxy
-import Data.Witness
 import qualified Data.Aeson as JSON
 import           Data.Aeson ( (.=) )
 import Data.Parameterized.Classes (ShowF(..))
