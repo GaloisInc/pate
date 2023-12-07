@@ -33,6 +33,7 @@ import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
 import qualified Prettyprinter.Render.Text as PPText
 import qualified Data.Aeson as JSON
+import           Data.Aeson ( (.=) )
 import qualified Data.IORef as IO
 import qualified GHC.IO as IO hiding (liftIO)
 import qualified Data.ByteString.Lazy as BS
@@ -183,6 +184,17 @@ mkJSON es = case mkJSON' es of
   (_, _es') -> error "Unexpected leftover elemenbts"
 -}
 
+outputElemJSON :: OutputElem -> JSON.Value
+outputElemJSON e = 
+  JSON.object 
+    [ "index" .= outIdx e
+    , "indent" .= outIndent e
+    , "finished" .= outFinished e
+    , "pretty" .= show (outPP e)
+    , "content" .= outJSON e
+    , "more" .= outMoreResults e
+    ]
+
 jsonOutput :: Output -> JSON.Value
 jsonOutput (Output out_ this_ tag_) =
   case out_ of
@@ -190,9 +202,9 @@ jsonOutput (Output out_ this_ tag_) =
       JSON.object
         [ "this" JSON..= show this__
         , "trace_node_kind" JSON..= tag_
-        , "trace_node_contents" JSON..= map outJSON es
+        , "trace_node_contents" JSON..= map outputElemJSON es
         ]
-    OutputElemList es -> JSON.toJSON $ map outJSON es
+    OutputElemList es -> JSON.toJSON $ map outputElemJSON es
     OutputInfo msg -> JSON.object ["message" JSON..= show msg]
     OutputErr msg -> JSON.object ["error" JSON..= show msg]
     OutputBreak -> JSON.Null

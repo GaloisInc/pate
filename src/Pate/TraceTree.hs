@@ -142,7 +142,6 @@ data TraceTag =
   | Full
   | Simplified
   | Simplified_Detail
-  | JSONTrace
   | Custom String
   deriving (Eq, Ord)
 
@@ -575,8 +574,7 @@ instance IsTraceNode k "subtree" where
   prettyNode lbl nm = prettyTree lbl nm
   nodeTags = [(Summary, prettyTree),
               (Simplified_Detail, \_ nm -> PP.pretty nm),
-              (Simplified, \_ nm -> PP.pretty nm),
-              (JSONTrace, \_ nm -> PP.pretty nm)
+              (Simplified, \_ nm -> PP.pretty nm)
               ]
   jsonNode (SomeSymRepr (SomeSym r)) nm =
     JSON.object [ "subtree_kind" JSON..=  (show (symbolRepr r))
@@ -593,7 +591,7 @@ prettyTree (SomeSymRepr (SomeSym lbl)) nm = PP.pretty nm <> "::[" <> PP.pretty (
 instance IsTraceNode k "message" where
   type TraceNodeType k "message" = String
   prettyNode () msg = PP.pretty msg
-  nodeTags = mkTags @k @"message" [Summary, Simplified, JSONTrace]
+  nodeTags = mkTags @k @"message" [Summary, Simplified]
 
 instance IsTraceNode k "debug" where
   type TraceNodeType k "debug" = String
@@ -618,7 +616,7 @@ instance IsTraceNode k "bool" where
 instance IsTraceNode k "final_result" where
   type TraceNodeType k "final_result" = ()
   prettyNode _lbl _msg = "Final Result"
-  nodeTags = mkTags @k @"final_result" [Summary, Simplified, JSONTrace]
+  nodeTags = mkTags @k @"final_result" [Summary, Simplified]
 
 data ChoiceHeader k (nm_choice :: Symbol) a = 
   (IsTraceNode k nm_choice) =>
@@ -641,7 +639,6 @@ instance IsTraceNode k "choiceTree" where
     [(Summary, \lbl ((SomeChoiceHeader (ChoiceHeader nm_choice _ _ _))) -> prettyTree (SomeSymRepr (SomeSym nm_choice)) lbl)
     ,(Simplified_Detail, \nm _ -> PP.pretty nm)
     ,(Simplified, \nm _ -> PP.pretty nm)
-    ,(JSONTrace, \nm _ -> PP.pretty nm)
     ]
 
 data Choice k (nm_choice :: Symbol) a = 
@@ -674,14 +671,14 @@ instance IsTraceNode k "choice" where
   prettyNode nm (SomeChoice c) = case nm of
     "" -> prettyChoice c
     _ -> PP.pretty nm PP.<+> prettyChoice c
-  nodeTags = mkTags @k @"choice" [Summary, Simplified, JSONTrace]
+  nodeTags = mkTags @k @"choice" [Summary, Simplified]
   jsonNode = nodeToJSON @k @"choice"
 
 instance IsTraceNode k "()" where
   type TraceNodeType k "()" = ()
   type TraceNodeLabel "()" = ()
   prettyNode () () = PP.emptyDoc
-  nodeTags = mkTags @k @"()" [Summary, Simplified, JSONTrace]
+  nodeTags = mkTags @k @"()" [Summary, Simplified]
 
 -- | Returns the unblocking action
 setBlockedStatus ::
@@ -1093,7 +1090,6 @@ instance IsTraceNode (k :: l) "function_name" where
   prettyNode () st = PP.pretty st
   nodeTags = [(Summary, \() -> PP.pretty)
              , (Simplified, \() _ -> "------")
-             , (JSONTrace, \() _ -> "------")
              ]
 
 traceAlternatives ::

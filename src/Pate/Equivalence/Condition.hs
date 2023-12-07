@@ -167,7 +167,6 @@ instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond"
     EquivalenceCondition{} -> PP.pretty someExpr
   nodeTags = [(Summary, \someExpr _ -> printSomeExprTruncated someExpr )
              ,(Simplified, \someExpr _ -> printSomeExprTruncated someExpr)
-             ,(JSONTrace, \someExpr _ -> printSomeExprTruncated someExpr)
              ]
   jsonNode someExpr _ = 
     JSON.object 

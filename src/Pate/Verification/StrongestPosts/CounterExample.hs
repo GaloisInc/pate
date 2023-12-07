@@ -137,7 +137,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "obser
                   ObservableCheckEq -> "Observably Equivalent"
                   ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
                   ObservableCheckError{} -> "Error during observability check")
-      | tag <- [Simplified, Summary, JSONTrace]
+      | tag <- [Simplified, Summary]
     ]
 
 ppObservableCounterexample ::

@@ -676,7 +676,7 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "pickM
     PickIncludeAllRegisters -> "Include All Registers"
     PickIncludeAll -> "Include All Locations"
     PickFinish -> "Finish"
-  nodeTags = mkTags @'(sym,arch) @"pickManyChoice" [Summary, Simplified, JSONTrace]
+  nodeTags = mkTags @'(sym,arch) @"pickManyChoice" [Summary, Simplified]
   jsonNode = nodeToJSON @'(sym,arch) @"pickManyChoice"
 
 pickMany ::

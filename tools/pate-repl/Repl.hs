@@ -221,8 +221,8 @@ loadSomeTree tid topTraceTree opts = do
             , replNesting = 0
             , replSubTreeNodes = strees
             }
-          strees = if loadJSONMode opts then ["function_name"] else defaultSubTreeNodes
-          dtags = if loadJSONMode opts then [JSONTrace] else [Simplified]
+          strees = defaultSubTreeNodes
+          dtags = [Simplified]
       IO.writeIORef ref (SomeReplState tid st)
       execReplM updateNextNodes
       return True
@@ -230,7 +230,7 @@ loadSomeTree tid topTraceTree opts = do
 instance IsTraceNode k "toplevel" where
   type TraceNodeType k "toplevel" = ()
   prettyNode () () = "<Toplevel>"
-  nodeTags = mkTags @k @"toplevel" [Simplified,Summary,JSONTrace]
+  nodeTags = mkTags @k @"toplevel" [Simplified,Summary]
 
 run :: String -> IO ()
 run rawOpts = do

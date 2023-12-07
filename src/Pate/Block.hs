@@ -254,13 +254,13 @@ ppBlockTarget (BlockTarget tgt ret c _) = case c of
 instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget" where
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (BlockTarget arch)
   prettyNode () blkts = PPa.ppPatchPair' ppBlockTarget blkts
-  nodeTags = mkTags @'(sym,arch) @"blocktarget" [Simplified,Summary, JSONTrace]
+  nodeTags = mkTags @'(sym,arch) @"blocktarget" [Simplified,Summary]
   jsonNode = nodeToJSON @'(sym,arch) @"blocktarget"
 
 instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget1" where
   type TraceNodeType '(sym,arch) "blocktarget1" = Some (BlockTarget arch)
   prettyNode () (Some blkt) = ppBlockTarget blkt
-  nodeTags = mkTags @'(sym,arch) @"blocktarget1" [Simplified,Summary, JSONTrace]
+  nodeTags = mkTags @'(sym,arch) @"blocktarget1" [Simplified,Summary]
 
 data FunctionSymbol = FunctionSymbol 
   { fnSymBytes :: BSC.ByteString
