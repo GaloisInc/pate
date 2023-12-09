@@ -74,6 +74,12 @@ data PredOpRepr k where
   PredConjRepr :: PredOpRepr PredConjT
   PredDisjRepr :: PredOpRepr PredDisjT
 
+
+instance TestEquality PredOpRepr where
+  testEquality PredConjRepr PredConjRepr = Just Refl
+  testEquality PredDisjRepr PredDisjRepr = Just Refl
+  testEquality _ _ = Nothing
+
 instance HasRepr (PredMap sym f) PredOpRepr where
   typeRepr pm = predOpRepr pm
 
