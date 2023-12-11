@@ -17,6 +17,9 @@ build-type:          Simple
 extra-source-files:  CHANGELOG.md
                      tools/pate/static/*.css
                      tools/pate/static/*.js
+                     
+if flag(unsafe-operations)
+  cpp-options: -DUNSAFE_OPS
 
 common shared
   build-depends:       base >= 4.10 && < 5,
@@ -154,6 +157,7 @@ library
                        What4.UninterpFns,
                        What4.JSON,
                        Data.Parameterized.SetF,
+                       Data.Parameterized.SetCtx,
                        Pate.SimState,
                        Pate.Equivalence,
                        Pate.Equivalence.Condition,
