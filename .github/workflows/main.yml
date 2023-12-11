@@ -36,27 +36,14 @@ jobs:
 
     - uses: actions/checkout@v2
       with:
-        submodules: 'true'
+        submodules: 'false'
 
-    # This is necessary to support caching with cabal. If we build directly from
-    # submodules, cabal will not use the cache for them due to mtime
-    # differences.  Instead, we convert our submodules into cabal's "source
-    # repositories", which are actually built into the cabal store
-    # instead. While that shouldn't make a difference, packages in the store are
-    # only rebuilt based on hashes and not mtimes, which means that they are
-    # actually reused from the cache.
-    - name: Convert Submodules to Source Repos
+    - name: Setup subrepos and cabal.project
       run: |
         git config --global url."https://github.com/".insteadOf "git@github.com:"
         git config --global url."https://".insteadOf "git://"
-        curl -sL https://github.com/RyanGlScott/submods-to-source-repos/releases/download/0.0.0.20211210/submods-to-source-repos-0.0.0.20211210.xz > submods-to-source-repos.xz
-        echo 'f339f4bbe43af96df7e8ce115377e56f4861bab5c8f66d3129492cbe7695bbac  submods-to-source-repos.xz' | sha256sum -c -
-        xz -d < submods-to-source-repos.xz > submods-to-source-repos
-        rm -f submods-to-source-repos.xz
-        chmod a+x submods-to-source-repos
-        ./submods-to-source-repos cabal.project.dist > cabal.project
-        echo "Constructed cabal.project:"
-        cat cabal.project
+        git submodule update --init
+        cp cabal.project.dist cabal.project
 
     - name: Installing the freeze file
       run: mv cabal.GHC-${{ matrix.ghc }}.freeze cabal.project.freeze
