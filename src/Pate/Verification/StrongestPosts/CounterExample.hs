@@ -267,8 +267,8 @@ ppTraceEventSummary ::
   [TraceEventGroup sym arch] -> 
   PP.Doc a
 ppTraceEventSummary [] = ""
-ppTraceEventSummary (t:tr) = case (t, last tr) of
-  (TraceEventGroup Nothing _, _) -> ppTraceEventSummary tr
+ppTraceEventSummary tr@(t:tr_tail) = case (t, last tr) of
+  (TraceEventGroup Nothing _, _) -> ppTraceEventSummary tr_tail
   (TraceEventGroup (Just addr_head) _, TraceEventGroup (Just addr_last) _) ->
     PP.viaShow addr_head PP.<+> ".." <+> PP.viaShow addr_last
   _ -> ""
