@@ -124,6 +124,7 @@ import qualified Pate.ExprMappable as PEM
 import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), prettyRegsCE)
 import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
+import qualified Data.Aeson as JSON
 
 -- Overall module notes/thoughts
 --
@@ -2112,7 +2113,7 @@ handleOrdinaryFunCall scope bundle currBlock d gr pPair pRetPair = fnTrace "hand
               , show pRetPair
               ]
 
-data FnStubKind = DefinedFn | UndefinedFn | SkippedFn | IgnoredFn | DivergedJump
+data FnStubKind = DefinedFn | UndefinedFn | SkippedFn | IgnoredFn | DivergedJump | TerminalFn
   deriving (Eq, Ord, Show)
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
@@ -2123,7 +2124,9 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   prettyNode SkippedFn _nm = "Skipped unnamed function"
   prettyNode IgnoredFn nm = "Ignoring function:" <+> PP.pretty nm
   prettyNode DivergedJump nm = "Diverging jump:" <+> PP.pretty nm
+  prettyNode TerminalFn nm = "Diverging jump:" <+> PP.pretty nm
   nodeTags = mkTags @'(sym,arch) @"fnstub" [Summary, Simplified]
+  jsonNode = \v lbl -> JSON.object [ "fnstub" JSON..= lbl, "kind" JSON..= (show v)]
   
 -- | Mark the function that this entry belongs to as terminal, indicating
 --   that it might have no valid exits (i.e. if a terminal exit is the only
@@ -2144,7 +2147,7 @@ getStubOverrideOne ::
   EquivM sym arch (Maybe (PA.StubOverride arch))
 getStubOverrideOne blk mstubSymbol = do
   PA.SomeValidArch archData <- asks envValidArch
-  case mstubSymbol of       
+  case mstubSymbol of
     Just stubSymbol | stubSymbol == skippedFnSym -> do
       emitTraceLabel @"fnstub" SkippedFn ""
       return Nothing
@@ -2154,6 +2157,9 @@ getStubOverrideOne blk mstubSymbol = do
     Just stubSymbol | Just f <- PA.lookupStubOverride archData stubSymbol -> do
       emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
       return $ Just f
+    Just stubSymbol | PD.isAbortStub stubSymbol -> do
+      emitTraceLabel @"fnstub" TerminalFn (show stubSymbol)
+      return Nothing
     Nothing | isIgnoredBlock blk -> do
       emitTraceLabel @"fnstub" IgnoredFn (show skippedFnSym)
       return $ Nothing
@@ -2317,14 +2323,14 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
   gr0 <- case hasTerminalStub stubPair of
     True -> handleTerminalFunction currBlock gr0_
     False -> return gr0_
+  PA.SomeValidArch archData <- asks envValidArch
+  ovPair <- PPa.forBins $ \bin -> do
+    blk <- PPa.get bin pPair
+    Const stub <- PPa.get bin stubPair
+    Const <$> getStubOverrideOne blk stub
   case bothTerminalStub stubPair of
     True -> return gr0
     False -> do
-      PA.SomeValidArch archData <- asks envValidArch
-      ovPair <- PPa.forBins $ \bin -> do
-        blk <- PPa.get bin pPair
-        Const stub <- PPa.get bin stubPair
-        Const <$> getStubOverrideOne blk stub
       ov <- mergeStubOverrides archData stubPair ovPair
       wsolver <- getWrappedSolver
 
