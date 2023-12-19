@@ -14,6 +14,10 @@ room_1011_dendy: $(HACKATHON_NOV_2023)/.git/HEAD
 	cd "$(HACKATHON_NOV_2023)" && git fetch && git checkout room_1011_dendy
 	cat $(HACKATHON_NOV_2023)/.git/HEAD > room_1011_dendy
 
+room1018: $(HACKATHON_NOV_2023)/.git/HEAD
+	cd "$(HACKATHON_NOV_2023)" && git fetch && git checkout room1018
+	cat $(HACKATHON_NOV_2023)/.git/HEAD > room1018
+
 target4.original.exe: main
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/build/Amp_Chal_IDPS_Unpatched.ino.elf" $@
 
@@ -68,7 +72,7 @@ target1-self: target1.original.exe
 		-s main \
 		--save-macaw-cfgs $(DEMOS)/target1_CFGs
 
-target1: target1.original.exe target1.patched.exe
+target1-exe: target1.original.exe target1.patched.exe
 	$(PATE) \
 	  -o $(DEMOS)/target1.original.exe \
 		-p $(DEMOS)/target1.patched.exe \
@@ -80,6 +84,9 @@ target1: target1.original.exe target1.patched.exe
 target1.original.so: main
 	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/cf/rr.so" $@
 
+target1-room1018: room1018
+	cp "$(HACKATHON_NOV_2023)/Target 1 - NASA Lunar Relay Sat (powerpc)/cpu1/cf/rr_patched.so" target1.patched.so
+
 target1-so-self: target1.original.so
 	$(PATE) \
 	  -o $(DEMOS)/target1.original.so \
@@ -88,6 +95,19 @@ target1-so-self: target1.original.so
 		-r AllowEqRescopeFailure \
 		-s RR_Init \
 		-s RR_ReadTlmInput \
+		-s RR_tohex \
+		-s deregister_tm_clones \
+		--save-macaw-cfgs $(DEMOS)/target1_CFGs
+
+target1: target1.original.so target1.patched.so
+	$(PATE) \
+	  -o $(DEMOS)/target1.original.so \
+		-p $(DEMOS)/target1.patched.so \
+		-e ContinueAfterRecoverableFailures \
+		-r AllowEqRescopeFailure \
+		-s RR_Init \
+		-s RR_ReadTlmInput \
+		-s RR_tohex \
 		--save-macaw-cfgs $(DEMOS)/target1_CFGs
 
 target3.original.so: main
