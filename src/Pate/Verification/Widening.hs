@@ -1365,7 +1365,7 @@ widenPostcondition scope bundle preD postD0 = do
       widenLoop sym localWideningGas eqCtx postD0 Nothing
   case r of
     -- since widening was required, we show why it was needed
-    Widen _ _ _postD1 -> withSym $ \sym -> do
+    Widen WidenEquality _ _postD1 -> withSym $ \sym -> do
       eqCtx <- equivalenceContext
       eqPost <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD0)
       eqPost_pred <- liftIO $ postCondPredicate sym eqPost
