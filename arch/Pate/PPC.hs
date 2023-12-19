@@ -29,6 +29,7 @@ where
 
 import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
+import           Control.Applicative ( (<|>) )
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString.Char8 as BSC
@@ -197,6 +198,7 @@ instance PA.ValidArch PPC.PPC64 where
   -- FIXME: TODO
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
+  archClassifierWrapper cl = PPC.ppcReadPCClassifier <|> cl
 
 -- | Determine the argument name for the argument held in the given register.
 --
