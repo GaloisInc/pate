@@ -28,7 +28,7 @@ module What4.JSON
 import           Control.Monad.Except (ExceptT, MonadError)
 import           Control.Monad.Reader (ReaderT, MonadReader)
 import           Control.Monad.IO.Class (MonadIO)
-import           Control.Monad.State (StateT, MonadState (..), State, modify, evalState)
+import           Control.Monad.State (StateT, MonadState (..), State, modify, evalState, runState)
 
 import           Data.Map.Ordered (OMap)
 import qualified Data.Map.Ordered as OMap
@@ -53,6 +53,10 @@ import qualified What4.PredMap as W4P
 import Data.Parameterized.HasRepr
 import qualified What4.Concrete as W4
 import qualified Data.Text as T
+import GHC.IO (catch, evaluate, unsafePerformIO)
+import GHC.IO.Exception (IOException)
+import Control.DeepSeq (force)
+
 
 
 newtype ExprCache sym = ExprCache (Map (Some (W4.SymExpr sym)) JSON.Value)
@@ -78,6 +82,21 @@ class W4SerializableF sym f where
 
 class (forall sym. W4SerializableF sym f) => W4SerializableFC f where
 
+-- | Wrap a serialization step in an error handler that tries to fully evaluate the
+--   JSON value.
+--   This is needed because the What4 serializer does not return partial results, and simply
+--   throws runtime errors for unsupported expressions (e.g. annotated expressions, quantified expressions).
+--   We shouldn't be sending these to be serialized regardless, but this allows the serializer to
+--   fail gracefully if it does happen.
+trySerialize :: W4S sym JSON.Value -> W4S sym (Either String JSON.Value)
+trySerialize (W4S f) = do
+  st <- get
+  r <- return $! unsafePerformIO ((Right <$> (evaluate (runState f st) >>= \(x,st') -> return (force x, st'))) `catch` (\(er :: IOException) -> return $ Left (show er)))
+  case r of
+    Left err -> return $ Left err
+    Right (x,st') -> do
+      put st'
+      return $ Right x
 
 instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) where
   w4Serialize e = do
@@ -90,8 +109,15 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
           Just (W4.ConcreteBool b) -> return $ JSON.toJSON b
           Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e)))
           _ -> do
-            let sexpr = W4S.resSExpr $ W4S.serializeExprWithConfig (W4S.Config True True) e
-            return $ JSON.object [ "symbolic" .= JSON.String (W4D.printSExpr mempty sexpr) ]
+            mv <- trySerialize $ do
+              let result = W4S.serializeExprWithConfig (W4S.Config True True) e
+              let var_env = map (\(Some bv, t) -> (show (W4B.bvarName bv), t)) $ OMap.toAscList $ W4S.resFreeVarEnv result
+              let fn_env = map (\(W4S.SomeExprSymFn fn, t) -> (show (W4B.symFnName fn), t)) $ OMap.toAscList $ W4S.resSymFnEnv result
+              let sexpr = W4S.resSExpr result
+              return $ JSON.object [ "symbolic" .= JSON.String (W4D.printSExpr mempty sexpr), "vars" .= var_env, "fns" .= fn_env ]
+            case mv of
+              Left er -> return $ JSON.object [ "symbolic_serialize_err" .= er]
+              Right v -> return v
         modify $ \(ExprCache s') -> ExprCache (Map.insert (Some e) v s')
         return v
 
