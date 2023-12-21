@@ -28,7 +28,10 @@ import qualified What4.BaseTypes as WT
 import qualified What4.Interface as WI
 
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Pointer as Ptr
 import qualified What4.ExprHelpers as WEH
+import qualified What4.JSON as W4S
+import qualified Data.Aeson as JSON
 
 -- | Type family that indicates the 'WI.BaseType' of the sub-expressions of a given 'CT.CrucibleType'.
 -- Requires defining a bijection between the two types.
@@ -49,6 +52,15 @@ data MacawRegEntry sym (tp :: MT.Type) where
     , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
     } ->
     MacawRegEntry sym tp
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MacawRegEntry sym tp) where
+  w4Serialize (MacawRegEntry r v) = case r of
+    CLM.LLVMPointerRepr{} -> W4S.w4Serialize (Ptr.fromLLVMPointer v)
+    CT.BoolRepr -> W4S.w4SerializeF v
+    CT.StructRepr Ctx.Empty -> return $ JSON.String "()"
+    tp -> return $ JSON.object [ "error" JSON..= ("MacawRegEntry: unexpected type" :: String), "type" JSON..= (show tp) ]
+
+instance W4S.SerializableExprs sym => W4S.W4SerializableF sym (MacawRegEntry sym)
 
 ptrEquality ::
   PC.TestEquality (WI.SymExpr sym) =>
