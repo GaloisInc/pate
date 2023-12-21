@@ -68,6 +68,7 @@ module Pate.PatchPair (
   , asSingleton
   , zip
   , jsonPatchPair
+  , w4SerializePair
   ) where
 
 import           Prelude hiding (zip)
@@ -92,6 +93,8 @@ import qualified Pate.ExprMappable as PEM
 import Data.Parameterized (Some(..))
 import Control.Monad.Identity
 import Pate.TraceTree
+import qualified What4.JSON as W4S
+import What4.JSON
 
 -- | A pair of values indexed based on which binary they are associated with (either the
 --   original binary or the patched binary).
@@ -520,3 +523,19 @@ jsonPatchPair f ppair = case ppair of
 
 instance (forall bin. JSON.ToJSON (tp bin)) => JSON.ToJSON (PatchPair tp) where
   toJSON p = jsonPatchPair (JSON.toJSON) p
+
+w4SerializePair :: PatchPair f -> (forall bin. f bin -> W4S.W4S sym JSON.Value) -> W4S.W4S sym JSON.Value
+w4SerializePair ppair f = case ppair of
+    PatchPair o p -> do
+      o_v <- f o
+      p_v <- f p
+      return $ JSON.object ["original" JSON..= o_v, "patched" JSON..= p_v]
+    PatchPairOriginal o -> do
+      o_v <- f o
+      return $ JSON.object ["original" JSON..= o_v]
+    PatchPairPatched p -> do
+      p_v <- f p
+      return $ JSON.object ["patched" JSON..= p_v]
+
+instance W4S.W4SerializableF sym f => W4S.W4Serializable sym (PatchPair f) where
+  w4Serialize ppair = w4SerializePair ppair w4SerializeF

@@ -11,6 +11,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Pate.Verification.StrongestPosts.CounterExample
   ( TotalityCounterexample(..)
@@ -61,6 +62,8 @@ import qualified What4.Concrete as W4
 import Data.Functor.Const
 import qualified Data.Parameterized.Map as MapF
 import Data.Maybe (mapMaybe)
+import qualified What4.JSON as W4S
+import What4.JSON
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -216,8 +219,16 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
 data TraceEvents sym arch =
   TraceEvents (PPa.PatchPairC (MT.RegOp sym arch, [TraceEventGroup sym arch]))
 
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEvents sym arch) where
+  w4Serialize (TraceEvents p) = PPa.w4SerializePair p $ \(Const (rop, evs)) ->
+    W4S.object [ "initial_regs" .= rop, "events" .= evs]
+
 data TraceEventGroup sym arch =
   TraceEventGroup (Maybe (MM.ArchSegmentOff arch)) [MT.TraceEvent sym arch]
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEventGroup sym arch) where
+  w4Serialize (TraceEventGroup mi evs) =
+    W4S.object [ "instruction_addr" .= mi, "events" .= evs]
 
 ppRegOp :: forall sym arch ann. (PA.ValidArch arch, PSo.ValidSym sym) => MT.RegOp sym arch -> [PP.Doc ann]
 ppRegOp (MT.RegOp m) = mapMaybe (\(MapF.Pair r v) -> 
@@ -260,6 +271,7 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace
       "Event Trace:" PP.<+> PPa.ppPatchPair' (\(Const (_init_regs, s)) -> 
         ppTraceEventSummary s) evs))
     [Summary, Simplified]
+  jsonNode () v = W4S.w4ToJSON @sym v
 
 ppTraceEventSummary ::
   forall sym arch a.

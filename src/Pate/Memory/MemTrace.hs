@@ -109,7 +109,7 @@ import Data.Macaw.Memory
            , MemWord, memWordToUnsigned, segmentFlags
            , Memory, emptyMemory, memWord, segoffSegment
            , segoffAddr, readWord8, readWord16be, readWord16le
-           , readWord32le, readWord32be, readWord64le, readWord64be, MemAddr, asSegmentOff
+           , readWord32le, readWord32be, readWord64le, readWord64be, MemAddr (..), asSegmentOff
            )
 import qualified Data.Macaw.Memory.Permissions as MMP
 import Data.Macaw.Symbolic.Backend (MacawEvalStmtFunc, MacawArchEvalFn(..))
@@ -154,11 +154,15 @@ import qualified Pate.ExprMappable as PEM
 import           What4.ExprHelpers ( integerToNat )
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Memory as PM
-import Data.Macaw.CFG (ArchSegmentOff, RegisterInfo, ip_reg, MemAddr (MemAddr))
+import Data.Macaw.CFG (ArchSegmentOff, RegisterInfo, ip_reg)
 import qualified Pate.SimulatorRegisters as PSr
 import Data.Data (Typeable, eqT)
 import Data.Maybe (mapMaybe)
 import qualified Data.Parameterized.TraversableF as TF
+import qualified What4.JSON as W4S
+import qualified Data.Aeson as JSON
+import What4.JSON ((.=), (.==), (.=~))
+import qualified Pate.Pointer as Ptr
 
 ------
 -- * Undefined pointers
@@ -188,6 +192,11 @@ data UndefinedPtrOps sym =
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (SymBV' sym w) where
+  w4Serialize (SymBV' bv) = W4S.w4SerializeF bv
+
+instance W4S.SerializableExprs sym => W4S.W4SerializableF sym (SymBV' sym)
 
 instance OrdF (SymExpr sym) => TestEquality (SymBV' sym) where
   testEquality a b = case compareF a b of
@@ -620,6 +629,10 @@ data MemOpCondition sym
   = Unconditional
   | Conditional (Pred sym)
 
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemOpCondition sym) where
+  w4Serialize = \case
+    Unconditional -> W4S.w4SerializeString ("unconditional" :: String)
+    Conditional p -> W4S.object ["condition" .== p]
 
 deriving instance Show (Pred sym) => Show (MemOpCondition sym)
 
@@ -628,6 +641,8 @@ data MemOpDirection =
   | Write
   deriving (Eq, Ord, Show)
 
+instance W4S.W4Serializable sym MemOpDirection where
+  w4Serialize = W4S.w4SerializeString
 
 data MemOp sym ptrW where
   MemOp ::
@@ -731,6 +746,10 @@ instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
 data RegOp sym arch =
   RegOp (MapF.MapF (ArchReg arch) (PSr.MacawRegEntry sym))
 
+instance (W4S.W4SerializableFC (ArchReg arch), W4S.SerializableExprs sym)
+  => W4S.W4Serializable sym (RegOp sym arch) where
+  w4Serialize (RegOp m) = W4S.object ["reg_op" .= m]
+
 instance PEM.ExprMappable sym (RegOp sym arch) where
   mapExpr sym f (RegOp m) = (RegOp . PEM.unExprMapFElems) <$> PEM.mapExpr sym f (PEM.ExprMapFElems m)
 
@@ -743,6 +762,38 @@ instance PEM.ExprMappable sym (TraceEvent sym arch) where
   mapExpr sym f e = case e of
     RegOpEvent i rop -> RegOpEvent <$> PEM.mapExpr sym f i <*> PEM.mapExpr sym f rop
     TraceMemEvent i mop -> TraceMemEvent <$> PEM.mapExpr sym f i <*> PEM.mapExpr sym f mop
+
+instance W4S.W4Serializable sym  (MemAddr w) where
+  w4Serialize addr = do
+    base_json <- return $ JSON.toJSON (addrBase addr)
+    off_json <- return $ JSON.toJSON (show (addrOffset addr))
+    return $ JSON.object ["base" JSON..= base_json, "offset" JSON..= off_json]
+
+instance W4S.W4Serializable sym  (MemSegmentOff w) where
+  w4Serialize segOff = W4S.w4Serialize $ segoffAddr segOff
+
+instance (W4S.W4SerializableFC (ArchReg arch), W4S.SerializableExprs sym)
+  => W4S.W4Serializable sym (TraceEvent sym arch) where
+    w4Serialize = \case
+      RegOpEvent i rop -> W4S.object ["instruction" .= i, "register_op" .= rop]
+      TraceMemEvent i mop -> W4S.object ["instruction" .= i, "memory_op" .= mop]
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemEvent sym ptrW) where
+  w4Serialize = \case
+    MemOpEvent mop -> W4S.object ["mem_op" .= mop]
+    SyscallEvent i r0 -> W4S.object ["syscall" .= i, "r0" .== r0]
+    ExternalCallEvent nm bvs -> W4S.object ["external_call" .= nm, "args" .= bvs]
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemOp sym ptrW) where
+  w4Serialize (MemOp addr dir cond n val end) =
+    W4S.object
+      [ "addr" .= Ptr.fromLLVMPointer addr
+      , "direction" .= dir
+      , "condition" .= cond
+      , "size" .= n
+      , "value" .= Ptr.fromLLVMPointer val
+      , "endianness" .=~ end
+      ]
 
 data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW

@@ -15,6 +15,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE LambdaCase #-}
 
 module What4.JSON 
   ( W4S
@@ -23,27 +24,25 @@ module What4.JSON
   , W4SerializableFC
   , SerializableExprs
   , w4ToJSON
+  , object
+  , w4SerializeString
+  , (.=)
+  , (.==)
+  , (.=~)
   ) where
 
-import           Control.Monad.Except (ExceptT, MonadError)
-import           Control.Monad.Reader (ReaderT, MonadReader)
-import           Control.Monad.IO.Class (MonadIO)
-import           Control.Monad.State (StateT, MonadState (..), State, modify, evalState, runState)
+import           Control.Monad.State (MonadState (..), State, modify, evalState, runState)
 
-import           Data.Map.Ordered (OMap)
 import qualified Data.Map.Ordered as OMap
 import           Data.Map (Map)
 import           Data.Text (Text)
-import qualified Data.Text as Text
 import           Data.Data (Proxy(..), Typeable)
 import qualified Data.Aeson as JSON
-import           Data.Aeson ( (.=) )
 
 import           Data.Parameterized.Some (Some(..))
 
 import qualified What4.Interface as W4
 
-import           What4.Serialize.Parser (SomeSymFn(..))
 import qualified What4.Serialize.Printer as W4S
 import qualified What4.Serialize.Parser as W4D
 import qualified What4.Expr.Builder as W4B
@@ -56,6 +55,12 @@ import qualified Data.Text as T
 import GHC.IO (catch, evaluate, unsafePerformIO)
 import GHC.IO.Exception (IOException)
 import Control.DeepSeq (force)
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
+import Data.Kind
+import qualified Lang.Crucible.Utils.MuxTree as MT
+import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Parameterized.TraversableFC as TFC
 
 
 
@@ -67,11 +72,13 @@ newtype W4S sym a = W4S (State (ExprCache sym) a)
 class W4Serializable sym a where
   w4Serialize :: a -> W4S sym JSON.Value
 
+w4SerializeString :: Show a => a -> W4S sym JSON.Value
+w4SerializeString s = return $ JSON.String (T.pack (show s))
 
-w4ToJSON :: forall sym a. W4Serializable sym a => a -> JSON.Value
+w4ToJSON :: forall sym a. SerializableExprs sym => W4Serializable sym a => a -> JSON.Value
 w4ToJSON a = let W4S f = w4Serialize @sym a in evalState f (ExprCache Map.empty)
 
-class W4SerializableF sym f where
+class W4SerializableF sym (f :: k -> Type) where
   withSerializable :: Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a
 
   default withSerializable :: W4Serializable sym (f tp) => Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a
@@ -114,9 +121,9 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
               let var_env = map (\(Some bv, t) -> (show (W4B.bvarName bv), t)) $ OMap.toAscList $ W4S.resFreeVarEnv result
               let fn_env = map (\(W4S.SomeExprSymFn fn, t) -> (show (W4B.symFnName fn), t)) $ OMap.toAscList $ W4S.resSymFnEnv result
               let sexpr = W4S.resSExpr result
-              return $ JSON.object [ "symbolic" .= JSON.String (W4D.printSExpr mempty sexpr), "vars" .= var_env, "fns" .= fn_env ]
+              return $ JSON.object [ "symbolic" JSON..= JSON.String (W4D.printSExpr mempty sexpr), "vars" JSON..= var_env, "fns" JSON..= fn_env ]
             case mv of
-              Left er -> return $ JSON.object [ "symbolic_serialize_err" .= er]
+              Left er -> return $ JSON.object [ "symbolic_serialize_err" JSON..= er]
               Right v -> return v
         modify $ \(ExprCache s') -> ExprCache (Map.insert (Some e) v s')
         return v
@@ -129,35 +136,74 @@ instance W4SerializableF sym x => W4Serializable sym (Some x) where
   w4Serialize (Some x) = w4SerializeF x
 
 instance (W4Serializable sym x, W4Serializable sym y) => W4Serializable sym (x, y) where
-  w4Serialize (x,y) = do
-    x_v <- w4Serialize x
-    y_v <- w4Serialize y
-    return $ JSON.object [ "fst" .= x_v, "snd" .= y_v]
+  w4Serialize (x,y) = object [ "fst" .= x, "snd" .= y]
+
+instance (W4Serializable sym x) => W4Serializable sym [x] where
+  w4Serialize xs = do
+    xs_json <- mapM w4Serialize xs
+    return $ JSON.toJSON xs_json
+
+instance W4Serializable sym JSON.Value where
+  w4Serialize = return
 
 instance (W4Serializable sym x, W4Serializable sym y) => W4Serializable sym (Map x y) where
   w4Serialize x = do
-    objs <- forM (Map.toList x) $ \(k, v) -> do
-      k_v <- w4Serialize k
-      v_v <- w4Serialize v
-      return $ JSON.object [ "key" .= k_v, "val" .= v_v]
-    return $ JSON.object [ "map" .= objs ]
+    objs <- forM (Map.toList x) $ \(k, v) -> object [ "key" .= k, "val" .= v]
+    object [ "map" .= objs ]
 
 type SerializableExprs sym = W4SerializableF sym (W4.SymExpr sym)
 
 instance (SerializableExprs sym, W4Serializable sym x) => W4Serializable sym (W4P.PredMap sym x k) where
   w4Serialize x = do
-    objs <- forM (W4P.toList x) $ \(k,p) -> do
-      k_v <- w4Serialize k
-      p_v <- w4SerializeF p
-      return $ JSON.object [ "val" .= k_v, "pred" .= p_v]
-    let (repr :: String) = case typeRepr x of
+    objs <- forM (W4P.toList x) $ \(k,p) -> object [ "val" .= k, "pred" .== p]
+    let (repr :: Text) = case typeRepr x of
           W4P.PredConjRepr -> "conj"
           W4P.PredDisjRepr -> "disj"
-    return $ JSON.object [ "predmap" .= objs, "kind" .= repr ]
+    object [ "predmap" .= objs, "kind" .= repr ]
 
 instance W4Serializable sym Integer where
   w4Serialize i = return $ JSON.toJSON i
 
-instance W4Serializable sym String where
+instance W4Serializable sym Text where
   w4Serialize i = return $ JSON.toJSON i
 
+instance W4Serializable sym a => W4Serializable sym (Maybe a) where
+  w4Serialize = \case
+    Just a -> w4Serialize a
+    Nothing -> return $ JSON.Null
+
+instance W4Serializable sym (W4.NatRepr n) where
+  w4Serialize nr = w4Serialize $ W4.intValue nr
+
+instance (W4SerializableF sym x, W4SerializableF sym y) => W4Serializable sym (MapF x y) where
+  w4Serialize x = do
+    objs <- forM (MapF.toList x) $ \(MapF.Pair k v) -> object [ "key" .== k, "val" .== v]
+    object [ "map" .= objs ]
+
+instance (W4Serializable sym tp, SerializableExprs sym) => W4Serializable sym (MT.MuxTree sym tp) where
+  w4Serialize mt = case MT.viewMuxTree mt of
+    [] -> error "Serialize: Invalid Muxtree"
+    [(e,_)] -> w4Serialize e
+    es -> do
+      body <- forM es $ \(e,p) ->
+        object [ "val" .= e, "pred" .== p]
+      object ["muxtree" .= body]
+
+instance W4SerializableF sym f => W4Serializable sym (Ctx.Assignment f ctx) where
+  w4Serialize x = w4Serialize $ TFC.toListFC Some x
+
+data W4KeyValue sym = forall a. W4Serializable sym a => W4KeyValue JSON.Key a
+
+(.=) :: W4Serializable sym v => JSON.Key -> v -> W4KeyValue sym
+(.=) = W4KeyValue
+
+(.==) :: forall sym v tp. W4SerializableF sym v => JSON.Key -> v tp -> W4KeyValue sym
+(.==) = \k v -> withSerializable (Proxy @sym) (Proxy @v) (Proxy @tp) $ W4KeyValue k v
+
+(.=~) :: Show v => JSON.Key -> v -> W4KeyValue sym
+(.=~) = \k v -> W4KeyValue k (T.pack (show v))
+
+object :: [W4KeyValue sym] -> W4S sym JSON.Value
+object kvs = fmap JSON.object $ forM kvs $ \(W4KeyValue k v) -> do
+    v_json <- w4Serialize v
+    return $ k JSON..= v_json
