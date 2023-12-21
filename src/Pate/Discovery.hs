@@ -766,8 +766,6 @@ callTargets from mnext_block_addr next_ips mret = fnTrace "callTargets" $ do
          let pb = PB.functionEntryToConcreteBlock fe'
          
          ret_blk <- case mret of
-           -- abort PLTs don't have return locations
-           _ | isAbortPLT -> return Nothing
            Just ret -> return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction ret
            Nothing | isPLT, not isAbortPLT, Just next_block_addr <- mnext_block_addr ->
              return $ Just $ PB.mkConcreteBlock from PB.BlockEntryPostFunction next_block_addr

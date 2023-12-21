@@ -1891,7 +1891,16 @@ combineCases c1 c2 = case (c1,c2) of
   _ | c1 == c2 -> Just c1
   _ -> Nothing
 
-
+-- | Regardless of what is in the 'BlockTarget', we consider the return point of
+--   a terminal/abort stub to always be 'Nothing', so we don't consider the code
+--   at its (non-reachable) return point.
+--   This is handled here (rather than when the 'BlockTarget' is created) so that
+--   all of the branch/path matching is still consistent.
+getTargetReturn :: PBi.KnownBinary bin => PB.BlockTarget arch bin -> EquivM sym arch (Maybe (PB.ConcreteBlock arch bin))
+getTargetReturn PB.BlockTargetReturn{} = return Nothing
+getTargetReturn blkt = getFunctionStub (PB.targetCall blkt) >>= \case
+  Just stub | PD.isAbortStub stub -> return Nothing
+  _ -> return $ PB.targetReturn blkt
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
@@ -1910,7 +1919,7 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
   fmap (fromMaybe st) $ withPathCondition matches $ do
     let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
     mrets <- PPa.toMaybeCases <$> 
-      PPa.forBinsF (\bin -> PB.targetReturn <$> PPa.get bin blkts)
+      PPa.forBinsF (\bin -> PPa.get bin blkts >>= getTargetReturn) 
     case (combineCases ecase1 ecase2,mrets) of
       (Nothing,_) -> handleDivergingPaths scope bundle' currBlock st d blkts
       (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope bundle' currBlock st d blkts
