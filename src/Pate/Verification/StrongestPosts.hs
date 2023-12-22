@@ -2133,7 +2133,7 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   prettyNode SkippedFn _nm = "Skipped unnamed function"
   prettyNode IgnoredFn nm = "Ignoring function:" <+> PP.pretty nm
   prettyNode DivergedJump nm = "Diverging jump:" <+> PP.pretty nm
-  prettyNode TerminalFn nm = "Diverging jump:" <+> PP.pretty nm
+  prettyNode TerminalFn nm = "Terminal Function:" <+> PP.pretty nm
   nodeTags = mkTags @'(sym,arch) @"fnstub" [Summary, Simplified]
   jsonNode = \v lbl -> JSON.object [ "fnstub" JSON..= lbl, "kind" JSON..= (show v)]
   
