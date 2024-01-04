@@ -12,6 +12,7 @@
 {-# LANGUAGE LambdaCase #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Pate.Monad.Environment (
     EquivEnv(..)
@@ -28,6 +29,20 @@ module Pate.Monad.Environment (
   , printPriorityKind
   , tagPriority
   , priorityTag
+  , SolverCacheFrameF(..)
+  , SolverCacheFrame
+  , SolverCache(..)
+  , pattern SolverCacheFrame
+  , SolverCacheFrameRef
+  , emptyCacheFrame
+  , resolveCacheFrameRef
+  , diffCacheFrame
+  , makeCacheFrameRef
+  , unionCacheFrame
+  , lookupSolverCache
+  , insertSolverCache
+  , emptySolverCache
+  , lookupSolverCache_
   ) where
 
 import qualified Control.Concurrent as IO
@@ -74,6 +89,18 @@ import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
 import           Pate.TraceTree
 import qualified Prettyprinter as PP
+import Data.Parameterized.Map (MapF)
+import qualified What4.Expr.GroundEval as W4G
+import Data.Set (Set)
+import Pate.SimState (VarScope, Scoped (..), SimSpec)
+import Data.Functor.Identity
+import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.Map as MapF
+import Data.Parameterized.Classes
+import Data.Parameterized.WithOrd
+import qualified Pate.ExprMappable as PEM
+import Control.Monad (forM, foldM)
+import Control.Monad.IO.Class
 
 data EquivEnv sym arch where
   EquivEnv ::
@@ -118,11 +145,16 @@ data EquivEnv sym arch where
     -- ^ Overrides to apply in the inline-callee symbolic execution mode
     , envTreeBuilder :: TreeBuilder '(sym, arch)
     , envResetTraceTree :: IO ()
-    , envUnsatCacheRef :: IO.IORef (SolverCache sym)
-    , envSatCacheRef :: IO.IORef (SolverCache sym)
     , envTargetEquivRegs :: Set.Set (Some (MC.ArchReg arch))
     , envPtrAssertions :: MT.PtrAssertions sym
     , envCurrentPriority :: NodePriority
+    , envSolverBlockCache :: BlockCache arch (SimSpec sym arch (SolverCache sym))
+    -- ^ individual solver cache for each node
+    , envInProgressCache :: IO.IORef (Some (SolverCache sym))
+    -- ^ the solver cache that's currently under construction (i.e. one a block has been picked)
+    , envSolverCache :: SolverCacheFrameRef sym
+    -- ^ currently in-scope cache frame
+    , envCurrentFramePred :: W4.Pred sym
     } -> EquivEnv sym arch
 
 -- | Scheduling priority for the worklist
@@ -190,9 +222,137 @@ raisePriority (NodePriority pK x msg) = (NodePriority pK (x-1) msg)
 --    (i.e. relaxing assumptions may cause previously unsatsfiable results to now be satisfiable)
 --    preserve any learned Sat results from inner context
 --    (i.e. relaxing assumptions cannot may a satsifiable result unsatisfiable)
-type SolverCache sym = SetF.SetF (W4.SymExpr sym) W4.BaseBoolType
 
 type ExitPairCache arch = BlockCache arch (Set.Set (PPa.PatchPair (PB.BlockTarget arch)))
+
+type GroundCache sym = MapF (W4.SymExpr sym) (W4.SymExpr sym)
+
+data SolverCacheFrameF sym f = SolverCacheFrameF
+  { unsatCacheF :: f (Set (W4.Pred sym))
+  , satCacheF :: f (Set (W4.Pred sym))
+  , concCacheF :: f (GroundCache sym)
+  , symCacheF :: f (Set (Some (W4.SymExpr sym)))
+  }
+
+pattern SolverCacheFrame :: 
+  Set (W4.Pred sym) -> Set (W4.Pred sym) -> GroundCache sym -> Set (Some (W4.SymExpr sym)) -> SolverCacheFrameF sym Identity
+pattern SolverCacheFrame a b c d = SolverCacheFrameF (Identity a) (Identity b) (Identity c) (Identity d)
+{-# COMPLETE SolverCacheFrame #-}
+
+type SolverCacheFrame sym = SolverCacheFrameF sym Identity
+type SolverCacheFrameRef sym = SolverCacheFrameF sym IO.IORef
+
+emptyCacheFrame :: SolverCacheFrame sym
+emptyCacheFrame = SolverCacheFrame Set.empty Set.empty MapF.empty Set.empty
+
+emptySolverCache :: SolverCache sym v
+emptySolverCache = SolverCache M.empty
+
+resolveCacheFrameRef :: SolverCacheFrameRef sym -> IO (SolverCacheFrame sym)
+resolveCacheFrameRef sc = TF.traverseF (\x -> Identity <$> IO.readIORef x) sc
+
+makeCacheFrameRef :: SolverCacheFrame sym -> IO (SolverCacheFrameRef sym)
+makeCacheFrameRef sc = TF.traverseF (\(Identity x) -> IO.newIORef x) sc
+
+-- | Reduce the first cache frame to only have elements that are not in the second
+diffCacheFrame :: forall sym.
+  OrdF (W4.SymExpr sym) => SolverCacheFrame sym -> SolverCacheFrame sym -> SolverCacheFrame sym
+diffCacheFrame (SolverCacheFrame unsatL satL concL symL) (SolverCacheFrame unsatR satR concR symR) =
+  withOrd @(W4.SymExpr sym) @W4.BaseBoolType $
+  SolverCacheFrame (Set.difference unsatL unsatR) (Set.difference satL satR) 
+    (MapF.filterWithKey (\k _ -> not (MapF.member k concR)) concL)
+    (Set.difference symL symR)
+
+unionCacheFrame :: forall sym.
+  OrdF (W4.SymExpr sym) => SolverCacheFrame sym -> SolverCacheFrame sym -> Either String (SolverCacheFrame sym)
+unionCacheFrame (SolverCacheFrame unsatL satL concL symL) (SolverCacheFrame unsatR satR concR symR) =
+  withOrd @(W4.SymExpr sym) @W4.BaseBoolType $
+  SolverCacheFrame <$> pure (Set.union unsatL unsatR) <*> pure (Set.union satL satR) <*>
+    (MapF.mergeWithKeyM (\_k e1 e2 -> case testEquality e1 e2 of Just Refl -> return (Just e1); _ -> Left "unionCacheFrame: mismatch")
+      pure pure concL concR) <*> pure (Set.union symL symR)
+
+instance TF.FunctorF (SolverCacheFrameF sym) where
+  fmapF = TF.fmapFDefault
+
+instance TF.FoldableF (SolverCacheFrameF sym) where
+  foldMapF = TF.foldMapFDefault
+
+instance TF.TraversableF (SolverCacheFrameF sym) where
+  traverseF f (SolverCacheFrameF a b c d) = SolverCacheFrameF <$> (f a) <*> (f b) <*> (f c) <*> (f d)
+
+newtype SolverCache sym (v :: VarScope) = 
+  SolverCache (Map (W4.Pred sym) (SolverCacheFrame sym))
+
+instance PEM.ExprMappable sym (SolverCacheFrameF sym Identity) where
+  mapExpr _sym f (SolverCacheFrame a b c d) = withOrd @(W4.SymExpr sym) @W4.BaseBoolType $ do
+    a' <- Set.fromList <$> mapM f (Set.toList a)
+    b' <- Set.fromList <$> mapM f (Set.toList b)
+    -- Note: this will drop duplicate entries if there are clashing keys
+    -- in the resulting map
+    c' <- fmap (MapF.fromList) $ forM (MapF.toList c) $ \(MapF.Pair k v) -> do
+      k' <- f k
+      v' <- f v
+      return $ MapF.Pair k' v'
+    d' <- mapM (\(Some e) -> do
+      e' <- f e
+      liftIO $ putStrLn $ "Old:  \n" ++ show (W4.printSymExpr e) ++ "\n" ++ show (hashF e) ++ "\nNew\n" ++ show (W4.printSymExpr e') ++ "\n" ++ show (hashF e') 
+      Some <$> return e') (Set.toList d)
+    d'' <- foldM (\acc (Some e) -> case Set.lookupIndex (Some e) acc of
+      Just i -> do
+        (Some e') <- return $ Set.elemAt i acc
+        -- liftIO $ putStrLn $ "Duplicate dropped:  \n" ++ show (W4.printSymExpr e) ++ "\n" ++ show (hashF e) ++ "\n" ++ show (W4.printSymExpr e') ++ "\n" ++ show (hashF e') 
+        
+        return acc
+      Nothing -> return $ Set.insert (Some e) acc
+      ) Set.empty d'
+    return $ SolverCacheFrame a' b' c' d''
+
+instance PEM.ExprMappable sym (SolverCache sym v) where
+  -- Note: this will drop duplicate entries if there are clashing keys
+  -- in the resulting map
+  -- We could consider merging the caches instead, but this is unlikely to
+  -- happen in practice, since we are just using this to rewrite
+  -- the bound variables
+  mapExpr sym f (SolverCache m) = 
+    withOrd @(W4.SymExpr sym) @W4.BaseBoolType $ 
+    fmap (SolverCache . M.fromList) $ forM (M.toList m) $ \(k,v) -> do
+      k' <- f k
+      v' <- PEM.mapExpr sym f v
+      return (k', v')
+
+
+lookupSolverCache ::
+  forall sym v.
+  OrdF (W4.SymExpr sym) => 
+  W4.Pred sym ->
+  SolverCache sym v ->
+  SolverCacheFrame sym
+lookupSolverCache p (SolverCache m) = withOrd @(W4.SymExpr sym) @W4.BaseBoolType $ 
+  case M.lookup p m of
+    Just sc -> sc
+    Nothing -> emptyCacheFrame
+
+lookupSolverCache_ ::
+  forall sym v.
+  OrdF (W4.SymExpr sym) => 
+  W4.Pred sym ->
+  SolverCache sym v ->
+  Maybe (SolverCacheFrame sym)
+lookupSolverCache_ p (SolverCache m) =
+  withOrd @(W4.SymExpr sym) @W4.BaseBoolType $ M.lookup p m
+
+insertSolverCache ::
+  forall sym v.
+  OrdF (W4.SymExpr sym) => 
+  W4.Pred sym ->
+  SolverCacheFrame sym ->
+  SolverCache sym v ->
+  SolverCache sym v
+insertSolverCache p sc (SolverCache m) = withOrd @(W4.SymExpr sym) @W4.BaseBoolType $ 
+  SolverCache $ M.insert p sc m
+
+instance Scoped (SolverCache sym) where
+  unsafeCoerceScope (SolverCache m) = SolverCache m 
 
 data BlockCache arch a where
   BlockCache :: IO.MVar (Map (PB.BlockPair arch) a) -> BlockCache arch a

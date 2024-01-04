@@ -162,6 +162,7 @@ library
                        What4.JSON,
                        Data.Parameterized.SetF,
                        Data.Parameterized.SetCtx,
+                       Data.Parameterized.WithOrd,
                        Pate.SimState,
                        Pate.Equivalence,
                        Pate.Equivalence.Condition,

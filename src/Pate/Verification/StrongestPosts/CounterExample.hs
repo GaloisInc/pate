@@ -242,7 +242,6 @@ ppRegOp (MT.RegOp m) = mapMaybe (\(MapF.Pair r v) ->
       CLM.LLVMPointerRepr{} -> MT.ppPtr' (PSR.macawRegValue r)
       _ -> PP.pretty $ show r
 
-
 ppTraceEvent :: (PA.ValidArch arch, PSo.ValidSym sym) => MT.TraceEvent sym arch -> [PP.Doc ann]
 ppTraceEvent ev = case ev of
   MT.RegOpEvent _ rop -> ppRegOp rop
@@ -376,3 +375,5 @@ groundTraceEventSequence sym evalFn s = do
                     (_ : _) | Just{} <- e1_instr -> map dropPCReg ground_evs
                     _ -> ground_evs
               return $ (TraceEventGroup last_instr (reverse ground_evs') : evs')
+
+

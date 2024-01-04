@@ -89,6 +89,7 @@ type ValidSym sym =
   , CB.IsSymInterface sym
   , ShowF (WI.SymExpr sym)
   , W4S.W4SerializableF sym (WI.SymExpr sym)
+  , Ord (WI.Pred sym)
   )
 
 -- | A wrapper around the symbolic backend (a 'WE.ExprBuilder') that captures

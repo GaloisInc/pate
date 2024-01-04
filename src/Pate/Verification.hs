@@ -217,6 +217,9 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   -- safe but makes things significantly easier.
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
   ePairCache <- liftIO $ freshBlockCache
+  sCache <- liftIO $ freshBlockCache
+  inProgressCache <- liftIO $ IO.newIORef (Some emptySolverCache)
+  curCache <- liftIO $ makeCacheFrameRef emptyCacheFrame
   statsVar <- liftIO $ MVar.newMVar mempty
 
 
@@ -267,9 +270,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   
   (treeBuilder :: TreeBuilder '(sym, arch)) <- liftIO $ startSomeTreeBuilder (PA.ValidRepr sym validArch) (PC.cfgTraceTree vcfg)
 
-  satCache <- liftIO $ IO.newIORef SetF.empty
-  unsatCache <- liftIO $ IO.newIORef SetF.empty
-
   let targetRegsRaw = PC.cfgTargetEquivRegs vcfg
 
   targetRegs <- fmap S.fromList $ mapM (\r_raw -> case PA.readRegister @arch r_raw of
@@ -318,11 +318,13 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
                                                 ]
           , envTreeBuilder = treeBuilder
           , envResetTraceTree = resetSomeTreeBuilder (PC.cfgTraceTree vcfg)
-          , envSatCacheRef = satCache
-          , envUnsatCacheRef = unsatCache
           , envTargetEquivRegs = targetRegs
           , envPtrAssertions = ptrAsserts
           , envCurrentPriority = normalPriority PriorityUserRequest
+          , envSolverBlockCache = sCache
+          , envInProgressCache = inProgressCache
+          , envSolverCache = curCache
+          , envCurrentFramePred = W4.truePred sym
           }
     -- Note from above: we are installing overrides for each override that cover
     -- both local symbol definitions and the corresponding PLT stubs for each

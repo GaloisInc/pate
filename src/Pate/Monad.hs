@@ -166,7 +166,7 @@ import qualified What4.Symbol as WS
 import           What4.Utils.Process (filterAsync)
 import qualified What4.Protocol.Online as WPO
 import qualified What4.Protocol.SMTWriter as W4
-import           What4.ExprHelpers
+import           What4.ExprHelpers hiding ( normCache )
 import           What4.ProgramLoc
 
 import qualified Pate.Arch as PA
@@ -198,6 +198,8 @@ import Data.Functor.Const (Const(..))
 import Unsafe.Coerce (unsafeCoerce)
 import Debug.Trace
 import Data.List
+import Data.Functor.Identity
+import qualified What4.ExprHelpers as WEH
 
 atPriority :: 
   NodePriority ->
@@ -596,46 +598,124 @@ withFreshVars blocks f = do
 
   freshSimSpec (\bin r -> unconstrainedRegister bin argNames r) (\x -> mkMem x) mkStackBase mkMaxRegion (\v -> f v)
  
+
+
 -- should we clear this between nodes?
 withFreshSatCache ::
   EquivM_ sym arch f ->
   EquivM sym arch f
-withFreshSatCache f = do
-  unsatCacheRef <- asks envUnsatCacheRef
-  unsatCache <- liftIO $ IO.readIORef unsatCacheRef
-  satCache <- asks envSatCacheRef
-  -- preserve any known unsat results
-  freshUnsatCacheRef <- liftIO $ IO.newIORef unsatCache
-  -- discard any known sat results
-  freshSatCacheRef <- liftIO $ IO.newIORef SetF.empty
-  result <- CMR.local (\env -> env { envUnsatCacheRef = freshUnsatCacheRef, envSatCacheRef = freshSatCacheRef }) f
-  -- preserve learned sat results
-  newSatResults <- liftIO $ IO.readIORef freshSatCacheRef
-  liftIO $ IO.modifyIORef satCache (SetF.union newSatResults)
-  return result
+withFreshSatCache f = fnTrace "withFreshSatCache" $ do
+  curCacheRef <- asks envSolverCache
+  -- other cache frame
+  curCache <- liftIO $ resolveCacheFrameRef curCacheRef
+  currentPred <- asks envCurrentFramePred
+  withTracing @"debug" "currentPred" $ emitTrace @"expr" (Some currentPred) 
+  predCacheRef <- asks envInProgressCache
+  Some predCache <- liftIO $ IO.readIORef predCacheRef
+  -- previously-cached frame
+  prevCacheFrame <- case lookupSolverCache_ currentPred predCache of
+    Just r@(SolverCacheFrame a b c d) -> do
+      withTracing @"debug" ("Cache hit: " ++ show (S.size a) ++ " " ++ show (S.size b) ++ " " ++ show (MapF.size c) ++ " " ++ show (S.size d)) $ do
+        forM_ (S.toList d) $ \(Some e) -> emitTrace @"debug" (show (hashF e))
+      return r
+    Nothing -> do
+      emitTrace @"debug" "Cache miss"
+      return emptyCacheFrame
+  -- drop the satisfiable cache and symbolic term cache from outer frame and merge with cached frame
+  -- notably this is a copy of the outer frame, so the inner action will
+  -- leave it unmodified
+  let mfreshFrame = 
+        unionCacheFrame prevCacheFrame (curCache { satCacheF  = Identity S.empty, symCacheF = Identity S.empty })
+  freshFrame <- case mfreshFrame of
+    Left err -> fail err
+    Right a -> return a
+  freshFrameRef <- liftIO $ makeCacheFrameRef freshFrame
+  mresult <- manifestError $ CMR.local (\env -> env { envSolverCache = freshFrameRef }) f
+  postFrame <- liftIO $ resolveCacheFrameRef freshFrameRef
+  -- drop any results that are present in the outer frame and update the
+  -- cache for this predicate
+  let postFrame_new@(SolverCacheFrame a b c d) = diffCacheFrame postFrame curCache
+  withTracing @"debug" ("Cache result: " ++ show (S.size a) ++ " " ++ show (S.size b) ++ " " ++ show (MapF.size c) ++ " " ++ show (S.size d)) $ do
+    forM_ (S.toList d) $ \(Some e) -> emitTrace @"debug" (show (hashF e))
+  liftIO $ IO.modifyIORef predCacheRef (\(Some x) -> Some $ insertSolverCache currentPred postFrame_new x)
+
+  -- add any sat results to the outer frame (this will be added to
+  -- the solver cache when that frame closes)
+  liftIO $ 
+    IO.modifyIORef (satCacheF curCacheRef) (S.union (runIdentity $ satCacheF postFrame_new))
+  -- same with any symbolic terms (i.e. terms that are non-concrete in the stronger assumption context
+  -- will still be symbolic in the weaker context)
+  liftIO $ 
+    IO.modifyIORef (symCacheF curCacheRef) (S.union (runIdentity $ symCacheF postFrame_new))
+  case mresult of
+    Left err -> throwError err
+    Right a -> return a
 
 withNoSatCache ::
   EquivM_ sym arch f ->
   EquivM sym arch f
 withNoSatCache f = do
-  freshUnsatCacheRef <- liftIO $ IO.newIORef SetF.empty
-  freshSatCacheRef <- liftIO $ IO.newIORef SetF.empty
-  CMR.local (\env -> env { envUnsatCacheRef = freshUnsatCacheRef, envSatCacheRef = freshSatCacheRef }) f
-
+  freshCacheRef <- liftIO $ makeCacheFrameRef emptyCacheFrame
+  CMR.local (\env -> env { envSolverCache = freshCacheRef }) f
 
 markPredSat ::
   W4.Pred sym ->
   EquivM sym arch ()
 markPredSat p = do
-  satCache <- asks envSatCacheRef
-  liftIO $ IO.modifyIORef satCache (SetF.insert p)
+  curCacheRef <- asks envSolverCache
+  liftIO $ IO.modifyIORef (satCacheF curCacheRef) (S.insert p)
 
 markPredUnsat ::
   W4.Pred sym ->
   EquivM sym arch ()
 markPredUnsat p = do
-  unsatCache <- asks envUnsatCacheRef
-  liftIO $ IO.modifyIORef unsatCache (SetF.insert p)
+  curCacheRef <- asks envSolverCache
+  liftIO $ IO.modifyIORef (unsatCacheF curCacheRef) (S.insert p)
+
+markExprConcrete ::
+  W4.SymExpr sym tp ->
+  W4.SymExpr sym tp {- ^ concrete value -} ->
+  EquivM sym arch ()
+markExprConcrete e_sym e_conc = do
+  curCacheRef <- asks envSolverCache
+  withTracing @"debug" "Marked Concrete" $ do
+    emitTrace @"expr" (Some e_sym)
+    emitTrace @"message" (show (hashF e_sym))
+
+  liftIO $ IO.modifyIORef (concCacheF curCacheRef) (MapF.insert e_sym e_conc)
+
+markExprSymbolic ::
+  W4.SymExpr sym tp -> EquivM sym arch ()
+markExprSymbolic e = do
+  curCacheRef <- asks envSolverCache
+  withTracing @"debug" "Marked Symbolic" $ do
+    emitTrace @"expr" (Some e)
+    emitTrace @"message" (show (hashF e))
+  liftIO $ IO.modifyIORef (symCacheF curCacheRef) (S.insert (Some e))
+
+data ExprCacheResult sym tp =
+    ExprCacheMiss
+  | ExprCacheConcrete (W4.SymExpr sym tp)
+  | ExprCacheSymbolic
+
+isConcreteCache ::
+  W4.SymExpr sym tp -> EquivM sym arch (ExprCacheResult sym tp)
+isConcreteCache e_sym = do
+  curCacheRef <- asks envSolverCache
+  concCache <- liftIO $ IO.readIORef (concCacheF curCacheRef)
+  symCache <- liftIO $ IO.readIORef (symCacheF curCacheRef)
+  case MapF.lookup e_sym concCache of
+    Just r -> do
+      emitTrace @"debug" "isConcreteCache: Concrete Hit"
+      return $ ExprCacheConcrete r
+    Nothing -> do
+      case S.member (Some e_sym) symCache of
+        True -> do
+          emitTrace @"debug" "isConcreteCache: Symbolic Hit"
+          return ExprCacheSymbolic
+        False -> do
+          emitTrace @"debug" "isConcreteCache Miss"
+          return ExprCacheMiss
 
 -- | Mark the result as sat or unsat as appropriate
 processSatResult ::
@@ -668,24 +748,27 @@ withAssumptionSet asm f = withSym $ \sym -> do
   p <- liftIO $ PAS.toPred sym asm
   case PAS.isAssumedPred curAsm p of
     True -> f
-    _ ->
-        CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
-        (frame, st) <- withOnlineBackend $ \bak ->  do
-          st <- liftIO $ LCB.saveAssumptionState bak
-          frame <- liftIO $ LCB.pushAssumptionFrame bak
-          safeAssumedFalseIO mempty asm $ 
-            LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-          return (frame, st)
-        withFreshSatCache $ do
-          result <- goalSat "validateAssumptions" (W4.truePred sym) $ return
-          case result of
-            W4R.Sat{} -> return ()
-            W4R.Unknown{} -> return ()
-            W4R.Unsat{} -> withNoSatCache $ do
-              safePop frame st
-              asm' <- getUnsatAsm asm
-              throwAssumeFalse mempty asm'
-          propagateAssumeFalse asm (safePop frame st) f
+    _ -> do
+        curAsmPred <- asks envCurrentFramePred
+        p' <- normCache p
+        newFramePred <- liftIO $ W4.andPred sym curAsmPred p'
+        CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm), envCurrentFramePred = newFramePred }) $ do
+          (frame, st) <- withOnlineBackend $ \bak ->  do
+            st <- liftIO $ LCB.saveAssumptionState bak
+            frame <- liftIO $ LCB.pushAssumptionFrame bak
+            safeAssumedFalseIO mempty asm $ 
+              LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+            return (frame, st)
+          withFreshSatCache $ do
+            result <- goalSat "validateAssumptions" (W4.truePred sym) $ return
+            case result of
+              W4R.Sat{} -> return ()
+              W4R.Unknown{} -> return ()
+              W4R.Unsat{} -> withNoSatCache $ do
+                safePop frame st
+                asm' <- getUnsatAsm asm
+                throwAssumeFalse mempty asm'
+            propagateAssumeFalse asm (safePop frame st) f
 
 safeAssumedFalseIO ::
   forall sym arch a.
@@ -850,7 +933,10 @@ withSatAssumption asm f = withSym $ \sym -> do
     Just True -> Just <$> f
     _ ->  do
       curAsm <- currentAsm
-      CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
+      curAsmPred <- asks envCurrentFramePred
+      p' <- normCache p
+      newFramePred <- liftIO $ W4.andPred sym curAsmPred p'
+      CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm), envCurrentFramePred = newFramePred }) $ do
         mst <- withOnlineBackend $ \bak -> do
           st <- liftIO $ LCB.saveAssumptionState bak
           frame <- liftIO $  LCB.pushAssumptionFrame bak
@@ -860,13 +946,13 @@ withSatAssumption asm f = withSym $ \sym -> do
               return $ Just (frame, st))
             (\_ -> (safeIO (\_ -> PEE.SolverStackMisalignment) (LCB.popAssumptionFrame bak frame)) >> return Nothing)
         case mst of
-          Just (frame, st) -> do
+          Just (frame, st) -> withFreshSatCache $ do
             -- it's critical that we don't execute the inner action inside
             -- the 'goalSat' continuation, since we're popping the outer frame
             -- after it's finished (or on an error result)
             res <- goalSat "check assumptions" (W4.truePred sym) return
             case res of
-              W4R.Sat{} -> Just <$> propagateAssumeFalse asm (safePop frame st) (withFreshSatCache f)
+              W4R.Sat{} -> Just <$> propagateAssumeFalse asm (safePop frame st) f
               -- on an inconclusive result we can't safely return 'Nothing' since
               -- that may unsoundly exclude viable paths
               W4R.Unknown -> safePop frame st >> throwHere PEE.InconclusiveSAT
@@ -894,7 +980,8 @@ goalSat ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
-goalSat desc p k = do
+goalSat desc p_ k = do
+  p <- normCache p_
   isPredSat_cache p >>= \case
     Just False -> k (W4R.Unsat ())
     _ -> do
@@ -913,7 +1000,8 @@ heuristicSat ::
   W4.Pred sym ->
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
-heuristicSat desc p k = do
+heuristicSat desc p_ k = do
+  p <- normCache p_
   isPredSat_cache p >>= \case
     Just False -> k (W4R.Unsat ())
     _ -> do
@@ -950,21 +1038,28 @@ concretizeWithModel fn e = withSym $ \sym -> do
 concretizeWithSolver ::
   W4.SymExpr sym tp ->
   EquivM sym arch (W4.SymExpr sym tp)
-concretizeWithSolver e = withSym $ \sym -> do
-  
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
-  let wsolver = PVC.WrappedSolver sym $ \_desc p k -> do
-        isPredSat_cache p >>= \case
-          Just False -> (k (W4R.Unsat ()))
-          _ -> do
-            r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
-              res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
-              inIO (k res')
-            case r of
-              Left _err -> k W4R.Unknown
-              Right a -> return a
-
-  PVC.resolveSingletonSymbolicAsDefault wsolver e
+concretizeWithSolver e_ = withSym $ \sym -> do
+  e <- normCache e_
+  isConcreteCache e >>= \case
+    ExprCacheConcrete result -> return result
+    ExprCacheSymbolic -> return e_
+    ExprCacheMiss -> do
+      heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+      let wsolver = PVC.WrappedSolver sym $ \_desc p_ k -> do
+            p <- normCache p_
+            isPredSat_cache p >>= \case
+              Just False -> (k (W4R.Unsat ()))
+              _ -> do
+                r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO -> do
+                  res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO (execGroundFn r' e'))) pure res
+                  inIO (k res')
+                case r of
+                  Left _err -> k W4R.Unknown
+                  Right a -> return a
+      result <- PVC.resolveSingletonSymbolicAsDefault wsolver e
+      case W4.asConcrete result of
+        Just{} -> markExprConcrete e result >> return result
+        Nothing -> markExprSymbolic e >> return e_
 
 -- | Check a predicate for satisfiability (in our monad) subject to a timeout
 --
@@ -1046,10 +1141,16 @@ isPredSat' ::
   PT.Timeout ->
   W4.Pred sym ->
   EquivM sym arch (Maybe Bool)
-isPredSat' timeout p = isPredSat_cache p >>= \case
-  Just b -> return $ Just b
-  Nothing -> 
-    either (const Nothing) Just <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
+isPredSat' timeout p_ = do
+  p <- normCache p_
+  isPredSat_cache p >>= \case
+    Just b -> return $ Just b
+    Nothing -> 
+      either (const Nothing) Just <$> checkSatisfiableWithModel timeout "isPredSat" p (\x -> asSat x)
+
+-- | Normalize an expression to be used for caching
+normCache :: W4.SymExpr sym tp -> EquivM sym arch (W4.SymExpr sym tp)
+normCache e = withSym $ \sym -> liftIO $ WEH.normCache sym e
 
 -- | Do we have a cached result for this predicate?
 isPredSat_cache :: 
@@ -1058,16 +1159,20 @@ isPredSat_cache ::
 isPredSat_cache p = case W4.asConstantPred p of
   Just b -> return $ Just b
   Nothing -> do
-    satCacheRef <- asks envSatCacheRef
-    satCache <- liftIO $ IO.readIORef satCacheRef
-
-    unSatCacheRef <- asks envUnsatCacheRef
-    unSatCache <- liftIO $ IO.readIORef unSatCacheRef
-    case SetF.member p satCache of
-      True -> return $ Just True
-      False -> case SetF.member p unSatCache of
-        True -> return $ Just False
-        False -> return Nothing
+    curCacheRef <- asks envSolverCache
+    satCache <- liftIO $ IO.readIORef (satCacheF curCacheRef)
+    unSatCache <- liftIO $ IO.readIORef (unsatCacheF curCacheRef)
+    case S.member p satCache of
+      True -> do
+        emitTrace @"debug" "isPredSat_cache: Hit (Sat)"
+        return $ Just True
+      False -> case S.member p unSatCache of
+        True -> do
+          emitTrace @"debug" "isPredSat_cache: Hit (Unsat)"
+          return $ Just False
+        False -> do
+          emitTraceLabel @"expr" "isPredSat_cache: Miss" (Some p)
+          return Nothing
 
 -- | Convert a 'W4R.Sat' result to True, and other results to False
 asSat :: Monad m => W4R.SatResult mdl core -> m Bool

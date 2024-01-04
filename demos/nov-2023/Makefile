@@ -21,9 +21,6 @@ room1018: $(HACKATHON_NOV_2023)/.git/HEAD
 target4.original.exe: main
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/build/Amp_Chal_IDPS_Unpatched.ino.elf" $@
 
-target4-master: main
-	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/build/Amp_Chal_IDPS_Patched.ino.elf" target4.patched.exe
-
 target4-room_1011_dendy: room_1011_dendy
 	cp "$(HACKATHON_NOV_2023)/Target 4 - Grid IDPS (ARM Cortex M7)/Amp_Chal_IDPS_Ghidra_patched_r3.ino.elf" target4.patched.exe
 
@@ -41,7 +38,7 @@ target4-self: target4.original.exe target4.csv
 		--patched-csv-function-hints $(DEMOS)/target4.csv \
 		--save-macaw-cfgs $(DEMOS)/target4_CFGs
 
-target4: target4.original.exe target4.patched.exe target4.csv
+target4: target4.original.exe target4.patched.exe
 	$(PATE) \
 	  --ignore-segments 1 \
 	  --read-only-segments 3 \

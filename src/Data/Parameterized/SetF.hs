@@ -44,6 +44,7 @@ module Data.Parameterized.SetF
   , unions
   , null
   , ppSetF
+  , difference
   ) where
 
 import Prelude hiding (filter, null)
@@ -129,6 +130,10 @@ lookupMin (SetF es) = fmap unAsOrd $ S.lookupMin es
 null ::
   SetF f tp -> Bool
 null (SetF es) = S.null es
+
+difference :: OrdF f =>
+  SetF f tp -> SetF f tp -> SetF f tp
+difference (SetF esL) (SetF esR) = SetF (S.difference esL esR)
 
 ppSetF ::
   (f tp -> PP.Doc a) ->

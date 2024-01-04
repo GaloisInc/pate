@@ -126,6 +126,7 @@ import           Pate.AssumptionSet
 import           Pate.TraceTree
 
 import           Data.Coerce ( coerce ) 
+import Control.Monad (forM_)
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -469,10 +470,13 @@ data ScopeCoercion sym v v' =
 
 -- UNSAFE: assumes that the incoming expressions adhere to the given scopes
 singleRewrite ::
+  TestEquality (W4.SymExpr sym) =>
   W4.SymExpr sym tp ->
   W4.SymExpr sym tp ->
   ExprRewrite sym v v'
-singleRewrite e1 e2 = ExprRewrite (MapF.singleton e1 e2)
+singleRewrite e1 e2 = case testEquality e1 e2 of
+  Just Refl -> ExprRewrite MapF.empty
+  Nothing -> ExprRewrite (MapF.singleton e1 e2)
 
 -- TODO: check that the resulting binding is total
 asScopeCoercion ::
@@ -631,10 +635,14 @@ getScopeCoercion ::
   IO (ScopeCoercion sym v1 v2)
 getScopeCoercion sym scope vals = do
   let vars = scopeBoundVars scope
-  binds <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
+  binds@(ExprRewrite binds_) <- PPa.runPatchPairT $ PPa.catBins $ \bin -> do
     st <- simVarState <$> PPa.get bin (PPa.fromTuple vals)
     vars' <- PPa.get bin vars
     lift $ mkVarBinds sym vars' (MT.memState $ simMem st) (simRegs st) (simStackBase st) (simCallerStackBase st) (simMaxRegion st)
+  {- putStrLn "getScopeCoercion:"
+  forM_ (MapF.toList binds_) $ \(MapF.Pair k v) -> do
+    putStrLn $ (show (W4.printSymExpr k)) ++ " -> " ++ (show (W4.printSymExpr v))
+  -}
   asScopeCoercion $ binds
 
 bindSpec ::

@@ -394,12 +394,15 @@ type instance TupleF '(a,b,c,d) = PairF a (PairF b (PairF c d))
 
 pattern TupleF2 :: a k -> b k -> TupleF '(a,b) k
 pattern TupleF2 a b = PairF a b
+{-# COMPLETE TupleF2 #-}
 
 pattern TupleF3 :: a k -> b k -> c k -> TupleF '(a,b,c) k
 pattern TupleF3 a b c = PairF a (PairF b c)
+{-# COMPLETE TupleF3 #-}
 
 pattern TupleF4 :: a k -> b k -> c k -> d k -> TupleF '(a,b,c,d) k
 pattern TupleF4 a b c d = PairF a (PairF b (PairF c d))
+{-# COMPLETE TupleF4 #-}
 
 data PendingAction sym arch (f :: PS.VarScope -> Type) = 
   PendingAction { pactIdent :: Int, _pactAction :: LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)}

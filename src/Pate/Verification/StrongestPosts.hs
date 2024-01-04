@@ -125,6 +125,7 @@ import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), 
 import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
 import qualified Data.Aeson as JSON
+import qualified Data.IORef as IO
 
 -- Overall module notes/thoughts
 --
@@ -715,11 +716,16 @@ pairGraphComputeFixpoint entries gr_init = do
                     d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
                       True -> strengthenStackDomain scope d
                       False -> return d
-                    withAssumptionSet (PS.scopeAsm scope) $ do
-                      gr2 <- addRefinementChoice nd gr1
-                      gr3 <- visitNode scope nd d' gr2
-                      emitEvent $ PE.VisitedNode nd
-                      return gr3
+
+                    
+                    gr3 <- 
+                      withAssumptionSet (PS.scopeAsm scope) $ do
+                        gr2 <- addRefinementChoice nd gr1
+                        gr3 <- visitNode scope nd d' gr2
+                        emitEvent $ PE.VisitedNode nd
+                        return gr3
+
+                    return gr3
         go gr4
     
     go_outer :: PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)
@@ -1114,6 +1120,36 @@ checkParsedBlocks pPair = PPa.catBins $ \bin -> do
     Just{} -> return ()
     Nothing -> throwHere $ PEE.MissingParsedBlockEntry "checkParsedBlocks" blk
 
+-- | Execute the inner computation with a fresh cache
+withSolverCache ::
+  PS.SimScope sym arch v ->
+  PB.BlockPair arch ->
+  EquivM_ sym arch a ->
+  EquivM sym arch a
+withSolverCache scope bp f = withSym $ \sym -> do
+  sc <- lookupBlockCache envSolverBlockCache bp >>= \case
+    Just sc_spec -> do
+      PS.viewSpec sc_spec $ \_scope (SolverCache sc_) -> do
+        withTracing @"debug" ("Solver cache hit (spec): " ++ show (Map.size sc_)) $ do
+          forM_ (Map.toList sc_) $ \(p,_) -> do
+            emitTrace @"expr" (Some p)            
+      (_, sc) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) sc_spec
+      let SolverCache sc_ = sc
+      withTracing @"debug" ("Solver cache hit: " ++ show (Map.size sc_)) $ do
+        forM_ (Map.toList sc_) $ \(p,_) -> do
+          emitTrace @"expr" (Some p)
+      return (Some sc)
+    Nothing -> do
+      emitTrace @"debug" "Solver cache miss"
+      return $ (Some emptySolverCache)
+  scRef <- liftIO $ IO.newIORef sc
+  result <- local (\env -> env { envInProgressCache = scRef, envCurrentFramePred = W4.truePred sym }) $ f
+  Some new_sc <- liftIO $ IO.readIORef scRef
+  let new_sc_spec = PS.mkSimSpec scope (PS.unsafeCoerceScope new_sc)
+  modifyBlockCache envSolverBlockCache bp
+    (\new _old -> new) new_sc_spec
+  return result
+
 
 -- | Perform the work of propagating abstract domain information through
 --   a single program "slice". First we check for equivalence of observables,
@@ -1136,7 +1172,7 @@ visitNode :: forall sym arch v.
 visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 = 
   withAbsDomain node d gr0 $ do
     checkParsedBlocks bPair
-    withValidInit scope bPair $ do
+    withValidInit scope bPair $ withSolverCache scope bPair $ do
       d' <- applyCurrentAsms d
       emitTraceLabel @"domain" PAD.Predomain (Some d')
       gr2 <- updateExtraEdges scope node d gr0

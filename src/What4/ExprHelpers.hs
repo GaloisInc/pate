@@ -77,6 +77,7 @@ module What4.ExprHelpers (
   , stripAnnotations
   , assertPositiveNat
   , printAtoms
+  , normCache
   ) where
 
 import           GHC.TypeNats
@@ -134,6 +135,31 @@ import qualified What4.Utils.AbstractDomains as W4AD
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
 import Data.Maybe (fromMaybe)
+import Data.Parameterized.Context
+import qualified Data.IORef as IO
+import qualified System.IO.Unsafe as IO
+import Data.Parameterized.WithOrd
+import Data.Typeable
+
+clampLow :: W4AD.ValueBound Integer -> W4AD.ValueBound Integer
+clampLow = \case
+  W4AD.Unbounded -> W4AD.Inclusive 0
+  W4AD.Inclusive i | i < 0 -> W4AD.Inclusive 0
+  W4AD.Inclusive i -> W4AD.Inclusive i
+
+clampHi :: W4AD.ValueBound Integer -> W4AD.ValueBound Integer
+clampHi = \case
+  W4AD.Unbounded -> W4AD.Unbounded
+  W4AD.Inclusive i | i < 0 -> W4AD.Inclusive 0
+  W4AD.Inclusive i -> W4AD.Inclusive i
+
+clampBound :: W4AD.ValueRange Integer -> W4AD.ValueRange Integer
+clampBound = \case
+  W4AD.SingleRange i | i < 0 -> W4AD.SingleRange 0
+  W4AD.SingleRange i -> W4AD.SingleRange i
+  W4AD.MultiRange lo hi -> case (clampLow lo, clampHi hi) of
+    (W4AD.Inclusive lo_i, W4AD.Inclusive hi_i) | lo_i == hi_i -> W4AD.SingleRange lo_i
+    (lo', hi') -> W4AD.MultiRange lo' hi'
 
 -- | Sets the abstract domain of the given integer to assume
 --   that it is positive. 
@@ -144,7 +170,7 @@ assumePositiveInt ::
   W4.SymExpr sym W4.BaseIntegerType
 assumePositiveInt _sym e = 
   let
-    rng = W4AD.rangeMax (W4AD.singleRange 0) (W4.integerBounds e)
+    rng = clampBound (W4AD.getAbsValue e)
   in W4.unsafeSetAbstractValue rng e
 
 -- | Redundant assumption that ensures regions are consistent
@@ -340,13 +366,14 @@ data VarBindCache sym where
   VarBindCache :: sym ~ W4B.ExprBuilder t solver fs =>
     W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t))
     -> W4B.IdxCache t (W4B.Expr t)
+    -> W4B.IdxCache t (W4B.Expr t)
     -> VarBindCache sym
 
 freshVarBindCache ::
   forall sym t solver fs.
   sym ~ (W4B.ExprBuilder t solver fs) =>
   IO (VarBindCache sym)
-freshVarBindCache = VarBindCache <$> W4B.newIdxCache <*> W4B.newIdxCache
+freshVarBindCache = VarBindCache <$> W4B.newIdxCache <*> W4B.newIdxCache <*> W4B.newIdxCache
 
 rewriteSubExprs' ::
   forall sym tp m.
@@ -356,7 +383,72 @@ rewriteSubExprs' ::
   (forall tp'. W4.SymExpr sym tp' -> Maybe (W4.SymExpr sym tp')) ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-rewriteSubExprs' sym (VarBindCache taggedCache resultCache) = rewriteSubExprs'' sym taggedCache resultCache
+rewriteSubExprs' sym (VarBindCache taggedCache resultCache fixMuxCache) = rewriteSubExprs'' sym taggedCache resultCache fixMuxCache
+
+data ArrayMapC sym atp where
+  ArrayMapC :: 
+    Ctx.Assignment W4.BaseTypeRepr (i ::> itp) ->
+    W4.BaseTypeRepr tp ->
+    AUM.ArrayUpdateMap (W4.SymExpr sym) (i ::> itp) tp ->
+    W4.SymExpr sym (W4.BaseArrayType (i::> itp) tp) ->
+    ArrayMapC sym (W4.BaseArrayType (i::> itp) tp)
+
+instance OrdF (W4.SymExpr sym) => TestEquality (ArrayMapC sym) where
+  testEquality a b = case compareF a b of
+    EQF -> Just Refl
+    _ -> Nothing
+
+instance OrdF (W4.SymExpr sym) => OrdF (ArrayMapC sym) where
+  compareF (ArrayMapC a1 (b1 :: W4.BaseTypeRepr tp) c1 d1) (ArrayMapC a2 b2 c2 d2) =
+    lexCompareF a1 a2 $ lexCompareF b1 b2 $ lexCompareF d1 d2 $
+    case c1 == c2 of
+      True -> EQF
+      False -> withOrd @(W4.SymExpr sym) @tp $
+        fromOrdering $ (compare (AUM.toMap c1) (AUM.toMap c2))
+
+-- | FIXME: hacky way to test for builder equality
+testBuilderEquality :: 
+  sym ~ (W4B.ExprBuilder t solver fs) => 
+  sym' ~ (W4B.ExprBuilder t' solver' fs') =>
+  sym -> sym' -> Maybe (sym :~: sym')
+testBuilderEquality sym1 sym2 = Just (unsafeCoerce (Refl :: sym1 :~: sym1)) {- IO.unsafePerformIO $ do
+  e1 <- N.countNoncesGenerated (sym1 ^. W4B.exprCounter)
+  e2 <- N.countNoncesGenerated (sym2 ^. W4B.exprCounter)
+  case e1 == e2 of
+    True -> return $ Just (unsafeCoerce (Refl :: sym1 :~: sym1))
+    False -> return Nothing -}
+
+data ArrayMapCache sym where
+  ArrayMapCache :: 
+    sym ~ (W4B.ExprBuilder t solver fs) => sym -> (MapF.MapF (ArrayMapC sym) (W4.SymExpr sym)) ->
+      ArrayMapCache (W4B.ExprBuilder t solver fs)
+
+-- | Used to normalize array maps, since hash-consing doesn't seem to work on them
+arrayMapCache :: IO.IORef [Some (ArrayMapCache)]
+arrayMapCache = IO.unsafePerformIO (IO.newIORef [])
+
+-- We make it heterogenous over the builder so it can be global state
+getSymCache :: forall sym t solver fs. sym ~ (W4B.ExprBuilder t solver fs) => sym -> IO (ArrayMapCache sym)
+getSymCache sym = do
+  c <- IO.readIORef arrayMapCache
+  case go c of
+    Just amc -> return amc
+    Nothing -> return $ ArrayMapCache sym MapF.empty
+  where
+    go :: [Some ArrayMapCache] -> Maybe (ArrayMapCache sym)
+    go ((Some amc):xs) | ArrayMapCache sym' _ <- amc = case testBuilderEquality sym sym' of
+      Just Refl -> Just amc
+      Nothing -> go xs
+    go [] = Nothing
+
+modifySymCache :: forall sym t solver fs. sym ~ (W4B.ExprBuilder t solver fs) => sym -> (ArrayMapCache sym -> ArrayMapCache sym) -> IO ()
+modifySymCache sym f = IO.modifyIORef arrayMapCache (go)
+  where
+    go :: [Some ArrayMapCache] -> [Some ArrayMapCache]
+    go ((Some amc@(ArrayMapCache sym' _)):xs) = case testBuilderEquality sym sym' of
+      Just Refl -> (Some (f amc)):xs
+      Nothing -> (Some amc:go xs)
+    go [] = [Some (f (ArrayMapCache sym MapF.empty))]
 
 rewriteSubExprs'' ::
   forall sym t solver fs tp m.
@@ -365,10 +457,11 @@ rewriteSubExprs'' ::
   sym ->
   W4B.IdxCache t (Tagged (VarBinds sym) (W4B.Expr t))  ->
   W4B.IdxCache t (W4B.Expr t) ->
+  W4B.IdxCache t (W4B.Expr t) ->
   (forall tp'. W4B.Expr t tp' -> Maybe (W4B.Expr t tp')) ->
   W4B.Expr t tp ->
   m (W4B.Expr t tp)
-rewriteSubExprs'' sym taggedCache resultCache f e_outer = W4B.idxCacheEval resultCache e_outer $ do
+rewriteSubExprs'' sym taggedCache resultCache fixMuxCache f e_outer = W4B.idxCacheEval resultCache e_outer $ do
   -- During this recursive descent, we find any sub-expressions which need to be rewritten
   -- and perform an in-place replacement with a bound variable, and track that replacement
   -- in the 'VarBinds' environment.
@@ -383,7 +476,7 @@ rewriteSubExprs'' sym taggedCache resultCache f e_outer = W4B.idxCacheEval resul
         return $ W4.varExpr sym bv
       Nothing -> case e of
         W4B.AppExpr a0 -> do
-          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
+          a0' <- W4B.traverseApp go (W4B.appExprApp a0)         
           if (W4B.appExprApp a0) == a0' then return e
           else IO.liftIO $ W4B.sbMakeExpr sym a0'
         W4B.NonceAppExpr a0 -> do
@@ -391,7 +484,8 @@ rewriteSubExprs'' sym taggedCache resultCache f e_outer = W4B.idxCacheEval resul
           if (W4B.nonceExprApp a0) == a0' then return e
           else IO.liftIO $ W4B.sbNonceExpr sym a0'
         _ -> return e
-  (e', binds) <- CMW.runWriterT (go e_outer)
+  e_outer' <- liftIO $ fixMux' sym fixMuxCache e_outer
+  (e', binds) <- CMW.runWriterT (go e_outer')
   -- Now we take our rewritten expression and use it to construct a function application.
   -- i.e. we define 'f(bv_0, bv_1) := bv_0 + bv_1', and then return 'f(a, b)', unfolding in-place.
   -- This ensures that the What4 expression builder correctly re-establishes any invariants it requires
@@ -402,7 +496,7 @@ rewriteSubExprs'' sym taggedCache resultCache f e_outer = W4B.idxCacheEval resul
     Ctx.ZeroSize -> return e_outer
     _ -> IO.liftIO $ do
       fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
-      W4.applySymFn sym fn vals >>= fixMux sym
+      W4.applySymFn sym fn vals >>= fixMux' sym fixMuxCache
 
 -- | An expression binding environment. When applied to an expression 'e'
 -- with 'applyExprBindings', each sub-expression of 'e' is recursively inspected
@@ -475,7 +569,7 @@ mapExprPtr ::
   m (CLM.LLVMPtr sym w)
 mapExprPtr sym f (CLM.LLVMPointer reg off) = do
   regInt <- f (W4.natToIntegerPure reg)
-  reg' <- IO.liftIO $ integerToNat sym (assumePositiveInt sym regInt)
+  reg' <- liftIO $ integerToNat sym (assumePositiveInt sym regInt)
   off' <- f off
   return $ CLM.LLVMPointer reg' off'
 
@@ -600,6 +694,27 @@ getIsBoundFilter expr = do
 
 newtype BoundVarBinding sym = BoundVarBinding (forall tp'. W4.BoundVar sym tp' -> IO (Maybe (W4.SymExpr sym tp')))
 
+-- | Normalize an expression to be used for caching
+normCache :: forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4B.Expr t tp ->
+  IO (W4B.Expr t tp)
+normCache sym e = do
+  e' <- stripAnnotations sym e
+  e'' <- fixMux sym e'
+  -- e''' <- simplifyBVOps sym e''
+  return e''
+  {-
+  -- rebuild entire term
+  rewriteSubExprs sym (\e_ -> case e_ of
+    W4B.BoundVarExpr{} -> Just e_
+    _ | Just{} <- W4.asConcrete e_ -> Just e_
+    _ -> Nothing
+    ) e'''
+  -}
+  
+
 -- | Simplify 'ite (eq y x) y x' into 'x'
 fixMux ::
   forall sym t solver fs tp.
@@ -620,6 +735,11 @@ fixMux' ::
   IO (W4B.Expr t tp)
 fixMux' sym cache e_outer = do
   let
+    ite :: forall tp'. W4B.Expr t W4.BaseBoolType -> W4B.Expr t tp' -> W4B.Expr t tp' -> IO (W4B.Expr t tp')
+    ite cond eT eF = do
+      cond' <- go cond
+      W4.baseTypeIte sym cond' eT eF
+
     go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
     go e = W4B.idxCacheEval cache e $ case e of
       W4B.AppExpr a0
@@ -633,22 +753,47 @@ fixMux' sym cache e_outer = do
          -> do
              eT' <- go eT
              eF' <- go eF
+             cond' <- go cond
              if | Just (W4B.BaseIte _ _ cond2 eT2 _) <- W4B.asApp eT'
-                , cond == cond2 -> W4.baseTypeIte sym cond eT2 eF'
+                , cond == cond2 -> W4.baseTypeIte sym cond' eT2 eF'
                 | Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF'
-                , cond == cond2 ->  W4.baseTypeIte sym cond eT' eF2
-                | eT' == eT, eF' == eF -> return e
-                | otherwise -> W4.baseTypeIte sym cond eT' eF'
+                , cond == cond2 -> W4.baseTypeIte sym cond' eT' eF2
+                | eT' == eT, eF' == eF, cond == cond' -> return e
+                | otherwise -> W4.baseTypeIte sym cond' eT' eF'
       W4B.AppExpr a0
          | W4B.BaseIte _ _ cond eT eF <- W4B.appExprApp a0
          , Just (W4B.BaseIte _ _ cond2 eT2 _) <- W4B.asApp eT
          , cond == cond2
-         -> go =<< W4.baseTypeIte sym cond eT2 eF
+         -> go =<< ite cond eT2 eF
       W4B.AppExpr a0
          | (W4B.BaseIte _ _ cond eT eF) <- W4B.appExprApp a0
          , Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF
          , cond == cond2
-         -> go =<< W4.baseTypeIte sym cond eT eF2
+         -> go =<< ite cond eT eF2
+      W4B.AppExpr a0
+         | (W4B.BaseEq _ e1 e2) <- W4B.appExprApp a0
+         , e1 == e2
+         -> return $ W4.truePred sym
+      -- FIXME: not exactly 'fixMux', but performs needed term hash-consing for array map updates
+      W4B.AppExpr a0
+         | W4B.ArrayMap idx repr aum arr <- W4B.appExprApp a0
+         -> do
+          aum' <- AUM.traverseArrayUpdateMap go aum
+          arr' <- go arr
+          let outer_idx = ArrayMapC idx repr aum' arr'
+          ArrayMapCache _ amc <- liftIO $ getSymCache sym
+          case MapF.lookup outer_idx amc of
+            Just e'' -> do
+              -- putStrLn "fixMux: arrayMap cache hit"
+              return e''
+            Nothing -> do
+              -- putStrLn "fixMux: arrayMap cache miss"
+              -- putStrLn (show (W4.printSymExpr e))
+              e'' <- case W4B.appExprApp a0 == W4B.ArrayMap idx repr aum' arr' of
+                True -> return e
+                False -> W4B.sbMakeExpr sym (W4B.ArrayMap idx repr aum' arr')
+              modifySymCache sym (\(ArrayMapCache sym' amc') -> ArrayMapCache sym' (MapF.insert outer_idx e'' amc'))
+              return e''
       W4B.AppExpr a0 -> do
         a0' <- W4B.traverseApp go (W4B.appExprApp a0)
         if (W4B.appExprApp a0) == a0' then return e
