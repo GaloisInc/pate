@@ -168,6 +168,9 @@ instance W4Serializable sym Integer where
 instance W4Serializable sym Text where
   w4Serialize i = return $ JSON.toJSON i
 
+instance W4Serializable sym Bool where
+  w4Serialize i = return $ JSON.toJSON i
+
 instance W4Serializable sym a => W4Serializable sym (Maybe a) where
   w4Serialize = \case
     Just a -> w4Serialize a

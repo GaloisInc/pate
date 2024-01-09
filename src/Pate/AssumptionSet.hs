@@ -139,7 +139,7 @@ instance OrdF (W4.SymExpr sym) => PEM.ExprMappable sym (AssumptionSet sym) where
     return $ mkAssumptionSet sym ps' (foldr (mergeExprSetFMap (Proxy @sym)) MapF.empty bs')
 
 instance forall sym. W4S.SerializableExprs sym => W4S.W4Serializable sym (AssumptionSet sym) where
-  w4Serialize (AssumptionSet ps bs) | SetF.null ps, MapF.null bs = W4S.w4SerializeString ("true" :: String)
+  w4Serialize (AssumptionSet ps bs) | SetF.null ps, MapF.null bs = W4S.w4Serialize True
   w4Serialize (AssumptionSet ps bs) | [p] <- SetF.toList ps, MapF.null bs = W4S.w4SerializeF p
   w4Serialize (AssumptionSet ps bs) =
     W4S.withSerializable (Proxy @sym) (Proxy @(W4.SymExpr sym)) (Proxy @W4.BaseBoolType) $ do
