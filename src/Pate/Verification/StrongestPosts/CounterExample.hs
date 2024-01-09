@@ -24,6 +24,7 @@ module Pate.Verification.StrongestPosts.CounterExample
   , groundMemEvent
   , ppTraceEvents
   , TraceEvents(..)
+  , TraceEventsOne(..)
   , groundTraceEvent
   , groundTraceEventSequence
   , groundRegOp
@@ -64,6 +65,8 @@ import qualified Data.Parameterized.Map as MapF
 import Data.Maybe (mapMaybe)
 import qualified What4.JSON as W4S
 import What4.JSON
+import Pate.Equivalence (StatePostCondition)
+import qualified Pate.Binary as PB
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -217,11 +220,18 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
          if b then return x else return y
 
 data TraceEvents sym arch =
-  TraceEvents (PPa.PatchPairC (MT.RegOp sym arch, [TraceEventGroup sym arch]))
+  TraceEvents (PPa.PatchPair (TraceEventsOne sym arch))
+
+data TraceEventsOne sym arch (bin :: PB.WhichBinary) = TraceEventsOne
+  { initialRegs :: MT.RegOp sym arch
+  , traceEventGroups :: [TraceEventGroup sym arch]
+  , preCond :: Some (StatePostCondition sym arch)
+  , postCond :: Maybe (Some (StatePostCondition sym arch))
+  }
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEvents sym arch) where
-  w4Serialize (TraceEvents p) = PPa.w4SerializePair p $ \(Const (rop, evs)) ->
-    W4S.object [ "initial_regs" .= rop, "events" .= evs]
+  w4Serialize (TraceEvents p) = PPa.w4SerializePair p $ \(TraceEventsOne rop evs pre post) ->
+    W4S.object [ "initial_regs" .= rop, "events" .= evs, "precondition" .= pre, "postcondition" .= post]
 
 data TraceEventGroup sym arch =
   TraceEventGroup (Maybe (MM.ArchSegmentOff arch)) [MT.TraceEvent sym arch]
@@ -268,7 +278,7 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace
   prettyNode () = ppTraceEvents
   nodeTags = 
     map (\tag -> (tag, \_ (TraceEvents evs) -> 
-      "Event Trace:" PP.<+> PPa.ppPatchPair' (\(Const (_init_regs, s)) -> 
+      "Event Trace:" PP.<+> PPa.ppPatchPair' (\(TraceEventsOne _init_regs s _ _) ->
         ppTraceEventSummary s) evs))
     [Summary, Simplified]
   jsonNode () v = W4S.w4ToJSON @sym v
@@ -291,11 +301,11 @@ ppTraceEvents ::
   TraceEvents sym arch ->
   PP.Doc a
 ppTraceEvents (TraceEvents tr) = case tr of
-  PPa.PatchPairOriginal (Const (init_regsO, trO)) -> 
+  PPa.PatchPairOriginal (TraceEventsOne init_regsO trO _ _) ->
     PP.vsep $ [ "== Initial Registers ==" ] ++ ppRegOp init_regsO ++ mapMaybe ppTraceEventGroup trO
-  PPa.PatchPairPatched (Const (init_regsP, trP)) -> 
+  PPa.PatchPairPatched (TraceEventsOne init_regsP trP _ _) ->
     PP.vsep $ [ "== Initial Registers ==" ] ++ ppRegOp init_regsP ++ mapMaybe ppTraceEventGroup trP
-  PPa.PatchPairC (init_regsO, trO) (init_regsP, trP) -> PP.vsep $ 
+  PPa.PatchPair (TraceEventsOne init_regsO trO _ _) (TraceEventsOne init_regsP trP _ _)-> PP.vsep $
        [ "== Initial Original Registers ==" ]
     ++ ppRegOp init_regsO
     ++ [ "== Original sequence ==" ]

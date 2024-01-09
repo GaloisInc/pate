@@ -69,6 +69,8 @@ import           What4.ExprHelpers ( ExprSet, VarBindCache, ExprBindings, ppExpr
 import qualified Pate.ExprMappable as PEM
 import           Pate.TraceTree
 import qualified Pate.Location as PL
+import qualified What4.JSON as W4S
+import           What4.JSON ( (.=) )
 
 -- | A structured collection of predicates intended to represent an assumption state.
 --   Logically it is simply a set of predicates that can be added to the solver's
@@ -95,6 +97,28 @@ data AssumptionSet sym =
     , asmBinds :: MapF.MapF (W4.SymExpr sym) (ExprSet sym)
     }
 
+-- | Make an AssumptionSet, attempting to collapse it to be concretely False if it
+--   has inconsistent predicates or bindings
+mkAssumptionSet :: forall sym. W4.IsSymExprBuilder sym => sym -> ExprSet sym W4.BaseBoolType -> MapF.MapF (W4.SymExpr sym) (ExprSet sym) -> AssumptionSet sym
+mkAssumptionSet sym ps bs = case SetF.member (W4.falsePred sym) ps of
+  True -> AssumptionSet (SetF.singleton (W4.falsePred sym)) MapF.empty
+  False ->
+    let bad_binds = MapF.filterWithKey (\k v -> case concreteBind k (SetF.toList v) of
+          Just False -> True
+          _ -> False) bs
+    in case MapF.null bad_binds of
+      True -> AssumptionSet ps bs
+      False -> AssumptionSet (SetF.singleton (W4.falsePred sym)) MapF.empty
+  where
+    -- Returns Just False if the binding is concretely inconsistent
+    concreteBind :: forall tp. W4.SymExpr sym tp -> [W4.SymExpr sym tp] -> Maybe Bool
+    concreteBind _e [] = Nothing
+    concreteBind e (e':es) = case (W4.asConcrete e, W4.asConcrete e') of
+      (Just c1, Just c2) -> case concreteBind e es of
+        Just b -> Just (c1 == c2 && b)
+        Nothing -> Just (c1 == c2)
+      (Just{}, Nothing) -> concreteBind e es
+      (Nothing,_) -> Nothing
 
 instance OrdF (W4.SymExpr sym) => Semigroup (AssumptionSet sym) where
   asm1 <> asm2 = let
@@ -112,8 +136,14 @@ instance OrdF (W4.SymExpr sym) => PEM.ExprMappable sym (AssumptionSet sym) where
         return $ MapF.empty
       else
         return $ MapF.singleton k' v'
-    return $ AssumptionSet ps' (foldr (mergeExprSetFMap (Proxy @sym)) MapF.empty bs')
+    return $ mkAssumptionSet sym ps' (foldr (mergeExprSetFMap (Proxy @sym)) MapF.empty bs')
 
+instance forall sym. W4S.SerializableExprs sym => W4S.W4Serializable sym (AssumptionSet sym) where
+  w4Serialize (AssumptionSet ps bs) | SetF.null ps, MapF.null bs = W4S.w4SerializeString ("true" :: String)
+  w4Serialize (AssumptionSet ps bs) | [p] <- SetF.toList ps, MapF.null bs = W4S.w4SerializeF p
+  w4Serialize (AssumptionSet ps bs) =
+    W4S.withSerializable (Proxy @sym) (Proxy @(W4.SymExpr sym)) (Proxy @W4.BaseBoolType) $ do
+    W4S.object [ "predicates" .= ps, "bindings" .= bs ]
 
 instance forall sym. W4.IsExpr (W4.SymExpr sym) => PP.Pretty (AssumptionSet sym) where
   pretty asms =
@@ -132,6 +162,9 @@ instance OrdF (W4.SymExpr sym) => Monoid (AssumptionSet sym) where
 
 data NamedAsms sym (nm :: Symbol) =
   KnownSymbol nm => NamedAsms { namedAsms :: AssumptionSet sym }
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (NamedAsms sym nm) where
+  w4Serialize (NamedAsms asm) = W4S.w4Serialize asm
 
 instance PEM.ExprMappable sym (NamedAsms sym nm) where
   mapExpr sym f (NamedAsms asm) = NamedAsms <$> PEM.mapExpr sym f asm

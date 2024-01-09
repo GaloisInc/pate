@@ -1067,7 +1067,7 @@ processBundle scope node bundle d gr0 = do
   case allHandled || anyNonTotal of
     -- we've handled all outstanding block exits, so we should now check
     -- that the result is total
-    True -> checkTotality node bundle d (branchHandled st) (branchGraph st)
+    True -> checkTotality node scope bundle d (branchHandled st) (branchGraph st)
     -- some block exits have been intentially skipped,
     -- since we'll be revisiting this node we can skip the totality check as well
     False -> return $ branchGraph st
@@ -1609,14 +1609,15 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "totality" where
 
 checkTotality :: forall sym arch v.
   NodeEntry arch ->
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-checkTotality bPair bundle preD exits gr =
+checkTotality bPair scope bundle preD exits gr =
   considerDesyncEvent gr bPair $
-    do tot <- doCheckTotality bundle preD exits
+    do tot <- doCheckTotality scope bundle preD exits
        withTracing @"totality" tot $ case tot of
          TotalityCheckCounterexample{} -> emitWarning $ PEE.NonTotalBlockExits (nodeBlocks bPair)
          _ -> return()
@@ -1737,11 +1738,12 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
   fromMaybe Map.empty <$> (withSatAssumption isFailure $ findOne Map.empty)
 
 doCheckTotality :: forall sym arch v.
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v -> 
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   EquivM sym arch (TotalityResult sym arch)
-doCheckTotality bundle _preD exits =
+doCheckTotality scope bundle preD exits =
   withSym $ \sym ->
     do
        -- compute the condition that leads to each of the computed
@@ -1768,7 +1770,7 @@ doCheckTotality bundle _preD exits =
          Unsat _ -> return CasesTotal
          Unknown -> return (TotalityCheckingError "UNKNOWN result when checking totality")
          Sat evalFn' -> do
-           ocex <- getTraceFromModel evalFn' bundle
+           ocex <- getTraceFromModel scope evalFn' bundle preD Nothing
            withGroundEvalFn evalFn' $ \evalFn -> do
            -- We found an execution that does not correspond to one of the
            -- executions listed above, so compute the counterexample.
@@ -1963,7 +1965,7 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
       (Just ecase, PPa.PatchPairJust rets) -> fmap (updateBranchGraph st blkts) $ do
         let pPair = TF.fmapF PB.targetCall blkts
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
-        getSomeGroundTrace bundle >>= emitTrace @"trace_events"
+        getSomeGroundTrace scope bundle d Nothing >>= emitTrace @"trace_events"
         traceBundle bundle ("  Return target " ++ show rets)
         ctx <- view PME.envCtxL
         let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
@@ -1974,7 +1976,7 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
 
       (Just ecase, PPa.PatchPairNothing) -> fmap (updateBranchGraph st blkts) $ do
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
-        getSomeGroundTrace bundle >>= emitTrace @"trace_events"
+        getSomeGroundTrace scope bundle d Nothing >>= emitTrace @"trace_events"
         case ecase of
           MCS.MacawBlockEndReturn -> handleReturn scope bundle currBlock d gr
           _ -> do
@@ -2317,7 +2319,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
         _ -> do
           () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
             -- we've already introduced the path condition here, so we just want to see how we got here
-            res <- getSomeGroundTrace bundle
+            res <- getSomeGroundTrace scope bundle dom Nothing
             emitTrace @"trace_events" res
             return ()
           choose @"()" msg $ \choice -> do

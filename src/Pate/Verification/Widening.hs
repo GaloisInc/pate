@@ -115,6 +115,7 @@ import qualified Data.Aeson as JSON
 import qualified Prettyprinter as PP
 import qualified What4.Expr.GroundEval as W4
 import qualified Lang.Crucible.Utils.MuxTree as MT
+import Pate.Verification.Domain (universalDomain)
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -476,9 +477,12 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
         return $ emptyWorkList gr4
 
 getSomeGroundTrace ::
+  PS.SimScope sym arch v ->
   SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  Maybe (StatePostCondition sym arch v) ->
   EquivM sym arch (CE.TraceEvents sym arch)
-getSomeGroundTrace bundle = withSym $ \sym -> do
+getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
   (_, ptrAsserts) <- PVV.collectPointerAssertions bundle
   
   -- try to ground the model with a zero stack base, so calculated stack offsets
@@ -495,31 +499,42 @@ getSomeGroundTrace bundle = withSym $ \sym -> do
   mevs <- goalSat "getCounterExample" ptrAsserts_pred $ \res -> case res of
     Unsat _ -> emitWarning PEE.RequiresInvalidPointerOps >> return Nothing
     Unknown -> emitWarning PEE.RequiresInvalidPointerOps >> return Nothing
-    Sat evalFn -> Just <$> getTraceFromModel evalFn bundle
+    Sat evalFn -> Just <$> getTraceFromModel scope evalFn bundle preD postCond
   case mevs of
     Just evs -> return evs
     -- otherwise, just try to get any model
     Nothing -> goalSat "getCounterExample" (W4.truePred sym) $ \res -> case res of
       Unsat _ -> throwHere PEE.InvalidSMTModel
       Unknown -> throwHere PEE.InconclusiveSAT
-      Sat evalFn -> getTraceFromModel evalFn bundle
+      Sat evalFn -> getTraceFromModel scope evalFn bundle preD postCond
 
 -- | Compute a counter-example for a given predicate
 getTraceFromModel ::
   forall sym arch v.
+  PS.SimScope sym arch v ->
   SymGroundEvalFn sym ->
   SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  Maybe (StatePostCondition sym arch v) ->
   EquivM sym arch (CE.TraceEvents sym arch)
-getTraceFromModel evalFn' bundle = fmap CE.TraceEvents $ withSym $ \sym -> PPa.forBinsC $ \bin -> do
+getTraceFromModel scope evalFn' bundle preD postCond = fmap CE.TraceEvents $ withSym $ \sym -> PPa.forBins $ \bin -> do
   out <- PPa.get bin (PS.simOut bundle)
   in_ <- PPa.get bin (PS.simIn bundle)
   let mem = PS.simOutMem out
+  ground_postCond <- PEM.mapExpr sym (concretizeWithModel evalFn') postCond
+  let (pre_stO, pre_stP) = PS.asStatePair scope (simIn bundle) PS.simInState
+  eqCtx <- equivalenceContext
+  -- NB: we use eqDomPost here because we want a StatePostCondition, since
+  -- that will include individual assertions on each location
+
+  preCond <- liftIO $ eqDomPost sym pre_stO pre_stP eqCtx (PAD.absDomEq preD) (universalDomain sym)
+  ground_preCond <- PEM.mapExpr sym (concretizeWithModel evalFn') preCond
   withGroundEvalFn evalFn' $ \evalFn -> do
     evs <- CE.groundTraceEventSequence sym evalFn (MT.memFullSeq @_ @arch mem)
     let in_regs = PS.simInRegs in_
     ground_rop <- CE.groundRegOp sym evalFn (MT.RegOp (MM.regStateMap in_regs))
     -- create a dummy initial register op representing the initial values
-    return (ground_rop, evs)
+    return $ CE.TraceEventsOne ground_rop evs (Some ground_preCond) (fmap Some ground_postCond)
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->
@@ -1372,7 +1387,7 @@ widenPostcondition scope bundle preD postD0 = do
       withTracing @"message" "Equivalence Counter-example" $ do
         not_eqPost_pred <- liftIO $ W4.notPred sym eqPost_pred
         mres <- withSatAssumption (PAs.fromPred not_eqPost_pred) $ do
-          res <- getSomeGroundTrace bundle
+          res <- getSomeGroundTrace scope bundle preD (Just eqPost)
           emitTrace @"trace_events" res
         case mres of
           Just () -> return ()

@@ -52,7 +52,7 @@ module Pate.Equivalence
   , memPostCondToPred
   ) where
 
-import           Control.Lens hiding ( op, pre )
+import           Control.Lens hiding ( op, pre, (.=) )
 import           Control.Monad ( foldM )
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
@@ -88,6 +88,8 @@ import qualified Pate.ExprMappable as PEM
 
 import           Pate.TraceTree
 import Data.Data (Typeable)
+import qualified What4.JSON as W4S
+import           What4.JSON ((.=))
 
 data EquivalenceStatus =
     Equivalent
@@ -376,6 +378,9 @@ instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PL.LocationTraversable
 instance (W4.IsExprBuilder sym, OrdF (W4.SymExpr sym)) => PEM.ExprMappable sym (MemoryCondition sym arch) where
   mapExpr sym f (MemoryCondition cond) = MemoryCondition <$> PEM.mapExpr sym f cond
 
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemoryCondition sym arch) where
+  w4Serialize (MemoryCondition cond) = W4S.w4Serialize cond
+
 -- | Flatten a structured 'MemoryCondition' representing a memory pre-condition into
 -- a single predicate.
 -- We require the pre-states in order to construct the initial equality assumption.
@@ -500,6 +505,12 @@ instance (MM.RegisterInfo (MM.ArchReg arch), W4.IsSymExprBuilder sym) => PL.Loca
 instance W4.IsSymExprBuilder sym => PEM.ExprMappable sym (StatePostCondition sym arch v) where
   mapExpr sym f (StatePostCondition a b c d e) =
     StatePostCondition <$> PEM.mapExpr sym f a <*> PEM.mapExpr sym f b <*> PEM.mapExpr sym f c <*> PEM.mapExpr sym f d <*>  PEM.mapExpr sym f e
+
+instance (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4Serializable sym (StatePostCondition sym arch v) where
+  w4Serialize (StatePostCondition a b c d e) =
+    W4S.object [ "registers" .= a, "stack" .= b, "memory" .= c, "max_region" .= d, "stack_base" .= e]
+
+instance (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4SerializableF sym (StatePostCondition sym arch)
 
 
 eqDomPre ::

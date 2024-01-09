@@ -61,7 +61,8 @@ import Data.Kind
 import qualified Lang.Crucible.Utils.MuxTree as MT
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
-
+import qualified Data.Parameterized.SetF as SetF
+import Data.Functor.Const
 
 
 newtype ExprCache sym = ExprCache (Map (Some (W4.SymExpr sym)) JSON.Value)
@@ -207,3 +208,14 @@ object :: [W4KeyValue sym] -> W4S sym JSON.Value
 object kvs = fmap JSON.object $ forM kvs $ \(W4KeyValue k v) -> do
     v_json <- w4Serialize v
     return $ k JSON..= v_json
+
+instance forall sym e tp. (W4Serializable sym (e tp)) => W4Serializable sym (SetF.SetF e tp) where
+  w4Serialize mt = w4Serialize (SetF.toList mt)
+
+instance forall sym e. (W4SerializableF sym e) => W4SerializableF sym (SetF.SetF e) where
+  withSerializable sym _a (b :: q tp)  f = withSerializable sym (Proxy @e) b $ f
+
+instance forall sym f tp. (W4Serializable sym f) => W4Serializable sym (Const f tp) where
+  w4Serialize (Const f) = w4Serialize f
+
+instance forall sym f. (W4Serializable sym f) => W4SerializableF sym (Const f)

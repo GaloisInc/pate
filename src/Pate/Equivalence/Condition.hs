@@ -58,6 +58,7 @@ import           Pate.TraceTree
 import qualified Data.Kind as DK
 import Control.Monad.Identity
 import Pate.Equivalence.Error (SomeExpr, printSomeExprTruncated)
+import qualified What4.JSON as W4S
 ---------------------------------------------
 -- Equivalence Condition
 
@@ -182,6 +183,11 @@ instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond"
 -- FIXME: abstract this
 newtype RegisterCondition sym arch (v :: PS.VarScope) =
   RegisterCondition { regCondPreds :: MM.RegState (MM.ArchReg arch) (Const (PAS.AssumptionSet sym)) }
+
+instance forall sym arch v. (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4Serializable sym (RegisterCondition sym arch v) where
+  w4Serialize (RegisterCondition ps) = W4S.w4Serialize (MM.regStateMap ps)
+
+instance forall sym arch. (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4SerializableF sym (RegisterCondition sym arch)
 
 muxRegCond ::
   W4.IsSymExprBuilder sym =>
