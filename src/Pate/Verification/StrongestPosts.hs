@@ -414,6 +414,35 @@ addIntraBlockCut segOff blk = fnTrace "addIntraBlockCut" $ do
     (pblk:_) -> return $ PB.mkConcreteBlock blk PB.BlockEntryJump (MD.pblockAddr pblk)
     _ -> throwHere $ PEE.MissingBlockAtAddress segOff (map MD.pblockAddr pblks) repr blk
 
+chooseDesyncPoint ::
+  GraphNode arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+chooseDesyncPoint nd pg0 = do
+  divergePair@(PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
+    let ret = case nd of
+          GraphNode ne -> returnOfEntry ne
+          ReturnNode nr -> nr
+    blk <- PPa.get bin (graphNodeBlocks nd)
+    pblks <- PD.lookupBlocks blk
+    retSingle <- asSingleReturn bin nd ret
+    divergeSingle <- asSingleGraphNode bin nd
+    return $ (retSingle, divergeSingle, Some blk, pblks)
+  (sync, Some syncBin) <- pickCutPoint syncMsg
+    [divergeO, divergeP]
+  let otherBin = PBi.flipRepr syncBin
+
+  -- Introducing a cut-point is a stateful operation, as it modifies
+  -- the underlying ParsedFunctionMap to change the behavior of the disassembler
+  case sync of
+    GraphNode{} -> do
+      diverge <- PPa.getC otherBin divergePair
+      _ <- pickCutPoint syncMsg [diverge]
+      return pg0
+    _ -> return pg0
+  where
+    syncMsg = "Choose a desynchronization point:"
+
 -- | Given a source divergent node, pick a synchronization point where
 --   control flow should again match between the two binaries
 chooseSyncPoint :: 
@@ -430,18 +459,21 @@ chooseSyncPoint nd pg0 = do
     retSingle <- asSingleReturn bin nd ret
     divergeSingle <- asSingleGraphNode bin nd
     return $ (retSingle, divergeSingle, Some blk, pblks)
-  (sync, Some syncBin) <- pickSyncPoint [divergeO, divergeP]
+  (sync, Some syncBin) <- pickCutPoint syncMsg
+    [divergeO, divergeP]
   let otherBin = PBi.flipRepr syncBin
   pg1 <- setSyncPoint pg0 nd sync
 
   case sync of
     GraphNode{} -> do
       diverge <- PPa.getC otherBin divergePair
-      syncOther <- fst <$> pickSyncPoint [diverge]
+      syncOther <- fst <$> pickCutPoint syncMsg [diverge]
       setSyncPoint pg1 nd syncOther
     ReturnNode{} -> do
       (retSingle, _, _, _) <- PPa.getC otherBin divergePair
       setSyncPoint pg1 nd (ReturnNode retSingle)
+  where
+    syncMsg = "Choose a synchronization point:"
 
 {-
 guessDivergence ::
@@ -484,11 +516,15 @@ getIntermediateAddrs pb =
     segOffs = map (\mw -> MM.incSegmentOff @(MM.ArchAddrWidth arch) (MD.pblockAddr pb) (fromIntegral mw)) offs
   in catMaybes $ segOffs
 
-pickSyncPoint ::
+-- | Introduce a cut point (chosen from a list of nodes).
+--   Code discovery will consider any CFAR that reaches this cut point to end in a Jump
+--   to the next CFAR (i.e. splits a CFAR in two at the given address)
+pickCutPoint ::
+  String ->
   [(NodeReturn arch, GraphNode arch, Some (PB.ConcreteBlock arch), PD.ParsedBlocks arch)] -> 
   EquivM sym arch (GraphNode arch, Some PBi.WhichBinaryRepr)
-pickSyncPoint inputs = do
-  (sync, Some bin, maddr) <- choose @"node" "Choose a synchronization point:" $ \choice -> do
+pickCutPoint msg inputs = do
+  (sync, Some bin, maddr) <- choose @"node" msg $ \choice -> do
     forM_ inputs $ \(retSingle, divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
       let bin = PB.blockBinRepr blk
       forM_ pblks $ \pblk -> forM_ (getIntermediateAddrs pblk) $ \addr -> do
@@ -2291,6 +2327,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
             choice "Assert divergence is infeasible" () $ return (IsInfeasible ConditionAsserted)
             choice "Assume divergence is infeasible" () $ return (IsInfeasible ConditionAssumed)
             choice "Remove divergence in equivalence condition" () $ return (IsInfeasible ConditionEquiv)
+            choice "Choose desynchronization points" () $ return ChooseDesyncPoint
             choice "Choose synchronization points" () $ return ChooseSyncPoint
             choice "Defer decision" () $ return DeferDecision
       
@@ -2302,6 +2339,14 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
           pg1 <- chooseSyncPoint divergeNode pg
           pg2 <- updateCombinedSyncPoint divergeNode pg1
           handleDivergingPaths scope bundle currBlock (st'{ branchGraph = pg2 }) dom blkt
+        ChooseDesyncPoint -> do
+          pg1 <- chooseDesyncPoint divergeNode pg
+          -- drop domains from any outgoing edges, since the set of outgoing edges
+          -- from this node will likely change
+          let pg2 = dropPostDomains divergeNode (priority PriorityDomainRefresh) pg1
+          -- re-queue the node after picking a de-synchronization point
+          let pg3 = queueNode (priority PriorityHandleActions) divergeNode pg2
+          return $ updateBranchGraph st blkt pg3
         IsInfeasible condK -> do
           gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
           gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
@@ -2314,7 +2359,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
           Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
           return $ updateBranchGraph st blkt pg1
 
-data DesyncChoice = ChooseSyncPoint | AdmitNonTotal | IsInfeasible ConditionKind | DeferDecision
+data DesyncChoice = ChooseSyncPoint | ChooseDesyncPoint | AdmitNonTotal | IsInfeasible ConditionKind | DeferDecision
   deriving Eq
 
 handleStub ::
