@@ -776,12 +776,11 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
   subTree @"node" "Assumed Equivalence Conditions" $ do
     forM_ (getAllNodes pg) $ \nd -> do
        case getCondition pg nd ConditionEquiv of
-        Just eqCondSpec -> subTrace nd $ do 
-          _ <- PS.forSpec eqCondSpec $ \_scope eqCond -> do
-            () <- do
-              eqCondPred <- PEE.someExpr sym <$> PEC.toPred sym eqCond
-              emitTraceLabel @"eqcond" (eqCondPred) (Some eqCond)
-              return ()
+        Just eqCondSpec -> subTrace nd $ do
+          _ <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
+            (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
+            eqCondPred <- PEE.someExpr sym <$> PEC.toPred sym eqCond
+            emitTraceLabel @"eqcond" (eqCondPred) (Some eqCond)
             return eqCond
           return ()
         Nothing -> return ()
