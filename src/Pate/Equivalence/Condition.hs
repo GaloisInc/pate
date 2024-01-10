@@ -59,6 +59,8 @@ import qualified Data.Kind as DK
 import Control.Monad.Identity
 import Pate.Equivalence.Error (SomeExpr, printSomeExprTruncated)
 import qualified What4.JSON as W4S
+import           What4.JSON  ((.=))
+import qualified Pate.Solver as PSo
 ---------------------------------------------
 -- Equivalence Condition
 
@@ -160,7 +162,13 @@ instance (W4.IsSymExprBuilder sym, OrdF (W4.SymExpr sym), PA.ValidArch arch) => 
     <*> PL.witherLocation sym c f
     <*> PL.witherLocation sym d f
 
-instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond" where
+instance (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4Serializable sym (EquivalenceCondition sym arch v) where
+  w4Serialize (EquivalenceCondition a b c d) =
+    W4S.object [ "registers" .= a, "memory" .= b, "max_region" .= c, "extra_preds" .= d]
+
+instance (W4S.W4SerializableF sym (MM.ArchReg arch), W4S.SerializableExprs sym) => W4S.W4SerializableF sym (EquivalenceCondition sym arch)
+
+instance forall sym arch. (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond" where
   type TraceNodeType '(sym,arch) "eqcond" = Some (EquivalenceCondition sym arch)
   -- cludge until we have a proper pretty printer
   type TraceNodeLabel "eqcond" = SomeExpr W4.BaseBoolType
@@ -169,11 +177,7 @@ instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "eqcond"
   nodeTags = [(Summary, \someExpr _ -> printSomeExprTruncated someExpr )
              ,(Simplified, \someExpr _ -> printSomeExprTruncated someExpr)
              ]
-  jsonNode someExpr _ = 
-    JSON.object 
-      [ "trace_node_kind" JSON..= ("eqcond" :: String)
-      , "trace_node" JSON..= show (PP.pretty someExpr)
-      ]
+  jsonNode _ = W4S.w4ToJSON @sym
 
 -- | A mapping from registers to a predicate representing an equality condition for
 -- that specific register.
