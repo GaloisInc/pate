@@ -76,8 +76,8 @@ class W4Serializable sym a where
 w4SerializeString :: Show a => a -> W4S sym JSON.Value
 w4SerializeString s = return $ JSON.String (T.pack (show s))
 
-w4ToJSON :: forall sym a. SerializableExprs sym => W4Serializable sym a => sym -> a -> JSON.Value
-w4ToJSON _ a = let W4S f = w4Serialize @sym a in evalState f (ExprCache Map.empty)
+w4ToJSON :: forall sym a. SerializableExprs sym => W4Serializable sym a => sym -> a -> IO JSON.Value
+w4ToJSON _ a = let W4S f = w4Serialize @sym a in return $ evalState f (ExprCache Map.empty)
 
 class W4SerializableF sym (f :: k -> Type) where
   withSerializable :: Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a

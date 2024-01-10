@@ -402,6 +402,7 @@ prettyNextNodes startAt onlyFinished = do
   ppContents' <- 
        mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
+                json <- IO.liftIO $ jsonNode @_ @'(sym, arch) @nm sym lbl v
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
                     suf <- ppSuffix nesting b (knownSymbol @nm)
@@ -413,7 +414,7 @@ prettyNextNodes startAt onlyFinished = do
                       , PO.outFinished = isFinished b
                       , PO.outSuffix = suf
                       , PO.outMoreResults = nesting < 0
-                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm sym lbl v
+                      , PO.outJSON = json
                       }
                     {-
                     maybeSubNodes nd ()) $ do
@@ -427,7 +428,7 @@ prettyNextNodes startAt onlyFinished = do
                       , PO.outFinished = isFinished b
                       , PO.outSuffix = Nothing
                       , PO.outMoreResults = nesting < 0
-                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm sym lbl v
+                      , PO.outJSON = json
                       }
               ) nextNodes
 

@@ -177,7 +177,7 @@ instance forall sym arch. (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '
   nodeTags = [(Summary, \someExpr _ -> printSomeExprTruncated someExpr )
              ,(Simplified, \someExpr _ -> printSomeExprTruncated someExpr)
              ]
-  jsonNode core _ v = W4S.w4ToJSON @sym core v
+  jsonNode sym _ v = W4S.w4ToJSON sym v
 
 -- | A mapping from registers to a predicate representing an equality condition for
 -- that specific register.

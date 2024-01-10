@@ -902,9 +902,9 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domai
                       , PED.ppEquivalenceDomain (\_ -> "") (\r -> fmap PP.pretty (PA.fromRegisterDisplay (PA.displayRegister r))) (absDomEq absDom)
                       ])
              ]
-  jsonNode sym lbl (Some abs_dom) = 
-    let abs_dom_json = W4S.w4ToJSON sym abs_dom
-    in JSON.object [ "abstract_domain" .= abs_dom_json, "kind" .= (show lbl) ]
+  jsonNode sym lbl (Some abs_dom) = do 
+    abs_dom_json <- W4S.w4ToJSON sym abs_dom
+    return $ JSON.object [ "abstract_domain" .= abs_dom_json, "kind" .= (show lbl) ]
 
 -- simplified variant of domain trace node
 -- currently only displays equivalence domain
