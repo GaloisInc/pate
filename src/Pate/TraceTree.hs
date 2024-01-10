@@ -355,8 +355,8 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
   --   respect to the 'Full' tag
   prettyNode :: TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a
 
-  jsonNode :: TraceNodeCore k -> TraceNodeLabel nm -> TraceNodeType k nm -> JSON.Value
-  jsonNode _ _ _ = case symbolRepr (knownSymbol @nm) of
+  jsonNode :: TraceNodeCore k -> TraceNodeLabel nm -> TraceNodeType k nm -> IO JSON.Value
+  jsonNode _ _ _ = return $ case symbolRepr (knownSymbol @nm) of
     "()" -> JSON.Null
     x -> JSON.object ["node_kind" JSON..= x ]
 
@@ -369,7 +369,7 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
 nodeToJSON :: forall k nm. (IsTraceNode k nm, JSON.ToJSON (TraceNodeType k nm), JSON.ToJSON (TraceNodeLabel nm))
            => TraceNodeLabel nm 
            -> TraceNodeType k nm 
-           -> JSON.Value
+           -> IO JSON.Value
 nodeToJSON lbl v =
   let i1 = case JSON.toJSON lbl of
         JSON.String "" -> [] 
@@ -378,7 +378,7 @@ nodeToJSON lbl v =
       i2 = case JSON.toJSON v of
         JSON.Null -> []
         x -> [ "trace_node" JSON..= x ]
-  in JSON.object $ i1 ++ i2 ++ [ "trace_node_kind" JSON..= symbolRepr (knownSymbol @nm) ]
+  in return $ JSON.object $ i1 ++ i2 ++ [ "trace_node_kind" JSON..= symbolRepr (knownSymbol @nm) ]
 
 mkTags :: forall k nm a. IsTraceNode k nm => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
 mkTags tags = map (\tag -> (tag, prettyNode @_ @k @nm)) tags
@@ -583,7 +583,7 @@ instance IsTraceNode k "subtree" where
               (Simplified_Detail, \_ nm -> PP.pretty nm),
               (Simplified, \_ nm -> PP.pretty nm)
               ]
-  jsonNode _ (SomeSymRepr (SomeSym r)) nm =
+  jsonNode _ (SomeSymRepr (SomeSym r)) nm = return $
     JSON.object [ "subtree_kind" JSON..=  (show (symbolRepr r))
                 , "message" JSON..= nm
                 ]
