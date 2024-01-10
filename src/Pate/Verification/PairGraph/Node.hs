@@ -267,10 +267,10 @@ instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "node" w
   type TraceNodeLabel "node" = String
   prettyNode msg nd = tracePrettyNode nd msg
   nodeTags = mkTags @'(sym,arch) @"node" [Simplified, Summary]
-  jsonNode = nodeToJSON @'(sym,arch) @"node"
+  jsonNode _ = nodeToJSON @'(sym,arch) @"node"
 
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where
   type TraceNodeType '(sym, arch) "entrynode" = NodeEntry arch
   prettyNode () = pretty
   nodeTags = mkTags @'(sym,arch) @"entrynode" [Simplified, Summary]
-  jsonNode = nodeToJSON @'(sym,arch) @"entrynode"
+  jsonNode _ = nodeToJSON @'(sym,arch) @"entrynode"

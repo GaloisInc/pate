@@ -2173,7 +2173,7 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "fnstub" where
   prettyNode DivergedJump nm = "Diverging jump:" <+> PP.pretty nm
   prettyNode TerminalFn nm = "Terminal Function:" <+> PP.pretty nm
   nodeTags = mkTags @'(sym,arch) @"fnstub" [Summary, Simplified]
-  jsonNode = \v lbl -> JSON.object [ "fnstub" JSON..= lbl, "kind" JSON..= (show v)]
+  jsonNode _ = \v lbl -> JSON.object [ "fnstub" JSON..= lbl, "kind" JSON..= (show v)]
   
 -- | Mark the function that this entry belongs to as terminal, indicating
 --   that it might have no valid exits (i.e. if a terminal exit is the only
