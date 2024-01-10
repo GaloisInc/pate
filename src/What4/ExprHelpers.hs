@@ -620,6 +620,24 @@ fixMux' ::
   IO (W4B.Expr t tp)
 fixMux' sym cache e_outer = do
   let
+    go_eq :: forall tp'. W4B.Expr t tp' -> W4B.Expr t tp' -> Maybe (IO (W4B.Expr t W4.BaseBoolType))
+     -- x = (ite cond x y) --> cond \/ x == y
+    go_eq e1 e2 | 
+        Just (W4B.BaseIte _ _ cond e2T e2F) <- W4B.asApp e2
+      , Just Refl <- testEquality e1 e2T
+      = Just $ do
+        branches_eq <- W4.isEq sym e2T e2F
+        go =<< W4.orPred sym cond branches_eq
+    -- y = (ite cond x y) --> not cond \/ x == y
+    go_eq e1 e2 | 
+        Just (W4B.BaseIte _ _ cond e2T e2F) <- W4B.asApp e2
+      , Just Refl <- testEquality e1 e2F
+      = Just $ do
+        branches_eq <- W4.isEq sym e2T e2F
+        not_cond <- W4.notPred sym cond
+        go =<< W4.orPred sym not_cond branches_eq
+    go_eq _ _ = Nothing
+
     go :: forall tp'. W4B.Expr t tp' -> IO (W4B.Expr t tp')
     go e = W4B.idxCacheEval cache e $ case e of
       W4B.AppExpr a0
@@ -649,6 +667,14 @@ fixMux' sym cache e_outer = do
          , Just (W4B.BaseIte _ _ cond2 _ eF2) <- W4B.asApp eF
          , cond == cond2
          -> go =<< W4.baseTypeIte sym cond eT eF2
+      W4B.AppExpr a0
+         | (W4B.BaseEq _ e1 e2) <- W4B.appExprApp a0
+         , Just f <- go_eq e1 e2
+         -> f
+      W4B.AppExpr a0
+         | (W4B.BaseEq _ e1 e2) <- W4B.appExprApp a0
+         , Just f <- go_eq e2 e1
+         -> f
       W4B.AppExpr a0 -> do
         a0' <- W4B.traverseApp go (W4B.appExprApp a0)
         if (W4B.appExprApp a0) == a0' then return e
