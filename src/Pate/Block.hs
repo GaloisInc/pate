@@ -255,7 +255,7 @@ instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(s
   type TraceNodeType '(sym,arch) "blocktarget" = PPa.PatchPair (BlockTarget arch)
   prettyNode () blkts = PPa.ppPatchPair' ppBlockTarget blkts
   nodeTags = mkTags @'(sym,arch) @"blocktarget" [Simplified,Summary]
-  jsonNode = nodeToJSON @'(sym,arch) @"blocktarget"
+  jsonNode _ = nodeToJSON @'(sym,arch) @"blocktarget"
 
 instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "blocktarget1" where
   type TraceNodeType '(sym,arch) "blocktarget1" = Some (BlockTarget arch)

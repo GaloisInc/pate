@@ -398,7 +398,7 @@ prettyNextNodes ::
 prettyNextNodes startAt onlyFinished = do
   tags <- gets replNextTags
   nextNodes <- gets replNext
-  
+  ValidSymArchRepr sym _ <- gets replValidRepr
   ppContents' <- 
        mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
@@ -413,7 +413,7 @@ prettyNextNodes startAt onlyFinished = do
                       , PO.outFinished = isFinished b
                       , PO.outSuffix = suf
                       , PO.outMoreResults = nesting < 0
-                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm lbl v
+                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm sym lbl v
                       }
                     {-
                     maybeSubNodes nd ()) $ do
@@ -427,7 +427,7 @@ prettyNextNodes startAt onlyFinished = do
                       , PO.outFinished = isFinished b
                       , PO.outSuffix = Nothing
                       , PO.outMoreResults = nesting < 0
-                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm lbl v
+                      , PO.outJSON = jsonNode @_ @'(sym, arch) @nm sym lbl v
                       }
               ) nextNodes
 

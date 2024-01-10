@@ -285,7 +285,7 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace
       "Event Trace:" PP.<+> PPa.ppPatchPair' (\(TraceEventsOne _init_regs s) ->
         ppTraceEventSummary s) evs))
     [Summary, Simplified]
-  jsonNode () v = W4S.w4ToJSON @sym v
+  jsonNode sym () v = W4S.w4ToJSON sym v
 
 ppTraceEventSummary ::
   forall sym arch a.

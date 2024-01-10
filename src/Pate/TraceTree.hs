@@ -330,6 +330,13 @@ newtype TraceTree k = TraceTree (IOList (Some (TraceTreeNode k)))
 isTraceNode :: TraceTreeNode k nm -> (IsTraceNode k nm => a) -> a
 isTraceNode TraceTreeNode{} a = a
 
+-- | A somewhat clunky way to allow the 'k' parameter to specify
+--   the type of additional input parameters for json serialization
+--   (specifically needed to support passing in the expression builder
+--    when serializing what4 terms)
+type family TraceNodeCore (k :: l) :: Type
+type instance TraceNodeCore '(a,b) = a
+
 class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Symbol)  where
   -- TODO: these types often have extra parameters where we need to wrap them
   -- in a 'Some' to get them down to a 'Type'.
@@ -348,8 +355,8 @@ class (KnownSymbol nm, Eq (TraceNodeLabel nm)) => IsTraceNode (k :: l) (nm :: Sy
   --   respect to the 'Full' tag
   prettyNode :: TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a
 
-  jsonNode :: TraceNodeLabel nm -> TraceNodeType k nm -> JSON.Value
-  jsonNode _ _ = case symbolRepr (knownSymbol @nm) of
+  jsonNode :: TraceNodeCore k -> TraceNodeLabel nm -> TraceNodeType k nm -> JSON.Value
+  jsonNode _ _ _ = case symbolRepr (knownSymbol @nm) of
     "()" -> JSON.Null
     x -> JSON.object ["node_kind" JSON..= x ]
 
@@ -576,7 +583,7 @@ instance IsTraceNode k "subtree" where
               (Simplified_Detail, \_ nm -> PP.pretty nm),
               (Simplified, \_ nm -> PP.pretty nm)
               ]
-  jsonNode (SomeSymRepr (SomeSym r)) nm =
+  jsonNode _ (SomeSymRepr (SomeSym r)) nm =
     JSON.object [ "subtree_kind" JSON..=  (show (symbolRepr r))
                 , "message" JSON..= nm
                 ]
@@ -657,9 +664,6 @@ data SomeChoice k = forall nm_choice nm_ret.
   IsTraceNode k nm_choice => 
     SomeChoice (Choice k nm_choice nm_ret)
 
-instance JSON.ToJSON (SomeChoice k) where
-  toJSON (SomeChoice (c :: Choice k nm_choice nm_ret)) = 
-    jsonNode @_ @k @nm_choice (choiceLabel c) (choiceLabelValue c)
 
 prettyChoice :: forall k nm_choice nm_ret a. Choice k nm_choice nm_ret -> PP.Doc a
 prettyChoice c = (\(ChoiceHeader{}) -> 
@@ -672,7 +676,7 @@ instance IsTraceNode k "choice" where
     "" -> prettyChoice c
     _ -> PP.pretty nm PP.<+> prettyChoice c
   nodeTags = mkTags @k @"choice" [Summary, Simplified]
-  jsonNode = nodeToJSON @k @"choice"
+  jsonNode core _ (SomeChoice (c :: Choice k nm_choice nm_ret))= jsonNode @_ @k @nm_choice core (choiceLabel c) (choiceLabelValue c)
 
 instance IsTraceNode k "()" where
   type TraceNodeType k "()" = ()
