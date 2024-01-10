@@ -63,12 +63,32 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.SetF as SetF
 import Data.Functor.Const
+import Control.Monad.Trans.Reader hiding (asks,ask)
+import qualified Data.IORef as IO
+import Control.Monad.Reader
+import Control.Exception (tryJust)
+import What4.Utils.Process (filterAsync)
+import qualified What4.ExprHelpers as WEH
 
 
 newtype ExprCache sym = ExprCache (Map (Some (W4.SymExpr sym)) JSON.Value)
 
-newtype W4S sym a = W4S (State (ExprCache sym) a)
-  deriving (Monad, Applicative, Functor, MonadState (ExprCache sym))
+data W4SEnv sym = W4SEnv {
+    w4sCache :: IO.IORef (ExprCache sym)
+  , w4sSym :: sym
+}
+
+newtype W4S sym a = W4S (ReaderT (W4SEnv sym) IO a)
+  deriving (Monad, Applicative, Functor, MonadReader (W4SEnv sym), MonadIO)
+
+-- NB: state updates will persist even if IO exceptions are thrown
+instance MonadState (ExprCache sym) (W4S sym) where
+  get = do
+    cache <- asks w4sCache
+    liftIO $ IO.readIORef cache
+  state f = do
+    cache <- asks w4sCache
+    liftIO $ IO.atomicModifyIORef' cache (\c -> let (a,c') = f c in (c',a))
 
 class W4Serializable sym a where
   w4Serialize :: a -> W4S sym JSON.Value
@@ -77,7 +97,11 @@ w4SerializeString :: Show a => a -> W4S sym JSON.Value
 w4SerializeString s = return $ JSON.String (T.pack (show s))
 
 w4ToJSON :: forall sym a. SerializableExprs sym => W4Serializable sym a => sym -> a -> IO JSON.Value
-w4ToJSON _ a = let W4S f = w4Serialize @sym a in return $ evalState f (ExprCache Map.empty)
+w4ToJSON sym a = do
+  cacheRef <- IO.newIORef (ExprCache Map.empty)
+  W4S f <- return $ w4Serialize @sym a
+  let env = W4SEnv cacheRef sym
+  runReaderT f env
 
 class W4SerializableF sym (f :: k -> Type) where
   withSerializable :: Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a
@@ -98,25 +122,27 @@ class (forall sym. W4SerializableF sym f) => W4SerializableFC f where
 --   fail gracefully if it does happen.
 trySerialize :: W4S sym JSON.Value -> W4S sym (Either String JSON.Value)
 trySerialize (W4S f) = do
-  st <- get
-  r <- return $! unsafePerformIO ((Right <$> (evaluate (runState f st) >>= \(x,st') -> return (force x, st'))) `catch` (\(er :: IOException) -> return $ Left (show er)))
+  env <- ask
+  r <- liftIO $ tryJust filterAsync $ do
+    x <- runReaderT f env
+    evaluate $ force x
   case r of
-    Left err -> return $ Left err
-    Right (x,st') -> do
-      put st'
-      return $ Right x
+    Left err -> return $ Left (show err)
+    Right x -> return $ Right x
 
 instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) where
-  w4Serialize e = do
+  w4Serialize e' = do
     ExprCache s <- get
-    case Map.lookup (Some e) s of
+    case Map.lookup (Some e') s of
       Just v -> return $ v
       Nothing -> do
-        v <- case W4.asConcrete e of
+        v <- case W4.asConcrete e' of
           Just (W4.ConcreteInteger i) -> return $ JSON.toJSON i
           Just (W4.ConcreteBool b) -> return $ JSON.toJSON b
-          Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e)))
+          Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e')))
           _ -> do
+            sym <- asks w4sSym
+            e <- liftIO $ WEH.stripAnnotations sym e'
             mv <- trySerialize $ do
               let result = W4S.serializeExprWithConfig (W4S.Config True True) e
               let var_env = map (\(Some bv, t) -> (show (W4B.bvarName bv), t)) $ OMap.toAscList $ W4S.resFreeVarEnv result
@@ -126,7 +152,7 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
             case mv of
               Left er -> return $ JSON.object [ "symbolic_serialize_err" JSON..= er]
               Right v -> return v
-        modify $ \(ExprCache s') -> ExprCache (Map.insert (Some e) v s')
+        modify $ \(ExprCache s') -> ExprCache (Map.insert (Some e') v s')
         return v
 
 deriving instance Typeable (W4B.ExprBuilder t fs scope)
