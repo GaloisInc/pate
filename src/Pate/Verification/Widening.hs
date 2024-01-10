@@ -517,24 +517,26 @@ getTraceFromModel ::
   AbstractDomain sym arch v ->
   Maybe (StatePostCondition sym arch v) ->
   EquivM sym arch (CE.TraceEvents sym arch)
-getTraceFromModel scope evalFn' bundle preD postCond = fmap CE.TraceEvents $ withSym $ \sym -> PPa.forBins $ \bin -> do
-  out <- PPa.get bin (PS.simOut bundle)
-  in_ <- PPa.get bin (PS.simIn bundle)
-  let mem = PS.simOutMem out
+getTraceFromModel scope evalFn' bundle preD postCond = withSym $ \sym -> do
   ground_postCond <- PEM.mapExpr sym (concretizeWithModel evalFn') postCond
   let (pre_stO, pre_stP) = PS.asStatePair scope (simIn bundle) PS.simInState
   eqCtx <- equivalenceContext
   -- NB: we use eqDomPost here because we want a StatePostCondition, since
   -- that will include individual assertions on each location
-
   preCond <- liftIO $ eqDomPost sym pre_stO pre_stP eqCtx (PAD.absDomEq preD) (universalDomain sym)
   ground_preCond <- PEM.mapExpr sym (concretizeWithModel evalFn') preCond
-  withGroundEvalFn evalFn' $ \evalFn -> do
-    evs <- CE.groundTraceEventSequence sym evalFn (MT.memFullSeq @_ @arch mem)
-    let in_regs = PS.simInRegs in_
-    ground_rop <- CE.groundRegOp sym evalFn (MT.RegOp (MM.regStateMap in_regs))
-    -- create a dummy initial register op representing the initial values
-    return $ CE.TraceEventsOne ground_rop evs (Some ground_preCond) (fmap Some ground_postCond)
+
+  trace_pair <- PPa.forBins $ \bin -> do
+    out <- PPa.get bin (PS.simOut bundle)
+    in_ <- PPa.get bin (PS.simIn bundle)
+    let mem = PS.simOutMem out
+    withGroundEvalFn evalFn' $ \evalFn -> do
+      evs <- CE.groundTraceEventSequence sym evalFn (MT.memFullSeq @_ @arch mem)
+      let in_regs = PS.simInRegs in_
+      ground_rop <- CE.groundRegOp sym evalFn (MT.RegOp (MM.regStateMap in_regs))
+      -- create a dummy initial register op representing the initial values
+      return $ CE.TraceEventsOne ground_rop evs
+  return $ CE.TraceEvents trace_pair (Some ground_preCond) (fmap Some ground_postCond)
 
 applyDomainRefinements ::
   PS.SimScope sym arch v ->

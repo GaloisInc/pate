@@ -220,18 +220,22 @@ groundMuxTree sym evalFn = MT.collapseMuxTree sym ite
          if b then return x else return y
 
 data TraceEvents sym arch =
-  TraceEvents (PPa.PatchPair (TraceEventsOne sym arch))
+  TraceEvents 
+    { traceEvents :: PPa.PatchPair (TraceEventsOne sym arch)
+    , preCond :: Some (StatePostCondition sym arch)
+    , postCond :: Maybe (Some (StatePostCondition sym arch))
+    }
 
 data TraceEventsOne sym arch (bin :: PB.WhichBinary) = TraceEventsOne
   { initialRegs :: MT.RegOp sym arch
   , traceEventGroups :: [TraceEventGroup sym arch]
-  , preCond :: Some (StatePostCondition sym arch)
-  , postCond :: Maybe (Some (StatePostCondition sym arch))
   }
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEvents sym arch) where
-  w4Serialize (TraceEvents p) = PPa.w4SerializePair p $ \(TraceEventsOne rop evs pre post) ->
-    W4S.object [ "initial_regs" .= rop, "events" .= evs, "precondition" .= pre, "postcondition" .= post]
+  w4Serialize (TraceEvents p pre post) = do
+    trace_pair <- PPa.w4SerializePair p $ \(TraceEventsOne rop evs) -> 
+      W4S.object [ "initial_regs" .= rop, "events" .= evs]
+    W4S.object [ "precondition" .= pre, "postcondition" .= post, "traces" .= trace_pair ]
 
 data TraceEventGroup sym arch =
   TraceEventGroup (Maybe (MM.ArchSegmentOff arch)) [MT.TraceEvent sym arch]
@@ -277,8 +281,8 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace
   type TraceNodeType '(sym,arch) "trace_events" = TraceEvents sym arch
   prettyNode () = ppTraceEvents
   nodeTags = 
-    map (\tag -> (tag, \_ (TraceEvents evs) -> 
-      "Event Trace:" PP.<+> PPa.ppPatchPair' (\(TraceEventsOne _init_regs s _ _) ->
+    map (\tag -> (tag, \_ (TraceEvents evs _ _) -> 
+      "Event Trace:" PP.<+> PPa.ppPatchPair' (\(TraceEventsOne _init_regs s) ->
         ppTraceEventSummary s) evs))
     [Summary, Simplified]
   jsonNode () v = W4S.w4ToJSON @sym v
@@ -300,12 +304,12 @@ ppTraceEvents ::
   PSo.ValidSym sym =>
   TraceEvents sym arch ->
   PP.Doc a
-ppTraceEvents (TraceEvents tr) = case tr of
-  PPa.PatchPairOriginal (TraceEventsOne init_regsO trO _ _) ->
+ppTraceEvents (TraceEvents tr _ _) = case tr of
+  PPa.PatchPairOriginal (TraceEventsOne init_regsO trO) ->
     PP.vsep $ [ "== Initial Registers ==" ] ++ ppRegOp init_regsO ++ mapMaybe ppTraceEventGroup trO
-  PPa.PatchPairPatched (TraceEventsOne init_regsP trP _ _) ->
+  PPa.PatchPairPatched (TraceEventsOne init_regsP trP) ->
     PP.vsep $ [ "== Initial Registers ==" ] ++ ppRegOp init_regsP ++ mapMaybe ppTraceEventGroup trP
-  PPa.PatchPair (TraceEventsOne init_regsO trO _ _) (TraceEventsOne init_regsP trP _ _)-> PP.vsep $
+  PPa.PatchPair (TraceEventsOne init_regsO trO) (TraceEventsOne init_regsP trP)-> PP.vsep $
        [ "== Initial Original Registers ==" ]
     ++ ppRegOp init_regsO
     ++ [ "== Original sequence ==" ]
