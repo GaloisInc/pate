@@ -450,10 +450,22 @@ withSolverProcess ::
      (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
      WPO.SolverProcess scope solver -> EquivM sym arch a) ->
   EquivM sym arch a
-withSolverProcess f = withOnlineBackend $ \bak -> do
+withSolverProcess f = do
+  PSo.Sym _ _ pool <- CMR.asks envValidSym
+  PSo.withSyncedBackend pool $ \sbak -> do
+    withSolverProcess' sbak f
+
+withSolverProcess' ::
+  PSo.SyncedBackend sym -> 
+  (forall scope st fs solver.
+     (sym ~ WE.ExprBuilder scope st fs) => WPO.OnlineSolver solver =>
+     WPO.SolverProcess scope solver -> EquivM sym arch a) ->
+  EquivM sym arch a  
+withSolverProcess' sbak f =  PSo.viewSyncedBackend sbak $ \bak -> do
   let doPanic = panic Solver "withSolverProcess" ["Online solving not enabled"]
   IO.withRunInIO $ \runInIO -> LCBO.withSolverProcess bak doPanic $ \sp ->
     runInIO (f sp)
+
 
 withOnlineBackend ::
   (forall scope st fs solver.
@@ -461,8 +473,8 @@ withOnlineBackend ::
      LCBO.OnlineBackend solver scope st fs -> EquivM sym arch a) ->
   EquivM sym arch a
 withOnlineBackend f = do
-  PSo.Sym _ _ bak <- CMR.asks envValidSym
-  f bak
+  PSo.Sym _ _ pool <- CMR.asks envValidSym
+  PSo.withSyncedBackend pool $ \sbak -> PSo.viewSyncedBackend sbak $ \solver -> f solver
 
 withSymIO :: forall sym arch a.
   (forall t st fs . (sym ~ WE.ExprBuilder t st fs) => sym -> IO a) ->
@@ -661,34 +673,76 @@ withPathCondition asm f = CMR.local (\env -> env { envPathCondition = (asm <> (e
 -- | Evaluate the given function in an assumption context augmented with the given
 -- 'AssumptionSet'.
 withAssumptionSet ::
-  HasCallStack =>
   forall sym arch f.
+  HasCallStack =>
   AssumptionSet sym ->
   EquivM_ sym arch f ->
   EquivM sym arch f
-withAssumptionSet asm f = withSym $ \sym -> do
+withAssumptionSet asm f = do
   curAsm <- currentAsm
-  p <- liftIO $ PAS.toPred sym asm
+  p <- withSym $ \sym -> liftIO $ PAS.toPred sym asm
   case PAS.isAssumedPred curAsm p of
     True -> f
-    _ ->
-        CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
-        (frame, st) <- withOnlineBackend $ \bak ->  do
-          st <- liftIO $ LCB.saveAssumptionState bak
-          frame <- liftIO $ LCB.pushAssumptionFrame bak
-          safeAssumedFalseIO mempty asm $ 
-            LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
-          return (frame, st)
-        withFreshSatCache $ do
-          result <- goalSat "validateAssumptions" (W4.truePred sym) $ return
-          case result of
-            W4R.Sat{} -> return ()
-            W4R.Unknown{} -> return ()
-            W4R.Unsat{} -> withNoSatCache $ do
-              safePop frame st
-              asm' <- getUnsatAsm asm
-              throwAssumeFalse mempty asm'
-          propagateAssumeFalse asm (safePop frame st) f
+    _ -> do
+      PSo.Sym _ _ pool <- CMR.asks envValidSym
+      result <- catchAssumeFalse $ CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $
+          (snd <$> PSo.bracketSyncedBackends pool (push_asms p) with_asms pop_asms)
+
+      case result of
+        Right a -> return a
+        Left (asm_context, bad_asm) -> 
+          -- take the 'AssumedFalse' error and conditionally add
+          -- the input assumption 'asm' to its context, only if
+          -- the offending predicate 'bad_asm' becomes satisfiable
+          -- once 'asm' is popped
+          propagateAssumeFalse' asm asm_context bad_asm
+  where
+    push_asms :: W4.Pred sym -> PSo.SyncedBackend sym -> 
+       EquivM_ sym arch (AsmFrame sym)
+    push_asms p sbak = PSo.viewSyncedBackend sbak $ \bak -> do
+      st <- liftIO $ LCB.saveAssumptionState bak
+      frame <- liftIO $ LCB.pushAssumptionFrame bak
+      mfalse_asm <- catchAssumeFalse $ safeAssumedFalseIO mempty asm $ 
+          LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
+      case mfalse_asm of
+        Left false_asm -> return (frame,st, Just false_asm)
+        Right () -> return (frame, st, Nothing)
+    
+    with_asms :: [AsmFrame sym] -> EquivM_ sym arch f
+    with_asms asm_frames = do
+      mapM_ (\(_, _, mfalse_asm) -> case mfalse_asm of
+        Just (asm_context,bad_asm) ->  throwAssumeFalse asm_context bad_asm
+        Nothing -> return ()) asm_frames
+      withSym $ \sym -> withFreshSatCache $ do
+        asms_sat <- goalSat "validateAssumptions" (W4.truePred sym) $ return
+        case asms_sat of
+          W4R.Sat{} -> f
+          W4R.Unknown -> f
+          W4R.Unsat{} -> throwAssumeFalse mempty asm
+    
+    pop_asms :: PSo.SyncedBackend sym -> AsmFrame sym -> EquivM_ sym arch ()
+    pop_asms sbak (frame,st,_) = safePop' sbak frame st
+
+type AsmFrame sym = (LCB.FrameIdentifier, LCB.AssumptionState sym, Maybe (AssumptionSet sym, AssumptionSet sym))
+
+propagateAssumeFalse' ::
+  AssumptionSet sym {- ^ most recently pushed assumption -} ->
+  AssumptionSet sym {- ^ assumption context -} ->
+  AssumptionSet sym {- ^ assumption that was initially shown unsatisfiable -} ->
+  EquivM sym arch a
+propagateAssumeFalse' asm asm_context bad_asm = do
+  masm' <- withSatAssumption (asm_context <> bad_asm) $ getUnsatAsm asm
+  case masm' of
+    Just asm' -> throwAssumeFalse (asm_context <> asm') bad_asm
+    Nothing -> throwAssumeFalse asm_context bad_asm
+
+catchAssumeFalse ::
+  EquivM_ sym arch a ->
+  EquivM sym arch (Either (AssumptionSet sym, AssumptionSet sym) a)
+catchAssumeFalse f = (Right <$> f) `catch` \(e :: PEE.EquivalenceError) -> case PEE.errEquivError e of
+  Left (PEE.SomeInnerError (PEE.InnerSymEquivalenceError (PEE.AssumedFalse asm_context badasm))) ->
+    return $ Left (asm_context, badasm)
+  _ -> throwError e
 
 safeAssumedFalseIO ::
   forall sym arch a.
@@ -805,10 +859,20 @@ safePop ::
   LCB.FrameIdentifier ->
   LCB.AssumptionState sym ->
   EquivM sym arch ()
-safePop frame st = withOnlineBackend $ \bak -> 
+safePop frame st = do
+  PSo.Sym _ _ pool <- CMR.asks envValidSym
+  PSo.withSyncedBackend pool $ \sbak -> safePop' sbak frame st
+
+safePop' ::
+  PSo.SyncedBackend sym ->
+  LCB.FrameIdentifier ->
+  LCB.AssumptionState sym ->
+  EquivM sym arch ()
+safePop' sbak frame st = PSo.viewSyncedBackend sbak $ \bak ->
   catchError
     (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame)) $ \_ -> do 
       void $ liftIO $ tryJust filterAsync $ LCBO.restoreSolverState bak st
+
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.
