@@ -99,6 +99,7 @@ import qualified System.IO as IO
 
 import qualified Prettyprinter as PP
 
+import qualified Data.List.NonEmpty as NE
 import           Data.Foldable (foldlM, foldrM)
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.HashTable.ST.Basic as H
@@ -491,12 +492,10 @@ rewriteSubExprs'' sym taggedCache resultCache fixMuxCache f e_outer = W4B.idxCac
   -- This ensures that the What4 expression builder correctly re-establishes any invariants it requires
   -- after rebinding.
   Pair vars vals <- return $ toBindings binds
-  case Ctx.viewSize (Ctx.size vals) of
-    -- no replacement
+  e'' <- case Ctx.viewSize (Ctx.size vals) of
     Ctx.ZeroSize -> return e_outer
-    _ -> IO.liftIO $ do
-      fn <- W4.definedFn sym W4.emptySymbol vars e' W4.AlwaysUnfold
-      W4.applySymFn sym fn vals >>= fixMux' sym fixMuxCache
+    _ -> IO.liftIO $ W4B.evalBoundVars sym e' vars vals
+  IO.liftIO $ fixMux' sym fixMuxCache e''
 
 -- | An expression binding environment. When applied to an expression 'e'
 -- with 'applyExprBindings', each sub-expression of 'e' is recursively inspected
@@ -713,7 +712,7 @@ normCache sym e = do
     _ -> Nothing
     ) e'''
   -}
-  
+
 
 -- | Simplify 'ite (eq y x) y x' into 'x'
 fixMux ::
@@ -803,8 +802,66 @@ fixMux' sym cache e_outer = do
         if (W4B.nonceExprApp a0) == a0' then return e
         else W4B.sbNonceExpr sym a0'
       _ -> return e
-  go e_outer
+  e' <- go e_outer
+  -- find a fixpoint after applying standard term simplification rules
+  -- via reduceApp
+  e'' <- W4B.evalBoundVars sym e' Ctx.empty Ctx.empty
+  case e' == e'' of
+    True -> return e'
+    False -> fixMux' sym cache e''
 
+-- | Strip a predicate to only contain variables that are
+--   common with the given expression
+stripToSharedVars ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.Pred sym ->
+  W4.SymExpr sym tp ->
+  IO (W4.Pred sym)
+stripToSharedVars sym p_outer e_outer = do
+  vars <- varsOf e_outer
+  go p_outer BM.Positive vars
+  where
+    varsOf :: forall tp'. W4.SymExpr sym tp' -> IO (Set (Some (W4.BoundVar sym)))
+    varsOf _ = error ""
+
+    varsOfList :: [W4.Pred sym] -> IO (Set (Some (W4.BoundVar sym)))
+    varsOfList _ = error ""
+
+    -- strip each predicate to only contain variables that are in the given set or
+    -- shared with other predicates in the set 
+    go_list :: Set (Some (W4.BoundVar sym)) -> [(W4.Pred sym, BM.Polarity)] -> IO (W4.Pred sym)
+    go_list _ [] = return $ W4.truePred sym
+    go_list vars ((x1, pol):xs) = do
+      vars_ps <- varsOfList (map fst xs)
+      x1' <- go x1 pol (S.union vars vars_ps)
+      vars_x1 <- varsOf x1'
+      rest_pred <- go_list (S.union vars vars_x1) xs
+      W4.andPred sym x1' rest_pred
+
+    go :: W4.Pred sym -> BM.Polarity -> Set (Some (W4.BoundVar sym)) -> IO (W4.Pred sym)
+    go p pol vars = do
+      vars_p <- varsOf p
+      case S.disjoint vars_p vars of
+        True -> appPol pol $ W4.truePred sym
+        False -> case W4B.asApp p of
+          Just (W4B.ConjPred bm) -> case BM.viewBoolMap bm of
+            BM.BoolMapDualUnit -> appPol pol $ W4.falsePred sym
+            BM.BoolMapUnit     -> appPol pol $  W4.truePred sym
+            BM.BoolMapTerms tms -> appPol pol =<< go_list vars (NE.toList tms)
+          Just (W4B.NotPred p') -> go p' (BM.negatePolarity pol) vars
+          -- for simplicity we just convert (ite c x y) into (c && x) || ((not c) && y)
+          Just (W4B.BaseIte _ _ c x y) -> do
+            c_x <- W4.andPred sym x c
+            c_y <- W4.andPred sym y =<< W4.notPred sym c
+            p' <- W4.orPred sym c_x c_y
+            go p' pol vars
+          _ -> appPol pol p
+
+    appPol :: BM.Polarity -> W4.Pred sym -> IO (W4.Pred sym)
+    appPol BM.Positive p' = return p'
+    appPol BM.Negative p' = W4.notPred sym p'
 
 groundToConcrete ::
   W4.BaseTypeRepr tp ->

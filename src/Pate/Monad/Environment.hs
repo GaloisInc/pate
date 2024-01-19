@@ -295,16 +295,17 @@ instance PEM.ExprMappable sym (SolverCacheFrameF sym Identity) where
       return $ MapF.Pair k' v'
     d' <- mapM (\(Some e) -> do
       e' <- f e
-      liftIO $ putStrLn $ "Old:  \n" ++ show (W4.printSymExpr e) ++ "\n" ++ show (hashF e) ++ "\nNew\n" ++ show (W4.printSymExpr e') ++ "\n" ++ show (hashF e') 
+      -- liftIO $ putStrLn $ "Old:  \n" ++ show (W4.printSymExpr e) ++ "\n" ++ show (hashF e) ++ "\nNew\n" ++ show (W4.printSymExpr e') ++ "\n" ++ show (hashF e') 
       Some <$> return e') (Set.toList d)
-    d'' <- foldM (\acc (Some e) -> case Set.lookupIndex (Some e) acc of
+    let d'' = Set.fromList d'
+    {- d'' <- foldM (\acc (Some e) -> case Set.lookupIndex (Some e) acc of
       Just i -> do
         (Some e') <- return $ Set.elemAt i acc
         -- liftIO $ putStrLn $ "Duplicate dropped:  \n" ++ show (W4.printSymExpr e) ++ "\n" ++ show (hashF e) ++ "\n" ++ show (W4.printSymExpr e') ++ "\n" ++ show (hashF e') 
         
         return acc
-      Nothing -> return $ Set.insert (Some e) acc
-      ) Set.empty d'
+      Nothing -> return $ Set.insert (Some e) acc 
+      ) Set.empty d'-}
     return $ SolverCacheFrame a' b' c' d''
 
 instance PEM.ExprMappable sym (SolverCache sym v) where
