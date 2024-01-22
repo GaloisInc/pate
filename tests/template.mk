@@ -1,6 +1,6 @@
 .PHONY: all %.test %.copy
 
-all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(addprefix ./build/,$(notdir $(patsubst %c,%i,$(wildcard ../src/*.c))))
+all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(addprefix ./build/,$(notdir $(patsubst %c,%i,$(wildcard ../src/*.c)))) ${EXTRA_TARGETS}
 
 ./unequal:
 	mkdir -p $@
