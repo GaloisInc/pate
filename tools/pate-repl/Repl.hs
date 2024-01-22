@@ -242,7 +242,8 @@ run rawOpts = do
     OA.Success opts -> do
       setJSONMode $ CLI.jsonToplevel opts
       topTraceTree <- someTraceTree
-      let cfg = CLI.mkRunConfig topTraceTree PAL.archLoader opts
+      let cfg = PL.setTraceTree topTraceTree (CLI.mkRunConfig PAL.archLoader opts)
+
       tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \case
         Left err -> do
           killWaitThread

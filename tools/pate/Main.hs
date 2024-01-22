@@ -13,7 +13,7 @@ import qualified Pate.Equivalence as PEq
 main :: IO ()
 main = do
   opts <- OA.execParser CLI.cliOptions
-  let cfg = CLI.mkRunConfig noTraceTree PAL.archLoader opts
+  let cfg = CLI.mkRunConfig PAL.archLoader opts
   status <- PL.runEquivConfig cfg
   case status of
     PEq.Errored err -> SE.die (show err)
