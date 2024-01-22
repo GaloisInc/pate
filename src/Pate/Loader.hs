@@ -12,6 +12,7 @@ module Pate.Loader
   , runSelfEquivConfig
   , runEquivConfig
   , RunConfig(..)
+  , setTraceTree
   , Logger(..)
   )
 where
@@ -39,6 +40,7 @@ import           Pate.Loader.ELF ( LoaderM, ElfLoaderConfig  )
 import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
 import qualified Control.Monad.Reader as CMR
+import           Pate.TraceTree
 
 data RunConfig =
   RunConfig
@@ -52,6 +54,9 @@ data RunConfig =
     , useDwarfHints :: Bool
     , elfLoaderConfig :: ElfLoaderConfig
     }
+
+setTraceTree :: SomeTraceTree PA.ValidRepr -> RunConfig -> RunConfig
+setTraceTree traceTree rcfg = rcfg { verificationCfg = (verificationCfg rcfg){ PC.cfgTraceTree = traceTree }}
 
 data Logger arch =
   Logger
