@@ -55,8 +55,11 @@ import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, Symbo
 
 
 import qualified Pate.Arch as PA
+import qualified Pate.ArchLoader as PAL
 import qualified Pate.Solver as PS
 import qualified Pate.Equivalence as PEq
+import qualified Pate.CLI as CLI
+import qualified Pate.Loader as PL
 import qualified ReplHelper as PIRH
 import qualified ReplBase
 import           ReplBase ( Sym, Arch )
@@ -66,7 +69,6 @@ import           What4.Expr.Builder as W4B
 
 import Unsafe.Coerce(unsafeCoerce)
 
-import qualified Main as PM
 import qualified Output as PO
 
 maxSubEntries :: Int
@@ -236,11 +238,12 @@ run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
   let optsList = filter (\s -> s /= "") $ map (concat . map (\case '\\' -> []; x -> [x])) (splitOn "\\n" rawOpts)
-  case OA.execParserPure OA.defaultPrefs PM.cliOptions optsList of
+  case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
     OA.Success opts -> do
-      setJSONMode $ PM.jsonToplevel opts
+      setJSONMode $ CLI.jsonToplevel opts
       topTraceTree <- someTraceTree
-      tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
+      let cfg = CLI.mkRunConfig topTraceTree PAL.archLoader opts
+      tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \case
         Left err -> do
           killWaitThread
           let msg = show err
@@ -252,7 +255,7 @@ run rawOpts = do
               exitFailure
           IO.writeIORef finalResult (Just (Left msg))
         Right a -> IO.writeIORef finalResult (Just (Right a))
-      IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (PM.jsonToplevel opts)))
+      IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (CLI.jsonToplevel opts)))
       -- give some time for the verifier to start
       IO.threadDelay 100000
       wait_initial
