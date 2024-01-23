@@ -64,7 +64,7 @@ import qualified ReplHelper as PIRH
 import qualified ReplBase
 import           ReplBase ( Sym, Arch )
 
-import           Pate.TraceTree
+import           Pate.TraceTree hiding (asChoice)
 import           What4.Expr.Builder as W4B
 
 import Unsafe.Coerce(unsafeCoerce)

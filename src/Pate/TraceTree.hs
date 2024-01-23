@@ -103,6 +103,11 @@ module Pate.TraceTree (
   , SomeChoice(..)
   , LazyIOAction(..)
   , nodeToJSON
+  , resolveQuery
+  , NodeQuery(..)
+  , NodeIdentQuery(..)
+  , SomeTraceNode(..)
+  , asChoice
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -115,6 +120,7 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
+import           Data.List ((!!), find)
 import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
@@ -201,21 +207,44 @@ instance IsString TraceTag where
 
 -- | Allowing for lazy evaluation of trace trees
 data IOList' a = IOList' { ioList :: [a], ioListStatus :: NodeStatus }
-newtype IOList a = IOList (IO.IORef (IOList' a))
+-- The Mvar is used to signal when updates are made, for clients to
+-- block on updates (rather than busy-waiting)
+data IOList a = IOList (IO.IORef (IOList' a)) (MVar ())
 
 evalIOList' :: IOList a -> IO (IOList' a)
-evalIOList' (IOList ref) = do
-  IO.liftIO $ IO.readIORef ref
+evalIOList' (IOList ref _) = IO.readIORef ref
 
 evalIOList :: IOList a -> IO [a]
 evalIOList l = ioList <$> evalIOList' l
 
+-- Keep re-running the inner computation until it gives a 'Just'
+-- result or the list is finalized.
+-- The list of 'a' given to the continuation is the full value of the
+-- IOList each time it is executed.
+-- The result is either the computer 'b' or the final contents of the list
+withIOList :: forall a b. IOList a -> ([a] -> IO (Maybe b)) -> IO (Either [a] b)
+withIOList (IOList ref mv) f = go
+  where
+    go :: IO (Either [a] b)
+    go = do
+      () <- takeMVar mv
+      IOList' l st <- IO.readIORef ref
+      f l >>= \case
+        -- make sure we wake up anyone else waiting for this signal
+        -- once we finish
+        Just b -> tryPutMVar mv () >> (return $ Right b)
+        Nothing | isFinished st -> tryPutMVar mv () >> (return $ Left l)
+        Nothing -> go
+
 addIOList :: a -> IOList a -> IO ()
-addIOList a (IOList ref) =
-  IO.modifyIORef ref (\(IOList' as st) -> (IOList' (a : as) st))
+addIOList a (IOList ref mv) = do
+  IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' (a : as) st,()))
+  void $ tryPutMVar mv ()
 
 modifyIOListStatus :: (NodeStatus -> NodeStatus) -> IOList a -> IO ()
-modifyIOListStatus f (IOList ref) = IO.modifyIORef ref (\(IOList' as st) -> IOList' as (f st))
+modifyIOListStatus f (IOList ref mv) = do
+  b <- IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' as (f st),isFinished st == (isFinished $ f st)))
+  unless b $ void $ tryPutMVar mv ()
 
 propagateIOListStatus :: NodeStatus -> IOList a -> IO ()
 propagateIOListStatus st l = modifyIOListStatus (propagateStatus st) l
@@ -235,10 +264,14 @@ getIOListStatus l = ioListStatus <$> evalIOList' l
 emptyIOList :: IO (IOList a)
 emptyIOList = do
   r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess False mempty))
-  return $ IOList r
+  mv <- newMVar ()
+  return $ IOList r mv
 
 resetIOList :: IOList a -> IO ()
-resetIOList (IOList r) = IO.modifyIORef' r (\_ -> IOList' [] (NodeStatus StatusSuccess False mempty))
+resetIOList (IOList r mv) = do
+  IO.atomicWriteIORef r (IOList' [] (NodeStatus StatusSuccess False mempty))
+  void $ tryPutMVar mv ()
+  return ()
 
 data NodeBuilder k nm where
   NodeBuilder ::
@@ -246,6 +279,67 @@ data NodeBuilder k nm where
     , startTreeFromNode :: IO (TraceTree k, TreeBuilder k)
     , addNodeValue :: TraceNodeLabel nm -> TraceNodeType k nm -> TraceTree k -> IO ()
     } -> NodeBuilder k nm
+
+data NodeIdentQuery = QueryInt Int | QueryString String
+  deriving (Eq, Ord)
+
+-- context plus final selection
+data NodeQuery = NodeQuery [NodeIdentQuery]
+  deriving (Eq, Ord)
+
+-- Attempt to resolve a query by traversing the TraceTree to the
+-- referenced node.
+-- This will block if the node traversal can't be completed due to
+-- pending results (i.e. the search ended on a node that has not been finalized),
+-- waiting until the node is completed before either terminating
+
+-- blocks until either the requested node becomes available, returning true
+-- returns false if the requested node could not be found, after the relevant
+-- subtree has finished
+
+data SomeTraceNode k = forall nm. IsTraceNode k nm => SomeTraceNode (SymbolRepr nm) (TraceNodeLabel nm) (TraceNodeType k nm)
+
+asChoice :: forall k. SomeTraceNode k -> Maybe (IO ())
+asChoice (SomeTraceNode nm _ v) |
+    Just Refl <- testEquality nm (knownSymbol @"choice")
+  , (SomeChoice c) :: SomeChoice k <- v
+  = Just $ choicePick c
+asChoice _ = Nothing
+
+resolveQuery :: forall k. NodeQuery -> TraceTree k -> IO (Maybe (SomeTraceNode k))
+resolveQuery (NodeQuery []) _ = return Nothing
+resolveQuery (NodeQuery (q_outer:qs_outer)) (TraceTree l_outer) = do
+  mb <- withIOList l_outer $ \nodes -> go q_outer (NodeQuery qs_outer) 0 nodes
+  case mb of
+    Right b -> return $ Just b
+    Left{} -> return Nothing
+  where
+    go_top :: forall nm. IsTraceNode k nm => TraceNodeLabel nm -> TraceNodeType k nm -> [NodeIdentQuery] -> TraceTree k -> IO (Maybe (SomeTraceNode k))
+    go_top lbl v [] _ = return $ Just (SomeTraceNode @k (knownSymbol @nm) lbl v)
+    go_top _lbl _v (q:qs) (TraceTree t) = do
+      mb <- withIOList t $ \nodes -> go q (NodeQuery qs) 0 nodes
+      case mb of
+        Right b -> return $ Just b
+        Left{} -> return Nothing
+
+    go :: NodeIdentQuery -> NodeQuery -> Int -> [Some (TraceTreeNode k)] -> IO (Maybe (SomeTraceNode k))
+    go _ _ _ [] = return Nothing
+    go q (NodeQuery qs) i (Some ((TraceTreeNode l) :: TraceTreeNode k nm):ls) = do
+      case getNodePrinter @k @nm [Simplified] of
+        Nothing -> go q (NodeQuery qs) i ls
+        Just pp -> do
+          mb <- withIOList l $ \elems -> case q of
+            QueryInt i' | (i' - i) >= length elems, ((v,lbl), t) <- elems !! (i' - i) -> return $ Just (v,lbl,t)
+            QueryString s
+              | Just ((v,lbl),t) <- find (\((v,lbl),_t) -> show (pp lbl v) == s) elems -> return $ Just (v,lbl,t)
+            _ -> return Nothing
+          case mb of
+            -- this TraceTreeNode doesn't contain the next subtree in the query,
+            -- so continue checking the other TraceTreeNodes
+            Left elems -> go q (NodeQuery qs) (length elems + i) ls
+            -- this TraceTreeNode contains the next subtree in the query, so we
+            -- recurse into it with the rest of the query
+            Right (v,lbl,t) -> go_top @nm lbl v qs t
 
 data InteractionMode = 
     Interactive (IO ChoiceIdent)
