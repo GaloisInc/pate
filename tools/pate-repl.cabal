@@ -9,7 +9,6 @@ library
                        ReplHelper,
                        ReplBase,
                        Main,
-                       JSONReport,
                        Output,
                        Pate.ArchLoader,
                        Pate.AArch32,

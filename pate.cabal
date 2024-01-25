@@ -156,6 +156,7 @@ library
                        Pate.Register.Traversal,
                        Pate.Solver,
                        Pate.SymbolTable,
+                       Pate.Script,
                        Pate.Timeout,
                        Pate.TraceTree,
                        Pate.ExprMappable,

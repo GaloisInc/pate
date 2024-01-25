@@ -108,6 +108,7 @@ module Pate.TraceTree (
   , NodeIdentQuery(..)
   , SomeTraceNode(..)
   , asChoice
+  , forkTraceTreeHook
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -142,6 +143,7 @@ import Control.Concurrent.MVar
 import qualified Data.Set as Set
 import Data.Set (Set)
 import GHC.IO (unsafePerformIO)
+import qualified Control.Concurrent as IO
 
 data TraceTag =
     Summary
@@ -281,11 +283,11 @@ data NodeBuilder k nm where
     } -> NodeBuilder k nm
 
 data NodeIdentQuery = QueryInt Int | QueryString String
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 -- context plus final selection
 data NodeQuery = NodeQuery [NodeIdentQuery]
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 -- Attempt to resolve a query by traversing the TraceTree to the
 -- referenced node.
@@ -330,8 +332,9 @@ resolveQuery (NodeQuery (q_outer:qs_outer)) (TraceTree l_outer) = do
         Just pp -> do
           mb <- withIOList l $ \elems -> case q of
             QueryInt i' | (i' - i) >= length elems, ((v,lbl), t) <- elems !! (i' - i) -> return $ Just (v,lbl,t)
+            -- prefer the last element when picking by name so we get the latest one
             QueryString s
-              | Just ((v,lbl),t) <- find (\((v,lbl),_t) -> show (pp lbl v) == s) elems -> return $ Just (v,lbl,t)
+              | Just ((v,lbl),t) <- find (\((v,lbl),_t) -> show (pp lbl v) == s) (reverse elems) -> return $ Just (v,lbl,t)
             _ -> return Nothing
           case mb of
             -- this TraceTreeNode doesn't contain the next subtree in the query,
@@ -601,7 +604,7 @@ getTreeStatus (TraceTree ls) = getIOListStatus ls
 
 
 data SomeTraceTree' (tp :: l -> Type) =
-    StartTree 
+    StartTree
   -- ^ a trace tree that we intend to build but hasn't been initialized yet
   | forall (k :: l). SomeTraceTree' (tp k) (TreeBuilder k) (TraceTree k)
 
@@ -610,14 +613,33 @@ data SomeTraceTree' (tp :: l -> Type) =
 -- We could make this fully polymorphic (i.e. make tp :: forall l. l -> Type), to
 -- account for cases where the kind of the type parameters to the tree isn't
 -- statically known, but this seem excessive for most use cases.
-data SomeTraceTree tp =
-    SomeTraceTree (IO.IORef (SomeTraceTree' tp))
+data SomeTraceTree (tp :: l -> Type) =
+    SomeTraceTree (IO.IORef (SomeTraceTree' tp)) (forall (k :: l). TraceTree k -> IO ())
+  -- a reference to the underlying tracetree, either pending to start or
+  -- the current state
+  -- also a hook that is executed once the trace tree is started (or restarted)
   | NoTreeBuild
+
+forkTraceTreeHook :: forall l (tp :: l -> Type). 
+  (forall (k :: l). TraceTree k -> IO ()) -> 
+  SomeTraceTree tp -> 
+  IO (SomeTraceTree tp)
+forkTraceTreeHook f NoTreeBuild = do
+  stt <- someTraceTree
+  forkTraceTreeHook f stt
+forkTraceTreeHook f (SomeTraceTree ref g) = do
+  (mv :: MVar (Some TraceTree)) <- newEmptyMVar
+  let go = do
+        Some t <- takeMVar mv
+        g t
+
+  _ <- IO.forkIO go
+  return $ SomeTraceTree ref (\t -> f t >> putMVar mv (Some t))
 
 someTraceTree :: forall tp. IO (SomeTraceTree tp)
 someTraceTree = do
   ref <- IO.newIORef StartTree
-  return $ SomeTraceTree ref
+  return $ SomeTraceTree ref (\_ -> return ())
 
 noTraceTree :: forall tp. SomeTraceTree tp
 noTraceTree = NoTreeBuild
@@ -648,7 +670,7 @@ viewSomeTraceTree ::
   (forall k. tp k -> TraceTree k -> IO a) ->
   IO a
 viewSomeTraceTree NoTreeBuild noTreeFn _ = noTreeFn
-viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
+viewSomeTraceTree (SomeTraceTree ref _) noTreeFn f = do
   t <- IO.readIORef ref
   case t of
     SomeTraceTree' validRepr _ (t' :: TraceTree k) -> f @k validRepr t'
@@ -969,14 +991,16 @@ instance MonadError e m => MonadError e (NoTreeBuilder k m) where
   catchError (NoTreeBuilder f) g = NoTreeBuilder $ catchError f (\e -> noTracing (g e))
 
 resetSomeTreeBuilder ::
-  forall k m tp.
+  forall m tp.
   IO.MonadIO m =>
   SomeTraceTree tp ->
   m ()
 resetSomeTreeBuilder NoTreeBuild = return ()
-resetSomeTreeBuilder (SomeTraceTree ref) = (IO.liftIO $ IO.readIORef ref) >>= \case
+resetSomeTreeBuilder (SomeTraceTree ref f) = (IO.liftIO $ IO.readIORef ref) >>= \case
   StartTree -> return ()
-  SomeTraceTree' _ _ (TraceTree l) -> liftIO $ resetIOList l
+  SomeTraceTree' _ _ tt@(TraceTree l) -> liftIO $ do
+    resetIOList l
+    f tt
 
 startSomeTreeBuilder ::
   forall k m tp.
@@ -985,10 +1009,11 @@ startSomeTreeBuilder ::
   SomeTraceTree tp ->
   m (TreeBuilder k)
 startSomeTreeBuilder _ NoTreeBuild = return noTreeBuilder
-startSomeTreeBuilder validRepr someTree@(SomeTraceTree ref) = (IO.liftIO $ IO.readIORef ref) >>= \case
+startSomeTreeBuilder validRepr someTree@(SomeTraceTree ref f) = (IO.liftIO $ IO.readIORef ref) >>= \case
   StartTree -> do
     (tree, builder) <- IO.liftIO $ startTree @k
     IO.liftIO $ IO.writeIORef ref (SomeTraceTree' validRepr builder tree)
+    IO.liftIO $ f tree
     return builder
   -- If a tree has already started we need to just throw it away and start again
   SomeTraceTree'{} -> do

@@ -280,6 +280,7 @@ data VerificationConfig validRepr =
     , cfgStackScopeAssume :: Bool
     -- ^ true if out-of-scope stack slots should always be considered equal once
     -- returning from a function (i.e. differences in these slots are implicitly ignored)
+    , cfgScriptPath :: Maybe FilePath
     }
 
 
@@ -303,4 +304,5 @@ defaultVerificationCfg =
                      , cfgTargetEquivRegs = []
                      , cfgRescopingFailureMode = ThrowOnEqRescopeFailure
                      , cfgStackScopeAssume = True
+                     , cfgScriptPath = Nothing
                      }
