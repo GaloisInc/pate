@@ -23,6 +23,7 @@ run: challenge10.patched.exe
 		-r AllowEqRescopeFailure \
 		-s transport_handler \
 		--save-macaw-cfgs CFGs \
+		--script challenge10.pate \
         ${EXTRA_FLAGS}
 
 run_json: EXTRA_FLAGS = --json-toplevel

@@ -56,7 +56,9 @@ import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, Symbo
 
 import qualified Pate.Arch as PA
 import qualified Pate.ArchLoader as PAL
+import qualified Pate.Config as PC
 import qualified Pate.Solver as PS
+import qualified Pate.Script as PSc
 import qualified Pate.Equivalence as PEq
 import qualified Pate.CLI as CLI
 import qualified Pate.Loader as PL
@@ -234,6 +236,7 @@ instance IsTraceNode k "toplevel" where
   prettyNode () () = "<Toplevel>"
   nodeTags = mkTags @k @"toplevel" [Simplified,Summary]
 
+
 run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
@@ -241,25 +244,35 @@ run rawOpts = do
   case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
     OA.Success opts -> do
       setJSONMode $ CLI.jsonToplevel opts
-      topTraceTree <- someTraceTree
-      let cfg = PL.setTraceTree topTraceTree (CLI.mkRunConfig PAL.archLoader opts)
-
-      tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \case
-        Left err -> do
-          killWaitThread
-          let msg = show err
-          case msg of
-            "thread killed" -> return ()
-            _ -> do
-              IO.writeIORef ref NoTreeLoaded
-              IO.hPutStrLn IO.stderr (show err)
-              exitFailure
-          IO.writeIORef finalResult (Just (Left msg))
-        Right a -> IO.writeIORef finalResult (Just (Right a))
-      IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (CLI.jsonToplevel opts)))
-      -- give some time for the verifier to start
-      IO.threadDelay 100000
-      wait_initial
+      topTraceTree' <- someTraceTree
+      let cfg' = CLI.mkRunConfig PAL.archLoader opts
+      cfgE <- case PC.cfgScriptPath (PL.verificationCfg cfg') of
+        Nothing -> return $ Right $ PL.setTraceTree topTraceTree' cfg'
+        Just fp -> PSc.readScript fp >>= \case
+          Left err -> return $ Left err
+          Right sc -> do
+            tt' <- forkTraceTreeHook (PSc.runScript sc) topTraceTree'
+            return $ Right $ PL.setTraceTree tt' cfg'
+      case cfgE of
+        Left err -> PO.printErrLn (PP.viaShow err)
+        Right cfg -> do
+          let topTraceTree = PC.cfgTraceTree (PL.verificationCfg cfg)
+          tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \case
+            Left err -> do
+              killWaitThread
+              let msg = show err
+              case msg of
+                "thread killed" -> return ()
+                _ -> do
+                  IO.writeIORef ref NoTreeLoaded
+                  IO.hPutStrLn IO.stderr (show err)
+                  exitFailure
+              IO.writeIORef finalResult (Just (Left msg))
+            Right a -> IO.writeIORef finalResult (Just (Right a))
+          IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (CLI.jsonToplevel opts)))
+          -- give some time for the verifier to start
+          IO.threadDelay 100000
+          wait_initial
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn

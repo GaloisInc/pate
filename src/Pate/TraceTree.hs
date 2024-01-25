@@ -108,6 +108,7 @@ module Pate.TraceTree (
   , NodeIdentQuery(..)
   , SomeTraceNode(..)
   , asChoice
+  , forkTraceTreeHook
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -120,7 +121,7 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
-import           Data.List ((!!), find)
+import           Data.List ((!!), find, isPrefixOf)
 import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
@@ -142,6 +143,9 @@ import Control.Concurrent.MVar
 import qualified Data.Set as Set
 import Data.Set (Set)
 import GHC.IO (unsafePerformIO)
+import qualified Control.Concurrent as IO
+import qualified System.IO as IO
+import Data.Maybe (catMaybes)
 
 data TraceTag =
     Summary
@@ -236,6 +240,12 @@ withIOList (IOList ref mv) f = go
         Nothing | isFinished st -> tryPutMVar mv () >> (return $ Left l)
         Nothing -> go
 
+mkStaticIOList :: [a] -> IO (IOList a)
+mkStaticIOList xs = do
+  ref <- IO.newIORef (IOList' xs (NodeStatus StatusSuccess True mempty))
+  mv <- newMVar ()
+  return $ IOList ref mv
+
 addIOList :: a -> IOList a -> IO ()
 addIOList a (IOList ref mv) = do
   IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' (a : as) st,()))
@@ -243,7 +253,7 @@ addIOList a (IOList ref mv) = do
 
 modifyIOListStatus :: (NodeStatus -> NodeStatus) -> IOList a -> IO ()
 modifyIOListStatus f (IOList ref mv) = do
-  b <- IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' as (f st),isFinished st == (isFinished $ f st)))
+  b <- IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' as (f st),isFinished st && (isFinished $ f st)))
   unless b $ void $ tryPutMVar mv ()
 
 propagateIOListStatus :: NodeStatus -> IOList a -> IO ()
@@ -280,12 +290,12 @@ data NodeBuilder k nm where
     , addNodeValue :: TraceNodeLabel nm -> TraceNodeType k nm -> TraceTree k -> IO ()
     } -> NodeBuilder k nm
 
-data NodeIdentQuery = QueryInt Int | QueryString String
-  deriving (Eq, Ord)
+data NodeIdentQuery = QueryInt Int | QueryString String | QueryAny
+  deriving (Eq, Ord, Show)
 
 -- context plus final selection
 data NodeQuery = NodeQuery [NodeIdentQuery]
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 -- Attempt to resolve a query by traversing the TraceTree to the
 -- referenced node.
@@ -299,49 +309,73 @@ data NodeQuery = NodeQuery [NodeIdentQuery]
 
 data SomeTraceNode k = forall nm. IsTraceNode k nm => SomeTraceNode (SymbolRepr nm) (TraceNodeLabel nm) (TraceNodeType k nm)
 
-asChoice :: forall k. SomeTraceNode k -> Maybe (IO ())
+instance Show (SomeTraceNode k) where
+  show (SomeTraceNode (nm :: SymbolRepr nm) lbl v) = show nm ++ ": " ++ show (prettyNode @_ @k @nm lbl v)
+
+asChoice :: forall k. SomeTraceNode k -> Maybe (SomeChoice k)
 asChoice (SomeTraceNode nm _ v) |
     Just Refl <- testEquality nm (knownSymbol @"choice")
-  , (SomeChoice c) :: SomeChoice k <- v
-  = Just $ choicePick c
+  = Just v
 asChoice _ = Nothing
 
-resolveQuery :: forall k. NodeQuery -> TraceTree k -> IO (Maybe (SomeTraceNode k))
-resolveQuery (NodeQuery []) _ = return Nothing
-resolveQuery (NodeQuery (q_outer:qs_outer)) (TraceTree l_outer) = do
-  mb <- withIOList l_outer $ \nodes -> go q_outer (NodeQuery qs_outer) 0 nodes
-  case mb of
-    Right b -> return $ Just b
-    Left{} -> return Nothing
+resolveQuery :: forall k b.
+ NodeQuery ->
+ TraceTree k ->
+ (SomeTraceNode k -> IO (Maybe b)) ->
+ IO (Maybe b)
+resolveQuery (NodeQuery []) _ _ = return Nothing
+resolveQuery (NodeQuery (q_outer:qs_outer)) t_outer f = go q_outer (NodeQuery qs_outer) t_outer
   where
-    go_top :: forall nm. IsTraceNode k nm => TraceNodeLabel nm -> TraceNodeType k nm -> [NodeIdentQuery] -> TraceTree k -> IO (Maybe (SomeTraceNode k))
-    go_top lbl v [] _ = return $ Just (SomeTraceNode @k (knownSymbol @nm) lbl v)
-    go_top _lbl _v (q:qs) (TraceTree t) = do
-      mb <- withIOList t $ \nodes -> go q (NodeQuery qs) 0 nodes
-      case mb of
-        Right b -> return $ Just b
+
+    go :: NodeIdentQuery -> NodeQuery -> TraceTree k -> IO (Maybe b)
+    go q (NodeQuery qs) (TraceTree t) = do
+      -- IO.putStrLn $ "go 1:" ++ show q
+      result <- withIOList t $ \nodes -> do
+        -- IO.putStrLn "go 2"
+        matches <- get_matches q nodes
+        case (matches,q) of
+          ([],QueryString{}) -> do
+            -- IO.putStrLn "No matches"
+            all_contents <- get_matches QueryAny nodes
+            check_matches (NodeQuery (q:qs)) all_contents
+          _ -> do
+            -- IO.putStrLn $ "Got matches: " ++ show q ++ "\n" ++ show (map fst matches)
+            check_matches (NodeQuery qs) matches
+      case result of
         Left{} -> return Nothing
+        Right a -> return $ Just a
+    check_matches :: NodeQuery -> [(SomeTraceNode k, TraceTree k)] -> IO (Maybe b)
+    check_matches (NodeQuery []) ((x,_):xs) = f x >>= \case
+      Just result -> return $ Just result
+      Nothing -> check_matches (NodeQuery []) xs
+    check_matches _ [] = return Nothing
+    check_matches (NodeQuery (q:qs)) ((_,t):xs) = go q (NodeQuery qs) t >>= \case
+      Just result -> return $ Just result
+      Nothing -> check_matches (NodeQuery (q:qs)) xs
 
-    go :: NodeIdentQuery -> NodeQuery -> Int -> [Some (TraceTreeNode k)] -> IO (Maybe (SomeTraceNode k))
-    go _ _ _ [] = return Nothing
-    go q (NodeQuery qs) i (Some ((TraceTreeNode l) :: TraceTreeNode k nm):ls) = do
-      case getNodePrinter @k @nm [Simplified] of
-        Nothing -> go q (NodeQuery qs) i ls
-        Just pp -> do
-          mb <- withIOList l $ \elems -> case q of
-            QueryInt i' | (i' - i) >= length elems, ((v,lbl), t) <- elems !! (i' - i) -> return $ Just (v,lbl,t)
-            QueryString s
-              | Just ((v,lbl),t) <- find (\((v,lbl),_t) -> show (pp lbl v) == s) elems -> return $ Just (v,lbl,t)
-            _ -> return Nothing
-          case mb of
-            -- this TraceTreeNode doesn't contain the next subtree in the query,
-            -- so continue checking the other TraceTreeNodes
-            Left elems -> go q (NodeQuery qs) (length elems + i) ls
-            -- this TraceTreeNode contains the next subtree in the query, so we
-            -- recurse into it with the rest of the query
-            Right (v,lbl,t) -> go_top @nm lbl v qs t
+    get_matches :: NodeIdentQuery -> [Some (TraceTreeNode k)] -> IO [(SomeTraceNode k, TraceTree k)]
+    get_matches q  nodes = do
+      nodes' <- fmap concat $ forM nodes $ \(Some ((TraceTreeNode l) :: TraceTreeNode k nm)) ->
+        case getNodePrinter @k @nm [Simplified] of
+          Nothing -> return []
+          Just _pp -> map (\((v,lbl),t) -> (SomeTraceNode @k (knownSymbol @nm) lbl v,t)) <$> evalIOList l
+      -- IO.putStrLn $ "Check node contents: " ++ show (map fst nodes')
+      fmap catMaybes $ forM (zip [0..] nodes') $ \(i,(SomeTraceNode (nm :: SymbolRepr nm) lbl v, t)) -> do
+        Just pp <- return $ getNodePrinter @k @nm [Simplified]
+        let ret = return $ Just $ (SomeTraceNode nm lbl v,t)
+        case q of
+          QueryInt i' | i == i' -> ret
+          QueryString s -> do
+            -- IO.putStrLn $ "Checking " ++ s ++ " vs. " ++ show (pp lbl v)
+            case isPrefixOf s (show (pp lbl v)) of
+              True -> do
+                -- IO.putStrLn $ "success! " ++ show s
+                ret
+              False -> return Nothing
+          QueryAny -> ret
+          _ -> return Nothing
 
-data InteractionMode = 
+data InteractionMode =
     Interactive (IO ChoiceIdent)
   | DefaultChoice
 
@@ -400,10 +434,8 @@ singleNode ::
   TraceNodeType k nm ->
   IO (TraceTreeNode k nm)
 singleNode lbl v = do
-  l <- emptyIOList
-  t <- emptyIOList
-  modifyIOListStatus (\_ -> NodeStatus StatusSuccess True mempty) t
-  addIOList ((v, lbl), TraceTree t) l
+  t <- mkStaticIOList []
+  l <- mkStaticIOList [((v,lbl), TraceTree t)]
   return $ TraceTreeNode l
 
 -- | A labeled node in a 'TraceTree' that contains a list of sub-trees
@@ -608,7 +640,7 @@ getTreeStatus (TraceTree ls) = getIOListStatus ls
 
 
 data SomeTraceTree' (tp :: l -> Type) =
-    StartTree 
+    StartTree
   -- ^ a trace tree that we intend to build but hasn't been initialized yet
   | forall (k :: l). SomeTraceTree' (tp k) (TreeBuilder k) (TraceTree k)
 
@@ -617,14 +649,33 @@ data SomeTraceTree' (tp :: l -> Type) =
 -- We could make this fully polymorphic (i.e. make tp :: forall l. l -> Type), to
 -- account for cases where the kind of the type parameters to the tree isn't
 -- statically known, but this seem excessive for most use cases.
-data SomeTraceTree tp =
-    SomeTraceTree (IO.IORef (SomeTraceTree' tp))
+data SomeTraceTree (tp :: l -> Type) =
+    SomeTraceTree (IO.IORef (SomeTraceTree' tp)) (forall (k :: l). TraceTree k -> IO ())
+  -- a reference to the underlying tracetree, either pending to start or
+  -- the current state
+  -- also a hook that is executed once the trace tree is started (or restarted)
   | NoTreeBuild
+
+forkTraceTreeHook :: forall l (tp :: l -> Type).
+  (forall (k :: l). TraceTree k -> IO ()) ->
+  SomeTraceTree tp ->
+  IO (SomeTraceTree tp)
+forkTraceTreeHook f NoTreeBuild = do
+  stt <- someTraceTree
+  forkTraceTreeHook f stt
+forkTraceTreeHook f (SomeTraceTree ref g) = do
+  (mv :: MVar (Some TraceTree)) <- newEmptyMVar
+  let go = do
+        Some t <- takeMVar mv
+        f t
+
+  _ <- IO.forkIO go
+  return $ SomeTraceTree ref (\t -> g t >> putMVar mv (Some t))
 
 someTraceTree :: forall tp. IO (SomeTraceTree tp)
 someTraceTree = do
   ref <- IO.newIORef StartTree
-  return $ SomeTraceTree ref
+  return $ SomeTraceTree ref (\_ -> return ())
 
 noTraceTree :: forall tp. SomeTraceTree tp
 noTraceTree = NoTreeBuild
@@ -632,18 +683,12 @@ noTraceTree = NoTreeBuild
 noTreeBuilder :: TreeBuilder k
 noTreeBuilder = TreeBuilder (\_ -> return ()) noNodeBuilder (\_ -> return ()) DefaultChoice
 
-emptyTraceTree :: IO (TraceTree k)
-emptyTraceTree = do
-  l <- emptyIOList
-  return $ TraceTree l
-
-
 noNodeBuilder :: forall k nm. IsTraceNode k nm => IO (TraceTreeNode k nm, NodeBuilder k nm)
 noNodeBuilder = do
   -- todo: add constructor for IOList that is always empty?
-  l <- emptyIOList
+  l <- mkStaticIOList []
   let noStart = do
-        t <- emptyTraceTree
+        t <- TraceTree <$> mkStaticIOList []
         return (t, noTreeBuilder)
   let builder = NodeBuilder (\_ -> return ()) noStart (\_ _ _ -> return ())
   return $ (TraceTreeNode l, builder)
@@ -655,7 +700,7 @@ viewSomeTraceTree ::
   (forall k. tp k -> TraceTree k -> IO a) ->
   IO a
 viewSomeTraceTree NoTreeBuild noTreeFn _ = noTreeFn
-viewSomeTraceTree (SomeTraceTree ref) noTreeFn f = do
+viewSomeTraceTree (SomeTraceTree ref _) noTreeFn f = do
   t <- IO.readIORef ref
   case t of
     SomeTraceTree' validRepr _ (t' :: TraceTree k) -> f @k validRepr t'
@@ -973,14 +1018,17 @@ instance MonadError e m => MonadError e (NoTreeBuilder k m) where
   catchError (NoTreeBuilder f) g = NoTreeBuilder $ catchError f (\e -> noTracing (g e))
 
 resetSomeTreeBuilder ::
-  forall k m tp.
+  forall m tp.
   IO.MonadIO m =>
   SomeTraceTree tp ->
   m ()
 resetSomeTreeBuilder NoTreeBuild = return ()
-resetSomeTreeBuilder (SomeTraceTree ref) = (IO.liftIO $ IO.readIORef ref) >>= \case
+resetSomeTreeBuilder (SomeTraceTree ref f) = (IO.liftIO $ IO.readIORef ref) >>= \case
   StartTree -> return ()
-  SomeTraceTree' _ _ (TraceTree l) -> liftIO $ resetIOList l
+  SomeTraceTree' _ _ tt@(TraceTree l) -> liftIO $ do
+    resetIOList l
+    liftIO $ fail "Unexpected reset"
+    --f tt
 
 startSomeTreeBuilder ::
   forall k m tp.
@@ -989,10 +1037,13 @@ startSomeTreeBuilder ::
   SomeTraceTree tp ->
   m (TreeBuilder k)
 startSomeTreeBuilder _ NoTreeBuild = return noTreeBuilder
-startSomeTreeBuilder validRepr someTree@(SomeTraceTree ref) = (IO.liftIO $ IO.readIORef ref) >>= \case
+startSomeTreeBuilder validRepr someTree@(SomeTraceTree ref f) = (IO.liftIO $ IO.readIORef ref) >>= \case
   StartTree -> do
     (tree, builder) <- IO.liftIO $ startTree @k
     IO.liftIO $ IO.writeIORef ref (SomeTraceTree' validRepr builder tree)
+    IO.liftIO $ IO.putStrLn "Starting tree hook.."
+    IO.liftIO $ f tree
+    IO.liftIO $ IO.putStrLn "Started!"
     return builder
   -- If a tree has already started we need to just throw it away and start again
   SomeTraceTree'{} -> do
