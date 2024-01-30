@@ -27,67 +27,19 @@ RUN find . -name .git -exec rm {} \;
 RUN find . -name .gitmodules -exec rm {} \;
 RUN find . -name .gitignore -exec rm {} \;
 
-FROM --platform=linux/amd64 ubuntu:20.04 as solver-base
-
-ENV TZ=America/Los_Angeles
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-RUN apt update && \
-    apt install -y software-properties-common curl zlibc zlib1g zlib1g-dev git libgmp3-dev build-essential # Version 1
-
-RUN apt install locales
-RUN locale-gen en_US.UTF-8
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
-
-######################################################################
-# Sorry, Docker uses Debian, but SRI builds for Ubuntu, so these won't work:
-# RUN add-apt-repository ppa:sri-csl/formal-methods
-# RUN apt-get update
-# RUN apt-get install -y yices2
-
-RUN apt install autoconf gperf --yes
-RUN mkdir -p /home/yices2/src; \
-    git clone https://github.com/SRI-CSL/yices2.git /home/yices2/src && \
-    (cd /home/yices2/src; \
-     git checkout Yices-2.6.1 && \
-     autoconf && \
-     ./configure && \
-     make -j && \
-     make install)
-
-######################################################################
-# Similarly, this won't work for Z3:
-# RUN apt-get install -y z3
-
-RUN apt install -y cmake python3-distutils python-setuptools
-RUN mkdir -p /home/z3/src; \
-    git clone https://github.com/Z3Prover/z3.git /home/z3/src && \
-    cd /home/z3/src && \
-    git checkout z3-4.8.3 && \
-    mkdir -p /home/z3/bld && \
-    (cd /home/z3/bld; \
-     cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSE_OPENMP=ON /home/z3/src -DUSE_LIB_GMP=FALSE -DBUILD_LIBZ3_SHARED=OFF /home/z3/src && \
-     make && \
-     make install)
-
-RUN apt update && apt install -y antlr3 libantlr3c-dev libtool libtool-bin libboost-dev
-RUN mkdir -p /home/cvc4/src; \
-    git clone https://github.com/CVC4/CVC4.git /home/cvc4/src && \
-    cd /home/cvc4/src && \
-    git checkout 1.6 && \
-    (./autogen.sh && \
-    ./configure && \
-    make && \
-    make install)
 
 ## Build project in image
 FROM --platform=linux/amd64 ubuntu:20.04
-ENV GHC_VERSION=9.2.8
+ENV GHC_VERSION=9.6.2
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 RUN apt update && \
     apt install -y software-properties-common curl zlibc zlib1g zlib1g-dev git libgmp3-dev build-essential # Version 1
+
+RUN add-apt-repository -y ppa:sri-csl/formal-methods
+RUN apt-get update
+RUN apt-get install -y yices2
+
 RUN curl https://downloads.haskell.org/~ghcup/x86_64-linux-ghcup -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
 RUN mkdir -p /root/.ghcup && ghcup install-cabal
 RUN ghcup install ghc ${GHC_VERSION} && ghcup set ghc ${GHC_VERSION} 
@@ -137,10 +89,6 @@ RUN cabal v2-build asl-parser
 # dismantle
 COPY --from=gitbase /home/src/submodules/dismantle /home/src/submodules/dismantle
 RUN cabal v2-build dismantle-tablegen dismantle-arm-xml dismantle-ppc
-
-# what4-serialize
-COPY --from=gitbase /home/src/submodules/what4-serialize /home/src/submodules/what4-serialize
-RUN cabal v2-build what4-serialize
 
 # asl-translator
 COPY --from=gitbase /home/src/submodules/asl-translator /home/src/submodules/asl-translator
