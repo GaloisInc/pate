@@ -32,8 +32,10 @@ jobs:
 
       - name: Test Docker Image
         run: |
+          docker run --rm -it pate --help
           docker run --rm -itd --entrypoint bash --name pate -v `pwd`/tests/aarch32:/tests pate
-          (echo "cabal run pate-test-aarch32 -- -p args-equal") | script -q /dev/null docker attach pate
+          (echo "bash -c 'cabal run pate-test-aarch32 -- -p args-equal'") | script -q /dev/null docker attach pate > out.log
+          grep -e "All .* tests passed" out.log || exit 1
 
   build:
     runs-on: ${{ matrix.os }}
