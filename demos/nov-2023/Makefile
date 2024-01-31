@@ -48,7 +48,6 @@ target4-self: target4.original.exe target4.csv
 target4: target4.original.exe target4.patched.exe target4.csv
 	$(PATE) \
 	  --ignore-segments 1 \
-
 	  --read-only-segments 3 \
 	  -o target4.original.exe \
 		-p target4.patched.exe \
