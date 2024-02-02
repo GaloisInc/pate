@@ -10,13 +10,13 @@ ifeq (,$(wildcard ${CHALLENGE_10_BIN}))
 
 else
 EXTRA_TARGETS=challenge10.test
-challenge10.original.exe: ${CHALLENGE_10_BIN}
+scripted/challenge10.original.exe: ${CHALLENGE_10_BIN}
 	cp ${CHALLENGE_10_BIN} $@
 
-challenge10.patched.exe: challenge10.original.exe ${CHALLENGE_10_PATCH}
-	bspatch challenge10.original.exe challenge10.patched.exe ${CHALLENGE_10_PATCH}
+scripted/challenge10.patched.exe: scripted/challenge10.original.exe ${CHALLENGE_10_PATCH}
+	bspatch scripted/challenge10.original.exe scripted/challenge10.patched.exe ${CHALLENGE_10_PATCH}
 
-challenge10.test: challenge10.original.exe challenge10.patched.exe
+challenge10.test: scripted/challenge10.original.exe scripted/challenge10.patched.exe
 endif
 
 

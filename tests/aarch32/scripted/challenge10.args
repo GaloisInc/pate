@@ -1,0 +1,11 @@
+-o challenge10.original.exe
+-p challenge10.patched.exe
+-b challenge10.toml
+--original-bsi-hints challenge10.json
+--patched-bsi-hints challenge10.json
+--original-csv-function-hints challenge10.csv
+--patched-csv-function-hints challenge10.csv
+-e ContinueAfterRecoverableFailures
+-r AllowEqRescopeFailure
+-s transport_handler
+--script challenge10.pate

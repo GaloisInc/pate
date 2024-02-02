@@ -1,0 +1,37 @@
+Choose Entry Point
+    > Function Entry "transport_handler" (segment1+0x400c)
+
+segment1+0x4114 [ via: "transport_handler" (segment1+0x400c) ]
+    ...
+    Call to: "puts" (segment1+0x33ac) Returns to: "transport_handler" (segment1+0x41b8) (original) vs. Call to: segment1+0x3dd24 Returns to: "transport_handler" (segment1+0x3dd44) (patched)
+        ...
+            ...
+            > Choose synchronization points
+
+            Choose a synchronization point:
+                > segment1+0x3dd44 (patched)
+                > segment1+0x4128 (original)
+
+segment1+0x4128 (original) vs. segment1+0x3dd44 (patched) [ via: "transport_handler" (segment1+0x400c) ]
+    ...
+        Call to: "puts" (segment1+0x33ac) Returns to: "transport_handler" (segment1+0x41b8) (original) vs. Jump to: "transport_handler" (segment1+0x412a) (patched)
+            ...
+            ...
+            > Remove divergence in equivalence condition
+        Branch to: "transport_handler" (segment1+0x412a) (original) vs. Call to: "puts" (segment1+0x33ac) Returns to: "transport_handler" (segment1+0x41b8) (patched)
+            ...
+            ...
+            > Remove divergence in equivalence condition
+
+segment1+0x412a [ via: "transport_handler" (segment1+0x400c) ]
+    Modify Proof Node
+    Add Assertion
+        > 0: Assert condition
+
+segment1+0x412a [ via: "transport_handler" (segment1+0x400c) ]
+    Include Location:
+        > Include All Registers
+
+Verification Finished
+Continue verification?
+    > Finish and view final result
