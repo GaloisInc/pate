@@ -245,14 +245,7 @@ run rawOpts = do
     OA.Success opts -> do
       setJSONMode $ CLI.jsonToplevel opts
       topTraceTree' <- someTraceTree
-      let cfg' = CLI.mkRunConfig PAL.archLoader opts
-      cfgE <- case PC.cfgScriptPath (PL.verificationCfg cfg') of
-        Nothing -> return $ Right $ PL.setTraceTree topTraceTree' cfg'
-        Just fp -> PSc.readScript fp >>= \case
-          Left err -> return $ Left err
-          Right sc -> do
-            tt' <- forkTraceTreeHook (PSc.runScript sc) topTraceTree'
-            return $ Right $ PL.setTraceTree tt' cfg'
+      cfgE <- CLI.mkRunConfig PAL.archLoader opts (Just topTraceTree')
       case cfgE of
         Left err -> PO.printErrLn (PP.viaShow err)
         Right cfg -> do

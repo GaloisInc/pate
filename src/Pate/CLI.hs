@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.CLI
     ( CLIOptions(..)
@@ -37,17 +38,17 @@ import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
+import qualified Pate.Script as PSc
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
 import qualified Pate.JSONReport as JR
--- import qualified Pate.Interactive as I
--- import qualified Pate.Interactive.Port as PIP
--- import qualified Pate.Interactive.State as IS
+import           Pate.TraceTree
+import Data.Maybe (fromMaybe)
 
-mkRunConfig :: PA.ArchLoader PEE.LoadError -> CLIOptions -> PL.RunConfig
-mkRunConfig archLoader opts = let
+mkRunConfig :: PA.ArchLoader PEE.LoadError -> CLIOptions -> Maybe (SomeTraceTree PA.ValidRepr) -> IO (Either String PL.RunConfig)
+mkRunConfig archLoader opts mtt = let
     origPaths = PLE.LoadPaths
       { PLE.binPath = originalBinary opts
       , PLE.anvillHintsPaths = originalAnvillHints opts
@@ -105,7 +106,14 @@ mkRunConfig archLoader opts = let
         , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig { PLE.ignoreSegments = ignoreSegments opts }
         }
 
-  in cfg
+  in case PC.cfgScriptPath (PL.verificationCfg cfg) of
+        Just fp -> PSc.readScript fp >>= \case
+          Left err -> return $ Left (show err)
+          Right scr -> do
+            let tt = fromMaybe noTraceTree mtt
+            tt' <- PSc.attachToTraceTree scr tt
+            return $ Right $ PL.setTraceTree tt' cfg
+        Nothing -> return $ Right $ PL.setTraceTree (fromMaybe noTraceTree mtt) cfg
 
 data CLIOptions = CLIOptions
   { originalBinary :: FilePath
