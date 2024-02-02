@@ -109,6 +109,8 @@ module Pate.TraceTree (
   , SomeTraceNode(..)
   , asChoice
   , forkTraceTreeHook
+  , NodeFinalAction(..)
+  , QueryResult(..)
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -146,6 +148,7 @@ import GHC.IO (unsafePerformIO)
 import qualified Control.Concurrent as IO
 import qualified System.IO as IO
 import Data.Maybe (catMaybes)
+import Control.Concurrent (threadDelay)
 
 data TraceTag =
     Summary
@@ -238,7 +241,7 @@ withIOList (IOList ref mv) f = go
         -- once we finish
         Just b -> tryPutMVar mv () >> (return $ Right b)
         Nothing | isFinished st -> tryPutMVar mv () >> (return $ Left l)
-        Nothing -> go
+        Nothing -> threadDelay 1000000 >> go
 
 mkStaticIOList :: [a] -> IO (IOList a)
 mkStaticIOList xs = do
@@ -290,12 +293,26 @@ data NodeBuilder k nm where
     , addNodeValue :: TraceNodeLabel nm -> TraceNodeType k nm -> TraceTree k -> IO ()
     } -> NodeBuilder k nm
 
-data NodeIdentQuery = QueryInt Int | QueryString String | QueryAny
-  deriving (Eq, Ord, Show)
+data NodeIdentQuery = QueryInt Int | QueryString String | QueryStringInt Int String | QueryAny
+  deriving (Eq, Ord)
+
+instance Show NodeIdentQuery where
+  show = \case
+    QueryInt i -> show i ++ ":"
+    QueryString s -> "\"" ++ s ++ "\""
+    QueryStringInt i s -> show i ++ ": " ++ "\"" ++ s ++ "\""
+    QueryAny -> "..."
+
+data NodeFinalAction = NodeFinalAction
+  {
+    finalAct :: forall l (k :: l). SomeTraceNode k -> IO Bool
+  }
 
 -- context plus final selection
-data NodeQuery = NodeQuery [NodeIdentQuery]
-  deriving (Eq, Ord, Show)
+data NodeQuery = NodeQuery [NodeIdentQuery] NodeFinalAction
+
+instance Show NodeQuery where
+  show (NodeQuery qs _) = show qs
 
 -- Attempt to resolve a query by traversing the TraceTree to the
 -- referenced node.
@@ -318,60 +335,52 @@ asChoice (SomeTraceNode nm _ v) |
   = Just v
 asChoice _ = Nothing
 
-resolveQuery :: forall k b.
+data QueryResult k = QueryResult [NodeIdentQuery] (SomeTraceNode k)
+
+resolveQuery :: forall k.
  NodeQuery ->
  TraceTree k ->
- (SomeTraceNode k -> IO (Maybe b)) ->
- IO (Maybe b)
-resolveQuery (NodeQuery []) _ _ = return Nothing
-resolveQuery (NodeQuery (q_outer:qs_outer)) t_outer f = go q_outer (NodeQuery qs_outer) t_outer
+ IO (Maybe (QueryResult k))
+resolveQuery (NodeQuery [] _) _ = return Nothing
+resolveQuery (NodeQuery (q_outer:qs_outer) fin_outer) t_outer =
+  go [] q_outer (NodeQuery qs_outer fin_outer) t_outer
   where
 
-    go :: NodeIdentQuery -> NodeQuery -> TraceTree k -> IO (Maybe b)
-    go q (NodeQuery qs) (TraceTree t) = do
+    go :: [NodeIdentQuery]-> NodeIdentQuery -> NodeQuery -> TraceTree k -> IO (Maybe (QueryResult k))
+    go acc q (NodeQuery qs fin) (TraceTree t) = do
       -- IO.putStrLn $ "go 1:" ++ show q
       result <- withIOList t $ \nodes -> do
         -- IO.putStrLn "go 2"
         matches <- get_matches q nodes
-        case (matches,q) of
-          ([],QueryString{}) -> do
-            -- IO.putStrLn "No matches"
-            all_contents <- get_matches QueryAny nodes
-            check_matches (NodeQuery (q:qs)) all_contents
-          _ -> do
-            -- IO.putStrLn $ "Got matches: " ++ show q ++ "\n" ++ show (map fst matches)
-            check_matches (NodeQuery qs) matches
+        check_matches acc (NodeQuery qs fin) matches
       case result of
         Left{} -> return Nothing
         Right a -> return $ Just a
-    check_matches :: NodeQuery -> [(SomeTraceNode k, TraceTree k)] -> IO (Maybe b)
-    check_matches (NodeQuery []) ((x,_):xs) = f x >>= \case
-      Just result -> return $ Just result
-      Nothing -> check_matches (NodeQuery []) xs
-    check_matches _ [] = return Nothing
-    check_matches (NodeQuery (q:qs)) ((_,t):xs) = go q (NodeQuery qs) t >>= \case
-      Just result -> return $ Just result
-      Nothing -> check_matches (NodeQuery (q:qs)) xs
 
-    get_matches :: NodeIdentQuery -> [Some (TraceTreeNode k)] -> IO [(SomeTraceNode k, TraceTree k)]
+    check_matches :: [NodeIdentQuery] -> NodeQuery -> [(NodeIdentQuery, SomeTraceNode k, TraceTree k)] -> IO (Maybe (QueryResult k))
+    check_matches acc (NodeQuery [] fin) ((q, x,_):xs) = finalAct fin x >>= \case
+      True -> return $ Just (QueryResult (reverse (q:acc)) x)
+      False -> check_matches acc (NodeQuery [] fin) xs
+    check_matches _ _ [] = return Nothing
+    check_matches acc (NodeQuery (q:qs) fin) ((matched_q, _,t):xs) = go (matched_q:acc) q (NodeQuery qs fin) t >>= \case
+      Just result -> return $ Just result
+      Nothing -> check_matches acc (NodeQuery (q:qs) fin) xs
+
+    get_matches :: NodeIdentQuery -> [Some (TraceTreeNode k)] -> IO [(NodeIdentQuery, SomeTraceNode k, TraceTree k)]
     get_matches q  nodes = do
       nodes' <- fmap concat $ forM nodes $ \(Some ((TraceTreeNode l) :: TraceTreeNode k nm)) ->
         case getNodePrinter @k @nm [Simplified] of
           Nothing -> return []
           Just _pp -> map (\((v,lbl),t) -> (SomeTraceNode @k (knownSymbol @nm) lbl v,t)) <$> evalIOList l
-      -- IO.putStrLn $ "Check node contents: " ++ show (map fst nodes')
-      fmap catMaybes $ forM (zip [0..] nodes') $ \(i,(SomeTraceNode (nm :: SymbolRepr nm) lbl v, t)) -> do
+      -- NB: nodes are stored in the tree in reverse order (latest trace entry is the first element of the list),
+      -- we need to reverse it here so the indices match up
+      fmap catMaybes $ forM (zip [0..] (reverse nodes')) $ \(i,(SomeTraceNode (nm :: SymbolRepr nm) lbl v, t)) -> do
         Just pp <- return $ getNodePrinter @k @nm [Simplified]
-        let ret = return $ Just $ (SomeTraceNode nm lbl v,t)
+        let ret = return $ Just $ (QueryStringInt i (show (pp lbl v)), SomeTraceNode nm lbl v,t)
         case q of
           QueryInt i' | i == i' -> ret
-          QueryString s -> do
-            -- IO.putStrLn $ "Checking " ++ s ++ " vs. " ++ show (pp lbl v)
-            case isPrefixOf s (show (pp lbl v)) of
-              True -> do
-                -- IO.putStrLn $ "success! " ++ show s
-                ret
-              False -> return Nothing
+          QueryString s | isPrefixOf s (show (pp lbl v)) -> ret
+          QueryStringInt i' s | i == i', isPrefixOf s (show (pp lbl v)) -> ret
           QueryAny -> ret
           _ -> return Nothing
 
