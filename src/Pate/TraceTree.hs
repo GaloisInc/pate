@@ -130,6 +130,7 @@ import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT
 import           Control.Monad.Except
 import           Control.Monad.Catch
+import           Control.Monad (void, unless, forM) -- GHC 9.6
 import           Control.Applicative
 
 import qualified Prettyprinter as PP
@@ -376,13 +377,14 @@ resolveQuery (NodeQuery (q_outer:qs_outer) fin_outer) t_outer =
       -- we need to reverse it here so the indices match up
       fmap catMaybes $ forM (zip [0..] (reverse nodes')) $ \(i,(SomeTraceNode (nm :: SymbolRepr nm) lbl v, t)) -> do
         Just pp <- return $ getNodePrinter @k @nm [Simplified]
-        let ret = return $ Just $ (QueryStringInt i (show (pp lbl v)), SomeTraceNode nm lbl v,t)
-        case q of
-          QueryInt i' | i == i' -> ret
-          QueryString s | isPrefixOf s (show (pp lbl v)) -> ret
-          QueryStringInt i' s | i == i', isPrefixOf s (show (pp lbl v)) -> ret
-          QueryAny -> ret
-          _ -> return Nothing
+        let matched = case q of
+              QueryInt i' -> i == i'
+              QueryString s -> isPrefixOf s (show (pp lbl v))
+              QueryStringInt i' s -> i == i' && isPrefixOf s (show (pp lbl v))
+              QueryAny -> True
+        case matched of
+          True -> return $ Just $ (QueryStringInt i (show (pp lbl v)), SomeTraceNode nm lbl v,t)
+          False -> return Nothing
 
 data InteractionMode =
     Interactive (IO ChoiceIdent)
