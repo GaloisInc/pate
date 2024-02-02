@@ -55,15 +55,18 @@ runTests cfg = do
     glob = "tests" </> name </> "*.original.exe"
     globUnequal = "tests" </> name </> "unequal" </> "*.original.exe"
     globCondequal = "tests" </> name </> "conditional" </> "*.original.exe"
+    globScripted = "tests" </> name </> "scripted" </> "*.args"
 
   equivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching glob
   inequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globUnequal
   condequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globCondequal
+  scriptedFiles <- mapMaybe (stripExtension "args") <$> namesMatching globScripted
 
   T.defaultMain $ T.testGroup name $
     [ T.testGroup "equivalence" $ map (mkTest cfg) equivTestFiles
     , T.testGroup "inequivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldNotVerify fp]) inequivTestFiles
     , T.testGroup "conditional equivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) condequivTestFiles
+    , T.testGroup "scripted" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) scriptedFiles
     ]
 
 expectSelfEquivalenceFailure :: TestConfig -> FilePath -> Bool
@@ -145,8 +148,11 @@ doTest mwb cfg sv fp = do
       rawOpts <- readFile (fp <.> "args")
       let optsList = filter (\s -> s /= "") $ (concat ((map (splitOn " ") (splitOn "\n" rawOpts))))
       case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
-        OA.Success opts ->
-          return $ (("tests" </> testArchName cfg), CLI.mkRunConfig (testArchLoader cfg) opts)
+        OA.Success opts -> do
+          let dir = takeDirectory (fp <.> "args")
+          withCurrentDirectory dir $ CLI.mkRunConfig (testArchLoader cfg) opts Nothing >>= \case
+            Left err -> failTest err
+            Right rcfg -> return $ (dir, rcfg)
         OA.Failure failure -> do
           progn <- getProgName
           let (msg, _exit) = OA.renderFailure failure progn
