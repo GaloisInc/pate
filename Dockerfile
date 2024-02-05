@@ -23,7 +23,8 @@ RUN mv /home/src-git/.git/modules/tools/pate/static/* /home/src-git/.git/modules
 RUN git submodule update --init
 
 # delete all git files, since we don't want to copy them
-RUN find . -name .git -exec rm {} \;
+RUN find submodules -name .git -exec rm -rf {} \;
+RUN rm -r .git
 RUN find . -name .gitmodules -exec rm {} \;
 RUN find . -name .gitignore -exec rm {} \;
 
