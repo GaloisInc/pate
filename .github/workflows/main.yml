@@ -68,6 +68,7 @@ jobs:
         git submodule update --init
         cp cabal.project.dist cabal.project
 
+
     - name: Installing the freeze file
       run: mv cabal.GHC-${{ matrix.ghc }}.freeze cabal.project.freeze
 
@@ -98,11 +99,21 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y software-properties-common apt-transport-https ca-certificates wget
-        sudo apt install -y curl zlibc zlib1g zlib1g-dev git zip \
+        sudo apt install -y bsdiff curl zlibc zlib1g zlib1g-dev git zip \
           libgmp3-dev build-essential libtinfo-dev autoconf automake gperf cmake locales \
           python3-distutils python-setuptools antlr3 libantlr3c-dev libtool libtool-bin libboost-all-dev python3-pip libfftw3-dev
         sudo locale-gen en_US.UTF-8
         sudo pip3 install toml
+
+    - name: Checkout Challenge Problems
+      env:
+        GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        GITLAB_USER: ${{ env.GITLAB_USER }}
+      run: |
+        export CHALLENGE_DIR=${HOME}/programtargets
+        git clone --depth=1 https://${GITLAB_USER}:${GITLAB_TOKEN}@gitlab-ext.galois.com/pate/programtargets.git ${CHALLENGE_DIR}
+        cd tests
+        make extras
 
     - name: Build pate
       run: |
@@ -116,7 +127,6 @@ jobs:
         Z3_VERSION: "4.8.8"
         YICES_VERSION: "2.6.2"
         CVC4_VERSION: "4.1.8"
-
 
     - name: Test
       if: runner.os == 'Linux'

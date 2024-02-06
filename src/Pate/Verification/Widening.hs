@@ -351,10 +351,10 @@ addEqDomRefinementChoice ::
 addEqDomRefinementChoice condK nd gr0 = do
   addLazyAction refineActions nd gr0 ("Add " ++ conditionName condK) $ \choice -> do
     let msg = conditionAction condK
-    choice (msg ++ " condition") $ \(TupleF2 _ preD) gr1 -> do
+    choice (msg ++ " condition") $ \(TupleF2 _ preD) gr1 -> withTracing @"node" nd $ do
       locFilter <- refineEquivalenceDomain preD
       return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality locFilter) gr1
-    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> do
+    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> withTracing @"node" nd $ do
       locFilter <- refineEquivalenceDomain preD
       return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
     choice (msg ++ " that branch is infeasible") $ \_ gr1 ->

@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-module JSONReport (
+module Pate.JSONReport (
     ProofEventConsumer
   , SomeProofEvent(..)
   , consumeProofEvents

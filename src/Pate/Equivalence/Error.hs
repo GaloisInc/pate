@@ -55,6 +55,7 @@ import qualified Pate.Address as PA
 import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.SimState as PS
+import qualified Pate.Script as PSc
 import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
@@ -250,6 +251,7 @@ data LoadError where
   UnsupportedArchitecture :: DEE.ElfMachine -> LoadError
   InvalidArchOpts :: [String] -> LoadError
   BadPatchInfo :: FilePath -> PC.PatchDataParseError -> LoadError
+  BadScript :: FilePath -> PSc.ScriptParseError -> LoadError
   JSONParseError :: FilePath -> PHJ.JSONError -> LoadError
   CSVParseError :: FilePath -> PHC.CSVParseError -> LoadError
   DWARFError :: FilePath -> PHD.DWARFError -> LoadError

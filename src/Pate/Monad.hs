@@ -102,7 +102,6 @@ module Pate.Monad
   , subTree
   , fnTrace
   , getWrappedSolver
-  , catchInIO
   , joinPatchPred
   , module PME
   , atPriority, currentPriority, thisPriority)
@@ -116,10 +115,10 @@ import           Control.Monad (void)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
-import           Control.Exception hiding ( try, finally )
-import           Control.Monad.Catch hiding ( catch, catches, tryJust, Handler )
+import           Control.Exception hiding ( try, finally, catch, mask )
+import           Control.Monad.Catch hiding ( catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
-import           Control.Monad.Reader ( asks )
+import           Control.Monad.Reader ( asks, ask )
 import           Control.Monad.Except
 
 import           Data.Maybe ( fromMaybe )
@@ -318,17 +317,21 @@ emitEvent evt = do
   logAction <- CMR.asks envLogger
   IO.liftIO $ LJ.writeLog logAction (evt duration)
 
-newtype EquivM_ sym arch a = EquivM { unEQ :: (CMR.ReaderT (EquivEnv sym arch) (ExceptT PEE.EquivalenceError IO)) a }
+newtype EquivM_ sym arch a = EquivM { unEQ :: (CMR.ReaderT (EquivEnv sym arch) IO) a }
   deriving (Functor
            , Applicative
            , Monad
            , IO.MonadIO
            , CMR.MonadReader (EquivEnv sym arch)
            , MonadThrow
-           , MonadCatch
            , MonadMask
-           , MonadError PEE.EquivalenceError
+           , MonadCatch
            )
+
+-- Treat PEE.EquivalenceError specially, although it is just raised like any other exception
+instance MonadError PEE.EquivalenceError (EquivM_ sym arch) where
+  throwError e = throwM e
+  catchError f hdl = f `catch` (\(e :: PEE.EquivalenceError) -> hdl e)
 
 instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
   getTreeBuilder = CMR.asks envTreeBuilder
@@ -1128,7 +1131,7 @@ instance Par.IsFuture (EquivM_ sym arch) Par.Future where
   -- here we can implement scheduling of IOFutures, which can be tracked
   -- in the equivM state
   promise m = IO.withRunInIO $ \runInIO -> Par.promise (runInIO m)
-  joinFuture future = withValid $ catchInIO $ Par.joinFuture future
+  joinFuture future = withValid $ liftIO $ Par.joinFuture future
   forFuture future f = IO.withRunInIO $ \runInIO -> Par.forFuture future (runInIO . f)
 
 {-
@@ -1325,18 +1328,9 @@ fnTrace nm f = withTracing @"function_name" nm f
 instance forall sym arch. IO.MonadUnliftIO (EquivM_ sym arch) where
   withRunInIO f = withValid $ do
     env <- CMR.ask
-    catchInIO (f (\x -> runEquivM env x >>= \case
+    liftIO $ (f (\x -> runEquivM env x >>= \case
                      Left err -> throwIO err
                      Right r -> return r))
-
-catchInIO ::
-  forall sym arch a.
-  IO a ->
-  EquivM sym arch a
-catchInIO f =
-  (liftIO $ catch (Right <$> f) (\(e :: PEE.EquivalenceError) -> return $ Left e)) >>= \case
-    Left err -> throwError err
-    Right result -> return result
 
 runInIO1 ::
   IO.MonadUnliftIO m =>
@@ -1354,7 +1348,8 @@ runEquivM ::
   EquivEnv sym arch ->
   EquivM sym arch a ->
   IO (Either PEE.EquivalenceError a)
-runEquivM env f = withValidEnv env $ runExceptT $ (CMR.runReaderT (unEQ f) env)
+runEquivM env f = withValidEnv env $ do
+  (Right <$> CMR.runReaderT (unEQ f) env) `catch` (\(e :: PEE.EquivalenceError) -> return $ Left e)
 
 ----------------------------------------
 -- Errors

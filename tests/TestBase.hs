@@ -13,15 +13,18 @@ module TestBase
 import           System.Directory
 import           System.FilePath
 import           System.FilePath.Glob (namesMatching)
+import           System.Environment
 
 import qualified Data.IORef as IOR
 
 import           Data.Maybe
 import           Data.List ( intercalate )
+import           Data.List.Split (splitOn)
 import qualified Lumberjack as LJ
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import qualified Test.Tasty.ExpectedFailure as T
+import qualified Options.Applicative as OA
 
 import qualified Pate.Arch as PA
 import qualified Pate.Binary as PBi
@@ -32,6 +35,7 @@ import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.PatchPair as PPa
+import qualified Pate.CLI as CLI
 
 data TestConfig where
   TestConfig ::
@@ -51,15 +55,18 @@ runTests cfg = do
     glob = "tests" </> name </> "*.original.exe"
     globUnequal = "tests" </> name </> "unequal" </> "*.original.exe"
     globCondequal = "tests" </> name </> "conditional" </> "*.original.exe"
+    globScripted = "tests" </> name </> "scripted" </> "*.args"
 
   equivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching glob
   inequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globUnequal
   condequivTestFiles <- mapMaybe (stripExtension "original.exe") <$> namesMatching globCondequal
+  scriptedFiles <- mapMaybe (stripExtension "args") <$> namesMatching globScripted
 
   T.defaultMain $ T.testGroup name $
     [ T.testGroup "equivalence" $ map (mkTest cfg) equivTestFiles
     , T.testGroup "inequivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldNotVerify fp]) inequivTestFiles
     , T.testGroup "conditional equivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) condequivTestFiles
+    , T.testGroup "scripted" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) scriptedFiles
     ]
 
 expectSelfEquivalenceFailure :: TestConfig -> FilePath -> Bool
@@ -123,56 +130,74 @@ doTest ::
   IO ()
 doTest mwb cfg sv fp = do
   infoCfgExists <- doesFileExist (fp <.> "toml")
+  argFileExists <- doesFileExist (fp <.> "args")
+
   (logsRef :: IOR.IORef [String]) <- IOR.newIORef []
 
   let
     addLogMsg :: String -> IO ()
     addLogMsg msg = IOR.atomicModifyIORef' logsRef $ \logs -> (msg : logs, ())
 
-    failTest :: String -> IO ()
+    failTest :: forall a. String -> IO a
     failTest msg = do
       logs <- IOR.readIORef logsRef
       T.assertFailure (msg ++ "\n" ++ (intercalate "\n" (reverse logs)))
 
-    infoPath = if infoCfgExists then Just $ fp <.> "toml" else Nothing
-    rcfg = PL.RunConfig
-      { PL.patchInfoPath = infoPath
-      , PL.patchData = defaultPatchData cfg
-      , PL.origPaths = PLE.simplePaths (fp <.> "original" <.> "exe")
-      , PL.patchedPaths = PLE.simplePaths (fp <.> "patched" <.> "exe")
-      , PL.verificationCfg = 
-          PC.defaultVerificationCfg 
-            { PC.cfgFailureMode = PC.ThrowOnAnyFailure
-            , PC.cfgAddOrphanEdges = False
-            , PC.cfgCheckSimplifier = True
-            , PC.cfgIgnoreUnnamedFunctions = False
-            , PC.cfgIgnoreDivergedControlFlow = False
-            , PC.cfgStackScopeAssume = False
-            }
-      , PL.logger = \(PA.SomeValidArch{}) -> do
-          let
-            act = LJ.LogAction $ \e -> case e of
-              PE.Warning err -> do
-                addLogMsg $ "WARNING: " ++ show err
-              PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
-              PE.ProofTraceEvent _ addrPair msg _ -> do
-                let addr = case addrPair of
-                      PPa.PatchPairC oAddr pAddr | oAddr == pAddr -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
-                      _ -> show (PPa.some addrPair)
-                addLogMsg $ addr ++ ":" ++ show msg
-              PE.StrongestPostDesync pPair _ ->
-                addLogMsg $ "Desync at: " ++ show pPair
-              PE.StrongestPostObservable pPair _ ->
-                addLogMsg $ "Observable counterexample at: " ++ show pPair
-              PE.StrongestPostOverallResult status _ ->
-                addLogMsg $ "Overall Result:" ++ show status
-              _ -> return ()
-          return $ PL.Logger act []
-      , PL.archLoader = testArchLoader cfg
-      , PL.useDwarfHints = False
-      , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig
-      }
-  result <- case mwb of
+  (dir, rcfg) <- case argFileExists of
+    True -> do
+      rawOpts <- readFile (fp <.> "args")
+      let optsList = filter (\s -> s /= "") $ (concat ((map (splitOn " ") (splitOn "\n" rawOpts))))
+      case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
+        OA.Success opts -> do
+          let dir = takeDirectory (fp <.> "args")
+          withCurrentDirectory dir $ CLI.mkRunConfig (testArchLoader cfg) opts Nothing >>= \case
+            Left err -> failTest err
+            Right rcfg -> return $ (dir, rcfg)
+        OA.Failure failure -> do
+          progn <- getProgName
+          let (msg, _exit) = OA.renderFailure failure progn
+          failTest ("Input: \n" ++ (show optsList) ++ "\n" ++ msg)
+        _ -> failTest "unexpected parser result"
+    False -> let
+      infoPath = if infoCfgExists then Just $ fp <.> "toml" else Nothing
+      in return $ ("./", PL.RunConfig
+        { PL.patchInfoPath = infoPath
+        , PL.patchData = defaultPatchData cfg
+        , PL.origPaths = PLE.simplePaths (fp <.> "original" <.> "exe")
+        , PL.patchedPaths = PLE.simplePaths (fp <.> "patched" <.> "exe")
+        , PL.verificationCfg =
+            PC.defaultVerificationCfg
+              { PC.cfgFailureMode = PC.ThrowOnAnyFailure
+              , PC.cfgAddOrphanEdges = False
+              , PC.cfgCheckSimplifier = True
+              , PC.cfgIgnoreUnnamedFunctions = False
+              , PC.cfgIgnoreDivergedControlFlow = False
+              , PC.cfgStackScopeAssume = False
+              }
+        , PL.logger = \(PA.SomeValidArch{}) -> do
+            let
+              act = LJ.LogAction $ \e -> case e of
+                PE.Warning err -> do
+                  addLogMsg $ "WARNING: " ++ show err
+                PE.ErrorRaised err -> putStrLn $ "Error: " ++ show err
+                PE.ProofTraceEvent _ addrPair msg _ -> do
+                  let addr = case addrPair of
+                        PPa.PatchPairC oAddr pAddr | oAddr == pAddr -> "(" ++ show oAddr ++ "," ++ show pAddr ++ ")"
+                        _ -> show (PPa.some addrPair)
+                  addLogMsg $ addr ++ ":" ++ show msg
+                PE.StrongestPostDesync pPair _ ->
+                  addLogMsg $ "Desync at: " ++ show pPair
+                PE.StrongestPostObservable pPair _ ->
+                  addLogMsg $ "Observable counterexample at: " ++ show pPair
+                PE.StrongestPostOverallResult status _ ->
+                  addLogMsg $ "Overall Result:" ++ show status
+                _ -> return ()
+            return $ PL.Logger act []
+        , PL.archLoader = testArchLoader cfg
+        , PL.useDwarfHints = False
+        , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig
+        })
+  result <- withCurrentDirectory dir $ case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg
   case result of

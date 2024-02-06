@@ -55,18 +55,22 @@ import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, Symbo
 
 
 import qualified Pate.Arch as PA
+import qualified Pate.ArchLoader as PAL
+import qualified Pate.Config as PC
 import qualified Pate.Solver as PS
+import qualified Pate.Script as PSc
 import qualified Pate.Equivalence as PEq
+import qualified Pate.CLI as CLI
+import qualified Pate.Loader as PL
 import qualified ReplHelper as PIRH
 import qualified ReplBase
 import           ReplBase ( Sym, Arch )
 
-import           Pate.TraceTree
+import           Pate.TraceTree hiding (asChoice)
 import           What4.Expr.Builder as W4B
 
 import Unsafe.Coerce(unsafeCoerce)
 
-import qualified Main as PM
 import qualified Output as PO
 
 maxSubEntries :: Int
@@ -232,30 +236,36 @@ instance IsTraceNode k "toplevel" where
   prettyNode () () = "<Toplevel>"
   nodeTags = mkTags @k @"toplevel" [Simplified,Summary]
 
+
 run :: String -> IO ()
 run rawOpts = do
   PIRH.setLastRunCmd rawOpts
   let optsList = filter (\s -> s /= "") $ map (concat . map (\case '\\' -> []; x -> [x])) (splitOn "\\n" rawOpts)
-  case OA.execParserPure OA.defaultPrefs PM.cliOptions optsList of
+  case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
     OA.Success opts -> do
-      setJSONMode $ PM.jsonToplevel opts
-      topTraceTree <- someTraceTree
-      tid <- IO.forkFinally (PM.runMain topTraceTree opts) $ \case
-        Left err -> do
-          killWaitThread
-          let msg = show err
-          case msg of
-            "thread killed" -> return ()
-            _ -> do
-              IO.writeIORef ref NoTreeLoaded
-              IO.hPutStrLn IO.stderr (show err)
-              exitFailure
-          IO.writeIORef finalResult (Just (Left msg))
-        Right a -> IO.writeIORef finalResult (Just (Right a))
-      IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (PM.jsonToplevel opts)))
-      -- give some time for the verifier to start
-      IO.threadDelay 100000
-      wait_initial
+      setJSONMode $ CLI.jsonToplevel opts
+      topTraceTree' <- someTraceTree
+      cfgE <- CLI.mkRunConfig PAL.archLoader opts (Just topTraceTree')
+      case cfgE of
+        Left err -> PO.printErrLn (PP.viaShow err)
+        Right cfg -> do
+          let topTraceTree = PC.cfgTraceTree (PL.verificationCfg cfg)
+          tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \case
+            Left err -> do
+              killWaitThread
+              let msg = show err
+              case msg of
+                "thread killed" -> return ()
+                _ -> do
+                  IO.writeIORef ref NoTreeLoaded
+                  IO.hPutStrLn IO.stderr (show err)
+                  exitFailure
+              IO.writeIORef finalResult (Just (Left msg))
+            Right a -> IO.writeIORef finalResult (Just (Right a))
+          IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (CLI.jsonToplevel opts)))
+          -- give some time for the verifier to start
+          IO.threadDelay 100000
+          wait_initial
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn

@@ -5,6 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Loader
   (
@@ -12,6 +13,7 @@ module Pate.Loader
   , runSelfEquivConfig
   , runEquivConfig
   , RunConfig(..)
+  , setTraceTree
   , Logger(..)
   )
 where
@@ -34,11 +36,14 @@ import qualified Pate.Config as PC
 import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
+import qualified Pate.Script as PS
 import qualified Pate.Loader.ELF as PLE
 import           Pate.Loader.ELF ( LoaderM, ElfLoaderConfig  )
 import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
 import qualified Control.Monad.Reader as CMR
+import           Pate.TraceTree
+import qualified Data.IORef as IO
 
 data RunConfig =
   RunConfig
@@ -52,6 +57,9 @@ data RunConfig =
     , useDwarfHints :: Bool
     , elfLoaderConfig :: ElfLoaderConfig
     }
+
+setTraceTree :: SomeTraceTree PA.ValidRepr -> RunConfig -> RunConfig
+setTraceTree traceTree rcfg = rcfg { verificationCfg = (verificationCfg rcfg){ PC.cfgTraceTree = traceTree }}
 
 data Logger arch =
   Logger

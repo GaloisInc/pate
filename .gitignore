@@ -19,3 +19,5 @@ dist-profile/
 *.log
 *.hi
 /tools/pate/Main
+/tests/aarch32/scripted/challenge10.original.exe
+/tests/aarch32/scripted/challenge10.patched.exe
