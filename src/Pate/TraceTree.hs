@@ -1038,8 +1038,7 @@ resetSomeTreeBuilder (SomeTraceTree ref f) = (IO.liftIO $ IO.readIORef ref) >>= 
   StartTree -> return ()
   SomeTraceTree' _ _ tt@(TraceTree l) -> liftIO $ do
     resetIOList l
-    liftIO $ fail "Unexpected reset"
-    --f tt
+    f tt
 
 startSomeTreeBuilder ::
   forall k m tp.
