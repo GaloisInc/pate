@@ -17,6 +17,22 @@ scripted/challenge10.patched.exe: scripted/challenge10.original.exe ${CHALLENGE_
 	bspatch scripted/challenge10.original.exe scripted/challenge10.patched.exe ${CHALLENGE_10_PATCH}
 
 challenge10.test: scripted/challenge10.original.exe scripted/challenge10.patched.exe
+
+challenge10_interactive: challenge10.test
+	cd scripted; ../../../pate.sh \
+	    -o challenge10.original.exe \
+		-p challenge10.patched.exe \
+		-b challenge10.toml \
+		--original-bsi-hints challenge10.json \
+		--patched-bsi-hints challenge10.json \
+		--original-csv-function-hints challenge10.csv \
+		--patched-csv-function-hints challenge10.csv \
+		-e ContinueAfterRecoverableFailures \
+		-r AllowEqRescopeFailure \
+		-s transport_handler \
+		--save-macaw-cfgs CFGs \
+		--script challenge10.pate
+
 endif
 
 
