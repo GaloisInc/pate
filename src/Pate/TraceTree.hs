@@ -1051,9 +1051,9 @@ startSomeTreeBuilder validRepr someTree@(SomeTraceTree ref f) = (IO.liftIO $ IO.
   StartTree -> do
     (tree, builder) <- IO.liftIO $ startTree @k
     IO.liftIO $ IO.writeIORef ref (SomeTraceTree' validRepr builder tree)
-    IO.liftIO $ IO.putStrLn "Starting tree hook.."
+    -- IO.liftIO $ IO.putStrLn "Starting tree hook.."
     IO.liftIO $ f tree
-    IO.liftIO $ IO.putStrLn "Started!"
+    -- IO.liftIO $ IO.putStrLn "Started!"
     return builder
   -- If a tree has already started we need to just throw it away and start again
   SomeTraceTree'{} -> do
