@@ -1,0 +1,18 @@
+Choose Entry Point
+    > Function Entry "_start"
+
+Function Entry "f"
+    ...
+    Call to: "clock"
+        ...
+        ...
+        > Choose synchronization points
+
+        ...
+        Choose a synchronization point:
+            > 0x8058 (original)
+            > 0x8054 (patched)
+
+Verification Finished
+Continue verification?
+    > Finish and view final result
