@@ -134,6 +134,7 @@ import           Control.Monad (void, unless, forM) -- GHC 9.6
 import           Control.Applicative
 
 import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.String as PP
 
 import qualified Data.Aeson as JSON
 import qualified Compat.Aeson as JSON

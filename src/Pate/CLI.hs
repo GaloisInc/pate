@@ -93,6 +93,7 @@ mkRunConfig archLoader opts mtt = let
         , PC.cfgTargetEquivRegs = targetEquivRegs opts
         , PC.cfgRescopingFailureMode = rerrMode opts
         , PC.cfgScriptPath = scriptPath opts
+        , PC.cfgTraceTree = fromMaybe noTraceTree mtt
         }
     cfg = PL.RunConfig
         { PL.archLoader = archLoader
@@ -105,15 +106,7 @@ mkRunConfig archLoader opts mtt = let
         , PL.useDwarfHints = not $ noDwarfHints opts
         , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig { PLE.ignoreSegments = ignoreSegments opts }
         }
-
-  in case PC.cfgScriptPath (PL.verificationCfg cfg) of
-        Just fp -> PSc.readScript fp >>= \case
-          Left err -> return $ Left (show err)
-          Right scr -> do
-            let tt = fromMaybe noTraceTree mtt
-            tt' <- PSc.attachToTraceTree scr tt
-            return $ Right $ PL.setTraceTree tt' cfg
-        Nothing -> return $ Right $ PL.setTraceTree (fromMaybe noTraceTree mtt) cfg
+  in PL.parseAndAttachScript cfg
 
 data CLIOptions = CLIOptions
   { originalBinary :: FilePath
