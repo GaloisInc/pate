@@ -377,13 +377,14 @@ resolveQuery (NodeQuery (q_outer:qs_outer) fin_outer) t_outer =
       -- we need to reverse it here so the indices match up
       fmap catMaybes $ forM (zip [0..] (reverse nodes')) $ \(i,(SomeTraceNode (nm :: SymbolRepr nm) lbl v, t)) -> do
         Just pp <- return $ getNodePrinter @k @nm [Simplified]
+        let as_string = PP.renderString $ PP.layoutPretty (PP.defaultLayoutOptions { PP.layoutPageWidth = PP.Unbounded }) (pp lbl v)
         let matched = case q of
               QueryInt i' -> i == i'
-              QueryString s -> isPrefixOf s (show (pp lbl v))
-              QueryStringInt i' s -> i == i' && isPrefixOf s (show (pp lbl v))
+              QueryString s -> isPrefixOf s as_string
+              QueryStringInt i' s -> i == i' && isPrefixOf s as_string
               QueryAny -> True
         case matched of
-          True -> return $ Just $ (QueryStringInt i (show (pp lbl v)), SomeTraceNode nm lbl v,t)
+          True -> return $ Just $ (QueryStringInt i as_string, SomeTraceNode nm lbl v,t)
           False -> return Nothing
 
 data InteractionMode =
