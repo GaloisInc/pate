@@ -5,7 +5,12 @@ ifdef json
 endif
 
 ifdef docker
-  PATE=docker run --rm -it -v .:/work --workdir=/work pate $(JSON_FLAG)
+  ifdef json
+    # Don't run with terminal when using json interface
+    PATE=docker run --rm -i -v .:/work --workdir=/work pate $(JSON_FLAG)
+  else
+    PATE=docker run --rm -it -v .:/work --workdir=/work pate $(JSON_FLAG)
+  endif
 else
   PATE=../../pate.sh $(JSON_FLAG)
 endif
