@@ -110,7 +110,7 @@ module Pate.Verification.PairGraph
 
 import           Prettyprinter
 
-import           Control.Monad (foldM)
+import           Control.Monad (foldM, guard)
 import           Control.Monad.IO.Class
 import qualified Control.Lens as L
 import           Control.Lens ( (&), (.~), (^.), (%~) )
@@ -147,7 +147,7 @@ import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -972,17 +972,23 @@ combineNodes node1 node2 = do
   (nodeO, nodeP) <- case PPa.get PBi.OriginalRepr (graphNodeBlocks node1) of
     Just{} -> return (node1, node2)
     Nothing -> return (node2, node1)
+  -- it only makes sense to combine nodes that share a divergence point,
+  -- where that divergence point will be used as the calling context for the
+  -- merged point
+  GraphNode divergeO <- divergePoint $ nodeContext nodeO
+  GraphNode divergeP <- divergePoint $ nodeContext nodeP
+  guard $ divergeO == divergeP
   case (nodeO, nodeP) of
     (GraphNode nodeO', GraphNode nodeP') -> do
       blocksO <- PPa.get PBi.OriginalRepr (nodeBlocks nodeO')
       blocksP <- PPa.get PBi.PatchedRepr (nodeBlocks nodeP')
       -- FIXME: retain calling context?
-      return $ GraphNode $ rootEntry (PPa.PatchPair blocksO blocksP)
+      return $ GraphNode $ mkNodeEntry divergeO (PPa.PatchPair blocksO blocksP)
     (ReturnNode nodeO', ReturnNode nodeP') -> do
       fnsO <- PPa.get PBi.OriginalRepr (nodeFuns nodeO')
       fnsP <- PPa.get PBi.PatchedRepr (nodeFuns nodeP')
       -- FIXME: retain calling context?
-      return $ ReturnNode $ rootReturn (PPa.PatchPair fnsO fnsP)
+      return $ ReturnNode $ mkNodeReturn divergeO (PPa.PatchPair fnsO fnsP)
     _ -> Nothing
 
 singleNodeRepr :: GraphNode arch -> Maybe (Some (PBi.WhichBinaryRepr))

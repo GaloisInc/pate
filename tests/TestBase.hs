@@ -131,9 +131,9 @@ doTest ::
 doTest mwb cfg sv fp = do
   infoCfgExists <- doesFileExist (fp <.> "toml")
   argFileExists <- doesFileExist (fp <.> "args")
+  scriptFileExists <- doesFileExist (fp <.> "pate")
 
   (logsRef :: IOR.IORef [String]) <- IOR.newIORef []
-
   let
     addLogMsg :: String -> IO ()
     addLogMsg msg = IOR.atomicModifyIORef' logsRef $ \logs -> (msg : logs, ())
@@ -158,9 +158,14 @@ doTest mwb cfg sv fp = do
           let (msg, _exit) = OA.renderFailure failure progn
           failTest ("Input: \n" ++ (show optsList) ++ "\n" ++ msg)
         _ -> failTest "unexpected parser result"
-    False -> let
-      infoPath = if infoCfgExists then Just $ fp <.> "toml" else Nothing
-      in return $ ("./", PL.RunConfig
+    False -> do
+      let infoPath = if infoCfgExists then Just $ fp <.> "toml" else Nothing
+      -- only include the script for the equivalence proof, for self-equivalence we
+      -- assume no script
+      -- NB: this is not necessarily true if code discovery requires input, but we don't have
+      -- any tests that require this at the moment
+      let scriptPath = if scriptFileExists && not (isJust mwb) then Just (fp <.> "pate") else Nothing
+      mrcfg <- PL.parseAndAttachScript $ PL.RunConfig
         { PL.patchInfoPath = infoPath
         , PL.patchData = defaultPatchData cfg
         , PL.origPaths = PLE.simplePaths (fp <.> "original" <.> "exe")
@@ -173,6 +178,7 @@ doTest mwb cfg sv fp = do
               , PC.cfgIgnoreUnnamedFunctions = False
               , PC.cfgIgnoreDivergedControlFlow = False
               , PC.cfgStackScopeAssume = False
+              , PC.cfgScriptPath = scriptPath
               }
         , PL.logger = \(PA.SomeValidArch{}) -> do
             let
@@ -196,7 +202,11 @@ doTest mwb cfg sv fp = do
         , PL.archLoader = testArchLoader cfg
         , PL.useDwarfHints = False
         , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig
-        })
+        }
+      case mrcfg of
+        Left err -> failTest err
+        Right rcfg -> return ("./", rcfg)
+
   result <- withCurrentDirectory dir $ case mwb of
     Just wb -> PL.runSelfEquivConfig rcfg wb
     Nothing -> PL.runEquivConfig rcfg

@@ -22,6 +22,8 @@ module Pate.Verification.PairGraph.Node (
   , CallingContext
   , pattern GraphNodeEntry
   , pattern GraphNodeReturn
+  , nodeContext
+  , divergePoint
   , graphNodeBlocks
   , mkNodeEntry
   , mkNodeEntry'
@@ -87,6 +89,9 @@ graphNodeBlocks :: GraphNode arch -> PB.BlockPair arch
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
 graphNodeBlocks (ReturnNode ret) = TF.fmapF PB.functionEntryToConcreteBlock (nodeFuns ret)
 
+nodeContext :: GraphNode arch -> CallingContext arch
+nodeContext (GraphNode nd) = graphNodeContext nd
+nodeContext (ReturnNode ret) = returnNodeContext ret
 
 pattern GraphNodeEntry :: PB.BlockPair arch -> GraphNode arch
 pattern GraphNodeEntry blks <- (GraphNode (NodeEntry _ blks))

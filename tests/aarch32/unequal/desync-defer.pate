@@ -1,0 +1,43 @@
+Choose Entry Point
+    > Function Entry "_start"
+
+Function Entry "f" (0x10158)
+    ...
+    Call to: "malloc" (0x10104) Returns to: "f" (0x10178) (original) vs. Call to: "write" (0x100d8) Returns to: "f" (0x101a8) (patched)
+        ...
+        ...
+        > Choose desynchronization points
+
+        ...
+        Choose a desynchronization point:
+            > 0x1016c (original)
+            > 0x1016c (patched)
+            // 0x1070 - should be this, but the splitting for desync points is incorrect
+
+0x10170 [ via: "f" (0x10158) <- "_start" (0x10218) (original) vs. "_start" (0x10214) (patched) ]
+    ...
+    Call to: "malloc"
+        ...
+        ...
+        > Choose synchronization points
+
+        ...
+        Choose a synchronization point:
+            > 0x10188 (original)
+            > 0x10178 (patched)
+
+0x101e8 (original) vs. 0x101d8 (patched)
+    ...
+    Return (original) vs. Call to: "g"
+        ...
+        ...
+        > Choose synchronization points
+
+        ...
+        Choose a synchronization point:
+            > Return "f" (0x10158)
+            // applies to both original and patched
+
+Verification Finished
+Continue verification?
+    > Finish and view final result

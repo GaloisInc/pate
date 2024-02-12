@@ -13,8 +13,8 @@ module Pate.Loader
   , runSelfEquivConfig
   , runEquivConfig
   , RunConfig(..)
-  , setTraceTree
   , Logger(..)
+  , parseAndAttachScript
   )
 where
 
@@ -57,6 +57,19 @@ data RunConfig =
     , useDwarfHints :: Bool
     , elfLoaderConfig :: ElfLoaderConfig
     }
+
+parseAndAttachScript ::
+  RunConfig ->
+  IO (Either String RunConfig)
+parseAndAttachScript cfg = case PC.cfgScriptPath (verificationCfg cfg) of
+    Just fp -> PS.readScript fp >>= \case
+      Left err -> return $ Left (show err)
+      Right scr -> do
+        let tt = PC.cfgTraceTree $ verificationCfg cfg
+        tt' <- PS.attachToTraceTree scr tt
+        return $ Right $ setTraceTree tt' cfg
+    Nothing -> return $ Right cfg
+
 
 setTraceTree :: SomeTraceTree PA.ValidRepr -> RunConfig -> RunConfig
 setTraceTree traceTree rcfg = rcfg { verificationCfg = (verificationCfg rcfg){ PC.cfgTraceTree = traceTree }}

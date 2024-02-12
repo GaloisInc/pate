@@ -138,8 +138,8 @@ matchAnyAct = NodeFinalAction $ \_ -> return True
 
 parseIdentQuery :: Parser NodeIdentQuery
 parseIdentQuery =
-  (do
-    i <- int
+  P.try (do
+    i <-  int
     _ <- ":"
     s <- P.many (P.notFollowedBy (P.newline) >> L.charLiteral)
     case s of
