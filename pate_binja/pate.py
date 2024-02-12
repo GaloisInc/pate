@@ -8,12 +8,14 @@ import json
 import os
 import pprint
 import re
+import shlex
 import sys
 import warnings
 from json import JSONDecodeError
 from subprocess import Popen, PIPE
 from typing import IO, Any, Optional
 
+from binaryninja import interaction
 
 # TODO: Get rid of these globals
 pp = pprint.PrettyPrinter(indent=4)
@@ -1252,11 +1254,23 @@ def test_replay(run_fn):
         test(proc.stdout, proc.stdin, None)
 
 
-def run_replay(replay_file: str) -> Popen:
+def run_replay(file: str) -> Popen:
     return Popen(
-        ['cat', replay_file],
+        ['cat', file],
         stdin=None, stdout=PIPE, text=True, encoding='utf-8'
         )
+
+
+def run_pate_config(file):
+    with open(file, 'r') as f:
+        config = json.load(f)
+    cwd = os.path.dirname(file)
+    original = config.get('original')
+    patched = config.get('patched')
+    rawargs = config.get('args')
+    args = shlex.split(' '.join(rawargs))
+    # TODO: Error checking
+    return run_pate(cwd, original, patched, args)
 
 
 def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
@@ -1270,78 +1284,28 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
         )
 
 
-def run_may23_c10(replay: bool = False) -> Popen:
-    # Entry point: transport_handler
+def run_pate_config_or_replay_file(f: str) -> Popen:
+    if f.endswith(".run-config.json"):
+        test_live(lambda ignore: run_pate_config(f))
+    elif f.endswith(".replay"):
+        test_replay(lambda ignore: run_replay(f))
+
+
+def get_demo_files():
     demos_dir = os.getenv('PATE_BINJA_DEMOS')
-    demo_dir = os.path.join(demos_dir, 'may23-challenge10')
-    if replay:
-        return run_replay(os.path.join(demo_dir, 'may23-challenge10.replay'))
-    else:
-        return run_pate(
-            demo_dir,
-            'may23-challenge10.original.exe',
-           'may23-challenge10.patched.exe',
-            [
-                '-b', 'may23-challenge10.toml',
-                '--original-bsi-hints', 'may23-challenge10-bsi-hints.json',
-                '--patched-bsi-hints', 'may23-challenge10-bsi-hints.json',
-                '--original-csv-function-hints', 'may23-challenge10-function-hints.csv',
-                '--patched-csv-function-hints', 'may23-challenge10-function-hints.csv',
-                '-e', 'ContinueAfterRecoverableFailures',
-                '-r', 'AllowEqRescopeFailure',
-                '-s', 'transport_handler',
-                '--save-macaw-cfgs', 'CFGs',
-            ]
-        )
+    # TODO: Search dir for matching files rather than hardcoded list
+    files = []
+    for d in ['may23-challenge10', 'nov23-target1-room1018', 'nov23-target4-room1011-dendy']:
+        files.append(os.path.join(demos_dir, d, d + '.run-config.json'))
+        files.append(os.path.join(demos_dir, d, d + '.replay'))
+    return files
 
+def run_pate_demo():
+    files = get_demo_files()
+    print("Select PATE run configuration or replay file:")
+    for i, f in enumerate(files):
+        print('  {}: {}'.format(i, f))
 
-def run_nov23_t1_rm1018(replay: bool = False) -> Popen:
-    # [2023/12/29 JCC] Result: Binaries are observably equivalent
-    # Entry point: RR_ReadTlmInput
-    # Choose Sync points: 0x1a98 (choice: 303 and 109) (orig and patched?)
-    # Then "Remove in equivalence condition" about 18 times
-    # count: 3
-    demos_dir = os.getenv('PATE_BINJA_DEMOS')
-    demo_dir = os.path.join(demos_dir, 'nov23-target1-room1018')
-    if replay:
-        return run_replay(os.path.join(demo_dir, 'nov23-target1-room1018.replay'))
-    else:
-        return run_pate(
-            demo_dir,
-            'nov23-target1-room1018.original.so',
-             'nov23-target1-room1018.patched.so',
-             [
-                '-s', 'RR_Init',
-                '-s', 'RR_ReadTlmInput',
-                '-s', 'RR_tohex',
-                '-e', 'ContinueAfterRecoverableFailures',
-                '-r', 'AllowEqRescopeFailure',
-                '--save-macaw-cfgs', 'CFGs',
-             ]
-        )
-
-
-def run_nov23_t4_rm1011_dendy(replay: bool = False) -> Popen:
-    # [2024/01/02 JCC] Result: Binaries are observably equivalent (one CFAR)
-    # Entry point: get_bitchunk
-    demos_dir = os.getenv('PATE_BINJA_DEMOS')
-    demo_dir = os.path.join(demos_dir, 'nov23-target4-room1011-dendy')
-    if replay:
-        return run_replay(os.path.join(demo_dir, 'nov23-target4-room1011-dendy.replay'))
-    else:
-        return run_pate(
-            demo_dir,
-            'nov23-target4-room1011-dendy.original.exe',
-            'nov23-target4-room1011-dendy.patched.exe',
-            [
-                '--original-csv-function-hints', 'nov23-target4-room1011-dendy-function-hints.csv',
-                '--patched-csv-function-hints', 'nov23-target4-room1011-dendy-function-hints.csv',
-                '-b', 'nov23-target4-room1011-dendy.toml',
-                '-s', 'get_bitchunk',
-                '--ignore-segments', '1',
-                '--read-only-segments', '3',
-                '-e', 'ContinueAfterRecoverableFailures',
-                '-r', 'AllowEqRescopeFailure',
-                '--save-macaw-cfgs', 'CFGs',
-            ]
-        )
+    choice = input("Choice: ")
+    file = files[int(choice)]
+    run_pate_config_or_replay_file(file)
