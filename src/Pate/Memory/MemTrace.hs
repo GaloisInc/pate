@@ -37,9 +37,7 @@ module Pate.Memory.MemTrace
 , readMemState
 , writeMemState
 , MemFootprint(..)
-, MemOpDirection(..)
 , isDir
-, getCond
 , MemTraceK
 , traceFootprint
 , observableEvents
@@ -62,8 +60,6 @@ module Pate.Memory.MemTrace
 , memEqAtRegion
 , memEqExact
 , memOpOverlapsRegion
-, prettyMemOp
-, prettyMemEvent
 , prettyMemTraceSeq
 , addExternalCallEvent
 , SymBV'(..)
@@ -75,20 +71,19 @@ module Pate.Memory.MemTrace
 , RegOp(..)
 , memFullSeq
 , addRegEvent
-, ppPtr'
+
+, module Pate.EventTrace
 ) where
 
 import Unsafe.Coerce
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.), (.~))
 import           Control.Monad.State
-import qualified Control.Monad.IO.Class as IO
 import qualified Data.BitVector.Sized as BV
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
 import qualified Data.Vector as V
-import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Proxy
 import           Data.IORef
 import           Data.Set (Set)
@@ -129,7 +124,7 @@ import Data.Text (Text, pack)
 import Lang.Crucible.Backend (IsSymInterface, IsSymBackend, HasSymInterface(..), assert)
 import Lang.Crucible.CFG.Common (GlobalVar, freshGlobalVar)
 import Lang.Crucible.FunctionHandle (HandleAllocator, mkHandle',insertHandleMap)
-import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, pattern LLVMPointerRepr, ppPtr)
+import Lang.Crucible.LLVM.MemModel (LLVMPointerType, LLVMPtr, pattern LLVMPointer, pattern LLVMPointerRepr)
 import Lang.Crucible.Simulator.ExecutionTree
          ( CrucibleState, ExtensionImpl(..), actFrame, gpGlobals
          , stateSymInterface, stateTree, withBackend, stateContext
@@ -147,22 +142,17 @@ import Lang.Crucible.Types
 import Lang.Crucible.Utils.MuxTree
 import What4.Expr.Builder (ExprBuilder)
 import What4.Interface hiding ( integerToNat )
-import           Data.Parameterized.SetF (AsOrd(..))
 
 import           Pate.Panic
 import qualified Pate.ExprMappable as PEM
 import           What4.ExprHelpers ( integerToNat )
 import qualified What4.ExprHelpers as WEH
 import qualified Pate.Memory as PM
-import Data.Macaw.CFG (ArchSegmentOff, RegisterInfo, ip_reg)
+import Data.Macaw.CFG (RegisterInfo, ip_reg)
 import qualified Pate.SimulatorRegisters as PSr
 import Data.Data (Typeable, eqT)
-import Data.Maybe (mapMaybe)
 import qualified Data.Parameterized.TraversableF as TF
-import qualified What4.JSON as W4S
-import qualified Data.Aeson as JSON
-import What4.JSON ((.=), (.==), (.=~))
-import qualified Pate.Pointer as Ptr
+import           Pate.EventTrace 
 
 ------
 -- * Undefined pointers
@@ -190,35 +180,7 @@ data UndefinedPtrOps sym =
     , undefPtrClassify :: UndefPtrClassify sym
     }
 
--- Needed since SymBV is a type alias
-newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
 
-instance W4S.SerializableExprs sym => W4S.W4Serializable sym (SymBV' sym w) where
-  w4Serialize (SymBV' bv) = W4S.w4SerializeF bv
-
-instance W4S.SerializableExprs sym => W4S.W4SerializableF sym (SymBV' sym)
-
-instance OrdF (SymExpr sym) => TestEquality (SymBV' sym) where
-  testEquality a b = case compareF a b of
-    EQF -> Just Refl
-    _ -> Nothing
-
-instance OrdF (SymExpr sym) => OrdF (SymBV' sym) where
-  compareF (SymBV' a) (SymBV' b) = case compareF a b of
-    EQF -> EQF
-    LTF -> LTF
-    GTF -> GTF
-
-instance PEM.ExprMappable sym (SymBV' sym w) where
-  mapExpr _sym f (SymBV' bv) = SymBV' <$> f bv
-
-instance IsExpr (SymExpr sym) => Pretty (SymBV' sym w) where
-  pretty (SymBV' bv) = printSymExpr bv
-
-instance IsExpr (SymExpr sym) => Show (SymBV' sym w) where
-  show (SymBV' bv) = show (printSymExpr bv)
-
-instance IsExpr (SymExpr sym) => ShowF (SymBV' sym) where
 
 -- Needed since LLVMPtr is a type alias
 newtype LLVMPtr' sym w = LLVMPtr' { unLLVMPtr:: LLVMPtr sym w }
@@ -625,55 +587,18 @@ macawTraceExtensions archStmtFn syscallModel mvar globs undefptr =
     }
 
 
-data MemOpCondition sym
-  = Unconditional
-  | Conditional (Pred sym)
 
-instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemOpCondition sym) where
-  w4Serialize = \case
-    Unconditional -> W4S.w4SerializeString ("unconditional" :: String)
-    Conditional p -> W4S.object ["condition" .== p]
 
-deriving instance Show (Pred sym) => Show (MemOpCondition sym)
 
-data MemOpDirection =
-    Read
-  | Write
-  deriving (Eq, Ord, Show)
 
-instance W4S.W4Serializable sym MemOpDirection where
-  w4Serialize = W4S.w4SerializeString
 
-data MemOp sym ptrW where
-  MemOp ::
-    1 <= w =>
-    -- The address of the operation
-    LLVMPtr sym ptrW ->
-    MemOpDirection ->
-    MemOpCondition sym ->
-    -- The size of the operation in bytes
-    NatRepr w ->
-    -- The value read or written during the operation
-    LLVMPtr sym (8*w) ->
-    Endianness ->
-    MemOp sym ptrW
 
-ppPtr' :: IsExpr (SymExpr sym) => LLVMPtr sym arch -> Doc ann
-ppPtr' ptr@(LLVMPointer r off) 
-  | BaseBVRepr w <- exprType off
-  = case (asNat r, asBV off) of
-  (Just 1, Just off') -> "Stack Slot:" <+> viaShow (BV.asSigned w off')
-  _ -> ppPtr ptr
 
-prettyMemOp :: IsExpr (SymExpr sym) => MemOp sym ptrW -> Doc ann
-prettyMemOp (MemOp ptr dir cond _sz val _end) =
-  viaShow dir <+>
-  ppPtr' ptr <+>
-  (case dir of Read -> "->" ; Write -> "<-") <+>
-  ppPtr val <+>
-  case cond of
-    Unconditional -> mempty
-    Conditional p -> "when" <+> printSymExpr p
+
+
+
+
+
 
 -- | Test if a memory operation overlaps with a concretrely-defined
 --   region of memory, given as a starting address and a length.
@@ -704,134 +629,6 @@ memOpOverlapsRegion sym (MemOp (LLVMPointer _blk off) _dir _cond w _val _end) ad
      x1 <- bvUle sym diff len'
      (x2, _) <- addUnsignedOF sym diff oplen
      orPred sym x1 x2
-
-instance TestEquality (SymExpr sym) => Eq (MemOpCondition sym) where
-  Unconditional == Unconditional = True
-  Conditional p == Conditional p' | Just Refl <- testEquality p p' = True
-  _ == _ = False
-
-instance OrdF (SymExpr sym) => Ord (MemOpCondition sym) where
-  compare Unconditional Unconditional = EQ
-  compare (Conditional p) (Conditional p') = toOrdering $ compareF p p'
-  compare Unconditional _ = GT
-  compare _ Unconditional = LT
-
-instance TestEquality (SymExpr sym) => Eq (MemOp sym ptrW) where
-  MemOp (LLVMPointer addrR addrO) dir cond repr (LLVMPointer valR valO) end
-    == MemOp (LLVMPointer addrR' addrO') dir' cond' repr' (LLVMPointer valR' valO') end'
-     | Just Refl <- testEquality repr repr'
-     , addrR == addrR'
-     , Just Refl <- testEquality addrO addrO'
-     , valR == valR'
-     , Just Refl <- testEquality valO valO'
-    = cond == cond' && dir == dir' && end == end'
-
-  _ == _ = False
-
-instance OrdF (SymExpr sym) => Ord (MemOp sym ptrW) where
-  compare (MemOp (LLVMPointer reg1 off1) dir1 cond1 sz1 (LLVMPointer vr1 vo1) end1)
-          (MemOp (LLVMPointer reg2 off2) dir2 cond2 sz2 (LLVMPointer vr2 vo2) end2) =
-    case compareF sz1 sz2 of
-      LTF -> LT
-      GTF -> GT
-      EQF ->
-        (compare reg1 reg2) <>
-        (toOrdering $ compareF off1 off2) <>
-        compare dir1 dir2 <>
-        (compare cond1 cond2) <>
-        (compare vr1 vr2) <>
-        (toOrdering $ compareF vo1 vo2) <>
-        compare end1 end2
-
-data RegOp sym arch =
-  RegOp (MapF.MapF (ArchReg arch) (PSr.MacawRegEntry sym))
-
-instance (W4S.W4SerializableFC (ArchReg arch), W4S.SerializableExprs sym)
-  => W4S.W4Serializable sym (RegOp sym arch) where
-  w4Serialize (RegOp m) = W4S.object ["reg_op" .= m]
-
-instance PEM.ExprMappable sym (RegOp sym arch) where
-  mapExpr sym f (RegOp m) = (RegOp . PEM.unExprMapFElems) <$> PEM.mapExpr sym f (PEM.ExprMapFElems m)
-
--- | Used for presenting counter-examples that contain all register updates
-data TraceEvent sym arch =
-    RegOpEvent { traceInstr :: MuxTree sym (Maybe (ArchSegmentOff arch, Text)), _traceRegOp :: RegOp sym arch }
-  | TraceMemEvent { traceInstr :: MuxTree sym (Maybe (ArchSegmentOff arch, Text)), _traceMemEvent :: MemEvent sym (ArchAddrWidth arch)}
-
-instance PEM.ExprMappable sym (TraceEvent sym arch) where
-  mapExpr sym f e = case e of
-    RegOpEvent i rop -> RegOpEvent <$> PEM.mapExpr sym f i <*> PEM.mapExpr sym f rop
-    TraceMemEvent i mop -> TraceMemEvent <$> PEM.mapExpr sym f i <*> PEM.mapExpr sym f mop
-
-instance W4S.W4Serializable sym  (MemAddr w) where
-  w4Serialize addr = do
-    base_json <- return $ JSON.toJSON (addrBase addr)
-    off_json <- return $ JSON.toJSON (show (addrOffset addr))
-    return $ JSON.object ["base" JSON..= base_json, "offset" JSON..= off_json]
-
-instance W4S.W4Serializable sym  (MemSegmentOff w) where
-  w4Serialize segOff = W4S.w4Serialize $ segoffAddr segOff
-
-instance (W4S.W4SerializableFC (ArchReg arch), W4S.SerializableExprs sym)
-  => W4S.W4Serializable sym (TraceEvent sym arch) where
-    w4Serialize = \case
-      RegOpEvent i rop -> W4S.object ["instruction" .= i, "register_op" .= rop]
-      TraceMemEvent i mop -> W4S.object ["instruction" .= i, "memory_op" .= mop]
-
-instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemEvent sym ptrW) where
-  w4Serialize = \case
-    MemOpEvent mop -> W4S.object ["mem_op" .= mop]
-    SyscallEvent i r0 -> W4S.object ["syscall" .= i, "r0" .== r0]
-    ExternalCallEvent nm bvs -> W4S.object ["external_call" .= nm, "args" .= bvs]
-
-instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemOp sym ptrW) where
-  w4Serialize (MemOp addr dir cond n val end) =
-    W4S.object
-      [ "addr" .= Ptr.fromLLVMPointer addr
-      , "direction" .= dir
-      , "condition" .= cond
-      , "size" .= n
-      , "value" .= Ptr.fromLLVMPointer val
-      , "endianness" .=~ end
-      ]
-
-data MemEvent sym ptrW where
-  MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
-  SyscallEvent :: forall sym ptrW w.
-    (1 <= w) =>
-    MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
-      {- ^ location and dissassembly of the instruction generating this system call -} ->
-    SymBV sym w
-      {- ^ Value of r0 during this syscall -} ->
-    MemEvent sym ptrW
-  ExternalCallEvent :: forall sym ptrW ctx.
-    Text ->
-    Ctx.Assignment (SymBV' sym) ctx
-      {- ^ relevant data for this visible call -} ->
-    MemEvent sym ptrW
-
-instance OrdF (SymExpr sym) => Eq (MemEvent sym ptrW) where
-  a == b = case compare a b of
-    EQ -> True
-    _ -> False
-
-compareTrees :: OrdF (SymExpr sym) => Ord tp => MuxTree sym tp -> MuxTree sym tp -> Ordering
-compareTrees mt1 mt2 = 
-  let 
-    es1 = map (\(x, p) -> (x, AsOrd p)) $ viewMuxTree mt1
-    es2 = map (\(x, p) -> (x, AsOrd p)) $ viewMuxTree mt2
-  in compare es1 es2
-
-instance OrdF (SymExpr sym) => Ord (MemEvent sym ptrW) where
-  compare a b = case (a,b) of
-    (MemOpEvent op1, MemOpEvent op2) -> compare op1 op2
-    (SyscallEvent mt1 bv1, SyscallEvent mt2 bv2) -> compareTrees mt1 mt2 <> (toOrdering $ compareF bv1 bv2)
-    (ExternalCallEvent nm1 vs1, ExternalCallEvent nm2 vs2) -> 
-      compare nm1 nm2 <> (toOrdering $ (compareF vs1 vs2))
-    (MemOpEvent{}, _) -> GT
-    (SyscallEvent{}, ExternalCallEvent{}) -> GT
-    (ExternalCallEvent{}, _) -> LT
-    (SyscallEvent{}, MemOpEvent{}) -> LT
 
 
 addExternalCallEvent ::
@@ -880,47 +677,16 @@ addRegEvent sym rop mem = do
       Nothing -> error "addRegEvent: unexpected arch mismatch"
   return mem { memFullSeq_ = fs }
 
+type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
 
-prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
-prettyMemEvent (MemOpEvent op) = prettyMemOp op
-prettyMemEvent (SyscallEvent i v) =
-  case viewMuxTree i of
-    [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
-    _ -> "Syscall" <+> printSymExpr v
-prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> pretty (show vs)
-  
 prettyMemTraceSeq :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemTraceSeq sym ptrW -> Doc ann
 prettyMemTraceSeq = prettySymSequence prettyMemEvent
-
-data MemTraceImpl sym ptrW = MemTraceImpl
-  { memSeq :: MemTraceSeq sym ptrW
-  -- ^ The sequence of memory operations in reverse execution order;
-  --   later events appear closer to the front of the sequence.
-  , memState :: MemTraceState sym ptrW
-  -- ^ the logical contents of memory
-  , memCurrentInstr :: MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
-  -- ^ the most recent program instruction we encountered (address, dissassembly)
-  , memBaseMemory :: Memory ptrW
-  -- ^ The "base" memory loaded with the binary. We use this to directly service concrete
-  --   reads from read-only memory. INVARIANT: we only mux together memories that were
-  --   derived from the same initial memory, so we can assume the base memories are identical.
-  , memFullSeq_ :: MemTraceFullSeq sym ptrW
-  -- ^ Full sequence of register and memory operations since the start of the block
-
-  }
-
-data MemTraceState sym ptrW = MemTraceState
-  { memArrBytes :: MemTraceArrBytes sym ptrW
-  , memArrRegions :: MemTraceArrRegions sym ptrW
-  }
-
-type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
 
 --   FIXME: existentially-quantified 'arch' parameter is a workaround for the
 --   fact that only 'ptrW' is available in 'MemTraceImpl'
 data MemTraceFullSeq sym ptrW = 
   forall arch. (Typeable arch, ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => 
-    MemTraceFullSeq (Proxy arch) (SymSequence sym (TraceEvent sym arch)) 
+    MemTraceFullSeq (Proxy arch) (EventTrace sym arch)
 
 instance PEM.ExprMappable sym (MemTraceFullSeq sym ptrW) where
   mapExpr sym f (MemTraceFullSeq px s) = MemTraceFullSeq px <$> PEM.mapExpr sym f s
@@ -945,6 +711,28 @@ muxFullSeq sym p (MemTraceFullSeq (px :: Proxy arch1) a) (MemTraceFullSeq (_ :: 
   case eqT @arch1 @arch2 of
     Just Refl -> MemTraceFullSeq px <$> muxSymSequence sym p a b
     Nothing -> fail "muxFullSeq: incompatible architectures"
+
+data MemTraceImpl sym ptrW = MemTraceImpl
+  { memSeq :: MemTraceSeq sym ptrW
+  -- ^ The sequence of memory operations in reverse execution order;
+  --   later events appear closer to the front of the sequence.
+  , memState :: MemTraceState sym ptrW
+  -- ^ the logical contents of memory
+  , memCurrentInstr :: MuxTree sym (Maybe (MemSegmentOff ptrW, Text))
+  -- ^ the most recent program instruction we encountered (address, dissassembly)
+  , memBaseMemory :: Memory ptrW
+  -- ^ The "base" memory loaded with the binary. We use this to directly service concrete
+  --   reads from read-only memory. INVARIANT: we only mux together memories that were
+  --   derived from the same initial memory, so we can assume the base memories are identical.
+  , memFullSeq_ :: MemTraceFullSeq sym ptrW
+  -- ^ Full sequence of register and memory operations since the start of the block
+
+  }
+
+data MemTraceState sym ptrW = MemTraceState
+  { memArrBytes :: MemTraceArrBytes sym ptrW
+  , memArrRegions :: MemTraceArrRegions sym ptrW
+  }
 
 -- | A map from pointers (a region integer combined with a pointer-width bitvector)
 -- to bytes, representing the contents of memory at the given pointer.
@@ -1989,26 +1777,7 @@ traceFootprint sym mem = do
                     Just False -> []
       return $ Set.fromList xs
 
-filterEvent ::
-  IsExprBuilder sym =>
-  sym ->
-  (MemOp sym ptrW -> IO (Pred sym)) ->
-  MemEvent sym ptrW ->
-  IO (Maybe (MemEvent sym ptrW), Pred sym)
-filterEvent sym f x = case x of
-    -- always include system call events
-    SyscallEvent{} -> return $ (Nothing, truePred sym)
-    -- always include external call events
-    ExternalCallEvent{} -> return $ (Nothing, truePred sym)
-    
-    -- Include memory operations only if they acutally
-    -- happen (their condition is true) and if they are
-    -- deemed observable by the given filtering function.
-    MemOpEvent op@(MemOp ptr dir cond w val end) -> do
-      opObservable <- f op
-      p <- andPred sym opObservable (getCond sym cond)
-      let x' = MemOpEvent (MemOp ptr dir Unconditional w val end)
-      return $ (Just x', p)
+
 
 -- | Filter the memory event traces to leave just the observable
 --   events.  This currently includes all system call events,
@@ -2035,15 +1804,6 @@ llvmPtrEq sym (LLVMPointer region offset) (LLVMPointer region' offset') = do
   regionsEq <- natEq sym region region'
   offsetsEq <- isEq sym offset offset'
   andPred sym regionsEq offsetsEq
-
-getCond ::
-  IsExprBuilder sym =>
-  sym ->
-  MemOpCondition sym ->
-  Pred sym
-getCond sym Unconditional = truePred sym
-getCond _sym (Conditional p) = p
-
 
 -- | Memory states are equivalent everywhere but the given region.
 memEqOutsideRegion ::
@@ -2114,54 +1874,6 @@ memEqExact sym mem1 mem2 = do
   bytesEq <- isEq sym (memArrBytes mem1) (memArrBytes mem2)
   regionsEq <- isEq sym (memArrRegions mem1) (memArrRegions mem2)
   andPred sym bytesEq regionsEq
-
-instance PEM.ExprMappable sym (MemOpCondition sym) where
-  mapExpr _sym f = \case
-    Conditional p -> Conditional <$> f p
-    Unconditional -> return Unconditional
-
-instance PEM.ExprMappable sym (MemOp sym w) where
-  mapExpr sym f = \case
-    MemOp ptr dir cond w val endian -> do
-      ptr' <- WEH.mapExprPtr sym f ptr
-      val' <- WEH.mapExprPtr sym f val
-      cond' <- PEM.mapExpr sym f cond
-      return $ MemOp ptr' dir cond' w val' endian
-
-instance PEM.ExprMappable sym (MemEvent sym w) where
-  mapExpr sym f = \case
-    MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
-    SyscallEvent i arg -> SyscallEvent i <$> f arg
-    -- MuxTree is unmodified since it has no symbolic expressions
-    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr sym f) vs
-
-instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
-  pretty ev = prettyMemEvent ev
-
-instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
-  mapExpr sym f = evalWithFreshCache $ \rec -> \case
-    SymSequenceNil -> IO.liftIO $ nilSymSequence sym
-    SymSequenceCons _ x xs ->
-      do x'  <- PEM.mapExpr sym f x
-         xs' <- rec xs
-         IO.liftIO $ consSymSequence sym x' xs'
-    SymSequenceAppend _ xs ys ->
-     do xs' <- rec xs
-        ys' <- rec ys
-        IO.liftIO $ appendSymSequence sym xs' ys'
-    SymSequenceMerge _ p xs ys ->
-     do p' <- f p
-        case asConstantPred p' of
-          Just True -> rec xs
-          Just False -> rec ys
-          Nothing -> do
-            xs' <- rec xs
-            ys' <- rec ys
-            IO.liftIO $ muxSymSequence sym p' xs' ys'
-
-instance PEM.ExprMappable sym (MemSegmentOff w) where
-  mapExpr _ _ = return
-
 
 instance PEM.ExprMappable sym (MemTraceImpl sym w) where
   mapExpr sym f mem = do
