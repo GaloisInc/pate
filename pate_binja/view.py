@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os.path
 import threading
 from subprocess import Popen
 from typing import Optional
@@ -112,10 +113,11 @@ class GuiUserInteraction(pate.PateUserInteraction):
 class PateThread(BackgroundTaskThread):
     # TODO: Look at interaction.run_progress_dialog
     # handle cancel and restart
-    def __init__(self, bv, run_fn, replay=False, show_ce_trace=False):
+    def __init__(self, bv, run_fn, replay=False, show_ce_trace=True, trace_file=None):
         BackgroundTaskThread.__init__(self, "Pate Process", True)
         self.replay = replay
         self.run_fn = run_fn
+        self.trace_file = trace_file
         self.show_ce_trace = show_ce_trace
 
     def run(self):
@@ -136,17 +138,22 @@ class PateThread(BackgroundTaskThread):
         #         return
 
         x = self.run_fn(self.replay)
-        with x as proc:
-            self._command_loop(proc, self.show_ce_trace)
+        if self.trace_file:
+            with open(self.trace_file, "w") as trace:
+                with x as proc:
+                    self._command_loop(proc, self.show_ce_trace, trace)
+        else:
+            with x as proc:
+                self._command_loop(proc, self.show_ce_trace)
 
-    def _command_loop(self, proc: Popen, show_ce_trace: bool = False):
+    def _command_loop(self, proc: Popen, show_ce_trace: bool = False, trace_io=None):
         global pateWidget
 
         #self.progress = 'Pate running...'
         execute_on_main_thread_and_wait(lambda: pateWidget.textfield.setText('Pate running...'))
 
         user = GuiUserInteraction(pateWidget, self.replay, show_ce_trace)
-        pate_wrapper = pate.PateWrapper(user, proc.stdout, proc.stdin)
+        pate_wrapper = pate.PateWrapper(user, proc.stdout, proc.stdin, trace_io)
 
         pate_wrapper.command_loop()
 
@@ -154,26 +161,26 @@ class PateThread(BackgroundTaskThread):
         execute_on_main_thread_and_wait(lambda: pateWidget.textfield.setText('Pate finished.'))
 
 
-def run_pate_thread_nov23_t4_dendy1011(bv):
-    # x = pate.run_may23_c10(self.replay)
-    # x = pate.run_nov23_t1_self(self.replay)
-    # x = pate.run_nov23_t1_room1018(self.replay)
-    # x = pate.run_nov23_t3_self(self.replay)
-    # x = pate.run_nov23_t4_self(self.replay)
-    # x = pate.run_nov23_t4_master(self.replay)
-    # x = pate.run_nov23_t4_dendy1011(self.replay)
-    pt = PateThread(bv, pate.run_nov23_t4_rm1011_dendy, True)
-    pt.start()
-
-
-def run_pate_thread_may23_ch10(bv):
-    pt = PateThread(bv, pate.run_may23_c10, False)
-    pt.start()
-
-
-def run_pate_thread_nov23_t1_room1018(bv):
-    pt = PateThread(bv, pate.run_nov23_t1_rm1018, False)
-    pt.start()
+# def run_pate_thread_nov23_t4_dendy1011(bv):
+#     # x = pate.run_may23_c10(self.replay)
+#     # x = pate.run_nov23_t1_self(self.replay)
+#     # x = pate.run_nov23_t1_room1018(self.replay)
+#     # x = pate.run_nov23_t3_self(self.replay)
+#     # x = pate.run_nov23_t4_self(self.replay)
+#     # x = pate.run_nov23_t4_master(self.replay)
+#     # x = pate.run_nov23_t4_dendy1011(self.replay)
+#     pt = PateThread(bv, pate.run_nov23_t4_rm1011_dendy, True)
+#     pt.start()
+#
+#
+# def run_pate_thread_may23_ch10(bv):
+#     pt = PateThread(bv, pate.run_may23_c10, False)
+#     pt.start()
+#
+#
+# def run_pate_thread_nov23_t1_room1018(bv):
+#     pt = PateThread(bv, pate.run_nov23_t1_rm1018, False)
+#     pt.start()
 
 
 def build_pate_flow_graph(cfar_graph: pate.CFARGraph,
@@ -262,11 +269,13 @@ def launch_pate(context: UIActionContext):
     print(f)
     if f.endswith(".run-config.json"):
         replay = False
+        trace_file = os.path.join(os.path.dirname(f), 'lastrun.replay')
         fn = lambda ignore: pate.run_pate_config(f)
     elif f.endswith(".replay"):
         replay = True
+        trace_file = None
         fn = lambda ignore: pate.run_replay(f)
-    pt = PateThread(None, fn, replay=replay)
+    pt = PateThread(None, fn, replay=replay, trace_file=trace_file)
 
     pt.start()
 
