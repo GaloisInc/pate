@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="run_pate_demo" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
-    <output_file path="run_pate_demo.log" is_save="true" />
+    <output_file path="$PROJECT_DIR$/run_pate_demo.log" is_save="true" />
     <module name="pate_binja" />
     <option name="ENV_FILES" value="" />
     <option name="INTERPRETER_OPTIONS" value="" />

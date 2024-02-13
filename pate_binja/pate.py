@@ -254,7 +254,7 @@ class PateWrapper:
             and rec['trace_node_contents'][1].get('pretty') == 'Equivalence Counter-example'
             ):
             for c in rec['trace_node_contents']:
-                if c.get('content', {}).get('original', {}).get('events'):
+                if c.get('content', {}).get('traces', {}):
                     cfar_parent.addExitMetaData(cfar_exit, 'ce_event_trace', c['content'])
             # don't go any deeper
             return
@@ -279,7 +279,7 @@ class PateWrapper:
             cfar_parent.addExit(cfar_node)
             if rec['trace_node_kind'] == 'blocktarget':
                 for c in  rec['trace_node_contents']:
-                    if c.get('content') and c['content'].get('original',{}).get('events'):
+                    if c.get('content') and c['content'].get('traces', {}):
                         cfar_parent.addExitMetaData(cfar_exit, 'event_trace', c['content'])
             if self.debug_cfar:
                 print('CFAR ID (parent):', cfar_parent.id)
@@ -511,16 +511,16 @@ class CFARNode:
                 #     self.pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], '', pre + '  ', out)
 
     def pprint_node_event_trace(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
-        if trace['original'].get('precondition'):
+        if trace.get('precondition'):
             out.write(f'{pre}Trace Precondition:\n')
-            pprint_eq_domain(trace['original']['precondition'], pre + '  ', out)
-        if trace['original'].get('postcondition'):
+            pprint_eq_domain(trace['precondition'], pre + '  ', out)
+        if trace.get('postcondition'):
             out.write(f'{pre}Trace Postcondition:\n')
-            pprint_eq_domain(trace['original']['postcondition'], pre + '  ', out)
-        if trace.get('original'):
-            pprint_event_trace(f'{label} Original', trace['original'], pre, out)
-        if trace.get('patched'):
-            pprint_event_trace(f'{label} Patched', trace['patched'], pre, out)
+            pprint_eq_domain(trace['postcondition'], pre + '  ', out)
+        if trace.get('traces', {}).get('original'):
+            pprint_event_trace(f'{label} Original', trace['traces']['original'], pre, out)
+        if trace.get('traces',{}).get('patched'):
+            pprint_event_trace(f'{label} Patched', trace['traces']['patched'], pre, out)
 
 
 class CFARGraph:
