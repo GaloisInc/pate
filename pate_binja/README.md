@@ -41,12 +41,6 @@ export PATE_BINJA_MODE=BUILD
 
 ## Running
 
-To run the PATE Verifier live (docker or built from source) you need to start Binja from a bash shell because it needs your bash environment. For example, on macOS:
-```bash
-open /Applications/Binary\ Ninja.app
-```
-If you only want to run replays, you can launch Binary Ninja from the macOS Dock.
-
 Once Binary Ninja is running, you can run PATE from the "Plugins" menu. An open file dialog will open. By defualt it will be looking for a PATE Run Configuration file (*.run-config.json). If you want to run a replay file, select "PATE Replay (*.json)" in the file type drop down menu.
 
 

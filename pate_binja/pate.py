@@ -15,8 +15,6 @@ from json import JSONDecodeError
 from subprocess import Popen, PIPE
 from typing import IO, Any, Optional
 
-from binaryninja import interaction
-
 # TODO: Get rid of these globals
 pp = pprint.PrettyPrinter(indent=4)
 
@@ -1275,10 +1273,13 @@ def run_pate_config(file):
 
 def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
     if os.getenv('PATE_BINJA_MODE') == 'BUILD':
-        cmd = [os.getenv('PATE') + '/pate.sh']
+        pate = [os.getenv('PATE') + '/pate.sh']
     else:
-        cmd = ['docker', 'run', '--rm', '-i', '-v', '.:/work', '--workdir=/work', 'pate']
-    return Popen(cmd + ['-o', original, '-p', patched, '--json-toplevel'] + args,
+        pate = ['docker', 'run', '--rm', '-i', '-v', '.:/work', '--workdir=/work', 'pate']
+    bash_cmd = " ".join(pate + ['-o', original, '-p', patched, '--json-toplevel'] + args)
+    #print("Bash cmd: " + bash_cmd)
+    # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools)
+    return Popen(['/bin/bash', '-l', '-c', bash_cmd],
                  cwd=cwd,
                  stdin=PIPE, stdout=PIPE, text=True, encoding='utf-8'
         )
@@ -1292,12 +1293,15 @@ def run_pate_config_or_replay_file(f: str) -> Popen:
 
 
 def get_demo_files():
-    demos_dir = os.getenv('PATE_BINJA_DEMOS')
-    # TODO: Search dir for matching files rather than hardcoded list
     files = []
-    for d in ['may23-challenge10', 'nov23-target1-room1018', 'nov23-target4-room1011-dendy']:
-        files.append(os.path.join(demos_dir, d, d + '.run-config.json'))
-        files.append(os.path.join(demos_dir, d, d + '.replay'))
+    demos_dir = os.getenv('PATE_BINJA_DEMOS')
+    if demos_dir:
+        # TODO: Search dir for matching files rather than hardcoded list
+        for d in ['may23-challenge10', 'nov23-target1-room1018', 'nov23-target4-room1011-dendy']:
+            for ext in ['.run-config.json', '.replay']:
+                f = os.path.join(demos_dir, d, d + ext)
+                if os.path.isfile(f):
+                    files.append(f)
     return files
 
 def run_pate_demo():
