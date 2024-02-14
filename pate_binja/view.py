@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Galois Inc
+# Copyright 2023-2024, Galois Inc. All rights reserved.
 
 from __future__ import annotations
 
