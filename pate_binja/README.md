@@ -19,7 +19,7 @@ This is an early release of the PATE plugin for Binary Ninja (Binja). At this ti
 }         
 ```
 
-There are several examples in [PATE Binja Demos repo](https://gitlab-ext.galois.com/pate/pate-binja-demos).
+There are several examples in the [PATE Binja Demos repo](https://gitlab-ext.galois.com/pate/pate-binja-demos).
 
 
 ## Installation
@@ -47,7 +47,7 @@ open /Applications/Binary\ Ninja.app
 ```
 If you only want to run replays, you can launch Binary Ninja from the macOS Dock.
 
-Once Binary Ninja is running, the demos are available in the "Plugins" menu.
+Once Binary Ninja is running, you can run PATE from the "Plugins" menu. An open file dialog will open. By defualt it will be looking for a PATE Run Configuration file (*.run-config.json). If you want to run a replay file, select "PATE Replay (*.json)" in the file type drop down menu.
 
 
 ## Developer Notes (macOS with PyCharm Pro)
