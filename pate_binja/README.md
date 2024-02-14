@@ -44,11 +44,11 @@ export PATE_BINJA_MODE=BUILD
 Once Binary Ninja is running, you can run PATE from the "Plugins" menu. An open file dialog will open. By defualt it will be looking for a PATE Run Configuration file (*.run-config.json). If you want to run a replay file, select "PATE Replay (*.json)" in the file type drop down menu.
 
 
-## Developer Notes (macOS with PyCharm Pro)
+## Developer Notes (macOS with PyCharm)
 
-You must launch PyCharm Pro from a bash shell because it needs your bash environment. For example, on macOS:
+To run demos in tty mode, you need to define an environment variable to point at the clone of the [PATE Binja Demos repo](https://gitlab-ext.galois.com/pate/pate-binja-demos):
 ```bash
-open /Applications/PyCharm.app
+export PATE_BINJA_DEMOS=<demos dir>
 ```
 
 To install the Binja api for completion in PyCharm:
@@ -57,7 +57,7 @@ To install the Binja api for completion in PyCharm:
 - Go to python console (runs within venv)
 - python /Applications/Binary\ Ninja.app/Contents/Resources/scripts/install_api.py 
 
-To setup debugging:
+To set up debugging under Binary Ninja (requires PyCharm Pro):
 
 - See https://docs.binary.ninja/dev/plugins.html#remote-debugging-with-intellij-pycharm
 - In Binja settings specify python interpreter and site package dir to point at your Pycharm project venv installs.

@@ -1272,17 +1272,13 @@ def run_pate_config(file):
 
 
 def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
-    if os.getenv('PATE_BINJA_MODE') == 'BUILD':
-        pate = [os.getenv('PATE') + '/pate.sh']
-    else:
-        pate = ['docker', 'run', '--rm', '-i', '-v', '.:/work', '--workdir=/work', 'pate']
-    bash_cmd = " ".join(pate + ['-o', original, '-p', patched, '--json-toplevel'] + args)
-    #print("Bash cmd: " + bash_cmd)
-    # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools)
-    return Popen(['/bin/bash', '-l', '-c', bash_cmd],
+    # We use a helper script to run logic in the user's shell environment.
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
+    # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
+    return Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel'] + args,
                  cwd=cwd,
                  stdin=PIPE, stdout=PIPE, text=True, encoding='utf-8'
-        )
+                 )
 
 
 def run_pate_config_or_replay_file(f: str) -> Popen:
