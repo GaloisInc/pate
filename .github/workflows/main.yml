@@ -10,7 +10,7 @@ name: CI Matrix
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, dwest/test-docker]
 
 jobs:
   docker:
@@ -35,6 +35,19 @@ jobs:
           docker run --rm --entrypoint cabal pate run pate-test-aarch32 -- -p args-equal > out.log
           cat out.log
           grep -e "All .* tests passed" out.log || exit 1
+
+      - name: Artifactory Login
+        uses: docker/login-action@v2
+        with:
+          registry: artifactory.galois.com:5025
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_KEY }}
+
+      - name: Push Docker image
+        run: |
+          CI_COMMIT_SHORT_SHA=$(git rev-parse --short $GITHUB_SHA)
+          docker tag pate artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
+          docker push artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
 
   build:
     runs-on: ${{ matrix.os }}
