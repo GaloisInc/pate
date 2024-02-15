@@ -1,3 +1,13 @@
+{-|
+Module           : Pate.EventTrace
+Copyright        : (c) Galois, Inc 2024
+Maintainer       : Daniel Matichuk <dmatichuk@galois.com>
+
+Defines data structures relating to collecting traces of events during
+symbolic execution.
+
+-}
+
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -14,15 +24,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-{-|
-Module           : Pate.EventTrace
-Copyright        : (c) Galois, Inc 2024
-Maintainer       : Daniel Matichuk <dmatichuk@galois.com>
 
-Defines data structures relating to collecting traces of events during
-symbolic execution.
-
--}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -36,16 +38,24 @@ module Pate.EventTrace
 , SymBV'(..)
 , TraceEvent(..)
 , EventTrace
+, InstructionEvent(..)
+, InstructionTrace
 , ppPtr'
 , prettyMemOp
 , prettyMemEvent
 , filterEvent
+, asInstructionTrace
+, takeMatchingPrefix
+, takeMatchingPrefix2
+, reverseSeq
+, collapsePartialSeq
 ) where
 
 import           Prettyprinter
 import qualified Data.BitVector.Sized as BV
 import           Data.Text ( Text )
 import qualified Control.Monad.IO.Class as IO
+import           Data.Functor.Const ( Const(..) )
 
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
@@ -55,11 +65,11 @@ import           What4.Interface hiding ( integerToNat )
 
 import           Lang.Crucible.LLVM.MemModel (LLVMPtr, pattern LLVMPointer, ppPtr)
 import           Lang.Crucible.Utils.MuxTree ( MuxTree, viewMuxTree )
-import           Lang.Crucible.Simulator.SymSequence ( SymSequence(..), muxSymSequence, evalWithFreshCache, nilSymSequence, consSymSequence, appendSymSequence )
+import           Lang.Crucible.Simulator.SymSequence ( SymSequence(..), muxSymSequence, evalWithFreshCache, nilSymSequence, consSymSequence, appendSymSequence, isNilSymSequence, traverseSymSequence )
 
 import           Data.Macaw.Memory (Endianness(..), MemSegmentOff, MemWidth, MemAddr (..), segoffAddr)
 import           Data.Macaw.CFG.AssignRhs (ArchAddrWidth, ArchReg)
-import           Data.Macaw.CFG (ArchSegmentOff)
+import           Data.Macaw.CFG (ArchSegmentOff, RegAddrWidth)
 
 import qualified What4.ExprHelpers as WEH
 import qualified What4.JSON as W4S
@@ -71,7 +81,11 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.SimulatorRegisters as PSr
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Pate.Pointer as Ptr
-
+import Control.Monad (forM)
+import Data.Maybe (catMaybes)
+import What4.Partial (PartExpr, pattern Unassigned, pattern PE)
+import Control.Monad.Trans.Maybe (MaybeT(..))
+import Control.Monad.Trans (lift)
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
@@ -372,3 +386,338 @@ instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) wher
             IO.liftIO $ muxSymSequence sym p' xs' ys'
 
 type EventTrace sym arch = SymSequence sym (TraceEvent sym arch)
+
+data InstructionEvent arch = InstructionEvent { instrAddr :: ArchSegmentOff arch, instrDisassembled :: Text }
+  deriving (Eq, Ord)
+
+deriving instance MemWidth (RegAddrWidth (ArchReg arch)) => Show (InstructionEvent arch)
+
+type InstructionTrace sym arch = SymSequence sym (InstructionEvent arch)
+
+
+singleSeq ::
+  forall sym a.
+  IsExprBuilder sym =>
+  sym ->
+  a ->
+  IO (SymSequence sym a)
+singleSeq sym a = do
+  n <- nilSymSequence sym
+  consSymSequence sym a n
+
+-- | Convert a 'MuxTree' into a sequence with length at most 1, collapsing all 'Nothing' results
+--   from the given function into an empty sequence.
+muxTreeToSeq ::
+  forall sym a b.
+  IsExprBuilder sym =>
+  sym ->
+  (a -> IO (Maybe b)) ->
+  MuxTree sym a ->
+  IO (SymSequence sym b)
+muxTreeToSeq sym f mt = do
+  es <- fmap catMaybes $ forM (viewMuxTree mt) $ \(x, p) -> f x >>= \case
+    Just y -> return $ Just (p, y)
+    Nothing -> return Nothing
+  collect es
+  where
+    collect :: [(Pred sym, b)] -> IO (SymSequence sym b)
+    collect [] = nilSymSequence sym
+    collect ((p,y):ys) = do
+      y_seq <- singleSeq sym y
+      ys_seq <- collect ys
+      muxSymSequence sym p y_seq ys_seq
+
+asInstructionTrace ::
+  forall sym arch.
+  IsExprBuilder sym =>
+  sym ->
+  EventTrace sym arch ->
+  IO (InstructionTrace sym arch)
+asInstructionTrace sym e_seq = fmap getConst $ evalWithFreshCache f e_seq
+  where
+    -- NB: this is not quite a copy of traverseSymSequence, because each 'TraceEvent' turns into a full 'InstructionTrace', which captures
+    -- the inner 'MuxTree' as a sequence (see: 'muxTreeToSeq')
+    f :: tp ~ TraceEvent sym arch => (SymSequence sym tp -> IO (Const (InstructionTrace sym arch) tp)) -> (SymSequence sym tp -> IO (Const (InstructionTrace sym arch) tp))
+    f loop s = fmap Const $ case s of
+      SymSequenceNil -> nilSymSequence sym
+      SymSequenceCons _ a b -> do
+        a' <- g a
+        Const b' <- loop b
+        appendSymSequence sym a' b'
+      SymSequenceAppend _ s1 s2 -> do
+        Const s1' <- loop s1
+        Const s2' <- loop s2
+        appendSymSequence sym s1' s2'
+      SymSequenceMerge _ p s1 s2 -> do
+        Const s1' <- loop s1
+        Const s2' <- loop s2
+        muxSymSequence sym p s1' s2'
+
+    g :: TraceEvent sym arch -> IO (InstructionTrace sym arch)
+    g e@RegOpEvent{} = muxTreeToSeq sym (\x -> return $ fmap (\(addr,dis) -> InstructionEvent addr dis) x) (traceInstr e)
+    -- NB: we ignore memory events under the assumption that every memory event will be paired with a register event
+    -- that at least updates the PC afterwards
+    g _ = nilSymSequence sym
+
+
+-- TODO: These are general functions over symbolic sequences that should probably be
+-- moved into What4
+-- Likely will want some low-level testing since their semantics are somewhat non-trivial
+-- The intention is that they should be useful for matching up control flow by investigating InstructionEvent sequences
+
+-- | Smarter mux that checks for predicate concreteness
+muxSymSequence' ::
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  Pred sym ->
+  SymSequence sym a ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+muxSymSequence' sym p sT sF = case asConstantPred p of
+  Just True -> return sT
+  Just False -> return sF
+  Nothing -> IO.liftIO $ muxSymSequence sym p sT sF
+
+appendSingle ::
+  IO.MonadIO m =>
+  IsExprBuilder sym =>
+  sym ->
+  SymSequence sym a ->
+  a ->
+  m (SymSequence sym a)
+appendSingle sym s a = IO.liftIO $ do
+  a_seq <- consSymSequence sym a =<< nilSymSequence sym
+  appendSymSequence sym s a_seq
+
+muxSeqM ::
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  Pred sym ->
+  m (SymSequence sym a) ->
+  m (SymSequence sym a) ->
+  m (SymSequence sym a)
+muxSeqM sym p f_s1 f_s2 = case asConstantPred p of
+  Just True -> f_s1
+  Just False -> f_s2
+  Nothing -> do
+    aT <- f_s1
+    aF <- f_s2
+    muxSymSequence' sym p aT aF
+
+muxSeqM2 ::
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  Pred sym ->
+  m (SymSequence sym a, SymSequence sym b) ->
+  m (SymSequence sym a, SymSequence sym b) ->
+  m (SymSequence sym a, SymSequence sym b)
+muxSeqM2 sym p f_s1 f_s2 = case asConstantPred p of
+  Just True -> f_s1
+  Just False -> f_s2
+  Nothing -> do
+    (a1,b1) <- f_s1
+    (a2,b2) <- f_s2
+    a <- muxSymSequence' sym p a1 a2
+    b <- muxSymSequence' sym p b1 b2
+    return $ (a,b)
+
+-- | Apply a partial function to a sequence, returning the longest
+--   prefix of nonempty results.
+--   For example, given any predicate 'p' and 'f a :=  if p a then Just a else Nothing'
+--   Then we expect the following to hold:
+--     let (result, as_suffix) = takeMatchingPrefix f as
+--     in   result ++ as_suffix == as
+--       && all r result
+--       && not (p (head as_suffix))
+--   Notably this is semantic equality since 'p' is a symbolic predicate
+--   TODO: caching?
+--   TODO: if 'a' and 'b' are the same type there are a few optimizations
+--     that could be made to avoid re-creating sub-sequences
+takeMatchingPrefix ::
+  forall sym m a b.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  (a -> m (PartExpr (Pred sym) b)) ->
+  SymSequence sym a ->
+  m (SymSequence sym b, SymSequence sym a)
+takeMatchingPrefix sym f s_a_outer = go SymSequenceNil s_a_outer
+  where
+    go :: SymSequence sym b -> SymSequence sym a -> m (SymSequence sym b, SymSequence sym a)
+    go acc s_a = case s_a of
+      SymSequenceNil -> return $ (acc, s_a)
+      (SymSequenceCons _ a s_a') -> do
+        f a >>= \case
+          Unassigned -> return $ (acc, s_a)
+          PE p v -> muxSeqM2 sym p
+            -- for a 'Just' result we add it to the accumulated prefix and continue
+            ((IO.liftIO $ appendSingle sym acc v) >>= \acc' -> go acc' s_a')
+            -- otherwise we return the current accumulated prefix and stop
+            (return (acc, s_a))
+      (SymSequenceAppend _ a1 a2) -> do
+        (acc', a1_suf) <- go acc a1
+        p <- IO.liftIO $ isNilSymSequence sym a1_suf
+        muxSeqM2 sym p
+          (go acc' a2) $ do
+            a2_suf <- if a1 == a1_suf then return s_a
+              else IO.liftIO $ appendSymSequence sym a1_suf a2
+            return (acc', a2_suf)
+      (SymSequenceMerge _ p a_T a_F) -> muxSeqM2 sym p (go acc a_T) (go acc a_F)
+
+muxSeqM3 ::
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  Pred sym ->
+  m (SymSequence sym a, SymSequence sym b, SymSequence sym c) ->
+  m (SymSequence sym a, SymSequence sym b, SymSequence sym c) ->
+  m (SymSequence sym a, SymSequence sym b, SymSequence sym c)
+muxSeqM3 sym p f_s1 f_s2 = case asConstantPred p of
+  Just True -> f_s1
+  Just False -> f_s2
+  Nothing -> do
+    (a1,b1,c1) <- f_s1
+    (a2,b2,c2) <- f_s2
+    a <- muxSymSequence' sym p a1 a2
+    b <- muxSymSequence' sym p b1 b2
+    c <- muxSymSequence' sym p c1 c2
+    return $ (a,b,c)
+
+-- | Zip two sequences pointwise. If one is longer than the other, return
+--   the suffix of elements.
+--   Notably this is not an 'Either' result (i.e. returning only the suffix of the longer sequence),
+--   as both suffixes may be nontrivial and symbolic.
+zipSeq ::
+  forall sym a b.
+  IsExprBuilder sym =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym b ->
+  IO (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b)
+zipSeq sym as_outer bs_outer = go SymSequenceNil as_outer bs_outer
+  where
+    handle_append :: forall x y.
+      (SymSequence sym (a,b) -> SymSequence sym x -> SymSequence sym y -> IO (SymSequence sym (a,b), SymSequence sym x, SymSequence sym y)) ->
+      SymSequence sym (a,b) ->
+      SymSequence sym x ->
+      SymSequence sym y ->
+      Maybe (IO (SymSequence sym (a,b), SymSequence sym x, SymSequence sym y))
+    handle_append rec acc xs@(SymSequenceAppend _ xs_1 xs_2) ys = Just $ do
+      (acc', xs_suf', ys_suf) <- rec acc xs_1 ys
+      p <- isNilSymSequence sym xs_suf'
+      muxSeqM3 sym p
+        -- if xs_suf' is nil then it means we consumed all of the first
+        -- and thus we can continue zipping elements
+        (rec acc' xs_2 ys_suf) $ do
+          -- otherwise, we append the tail to the found suffix and return
+          -- as a small optimization, if the suffix is the same as the input
+          -- then we don't need to create a new sequence for appended suffix
+        xs_suf'' <- if xs_suf' == xs_1 then return xs
+          else appendSymSequence sym xs_suf' xs_2
+        return $ (acc', xs_suf'', ys_suf)
+
+    handle_append _ _ _ _ = Nothing
+    go' :: SymSequence sym (a,b) -> SymSequence sym b -> SymSequence sym a -> IO (SymSequence sym (a,b), SymSequence sym b, SymSequence sym a)
+    go' acc s_b s_a = go acc s_a s_b >>= \(acc', s_a', s_b') -> return (acc', s_b', s_a')
+
+    go :: SymSequence sym (a,b) -> SymSequence sym a -> SymSequence sym b -> IO (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b)
+    go acc s_a s_b = case (s_a, s_b) of
+      -- if either sequence is nil that we can't extend the matching prefix any more
+      -- and so we return
+      (_, SymSequenceNil) -> return $ (acc, s_a, s_b)
+      (SymSequenceNil, _) -> return $ (acc, s_a, s_b)
+      (SymSequenceCons _ a s_a', SymSequenceCons _ b s_b') -> do
+        acc' <- IO.liftIO $ appendSingle sym acc (a,b)
+        go acc' s_a' s_b'
+      _ | Just g <- handle_append go acc s_a s_b -> g
+      _ | Just g <- handle_append go' acc s_b s_a -> g >>= \(acc', s_b', s_a') -> return (acc', s_a', s_b')
+      (SymSequenceMerge _ p a_T a_F, _) -> muxSeqM3 sym p (go acc a_T s_b) (go acc a_F s_b)
+      (_, SymSequenceMerge _ p b_T b_F) -> muxSeqM3 sym p (go acc s_a b_T) (go acc s_a b_F)
+      (SymSequenceAppend{}, _) -> error "zipSeq: handle_append unexpectedly failed"
+      (_, SymSequenceAppend{}) -> error "zipSeq: handle_append unexpectedly failed"
+
+unzipSeq ::
+  forall sym a b.
+  IsExprBuilder sym =>
+  sym ->
+  SymSequence sym (a,b) ->
+  IO (SymSequence sym a, SymSequence sym b)
+unzipSeq sym s = do
+  s_a <- traverseSymSequence sym (\(a, _) -> return a) s
+  s_b <- traverseSymSequence sym (\(_, b) -> return b) s
+  return (s_a, s_b)
+
+-- | Collapses partial elements into empty sub-sequences
+collapsePartialSeq ::
+  forall sym c.
+  IsExprBuilder sym =>
+  sym ->
+  SymSequence sym (PartExpr (Pred sym) c) ->
+  IO (SymSequence sym c)
+collapsePartialSeq sym s_outer = go s_outer
+  where
+    go :: SymSequence sym (PartExpr (Pred sym) c) -> IO (SymSequence sym c)
+    go SymSequenceNil = nilSymSequence sym
+    go (SymSequenceCons _ a as) = case a of
+      Unassigned -> go as
+      PE p a' -> muxSeqM sym p
+        (consSymSequence sym a' =<< go as)
+        (nilSymSequence sym)
+    go (SymSequenceAppend _ as1 as2) = do
+      as1' <- go as1
+      as2' <- go as2
+      appendSymSequence sym as1' as2'
+    go (SymSequenceMerge _ p asT asF) = muxSeqM sym p (go asT) (go asF)
+
+-- | Apply a partial function pairwise to two sequences, returning the longest
+--   prefix of nonempty results.
+--   For example, given any relation 'r' and 'f a b :=  if r (a, b) then Just (a, b) else Nothing'
+--   Then we expect the following to hold:
+--     let (result, as_suffix, bs_suffix) = takeMatchingPrefix2 f as bs
+--     in   (map fst result) ++ as_suffix == as
+--       && (map snd result) ++ bs_suffix == bs
+--       && all r result
+--       && not (r (head as_suffix, head bs_suffix))
+--   Notably this is semantic equality since 'r' is a symbolic relation
+--   TODO: caching?
+takeMatchingPrefix2 ::
+  forall sym m a b c.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  (a -> b -> m (PartExpr (Pred sym) c)) ->
+  SymSequence sym a ->
+  SymSequence sym b ->
+  m (SymSequence sym c, SymSequence sym a, SymSequence sym b)
+takeMatchingPrefix2 sym f s_a_outer s_b_outer = do
+  (zipped, as_suffix, bs_suffix) <- IO.liftIO $ zipSeq sym s_a_outer s_b_outer
+  (matching_prefix, as_bs_suffix) <- takeMatchingPrefix sym (\(a,b) -> f a b) zipped
+  (as_suffix', bs_suffix') <- IO.liftIO $ unzipSeq sym as_bs_suffix
+  as_suffix'' <- IO.liftIO $ appendSymSequence sym as_suffix' as_suffix
+  bs_suffix'' <- IO.liftIO $ appendSymSequence sym bs_suffix' bs_suffix
+  return (matching_prefix, as_suffix'', bs_suffix'')
+
+-- | Reverse the order of elements in a sequence
+--   TODO: caching?
+reverseSeq ::
+  forall sym a.
+  IsExprBuilder sym =>
+  sym ->
+  SymSequence sym a ->
+  IO (SymSequence sym a)
+reverseSeq sym s_outer = go s_outer
+  where
+    go :: SymSequence sym a -> IO (SymSequence sym a)
+    go SymSequenceNil = nilSymSequence sym
+    go (SymSequenceCons _ a as) = go as >>= \as_rev -> appendSingle sym as_rev a
+    go (SymSequenceAppend _ as bs) = do
+      as_rev <- go as
+      bs_rev <- go bs
+      appendSymSequence sym bs_rev as_rev
+    go (SymSequenceMerge _ p sT sF) = do
+      sT_rev <- go sT
+      sF_rev <- go sF
+      muxSymSequence sym p sT_rev sF_rev

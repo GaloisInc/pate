@@ -586,20 +586,6 @@ macawTraceExtensions archStmtFn syscallModel mvar globs undefptr =
     , extensionExec = execMacawStmtExtension archStmtFn undefptr syscallModel mvar globs
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 -- | Test if a memory operation overlaps with a concretrely-defined
 --   region of memory, given as a starting address and a length.
 --   For this test, we ignore the pointer region of the memory operation.
