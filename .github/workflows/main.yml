@@ -10,7 +10,7 @@ name: CI Matrix
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, dwest/test-docker]
 
 jobs:
   docker:
@@ -34,6 +34,19 @@ jobs:
         run: |
           docker run --rm -itd --entrypoint bash --name pate -v `pwd`/tests/aarch32:/tests pate
           (echo "cabal run pate-test-aarch32 -- -p args-equal") | script -q /dev/null docker attach pate
+
+      - name: Artifactory Login
+        uses: docker/login-action@v2
+        with:
+          registry: artifactory.galois.com:5025
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_KEY }}
+
+      - name: Push Docker image
+        run: |
+          CI_COMMIT_SHORT_SHA=$(git rev-parse --short $GITHUB_SHA)
+          docker tag pate artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
+          docker push artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
 
   build:
     runs-on: ${{ matrix.os }}
