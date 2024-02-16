@@ -29,7 +29,7 @@ class PateWidget(QWidget):
         global instance_id
         super().__init__(parent)
 
-        self.flow_graph_widget = MyFlowGraphWidget(self, None, graph=g)
+        self.flow_graph_widget = MyFlowGraphWidget(self)
         self.flow_graph_widget.setWindowTitle('FNORT BLORT')
 
         self.output_field = QPlainTextEdit()
