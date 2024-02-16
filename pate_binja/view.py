@@ -20,51 +20,55 @@ from binaryninjaui import GlobalAreaWidget, GlobalArea, UIAction, UIActionHandle
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QPushButton, QMessageBox
+    QDialogButtonBox, QPushButton, QMessageBox, QSplitter
 
 from . import pate
 
-instance_id = 0
-
-# TODO: find a way to do this without a global variable
-pateWidget: PateWidget
-
-
-class PateWidget(GlobalAreaWidget):
-    def __init__(self, name):
+class PateWidget(QWidget):
+    def __init__(self, parent: QWidget):
         global instance_id
-        global pateWidget
-        GlobalAreaWidget.__init__(self, name)
-        pateWidget = self
+        super().__init__(parent)
 
-        self.outputfield = QPlainTextEdit()
-        self.outputfield.setReadOnly(True)
-        self.outputfield.setMaximumBlockCount(1000000)
+        self.flow_graph_widget = MyFlowGraphWidget(self, None, graph=g)
+        self.flow_graph_widget.setWindowTitle('FNORT BLORT')
 
-        textfield_layout = QHBoxLayout()
-        textfield_layout.addWidget(QLabel("Pate Command: "))
-        self.textfield = QLineEdit()
-        self.textfield.setEnabled(False)
-        textfield_layout.addWidget(self.textfield)
-        textfield_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.textfield.returnPressed.connect(self.onPateCommandReturnPressed)
+        self.output_field = QPlainTextEdit()
+        self.output_field.setReadOnly(True)
+        self.output_field.setMaximumBlockCount(1000000)
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.outputfield)
-        layout.addLayout(textfield_layout)
-        self.setLayout(layout)
+        self.cmd_field = QLineEdit()
+        self.cmd_field.setEnabled(False)
+        self.cmd_field.returnPressed.connect(self.onPateCommandReturnPressed)
 
-        instance_id += 1
-        self.data = None
+        cmd_field_layout = QHBoxLayout()
+        cmd_field_layout.addWidget(QLabel("Pate Command: "))
+        cmd_field_layout.addWidget(self.cmd_field)
+        cmd_field_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        io_layout = QVBoxLayout()
+        io_layout.addWidget(self.output_field)
+        io_layout.addLayout(cmd_field_layout)
+
+        io_widget = QWidget()
+        io_widget.setLayout(io_layout)
+
+        splitter = QSplitter()
+        splitter.setOrientation(Qt.Orientation.Vertical)
+        splitter.addWidget(self.flow_graph_widget)
+        splitter.addWidget(io_widget)
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(splitter)
+        self.setLayout(main_layout)
 
         self.user_response_condition = threading.Condition()
         self.user_response = None
 
     def onPateCommandReturnPressed(self):
-        user_response = self.textfield.text()
+        user_response = self.cmd_field.text()
         # TODO: validate here or use QLineEdit validation mechanism
-        self.textfield.setText('Pate running...')
-        self.textfield.setEnabled(False)
+        self.cmd_field.setText('Pate running...')
+        self.cmd_field.setEnabled(False)
         # Notify Pate background thread
         with self.user_response_condition:
             self.user_response = user_response
@@ -74,47 +78,48 @@ class PateWidget(GlobalAreaWidget):
         query = '\n' + prompt + '\n'
         for i, e in enumerate(choices):
             query += '  {}\n'.format(e)
-        self.outputfield.appendPlainText(query)
+        self.output_field.appendPlainText(query)
         if not replay:
-            self.textfield.setText('')
-            self.textfield.setEnabled(True)
+            self.cmd_field.setText('')
+            self.cmd_field.setEnabled(True)
 
 
 class GuiUserInteraction(pate.PateUserInteraction):
-    def __init__(self, pateWidget: PateWidget, replay: bool = False,
+    def __init__(self, pate_widget: PateWidget, replay: bool = False,
                  show_ce_trace: bool = False):
-        self.pateWidget = pateWidget
+        self.pate_widget = pate_widget
         self.replay = replay
         self.show_ce_trace = show_ce_trace
 
     def ask_user(self, prompt: str, choices: list[str]) -> Optional[str]:
-        execute_on_main_thread_and_wait(lambda: self.pateWidget.ask_user(prompt, choices, self.replay))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.ask_user(prompt, choices, self.replay))
         if self.replay:
-            execute_on_main_thread_and_wait(lambda: self.pateWidget.outputfield.appendPlainText('Pate Command: auto replay\n'))
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText('Pate Command: auto replay\n'))
             return '42' # Return anything (its ignored) for fast replay
         # Wait for user to respond to prompt. This happens on the GUI thread.
-        urc = self.pateWidget.user_response_condition
+        urc = self.pate_widget.user_response_condition
         with urc:
-            while self.pateWidget.user_response is None:
+            while self.pate_widget.user_response is None:
                 urc.wait()
-            choice = self.pateWidget.user_response
-            self.pateWidget.user_response = None
-            execute_on_main_thread_and_wait(self.pateWidget.outputfield.appendPlainText(f'Pate Command: {choice}\n'))
+            choice = self.pate_widget.user_response
+            self.pate_widget.user_response = None
+            execute_on_main_thread_and_wait(self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
             return choice
 
     def show_message(self, msg) -> None:
-        execute_on_main_thread_and_wait(lambda: self.pateWidget.outputfield.appendPlainText(msg))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(msg))
 
     def show_cfar_graph(self, graph: pate.CFARGraph) -> None:
         flow_graph = build_pate_flow_graph(graph, self.show_ce_trace)
-        execute_on_main_thread_and_wait(lambda: show_graph_report("Pate Flowgraph", flow_graph))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.setGraph(flow_graph))
 
 
 class PateThread(BackgroundTaskThread):
     # TODO: Look at interaction.run_progress_dialog
     # handle cancel and restart
-    def __init__(self, bv, run_fn, replay=False, show_ce_trace=True, trace_file=None):
+    def __init__(self, bv, run_fn, pate_widget: PateWidget, replay=False, show_ce_trace=True, trace_file=None):
         BackgroundTaskThread.__init__(self, "Pate Process", True)
+        self.pate_widget = pate_widget
         self.replay = replay
         self.run_fn = run_fn
         self.trace_file = trace_file
@@ -147,18 +152,17 @@ class PateThread(BackgroundTaskThread):
                 self._command_loop(proc, self.show_ce_trace)
 
     def _command_loop(self, proc: Popen, show_ce_trace: bool = False, trace_io=None):
-        global pateWidget
 
         #self.progress = 'Pate running...'
-        execute_on_main_thread_and_wait(lambda: pateWidget.textfield.setText('Pate running...'))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText('Pate running...'))
 
-        user = GuiUserInteraction(pateWidget, self.replay, show_ce_trace)
+        user = GuiUserInteraction(self.pate_widget, self.replay, show_ce_trace)
         pate_wrapper = pate.PateWrapper(user, proc.stdout, proc.stdin, trace_io)
 
         pate_wrapper.command_loop()
 
         #self.progress = 'Pate finished.'
-        execute_on_main_thread_and_wait(lambda: pateWidget.textfield.setText('Pate finished.'))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText('Pate finished.'))
 
 
 # def run_pate_thread_nov23_t4_dendy1011(bv):
@@ -266,7 +270,10 @@ def launch_pate(context: UIActionContext):
     f = interaction.get_open_filename_input(
         "Run PATE",
         "PATE Run Configuration (*.run-config.json);;PATE Replay (*.replay)")
-    print(f)
+
+    if f is None:
+        return
+
     if f.endswith(".run-config.json"):
         replay = False
         trace_file = os.path.join(os.path.dirname(f), 'lastrun.replay')
@@ -275,9 +282,13 @@ def launch_pate(context: UIActionContext):
         replay = True
         trace_file = None
         fn = lambda ignore: pate.run_replay(f)
-    pt = PateThread(None, fn, replay=replay, trace_file=trace_file)
 
+    pate_widget = PateWidget(context.widget)
+    context.context.createTabForWidget("PATE " + os.path.basename(f), pate_widget)
+
+    pt = PateThread(None, fn, pate_widget, replay=replay, trace_file=trace_file)
     pt.start()
+
 
 # class PateConfigDialog(QDialog):
 #     def __init__(self, context: UIActionContext, parent=None):
@@ -372,21 +383,27 @@ def launch_pate(context: UIActionContext):
 #     pate_window.setWindowState(pate_window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
 #     pate_window.raise_()
 
-
 def register():
     #PluginCommand.register('Run Pate ch10', 'Run Pate Verifier and show flow graph', run_pate_thread_may23_ch10)
     #PluginCommand.register('Run Pate t1', 'Run Pate Verifier and show flow graph', run_pate_thread_nov23_t1_room1018)
     #PluginCommand.register('Run Pate t4', 'Run Pate Verifier and show flow graph', run_pate_thread_nov23_t4_dendy1011)
 
-    GlobalArea.addWidget(lambda context: PateWidget('Pate Interaction'))
+    # [JCC 20240216] If we want to use setting rather than env vars...
+    # Settings().register_group("pate", "PATE")
+    # Settings().register_setting("pate.source", """
+    # 	{
+    # 		"title" : "PATE Verifier Source Directory",
+    # 		"type" : "string",
+    # 		"default" : null,
+    # 		"description" : "If this is set, PATE will run as built in the source directory rather than using the docker image."
+    # 	}
+    # 	""")
+    #
+    # print("pate.source:", Settings().get_string("pate.source"))
+    # print("contains(pate.source):", Settings().contains("pate.source"))
 
     UIAction.registerAction('Pate...')
     UIActionHandler.globalActions().bindAction('Pate...', UIAction(launch_pate))
     Menu.mainMenu('Plugins').addAction('Pate...', 'Pate', True)
-
-    #UIAction.registerAction('Pate...')
-    #UIActionHandler.globalActions().bindAction('Pate...', UIAction(launch_pate))
-    #Menu.mainMenu('Plugins').addAction('Pate...', 'Pate', True)
-
 
 register()
