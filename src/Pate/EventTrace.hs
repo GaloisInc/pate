@@ -84,8 +84,6 @@ import qualified Pate.Pointer as Ptr
 import Control.Monad (forM)
 import Data.Maybe (catMaybes)
 import What4.Partial (PartExpr, pattern Unassigned, pattern PE)
-import Control.Monad.Trans.Maybe (MaybeT(..))
-import Control.Monad.Trans (lift)
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
@@ -433,32 +431,13 @@ asInstructionTrace ::
   sym ->
   EventTrace sym arch ->
   IO (InstructionTrace sym arch)
-asInstructionTrace sym e_seq = fmap getConst $ evalWithFreshCache f e_seq
+asInstructionTrace sym e_seq = mapConcatSeq sym g e_seq
   where
-    -- NB: this is not quite a copy of traverseSymSequence, because each 'TraceEvent' turns into a full 'InstructionTrace', which captures
-    -- the inner 'MuxTree' as a sequence (see: 'muxTreeToSeq')
-    f :: tp ~ TraceEvent sym arch => (SymSequence sym tp -> IO (Const (InstructionTrace sym arch) tp)) -> (SymSequence sym tp -> IO (Const (InstructionTrace sym arch) tp))
-    f loop s = fmap Const $ case s of
-      SymSequenceNil -> nilSymSequence sym
-      SymSequenceCons _ a b -> do
-        a' <- g a
-        Const b' <- loop b
-        appendSymSequence sym a' b'
-      SymSequenceAppend _ s1 s2 -> do
-        Const s1' <- loop s1
-        Const s2' <- loop s2
-        appendSymSequence sym s1' s2'
-      SymSequenceMerge _ p s1 s2 -> do
-        Const s1' <- loop s1
-        Const s2' <- loop s2
-        muxSymSequence sym p s1' s2'
-
     g :: TraceEvent sym arch -> IO (InstructionTrace sym arch)
     g e@RegOpEvent{} = muxTreeToSeq sym (\x -> return $ fmap (\(addr,dis) -> InstructionEvent addr dis) x) (traceInstr e)
     -- NB: we ignore memory events under the assumption that every memory event will be paired with a register event
     -- that at least updates the PC afterwards
     g _ = nilSymSequence sym
-
 
 -- TODO: These are general functions over symbolic sequences that should probably be
 -- moved into What4
@@ -590,6 +569,7 @@ muxSeqM3 sym p f_s1 f_s2 = case asConstantPred p of
 --   the suffix of elements.
 --   Notably this is not an 'Either' result (i.e. returning only the suffix of the longer sequence),
 --   as both suffixes may be nontrivial and symbolic.
+--   TODO: not obvious how to handle caching here
 zipSeq ::
   forall sym a b.
   IsExprBuilder sym =>
@@ -650,6 +630,50 @@ unzipSeq sym s = do
   s_b <- traverseSymSequence sym (\(_, b) -> return b) s
   return (s_a, s_b)
 
+-- | Same as 'evalWithFreshCache' but without the result type depending on 'a'
+evalWithFreshCache' ::
+  forall sym m a b.
+  IO.MonadIO m =>
+  ((SymSequence sym a -> m b) -> SymSequence sym a -> m b) ->
+  (SymSequence sym a -> m b)
+evalWithFreshCache' f s_outer = getConst <$> evalWithFreshCache (\rec s -> Const <$> f (do_wrap rec) s) s_outer
+  where
+    do_wrap :: (SymSequence sym a -> m (Const b a)) -> (SymSequence sym a -> m b)
+    do_wrap g = \s -> getConst <$> g s
+
+mapConcatSeq ::
+  forall sym m a b.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  (a -> m (SymSequence sym b)) ->
+  SymSequence sym a ->
+  m (SymSequence sym b)
+mapConcatSeq sym f s_a_outer = evalWithFreshCache' go s_a_outer
+  where
+    go :: (SymSequence sym a -> m (SymSequence sym b)) -> SymSequence sym a -> m (SymSequence sym b)
+    go _ SymSequenceNil = IO.liftIO $ nilSymSequence sym
+    go rec (SymSequenceCons _ a as) = do
+      bs <- f a
+      bs' <- rec as
+      IO.liftIO $ appendSymSequence sym bs bs'
+    go rec (SymSequenceAppend _ as1 as2) = do
+      bs1 <- rec as1
+      bs2 <- rec as2
+      IO.liftIO $ appendSymSequence sym bs1 bs2
+    go rec (SymSequenceMerge _ p asT asF) =
+      muxSeqM sym p (rec asT) (rec asF)
+
+partToSeq ::
+  forall sym c.
+  IsExprBuilder sym =>
+  sym ->
+  PartExpr (Pred sym) c ->
+  IO (SymSequence sym c)
+partToSeq sym = \case
+  Unassigned -> nilSymSequence sym
+  PE p c -> muxSeqM sym p (singleSeq sym c) (nilSymSequence sym)
+
 -- | Collapses partial elements into empty sub-sequences
 collapsePartialSeq ::
   forall sym c.
@@ -657,20 +681,7 @@ collapsePartialSeq ::
   sym ->
   SymSequence sym (PartExpr (Pred sym) c) ->
   IO (SymSequence sym c)
-collapsePartialSeq sym s_outer = go s_outer
-  where
-    go :: SymSequence sym (PartExpr (Pred sym) c) -> IO (SymSequence sym c)
-    go SymSequenceNil = nilSymSequence sym
-    go (SymSequenceCons _ a as) = case a of
-      Unassigned -> go as
-      PE p a' -> muxSeqM sym p
-        (consSymSequence sym a' =<< go as)
-        (nilSymSequence sym)
-    go (SymSequenceAppend _ as1 as2) = do
-      as1' <- go as1
-      as2' <- go as2
-      appendSymSequence sym as1' as2'
-    go (SymSequenceMerge _ p asT asF) = muxSeqM sym p (go asT) (go asF)
+collapsePartialSeq sym s_outer = mapConcatSeq sym (partToSeq sym) s_outer
 
 -- | Apply a partial function pairwise to two sequences, returning the longest
 --   prefix of nonempty results.
@@ -708,16 +719,16 @@ reverseSeq ::
   sym ->
   SymSequence sym a ->
   IO (SymSequence sym a)
-reverseSeq sym s_outer = go s_outer
+reverseSeq sym s_outer = evalWithFreshCache go s_outer
   where
-    go :: SymSequence sym a -> IO (SymSequence sym a)
-    go SymSequenceNil = nilSymSequence sym
-    go (SymSequenceCons _ a as) = go as >>= \as_rev -> appendSingle sym as_rev a
-    go (SymSequenceAppend _ as bs) = do
-      as_rev <- go as
-      bs_rev <- go bs
+    go :: (SymSequence sym a -> IO (SymSequence sym a)) -> SymSequence sym a -> IO (SymSequence sym a)
+    go _ SymSequenceNil = nilSymSequence sym
+    go rec (SymSequenceCons _ a as) = rec as >>= \as_rev -> appendSingle sym as_rev a
+    go rec (SymSequenceAppend _ as bs) = do
+      as_rev <- rec as
+      bs_rev <- rec bs
       appendSymSequence sym bs_rev as_rev
-    go (SymSequenceMerge _ p sT sF) = do
-      sT_rev <- go sT
-      sF_rev <- go sF
+    go rec (SymSequenceMerge _ p sT sF) = do
+      sT_rev <- rec sT
+      sF_rev <- rec sF
       muxSymSequence sym p sT_rev sF_rev
