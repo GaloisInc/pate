@@ -111,7 +111,7 @@ import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, asSingleGraphNode )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -425,8 +425,8 @@ chooseDesyncPoint nd pg0 = do
           ReturnNode nr -> nr
     blk <- PPa.get bin (graphNodeBlocks nd)
     pblks <- PD.lookupBlocks blk
-    retSingle <- asSingleReturn bin nd ret
-    divergeSingle <- asSingleGraphNode bin nd
+    retSingle <- toSingleReturn bin nd ret
+    divergeSingle <- toSingleGraphNode bin nd
     return $ (retSingle, divergeSingle, Some blk, pblks)
   (sync, Some syncBin) <- pickCutPoint syncMsg
     [divergeO, divergeP]
@@ -456,8 +456,8 @@ chooseSyncPoint nd pg0 = do
           ReturnNode nr -> nr
     blk <- PPa.get bin (graphNodeBlocks nd)
     pblks <- PD.lookupBlocks blk
-    retSingle <- asSingleReturn bin nd ret
-    divergeSingle <- asSingleGraphNode bin nd
+    retSingle <- toSingleReturn bin nd ret
+    divergeSingle <- toSingleGraphNode bin nd
     return $ (retSingle, divergeSingle, Some blk, pblks)
   (sync, Some syncBin) <- pickCutPoint syncMsg
     [divergeO, divergeP]
@@ -628,7 +628,7 @@ updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ cas
           Just dom_spec -> do
             fmap (\x -> PS.viewSpecBody x PS.unWS) $ PS.forSpec dom_spec $ \scope dom -> fmap PS.WithScope $ do
               domP <- PAD.singletonDomain PBi.PatchedRepr dom
-              divergeNodeP <- asSingleGraphNode PBi.PatchedRepr divergeNode
+              divergeNodeP <- toSingleGraphNode PBi.PatchedRepr divergeNode
               bundle <- noopBundle scope (graphNodeBlocks divergeNodeP)
               pg1 <- case getCurrentDomain pg divergeNodeP of
                 Nothing -> return $ updateDomain' pg syncO divergeNodeP (PS.mkSimSpec scope domP) (priority PriorityWidening)
@@ -641,7 +641,7 @@ updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ cas
         mergeDualNodes syncO syncP domO_spec domP_spec combinedNode pg
       _ -> withTracing @"message" "Missing domain(s) for sync points" $ do
         priority <- thisPriority
-        divergeNodeO <- asSingleGraphNode PBi.OriginalRepr divergeNode
+        divergeNodeO <- toSingleGraphNode PBi.OriginalRepr divergeNode
         return $ queueNode (priority PriorityDomainRefresh) divergeNodeO $ queueAncestors (priority PriorityHandleDesync) syncO pg
 
 {-
@@ -952,7 +952,7 @@ withAbsDomain node d gr f = do
             Just (GraphNode divergeNode) -> do
               Just (Some bin) <- return $ singleNodeRepr (GraphNode node)
               let fnNode_diverge = functionEntryOf divergeNode
-              fnNode_diverge_single <- asSingleNode bin fnNode_diverge
+              fnNode_diverge_single <- toSingleNode bin fnNode_diverge
               case getCurrentDomain gr (GraphNode fnNode_diverge) of
                 Just d' | eqUptoDivergePoint (GraphNode fnNode_diverge_single) (GraphNode fnNode) ->
                   PS.viewSpec d' $ \_ d'' -> do
@@ -2278,7 +2278,7 @@ singletonBundle ::
   SimBundle sym arch v ->
   EquivM sym arch (SimBundle sym arch v)
 singletonBundle bin (SimBundle in_ out_) = 
-  SimBundle <$> PPa.asSingleton bin in_ <*> PPa.asSingleton bin out_
+  SimBundle <$> PPa.toSingleton bin in_ <*> PPa.toSingleton bin out_
 
 handleDivergingPaths ::
   HasCallStack =>
@@ -2293,8 +2293,8 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
   let gr0 = branchGraph st
   let mchoice = branchDesyncChoice st
   priority <- thisPriority
-  currBlockO <- asSingleNode PBi.OriginalRepr currBlock
-  currBlockP <- asSingleNode PBi.PatchedRepr currBlock
+  currBlockO <- toSingleNode PBi.OriginalRepr currBlock
+  currBlockP <- toSingleNode PBi.PatchedRepr currBlock
 
   case (getSyncPoint gr0 PBi.OriginalRepr (GraphNode currBlock), getSyncPoint gr0 PBi.PatchedRepr (GraphNode currBlock)) of
     (Just{},Just{}) -> do

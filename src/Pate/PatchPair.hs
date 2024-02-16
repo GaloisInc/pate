@@ -66,6 +66,7 @@ module Pate.PatchPair (
   , joinPatchPred
   , collapse
   , asSingleton
+  , toSingleton
   , zip
   , jsonPatchPair
   , w4SerializePair
@@ -90,7 +91,7 @@ import qualified Compat.Aeson as JSON
 
 import qualified Pate.Binary as PB
 import qualified Pate.ExprMappable as PEM
-import Data.Parameterized (Some(..))
+import Data.Parameterized (Some(..), Pair(..))
 import Control.Monad.Identity
 import Pate.TraceTree
 import qualified What4.JSON as W4S
@@ -262,14 +263,21 @@ zip (PatchPair{}) (PatchPair{}) = throwPairErr
 mkSingle :: PB.WhichBinaryRepr bin -> tp bin -> PatchPair tp
 mkSingle bin a = PatchPairSingle bin a
 
+-- | Return the single 'tp' and which binary if the input is a singleton 'PatchPair'.
+--   'asSingleton (toSingleton bin x) == (bin, x)' when 'x' contains an entry for 'bin'
+--   '(y,bin) <- asSingleton x; toSingleton bin y == x' when 'x' is a singleton
+asSingleton :: PatchPairM m => PatchPair tp -> m (Pair PB.WhichBinaryRepr tp)
+asSingleton (PatchPairSingle bin v) = return (Pair bin v)
+asSingleton _ = throwPairErr
+
 -- | Convert a 'PatchPair' into a singleton containing only
 --   a value for the given binary 'bin'.
-asSingleton ::
+toSingleton ::
   PatchPairM m =>
   PB.WhichBinaryRepr bin -> 
   PatchPair tp ->
   m (PatchPair tp)
-asSingleton bin pPair = PatchPairSingle bin <$> get bin pPair
+toSingleton bin pPair = PatchPairSingle bin <$> get bin pPair
 
 -- | Create a 'PatchPair' with a shape according to 'getPairRepr'.
 --   The provided function execution for both the original and patched binaries

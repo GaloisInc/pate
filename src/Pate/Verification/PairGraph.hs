@@ -147,7 +147,7 @@ import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNode )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -155,7 +155,7 @@ import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDoma
 import           Pate.TraceTree
 import qualified Pate.Binary as PBi
 import Data.Parameterized (Some(..), Pair (..))
-import Control.Applicative (Const(..))
+import Control.Applicative (Const(..), (<|>))
 import qualified Control.Monad.IO.Unlift as IO
 import Pate.Solver (ValidSym)
 import Control.Monad.Reader (local, MonadReader (ask))
