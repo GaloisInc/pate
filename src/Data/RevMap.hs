@@ -18,12 +18,15 @@ module Data.RevMap
   , delete
   , alter
   , insertWith
+  , findFirst
   ) where
 
 import Prelude hiding (lookup)
 
 import qualified Data.Set as Set
 import           Data.Set (Set)
+
+import qualified Data.List as List
 
 import qualified Data.Map as Map
 import           Data.Map (Map)
@@ -37,6 +40,9 @@ empty = RevMap Map.empty Map.empty
 
 lookup :: (Ord a) => a -> RevMap a b -> Maybe b
 lookup a (RevMap a_to_b _) = Map.lookup a a_to_b
+
+findFirst :: (a -> b -> Bool) -> RevMap a b -> Maybe (a, b)
+findFirst f (RevMap a_to_b _) =  List.find (\(a,b) -> f a b) (Map.toAscList a_to_b)
 
 minView :: (Ord a, Ord b) => RevMap a b -> Maybe (a, RevMap a b)
 minView m@(RevMap a_to_b _) = case Set.minView (Map.keysSet a_to_b) of
