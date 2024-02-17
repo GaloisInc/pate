@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import io
 import os.path
-import threading
+import signal
+from threading import Thread, Condition
 from subprocess import Popen
 from typing import Optional
 
@@ -25,9 +26,12 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlai
 from . import pate
 
 class PateWidget(QWidget):
-    def __init__(self, parent: QWidget):
+    def __init__(self, parent: QWidget, filename: str) -> None:
         global instance_id
         super().__init__(parent)
+
+        self.filename = filename
+        self.pate_thread: PateThread= None
 
         self.flow_graph_widget = MyFlowGraphWidget(self)
         self.flow_graph_widget.setWindowTitle('FNORT BLORT')
@@ -61,8 +65,16 @@ class PateWidget(QWidget):
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
 
-        self.user_response_condition = threading.Condition()
+        self.user_response_condition = Condition()
         self.user_response = None
+
+    def closeEvent(self, event):
+        if self.pate_thread:
+            self.pate_thread.cancel()
+
+    def hideEvent(self, event):
+        if self.pate_thread:
+            self.pate_thread.cancel()
 
     def onPateCommandReturnPressed(self):
         user_response = self.cmd_field.text()
@@ -114,42 +126,36 @@ class GuiUserInteraction(pate.PateUserInteraction):
         execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.setGraph(flow_graph))
 
 
-class PateThread(BackgroundTaskThread):
+class PateThread(Thread):
     # TODO: Look at interaction.run_progress_dialog
     # handle cancel and restart
     def __init__(self, bv, run_fn, pate_widget: PateWidget, replay=False, show_ce_trace=True, trace_file=None):
-        BackgroundTaskThread.__init__(self, "Pate Process", True)
+        super().__init__(name="Pate " + pate_widget.filename)
+        self.daemon = True
         self.pate_widget = pate_widget
         self.replay = replay
         self.run_fn = run_fn
         self.trace_file = trace_file
         self.show_ce_trace = show_ce_trace
+        self.proc: Popen = None
 
     def run(self):
-        # # TODO: OK to do this on the background thread?
-        # ans = show_message_box(
-        #     "Pate msg box", "Run pate in replay mode?",
-        #     MessageBoxButtonSet.YesNoCancelButtonSet, MessageBoxIcon.QuestionIcon
-        # )
-        #
-        # match ans:
-        #     case MessageBoxButtonResult.YesButton:
-        #         # Replay mode
-        #         self.replay = True
-        #     case MessageBoxButtonResult.NoButton:
-        #         # Live mode
-        #         self.replay = False
-        #     case _:
-        #         return
 
         x = self.run_fn(self.replay)
         if self.trace_file:
             with open(self.trace_file, "w") as trace:
                 with x as proc:
+                    self.proc = proc
                     self._command_loop(proc, self.show_ce_trace, trace)
         else:
             with x as proc:
+                self.proc = proc
                 self._command_loop(proc, self.show_ce_trace)
+
+    def cancel(self) -> None:
+        if self.proc and self.is_alive():
+            # Terminate the process group (SIGINT does not work so using SIGKILL)
+            os.killpg(self.proc.pid, signal.SIGKILL)
 
     def _command_loop(self, proc: Popen, show_ce_trace: bool = False, trace_io=None):
 
@@ -161,8 +167,7 @@ class PateThread(BackgroundTaskThread):
 
         pate_wrapper.command_loop()
 
-        #self.progress = 'Pate finished.'
-        execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText('Pate finished.'))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText('Pate finished'))
 
 
 # def run_pate_thread_nov23_t4_dendy1011(bv):
@@ -283,10 +288,11 @@ def launch_pate(context: UIActionContext):
         trace_file = None
         fn = lambda ignore: pate.run_replay(f)
 
-    pate_widget = PateWidget(context.widget)
-    context.context.createTabForWidget("PATE " + os.path.basename(f), pate_widget)
+    pate_widget = PateWidget(context.widget, f)
+    tab = context.context.createTabForWidget("PATE " + os.path.basename(f), pate_widget)
 
     pt = PateThread(None, fn, pate_widget, replay=replay, trace_file=trace_file)
+    pate_widget.pate_thread = pt
     pt.start()
 
 
@@ -405,5 +411,6 @@ def register():
     UIAction.registerAction('Pate...')
     UIActionHandler.globalActions().bindAction('Pate...', UIAction(launch_pate))
     Menu.mainMenu('Plugins').addAction('Pate...', 'Pate', True)
+
 
 register()

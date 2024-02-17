@@ -344,23 +344,18 @@ class PateWrapper:
         return self.user.ask_user(prompt, choices)
 
     def command_loop(self):
-        # Skip the build output
-        #self.skip_lines_till('Started!')
-
-        # Process json records from pate
-        while True:
-            try:
-                rec = self.next_json()
-
-                if not self.process_json(rec):
-                    # Done
-                    break
-
-            except EOFError:
-                self.user.show_message("Pate terminated unexpectedly")
-                break
-
+        while self.command_step():
+            pass
         self.user.show_message("Pate finished")
+
+    def command_step(self):
+        # Process one json record from pate
+        try:
+            rec = self.next_json()
+            return self.process_json(rec)
+        except EOFError:
+            self.user.show_message("Pate terminated unexpectedly")
+            return False
 
     def process_json(self, rec):
 
@@ -1277,7 +1272,10 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
     # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
     return Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel'] + args,
                  cwd=cwd,
-                 stdin=PIPE, stdout=PIPE, text=True, encoding='utf-8'
+                 stdin=PIPE, stdout=PIPE, text=True, encoding='utf-8',
+                 close_fds=True,
+                 # Create a new process group, so we can kill it cleanly
+                 preexec_fn=os.setsid
                  )
 
 

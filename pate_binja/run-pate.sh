@@ -8,5 +8,5 @@ else
     pate="docker run --rm -i -v .:/work --workdir=/work pate"
 fi
 
-$pate "$@"
+exec $pate "$@"
 
