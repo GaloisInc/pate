@@ -483,8 +483,18 @@ class CFARNode:
         #print('data:')
         #pp.pprint(self.data)
 
-    def pprint_node_contents(self, pre: str = '', out: IO = sys.stdout,
-                             show_ce_trace: bool = False):
+    def pprint_node_contents(self, pre: str = '', out: IO = sys.stdout, show_ce_trace: bool = False):
+        self.pprint_node_domain(pre, out, show_ce_trace)
+        if show_ce_trace:
+            for n in self.exits:
+                out.write(f'{pre}Exit: {n.id}\n')
+                if self.exit_meta_data.get(n,{}).get('ce_event_trace'):
+                    self.pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example', pre + '  ', out)
+                elif self.exit_meta_data.get(n, {}).get('event_trace'):
+                     self.pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], '', pre + '  ', out)
+
+    def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
+                           show_ce_trace: bool = False):
         if self.predomain:
             out.write(f'{pre}Predomain:\n')
             pprint_domain(self.predomain, pre + '  ', out)
@@ -495,26 +505,27 @@ class CFARNode:
         if self.external_postdomain:
             out.write(f'{pre}Postdomain:\n')
             pprint_domain(self.external_postdomain, pre + '  ', out)
-        if show_ce_trace:
-            for n in self.exits:
-                out.write(f'{pre}Exit: {n.id}\n')
-                if self.exit_meta_data.get(n,{}).get('ce_event_trace'):
-                    self.pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example', pre + '  ', out)
-                # elif self.exit_meta_data.get(n, {}).get('event_trace'):
-                #     self.pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], '', pre + '  ', out)
 
     def pprint_node_event_trace(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
+        self.pprint_node_event_trace_domain(trace, label, pre, out)
+        self.pprint_node_event_trace_original(trace, label, pre, out)
+        self.pprint_node_event_trace_patched(trace, label, pre, out)
+
+    def pprint_node_event_trace_domain(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
         if trace.get('precondition'):
             out.write(f'{pre}Trace Precondition:\n')
             pprint_eq_domain(trace['precondition'], pre + '  ', out)
         if trace.get('postcondition'):
             out.write(f'{pre}Trace Postcondition:\n')
             pprint_eq_domain(trace['postcondition'], pre + '  ', out)
+
+    def pprint_node_event_trace_original(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
         if trace.get('traces', {}).get('original'):
             pprint_event_trace(f'{label} Original', trace['traces']['original'], pre, out)
+
+    def pprint_node_event_trace_patched(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
         if trace.get('traces',{}).get('patched'):
             pprint_event_trace(f'{label} Patched', trace['traces']['patched'], pre, out)
-
 
 class CFARGraph:
 
