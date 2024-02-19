@@ -238,8 +238,6 @@ class MyFlowGraphWidget(FlowGraphWidget):
                               show_ce_trace: bool = False):
         flow_graph = FlowGraph()
 
-        show_ce_trace = False # disable for now
-
         # First create all nodes
         cfarToFlowNode = {}
         cfar_node: pate.CFARNode
@@ -253,7 +251,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
             out.write(cfar_node.id.replace(' <- ', '\n  <- '))
             out.write('\n')
 
-            cfar_node.pprint_node_contents('', out, show_ce_trace)
+            cfar_node.pprint_node_contents('', out, False)  # show_ce_trace) Disable trace in node
 
             flow_node.lines = out.getvalue().split('\n')
             # flow_node.lines = [lines[0]]
@@ -284,17 +282,25 @@ class MyFlowGraphWidget(FlowGraphWidget):
     def mousePressEvent(self, event: QMouseEvent):
         node = self.getNodeForMouseEvent(event)
         edgeTuple = self.getEdgeForMouseEvent(event)
-        print("Node: ", node)
-        print("Edge: ", edgeTuple)
+        # if node:
+        #     print("Node: ", self.flowToCfarNode[node].id)
+        # if edgeTuple:
+        #     print("Edge source: ", self.flowToCfarNode[edgeTuple[0].source].id)
+        #     print("Edge target: ", self.flowToCfarNode[edgeTuple[0].target].id)
+        #     print("Edge incoming: ", edgeTuple[1])
 
         if edgeTuple:
             self.showExitInfo(edgeTuple)
 
     def showExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
         edge = edgeTuple[0]
-        incoming = edgeTuple[1]
-        sourceCfarNode = self.flowToCfarNode[edge.source]
-        exitCfarNode = self.flowToCfarNode[edge.target]
+        incoming = edgeTuple[1]  # Direction of edge depends on which half was clicked
+        if incoming:
+            sourceCfarNode = self.flowToCfarNode[edge.target]
+            exitCfarNode = self.flowToCfarNode[edge.source]
+        else:
+            sourceCfarNode = self.flowToCfarNode[edge.source]
+            exitCfarNode = self.flowToCfarNode[edge.target]
 
         exitMetaData = sourceCfarNode.exit_meta_data.get(exitCfarNode, {})
 
@@ -307,6 +313,13 @@ class MyFlowGraphWidget(FlowGraphWidget):
         else:
             # TODO: dialog?
             print("No exit info")
+
+        exitMetaData = sourceCfarNode.exit_meta_data.get(exitCfarNode, {})
+        ceTrace = exitMetaData.get('ce_event_trace')
+        trace = exitMetaData.get('event_trace')
+        print('exitMetaData:', exitMetaData)
+        print('ceTrace', ceTrace)
+        print('trace', trace)
 
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
         d = PateCfarExitDialog(parent=self)

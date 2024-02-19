@@ -513,10 +513,10 @@ class CFARNode:
 
     def pprint_node_event_trace_domain(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
         if trace.get('precondition'):
-            out.write(f'{pre}Trace Precondition:\n')
+            out.write(f'{pre}Precondition:\n')
             pprint_eq_domain(trace['precondition'], pre + '  ', out)
         if trace.get('postcondition'):
-            out.write(f'{pre}Trace Postcondition:\n')
+            out.write(f'{pre}Postcondition:\n')
             pprint_eq_domain(trace['postcondition'], pre + '  ', out)
 
     def pprint_node_event_trace_original(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
