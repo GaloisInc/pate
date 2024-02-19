@@ -11,8 +11,8 @@ from typing import Optional
 
 from binaryninja import show_graph_report, execute_on_main_thread_and_wait, BinaryView, OpenFileNameField, interaction, \
     MultilineTextField
-from binaryninja.enums import BranchType, HighlightStandardColor
-from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge
+from binaryninja.enums import BranchType, HighlightStandardColor, EdgePenStyle, ThemeColor
+from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninja.plugin import BackgroundTaskThread
 from binaryninjaui import GlobalAreaWidget, GlobalArea, UIAction, UIActionHandler, Menu, UIActionContext, \
     FlowGraphWidget
@@ -275,7 +275,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
             cfar_exit: pate.CFARNode
             for cfar_exit in cfar_node.exits:
                 flow_exit = cfarToFlowNode[cfar_exit.id]
-                flow_node.add_outgoing_edge(BranchType.UnconditionalBranch, flow_exit)
+                if self.showCfarExitInfo(cfar_node, cfar_exit, simulate=True):
+                    edgeStyle = EdgeStyle(width=3, theme_color=ThemeColor.GraphNodeOutlineColor)
+                else:
+                    edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.GraphNodeOutlineColor)
+                flow_node.add_outgoing_edge(BranchType.UserDefinedBranch, flow_exit, edgeStyle)
 
         self.setGraph(flow_graph)
 
@@ -290,9 +294,9 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #     print("Edge incoming: ", edgeTuple[1])
 
         if edgeTuple:
-            self.showExitInfo(edgeTuple)
+            self.showEdgeExitInfo(edgeTuple)
 
-    def showExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
+    def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
         edge = edgeTuple[0]
         incoming = edgeTuple[1]  # Direction of edge depends on which half was clicked
         if incoming:
@@ -301,18 +305,26 @@ class MyFlowGraphWidget(FlowGraphWidget):
         else:
             sourceCfarNode = self.flowToCfarNode[edge.source]
             exitCfarNode = self.flowToCfarNode[edge.target]
+        self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
+
+    def showCfarExitInfo(self, sourceCfarNode: pate.CFARNode, exitCfarNode: pate.CFARNode, simulate: bool=False) -> bool:
 
         exitMetaData = sourceCfarNode.exit_meta_data.get(exitCfarNode, {})
 
         ceTrace = exitMetaData.get('ce_event_trace')
         trace = exitMetaData.get('event_trace')
         if ceTrace:
-            self.showExitTraceInfo(sourceCfarNode, ceTrace, 'Counter-Example Trace')
+            if not simulate:
+                self.showExitTraceInfo(sourceCfarNode, ceTrace, 'Counter-Example Trace')
+            return True
         elif trace:
-            self.showExitTraceInfo(sourceCfarNode, trace, 'Trace')
+            if not simulate:
+                self.showExitTraceInfo(sourceCfarNode, trace, 'Trace')
+            return True
         else:
             # TODO: dialog?
             print("No exit info")
+            return False
 
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
         d = PateCfarExitDialog(parent=self)
