@@ -314,13 +314,6 @@ class MyFlowGraphWidget(FlowGraphWidget):
             # TODO: dialog?
             print("No exit info")
 
-        exitMetaData = sourceCfarNode.exit_meta_data.get(exitCfarNode, {})
-        ceTrace = exitMetaData.get('ce_event_trace')
-        trace = exitMetaData.get('event_trace')
-        print('exitMetaData:', exitMetaData)
-        print('ceTrace', ceTrace)
-        print('trace', trace)
-
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
         d = PateCfarExitDialog(parent=self)
         with io.StringIO() as out:
