@@ -16,11 +16,18 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Pate.Verification.PairGraph
   ( Gas(..)
   , initialGas
   , PairGraph
+  , PairGraphM
+  , runPairGraphM
+  , execPairGraphM
+  , evalPairGraphM
   , maybeUpdate
   , AbstractDomain
   , initialDomain
@@ -41,6 +48,7 @@ module Pate.Verification.PairGraph
   , initDomain
   , pairGraphComputeVerdict
   , getCurrentDomain
+  , getCurrentDomainM
   , considerObservableEvent
   , considerDesyncEvent
   , recordMiscAnalysisError
@@ -64,11 +72,10 @@ module Pate.Verification.PairGraph
   , dropReturns
   , dropPostDomains
   , markEdge
-  , getSyncPoint
-  , asSyncPoint
+  , getSyncPoints
   , getBackEdgesFrom
-  , setSyncPoint
-  , getCombinedSyncPoint
+  , addSyncNode
+  , getCombinedSyncPoints
   , combineNodes
   , NodePriority(..)
   , addToWorkList
@@ -106,12 +113,28 @@ module Pate.Verification.PairGraph
   , shouldAddPathCond
   , maybeUpdate'
   , hasSomeCondition
-  , propagateOnce, getPropagationKind, propagateAction) where
+  , propagateOnce
+  , getPropagationKind
+  , propagateAction
+  , getSyncAddress
+  , setSyncAddress
+  , checkForNodeSync
+  , checkForReturnSync
+  ) where
 
 import           Prettyprinter
 
-import           Control.Monad (foldM, guard)
+import           Control.Monad (foldM, guard, join, void, forM)
 import           Control.Monad.IO.Class
+import           Control.Monad.Reader (local, MonadReader (ask))
+import           Control.Monad.State.Strict (StateT (..), MonadState (..), MonadTrans (..), execStateT, modify, State, execState, gets)
+import           Control.Monad.Catch (MonadCatch, MonadThrow, MonadMask)
+import           Control.Monad.Error (MonadError (..))
+import           Control.Monad.Trans.Maybe (MaybeT(..) )
+import           Control.Monad.Except (ExceptT )
+import           Control.Monad.Trans.Except (runExceptT)
+import           Control.Monad.Trans.State.Strict (runState)
+
 import qualified Control.Lens as L
 import           Control.Lens ( (&), (.~), (^.), (%~) )
 import           Data.Kind (Type)
@@ -126,6 +149,7 @@ import qualified Data.Set as Set
 import           Data.Word (Word32)
 import qualified Lumberjack as LJ
 
+import           Data.Parameterized (Some(..), Pair (..))
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.RevMap as RevMap
 import           Data.RevMap (RevMap)
@@ -147,21 +171,24 @@ import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNode )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNode, isSingleNodeEntry, isSingleReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
 import qualified Pate.Binary as PBi
-import Data.Parameterized (Some(..), Pair (..))
-import Control.Applicative (Const(..), (<|>))
+
+import           Control.Applicative (Const(..), Alternative(..)) 
 import qualified Control.Monad.IO.Unlift as IO
-import Pate.Solver (ValidSym)
-import Control.Monad.Reader (local, MonadReader (ask))
-import SemMC.Formula.Env (SomeSome(..))
+import           Pate.Solver (ValidSym)
+
+import           SemMC.Formula.Env (SomeSome(..))
 import qualified Pate.Location as PL
 import qualified Pate.ExprMappable as PEM
+import qualified Pate.Address as PAd
+import Data.Foldable (find)
+
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -281,6 +308,53 @@ data PairGraph sym arch =
   , pairGraphDomainRefinements ::
       !(Map (GraphNode arch) [DomainRefinement sym arch])
   }
+
+
+
+newtype PairGraphM sym arch a = PairGraphT { unpgT :: ExceptT PEE.PairGraphErr (State (PairGraph sym arch)) a }
+  deriving (Functor
+           , Applicative
+           , Monad
+           , MonadState (PairGraph sym arch)
+           , MonadError PEE.PairGraphErr
+           )
+
+instance PPa.PatchPairM (PairGraphM sym arch) where
+  throwPairErr = throwError $ PEE.PairGraphErr "PatchPair"
+  catchPairErr f hdl = catchError f $ \case
+    PEE.PairGraphErr "PatchPair" -> hdl
+    e -> throwError e
+
+instance Alternative (PairGraphM sym arch) where
+  a <|> b = catchError a $ \_ -> b
+  empty = throwError $ PEE.PairGraphErr "No more alternatives"
+
+instance MonadFail (PairGraphM sym arch) where
+  fail msg = throwError $ PEE.PairGraphErr ("fail: " ++ msg)
+
+runPairGraphM :: PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr (a, PairGraph sym arch)
+runPairGraphM pg f = case runState (runExceptT (unpgT f)) pg of
+  (Left err, _) -> Left err
+  (Right a, pg') -> Right (a, pg')
+
+execPairGraphM :: PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr (PairGraph sym arch)
+execPairGraphM pg f  = case runPairGraphM pg f of
+  Left err -> Left err
+  Right (_,pg') -> Right pg'
+
+evalPairGraphM :: PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr a
+evalPairGraphM pg f  = case runPairGraphM pg f of
+  Left err -> Left err
+  Right (a,_) -> Right a
+
+lookupPairGraph ::
+  forall sym arch b.
+  (PairGraph sym arch -> Map (GraphNode arch) b) -> 
+  GraphNode arch ->
+  PairGraphM sym arch b
+lookupPairGraph f node = do
+  m <- gets f
+  pgMaybe "missing node entry" $ Map.lookup node m
 
 data ConditionKind = 
     ConditionAsserted
@@ -493,6 +567,14 @@ getCurrentDomain ::
   GraphNode arch ->
   Maybe (AbstractDomainSpec sym arch)
 getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
+
+getCurrentDomainM ::
+  GraphNode arch ->
+  PairGraphM sym arch (AbstractDomainSpec sym arch)
+getCurrentDomainM nd = do
+  pg <- get
+  Just spec <- return $ getCurrentDomain pg nd
+  return spec
 
 getEdgesFrom ::
   PairGraph sym arch ->

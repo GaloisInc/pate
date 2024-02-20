@@ -48,6 +48,7 @@ module Pate.PatchPair (
   , view
   , asTuple
   , fromTuple
+  , fromMaybes
   , ppEq
   , LiftF(..)
   , PatchPairF
@@ -96,6 +97,8 @@ import Control.Monad.Identity
 import Pate.TraceTree
 import qualified What4.JSON as W4S
 import What4.JSON
+import Control.Monad.State.Strict (StateT (..), put)
+import qualified Control.Monad.State.Strict as CMS
 
 -- | A pair of values indexed based on which binary they are associated with (either the
 --   original binary or the patched binary).
@@ -172,6 +175,14 @@ instance Monad m => PatchPairM (MaybeT m) where
     Just ra -> return $ Just ra
     Nothing -> b
 
+instance PatchPairM m => PatchPairM (StateT s m) where
+  throwPairErr = lift $ throwPairErr
+  catchPairErr a b = do
+    s <- CMS.get
+    (x, s') <- lift $ catchPairErr (runStateT a s) (runStateT b s)
+    put s'
+    return x
+
 liftPairErr :: PatchPairM m => Maybe a -> m a
 liftPairErr (Just a) = return a
 liftPairErr Nothing = throwPairErr
@@ -203,6 +214,15 @@ asTuple pPair = case pPair of
 
 fromTuple :: (tp PB.Original, tp PB.Patched) -> PatchPair tp
 fromTuple (vO,vP) = PatchPair vO vP
+
+fromMaybes :: PatchPairM m => (Maybe (tp PB.Original), Maybe (tp PB.Patched)) -> m (PatchPair tp)
+fromMaybes = \case
+  (Just vO,Just vP) -> return $ PatchPair vO vP
+  (Just vO, Nothing) -> return $ PatchPairSingle PB.OriginalRepr vO
+  (Nothing, Just vP) -> return $ PatchPairSingle PB.PatchedRepr vP
+  (Nothing, Nothing) -> throwPairErr
+
+
 
 -- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.

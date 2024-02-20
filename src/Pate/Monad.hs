@@ -1319,7 +1319,12 @@ traceBundle bundle msg = do
   let bp = TF.fmapF (Const . PB.concreteAddress . simInBlock) (simIn bundle)
   emitEvent (PE.ProofTraceEvent callStack bp (T.pack msg))
 
-fnTrace :: String -> EquivM_ sym arch a -> EquivM_ sym arch a
+fnTrace :: 
+  forall k e m a.
+  IsTreeBuilder k e m =>
+  TraceNodeType k "function_name" ->
+  m a ->
+  m a
 fnTrace nm f = withTracing @"function_name" nm f
 
 --------------------------------------
