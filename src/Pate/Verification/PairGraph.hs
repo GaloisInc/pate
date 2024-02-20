@@ -129,9 +129,8 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Reader (local, MonadReader (ask))
 import           Control.Monad.State.Strict (StateT (..), MonadState (..), MonadTrans (..), execStateT, modify, State, execState, gets)
 import           Control.Monad.Catch (MonadCatch, MonadThrow, MonadMask)
-import           Control.Monad.Error (MonadError (..))
 import           Control.Monad.Trans.Maybe (MaybeT(..) )
-import           Control.Monad.Except (ExceptT )
+import           Control.Monad.Except (ExceptT, MonadError (..))
 import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Monad.Trans.State.Strict (runState)
 
@@ -490,7 +489,16 @@ data ActionQueue sym arch =
 
 
 data SyncPoint arch =
-  SyncPoint { syncNodes :: PPa.PatchPairC (GraphNode arch) }
+  SyncPoint
+    -- each side of the analysis independently defines a set of
+    -- graph nodes, representing CFARs that can terminate
+    -- respectively on the cut addresses
+    -- The "merge" nodes are the cross product of these, since we
+    -- must assume that any combination of exits is possible
+    -- during the single-sided analysis
+    { syncStartNodes :: PPa.PatchPairC (Set (GraphNode arch))
+    , syncCutAddresses :: PPa.PatchPairC (PAd.ConcreteAddress arch) 
+    }
 
 ppProgramDomains ::
   forall sym arch a.
@@ -1000,52 +1008,53 @@ addReturnVector gr funPair retPair priority =
 
     wl = RevMap.insertWith (min) (ReturnNode funPair) priority (pairGraphWorklist gr)
 
+pgMaybe :: String -> Maybe a -> PairGraphM sym arch a
+pgMaybe _ (Just a) = return a
+pgMaybe msg Nothing = throwError $ PEE.PairGraphErr msg
 
-getSyncPoint ::
-  PairGraph sym arch ->
+getSyncPoints ::
+  forall sym arch bin.
   PBi.WhichBinaryRepr bin ->
   GraphNode arch ->
-  Maybe (GraphNode arch)
-getSyncPoint gr bin nd = case Map.lookup nd (pairGraphSyncPoints gr) of
-  Just (SyncPoint syncPair) -> PPa.getC bin syncPair
-  Nothing -> Nothing
+  PairGraphM sym arch (Set (GraphNode arch))
+getSyncPoints bin nd = do
+  (SyncPoint syncPair _) <- lookupPairGraph @sym pairGraphSyncPoints nd
+  PPa.getC bin syncPair
+
+getSyncAddress ::
+  forall sym arch bin.
+  PBi.WhichBinaryRepr bin ->
+  GraphNode arch ->
+  PairGraphM sym arch (PAd.ConcreteAddress arch)
+getSyncAddress bin nd = do
+  (SyncPoint _ addrPair) <- lookupPairGraph @sym pairGraphSyncPoints nd
+  PPa.getC bin addrPair
 
 updateSyncPoint ::
-  PairGraph sym arch ->
+  forall sym arch.
   GraphNode arch -> 
   (SyncPoint arch -> SyncPoint arch) ->
-  PairGraph sym arch
-updateSyncPoint pg nd f = case getDivergePoint nd of
-  Just divergePoint | Just sync <- asSyncPoint pg nd -> 
-    pg { pairGraphSyncPoints = Map.insert divergePoint (f sync) (pairGraphSyncPoints pg)}
-  _ -> pg
+  PairGraphM sym arch ()
+updateSyncPoint nd f = do
+  dp <- pgMaybe "missing diverge point" $ getDivergePoint nd
+  sp <- lookupPairGraph pairGraphSyncPoints dp
+  modify $ \pg -> 
+    pg { pairGraphSyncPoints = Map.insert dp (f sp) (pairGraphSyncPoints pg)}
 
-asSyncPoint ::
-  PairGraph sym arch ->
+-- | Returns all discovered merge points from the given diverge point
+getCombinedSyncPoints ::
+  forall sym arch.
   GraphNode arch ->
-  Maybe (SyncPoint arch)
-asSyncPoint pg nd = do
-  divergeNode <- getDivergePoint nd
-  Some bin <- singleNodeRepr nd
-  sync@(SyncPoint syncPair) <- Map.lookup divergeNode (pairGraphSyncPoints pg)
-  nd' <- PPa.getC bin syncPair
-  case nd == nd' of
-    True -> return sync
-    False -> Nothing
-
--- | If both sides of the sync point are defined, returns
---   the merged node for them
-getCombinedSyncPoint ::
-  PairGraph sym arch ->
-  GraphNode arch ->
-  Maybe (GraphNode arch, SyncPoint arch)
-getCombinedSyncPoint gr ndDiv = do
-  sync@(SyncPoint syncPair) <- Map.lookup ndDiv (pairGraphSyncPoints gr)
-  case syncPair of
-    PPa.PatchPairSingle{} -> Nothing
-    PPa.PatchPairC ndO ndP -> case combineNodes ndO ndP of
-      Just mergedNode -> Just (mergedNode, sync)
-      Nothing -> panic Verifier "getCombinedSyncPoint" ["Unexpected sync nodes"]
+  PairGraphM sym arch ([((GraphNode arch, GraphNode arch), GraphNode arch)], SyncPoint arch)
+getCombinedSyncPoints ndDiv = do
+  sync@(SyncPoint syncSet _) <- lookupPairGraph @sym pairGraphSyncPoints ndDiv
+  case syncSet of
+    PPa.PatchPairC ndsO ndsP -> do
+      all_pairs <- forM (Set.toList $ Set.cartesianProduct ndsO ndsP) $ \(ndO, ndP) -> do
+        combined <- pgMaybe "failed to combine nodes" $ combineNodes ndO ndP
+        return $ ((ndO, ndP), combined)
+      return (all_pairs, sync)
+    _ -> return ([], sync)
 
 -- | Compute a merged node for two diverging nodes
 -- FIXME: do we need to support mismatched node kinds here?
@@ -1078,25 +1087,40 @@ singleNodeRepr nd = case graphNodeBlocks nd of
   PPa.PatchPairSingle bin _ -> return $ Some bin
   PPa.PatchPair{} -> Nothing
 
-setSyncPoint ::
-  PPa.PatchPairM m =>
-  PairGraph sym arch ->
+addSyncNode ::
+  forall sym arch.
   GraphNode arch {- ^ The divergent node -}  ->
-  GraphNode arch {- ^ The sync node -} ->
-  m (PairGraph sym arch)
-setSyncPoint pg ndDiv ndSync = do
-  fmap PPa.someC $ PPa.forBinsC $ \bin -> do
-    -- check which binary these nodes are for
-    _ <- PPa.get bin (graphNodeBlocks ndDiv)
-    _ <- PPa.get bin (graphNodeBlocks ndSync)
-    let ndSync' = PPa.PatchPairSingle bin (Const ndSync)
-    case Map.lookup ndDiv (pairGraphSyncPoints pg) of
-      Just (SyncPoint sp) -> do
-        sp' <- PPa.update sp $ \bin' -> PPa.get bin' ndSync'
-        return $ pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp') (pairGraphSyncPoints pg) }
-      Nothing -> do
-        let sp = PPa.mkSingle bin (Const ndSync)
-        return $ pg {pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp) (pairGraphSyncPoints pg) }
+  GraphNode arch {- ^ the sync node -} ->
+  PairGraphM sym arch ()
+addSyncNode ndDiv ndSync = do
+  Pair bin _ <- PPa.asSingleton (graphNodeBlocks ndSync)
+  let ndSync' = PPa.PatchPairSingle bin (Const ndSync)
+  (SyncPoint sp addrs) <- lookupPairGraph @sym pairGraphSyncPoints ndDiv
+  sp' <- PPa.update sp $ \bin' -> do
+    s <- PPa.getC bin' ndSync'
+    case PPa.getC bin' sp of
+      Nothing -> return $ (Const (Set.singleton s))
+      Just s' -> return $ (Const (Set.insert s s'))
+  modify $ \pg -> pg { pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp' addrs) (pairGraphSyncPoints pg) }
+
+tryPG :: PairGraphM sym arch a -> PairGraphM sym arch (Maybe a)
+tryPG f = catchError (Just <$> f) (\_ -> return Nothing)
+
+setSyncAddress ::
+  forall sym arch bin.
+  GraphNode arch {- ^ The divergent node -}  ->
+  PBi.WhichBinaryRepr bin ->
+  PAd.ConcreteAddress arch ->
+  PairGraphM sym arch ()
+setSyncAddress ndDiv bin syncAddr = do
+  let syncAddr' = PPa.PatchPairSingle bin (Const syncAddr)
+  tryPG (lookupPairGraph @sym pairGraphSyncPoints ndDiv) >>= \case
+    Just (SyncPoint sp addrs) -> do
+      addrs' <- PPa.update addrs $ \bin' -> PPa.get bin' syncAddr'
+      modify $ \pg -> pg{ pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp addrs') (pairGraphSyncPoints pg) }
+    Nothing -> do
+      let sp = PPa.mkPair bin (Const Set.empty) (Const Set.empty)
+      modify $ \pg -> pg{pairGraphSyncPoints = Map.insert ndDiv (SyncPoint sp syncAddr') (pairGraphSyncPoints pg) }
 
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.
@@ -1315,8 +1339,47 @@ runPendingActions lens edge result pg = do
     False -> return Nothing
 
 
+-- If the given node is single-sided, check if any of the exits
+-- match the given synchronization point for the diverge point of this node.
+-- 
+-- We can restrict our search to just the block exits because we already
+-- defined the synchronization point as a cut point for code discovery.
+-- This means that any CFAR which can reach the sync point will necessarily
+-- have one block exit that jumps to it, regardless of where it is
+-- in a basic block.
+checkForNodeSync ::
+  NodeEntry arch ->
+  [(PPa.PatchPair (PB.BlockTarget arch))] ->
+  PairGraphM sym arch Bool
+checkForNodeSync ne targets_pairs = fmap (fromMaybe False) $ tryPG $ do
+  Just (Some bin) <- return $ isSingleNodeEntry ne
 
+  Just dp <- return $ getDivergePoint (GraphNode ne)
+  syncPoints <- getSyncPoints bin dp
+  syncAddr <- getSyncAddress bin dp
+  thisAddr <- fmap PB.concreteAddress $ PPa.get bin (nodeBlocks ne)
+  -- if this node is already defined as sync point then we don't
+  -- have to check anything else
+  if | Set.member (GraphNode ne) syncPoints -> return True
+    -- similarly if this is exactly the sync address then we should
+    -- stop the single-sided analysis
+     | thisAddr == syncAddr -> return True
+     | otherwise -> do
+          targets <- mapM (PPa.get bin) targets_pairs
+          let matchTarget btgt = case btgt of
+                 PB.BlockTarget{} -> PB.targetRawPC btgt == syncAddr
+                 _ -> False
+          return $ isJust $ find matchTarget targets
 
-
-
-
+-- Same as 'checkForNodeSync' but considers a single outgoing edge from
+-- a function return.
+checkForReturnSync ::
+  NodeReturn arch ->
+  NodeEntry arch ->
+  PairGraphM sym arch Bool
+checkForReturnSync nr ne = fmap (fromMaybe False) $ tryPG $ do
+  Just (Some bin) <- return $ isSingleReturn nr
+  Just dp <- return $ getDivergePoint (ReturnNode nr)
+  syncAddr <- getSyncAddress bin dp
+  blk <- PPa.get bin (nodeBlocks ne)
+  return $ PB.concreteAddress blk == syncAddr
