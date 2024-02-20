@@ -151,6 +151,7 @@ import qualified Control.Concurrent as IO
 import qualified System.IO as IO
 import Data.Maybe (catMaybes)
 import Control.Concurrent (threadDelay)
+import Control.Monad.State.Strict (StateT (..), MonadState (..))
 
 data TraceTag =
     Summary
@@ -1022,6 +1023,14 @@ newtype NoTreeBuilder k m a = NoTreeBuilder (m a)
 instance Monad m => MonadTreeBuilder k (NoTreeBuilder k m) where
   getTreeBuilder = return $ noTreeBuilder
   withTreeBuilder _ = id
+
+instance MonadTreeBuilder k m => MonadTreeBuilder k (StateT s m) where
+  getTreeBuilder = lift $ getTreeBuilder
+  withTreeBuilder tb f = do
+    s <- get
+    (a,s') <- lift $ withTreeBuilder tb (runStateT f s)
+    put s'
+    return a
 
 noTracing :: NoTreeBuilder k m a -> m a
 noTracing (NoTreeBuilder f) = f

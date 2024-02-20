@@ -25,13 +25,15 @@ module Pate.Verification.StrongestPosts
 
 import           GHC.Stack ( HasCallStack )
 
+import           Control.Applicative
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
 import           Control.Monad (foldM, forM, unless, void, when)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Reader (asks, local)
-import           Control.Monad.Except (catchError)
+import           Control.Monad.Except (catchError, throwError)
+import           Control.Monad.State.Strict  (get, StateT, runStateT, put, execStateT, modify)
 import           Control.Monad.Trans (lift)
 import           Numeric (showHex)
 import           Prettyprinter
@@ -41,7 +43,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import           Data.List (findIndex)
+import           Data.List (findIndex, find)
 import           Data.Maybe (mapMaybe, catMaybes)
 import           Data.Proxy
 import           Data.Functor.Const
@@ -111,7 +113,7 @@ import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -451,29 +453,24 @@ chooseSyncPoint ::
   EquivM sym arch (PairGraph sym arch)
 chooseSyncPoint nd pg0 = do
   divergePair@(PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
-    let ret = case nd of
-          GraphNode ne -> returnOfEntry ne
-          ReturnNode nr -> nr
     blk <- PPa.get bin (graphNodeBlocks nd)
     pblks <- PD.lookupBlocks blk
-    retSingle <- toSingleReturn bin nd ret
     divergeSingle <- toSingleGraphNode bin nd
-    return $ (retSingle, divergeSingle, Some blk, pblks)
+    return $ (divergeSingle, Some blk, pblks)
   (sync, Some syncBin) <- pickCutPoint syncMsg
     [divergeO, divergeP]
   let otherBin = PBi.flipRepr syncBin
-  pg1 <- setSyncPoint pg0 nd sync
-
-  case sync of
-    GraphNode{} -> do
-      diverge <- PPa.getC otherBin divergePair
-      syncOther <- fst <$> pickCutPoint syncMsg [diverge]
-      setSyncPoint pg1 nd syncOther
-    ReturnNode{} -> do
-      (retSingle, _, _, _) <- PPa.getC otherBin divergePair
-      setSyncPoint pg1 nd (ReturnNode retSingle)
+  
+  addr <- PB.concreteAddress <$> PPa.get syncBin (nodeBlocks sync)
+  withPG_ pg0 $ do 
+    liftPG $ setSyncAddress nd syncBin addr
+    diverge <- PPa.getC otherBin divergePair
+    syncOther <- lift $ fst <$> pickCutPoint syncMsg [diverge]
+    addrOther <- PB.concreteAddress <$> PPa.get otherBin (nodeBlocks syncOther) 
+    liftPG $ setSyncAddress nd otherBin addrOther
   where
     syncMsg = "Choose a synchronization point:"
+
 
 {-
 guessDivergence ::
