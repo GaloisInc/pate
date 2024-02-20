@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="test_may23_c10_replay" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
-    <output_file path="$PROJECT_DIR$/test_may23_c10_replay.log" is_save="true" />
+  <configuration default="false" name="run_pate_demo" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
+    <output_file path="$PROJECT_DIR$/run_pate_demo.log" is_save="true" />
     <module name="pate_binja" />
     <option name="ENV_FILES" value="" />
     <option name="INTERPRETER_OPTIONS" value="" />
@@ -14,7 +14,7 @@
     <option name="ADD_CONTENT_ROOTS" value="true" />
     <option name="ADD_SOURCE_ROOTS" value="true" />
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
-    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/test_may23_c10_replay.py" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/run_pate_demo.py" />
     <option name="PARAMETERS" value="" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />

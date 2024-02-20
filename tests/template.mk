@@ -42,7 +42,8 @@ malloc-%.exe: ./build/malloc-%.s ./build/link.ld
 %.test_run: %.original.exe %.patched.exe
 	../../pate.sh -o $(basename $@).original.exe -p $(basename $@).patched.exe \
 		`( (test -f $(basename $@).toml && echo "-b $(basename $@).toml") || echo "")` \
-		`( (test -f $(basename $@).pate && echo "--script $(basename $@).pate") || echo "")`
+		`( (test -f $(basename $@).pate && echo "--script $(basename $@).pate") || echo "")` \
+		--no-assume-stack-scope
 
 .PRECIOUS: ./build/%.s ./build/%.i %.exe malloc-%.exe ./unequal/%.original.exe ./unequal/%.patched.exe
 

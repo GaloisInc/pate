@@ -94,6 +94,7 @@ mkRunConfig archLoader opts mtt = let
         , PC.cfgRescopingFailureMode = rerrMode opts
         , PC.cfgScriptPath = scriptPath opts
         , PC.cfgTraceTree = fromMaybe noTraceTree mtt
+        , PC.cfgStackScopeAssume = not $ noAssumeStackScope opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = archLoader
@@ -142,6 +143,7 @@ data CLIOptions = CLIOptions
   , jsonToplevel :: Bool
   , readOnlySegments :: [Int]
   , scriptPath :: Maybe FilePath
+  , noAssumeStackScope :: Bool
   } deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -451,3 +453,7 @@ cliOptions = OA.info (OA.helper <*> parser)
          <> OA.metavar "FILENAME"
          <> OA.help "Save macaw CFGs to the provided directory"
          ))
+    <*> OA.switch
+         ( OA.long "no-assume-stack-scope"
+         <> OA.help "Don't add additional assumptions about stack frame scoping"
+         )

@@ -1,10 +1,26 @@
 # PATE Verifier Plugin for Binary Ninja
 
-This is an early release of the PATE plugin for Binary Ninja (Binja). At this time, there is no interface to specify PATE parameters. There are three hard coded demos that can be run in replay or live mode:
+This is an early release of the PATE plugin for Binary Ninja (Binja). At this time, there is no interface to specify PATE run parameters. You must create a run configuration file in json format. For example:
+```json
+{
+  "original": "may23-challenge10.original.exe",
+  "patched": "may23-challenge10.patched.exe",
+  "args": [
+           "-b may23-challenge10.toml",
+           "--original-bsi-hints may23-challenge10.bsi-hints.json",
+           "--patched-bsi-hints may23-challenge10.bsi-hints.json",
+           "--original-csv-function-hints may23-challenge10.function-hints.csv",
+           "--patched-csv-function-hints may23-challenge10.function-hints.csv",
+           "-e ContinueAfterRecoverableFailures",
+           "-r AllowEqRescopeFailure",
+           "-s transport_handler",
+           "--save-macaw-cfgs CFGs"
+         ]
+}         
+```
 
-- May23 Challenge 10
-- Nov23 Target 1 Room 1018
-- Nov23 Target 4 Room 1011 dendy
+There are several examples in [PATE Binja Demos repo](https://gitlab-ext.galois.com/pate/pate-binja-demos).
+
 
 ## Installation
 
@@ -14,20 +30,14 @@ To use this plugin in Binja, put this directory (or a symlink to this directory)
 - macOS: ~/Library/Application Support/Binary Ninja/plugins/
 - Linux: ~/.binaryninja/plugins/
 
-Clone the [PATE Binja Demos repo](https://gitlab-ext.galois.com/pate/pate-binja-demos) and define an environment variable to point at the cloned directory;
-```bash
-export PATE_BINJA_DEMOS=<pate binja demos directory>
-```
-
 To run replays of the PATE Verifier you do not need any more configuration. 
 
-If you want to run the PATE Verifier live, you need to install a PATE docker image or build PATE from source. See the [PATE project](https://github.com/GaloisInc/pate) for instructions. To run PATE built from source you do not also need to define these the environment variables:
+If you want to run the PATE Verifier live, you need to install a PATE docker image or build PATE from source. See the [PATE project](https://github.com/GaloisInc/pate) for instructions. No environment variables are needed to run PATE docker. To run PATE built from source you do need to define these the environment variables:
 ```bash
 export PATE=<pate source directory>
 export PATE_BINJA_MODE=BUILD
 ```
- 
-No environment variables are needed to run PATE docker.
+
 
 ## Running
 
@@ -38,6 +48,7 @@ open /Applications/Binary\ Ninja.app
 If you only want to run replays, you can launch Binary Ninja from the macOS Dock.
 
 Once Binary Ninja is running, the demos are available in the "Plugins" menu.
+
 
 ## Developer Notes (macOS with PyCharm Pro)
 
