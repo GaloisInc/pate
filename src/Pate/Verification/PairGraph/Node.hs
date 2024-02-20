@@ -40,6 +40,8 @@ module Pate.Verification.PairGraph.Node (
   , toSingleNode
   , toSingleGraphNode
   , isSingleNode
+  , isSingleNodeEntry
+  , isSingleReturn
   , splitGraphNode
   , getDivergePoint
   , eqUptoDivergePoint
