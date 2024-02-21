@@ -12,7 +12,7 @@ import shlex
 import sys
 import warnings
 from json import JSONDecodeError
-from subprocess import Popen, PIPE
+from subprocess import Popen, PIPE, STDOUT
 from typing import IO, Any, Optional
 
 # TODO: Get rid of these globals
@@ -53,7 +53,7 @@ class PateWrapper:
             self.trace_file.flush()
         return line
 
-    def next_json(self):
+    def next_json(self, gotoPromptAfterNonJson=False):
         while True:
             line = self.next_line()
             if self.debug_io:
@@ -64,9 +64,12 @@ class PateWrapper:
             except JSONDecodeError:
                 # Output line and continue looking for a JSON record
                 self.user.show_message(line.rstrip('\n'))
+                if gotoPromptAfterNonJson:
+                    self.command('goto_prompt')
+                    # Skip lines till we get json
+                    gotoPromptAfterNonJson = False
             else:
                 return rec
-
 
     def skip_lines_till(self, s: str) -> None:
         """Skip lines till EOF or line completely matching s (without newline)."""
@@ -341,9 +344,16 @@ class PateWrapper:
         # Read entry point choices
         prompt = prompt_rec['this']
         choices = list(map(get_choice_id, prompt_rec.get('trace_node_contents', [])))
-        return self.user.ask_user(prompt, choices)
+        while True:
+            choice = self.user.ask_user(prompt, choices).strip()
+            if choice:
+                return choice
+            self.user.show_message("error: empty choice")
+
 
     def command_loop(self):
+        rec = self.next_json()
+        self.command('goto_prompt')
         while self.command_step():
             pass
         self.user.show_message("Pate finished")
@@ -351,7 +361,7 @@ class PateWrapper:
     def command_step(self):
         # Process one json record from pate
         try:
-            rec = self.next_json()
+            rec = self.next_json(gotoPromptAfterNonJson=True)
             return self.process_json(rec)
         except EOFError:
             self.user.show_message("Pate terminated unexpectedly")
@@ -410,6 +420,10 @@ class PateWrapper:
             self.user.show_message(rec['this'] + '\n')
             return False
 
+        elif isinstance(rec, dict) and rec.get('error'):
+            self.show_message('error: ' + rec['error'])
+            self.command('goto_prompt')
+
         else:
             # Message(s)
             self.show_message(rec)
@@ -424,7 +438,7 @@ class PateWrapper:
         elif isinstance(rec, dict) and rec.get('message'):
             self.user.show_message(rec['message'])
         else:
-            self.user.show_message(rec)
+            self.user.show_message(str(rec))
 
 
 class CFARNode:
@@ -1284,7 +1298,9 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
     # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
     return Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel'] + args,
                  cwd=cwd,
-                 stdin=PIPE, stdout=PIPE, text=True, encoding='utf-8',
+                 stdin=PIPE, stdout=PIPE,
+                 stderr=STDOUT,
+                 text=True, encoding='utf-8',
                  close_fds=True,
                  # Create a new process group, so we can kill it cleanly
                  preexec_fn=os.setsid
