@@ -428,13 +428,6 @@ class PateWrapper:
 
 
 class CFARNode:
-
-    id: str
-    desc: str
-    data = None
-    predomain = None
-    postdomain = None
-    external_postdomain = None
     exits: list[CFARNode]
 
     def __init__(self, id: str, desc: str, data: dict):
@@ -444,6 +437,10 @@ class CFARNode:
         self.update_node(desc, data)
         self.desc = desc
         self.data = data
+        self.predomain = None
+        self.postdomain = None
+        self.external_postdomain = None
+        self.addr = None
 
     def update_node(self, desc: str, data: dict):
         self.desc = desc
@@ -528,7 +525,6 @@ class CFARNode:
             pprint_event_trace(f'{label} Patched', trace['traces']['patched'], pre, out)
 
 class CFARGraph:
-
     nodes: dict[str, CFARNode]
 
     def __init__(self):
@@ -1265,10 +1261,15 @@ def run_replay(file: str) -> Popen:
         )
 
 
-def run_pate_config(file):
+def get_run_config(file: os.PathLike) -> dict:
     with open(file, 'r') as f:
         config = json.load(f)
-    cwd = os.path.dirname(file)
+    config['cwd'] = os.path.dirname(file)
+    return config
+
+
+def run_config(config: dict):
+    cwd = config.get('cwd')
     original = config.get('original')
     patched = config.get('patched')
     rawargs = config.get('args')
@@ -1292,7 +1293,8 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
 
 def run_pate_config_or_replay_file(f: str) -> Popen:
     if f.endswith(".run-config.json"):
-        test_live(lambda ignore: run_pate_config(f))
+        config = get_run_config(f)
+        test_live(lambda ignore: run_config(config))
     elif f.endswith(".replay"):
         test_replay(lambda ignore: run_replay(f))
 

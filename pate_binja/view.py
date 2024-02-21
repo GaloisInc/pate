@@ -27,10 +27,11 @@ from . import pate
 
 
 class PateWidget(QWidget):
-    def __init__(self, parent: QWidget, filename: str) -> None:
+    def __init__(self, parent: QWidget, filename: str, config: dict) -> None:
         super().__init__(parent)
 
         self.filename = filename
+        self.config = config
         self.pate_thread: PateThread = None
 
         self.flow_graph_widget = MyFlowGraphWidget(self)
@@ -125,6 +126,10 @@ class GuiUserInteraction(pate.PateUserInteraction):
 
 
 class PateThread(Thread):
+    proc: Popen or None
+    oBv: BinaryView | None
+    pBv: BinaryView | None
+
     # TODO: Look at interaction.run_progress_dialog
     # handle cancel and restart
     def __init__(self, bv, run_fn, pate_widget: PateWidget, replay=False, show_ce_trace=True, trace_file=None):
@@ -135,7 +140,9 @@ class PateThread(Thread):
         self.run_fn = run_fn
         self.trace_file = trace_file
         self.show_ce_trace = show_ce_trace
-        self.proc: Popen = None
+        self.proc = None
+        self.oBv = None
+        self.pBv = None
 
     def run(self):
 
@@ -352,16 +359,20 @@ def launch_pate(context: UIActionContext):
     if f.endswith(".run-config.json"):
         replay = False
         trace_file = os.path.join(os.path.dirname(f), 'lastrun.replay')
-        fn = lambda ignore: pate.run_pate_config(f)
+        config = pate.get_run_config(f)
     elif f.endswith(".replay"):
         replay = True
         trace_file = None
-        fn = lambda ignore: pate.run_replay(f)
+        config = {}  # TODO: need config for replay. Save it in replay file as first line?
 
-    pate_widget = PateWidget(context.widget, f)
+    pate_widget = PateWidget(context.widget, f, config)
     tab = context.context.createTabForWidget("PATE " + os.path.basename(f), pate_widget)
 
-    pt = PateThread(None, fn, pate_widget, replay=replay, trace_file=trace_file)
+    if replay:
+        pt = PateThread(None, lambda i: pate.run_replay(f), pate_widget, replay=replay, trace_file=trace_file)
+    else:
+        pt = PateThread(None, lambda i: pate.run_config(config), pate_widget, replay=replay, trace_file=trace_file)
+
     pate_widget.pate_thread = pt
     pt.start()
 
