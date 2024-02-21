@@ -36,9 +36,12 @@ module Pate.Verification.PairGraph.Node (
   , returnToEntry
   , functionEntryOf
   , returnOfEntry
-  , asSingleReturn
-  , asSingleNode
-  , asSingleGraphNode
+  , toSingleReturn
+  , toSingleNode
+  , toSingleGraphNode
+  , isSingleNode
+  , isSingleNodeEntry
+  , isSingleReturn
   , splitGraphNode
   , getDivergePoint
   , eqUptoDivergePoint
@@ -55,6 +58,7 @@ import qualified Pate.PatchPair as PPa
 import           Pate.TraceTree
 import qualified Pate.Binary as PB
 import qualified Prettyprinter as PP
+import Data.Parameterized (Some(..), Pair (..))
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -149,21 +153,46 @@ mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
 mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
 
 -- | Project the given 'NodeReturn' into a singleton node for the given binary
-asSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> NodeReturn arch -> m (NodeReturn arch)
-asSingleReturn bin divergedAt (NodeReturn ctx fPair) = do
-  fPair' <- PPa.asSingleton bin fPair
+toSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> NodeReturn arch -> m (NodeReturn arch)
+toSingleReturn bin divergedAt (NodeReturn ctx fPair) = do
+  fPair' <- PPa.toSingleton bin fPair
   return $ NodeReturn (ctx {divergePoint = Just divergedAt}) fPair'
 
 -- | Project the given 'NodeEntry' into a singleton node for the given binary
-asSingleNode:: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeEntry arch -> m (NodeEntry arch)
-asSingleNode bin node@(NodeEntry ctx bPair) = do
-  fPair' <- PPa.asSingleton bin bPair
+toSingleNode:: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> NodeEntry arch -> m (NodeEntry arch)
+toSingleNode bin node@(NodeEntry ctx bPair) = do
+  fPair' <- PPa.toSingleton bin bPair
   return $ NodeEntry (ctx {divergePoint = Just (GraphNode node)}) fPair'
 
-asSingleGraphNode :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> m (GraphNode arch)
-asSingleGraphNode bin node = case node of
-  GraphNode ne -> GraphNode <$> asSingleNode bin ne
-  ReturnNode nr -> ReturnNode <$> asSingleReturn bin node nr  
+toSingleGraphNode :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> m (GraphNode arch)
+toSingleGraphNode bin node = case node of
+  GraphNode ne -> GraphNode <$> toSingleNode bin ne
+  ReturnNode nr -> ReturnNode <$> toSingleReturn bin node nr  
+
+isSingleNodeEntry :: 
+  PPa.PatchPairM m => 
+  NodeEntry arch -> 
+  m (Some PB.WhichBinaryRepr)
+isSingleNodeEntry (NodeEntry _ bPair) = do
+  Pair bin _ <- PPa.asSingleton bPair
+  return $ Some bin
+
+isSingleReturn ::
+  PPa.PatchPairM m => 
+  NodeReturn arch -> 
+  m (Some PB.WhichBinaryRepr)
+isSingleReturn (NodeReturn _ bPair) = do
+  Pair bin _ <- PPa.asSingleton bPair
+  return $ Some bin
+
+-- | If the given 'GraphNode' is a singleton, return the corresponding
+--   'PB.WhichBinaryRepr'
+isSingleNode ::
+  PPa.PatchPairM m => 
+  GraphNode arch -> 
+  m (Some PB.WhichBinaryRepr)
+isSingleNode (GraphNode nd) = isSingleNodeEntry nd
+isSingleNode (ReturnNode nd) = isSingleReturn nd
 
 -- | Relaxed node equality that ignores differences in divergence points
 eqUptoDivergePoint ::
@@ -184,7 +213,7 @@ eqUptoDivergePoint _ _ = False
 --   The input node is marked as the diverge point in the two resulting nodes.
 splitGraphNode :: PPa.PatchPairM m => GraphNode arch -> m (GraphNode arch, GraphNode arch)
 splitGraphNode nd = do
-  nodes <- PPa.forBinsC $ \bin -> asSingleGraphNode bin nd
+  nodes <- PPa.forBinsC $ \bin -> toSingleGraphNode bin nd
   nodeO <- PPa.getC PB.OriginalRepr nodes
   nodeP <- PPa.getC PB.PatchedRepr nodes
   return (nodeO, nodeP)

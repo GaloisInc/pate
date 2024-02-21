@@ -27,7 +27,9 @@ module Pate.Equivalence.Error (
   , isRecoverable
   , isTracedWhenWarning
   , loaderError
-  , someExpr) where
+  , someExpr
+  , PairGraphErr(..)
+  ) where
 
 import qualified Control.Exception as X
 import           Data.Maybe ( catMaybes )
@@ -160,6 +162,10 @@ data InnerEquivalenceError arch
   | forall tp. FailedToGroundExpr (SomeExpr tp)
   | OrphanedSingletonAnalysis (PB.FunPair arch)
   | RequiresInvalidPointerOps
+  | PairGraphError PairGraphErr
+
+data PairGraphErr = PairGraphErr String
+  deriving Show
 
 data SomeExpr tp = forall sym. W4.IsExpr (W4.SymExpr sym) => SomeExpr (W4.SymExpr sym tp)
 
