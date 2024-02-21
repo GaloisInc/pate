@@ -10,7 +10,7 @@ from subprocess import Popen
 from typing import Optional
 
 from binaryninja import show_graph_report, execute_on_main_thread_and_wait, BinaryView, OpenFileNameField, interaction, \
-    MultilineTextField
+    MultilineTextField, load
 from binaryninja.enums import BranchType, HighlightStandardColor, EdgePenStyle, ThemeColor
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninja.plugin import BackgroundTaskThread
@@ -145,7 +145,7 @@ class PateThread(Thread):
         self.pBv = None
 
     def run(self):
-
+        #self.loadBinaryViews()
         x = self.run_fn(self.replay)
         if self.trace_file:
             with open(self.trace_file, "w") as trace:
@@ -156,6 +156,27 @@ class PateThread(Thread):
             with x as proc:
                 self.proc = proc
                 self._command_loop(proc, self.show_ce_trace)
+
+    def loadBinaryViews(self):
+        # TODO: May need a progress feedback. Can this take a significant amount of time?
+        config = self.pate_widget.config
+        if config:
+            cwd = config.get('cwd')
+            original = config.get('original')
+            patched = config.get('patched')
+            if cwd and original:
+                self.oBv = load(os.path.join(cwd, original))
+                self.oBv.add_analysis_completion_event(lambda: print('finished loading', original))
+            if cwd and patched:
+                self.pBv = load(os.path.join(cwd, patched))
+                self.pBv.add_analysis_completion_event(lambda: print('finished loading', patched))
+        # TODO: close binary views when finished
+        self.hackaroo()
+
+    def hackaroo(self):
+        a = 0x400c
+        bb = self.oBv.get_basic_blocks_at(a)
+        print(bb)
 
     def cancel(self) -> None:
         if self.proc and self.is_alive():
