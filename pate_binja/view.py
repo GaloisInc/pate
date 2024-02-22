@@ -6,7 +6,7 @@ import io
 import os.path
 import signal
 from threading import Thread, Condition
-from subprocess import Popen
+from subprocess import Popen, TimeoutExpired
 from typing import Optional
 
 from binaryninja import show_graph_report, execute_on_main_thread_and_wait, BinaryView, OpenFileNameField, interaction, \
@@ -180,8 +180,14 @@ class PateThread(Thread):
 
     def cancel(self) -> None:
         if self.proc and self.is_alive():
-            # Terminate the process group (SIGINT does not work so using SIGKILL)
-            os.killpg(self.proc.pid, signal.SIGKILL)
+            # Closing input should cause PATE process to exit
+            self.proc.stdin.close()
+            try:
+                self.proc.wait(3)
+            except TimeoutExpired:
+                # Orderly shutdown did not work, kill the process group
+                print('KILLING PATE Process')
+                self.proc.killpg(self.proc.pid, signal.SIGKILL)
 
     def _command_loop(self, proc: Popen, show_ce_trace: bool = False, trace_io=None):
 
