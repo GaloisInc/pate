@@ -128,6 +128,7 @@ library
                        Pate.Loader,
                        Pate.Loader.ELF,
                        Pate.Event,
+                       Pate.EventTrace,
                        Pate.Ground,
                        Pate.Hints,
                        Pate.Hints.CSV,
