@@ -1265,7 +1265,12 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
               withPG_ gr2 $ do
                 (liftPG $ checkForNodeSync node exitPairs) >>= \case
                   True -> liftEqM $ handleSyncPoint (GraphNode node)
-                  False -> liftEqM $ processBundle scope node bundle d exitPairs 
+                  False -> liftEqM $ \pg -> do
+                    handleSplitAnalysis scope node d pg >>= \case
+                      Just pg' -> return pg'
+                      Nothing -> do
+                        pg' <- processBundle scope node bundle d exitPairs pg
+                        fromMaybe pg' <$> handleSplitAnalysis scope node d pg'
 
 visitNode scope (ReturnNode fPair) d gr0 =  do
   -- propagate the abstract domain of the return node to
@@ -2371,6 +2376,42 @@ singletonBundle ::
   EquivM sym arch (SimBundle sym arch v)
 singletonBundle bin (SimBundle in_ out_) = 
   SimBundle <$> PPa.toSingleton bin in_ <*> PPa.toSingleton bin out_
+
+-- | Check if the given node has defined sync addresses. If so,
+--   connect it to the one-sided Original version of the node and
+--   queue it in the worklist.
+--   Returns 'Nothing' if the node does not have sync addresses defined
+--   (i.e. it is not the start of a split analysis)
+handleSplitAnalysis ::
+  PS.SimScope sym arch v ->
+  NodeEntry arch ->
+  AbstractDomain sym arch v ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+handleSplitAnalysis scope node dom pg = do
+  let syncAddrs = evalPairGraphM pg $ do
+        syncO <- getSyncAddress PBi.OriginalRepr (GraphNode node)
+        syncP <- getSyncAddress PBi.PatchedRepr (GraphNode node)
+        return (syncO, syncP)
+  case syncAddrs of
+    Right (syncO, syncP) -> do
+      currBlockO <- toSingleNode PBi.OriginalRepr node
+      currBlockP <- toSingleNode PBi.PatchedRepr node
+      subTree @"node" "Split analysis" $ do
+        pg' <- subTraceLabel @"node" "Original:" (GraphNode currBlockO) $ do
+          priority <- thisPriority
+          emitTraceLabel @"address" "Synchronization Address" syncO
+          bundleO <- noopBundle scope (nodeBlocks currBlockO)
+          atPriority (raisePriority (priority PriorityHandleDesync)) Nothing $ do
+            -- we arbitrarily pick the original program to perform the first step of
+            -- the analysis
+            -- by convention, we define the sync point of the original program to
+            -- connect to the divergence point of the patched program
+            widenAlongEdge scope bundleO (GraphNode node) dom pg (GraphNode currBlockO)
+        subTraceLabel @"node" "Patched" (GraphNode currBlockP) $ do
+          emitTraceLabel @"address" "Synchronization Address" syncP
+        return $ Just pg'
+    Left{} -> return Nothing
 
 handleDivergingPaths ::
   HasCallStack =>
