@@ -1165,7 +1165,7 @@ withValidInit scope bPair f = withPair bPair $ do
     vars = PS.scopeVars scope
     varsSt = TF.fmapF PS.simVarState vars
 
-  validInit <- PVV.validInitState (Just bPair) varsSt
+  validInit <- PVV.validInitState bPair varsSt
   validAbs <- PPa.catBins $ \bin -> do
     blk <- PPa.get bin bPair
     vars' <- PPa.get bin vars
@@ -1314,7 +1314,7 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
     let
       vars = PS.scopeVars scope
       varsSt = TF.fmapF PS.simVarState vars
-    validState <- PVV.validInitState (Just ret) varsSt
+    validState <- PVV.validInitState ret varsSt
     withAssumptionSet validState $ do
       (asm, bundle) <- returnSiteBundle scope vars d ret
       withAssumptionSet asm $ withPredomain scope bundle d $ do
