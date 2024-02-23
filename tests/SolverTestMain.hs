@@ -72,7 +72,6 @@ withEqEnv _px f = do
           , PM.envUndefPointerOps = error "envUndefPointerOps"
           , PM.envParentBlocks = []
           , PM.envEqCondFns = Map.empty
-          , PM.envExitPairsCache = error "envExitPairsCache"
           , PM.envStatistics = error "envStatistics"
           , PM.envOverrides = \_ -> Map.empty
           , PM.envTreeBuilder = treeBuilder
