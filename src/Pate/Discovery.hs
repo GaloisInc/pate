@@ -128,9 +128,6 @@ discoverPairs ::
   SimBundle sym arch v ->
   EquivM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
 discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> do
-  cachedTargets <- lookupBlockCache envExitPairsCache pPair >>= \case
-    Just pairs -> return pairs
-    Nothing -> return Set.empty
   cache <- IO.liftIO $ IO.newIORef (Map.empty :: Map.Map (Some (PB.BlockTarget arch)) Bool)
   let
     -- quickly filter out unreachable block exits
@@ -165,18 +162,12 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
       PPa.PatchPairSingle bin (PPa.LiftF blks) -> map (PPa.mkSingle bin) blks
   blocks <- getBlocks $ PSS.simPair bundle
   
-  let newCalls = Set.toList ((Set.fromList allCalls) Set.\\ cachedTargets)
-
   subTree @"blocktarget" "Tested Pairs" $
-    mapM_ (\blkts -> subTrace blkts $ return ()) newCalls
+    mapM_ (\blkts -> subTrace blkts $ return ()) allCalls
   
-  subTree @"blocktarget" "Cached Pairs" $
-    mapM_ (\blkts -> subTrace blkts $ return ()) (Set.toList cachedTargets)
-
-
   result <-
     subTree @"blocktarget" "Discovered Pairs" $ 
-    forM newCalls $ \blkts -> subTrace blkts $ startTimer $ do
+    forM allCalls $ \blkts -> subTrace blkts $ startTimer $ do
       let emit r = (emitEvent (PE.DiscoverBlockPair blocks blkts r) >> emitTrace @"blocktargetresult" r)
       matches <- (matchesBlockTarget bundle blkts >>= PAS.toPred sym)
       case WI.asConstantPred matches of
@@ -204,9 +195,7 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
               emit PE.InconclusiveTarget
               throwHere PEE.InconclusiveSAT
             Right r -> return r
-  let resultSet = Set.fromList (catMaybes result)
-  modifyBlockCache envExitPairsCache pPair Set.union resultSet
-  return $ Set.toList (Set.union resultSet cachedTargets)
+  return $ catMaybes result
   where
   pPair = PSS.simPair bundle
 

@@ -281,7 +281,6 @@ updateEquivCondition ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)  
 updateEquivCondition scope nd condK mpropK cond gr = withSym $ \sym -> do
-  resetBlockCache envExitPairsCache
   let propK = case mpropK of
         Just _propK -> _propK
         Nothing -> getPropagationKind gr nd condK
@@ -303,7 +302,6 @@ addToEquivCondition ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)    
 addToEquivCondition scope nd condK condPred gr = withSym $ \sym -> do
-  resetBlockCache envExitPairsCache
   let eqCond = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred condPred}
   eqCond' <- getScopedCondition scope gr nd condK 
   eqCond'' <- PEC.merge sym eqCond eqCond'

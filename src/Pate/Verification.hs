@@ -216,7 +216,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   -- are not practical to recover without major refactoring.  This is just as
   -- safe but makes things significantly easier.
   symNonce <- liftIO (N.freshNonce N.globalNonceGenerator)
-  ePairCache <- liftIO $ freshBlockCache
   statsVar <- liftIO $ MVar.newMVar mempty
 
 
@@ -309,7 +308,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envUndefPointerOps = undefops
           , envParentBlocks = mempty
           , envEqCondFns = mempty
-          , envExitPairsCache = ePairCache
           , envStatistics = statsVar
           , envOverrides = \ovCfg -> M.fromList [ (n, ov)
                                                 | ov@(PVO.SomeOverride o) <- PVOL.overrides ovCfg

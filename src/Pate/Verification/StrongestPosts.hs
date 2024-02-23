@@ -242,7 +242,6 @@ refineFinalResult entries pg = do
       choice_outer "Finish and view final result" () $ return Nothing
       choice_outer "Restart from entry point" () $ fmap Just $ do
         pg' <- chooseEntryPoint entries pg
-        resetBlockCache envExitPairsCache
         (asks envResetTraceTree >>= liftIO)
         return pg'
       choice_outer "Handle pending refinements" () $ do
