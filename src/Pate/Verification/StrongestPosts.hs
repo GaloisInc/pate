@@ -615,7 +615,7 @@ updateCombinedSyncPoint ::
   GraphNode arch {- ^ diverging node -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-updateCombinedSyncPoint divergeNode pg_top = fnTrace "updateCombinedSyncPoint" $ withPG_ pg_top $ do
+updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
   priority <- lift $ thisPriority
   syncsO_ <- fmap Set.toList $ liftPG $ getSyncPoints PBi.OriginalRepr divergeNode
   syncsP_ <- fmap Set.toList $ liftPG $ getSyncPoints PBi.PatchedRepr divergeNode
@@ -632,7 +632,7 @@ updateCombinedSyncPoint divergeNode pg_top = fnTrace "updateCombinedSyncPoint" $
     -- the graph as a result of some other operation (e.g. introducing an assertion).
     -- In the case where the first Original single-sided node is dropped, this ensures that it is
     -- re-scheduled by re-processing the divergence point.
-    [] -> withTracing @"message" "Missing Original sync point" $ do
+    [] -> do
         divergeNodeO <- toSingleGraphNode PBi.OriginalRepr divergeNode
         liftPG $ do
           modify $ queueNode (priority PriorityDomainRefresh) divergeNodeO
@@ -668,6 +668,9 @@ updateCombinedSyncPoint divergeNode pg_top = fnTrace "updateCombinedSyncPoint" $
         combinedNode <- liftPG $ do
           Just combinedNode <- return $ combineNodes syncO syncP
           return combinedNode
+        withTracingLabel @"node" "Merge Node" combinedNode $ do
+          emitTrace @"node" syncO
+          emitTrace @"node" syncP
         liftEqM $ mergeDualNodes syncO syncP domO_spec domP_spec combinedNode
 
 
