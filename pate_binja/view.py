@@ -15,7 +15,7 @@ from binaryninja.enums import BranchType, HighlightStandardColor, EdgePenStyle, 
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninja.plugin import BackgroundTaskThread
 from binaryninjaui import GlobalAreaWidget, GlobalArea, UIAction, UIActionHandler, Menu, UIActionContext, \
-    FlowGraphWidget
+    FlowGraphWidget, FileContext, UIContext
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt
@@ -27,8 +27,9 @@ from . import pate
 
 
 class PateWidget(QWidget):
-    def __init__(self, parent: QWidget, filename: str, config: dict) -> None:
+    def __init__(self, context: UIActionContext, parent: QWidget, filename: str, config: dict) -> None:
         super().__init__(parent)
+        self.context = context
 
         self.filename = filename
         self.config = config
@@ -67,6 +68,32 @@ class PateWidget(QWidget):
 
         self.user_response_condition = Condition()
         self.user_response = None
+
+        #self.loadBinaryViews()
+        #self.hackaroo()
+
+    def loadBinaryViews(self):
+        # TODO: May need a progress feedback. Can this take a significant amount of time?
+        config = self.config
+        if config:
+            cwd = config.get('cwd')
+            original = config.get('original')
+            patched = config.get('patched')
+            if cwd and original:
+                #self.oBv = load(os.path.join(cwd, original))
+                #self.oBv.add_analysis_completion_event(lambda: print('finished loading', original))
+                #self.oBv = oF.getRawData()
+                oF = FileContext.openFilename(os.path.join(cwd, original))
+                if oF:
+                    vF = self.context.openFileContext(oF)
+            if cwd and patched:
+                self.pBv = load(os.path.join(cwd, patched))
+                self.pBv.add_analysis_completion_event(lambda: print('finished loading', patched))
+
+    def hackaroo(self):
+        a = 0x400c
+        bb = self.oBv.get_basic_blocks_at(a)
+        print(bb)
 
     def closeEvent(self, event):
         if self.pate_thread:
@@ -107,7 +134,7 @@ class GuiUserInteraction(pate.PateUserInteraction):
         execute_on_main_thread_and_wait(lambda: self.pate_widget.ask_user(prompt, choices, self.replay))
         if self.replay:
             execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText('Pate Command: auto replay\n'))
-            return '42' # Return anything (its ignored) for fast replay
+            return '42'  # Return anything (its ignored) for fast replay
         # Wait for user to respond to prompt. This happens on the GUI thread.
         urc = self.pate_widget.user_response_condition
         with urc:
@@ -145,7 +172,6 @@ class PateThread(Thread):
         self.pBv = None
 
     def run(self):
-        #self.loadBinaryViews()
         x = self.run_fn(self.replay)
         if self.trace_file:
             with open(self.trace_file, "w") as trace:
@@ -156,27 +182,6 @@ class PateThread(Thread):
             with x as proc:
                 self.proc = proc
                 self._command_loop(proc, self.show_ce_trace)
-
-    def loadBinaryViews(self):
-        # TODO: May need a progress feedback. Can this take a significant amount of time?
-        config = self.pate_widget.config
-        if config:
-            cwd = config.get('cwd')
-            original = config.get('original')
-            patched = config.get('patched')
-            if cwd and original:
-                self.oBv = load(os.path.join(cwd, original))
-                self.oBv.add_analysis_completion_event(lambda: print('finished loading', original))
-            if cwd and patched:
-                self.pBv = load(os.path.join(cwd, patched))
-                self.pBv.add_analysis_completion_event(lambda: print('finished loading', patched))
-        # TODO: close binary views when finished
-        self.hackaroo()
-
-    def hackaroo(self):
-        a = 0x400c
-        bb = self.oBv.get_basic_blocks_at(a)
-        print(bb)
 
     def cancel(self) -> None:
         if self.proc and self.is_alive():
@@ -392,7 +397,7 @@ def launch_pate(context: UIActionContext):
         trace_file = None
         config = {}  # TODO: need config for replay. Save it in replay file as first line?
 
-    pate_widget = PateWidget(context.widget, f, config)
+    pate_widget = PateWidget(context.context, context.widget, f, config)
     tab = context.context.createTabForWidget("PATE " + os.path.basename(f), pate_widget)
 
     if replay:

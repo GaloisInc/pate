@@ -41,7 +41,7 @@ class PateWrapper:
         self.user = user
         self.pate_in = pate_in
         self.pate_out = pate_out
-        self.trace_file = trace
+        self.trace_file = trace # no trace file also indicates replay mode
 
     def next_line(self) -> str:
         line = self.pate_out.readline()
@@ -80,10 +80,18 @@ class PateWrapper:
                 break
 
     def command(self, cmd: str) -> None:
+        if self.debug_io:
+            print('Command to Pate: ', cmd)
         if self.pate_in:
-            if self.debug_io:
-                print('Command to Pate: ', cmd)
             print(cmd, file=self.pate_in, flush=True)
+        if self.trace_file:
+            # Write line to trace file for replay
+            self.trace_file.write('Command: ' + cmd + '\n')
+            self.trace_file.flush()
+        else:
+            # Replay mode
+            # TODO: make cmd available to show in replay
+            cmd = self.pate_out.readline()
 
     def extract_graph(self) -> CFARGraph:
         cfar_graph = CFARGraph()
@@ -115,19 +123,51 @@ class PateWrapper:
 
         # TODO: Replace string hacks with something more resilient.
         for n in divergentNodes:
-            # Prune non-matching exits from divergedAt node and splice around remaining parts
+            # Prune non-matching exits from divergedAt node
             parts = [e for e in n.exits if e.id.startswith(n.id)]
-            n.exits = []
-            for p in parts:
-                for e in p.exits:
-                    n.addExit(e)
-                p.exits = []
+            n.exits = parts
+            # Don't splice out the "fake" node. Breaks things when the one-sided analysis is empty.
+            # for p in parts:
+            #     for e in p.exits:
+            #         n.addExit(e)
+            #     p.exits = []
 
             if self.debug_cfar:
                 print('CFAR ID (divergedAt):', n.id)
                 print("Remaining exits:")
                 for e in n.exits:
                     print('   ', e.id)
+
+    def connect_synchronization_nodes(self, graph: CFARGraph):
+        # TODO: Replace string hacks with something more resilient.
+        for n in list(graph.nodes.values()):
+            if (n.id.find(' vs ') >= 0
+                    and isinstance(n.data, dict)
+                    and n.data.get('trace_node_kind') == 'node'
+                    and not graph.get_parents(n)):
+                parts = n.id.split(' vs ')
+                if len(parts) != 2:
+                    print('WARNING: Did not get exactly two parts for CFAR synchronization node. Skipping:', id)
+                else:
+                    o_id = parts[0] + ' (original)'
+                    o_node = graph.get(o_id)
+                    p_id = parts[1] + ' (patched)'
+                    p_node = graph.get(p_id)
+
+                    if self.debug_cfar and (o_node or p_node):
+                        print()
+                        pp.pprint(n.data)
+                        print('CFAR Synchronization node:', n.id)
+
+                    if o_node:
+                        o_node.addExit(n)
+                        if self.debug_cfar:
+                            print('   Original CFAR:', o_id)
+
+                    if p_node:
+                        p_node.addExit(n)
+                        if self.debug_cfar:
+                            print('   Patched CFAR:', p_id)
 
     def prune_orphans(self, graph: CFARGraph):
         while True:
@@ -145,93 +185,6 @@ class PateWrapper:
             if not orphans:
                 # Done
                 break
-
-    def connect_synchronization_nodes_OLD(self, graph: CFARGraph):
-        # TODO: Replace string hacks with something more resilient.
-        for n in list(graph.nodes.values()):
-            if (n.id.find(' vs ') >= 0
-                    and isinstance(n.data, dict)
-                    and n.data.get('trace_node_kind') == 'node'
-                    and not graph.get_parents(n)):
-                if self.debug_cfar:
-                    print()
-                    pp.pprint(n.data)
-                    print('CFAR Synchronization node:', n.id)
-                parts = n.id.split(' vs ')
-                if len(parts) != 2:
-                    print('WARNING: Did not get exactly two parts for CFAR synchronization node. Skipping:', id)
-                else:
-                    o_id = parts[0] +  ' (original)'
-                    o_node = graph.get(o_id)
-                    if o_node:
-                        # splice around o_node
-                        for p in graph.get_parents(o_node):
-                            p.exits.remove(o_node)
-                            p.addExit(n)
-                        # delete o_node
-                        o_node.exits = []
-                        del graph.nodes[o_node.id]
-
-                    p_id = parts[1] +  ' (patched)'
-                    p_node = graph.get(p_id)
-                    if p_node:
-                        # splice around p_node
-                        for p in graph.get_parents(p_node):
-                            p.exits.remove(p_node)
-                            p.addExit(n)
-                        # delete p_node
-                        p_node.exits = []
-                        del graph.nodes[p_node.id]
-
-    def connect_synchronization_nodes(self, graph: CFARGraph):
-        # TODO: Replace string hacks with something more resilient.
-        for n in list(graph.nodes.values()):
-
-            if n.id == 'S1+0x1a98 in S1+0x18e4(RR_ReadTlmInput)':
-                pass
-
-            if (True #not graph.get_parents(n)
-                    and isinstance(n.data, dict)
-                    and n.data.get('trace_node_kind') == 'node'):
-
-                if (n.data['trace_node'].get('graph_node_type') == 'entry'
-                        and n.data['trace_node']['entry_body']['blocks'].get('original')
-                        and n.data['trace_node']['entry_body']['blocks'].get('patched')):
-                    o_rec = n.data['trace_node']['entry_body']['blocks']['original']
-                    o_id = get_ref_id(o_rec) + ' (original)'
-                    p_rec = n.data['trace_node']['entry_body']['blocks']['patched']
-                    p_id = get_ref_id(p_rec) + ' (patched)'
-                else:
-                    continue
-
-                if self.debug_cfar:
-                    print()
-                    #pp.pprint(n.data)
-                    print('CFAR Synchronization node:', n.id)
-
-                o_node = graph.get(o_id)
-                if o_node:
-                    # splice around o_node
-                    if self.debug_cfar:
-                        print('  Replacing original node:', o_node.id)
-                    for p in graph.get_parents(o_node):
-                        p.exits.remove(o_node)
-                        p.addExit(n)
-                    # delete o_node
-                    o_node.exits = []
-                    del graph.nodes[o_node.id]
-
-                p_node = graph.get(p_id)
-                if p_node:
-                    # splice around p_node
-                    if self.debug_cfar:
-                        print('  Replacing patched node:', p_node.id)
-                    for p in graph.get_parents(p_node):
-                        p.exits.remove(p_node)
-                        p.addExit(n)
-                    # delete p_node
-                    p_node.exits = []
-                    del graph.nodes[p_node.id]
 
     def extract_graph_rec(self,
                           rec: dict,
@@ -1227,7 +1180,7 @@ class TtyUserInteraction(PateUserInteraction):
         if self.replay:
             # In replay mode, response is ignored, just return anything for fast replay
             print('Pate command: auto replay\n')
-            choice = 42
+            choice = '42'
         else:
             choice = input("Pate command: ")
         return choice
@@ -1248,7 +1201,7 @@ class TtyUserInteraction(PateUserInteraction):
 
 
 def test(pate_out, pate_in, trace):
-    user = TtyUserInteraction(pate_in is None)
+    user = TtyUserInteraction(trace is None)
     pate = PateWrapper(user, pate_out, pate_in, trace)
 
     #pate.debug_io = True
