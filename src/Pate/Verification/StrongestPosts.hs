@@ -30,7 +30,7 @@ import           GHC.Stack ( HasCallStack )
 import           Control.Applicative
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
-import           Control.Monad (foldM, forM, unless, void, when)
+import           Control.Monad (foldM, forM, unless, void, when, guard)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Reader (asks, local)
@@ -129,6 +129,7 @@ import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), 
 import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
 import qualified Data.Aeson as JSON
+import qualified Pate.Solver as PSo
 
 -- Overall module notes/thoughts
 --
@@ -770,18 +771,25 @@ mergeDualNodes in1 in2 spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ wit
           widenAlongEdge scope bundle in2 dom gr2 syncNode
 
 -- | Choose some work item (optionally interactively)
-chooseWorkItemM ::
+withWorkItem ::
   PA.ValidArch arch =>
+  PSo.ValidSym sym =>
   PairGraph sym arch ->
-  EquivM sym arch (Maybe (NodePriority, PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch))
-chooseWorkItemM gr0 = do
-  gr0' <- queuePendingNodes gr0
+  ((NodePriority, PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch) -> EquivM_ sym arch a) ->
+  NodeBuilderT '(sym,arch) "node" (EquivM_ sym arch) (Maybe a)
+withWorkItem gr0 f = do
+  gr0' <- lift $ queuePendingNodes gr0
   case chooseWorkItem gr0' of
     Nothing -> return Nothing
-    Just (priority, gr1, nd, spec) -> atPriority priority Nothing $ PS.viewSpec spec $ \scope d -> do
-      runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
-        Just gr2 -> chooseWorkItemM gr2
-        Nothing -> return $ Just (priority, gr1, nd, spec)
+    Just (priority, gr1, nd, spec) -> do
+      res <- subTraceLabel @"node" (printPriorityKind priority) nd $ startTimer $
+        atPriority priority Nothing $ PS.viewSpec spec $ \scope d -> do
+          runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
+            Just gr2 -> return $ Left gr2
+            Nothing -> Right <$> f (priority, gr1, nd, spec)
+      case res of
+        Left gr2 -> withWorkItem gr2 f
+        Right a -> return $ Just a
 
 {-
   let nodes = Set.toList $ pairGraphWorklist gr
@@ -803,27 +811,27 @@ pairGraphComputeFixpoint ::
   forall sym arch. [PB.FunPair arch] -> PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
 pairGraphComputeFixpoint entries gr_init = do
   let
-    go (gr0 :: PairGraph sym arch) = (lift $ chooseWorkItemM gr0) >>= \case
-      Nothing -> return gr0
-      Just (priority, gr1, nd, preSpec) -> do
-        gr4 <- subTraceLabel @"node" (printPriorityKind priority) nd $ startTimer $ do
-          shouldProcessNode nd >>= \case
-            False -> do
-              emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
-              return gr1
-            True -> do
-              emitTrace @"priority" priority
-              atPriority priority (Just (show nd)) $ do
-                PS.viewSpec preSpec $ \scope d -> do
-                  d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
-                    True -> strengthenStackDomain scope d
-                    False -> return d
-                  withAssumptionSet (PS.scopeAsm scope) $ do
-                    gr2 <- addRefinementChoice nd gr1
-                    gr3 <- visitNode scope nd d' gr2
-                    emitEvent $ PE.VisitedNode nd
-                    return gr3
-        go gr4
+    go (gr0 :: PairGraph sym arch) = do
+      mgr4 <- withWorkItem gr0 $ \(priority, gr1, nd, preSpec) -> do
+        shouldProcessNode nd >>= \case
+          False -> do
+            emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
+            return gr1
+          True -> do
+            emitTrace @"priority" priority
+            atPriority priority (Just (show nd)) $ do
+              PS.viewSpec preSpec $ \scope d -> do
+                d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
+                  True -> strengthenStackDomain scope d
+                  False -> return d
+                withAssumptionSet (PS.scopeAsm scope) $ do
+                  gr2 <- addRefinementChoice nd gr1
+                  gr3 <- visitNode scope nd d' gr2
+                  emitEvent $ PE.VisitedNode nd
+                  return gr3
+      case mgr4 of
+        Just gr4 -> go gr4
+        Nothing -> return gr0
     
     go_outer :: PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)
     go_outer gr = do
