@@ -2406,7 +2406,7 @@ handleSplitAnalysis scope node dom pg = do
       currBlockO <- toSingleNode PBi.OriginalRepr node
       currBlockP <- toSingleNode PBi.PatchedRepr node
       subTree @"node" "Split analysis" $ do
-        pg' <- subTraceLabel @"node" "Original:" (GraphNode currBlockO) $ do
+        pg' <- subTrace @"node" (GraphNode currBlockO) $ do
           priority <- thisPriority
           emitTraceLabel @"address" "Synchronization Address" syncO
           bundleO <- noopBundle scope (nodeBlocks currBlockO)
@@ -2416,7 +2416,7 @@ handleSplitAnalysis scope node dom pg = do
             -- by convention, we define the sync point of the original program to
             -- connect to the divergence point of the patched program
             widenAlongEdge scope bundleO (GraphNode node) dom pg (GraphNode currBlockO)
-        subTraceLabel @"node" "Patched" (GraphNode currBlockP) $ do
+        subTrace @"node" (GraphNode currBlockP) $ do
           emitTraceLabel @"address" "Synchronization Address" syncP
         return $ Just pg'
     Left{} -> return Nothing
