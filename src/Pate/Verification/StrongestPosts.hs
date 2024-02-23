@@ -417,7 +417,7 @@ handleSyncPoint ::
   GraphNode arch ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-handleSyncPoint nd pg = withPG_ pg $ do
+handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ withPG_ pg $ do
   divergeNode <- liftPG $ do
     Just divergeNode <- return $ getDivergePoint nd
     addSyncNode divergeNode nd
