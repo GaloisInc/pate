@@ -1117,6 +1117,8 @@ withConditionsAssumed scope node gr0 f = do
     go condK g =
       withSatConditionAssumed scope node condK gr0 g
 
+accM :: (Monad m, Foldable t) => b -> t a -> (b -> a -> m b) -> m b
+accM b ta f = foldM f b ta
 
 processBundle ::
   forall sym arch v.
@@ -1129,11 +1131,14 @@ processBundle ::
   EquivM sym arch (PairGraph sym arch)
 processBundle scope node bundle d exitPairs gr0 = do
   gr1 <- checkObservables node bundle d gr0
-
   -- Follow all the exit pairs we found
   let initBranchState = BranchState { branchGraph = gr1, branchDesyncChoice = Nothing, branchHandled = []}
-  st <- subTree @"blocktarget" "Block Exits" $
-    foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) initBranchState (zip [0 ..] exitPairs)
+  st <- subTree @"blocktarget" "Block Exits" $ accM initBranchState (zip [0 ..] exitPairs) $ \st0 (idx,tgt) -> do
+    pg1 <- lift $ queuePendingNodes (branchGraph st0)
+    let st1 = st0 { branchGraph = pg1 }
+    case checkNodeRequeued st1 node of
+      True -> return st1
+      False -> subTrace tgt $ followExit scope bundle node d st1 (idx,tgt)
   -- confirm that all handled exits cover the set of possible exits
   let allHandled = length (branchHandled st) == length exitPairs
   let anyNonTotal = branchDesyncChoice st == Just AdmitNonTotal
@@ -1926,6 +1931,15 @@ data BranchState sym arch =
 updateBranchGraph :: BranchState sym arch -> PPa.PatchPair (PB.BlockTarget arch) -> PairGraph sym arch -> BranchState sym arch
 updateBranchGraph st blkt pg = st {branchGraph = pg, branchHandled = blkt : branchHandled st }
 
+checkNodeRequeued ::
+  BranchState sym arch ->
+  NodeEntry arch ->
+  Bool
+checkNodeRequeued st node = fromMaybe False $ do
+  bc <- branchDesyncChoice st
+  return $ choiceRequiresRequeue bc
+  <|> (getQueuedPriority (GraphNode node) (branchGraph st) >> return True)
+
 followExit ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -1937,12 +1951,7 @@ followExit ::
 followExit scope bundle currBlock d st (idx, pPair) = do
   let gr = branchGraph st
   traceBundle bundle ("Handling proof case " ++ show idx) 
-  res <- manifestError $
-    case getQueuedPriority (GraphNode currBlock) gr of
-      Just{} -> do
-        emitTrace @"message" "Node was re-queued, skipping analysis"
-        return st
-      Nothing -> triageBlockTarget scope bundle currBlock st d pPair
+  res <- manifestError $ triageBlockTarget scope bundle currBlock st d pPair
   case res of
     Left err -> do
       emitEvent $ PE.ErrorEmitted err
@@ -2427,78 +2436,83 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
   priority <- thisPriority
   currBlockO <- toSingleNode PBi.OriginalRepr currBlock
   currBlockP <- toSingleNode PBi.PatchedRepr currBlock
-  
-  -- check if we already have defined a sync address for this divergence
-  let hasSyncPoints = execPairGraphM gr0 $ do
-        _ <- getSyncAddress PBi.OriginalRepr (GraphNode currBlock)
-        _ <- getSyncAddress PBi.PatchedRepr (GraphNode currBlock)
+  let divergeNode = GraphNode currBlock
+  let pg = gr0
+  let msg = "Control flow desynchronization found at: " ++ show divergeNode
+  a <- case mchoice of
+    Just bc | choiceRequiresRequeue bc -> return bc
+    _ -> do
+      () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
+        -- we've already introduced the path condition here, so we just want to see how we got here
+        res <- getSomeGroundTrace scope bundle dom Nothing
+        emitTrace @"trace_events" res
         return ()
+      choose @"()" msg $ \choice -> forM_ [minBound..maxBound] $ \bc ->
+        choice (show bc) () $ return bc
+  emitTrace @"message" $ "Resolved control flow desynchronization with: " ++ show a
+  let st' = st { branchDesyncChoice = Just a }
+  case a of
+    -- leave block exit as unhandled
+    AdmitNonTotal -> return st'
+    ChooseSyncPoint -> do
+      -- re-queuing for sync points happens at the toplevel
+      pg1 <- chooseSyncPoint divergeNode pg
+      -- pg2 <- updateCombinedSyncPoint divergeNode pg1
+      return $ st'{ branchGraph = pg1 }
+      -- handleDivergingPaths scope bundle currBlock (st'{ branchGraph = pg2 }) dom blkt
+    ChooseDesyncPoint -> do
+      pg1 <- chooseDesyncPoint divergeNode pg
+      -- drop domains from any outgoing edges, since the set of outgoing edges
+      -- from this node will likely change
+      let pg2 = dropPostDomains divergeNode (priority PriorityDomainRefresh) pg1
+      -- re-queue the node after picking a de-synchronization point
+      let pg3 = queueNode (priority PriorityHandleActions) divergeNode pg2
+      return $ st'{ branchGraph = pg3 }
+    IsInfeasible condK -> do
+      gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
+      gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
+      return $ st'{ branchGraph = gr3 }
+    DeferDecision -> do
+      -- add this back to the work list at a low priority
+      -- this allows, for example, the analysis to determine
+      -- that this is unreachable (potentially after refinements) and therefore
+      -- doesn't need synchronization
+      Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
+      return $ st'{ branchGraph = pg1 }
 
-  case hasSyncPoints of
-    Right{} -> do
-      bundleO <- noopBundle scope (nodeBlocks currBlockO)
-      atPriority (raisePriority (priority PriorityHandleDesync)) Nothing $ do
-        -- we arbitrarily pick the original program to perform the first step of
-        -- the analysis
-        -- by convention, we define the sync point of the original program to
-        -- connect to the divergence point of the patched program
-        gr1 <- withTracing @"node" (GraphNode currBlockO) $ 
-          widenAlongEdge scope bundleO (GraphNode currBlock) dom gr0 (GraphNode currBlockO)
-        return $ updateBranchGraph st blkt gr1
-    Left{} -> do
-      let divergeNode = GraphNode currBlock
-      let pg = gr0
-      let msg = "Control flow desynchronization found at: " ++ show divergeNode
-      a <- case mchoice of
-        Just DeferDecision -> return DeferDecision
-        Just ChooseSyncPoint -> return DeferDecision
-        _ -> do
-          () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
-            -- we've already introduced the path condition here, so we just want to see how we got here
-            res <- getSomeGroundTrace scope bundle dom Nothing
-            emitTrace @"trace_events" res
-            return ()
-          choose @"()" msg $ \choice -> do
-            -- default choice
-            choice "Ignore divergence (admit a non-total result)" () $ return AdmitNonTotal
+data DesyncChoice = AdmitNonTotal | IsInfeasible ConditionKind | ChooseDesyncPoint | ChooseSyncPoint | DeferDecision
+  deriving (Eq,Ord)
 
-            choice "Assert divergence is infeasible" () $ return (IsInfeasible ConditionAsserted)
-            choice "Assume divergence is infeasible" () $ return (IsInfeasible ConditionAssumed)
-            choice "Remove divergence in equivalence condition" () $ return (IsInfeasible ConditionEquiv)
-            choice "Choose desynchronization points" () $ return ChooseDesyncPoint
-            choice "Choose synchronization points" () $ return ChooseSyncPoint
-            choice "Defer decision" () $ return DeferDecision
-      
-      let st' = st { branchDesyncChoice = Just a }
-      case a of
-        -- leave block exit as unhandled
-        AdmitNonTotal -> return st'
-        ChooseSyncPoint -> do
-          pg1 <- chooseSyncPoint divergeNode pg
-          pg2 <- updateCombinedSyncPoint divergeNode pg1
-          handleDivergingPaths scope bundle currBlock (st'{ branchGraph = pg2 }) dom blkt
-        ChooseDesyncPoint -> do
-          pg1 <- chooseDesyncPoint divergeNode pg
-          -- drop domains from any outgoing edges, since the set of outgoing edges
-          -- from this node will likely change
-          let pg2 = dropPostDomains divergeNode (priority PriorityDomainRefresh) pg1
-          -- re-queue the node after picking a de-synchronization point
-          let pg3 = queueNode (priority PriorityHandleActions) divergeNode pg2
-          return $ updateBranchGraph st blkt pg3
-        IsInfeasible condK -> do
-          gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
-          gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
-          return $ updateBranchGraph st blkt gr3
-        DeferDecision -> do
-          -- add this back to the work list at a low priority
-          -- this allows, for example, the analysis to determine
-          -- that this is unreachable (potentially after refinements) and therefore
-          -- doesn't need synchronization
-          Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
-          return $ updateBranchGraph st blkt pg1
+allDesyncChoice :: [DesyncChoice]
+allDesyncChoice =
+      [AdmitNonTotal
+      , IsInfeasible ConditionAsserted, IsInfeasible ConditionAssumed, IsInfeasible ConditionEquiv
+      , ChooseDesyncPoint
+      , ChooseSyncPoint
+      , DeferDecision]
 
-data DesyncChoice = ChooseSyncPoint | ChooseDesyncPoint | AdmitNonTotal | IsInfeasible ConditionKind | DeferDecision
-  deriving Eq
+instance Bounded DesyncChoice where
+  minBound = head allDesyncChoice
+  maxBound = last allDesyncChoice
+
+instance Enum DesyncChoice where
+  toEnum i = allDesyncChoice !! i
+  fromEnum e = fromMaybe minBound (findIndex ((==) e) allDesyncChoice)
+
+instance Show DesyncChoice where
+  show = \case
+    ChooseSyncPoint -> "Choose synchronization points"
+    ChooseDesyncPoint -> "Choose desynchronization points"
+    AdmitNonTotal -> "Ignore divergence (admit a non-total result)"
+    IsInfeasible ConditionAsserted -> "Assert divergence is infeasible"
+    IsInfeasible ConditionAssumed -> "Assume divergence is infeasible"
+    IsInfeasible ConditionEquiv -> "Remove divergence in equivalence condition"
+    DeferDecision -> "Defer decision"
+
+choiceRequiresRequeue :: DesyncChoice -> Bool
+choiceRequiresRequeue = \case
+  AdmitNonTotal -> False
+  _ -> True
 
 handleStub ::
   HasCallStack =>
