@@ -281,7 +281,6 @@ updateEquivCondition ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)  
 updateEquivCondition scope nd condK mpropK cond gr = withSym $ \sym -> do
-  resetBlockCache envExitPairsCache
   let propK = case mpropK of
         Just _propK -> _propK
         Nothing -> getPropagationKind gr nd condK
@@ -303,7 +302,6 @@ addToEquivCondition ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)    
 addToEquivCondition scope nd condK condPred gr = withSym $ \sym -> do
-  resetBlockCache envExitPairsCache
   let eqCond = (PEC.universal sym) { PEC.eqCondExtraCond = PAs.NamedAsms $ PAs.fromPred condPred}
   eqCond' <- getScopedCondition scope gr nd condK 
   eqCond'' <- PEC.merge sym eqCond eqCond'
@@ -351,10 +349,10 @@ addEqDomRefinementChoice ::
 addEqDomRefinementChoice condK nd gr0 = do
   addLazyAction refineActions nd gr0 ("Add " ++ conditionName condK) $ \choice -> do
     let msg = conditionAction condK
-    choice (msg ++ " condition") $ \(TupleF2 _ preD) gr1 -> withTracing @"node" nd $ do
+    choice (msg ++ " condition") $ \(TupleF2 _ preD) gr1 -> do
       locFilter <- refineEquivalenceDomain preD
       return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality locFilter) gr1
-    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> withTracing @"node" nd $ do
+    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> do
       locFilter <- refineEquivalenceDomain preD
       return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
     choice (msg ++ " that branch is infeasible") $ \_ gr1 ->

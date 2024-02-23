@@ -107,8 +107,6 @@ data EquivEnv sym arch where
     -- ^ all block pairs on this path from the toplevel
     , envEqCondFns :: Map (PB.FunPair arch) (PL.SomeLocation sym arch -> Bool)
     -- ^ functions that should be considered for generating equivalence conditions
-    , envExitPairsCache :: ExitPairCache arch
-    -- ^ cache for intermediate proof results
     , envStatistics :: MVar.MVar PES.EquivalenceStatistics
     -- ^ Statistics collected during verification
     , envOverrides :: forall w

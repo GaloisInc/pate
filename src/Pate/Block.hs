@@ -262,6 +262,15 @@ instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(s
   prettyNode () (Some blkt) = ppBlockTarget blkt
   nodeTags = mkTags @'(sym,arch) @"blocktarget1" [Simplified,Summary]
 
+instance forall sym arch. MM.MemWidth (MM.ArchAddrWidth arch) => IsTraceNode '(sym,arch) "address" where
+  type TraceNodeType '(sym,arch) "address" = PA.ConcreteAddress arch
+  type TraceNodeLabel "address" = String
+  prettyNode msg addr = case msg of
+    "" -> PP.pretty addr
+    _ -> PP.viaShow msg <+> PP.pretty addr
+  nodeTags = mkTags @'(sym,arch) @"address" [Simplified,Summary]
+  jsonNode _ = nodeToJSON @'(sym,arch) @"address"
+
 data FunctionSymbol = FunctionSymbol 
   { fnSymBytes :: BSC.ByteString
   -- ^ raw representation of the symbol
