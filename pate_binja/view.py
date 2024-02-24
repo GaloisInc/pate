@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os.path
 import signal
+import time
 from threading import Thread, Condition
 from subprocess import Popen, TimeoutExpired
 from typing import Optional
@@ -150,6 +151,10 @@ class GuiUserInteraction(pate.PateUserInteraction):
 
     def show_cfar_graph(self, graph: pate.CFARGraph) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.build_pate_flow_graph(graph, self.show_ce_trace))
+        # Experiment focusing graph display on a particular node. Only work with sleep. Probably need to do this
+        # on some event that is called when graph is rendered.
+        #time.sleep(1)
+        #execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfar())
 
 
 class PateThread(Thread):
@@ -268,22 +273,28 @@ class PateCfarExitDialog(QDialog):
 
 
 class MyFlowGraphWidget(FlowGraphWidget):
+
+    flowGraph: FlowGraph
+    cfarGraph: pate.CFARGraph
+    flowToCfar: dict[FlowGraphNode, pate.CFARNode]
+    cfarToFlow: dict[pate.CFARNode, FlowGraphNode]
     def __init__(self, parent: QWidget, view: BinaryView=None, graph: FlowGraph=None):
         super().__init__(parent, view, graph)
-        self.flowToCfarNode: dict[FlowGraphNode, pate.CFARNode] = {}
+        self.flowToCfar = {}
 
     def build_pate_flow_graph(self,
-                              cfar_graph: pate.CFARGraph,
+                              cfarGraph: pate.CFARGraph,
                               show_ce_trace: bool = False):
-        flow_graph = FlowGraph()
+        self.flowGraph = FlowGraph()
+        self.cfarGraph = cfarGraph
 
         # First create all nodes
-        cfarToFlowNode = {}
+        self.cfarToFlow = {}
         cfar_node: pate.CFARNode
-        for cfar_node in cfar_graph.nodes.values():
-            flow_node = FlowGraphNode(flow_graph)
+        for cfar_node in self.cfarGraph.nodes.values():
+            flow_node = FlowGraphNode(self.flowGraph)
 
-            self.flowToCfarNode[flow_node] = cfar_node
+            self.flowToCfar[flow_node] = cfar_node
 
             out = io.StringIO()
 
@@ -304,23 +315,31 @@ class MyFlowGraphWidget(FlowGraphWidget):
             elif cfar_node.id.find('(patched)') >= 0:
                 flow_node.highlight = HighlightStandardColor.MagentaHighlightColor
 
-            flow_graph.append(flow_node)
-            cfarToFlowNode[cfar_node.id] = flow_node
+            self.flowGraph.append(flow_node)
+            self.cfarToFlow[cfar_node.id] = flow_node
 
         # Add edges
         cfar_node: pate.CFARNode
-        for cfar_node in cfar_graph.nodes.values():
-            flow_node = cfarToFlowNode[cfar_node.id]
+        for cfar_node in self.cfarGraph.nodes.values():
+            flow_node = self.cfarToFlow[cfar_node.id]
             cfar_exit: pate.CFARNode
             for cfar_exit in cfar_node.exits:
-                flow_exit = cfarToFlowNode[cfar_exit.id]
+                flow_exit = self.cfarToFlow[cfar_exit.id]
                 if self.showCfarExitInfo(cfar_node, cfar_exit, simulate=True):
                     edgeStyle = EdgeStyle(width=3, theme_color=ThemeColor.GraphNodeOutlineColor)
                 else:
                     edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.GraphNodeOutlineColor)
                 flow_node.add_outgoing_edge(BranchType.UserDefinedBranch, flow_exit, edgeStyle)
 
-        self.setGraph(flow_graph)
+        self.setGraph(self.flowGraph)
+
+    def showCfar(self):
+        focusCfar = self.cfarGraph.get('S1+0x4114 in S1+0x400c(transport_handler)')
+        focusFlow = self.cfarToFlow.get(focusCfar.id)
+        print('focusCfar.id', focusCfar.id)
+        print('focusFlowNode', focusFlow)
+        if focusFlow:
+            self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):
         node = self.getNodeForMouseEvent(event)
@@ -339,11 +358,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
         edge = edgeTuple[0]
         incoming = edgeTuple[1]  # Direction of edge depends on which half was clicked
         if incoming:
-            sourceCfarNode = self.flowToCfarNode[edge.target]
-            exitCfarNode = self.flowToCfarNode[edge.source]
+            sourceCfarNode = self.flowToCfar[edge.target]
+            exitCfarNode = self.flowToCfar[edge.source]
         else:
-            sourceCfarNode = self.flowToCfarNode[edge.source]
-            exitCfarNode = self.flowToCfarNode[edge.target]
+            sourceCfarNode = self.flowToCfar[edge.source]
+            exitCfarNode = self.flowToCfar[edge.target]
         self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
 
     def showCfarExitInfo(self, sourceCfarNode: pate.CFARNode, exitCfarNode: pate.CFARNode, simulate: bool=False) -> bool:
@@ -362,7 +381,6 @@ class MyFlowGraphWidget(FlowGraphWidget):
             return True
         else:
             # TODO: dialog?
-            print("No exit info")
             return False
 
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
