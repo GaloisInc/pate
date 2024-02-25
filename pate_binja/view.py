@@ -114,9 +114,9 @@ class PateWidget(QWidget):
             self.user_response_condition.notify()
 
     def ask_user(self, prompt: str, choices: list[str], replay: bool):
-        query = '\n' + prompt + '\n'
+        query = '\n' + prompt
         for i, e in enumerate(choices):
-            query += '  {}\n'.format(e)
+            query += '\n  {}'.format(e)
         self.output_field.appendPlainText(query)
         if not replay:
             self.cmd_field.setText('')
@@ -145,7 +145,7 @@ class GuiUserInteraction(pate.PateUserInteraction):
         execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
         return choice
 
-    def show_message(self, msg) -> None:
+    def show_message(self, msg: str) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(msg))
 
     def show_cfar_graph(self, graph: pate.CFARGraph) -> None:
