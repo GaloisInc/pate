@@ -6,23 +6,22 @@ import io
 import os.path
 import signal
 import time
-from threading import Thread, Condition
 from subprocess import Popen, TimeoutExpired
+from threading import Thread, Condition
 from typing import Optional
 
-from binaryninja import show_graph_report, execute_on_main_thread_and_wait, BinaryView, OpenFileNameField, interaction, \
-    MultilineTextField, load
-from binaryninja.enums import BranchType, HighlightStandardColor, EdgePenStyle, ThemeColor
+from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
+    load
+from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
-from binaryninja.plugin import BackgroundTaskThread
-from binaryninjaui import GlobalAreaWidget, GlobalArea, UIAction, UIActionHandler, Menu, UIActionContext, \
-    FlowGraphWidget, FileContext, UIContext
+from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
+    FlowGraphWidget, FileContext
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QPushButton, QMessageBox, QSplitter
+    QDialogButtonBox, QSplitter
 
 from . import pate
 
@@ -143,18 +142,21 @@ class GuiUserInteraction(pate.PateUserInteraction):
                 urc.wait()
             choice = self.pate_widget.user_response
             self.pate_widget.user_response = None
-            execute_on_main_thread_and_wait(self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
-            return choice
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
+        return choice
 
     def show_message(self, msg) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(msg))
 
     def show_cfar_graph(self, graph: pate.CFARGraph) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.build_pate_flow_graph(graph, self.show_ce_trace))
-        # Experiment focusing graph display on a particular node. Only work with sleep. Probably need to do this
-        # on some event that is called when graph is rendered.
-        #time.sleep(1)
-        #execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfar())
+
+        promptNode = graph.getPromptNode()
+        if promptNode:
+            # Experiment focusing graph display on a particular node. Only work with sleep. Probably need to do this
+            # on some event that is called when graph is rendered.
+            time.sleep(1)
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfar(promptNode))
 
 
 class PateThread(Thread):
@@ -333,12 +335,12 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
         self.setGraph(self.flowGraph)
 
-    def showCfar(self):
-        focusCfar = self.cfarGraph.get('S1+0x4114 in S1+0x400c(transport_handler)')
-        focusFlow = self.cfarToFlow.get(focusCfar.id)
-        print('focusCfar.id', focusCfar.id)
-        print('focusFlowNode', focusFlow)
+    def showCfar(self, focusCfar: pate.CFARNode):
+        focusFlow: FlowGraphNode | None = self.cfarToFlow.get(focusCfar.id)
+        #print('focusCfar.id', focusCfar.id)
+        #print('focusFlowNode', focusFlow)
         if focusFlow:
+            focusFlow.highlight = HighlightStandardColor.BlueHighlightColor
             self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):

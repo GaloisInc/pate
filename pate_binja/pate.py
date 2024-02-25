@@ -99,7 +99,7 @@ class PateWrapper:
         self.command('top')
         top = self.next_json()
 
-        self.extract_graph_rec(top, [], None, cfar_graph, None, None)
+        self.extract_graph_rec(top, [], None, cfar_graph, None, None, None)
 
         self .connect_divergence_nodes(cfar_graph)
         self .connect_synchronization_nodes(cfar_graph)
@@ -192,7 +192,8 @@ class PateWrapper:
                           context: dict | None,
                           cfar_graph: CFARGraph,
                           cfar_parent: CFARNode | None,
-                          cfar_exit: CFARNode | None
+                          cfar_exit: CFARNode | None,
+                          ancestor_tnc: dict | None,
                           ) -> None:
         this = rec.get('this')
         this = this.replace('\n',' ')
@@ -254,6 +255,7 @@ class PateWrapper:
                 cfar_node.exit_meta_data = {}
             if rec['trace_node'].get('entry_body'):
                 context = rec['trace_node']['entry_body']['context']
+            cfar_node.finished = ancestor_tnc['finished']
 
         # TODO: Hack for blocks requiring implicit exit. Could possibly also look for 'endcase' == 'MacawBlockEndCall'.
         # TODO: Ask Dan about this, but the resulting graph looks reasonable to me.
@@ -269,8 +271,8 @@ class PateWrapper:
                 if self.debug_cfar:
                     print('CFAR ID (exit):', exit_id)
 
-        for i, child in enumerate(rec['trace_node_contents']):
-            child = child['content']
+        for i, tnc in enumerate(rec['trace_node_contents']):
+            child = tnc['content']
             if not child:
                 continue
             # TODO: Ask Dan about this filter.
@@ -284,7 +286,7 @@ class PateWrapper:
                 childrec = self.next_json()
                 # update with values from child. TODO: ask Dan about this?
                 childrec.update(child)
-                self.extract_graph_rec(childrec, path + [i], context, cfar_graph, cfar_parent, cfar_exit)
+                self.extract_graph_rec(childrec, path + [i], context, cfar_graph, cfar_parent, cfar_exit, tnc)
                 self.command('up')
                 # Consume result of up, but do not need it
                 ignore = self.next_json()
@@ -396,6 +398,7 @@ class PateWrapper:
 
 class CFARNode:
     exits: list[CFARNode]
+    finished: bool
 
     def __init__(self, id: str, desc: str, data: dict):
         self.id = id
@@ -408,6 +411,7 @@ class CFARNode:
         self.postdomain = None
         self.external_postdomain = None
         self.addr = None
+        self.finished = True
 
     def update_node(self, desc: str, data: dict):
         self.desc = desc
@@ -499,6 +503,11 @@ class CFARGraph:
 
     def get(self, id):
         return self.nodes.get(id)
+
+    def getPromptNode(self):
+        for n in self.nodes.values():
+            if not n.finished:
+                return n
 
     def add_node(self, id: str, desc: str, data) -> CFARNode:
         """Add node, creating if node with ID does not exist."""
@@ -1198,6 +1207,11 @@ class TtyUserInteraction(PateUserInteraction):
         if choice == 'y':
             print('\nPate CFAR Graph:\n')
             graph.pprint()
+
+        promptNode = graph.getPromptNode()
+        if promptNode:
+            print('Prompt Node:', promptNode.id)
+
 
 
 def test(pate_out, pate_in, trace):
