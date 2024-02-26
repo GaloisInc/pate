@@ -49,15 +49,13 @@ import qualified Pate.ExprMappable as PEM
 
 validInitState ::
   forall sym arch v.
-  Maybe (PB.BlockPair arch) ->
+  PB.BlockPair arch ->
   PPa.PatchPair (SimState sym arch v) ->
   EquivM sym arch (AssumptionSet sym)
-validInitState mpPair stPair = withSym $ \sym -> PPa.catBins $ \bin -> do
-  mblk <- case mpPair of
-    Just pPair -> Just <$> PPa.get bin pPair
-    Nothing -> return Nothing
+validInitState pPair stPair = withPair pPair $ withSym $ \sym -> PPa.catBins $ \bin -> do
+  blk <- PPa.get bin pPair
   regs <- simRegs <$> PPa.get bin stPair
-  reg_asms <- fmap PRt.collapse $ MM.traverseRegsWith (\r v -> Const <$> validRegister mblk v r) regs
+  reg_asms <- fmap PRt.collapse $ MM.traverseRegsWith (\r v -> Const <$> validRegister (Just blk) v r) regs
   stackBase <- (unSE . simStackBase) <$> PPa.get bin stPair
   stackBaseCaller <- (unSE . simCallerStackBase) <$> PPa.get bin stPair
   -- current stack base comes after caller
