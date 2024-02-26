@@ -17,6 +17,8 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
 module Pate.Verification.StrongestPosts
   ( pairGraphComputeFixpoint
@@ -25,13 +27,15 @@ module Pate.Verification.StrongestPosts
 
 import           GHC.Stack ( HasCallStack )
 
+import           Control.Applicative
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
-import           Control.Monad (foldM, forM, unless, void, when)
+import           Control.Monad (foldM, forM, unless, void, when, guard)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Reader (asks, local)
-import           Control.Monad.Except (catchError)
+import           Control.Monad.Except (catchError, throwError)
+import           Control.Monad.State.Strict  (get, StateT, runStateT, put, execStateT, modify)
 import           Control.Monad.Trans (lift)
 import           Numeric (showHex)
 import           Prettyprinter
@@ -41,7 +45,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import           Data.List (findIndex)
+import           Data.List (findIndex, find)
 import           Data.Maybe (mapMaybe, catMaybes)
 import           Data.Proxy
 import           Data.Functor.Const
@@ -111,7 +115,7 @@ import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), asSingleReturn, rootEntry, rootReturn, getDivergePoint, asSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, asSingleGraphNode )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -125,6 +129,7 @@ import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), 
 import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
 import qualified Data.Aeson as JSON
+import qualified Pate.Solver as PSo
 
 -- Overall module notes/thoughts
 --
@@ -237,7 +242,6 @@ refineFinalResult entries pg = do
       choice_outer "Finish and view final result" () $ return Nothing
       choice_outer "Restart from entry point" () $ fmap Just $ do
         pg' <- chooseEntryPoint entries pg
-        resetBlockCache envExitPairsCache
         (asks envResetTraceTree >>= liftIO)
         return pg'
       choice_outer "Handle pending refinements" () $ do
@@ -367,29 +371,58 @@ handleDanglingReturns fnPairs pg = do
          
   foldM go pg single_rets 
 
+-- FIXME: move this to Pate.Monad
+-- Helper functions for bringing PairGraphM operations and EquivM operations into the same monad
 
 
--- If the given 'GraphNode' is a synchronization point (i.e. it has
--- a corresponding synchronization edge), then we need to pop it from
--- the worklist and instead enqueue the corresponding biprogram nodes
+withPG :: 
+  PairGraph sym arch -> 
+  StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
+  EquivM sym arch (a, PairGraph sym arch)
+withPG pg f = runStateT f pg 
+
+withPG_ :: 
+  PairGraph sym arch -> 
+  StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
+  EquivM sym arch (PairGraph sym arch)
+withPG_ pg f = execStateT f pg 
+
+liftPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) a
+liftPG f = do
+  pg <- get
+  case runPairGraphM pg f of
+    Left err -> lift $ throwHere $ PEE.PairGraphError err
+    Right (a,pg') -> do
+      put pg'
+      return a
+
+catchPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) (Maybe a)
+catchPG f = do
+  pg <- get
+  case runPairGraphM pg f of
+    Left{} -> return Nothing
+    Right (a,pg') -> do
+      put pg'
+      return $ Just a
+
+liftEqM :: 
+  (PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> 
+  StateT (PairGraph sym arch) (EquivM_ sym arch) ()
+liftEqM f = do
+  s <- get
+  s' <- lift $ f s
+  put s'
+
 handleSyncPoint ::
-  PairGraph sym arch ->
   GraphNode arch ->
-  PAD.AbstractDomainSpec sym arch ->
-  EquivM sym arch (Maybe (PairGraph sym arch))
-handleSyncPoint pg nd _spec = case getDivergePoint nd of
-  -- not a diverging node
-  Nothing -> return Nothing
-  Just divergeNode -> do
-    Just (Some bin) <- return $ singleNodeRepr nd
-    case getSyncPoint pg bin divergeNode of
-      Just sync  -> do
-        case nd == sync of
-          True -> Just <$> updateCombinedSyncPoint divergeNode pg
-           -- We have a sync node but it hasn't been processed yet, so continue execution
-          False -> return Nothing
-      Nothing -> return Nothing
-
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ withPG_ pg $ do
+  divergeNode <- liftPG $ do
+    Just divergeNode <- return $ getDivergePoint nd
+    addSyncNode divergeNode nd
+    return divergeNode
+  liftEqM $ updateCombinedSyncPoint divergeNode
 
 addressOfNode ::
   GraphNode arch ->
@@ -420,26 +453,16 @@ chooseDesyncPoint ::
   EquivM sym arch (PairGraph sym arch)
 chooseDesyncPoint nd pg0 = do
   divergePair@(PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
-    let ret = case nd of
-          GraphNode ne -> returnOfEntry ne
-          ReturnNode nr -> nr
     blk <- PPa.get bin (graphNodeBlocks nd)
     pblks <- PD.lookupBlocks blk
-    retSingle <- asSingleReturn bin nd ret
-    divergeSingle <- asSingleGraphNode bin nd
-    return $ (retSingle, divergeSingle, Some blk, pblks)
-  (sync, Some syncBin) <- pickCutPoint syncMsg
+    divergeSingle <- toSingleGraphNode bin nd
+    return $ (divergeSingle, Some blk, pblks)
+  (_, Some syncBin) <- pickCutPoint syncMsg
     [divergeO, divergeP]
   let otherBin = PBi.flipRepr syncBin
-
-  -- Introducing a cut-point is a stateful operation, as it modifies
-  -- the underlying ParsedFunctionMap to change the behavior of the disassembler
-  case sync of
-    GraphNode{} -> do
-      diverge <- PPa.getC otherBin divergePair
-      _ <- pickCutPoint syncMsg [diverge]
-      return pg0
-    _ -> return pg0
+  diverge <- PPa.getC otherBin divergePair
+  _ <- pickCutPoint syncMsg [diverge]
+  return pg0
   where
     syncMsg = "Choose a desynchronization point:"
 
@@ -451,29 +474,24 @@ chooseSyncPoint ::
   EquivM sym arch (PairGraph sym arch)
 chooseSyncPoint nd pg0 = do
   divergePair@(PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
-    let ret = case nd of
-          GraphNode ne -> returnOfEntry ne
-          ReturnNode nr -> nr
     blk <- PPa.get bin (graphNodeBlocks nd)
     pblks <- PD.lookupBlocks blk
-    retSingle <- asSingleReturn bin nd ret
-    divergeSingle <- asSingleGraphNode bin nd
-    return $ (retSingle, divergeSingle, Some blk, pblks)
+    divergeSingle <- toSingleGraphNode bin nd
+    return $ (divergeSingle, Some blk, pblks)
   (sync, Some syncBin) <- pickCutPoint syncMsg
     [divergeO, divergeP]
   let otherBin = PBi.flipRepr syncBin
-  pg1 <- setSyncPoint pg0 nd sync
-
-  case sync of
-    GraphNode{} -> do
-      diverge <- PPa.getC otherBin divergePair
-      syncOther <- fst <$> pickCutPoint syncMsg [diverge]
-      setSyncPoint pg1 nd syncOther
-    ReturnNode{} -> do
-      (retSingle, _, _, _) <- PPa.getC otherBin divergePair
-      setSyncPoint pg1 nd (ReturnNode retSingle)
+  
+  addr <- PB.concreteAddress <$> PPa.get syncBin (nodeBlocks sync)
+  withPG_ pg0 $ do 
+    liftPG $ setSyncAddress nd syncBin addr
+    diverge <- PPa.getC otherBin divergePair
+    syncOther <- lift $ fst <$> pickCutPoint syncMsg [diverge]
+    addrOther <- PB.concreteAddress <$> PPa.get otherBin (nodeBlocks syncOther) 
+    liftPG $ setSyncAddress nd otherBin addrOther
   where
     syncMsg = "Choose a synchronization point:"
+
 
 {-
 guessDivergence ::
@@ -521,31 +539,19 @@ getIntermediateAddrs pb =
 --   to the next CFAR (i.e. splits a CFAR in two at the given address)
 pickCutPoint ::
   String ->
-  [(NodeReturn arch, GraphNode arch, Some (PB.ConcreteBlock arch), PD.ParsedBlocks arch)] -> 
-  EquivM sym arch (GraphNode arch, Some PBi.WhichBinaryRepr)
+  [(GraphNode arch, Some (PB.ConcreteBlock arch), PD.ParsedBlocks arch)] -> 
+  EquivM sym arch (NodeEntry arch, Some PBi.WhichBinaryRepr)
 pickCutPoint msg inputs = do
-  (sync, Some bin, maddr) <- choose @"node" msg $ \choice -> do
-    forM_ inputs $ \(retSingle, divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
+  (sync, Some bin, (addr, Some blk)) <- choose @"node" msg $ \choice -> do
+    forM_ inputs $ \(divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
       let bin = PB.blockBinRepr blk
       forM_ pblks $ \pblk -> forM_ (getIntermediateAddrs pblk) $ \addr -> do
         -- FIXME: block entry kind is unused at the moment?
         let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump addr
         let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
         choice "" (GraphNode node) $ do
-          
-          return (GraphNode node, Some bin, Just (addr, Some concBlk))
-      choice "" (ReturnNode retSingle) $ return (ReturnNode retSingle, Some bin, Nothing)
-  case maddr of
-    Just (addr, Some blk) -> do
-      _ <- addIntraBlockCut addr blk
-      -- this is a heuristic that attempts to capture the fact that
-      -- the patched binary likely has additional control flow that we
-      -- want to analyze as part of the synchronization block, but only
-      -- up to exactly the instruction where control flow re-synchronizes
-      case bin of
-        PBi.OriginalRepr -> cutAfterAddress addr blk
-        PBi.PatchedRepr -> return ()
-    Nothing -> return ()
+          return (node, Some bin, (addr, Some concBlk))
+  _ <- addIntraBlockCut addr blk
   return (sync, Some bin)
 
 -- | Add an intra-block cut to *both* binaries after the given address.
@@ -600,15 +606,80 @@ handleSyncPoint pg (ReturnNode nd) spec = case nodeFuns nd of
     Nothing -> return Nothing
 -}
 
-
-
--- FIXME: this is pretty brittle, as it makes a bunch of assumptions about
--- the graph state
+-- Connects the terminal nodes of any single-sided analysis to "merge" nodes
+-- Notably a single divergence may give rise to multiple synchronization points,
+-- since multiple CFARs may terminate at the provided address
+-- To address this we take the cartesian product of all original vs. patched sync points
+-- and create merge nodes for all of them
 updateCombinedSyncPoint ::
   GraphNode arch {- ^ diverging node -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ case getCombinedSyncPoint pg divergeNode of
+updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
+  priority <- lift $ thisPriority
+  syncsO_ <- fmap Set.toList $ liftPG $ getSyncPoints PBi.OriginalRepr divergeNode
+  syncsP_ <- fmap Set.toList $ liftPG $ getSyncPoints PBi.PatchedRepr divergeNode
+
+  -- collect all sync points that have been found and that have a pre-domain
+  syncsO <- fmap catMaybes $ mapM (\nd -> catchPG $ fmap (nd,) $ getCurrentDomainM nd) syncsO_
+  syncsP <- fmap catMaybes $ mapM (\nd -> catchPG $ fmap (nd,) $ getCurrentDomainM nd) syncsP_
+
+  case syncsO of
+    -- We have not completed a single-sided analysis for the
+    -- Original binary.
+    -- We re-schedule the diverge node and any ancestors of discovered Original sync points.
+    -- This is needed to handle cases where the single-sided nodes have been dropped from
+    -- the graph as a result of some other operation (e.g. introducing an assertion).
+    -- In the case where the first Original single-sided node is dropped, this ensures that it is
+    -- re-scheduled by re-processing the divergence point.
+    [] -> do
+        divergeNodeO <- toSingleGraphNode PBi.OriginalRepr divergeNode
+        liftPG $ do
+          modify $ queueNode (priority PriorityDomainRefresh) divergeNodeO
+          -- also re-queue the ancestors of any known sync points that are missing domains
+          forM_ syncsO_ $ \syncO -> do
+            modify $ queueAncestors (priority PriorityHandleDesync) syncO
+    -- We have at least one completed one-sided analysis for the Original binary.
+    -- The convention is that we find at least one Original sync point before
+    -- moving on to the Patched one-sided analysis.
+    -- We artifically connect the post-domain of each Original one-sided analysis to the
+    -- pre-domain of the start of the Patched one-sided analysis. This ensures that any
+    -- assertions are carried forward to the Patched analysis.
+    _:_ -> do
+      (catchPG $ getCurrentDomainM divergeNode) >>= \case
+        Nothing -> liftPG $ modify $ queueNode (priority PriorityHandleDesync) divergeNode
+        Just dom_spec -> do
+          divergeNodeY <- toSingleGraphNode PBi.PatchedRepr divergeNode
+          fmap (\x -> PS.viewSpecBody x PS.unWS) $ PS.forSpec dom_spec $ \scope dom -> fmap PS.WithScope $ do
+            domP <- lift $ PAD.singletonDomain PBi.PatchedRepr dom
+            bundle <- lift $ noopBundle scope (graphNodeBlocks divergeNodeY)
+            forM_ syncsO $ \(syncO, _) -> do
+              liftPG $ (void $ getCurrentDomainM divergeNodeY) 
+                  <|> (modify $ \pg -> updateDomain' pg syncO divergeNodeY (PS.mkSimSpec scope domP) (priority PriorityWidening))
+              liftEqM $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope syncO pg $
+                widenAlongEdge scope bundle syncO domP pg divergeNodeY
+
+      -- Finally, if we have any Patched one-sided results, we take all combinations
+      -- of Original and Patched sync points and connect them to a "combined" two-sided node
+      -- that contains the intersection of their pre-domains.
+      -- From this combined node, normal two-sided analysis can continue.
+      let syncPairs = [ (x,y) | x <- syncsO, y <- syncsP ]
+      forM_ syncPairs $ \((syncO, domO_spec), (syncP, domP_spec)) -> do
+        combinedNode <- liftPG $ do
+          Just combinedNode <- return $ combineNodes syncO syncP
+          return combinedNode
+        withTracingLabel @"node" "Merge Node" combinedNode $ do
+          emitTrace @"node" syncO
+          emitTrace @"node" syncP
+        liftEqM $ mergeDualNodes syncO syncP domO_spec domP_spec combinedNode
+
+
+{-
+fnTrace "updateCombinedSyncPoint" $ do
+  runMaybeT $ do
+    getCombinedSyncPoint divergeNode
+
+  case getCombinedSyncPoint pg divergeNode of
   Nothing -> do
     emitTrace @"message" ("No sync node found for: " ++ show divergeNode)
     return pg
@@ -628,7 +699,7 @@ updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ cas
           Just dom_spec -> do
             fmap (\x -> PS.viewSpecBody x PS.unWS) $ PS.forSpec dom_spec $ \scope dom -> fmap PS.WithScope $ do
               domP <- PAD.singletonDomain PBi.PatchedRepr dom
-              divergeNodeP <- asSingleGraphNode PBi.PatchedRepr divergeNode
+              divergeNodeP <- toSingleGraphNode PBi.PatchedRepr divergeNode
               bundle <- noopBundle scope (graphNodeBlocks divergeNodeP)
               pg1 <- case getCurrentDomain pg divergeNodeP of
                 Nothing -> return $ updateDomain' pg syncO divergeNodeP (PS.mkSimSpec scope domP) (priority PriorityWidening)
@@ -641,8 +712,9 @@ updateCombinedSyncPoint divergeNode pg = fnTrace "updateCombinedSyncPoint" $ cas
         mergeDualNodes syncO syncP domO_spec domP_spec combinedNode pg
       _ -> withTracing @"message" "Missing domain(s) for sync points" $ do
         priority <- thisPriority
-        divergeNodeO <- asSingleGraphNode PBi.OriginalRepr divergeNode
+        divergeNodeO <- toSingleGraphNode PBi.OriginalRepr divergeNode
         return $ queueNode (priority PriorityDomainRefresh) divergeNodeO $ queueAncestors (priority PriorityHandleDesync) syncO pg
+-}
 
 {-
 -- | Connect two nodes with a no-op
@@ -701,18 +773,25 @@ mergeDualNodes in1 in2 spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ wit
           widenAlongEdge scope bundle in2 dom gr2 syncNode
 
 -- | Choose some work item (optionally interactively)
-chooseWorkItemM ::
+withWorkItem ::
   PA.ValidArch arch =>
+  PSo.ValidSym sym =>
   PairGraph sym arch ->
-  EquivM sym arch (Maybe (NodePriority, PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch))
-chooseWorkItemM gr0 = do
-  gr0' <- queuePendingNodes gr0
+  ((NodePriority, PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch) -> EquivM_ sym arch a) ->
+  NodeBuilderT '(sym,arch) "node" (EquivM_ sym arch) (Maybe a)
+withWorkItem gr0 f = do
+  gr0' <- lift $ queuePendingNodes gr0
   case chooseWorkItem gr0' of
     Nothing -> return Nothing
-    Just (priority, gr1, nd, spec) -> atPriority priority Nothing $ PS.viewSpec spec $ \scope d -> do
-      runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
-        Just gr2 -> chooseWorkItemM gr2
-        Nothing -> return $ Just (priority, gr1, nd, spec)
+    Just (priority, gr1, nd, spec) -> do
+      res <- subTraceLabel @"node" (printPriorityKind priority) nd $ startTimer $
+        atPriority priority Nothing $ PS.viewSpec spec $ \scope d -> do
+          runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
+            Just gr2 -> return $ Left gr2
+            Nothing -> Right <$> f (priority, gr1, nd, spec)
+      case res of
+        Left gr2 -> withWorkItem gr2 f
+        Right a -> return $ Just a
 
 {-
   let nodes = Set.toList $ pairGraphWorklist gr
@@ -734,29 +813,27 @@ pairGraphComputeFixpoint ::
   forall sym arch. [PB.FunPair arch] -> PairGraph sym arch -> EquivM sym arch (PairGraph sym arch)
 pairGraphComputeFixpoint entries gr_init = do
   let
-    go (gr0 :: PairGraph sym arch) = (lift $ chooseWorkItemM gr0) >>= \case
-      Nothing -> return gr0
-      Just (priority, gr1, nd, preSpec) -> do
-        gr4 <- subTraceLabel @"node" (printPriorityKind priority) nd $ startTimer $ do
-          shouldProcessNode nd >>= \case
-            False -> do
-              emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
-              return gr1
-            True -> do
-              emitTrace @"priority" priority
-              atPriority priority (Just (show nd)) $ do
-                handleSyncPoint gr1 nd preSpec >>= \case
-                  Just gr2 -> return gr2
-                  Nothing -> PS.viewSpec preSpec $ \scope d -> do
-                    d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
-                      True -> strengthenStackDomain scope d
-                      False -> return d
-                    withAssumptionSet (PS.scopeAsm scope) $ do
-                      gr2 <- addRefinementChoice nd gr1
-                      gr3 <- visitNode scope nd d' gr2
-                      emitEvent $ PE.VisitedNode nd
-                      return gr3
-        go gr4
+    go (gr0 :: PairGraph sym arch) = do
+      mgr4 <- withWorkItem gr0 $ \(priority, gr1, nd, preSpec) -> do
+        shouldProcessNode nd >>= \case
+          False -> do
+            emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
+            return gr1
+          True -> do
+            emitTrace @"priority" priority
+            atPriority priority (Just (show nd)) $ do
+              PS.viewSpec preSpec $ \scope d -> do
+                d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
+                  True -> strengthenStackDomain scope d
+                  False -> return d
+                withAssumptionSet (PS.scopeAsm scope) $ do
+                  gr2 <- addRefinementChoice nd gr1
+                  gr3 <- visitNode scope nd d' gr2
+                  emitEvent $ PE.VisitedNode nd
+                  return gr3
+      case mgr4 of
+        Just gr4 -> go gr4
+        Nothing -> return gr0
     
     go_outer :: PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)
     go_outer gr = do
@@ -952,7 +1029,7 @@ withAbsDomain node d gr f = do
             Just (GraphNode divergeNode) -> do
               Just (Some bin) <- return $ singleNodeRepr (GraphNode node)
               let fnNode_diverge = functionEntryOf divergeNode
-              fnNode_diverge_single <- asSingleNode bin fnNode_diverge
+              fnNode_diverge_single <- toSingleNode bin fnNode_diverge
               case getCurrentDomain gr (GraphNode fnNode_diverge) of
                 Just d' | eqUptoDivergePoint (GraphNode fnNode_diverge_single) (GraphNode fnNode) ->
                   PS.viewSpec d' $ \_ d'' -> do
@@ -1043,23 +1120,28 @@ withConditionsAssumed scope node gr0 f = do
     go condK g =
       withSatConditionAssumed scope node condK gr0 g
 
+accM :: (Monad m, Foldable t) => b -> t a -> (b -> a -> m b) -> m b
+accM b ta f = foldM f b ta
+
 processBundle ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   NodeEntry arch ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
+  [(PPa.PatchPair (PB.BlockTarget arch))] ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-processBundle scope node bundle d gr0 = do
-  exitPairs <- PD.discoverPairs bundle
-
+processBundle scope node bundle d exitPairs gr0 = do
   gr1 <- checkObservables node bundle d gr0
-
   -- Follow all the exit pairs we found
   let initBranchState = BranchState { branchGraph = gr1, branchDesyncChoice = Nothing, branchHandled = []}
-  st <- subTree @"blocktarget" "Block Exits" $
-    foldM (\x y@(_,tgt) -> subTrace tgt $ followExit scope bundle node d x y) initBranchState (zip [0 ..] exitPairs)
+  st <- subTree @"blocktarget" "Block Exits" $ accM initBranchState (zip [0 ..] exitPairs) $ \st0 (idx,tgt) -> do
+    pg1 <- lift $ queuePendingNodes (branchGraph st0)
+    let st1 = st0 { branchGraph = pg1 }
+    case checkNodeRequeued st1 node of
+      True -> return st1
+      False -> subTrace tgt $ followExit scope bundle node d st1 (idx,tgt)
   -- confirm that all handled exits cover the set of possible exits
   let allHandled = length (branchHandled st) == length exitPairs
   let anyNonTotal = branchDesyncChoice st == Just AdmitNonTotal
@@ -1083,7 +1165,7 @@ withValidInit scope bPair f = withPair bPair $ do
     vars = PS.scopeVars scope
     varsSt = TF.fmapF PS.simVarState vars
 
-  validInit <- PVV.validInitState (Just bPair) varsSt
+  validInit <- PVV.validInitState bPair varsSt
   validAbs <- PPa.catBins $ \bin -> do
     blk <- PPa.get bin bPair
     vars' <- PPa.get bin vars
@@ -1182,7 +1264,20 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
             Just gr3 -> do
               priority <- thisPriority
               return $ queueNode (priority PriorityHandleActions) (GraphNode node) gr3
-            Nothing -> withConditionsAssumed scope (GraphNode node) gr0 $ processBundle scope node bundle d gr2
+            Nothing -> withConditionsAssumed scope (GraphNode node) gr0 $ do
+              exitPairs <- PD.discoverPairs bundle
+              -- if a sync point is reachable then we don't want to do
+              -- further analysis, since we want to instead treat this
+              -- node as a merge point
+              withPG_ gr2 $ do
+                (liftPG $ checkForNodeSync node exitPairs) >>= \case
+                  True -> liftEqM $ handleSyncPoint (GraphNode node)
+                  False -> liftEqM $ \pg -> do
+                    handleSplitAnalysis scope node d pg >>= \case
+                      Just pg' -> return pg'
+                      Nothing -> do
+                        pg' <- processBundle scope node bundle d exitPairs pg
+                        fromMaybe pg' <$> handleSplitAnalysis scope node d pg'
 
 visitNode scope (ReturnNode fPair) d gr0 =  do
   -- propagate the abstract domain of the return node to
@@ -1204,7 +1299,10 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
           priority <- thisPriority
           return $ queueNode (priority PriorityHandleActions) (ReturnNode fPair) gr1      
         Nothing -> withTracing @"message" "Toplevel Return" $ do
-          withConditionsAssumed scope (ReturnNode fPair) gr0' $ 
+          withConditionsAssumed scope (ReturnNode fPair) gr0' $ do
+            case isSingleReturn fPair of
+              Just{} -> void $ emitError' $ PEE.OrphanedSingletonAnalysis (nodeFuns fPair)
+              Nothing -> return ()
             return gr0'
 
    -- Here, we're using a bit of a trick to propagate abstract domain information to call sites.
@@ -1212,11 +1310,11 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
    -- using the ordinary widening machinery.
 
 
-  processReturn gr0' node@(nodeBlocks -> ret) = withPair ret $ withAbsDomain node d gr0 $ do
+  processReturn gr0' node@(nodeBlocks -> ret) = do
     let
       vars = PS.scopeVars scope
       varsSt = TF.fmapF PS.simVarState vars
-    validState <- PVV.validInitState (Just ret) varsSt
+    validState <- PVV.validInitState ret varsSt
     withAssumptionSet validState $ do
       (asm, bundle) <- returnSiteBundle scope vars d ret
       withAssumptionSet asm $ withPredomain scope bundle d $ do
@@ -1233,12 +1331,13 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
             -- TODO: formally we could just check the event sequence once for the return node
             -- (rather than once for each return edge)
             -- but it would require some refactoring to make the types match up correctly
-            gr1' <- checkObservables node bundle d gr0'
-    --        traceBundle bundle "== bundle asm =="
-    --        traceBundle bundle (show (W4.printSymExpr asm))
-            widenAlongEdge scope bundle (ReturnNode fPair) d gr1' (GraphNode node)
-
-
+            withPG_ gr0' $ do
+              liftEqM $ checkObservables node bundle d
+              liftEqM $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
+              (liftPG $ checkForReturnSync fPair node) >>= \case
+                True -> liftEqM $ handleSyncPoint (GraphNode node)
+                False -> return ()
+                
 -- | Construct a "dummy" simulation bundle that basically just
 --   immediately returns the prestate as the poststate.
 --   This is used to compute widenings that propagate abstract domain
@@ -1835,6 +1934,15 @@ data BranchState sym arch =
 updateBranchGraph :: BranchState sym arch -> PPa.PatchPair (PB.BlockTarget arch) -> PairGraph sym arch -> BranchState sym arch
 updateBranchGraph st blkt pg = st {branchGraph = pg, branchHandled = blkt : branchHandled st }
 
+checkNodeRequeued ::
+  BranchState sym arch ->
+  NodeEntry arch ->
+  Bool
+checkNodeRequeued st node = fromMaybe False $ do
+  bc <- branchDesyncChoice st
+  return $ choiceRequiresRequeue bc
+  <|> (getQueuedPriority (GraphNode node) (branchGraph st) >> return True)
+
 followExit ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -1846,12 +1954,7 @@ followExit ::
 followExit scope bundle currBlock d st (idx, pPair) = do
   let gr = branchGraph st
   traceBundle bundle ("Handling proof case " ++ show idx) 
-  res <- manifestError $
-    case getQueuedPriority (GraphNode currBlock) gr of
-      Just{} -> do
-        emitTrace @"message" "Node was re-queued, skipping analysis"
-        return st
-      Nothing -> triageBlockTarget scope bundle currBlock st d pPair
+  res <- manifestError $ triageBlockTarget scope bundle currBlock st d pPair
   case res of
     Left err -> do
       emitEvent $ PE.ErrorEmitted err
@@ -1953,7 +2056,7 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
   let gr = branchGraph st
   stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
   matches <- PD.matchesBlockTarget bundle' blkts
-  fmap (fromMaybe st) $ withPathCondition matches $ do
+  res <- withPathCondition matches $ do
     let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
     mrets <- PPa.toMaybeCases <$> 
       PPa.forBinsF (\bin -> PPa.get bin blkts >>= getTargetReturn) 
@@ -1994,6 +2097,11 @@ triageBlockTarget scope bundle' currBlock st d blkts = do
               MCS.MacawBlockEndJump -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
               MCS.MacawBlockEndBranch -> fnTrace "handleJump" $ handleJump scope bundle currBlock d gr nextNode
               _ -> throwHere $ PEE.BlockExitMismatch
+  case res of
+    Just st' -> return st'
+    Nothing -> do
+      emitTrace @"message" "Block exit is unreachable"
+      return st
 
 {-
 -- | See if the given jump targets correspond to a PLT stub for
@@ -2278,7 +2386,43 @@ singletonBundle ::
   SimBundle sym arch v ->
   EquivM sym arch (SimBundle sym arch v)
 singletonBundle bin (SimBundle in_ out_) = 
-  SimBundle <$> PPa.asSingleton bin in_ <*> PPa.asSingleton bin out_
+  SimBundle <$> PPa.toSingleton bin in_ <*> PPa.toSingleton bin out_
+
+-- | Check if the given node has defined sync addresses. If so,
+--   connect it to the one-sided Original version of the node and
+--   queue it in the worklist.
+--   Returns 'Nothing' if the node does not have sync addresses defined
+--   (i.e. it is not the start of a split analysis)
+handleSplitAnalysis ::
+  PS.SimScope sym arch v ->
+  NodeEntry arch ->
+  AbstractDomain sym arch v ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+handleSplitAnalysis scope node dom pg = do
+  let syncAddrs = evalPairGraphM pg $ do
+        syncO <- getSyncAddress PBi.OriginalRepr (GraphNode node)
+        syncP <- getSyncAddress PBi.PatchedRepr (GraphNode node)
+        return (syncO, syncP)
+  case syncAddrs of
+    Right (syncO, syncP) -> do
+      currBlockO <- toSingleNode PBi.OriginalRepr node
+      currBlockP <- toSingleNode PBi.PatchedRepr node
+      subTree @"node" "Split analysis" $ do
+        pg' <- subTrace @"node" (GraphNode currBlockO) $ do
+          priority <- thisPriority
+          emitTraceLabel @"address" "Synchronization Address" syncO
+          bundleO <- noopBundle scope (nodeBlocks currBlockO)
+          atPriority (raisePriority (priority PriorityHandleDesync)) Nothing $ do
+            -- we arbitrarily pick the original program to perform the first step of
+            -- the analysis
+            -- by convention, we define the sync point of the original program to
+            -- connect to the divergence point of the patched program
+            widenAlongEdge scope bundleO (GraphNode node) dom pg (GraphNode currBlockO)
+        subTrace @"node" (GraphNode currBlockP) $ do
+          emitTraceLabel @"address" "Synchronization Address" syncP
+        return $ Just pg'
+    Left{} -> return Nothing
 
 handleDivergingPaths ::
   HasCallStack =>
@@ -2293,75 +2437,85 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
   let gr0 = branchGraph st
   let mchoice = branchDesyncChoice st
   priority <- thisPriority
-  currBlockO <- asSingleNode PBi.OriginalRepr currBlock
-  currBlockP <- asSingleNode PBi.PatchedRepr currBlock
-
-  case (getSyncPoint gr0 PBi.OriginalRepr (GraphNode currBlock), getSyncPoint gr0 PBi.PatchedRepr (GraphNode currBlock)) of
-    (Just{},Just{}) -> do
-      bundleO <- noopBundle scope (nodeBlocks currBlockO)
-
-      atPriority (raisePriority (priority PriorityHandleDesync)) Nothing $ do
-        -- we arbitrarily pick the original program to perform the first step of
-        -- the analysis
-        -- by convention, we define the sync point of the original program to
-        -- connect to the divergence point of the patched program
-        gr1 <- withTracing @"node" (GraphNode currBlockO) $ 
-          widenAlongEdge scope bundleO (GraphNode currBlock) dom gr0 (GraphNode currBlockO)
-        return $ updateBranchGraph st blkt gr1
+  currBlockO <- toSingleNode PBi.OriginalRepr currBlock
+  currBlockP <- toSingleNode PBi.PatchedRepr currBlock
+  let divergeNode = GraphNode currBlock
+  let pg = gr0
+  let msg = "Control flow desynchronization found at: " ++ show divergeNode
+  a <- case mchoice of
+    Just bc | choiceRequiresRequeue bc -> return bc
     _ -> do
-      let divergeNode = GraphNode currBlock
-      let pg = gr0
-      let msg = "Control flow desynchronization found at: " ++ show divergeNode
-      a <- case mchoice of
-        Just DeferDecision -> return DeferDecision
-        Just ChooseSyncPoint -> return DeferDecision
-        _ -> do
-          () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
-            -- we've already introduced the path condition here, so we just want to see how we got here
-            res <- getSomeGroundTrace scope bundle dom Nothing
-            emitTrace @"trace_events" res
-            return ()
-          choose @"()" msg $ \choice -> do
-            -- default choice
-            choice "Ignore divergence (admit a non-total result)" () $ return AdmitNonTotal
+      () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
+        -- we've already introduced the path condition here, so we just want to see how we got here
+        res <- getSomeGroundTrace scope bundle dom Nothing
+        emitTrace @"trace_events" res
+        return ()
+      choose @"()" msg $ \choice -> forM_ [minBound..maxBound] $ \bc ->
+        choice (show bc) () $ return bc
+  emitTrace @"message" $ "Resolved control flow desynchronization with: " ++ show a
+  let st' = st { branchDesyncChoice = Just a }
+  case a of
+    -- leave block exit as unhandled
+    AdmitNonTotal -> return st'
+    ChooseSyncPoint -> do
+      -- re-queuing for sync points happens at the toplevel
+      pg1 <- chooseSyncPoint divergeNode pg
+      -- pg2 <- updateCombinedSyncPoint divergeNode pg1
+      return $ st'{ branchGraph = pg1 }
+      -- handleDivergingPaths scope bundle currBlock (st'{ branchGraph = pg2 }) dom blkt
+    ChooseDesyncPoint -> do
+      pg1 <- chooseDesyncPoint divergeNode pg
+      -- drop domains from any outgoing edges, since the set of outgoing edges
+      -- from this node will likely change
+      let pg2 = dropPostDomains divergeNode (priority PriorityDomainRefresh) pg1
+      -- re-queue the node after picking a de-synchronization point
+      let pg3 = queueNode (priority PriorityHandleActions) divergeNode pg2
+      return $ st'{ branchGraph = pg3 }
+    IsInfeasible condK -> do
+      gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
+      gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
+      return $ st'{ branchGraph = gr3 }
+    DeferDecision -> do
+      -- add this back to the work list at a low priority
+      -- this allows, for example, the analysis to determine
+      -- that this is unreachable (potentially after refinements) and therefore
+      -- doesn't need synchronization
+      Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
+      return $ st'{ branchGraph = pg1 }
 
-            choice "Assert divergence is infeasible" () $ return (IsInfeasible ConditionAsserted)
-            choice "Assume divergence is infeasible" () $ return (IsInfeasible ConditionAssumed)
-            choice "Remove divergence in equivalence condition" () $ return (IsInfeasible ConditionEquiv)
-            choice "Choose desynchronization points" () $ return ChooseDesyncPoint
-            choice "Choose synchronization points" () $ return ChooseSyncPoint
-            choice "Defer decision" () $ return DeferDecision
-      
-      let st' = st { branchDesyncChoice = Just a }
-      case a of
-        -- leave block exit as unhandled
-        AdmitNonTotal -> return st'
-        ChooseSyncPoint -> do
-          pg1 <- chooseSyncPoint divergeNode pg
-          pg2 <- updateCombinedSyncPoint divergeNode pg1
-          handleDivergingPaths scope bundle currBlock (st'{ branchGraph = pg2 }) dom blkt
-        ChooseDesyncPoint -> do
-          pg1 <- chooseDesyncPoint divergeNode pg
-          -- drop domains from any outgoing edges, since the set of outgoing edges
-          -- from this node will likely change
-          let pg2 = dropPostDomains divergeNode (priority PriorityDomainRefresh) pg1
-          -- re-queue the node after picking a de-synchronization point
-          let pg3 = queueNode (priority PriorityHandleActions) divergeNode pg2
-          return $ updateBranchGraph st blkt pg3
-        IsInfeasible condK -> do
-          gr2 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockO) condK pg
-          gr3 <- pruneCurrentBranch scope (divergeNode, GraphNode currBlockP) condK gr2
-          return $ updateBranchGraph st blkt gr3
-        DeferDecision -> do
-          -- add this back to the work list at a low priority
-          -- this allows, for example, the analysis to determine
-          -- that this is unreachable (potentially after refinements) and therefore
-          -- doesn't need synchronization
-          Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
-          return $ updateBranchGraph st blkt pg1
+data DesyncChoice = AdmitNonTotal | IsInfeasible ConditionKind | ChooseDesyncPoint | ChooseSyncPoint | DeferDecision
+  deriving (Eq,Ord)
 
-data DesyncChoice = ChooseSyncPoint | ChooseDesyncPoint | AdmitNonTotal | IsInfeasible ConditionKind | DeferDecision
-  deriving Eq
+allDesyncChoice :: [DesyncChoice]
+allDesyncChoice =
+      [AdmitNonTotal
+      , IsInfeasible ConditionAsserted, IsInfeasible ConditionAssumed, IsInfeasible ConditionEquiv
+      , ChooseDesyncPoint
+      , ChooseSyncPoint
+      , DeferDecision]
+
+instance Bounded DesyncChoice where
+  minBound = head allDesyncChoice
+  maxBound = last allDesyncChoice
+
+instance Enum DesyncChoice where
+  toEnum i = allDesyncChoice !! i
+  fromEnum e = fromMaybe minBound (findIndex ((==) e) allDesyncChoice)
+
+instance Show DesyncChoice where
+  show = \case
+    ChooseSyncPoint -> "Choose synchronization points"
+    ChooseDesyncPoint -> "Choose desynchronization points"
+    AdmitNonTotal -> "Ignore divergence (admit a non-total result)"
+    IsInfeasible ConditionAsserted -> "Assert divergence is infeasible"
+    IsInfeasible ConditionAssumed -> "Assume divergence is infeasible"
+    IsInfeasible ConditionEquiv -> "Remove divergence in equivalence condition"
+    DeferDecision -> "Defer decision"
+
+choiceRequiresRequeue :: DesyncChoice -> Bool
+choiceRequiresRequeue = \case
+  AdmitNonTotal -> False
+  _ -> True
 
 handleStub ::
   HasCallStack =>
@@ -2426,6 +2580,7 @@ handleJump ::
   EquivM sym arch (PairGraph sym arch)
 handleJump scope bundle currBlock d gr nextNode =
   widenAlongEdge scope bundle (GraphNode currBlock) d gr (GraphNode nextNode)
+
 
 mkSimBundle ::
   forall sym arch v.

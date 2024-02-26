@@ -148,8 +148,8 @@ singletonDomain ::
   AbstractDomain sym arch v ->
   m (AbstractDomain sym arch v)
 singletonDomain bin d = do
-  vals <- PPa.asSingleton bin (absDomVals d)
-  evs <- PPa.asSingleton bin (absDomEvents d)
+  vals <- PPa.toSingleton bin (absDomVals d)
+  evs <- PPa.toSingleton bin (absDomEvents d)
   -- NOTE: the equivalence domain is not separated by patched vs. original entries,
   -- and so we pass it through here unmodified. However it now may contain unbound variables, since
   -- we will have dropped them from the scope.

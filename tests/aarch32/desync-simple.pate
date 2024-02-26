@@ -10,7 +10,7 @@ Function Entry "f"
 
         ...
         Choose a synchronization point:
-            > 0x8058 (original)
+            > 0x8054 (original)
             > 0x8054 (patched)
 
 Verification Finished
