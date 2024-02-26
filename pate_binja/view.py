@@ -11,11 +11,11 @@ from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    load
+    load, execute_on_main_thread
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
-    FlowGraphWidget, FileContext
+    FlowGraphWidget, FileContext, UIContext, ViewFrame, ViewLocation
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt
@@ -27,15 +27,21 @@ from . import pate
 
 
 class PateWidget(QWidget):
-    def __init__(self, context: UIActionContext, parent: QWidget, filename: str, config: dict) -> None:
+    context: UIContext | None
+    filename: str
+    config: dict
+    pate_thread: Thread | None
+    flow_graph_widget: MyFlowGraphWidget
+
+    def __init__(self, context: UIContext, parent: QWidget, filename: str, config: dict) -> None:
         super().__init__(parent)
         self.context = context
 
         self.filename = filename
         self.config = config
-        self.pate_thread: PateThread = None
+        self.pate_thread = None
 
-        self.flow_graph_widget = MyFlowGraphWidget(self)
+        self.flow_graph_widget = MyFlowGraphWidget(self, self)
 
         self.output_field = QPlainTextEdit()
         self.output_field.setReadOnly(True)
@@ -69,31 +75,30 @@ class PateWidget(QWidget):
         self.user_response_condition = Condition()
         self.user_response = None
 
-        #self.loadBinaryViews()
-        #self.hackaroo()
-
-    def loadBinaryViews(self):
-        # TODO: May need a progress feedback. Can this take a significant amount of time?
-        config = self.config
+        self.originalFilename = None
+        self.patchedFilename = None
         if config:
             cwd = config.get('cwd')
             original = config.get('original')
             patched = config.get('patched')
             if cwd and original:
-                #self.oBv = load(os.path.join(cwd, original))
-                #self.oBv.add_analysis_completion_event(lambda: print('finished loading', original))
-                #self.oBv = oF.getRawData()
-                oF = FileContext.openFilename(os.path.join(cwd, original))
-                if oF:
-                    vF = self.context.openFileContext(oF)
+                self.originalFilename = os.path.join(cwd, original)
             if cwd and patched:
-                self.pBv = load(os.path.join(cwd, patched))
-                self.pBv.add_analysis_completion_event(lambda: print('finished loading', patched))
+                self.patchedFilename = os.path.join(cwd, patched)
+
+        self.loadBinaryViews()
+
+    def loadBinaryViews(self):
+        if self.originalFilename:
+            getTabForFilename(self.context, self.originalFilename, True)
+        if self.patchedFilename:
+            getTabForFilename(self.context, self.patchedFilename, True)
 
     def hackaroo(self):
         a = 0x400c
-        bb = self.oBv.get_basic_blocks_at(a)
-        print(bb)
+        showLocationInFilename(self.context, self.originalFilename, a)
+        # bb = self.oBv.get_basic_blocks_at(a)
+        # print(bb)
 
     def closeEvent(self, event):
         if self.pate_thread:
@@ -121,6 +126,7 @@ class PateWidget(QWidget):
         if not replay:
             self.cmd_field.setText('')
             self.cmd_field.setEnabled(True)
+            self.cmd_field.setFocus()
 
 
 class GuiUserInteraction(pate.PateUserInteraction):
@@ -276,13 +282,15 @@ class PateCfarExitDialog(QDialog):
 
 class MyFlowGraphWidget(FlowGraphWidget):
 
+    pate_widget: PateWidget
     flowGraph: FlowGraph
     cfarGraph: pate.CFARGraph
     flowToCfar: dict[FlowGraphNode, pate.CFARNode]
     cfarToFlow: dict[pate.CFARNode, FlowGraphNode]
-    def __init__(self, parent: QWidget, view: BinaryView=None, graph: FlowGraph=None):
+
+    def __init__(self, parent: QWidget, pate_widget: PateWidget, view: BinaryView=None, graph: FlowGraph=None):
         super().__init__(parent, view, graph)
-        self.flowToCfar = {}
+        self.pate_widget = parent
 
     def build_pate_flow_graph(self,
                               cfarGraph: pate.CFARGraph,
@@ -290,8 +298,10 @@ class MyFlowGraphWidget(FlowGraphWidget):
         self.flowGraph = FlowGraph()
         self.cfarGraph = cfarGraph
 
-        # First create all nodes
+        self.flowToCfar = {}
         self.cfarToFlow = {}
+
+        # First create all nodes
         cfar_node: pate.CFARNode
         for cfar_node in self.cfarGraph.nodes.values():
             flow_node = FlowGraphNode(self.flowGraph)
@@ -353,6 +363,9 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #     print("Edge target: ", self.flowToCfarNode[edgeTuple[0].target].id)
         #     print("Edge incoming: ", edgeTuple[1])
 
+        # if node:
+        #     self.pate_widget.hackaroo()
+
         if edgeTuple:
             self.showEdgeExitInfo(edgeTuple)
 
@@ -399,6 +412,39 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d.exec()
 
 
+def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> QWidget | None:
+    """Find Tab for filename."""
+    tabs = context.getTabs()
+    tab = None
+    for t in tabs:
+        vf: ViewFrame = context.getViewFrameForTab(t)
+        if vf:
+            fc: FileContext = vf.getFileContext()
+            #print('tab:', t, "ViewFrame", vf, "filename:", fc.getFilename())
+            if fc.getFilename() == filename:
+                tab = t
+    if not tab and loadIfDoesNotExist:
+        # No Tab found for filename, open it in a new tab
+        file_context = FileContext.openFilename(filename)
+        view_frame = context.openFileContext(file_context)
+        tab = getTabForFilename(context, filename, False)
+        #print('Opened ViewFrame:', view_frame, "Tab:", tab)
+    #print('Found Tab:', tab, "for filename:", filename)
+    return tab
+
+
+def showLocationInFilename(context: UIContext, filename: str, addr: int):
+    # Get tab for filename, opening if necessary
+    tab = getTabForFilename(context, filename, True)
+    vl = ViewLocation("What is this for?", addr)
+    vf: ViewFrame = context.getViewFrameForTab(tab)
+    vf.navigateToViewLocation(vf.getCurrentBinaryView(), vl)
+    #vf.focus()
+    #vf.setFocus()
+    context.activateTab(tab)
+    print("Showed location", addr, "in", filename)
+
+
 def launch_pate(context: UIActionContext):
 
     f = interaction.get_open_filename_input(
@@ -427,7 +473,6 @@ def launch_pate(context: UIActionContext):
 
     pate_widget.pate_thread = pt
     pt.start()
-
 
 # class PateConfigDialog(QDialog):
 #     def __init__(self, context: UIActionContext, parent=None):
