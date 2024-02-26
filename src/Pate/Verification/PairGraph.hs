@@ -124,12 +124,10 @@ module Pate.Verification.PairGraph
 
 import           Prettyprinter
 
-import           Control.Monad (foldM, guard, join, void, forM)
+import           Control.Monad (foldM, guard, forM)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader (local, MonadReader (ask))
-import           Control.Monad.State.Strict (StateT (..), MonadState (..), MonadTrans (..), execStateT, modify, State, execState, gets)
-import           Control.Monad.Catch (MonadCatch, MonadThrow, MonadMask)
-import           Control.Monad.Trans.Maybe (MaybeT(..) )
+import           Control.Monad.State.Strict (MonadState (..), modify, State, gets)
 import           Control.Monad.Except (ExceptT, MonadError (..))
 import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Monad.Trans.State.Strict (runState)
@@ -170,7 +168,7 @@ import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNode, isSingleNodeEntry, isSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNodeEntry, isSingleReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -180,14 +178,11 @@ import qualified Pate.Binary as PBi
 
 import           Control.Applicative (Const(..), Alternative(..)) 
 import qualified Control.Monad.IO.Unlift as IO
-import           Pate.Solver (ValidSym)
 
 import           SemMC.Formula.Env (SomeSome(..))
 import qualified Pate.Location as PL
-import qualified Pate.ExprMappable as PEM
 import qualified Pate.Address as PAd
 import Data.Foldable (find)
-
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -629,11 +624,11 @@ dropPostDomains ::
   PairGraph sym arch   
 dropPostDomains nd priority pg = dropObservableReports nd $ Set.foldl' (\pg_ nd' -> dropDomain nd' priority pg_) pg (getEdgesFrom pg nd)
 
-dropDomainRefinement ::
+_dropDomainRefinement ::
   GraphNode arch -> 
   PairGraph sym arch ->
   PairGraph sym arch
-dropDomainRefinement nd pg = pg { pairGraphDomainRefinements = Map.delete nd (pairGraphDomainRefinements pg)}
+_dropDomainRefinement nd pg = pg { pairGraphDomainRefinements = Map.delete nd (pairGraphDomainRefinements pg)}
 
 -- | Delete the abstract domain for the given node, following
 --   any reachable edges and discarding those domains as well

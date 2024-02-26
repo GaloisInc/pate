@@ -37,7 +37,6 @@ import qualified What4.Interface as W4
 
 import qualified Pate.AssumptionSet as PAS
 import qualified Pate.Config as PC
-import qualified Pate.SimState as PS
 import qualified Pate.Verification.Simplify as PSi
 import           Pate.Monad
 
@@ -112,8 +111,6 @@ computeEqCondition eqPred vals = withTracing @"function_name" "computeEqConditio
         -- counter-example, compute another path condition and continue
         W4R.Sat fn_ -> Just <$> do
           fn <- wrapGroundEvalFn fn_ (S.singleton (Some eqPred))
-          vars <- (S.toList . S.unions) <$> mapM (\(Some e') -> liftIO $ WEH.boundVars e') (S.toList vals)
-          let varsE = map (\(Some v) -> Some (W4.varExpr sym v)) vars
           
           binds <- extractBindings fn vals
           subTree @"expr" "Bindings" $ do

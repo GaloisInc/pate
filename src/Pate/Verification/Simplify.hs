@@ -147,8 +147,8 @@ tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -
         emitError $ PEE.InconsistentSimplificationResult (PEE.SimpResult (Proxy @sym) e_orig e_simp)
         return e_orig
 
-getSimpCheck :: EquivM sym arch (WEH.SimpCheck sym (EquivM_ sym arch))
-getSimpCheck = do
+_getSimpCheck :: EquivM sym arch (WEH.SimpCheck sym (EquivM_ sym arch))
+_getSimpCheck = do
   shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
   case shouldCheck of
     True -> return tracedSimpCheck

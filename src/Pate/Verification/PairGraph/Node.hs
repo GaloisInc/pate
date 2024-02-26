@@ -49,7 +49,6 @@ module Pate.Verification.PairGraph.Node (
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 import qualified Data.Aeson as JSON
-import qualified Compat.Aeson as HMS
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA

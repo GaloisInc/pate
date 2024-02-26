@@ -111,14 +111,12 @@ import           GHC.Stack ( HasCallStack, callStack )
 
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
-import           Control.Monad (void)
-import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
 import           Control.Exception hiding ( try, finally, catch, mask )
 import           Control.Monad.Catch hiding ( catches, tryJust, Handler )
 import qualified Control.Monad.Reader as CMR
-import           Control.Monad.Reader ( asks, ask )
+import           Control.Monad.Reader ( asks )
 import           Control.Monad.Except
 
 import           Data.Maybe ( fromMaybe )
@@ -158,7 +156,6 @@ import qualified Data.Macaw.BinaryLoader as MBL
 
 import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
-import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
 import qualified What4.SatResult as W4R
 import qualified What4.Symbol as WS
@@ -194,9 +191,6 @@ import qualified Pate.Timeout as PT
 import qualified Pate.Verification.Concretize as PVC
 import           Pate.TraceTree
 import Data.Functor.Const (Const(..))
-import Unsafe.Coerce (unsafeCoerce)
-import Debug.Trace
-import Data.List
 
 atPriority :: 
   NodePriority ->

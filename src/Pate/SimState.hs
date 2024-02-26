@@ -36,7 +36,7 @@ Functionality for handling the inputs and outputs of crucible.
 module Pate.SimState
   ( -- simulator state
     SimState(..)
-  , StackBase(..)
+  , StackBase
   , freshStackBase
   , SimInput(..)
   , SimOutput(..)

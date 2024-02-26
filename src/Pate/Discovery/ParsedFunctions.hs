@@ -38,10 +38,9 @@ import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
-import           Data.Maybe ( mapMaybe, listToMaybe )
-import qualified Data.Parameterized.Classes as PC
+import           Data.Maybe ( mapMaybe )
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some ( Some(..), viewSome )
+import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Set as Set
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
@@ -67,9 +66,7 @@ import           Pate.Discovery.PLT (extraJumpClassifier, extraReturnClassifier,
 
 import           Pate.TraceTree
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (forM)
 
-import Debug.Trace
 import Control.Applicative ((<|>))
 import Data.Macaw.Utils.IncComp (incCompResult)
 import qualified Data.Text as T
@@ -482,7 +479,7 @@ parsedFunctionContaining ::
   PB.ConcreteBlock arch bin ->
   ParsedFunctionMap arch bin ->
   IO (Maybe (Some (MD.DiscoveryFunInfo arch)))
-parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _ _) = do
+parsedFunctionContaining blk pfm@(ParsedFunctionMap _pfmRef mCFGDir _pd _ _ _ _ _ _) = do
   let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
 
   st <- getParsedFunctionState faddr pfm

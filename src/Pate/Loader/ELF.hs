@@ -51,11 +51,8 @@ import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Hints.BSI as PHB
 import Data.Macaw.Memory.Permissions as MP (execute,read)
 
-import Data.Bits ((.|.), Bits ((.&.)))
+import Data.Bits ((.|.))
 import qualified Control.Monad.Reader as CMR
-import qualified System.IO as IO
-import qualified System.Directory as IO
-import qualified System.Exit as SE
 
 data LoadedELF arch =
   LoadedELF

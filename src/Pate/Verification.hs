@@ -74,7 +74,6 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Hints as PH
 import qualified Pate.Loader.ELF as PLE
-import qualified Pate.Location as PL
 import qualified Pate.Memory as PM
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad

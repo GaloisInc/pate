@@ -115,7 +115,6 @@ module Pate.TraceTree (
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
 import           Data.Kind ( Type )
-import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Data.IORef as IO
@@ -123,21 +122,19 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
-import           Data.List ((!!), find, isPrefixOf)
-import           Control.Monad.Trans (lift)
+import           Data.List (isPrefixOf)
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
 import qualified Control.Monad.Trans as CMT
 import           Control.Monad.Except
 import           Control.Monad.Catch
-import           Control.Monad (void, unless, forM) -- GHC 9.6
+ -- GHC 9.6
 import           Control.Applicative
 
 import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.String as PP
 
 import qualified Data.Aeson as JSON
-import qualified Compat.Aeson as JSON
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Parameterized.SymbolRepr ( knownSymbol, symbolRepr, SomeSym(..), SymbolRepr )
@@ -148,7 +145,6 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import GHC.IO (unsafePerformIO)
 import qualified Control.Concurrent as IO
-import qualified System.IO as IO
 import Data.Maybe (catMaybes)
 import Control.Concurrent (threadDelay)
 import Control.Monad.State.Strict (StateT (..), MonadState (..))

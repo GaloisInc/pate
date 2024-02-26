@@ -128,6 +128,7 @@ concreteBlockFromBVAddr _proxy binRepr mem bv =
                                 , PB.functionSymbol = Nothing
                                 , PB.functionBinRepr = binRepr
                                 , PB.functionIgnored = False
+                                , PB.functionEnd = Nothing
                                 }
       return PB.ConcreteBlock { PB.concreteAddress = addr
                               , PB.concreteBlockEntry = PB.BlockEntryInitFunction

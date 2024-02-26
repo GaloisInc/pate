@@ -96,7 +96,7 @@ import qualified Pate.Config as PC
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn )
 import qualified Pate.Verification.StrongestPosts.CounterExample as CE
 
 import qualified Pate.AssumptionSet as PAs
@@ -109,12 +109,8 @@ import qualified Pate.Monad.Context as PMC
 import Data.Functor.Const (Const(..))
 import Pate.Verification.Concretize (symbolicFromConcrete)
 import qualified Pate.Arch as PA
-import Data.Parameterized (Pair(..))
 import Data.Kind (Type)
 import qualified Data.Aeson as JSON
-import qualified Prettyprinter as PP
-import qualified What4.Expr.GroundEval as W4
-import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
 
 -- | Generate a fresh abstract domain value for the given graph node.
@@ -417,7 +413,7 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
       -- TODO: allow updates here
       emitTrace @"interactiveBundle" b
       return gr2
-    choice "Strengthen conditions" $ \(TupleF3 scope bundle d) gr2 -> withSym $ \sym -> do
+    choice "Strengthen conditions" $ \(TupleF3 scope _bundle _d) gr2 -> withSym $ \_sym -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
               (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
@@ -714,7 +710,7 @@ pickMany pickIn = go mempty pickIn
         forM_ (zip [0..] (pickRegs remaining)) $ \(idx, Some r) ->
           case PA.displayRegister r of
             PA.Normal{} -> choice "" (PickRegister r) $ do
-              let (hd_,(_:tl_)) = splitAt idx (pickRegs remaining)
+              (hd_,(_:tl_)) <- return $ splitAt idx (pickRegs remaining)
               return $ (mempty { pickRegs = [Some r] } <> acc, remaining { pickRegs = hd_++tl_ })
             -- in general we can include any register, but it likely
             -- makes sense to only consider registers that we have
@@ -722,11 +718,11 @@ pickMany pickIn = go mempty pickIn
             _ -> return ()
         forM_ (zip [0..] (pickStack remaining)) $ \(idx, Some c) -> do
           choice "" (PickStack c) $ do
-            let (hd_,(_:tl_)) = splitAt idx (pickStack remaining)
+            (hd_,(_:tl_)) <- return $ splitAt idx (pickStack remaining)
             return $ (mempty { pickStack = [Some c] } <> acc, remaining { pickStack = hd_++tl_ })
         forM_ (zip [0..] (pickGlobal remaining)) $ \(idx, Some c) -> do
           choice "" (PickGlobal c) $ do
-            let (hd_,(_:tl_)) = splitAt idx (pickGlobal remaining)
+            (hd_,(_:tl_)) <- return $ splitAt idx (pickGlobal remaining)
             return $ (mempty { pickGlobal = [Some c] } <> acc, remaining { pickGlobal = hd_++tl_ })
 
       go acc' remaining'
@@ -761,14 +757,14 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
 
 -- | True if the satisfiability of the predicate only depends on
 --   variables from the given binary
-isEqCondSingleSided ::
+_isEqCondSingleSided ::
   forall sym arch bin v.
   PS.SimScope sym arch v ->
   PB.BlockPair arch ->
   PBi.WhichBinaryRepr bin ->
   PEC.EquivalenceCondition sym arch v ->
   EquivM sym arch Bool
-isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
+_isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- rewrite the free variables for the other binary into arbitrary (free) terms and
   -- determine if the resulting predicate is equal to the original
@@ -1013,9 +1009,9 @@ runMaybeTF m = runMaybeT m >>= \case
   Just a -> return $ JustF a
   Nothing -> return $ NothingF
 
-toMaybe :: MaybeCF a c tp -> Maybe (a tp c)
-toMaybe (JustF a) = Just a
-toMaybe NothingF = Nothing
+_toMaybe :: MaybeCF a c tp -> Maybe (a tp c)
+_toMaybe (JustF a) = Just a
+_toMaybe NothingF = Nothing
 
 memVars ::
   PS.SimVars sym arch v bin -> EquivM sym arch (Set.Set (Some (W4.BoundVar sym)))

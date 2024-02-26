@@ -13,6 +13,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# OPTIONS_GHC -Wno-unused-imports #-}
 module Pate.AArch32 (
     SA.AArch32
   , AArch32Opts(..)
@@ -326,8 +327,8 @@ stubOverrides =
     r4 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")
 
     v0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V0")
-    v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
-    v2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V2")
+    _v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
+    _v2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V2")
     --r3 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
 
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where

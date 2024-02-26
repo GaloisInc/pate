@@ -26,7 +26,6 @@ module Repl where
 
 import qualified Language.Haskell.TH as TH
 
-import qualified System.Console.ANSI as ANSI
 import qualified Options.Applicative as OA
 import qualified System.IO as IO
 import qualified System.IO.Unsafe as IO
@@ -36,9 +35,7 @@ import           Control.Monad ( forM )
 import           Control.Monad.State ( MonadState, StateT, modify, gets, runStateT, get, put )
 import qualified Control.Monad.IO.Class as IO
 import           Data.Proxy
-import qualified Data.Text.IO as Text
 import qualified Data.Text as Text
-import qualified Data.Text.Lazy as TextL
 import           Text.Read (readMaybe)
 import           System.Exit
 import           System.Environment
@@ -48,8 +45,6 @@ import           Data.Parameterized.Classes
 import           Data.List.Split (splitOn)
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
-import qualified Prettyprinter.Render.Terminal as PPRT
-import qualified Prettyprinter.Render.Text as PPText
 
 import           Data.Parameterized.SymbolRepr ( KnownSymbol, knownSymbol, SymbolRepr, symbolRepr )
 
@@ -58,7 +53,6 @@ import qualified Pate.Arch as PA
 import qualified Pate.ArchLoader as PAL
 import qualified Pate.Config as PC
 import qualified Pate.Solver as PS
-import qualified Pate.Script as PSc
 import qualified Pate.Equivalence as PEq
 import qualified Pate.CLI as CLI
 import qualified Pate.Loader as PL
@@ -67,7 +61,6 @@ import qualified ReplBase
 import           ReplBase ( Sym, Arch )
 
 import           Pate.TraceTree hiding (asChoice)
-import           What4.Expr.Builder as W4B
 
 import Unsafe.Coerce(unsafeCoerce)
 
@@ -212,7 +205,7 @@ isSubTreeNode (TraceNode{}) = do
 
 loadSomeTree ::
   IO.ThreadId -> SomeTraceTree PA.ValidRepr -> LoadOpts -> IO Bool
-loadSomeTree tid topTraceTree opts = do
+loadSomeTree tid topTraceTree _opts = do
   viewSomeTraceTree topTraceTree (return False) $ \(PA.ValidRepr sym arch) (toptree :: TraceTree k) -> do
       let st = ReplState
             { replNode = Some (TraceNode @"toplevel" () () toptree)
@@ -314,7 +307,6 @@ addNextNodes node = isTraceNode node $ do
   (IO.liftIO $ nodeShownAt tags node) >>= \case
     True -> do
       nextSubs <- fmap concat $ forM nextTrees $ \(n, Some nextNode) -> do
-        prevNodes <- gets replPrev
         next <- maybeSubNodes nextNode (return []) (gets replNext)
         issub <- isSubTreeNode nextNode
         case (issub, next) of
@@ -353,7 +345,7 @@ mkStatusTag st = case ppStatusTag st of
   Nothing -> Nothing
 
 ppSuffix :: Int -> NodeStatus -> SymbolRepr nm -> ReplM sym arch (Maybe (PP.Doc a))
-ppSuffix nesting s nm = do
+ppSuffix _nesting s nm = do
   tags <- gets replTags
   case tags of
     [Simplified] -> return $ mkStatusTag s
@@ -381,7 +373,7 @@ maybeSubNodes ::
   ReplM sym arch a ->
   ReplM sym arch a ->
   ReplM sym arch a
-maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
+maybeSubNodes nd@(TraceNode _lbl _v _subtree) g f = do
   prevNodes <- gets replPrev
   isSubTreeNode nd >>= \case
     True -> withNode nd $ f
@@ -410,7 +402,7 @@ prettyNextNodes startAt onlyFinished = do
   nextNodes <- gets replNext
   ValidSymArchRepr sym _ <- gets replValidRepr
   ppContents' <- 
-       mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
+       mapM (\(nesting, Some ((TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
                 json <- IO.liftIO $ jsonNode @_ @'(sym, arch) @nm sym lbl v
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
@@ -575,17 +567,17 @@ loadTraceNode node = do
 
 isBlocked :: forall sym arch. ReplM sym arch Bool
 isBlocked = do
-  (Some (node@(TraceNode _ _ subtree))) <- gets replNode
+  (Some (TraceNode _ _ subtree)) <- gets replNode
   st <- IO.liftIO $ getTreeStatus subtree
   return $ isBlockedStatus st
 
 asChoice :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch (Maybe (SomeChoice '(sym,arch)))
-asChoice (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (knownSymbol @"choice")  of
+asChoice (TraceNode _ v _) = case testEquality (knownSymbol @nm) (knownSymbol @"choice")  of
   Just Refl -> return $ Just v
   Nothing -> return Nothing
 
 asChoiceTree :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch (Maybe (SomeChoiceHeader '(sym,arch)))
-asChoiceTree (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (knownSymbol @"choiceTree")  of
+asChoiceTree (TraceNode _ v _) = case testEquality (knownSymbol @nm) (knownSymbol @"choiceTree")  of
   Just Refl -> return $ Just v
   Nothing -> return Nothing
 
@@ -597,7 +589,7 @@ goto_status'' f (Some node@(TraceNode _ _ subtree) : xs) = do
 
       goto_node' node >> (goto_status' f)
     False -> goto_status'' f xs
-goto_status'' f [] = return ()
+goto_status'' _f [] = return ()
 
 goto_status' :: (NodeStatus -> Bool) -> ReplM sym arch ()
 goto_status' f = do
@@ -620,7 +612,7 @@ goto_prompt = execReplM (goto_status' isBlockedStatus >> ls')
 next :: IO ()
 next = execReplM $ do
   nextNodes <- gets replNext
-  goto' (length nextNodes - 1)
+  _ <- goto' (length nextNodes - 1)
   return ()
 
 goto_node' :: TraceNode sym arch nm -> ReplM sym arch ()
@@ -636,7 +628,6 @@ goto' idx = do
       Just (SomeChoice c) -> do
         IO.liftIO $ choicePick c
         (IO.liftIO $ IO.threadDelay 100)
-        Some curNode <- currentNode
         top'
         IO.liftIO $ wait
         (Just <$> currentNode)
@@ -663,7 +654,7 @@ waitRepl lastShown = do
         PO.printBreak
         prettyNextNodes lastShown False >>= PO.printOutputLn   
       False -> do
-        Some (node@(TraceNode _ _ t)) <- gets replNode
+        Some (TraceNode _ _ t) <- gets replNode
         st <- IO.liftIO $ getTreeStatus t
         case isFinished st of
           True -> PO.printErrLn "No such option" >> return ()
