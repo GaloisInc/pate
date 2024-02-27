@@ -12,6 +12,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-unused-imports #-}
 
 module Pate.PPC (
     PPC.PPC64

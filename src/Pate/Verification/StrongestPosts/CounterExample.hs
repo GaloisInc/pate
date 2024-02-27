@@ -60,7 +60,6 @@ import           Lang.Crucible.Simulator.SymSequence
 import qualified Lang.Crucible.Types as CT
 import qualified Data.Parameterized.TraversableF as TF
 import qualified What4.Concrete as W4
-import Data.Functor.Const
 import qualified Data.Parameterized.Map as MapF
 import Data.Maybe (mapMaybe)
 import qualified What4.JSON as W4S

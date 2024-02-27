@@ -36,7 +36,6 @@ module Pate.Discovery (
 
 import           Control.Lens ( (^.) )
 import           Control.Monad (forM,filterM)
-import           Control.Monad.Fail (fail)
 import           Control.Monad.Trans (lift)
 import qualified Control.Monad.Catch as CMC
 import qualified Control.Monad.Except as CME
@@ -79,7 +78,6 @@ import qualified Data.Macaw.Types as MT
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator as CS
-import qualified Lang.Crucible.Simulator.RegValue as CS
 
 import qualified Lang.Crucible.Types as CT
 import qualified What4.Interface as WI
@@ -112,12 +110,9 @@ import qualified What4.ExprHelpers as WEH
 
 import           Pate.TraceTree
 import qualified Control.Monad.IO.Unlift as IO
-import Data.Parameterized.SetF (AsOrd(..))
 import qualified Data.ByteString.Char8 as BSC
-import qualified Data.Macaw.Architecture.Info as MAI
 import Control.Applicative
 import qualified Data.Vector as V
-import qualified Data.Macaw.Discovery.ParsedContents as Parsed
 
 --------------------------------------------------------
 -- Block pair matching
@@ -203,11 +198,11 @@ discoverPairs bundle = withTracing @"debug" "discoverPairs" $ withSym $ \sym -> 
 --   with a potential null jump target is a return
 --   Formally this is extremely unsound - but we need to track more symbolic
 --   information in order to resolve this when macaw fails
-relaxedReturnCondition ::
+_relaxedReturnCondition ::
   forall sym arch v.
   SimBundle sym arch v ->
   EquivM sym arch (WI.Pred sym)
-relaxedReturnCondition bundle = withSym $ \sym -> PPa.joinPatchPred (\x y -> liftIO $ WI.andPred sym x y) $ \bin -> do
+_relaxedReturnCondition bundle = withSym $ \sym -> PPa.joinPatchPred (\x y -> liftIO $ WI.andPred sym x y) $ \bin -> do
   out <- PPa.get bin (PSS.simOut bundle)
   let blkend = PSS.simOutBlockEnd out
   is_return <- liftIO $ MCS.isBlockEndCase (Proxy @arch) sym blkend MCS.MacawBlockEndReturn
@@ -267,11 +262,11 @@ isMatchingCall bundle = withSym $ \sym -> do
 
 -- | True for a pair of original and patched block targets that represent a valid pair of
 -- jumps
-compatibleTargets ::
+_compatibleTargets ::
   PB.BlockTarget arch PB.Original ->
   PB.BlockTarget arch PB.Patched ->
   Bool
-compatibleTargets blkt1 blkt2 = (PB.targetEndCase blkt1 == PB.targetEndCase blkt2) &&
+_compatibleTargets blkt1 blkt2 = (PB.targetEndCase blkt1 == PB.targetEndCase blkt2) &&
   PB.concreteBlockEntry (PB.targetCall blkt1) == PB.concreteBlockEntry (PB.targetCall blkt2) &&
   case (PB.targetReturn blkt1, PB.targetReturn blkt2) of
     (Just blk1, Just blk2) -> PB.concreteBlockEntry blk1 == PB.concreteBlockEntry blk2
@@ -671,12 +666,12 @@ findPLTSymbol blk = fnTrace "findPLTSymbol" $ do
     [sym] -> return (Just sym)
     _ -> return Nothing
 
-isPLTTarget ::
+_isPLTTarget ::
   forall bin sym arch.
   PB.KnownBinary bin =>
   PB.BlockTarget arch bin ->
   EquivM sym arch Bool  
-isPLTTarget bt = case PB.asFunctionEntry (PB.targetCall bt) of
+_isPLTTarget bt = case PB.asFunctionEntry (PB.targetCall bt) of
   Just fe -> isPLTFunction fe
   Nothing -> return False
 

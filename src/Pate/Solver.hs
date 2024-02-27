@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeOperators #-}
 -- | Definitions of solvers usable in the pate verifier
 module Pate.Solver (
     Solver(..)
@@ -26,7 +27,6 @@ import qualified What4.Solver as WS
 
 import qualified Lang.Crucible.Backend as CB
 import qualified Lang.Crucible.Backend.Online as CBO
-import Data.Data (Typeable)
 import qualified What4.JSON as W4S
 
 -- | The solvers supported by the pate verifier

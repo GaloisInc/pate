@@ -356,6 +356,7 @@ library pate-repl-base-helper
   build-depends:       template-haskell
   hs-source-dirs:      tools/pate-repl, tools/pate
   exposed-modules:     Repl, ReplHelper
+  other-modules:       Output
   build-depends:       pate-repl-base, pate-base
 
 library pate-base

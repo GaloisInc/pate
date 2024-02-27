@@ -30,25 +30,23 @@ import           GHC.Stack ( HasCallStack )
 import           Control.Applicative
 import qualified Control.Concurrent.MVar as MVar
 import           Control.Lens ( view, (^.) )
-import           Control.Monad (foldM, forM, unless, void, when, guard)
+import           Control.Monad (foldM, forM, void)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Reader (asks, local)
-import           Control.Monad.Except (catchError, throwError)
+import           Control.Monad.Except (catchError)
 import           Control.Monad.State.Strict  (get, StateT, runStateT, put, execStateT, modify)
 import           Control.Monad.Trans (lift)
 import           Numeric (showHex)
 import           Prettyprinter
 
 import qualified Data.BitVector.Sized as BV
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import           Data.List (findIndex, find)
+import           Data.List (findIndex)
 import           Data.Maybe (mapMaybe, catMaybes)
 import           Data.Proxy
-import           Data.Functor.Const
 import           Data.IORef ( IORef, newIORef, readIORef, modifyIORef )
 
 import qualified Prettyprinter as PP
@@ -57,7 +55,6 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
-import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
 import qualified Data.Parameterized.Context as Ctx
 
@@ -69,7 +66,6 @@ import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Lang.Crucible.Simulator.RegValue as LCS
 import           Lang.Crucible.Simulator.SymSequence
-import qualified Lang.Crucible.Utils.MuxTree as MT
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
@@ -85,7 +81,6 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
-import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PEq
 import qualified Pate.Equivalence.MemoryDomain as PEm
 import qualified Pate.Equivalence.Condition as PEC
@@ -95,7 +90,6 @@ import qualified Pate.Event as PE
 import qualified Pate.Memory as PM
 import qualified Pate.MemCell as PMc
 import qualified Pate.Memory.MemTrace as MT
-import qualified Pate.Location as PL
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
@@ -106,26 +100,23 @@ import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.StrongestPosts.CounterExample as CE
 import qualified Pate.Register.Traversal as PRt
-import           Pate.Discovery.PLT (extraJumpClassifier, ExtraJumps(..), ExtraJumpTarget(..))
+import           Pate.Discovery.PLT (ExtraJumps, ExtraJumpTarget(..))
 
 import           Pate.TraceTree
 import qualified Pate.Verification.Validity as PVV
 import qualified Pate.Verification.SymbolicExecution as PVSy
-import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), rootEntry, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleReturn )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
-import Data.Maybe (fromMaybe, fromJust)
-import qualified System.IO as IO
+import Data.Maybe (fromMaybe)
 import Control.Monad (forM_)
 import qualified Data.Macaw.Discovery as MD
-import Data.Foldable (foldl')
 import qualified Pate.ExprMappable as PEM
-import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..), prettyRegsCE)
+import Pate.Verification.StrongestPosts.CounterExample (RegsCounterExample(..))
 import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
 import qualified Data.Aeson as JSON
@@ -375,11 +366,11 @@ handleDanglingReturns fnPairs pg = do
 -- Helper functions for bringing PairGraphM operations and EquivM operations into the same monad
 
 
-withPG :: 
+_withPG :: 
   PairGraph sym arch -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
   EquivM sym arch (a, PairGraph sym arch)
-withPG pg f = runStateT f pg 
+_withPG pg f = runStateT f pg 
 
 withPG_ :: 
   PairGraph sym arch -> 
@@ -424,10 +415,10 @@ handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ 
     return divergeNode
   liftEqM $ updateCombinedSyncPoint divergeNode
 
-addressOfNode ::
+_addressOfNode ::
   GraphNode arch ->
   EquivM sym arch (PPa.PatchPairC (MM.ArchSegmentOff arch))
-addressOfNode nd = PPa.forBinsC $ \bin -> do
+_addressOfNode nd = PPa.forBinsC $ \bin -> do
   blk <- PPa.get bin (graphNodeBlocks nd)
   blockToSegOff blk
 
@@ -555,11 +546,11 @@ pickCutPoint msg inputs = do
   return (sync, Some bin)
 
 -- | Add an intra-block cut to *both* binaries after the given address.
-cutAfterAddress :: 
+_cutAfterAddress :: 
   MM.ArchSegmentOff arch ->
   PB.ConcreteBlock arch bin ->
   EquivM sym arch ()
-cutAfterAddress addr blk = do
+_cutAfterAddress addr blk = do
   PD.ParsedBlocks pblks <- PD.lookupBlocks blk
   let addrs = Set.toList $ Set.fromList $ concat $ map getIntermediateAddrs pblks
   go addrs
@@ -726,12 +717,12 @@ atomicJump ::
 atomicJump (from,to) domSpec gr0 = withSym $ \sym -> do
 -}
 
-addImmediateEqDomRefinementChoice ::
+_addImmediateEqDomRefinementChoice ::
   GraphNode arch ->
   PAD.AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-addImmediateEqDomRefinementChoice nd preD gr0 = do
+_addImmediateEqDomRefinementChoice nd preD gr0 = do
   let gr1 = gr0
   choose @"()" ("Refine equivalence domain for sync point?") $ \choice -> do
     let go condK = do
@@ -2139,7 +2130,7 @@ findPLTSymbol blkO blkP =
 
 -- TODO: This is a bit tricky because it might involve architecture-specific
 -- reasoning
-handleArchStmt ::
+_handleArchStmt ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   NodeEntry arch {- ^ current entry point -} ->
@@ -2149,7 +2140,7 @@ handleArchStmt ::
   PPa.PatchPair (PB.ConcreteBlock arch) {- ^ next entry point -} ->
   Maybe (PPa.PatchPair (PB.ConcreteBlock arch)) {- ^ return point -} ->
   EquivM sym arch (PairGraph sym arch)
-handleArchStmt scope bundle currBlock d gr endCase pPair mpRetPair = fnTrace "handleArchStmt" $ case endCase of
+_handleArchStmt scope bundle currBlock d gr endCase pPair mpRetPair = fnTrace "handleArchStmt" $ case endCase of
   -- this is the jump case for returns, if we return *with* a return site, then
   -- this is actually a normal jump
   MCS.MacawBlockEndReturn | Just pRetPair <- mpRetPair, pPair == pRetPair ->
@@ -2381,11 +2372,11 @@ isMismatchedStubs (PPa.PatchPairC ma mb) = case (ma, mb) of
   (Nothing, Just{}) -> True
   (Nothing, Nothing) -> False
 
-singletonBundle ::
+_singletonBundle ::
   PBi.WhichBinaryRepr bin ->
   SimBundle sym arch v ->
   EquivM sym arch (SimBundle sym arch v)
-singletonBundle bin (SimBundle in_ out_) = 
+_singletonBundle bin (SimBundle in_ out_) = 
   SimBundle <$> PPa.toSingleton bin in_ <*> PPa.toSingleton bin out_
 
 -- | Check if the given node has defined sync addresses. If so,
@@ -2433,7 +2424,7 @@ handleDivergingPaths ::
   AbstractDomain sym arch v {- ^ current abstract domain -}  ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (BranchState sym arch)  
-handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergingPaths" $ do
+handleDivergingPaths scope bundle currBlock st dom _blkt = fnTrace "handleDivergingPaths" $ do
   let gr0 = branchGraph st
   let mchoice = branchDesyncChoice st
   priority <- thisPriority
@@ -2445,7 +2436,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
   a <- case mchoice of
     Just bc | choiceRequiresRequeue bc -> return bc
     _ -> do
-      () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \sym -> do
+      () <- withTracing @"message" "Equivalence Counter-example" $ withSym $ \_sym -> do
         -- we've already introduced the path condition here, so we just want to see how we got here
         res <- getSomeGroundTrace scope bundle dom Nothing
         emitTrace @"trace_events" res

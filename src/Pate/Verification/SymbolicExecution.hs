@@ -17,12 +17,9 @@ module Pate.Verification.SymbolicExecution (
 
 import qualified System.Directory as SD
 import           System.FilePath ( (</>), (<.>) )
-import qualified Prettyprinter as PP
 import qualified Prettyprinter.Render.Text as PPT
 
 import           Control.Lens ( (^.) )
-import           Control.Monad ( forM_ )
-import           Control.Monad.IO.Class ( liftIO )
 import qualified Control.Monad.Reader as CMR
 import qualified Data.List as DL
 import qualified Data.Parameterized.Context as Ctx
@@ -89,7 +86,6 @@ isTerminalBlock pb =
     MCS.MacawBlockEndBranch -> False
     MCS.MacawBlockEndFail -> True
     MCS.MacawBlockEndArch -> True
-    _ -> error $ "Unexpected terminal block case:" ++ show c
 
 -- | Construct an initial 'CS.SimContext' for Crucible
 --

@@ -43,7 +43,6 @@ import qualified What4.Interface as W4
 import qualified Prettyprinter as PP
 
 import qualified Data.Macaw.CFG as MM
-import qualified Data.Aeson as JSON
 
 import qualified Pate.Arch as PA
 import qualified Pate.AssumptionSet as PAS

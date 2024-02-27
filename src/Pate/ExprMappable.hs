@@ -16,8 +16,6 @@
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 
--- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
-{-# LANGUAGE NoMonoLocalBinds #-}
 {-# OPTIONS_GHC -fno-warn-simplifiable-class-constraints #-}
 
 module Pate.ExprMappable (
@@ -63,7 +61,6 @@ import qualified Lang.Crucible.Utils.MuxTree as MT
 import Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.TraversableF as TF
 import Data.Text
-import Control.Monad (forM)
 
 -- Expression binding
 

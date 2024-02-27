@@ -74,7 +74,6 @@ import qualified Lang.Crucible.Types as LCT
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.AssumptionSet as PAS
-import qualified Pate.Address as PAd
 import qualified Pate.Binary as PB
 import qualified Pate.Block as PB
 import qualified Pate.Memory.MemTrace as PMT
@@ -94,10 +93,7 @@ import qualified What4.JSON as W4S
 
 import Pate.Config (PatchData)
 import Data.Macaw.AbsDomain.AbsState (AbsBlockState)
-import Pate.Address (ConcreteAddress)
 import qualified Data.ElfEdit as EEP
-import qualified Data.Parameterized.List as P
-import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Aeson as JSON
 import           Data.Aeson ( (.=) )
@@ -371,7 +367,6 @@ mkWriteOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
 mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
-  let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   -- TODO: must be less than len
   zero_nat <- W4.natLit sym 0
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)

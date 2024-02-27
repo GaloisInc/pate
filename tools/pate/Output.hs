@@ -63,8 +63,8 @@ data Output_ =
 
 data Output = Output
   { outputC :: Output_
-  , output_this :: Maybe (PP.Doc ())
-  , output_tag :: Maybe (Text.Text)
+  , _output_this :: Maybe (PP.Doc ())
+  , _output_tag :: Maybe (Text.Text)
   }
 
 output :: Output_ -> Output

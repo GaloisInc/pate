@@ -50,7 +50,6 @@ import qualified Prettyprinter as PP
 import qualified Pate.Location as PL
 import qualified Pate.Solver as PS
 import qualified Pate.ExprMappable as PEM
-import           Pate.TraceTree
 import qualified What4.JSON as W4S
 
 ---------------------------------------------

@@ -43,7 +43,6 @@ import qualified Pate.Verification as PV
 import qualified Pate.Equivalence.Error as PEE
 import qualified Control.Monad.Reader as CMR
 import           Pate.TraceTree
-import qualified Data.IORef as IO
 
 data RunConfig =
   RunConfig

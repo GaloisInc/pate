@@ -23,7 +23,6 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified Pate.Arch as PA
-import qualified Pate.ExprMappable as PEM
 
 -- | Helper for doing a case-analysis on registers
 data RegisterCase arch tp where

@@ -29,7 +29,6 @@ import qualified Data.Macaw.CFG as MC
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
-import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Event as PE
 import qualified Pate.Loader as PL
@@ -38,7 +37,6 @@ import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
-import qualified Pate.Script as PSc
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
