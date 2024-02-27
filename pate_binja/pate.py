@@ -1,7 +1,6 @@
 # Copyright 2023-2024, Galois Inc. All rights reserved.
 
 from __future__ import annotations
-
 import abc
 import io
 import json
@@ -436,7 +435,9 @@ class CFARNode:
             self.exit_meta_data[exit] = {}
         # Check for overwrite
         if self.exit_meta_data[exit].get(key):
-            warnings.warn('Meta data already exists. Overwriting.')
+            # TODO: Is this a problem?
+            #warnings.warn('Meta data already exists. Overwriting.')
+            pass
         # Add the meta data
         self.exit_meta_data[exit][key] = val
 

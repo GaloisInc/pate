@@ -19,9 +19,9 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QAction, QContextMenuEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QSplitter
+    QDialogButtonBox, QSplitter, QMenu
 
 from . import pate
 
@@ -94,11 +94,11 @@ class PateWidget(QWidget):
         if self.patchedFilename:
             getTabForFilename(self.context, self.patchedFilename, True)
 
-    def hackaroo(self):
-        a = 0x400c
-        showLocationInFilename(self.context, self.originalFilename, a)
-        # bb = self.oBv.get_basic_blocks_at(a)
-        # print(bb)
+    def gotoOriginalAddress(self, addr: int):
+        showLocationInFilename(self.context, self.originalFilename, addr)
+
+    def gotoPatchedAddress(self, addr: int):
+        showLocationInFilename(self.context, self.patchedFilename, addr)
 
     def closeEvent(self, event):
         if self.pate_thread:
@@ -159,9 +159,7 @@ class GuiUserInteraction(pate.PateUserInteraction):
 
         promptNode = graph.getPromptNode()
         if promptNode:
-            # Experiment focusing graph display on a particular node. Only work with sleep. Probably need to do this
-            # on some event that is called when graph is rendered.
-            time.sleep(1)
+            self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfar(promptNode))
 
 
@@ -290,7 +288,10 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
     def __init__(self, parent: QWidget, pate_widget: PateWidget, view: BinaryView=None, graph: FlowGraph=None):
         super().__init__(parent, view, graph)
-        self.pate_widget = parent
+        self.pate_widget = pate_widget
+
+        #self.setContextMenuPolicy(Qt.CustomContextMenu)
+        #self.customContextMenuRequested.connect(self.customContextMenu)
 
     def build_pate_flow_graph(self,
                               cfarGraph: pate.CFARGraph,
@@ -363,10 +364,20 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #     print("Edge target: ", self.flowToCfarNode[edgeTuple[0].target].id)
         #     print("Edge incoming: ", edgeTuple[1])
 
-        # if node:
-        #     self.pate_widget.hackaroo()
+        if node:
+            context = QMenu(self)
+            gotoOriginalAction = QAction("Goto original address", self)
+            context.addAction(gotoOriginalAction)
+            gotoPatchedAction = QAction("Goto patched address", self)
+            context.addAction(gotoPatchedAction)
+            choice = context.exec(event.globalPos())
+            print('context choice:', choice)
+            if choice == gotoOriginalAction:
+                self.pate_widget.gotoOriginalAddress(0x400c)
+            elif choice == gotoPatchedAction:
+                self.pate_widget.gotoPatchedAddress(0x400c)
 
-        if edgeTuple:
+        elif edgeTuple:
             self.showEdgeExitInfo(edgeTuple)
 
     def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
