@@ -31,6 +31,7 @@ module Pate.Verification.Widening
   , InteractiveBundle(..)
   , getSomeGroundTrace
   , getTraceFromModel
+  , addToEquivCondition
   ) where
 
 import           GHC.Stack
@@ -87,6 +88,7 @@ import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Monad
 import qualified Pate.Memory.MemTrace as MT
+import qualified Pate.EventTrace as ET
 
 import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS

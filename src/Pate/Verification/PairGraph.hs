@@ -424,7 +424,7 @@ conditionAction :: ConditionKind -> String
 conditionAction = \case
   ConditionAsserted{} -> "Assert"
   ConditionAssumed{} -> "Assume"
-  ConditionEquiv{} -> "Assume (Equivalence Condition)"
+  ConditionEquiv{} -> "Assume as equivalence condition"
 
 
 data DomainRefinementKind =
@@ -436,6 +436,7 @@ data DomainRefinementKind =
 data DomainRefinement sym arch =
     LocationRefinement ConditionKind DomainRefinementKind (PL.SomeLocation sym arch -> Bool)
   | PruneBranch ConditionKind
+  | AlignControlFlowRefinment ConditionKind
 
 addDomainRefinement ::
   GraphNode arch ->
