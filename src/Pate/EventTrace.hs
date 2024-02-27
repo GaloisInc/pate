@@ -49,6 +49,8 @@ module Pate.EventTrace
 , takeMatchingPrefix2
 , reverseSeq
 , collapsePartialSeq
+, compareSymSeq
+, concatSymSequence
 ) where
 
 import           Prettyprinter
@@ -81,9 +83,12 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.SimulatorRegisters as PSr
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Pate.Pointer as Ptr
-import Control.Monad (forM)
+import Control.Monad (forM, foldM)
 import Data.Maybe (catMaybes)
 import What4.Partial (PartExpr, pattern Unassigned, pattern PE)
+import qualified Data.IORef as IO
+import qualified Data.Map as Map
+import Data.Parameterized.Nonce
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
@@ -565,59 +570,121 @@ muxSeqM3 sym p f_s1 f_s2 = case asConstantPred p of
     c <- muxSymSequence' sym p c1 c2
     return $ (a,b,c)
 
--- | Zip two sequences pointwise. If one is longer than the other, return
---   the suffix of elements.
---   Notably this is not an 'Either' result (i.e. returning only the suffix of the longer sequence),
---   as both suffixes may be nontrivial and symbolic.
---   TODO: not obvious how to handle caching here
-zipSeq ::
+
+-- TODO: This is a duplicate of Pate.Verification.StrongestPosts.SeqPairCache
+-- Replacing 'equivalentSequences' in that module with 'compareSymSeq' will also
+-- let us remove the duplicates there
+data SeqPairCache a b c = SeqPairCache (IO.IORef (Map.Map (Maybe (Nonce GlobalNonceGenerator a), Maybe (Nonce GlobalNonceGenerator b)) c))
+
+newSeqPairCache :: IO (SeqPairCache a b c)
+newSeqPairCache = SeqPairCache <$> IO.newIORef Map.empty
+
+-- TODO: clagged from SymSequence module, should probably be exported, either
+-- directly or with some abstraction for the nonces
+symSequenceNonce :: SymSequence sym a -> Maybe (Nonce GlobalNonceGenerator a)
+symSequenceNonce SymSequenceNil = Nothing
+symSequenceNonce (SymSequenceCons n _ _ ) = Just n
+symSequenceNonce (SymSequenceAppend n _ _) = Just n
+symSequenceNonce (SymSequenceMerge n _ _ _) = Just n
+
+-- TODO: duplicated in Pate.Verification.StrongestPosts, see above
+evalWithPairCache :: IO.MonadIO m =>
+  SeqPairCache a b c ->
+  SymSequence sym a ->
+  SymSequence sym b ->
+  m c ->
+  m c
+evalWithPairCache (SeqPairCache ref) seq1 seq2 f = do
+  m <- IO.liftIO (IO.readIORef ref)
+  let k = (symSequenceNonce seq1, symSequenceNonce seq2)
+  case Map.lookup k m of
+    Just v -> return v
+    Nothing -> do
+      v <- f
+      IO.liftIO (IO.modifyIORef ref (Map.insert k v))
+      return v
+
+zipSeq' ::
   forall sym a b.
-  IsExprBuilder sym =>
+  IsSymExprBuilder sym =>
   sym ->
+  SeqPairCache a b (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b) ->
   SymSequence sym a ->
   SymSequence sym b ->
   IO (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b)
-zipSeq sym as_outer bs_outer = go SymSequenceNil as_outer bs_outer
+zipSeq' sym cache as_outer bs_outer = go as_outer bs_outer
   where
     handle_append :: forall x y.
-      (SymSequence sym (a,b) -> SymSequence sym x -> SymSequence sym y -> IO (SymSequence sym (a,b), SymSequence sym x, SymSequence sym y)) ->
-      SymSequence sym (a,b) ->
+      (SymSequence sym x -> SymSequence sym y -> IO (SymSequence sym (a,b), SymSequence sym x, SymSequence sym y)) ->
       SymSequence sym x ->
       SymSequence sym y ->
       Maybe (IO (SymSequence sym (a,b), SymSequence sym x, SymSequence sym y))
-    handle_append rec acc xs@(SymSequenceAppend _ xs_1 xs_2) ys = Just $ do
-      (acc', xs_suf', ys_suf) <- rec acc xs_1 ys
+    handle_append rec xs@(SymSequenceAppend _ xs_1 xs_2) ys = Just $ do
+      (acc, xs_suf', ys_suf) <- rec xs_1 ys
       p <- isNilSymSequence sym xs_suf'
-      muxSeqM3 sym p
+      (acc', xs_fin, ys_fin) <- muxSeqM3 sym p
         -- if xs_suf' is nil then it means we consumed all of the first
         -- and thus we can continue zipping elements
-        (rec acc' xs_2 ys_suf) $ do
+        (do
+          (acc', xs_fin, ys_fin) <- rec xs_2 ys_suf
+          return (acc', xs_fin, ys_fin)
+          ) $ do
           -- otherwise, we append the tail to the found suffix and return
           -- as a small optimization, if the suffix is the same as the input
           -- then we don't need to create a new sequence for appended suffix
         xs_suf'' <- if xs_suf' == xs_1 then return xs
           else appendSymSequence sym xs_suf' xs_2
-        return $ (acc', xs_suf'', ys_suf)
+        return $ (SymSequenceNil, xs_suf'', ys_suf)
+      acc'' <- appendSymSequence sym acc acc'
+      return (acc'', xs_fin, ys_fin)
 
-    handle_append _ _ _ _ = Nothing
-    go' :: SymSequence sym (a,b) -> SymSequence sym b -> SymSequence sym a -> IO (SymSequence sym (a,b), SymSequence sym b, SymSequence sym a)
-    go' acc s_b s_a = go acc s_a s_b >>= \(acc', s_a', s_b') -> return (acc', s_b', s_a')
+    handle_append _ _ _ = Nothing
+    go' :: SymSequence sym b -> SymSequence sym a -> IO (SymSequence sym (a,b), SymSequence sym b, SymSequence sym a)
+    go' s_b s_a = go s_a s_b >>= \(acc, s_a', s_b') -> return (acc, s_b', s_a')
 
-    go :: SymSequence sym (a,b) -> SymSequence sym a -> SymSequence sym b -> IO (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b)
-    go acc s_a s_b = case (s_a, s_b) of
+    go :: SymSequence sym a -> SymSequence sym b -> IO (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b)
+    go s_a s_b = evalWithPairCache cache s_a s_b $ case (s_a, s_b) of
       -- if either sequence is nil that we can't extend the matching prefix any more
       -- and so we return
-      (_, SymSequenceNil) -> return $ (acc, s_a, s_b)
-      (SymSequenceNil, _) -> return $ (acc, s_a, s_b)
+      (_, SymSequenceNil) -> return $ (SymSequenceNil, s_a, s_b)
+      (SymSequenceNil, _) -> return $ (SymSequenceNil, s_a, s_b)
       (SymSequenceCons _ a s_a', SymSequenceCons _ b s_b') -> do
+
+        (acc, suf_a, suf_b) <- go s_a' s_b'
         acc' <- IO.liftIO $ appendSingle sym acc (a,b)
-        go acc' s_a' s_b'
-      _ | Just g <- handle_append go acc s_a s_b -> g
-      _ | Just g <- handle_append go' acc s_b s_a -> g >>= \(acc', s_b', s_a') -> return (acc', s_a', s_b')
-      (SymSequenceMerge _ p a_T a_F, _) -> muxSeqM3 sym p (go acc a_T s_b) (go acc a_F s_b)
-      (_, SymSequenceMerge _ p b_T b_F) -> muxSeqM3 sym p (go acc s_a b_T) (go acc s_a b_F)
+        return (acc', suf_a, suf_b)
+      _ | Just g <- handle_append go s_a s_b -> g
+      _ | Just g <- handle_append go' s_b s_a -> g >>= \(acc', s_b', s_a') -> return (acc', s_a', s_b')
+      (SymSequenceMerge _ p_a a_T a_F, SymSequenceMerge _ p_b b_T b_F)
+        | Just Refl <- testEquality p_a p_b -> muxSeqM3 sym p_a (go a_T b_T)  (go a_F b_F)
+      (SymSequenceMerge _ p_a a_T a_F, SymSequenceMerge _ p_b b_T b_F) -> do
+        p_a_p_b <- andPred sym p_a p_b
+        not_p_a <- notPred sym p_a
+        not_p_b <- notPred sym p_b
+        not_p_a_not_p_b <- andPred sym not_p_a not_p_b
+
+        muxSeqM3 sym p_a_p_b (go a_T b_T) $
+          muxSeqM3 sym not_p_a_not_p_b (go a_F b_F) $
+            muxSeqM3 sym p_a (go a_T b_F) (go a_F b_T)
+
+      (SymSequenceMerge _ p a_T a_F, _) -> muxSeqM3 sym p (go a_T s_b) (go a_F s_b)
+      (_, SymSequenceMerge _ p b_T b_F) -> muxSeqM3 sym p (go s_a b_T) (go s_a b_F)
       (SymSequenceAppend{}, _) -> error "zipSeq: handle_append unexpectedly failed"
       (_, SymSequenceAppend{}) -> error "zipSeq: handle_append unexpectedly failed"
+
+
+-- | Zip two sequences pointwise. If one is longer than the other, return
+--   the suffix of elements.
+--   Notably this is not an 'Either' result (i.e. returning only the suffix of the longer sequence),
+--   as both suffixes may be nontrivial and symbolic.
+zipSeq ::
+  forall sym a b.
+  IsSymExprBuilder sym =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym b ->
+  IO (SymSequence sym (a,b), SymSequence sym a, SymSequence sym b)
+zipSeq sym as bs = newSeqPairCache >>= \cache -> zipSeq' sym cache as bs
 
 unzipSeq ::
   forall sym a b.
@@ -696,7 +763,7 @@ collapsePartialSeq sym s_outer = mapConcatSeq sym (partToSeq sym) s_outer
 --   TODO: caching?
 takeMatchingPrefix2 ::
   forall sym m a b c.
-  IsExprBuilder sym =>
+  IsSymExprBuilder sym =>
   IO.MonadIO m =>
   sym ->
   (a -> b -> m (PartExpr (Pred sym) c)) ->
@@ -732,3 +799,63 @@ reverseSeq sym s_outer = evalWithFreshCache go s_outer
       sT_rev <- rec sT
       sF_rev <- rec sF
       muxSymSequence sym p sT_rev sF_rev
+
+-- | Concatenate the elements of a 'SymSequence' together
+--   using the provided combine and mux operations and
+--   empty value.
+concatSymSequence ::
+  forall sym m c.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  (Pred sym -> c -> c -> m c) {-^ mux for 'c' -} ->
+  (c -> c -> m c) {-^ combining 'c' values -} ->
+  c {-^ empty c -} ->
+  SymSequence sym c ->
+  m c
+concatSymSequence _sym f g c_init s_outer = getConst <$> evalWithFreshCache go s_outer
+  where
+    go :: (SymSequence sym c -> m ((Const c) c)) -> SymSequence sym c -> m ((Const c) c)
+    go rec s = fmap Const $ case s of
+      SymSequenceNil -> return $ c_init
+      SymSequenceCons _ c1 sa -> do
+        Const c2 <- rec sa
+        g c1 c2
+      SymSequenceAppend _ sa1 sa2 -> do
+        Const c1 <- rec sa1
+        Const c2 <- rec sa2
+        g c1 c2
+      SymSequenceMerge _ p' saT saF -> do
+        Const cT <- rec saT
+        Const cF <- rec saF
+        f p' cT cF
+
+-- | Pointwise comparison of two sequences. When they are (semantically) not
+--   the same length, the resulting predicate is False. Otherwise it is
+--   the result of 'f' on each pair of values.
+--   TODO: Pate.Verification.StrongestPosts.equivalentSequences should be
+--   replaced with this. They are semantically equivalent, however
+--   'zipSeq' creates more concise terms in cases where the predicates
+--   for sequence merges aren't exactly equivalent between the two sequences.
+
+compareSymSeq ::
+  forall sym a b m.
+  IsSymExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym b ->
+  (a -> b -> m (Pred sym)) ->
+  m (Pred sym)
+compareSymSeq sym sa sb f = do
+  (matching_pfx, suf_a, suf_b) <- IO.liftIO $ zipSeq sym sa sb
+  f_seq <- traverseSymSequence sym (\(a,b) -> f a b) matching_pfx
+  nil_a <- IO.liftIO $ isNilSymSequence sym suf_a
+  nil_b <- IO.liftIO $ isNilSymSequence sym suf_b
+
+  matching_head <- concatSymSequence sym
+    (\p a b -> IO.liftIO $ baseTypeIte sym p a b)
+    (\a b -> IO.liftIO $ andPred sym a b)
+    (truePred sym)
+    f_seq
+  IO.liftIO $ andPred sym matching_head nil_a >>= andPred sym nil_b
