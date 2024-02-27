@@ -31,7 +31,7 @@ module What4.JSON
   , (.=~)
   ) where
 
-import           Control.Monad.State (MonadState (..), State, modify, evalState, runState)
+import           Control.Monad.State (MonadState (..), modify)
 
 import qualified Data.Map.Ordered as OMap
 import           Data.Map (Map)
@@ -47,13 +47,11 @@ import qualified What4.Serialize.Printer as W4S
 import qualified What4.Serialize.Parser as W4D
 import qualified What4.Expr.Builder as W4B
 import qualified Data.Map as Map
-import Control.Monad (forM)
 import qualified What4.PredMap as W4P
 import Data.Parameterized.HasRepr
 import qualified What4.Concrete as W4
 import qualified Data.Text as T
-import GHC.IO (catch, evaluate, unsafePerformIO)
-import GHC.IO.Exception (IOException)
+import GHC.IO (evaluate)
 import Control.DeepSeq (force)
 import Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF

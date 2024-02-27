@@ -916,7 +916,7 @@ choice_ header name label v f = do
 
 getChoice ::
   forall k m nm_choice a.
-  MonadIO m =>
+  IO.MonadIO m =>
   --IsTreeBuilder k e m =>
   [Choice k nm_choice a] ->
   m (Maybe a)
@@ -1014,7 +1014,7 @@ class Monad m => MonadTreeBuilder k m | m -> k where
   withTreeBuilder :: forall a. TreeBuilder k -> m a -> m a
 
 newtype NoTreeBuilder k m a = NoTreeBuilder (m a)
-  deriving (Applicative, Functor, Monad, MonadIO, MonadThrow)
+  deriving (Applicative, Functor, Monad, IO.MonadIO, MonadThrow)
 
 instance Monad m => MonadTreeBuilder k (NoTreeBuilder k m) where
   getTreeBuilder = return $ noTreeBuilder

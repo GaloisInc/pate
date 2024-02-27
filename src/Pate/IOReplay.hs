@@ -73,7 +73,7 @@ data IOAction ret = IOActionValue ret =>
   IOAction { ioActionArgs  :: [IOActionArg], ioActionRet :: ret }
 
 data IOActionStore = 
-  IOActionStore { storeQueued :: [T.Text], storeActions :: [Some IOAction], storeDesync :: Bool }
+  IOActionStore { _storeQueued :: [T.Text], _storeActions :: [Some IOAction], _storeDesync :: Bool }
 
 ioActionStore :: MVar IOActionStore
 ioActionStore = unsafePerformIO (newMVar (IOActionStore [] [] False))
