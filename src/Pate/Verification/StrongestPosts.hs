@@ -132,6 +132,7 @@ import qualified Data.Aeson as JSON
 import qualified Pate.Solver as PSo
 import qualified Pate.EventTrace as ET
 import Control.Exception (throw)
+import qualified What4.ExprHelpers as WEH
 
 -- Overall module notes/thoughts
 --
@@ -2492,11 +2493,15 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
           -- context: we are assuming a branch condition that leads to
           -- a control flow divergence, and this predicate states exact control
           -- flow equality.
-          -- Given this, it can't be simplified here.
+          -- Given this, it can't be simplified using the solver here.
           -- It can be simplified later outside of this context, once it has been
           -- added to the assumptions for the node
-          traces_eq <- ET.compareSymSeq sym traceO traceP $ \evO evP ->
+          traces_eq_ <- ET.compareSymSeq sym traceO traceP $ \evO evP ->
             return $ W4.backendPred sym (ET.instrDisassembled evO == ET.instrDisassembled evP)
+          -- if-then-else expressions for booleans are a bit clumsy and don't work well
+          -- with simplification, but the sequence comparison introduces them
+          -- at each branch point, so we convert them into implications
+          traces_eq <- IO.liftIO $ WEH.iteToImp sym traces_eq_
           pg1 <- addToEquivCondition scope (GraphNode currBlock) condK traces_eq pg
           -- drop all post domains from this node since they all need to be re-computed
           -- under this additional assumption/assertion
