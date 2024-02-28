@@ -440,10 +440,15 @@ class PateWrapper:
             if eqCond:
                 self.user.show_message('\n\nFinal Equivalence Condition:')
                 with io.StringIO() as out:
-                    for p in eqCond['predicates']:
-                        out.write('  ')
-                        pprint_symbolic(out, p)
-                        out.write('\n')
+                    out.write('  ')
+                    if eqCond.get('predicates'):
+                        for p in eqCond['predicates']:
+                            pprint_symbolic(out, p)
+                    elif eqCond.get('symbolic'):
+                        pprint_symbolic(out, eqCond)
+                    else:
+                        out.write(eqCond)
+                    out.write('\n')
                     self.user.show_message(out.getvalue())
                 return False
 
@@ -1167,7 +1172,7 @@ def simplify_sexp(sexp, env=None):
     # Simplify (#b1 = x) => x
     if op == '=' and len(arg) == 2:
         if arg[0] == '#b1':
-            return simplify_sexp(arg[1], env)
+            return arg[1]
 
     # Simplify and
     if op == 'andp' and len(arg) == 2:
@@ -1183,26 +1188,32 @@ def simplify_sexp(sexp, env=None):
         if arg[1] == False:
             return arg[0]
 
+    # Simplify not(not x))
+    if op == 'notp' and len(arg) == 1:
+        t = arg[0]
+        if isinstance(t, list) and len(t) == 2 and t[0] == 'not':
+            return t[1]
+
     # Simplify x = x
     if op == '=' and len(arg) == 2:
         if arg[0] == arg[1]:
             return True
 
-    # Simplify not(x & y) => (not(x) | not(y))
-    if op == 'notp' and len(arg) == 1:
-        t = arg[0]
-        if isinstance(t, list) and len(t) == 3 and t[0] == 'andp':
-            return ['orp',
-                    simplify_sexp(['notp', t[1]], env),
-                    simplify_sexp(['notp', t[2]], env)]
-
-    # Simplify not(x | y) => (not(x) & not(y))
-    if op == 'notp' and len(arg) == 1:
-        t = arg[0]
-        if isinstance(t, list) and len(t) == 3 and t[0] == 'orp':
-            return ['andp',
-                    simplify_sexp(['notp', t[1]], env),
-                    simplify_sexp(['notp', t[2]], env)]
+    # # Simplify not(x & y) => (not(x) | not(y))
+    # if op == 'notp' and len(arg) == 1:
+    #     t = arg[0]
+    #     if isinstance(t, list) and len(t) == 3 and t[0] == 'andp':
+    #         return ['orp',
+    #                 ['notp', t[1]],
+    #                 ['notp', t[2]]]
+    #
+    # # Simplify not(x | y) => (not(x) & not(y))
+    # if op == 'notp' and len(arg) == 1:
+    #     t = arg[0]
+    #     if isinstance(t, list) and len(t) == 3 and t[0] == 'orp':
+    #         return ['andp',
+    #                 ['notp', t[1]],
+    #                 ['notp', t[2]],]
 
     # Simplify not(x op y)
     if op == 'notp' and len(arg) == 1:
@@ -1212,10 +1223,10 @@ def simplify_sexp(sexp, env=None):
 
     # Simplify (ite c #b1 #b0) -> c
     if op == 'ite' and len(arg) == 3 and arg[1] == '#b1' and arg[2] == '#b0':
-        return simplify_sexp(arg[0], env)
+        return arg[0]
 
     # else
-    return [op] + list(map(lambda x: simplify_sexp(x, env), sexp[1:]))
+    return [op] + arg
 
 
 def simplify_sexp_let(defs, body, env=None):
@@ -1224,7 +1235,8 @@ def simplify_sexp_let(defs, body, env=None):
     for d in defs:
         x = simplify_sexp(d[1], env)
         env = acons(d[0], x, env)
-    return simplify_sexp(body, env)
+    res = simplify_sexp(body, env)
+    return res
 
 
 def simple_sexp_to_str(sexp):
@@ -1254,6 +1266,7 @@ def pprint_symbolic(out, v):
         env = list(map(lambda x: x[::-1], v['vars']))
         s = render_sexp(v.get('symbolic'), env)
         out.write(s)
+        #pprint.PrettyPrinter(indent=4, stream=out).pprint(s)
 
         # out.write('\n      ')
         # out.write(re.sub('\s+', ' ', v['symbolic']))
@@ -1357,7 +1370,7 @@ def get_demo_files():
     demos_dir = os.getenv('PATE_BINJA_DEMOS')
     if demos_dir:
         # TODO: Search dir for matching files rather than hardcoded list
-        for d in ['may23-challenge10', 'nov23-target1-room1018', 'nov23-target4-room1011-dendy']:
+        for d in ['may23-challenge10', 'nov23-target1-room1018', 'nov23-target3-room1011-dendy', 'nov23-target4-room1011-dendy']:
             for ext in ['.run-config.json', '.replay']:
                 f = os.path.join(demos_dir, d, d + ext)
                 if os.path.isfile(f):
@@ -1373,7 +1386,7 @@ def run_pate_demo():
     choice = input("Choice: ")
     file = files[int(choice)]
 
-    replay = f.endswith('.replay')
+    replay = file.endswith('.replay')
     user = TtyUserInteraction(not replay)
     pate = PateWrapper(file, user)
     pate.run()
