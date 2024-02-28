@@ -28,17 +28,14 @@ from . import pate
 
 class PateWidget(QWidget):
     context: UIContext | None
-    filename: str
     config: dict
-    pate_thread: Thread | None
+    pate_thread: PateThread | None
     flow_graph_widget: MyFlowGraphWidget
 
-    def __init__(self, context: UIContext, parent: QWidget, filename: str, config: dict) -> None:
+    def __init__(self, context: UIContext, parent: QWidget) -> None:
         super().__init__(parent)
         self.context = context
 
-        self.filename = filename
-        self.config = config
         self.pate_thread = None
 
         self.flow_graph_widget = MyFlowGraphWidget(self, self)
@@ -77,18 +74,16 @@ class PateWidget(QWidget):
 
         self.originalFilename = None
         self.patchedFilename = None
-        if config:
-            cwd = config.get('cwd')
-            original = config.get('original')
-            patched = config.get('patched')
-            if cwd and original:
-                self.originalFilename = os.path.join(cwd, original)
-            if cwd and patched:
-                self.patchedFilename = os.path.join(cwd, patched)
 
-        self.loadBinaryViews()
-
-    def loadBinaryViews(self):
+    def loadBinaryViews(self, config: dict):
+        #print('config:', config)
+        cwd = config.get('cwd')
+        original = config.get('original')
+        patched = config.get('patched')
+        if cwd and original:
+            self.originalFilename = os.path.join(cwd, original)
+        if cwd and patched:
+            self.patchedFilename = os.path.join(cwd, patched)
         if self.originalFilename:
             getTabForFilename(self.context, self.originalFilename, True)
         if self.patchedFilename:
@@ -101,10 +96,6 @@ class PateWidget(QWidget):
         showLocationInFilename(self.context, self.patchedFilename, addr)
 
     def closeEvent(self, event):
-        if self.pate_thread:
-            self.pate_thread.cancel()
-
-    def hideEvent(self, event):
         if self.pate_thread:
             self.pate_thread.cancel()
 
@@ -130,17 +121,14 @@ class PateWidget(QWidget):
 
 
 class GuiUserInteraction(pate.PateUserInteraction):
-    def __init__(self, pate_widget: PateWidget, replay: bool = False,
-                 show_ce_trace: bool = False):
+    def __init__(self, pate_widget: PateWidget):
         self.pate_widget = pate_widget
-        self.replay = replay
-        self.show_ce_trace = show_ce_trace
 
-    def ask_user(self, prompt: str, choices: list[str]) -> Optional[str]:
-        execute_on_main_thread_and_wait(lambda: self.pate_widget.ask_user(prompt, choices, self.replay))
-        if self.replay:
-            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText('Pate Command: auto replay\n'))
-            return '42'  # Return anything (its ignored) for fast replay
+    def ask_user(self, prompt: str, choices: list[str], replay_choice: Optional[str] = None) -> Optional[str]:
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.ask_user(prompt, choices, replay_choice is not None))
+        if replay_choice:
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command (replay): {replay_choice}\n'))
+            return replay_choice
         # Wait for user to respond to prompt. This happens on the GUI thread.
         urc = self.pate_widget.user_response_condition
         with urc:
@@ -155,7 +143,7 @@ class GuiUserInteraction(pate.PateUserInteraction):
         execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(msg))
 
     def show_cfar_graph(self, graph: pate.CFARGraph) -> None:
-        execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.build_pate_flow_graph(graph, self.show_ce_trace))
+        execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.build_pate_flow_graph(graph))
 
         promptNode = graph.getPromptNode()
         if promptNode:
@@ -164,59 +152,38 @@ class GuiUserInteraction(pate.PateUserInteraction):
 
 
 class PateThread(Thread):
-    proc: Popen or None
-    oBv: BinaryView | None
-    pBv: BinaryView | None
 
     # TODO: Look at interaction.run_progress_dialog
     # handle cancel and restart
-    def __init__(self, bv, run_fn, pate_widget: PateWidget, replay=False, show_ce_trace=True, trace_file=None):
-        super().__init__(name="Pate " + pate_widget.filename)
+    def __init__(self,
+                 filename,
+                 pate_widget: PateWidget,
+                 ):
+        super().__init__(name="Pate " + filename)
         self.daemon = True
+        self.filename = filename
         self.pate_widget = pate_widget
-        self.replay = replay
-        self.run_fn = run_fn
-        self.trace_file = trace_file
-        self.show_ce_trace = show_ce_trace
-        self.proc = None
-        self.oBv = None
-        self.pBv = None
+        self.pate_user = GuiUserInteraction(self.pate_widget)
+        self.pate_wrapper = pate.PateWrapper(self.filename,
+                                             self.pate_user,
+                                             config_callback=lambda c: self._config_callback(c))
+
+    def _config_callback(self, config: dict):
+        execute_on_main_thread_and_wait(
+            lambda: self.pate_widget.loadBinaryViews(config))
+        execute_on_main_thread_and_wait(
+            lambda: self.pate_widget.context.createTabForWidget("PATE " + os.path.basename(self.filename),
+                                                                self.pate_widget))
 
     def run(self):
-        x = self.run_fn(self.replay)
-        if self.trace_file:
-            with open(self.trace_file, "w") as trace:
-                with x as proc:
-                    self.proc = proc
-                    self._command_loop(proc, self.show_ce_trace, trace)
-        else:
-            with x as proc:
-                self.proc = proc
-                self._command_loop(proc, self.show_ce_trace)
-
-    def cancel(self) -> None:
-        if self.proc and self.is_alive():
-            # Closing input should cause PATE process to exit
-            self.proc.stdin.close()
-            try:
-                self.proc.wait(3)
-            except TimeoutExpired:
-                # Orderly shutdown did not work, kill the process group
-                print('KILLING PATE Process')
-                self.proc.killpg(self.proc.pid, signal.SIGKILL)
-
-    def _command_loop(self, proc: Popen, show_ce_trace: bool = False, trace_io=None):
-
         #self.progress = 'Pate running...'
         execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText('Pate running...'))
-
-        user = GuiUserInteraction(self.pate_widget, self.replay, show_ce_trace)
-        pate_wrapper = pate.PateWrapper(user, proc.stdout, proc.stdin, trace_io)
-
-        pate_wrapper.command_loop()
-
+        self.pate_wrapper.run()
         execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText('Pate finished'))
 
+    def cancel(self) -> None:
+        if self.pate_wrapper:
+            self.pate_wrapper.cancel()
 
 # def run_pate_thread_nov23_t4_dendy1011(bv):
 #     # x = pate.run_may23_c10(self.replay)
@@ -293,9 +260,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #self.setContextMenuPolicy(Qt.CustomContextMenu)
         #self.customContextMenuRequested.connect(self.customContextMenu)
 
-    def build_pate_flow_graph(self,
-                              cfarGraph: pate.CFARGraph,
-                              show_ce_trace: bool = False):
+    def build_pate_flow_graph(self, cfarGraph: pate.CFARGraph):
         self.flowGraph = FlowGraph()
         self.cfarGraph = cfarGraph
 
@@ -314,7 +279,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
             out.write(cfar_node.id.replace(' <- ', '\n  <- '))
             out.write('\n')
 
-            cfar_node.pprint_node_contents('', out, False)  # show_ce_trace) Disable trace in node
+            cfar_node.pprint_node_contents('', out)
 
             flow_node.lines = out.getvalue().split('\n')
             # flow_node.lines = [lines[0]]
@@ -436,8 +401,8 @@ def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: boo
                 tab = t
     if not tab and loadIfDoesNotExist:
         # No Tab found for filename, open it in a new tab
-        file_context = FileContext.openFilename(filename)
-        view_frame = context.openFileContext(file_context)
+        file_context = context.openFilename(filename)
+        #view_frame = context.openFileContext(file_context)
         tab = getTabForFilename(context, filename, False)
         #print('Opened ViewFrame:', view_frame, "Tab:", tab)
     #print('Found Tab:', tab, "for filename:", filename)
@@ -445,15 +410,16 @@ def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: boo
 
 
 def showLocationInFilename(context: UIContext, filename: str, addr: int):
-    # Get tab for filename, opening if necessary
-    tab = getTabForFilename(context, filename, True)
-    vl = ViewLocation("What is this for?", addr)
-    vf: ViewFrame = context.getViewFrameForTab(tab)
-    vf.navigateToViewLocation(vf.getCurrentBinaryView(), vl)
-    #vf.focus()
-    #vf.setFocus()
-    context.activateTab(tab)
-    print("Showed location", addr, "in", filename)
+    if filename:
+        # Get tab for filename, opening if necessary
+        tab = getTabForFilename(context, filename, True)
+        vl = ViewLocation("What is this for?", addr)
+        vf: ViewFrame = context.getViewFrameForTab(tab)
+        vf.navigateToViewLocation(vf.getCurrentBinaryView(), vl)
+        #vf.focus()
+        #vf.setFocus()
+        context.activateTab(tab)
+        print("Showed location", addr, "in", filename)
 
 
 def launch_pate(context: UIActionContext):
@@ -465,25 +431,10 @@ def launch_pate(context: UIActionContext):
     if f is None:
         return
 
-    if f.endswith(".run-config.json"):
-        replay = False
-        trace_file = os.path.join(os.path.dirname(f), 'lastrun.replay')
-        config = pate.get_run_config(f)
-    elif f.endswith(".replay"):
-        replay = True
-        trace_file = None
-        config = {}  # TODO: need config for replay. Save it in replay file as first line?
-
-    pate_widget = PateWidget(context.context, context.widget, f, config)
-    tab = context.context.createTabForWidget("PATE " + os.path.basename(f), pate_widget)
-
-    if replay:
-        pt = PateThread(None, lambda i: pate.run_replay(f), pate_widget, replay=replay, trace_file=trace_file)
-    else:
-        pt = PateThread(None, lambda i: pate.run_config(config), pate_widget, replay=replay, trace_file=trace_file)
-
+    pate_widget = PateWidget(context.context, context.widget)
+    pt = PateThread(f, pate_widget)
     pate_widget.pate_thread = pt
-    pt.start()
+    pt.start()  # This will call pate_widget.loadBinaryViews() once config is loaded
 
 # class PateConfigDialog(QDialog):
 #     def __init__(self, context: UIActionContext, parent=None):
