@@ -114,10 +114,9 @@ class PateWidget(QWidget):
         for i, e in enumerate(choices):
             query += '\n  {}'.format(e)
         self.output_field.appendPlainText(query)
-        if not replay:
-            self.cmd_field.setText('')
-            self.cmd_field.setEnabled(True)
-            self.cmd_field.setFocus()
+        self.cmd_field.setText('')
+        self.cmd_field.setEnabled(True)
+        self.cmd_field.setFocus()
 
 
 class GuiUserInteraction(pate.PateUserInteraction):
@@ -127,17 +126,20 @@ class GuiUserInteraction(pate.PateUserInteraction):
     def ask_user(self, prompt: str, choices: list[str], replay_choice: Optional[str] = None) -> Optional[str]:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.ask_user(prompt, choices, replay_choice is not None))
         if replay_choice:
-            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command (replay): {replay_choice}\n'))
-            return replay_choice
-        # Wait for user to respond to prompt. This happens on the GUI thread.
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText(replay_choice + ' (replay)'))
+        #Wait for user to respond to prompt. This happens on the GUI thread.
         urc = self.pate_widget.user_response_condition
         with urc:
             while self.pate_widget.user_response is None:
                 urc.wait()
             choice = self.pate_widget.user_response
             self.pate_widget.user_response = None
-        execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
-        return choice
+        if replay_choice:
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {replay_choice} (replay)\n'))
+            return replay_choice
+        else:
+            execute_on_main_thread_and_wait( lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
+            return choice
 
     def show_message(self, msg: str) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(msg))
