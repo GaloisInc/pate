@@ -75,7 +75,7 @@ class PateWrapper:
         # We use a helper script to run logic in the user's shell environment.
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
         # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
-        with open(os.path.join(cwd, "lastrun.replay"), "w") as trace:
+        with open(os.path.join(cwd, "lastrun.replay"), "w", encoding='utf-8') as trace:
             with Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel'] + args,
                        cwd=cwd,
                        stdin=PIPE, stdout=PIPE,
