@@ -854,12 +854,15 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
       subTrace (GraphNode nd) $ 
         emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
   subTree @"node" "Assumed Equivalence Conditions" $ do
+    simplifier <- lift $ PSi.deepPredicateSimplifier
     forM_ (getAllNodes pg) $ \nd -> do
        case getCondition pg nd ConditionEquiv of
-        Just{} -> subTrace nd $ do
+        Just cond_spec -> subTrace nd $ do
           _ <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
-            -- 'withConditionsAssumed' emits the expected tracing info here
-            _ <- withGraphNode scope nd pg $ \_ _ -> return pg
+            (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
+            cond_simplified <- PSi.applySimplifier simplifier cond
+            let pg' = setCondition nd ConditionEquiv PropagateNone (PS.mkSimSpec scope cond_simplified) pg
+            _ <- withGraphNode scope nd pg' $ \_ _ -> return pg
             return $ (Const ())
           return ()
         Nothing -> return ()
