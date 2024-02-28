@@ -148,7 +148,10 @@ target3: target3.original.so target3.patched.so
 		-s _ZN3ros22TransportPublisherLink15onMessageLengthERKN5boost10shared_ptrINS_10ConnectionEEERKNS1_12shared_arrayIhEEjb \
 		-s _ZN3ros22TransportPublisherLink16onHeaderReceivedERKN5boost10shared_ptrINS_10ConnectionEEERKNS_6HeaderE \
 		-s _ZN3ros22TransportPublisherLinkD2Ev \
-		--save-macaw-cfgs target1_CFGs
+		--save-macaw-cfgs target1_CFGs \
+		--ignore-warnings NonTotalBlockExits \
+		--ignore-warnings RequiresInvalidPointerOps \
+		--script target3.pate
 
 target3.diff: target3.original.so target3.patched.so
 	arm-none-eabi-objdump -M force-thumb-mode -d target3.original.so > target3.original.dump
