@@ -441,16 +441,12 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
                   emitTrace @"message" (conditionName condK ++ " Discharged")
                   return Nothing
                 False -> do
-                  simplifier <- PSi.getSimplifier
+                  simplifier <- PSi.deepPredicateSimplifier
                   curAsm <- currentAsm
                   emitTrace @"assumption" curAsm
-                  eqCond_pred1 <- liftIO $ WEH.stripAnnotations sym eqCond_pred          
-                  eqCond_pred2 <- PSi.applySimplifier simplifier eqCond_pred1
-                  eqCond_pred3 <- PSi.simplifyPred_deep eqCond_pred2
-                  eqCond_pred4 <- applyCurrentAsms eqCond_pred3
-
-                  emitTraceLabel @"expr" (ExprLabel $ "Simplified " ++ conditionName condK) (Some eqCond_pred4)
-                  return $ Just eqCond_pred4
+                  eqCond_pred_simp <- PSi.applySimplifier simplifier eqCond_pred
+                  emitTraceLabel @"expr" (ExprLabel $ "Simplified " ++ conditionName condK) (Some eqCond_pred_simp)
+                  return $ Just eqCond_pred_simp
               case meqCond_pred' of
                 Nothing -> return $ dropCondition nd condK gr0_
                 Just eqCond_pred' -> do

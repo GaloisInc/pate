@@ -17,6 +17,7 @@ module Pate.Verification.Simplify (
   , applySimplifier
   , runSimplifier
   , getSimplifier
+  , deepPredicateSimplifier
   ) where
 
 import           Control.Monad (foldM)
@@ -217,6 +218,17 @@ applySimplifier simplifier v = withSym $ \sym -> do
   case shouldCheck of
     True -> withTracing @"debug_tree" "Simplifier" $ PEM.mapExpr sym (runSimplifier simplifier) v
     False -> withNoTracing $ PEM.mapExpr sym (runSimplifier simplifier) v
+
+deepPredicateSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
+deepPredicateSimplifier = withSym $ \sym -> do
+  Simplifier f <- getSimplifier
+  return $ Simplifier $ \e0 ->  do
+    e1 <- liftIO $ WEH.stripAnnotations sym e0
+    e2 <- f e1
+    e4 <- case W4.exprType e0 of
+      W4.BaseBoolRepr -> simplifyPred_deep e2
+      _ -> return e2
+    applyCurrentAsms e4
 
 getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 getSimplifier = withSym $ \sym -> do
