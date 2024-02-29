@@ -440,15 +440,19 @@ class PateWrapper:
             if eqCond:
                 self.user.show_message('\n\nFinal Equivalence Condition:')
                 with io.StringIO() as out:
-                    out.write('  ')
                     if eqCond.get('predicates'):
                         for p in eqCond['predicates']:
+                            out.write('  ')
                             pprint_symbolic(out, p)
+                            out.write('\n')
                     elif eqCond.get('symbolic'):
+                        out.write('  ')
                         pprint_symbolic(out, eqCond)
+                        out.write('\n')
                     else:
+                        out.write('  ')
                         out.write(eqCond)
-                    out.write('\n')
+                        out.write('\n')
                     self.user.show_message(out.getvalue())
                 return False
 
@@ -1145,7 +1149,7 @@ infix_op_map = {
     'bvsgt': '>',
     'bvsge': '>=',
     'andp': '&',
-    'orp': '|'
+    'orp': '|',
     }
 
 
@@ -1169,53 +1173,84 @@ def simplify_sexp(sexp, env=None):
         if arg[1] == '#x00000001':
             return arg[0]
 
+    # Simplify not(#b1) => False
+    #          not(#b0) => True
+    if op == 'notp' and len(arg) == 1:
+        if arg[0] == '#b1':
+            return False
+        if arg[0] == '#b0':
+            return True
+
     # Simplify (#b1 = x) => x
     if op == '=' and len(arg) == 2:
         if arg[0] == '#b1':
             return arg[1]
+        if arg[1] == '#b1':
+            return arg[0]
 
-    # Simplify and
+    # Simplify (#b1 != x) => not(x)
+    if op == '!=' and len(arg) == 2:
+        if arg[0] == '#b1':
+            return simplify_sexp(['notp', arg[1]], env)
+        if arg[1] == '#b1':
+            return simplify_sexp(['notp', arg[0]], env)
+
+    # Simplify (#b0 = x) => not(x)
+    if op == '=' and len(arg) == 2:
+        if arg[0] == '#b0':
+            return simplify_sexp(['notp', arg[1]], env)
+        if arg[1] == '#b0':
+            return simplify_sexp(['notp', arg[0]], env)
+
+    # Simplify (#b0 != x) => x
+    if op == '!=' and len(arg) == 2:
+        if arg[0] == '#b0':
+            return arg[1]
+        if arg[1] == '#b0':
+            return arg[0]
+
+    # Simplify (x and True) => x
     if op == 'andp' and len(arg) == 2:
         if arg[0] == True:
             return arg[1]
         if arg[1] == True:
             return arg[0]
 
-    # Simplify or
+    # Simplify (x or False) -> x
     if op == 'orp' and len(arg) == 2:
         if arg[0] == False:
             return arg[1]
         if arg[1] == False:
             return arg[0]
 
-    # Simplify not(not x))
+    # Simplify not(not x)) => x
     if op == 'notp' and len(arg) == 1:
         t = arg[0]
-        if isinstance(t, list) and len(t) == 2 and t[0] == 'not':
+        if isinstance(t, list) and len(t) == 2 and t[0] == 'notp':
             return t[1]
 
-    # Simplify x = x
+    # Simplify (x = x) => True
     if op == '=' and len(arg) == 2:
         if arg[0] == arg[1]:
             return True
 
-    # # Simplify not(x & y) => (not(x) | not(y))
-    # if op == 'notp' and len(arg) == 1:
-    #     t = arg[0]
-    #     if isinstance(t, list) and len(t) == 3 and t[0] == 'andp':
-    #         return ['orp',
-    #                 ['notp', t[1]],
-    #                 ['notp', t[2]]]
-    #
-    # # Simplify not(x | y) => (not(x) & not(y))
-    # if op == 'notp' and len(arg) == 1:
-    #     t = arg[0]
-    #     if isinstance(t, list) and len(t) == 3 and t[0] == 'orp':
-    #         return ['andp',
-    #                 ['notp', t[1]],
-    #                 ['notp', t[2]],]
+    # Simplify not(x & y) => (not(x) | not(y))
+    if op == 'notp' and len(arg) == 1:
+        t = arg[0]
+        if isinstance(t, list) and len(t) == 3 and t[0] == 'andp':
+            return ['orp',
+                    simplify_sexp(['notp', t[1]], env),
+                    simplify_sexp(['notp', t[2]], env)]
 
-    # Simplify not(x op y)
+    # Simplify not(x | y) => (not(x) & not(y))
+    if op == 'notp' and len(arg) == 1:
+        t = arg[0]
+        if isinstance(t, list) and len(t) == 3 and t[0] == 'orp':
+            return ['andp',
+                    simplify_sexp(['notp', t[1]], env),
+                    simplify_sexp(['notp', t[2]],env)]
+
+    # Simplify not(x op y) = (x nop y)
     if op == 'notp' and len(arg) == 1:
         x = arg[0]
         if isinstance(x, list) and len(x) == 3 and neg_op_map.get(x[0]):
