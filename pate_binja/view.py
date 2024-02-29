@@ -401,15 +401,15 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
 def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> QWidget | None:
     """Find Tab for filename."""
-    tabs = context.getTabs()
     tab = None
-    for t in tabs:
-        vf: ViewFrame = context.getViewFrameForTab(t)
-        if vf:
-            fc: FileContext = vf.getFileContext()
-            #print('tab:', t, "ViewFrame", vf, "filename:", fc.getFilename())
-            if fc.getFilename() == filename:
-                tab = t
+    for c in UIContext.allContexts():
+        for t in c.getTabs():
+            vf: ViewFrame = context.getViewFrameForTab(t)
+            if vf:
+                fc: FileContext = vf.getFileContext()
+                print('tab:', t, "ViewFrame", vf, "filename:", fc.getFilename())
+                if fc.getFilename() == filename:
+                    tab = t
     if not tab and loadIfDoesNotExist:
         # No Tab found for filename, open it in a new tab
         file_context = context.openFilename(filename)
