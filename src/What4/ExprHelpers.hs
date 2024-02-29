@@ -77,6 +77,7 @@ module What4.ExprHelpers (
   , stripAnnotations
   , assertPositiveNat
   , printAtoms
+  , iteToImp
   ) where
 
 import           GHC.TypeNats
@@ -1488,6 +1489,53 @@ simplifyApp sym cache simp_check simp_app outer = do
         _ -> else_ e
   go outer
 
+-- (if x then y else z) ==> (x -> y) AND (NOT(x) -> z)
+--   Truth table:
+---  x | y | z | expr | simp
+---  T | T | T |   T  |  T
+--   T | T | F |   T  |  T
+--   T | F | T |   F  |  F
+--   T | F | F |   F  |  F
+--   F | T | T |   T  |  T
+--   F | T | F |   F  |  F
+--   F | F | T |   T  |  T
+--   F | F | F |   F  |  F
+iteToImp' ::
+  forall sym.
+  W4.IsExprBuilder sym =>
+  sym ->
+  W4.Pred sym {-^ if -} ->
+  W4.Pred sym {-^ then -} ->
+  W4.Pred sym {-^ else -} ->
+  IO (W4.Pred sym)
+iteToImp' sym i t e = do
+  i_imp_t <- W4.impliesPred sym i t
+  not_i <- W4.notPred sym i
+  not_i_imp_e <- W4.impliesPred sym not_i e
+  W4.andPred sym i_imp_t not_i_imp_e
+
+-- | Rewrite subterms with: (if x then y else z) ==> (x -> y) AND (NOT(x) -> z)
+iteToImp ::
+  forall sym t solver fs tp.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  W4.SymExpr sym tp ->
+  IO (W4.SymExpr sym tp)
+iteToImp sym e_outer = do
+  cache <- W4B.newIdxCache
+  let
+    go :: forall tp'. W4.SymExpr sym tp' -> IO (W4.SymExpr sym tp')
+    go = simplifyApp sym cache noSimpCheck goApp
+
+    goApp :: forall tp'. W4B.App (W4B.Expr t) tp' -> IO (Maybe (W4.SymExpr sym tp'))
+    goApp = \case
+      W4B.BaseIte W4.BaseBoolRepr _ p t e -> do
+        p' <- go p
+        t' <- go t
+        e' <- go e
+        Just <$> iteToImp' sym p' t' e'
+      _ -> return Nothing
+  go e_outer
 
 -- | Simplify the given predicate by deciding which atoms are logically necessary
 -- according to the given provability function.

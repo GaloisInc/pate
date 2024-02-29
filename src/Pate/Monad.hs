@@ -292,13 +292,17 @@ emitWarning ::
   PEE.InnerEquivalenceError arch ->
   EquivM sym arch ()
 emitWarning innererr = do
-  err <- CMR.asks envWhichBinary >>= \case
-    Just (Some wb) -> return $ PEE.equivalenceErrorFor wb innererr
-    Nothing -> return $ PEE.equivalenceError innererr
-  case PEE.isTracedWhenWarning err of
-    True -> emitTraceWarning err
-    False -> return ()
-  emitEvent (\_ -> PE.Warning err)
+  cfg <- CMR.asks envConfig
+  case elem (PEE.errShortName innererr) (PC.cfgIgnoreWarnings cfg) of
+    True -> return ()
+    False -> do
+      err <- CMR.asks envWhichBinary >>= \case
+        Just (Some wb) -> return $ PEE.equivalenceErrorFor wb innererr
+        Nothing -> return $ PEE.equivalenceError innererr
+      case PEE.isTracedWhenWarning err of
+        True -> emitTraceWarning err
+        False -> return ()
+      emitEvent (\_ -> PE.Warning err)
 
 -- | Emit an event declaring that an error has been raised, but only throw
 -- the error if it is not recoverable (according to 'PEE.isRecoverable')

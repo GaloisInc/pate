@@ -245,6 +245,8 @@ data SimScope sym arch v =
 instance Scoped (SimScope sym arch) where
   unsafeCoerceScope scope = coerce scope
 
+instance Scoped (Const x) where
+  unsafeCoerceScope scope = coerce scope
 
 scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
 scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)

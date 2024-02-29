@@ -130,6 +130,9 @@ import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
 import qualified Data.Aeson as JSON
 import qualified Pate.Solver as PSo
+import qualified Pate.EventTrace as ET
+import Control.Exception (throw)
+import qualified What4.ExprHelpers as WEH
 
 -- Overall module notes/thoughts
 --
@@ -656,7 +659,7 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
             forM_ syncsO $ \(syncO, _) -> do
               liftPG $ (void $ getCurrentDomainM divergeNodeY) 
                   <|> (modify $ \pg -> updateDomain' pg syncO divergeNodeY (PS.mkSimSpec scope domP) (priority PriorityWidening))
-              liftEqM $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope syncO pg $
+              liftEqM $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope bundle dom divergeNode pg $
                 widenAlongEdge scope bundle syncO domP pg divergeNodeY
 
       -- Finally, if we have any Patched one-sided results, we take all combinations
@@ -767,7 +770,7 @@ mergeDualNodes in1 in2 spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ wit
       (_, dom2) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec2
       dom <- PAD.zipSingletonDomains sym dom1 dom2
       bundle <- noopBundle scope (graphNodeBlocks syncNode)
-      withPredomain scope bundle dom $ withConditionsAssumed scope in2 gr2 $ do
+      withPredomain scope bundle dom $ withConditionsAssumed scope bundle dom2 in2 gr2 $ do
         withTracing @"node" in2 $ do
           emitTraceLabel @"domain" PAD.Predomain (Some dom)
           widenAlongEdge scope bundle in2 dom gr2 syncNode
@@ -851,18 +854,52 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
       subTrace (GraphNode nd) $ 
         emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
   subTree @"node" "Assumed Equivalence Conditions" $ do
+    simplifier <- lift $ PSi.deepPredicateSimplifier
     forM_ (getAllNodes pg) $ \nd -> do
        case getCondition pg nd ConditionEquiv of
-        Just eqCondSpec -> subTrace nd $ do
+        Just cond_spec -> subTrace nd $ do
           _ <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
-            (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
-            eqCondPred <- PEE.someExpr sym <$> PEC.toPred sym eqCond
-            emitTraceLabel @"eqcond" (eqCondPred) (Some eqCond)
-            return eqCond
+            (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
+            cond_simplified <- PSi.applySimplifier simplifier cond
+            let pg' = setCondition nd ConditionEquiv PropagateNone (PS.mkSimSpec scope cond_simplified) pg
+            _ <- withGraphNode scope nd pg' $ \_ _ -> return pg
+            return $ (Const ())
           return ()
         Nothing -> return ()
   result <- pairGraphComputeVerdict pg
   emitTrace @"equivalence_result" result
+
+-- | Run a 'PairGraph' computation in the assumption context of
+--   a given 'GraphNode'
+--   This is a subset of the steps taken in 'visitNode' which
+--   sets up the context before performing code discovery and
+--   domain widening.
+withGraphNode ::
+  PS.SimScope sym arch v ->
+  GraphNode arch ->
+  PairGraph sym arch ->
+  (PS.SimBundle sym arch v ->
+   AbstractDomain sym arch v ->
+   EquivM_ sym arch (PairGraph sym arch)) ->
+  EquivM sym arch (PairGraph sym arch)
+withGraphNode scope nd pg f = withSym $ \sym -> do
+  case getCurrentDomain pg nd of
+    Nothing | GraphNode ne <- nd -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks ne)
+    Nothing | ReturnNode nr <- nd -> throwHere $ PEE.MissingDomainForFun (nodeFuns nr)
+    Just dom_spec ->  do
+      (_, d) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) dom_spec
+      case nd of
+        GraphNode ne -> withAbsDomain ne d pg $ withValidInit scope (nodeBlocks ne) $
+          withSimBundle pg (PS.scopeVars scope) ne $ \bundle ->
+            withPredomain scope bundle d $
+              withConditionsAssumed scope bundle d nd pg $
+                f bundle d
+        ReturnNode nr -> do
+          bundle <- noopBundle scope (graphNodeBlocks (ReturnNode nr))
+          withPredomain scope bundle d $
+            withConditionsAssumed scope bundle d (ReturnNode nr) pg $
+              f bundle d
+
 
 -- | For an orphan return, we treat it the same as an undefined PLT stub,
 --   since we effectively have no way to characterize the function behavior.
@@ -1085,40 +1122,60 @@ updateAbsBlockState node d = do
 
 withSatConditionAssumed ::
   PS.SimScope sym arch v ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
   GraphNode arch ->
   ConditionKind ->
   PairGraph sym arch ->
   EquivM_ sym arch (PairGraph sym arch) ->
-  EquivM sym arch (PairGraph sym arch)  
-withSatConditionAssumed scope nd condK gr0 f = withSym $ \sym -> do
+  EquivM sym arch (PairGraph sym arch)
+withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   priority <- thisPriority
   eqCond <- getScopedCondition scope gr0 nd condK
   eqCond_pred <- PEC.toPred sym eqCond
-  (withSatAssumption (PAS.fromPred eqCond_pred) (traceEqCond condK eqCond >> f)) >>= \case
-    Just result -> return result
-    -- for propagated assumptions and assertions, we mark this branch as infeasible
-    Nothing | shouldPropagate (getPropagationKind gr0 nd condK) -> do
-      gr1 <- return $ addDomainRefinement nd (PruneBranch condK) gr0
-      emitTrace @"message" ("Branch dropped as " ++ conditionPrefix condK)
-      return $ queueAncestors (priority PriorityPropagation) nd gr1
-    -- for non-propagated assumptions we don't attempt to prune this branch,
-    -- we just do nothing
-    Nothing -> do
-      emitTrace @"message" ("Branch is " ++ conditionAction condK ++ " infeasible")
-      return gr0
-
+  not_eqCond_pred <- liftIO $ W4.notPred sym eqCond_pred
+  mtraceT <- withSatAssumption (PAS.fromPred eqCond_pred) $
+    getSomeGroundTrace scope bundle dom Nothing
+  mtraceF <- withSatAssumption (PAS.fromPred not_eqCond_pred) $
+    getSomeGroundTrace scope bundle dom Nothing
+  case (mtraceT, mtraceF) of
+    -- condition is not necessarily true or false
+    (Just traceT, Just traceF) -> do
+        let msg = conditionPrefix condK
+        withTracing @"message" msg $ do
+          emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
+          withTracing @"message" "With condition assumed" $
+            emitTrace @"trace_events" traceT
+          withTracing @"message" "With negation assumed" $
+            emitTrace @"trace_events" traceF
+        withAssumption eqCond_pred f
+    -- condition is necessarily true, so we don't need to do anything
+    (Just{}, Nothing) -> f
+    -- condition is not satisfiable
+    (Nothing, _) -> case shouldPropagate (getPropagationKind gr0 nd condK) of
+      True -> do
+        gr1 <- return $ addDomainRefinement nd (PruneBranch condK) gr0
+        emitTrace @"message" ("Branch dropped as " ++ conditionPrefix condK)
+        return $ queueAncestors (priority PriorityPropagation) nd gr1
+      -- for non-propagated assumptions we don't attempt to prune this branch,
+      -- we just do nothing
+      False -> do
+        emitTrace @"message" ("Branch is " ++ conditionAction condK ++ " infeasible")
+        return gr0
 
 withConditionsAssumed ::
   PS.SimScope sym arch v ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
   GraphNode arch ->
   PairGraph sym arch ->
   EquivM_ sym arch (PairGraph sym arch) ->
   EquivM sym arch (PairGraph sym arch)
-withConditionsAssumed scope node gr0 f = do
+withConditionsAssumed scope bundle d node gr0 f = do
   foldr go f [minBound..maxBound]
   where 
     go condK g =
-      withSatConditionAssumed scope node condK gr0 g
+      withSatConditionAssumed scope bundle d node condK gr0 g
 
 accM :: (Monad m, Foldable t) => b -> t a -> (b -> a -> m b) -> m b
 accM b ta f = foldM f b ta
@@ -1264,7 +1321,7 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
             Just gr3 -> do
               priority <- thisPriority
               return $ queueNode (priority PriorityHandleActions) (GraphNode node) gr3
-            Nothing -> withConditionsAssumed scope (GraphNode node) gr0 $ do
+            Nothing -> withConditionsAssumed scope bundle d (GraphNode node) gr0 $ do
               exitPairs <- PD.discoverPairs bundle
               -- if a sync point is reachable then we don't want to do
               -- further analysis, since we want to instead treat this
@@ -1299,7 +1356,7 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
           priority <- thisPriority
           return $ queueNode (priority PriorityHandleActions) (ReturnNode fPair) gr1      
         Nothing -> withTracing @"message" "Toplevel Return" $ do
-          withConditionsAssumed scope (ReturnNode fPair) gr0' $ do
+          withConditionsAssumed scope bundle d (ReturnNode fPair) gr0' $ do
             case isSingleReturn fPair of
               Just{} -> void $ emitError' $ PEE.OrphanedSingletonAnalysis (nodeFuns fPair)
               Nothing -> return ()
@@ -1322,7 +1379,7 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
           Just gr1 -> do
             priority <- thisPriority
             return $ queueNode (priority PriorityHandleActions) (ReturnNode fPair) gr1
-          Nothing -> withConditionsAssumed scope (ReturnNode fPair) gr0 $ do
+          Nothing -> withConditionsAssumed scope bundle d (ReturnNode fPair) gr0 $ do
             traceBundle bundle "Processing return edge"
             -- observable events may occur in return nodes specifically
             -- when they are a synchronization point, since the abstract
@@ -2482,17 +2539,56 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
       -- doesn't need synchronization
       Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
       return $ st'{ branchGraph = pg1 }
+    AlignControlFlow condK -> withSym $ \sym -> do
+      traces <- bundleToInstrTraces bundle
+      pg2 <- case traces of
+        PPa.PatchPairC traceO traceP -> do
+          -- NOTE: this predicate is not satisfiable in the current assumption
+          -- context: we are assuming a branch condition that leads to
+          -- a control flow divergence, and this predicate states exact control
+          -- flow equality.
+          -- Given this, it can't be simplified using the solver here.
+          -- It can be simplified later outside of this context, once it has been
+          -- added to the assumptions for the node
+          traces_eq_ <- ET.compareSymSeq sym traceO traceP $ \evO evP ->
+            return $ W4.backendPred sym (ET.instrDisassembled evO == ET.instrDisassembled evP)
+          -- if-then-else expressions for booleans are a bit clumsy and don't work well
+          -- with simplification, but the sequence comparison introduces them
+          -- at each branch point, so we convert them into implications
+          traces_eq <- IO.liftIO $ WEH.iteToImp sym traces_eq_
+          pg1 <- addToEquivCondition scope (GraphNode currBlock) condK traces_eq pg
+          -- drop all post domains from this node since they all need to be re-computed
+          -- under this additional assumption/assertion
+          return $ dropPostDomains (GraphNode currBlock) (priority PriorityDomainRefresh) pg1
+        _ -> return pg
+      return $ st'{ branchGraph = pg2 }
 
-data DesyncChoice = AdmitNonTotal | IsInfeasible ConditionKind | ChooseDesyncPoint | ChooseSyncPoint | DeferDecision
+bundleToInstrTraces ::
+  PS.SimBundle sym arch v ->
+  EquivM sym arch (PPa.PatchPairC (ET.InstructionTrace sym arch))
+bundleToInstrTraces bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
+  out_ <- PPa.get bin (simOut bundle)
+  let evt = MT.memFullSeq (PS.simOutMem out_)
+  IO.liftIO $ ET.asInstructionTrace sym evt
+
+data DesyncChoice =
+    AdmitNonTotal
+  | IsInfeasible ConditionKind
+  | ChooseDesyncPoint
+  | ChooseSyncPoint
+  | DeferDecision
+  | AlignControlFlow ConditionKind
   deriving (Eq,Ord)
 
 allDesyncChoice :: [DesyncChoice]
 allDesyncChoice =
       [AdmitNonTotal
-      , IsInfeasible ConditionAsserted, IsInfeasible ConditionAssumed, IsInfeasible ConditionEquiv
-      , ChooseDesyncPoint
+      ] ++ map IsInfeasible [minBound..maxBound]
+      ++
+      [ ChooseDesyncPoint
       , ChooseSyncPoint
-      , DeferDecision]
+      , DeferDecision
+      ] ++ map AlignControlFlow [minBound..maxBound]
 
 instance Bounded DesyncChoice where
   minBound = head allDesyncChoice
@@ -2511,6 +2607,9 @@ instance Show DesyncChoice where
     IsInfeasible ConditionAssumed -> "Assume divergence is infeasible"
     IsInfeasible ConditionEquiv -> "Remove divergence in equivalence condition"
     DeferDecision -> "Defer decision"
+    AlignControlFlow ConditionEquiv -> "Align control flow in equivalence condition"
+    AlignControlFlow condK -> conditionAction condK ++ " control flow alignment"
+
 
 choiceRequiresRequeue :: DesyncChoice -> Bool
 choiceRequiresRequeue = \case

@@ -1,0 +1,40 @@
+Choose Entry Point
+    > Function Entry "onMessageLength"
+
+Function Entry "onMessageLength"
+    ...
+    Call to: "function4" (segment1+0x71980) Returns to: "onMessageLength" (segment1+0x1200b8) (original) vs. Jump to: "onMessageLength" (segment1+0x11ffc0)
+        ...
+            ...
+            > Choose desynchronization points
+
+            Choose a desynchronization point:
+                > segment1+0x11ffc0 (original)
+                > segment1+0x11ffc0 (patched)
+
+
+segment1+0x11ffc0 [ via: "onMessageLength" (segment1+0x11febc) ]
+    Block Exits
+        ...
+        ...
+        Control flow desynchronization found
+            > Align control flow in equivalence condition
+
+
+segment1+0x11ebe4
+    Block Exits
+        ...
+        ...
+        Control flow desynchronization found
+            > Align control flow in equivalence condition
+
+segment1+0x11ec7c
+    Block Exits
+        ...
+        ...
+        Control flow desynchronization found
+            > Align control flow in equivalence condition
+
+Verification Finished
+Continue verification?
+    > Finish and view final result
