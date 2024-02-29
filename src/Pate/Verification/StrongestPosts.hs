@@ -867,19 +867,10 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
             let pg' = setCondition nd ConditionEquiv PropagateNone (PS.mkSimSpec scope cond_simplified) pg
             (tr, _) <- withGraphNode scope nd pg' $ \bundle d -> do
               eqCond_pred <- PEC.toPred sym cond_simplified
-              not_eqCond_pred <- liftIO $ W4.notPred sym eqCond_pred
-              mtraceT <- withSatAssumption (PAS.fromPred eqCond_pred) $
-                getSomeGroundTrace scope bundle d Nothing
-              mtraceF <- withSatAssumption (PAS.fromPred not_eqCond_pred) $
-                getSomeGroundTrace scope bundle d Nothing
+              (mtraceT, mtraceF) <- getTracesForPred scope bundle d eqCond_pred
               case (mtraceT, mtraceF) of
-                (Just traceT, Just traceF) -> do
-                  emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some cond_simplified)
-                  withTracing @"message" "With condition assumed" $
-                    emitTrace @"trace_events" traceT
-                  withTracing @"message" "With negation assumed" $
-                    emitTrace @"trace_events" traceF
-                  return $ (Just (FinalEquivCond eqCond_pred (PPa.PatchPairC traceT traceF)), pg')
+                (Just traceT, Just traceF) -> 
+                  return $ (Just (FinalEquivCond eqCond_pred traceT traceF), pg')
                 _ -> return (Nothing, pg')
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
@@ -900,7 +891,8 @@ data FinalResult sym arch = FinalResult
 data FinalEquivCond sym arch = FinalEquivCond
   { 
     _finEqCondPred :: W4.Pred sym
-  , _finEqCondTraces :: PPa.PatchPairC (CE.TraceEvents sym arch)
+  , _finEqCondTraceTrue :: CE.TraceEvents sym arch
+  , _finEqCondTraceFalse :: CE.TraceEvents sym arch
   }
 
 
@@ -912,8 +904,8 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalR
     W4S.object [ "eq_status" W4S..= st, "observable_counterexamples" W4S..= obs, "eq_conditions" W4S..= conds ]
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalEquivCond sym arch) where
-  w4Serialize (FinalEquivCond p evs) = do
-    W4S.object [ "predicate" W4S..== p, "traces" W4S..= evs ]
+  w4Serialize (FinalEquivCond p trT trF) = do
+    W4S.object [ "predicate" W4S..== p, "traces_true" W4S..= trT, "traces_false" W4S..= trF ]
 
 
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "toplevel_result" where
@@ -1186,21 +1178,11 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   priority <- thisPriority
   eqCond <- getScopedCondition scope gr0 nd condK
   eqCond_pred <- PEC.toPred sym eqCond
-  not_eqCond_pred <- liftIO $ W4.notPred sym eqCond_pred
-  mtraceT <- withSatAssumption (PAS.fromPred eqCond_pred) $
-    getSomeGroundTrace scope bundle dom Nothing
-  mtraceF <- withSatAssumption (PAS.fromPred not_eqCond_pred) $
-    getSomeGroundTrace scope bundle dom Nothing
+  let msg = conditionPrefix condK
+  (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred
   case (mtraceT, mtraceF) of
     -- condition is not necessarily true or false
-    (Just traceT, Just traceF) -> do
-        let msg = conditionPrefix condK
-        withTracing @"message" msg $ do
-          emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
-          withTracing @"message" "With condition assumed" $
-            emitTrace @"trace_events" traceT
-          withTracing @"message" "With negation assumed" $
-            emitTrace @"trace_events" traceF
+    (Just{}, Just{}) -> do
         withAssumption eqCond_pred f
     -- condition is necessarily true, so we don't need to do anything
     (Just{}, Nothing) -> f
@@ -1216,6 +1198,27 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
         emitTrace @"message" ("Branch is " ++ conditionAction condK ++ " infeasible")
         return gr0
 
+getTracesForPred ::
+  PS.SimScope sym arch v ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  W4.Pred sym ->
+  EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
+getTracesForPred scope bundle dom p = withSym $ \sym -> do
+  not_p <- liftIO $ W4.notPred sym p
+  withTracing @"expr" (Some p) $ do
+    mtraceT <- withTracing @"message" "With condition assumed" $ 
+      withSatAssumption (PAS.fromPred p) $ do
+        traceT <- getSomeGroundTrace scope bundle dom Nothing
+        emitTrace @"trace_events" traceT
+        return traceT
+    mtraceF <- withTracing @"message" "With negation assumed" $ 
+      withSatAssumption (PAS.fromPred not_p) $ do
+        traceF <- getSomeGroundTrace scope bundle dom Nothing
+        emitTrace @"trace_events" traceF
+        return traceF
+    return (mtraceT, mtraceF)
+  
 withConditionsAssumed ::
   PS.SimScope sym arch v ->
   PS.SimBundle sym arch v ->
