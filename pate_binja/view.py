@@ -332,20 +332,29 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #     print("Edge incoming: ", edgeTuple[1])
 
         if node:
-            context = QMenu(self)
-            gotoOriginalAction = QAction("Goto original address", self)
-            context.addAction(gotoOriginalAction)
-            gotoPatchedAction = QAction("Goto patched address", self)
-            context.addAction(gotoPatchedAction)
-            choice = context.exec(event.globalPos())
-            print('context choice:', choice)
-            if choice == gotoOriginalAction:
-                self.pate_widget.gotoOriginalAddress(0x400c)
-            elif choice == gotoPatchedAction:
-                self.pate_widget.gotoPatchedAddress(0x400c)
+            self.gotoAddressPopupMenu(event, node)
 
         elif edgeTuple:
             self.showEdgeExitInfo(edgeTuple)
+
+    def gotoAddressPopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
+        cfarNode = self.flowToCfar[node]
+        if cfarNode and (cfarNode.original_addr or cfarNode.patched_addr):
+            context = QMenu(self)
+            gotoOriginalAction = None
+            gotoPatchedAction = None
+            if cfarNode.original_addr:
+                gotoOriginalAction = QAction(f'Goto original address {hex(cfarNode.original_addr)}', self)
+                context.addAction(gotoOriginalAction)
+            if cfarNode.patched_addr:
+                gotoPatchedAction = QAction(f'Goto patched address {hex(cfarNode.patched_addr)}', self)
+                context.addAction(gotoPatchedAction)
+            choice = context.exec(event.globalPos())
+            #print('context choice:', choice)
+            if choice == gotoOriginalAction:
+                self.pate_widget.gotoOriginalAddress(cfarNode.original_addr)
+            elif choice == gotoPatchedAction:
+                self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr)
 
     def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
         edge = edgeTuple[0]
@@ -421,7 +430,7 @@ def showLocationInFilename(context: UIContext, filename: str, addr: int):
         #vf.focus()
         #vf.setFocus()
         context.activateTab(tab)
-        print("Showed location", addr, "in", filename)
+        #print("Showed location", addr, "in", filename)
 
 
 def launch_pate(context: UIActionContext):

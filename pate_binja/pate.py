@@ -509,6 +509,7 @@ class CFARNode:
 
     def __init__(self, id: str, desc: str, data: dict):
         self.id = id
+        (self.original_addr, self.patched_addr) = get_cfar_addr(id)
         self.exits = []
         self.exit_meta_data = {}
         self.update_node(desc, data)
@@ -642,6 +643,39 @@ class CFARGraph:
                 if node == e:
                     parents.append(n)
         return parents
+
+
+def get_cfar_addr(cfar_id: str) -> tuple[Optional[int], Optional[int]]:
+    """Get CFAR original and patched address"""
+    parts = cfar_id.split(' vs ')
+    if len(parts) == 2:
+        # diff addr for orig and patch
+        return get_cfar_addr_1(parts[0]), get_cfar_addr_1(parts[1])
+    elif len(parts) == 1:
+        m = re.match(r'(.*)\(original\)', parts[0])
+        if m:
+            # only orig addr
+            return get_cfar_addr_1(m.group(1)), None
+        m = re.match(r'(.*)\(patched\)', parts[0])
+        if m:
+            # only patch addr
+            return (None, get_cfar_addr_1(m.group(1)))
+        # same addr for both
+        addr = get_cfar_addr_1(parts[0])
+        return addr, addr
+    else:
+        return None, None
+
+
+def get_cfar_addr_1(cfar_id:str) -> Optional[int]:
+
+    # First addr
+    m = re.search(r'S[0-9A-Fa-f]+\+(0x[0-9A-Fa-f]+)', cfar_id)
+    if m:
+        addr = m.group(1)
+        return int(addr, 16)
+
+    return None
 
 
 def get_addr_id(a: dict):
