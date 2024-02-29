@@ -95,6 +95,7 @@ mkRunConfig archLoader opts mtt = let
         , PC.cfgScriptPath = scriptPath opts
         , PC.cfgTraceTree = fromMaybe noTraceTree mtt
         , PC.cfgStackScopeAssume = not $ noAssumeStackScope opts
+        , PC.cfgIgnoreWarnings = ignoreWarnings opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = archLoader
@@ -144,6 +145,7 @@ data CLIOptions = CLIOptions
   , readOnlySegments :: [Int]
   , scriptPath :: Maybe FilePath
   , noAssumeStackScope :: Bool
+  , ignoreWarnings :: [String]
   } deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -457,3 +459,7 @@ cliOptions = OA.info (OA.helper <*> parser)
          ( OA.long "no-assume-stack-scope"
          <> OA.help "Don't add additional assumptions about stack frame scoping"
          )
+    <*> OA.many (OA.strOption
+        ( OA.long "ignore-warnings"
+        <> OA.help "Don't raise any of the given warning types"
+        ))

@@ -424,7 +424,7 @@ conditionAction :: ConditionKind -> String
 conditionAction = \case
   ConditionAsserted{} -> "Assert"
   ConditionAssumed{} -> "Assume"
-  ConditionEquiv{} -> "Assume (Equivalence Condition)"
+  ConditionEquiv{} -> "Assume as equivalence condition"
 
 
 data DomainRefinementKind =
@@ -436,6 +436,7 @@ data DomainRefinementKind =
 data DomainRefinement sym arch =
     LocationRefinement ConditionKind DomainRefinementKind (PL.SomeLocation sym arch -> Bool)
   | PruneBranch ConditionKind
+  | AlignControlFlowRefinment ConditionKind
 
 addDomainRefinement ::
   GraphNode arch ->
@@ -751,19 +752,18 @@ considerObservableEvent gr bPair action =
 -- | If a program desync has not already be found
 --   for this block pair, run the given action to check if there
 --   currently is one.
-considerDesyncEvent :: Monad m =>
-  IsTreeBuilder '(sym, arch) PEE.EquivalenceError m =>
+considerDesyncEvent ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
   NodeEntry arch ->
-  (m (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
-  m (PairGraph sym arch)
+  (EquivM_ sym arch (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
+  EquivM sym arch (PairGraph sym arch)
 considerDesyncEvent gr bPair action =
   case Map.lookup bPair (pairGraphDesyncReports gr) of
     -- we have already found observable event differences at this location, so skip the check
     Just cex -> do
       withTracing @"totalityce" cex $ 
-        emitTraceWarning $ PEE.equivalenceError $ PEE.NonTotalBlockExits (nodeBlocks bPair)
+        emitWarning $ PEE.NonTotalBlockExits (nodeBlocks bPair)
       return gr
     Nothing ->
       do (mcex, gr') <- action
@@ -771,7 +771,7 @@ considerDesyncEvent gr bPair action =
            Nothing  -> return gr'
            Just cex -> do
              withTracing @"totalityce" cex $ 
-               emitTraceWarning $ PEE.equivalenceError $ PEE.NonTotalBlockExits (nodeBlocks bPair)
+               emitWarning $ PEE.NonTotalBlockExits (nodeBlocks bPair)
              return gr'{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
 
 -- | Record an error that occured during analysis that doesn't fall into one of the

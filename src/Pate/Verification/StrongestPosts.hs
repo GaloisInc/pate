@@ -130,6 +130,9 @@ import qualified Data.Macaw.BinaryLoader as MBL
 import What4.Partial (justPartExpr)
 import qualified Data.Aeson as JSON
 import qualified Pate.Solver as PSo
+import qualified Pate.EventTrace as ET
+import Control.Exception (throw)
+import qualified What4.ExprHelpers as WEH
 
 -- Overall module notes/thoughts
 --
@@ -2482,17 +2485,56 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
       -- doesn't need synchronization
       Just pg1 <- return $ addToWorkList divergeNode (priority PriorityDeferred) pg
       return $ st'{ branchGraph = pg1 }
+    AlignControlFlow condK -> withSym $ \sym -> do
+      traces <- bundleToInstrTraces bundle
+      pg2 <- case traces of
+        PPa.PatchPairC traceO traceP -> do
+          -- NOTE: this predicate is not satisfiable in the current assumption
+          -- context: we are assuming a branch condition that leads to
+          -- a control flow divergence, and this predicate states exact control
+          -- flow equality.
+          -- Given this, it can't be simplified using the solver here.
+          -- It can be simplified later outside of this context, once it has been
+          -- added to the assumptions for the node
+          traces_eq_ <- ET.compareSymSeq sym traceO traceP $ \evO evP ->
+            return $ W4.backendPred sym (ET.instrDisassembled evO == ET.instrDisassembled evP)
+          -- if-then-else expressions for booleans are a bit clumsy and don't work well
+          -- with simplification, but the sequence comparison introduces them
+          -- at each branch point, so we convert them into implications
+          traces_eq <- IO.liftIO $ WEH.iteToImp sym traces_eq_
+          pg1 <- addToEquivCondition scope (GraphNode currBlock) condK traces_eq pg
+          -- drop all post domains from this node since they all need to be re-computed
+          -- under this additional assumption/assertion
+          return $ dropPostDomains (GraphNode currBlock) (priority PriorityDomainRefresh) pg1
+        _ -> return pg
+      return $ st'{ branchGraph = pg2 }
 
-data DesyncChoice = AdmitNonTotal | IsInfeasible ConditionKind | ChooseDesyncPoint | ChooseSyncPoint | DeferDecision
+bundleToInstrTraces ::
+  PS.SimBundle sym arch v ->
+  EquivM sym arch (PPa.PatchPairC (ET.InstructionTrace sym arch))
+bundleToInstrTraces bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
+  out_ <- PPa.get bin (simOut bundle)
+  let evt = MT.memFullSeq (PS.simOutMem out_)
+  IO.liftIO $ ET.asInstructionTrace sym evt
+
+data DesyncChoice =
+    AdmitNonTotal
+  | IsInfeasible ConditionKind
+  | ChooseDesyncPoint
+  | ChooseSyncPoint
+  | DeferDecision
+  | AlignControlFlow ConditionKind
   deriving (Eq,Ord)
 
 allDesyncChoice :: [DesyncChoice]
 allDesyncChoice =
       [AdmitNonTotal
-      , IsInfeasible ConditionAsserted, IsInfeasible ConditionAssumed, IsInfeasible ConditionEquiv
-      , ChooseDesyncPoint
+      ] ++ map IsInfeasible [minBound..maxBound]
+      ++
+      [ ChooseDesyncPoint
       , ChooseSyncPoint
-      , DeferDecision]
+      , DeferDecision
+      ] ++ map AlignControlFlow [minBound..maxBound]
 
 instance Bounded DesyncChoice where
   minBound = head allDesyncChoice
@@ -2511,6 +2553,9 @@ instance Show DesyncChoice where
     IsInfeasible ConditionAssumed -> "Assume divergence is infeasible"
     IsInfeasible ConditionEquiv -> "Remove divergence in equivalence condition"
     DeferDecision -> "Defer decision"
+    AlignControlFlow ConditionEquiv -> "Align control flow in equivalence condition"
+    AlignControlFlow condK -> conditionAction condK ++ " control flow alignment"
+
 
 choiceRequiresRequeue :: DesyncChoice -> Bool
 choiceRequiresRequeue = \case
