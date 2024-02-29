@@ -905,7 +905,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalR
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalEquivCond sym arch) where
   w4Serialize (FinalEquivCond p trT trF) = do
-    W4S.object [ "predicate" W4S..== p, "traces_true" W4S..= trT, "traces_false" W4S..= trF ]
+    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF ]
 
 
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "toplevel_result" where
