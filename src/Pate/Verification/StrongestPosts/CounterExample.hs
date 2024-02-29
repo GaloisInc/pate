@@ -129,6 +129,18 @@ data ObservableCheckResult sym arch
     (ObservableCounterexample sym arch)
   | ObservableCheckError String
 
+obsResultSummary :: ObservableCheckResult sym arch -> String
+obsResultSummary res = case res of
+  ObservableCheckEq -> "Observably Equivalent"
+  ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
+  ObservableCheckError{} -> "Error during observability check"
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4Serializable sym (ObservableCounterexample sym arch) where
+  w4Serialize r = w4SerializeString (show (ppObservableCounterexample r))
+
+instance W4Serializable sym (ObservableCheckResult sym arch) where
+  w4Serialize r = w4SerializeString (show (obsResultSummary r))
+
 instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "observable_result" where
   type TraceNodeType '(sym,arch) "observable_result" = ObservableCheckResult sym arch
   prettyNode () = \case
@@ -139,10 +151,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "obser
       , PP.pretty msg
       ]
   nodeTags =
-    [ (tag, \() res -> case res of
-                  ObservableCheckEq -> "Observably Equivalent"
-                  ObservableCheckCounterexample{} -> "Observable Inequivalence Detected"
-                  ObservableCheckError{} -> "Error during observability check")
+    [ (tag, \() res -> PP.viaShow $ obsResultSummary res)
       | tag <- [Simplified, Summary]
     ]
 

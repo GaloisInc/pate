@@ -14,6 +14,7 @@
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Pate.Verification.PairGraph.Node (
     GraphNode(..)
@@ -59,6 +60,7 @@ import           Pate.TraceTree
 import qualified Pate.Binary as PB
 import qualified Prettyprinter as PP
 import Data.Parameterized (Some(..), Pair (..))
+import qualified What4.JSON as W4S
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -79,6 +81,12 @@ instance PA.ValidArch arch => JSON.ToJSON (GraphNode arch) where
   toJSON = \case
     GraphNode nd -> JSON.object [ ("graph_node_type", "entry"), "entry_body" JSON..= nd]
     ReturnNode nd -> JSON.object [ ("graph_node_type", "return"), "return_body" JSON..= nd]
+
+instance PA.ValidArch arch => W4S.W4Serializable sym (GraphNode arch) where
+  w4Serialize r = return $ JSON.toJSON r
+
+instance PA.ValidArch arch => W4S.W4Serializable sym (NodeEntry arch) where
+  w4Serialize r = return $ JSON.toJSON r
 
 -- A frozen binary 
 data NodeEntry arch =
