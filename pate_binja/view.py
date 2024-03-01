@@ -442,22 +442,22 @@ class MyFlowGraphWidget(FlowGraphWidget):
             pate.pprint_symbolic(out, cfarNode.predicate)
             d.commonField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_true, 'Trace True Domain', out=out)
+            pate.pprint_node_event_trace_domain(cfarNode.trace_true, 'True Trace Domain', out=out)
             d.trueTraceCommonField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_true, 'Trace True Original', out=out)
+            pate.pprint_node_event_trace_original(cfarNode.trace_true, 'True Trace Original', out=out)
             d.trueTraceOriginalField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_true, 'Trace True Patched', out=out)
+            pate.pprint_node_event_trace_patched(cfarNode.trace_true, 'True Trace Patched', out=out)
             d.trueTracePatchedField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_false, 'Trace False Domain', out=out)
+            pate.pprint_node_event_trace_domain(cfarNode.trace_false, 'False Trace Domain', out=out)
             d.falseTraceCommonField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_false, 'Trace False Original', out=out)
+            pate.pprint_node_event_trace_original(cfarNode.trace_false, 'False Trace Original', out=out)
             d.falseTraceOriginalField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_false, 'Trace False Patched', out=out)
+            pate.pprint_node_event_trace_patched(cfarNode.trace_false, 'False Trace Patched', out=out)
             d.falseTracePatchedField.appendPlainText(out.getvalue())
         d.exec()
 

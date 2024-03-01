@@ -471,10 +471,10 @@ class PateWrapper:
                             out.write('\n')
 
                             #out.write('\nTrace True\n')
-                            #pprint_node_event_trace(trace_true, 'Trace True', out=out)
+                            #pprint_node_event_trace(trace_true, 'True Trace', out=out)
 
                             #out.write('\nTrace False\n')
-                            #pprint_node_event_trace(trace_false, 'Trace True', out=out)
+                            #pprint_node_event_trace(trace_false, 'False Trace', out=out)
 
                             if self.last_cfar_graph:
                                 cfar_node = self.last_cfar_graph.get(node_id)
@@ -1107,12 +1107,12 @@ def pprint_node_event_trace_domain(trace, label: str, pre: str = '', out: IO = s
 
 def pprint_node_event_trace_original(trace, label: str, pre: str = '', out: IO = sys.stdout):
     if trace.get('traces', {}).get('original'):
-        pprint_event_trace(f'{label} Original', trace['traces']['original'], pre, out)
+        pprint_event_trace(f'{label} (original)', trace['traces']['original'], pre, out)
 
 
 def pprint_node_event_trace_patched(trace, label: str, pre: str = '', out: IO = sys.stdout):
     if trace.get('traces', {}).get('patched'):
-        pprint_event_trace(f'{label} Patched', trace['traces']['patched'], pre, out)
+        pprint_event_trace(f'{label} (patched)', trace['traces']['patched'], pre, out)
 
 
 def pprint_event_trace(k: str, et: dict, pre: str = '', out: IO = sys.stdout):
@@ -1176,7 +1176,7 @@ def pprint_mem_op(mem_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero:
 
 def pprint_event_trace_events(k: str, events: dict, pre: str = '', out: IO = sys.stdout):
     """Pretty print an event trace's initial registers."""
-    out.write(f'{pre}{k} Instructions:\n')
+    out.write(f'{pre}{k}\n')
     for e in events:
         ia = e['instruction_addr']
         if ia:
