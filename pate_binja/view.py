@@ -407,7 +407,7 @@ def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: boo
             vf: ViewFrame = context.getViewFrameForTab(t)
             if vf:
                 fc: FileContext = vf.getFileContext()
-                print('tab:', t, "ViewFrame", vf, "filename:", fc.getFilename())
+                #print('tab:', t, "ViewFrame", vf, "filename:", fc.getFilename())
                 if fc.getFilename() == filename:
                     tab = t
     if not tab and loadIfDoesNotExist:
