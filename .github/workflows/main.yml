@@ -10,7 +10,7 @@ name: CI Matrix
 on:
   pull_request:
   push:
-    branches: [master, dm/test-docker]
+    branches: [master]
 
 jobs:
   docker:
