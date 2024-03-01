@@ -330,6 +330,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #self.setContextMenuPolicy(Qt.CustomContextMenu)
         #self.customContextMenuRequested.connect(self.customContextMenu)
 
+    def contextMenuEvent(self, event):
+        # Disable normal FlowGraph context menu.
+        # TODO: Is there a better way to do this? Disconnect a signal/event?
+        pass
+
     def build_pate_flow_graph(self, cfarGraph: pate.CFARGraph):
         self.flowGraph = FlowGraph()
         self.cfarGraph = cfarGraph
