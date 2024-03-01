@@ -448,7 +448,7 @@ class PateWrapper:
             # Finish detected
             self.user.show_message('\nProcessing verification results.\n')
             cmd = rec[-1]['index']
-            self._command(cmd)
+            self._command(str(cmd))
             result = self.next_json()
             with io.StringIO() as out:
                 for tnc in result['trace_node_contents']:
@@ -464,7 +464,7 @@ class PateWrapper:
                             trace_true = eqcond['trace_true']
                             trace_false = eqcond['trace_false']
 
-                            print('CFAR id:', node_id)
+                            #print('CFAR id:', node_id)
 
                             out.write(f'Equivalence condition for {node_id}\n')
                             pprint_symbolic(out, predicate)
@@ -1097,25 +1097,44 @@ def pprint_node_event_trace(trace, label: str, pre: str = '', out: IO = sys.stdo
 
 
 def pprint_node_event_trace_domain(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    if not trace:
+        out.write(f'{pre}{label}:\n')
+        out.write(f'{pre}   No Pre/Post Condition:\n')
+        return
+
     if trace.get('precondition'):
-        out.write(f'{pre}Precondition:\n')
+        out.write(f'{pre}{label} Precondition:\n')
         pprint_eq_domain(trace['precondition'], pre + '  ', out)
     if trace.get('postcondition'):
-        out.write(f'{pre}Postcondition:\n')
+        out.write(f'{pre}{label} Postcondition:\n')
         pprint_eq_domain(trace['postcondition'], pre + '  ', out)
 
 
 def pprint_node_event_trace_original(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    if not trace:
+        out.write(f'{pre}{label} (original):\n')
+        out.write(f'{pre}   None\n')
+        return
+
     if trace.get('traces', {}).get('original'):
         pprint_event_trace(f'{label} (original)', trace['traces']['original'], pre, out)
 
 
 def pprint_node_event_trace_patched(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    if not trace:
+        out.write(f'{pre}{label} (patched):\n')
+        out.write(f'{pre}   None\n')
+        return
+
     if trace.get('traces', {}).get('patched'):
         pprint_event_trace(f'{label} (patched)', trace['traces']['patched'], pre, out)
 
 
 def pprint_event_trace(k: str, et: dict, pre: str = '', out: IO = sys.stdout):
+    if not et:
+        out.write(f'{pre}No event trace\n')
+        return
+
     # TODO: Dropping this for now. Unclear how useful this is to an end user without filtering.
     #pprint_event_trace_initial_reg(k, et['initial_regs'], pre, out)
     pprint_event_trace_events(k, et['events'], pre, out)

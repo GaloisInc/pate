@@ -423,12 +423,14 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 gotoPatchedAction = QAction(f'Goto patched address {hex(cfarNode.patched_addr)}', self)
                 context.addAction(gotoPatchedAction)
             if cfarNode.predicate:
-                print('CFAR with pred:', cfarNode.id)
+                #print('CFAR with pred:', cfarNode.id)
                 showEqCondAction = QAction(f'Show Equivalence Condition', self)
                 context.addAction(showEqCondAction)
             choice = context.exec(event.globalPos())
             #print('context choice:', choice)
-            if choice == gotoOriginalAction:
+            if choice is None:
+                pass
+            elif choice == gotoOriginalAction:
                 self.pate_widget.gotoOriginalAddress(cfarNode.original_addr)
             elif choice == gotoPatchedAction:
                 self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr)
