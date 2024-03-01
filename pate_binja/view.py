@@ -356,7 +356,20 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
             cfar_node.pprint_node_contents('', out)
 
-            flow_node.lines = out.getvalue().split('\n')
+            lines = out.getvalue().split('\n')
+            truncLines = []
+            maxLen = 0
+            for line in lines:
+                if len(truncLines) <= 1:
+                    # First and second line
+                    maxLen = max(maxLen, len(line))
+                else:
+                    # Truncate rest to length of first
+                    if len(line) > maxLen:
+                        line = line[:maxLen-4] + ' ...'
+                truncLines.append(line)
+
+            flow_node.lines = truncLines
             # flow_node.lines = [lines[0]]
 
             if cfar_node.id.find(' vs ') >= 0:
