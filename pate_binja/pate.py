@@ -614,9 +614,9 @@ class CFARNode:
             for n in self.exits:
                 out.write(f'{pre}Exit: {n.id}\n')
                 if self.exit_meta_data.get(n,{}).get('ce_event_trace'):
-                    self.pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example', pre + '  ', out)
+                    pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example', pre + '  ', out)
                 elif self.exit_meta_data.get(n, {}).get('event_trace'):
-                     self.pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], '', pre + '  ', out)
+                    pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], '', pre + '  ', out)
 
     def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
                            show_ce_trace: bool = False):
@@ -1159,7 +1159,7 @@ def pprint_reg_op(reg_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero:
                     if name == '_PC' and ppval.startswith('0x0:'):
                         #  TODO: is this correct?
                         out.write(f'{pre}pc <- return address\n')
-                    elif name in {'PSTATE_C', 'PSTATE_V', 'PSTATE_N', 'PSTATE_Z'}:
+                    elif name in {'_PC', 'PSTATE_C', 'PSTATE_V', 'PSTATE_N', 'PSTATE_Z'}:
                         out.write(f'{pre}{name} <- {ppval}\n')
                 case {'reg': name}:
                     out.write(f'{pre}{name} <- {ppval}\n')
