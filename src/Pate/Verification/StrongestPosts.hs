@@ -133,6 +133,7 @@ import qualified Pate.Solver as PSo
 import qualified Pate.EventTrace as ET
 import Control.Exception (throw)
 import qualified What4.ExprHelpers as WEH
+import qualified What4.JSON as W4S
 
 -- Overall module notes/thoughts
 --
@@ -849,25 +850,69 @@ pairGraphComputeFixpoint entries gr_init = do
 
 showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
 showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
+  
+  
   subTree @"node" "Observable Counter-examples" $ do
     forM_ (Map.toList (pairGraphObservableReports pg)) $ \(nd,report) -> 
       subTrace (GraphNode nd) $ 
         emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
-  subTree @"node" "Assumed Equivalence Conditions" $ do
+  eq_conds <- fmap catMaybes $ subTree @"node" "Assumed Equivalence Conditions" $ do
     simplifier <- lift $ PSi.deepPredicateSimplifier
-    forM_ (getAllNodes pg) $ \nd -> do
+    forM (getAllNodes pg) $ \nd -> do
        case getCondition pg nd ConditionEquiv of
         Just cond_spec -> subTrace nd $ do
-          _ <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
+          s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
             (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
             cond_simplified <- PSi.applySimplifier simplifier cond
             let pg' = setCondition nd ConditionEquiv PropagateNone (PS.mkSimSpec scope cond_simplified) pg
-            _ <- withGraphNode scope nd pg' $ \_ _ -> return pg
-            return $ (Const ())
-          return ()
-        Nothing -> return ()
+            (tr, _) <- withGraphNode scope nd pg' $ \bundle d -> do
+              eqCond_pred <- PEC.toPred sym cond_simplified
+              (mtraceT, mtraceF) <- getTracesForPred scope bundle d eqCond_pred
+              case (mtraceT, mtraceF) of
+                (Just traceT, Just traceF) -> 
+                  return $ (Just (FinalEquivCond eqCond_pred traceT traceF), pg')
+                _ -> return (Nothing, pg')
+            return $ (Const (fmap (nd,) tr))
+          return $ PS.viewSpec s (\_ -> getConst)
+        Nothing -> return Nothing
   result <- pairGraphComputeVerdict pg
   emitTrace @"equivalence_result" result
+  let eq_conds_map = Map.fromList eq_conds
+  let toplevel_result = FinalResult result (pairGraphObservableReports pg) eq_conds_map
+  emitTrace @"toplevel_result" toplevel_result
+
+data FinalResult sym arch = FinalResult
+  { 
+    _finEqStatus :: PE.EquivalenceStatus
+  , _finObservableCE ::  Map.Map (NodeEntry arch) (CE.ObservableCounterexample sym arch)
+  , _finEqConds :: Map.Map (GraphNode arch) (FinalEquivCond sym arch)
+  }
+
+data FinalEquivCond sym arch = FinalEquivCond
+  { 
+    _finEqCondPred :: W4.Pred sym
+  , _finEqCondTraceTrue :: CE.TraceEvents sym arch
+  , _finEqCondTraceFalse :: CE.TraceEvents sym arch
+  }
+
+
+instance W4S.W4Serializable sym (PE.EquivalenceStatus) where
+  w4Serialize st = W4S.w4SerializeString st
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalResult sym arch) where
+  w4Serialize (FinalResult st obs conds) = do
+    W4S.object [ "eq_status" W4S..= st, "observable_counterexamples" W4S..= obs, "eq_conditions" W4S..= conds ]
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalEquivCond sym arch) where
+  w4Serialize (FinalEquivCond p trT trF) = do
+    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF ]
+
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "toplevel_result" where
+  type TraceNodeType '(sym,arch) "toplevel_result" = FinalResult sym arch
+  prettyNode () _ = "Toplevel Result"
+  nodeTags = mkTags @'(sym, arch) @"toplevel_result" [Simplified, Summary]
+  jsonNode sym () v = W4S.w4ToJSON sym v
 
 -- | Run a 'PairGraph' computation in the assumption context of
 --   a given 'GraphNode'
@@ -880,8 +925,8 @@ withGraphNode ::
   PairGraph sym arch ->
   (PS.SimBundle sym arch v ->
    AbstractDomain sym arch v ->
-   EquivM_ sym arch (PairGraph sym arch)) ->
-  EquivM sym arch (PairGraph sym arch)
+   EquivM_ sym arch (a, PairGraph sym arch)) ->
+  EquivM sym arch (a, PairGraph sym arch)
 withGraphNode scope nd pg f = withSym $ \sym -> do
   case getCurrentDomain pg nd of
     Nothing | GraphNode ne <- nd -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks ne)
@@ -892,12 +937,12 @@ withGraphNode scope nd pg f = withSym $ \sym -> do
         GraphNode ne -> withAbsDomain ne d pg $ withValidInit scope (nodeBlocks ne) $
           withSimBundle pg (PS.scopeVars scope) ne $ \bundle ->
             withPredomain scope bundle d $
-              withConditionsAssumed scope bundle d nd pg $
+              {- withConditionsAssumed scope bundle d nd pg $ -}
                 f bundle d
         ReturnNode nr -> do
           bundle <- noopBundle scope (graphNodeBlocks (ReturnNode nr))
           withPredomain scope bundle d $
-            withConditionsAssumed scope bundle d (ReturnNode nr) pg $
+            {- withConditionsAssumed scope bundle d (ReturnNode nr) pg $ -}
               f bundle d
 
 
@@ -1133,21 +1178,11 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   priority <- thisPriority
   eqCond <- getScopedCondition scope gr0 nd condK
   eqCond_pred <- PEC.toPred sym eqCond
-  not_eqCond_pred <- liftIO $ W4.notPred sym eqCond_pred
-  mtraceT <- withSatAssumption (PAS.fromPred eqCond_pred) $
-    getSomeGroundTrace scope bundle dom Nothing
-  mtraceF <- withSatAssumption (PAS.fromPred not_eqCond_pred) $
-    getSomeGroundTrace scope bundle dom Nothing
+  let msg = conditionPrefix condK
+  (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred
   case (mtraceT, mtraceF) of
     -- condition is not necessarily true or false
-    (Just traceT, Just traceF) -> do
-        let msg = conditionPrefix condK
-        withTracing @"message" msg $ do
-          emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
-          withTracing @"message" "With condition assumed" $
-            emitTrace @"trace_events" traceT
-          withTracing @"message" "With negation assumed" $
-            emitTrace @"trace_events" traceF
+    (Just{}, Just{}) -> do
         withAssumption eqCond_pred f
     -- condition is necessarily true, so we don't need to do anything
     (Just{}, Nothing) -> f
@@ -1163,6 +1198,27 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
         emitTrace @"message" ("Branch is " ++ conditionAction condK ++ " infeasible")
         return gr0
 
+getTracesForPred ::
+  PS.SimScope sym arch v ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  W4.Pred sym ->
+  EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
+getTracesForPred scope bundle dom p = withSym $ \sym -> do
+  not_p <- liftIO $ W4.notPred sym p
+  withTracing @"expr" (Some p) $ do
+    mtraceT <- withTracing @"message" "With condition assumed" $ 
+      withSatAssumption (PAS.fromPred p) $ do
+        traceT <- getSomeGroundTrace scope bundle dom Nothing
+        emitTrace @"trace_events" traceT
+        return traceT
+    mtraceF <- withTracing @"message" "With negation assumed" $ 
+      withSatAssumption (PAS.fromPred not_p) $ do
+        traceF <- getSomeGroundTrace scope bundle dom Nothing
+        emitTrace @"trace_events" traceF
+        return traceF
+    return (mtraceT, mtraceF)
+  
 withConditionsAssumed ::
   PS.SimScope sym arch v ->
   PS.SimBundle sym arch v ->
