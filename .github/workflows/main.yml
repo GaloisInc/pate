@@ -36,7 +36,7 @@ jobs:
       # Pulls the latest image to try to re-use some layers
       - name: Pull Latest Docker image
         run: |
-          docker pull artifactory.galois.com:5025/pate/pate:latest
+          docker pull artifactory.galois.com:5025/pate/pate:latest || echo "No latest image found"
 
       - name: Build Docker Image
         run: |
