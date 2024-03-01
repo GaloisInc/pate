@@ -29,6 +29,7 @@ module Pate.Equivalence.Error (
   , loaderError
   , someExpr
   , PairGraphErr(..)
+  , errShortName
   ) where
 
 import qualified Control.Exception as X
@@ -75,6 +76,11 @@ data InequivalenceReason =
 data InnerSymEquivalenceError sym arch =
   forall tp pre post. RescopingFailure (PAS.AssumptionSet sym) (PS.ScopedExpr sym pre tp) (PS.ScopedExpr sym post tp)
   | AssumedFalse (PAS.AssumptionSet sym) (PAS.AssumptionSet sym)
+
+symErrShortName :: InnerSymEquivalenceError sym arch -> String
+symErrShortName = \case
+  RescopingFailure{} -> "RescopingFailure"
+  AssumedFalse{} -> "AssumedFalse"
 
 deriving instance W4.IsExprBuilder sym => Show (InnerSymEquivalenceError sym arch)
 
@@ -163,6 +169,11 @@ data InnerEquivalenceError arch
   | OrphanedSingletonAnalysis (PB.FunPair arch)
   | RequiresInvalidPointerOps
   | PairGraphError PairGraphErr
+
+errShortName :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> String
+errShortName = \case
+  InnerSymEquivalenceError_ se -> symErrShortName se
+  e -> head $ words (show e)
 
 data PairGraphErr = PairGraphErr String
   deriving Show
