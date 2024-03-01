@@ -1178,25 +1178,28 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   priority <- thisPriority
   eqCond <- getScopedCondition scope gr0 nd condK
   eqCond_pred <- PEC.toPred sym eqCond
-  let msg = conditionPrefix condK
-  (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred
-  case (mtraceT, mtraceF) of
-    -- condition is not necessarily true or false
-    (Just{}, Just{}) -> do
-        withAssumption eqCond_pred f
-    -- condition is necessarily true, so we don't need to do anything
-    (Just{}, Nothing) -> f
-    -- condition is not satisfiable
-    (Nothing, _) -> case shouldPropagate (getPropagationKind gr0 nd condK) of
-      True -> do
-        gr1 <- return $ addDomainRefinement nd (PruneBranch condK) gr0
-        emitTrace @"message" ("Branch dropped as " ++ conditionPrefix condK)
-        return $ queueAncestors (priority PriorityPropagation) nd gr1
-      -- for non-propagated assumptions we don't attempt to prune this branch,
-      -- we just do nothing
-      False -> do
-        emitTrace @"message" ("Branch is " ++ conditionAction condK ++ " infeasible")
-        return gr0
+  case W4.asConstantPred eqCond_pred of
+    Just True -> f
+    _ -> do
+      let msg = conditionPrefix condK
+      (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred
+      case (mtraceT, mtraceF) of
+        -- condition is not necessarily true or false
+        (Just{}, Just{}) -> do
+            withAssumption eqCond_pred f
+        -- condition is necessarily true, so we don't need to do anything
+        (Just{}, Nothing) -> f
+        -- condition is not satisfiable
+        (Nothing, _) -> case shouldPropagate (getPropagationKind gr0 nd condK) of
+          True -> do
+            gr1 <- return $ addDomainRefinement nd (PruneBranch condK) gr0
+            emitTrace @"message" ("Branch dropped as " ++ conditionPrefix condK)
+            return $ queueAncestors (priority PriorityPropagation) nd gr1
+          -- for non-propagated assumptions we don't attempt to prune this branch,
+          -- we just do nothing
+          False -> do
+            emitTrace @"message" ("Branch is " ++ conditionAction condK ++ " infeasible")
+            return gr0
 
 getTracesForPred ::
   PS.SimScope sym arch v ->
