@@ -857,21 +857,21 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
       subTrace (GraphNode nd) $ 
         emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
   eq_conds <- fmap catMaybes $ subTree @"node" "Assumed Equivalence Conditions" $ do
-    simplifier <- lift $ PSi.deepPredicateSimplifier
+    
     forM (getAllNodes pg) $ \nd -> do
        case getCondition pg nd ConditionEquiv of
         Just cond_spec -> subTrace nd $ do
           s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
             (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
-            cond_simplified <- PSi.applySimplifier simplifier cond
-            let pg' = setCondition nd ConditionEquiv PropagateNone (PS.mkSimSpec scope cond_simplified) pg
-            (tr, _) <- withGraphNode scope nd pg' $ \bundle d -> do
+            (tr, _) <- withGraphNode scope nd pg $ \bundle d -> do
+              simplifier <- PSi.deepPredicateSimplifier
+              cond_simplified <- PSi.applySimplifier simplifier cond
               eqCond_pred <- PEC.toPred sym cond_simplified
               (mtraceT, mtraceF) <- getTracesForPred scope bundle d eqCond_pred
               case (mtraceT, mtraceF) of
                 (Just traceT, Just traceF) -> 
-                  return $ (Just (FinalEquivCond eqCond_pred traceT traceF), pg')
-                _ -> return (Nothing, pg')
+                  return $ (Just (FinalEquivCond eqCond_pred traceT traceF), pg)
+                _ -> return (Nothing, pg)
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
         Nothing -> return Nothing
