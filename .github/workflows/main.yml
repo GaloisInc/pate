@@ -37,11 +37,16 @@ jobs:
       # Pulls the latest image to try to re-use some layers
       - name: Pull Latest Docker image
         run: |
-          docker pull artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} || echo "No latest image found"
+          docker pull artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} || \
+            docker pull artifactory.galois.com:5025/pate/pate:refs-heads-master || \
+            echo "No latest image found"
 
       - name: Build Docker Image
         run: |
-          docker build . -t pate
+          docker build . \
+            --cache-from artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} \
+            --cache-from artifactory.galois.com:5025/pate/pate:refs-heads-master \
+            -t pate
 
       - name: Test Docker Image
         run: |
