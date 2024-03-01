@@ -49,7 +49,7 @@ class PateWidget(QWidget):
         self.cmd_field.returnPressed.connect(self.onPateCommandReturnPressed)
 
         cmd_field_layout = QHBoxLayout()
-        cmd_field_layout.addWidget(QLabel("Pate Command: "))
+        cmd_field_layout.addWidget(QLabel("PATE Command: "))
         cmd_field_layout.addWidget(self.cmd_field)
         cmd_field_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -135,10 +135,10 @@ class GuiUserInteraction(pate.PateUserInteraction):
             choice = self.pate_widget.user_response
             self.pate_widget.user_response = None
         if replay_choice:
-            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {replay_choice} (replay)\n'))
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'PATE Command: {replay_choice} (replay)\n'))
             return replay_choice
         else:
-            execute_on_main_thread_and_wait( lambda: self.pate_widget.output_field.appendPlainText(f'Pate Command: {choice}\n'))
+            execute_on_main_thread_and_wait( lambda: self.pate_widget.output_field.appendPlainText(f'PATE Command: {choice}\n'))
             return choice
 
     def show_message(self, msg: str) -> None:
@@ -388,13 +388,13 @@ class MyFlowGraphWidget(FlowGraphWidget):
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
         d = PateCfarExitDialog(parent=self)
         with io.StringIO() as out:
-            sourceCfarNode.pprint_node_event_trace_domain(trace, label, out=out)
+            pate.pprint_node_event_trace_domain(trace, label, out=out)
             d.commonField.setPlainText(out.getvalue())
         with io.StringIO() as out:
-            sourceCfarNode.pprint_node_event_trace_original(trace, label, out=out)
+            pate.pprint_node_event_trace_original(trace, label, out=out)
             d.originalField.setPlainText(out.getvalue())
         with io.StringIO() as out:
-            sourceCfarNode.pprint_node_event_trace_patched(trace, label, out=out)
+            pate.pprint_node_event_trace_patched(trace, label, out=out)
             d.patchedField.setPlainText(out.getvalue())
         d.exec()
 

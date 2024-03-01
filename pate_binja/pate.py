@@ -38,6 +38,7 @@ class PateWrapper:
     filename: os.PathLike
     pate_proc: Optional[Popen]
     trace_file: Optional[IO]
+    last_cfar_graph: Optional[CFARGraph]
 
     def __init__(self, filename: os.PathLike,
                  user: PateUserInteraction,
@@ -53,6 +54,7 @@ class PateWrapper:
 
         self.pate_proc = None
         self.trace_file = None
+        self.last_cfar_graph = None
 
     def run(self) -> None:
         if self.filename.endswith(".run-config.json"):
@@ -426,37 +428,7 @@ class PateWrapper:
             print('\nProcessing JSON:')
             pp.pprint(rec)
 
-        if (isinstance(rec, dict) and rec.get('this')
-                and rec.get('trace_node_contents') is not None
-                and rec['this'].startswith('Assumed Equivalence Conditions')):
-            # pprint the eq cond
-            eqCond = rec['trace_node_contents'][len(rec['trace_node_contents']) - 1]['content'].get('trace_node')
-            if eqCond:
-                self.user.show_message('\n\nFinal Equivalence Condition:')
-                self.user.show_message(eqCond.replace('\\n', '\n') + '\n')
-                return False
-
-            eqCond = rec['trace_node_contents'][len(rec['trace_node_contents']) - 1]['content'].get('extra_preds')
-            if eqCond:
-                self.user.show_message('\n\nFinal Equivalence Condition:')
-                with io.StringIO() as out:
-                    if eqCond.get('predicates'):
-                        for p in eqCond['predicates']:
-                            out.write('  ')
-                            pprint_symbolic(out, p)
-                            out.write('\n')
-                    elif eqCond.get('symbolic'):
-                        out.write('  ')
-                        pprint_symbolic(out, eqCond)
-                        out.write('\n')
-                    else:
-                        out.write('  ')
-                        out.write(eqCond)
-                        out.write('\n')
-                    self.user.show_message(out.getvalue())
-                return False
-
-        elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
+        if isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
             # Prompt User
             # TODO: Heuristic for when to update graph. Ask Dan. Maybe add flag to JSON?
             if rec['this'].startswith('Control flow desynchronization found at') \
@@ -464,6 +436,7 @@ class PateWrapper:
                 # Extract flow graph
                 cfar_graph = self.extract_graph()
                 if cfar_graph:
+                    self.last_cfar_graph = cfar_graph
                     self.user.show_cfar_graph(cfar_graph)
                 # Go back to prompt
                 self._command('goto_prompt')
@@ -471,16 +444,84 @@ class PateWrapper:
             choice = self._ask_user_rec(rec)
             self._command(choice)
 
-        elif isinstance(rec, list) and rec[len(rec) - 1]['content'] == {'node_kind': 'final_result'}:
-            # TODO: Hack to detect finish. Talk to Dan about providing a better mechanism.
-            choices = list(map(get_choice_id, rec))
-            choice = self._ask_user('Final Prompt:', choices)
-            self._command(choice)
+        elif isinstance(rec, list) and len(rec) > 0 and rec[-1].get('content') == {'node_kind': 'final_result'}:
+            # Finish detected
+            self.user.show_message('\n\nProcessing verification results.\n\n')
+            cmd = rec[-1]['index']
+            self._command(cmd)
+            result = self.next_json()
+            with io.StringIO() as out:
+                for tnc in result['trace_node_contents']:
+                    eqconds = tnc.get('content', {}).get('eq_conditions', {}).get('map')
+                    if eqconds:
+                        # Found eq conditions
+                        for item in eqconds:
+                            node = item['key']
+                            eqcond = item['val']
 
-        elif isinstance(rec, dict) and rec.get('trace_node_kind') == 'equivalence_result':
-            # Done if we got an equivalence result
-            self.user.show_message(rec['this'] + '\n')
+                            node_id = get_graph_node_id(node)
+                            predicate = eqcond['predicate']
+                            trace_true = eqcond['trace_true']
+                            trace_false = eqcond['trace_false']
+
+                            print('CFAR id:', node_id)
+
+                            out.write(f'\nEquivalence condition for {node_id}\n')
+                            pprint_symbolic(out, predicate)
+                            out.write('\n')
+
+                            #out.write('\nTrace True\n')
+                            #pprint_node_event_trace(trace_true, 'Trace True', out=out)
+
+                            #out.write('\nTrace False\n')
+                            #pprint_node_event_trace(trace_false, 'Trace True', out=out)
+
+                            if self.last_cfar_graph:
+                                cfar_node = self.last_cfar_graph.get(node_id)
+                                cfar_node.predicate = predicate
+                                cfar_node.trace_true = trace_true
+                                cfar_node.trace_false = trace_false
+
+                self.user.show_message(out.getvalue())
+            if self.last_cfar_graph:
+                self.user.show_cfar_graph(self.last_cfar_graph)
+
             return False
+
+        # elif (isinstance(rec, dict) and rec.get('this')
+        #         and rec.get('trace_node_contents') is not None
+        #         and rec['this'].startswith('Assumed Equivalence Conditions')):
+        #     # pprint the eq cond
+        #     eqCond = rec['trace_node_contents'][len(rec['trace_node_contents']) - 1]['content'].get('trace_node')
+        #     if eqCond:
+        #         self.user.show_message('\n\nFinal Equivalence Condition:')
+        #         self.user.show_message(eqCond.replace('\\n', '\n') + '\n')
+        #         return False
+        #
+        #     eqCond = rec['trace_node_contents'][len(rec['trace_node_contents']) - 1]['content'].get('extra_preds')
+        #     if eqCond:
+        #         self.user.show_message('\n\nFinal Equivalence Condition:')
+        #         with io.StringIO() as out:
+        #             if eqCond.get('predicates'):
+        #                 for p in eqCond['predicates']:
+        #                     out.write('  ')
+        #                     pprint_symbolic(out, p)
+        #                     out.write('\n')
+        #             elif eqCond.get('symbolic'):
+        #                 out.write('  ')
+        #                 pprint_symbolic(out, eqCond)
+        #                 out.write('\n')
+        #             else:
+        #                 out.write('  ')
+        #                 out.write(eqCond)
+        #                 out.write('\n')
+        #             self.user.show_message(out.getvalue())
+        #         return False
+        #
+        # elif isinstance(rec, dict) and rec.get('trace_node_kind') == 'equivalence_result':
+        #     # Done if we got an equivalence result
+        #     self.user.show_message(rec['this'] + '\n')
+        #     return False
 
         elif isinstance(rec, dict) and rec.get('error'):
             self.show_message('error: ' + rec['error'])
@@ -493,7 +534,6 @@ class PateWrapper:
         return True
 
     def show_message(self, rec: Any):
-
         if isinstance(rec, list):
             for m in rec:
                 self.user.show_message("Processing ... " + get_choice_id(m))
@@ -520,6 +560,9 @@ class CFARNode:
         self.external_postdomain = None
         self.addr = None
         self.finished = True
+        self.predicate = None
+        self.trace_true = None
+        self.trace_false = None
 
     def update_node(self, desc: str, data: dict):
         self.desc = desc
@@ -556,6 +599,10 @@ class CFARNode:
     def pprint(self, pre: str = ''):
         print(f'{pre}CFAR Node: {self.id}')
         print(f'{pre}desc: {self.desc}')
+        if self.predicate:
+            sys.stdout.write('Equivalence Condition: ')
+            pprint_symbolic(sys.stdout, self.predicate)
+            sys.stdout.write('\n')
         self.pprint_node_contents(pre)
         print()
         #print('data:')
@@ -584,26 +631,7 @@ class CFARNode:
             out.write(f'{pre}Postdomain:\n')
             pprint_domain(self.external_postdomain, pre + '  ', out)
 
-    def pprint_node_event_trace(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
-        self.pprint_node_event_trace_domain(trace, label, pre, out)
-        self.pprint_node_event_trace_original(trace, label, pre, out)
-        self.pprint_node_event_trace_patched(trace, label, pre, out)
 
-    def pprint_node_event_trace_domain(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
-        if trace.get('precondition'):
-            out.write(f'{pre}Precondition:\n')
-            pprint_eq_domain(trace['precondition'], pre + '  ', out)
-        if trace.get('postcondition'):
-            out.write(f'{pre}Postcondition:\n')
-            pprint_eq_domain(trace['postcondition'], pre + '  ', out)
-
-    def pprint_node_event_trace_original(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
-        if trace.get('traces', {}).get('original'):
-            pprint_event_trace(f'{label} Original', trace['traces']['original'], pre, out)
-
-    def pprint_node_event_trace_patched(self, trace, label: str, pre: str = '', out: IO = sys.stdout):
-        if trace.get('traces',{}).get('patched'):
-            pprint_event_trace(f'{label} Patched', trace['traces']['patched'], pre, out)
 
 class CFARGraph:
     nodes: dict[str, CFARNode]
@@ -1053,6 +1081,31 @@ def pprint_eq_domain_memory(mem_kind, pv, pre: str = '', out: IO = sys.stdout):
             out.write('\n')
     else:
         out.write(f'{pre}Unknown domain memory logical op "{logop}": {pv}\n')
+
+
+def pprint_node_event_trace(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    pprint_node_event_trace_domain(trace, label, pre, out)
+    pprint_node_event_trace_original(trace, label, pre, out)
+    pprint_node_event_trace_patched(trace, label, pre, out)
+
+
+def pprint_node_event_trace_domain(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    if trace.get('precondition'):
+        out.write(f'{pre}Precondition:\n')
+        pprint_eq_domain(trace['precondition'], pre + '  ', out)
+    if trace.get('postcondition'):
+        out.write(f'{pre}Postcondition:\n')
+        pprint_eq_domain(trace['postcondition'], pre + '  ', out)
+
+
+def pprint_node_event_trace_original(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    if trace.get('traces', {}).get('original'):
+        pprint_event_trace(f'{label} Original', trace['traces']['original'], pre, out)
+
+
+def pprint_node_event_trace_patched(trace, label: str, pre: str = '', out: IO = sys.stdout):
+    if trace.get('traces', {}).get('patched'):
+        pprint_event_trace(f'{label} Patched', trace['traces']['patched'], pre, out)
 
 
 def pprint_event_trace(k: str, et: dict, pre: str = '', out: IO = sys.stdout):
