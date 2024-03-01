@@ -126,13 +126,13 @@ main = do
                 PM.withAssumptionSet asm1 $ do
                   asm2 <- manyDistinctVars 10
                   PM.withAssumptionSet asm2 $ do
-                    goal <- manyDistinctVars 250 >>= PAs.toPred sym
+                    goal <- manyDistinctVars 270 >>= PAs.toPred sym
                     liftIO $ putStrLn "check sat"
                     PM.goalSat "test" goal $ \case
                       W4.Sat _ -> liftIO $ TTH.assertFailure "Expected Timeout"
                       W4.Unsat{} -> liftIO $ TTH.assertFailure "Unexpected Unsat"
                       W4.Unknown{} -> return ()
-                  goal <- manyDistinctVars 250 >>= PAs.toPred sym
+                  goal <- manyDistinctVars 270 >>= PAs.toPred sym
                   PM.goalSat "test" goal $ \case
                     W4.Sat{} -> liftIO $ TTH.assertFailure "Expected Timeout"
                     W4.Unsat{} -> liftIO $ TTH.assertFailure "Unsat"
