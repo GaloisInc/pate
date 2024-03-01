@@ -237,13 +237,77 @@ class PateCfarExitDialog(QDialog):
         vsplitter.addWidget(self.commonField)
         vsplitter.addWidget(hsplitter)
 
-        QBtn = QDialogButtonBox.Ok
-        self.buttonBox = QDialogButtonBox(QBtn)
-        self.buttonBox.accepted.connect(self.accept)
-
         main_layout = QHBoxLayout()
         main_layout.addWidget(vsplitter)
-        #main_layout.addWidget(self.buttonBox)
+        self.setLayout(main_layout)
+
+
+class PateCfarEqCondDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("CFAR Equivalence Condition")
+
+        self.commonField = QPlainTextEdit()
+        self.commonField.setReadOnly(True)
+        self.commonField.setMaximumBlockCount(1000)
+
+        self.trueTraceCommonField = QPlainTextEdit()
+        self.trueTraceCommonField.setReadOnly(True)
+        self.trueTraceCommonField.setMaximumBlockCount(1000)
+
+        self.trueTraceOriginalField = QPlainTextEdit()
+        self.trueTraceOriginalField.setReadOnly(True)
+        self.trueTraceOriginalField.setMaximumBlockCount(1000)
+
+        self.trueTracePatchedField = QPlainTextEdit()
+        self.trueTracePatchedField.setReadOnly(True)
+        self.trueTracePatchedField.setMaximumBlockCount(1000)
+
+        self.falseTraceCommonField = QPlainTextEdit()
+        self.falseTraceCommonField.setReadOnly(True)
+        self.falseTraceCommonField.setMaximumBlockCount(1000)
+
+        self.falseTraceOriginalField = QPlainTextEdit()
+        self.falseTraceOriginalField.setReadOnly(True)
+        self.falseTraceOriginalField.setMaximumBlockCount(1000)
+
+        self.falseTracePatchedField = QPlainTextEdit()
+        self.falseTracePatchedField.setReadOnly(True)
+        self.falseTracePatchedField.setMaximumBlockCount(1000)
+
+        trueOriginalPatchedSplitter = QSplitter()
+        trueOriginalPatchedSplitter.setOrientation(Qt.Orientation.Horizontal)
+        trueOriginalPatchedSplitter.addWidget(self.trueTraceOriginalField)
+        trueOriginalPatchedSplitter.addWidget(self.trueTracePatchedField)
+
+        trueSplitter = QSplitter()
+        trueSplitter.setOrientation(Qt.Orientation.Vertical)
+        trueSplitter.addWidget(self.trueTraceCommonField)
+        trueSplitter.addWidget(trueOriginalPatchedSplitter)
+
+        falseOriginalPatchedSplitter = QSplitter()
+        falseOriginalPatchedSplitter.setOrientation(Qt.Orientation.Horizontal)
+        falseOriginalPatchedSplitter.addWidget(self.falseTraceOriginalField)
+        falseOriginalPatchedSplitter.addWidget(self.falseTracePatchedField)
+
+        falseSplitter = QSplitter()
+        falseSplitter.setOrientation(Qt.Orientation.Vertical)
+        falseSplitter.addWidget(self.falseTraceCommonField)
+        falseSplitter.addWidget(falseOriginalPatchedSplitter)
+        
+        trueFalseSplitter = QSplitter()
+        trueFalseSplitter.setOrientation(Qt.Orientation.Horizontal)
+        trueFalseSplitter.addWidget(trueSplitter)
+        trueFalseSplitter.addWidget(falseSplitter)
+
+        predSplitter = QSplitter()
+        predSplitter.setOrientation(Qt.Orientation.Vertical)
+        predSplitter.addWidget(self.commonField)
+        predSplitter.addWidget(trueFalseSplitter)
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(predSplitter)
         self.setLayout(main_layout)
 
 
@@ -343,18 +407,51 @@ class MyFlowGraphWidget(FlowGraphWidget):
             context = QMenu(self)
             gotoOriginalAction = None
             gotoPatchedAction = None
+            showEqCondAction = None
             if cfarNode.original_addr:
                 gotoOriginalAction = QAction(f'Goto original address {hex(cfarNode.original_addr)}', self)
                 context.addAction(gotoOriginalAction)
             if cfarNode.patched_addr:
                 gotoPatchedAction = QAction(f'Goto patched address {hex(cfarNode.patched_addr)}', self)
                 context.addAction(gotoPatchedAction)
+            if cfarNode.predicate:
+                print('CFAR with pred:', cfarNode.id)
+                showEqCondAction = QAction(f'Show Equivalence Condition', self)
+                context.addAction(showEqCondAction)
             choice = context.exec(event.globalPos())
             #print('context choice:', choice)
             if choice == gotoOriginalAction:
                 self.pate_widget.gotoOriginalAddress(cfarNode.original_addr)
             elif choice == gotoPatchedAction:
                 self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr)
+            elif choice == showEqCondAction:
+                self.showCfarEqCondDialog(cfarNode)
+
+    def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
+        d = PateCfarEqCondDialog(parent=self)
+        d.commonField.appendPlainText(f'CFAR ID: {cfarNode.id}')
+        with io.StringIO() as out:
+            pate.pprint_symbolic(out, cfarNode.predicate)
+            d.commonField.appendPlainText(out.getvalue())
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_domain(cfarNode.trace_true, 'Trace True Domain', out=out)
+            d.trueTraceCommonField.appendPlainText(out.getvalue())
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_original(cfarNode.trace_true, 'Trace True Original', out=out)
+            d.trueTraceOriginalField.appendPlainText(out.getvalue())
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_patched(cfarNode.trace_true, 'Trace True Patched', out=out)
+            d.trueTracePatchedField.appendPlainText(out.getvalue())
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_domain(cfarNode.trace_false, 'Trace False Domain', out=out)
+            d.falseTraceCommonField.appendPlainText(out.getvalue())
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_original(cfarNode.trace_false, 'Trace False Original', out=out)
+            d.falseTraceOriginalField.appendPlainText(out.getvalue())
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_patched(cfarNode.trace_false, 'Trace False Patched', out=out)
+            d.falseTracePatchedField.appendPlainText(out.getvalue())
+        d.exec()
 
     def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
         edge = edgeTuple[0]
