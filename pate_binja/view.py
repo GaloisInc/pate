@@ -148,9 +148,13 @@ class GuiUserInteraction(pate.PateUserInteraction):
         execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.build_pate_flow_graph(graph))
 
         promptNode = graph.getPromptNode()
+        eqCondNodes = graph.getEqCondNodes()
         if promptNode:
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
-            execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfar(promptNode))
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars([promptNode]))
+        elif eqCondNodes:
+            self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars(eqCondNodes))
 
 
 class PateThread(Thread):
@@ -377,12 +381,16 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
         self.setGraph(self.flowGraph)
 
-    def showCfar(self, focusCfar: pate.CFARNode):
-        focusFlow: FlowGraphNode | None = self.cfarToFlow.get(focusCfar.id)
+    def showCfars(self, cfars: list[pate.CFARNode]):
+        focusFlow = None
+        for cfar in cfars:
+            flow_node = self.cfarToFlow.get(cfar.id)
+            flow_node.highlight = HighlightStandardColor.BlueHighlightColor
+            if not focusFlow:
+                focusFlow = flow_node
         #print('focusCfar.id', focusCfar.id)
         #print('focusFlowNode', focusFlow)
         if focusFlow:
-            focusFlow.highlight = HighlightStandardColor.BlueHighlightColor
             self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):

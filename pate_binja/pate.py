@@ -446,7 +446,7 @@ class PateWrapper:
 
         elif isinstance(rec, list) and len(rec) > 0 and rec[-1].get('content') == {'node_kind': 'final_result'}:
             # Finish detected
-            self.user.show_message('\n\nProcessing verification results.\n\n')
+            self.user.show_message('\nProcessing verification results.\n')
             cmd = rec[-1]['index']
             self._command(cmd)
             result = self.next_json()
@@ -466,7 +466,7 @@ class PateWrapper:
 
                             print('CFAR id:', node_id)
 
-                            out.write(f'\nEquivalence condition for {node_id}\n')
+                            out.write(f'Equivalence condition for {node_id}\n')
                             pprint_symbolic(out, predicate)
                             out.write('\n')
 
@@ -646,6 +646,13 @@ class CFARGraph:
         for n in self.nodes.values():
             if not n.finished:
                 return n
+
+    def getEqCondNodes(self):
+        nodes = []
+        for n in self.nodes.values():
+            if n.predicate:
+                nodes.append(n)
+        return nodes
 
     def add_node(self, id: str, desc: str, data) -> CFARNode:
         """Add node, creating if node with ID does not exist."""
