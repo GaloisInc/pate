@@ -15,6 +15,7 @@ on:
 jobs:
   docker:
     runs-on: self-hosted
+
     steps:
       - uses: actions/checkout@v2
         with:
@@ -26,6 +27,18 @@ jobs:
           git config --global url."https://".insteadOf "git://"
           git submodule update --init
 
+      - name: Artifactory Login
+        uses: docker/login-action@v2
+        with:
+          registry: artifactory.galois.com:5025
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_KEY }}
+
+      # Pulls the latest image to try to re-use some layers
+      - name: Pull Latest Docker image
+        run: |
+          docker pull artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} || echo "No latest image found"
+
       - name: Build Docker Image
         run: |
           docker build . -t pate
@@ -36,6 +49,13 @@ jobs:
           cat out.log
           grep -e "All .* tests passed" out.log || exit 1
 
+      - name: Push Docker image
+        run: |
+          CI_COMMIT_SHORT_SHA=$(git rev-parse --short $GITHUB_SHA)
+          docker tag pate artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
+          docker tag pate artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-}
+          docker push -a artifactory.galois.com:5025/pate/pate
+
   build:
     runs-on: ${{ matrix.os }}
     env:
@@ -43,7 +63,7 @@ jobs:
       LANGUAGE: en_US:en
       LC_ALL: en_US.UTF-8
       TZ: America/Los_Angeles
-      CACHE_VERSION: 3
+      CACHE_VERSION: 4
 
     strategy:
       fail-fast: false
