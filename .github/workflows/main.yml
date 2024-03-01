@@ -39,7 +39,7 @@ jobs:
       # Pulls the latest image to try to re-use some layers
       - name: Pull Latest Docker image
         run: |
-          docker pull artifactory.galois.com:5025/pate/pate-$GITHUB_REF:latest || echo "No latest image found"
+          docker pull artifactory.galois.com:5025/pate/pate:$GITHUB_REF || echo "No latest image found"
 
       - name: Build Docker Image
         run: |
@@ -55,7 +55,7 @@ jobs:
         run: |
           CI_COMMIT_SHORT_SHA=$(git rev-parse --short $GITHUB_SHA)
           docker tag pate artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
-          docker tag pate artifactory.galois.com:5025/pate/pate-$GITHUB_REF:latest
+          docker tag pate artifactory.galois.com:5025/pate/pate:$GITHUB_REF
           docker push artifactory.galois.com:5025/pate/pate:$CI_COMMIT_SHORT_SHA
 
   build:
