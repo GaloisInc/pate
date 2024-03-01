@@ -392,7 +392,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
             for cfar_exit in cfar_node.exits:
                 flow_exit = self.cfarToFlow[cfar_exit.id]
                 if self.showCfarExitInfo(cfar_node, cfar_exit, simulate=True):
-                    edgeStyle = EdgeStyle(width=3, theme_color=ThemeColor.GraphNodeOutlineColor)
+                    edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.RedStandardHighlightColor)
                 else:
                     edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.GraphNodeOutlineColor)
                 flow_node.add_outgoing_edge(BranchType.UserDefinedBranch, flow_exit, edgeStyle)
@@ -403,7 +403,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         focusFlow = None
         for cfar in cfars:
             flow_node = self.cfarToFlow.get(cfar.id)
-            flow_node.highlight = HighlightStandardColor.BlueHighlightColor
+            flow_node.highlight = HighlightStandardColor.RedHighlightColor
             if not focusFlow:
                 focusFlow = flow_node
         #print('focusCfar.id', focusCfar.id)
@@ -412,20 +412,23 @@ class MyFlowGraphWidget(FlowGraphWidget):
             self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):
-        node = self.getNodeForMouseEvent(event)
-        edgeTuple = self.getEdgeForMouseEvent(event)
-        # if node:
-        #     print("Node: ", self.flowToCfarNode[node].id)
-        # if edgeTuple:
-        #     print("Edge source: ", self.flowToCfarNode[edgeTuple[0].source].id)
-        #     print("Edge target: ", self.flowToCfarNode[edgeTuple[0].target].id)
-        #     print("Edge incoming: ", edgeTuple[1])
+        if event.button() == Qt.RightButton:
+            node = self.getNodeForMouseEvent(event)
+            edgeTuple = self.getEdgeForMouseEvent(event)
+            # if node:
+            #     print("Node: ", self.flowToCfarNode[node].id)
+            # if edgeTuple:
+            #     print("Edge source: ", self.flowToCfarNode[edgeTuple[0].source].id)
+            #     print("Edge target: ", self.flowToCfarNode[edgeTuple[0].target].id)
+            #     print("Edge incoming: ", edgeTuple[1])
 
-        if node:
-            self.gotoAddressPopupMenu(event, node)
+            if node:
+                self.gotoAddressPopupMenu(event, node)
 
-        elif edgeTuple:
-            self.showEdgeExitInfo(edgeTuple)
+            elif edgeTuple:
+                self.showEdgeExitInfo(edgeTuple)
+        else:
+            super().mousePressEvent(event)
 
     def gotoAddressPopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
         cfarNode = self.flowToCfar[node]
