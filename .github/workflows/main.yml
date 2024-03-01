@@ -68,7 +68,7 @@ jobs:
       LANGUAGE: en_US:en
       LC_ALL: en_US.UTF-8
       TZ: America/Los_Angeles
-      CACHE_VERSION: 4
+      CACHE_VERSION: 5
 
     strategy:
       fail-fast: false
@@ -97,28 +97,25 @@ jobs:
     - name: Installing the freeze file
       run: mv cabal.GHC-${{ matrix.ghc }}.freeze cabal.project.freeze
 
-    - uses: actions/cache@v2
-      name: Cache cabal store
+    - uses: actions/cache/restore@v4
+      name: Restore GHCup
+      id: cache-ghcup
       with:
-        path: |
-          ~/.cabal/store
-          ~/.cabal/packages
-          ~/.ghcup
-          dist-newstyle
-        # Our key is the freeze file and also the (constructed)
-        # cabal.project. This captures the normal package dependencies *and* the
-        # submodule hashes (without capturing anything undesirable)
-        key: ${{ env.CACHE_VERSION }}-pate-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('cabal.project.freeze', 'cabal.project') }}
-        restore-keys: |
-          ${{ env.CACHE_VERSION }}-pate-${{ runner.os }}-${{ matrix.ghc }}-
+        path: ~/.ghcup
+        key: ${{ env.CACHE_VERSION }}-pate-ghcup-${{ runner.os }}-${{ matrix.ghc }}
 
-    - uses: haskell/actions/setup@v1
+    - uses: haskell-actions/setup@v2
       id: setup-haskell-cabal
       name: Setup Haskell
       with:
         ghc-version: ${{ matrix.ghc }}
         cabal-version: ${{ matrix.cabal }}
 
+    - uses: actions/cache/save@v4
+      name: Save GHCup
+      with:
+        path: ~/.ghcup
+        key: ${{ steps.cache-ghcup.outputs.cache-primary-key }}
 
     - name: System Dependencies
       run: |
@@ -140,11 +137,48 @@ jobs:
         cd tests
         make extras
 
-    - name: Build pate
+    - uses: actions/cache/restore@v4
+      name: Restore Cabal Cache
+      id: cache-cabal-pate
+      with:
+        path: ${{ steps.setup-haskell-cabal.outputs.cabal-store }}
+        key: ${{ env.CACHE_VERSION }}-pate-cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('cabal.project.freeze', 'cabal.project') }}
+        restore-keys: |
+          ${{ env.CACHE_VERSION }}-pate-cabal-${{ runner.os }}-${{ matrix.ghc }}-
+
+    - uses: actions/cache/restore@v4
+      name: Restore Build Cache
+      id: cache-build-pate
+      with:
+        path: dist-newstyle
+        key: ${{ env.CACHE_VERSION }}-pate-build-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('cabal.project.freeze', 'cabal.project', '.gitmodules') }}
+        restore-keys: |
+          ${{ env.CACHE_VERSION }}-pate-build-${{ runner.os }}-${{ matrix.ghc }}-
+
+    - name: Configure and build Pate dependencies
+      # installs parameterized-utils and then drops it from the project to resolve issue with bv-sized
       run: |
-        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base
+        cabal configure pkg:pate --write-ghc-environment-files=always --enable-tests -j --allow-newer=base --enable-documentation -f unsafe-operations
+        cabal install parameterized-utils --lib
+        cabal freeze
+        sed -i -e "/parameterized-utils/d" cabal.project
         cabal build pkg:pate --only-dependencies
-        cabal build pkg:pate
+
+    # Note that these keys still use the old hashes for cabal.project and cabal.project.freeze
+    - uses: actions/cache/save@v4
+      name: Save Cabal Cache
+      with:
+        path: ${{ steps.setup-haskell-cabal.outputs.cabal-store }}
+        key: ${{ steps.cache-cabal-pate.outputs.cache-primary-key }}
+
+    - uses: actions/cache/save@v4
+      name: Save Build Cache
+      with:
+        path: dist-newstyle
+        key: ${{ steps.cache-build-pate.outputs.cache-primary-key }}
+
+    - name: Build Pate
+      run: cabal build pkg:pate
 
     - name: Install Solvers
       run: .github/ci.sh install_system_deps
