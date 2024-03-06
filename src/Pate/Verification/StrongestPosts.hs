@@ -1089,8 +1089,35 @@ getFunctionAbs node d gr = do
         Nothing -> throwHere $ PEE.MissingDomainForFun fnPair
 
 
--- | Setup a special-purpose ParsedFunctionMap with this block having a special
---   domain 
+withCurrentAbsDomain ::
+  HasCallStack =>
+  NodeEntry arch ->
+  PairGraph sym arch ->
+  EquivM_ sym arch a ->
+  EquivM sym arch a
+withCurrentAbsDomain node gr f = do
+  let fnNode = functionEntryOf node
+  case getCurrentDomain gr (GraphNode fnNode)  of
+    Just d' -> PS.viewSpec d' $ \_ d'' -> withAbsDomain fnNode d'' gr f
+    Nothing -> do
+      -- this handles the case where we need to find the domain for this
+      -- node but we don't have a singleton variant of the entry point
+      case getDivergePoint (GraphNode node) of
+        Just (GraphNode divergeNode) -> do
+          Just (Some bin) <- return $ singleNodeRepr (GraphNode node)
+          let fnNode_diverge = functionEntryOf divergeNode
+          fnNode_diverge_single <- toSingleNode bin fnNode_diverge
+          case getCurrentDomain gr (GraphNode fnNode_diverge) of
+            Just d' | eqUptoDivergePoint (GraphNode fnNode_diverge_single) (GraphNode fnNode) ->
+              PS.viewSpec d' $ \_ d'' -> do
+                d_single <- PAD.singletonDomain bin d''
+                withAbsDomain fnNode d_single gr f
+            _ -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnNode)
+        _ -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnNode)
+
+-- | Setup a special-purpose ParsedFunctionMap with this block having a 
+--   macaw abstract domain that is augmented with concrete values from
+--   'AbstractDomain'
 withAbsDomain ::
   HasCallStack =>
   NodeEntry arch ->
@@ -1100,25 +1127,10 @@ withAbsDomain ::
   EquivM sym arch a
 withAbsDomain node d gr f = do
   case asFunctionPair (nodeBlocks node) of
-    Nothing -> do
-      let fnNode = functionEntryOf node
-      case getCurrentDomain gr (GraphNode fnNode)  of
-        Just d' -> PS.viewSpec d' $ \_ d'' -> withAbsDomain fnNode d'' gr f
-        Nothing -> do
-          -- this handles the case where we need to find the domain for this
-          -- node but we don't have a singleton variant of the entry point
-          case getDivergePoint (GraphNode node) of
-            Just (GraphNode divergeNode) -> do
-              Just (Some bin) <- return $ singleNodeRepr (GraphNode node)
-              let fnNode_diverge = functionEntryOf divergeNode
-              fnNode_diverge_single <- toSingleNode bin fnNode_diverge
-              case getCurrentDomain gr (GraphNode fnNode_diverge) of
-                Just d' | eqUptoDivergePoint (GraphNode fnNode_diverge_single) (GraphNode fnNode) ->
-                  PS.viewSpec d' $ \_ d'' -> do
-                    d_single <- PAD.singletonDomain bin d''
-                    withAbsDomain fnNode d_single gr f
-                _ -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnNode)
-            _ -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks fnNode)
+    -- only function entry points have macaw abstract domains (which is what is being overridden here)
+    -- so if we pass a non-function node entry then we just want to fetch the domain of its function
+    -- entry
+    Nothing -> withCurrentAbsDomain node gr f
     Just{} -> do
       PA.SomeValidArch archData <- asks envValidArch
       ovPair <- getFunctionAbs node d gr
@@ -1431,7 +1443,7 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
       vars = PS.scopeVars scope
       varsSt = TF.fmapF PS.simVarState vars
     validState <- PVV.validInitState ret varsSt
-    withAssumptionSet validState $ do
+    withCurrentAbsDomain (functionEntryOf node) gr0' $ withAssumptionSet validState $ do
       (asm, bundle) <- returnSiteBundle scope vars d ret
       withAssumptionSet asm $ withPredomain scope bundle d $ do
         runPendingActions nodeActions (ReturnNode fPair) (TupleF3 scope bundle d) gr0' >>= \case
