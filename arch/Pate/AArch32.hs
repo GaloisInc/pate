@@ -282,6 +282,10 @@ stubOverrides =
       -- FIXME: check abi for args
       , ("fread", PA.mkDefaultStubOverrideArg "fread" [Some r0, Some r1, Some r2, Some r4] r0)
       -- FIXME: default stubs below here
+      -- , ("sync", PA.mkDefaultStubOverrideArg "sync" [Some r0] r0)
+      -- , ("dirCache", PA.mkDefaultStubOverrideArg "dirCache" [Some r0] r0)
+      -- FIXME: reads from the stack as well
+      , ("timestamp", PA.mkDefaultStubOverrideArg "timestamp" [Some r0, Some r1, Some r2, Some r3] r0)
       ] ++
       (map mkDefault $
         [ "memcpy" -- FIXME: needs implementation
