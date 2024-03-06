@@ -774,6 +774,7 @@ instance IsTraceNode k "debug_tree" where
 instance IsTraceNode k "bool" where
   type TraceNodeType k "bool" = Bool
   type TraceNodeLabel "bool" = String
+  prettyNode "" b = PP.pretty b
   prettyNode msg b = PP.pretty msg <> ":" PP.<+> PP.pretty b
 
 -- | Dummy trace node to hold the final result of the analysis
