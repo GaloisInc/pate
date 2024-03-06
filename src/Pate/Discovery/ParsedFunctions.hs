@@ -38,7 +38,7 @@ import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
-import           Data.Maybe ( mapMaybe, listToMaybe )
+import           Data.Maybe ( mapMaybe, listToMaybe, fromMaybe )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..), viewSome )
@@ -532,6 +532,12 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
                       , discoveryState = ds2
                       }, Some dfi)
 
+segOffCases :: MM.MemWidth w => MM.MemSegmentOff w -> (MM.MemSegmentOff w, MM.MemSegmentOff w)
+segOffCases e = fromMaybe (error "segOffCases") $ do
+  let e' = MM.clearSegmentOffLeastBit e
+  e_hi <- MM.incSegmentOff e' 1
+  return (e', e_hi)
+
 resolveFunctionEntry ::
   forall bin arch .
   (MM.ArchConstraints arch) =>
@@ -542,12 +548,17 @@ resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _ _ _) = 
   st <- IORef.readIORef pfmRef
   let syms = MD.symbolNames (discoveryState st)
   ignoredAddresses <- getIgnoredFns (PB.functionBinRepr fe) pfm
-  case Map.lookup (PB.functionSegAddr fe) syms of
-    Just nm -> return $ fe { PB.functionSymbol = Just (PB.mkFunctionSymbol nm)
-                           , PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses 
-                           , PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap
-                           }
-    Nothing -> return fe { PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap }
+  let fe' = fe { PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap }
+  return $ fromMaybe fe' $ (do
+    let (addr_lo, addr_hi) = segOffCases (PB.functionSegAddr fe)
+    -- lookup both cases where the low bit is set or unset, since the symbol table
+    -- may have one or the other
+    nm <- Map.lookup addr_lo syms <|> Map.lookup addr_hi syms
+    return $ fe { PB.functionSymbol = Just (PB.mkFunctionSymbol nm)
+                , PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses 
+                , PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap
+                }
+    )
 
 instance MM.ArchConstraints arch => IsTraceNode '(sym,arch) "parsedblock" where
   type TraceNodeType '(sym,arch) "parsedblock" = Some (MD.ParsedBlock arch)
