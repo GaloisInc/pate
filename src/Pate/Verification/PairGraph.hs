@@ -89,11 +89,6 @@ module Pate.Verification.PairGraph
   , queuePendingAction
   , runPendingActions
   , queuePendingNodes
-  --- FIXME: move this
-  , TupleF
-  , pattern TupleF2
-  , pattern TupleF3
-  , pattern TupleF4
   --
   , addLazyAction
   , edgeActions
@@ -120,6 +115,8 @@ module Pate.Verification.PairGraph
   , setSyncAddress
   , checkForNodeSync
   , checkForReturnSync
+  -- FIXME: remove this and have modules import this directly
+  , module Data.Parameterized.PairF
   ) where
 
 import           Prettyprinter
@@ -187,7 +184,7 @@ import qualified Pate.Location as PL
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Address as PAd
 import Data.Foldable (find)
-
+import           Data.Parameterized.PairF
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -458,22 +455,6 @@ getNextDomainRefinement nd pg = case Map.lookup nd (pairGraphDomainRefinements p
   Just (refine:rest) -> Just (refine, pg {pairGraphDomainRefinements = Map.insert nd rest (pairGraphDomainRefinements pg)})
   _ -> Nothing
 
--- FIXME: move this 
-data PairF tp1 tp2 k = PairF (tp1 k) (tp2 k)
-
-type family TupleF (t :: l) :: (k -> Type)
-type instance TupleF '(a,b) = PairF a b
-type instance TupleF '(a,b,c) = PairF a (PairF b c)
-type instance TupleF '(a,b,c,d) = PairF a (PairF b (PairF c d))
-
-pattern TupleF2 :: a k -> b k -> TupleF '(a,b) k
-pattern TupleF2 a b = PairF a b
-
-pattern TupleF3 :: a k -> b k -> c k -> TupleF '(a,b,c) k
-pattern TupleF3 a b c = PairF a (PairF b c)
-
-pattern TupleF4 :: a k -> b k -> c k -> d k -> TupleF '(a,b,c,d) k
-pattern TupleF4 a b c d = PairF a (PairF b (PairF c d))
 
 data PendingAction sym arch (f :: PS.VarScope -> Type) = 
   PendingAction { pactIdent :: Int, _pactAction :: LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)}
