@@ -622,7 +622,7 @@ addExternalCallEvent ::
   OrdF (SymExpr sym) =>
   sym ->
   Text {- ^ name of the external call -} ->
-  Ctx.Assignment (SymBV' sym) ctx {- ^ data relevant to the call -} ->
+  Ctx.Assignment (SymExpr sym) ctx {- ^ data relevant to the call -} ->
   MemTraceImpl sym ptrW ->
   IO (MemTraceImpl sym ptrW)
 addExternalCallEvent sym nm data_ mem = do

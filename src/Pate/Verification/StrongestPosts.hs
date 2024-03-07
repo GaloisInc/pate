@@ -134,6 +134,7 @@ import qualified Pate.EventTrace as ET
 import Control.Exception (throw)
 import qualified What4.ExprHelpers as WEH
 import qualified What4.JSON as W4S
+import Data.Parameterized.PairF (PairF(..))
 
 -- Overall module notes/thoughts
 --
@@ -1744,7 +1745,13 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
 
   eqEvent (MT.ExternalCallEvent nmx x) (MT.ExternalCallEvent nmy y)
     | nmx == nmy
-    = eqSymBVs x y
+    = do
+        let tsX = TFC.fmapFC W4.exprType x
+        let tsY = TFC.fmapFC W4.exprType y
+        case testEquality tsX tsY of
+          Nothing -> return $ W4.falsePred sym
+          Just Refl -> IO.liftIO $
+            TFC.foldlMFC' (\p (PairF x_ y_) -> W4.isEq sym x_ y_ >>= W4.andPred sym p) (W4.truePred sym) (Ctx.zipWith PairF x y)
     
   eqEvent _ _ = return (W4.falsePred sym)
 

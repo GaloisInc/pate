@@ -263,7 +263,7 @@ data MemEvent sym ptrW where
     MemEvent sym ptrW
   ExternalCallEvent :: forall sym ptrW ctx.
     Text ->
-    Ctx.Assignment (SymBV' sym) ctx
+    Ctx.Assignment (SymExpr sym) ctx
       {- ^ relevant data for this visible call -} ->
     MemEvent sym ptrW
 
@@ -302,7 +302,7 @@ prettyMemEvent (SyscallEvent i v) =
   case viewMuxTree i of
     [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
     _ -> "Syscall" <+> printSymExpr v
-prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> pretty (show vs)
+prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> vsep (TFC.toListFC printSymExpr vs)
 
 
 instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
@@ -313,7 +313,7 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
     SyscallEvent i arg -> SyscallEvent i <$> f arg
     -- MuxTree is unmodified since it has no symbolic expressions
-    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC (PEM.mapExpr sym f) vs
+    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC f vs
 
 
 filterEvent ::
