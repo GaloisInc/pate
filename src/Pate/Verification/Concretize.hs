@@ -46,20 +46,20 @@ data Concretize sym tp where
              -> (sym -> WEG.GroundValue tp -> IO (WI.SymExpr sym tp)) -- Create a symbolic term wrapping the concrete result
              -> Concretize sym tp
 
-concreteBV :: (LCB.IsSymInterface sym, 1 <= w) => PN.NatRepr w -> Concretize sym (WI.BaseBVType w)
+concreteBV :: (WI.IsSymExprBuilder sym, 1 <= w) => PN.NatRepr w -> Concretize sym (WI.BaseBVType w)
 concreteBV w = Concretize (WT.BaseBVRepr w) WI.asBV toBlocking injectSymbolic
   where
     toBlocking sym symVal gv = WI.notPred sym =<< WI.bvEq sym symVal =<< WI.bvLit sym w gv
     injectSymbolic sym gv = WI.bvLit sym w gv
 
-concreteInteger :: (LCB.IsSymInterface sym) => Concretize sym WI.BaseIntegerType
+concreteInteger :: (WI.IsSymExprBuilder sym) => Concretize sym WI.BaseIntegerType
 concreteInteger = Concretize WT.BaseIntegerRepr WI.asInteger toBlocking injectSymbolic
   where
     toBlocking sym symVal gv = WI.notPred sym =<< WI.intEq sym symVal =<< WI.intLit sym gv
     injectSymbolic = WI.intLit
 
 
-concreteBool :: (LCB.IsSymInterface sym) => Concretize sym WI.BaseBoolType
+concreteBool :: (WI.IsSymExprBuilder sym) => Concretize sym WI.BaseBoolType
 concreteBool = Concretize WT.BaseBoolRepr WI.asConstantPred toBlocking injectSymbolic
   where
     toBlocking sym symVal gv = WI.notPred sym =<< WI.eqPred sym symVal =<< injectSymbolic sym gv
@@ -176,7 +176,7 @@ resolveSingletonPointer wsolver ptr@(LCLM.LLVMPointer base off) = do
 
 
 symbolicFromConcrete
-  :: ( LCB.IsSymInterface sym
+  :: ( WI.IsSymExprBuilder sym
      , HasCallStack
      )
   => sym

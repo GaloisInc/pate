@@ -356,7 +356,7 @@ mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _wsolver -> do
   return $ StateTransformer $ \st -> do
     let (CLM.LLVMPointer _ r1_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r1_reg
     let mem = PS.simMem st
-    mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' r1_val) mem
+    mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> r1_val) mem
     let st' = st { PS.simMem = mem' }
     zero_nat <- W4.natLit sym 0
     fresh_bv <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> r1_val) 
@@ -396,13 +396,13 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
         let memrepr = MC.BVMemRepr w MC.LittleEndian
         (CLM.LLVMPointer _ val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
         --FIXME: ignores regions
-        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> PMT.SymBV' fd_bv Ctx.:> PMT.SymBV' val_bv) mem
+        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv) mem
         -- globally-unique
         bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz") (Ctx.empty Ctx.:> (W4.exprType val_bv)) (W4.BaseBVRepr w_mem)
         sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> val_bv)
         return $ (st { PS.simMem = mem' },Just sz)
       _ -> do
-        putStrLn "Unhandled symbolic write length"
+        putStrLn $ (show nm) ++ ": Unhandled symbolic write length: " ++ (show $ W4.printSymExpr len_bv')
         return (st, Nothing)
         -- FIXME: what to do for non-concrete write lengths?
         --return st
