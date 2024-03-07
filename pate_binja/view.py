@@ -299,7 +299,7 @@ class PateCfarEqCondDialog(QDialog):
         falseSplitter.setOrientation(Qt.Orientation.Vertical)
         falseSplitter.addWidget(self.falseTraceCommonField)
         falseSplitter.addWidget(falseOriginalPatchedSplitter)
-        
+
         trueFalseSplitter = QSplitter()
         trueFalseSplitter.setOrientation(Qt.Orientation.Horizontal)
         trueFalseSplitter.addWidget(trueSplitter)
@@ -518,12 +518,36 @@ class MyFlowGraphWidget(FlowGraphWidget):
         with io.StringIO() as out:
             pate.pprint_node_event_trace_domain(trace, label, out=out)
             d.commonField.setPlainText(out.getvalue())
+
+        # collect trace text content, for formatting below
+        original_lines = []
+        patched_lines = []
         with io.StringIO() as out:
             pate.pprint_node_event_trace_original(trace, label, out=out)
-            d.originalField.setPlainText(out.getvalue())
+            original_lines = out.getvalue().splitlines()
         with io.StringIO() as out:
             pate.pprint_node_event_trace_patched(trace, label, out=out)
-            d.patchedField.setPlainText(out.getvalue())
+            patched_lines = out.getvalue().splitlines()
+
+        def fmt_diff(line, color):
+            return '<span style="background-color: ' + color + ';">' + line.replace(" ", "&nbsp;") + '</span>'
+
+        diff_color_unchanged = "rgb(255, 255, 255)" # white
+        diff_color_original_only = "rgb(186, 252, 172)" # green
+        diff_color_patched_only = "rgb(255, 201, 250)" # pink
+
+        # the diff algorithm here only checks for membership in the other trace.
+        # We're not matching up order at all. (TODO: improve this)
+        for l in original_lines:
+            if l in patched_lines:
+                d.originalField.appendHtml(fmt_diff(l, diff_color_unchanged))
+            else:
+                d.originalField.appendHtml(fmt_diff(l, diff_color_original_only))
+        for l in patched_lines:
+            if l in original_lines:
+                d.patchedField.appendHtml(fmt_diff(l, diff_color_unchanged))
+            else:
+                d.patchedField.appendHtml(fmt_diff(l, diff_color_patched_only))
         d.exec()
 
 
