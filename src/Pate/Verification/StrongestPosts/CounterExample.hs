@@ -47,6 +47,7 @@ import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PSo
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.PatchPair as PPa
+import qualified Pate.Verification.Concretize as PVC
 import Control.Monad.Identity
 import Control.Monad.Trans.Writer
 import Pate.Register.Traversal (zipWithRegStatesM)
@@ -197,10 +198,7 @@ groundMemEvent sym evalFn (MT.SyscallEvent i x) =
      x' <- W4.bvLit sym (W4.bvWidth x) =<< W4.groundEval evalFn x
      return (MT.SyscallEvent i' x')
 groundMemEvent sym evalFn (MT.ExternalCallEvent nm xs) =
-  do xs' <- TFC.traverseFC (\(MT.SymBV' x) ->
-                              case W4.exprType x of
-                                W4.BaseBVRepr w ->
-                                  MT.SymBV' <$> (W4.groundEval evalFn x >>= W4.bvLit sym w)) xs
+  do xs' <- TFC.traverseFC (\x -> W4.groundEval evalFn x >>= (\g -> PVC.symbolicFromConcrete sym g x)) xs
      return (MT.ExternalCallEvent nm xs')
 
 groundMemOp ::
