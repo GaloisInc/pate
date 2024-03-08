@@ -72,6 +72,9 @@ import Data.Macaw.ARM.Identify (conditionalCallClassifier, conditionalReturnClas
 import Control.Applicative
 import qualified Data.Macaw.Discovery as MD
 import qualified What4.JSON as W4S
+import qualified Pate.SimState as PS
+import qualified Data.Macaw.ARM.ARMReg as AR
+import qualified Pate.SimulatorRegisters as PSr
 
 data NoRegisters (tp :: LCT.CrucibleType) = NoRegisters Void
 
@@ -165,6 +168,9 @@ instance PA.ValidArch SA.AArch32 where
     MAA.ReturnIf{} -> MD.ParsedReturn st
     MAA.ReturnIfNot{} -> MD.ParsedReturn st
 
+  archSymReturnAddress _sym simSt = do
+    let rs = PS.simRegs simSt
+    return $ PSr.macawRegValue $ rs ^. MC.boundValue AR.arm_LR
 
 data AArch32Opts arch = AArch32Opts { thumbMode :: Bool }
 

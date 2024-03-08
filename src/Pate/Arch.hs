@@ -211,6 +211,9 @@ class
     Maybe (MD.ParsedTermStmt arch ids)
   archExtractArchTerms = \ _ _ _ -> Nothing
 
+  archSymReturnAddress ::
+    forall sym v bin. W4.IsSymExprBuilder sym => sym -> PS.SimState sym arch v bin -> IO (CLM.LLVMPtr sym (MD.ArchAddrWidth arch))
+
 serializeRegister :: ValidArch arch => MC.ArchReg arch tp -> W4S.W4S sym JSON.Value
 serializeRegister r = case displayRegister r of
   Normal r_n -> return $ JSON.object [ "reg" .= r_n ]

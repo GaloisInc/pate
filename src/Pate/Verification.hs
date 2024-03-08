@@ -37,6 +37,7 @@ import           System.IO as IO
 import           Control.Monad.Trans ( lift )
 import qualified Control.Monad.Trans as CMT
 import qualified Data.ElfEdit as DEE
+import           Data.Maybe ( mapMaybe )
 import qualified Data.Map as M
 import qualified Data.Parameterized.SetF as SetF
 import qualified Data.Parameterized.Nonce as N
@@ -87,6 +88,7 @@ import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Override.Library as PVOL
 import qualified Pate.Verification.StrongestPosts as PSP
 import           Pate.TraceTree
+import Data.Containers.ListUtils (nubOrd)
 
 -- | Run code discovery using macaw
 --
@@ -223,13 +225,21 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   upData <- unpackPatchData contexts pd
   -- include the process entry point, if configured to do so
   
-  entryPoints' <- DT.forM (PC.cfgStartSymbols vcfg) $ \s -> do
-    PPa.runPatchPairT $ PPa.forBins $ \bin -> do
-      ctx <- PPa.get bin contexts
-      (liftIO $ findFunctionByName s ctx) >>= \case
-        Just start -> return start
-        Nothing -> CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
-  
+  entryPoints' <- fmap nubOrd $ PPa.runPatchPairT $ do
+    entryPairs <- DT.forM (PC.cfgStartSymbols vcfg) $ \s -> do
+      pcases <- fmap PPa.toMaybeCases $ PPa.forBinsF $ \bin -> do
+        ctx <- PPa.get bin contexts
+        IO.liftIO $ findFunctionByName s ctx
+      case pcases of
+        PPa.PatchPairJust symbols -> return symbols
+        PPa.PatchPairMismatch bin symbol_single -> return $ PPa.PatchPairSingle bin symbol_single
+        PPa.PatchPairNothing ->
+          CME.throwError $ PEE.loaderError (PEE.ConfigError ("Missing Entry Point: " ++ s))
+    -- Combine all single-sided entry points and return the product of original vs. patched
+    fmap concat $ DT.forM entryPairs $ \ep -> case ep of
+      PPa.PatchPairSingle{} -> return $ mapMaybe (PPa.zip ep) entryPairs
+      _ -> return [ep]
+
   topEntryPoint <- PPa.runPatchPairT $ PPa.forBins $ \bin -> do
     ctx <- PPa.get bin contexts
     liftIO $ PD.resolveFunctionEntry (PMC.binEntry ctx) (PMC.parsedFunctionMap ctx)
