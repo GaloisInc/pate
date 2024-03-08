@@ -18,6 +18,8 @@ module Pate.Discovery.PLT (
   , pltStubClassifier
   , extraJumpClassifier
   , extraReturnClassifier
+  , extraCallClassifier
+  , extraTailCallClassifier
   , ExtraJumps
   , ExtraJumpTarget(..)
   ) where
@@ -35,7 +37,7 @@ import qualified Control.Monad.RWS as CMR
 import qualified Data.Macaw.Discovery as Parsed
 import qualified Data.Macaw.Discovery.ParsedContents as Parsed
 import qualified Data.Macaw.Architecture.Info as Info
-import Control.Lens ((^.), (&))
+import Control.Lens ((^.), (&), (.~))
 import Data.Macaw.Types
 import qualified Data.Macaw.AbsDomain.JumpBounds as Jmp
 import qualified Data.Macaw.Memory as MM
@@ -50,6 +52,8 @@ import Data.Macaw.CFG
 import Control.Monad (forM)
 import qualified Data.Text as T
 import Data.List (find)
+import Data.Macaw.Discovery.Classifier (classifierEndBlock)
+import Control.Applicative (Alternative(..))
 
 -- | A variant of 'pltStubSymbols' that inverts the order of keys and values in
 -- the 'Map.Map' and massages s
@@ -478,16 +482,26 @@ in Data.Macaw.X86:
 
 data ExtraJumpTarget arch =
     DirectTargets (Set (MM.ArchSegmentOff arch))
+  | DirectCall (MM.ArchSegmentOff arch) (Maybe (MM.ArchSegmentOff arch)) Bool
   | ReturnTarget
   deriving (Eq, Ord)
 
 instance MemWidth (RegAddrWidth (ArchReg arch)) => Show (ExtraJumpTarget arch) where
-  show (DirectTargets es) = show es
+  show (DirectTargets es) = "Jump: " ++ show es
+  show (DirectCall c (Just r) _) = "Call:" ++ show c ++ " returns: " ++ show r
+  show (DirectCall c Nothing True) = "Tail Call:" ++ show c
+  show (DirectCall c Nothing False) = "Jump:" ++ show c
   show ReturnTarget = "{return}"
 
+-- FIXME: Not really a semigroup at all, needs to be changed to a special-purpose merge function
+-- (or map should be to a set of targets rather than one)
 instance Semigroup (ExtraJumpTarget arch) where
+  a@(DirectCall{}) <> DirectCall{} = a
   (DirectTargets a) <> (DirectTargets b) = DirectTargets (a <> b)
-  _ <> _ = ReturnTarget
+  DirectTargets{} <> a@DirectCall{} = a
+  a@DirectCall{} <> DirectTargets{} = a
+  ReturnTarget <> _ = ReturnTarget
+  _ <> ReturnTarget = ReturnTarget
 
 type ExtraJumps arch = (Map (MM.ArchSegmentOff arch) (ExtraJumpTarget arch))
 
@@ -514,6 +528,80 @@ extraReturnClassifier jumps = classifierName "Extra Return" $ do
                               , Parsed.newFunctionAddrs = []
                               }
 
+extraTailCallClassifier ::  ExtraJumps arch -> BlockClassifier arch ids
+extraTailCallClassifier jumps = classifierName "Extra Tail call" $ do
+  bcc <- CMR.ask
+  let ctx = classifierParseContext bcc
+  let ainfo = pctxArchInfo ctx
+  -- Check for tail call when the calling convention seems to be satisfied.
+  Info.withArchConstraints ainfo $ do
+    startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
+    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc))
+    Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
+    call_tgt <- case Map.lookup final_addr jumps of
+      Just (DirectCall c Nothing True)  -> return c
+      _ -> fail $ "No extra tail calls for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
+    let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr call_tgt) (MM.segoffAddr call_tgt))
+    let finalRegs = (classifierFinalRegState bcc) & MM.curIP .~ v
+    let bcc' = bcc {classifierFinalRegState = finalRegs}
+    case (call_tgt `Map.member` pctxKnownFnEntries ctx) of
+      True -> return $! noreturnCallParsedContents bcc'
+      False -> extraJumpClassifier jumps <|> (return $! noreturnCallParsedContents bcc')
+
+noreturnCallParsedContents :: BlockClassifierContext arch ids -> Parsed.ParsedContents arch ids
+noreturnCallParsedContents bcc =
+  let ctx  = classifierParseContext bcc
+      mem  = pctxMemory ctx
+      absState = classifierAbsState bcc
+      regs = classifierFinalRegState bcc
+      blockEnd = classifierEndBlock bcc
+   in Info.withArchConstraints (pctxArchInfo ctx) $
+        Parsed.ParsedContents { Parsed.parsedNonterm = F.toList (classifierStmts bcc)
+                           , Parsed.parsedTerm  = Parsed.ParsedCall regs Nothing
+                           , Parsed.writtenCodeAddrs =
+                             filter (\a -> segoffAddr a /= blockEnd) $
+                             classifierWrittenAddrs bcc
+                           , Parsed.intraJumpTargets = []
+                           , Parsed.newFunctionAddrs = Parsed.identifyCallTargets mem absState regs
+                           }
+
+extraCallClassifier :: ExtraJumps arch -> BlockClassifier arch ids
+extraCallClassifier jumps = classifierName "Extra Call" $ do
+  bcc <- CMR.ask
+  let ctx = classifierParseContext bcc
+  let ainfo = pctxArchInfo ctx
+  let mem = pctxMemory ctx
+  let finalRegs_ = classifierFinalRegState bcc
+
+  Info.withArchConstraints ainfo $ do
+    startAddr <- CMR.asks (Info.pctxAddr . Info.classifierParseContext)
+    -- FIXME: This is not exactly right, but I'm not sure if there's a better way to find the
+    -- address corresponding to this instruction. Maybe examine the statements?
+    Just (instr_off, instr_txt) <- return $ lastInstructionStart (F.toList (classifierStmts bcc))
+
+    Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
+    (call_tgt, ret) <- case Map.lookup final_addr jumps of
+      Just (DirectCall c (Just r) _)  -> return $ (c,r)
+      _ -> fail $ "No extra calls for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
+    let v = MM.CValue (MM.RelocatableCValue (MM.addrWidthRepr call_tgt) (MM.segoffAddr call_tgt))
+    let finalRegs = finalRegs_ & MM.curIP .~ v
+
+    pure $ Parsed.ParsedContents { Parsed.parsedNonterm = F.toList (classifierStmts bcc)
+                              , Parsed.parsedTerm  = Parsed.ParsedCall finalRegs (Just ret)
+                              -- The return address may be written to
+                              -- stack, but is highly unlikely to be
+                              -- a function entry point.
+                              , Parsed.writtenCodeAddrs = filter (/= ret) (classifierWrittenAddrs bcc)
+                              --Include return target
+                              , Parsed.intraJumpTargets =
+                                [( ret
+                                 , Info.postCallAbsState ainfo (classifierAbsState bcc) finalRegs ret
+                                 , Jmp.postCallBounds (Info.archCallParams ainfo) (classifierJumpBounds bcc) finalRegs
+                                 )]
+                              -- Use the abstract domain to look for new code pointers for the current IP.
+                              , Parsed.newFunctionAddrs = Parsed.identifyCallTargets mem (classifierAbsState bcc) finalRegs
+                              }
+
 extraJumpClassifier :: ExtraJumps arch -> BlockClassifier arch ids
 extraJumpClassifier jumps = classifierName "Extra Jump" $ do
   bcc <- CMR.ask
@@ -529,6 +617,7 @@ extraJumpClassifier jumps = classifierName "Extra Jump" $ do
     Just final_addr <- return $ MM.incSegmentOff startAddr (fromIntegral instr_off)
     targets <- case Map.lookup final_addr jumps of
       Just (DirectTargets targets)  -> return $ Set.toList targets
+      Just (DirectCall tgt Nothing _ ) -> return [tgt]
       _ -> fail $ "No extra jumps for instruction: " ++ show final_addr ++ " (" ++ show instr_txt ++ ")"
 
     let abst = finalAbsBlockState (classifierAbsState bcc) (classifierFinalRegState bcc)
