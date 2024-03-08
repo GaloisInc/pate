@@ -286,6 +286,14 @@ stubOverrides =
       -- , ("dirCache", PA.mkDefaultStubOverrideArg "dirCache" [Some r0] r0)
       -- FIXME: reads from the stack as well
       , ("timestamp", PA.mkDefaultStubOverrideArg "timestamp" [Some r0, Some r1, Some r2, Some r3] r0)
+      , ("usb_serial_getchar", PA.mkDefaultStubOverride "usb_serial_getchar" r0)
+      , ("usb_serial_available", PA.mkDefaultStubOverride "usb_serial_available" r0)
+      , ("usb_serial_write", PA.mkWriteOverride "usb_serial_write" r0 r0 r1 r0)
+      , ("strlen", PA.mkDefaultStubOverrideArg "strlen" [Some r0] r0)
+      , ("println", PA.mkWriteOverride "println" r0 r0 r1 r0)
+      , ("strcmp", PA.mkDefaultStubOverrideArg "strcmp" [Some r0, Some r1] r0)
+      , ("strncpy", PA.mkDefaultStubOverrideArg "strncpy" [Some r0, Some r1] r0)
+      , ("random", PA.mkDefaultStubOverrideArg "random" [Some r0] r0)
       ] ++
       (map mkDefault $
         [ "memcpy" -- FIXME: needs implementation
