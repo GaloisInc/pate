@@ -150,15 +150,16 @@ data PatchData =
             --   that are considered of inteterest to the user.
 
             , archOpts :: [String]
+            , ignoredFunctionsByPrefix :: [String]
             }
   deriving (Show)
 
 instance Semigroup PatchData where
-  (PatchData a b c d e f g h) <> (PatchData a' b' c' d' e' f' g' h')
-   = (PatchData (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g') (h <> h'))
+  (PatchData a b c d e f g h i) <> (PatchData a' b' c' d' e' f' g' h' i')
+   = (PatchData (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g') (h <> h') (i <> i'))
 
 instance Monoid PatchData where
-  mempty = PatchData [] [] [] [] [] [] [] []
+  mempty = PatchData [] [] [] [] [] [] [] [] []
 
 _Address :: Toml.TomlBiMap Address Toml.AnyValue
 _Address = Toml._Coerce Toml._Natural
@@ -191,6 +192,7 @@ patchDataCodec = PatchData
   <*> optionalArrayOf _Address "ignore-patched-functions" .= ignorePatchedFunctions
   <*> Toml.list memRegionCodec "observable-memory" .= observableMemory
   <*> optionalArrayOf Toml._String "arch-opts" .= archOpts
+  <*> optionalArrayOf Toml._String "ignored-function-prefix" .= ignoredFunctionsByPrefix
 
 data PatchDataParseError = UnicodeError DTEE.UnicodeException
                          | TOMLError [Toml.TomlDecodeError]

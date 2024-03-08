@@ -73,6 +73,8 @@ import Debug.Trace
 import Control.Applicative ((<|>))
 import Data.Macaw.Utils.IncComp (incCompResult)
 import qualified Data.Text as T
+import qualified Pate.PatchPair as PPa
+import Data.List (isPrefixOf)
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
@@ -341,14 +343,13 @@ funInfoToFunEntry ::
   PBi.WhichBinaryRepr bin ->
   MD.DiscoveryFunInfo arch ids ->
   ParsedFunctionMap arch bin ->
-  Set.Set (MM.MemSegmentOff (MM.ArchAddrWidth arch)) ->
   PB.FunctionEntry arch bin
-funInfoToFunEntry binRepr dfi pfm ignoredAddrs =
+funInfoToFunEntry binRepr dfi pfm =
   PB.FunctionEntry
   { PB.functionSegAddr = MD.discoveredFunAddr dfi
   , PB.functionSymbol  = fmap PB.mkFunctionSymbol (MD.discoveredFunSymbol dfi)
   , PB.functionBinRepr = binRepr
-  , PB.functionIgnored = Set.member (MD.discoveredFunAddr dfi) ignoredAddrs
+  , PB.functionIgnored = False
   , PB.functionEnd = Map.lookup (MD.discoveredFunAddr dfi) (pfmEndMap pfm)
   }
 
@@ -487,6 +488,14 @@ getIgnoredFns repr (ParsedFunctionMap pfmRef _ pd _ _ _ _ _ _) = do
       PBi.OriginalRepr -> mapMaybe (segoffAddrsFor mem) (PC.ignoreOriginalFunctions pd)
       PBi.PatchedRepr -> mapMaybe (segoffAddrsFor mem) (PC.ignorePatchedFunctions pd)
 
+isIgnoredSymbol ::
+  ParsedFunctionMap arch bin ->
+  PB.FunctionSymbol ->
+  Bool
+isIgnoredSymbol (ParsedFunctionMap _ _ pd _ _ _ _ _ _) symbol =
+  isJust (F.find (\pref -> pref `isPrefixOf` (PB.fnSymPlain symbol)) (PC.ignoredFunctionsByPrefix pd))
+
+
 -- | Return the 'MD.DiscoveryFunInfo' (raw macaw code discovery artifact)
 -- corresponding to the function that contains the given basic block
 --
@@ -507,7 +516,6 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
   let faddr = PB.functionSegAddr (PB.blockFunctionEntry blk)
 
   st <- getParsedFunctionState faddr pfm
-  ignoredAddresses <- getIgnoredFns (PB.blockBinRepr blk) pfm
 
   -- First, check if we have a cached set of blocks for this state
   case Map.lookup (PB.blockFunctionEntry blk) (parsedFunctionCache st) of
@@ -523,7 +531,7 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
       -- IORef that might be evaluated multiple times if there is a lot of
       -- contention. If that becomes a problem, we may want to change this
       -- to an MVar where we fully evaluate each result before updating it.
-      (_, Some dfi) <- return $ atomicAnalysis ignoredAddresses faddr st
+      (_, Some dfi) <- atomicAnalysis faddr st
       --IORef.writeIORef pfmRef pfm'
       saveCFG mCFGDir (PB.blockBinRepr blk) dfi
       return (Just (Some dfi))
@@ -542,16 +550,20 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
     -- no interesting effects (thus skipping the ignored function and all of its
     -- callees). Note that by returning it here, the empty function is cached
     -- for the entry point address and reused if needed.
-    atomicAnalysis ignoredAddressSet faddr st
-      | Set.member faddr ignoredAddressSet = (st, Some (emptyFunction faddr))
-      | otherwise =
-        let rsn = MD.CallTarget faddr
-        in case incCompResult (MD.discoverFunction MD.defaultDiscoveryOptions faddr rsn (discoveryState st) []) of
-             (ds2, Some dfi) ->
-               let entry = funInfoToFunEntry (PB.blockBinRepr blk) dfi pfm ignoredAddressSet 
-               in (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
-                      , discoveryState = ds2
-                      }, Some dfi)
+    atomicAnalysis faddr st = do
+      fe <- resolveFunctionEntry (PB.FunctionEntry faddr Nothing bin False Nothing) pfm
+      case PB.functionIgnored fe of
+        True -> return $ (st, Some (emptyFunction faddr))
+        False -> do
+          let rsn = MD.CallTarget faddr
+          case incCompResult (MD.discoverFunction MD.defaultDiscoveryOptions faddr rsn (discoveryState st) []) of
+            (ds2, Some dfi) -> do
+                entry <- resolveFunctionEntry (funInfoToFunEntry (PB.blockBinRepr blk) dfi pfm) pfm
+                return $ (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
+                             , discoveryState = ds2
+                             }, Some dfi)
+    bin :: PBi.WhichBinaryRepr bin
+    bin = PB.blockBinRepr blk
 
 segOffCases :: MM.MemWidth w => MM.MemSegmentOff w -> (MM.MemSegmentOff w, MM.MemSegmentOff w)
 segOffCases e = fromMaybe (error "segOffCases") $ do
@@ -570,16 +582,21 @@ resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _ _ _) = 
   let syms = MD.symbolNames (discoveryState st)
   ignoredAddresses <- getIgnoredFns (PB.functionBinRepr fe) pfm
   let fe' = fe { PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap }
-  return $ fromMaybe fe' $ (do
-    let (addr_lo, addr_hi) = segOffCases (PB.functionSegAddr fe)
-    -- lookup both cases where the low bit is set or unset, since the symbol table
-    -- may have one or the other
-    nm <- Map.lookup addr_lo syms <|> Map.lookup addr_hi syms
-    return $ fe { PB.functionSymbol = Just (PB.mkFunctionSymbol nm)
-                , PB.functionIgnored = Set.member (PB.functionSegAddr fe) ignoredAddresses 
-                , PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap
-                }
-    )
+  let fe'' = fromMaybe fe' $ (do
+        let (addr_lo, addr_hi) = segOffCases (PB.functionSegAddr fe)
+        -- lookup both cases where the low bit is set or unset, since the symbol table
+        -- may have one or the other
+        nm <- Map.lookup addr_lo syms <|> Map.lookup addr_hi syms
+        return $ fe { PB.functionSymbol = Just $ fromMaybe (PB.mkFunctionSymbol nm) (PB.functionSymbol fe)
+                    , PB.functionIgnored = PB.functionIgnored fe
+                    , PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap
+                    }
+        )
+  let ignored =
+        PB.functionIgnored fe''
+        || (case PB.functionSymbol fe'' of Just s -> isIgnoredSymbol pfm s; _ -> False)
+        ||  Set.member (PB.functionSegAddr fe) ignoredAddresses
+  return $ fe'' { PB.functionIgnored = ignored }
 
 instance MM.ArchConstraints arch => IsTraceNode '(sym,arch) "parsedblock" where
   type TraceNodeType '(sym,arch) "parsedblock" = Some (MD.ParsedBlock arch)
