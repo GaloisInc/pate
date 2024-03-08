@@ -115,8 +115,8 @@ import           Control.Monad (void)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
-import           Control.Exception hiding ( try, finally, catch, mask )
-import           Control.Monad.Catch hiding ( catches, tryJust, Handler )
+import           Control.Exception hiding ( try, tryJust, finally, catch, catches, mask, Handler )
+import           Control.Monad.Catch
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Reader ( asks, ask )
 import           Control.Monad.Except
@@ -335,7 +335,12 @@ newtype EquivM_ sym arch a = EquivM { unEQ :: (CMR.ReaderT (EquivEnv sym arch) I
 -- Treat PEE.EquivalenceError specially, although it is just raised like any other exception
 instance MonadError PEE.EquivalenceError (EquivM_ sym arch) where
   throwError e = throwM e
-  catchError f hdl = f `catch` (\(e :: PEE.EquivalenceError) -> hdl e)
+  catchError f hdl = f `catches`
+    [ Handler (\(e :: PEE.EquivalenceError) -> hdl e)
+    , Handler (\(e :: IOException) -> catchError (throwHere (PEE.UnhandledException e)) hdl)
+    , Handler (\(e :: IOError) -> catchError (throwHere (PEE.UnhandledException e)) hdl)
+    , Handler (\(e :: ArithException) -> catchError (throwHere (PEE.UnhandledException e)) hdl)
+    ]
 
 instance MonadTreeBuilder '(sym, arch) (EquivM_ sym arch) where
   getTreeBuilder = CMR.asks envTreeBuilder
@@ -678,8 +683,8 @@ withAssumptionSet asm f = withSym $ \sym -> do
     _ ->
         CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
         (frame, st) <- withOnlineBackend $ \bak ->  do
-          st <- liftIO $ LCB.saveAssumptionState bak
-          frame <- liftIO $ LCB.pushAssumptionFrame bak
+          st <- safeIO PEE.SolverError $ LCB.saveAssumptionState bak
+          frame <- safeIO PEE.SolverError $ LCB.pushAssumptionFrame bak
           safeAssumedFalseIO mempty asm $ 
             LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
           return (frame, st)
@@ -812,7 +817,7 @@ safePop ::
 safePop frame st = withOnlineBackend $ \bak -> 
   catchError
     (safeIO (\_ -> PEE.SolverStackMisalignment) (void $ LCB.popAssumptionFrame bak frame)) $ \_ -> do 
-      void $ liftIO $ tryJust filterAsync $ LCBO.restoreSolverState bak st
+      void $ safeIO PEE.SolverError $ tryJust filterAsync $ LCBO.restoreSolverState bak st
 
 -- | Evaluate the given function in an assumption context augmented with the given
 -- predicate.
@@ -859,8 +864,8 @@ withSatAssumption asm f = withSym $ \sym -> do
       curAsm <- currentAsm
       CMR.local (\env -> env { envCurrentFrame = (asm <> curAsm) }) $ do
         mst <- withOnlineBackend $ \bak -> do
-          st <- liftIO $ LCB.saveAssumptionState bak
-          frame <- liftIO $  LCB.pushAssumptionFrame bak
+          st <- safeIO PEE.SolverError $ LCB.saveAssumptionState bak
+          frame <- safeIO PEE.SolverError $ LCB.pushAssumptionFrame bak
           catchError
             (safeAssumedFalseIO mempty asm $ do
               LCB.addAssumption bak (LCB.GenericAssumption initializationLoc "withAssumptionSet" p)
@@ -934,14 +939,15 @@ getWrappedSolver ::
 getWrappedSolver = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   IO.withRunInIO $ \inIO -> return $ PVC.WrappedSolver sym $ \_desc p k -> inIO $ do
+
     isPredSat_cache p >>= \case
-      Just False -> liftIO $ (k (W4R.Unsat ()))
+      Just False -> safeIO PEE.SolverError $ (k (W4R.Unsat ()))
       _ -> do
         r <- checkSatisfiableWithModel heuristicTimeout "concretizeWithSolver" p $ \res -> IO.withRunInIO $ \inIO' -> do
           res' <- W4R.traverseSatResult (\r' -> return $ W4G.GroundEvalFn (\e' -> inIO' (execGroundFn r' e'))) pure res
-          k res'
+          inIO' $ (safeIO PEE.SolverError (k res'))
         case r of
-          Left _err -> liftIO $ k W4R.Unknown
+          Left _err -> safeIO PEE.SolverError $ k W4R.Unknown
           Right a -> return a
   
 
@@ -951,7 +957,7 @@ concretizeWithModel ::
   EquivM sym arch (W4.SymExpr sym tp)
 concretizeWithModel fn e = withSym $ \sym -> do
   grnd <- execGroundFn fn e
-  liftIO $ PVC.symbolicFromConcrete sym grnd e
+  safeIO PEE.SolverError $ PVC.symbolicFromConcrete sym grnd e
 
 -- | Concretize a symbolic expression in the current assumption context
 concretizeWithSolver ::
@@ -990,11 +996,11 @@ checkSatisfiableWithModel ::
   (W4R.SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch (Either SomeException a)
 checkSatisfiableWithModel timeout desc p k = withSym $ \sym -> do
-  (frame, st) <- withOnlineBackend $ \bak -> liftIO $ do
+  (frame, st) <- withOnlineBackend $ \bak -> safeIO PEE.SolverError $ do
     st <- LCB.saveAssumptionState bak
     frame <- LCB.pushAssumptionFrame bak
     return (frame, st)
-  mres <- withSolverProcess $ \sp -> liftIO $ do
+  mres <- withSolverProcess $ \sp -> safeIO PEE.SolverError $ do
     W4.assume (WPO.solverConn sp) p
     tryJust filterAsync $ do
       res <- checkSatisfiableWithoutBindings timeout sym desc $ WPO.checkAndGetModel sp "checkSatisfiableWithModel"
@@ -1257,7 +1263,7 @@ extractBindings fn e = withSym $ \sym -> do
   fmap MapF.fromList $ mapM (\(Some var) -> do
     let varE = W4.varExpr sym var
     gv <- execGroundFn fn varE
-    val <- liftIO $ PVC.symbolicFromConcrete sym gv varE
+    val <- safeIO PEE.SolverError $ PVC.symbolicFromConcrete sym gv varE
     return $ MapF.Pair varE val) vars
   
 
@@ -1276,14 +1282,10 @@ execGroundFn ::
   EquivM_ sym arch (W4G.GroundValue tp)
 execGroundFn (SymGroundEvalFn fn) e = do
   groundTimeout <- CMR.asks (PC.cfgGroundTimeout . envConfig)
-  result <- liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e) `catches`
-    [ Handler (\(ae :: ArithException) -> liftIO (putStrLn ("ArithEx: " ++ show ae)) >> return Nothing)
-    , Handler (\(ie :: IOException) -> liftIO (putStrLn ("IOEx: " ++ show ie)) >> return Nothing)
-    , Handler (\(ie :: IOError) -> liftIO (putStrLn ("IOErr: " ++ show ie)) >> return Nothing)
-    ]
+  result <- tryJust filterAsync $ liftIO $ (PT.timeout' groundTimeout $ W4G.groundEval fn e)
   case result of
-    Just a -> return a
-    Nothing -> throwHere $ PEE.FailedToGroundExpr (PEE.SomeExpr @_ @sym e)
+    Right (Just a) -> return a
+    _ -> throwHere $ PEE.FailedToGroundExpr (PEE.SomeExpr @_ @sym e)
 
 getFootprints ::
   SimBundle sym arch v ->
