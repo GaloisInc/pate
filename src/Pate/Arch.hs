@@ -372,43 +372,52 @@ mkWriteOverride ::
   StubOverride arch
 mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  -- TODO: must be less than len
-  zero_nat <- W4.natLit sym 0
-  let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  sym_write_bv <- W4.freshConstant sym (W4.safeSymbol "sym_write") (W4.BaseBVRepr w_mem)
-  let sym_ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat sym_write_bv)
-
   return $ StateTransformer $ \st -> do
     let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
 
     let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue flen
     let (CLM.LLVMPointer _ fd_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue fd_reg
+    let (CLM.LLVMPointer _ buf_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
     len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
-    (st',msz) <- case W4.asConcrete len_bv' of
+    (st',sz) <- case W4.asConcrete len_bv' of
       Just (W4.ConcreteBV _ lenC)
         | Just (Some w) <- W4.someNat (BVS.asUnsigned lenC)
         , Just W4.LeqProof <- W4.isPosNat w -> do
         let mem = PS.simMem st
         -- endianness doesn't really matter, as long as we're consistent
         let memrepr = MC.BVMemRepr w MC.LittleEndian
-        (CLM.LLVMPointer _ val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
-        --FIXME: ignores regions
-        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv) mem
+        (CLM.LLVMPointer region val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
+        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv Ctx.:> W4.natToIntegerPure region) mem
         -- globally-unique
         bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz") (Ctx.empty Ctx.:> (W4.exprType val_bv)) (W4.BaseBVRepr w_mem)
         sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> val_bv)
-        return $ (st { PS.simMem = mem' },Just sz)
+        return $ (st { PS.simMem = mem' },sz)
       _ -> do
-        putStrLn $ (show nm) ++ ": Unhandled symbolic write length: " ++ (show $ W4.printSymExpr len_bv')
-        return (st, Nothing)
-        -- FIXME: what to do for non-concrete write lengths?
-        --return st
-    case msz of
-      Just sz -> do
-        let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat sz)
-        return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
-      Nothing -> return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ sym_ptr ) })
+        let mem = PS.simMem st
+        bytes_chunk <- PMT.readChunk sym (PMT.memState mem) buf_ptr len_bv
+        let memrepr = MC.BVMemRepr (W4.knownNat @8) MC.LittleEndian
+        (CLM.LLVMPointer _region first_byte) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
+        one <- W4.bvLit sym w_mem (BVS.mkBV w_mem 1)
+        len_minus_one <- W4.bvSub sym len_bv one
+        last_idx <- W4.bvAdd sym buf_bv len_minus_one
+        last_byte <- W4.arrayLookup sym (PMT.memChunkArr bytes_chunk) (Ctx.empty Ctx.:> last_idx)
+        mem' <- PMT.addExternalCallWrite sym nm bytes_chunk (Ctx.empty Ctx.:> fd_bv ) mem
+        -- this is used in the case where there is a symbolic length, in lieu of
+        -- making the symbolic length depends on the entire contents of the read value,
+        -- we only make it depend on the first byte and last byte
+        bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz_chunk")
+          (Ctx.empty Ctx.:> W4.BaseBVRepr w_mem Ctx.:> (W4.exprType first_byte) Ctx.:> (W4.exprType last_byte) ) (W4.BaseBVRepr w_mem)
+        sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> len_bv Ctx.:> first_byte Ctx.:> last_byte)
+        return $ (st { PS.simMem = mem' },sz)
 
+    zero_nat <- W4.natLit sym 0
+    -- we're returning a symbolic result representing the number of bytes written, so
+    -- we clamp this explicitly to the given write length
+    zero_ptr <- W4.bvLit sym w_mem (BVS.mkBV w_mem 0)
+    sz_is_bounded <- W4.bvUle sym len_bv' sz
+    bounded_sz <- W4.baseTypeIte sym sz_is_bounded sz zero_ptr
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat bounded_sz)
+    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
 
 
 

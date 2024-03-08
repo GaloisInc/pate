@@ -27,6 +27,7 @@ symbolic execution.
 
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE KindSignatures #-}
 
 module Pate.EventTrace
 ( MemEvent(..)
@@ -51,6 +52,11 @@ module Pate.EventTrace
 , collapsePartialSeq
 , compareSymSeq
 , concatSymSequence
+, groundExternalCallData
+, printExternalCallData
+, compareExternalCallData
+, ExternalCallData(..)
+, MemChunk(..)
 ) where
 
 import           Prettyprinter
@@ -69,7 +75,7 @@ import           Lang.Crucible.LLVM.MemModel (LLVMPtr, pattern LLVMPointer, ppPt
 import           Lang.Crucible.Utils.MuxTree ( MuxTree, viewMuxTree )
 import           Lang.Crucible.Simulator.SymSequence ( SymSequence(..), muxSymSequence, evalWithFreshCache, nilSymSequence, consSymSequence, appendSymSequence, isNilSymSequence, traverseSymSequence )
 
-import           Data.Macaw.Memory (Endianness(..), MemSegmentOff, MemWidth, MemAddr (..), segoffAddr)
+import           Data.Macaw.Memory (Endianness(..), MemSegmentOff, MemWidth, MemAddr (..), segoffAddr, memWidthNatRepr)
 import           Data.Macaw.CFG.AssignRhs (ArchAddrWidth, ArchReg)
 import           Data.Macaw.CFG (ArchSegmentOff, RegAddrWidth)
 
@@ -89,6 +95,13 @@ import What4.Partial (PartExpr, pattern Unassigned, pattern PE)
 import qualified Data.IORef as IO
 import qualified Data.Map as Map
 import Data.Parameterized.Nonce
+import qualified What4.Expr.Builder as W4B
+import qualified What4.Expr.GroundEval as W4G
+import qualified Pate.Verification.Concretize as PVC
+import qualified What4.Expr.ArrayUpdateMap as AUM
+import Data.Data (Typeable)
+import GHC.TypeLits
+import qualified Data.Macaw.Memory as MC
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
@@ -108,6 +121,13 @@ instance OrdF (SymExpr sym) => OrdF (SymBV' sym) where
     EQF -> EQF
     LTF -> LTF
     GTF -> GTF
+
+instance OrdF (SymExpr sym) => Eq (SymBV' sym w) where
+  a == b | Just{} <- testEquality a b = True
+  _ == _ = False
+
+instance OrdF (SymExpr sym) => Ord (SymBV' sym w) where
+  compare a b = toOrdering $ compareF a b
 
 instance PEM.ExprMappable sym (SymBV' sym w) where
   mapExpr _sym f (SymBV' bv) = SymBV' <$> f bv
@@ -261,16 +281,138 @@ data MemEvent sym ptrW where
     SymBV sym w
       {- ^ Value of r0 during this syscall -} ->
     MemEvent sym ptrW
-  ExternalCallEvent :: forall sym ptrW ctx.
+  ExternalCallEvent :: forall sym ptrW.
     Text ->
-    Ctx.Assignment (SymExpr sym) ctx
-      {- ^ relevant data for this visible call -} ->
+    [ExternalCallData sym ptrW] {- ^ relevant data for this visible call -} ->
     MemEvent sym ptrW
+
+data ExternalCallData sym ptrW =
+    forall tp. ExternalCallDataExpr (SymExpr sym tp)
+  | ExternalCallDataChunk (MemChunk sym ptrW)
+
+instance PEM.ExprMappable sym (ExternalCallData sym ptrW) where
+  mapExpr sym f = \case
+    ExternalCallDataExpr e -> ExternalCallDataExpr <$> f e
+    ExternalCallDataChunk c -> ExternalCallDataChunk <$> PEM.mapExpr sym f c
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (ExternalCallData sym ptrW) where
+  w4Serialize (ExternalCallDataExpr e) = W4S.object ["data_expr" .== e]
+  w4Serialize (ExternalCallDataChunk c) = W4S.object ["mem_chunk" .= c]
+
+instance OrdF (SymExpr sym) => Eq (ExternalCallData sym ptrW) where
+  a == b = (compare a b == EQ)
+
+instance OrdF (SymExpr sym) => Ord (ExternalCallData sym ptrW) where
+  compare (ExternalCallDataExpr e1) (ExternalCallDataExpr e2) = toOrdering $ compareF e1 e2
+  compare (ExternalCallDataChunk c1) (ExternalCallDataChunk c2) = compare c1 c2
+  compare (ExternalCallDataExpr{}) (ExternalCallDataChunk{}) = LT
+  compare (ExternalCallDataChunk{}) (ExternalCallDataExpr{})  = GT
+
+groundExternalCallData ::
+  forall sym ptrW t st fs. sym ~ W4B.ExprBuilder t st fs =>
+  MemWidth ptrW =>
+  sym ->
+  W4G.GroundEvalFn t ->
+  ExternalCallData sym ptrW ->
+  IO (ExternalCallData sym ptrW)
+groundExternalCallData sym evalFn = \case
+  ExternalCallDataExpr e -> ExternalCallDataExpr <$> do
+    e_g <- W4G.groundEval evalFn e
+    PVC.symbolicFromConcrete sym e_g e
+  ExternalCallDataChunk (MemChunk mem base len) -> ExternalCallDataChunk <$> do
+    let ptrW = memWidthNatRepr @ptrW
+    base_g <- W4G.groundEval evalFn base
+    len_g <- W4G.groundEval evalFn len
+    base' <- PVC.symbolicFromConcrete sym base_g base
+    len' <- PVC.symbolicFromConcrete sym len_g len
+    idxs <- forM [0..(max fIXME_MAX_SYMBOLIC_WRITE (BV.asUnsigned len_g))] $ \i -> do
+      let bv_idx = BV.add ptrW base_g (BV.mkBV ptrW i)
+      bv_idx_lit <- bvLit sym ptrW bv_idx
+      byte <- arrayLookup sym mem (Ctx.empty Ctx.:> bv_idx_lit)
+      return $ (Ctx.empty Ctx.:> BVIndexLit ptrW bv_idx, byte)
+    let aum = AUM.fromAscList (BaseBVRepr (knownNat @8)) idxs
+    zero <- bvLit sym (knownNat @8) (BV.mkBV (knownNat @8) 0)
+    mem' <- arrayFromMap sym (Ctx.empty Ctx.:> BaseBVRepr ptrW) aum zero
+    return $ MemChunk mem' base' len'
+
+fIXME_MAX_SYMBOLIC_WRITE :: Integer
+fIXME_MAX_SYMBOLIC_WRITE = 1
+
+compareExternalCallData ::
+  forall sym ptrW.
+  IsSymExprBuilder sym =>
+  MemWidth ptrW =>
+  sym ->
+  ExternalCallData sym ptrW ->
+  ExternalCallData sym ptrW ->
+  IO (Pred sym)
+compareExternalCallData sym ec1 ec2 = case (ec1, ec2) of
+  (ExternalCallDataExpr e1, ExternalCallDataExpr e2) | Just Refl <- testEquality (exprType e1) (exprType e2) ->
+    isEq sym e1 e2
+  (ExternalCallDataChunk (MemChunk mem1 base1 len1), ExternalCallDataChunk (MemChunk mem2 base2 len2)) -> do
+    len_eq <- isEq sym len1 len2
+    let ptrW = MC.memWidthNatRepr @ptrW
+    -- FIXME: we only compare a fixed number of elements due to
+    -- some incompatibility with arrayCopy and arrayRangeEq that
+    -- needs further investigation
+    -- also check the last byte, which has a symbolic offset into
+    -- the array
+    one <- bvLit sym ptrW (BV.mkBV ptrW 1)
+    len_minus_one <- bvSub sym len1 one
+    last_idx1 <- bvAdd sym base1 len_minus_one
+    last_idx2 <- bvAdd sym base1 len_minus_one
+    last_byte1 <- arrayLookup sym mem1 (Ctx.empty Ctx.:> last_idx1)
+    last_byte2 <- arrayLookup sym mem2 (Ctx.empty Ctx.:> last_idx2)
+    last_bytes_eq <- isEq sym last_byte1 last_byte2
+
+    elems_eq <- forM [0..fIXME_MAX_SYMBOLIC_WRITE] $ \i -> do
+      bv_off_lit <- bvLit sym ptrW (BV.mkBV ptrW i)
+      bv_idx1 <- bvAdd sym base1 bv_off_lit
+      bv_idx2 <- bvAdd sym base2 bv_off_lit
+      byte1 <- arrayLookup sym mem1 (Ctx.empty Ctx.:> bv_idx1)
+      byte2 <- arrayLookup sym mem2 (Ctx.empty Ctx.:> bv_idx2)
+      in_range <- bvUle sym bv_off_lit len1
+      eq_bytes <- isEq sym byte1 byte2
+      impliesPred sym in_range eq_bytes
+    foldM (andPred sym) len_eq (last_bytes_eq:elems_eq)
+    {-
+    arr_eq <- arrayRangeEq sym mem1 base1 mem2 base2 len1
+    andPred sym len_eq arr_eq
+    -}
+  _ -> return $ falsePred sym
+
+printExternalCallData ::
+  IsExpr (SymExpr sym) =>
+  MemWidth ptrW =>
+  ExternalCallData sym ptrW ->
+  Doc a
+printExternalCallData (ExternalCallDataExpr e) = printSymExpr e
+printExternalCallData (ExternalCallDataChunk (MemChunk mem1 base1 len1)) =
+  "TODO print mem chunk: " <+> printSymExpr mem1 <+> printSymExpr base1 <+> printSymExpr len1
+
+data MemChunk sym ptrW = MemChunk
+  { memChunkArr :: SymExpr sym (BaseArrayType (Ctx.EmptyCtx Ctx.::> BaseBVType ptrW) (BaseBVType 8))
+  , memChunkBase :: SymExpr sym (BaseBVType ptrW)
+  , memChunkLen :: SymExpr sym (BaseBVType ptrW)
+  }
+
+instance OrdF (SymExpr sym) => Eq (MemChunk sym ptrW) where
+  a == b = (compare a b == EQ)
+
+instance OrdF (SymExpr sym) => Ord (MemChunk sym ptrW) where
+  compare (MemChunk a1 b1 c1) (MemChunk a2 b2 c2) =
+    (toOrdering $ compareF a1 a2) <> (toOrdering $ compareF b1 b2) <>(toOrdering $ compareF c1 c2)
 
 instance OrdF (SymExpr sym) => Eq (MemEvent sym ptrW) where
   a == b = case compare a b of
     EQ -> True
     _ -> False
+
+instance PEM.ExprMappable sym (MemChunk sym ptrW) where
+  mapExpr _sym f (MemChunk a b c) = MemChunk <$> f a <*> f b <*> f c
+
+instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemChunk sym ptrW) where
+  w4Serialize (MemChunk a b c) = W4S.object ["mem_arr" .== a, "base" .== b, "len" .== c]
 
 compareTrees :: OrdF (SymExpr sym) => Ord tp => MuxTree sym tp -> MuxTree sym tp -> Ordering
 compareTrees mt1 mt2 = 
@@ -284,7 +426,7 @@ instance OrdF (SymExpr sym) => Ord (MemEvent sym ptrW) where
     (MemOpEvent op1, MemOpEvent op2) -> compare op1 op2
     (SyscallEvent mt1 bv1, SyscallEvent mt2 bv2) -> compareTrees mt1 mt2 <> (toOrdering $ compareF bv1 bv2)
     (ExternalCallEvent nm1 vs1, ExternalCallEvent nm2 vs2) -> 
-      compare nm1 nm2 <> (toOrdering $ (compareF vs1 vs2))
+      compare nm1 nm2 <> (compare vs1 vs2)
     (MemOpEvent{}, _) -> GT
     (SyscallEvent{}, ExternalCallEvent{}) -> GT
     (ExternalCallEvent{}, _) -> LT
@@ -302,7 +444,7 @@ prettyMemEvent (SyscallEvent i v) =
   case viewMuxTree i of
     [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
     _ -> "Syscall" <+> printSymExpr v
-prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> vsep (TFC.toListFC printSymExpr vs)
+prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> vsep (map printExternalCallData vs)
 
 
 instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
@@ -313,7 +455,7 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
     SyscallEvent i arg -> SyscallEvent i <$> f arg
     -- MuxTree is unmodified since it has no symbolic expressions
-    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> TFC.traverseFC f vs
+    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> PEM.mapExpr sym f vs
 
 
 filterEvent ::
