@@ -38,7 +38,7 @@ import qualified Data.Foldable as F
 import qualified Data.IORef as IORef
 import qualified Data.Map as Map
 import qualified Data.Map.Merge.Strict as Map
-import           Data.Maybe ( mapMaybe, listToMaybe, fromMaybe )
+import           Data.Maybe ( mapMaybe, listToMaybe, fromMaybe, isJust )
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some ( Some(..), viewSome )
@@ -63,7 +63,7 @@ import qualified Pate.Binary as PBi
 import qualified Pate.Block as PB
 import qualified Pate.Config as PC
 import qualified Pate.Memory as PM
-import           Pate.Discovery.PLT (extraJumpClassifier, extraReturnClassifier, ExtraJumps, ExtraJumpTarget(..))
+import           Pate.Discovery.PLT (extraJumpClassifier, extraReturnClassifier, ExtraJumps, ExtraJumpTarget(..), extraCallClassifier, extraTailCallClassifier)
 
 import           Pate.TraceTree
 import Control.Monad.IO.Class (liftIO)
@@ -227,9 +227,19 @@ addExtraEdges ::
   ExtraJumps arch ->
   IO ()
 addExtraEdges pfm es = do
-  mapM_ (\tgts -> case tgts of {DirectTargets es' -> mapM_ (addExtraTarget pfm) (Set.toList es'); _ -> return ()}) (Map.elems es)
+  mapM_ addTgt (Map.elems es)
   IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
     st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (l <> r))) es (extraEdges st')}
+  where
+    addTgt :: ExtraJumpTarget arch -> IO ()
+    addTgt = \case
+      DirectTargets es' -> mapM_ (addExtraTarget pfm) (Set.toList es')
+      -- we need to flush the cache here to ensure that we re-check the block at the
+      -- call site(s) after adding this as a return
+      ReturnTarget -> flushCache pfm
+      -- a call shouldn't require special treatment since it won't introduce
+      -- any edges
+      DirectCall{} -> return ()
 
 -- | Apply the various overrides to the architecture definition before returning the discovery state
 getDiscoveryState ::
@@ -259,7 +269,14 @@ getDiscoveryState fnaddr pfm st = let
   -- TODO: apply some intelligence here to distinguish direct jumps from tail calls,
   -- for the moment our infrastructure handles direct jumps better, so we prefer that
   ainfo4 = ainfo3 { MAI.archClassifier = pfmWrapClassifier pfm
-    (extraJumpClassifier (extraEdges st) <|> extraReturnClassifier (extraEdges st))
+    (extraCallClassifier (extraEdges st) 
+     <|> extraTailCallClassifier (extraEdges st)
+     <|> extraJumpClassifier (extraEdges st) 
+       -- note that 'extraTailCallClassifier' will attempt 'extraJumpClassifier' itself
+       -- (and prefer that result) if the PC target is not a known function address
+       -- we include 'extraJumpClassifier' here to capture cases where 'extraTailCallClassifier'
+       -- fails early and doesn't have a chance to run the jump classifier itself
+     <|> extraReturnClassifier (extraEdges st))
     }
   ainfo5 = ainfo4 { MAI.disassembleFn = addTranslationErrorWrapper (MAI.disassembleFn ainfo4)}
   in initDiscoveryState pfm ainfo5

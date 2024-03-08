@@ -134,6 +134,7 @@ import qualified Pate.EventTrace as ET
 import Control.Exception (throw)
 import qualified What4.ExprHelpers as WEH
 import qualified What4.JSON as W4S
+import qualified What4.Concrete as W4
 
 -- Overall module notes/thoughts
 --
@@ -1893,9 +1894,13 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
   let mem_image = MBL.memoryImage $ PMC.binary ctx
   let regs  = PS.simRegs (PS.simOutState simOut_)
   let iPReg = regs ^. MM.curIP
-  let mem = PS.simMem (PS.simOutState simOut_) 
+  let mem = PS.simMem (PS.simOutState simOut_)
+  let stackBase = PS.unSE $ PS.simStackBase (PS.simInState simIn_)
+  let CLM.LLVMPointer _ stackOut = PSR.macawRegValue $ PS.simSP (PS.simOutState simOut_)
 
-  
+  CLM.LLVMPointer retR retV <- IO.liftIO $ PA.archSymReturnAddress sym (PS.simInState simIn_)
+  goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
+
   -- | is it possible to end in a classification failure? If so, find all of the concrete edges that
   --   resulted in failure
   let
@@ -1956,7 +1961,20 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
                 False -> return tried
               False -> do
                 targets <- findTargets Set.empty
-                return $ Map.insertWith (<>) instr_addr (DirectTargets targets) tried
+                retV_conc <- concretizeWithSolver retV
+                retR_conc <- concretizeWithSolver (W4.natToIntegerPure retR)
+                mret <- case (W4.asConcrete retV_conc, W4.asConcrete retR_conc) of
+                  (Just (W4.ConcreteBV _ rvc), Just (W4.ConcreteInteger 0))
+                    | ret_raw <- MM.memWord (fromIntegral (BV.asUnsigned rvc))
+                    -> return $ PM.resolveAbsoluteAddress mem_image ret_raw
+                  _ -> return Nothing
+
+                stack_bottom_pred <- IO.liftIO $ W4.isEq sym stackOut stackBase
+                stack_bottom <- isPredTrue' goalTimeout stack_bottom_pred
+                extra_jump <- case Set.toList targets of
+                  [target_addr] -> return $ DirectCall target_addr mret stack_bottom
+                  _ -> return $ DirectTargets targets
+                return $ Map.insertWith (<>) instr_addr extra_jump tried
           not_this_instr <-  PAS.fromPred <$> (liftIO $ W4.notPred sym is_this_instr)
           fromMaybe with_targets <$> (withSatAssumption not_this_instr $ findOne with_targets)
         Nothing -> return $ tried

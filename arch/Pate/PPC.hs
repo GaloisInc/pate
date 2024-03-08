@@ -83,6 +83,8 @@ import qualified Pate.Verification.Domain as PD
 import           Pate.TraceTree
 import Data.Macaw.CFG.Core
 import qualified What4.JSON as W4S
+import qualified Data.Macaw.CFG as MC
+import qualified Pate.SimState as PS
 
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where
@@ -181,6 +183,9 @@ instance PA.ValidArch PPC.PPC32 where
   -- FIXME: TODO
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
+  archSymReturnAddress _sym simSt = do
+    let rs = PS.simRegs simSt
+    return $ PSR.macawRegValue $ rs ^. MC.boundValue PPC.PPC_LNK
 
 instance PA.ValidArch PPC.PPC64 where
   type ArchConfigOpts PPC.PPC64 = ()
@@ -199,6 +204,9 @@ instance PA.ValidArch PPC.PPC64 where
   readRegister _ = Nothing
   uninterpretedArchStmt _ = False
   archClassifierWrapper cl = PPC.ppcReadPCClassifier <|> cl
+  archSymReturnAddress _sym simSt = do
+    let rs = PS.simRegs simSt
+    return $ PSR.macawRegValue $ rs ^. MC.boundValue PPC.PPC_LNK
 
 -- | Determine the argument name for the argument held in the given register.
 --
