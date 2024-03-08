@@ -282,15 +282,39 @@ data FunctionSymbol = FunctionSymbol
   -- when looking up stub definitions
   }
 
+
 instance Eq FunctionSymbol where
   (FunctionSymbol a _ _) == (FunctionSymbol b _ _) = a == b
 
 -- FIXME: cases where the demangler fails
-demanglerOverrides :: BSC.ByteString -> Maybe (String,String)
+demanglerOverrides :: BSC.ByteString -> Maybe (String, String)
 demanglerOverrides = \case
   "_ZN5boost9function4IvRKNS_10shared_ptrIN3ros10ConnectionEEERKNS_12shared_arrayIhEEjbEC2INS_3_bi6bind_tIvNS_4_mfi3mf4IvNS2_22TransportPublisherLinkES6_SA_jbEENSD_5list5INSD_5valueIPSH_EENS_3argILi1EEENSN_ILi2EEENSN_ILi3EEENSN_ILi4EEEEEEEEET_NS_10enable_if_IXntsrNS_11is_integralISU_EE5valueEiE4typeE"
+
     -- FIXME: it's unclear if this is just "bind" or something more interesting
-    -> Just ("function4","boost::function4<void, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>::function4<boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > > >(boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > >, boost::enable_if_<!boost::is_integral<boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > > >::value, int>::type)")
+    -> Just ("function4", "boost::function4<void, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>::function4<boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > > >(boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > >, boost::enable_if_<!boost::is_integral<boost::_bi::bind_t<void, boost::_mfi::mf4<void, ros::TransportPublisherLink, boost::shared_ptr<ros::Connection> const&, boost::shared_array<unsigned char> const&, unsigned int, bool>, boost::_bi::list5<boost::_bi::value<ros::TransportPublisherLink*>, boost::arg<1>, boost::arg<2>, boost::arg<3>, boost::arg<4> > > >::value, int>::type)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075642368EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE5beginEv"
+    -> Just ("begin", "FlexCAN_T4<(CAN_DEV_TABLE)1075642368, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::begin()")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075658752EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE5beginEv"
+    -> Just ("begin", "FlexCAN_T4<(CAN_DEV_TABLE)1075658752, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::begin()")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075642368EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE8readFIFOER13CAN_message_t"
+    -> Just ("readFIFO", "FlexCAN_T4<(CAN_DEV_TABLE)1075642368, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::readFIFO(CAN_message_t&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075642368EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE6readMBER13CAN_message_t"
+    -> Just ("readMB", "FlexCAN_T4<(CAN_DEV_TABLE)1075642368, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::readMB(CAN_message_t&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075658752EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE8readFIFOER13CAN_message_t"
+    -> Just ("readFIFO", "FlexCAN_T4<(CAN_DEV_TABLE)1075658752, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::readFIFO(CAN_message_t&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075658752EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE6readMBER13CAN_message_t"
+    -> Just ("readMB", "FlexCAN_T4<(CAN_DEV_TABLE)1075658752, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::readMB(CAN_message_t&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075642368EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE5writeERK13CAN_message_t"
+    -> Just ("write", "FlexCAN_T4<(CAN_DEV_TABLE)1075642368, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::write(CAN_message_t const&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075642368EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE14struct2queueTxERK13CAN_message_t"
+    -> Just ("struct2queueTx", "FlexCAN_T4<(CAN_DEV_TABLE)1075642368, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::struct2queueTx(CAN_message_t const&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075658752EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE5writeERK13CAN_message_t"
+    -> Just ("write", "FlexCAN_T4<(CAN_DEV_TABLE)1075658752, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::write(CAN_message_t const&)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075642368EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE11setBaudRateEm12FLEXCAN_RXTX"
+    -> Just ("setBaudRate", "FlexCAN_T4<(CAN_DEV_TABLE)1075642368, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::setBaudRate(unsigned long, FLEXCAN_RXTX)")
+  "_ZN10FlexCAN_T4IL13CAN_DEV_TABLE1075658752EL21FLEXCAN_RXQUEUE_TABLE256EL21FLEXCAN_TXQUEUE_TABLE16EE11setBaudRateEm12FLEXCAN_RXTX"
+    -> Just ("setBaudRate", "FlexCAN_T4<(CAN_DEV_TABLE)1075658752, (FLEXCAN_RXQUEUE_TABLE)256, (FLEXCAN_TXQUEUE_TABLE)16>::setBaudRate(unsigned long, FLEXCAN_RXTX)")
   _ -> Nothing
 
 mkFunctionSymbol :: BSC.ByteString -> FunctionSymbol
