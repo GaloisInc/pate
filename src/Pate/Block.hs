@@ -49,6 +49,7 @@ module Pate.Block (
   , FunctionSymbol
   , fnSymBytes
   , fnSymBase
+  , fnSymPlain
   ) where
 
 import qualified Data.ByteString.Char8 as BSC

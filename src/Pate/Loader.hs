@@ -169,6 +169,7 @@ runSelfEquivConfig cfg wb = liftToEquivStatus cfg $ do
       , PC.ignorePatchedFunctions = PC.ignoreOriginalFunctions pd
       , PC.observableMemory = PC.observableMemory pd
       , PC.archOpts = PC.archOpts pd
+      , PC.ignoredFunctionsByPrefix = PC.ignoredFunctionsByPrefix pd
       }
   (Some (PLE.LoadedElfPair proxy bin _), errs) <- CMW.listen $ PLE.loadELFs (archLoader cfg) pd' path path (useDwarfHints cfg)
   logger' <- IO.liftIO $ logger cfg proxy
