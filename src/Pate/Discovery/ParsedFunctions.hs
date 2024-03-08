@@ -297,7 +297,8 @@ newParsedFunctionMap
   -> (forall ids . MAI.BlockClassifier arch ids -> MAI.BlockClassifier arch ids)
   -- ^ wrapper for block classifiers
   -> IO (ParsedFunctionMap arch bin)
-newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond blockClassifiers = do
+newParsedFunctionMap mem syms_ archInfo mCFGDir pd fnEndMap fnExtractPrecond blockClassifiers = do
+  let syms = mkAddrSymMap syms_
   let ds0 = MD.emptyDiscoveryState mem syms archInfo
   let s0 = ParsedFunctionState { parsedFunctionCache = mempty
                                , discoveryState = ds0
@@ -315,6 +316,9 @@ newParsedFunctionMap mem syms archInfo mCFGDir pd fnEndMap fnExtractPrecond bloc
                            , pfmExtractBlockPrecond = fnExtractPrecond
                            , pfmWrapClassifier = blockClassifiers
                            }
+
+mkAddrSymMap :: MM.MemWidth ptrW => MD.AddrSymMap ptrW -> MD.AddrSymMap ptrW
+mkAddrSymMap m = Map.fromList $ concat $ map (\(se,s) -> let (addr_lo, addr_hi) = segOffCases se in [(addr_lo, s), (addr_hi, s)]) (Map.toList m)
 
 funInfoToFunEntry ::
   PBi.WhichBinaryRepr bin ->
