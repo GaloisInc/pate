@@ -1,4 +1,4 @@
-.PHONY: main target7-self target7-%
+.PHONY: target7-self target7-%
 
 ifdef json
   JSON_FLAG=--json-toplevel
@@ -11,13 +11,13 @@ ifdef docker
   else
     PATE=docker run --rm -it -v .:/work --workdir=/work pate $(JSON_FLAG)
   endif
-else
+else ifndef
   PATE=../../pate.sh $(JSON_FLAG)
 endif
 
-main: $(HACKATHON_MAR_2024)/.git/HEAD
+.main: $(HACKATHON_MAR_2024)/.git/HEAD
 	cd "$(HACKATHON_MAR_2024)" && git fetch && git checkout main
-	cat $(HACKATHON_MAR_2024)/.git/HEAD > main
+	cat $(HACKATHON_MAR_2024)/.git/HEAD > .main
 
 target7.original.exe: main
 	cp "$(HACKATHON_MAR_2024)/GridIDPS/build/amp_challenge_arm.ino_unstripped.elf" $@
@@ -32,20 +32,22 @@ target7-self: target7.original.exe
 		-p target7.original.exe \
 		-e ContinueAfterRecoverableFailures \
 		-r AllowEqRescopeFailure \
-		-s _ZN6SDFile13setModifyTimeERK14DateTimeFields \
+		-s loop \
 		--save-macaw-cfgs target7_CFGs \
-		--script target7.original.pate
+		--script target7.original.pate \
+		-b target7.toml
 
-target7-%: target7.%.exe target7.%.pate target7.original.exe
+target7-%: target7.%.exe target7.original.exe
 	$(PATE) \
 		--ignore-segments 1 \
 		-o 	target7.original.exe \
 		-p $(word 1,$^) \
 		-e ContinueAfterRecoverableFailures \
 		-r AllowEqRescopeFailure \
-		-s _ZN6SDFile13setModifyTimeERK14DateTimeFields \
+		-s loop \
 		--save-macaw-cfgs target7_CFGs \
-		--script $(word 2,$^)
+		--log-file $(subst exe,log,$(word 1,$^)) \
+		-b thumb.toml
 
 target7.%.dump: target7.%.exe
 	arm-none-eabi-objdump -M force-thumb-mode -d $^ > $@
