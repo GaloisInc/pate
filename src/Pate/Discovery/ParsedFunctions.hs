@@ -574,7 +574,7 @@ resolveFunctionEntry fe pfm@(ParsedFunctionMap pfmRef _ _ fnEndMap _ _ _ _ _) = 
   st <- IORef.readIORef pfmRef
   let syms = MD.symbolNames (discoveryState st)
   ignoredAddresses <- getIgnoredFns (PB.functionBinRepr fe) pfm
-  let fe' = fe { PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap }
+  let (fe' :: PB.FunctionEntry arch bin) = fe { PB.functionEnd = Map.lookup (PB.functionSegAddr fe) fnEndMap }
   let fe'' = fromMaybe fe' $ (do
         let (addr_lo, addr_hi) = segOffCases (PB.functionSegAddr fe)
         -- lookup both cases where the low bit is set or unset, since the symbol table
