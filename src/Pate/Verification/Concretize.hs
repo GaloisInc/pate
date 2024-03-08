@@ -37,6 +37,8 @@ import qualified What4.SatResult as WSat
 
 import           What4.ExprHelpers ( integerToNat )
 import qualified Pate.Panic as PP
+import qualified Data.Parameterized.Context as Ctx
+import qualified Data.BitVector.Sized as BVS
 
 data Concretize sym tp where
   Concretize :: (Show (WEG.GroundValue tp))

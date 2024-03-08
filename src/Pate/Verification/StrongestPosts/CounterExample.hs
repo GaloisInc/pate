@@ -177,7 +177,9 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty (ObservableCounterex
   pretty = ppObservableCounterexample
 
 groundObservableSequence ::
+  HasCallStack =>
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
+  MM.MemWidth ptrW =>
   sym ->
   W4.GroundEvalFn t ->
   MT.MemTraceSeq sym ptrW ->
@@ -186,7 +188,9 @@ groundObservableSequence sym evalFn =
   concreteizeSymSequence (\p -> W4.groundEval evalFn p) (groundMemEvent sym evalFn)
 
 groundMemEvent ::
+  HasCallStack =>
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
+  MM.MemWidth ptrW =>
   sym ->
   W4.GroundEvalFn t ->
   MT.MemEvent sym ptrW ->
@@ -197,9 +201,9 @@ groundMemEvent sym evalFn (MT.SyscallEvent i x) =
   do i' <- MT.toMuxTree sym <$> groundMuxTree sym evalFn i
      x' <- W4.bvLit sym (W4.bvWidth x) =<< W4.groundEval evalFn x
      return (MT.SyscallEvent i' x')
-groundMemEvent sym evalFn (MT.ExternalCallEvent nm xs) =
-  do xs' <- TFC.traverseFC (\x -> W4.groundEval evalFn x >>= (\g -> PVC.symbolicFromConcrete sym g x)) xs
-     return (MT.ExternalCallEvent nm xs')
+groundMemEvent sym evalFn (MT.ExternalCallEvent nm xs) = do
+  xs' <- mapM (MT.groundExternalCallData sym evalFn) xs
+  return (MT.ExternalCallEvent nm xs')
 
 groundMemOp ::
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
@@ -354,6 +358,7 @@ groundRegEntry sym evalFn (PSR.MacawRegEntry repr v) = PSR.MacawRegEntry repr <$
 groundTraceEvent ::
   (sym ~ W4.ExprBuilder t st fs) =>
   1 <= MM.ArchAddrWidth arch =>
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
   sym ->
   W4.GroundEvalFn t ->
   MT.TraceEvent sym arch ->

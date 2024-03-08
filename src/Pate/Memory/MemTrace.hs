@@ -62,6 +62,7 @@ module Pate.Memory.MemTrace
 , memOpOverlapsRegion
 , prettyMemTraceSeq
 , addExternalCallEvent
+, addExternalCallWrite
 , SymBV'(..)
 , getPtrAssertion
 , PtrAssertions
@@ -71,7 +72,7 @@ module Pate.Memory.MemTrace
 , RegOp(..)
 , memFullSeq
 , addRegEvent
-
+, readChunk
 , module Pate.EventTrace
 ) where
 
@@ -153,6 +154,7 @@ import qualified Pate.SimulatorRegisters as PSr
 import Data.Data (Typeable, eqT)
 import qualified Data.Parameterized.TraversableF as TF
 import           Pate.EventTrace 
+import qualified Data.Parameterized.TraversableFC as TFC
 
 ------
 -- * Undefined pointers
@@ -627,7 +629,21 @@ addExternalCallEvent ::
   IO (MemTraceImpl sym ptrW)
 addExternalCallEvent sym nm data_ mem = do
   let
-    event = ExternalCallEvent nm data_
+    event = ExternalCallEvent nm (TFC.toListFC ExternalCallDataExpr data_)
+  addMemEvent sym event mem
+
+addExternalCallWrite ::
+  IsExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  Text {- ^ name of the external call -} ->
+  MemChunk sym ptrW {- ^ data write relevant to the call -}  ->
+  Ctx.Assignment (SymExpr sym) ctx {- ^ data relevant to the call -} ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+addExternalCallWrite sym nm chunk data_ mem = do
+  let
+    event = ExternalCallEvent nm (ExternalCallDataChunk chunk : (TFC.toListFC ExternalCallDataExpr data_))
   addMemEvent sym event mem
 
 addMemEvent ::
@@ -1317,6 +1333,25 @@ chunkBV sym endianness w bv
         hd <- bvSelect sym sz' (knownNat @8) bv
         tl <- bvSelect sym (knownNat @0) sz' bv
         return (hd, tl)
+
+-- Returns an array of bytes, both with the
+-- contents of memory copied (starting at index zero, up to the given length)
+-- NOTE: this does not attempt to resolve concrete values from memory.
+-- If we had an upper bound on length then we could attempt to resolve
+-- reads up to the maximum length and then populate the array accordingly
+readChunk :: forall sym ptrW.
+  MemWidth ptrW =>
+  IsSymExprBuilder sym =>
+  MemWidth ptrW =>
+  sym ->
+  MemTraceState sym ptrW ->
+  LLVMPtr sym ptrW ->
+  SymBV sym ptrW ->
+  IO (MemChunk sym ptrW)
+readChunk sym mem ptr len = do
+  (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr 0
+  regArrayBytes <- arrayLookup sym (memArrBytes mem) (Ctx.singleton reg)
+  return $ MemChunk regArrayBytes off len
 
 -- | Read a packed value from the underlying array (without adding to the read trace)
 readMemState :: forall sym ptrW ty.
