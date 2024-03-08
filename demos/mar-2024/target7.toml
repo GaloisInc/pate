@@ -1,0 +1,2 @@
+arch-opts = [ "thumb" ]
+ignored-function-prefix = [ "FlexCAN_T4" ]
