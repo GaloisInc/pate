@@ -603,7 +603,7 @@ class CFARNode:
             sys.stdout.write('Equivalence Condition: ')
             pprint_symbolic(sys.stdout, self.predicate)
             sys.stdout.write('\n')
-        self.pprint_node_contents(pre)
+        self.pprint_node_contents(pre, show_ce_trace=True)
         print()
         #print('data:')
         #pp.pprint(self.data)
@@ -614,9 +614,9 @@ class CFARNode:
             for n in self.exits:
                 out.write(f'{pre}Exit: {n.id}\n')
                 if self.exit_meta_data.get(n,{}).get('ce_event_trace'):
-                    pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example', pre + '  ', out)
+                    pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example Trace', pre + '  ', out)
                 elif self.exit_meta_data.get(n, {}).get('event_trace'):
-                    pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], '', pre + '  ', out)
+                    pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], 'Witness Trace', pre + '  ', out)
 
     def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
                            show_ce_trace: bool = False):
@@ -1032,10 +1032,10 @@ def pprint_eq_domain(v, pre: str = '', out: IO = sys.stdout):
                 pprint_eq_domain_memory('Stack', v, pre, out)
             case 'max_region':
                 # TODO: Ask Dan about these. They appear in trace pre/post conditions
-                pass
+                out.write(f'{pre}Max Region: {v}\n')
             case 'stack_base':
                 # TODO: Ask Dan about these. They appear in trace pre/post conditions
-                pass
+                out.write(f'{pre}Stack Base: {v}\n')
             case _:
                 out.write(f'{pre}Unknown eq domain "{k}": {v}\n')
 
@@ -1091,58 +1091,57 @@ def pprint_eq_domain_memory(mem_kind, pv, pre: str = '', out: IO = sys.stdout):
 
 
 def pprint_node_event_trace(trace, label: str, pre: str = '', out: IO = sys.stdout):
-    pprint_node_event_trace_domain(trace, label, pre, out)
-    pprint_node_event_trace_original(trace, label, pre, out)
-    pprint_node_event_trace_patched(trace, label, pre, out)
+    out.write(f'{pre}{label} Domain:\n')
+    pprint_node_event_trace_domain(trace, pre + '  ', out)
+
+    out.write(f'{pre}{label} (original):\n')
+    pprint_node_event_trace_original(trace, pre + '  ', out)
+
+    out.write(f'{pre}{label} (patched):\n')
+    pprint_node_event_trace_patched(trace, pre + '  ', out)
 
 
-def pprint_node_event_trace_domain(trace, label: str, pre: str = '', out: IO = sys.stdout):
-    if not trace:
-        out.write(f'{pre}{label}:\n')
-        out.write(f'{pre}   No Pre/Post Condition:\n')
+def pprint_node_event_trace_domain(trace, pre: str = '', out: IO = sys.stdout):
+    precond = trace.get('precondition') if trace else None
+    postcond = trace.get('postcondition') if trace else None
+    if not (precond or postcond):
+        out.write(f'{pre}No Pre/Post Condition:\n')
         return
 
-    if trace.get('precondition'):
-        out.write(f'{pre}{label} Precondition:\n')
-        pprint_eq_domain(trace['precondition'], pre + '  ', out)
-    if trace.get('postcondition'):
-        out.write(f'{pre}{label} Postcondition:\n')
-        pprint_eq_domain(trace['postcondition'], pre + '  ', out)
+    if precond:
+        out.write(f'{pre}Precondition:\n')
+        pprint_eq_domain(precond, pre + '  ', out)
+    if postcond:
+        out.write(f'{pre}Postcondition:\n')
+        pprint_eq_domain(postcond, pre + '  ', out)
 
 
-def pprint_node_event_trace_original(trace, label: str, pre: str = '', out: IO = sys.stdout):
+def pprint_node_event_trace_original(trace, pre: str = '', out: IO = sys.stdout):
     if not trace:
-        out.write(f'{pre}{label} (original):\n')
-        out.write(f'{pre}   None\n')
+        out.write(f'{pre}No trace\n')
         return
 
-    if trace.get('traces', {}).get('original'):
-        pprint_event_trace(f'{label} (original)', trace['traces']['original'], pre, out)
+    pprint_event_trace(trace.get('traces', {}).get('original'), pre, out)
 
 
-def pprint_node_event_trace_patched(trace, label: str, pre: str = '', out: IO = sys.stdout):
+def pprint_node_event_trace_patched(trace, pre: str = '', out: IO = sys.stdout):
     if not trace:
-        out.write(f'{pre}{label} (patched):\n')
-        out.write(f'{pre}   None\n')
+        out.write(f'{pre}No trace\n')
         return
-
-    if trace.get('traces', {}).get('patched'):
-        pprint_event_trace(f'{label} (patched)', trace['traces']['patched'], pre, out)
+    pprint_event_trace(trace.get('traces', {}).get('patched'), pre, out)
 
 
-def pprint_event_trace(k: str, et: dict, pre: str = '', out: IO = sys.stdout):
+def pprint_event_trace(et: dict, pre: str = '', out: IO = sys.stdout):
     if not et:
-        out.write(f'{pre}No event trace\n')
+        out.write(f'{pre}No trace\n')
         return
-
-    # TODO: Dropping this for now. Unclear how useful this is to an end user without filtering.
-    #pprint_event_trace_initial_reg(k, et['initial_regs'], pre, out)
-    pprint_event_trace_events(k, et['events'], pre, out)
+    pprint_event_trace_initial_reg(et['initial_regs'], pre, out)
+    pprint_event_trace_instructions(et['events'], pre, out)
 
 
-def pprint_event_trace_initial_reg(k: str, initial_regs: dict, pre: str = '', out: IO = sys.stdout):
+def pprint_event_trace_initial_reg(initial_regs: dict, pre: str = '', out: IO = sys.stdout):
     """Pretty print an event trace's initial registers."""
-    out.write(f'{pre}{k} Initial Register Values (non-zero):\n')
+    out.write(f'{pre}Initial Register Values (non-zero):\n')
     pprint_reg_op(initial_regs['reg_op'], pre + '  ', out, True)
 
 
@@ -1193,9 +1192,9 @@ def pprint_mem_op(mem_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero:
         out.write(f'{pre}Unknown mem op: {mem_op}')
 
 
-def pprint_event_trace_events(k: str, events: dict, pre: str = '', out: IO = sys.stdout):
+def pprint_event_trace_instructions(events: dict, pre: str = '', out: IO = sys.stdout):
     """Pretty print an event trace's initial registers."""
-    out.write(f'{pre}{k}\n')
+    out.write(f'{pre}Instructions:\n')
     for e in events:
         ia = e['instruction_addr']
         if ia:
