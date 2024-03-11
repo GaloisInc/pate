@@ -244,6 +244,7 @@ withIOList (IOList ref mv) f = go
         -- once we finish
         Just b -> tryPutMVar mv () >> (return $ Right b)
         Nothing | isFinished st -> tryPutMVar mv () >> (return $ Left l)
+        Nothing | isBlockedStatus st -> tryPutMVar mv () >> (return $ Left [])
         Nothing -> threadDelay 10000 >> go
 
 mkStaticIOList :: [a] -> IO (IOList a)
@@ -682,8 +683,11 @@ forkTraceTreeHook f (SomeTraceTree ref g) = do
   let go = do
         Some t <- takeMVar mv
         f t
-
-  _ <- IO.forkIO go
+  
+  tid <- IO.myThreadId
+  _ <- IO.forkFinally go $ \case
+    Left (SomeException e) -> IO.throwTo tid e
+    Right () -> return ()
   return $ SomeTraceTree ref (\t -> g t >> putMVar mv (Some t))
 
 someTraceTree :: forall tp. IO (SomeTraceTree tp)

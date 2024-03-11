@@ -47,8 +47,8 @@ import qualified Pate.JSONReport as JR
 import           Pate.TraceTree
 import Data.Maybe (fromMaybe)
 
-mkRunConfig :: PA.ArchLoader PEE.LoadError -> CLIOptions -> Maybe (SomeTraceTree PA.ValidRepr) -> IO (Either String PL.RunConfig)
-mkRunConfig archLoader opts mtt = let
+mkRunConfig :: PA.ArchLoader PEE.LoadError -> CLIOptions -> PSc.ScriptRunConfig -> Maybe (SomeTraceTree PA.ValidRepr) -> IO (Either String PL.RunConfig)
+mkRunConfig archLoader opts rcfg mtt = let
     origPaths = PLE.LoadPaths
       { PLE.binPath = originalBinary opts
       , PLE.anvillHintsPaths = originalAnvillHints opts
@@ -107,6 +107,7 @@ mkRunConfig archLoader opts mtt = let
         , PL.verificationCfg = verificationCfg
         , PL.useDwarfHints = not $ noDwarfHints opts
         , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig { PLE.ignoreSegments = ignoreSegments opts }
+        , PL.scriptConfig = rcfg
         }
   in PL.parseAndAttachScript cfg
 

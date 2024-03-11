@@ -245,7 +245,7 @@ run rawOpts = do
     OA.Success opts -> do
       setJSONMode $ CLI.jsonToplevel opts
       topTraceTree' <- someTraceTree
-      cfgE <- CLI.mkRunConfig PAL.archLoader opts (Just topTraceTree')
+      cfgE <- CLI.mkRunConfig PAL.archLoader opts PSc.noRunConfig (Just topTraceTree')
       case cfgE of
         Left err -> PO.printErrLn (PP.viaShow err)
         Right cfg -> do
