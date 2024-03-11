@@ -6,6 +6,7 @@ import io
 import os.path
 import signal
 import time
+from difflib import HtmlDiff
 from subprocess import Popen, TimeoutExpired
 from threading import Thread, Condition
 from typing import Optional
@@ -21,7 +22,7 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent, QAction, QContextMenuEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QSplitter, QMenu
+    QDialogButtonBox, QSplitter, QMenu, QTextBrowser
 
 from . import pate
 
@@ -219,27 +220,25 @@ class PateCfarExitDialog(QDialog):
 
         self.setWindowTitle("CFAR Exit Info")
 
-        self.commonField = QPlainTextEdit()
-        self.commonField.setReadOnly(True)
-        self.commonField.setMaximumBlockCount(1000)
+        self.domainField = QPlainTextEdit()
+        self.domainField.setReadOnly(True)
+        self.domainField.setMaximumBlockCount(1000)
 
-        self.originalField = QPlainTextEdit()
-        self.originalField.setReadOnly(True)
-        self.originalField.setMaximumBlockCount(1000)
+        self.traceDiffField = QTextBrowser()
+        self.traceDiffField.setReadOnly(True)
 
-        self.patchedField = QPlainTextEdit()
-        self.patchedField.setReadOnly(True)
-        self.patchedField.setMaximumBlockCount(1000)
-
-        hsplitter = QSplitter()
-        hsplitter.setOrientation(Qt.Orientation.Horizontal)
-        hsplitter.addWidget(self.originalField)
-        hsplitter.addWidget(self.patchedField)
+        # Add Labels?
+        # traceDiffBox = QVBoxLayout()
+        # traceDiffBox.addWidget(QLabel("Trace"))
+        # traceDiffBox.addWidget(self.traceDiffField)
+        #
+        # traceDiffWidget = QWidget()
+        # traceDiffWidget.setLayout(traceDiffBox)
 
         vsplitter = QSplitter()
         vsplitter.setOrientation(Qt.Orientation.Vertical)
-        vsplitter.addWidget(self.commonField)
-        vsplitter.addWidget(hsplitter)
+        vsplitter.addWidget(self.domainField)
+        vsplitter.addWidget(self.traceDiffField)
 
         main_layout = QHBoxLayout()
         main_layout.addWidget(vsplitter)
@@ -465,22 +464,22 @@ class MyFlowGraphWidget(FlowGraphWidget):
             pate.pprint_symbolic(out, cfarNode.predicate)
             d.commonField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_true, 'True Trace Domain', out=out)
+            pate.pprint_node_event_trace_domain(cfarNode.trace_true, out=out)
             d.trueTraceCommonField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_true, 'True Trace Original', out=out)
+            pate.pprint_node_event_trace_original(cfarNode.trace_true, out=out)
             d.trueTraceOriginalField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_true, 'True Trace Patched', out=out)
+            pate.pprint_node_event_trace_patched(cfarNode.trace_true, out=out)
             d.trueTracePatchedField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_false, 'False Trace Domain', out=out)
+            pate.pprint_node_event_trace_domain(cfarNode.trace_false, out=out)
             d.falseTraceCommonField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_false, 'False Trace Original', out=out)
+            pate.pprint_node_event_trace_original(cfarNode.trace_false, out=out)
             d.falseTraceOriginalField.appendPlainText(out.getvalue())
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_false, 'False Trace Patched', out=out)
+            pate.pprint_node_event_trace_patched(cfarNode.trace_false, out=out)
             d.falseTracePatchedField.appendPlainText(out.getvalue())
         d.exec()
 
@@ -507,7 +506,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
             return True
         elif trace:
             if not simulate:
-                self.showExitTraceInfo(sourceCfarNode, trace, 'Trace')
+                self.showExitTraceInfo(sourceCfarNode, trace, 'Witness Trace')
             return True
         else:
             # TODO: dialog?
@@ -516,38 +515,26 @@ class MyFlowGraphWidget(FlowGraphWidget):
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
         d = PateCfarExitDialog(parent=self)
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(trace, label, out=out)
-            d.commonField.setPlainText(out.getvalue())
+            pate.pprint_node_event_trace_domain(trace, out=out)
+            d.domainField.setPlainText(out.getvalue())
 
         # collect trace text content, for formatting below
         original_lines = []
         patched_lines = []
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(trace, label, out=out)
+            pate.pprint_node_event_trace_original(trace, out=out)
             original_lines = out.getvalue().splitlines()
         with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(trace, label, out=out)
+            pate.pprint_node_event_trace_patched(trace, out=out)
             patched_lines = out.getvalue().splitlines()
 
-        def fmt_diff(line, color):
-            return '<span style="background-color: ' + color + ';">' + line.replace(" ", "&nbsp;") + '</span>'
+        htmlDiff = HtmlDiff()
+        html = htmlDiff.make_file(original_lines, patched_lines,
+                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
+        d.traceDiffField.setHtml(html)
+        # TODO: Can we get needed width from traceDiffField to render the HTML without wrap?
+        d.traceDiffField.setMinimumWidth(1100)
 
-        diff_color_unchanged = "rgb(255, 255, 255)" # white
-        diff_color_original_only = "rgb(186, 252, 172)" # green
-        diff_color_patched_only = "rgb(255, 201, 250)" # pink
-
-        # the diff algorithm here only checks for membership in the other trace.
-        # We're not matching up order at all. (TODO: improve this)
-        for l in original_lines:
-            if l in patched_lines:
-                d.originalField.appendHtml(fmt_diff(l, diff_color_unchanged))
-            else:
-                d.originalField.appendHtml(fmt_diff(l, diff_color_original_only))
-        for l in patched_lines:
-            if l in original_lines:
-                d.patchedField.appendHtml(fmt_diff(l, diff_color_unchanged))
-            else:
-                d.patchedField.appendHtml(fmt_diff(l, diff_color_patched_only))
         d.exec()
 
 
