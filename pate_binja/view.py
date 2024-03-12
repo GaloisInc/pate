@@ -328,13 +328,9 @@ class MyFlowGraphWidget(FlowGraphWidget):
         super().__init__(parent, view, graph)
         self.pate_widget = pate_widget
 
-        #self.setContextMenuPolicy(Qt.CustomContextMenu)
-        #self.customContextMenuRequested.connect(self.customContextMenu)
-
-    def contextMenuEvent(self, event):
-        # Disable normal FlowGraph context menu.
-        # TODO: Is there a better way to do this? Disconnect a signal/event?
-        pass
+        # Disable context menu. We need a QMouseEvent to get nodes and edges at mose position, so we use
+        # mouse press event instead.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
     def build_pate_flow_graph(self, cfarGraph: pate.CFARGraph):
         self.flowGraph = FlowGraph()
@@ -424,16 +420,16 @@ class MyFlowGraphWidget(FlowGraphWidget):
             #     print("Edge incoming: ", edgeTuple[1])
 
             if node:
-                self.gotoAddressPopupMenu(event, node)
+                self.nodePopupMenu(event, node)
 
             elif edgeTuple:
-                self.showEdgeExitInfo(edgeTuple)
+                self.edgePopupMenu(event, edgeTuple)
         else:
             super().mousePressEvent(event)
 
-    def gotoAddressPopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
+    def nodePopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
         cfarNode = self.flowToCfar[node]
-        if cfarNode and (cfarNode.original_addr or cfarNode.patched_addr):
+        if cfarNode and (cfarNode.original_addr or cfarNode.patched_addr or cfarNode.predicate):
             context = QMenu(self)
             gotoOriginalAction = None
             gotoPatchedAction = None
@@ -469,7 +465,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d.setFalseTrace(cfarNode.trace_true, 'False Trace')
         d.exec()
 
-    def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
+    def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
         edge = edgeTuple[0]
         incoming = edgeTuple[1]  # Direction of edge depends on which half was clicked
         if incoming:
@@ -478,7 +474,17 @@ class MyFlowGraphWidget(FlowGraphWidget):
         else:
             sourceCfarNode = self.flowToCfar[edge.source]
             exitCfarNode = self.flowToCfar[edge.target]
-        self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
+
+        if sourceCfarNode and exitCfarNode and self.showCfarExitInfo(sourceCfarNode, exitCfarNode, True):
+            # Just one menu item for an edge for now
+            context = QMenu(self)
+            showExitInfoAction = QAction(f'Show CFAR Exit Info', self)
+            context.addAction(showExitInfoAction)
+            choice = context.exec(event.globalPos())
+            if choice is None:
+                pass
+            elif choice == showExitInfoAction:
+                self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
 
     def showCfarExitInfo(self, sourceCfarNode: pate.CFARNode, exitCfarNode: pate.CFARNode, simulate: bool=False) -> bool:
 
