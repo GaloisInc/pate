@@ -214,11 +214,9 @@ class PateThread(Thread):
 #     pt.start()
 
 
-class PateCfarExitDialog(QDialog):
-    def __init__(self, parent=None):
+class TraceWidget(QWidget):
+    def __init__(self, parent):
         super().__init__(parent)
-
-        self.setWindowTitle("CFAR Exit Info")
 
         self.domainField = QPlainTextEdit()
         self.domainField.setReadOnly(True)
@@ -244,6 +242,44 @@ class PateCfarExitDialog(QDialog):
         main_layout.addWidget(vsplitter)
         self.setLayout(main_layout)
 
+    def setTrace(self, trace: dict, label: str):
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_domain(trace, out=out)
+            self.domainField.setPlainText(out.getvalue())
+
+        # collect trace text content, for formatting below
+        original_lines = []
+        patched_lines = []
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_original(trace, out=out)
+            original_lines = out.getvalue().splitlines()
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_patched(trace, out=out)
+            patched_lines = out.getvalue().splitlines()
+
+        htmlDiff = HtmlDiff()
+        html = htmlDiff.make_file(original_lines, patched_lines,
+                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
+        self.traceDiffField.setHtml(html)
+
+        # TODO: Can we get needed width from traceDiffField to render the HTML without wrap?
+
+
+class PateCfarExitDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("CFAR Exit Info")
+
+        self.traceWidget = TraceWidget(self)
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(self.traceWidget)
+        self.setLayout(main_layout)
+
+    def setTrace(self, trace: dict, label: str):
+        self.traceWidget.setTrace(trace, label)
+
 
 class PateCfarEqCondDialog(QDialog):
     def __init__(self, parent=None):
@@ -255,54 +291,13 @@ class PateCfarEqCondDialog(QDialog):
         self.commonField.setReadOnly(True)
         self.commonField.setMaximumBlockCount(1000)
 
-        self.trueTraceCommonField = QPlainTextEdit()
-        self.trueTraceCommonField.setReadOnly(True)
-        self.trueTraceCommonField.setMaximumBlockCount(1000)
-
-        self.trueTraceOriginalField = QPlainTextEdit()
-        self.trueTraceOriginalField.setReadOnly(True)
-        self.trueTraceOriginalField.setMaximumBlockCount(1000)
-
-        self.trueTracePatchedField = QPlainTextEdit()
-        self.trueTracePatchedField.setReadOnly(True)
-        self.trueTracePatchedField.setMaximumBlockCount(1000)
-
-        self.falseTraceCommonField = QPlainTextEdit()
-        self.falseTraceCommonField.setReadOnly(True)
-        self.falseTraceCommonField.setMaximumBlockCount(1000)
-
-        self.falseTraceOriginalField = QPlainTextEdit()
-        self.falseTraceOriginalField.setReadOnly(True)
-        self.falseTraceOriginalField.setMaximumBlockCount(1000)
-
-        self.falseTracePatchedField = QPlainTextEdit()
-        self.falseTracePatchedField.setReadOnly(True)
-        self.falseTracePatchedField.setMaximumBlockCount(1000)
-
-        trueOriginalPatchedSplitter = QSplitter()
-        trueOriginalPatchedSplitter.setOrientation(Qt.Orientation.Horizontal)
-        trueOriginalPatchedSplitter.addWidget(self.trueTraceOriginalField)
-        trueOriginalPatchedSplitter.addWidget(self.trueTracePatchedField)
-
-        trueSplitter = QSplitter()
-        trueSplitter.setOrientation(Qt.Orientation.Vertical)
-        trueSplitter.addWidget(self.trueTraceCommonField)
-        trueSplitter.addWidget(trueOriginalPatchedSplitter)
-
-        falseOriginalPatchedSplitter = QSplitter()
-        falseOriginalPatchedSplitter.setOrientation(Qt.Orientation.Horizontal)
-        falseOriginalPatchedSplitter.addWidget(self.falseTraceOriginalField)
-        falseOriginalPatchedSplitter.addWidget(self.falseTracePatchedField)
-
-        falseSplitter = QSplitter()
-        falseSplitter.setOrientation(Qt.Orientation.Vertical)
-        falseSplitter.addWidget(self.falseTraceCommonField)
-        falseSplitter.addWidget(falseOriginalPatchedSplitter)
+        self.trueTraceWidget = TraceWidget(self)
+        self.falseTraceWidget = TraceWidget(self)
 
         trueFalseSplitter = QSplitter()
         trueFalseSplitter.setOrientation(Qt.Orientation.Horizontal)
-        trueFalseSplitter.addWidget(trueSplitter)
-        trueFalseSplitter.addWidget(falseSplitter)
+        trueFalseSplitter.addWidget(self.trueTraceWidget)
+        trueFalseSplitter.addWidget(self.falseTraceWidget)
 
         predSplitter = QSplitter()
         predSplitter.setOrientation(Qt.Orientation.Vertical)
@@ -312,6 +307,13 @@ class PateCfarEqCondDialog(QDialog):
         main_layout = QHBoxLayout()
         main_layout.addWidget(predSplitter)
         self.setLayout(main_layout)
+
+    def setTrueTrace(self, trace: dict, label: str):
+        self.trueTraceWidget.setTrace(trace, label)
+
+    def setFalseTrace(self, trace: dict, label: str):
+        self.falseTraceWidget.setTrace(trace, label)
+
 
 
 class MyFlowGraphWidget(FlowGraphWidget):
@@ -463,24 +465,8 @@ class MyFlowGraphWidget(FlowGraphWidget):
         with io.StringIO() as out:
             pate.pprint_symbolic(out, cfarNode.predicate)
             d.commonField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_true, out=out)
-            d.trueTraceCommonField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_true, out=out)
-            d.trueTraceOriginalField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_true, out=out)
-            d.trueTracePatchedField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_false, out=out)
-            d.falseTraceCommonField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_false, out=out)
-            d.falseTraceOriginalField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_false, out=out)
-            d.falseTracePatchedField.appendPlainText(out.getvalue())
+        d.setTrueTrace(cfarNode.trace_true, 'True Trace')
+        d.setFalseTrace(cfarNode.trace_true, 'False Trace')
         d.exec()
 
     def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
@@ -513,28 +499,8 @@ class MyFlowGraphWidget(FlowGraphWidget):
             return False
 
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
-        d = PateCfarExitDialog(parent=self)
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(trace, out=out)
-            d.domainField.setPlainText(out.getvalue())
-
-        # collect trace text content, for formatting below
-        original_lines = []
-        patched_lines = []
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(trace, out=out)
-            original_lines = out.getvalue().splitlines()
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(trace, out=out)
-            patched_lines = out.getvalue().splitlines()
-
-        htmlDiff = HtmlDiff()
-        html = htmlDiff.make_file(original_lines, patched_lines,
-                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
-        d.traceDiffField.setHtml(html)
-        # TODO: Can we get needed width from traceDiffField to render the HTML without wrap?
-        d.traceDiffField.setMinimumWidth(1100)
-
+        d = PateCfarExitDialog(self)
+        d.setTrace(trace, label)
         d.exec()
 
 
