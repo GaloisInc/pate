@@ -56,6 +56,7 @@ data RunConfig =
     , archLoader :: PA.ArchLoader PEE.LoadError
     , useDwarfHints :: Bool
     , elfLoaderConfig :: ElfLoaderConfig
+    , scriptConfig :: PS.ScriptRunConfig
     }
 
 parseAndAttachScript ::
@@ -66,7 +67,7 @@ parseAndAttachScript cfg = case PC.cfgScriptPath (verificationCfg cfg) of
       Left err -> return $ Left (show err)
       Right scr -> do
         let tt = PC.cfgTraceTree $ verificationCfg cfg
-        tt' <- PS.attachToTraceTree scr tt
+        tt' <- PS.attachToTraceTree (scriptConfig cfg) scr tt
         return $ Right $ setTraceTree tt' cfg
     Nothing -> return $ Right cfg
 

@@ -16,7 +16,7 @@ import qualified System.IO as IO
 main :: IO ()
 main = do
   opts <- OA.execParser CLI.cliOptions
-  CLI.mkRunConfig PAL.archLoader opts Nothing >>= \case
+  CLI.mkRunConfig PAL.archLoader opts PS.noRunConfig Nothing >>= \case
     Left err -> SE.die (show err)
     Right cfg -> do
       status <- PL.runEquivConfig cfg

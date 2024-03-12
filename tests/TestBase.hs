@@ -33,6 +33,7 @@ import qualified Pate.Equivalence as PEq
 import qualified Pate.Event as PE
 import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
+import qualified Pate.Script as PSc
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.PatchPair as PPa
 import qualified Pate.CLI as CLI
@@ -138,6 +139,12 @@ doTest mwb cfg sv fp = do
     addLogMsg :: String -> IO ()
     addLogMsg msg = IOR.atomicModifyIORef' logsRef $ \logs -> (msg : logs, ())
 
+    scriptRunConfig :: PSc.ScriptRunConfig 
+    scriptRunConfig =  PSc.ScriptRunConfig
+      { PSc.scriptLogErr = (\msg -> let msg' = "Script failure: " ++ msg in failTest msg')
+      , PSc.scriptLogDebug = (\msg -> addLogMsg ("Script step: " ++ msg))
+      }
+
     failTest :: forall a. String -> IO a
     failTest msg = do
       logs <- IOR.readIORef logsRef
@@ -150,7 +157,7 @@ doTest mwb cfg sv fp = do
       case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
         OA.Success opts -> do
           let dir = takeDirectory (fp <.> "args")
-          withCurrentDirectory dir $ CLI.mkRunConfig (testArchLoader cfg) opts Nothing >>= \case
+          withCurrentDirectory dir $ CLI.mkRunConfig (testArchLoader cfg) opts scriptRunConfig Nothing >>= \case
             Left err -> failTest err
             Right rcfg -> return $ (dir, rcfg)
         OA.Failure failure -> do
@@ -202,6 +209,7 @@ doTest mwb cfg sv fp = do
         , PL.archLoader = testArchLoader cfg
         , PL.useDwarfHints = False
         , PL.elfLoaderConfig = PLE.defaultElfLoaderConfig
+        , PL.scriptConfig = scriptRunConfig
         }
       case mrcfg of
         Left err -> failTest err

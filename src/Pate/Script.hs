@@ -73,6 +73,8 @@ module Pate.Script (
     readScript
   , Script
   , ScriptParseError
+  , ScriptRunConfig(..)
+  , noRunConfig
   , parseScript
   , attachToTraceTree
 ) where
@@ -209,22 +211,32 @@ readScript fp = do
     Left err -> return $ Left $ ScriptParseError (P.errorBundlePretty err)
     Right a -> return $ Right a
 
+data ScriptRunConfig = 
+  ScriptRunConfig 
+    { scriptLogErr :: String -> IO ()
+    , scriptLogDebug :: String -> IO ()
+    }
+
+noRunConfig :: ScriptRunConfig
+noRunConfig = ScriptRunConfig (\_ -> return ()) (\_ -> return ())
+
 -- TODO: Add the script itself to the TraceTree in order to track progress,
 -- rather than just printing here.
-runScript :: forall l (k :: l). Script -> TraceTree k -> IO ()
-runScript _ss@(Script s) t = do
-  -- IO.putStrLn $ "Running script:" ++ (show ss)
+runScript :: forall l (k :: l). ScriptRunConfig -> Script -> TraceTree k -> IO ()
+runScript cfg ss@(Script s) t = do
+  scriptLogDebug cfg $ "Running script:" ++ (show ss)
   go s
   where
     go [] = return ()
     go (q:qs)  = do
-      -- IO.putStrLn $ "Running query:" ++ (show q)
+      scriptLogDebug cfg $ "Running query:" ++ (show q)
       result <- resolveQuery q t
       case result of
-        Nothing -> putStrLn $ "Query failed: " ++ show q
-        (Just (QueryResult _path _)) -> do
-          -- IO.putStrLn $ "Query succeeded:" ++ (show path)
+        Nothing -> do
+          scriptLogErr cfg $ "Query failed: " ++ show q
+        (Just (QueryResult path _)) -> do
+          scriptLogDebug cfg $ "Query succeeded:" ++ (show path)
           go qs
 
-attachToTraceTree :: Script -> SomeTraceTree k -> IO (SomeTraceTree k)
-attachToTraceTree scr t = forkTraceTreeHook (runScript scr) t
+attachToTraceTree :: ScriptRunConfig -> Script -> SomeTraceTree k -> IO (SomeTraceTree k)
+attachToTraceTree cfg scr t = forkTraceTreeHook (runScript cfg scr) t
