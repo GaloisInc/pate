@@ -6,6 +6,7 @@ import io
 import os.path
 import signal
 import time
+from difflib import HtmlDiff
 from subprocess import Popen, TimeoutExpired
 from threading import Thread, Condition
 from typing import Optional
@@ -21,7 +22,7 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent, QAction, QContextMenuEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QSplitter, QMenu
+    QDialogButtonBox, QSplitter, QMenu, QTextBrowser
 
 from . import pate
 
@@ -213,37 +214,71 @@ class PateThread(Thread):
 #     pt.start()
 
 
+class TraceWidget(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+
+        self.domainField = QPlainTextEdit()
+        self.domainField.setReadOnly(True)
+        self.domainField.setMaximumBlockCount(1000)
+
+        self.traceDiffField = QTextBrowser()
+        self.traceDiffField.setReadOnly(True)
+
+        # Add Labels?
+        # traceDiffBox = QVBoxLayout()
+        # traceDiffBox.addWidget(QLabel("Trace"))
+        # traceDiffBox.addWidget(self.traceDiffField)
+        #
+        # traceDiffWidget = QWidget()
+        # traceDiffWidget.setLayout(traceDiffBox)
+
+        vsplitter = QSplitter()
+        vsplitter.setOrientation(Qt.Orientation.Vertical)
+        vsplitter.addWidget(self.domainField)
+        vsplitter.addWidget(self.traceDiffField)
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(vsplitter)
+        self.setLayout(main_layout)
+
+    def setTrace(self, trace: dict, label: str):
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_domain(trace, out=out)
+            self.domainField.setPlainText(out.getvalue())
+
+        # collect trace text content, for formatting below
+        original_lines = []
+        patched_lines = []
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_original(trace, out=out)
+            original_lines = out.getvalue().splitlines()
+        with io.StringIO() as out:
+            pate.pprint_node_event_trace_patched(trace, out=out)
+            patched_lines = out.getvalue().splitlines()
+
+        htmlDiff = HtmlDiff()
+        html = htmlDiff.make_file(original_lines, patched_lines,
+                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
+        self.traceDiffField.setHtml(html)
+
+        # TODO: Can we get needed width from traceDiffField to render the HTML without wrap?
+
+
 class PateCfarExitDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self.setWindowTitle("CFAR Exit Info")
 
-        self.commonField = QPlainTextEdit()
-        self.commonField.setReadOnly(True)
-        self.commonField.setMaximumBlockCount(1000)
-
-        self.originalField = QPlainTextEdit()
-        self.originalField.setReadOnly(True)
-        self.originalField.setMaximumBlockCount(1000)
-
-        self.patchedField = QPlainTextEdit()
-        self.patchedField.setReadOnly(True)
-        self.patchedField.setMaximumBlockCount(1000)
-
-        hsplitter = QSplitter()
-        hsplitter.setOrientation(Qt.Orientation.Horizontal)
-        hsplitter.addWidget(self.originalField)
-        hsplitter.addWidget(self.patchedField)
-
-        vsplitter = QSplitter()
-        vsplitter.setOrientation(Qt.Orientation.Vertical)
-        vsplitter.addWidget(self.commonField)
-        vsplitter.addWidget(hsplitter)
+        self.traceWidget = TraceWidget(self)
 
         main_layout = QHBoxLayout()
-        main_layout.addWidget(vsplitter)
+        main_layout.addWidget(self.traceWidget)
         self.setLayout(main_layout)
+
+    def setTrace(self, trace: dict, label: str):
+        self.traceWidget.setTrace(trace, label)
 
 
 class PateCfarEqCondDialog(QDialog):
@@ -256,54 +291,13 @@ class PateCfarEqCondDialog(QDialog):
         self.commonField.setReadOnly(True)
         self.commonField.setMaximumBlockCount(1000)
 
-        self.trueTraceCommonField = QPlainTextEdit()
-        self.trueTraceCommonField.setReadOnly(True)
-        self.trueTraceCommonField.setMaximumBlockCount(1000)
+        self.trueTraceWidget = TraceWidget(self)
+        self.falseTraceWidget = TraceWidget(self)
 
-        self.trueTraceOriginalField = QPlainTextEdit()
-        self.trueTraceOriginalField.setReadOnly(True)
-        self.trueTraceOriginalField.setMaximumBlockCount(1000)
-
-        self.trueTracePatchedField = QPlainTextEdit()
-        self.trueTracePatchedField.setReadOnly(True)
-        self.trueTracePatchedField.setMaximumBlockCount(1000)
-
-        self.falseTraceCommonField = QPlainTextEdit()
-        self.falseTraceCommonField.setReadOnly(True)
-        self.falseTraceCommonField.setMaximumBlockCount(1000)
-
-        self.falseTraceOriginalField = QPlainTextEdit()
-        self.falseTraceOriginalField.setReadOnly(True)
-        self.falseTraceOriginalField.setMaximumBlockCount(1000)
-
-        self.falseTracePatchedField = QPlainTextEdit()
-        self.falseTracePatchedField.setReadOnly(True)
-        self.falseTracePatchedField.setMaximumBlockCount(1000)
-
-        trueOriginalPatchedSplitter = QSplitter()
-        trueOriginalPatchedSplitter.setOrientation(Qt.Orientation.Horizontal)
-        trueOriginalPatchedSplitter.addWidget(self.trueTraceOriginalField)
-        trueOriginalPatchedSplitter.addWidget(self.trueTracePatchedField)
-
-        trueSplitter = QSplitter()
-        trueSplitter.setOrientation(Qt.Orientation.Vertical)
-        trueSplitter.addWidget(self.trueTraceCommonField)
-        trueSplitter.addWidget(trueOriginalPatchedSplitter)
-
-        falseOriginalPatchedSplitter = QSplitter()
-        falseOriginalPatchedSplitter.setOrientation(Qt.Orientation.Horizontal)
-        falseOriginalPatchedSplitter.addWidget(self.falseTraceOriginalField)
-        falseOriginalPatchedSplitter.addWidget(self.falseTracePatchedField)
-
-        falseSplitter = QSplitter()
-        falseSplitter.setOrientation(Qt.Orientation.Vertical)
-        falseSplitter.addWidget(self.falseTraceCommonField)
-        falseSplitter.addWidget(falseOriginalPatchedSplitter)
-        
         trueFalseSplitter = QSplitter()
         trueFalseSplitter.setOrientation(Qt.Orientation.Horizontal)
-        trueFalseSplitter.addWidget(trueSplitter)
-        trueFalseSplitter.addWidget(falseSplitter)
+        trueFalseSplitter.addWidget(self.trueTraceWidget)
+        trueFalseSplitter.addWidget(self.falseTraceWidget)
 
         predSplitter = QSplitter()
         predSplitter.setOrientation(Qt.Orientation.Vertical)
@@ -313,6 +307,13 @@ class PateCfarEqCondDialog(QDialog):
         main_layout = QHBoxLayout()
         main_layout.addWidget(predSplitter)
         self.setLayout(main_layout)
+
+    def setTrueTrace(self, trace: dict, label: str):
+        self.trueTraceWidget.setTrace(trace, label)
+
+    def setFalseTrace(self, trace: dict, label: str):
+        self.falseTraceWidget.setTrace(trace, label)
+
 
 
 class MyFlowGraphWidget(FlowGraphWidget):
@@ -327,13 +328,9 @@ class MyFlowGraphWidget(FlowGraphWidget):
         super().__init__(parent, view, graph)
         self.pate_widget = pate_widget
 
-        #self.setContextMenuPolicy(Qt.CustomContextMenu)
-        #self.customContextMenuRequested.connect(self.customContextMenu)
-
-    def contextMenuEvent(self, event):
-        # Disable normal FlowGraph context menu.
-        # TODO: Is there a better way to do this? Disconnect a signal/event?
-        pass
+        # Disable context menu. We need a QMouseEvent to get nodes and edges at mose position, so we use
+        # mouse press event instead.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
     def build_pate_flow_graph(self, cfarGraph: pate.CFARGraph):
         self.flowGraph = FlowGraph()
@@ -423,16 +420,16 @@ class MyFlowGraphWidget(FlowGraphWidget):
             #     print("Edge incoming: ", edgeTuple[1])
 
             if node:
-                self.gotoAddressPopupMenu(event, node)
+                self.nodePopupMenu(event, node)
 
             elif edgeTuple:
-                self.showEdgeExitInfo(edgeTuple)
+                self.edgePopupMenu(event, edgeTuple)
         else:
             super().mousePressEvent(event)
 
-    def gotoAddressPopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
+    def nodePopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
         cfarNode = self.flowToCfar[node]
-        if cfarNode and (cfarNode.original_addr or cfarNode.patched_addr):
+        if cfarNode and (cfarNode.original_addr or cfarNode.patched_addr or cfarNode.predicate):
             context = QMenu(self)
             gotoOriginalAction = None
             gotoPatchedAction = None
@@ -464,27 +461,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
         with io.StringIO() as out:
             pate.pprint_symbolic(out, cfarNode.predicate)
             d.commonField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_true, 'True Trace Domain', out=out)
-            d.trueTraceCommonField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_true, 'True Trace Original', out=out)
-            d.trueTraceOriginalField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_true, 'True Trace Patched', out=out)
-            d.trueTracePatchedField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(cfarNode.trace_false, 'False Trace Domain', out=out)
-            d.falseTraceCommonField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(cfarNode.trace_false, 'False Trace Original', out=out)
-            d.falseTraceOriginalField.appendPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(cfarNode.trace_false, 'False Trace Patched', out=out)
-            d.falseTracePatchedField.appendPlainText(out.getvalue())
+        d.setTrueTrace(cfarNode.trace_true, 'True Trace')
+        d.setFalseTrace(cfarNode.trace_true, 'False Trace')
         d.exec()
 
-    def showEdgeExitInfo(self, edgeTuple: tuple[FlowGraphEdge, bool]) -> None:
+    def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
         edge = edgeTuple[0]
         incoming = edgeTuple[1]  # Direction of edge depends on which half was clicked
         if incoming:
@@ -493,7 +474,17 @@ class MyFlowGraphWidget(FlowGraphWidget):
         else:
             sourceCfarNode = self.flowToCfar[edge.source]
             exitCfarNode = self.flowToCfar[edge.target]
-        self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
+
+        if sourceCfarNode and exitCfarNode and self.showCfarExitInfo(sourceCfarNode, exitCfarNode, True):
+            # Just one menu item for an edge for now
+            context = QMenu(self)
+            showExitInfoAction = QAction(f'Show CFAR Exit Info', self)
+            context.addAction(showExitInfoAction)
+            choice = context.exec(event.globalPos())
+            if choice is None:
+                pass
+            elif choice == showExitInfoAction:
+                self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
 
     def showCfarExitInfo(self, sourceCfarNode: pate.CFARNode, exitCfarNode: pate.CFARNode, simulate: bool=False) -> bool:
 
@@ -507,23 +498,15 @@ class MyFlowGraphWidget(FlowGraphWidget):
             return True
         elif trace:
             if not simulate:
-                self.showExitTraceInfo(sourceCfarNode, trace, 'Trace')
+                self.showExitTraceInfo(sourceCfarNode, trace, 'Witness Trace')
             return True
         else:
             # TODO: dialog?
             return False
 
     def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
-        d = PateCfarExitDialog(parent=self)
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_domain(trace, label, out=out)
-            d.commonField.setPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_original(trace, label, out=out)
-            d.originalField.setPlainText(out.getvalue())
-        with io.StringIO() as out:
-            pate.pprint_node_event_trace_patched(trace, label, out=out)
-            d.patchedField.setPlainText(out.getvalue())
+        d = PateCfarExitDialog(self)
+        d.setTrace(trace, label)
         d.exec()
 
 
