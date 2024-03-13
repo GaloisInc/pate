@@ -271,7 +271,14 @@ getDiscoveryState fnaddr pfm st = let
   -- TODO: apply some intelligence here to distinguish direct jumps from tail calls,
   -- for the moment our infrastructure handles direct jumps better, so we prefer that
   ainfo4 = ainfo3 { MAI.archClassifier = pfmWrapClassifier pfm
-    (extraCallClassifier (extraEdges st) <|> extraTailCallClassifier (extraEdges st) <|> extraReturnClassifier (extraEdges st))
+    (extraCallClassifier (extraEdges st) 
+     <|> extraTailCallClassifier (extraEdges st)
+     <|> extraJumpClassifier (extraEdges st) 
+       -- note that 'extraTailCallClassifier' will attempt 'extraJumpClassifier' itself
+       -- (and prefer that result) if the PC target is not a known function address
+       -- we include 'extraJumpClassifier' here to capture cases where 'extraTailCallClassifier'
+       -- fails early and doesn't have a chance to run the jump classifier itself
+     <|> extraReturnClassifier (extraEdges st))
     }
   ainfo5 = ainfo4 { MAI.disassembleFn = addTranslationErrorWrapper (MAI.disassembleFn ainfo4)}
   in initDiscoveryState pfm ainfo5
