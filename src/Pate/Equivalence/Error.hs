@@ -169,6 +169,8 @@ data InnerEquivalenceError arch
   | OrphanedSingletonAnalysis (PB.FunPair arch)
   | RequiresInvalidPointerOps
   | PairGraphError PairGraphErr
+  | forall e. X.Exception e => UnhandledException e
+  | SolverError X.SomeException
 
 errShortName :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> String
 errShortName = \case

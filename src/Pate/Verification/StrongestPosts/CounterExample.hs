@@ -67,6 +67,7 @@ import qualified What4.JSON as W4S
 import What4.JSON
 import Pate.Equivalence (StatePostCondition)
 import qualified Pate.Binary as PB
+import GHC.Stack (HasCallStack)
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents

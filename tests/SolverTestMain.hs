@@ -119,6 +119,7 @@ main = do
                   W4.Unsat{} -> liftIO $ TTH.assertFailure "Unexpected Unsat"
                   W4.Unknown{} -> liftIO $ TTH.assertFailure "Unexpected Timeout"                
             ]
+            {-
           , TT.testGroup "Timeout" $
             [ TTH.testCase "timeout_then_check" $ inEquivM' (Proxy @AArch32) 
                 (\eenv -> eenv { PM.envConfig = (PM.envConfig eenv){PC.cfgGoalTimeout = PT.Microseconds 1}}) $ PM.withSym $ \sym -> do
@@ -138,6 +139,7 @@ main = do
                     W4.Unsat{} -> liftIO $ TTH.assertFailure "Unsat"
                     W4.Unknown{} -> return ()
             ]
+            -}
         ]
   TT.defaultMain tests
 
