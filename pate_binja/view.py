@@ -22,7 +22,7 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent, QAction, QContextMenuEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QSplitter, QMenu, QTextBrowser
+    QDialogButtonBox, QSplitter, QMenu, QTextBrowser, QSizePolicy, QTextEdit
 
 from . import pate
 
@@ -222,7 +222,7 @@ class TraceWidget(QWidget):
         self.domainField.setReadOnly(True)
         self.domainField.setMaximumBlockCount(1000)
 
-        self.traceDiffField = QTextBrowser()
+        self.traceDiffField = QTextEdit()
         self.traceDiffField.setReadOnly(True)
 
         # Add Labels?
@@ -262,13 +262,11 @@ class TraceWidget(QWidget):
                                   fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
         self.traceDiffField.setHtml(html)
 
-        # TODO: Can we get needed width from traceDiffField to render the HTML without wrap?
-
 
 class PateCfarExitDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-
+        self.resize(1100, 600)
         self.setWindowTitle("CFAR Exit Info")
 
         self.traceWidget = TraceWidget(self)
@@ -284,6 +282,7 @@ class PateCfarExitDialog(QDialog):
 class PateCfarEqCondDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.resize(1500, 800)
 
         self.setWindowTitle("CFAR Equivalence Condition")
 
