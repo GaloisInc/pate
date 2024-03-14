@@ -841,28 +841,25 @@ instance IsTraceNode k "()" where
   prettyNode () () = PP.emptyDoc
   nodeTags = mkTags @k @"()" [Summary, Simplified]
 
--- | Returns the unblocking action
-setBlockedStatus ::
-  IsTreeBuilder k e m =>
-  m (IO ())
-setBlockedStatus = do
-  builder <- getTreeBuilder
-  case interactionMode builder of
-    Interactive nextChoiceIdent -> do
-      newChoiceIdent <- liftIO $ nextChoiceIdent
-      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
-      liftIO $ updateTreeStatus builder status
-      let statusFinal = NodeStatus StatusSuccess True (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
-      return $ updateTreeStatus builder statusFinal
-    DefaultChoice -> return (return ())
-
 addStatusBlocker ::
   IsTreeBuilder k e m =>
   ChoiceHeader k nm_choice a ->
   m (ChoiceHeader k nm_choice a)
 addStatusBlocker header = do
-  unblock <- setBlockedStatus
-  return $ header { choiceSelected = choiceSelected header >> unblock }
+  builder <- getTreeBuilder
+  (setBlock, setUnblock) <- case interactionMode builder of
+    Interactive nextChoiceIdent -> do
+      newChoiceIdent <- liftIO $ nextChoiceIdent
+      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
+      let setBlock = liftIO $ updateTreeStatus builder status
+      let statusFinal = NodeStatus StatusSuccess True (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      let setUnblock = liftIO $ updateTreeStatus builder statusFinal
+      return (setBlock, setUnblock)
+    DefaultChoice -> return (return (), return ())
+  return $ 
+    header { choiceSelected = choiceSelected header >> setUnblock
+           , waitForChoice = setBlock >> waitForChoice header
+           }
 
 chooseHeader ::
   forall nm_choice a k m e.
