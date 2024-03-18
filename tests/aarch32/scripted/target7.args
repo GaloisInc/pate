@@ -1,0 +1,11 @@
+--ignore-segments 1
+-o target7.original.exe
+-p target7.original.exe
+-e ContinueAfterRecoverableFailures
+-r AllowEqRescopeFailure
+-s loop
+--save-macaw-cfgs target7_CFGs
+--script target7.pate
+--original-csv-function-hints target7.csv
+--patched-csv-function-hints target7.csv
+-b target7.toml
