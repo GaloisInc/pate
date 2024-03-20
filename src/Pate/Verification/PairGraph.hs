@@ -34,10 +34,8 @@ module Pate.Verification.PairGraph
   , hasWorkLeft
   , pairGraphWorklist
   , pairGraphObservableReports
-  , popWorkItem
   , updateDomain
   , updateDomain'
-  , dropWorkItem
   , addReturnVector
   , getReturnVectors
   , getEdgesFrom
@@ -75,6 +73,8 @@ module Pate.Verification.PairGraph
   , combineNodes
   , NodePriority(..)
   , addToWorkList
+  , WorkItem
+  , workItemNode
   , getQueuedPriority
   , queueAncestors
   , queueNode
@@ -233,7 +233,7 @@ data PairGraph sym arch =
     --   be revisited, and here we record all such nodes that must be examinied.
     --
     --   This is a mapping from nodes to their queue priority.
-  , pairGraphWorklist :: !(RevMap (GraphNode arch) NodePriority)
+  , pairGraphWorklist :: !(WorkList arch)
     -- | The set of blocks where this function may return to. Whenever we see a function
     --   call to the given FunPair, we record the program point pair where the function
     --   returns to here. This is used to tell us where we need to propagate abstract domain
@@ -293,7 +293,17 @@ data PairGraph sym arch =
       !(Map (GraphNode arch) [DomainRefinement sym arch])
   }
 
+type WorkList arch = RevMap (WorkItem arch) NodePriority
 
+-- | Operations that can be a scheduled and handled
+--   at the top-level.
+data WorkItem arch = 
+  -- | Handle all normal node processing logic
+  ProcessNode (GraphNode arch)
+  deriving (Eq, Ord)
+
+workItemNode :: WorkItem arch -> GraphNode arch
+workItemNode (ProcessNode nd) = nd
 
 newtype PairGraphM sym arch a = PairGraphT { unpgT :: ExceptT PEE.PairGraphErr (State (PairGraph sym arch)) a }
   deriving (Functor
@@ -615,9 +625,9 @@ dropDomain nd priority pg = case getCurrentDomain pg nd of
       pg' = case Set.null (getBackEdgesFrom pg nd) of
         -- don't drop the domain for a toplevel entrypoint, but mark it for
         -- re-analysis
-        True -> pg { pairGraphWorklist = RevMap.insertWith (min) nd priority (pairGraphWorklist pg) }
+        True -> pg { pairGraphWorklist = RevMap.insertWith (min) (ProcessNode nd) priority (pairGraphWorklist pg) }
         False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), 
-                      pairGraphWorklist = RevMap.delete nd (pairGraphWorklist pg)
+                      pairGraphWorklist = dropNodeFromWorkList nd (pairGraphWorklist pg)
                     }
       pg'' = Set.foldl' (\pg_ nd' -> dropDomain nd' priority pg_) pg' (getEdgesFrom pg nd)
       pg3 = dropObservableReports nd pg''
@@ -789,12 +799,11 @@ popWorkItem gr nd = case Map.lookup nd (pairGraphDomains gr) of
 
 -- | Drop the given node from the work queue if it is queued.
 --   Otherwise do nothing.
-dropWorkItem ::
-  PA.ValidArch arch =>
+dropNodeFromWorkList ::
   GraphNode arch ->
-  PairGraph sym arch ->
-  PairGraph sym arch
-dropWorkItem nd gr = gr { pairGraphWorklist = RevMap.delete nd (pairGraphWorklist gr) }
+  WorkList arch ->
+  WorkList arch
+dropNodeFromWorkList nd wl = RevMap.filter (\wi _ -> workItemNode wi == nd) wl
 
 hasWorkLeft ::
   PairGraph sym arch -> Bool
@@ -808,15 +817,15 @@ hasWorkLeft pg = case RevMap.minView_value (pairGraphWorklist pg) of
 chooseWorkItem ::
   PA.ValidArch arch =>
   PairGraph sym arch ->
-  Maybe (NodePriority, PairGraph sym arch, GraphNode arch, AbstractDomainSpec sym arch)
+  Maybe (NodePriority, PairGraph sym arch, WorkItem arch, AbstractDomainSpec sym arch)
 chooseWorkItem gr =
   -- choose the smallest pair from the worklist. This is a pretty brain-dead
   -- heuristic.  Perhaps we should do something more clever.
   case RevMap.minView_value (pairGraphWorklist gr) of
     Nothing -> Nothing
-    Just (nd, p, wl) -> case Map.lookup nd (pairGraphDomains gr) of
-      Nothing -> panic Verifier "chooseWorkItem" ["Could not find domain corresponding to block pair", show nd]
-      Just d  -> Just (p, gr{ pairGraphWorklist = wl }, nd, d)
+    Just (wi, p, wl) -> case Map.lookup (workItemNode wi) (pairGraphDomains gr) of
+      Nothing -> panic Verifier "chooseWorkItem" ["Could not find domain corresponding to block pair", show (workItemNode wi)]
+      Just d  -> Just (p, gr{ pairGraphWorklist = wl }, wi, d)
 
 -- | Update the abstract domain for the target graph node,
 --   decreasing the gas parameter as necessary.
@@ -857,7 +866,7 @@ updateDomain' ::
   PairGraph sym arch
 updateDomain' gr pFrom pTo d priority = markEdge pFrom pTo $ gr
   { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-  , pairGraphWorklist = RevMap.insertWith (min) pTo priority (pairGraphWorklist gr)
+  , pairGraphWorklist = RevMap.insertWith (min) (ProcessNode pTo) priority (pairGraphWorklist gr)
   , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
   , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
   }
@@ -913,7 +922,7 @@ addReturnVector gr funPair retPair priority =
     f Nothing  = Just (Set.singleton retPair)
     f (Just s) = Just (Set.insert retPair s)
 
-    wl = RevMap.insertWith (min) (ReturnNode funPair) priority (pairGraphWorklist gr)
+    wl = RevMap.insertWith (min) (ProcessNode (ReturnNode funPair)) priority (pairGraphWorklist gr)
 
 pgMaybe :: String -> Maybe a -> PairGraphM sym arch a
 pgMaybe _ (Just a) = return a
@@ -1037,12 +1046,14 @@ addToWorkList ::
   PairGraph sym arch ->
   Maybe (PairGraph sym arch)  
 addToWorkList nd priority gr = case getCurrentDomain gr nd of
-  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) nd priority (pairGraphWorklist gr) }
+  Just{} -> Just $ gr { pairGraphWorklist = RevMap.insertWith (min) (ProcessNode nd) priority (pairGraphWorklist gr) }
   Nothing -> Nothing
 
+-- | Return the priority of the given 'GraphNode' if it is queued for
+--   normal processing
 getQueuedPriority ::
   GraphNode arch -> PairGraph sym arch -> Maybe NodePriority
-getQueuedPriority nd pg = RevMap.lookup nd (pairGraphWorklist pg)
+getQueuedPriority nd pg = RevMap.lookup (ProcessNode nd) (pairGraphWorklist pg)
 
 emptyWorkList :: PairGraph sym arch -> PairGraph sym arch
 emptyWorkList pg = pg { pairGraphWorklist = RevMap.empty }
@@ -1057,7 +1068,7 @@ freshDomain ::
   PairGraph sym arch
 freshDomain gr pTo priority d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-    , pairGraphWorklist = RevMap.insertWith (min) pTo priority (pairGraphWorklist gr)
+    , pairGraphWorklist = RevMap.insertWith (min) (ProcessNode pTo) priority (pairGraphWorklist gr)
     }
 
 initDomain ::
