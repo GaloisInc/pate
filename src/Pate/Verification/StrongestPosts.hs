@@ -745,31 +745,22 @@ withWorkItem ::
   PA.ValidArch arch =>
   PSo.ValidSym sym =>
   PairGraph sym arch ->
-  ((NodePriority, PairGraph sym arch, GraphNode arch, PAD.AbstractDomainSpec sym arch) -> EquivM_ sym arch a) ->
+  ((NodePriority, PairGraph sym arch, WorkItem arch, PAD.AbstractDomainSpec sym arch) -> EquivM_ sym arch a) ->
   NodeBuilderT '(sym,arch) "node" (EquivM_ sym arch) (Maybe a)
 withWorkItem gr0 f = do
   gr0' <- lift $ queuePendingNodes gr0
   case chooseWorkItem gr0' of
     Nothing -> return Nothing
-    Just (priority, gr1, nd, spec) -> do
+    Just (priority, gr1, wi, spec) -> do
+      let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ startTimer $
         atPriority priority Nothing $ PS.viewSpec spec $ \scope d -> do
           runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
             Just gr2 -> return $ Left gr2
-            Nothing -> Right <$> f (priority, gr1, nd, spec)
+            Nothing -> Right <$> f (priority, gr1, wi, spec)
       case res of
         Left gr2 -> withWorkItem gr2 f
         Right a -> return $ Just a
-
-{-
-  let nodes = Set.toList $ pairGraphWorklist gr
-  case nodes of
-    [] -> return Nothing
-    [node] -> return (Just $ popWorkItem gr node)
-    _ -> 
-    _ -> choose @"node" "chooseWorkItem" $ \choice -> forM_ nodes $ \nd -> 
-      choice "" nd $ return (Just $ popWorkItem gr nd)
--}
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -782,7 +773,8 @@ pairGraphComputeFixpoint ::
 pairGraphComputeFixpoint entries gr_init = do
   let
     go (gr0 :: PairGraph sym arch) = do
-      mgr4 <- withWorkItem gr0 $ \(priority, gr1, nd, preSpec) -> do
+      mgr4 <- withWorkItem gr0 $ \(priority, gr1, wi, preSpec) -> do
+        let nd = workItemNode wi
         shouldProcessNode nd >>= \case
           False -> do
             emitWarning $ PEE.SkippedInequivalentBlocks (graphNodeBlocks nd)
