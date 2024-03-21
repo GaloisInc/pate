@@ -1,6 +1,6 @@
-.PHONY: all %.test %.copy ${EXTRA_TARGETS[@]} extras
+.PHONY: all extras
 
-extras: ${EXTRA_TARGETS[@]}
+extras: ${EXTRA_TARGETS}
 
 all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(addprefix ./build/,$(notdir $(patsubst %c,%i,$(wildcard ../src/*.c)))) extras
 
