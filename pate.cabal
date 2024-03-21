@@ -141,6 +141,7 @@ library
                        Pate.Monad,
                        Pate.Monad.Context,
                        Pate.Monad.Environment,
+                       Pate.Monad.PairGraph,
                        Pate.MemCell,
                        Pate.Memory,
                        Pate.Memory.MemTrace,

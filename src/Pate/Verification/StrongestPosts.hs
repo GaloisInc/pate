@@ -99,6 +99,7 @@ import qualified Pate.Location as PL
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.Monad.Environment as PME
+import           Pate.Monad.PairGraph
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof.Instances as PPI
@@ -185,7 +186,7 @@ runVerificationLoop env pPairs = do
             -- Report a summary of any errors we found during analysis
             pg1 <- handleDanglingReturns pPairs pg
             reportAnalysisErrors (envLogger env) pg1
-            pairGraphComputeVerdict pg1) (pure . PE.Errored)
+            return $ pairGraphComputeVerdict pg1) (pure . PE.Errored)
 
           emitEvent (PE.StrongestPostOverallResult result)
 
@@ -378,47 +379,6 @@ handleDanglingReturns fnPairs pg = do
          
   foldM go pg single_rets 
 
--- FIXME: move this to Pate.Monad
--- Helper functions for bringing PairGraphM operations and EquivM operations into the same monad
-
-
-withPG :: 
-  PairGraph sym arch -> 
-  StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
-  EquivM sym arch (a, PairGraph sym arch)
-withPG pg f = runStateT f pg 
-
-withPG_ :: 
-  PairGraph sym arch -> 
-  StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
-  EquivM sym arch (PairGraph sym arch)
-withPG_ pg f = execStateT f pg 
-
-liftPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) a
-liftPG f = do
-  pg <- get
-  case runPairGraphM pg f of
-    Left err -> lift $ throwHere $ PEE.PairGraphError err
-    Right (a,pg') -> do
-      put pg'
-      return a
-
-catchPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) (Maybe a)
-catchPG f = do
-  pg <- get
-  case runPairGraphM pg f of
-    Left{} -> return Nothing
-    Right (a,pg') -> do
-      put pg'
-      return $ Just a
-
-liftEqM :: 
-  (PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> 
-  StateT (PairGraph sym arch) (EquivM_ sym arch) ()
-liftEqM f = do
-  s <- get
-  s' <- lift $ f s
-  put s'
 
 handleSyncPoint ::
   GraphNode arch ->
@@ -429,7 +389,7 @@ handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ 
     Just divergeNode <- return $ getDivergePoint nd
     addSyncNode divergeNode nd
     return divergeNode
-  liftEqM $ updateCombinedSyncPoint divergeNode
+  liftEqM_ $ updateCombinedSyncPoint divergeNode
 
 addressOfNode ::
   GraphNode arch ->
@@ -663,7 +623,7 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
             forM_ syncsO $ \(syncO, _) -> do
               liftPG $ (void $ getCurrentDomainM divergeNodeY) 
                   <|> (modify $ \pg -> updateDomain' pg syncO divergeNodeY (PS.mkSimSpec scope domP) (priority PriorityWidening))
-              liftEqM $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope bundle dom divergeNode pg $
+              liftEqM_ $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope bundle dom divergeNode pg $
                 widenAlongEdge scope bundle syncO domP pg divergeNodeY
 
       -- Finally, if we have any Patched one-sided results, we take all combinations
@@ -678,7 +638,7 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
         withTracingLabel @"node" "Merge Node" combinedNode $ do
           emitTrace @"node" syncO
           emitTrace @"node" syncP
-        liftEqM $ mergeDualNodes syncO syncP domO_spec domP_spec combinedNode
+        liftEqM_ $ mergeDualNodes syncO syncP domO_spec domP_spec combinedNode
 
 
 {-
@@ -878,7 +838,7 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
         Nothing -> return Nothing
-  result <- pairGraphComputeVerdict pg
+  let result = pairGraphComputeVerdict pg
   emitTrace @"equivalence_result" result
   let eq_conds_map = Map.fromList eq_conds
   let toplevel_result = FinalResult result (pairGraphObservableReports pg) eq_conds_map
@@ -1402,8 +1362,8 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
               -- node as a merge point
               withPG_ gr2 $ do
                 (liftPG $ checkForNodeSync node exitPairs) >>= \case
-                  True -> liftEqM $ handleSyncPoint (GraphNode node)
-                  False -> liftEqM $ \pg -> do
+                  True -> liftEqM_ $ handleSyncPoint (GraphNode node)
+                  False -> liftEqM_ $ \pg -> do
                     handleSplitAnalysis scope node d pg >>= \case
                       Just pg' -> return pg'
                       Nothing -> do
@@ -1463,10 +1423,10 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
             -- (rather than once for each return edge)
             -- but it would require some refactoring to make the types match up correctly
             withPG_ gr0' $ do
-              liftEqM $ checkObservables node bundle d
-              liftEqM $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
+              liftEqM_ $ checkObservables node bundle d
+              liftEqM_ $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
               (liftPG $ checkForReturnSync fPair node) >>= \case
-                True -> liftEqM $ handleSyncPoint (GraphNode node)
+                True -> liftEqM_ $ handleSyncPoint (GraphNode node)
                 False -> return ()
                 
 -- | Construct a "dummy" simulation bundle that basically just

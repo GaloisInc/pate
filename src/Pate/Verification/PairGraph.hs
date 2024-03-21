@@ -30,9 +30,6 @@ module Pate.Verification.PairGraph
   , evalPairGraphM
   , maybeUpdate
   , AbstractDomain
-  , initialDomain
-  , initialDomainSpec
-  , initializePairGraph
   , chooseWorkItem
   , hasWorkLeft
   , pairGraphWorklist
@@ -46,11 +43,11 @@ module Pate.Verification.PairGraph
   , getEdgesFrom
   , freshDomain
   , initDomain
-  , pairGraphComputeVerdict
   , getCurrentDomain
   , getCurrentDomainM
   , considerObservableEvent
-  , considerDesyncEvent
+  , addDesyncReport
+  , getDesyncReport
   , recordMiscAnalysisError
   , reportAnalysisErrors
   , TotalityCounterexample(..)
@@ -64,7 +61,6 @@ module Pate.Verification.PairGraph
   , ConditionKind(..)
   , PropagateKind(..)
   , getCondition
-  , getScopedCondition
   , setCondition
   , dropCondition
   , nextPropagate
@@ -86,15 +82,15 @@ module Pate.Verification.PairGraph
   , SyncPoint(..)
   , updateSyncPoint
   , singleNodeRepr
-  , queuePendingAction
-  , runPendingActions
-  , queuePendingNodes
-  --
-  , addLazyAction
   , edgeActions
   , nodeActions
   , refineActions
   , queueActions
+  , ActionQueueLens
+  , queuePendingAction
+  , getPendingActions
+  , PendingAction
+  , pactAction
   , getAllNodes
   , emptyPairGraph
   , DomainRefinementKind(..)
@@ -115,18 +111,16 @@ module Pate.Verification.PairGraph
   , setSyncAddress
   , checkForNodeSync
   , checkForReturnSync
+  , pairGraphComputeVerdict
   -- FIXME: remove this and have modules import this directly
   , module Data.Parameterized.PairF
   ) where
 
 import           Prettyprinter
 
-import           Control.Monad (foldM, guard, join, void, forM)
+import           Control.Monad (guard, forM)
 import           Control.Monad.IO.Class
-import           Control.Monad.Reader (local, MonadReader (ask))
-import           Control.Monad.State.Strict (StateT (..), MonadState (..), MonadTrans (..), execStateT, modify, State, execState, gets)
-import           Control.Monad.Catch (MonadCatch, MonadThrow, MonadMask)
-import           Control.Monad.Trans.Maybe (MaybeT(..) )
+import           Control.Monad.State.Strict (MonadState (..), modify, State, gets)
 import           Control.Monad.Except (ExceptT, MonadError (..))
 import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Monad.Trans.State.Strict (runState)
@@ -146,7 +140,6 @@ import           Data.Word (Word32)
 import qualified Lumberjack as LJ
 
 import           Data.Parameterized (Some(..), Pair (..))
-import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.RevMap as RevMap
 import           Data.RevMap (RevMap)
 
@@ -158,16 +151,15 @@ import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Equivalence as PE
 import qualified Pate.Event as Event
-import           Pate.Monad
+import           Pate.Monad.Environment
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence.Condition as PEC
 import qualified Pate.Equivalence.Error as PEE
-import qualified Pate.Verification.Domain as PVD
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, pattern GraphNodeEntry, pattern GraphNodeReturn, rootEntry, nodeBlocks, rootReturn, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNode, isSingleNodeEntry, isSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, nodeBlocks, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNodeEntry, isSingleReturn )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -176,12 +168,8 @@ import           Pate.TraceTree
 import qualified Pate.Binary as PBi
 
 import           Control.Applicative (Const(..), Alternative(..)) 
-import qualified Control.Monad.IO.Unlift as IO
-import           Pate.Solver (ValidSym)
 
-import           SemMC.Formula.Env (SomeSome(..))
 import qualified Pate.Location as PL
-import qualified Pate.ExprMappable as PEM
 import qualified Pate.Address as PAd
 import Data.Foldable (find)
 import           Data.Parameterized.PairF
@@ -457,7 +445,7 @@ getNextDomainRefinement nd pg = case Map.lookup nd (pairGraphDomainRefinements p
 
 
 data PendingAction sym arch (f :: PS.VarScope -> Type) = 
-  PendingAction { pactIdent :: Int, _pactAction :: LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)}
+  PendingAction { pactIdent :: Int, pactAction :: LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)}
 
 -- TODO: After some refactoring I'm not sure if we actually need edge actions anymore, so this potentially can be simplified
 data ActionQueue sym arch =
@@ -684,18 +672,6 @@ getPropagationKind pg nd condK =
 hasSomeCondition :: PairGraph sym arch -> GraphNode arch -> Bool
 hasSomeCondition pg nd = any (\condK -> isJust $ getCondition pg nd condK) [minBound..maxBound]
 
-getScopedCondition ::
-  PS.SimScope sym arch v ->
-  PairGraph sym arch ->
-  GraphNode arch ->
-  ConditionKind ->
-  EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-getScopedCondition scope pg nd condK = withSym $ \sym -> case getCondition pg nd condK of
-  Just condSpec -> do
-    (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
-    return eqCond
-  Nothing -> return $ PEC.universal sym
-
 setCondition :: 
   GraphNode arch ->
   ConditionKind ->
@@ -730,30 +706,19 @@ considerObservableEvent gr bPair action =
            Nothing  -> return gr'
            Just cex -> return gr'{ pairGraphObservableReports = Map.insert bPair cex (pairGraphObservableReports gr) }
 
--- | If a program desync has not already be found
---   for this block pair, run the given action to check if there
---   currently is one.
-considerDesyncEvent ::
-  PA.ValidArch arch =>
-  PairGraph sym arch ->
-  NodeEntry arch ->
-  (EquivM_ sym arch (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)), PairGraph sym arch)) ->
-  EquivM sym arch (PairGraph sym arch)
-considerDesyncEvent gr bPair action =
-  case Map.lookup bPair (pairGraphDesyncReports gr) of
-    -- we have already found observable event differences at this location, so skip the check
-    Just cex -> do
-      withTracing @"totalityce" cex $ 
-        emitWarning $ PEE.NonTotalBlockExits (nodeBlocks bPair)
-      return gr
-    Nothing ->
-      do (mcex, gr') <- action
-         case mcex of
-           Nothing  -> return gr'
-           Just cex -> do
-             withTracing @"totalityce" cex $ 
-               emitWarning $ PEE.NonTotalBlockExits (nodeBlocks bPair)
-             return gr'{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports gr) }
+addDesyncReport :: 
+  NodeEntry arch -> 
+  TotalityCounterexample (MM.ArchAddrWidth arch) ->
+  PairGraphM sym arch ()
+addDesyncReport bPair cex = 
+  modify $ \pg -> pg{ pairGraphDesyncReports = Map.insert bPair cex (pairGraphDesyncReports pg) }
+
+getDesyncReport ::
+  NodeEntry arch -> 
+  PairGraphM sym arch (Maybe (TotalityCounterexample (MM.ArchAddrWidth arch)))
+getDesyncReport ne = do
+  pg <- get
+  return $ Map.lookup ne (pairGraphDesyncReports pg) 
 
 -- | Record an error that occured during analysis that doesn't fall into one of the
 --   other, more structured, types of errors.
@@ -796,59 +761,20 @@ reportAnalysisErrors logAction gr =
      liftIO $ F.forM_ msgs $ \msg -> do
        LJ.writeLog logAction (Event.StrongestPostMiscError pPair msg)
 
-
-initialDomain :: EquivM sym arch (PAD.AbstractDomain sym arch v)
-initialDomain = withSym $ \sym -> 
-  PAD.AbstractDomain 
-  <$> pure (PVD.universalDomain sym)
-  <*> (PPa.forBins $ \_ -> return $ PAD.emptyDomainVals)
-  <*> (PPa.forBins $ \_ -> PAD.emptyEvents sym)
-
-initialDomainSpec ::
-  forall sym arch.
-  GraphNode arch ->
-  EquivM sym arch (PAD.AbstractDomainSpec sym arch)
-initialDomainSpec (GraphNodeEntry blocks) = withTracing @"function_name" "initialDomainSpec" $ 
-  withFreshVars blocks $ \_vars -> do
-    dom <- initialDomain
-    return (mempty, dom)
-initialDomainSpec (GraphNodeReturn fPair) = withTracing @"function_name" "initialDomainSpec" $ do
-  let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
-  withFreshVars blocks $ \_vars -> do
-    dom <- initialDomain
-    return (mempty, dom)
-
--- | Given a list of top-level function entry points to analyse,
---   initialize a pair graph with default abstract domains for those
---   entry points and add them to the work list.
-initializePairGraph :: forall sym arch.
-  [PB.FunPair arch] ->
-  EquivM sym arch (PairGraph sym arch)
-initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
-  where
-    initPair :: PairGraph sym arch -> PB.FunPair arch -> EquivM sym arch (PairGraph sym arch)
-    initPair gr fnPair =
-      do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
-         withPair bPair $ do
-           -- initial state of the pair graph: choose the universal domain that equates as much as possible
-           let node = GraphNode (rootEntry bPair)
-           idom <- initialDomainSpec node
-           -- when the program is initialized, we assume no memory regions are allocated,
-           -- and therefore we pick a concrete initial region that doesn't overlap with
-           -- the global or stack regions.
-           --
-           -- in the event that this node is encountered again (i.e. the analysis entry
-           -- point is some intermediate program point), then this value domain will simply
-           -- be overridden as a result of widening
-           rootDom <- PS.forSpec idom $ \_ idom' -> do
-             vals' <- PPa.forBins $ \bin -> do
-               vals <- PPa.get bin (PAD.absDomVals idom')
-               -- FIXME: compute this from the global and stack regions
-               return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
-             return $ idom' { PAD.absDomVals = vals' }
-           let gr1 = freshDomain gr node (normalPriority PriorityUserRequest) rootDom
-           return $ emptyReturnVector gr1 (rootReturn fnPair) 
-
+-- | After computing the dataflow fixpoint, examine the generated
+--   error reports to determine an overall verdict for the programs.
+pairGraphComputeVerdict ::
+  PairGraph sym arch ->
+  PE.EquivalenceStatus
+pairGraphComputeVerdict gr =
+  if Map.null (pairGraphObservableReports gr) &&
+     Map.null (pairGraphDesyncReports gr) &&
+     Set.null (pairGraphGasExhausted gr) then
+    case filter (\(_,condK) -> case condK of {ConditionEquiv{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
+      [] -> PE.Equivalent
+      _ -> PE.ConditionallyEquivalent
+  else
+    PE.Inequivalent
 
 popWorkItem ::
   PA.ValidArch arch =>
@@ -1193,22 +1119,11 @@ getOrphanedReturns gr = do
   let rets = (Map.keysSet (pairGraphReturnVectors gr)) Set.\\ (pairGraphTerminalNodes gr)  
   Set.filter (\ret -> not (Map.member (ReturnNode ret) (pairGraphDomains gr))) rets
 
--- | After computing the dataflow fixpoint, examine the generated
---   error reports to determine an overall verdict for the programs.
-pairGraphComputeVerdict ::
-  PairGraph sym arch ->
-  EquivM sym arch PE.EquivalenceStatus
-pairGraphComputeVerdict gr =
-  if Map.null (pairGraphObservableReports gr) &&
-     Map.null (pairGraphDesyncReports gr) &&
-     Set.null (pairGraphGasExhausted gr) then
-    case filter (\(_,condK) -> case condK of {ConditionEquiv{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
-      [] -> return PE.Equivalent
-      _ -> return PE.ConditionallyEquivalent
-  else
-    return PE.Inequivalent
+
 
 $(L.makeLenses ''ActionQueue)
+
+type ActionQueueLens sym arch k v = L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch v])
 
 dropActId' ::
   Int ->
@@ -1228,23 +1143,9 @@ dropActId ::
   PairGraph sym arch
 dropActId actId pg = pg { pairGraphPendingActs = dropActId' actId (pairGraphPendingActs pg) }
 
-addLazyAction ::
-  Ord k =>
-  L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch f]) ->
-  k ->
-  PairGraph sym arch ->
-  String ->
-  (forall m'. Monad m' => ((String -> (forall v. (f v -> PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch))) -> m' ())) -> m' ()) ->
-  EquivM sym arch (PairGraph sym arch)  
-addLazyAction lens edge pg actNm f = do
-  inIO <- IO.askRunInIO
-  pendingAct <-
-    chooseLazy @"()"  actNm $ \choice -> f (\nm act -> choice nm () (\(env, Some result, pg') -> inIO $ local (\_ -> env) $ act result pg'))
-  liftIO $ queuePendingAction lens edge pendingAct pg
-
 queuePendingAction ::
   Ord k =>
-  L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch f]) ->
+  ActionQueueLens sym arch k f ->
   k ->
   (LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)) ->
   PairGraph sym arch ->
@@ -1259,66 +1160,12 @@ queuePendingAction lens edge (LazyIOAction actReady fn) pg = do
 
   return $ pg { pairGraphPendingActs = (pendingActs & latestPendingId %~ (+ 1)) }
 
-
--- | For any edges with pending actions, we need to ensure that the 'from' node is
---   queued so that the action is processed.
-queuePendingNodes ::
-  PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-queuePendingNodes pg0 = do
-  priority <- currentPriority
-  let 
-    edgeActs = (pairGraphPendingActs pg0) ^. edgeActions
-    nodeActs = (pairGraphPendingActs pg0) ^. nodeActions
-    refineActs = (pairGraphPendingActs pg0) ^. refineActions
-    nodeActs' = 
-      (map (\((from,_),acts) -> (from, map asSomeAct acts)) (Map.toList edgeActs))
-      ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList nodeActs))
-      ++ (map (\(from,acts) -> (from, map asSomeAct acts)) (Map.toList refineActs))
-    queueActs = concat $ Map.elems $ (pairGraphPendingActs pg0) ^. queueActions
-  
-  env <- ask
-  liftIO $ do
-    pg1 <- foldM (\pg_ (PendingAction _ act) -> 
-      maybeUpdate pg_ (runLazyAction act (env, Some (Const ()), pg_))) pg0 queueActs
-
-    foldM (\pg_ (from,acts) -> someActionReady acts >>= \case
-      True -> return $ queueNode (mkPriority PriorityHandleActions priority) from pg_
-      _ -> return pg_) pg1 nodeActs'
-  where
-    asSomeAct :: PendingAction sym arch f -> SomeSome LazyIOAction
-    asSomeAct (PendingAction _ act) = SomeSome act
-
-    someActionReady :: [SomeSome LazyIOAction] -> IO Bool
-    someActionReady [] = return False
-    someActionReady (SomeSome act:acts) = lazyActionReady act >>= \case
-      True -> return True
-      False-> someActionReady acts
-
--- | Run any pending actions for the given node or edge. Returns 'Nothing' if
---   no actions were run.
-runPendingActions ::
-  forall sym arch k f v.
-  Ord k =>
-  L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch f]) ->
-  k ->
-  f v ->
-  PairGraph sym arch ->
-  EquivM sym arch (Maybe (PairGraph sym arch))
-runPendingActions lens edge result pg = do
-  let actMap = (pairGraphPendingActs pg) ^. lens
-  let actList = fromMaybe [] (Map.lookup edge actMap)
-  env <- ask
-  let go :: [PendingAction sym arch f] -> PairGraph sym arch -> IO (PairGraph sym arch,Bool)
-      go [] _pg' = return (_pg', False)
-      go (PendingAction _ act:acts) pg' = runLazyAction act (env, Some result, pg') >>= \case
-        Just pg'' -> (go acts pg'' >>= \(pg''',_) -> return (pg''',True))
-        Nothing -> go acts pg'
-  (pg', didchange) <- liftIO $ go actList pg
-  case didchange of
-    True -> return $ Just pg'
-    False -> return Nothing
-
+getPendingActions ::
+  ActionQueueLens sym arch k f ->
+  PairGraphM sym arch (Map k [PendingAction sym arch f])
+getPendingActions lens = do
+  pg <- get
+  return $ (pairGraphPendingActs pg) ^. lens
 
 -- If the given node is single-sided, check if any of the exits
 -- match the given synchronization point for the diverge point of this node.
