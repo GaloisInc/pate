@@ -87,6 +87,7 @@ import qualified Pate.Solver as PSo
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Monad
+import           Pate.Monad.PairGraph
 import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.EventTrace as ET
 
