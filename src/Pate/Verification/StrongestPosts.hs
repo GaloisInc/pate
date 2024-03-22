@@ -64,7 +64,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
 import           What4.SatResult (SatResult(..))
-import           What4.SymSequence (compareSymSeq)
+import           What4.SymSequence (SymSequenceTree, toSequenceTree, compareSymSeq, ppSeqTree, feasiblePaths)
 
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -2153,6 +2153,16 @@ getTargetReturn blkt = getFunctionStub (PB.targetCall blkt) >>= \case
   Just stub | PD.isAbortStub stub -> return Nothing
   _ -> return $ PB.targetReturn blkt
 
+data InstructionPaths arch = InstructionPaths (PPa.PatchPairC (SymSequenceTree (ET.InstructionEvent arch)))
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "instruction_paths" where
+  type TraceNodeType '(sym,arch) "instruction_paths" = InstructionPaths arch
+  prettyNode () (InstructionPaths ps) =
+    let ppEvs es = PP.vsep $ map (PP.pretty . ET.instrAddr) es 
+    in PPa.ppPatchPair' (\(Const s) -> ppSeqTree ppEvs s) ps 
+  nodeTags = mkTags @'(sym, arch) @"instruction_paths" [Simplified, Summary]
+  jsonNode sym () (InstructionPaths ps) = return $ JSON.Null -- W4S.w4ToJSON sym ps
+
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
 triageBlockTarget ::
@@ -2163,11 +2173,19 @@ triageBlockTarget ::
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (BranchState sym arch)
-triageBlockTarget scope bundle' currBlock st d blkts = do
+triageBlockTarget scope bundle' currBlock st d blkts = withSym $ \sym -> do
   let gr = branchGraph st
   stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
   matches <- PD.matchesBlockTarget bundle' blkts
   res <- withPathCondition matches $ do
+    traces <- bundleToInstrTraces bundle'
+    goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
+    traces' <- PPa.forBinsC $ \bin -> do
+      tr <- PPa.getC bin traces
+      tr' <- feasiblePaths sym (withAssumption) (concretePred goalTimeout) tr
+      return $ toSequenceTree tr'
+    withTracing @"message" "Possible Paths" $ emitTrace @"instruction_paths" (InstructionPaths traces')
+
     let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
     mrets <- PPa.toMaybeCases <$> 
       PPa.forBinsF (\bin -> PPa.get bin blkts >>= getTargetReturn) 
