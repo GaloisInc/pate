@@ -167,6 +167,7 @@ library
                        What4.PredMap,
                        What4.UninterpFns,
                        What4.JSON,
+                       What4.SymSequence,
                        Data.Parameterized.SetF,
                        Data.Parameterized.SetCtx,
                        Data.Parameterized.PairF,
