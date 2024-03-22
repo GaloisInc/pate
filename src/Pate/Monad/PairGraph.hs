@@ -27,6 +27,8 @@ module Pate.Monad.PairGraph
 
 import           Control.Monad.State.Strict
 import           Control.Monad.Reader
+-- needed for GHC 9.6
+import           Control.Monad (foldM, forM_)
 import qualified Control.Monad.IO.Unlift as IO
 import           Data.Functor.Const
 import           Data.Maybe (fromMaybe)
