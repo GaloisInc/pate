@@ -64,6 +64,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
 import           What4.SatResult (SatResult(..))
+import           What4.SymSequence (compareSymSeq)
 
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -2603,7 +2604,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
           -- Given this, it can't be simplified using the solver here.
           -- It can be simplified later outside of this context, once it has been
           -- added to the assumptions for the node
-          traces_eq_ <- ET.compareSymSeq sym traceO traceP $ \evO evP ->
+          traces_eq_ <- compareSymSeq sym traceO traceP $ \evO evP ->
             return $ W4.backendPred sym (ET.instrDisassembled evO == ET.instrDisassembled evP)
           -- if-then-else expressions for booleans are a bit clumsy and don't work well
           -- with simplification, but the sequence comparison introduces them
