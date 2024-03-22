@@ -1187,9 +1187,16 @@ def pprint_mem_op(mem_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero:
             out.write(f' condition: {mem_op["condition"]}')
         out.write('\n')
     elif mem_op.get('external_call'):
-        out.write(f'{pre}{mem_op["external_call"]}({",".join(mem_op["args"])})\n')
+        out.write(f'{pre}{mem_op["external_call"]}({",".join(map(pretty_call_arg, mem_op["args"]))})\n')
     else:
         out.write(f'{pre}Unknown mem op: {mem_op}')
+
+
+def pretty_call_arg(arg):
+    if isinstance(arg, dict) and arg.get('data_expr'):
+        return str(arg['data_expr'])
+    else:
+        return str(arg)
 
 
 def pprint_event_trace_instructions(events: dict, pre: str = '', out: IO = sys.stdout):
