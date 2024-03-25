@@ -29,6 +29,7 @@ module What4.SymSequence
 , mapConcatSeq
 , muxTreeToSeq
 , appendSymSequence'
+, shareMuxPrefix
 , module Lang.Crucible.Simulator.SymSequence
 ) where
 
@@ -462,6 +463,101 @@ takeMatchingPrefix2 sym f s_a_outer s_b_outer = do
   as_suffix'' <- IO.liftIO $ appendSymSequence sym as_suffix' as_suffix
   bs_suffix'' <- IO.liftIO $ appendSymSequence sym bs_suffix' bs_suffix
   return (matching_prefix, as_suffix'', bs_suffix'')
+
+fromList :: 
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  Eq a =>
+  sym ->
+  [a] ->
+  m (SymSequence sym a)
+fromList _sym [] = return SymSequenceNil
+fromList sym (a: as) = do
+  as_seq <- fromList sym as
+  IO.liftIO $ consSymSequence sym a as_seq
+
+commonPrefix ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  Eq a =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym a ->
+  m ([a], SymSequence sym a, SymSequence sym a)
+commonPrefix sym = go []
+  where
+    go :: [a] -> SymSequence sym a -> SymSequence sym a -> m ([a], SymSequence sym a, SymSequence sym a)
+    go acc s1 s2 = case (s1,s2) of
+      (SymSequenceNil,_) -> fin
+      (_, SymSequenceNil) -> fin
+      (SymSequenceCons _ a1 s1', SymSequenceCons _ a2 s2') ->
+        if a1 == a2 then
+          go (a1:acc) s1' s2'
+        else fin
+      (SymSequenceAppend _ s1_1 s1_2, _) -> do
+        (acc', suf1, suf2) <- go acc s1_1 s2
+        if length acc == length acc' then fin
+        else case suf1 of
+          SymSequenceNil -> go acc' s1_2 suf2
+          _ -> do
+            suf <- appendSymSequence' sym suf1 s1_2
+            return (acc', suf, suf2)
+      (_, SymSequenceAppend{}) -> go_swapped
+      (SymSequenceMerge _ p s1T s1F, _) -> do
+        (prefix_TF, s1T_suf, s1F_suf) <- commonPrefix sym s1T s1F
+        case prefix_TF of
+          [] -> fin
+          _ -> do
+            prefix_TF_seq <- fromList sym prefix_TF
+            s1_suf <- muxSymSequence' sym p s1T_suf s1F_suf
+            s1' <- appendSymSequence' sym prefix_TF_seq s1_suf
+            go acc s1' s2
+      (_,SymSequenceMerge{}) -> go_swapped
+      where
+        go_swapped = do
+          (acc',s2_suf, s1_suf) <- go acc s2 s1
+          return (acc', s1_suf, s2_suf)
+        fin = return (reverse acc, s1, s2)
+
+-- | Push mux structure further into the sequence f both branches
+--   share a prefix. i.e. (mux p [a,b,c] [a,d,e]) --> ([a] ++ (mux p [b,c] [d,e]))
+--   Applied recursively to all branches in the sequence.
+shareMuxPrefix ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  Eq a =>
+  sym ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+shareMuxPrefix sym s_outer = evalWithFreshCache go s_outer
+  where
+    go :: (SymSequence sym a -> m (SymSequence sym a)) -> SymSequence sym a -> m (SymSequence sym a)
+    go rec s = case s of
+      SymSequenceNil -> return SymSequenceNil
+      SymSequenceCons _ a s' -> do
+        s'' <- rec s'
+        if s' == s'' then return s else
+          IO.liftIO $ consSymSequence sym a s''
+      SymSequenceAppend _ s1 s2 -> do
+        s1' <- rec s1
+        s2' <- rec s2
+        if s1 == s1' && s2 == s2' then return s else
+          appendSymSequence' sym s1' s2'
+      SymSequenceMerge _ p sT sF -> do
+        sT' <- rec sT
+        sF' <- rec sF
+        (pref, sT_suf, sF_suf) <- commonPrefix sym sT' sF'
+        case pref of
+          [] | sT' == sT, sF' == sF -> return s
+          [] -> muxSymSequence' sym p sT' sF'
+          _ -> do
+            pref_seq <- fromList sym pref
+            s_suf <- muxSymSequence' sym p sT_suf sF_suf
+            appendSymSequence' sym pref_seq s_suf
+
 
 -- | Reverse the order of elements in a sequence
 reverseSeq ::
