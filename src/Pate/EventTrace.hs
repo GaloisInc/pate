@@ -512,6 +512,9 @@ type EventTrace sym arch = SymSequence sym (TraceEvent sym arch)
 data InstructionEvent arch = InstructionEvent { instrAddr :: ArchSegmentOff arch, instrDisassembled :: Text }
   deriving (Eq, Ord)
 
+instance W4S.W4Serializable sym (InstructionEvent arch) where
+  w4Serialize (InstructionEvent addr dis) = W4S.object ["address" .= addr, "disassembled" .= dis]
+
 deriving instance MemWidth (RegAddrWidth (ArchReg arch)) => Show (InstructionEvent arch)
 
 type InstructionTrace sym arch = SymSequence sym (InstructionEvent arch)
