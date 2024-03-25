@@ -576,9 +576,9 @@ reverseSeq sym s_outer = evalWithFreshCache go s_outer
       bs_rev <- rec bs
       appendSymSequence' sym bs_rev as_rev
     go rec (SymSequenceMerge _ p sT sF) = do
-      sT_rev <- rec sT
-      sF_rev <- rec sF
-      muxSymSequence sym p sT_rev sF_rev
+      muxSeqM sym p (rec sT) (rec sF)
+
+
 
 -- | Concatenate the elements of a 'SymSequence' together
 --   using the provided combine and mux operations and
