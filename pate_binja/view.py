@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os.path
+import re
 import signal
 import time
 from difflib import HtmlDiff
@@ -256,6 +257,25 @@ class TraceWidget(QWidget):
         with io.StringIO() as out:
             pate.pprint_node_event_trace_patched(trace, out=out)
             patched_lines = out.getvalue().splitlines()
+
+        # Replace addr lines with binja disassembly
+        pw = getAncestorInstanceOf(self, PateWidget)
+        if pw:
+
+            def addDisassembly(l, bv):
+                m = re.fullmatch(r'(\s*)S[0-9A-Fa-f]+\+(0x[0-9A-Fa-f]+)', l)
+                if m:
+                    pre = m.group(1)
+                    a = int(m.group(2), 16)
+                    inst = next(bv.disassembly_text(a))[0]
+                    return pre + hex(a) + " " + inst
+                else:
+                    return l
+
+            with load(pw.originalFilename) as bv:
+                original_lines = map(lambda l: addDisassembly(l, bv), original_lines)
+            with load(pw.patchedFilename) as bv:
+                patched_lines = map(lambda l: addDisassembly(l, bv), patched_lines)
 
         htmlDiff = HtmlDiff()
         html = htmlDiff.make_file(original_lines, patched_lines,
@@ -541,6 +561,16 @@ def showLocationInFilename(context: UIContext, filename: str, addr: int):
         #vf.setFocus()
         context.activateTab(tab)
         #print("Showed location", addr, "in", filename)
+
+
+def getAncestorInstanceOf(w: QWidget, c: type) -> Optional[QWidget]:
+    p = w.parent()
+    if p is None:
+        return None
+    elif isinstance(p, c):
+        return p
+    else:
+        return getAncestorInstanceOf(p, c)
 
 
 def launch_pate(context: UIActionContext):
