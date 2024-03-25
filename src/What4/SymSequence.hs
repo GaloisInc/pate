@@ -28,6 +28,7 @@ module What4.SymSequence
 , feasiblePaths
 , mapConcatSeq
 , muxTreeToSeq
+, appendSymSequence'
 , module Lang.Crucible.Simulator.SymSequence
 ) where
 
@@ -61,7 +62,7 @@ instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) wher
     SymSequenceAppend _ xs ys ->
      do xs' <- rec xs
         ys' <- rec ys
-        IO.liftIO $ appendSymSequence sym xs' ys'
+        IO.liftIO $ appendSymSequence' sym xs' ys'
     SymSequenceMerge _ p xs ys ->
      do p' <- f p
         case asConstantPred p' of
@@ -129,7 +130,7 @@ appendSingle ::
   m (SymSequence sym a)
 appendSingle sym s a = IO.liftIO $ do
   a_seq <- consSymSequence sym a =<< nilSymSequence sym
-  appendSymSequence sym s a_seq
+  appendSymSequence' sym s a_seq
 
 muxSeqM ::
   IsExprBuilder sym =>
@@ -204,7 +205,7 @@ takeMatchingPrefix sym f s_a_outer = go SymSequenceNil s_a_outer
         muxSeqM2 sym p
           (go acc' a2) $ do
             a2_suf <- if a1 == a1_suf then return s_a
-              else IO.liftIO $ appendSymSequence sym a1_suf a2
+              else IO.liftIO $ appendSymSequence' sym a1_suf a2
             return (acc', a2_suf)
       (SymSequenceMerge _ p a_T a_F) -> muxSeqM2 sym p (go acc a_T) (go acc a_F)
 
@@ -290,9 +291,9 @@ zipSeq' sym cache as_outer bs_outer = go as_outer bs_outer
           -- as a small optimization, if the suffix is the same as the input
           -- then we don't need to create a new sequence for appended suffix
         xs_suf'' <- if xs_suf' == xs_1 then return xs
-          else appendSymSequence sym xs_suf' xs_2
+          else appendSymSequence' sym xs_suf' xs_2
         return $ (SymSequenceNil, xs_suf'', ys_suf)
-      acc'' <- appendSymSequence sym acc acc'
+      acc'' <- appendSymSequence' sym acc acc'
       return (acc'', xs_fin, ys_fin)
 
     handle_append _ _ _ = Nothing
@@ -365,6 +366,32 @@ evalWithFreshCache' f s_outer = getConst <$> evalWithFreshCache (\rec s -> Const
     do_wrap :: (SymSequence sym a -> m (Const b a)) -> (SymSequence sym a -> m b)
     do_wrap g = \s -> getConst <$> g s
 
+-- | Smarter version of 'appendSymSequence' that tries to
+--   avoid introducing and explicit 'SymSequenceAppend' if
+--   possible
+appendSymSequence' ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+appendSymSequence' sym = go
+  where
+    go :: SymSequence sym a -> SymSequence sym a -> m (SymSequence sym a)
+    go hd tl = case (hd,tl) of 
+      (SymSequenceNil, SymSequenceNil) -> return SymSequenceNil
+      (_,SymSequenceNil) -> return hd
+      (SymSequenceNil, _) -> return tl
+      (SymSequenceCons _ hd_a hd_as, _) -> do
+        tl' <- go hd_as tl
+        IO.liftIO $ consSymSequence sym hd_a tl'
+      (SymSequenceAppend _ hd_a1 hd_a2, _) -> do
+        hd_as' <- go hd_a2 tl
+        go hd_a1 hd_as'
+      _ -> IO.liftIO $ appendSymSequence sym hd tl
+
 mapConcatSeq ::
   forall sym m a b.
   IsExprBuilder sym =>
@@ -380,11 +407,11 @@ mapConcatSeq sym f s_a_outer = evalWithFreshCache' go s_a_outer
     go rec (SymSequenceCons _ a as) = do
       bs <- f a
       bs' <- rec as
-      IO.liftIO $ appendSymSequence sym bs bs'
+      appendSymSequence' sym bs bs'
     go rec (SymSequenceAppend _ as1 as2) = do
       bs1 <- rec as1
       bs2 <- rec as2
-      IO.liftIO $ appendSymSequence sym bs1 bs2
+      appendSymSequence' sym bs1 bs2
     go rec (SymSequenceMerge _ p asT asF) =
       muxSeqM sym p (rec asT) (rec asF)
 
@@ -450,7 +477,7 @@ reverseSeq sym s_outer = evalWithFreshCache go s_outer
     go rec (SymSequenceAppend _ as bs) = do
       as_rev <- rec as
       bs_rev <- rec bs
-      appendSymSequence sym bs_rev as_rev
+      appendSymSequence' sym bs_rev as_rev
     go rec (SymSequenceMerge _ p sT sF) = do
       sT_rev <- rec sT
       sF_rev <- rec sF
@@ -543,7 +570,7 @@ feasiblePaths sym with_asm dec_pred = go
         as2' <- go as2
         if as1' == as1 && as2' == as2
           then return s
-          else IO.liftIO $ appendSymSequence sym as1' as2'
+          else IO.liftIO $ appendSymSequence' sym as1' as2'
       SymSequenceMerge _ p asT asF -> do
         dec_pred p >>= \case
           Just True -> go asT
