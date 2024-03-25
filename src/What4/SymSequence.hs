@@ -28,9 +28,12 @@ module What4.SymSequence
 , feasiblePaths
 , mapConcatSeq
 , muxTreeToSeq
+, ppSeq
 , SymSequenceTree
 , toSequenceTree
 , ppSeqTree
+, shareMuxPrefix
+, appendSymSequence'
 , module Lang.Crucible.Simulator.SymSequence
 ) where
 
@@ -54,6 +57,32 @@ import Data.Parameterized.Nonce
 import Data.Functor.Const
 import Data.Maybe (catMaybes)
 
+ppSeq ::
+  forall sym e a.
+  ([e] -> PP.Doc a) ->
+  (W4.Pred sym -> PP.Doc a) ->
+  SymSequence sym e ->
+  PP.Doc a
+ppSeq pp_es pp_pred = go []
+  where
+    go :: [e] -> SymSequence sym e -> PP.Doc a
+    go es = \case 
+      SymSequenceNil -> pp_es (reverse es)
+      SymSequenceCons _ e es_seq ->
+        go (e:es) es_seq
+      SymSequenceAppend _ es1 es2 ->
+        go es es1 PP.<+> "++" PP.<+> go [] es2
+      SymSequenceMerge _ p esT esF ->
+        PP.vsep $
+          (case es of [] -> []; _ -> [ pp_es (reverse es)] ) ++ 
+          [ pp_pred p
+          , "True:"
+          , PP.indent 2 (go [] esT)
+          , "False:"
+          , PP.indent 2 (go [] esF)
+          ]
+
+
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
   mapExpr sym f = evalWithFreshCache $ \rec -> \case
     SymSequenceNil -> IO.liftIO $ nilSymSequence sym
@@ -64,7 +93,7 @@ instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) wher
     SymSequenceAppend _ xs ys ->
      do xs' <- rec xs
         ys' <- rec ys
-        IO.liftIO $ appendSymSequence sym xs' ys'
+        IO.liftIO $ appendSymSequence' sym xs' ys'
     SymSequenceMerge _ p xs ys ->
      do p' <- f p
         case asConstantPred p' of
@@ -103,6 +132,7 @@ muxTreeToSeq sym f mt = do
   where
     collect :: [(Pred sym, b)] -> IO (SymSequence sym b)
     collect [] = nilSymSequence sym
+    collect [(_,y)] = singleSeq sym y
     collect ((p,y):ys) = do
       y_seq <- singleSeq sym y
       ys_seq <- collect ys
@@ -132,7 +162,7 @@ appendSingle ::
   m (SymSequence sym a)
 appendSingle sym s a = IO.liftIO $ do
   a_seq <- consSymSequence sym a =<< nilSymSequence sym
-  appendSymSequence sym s a_seq
+  appendSymSequence' sym s a_seq
 
 muxSeqM ::
   IsExprBuilder sym =>
@@ -207,7 +237,7 @@ takeMatchingPrefix sym f s_a_outer = go SymSequenceNil s_a_outer
         muxSeqM2 sym p
           (go acc' a2) $ do
             a2_suf <- if a1 == a1_suf then return s_a
-              else IO.liftIO $ appendSymSequence sym a1_suf a2
+              else IO.liftIO $ appendSymSequence' sym a1_suf a2
             return (acc', a2_suf)
       (SymSequenceMerge _ p a_T a_F) -> muxSeqM2 sym p (go acc a_T) (go acc a_F)
 
@@ -293,9 +323,9 @@ zipSeq' sym cache as_outer bs_outer = go as_outer bs_outer
           -- as a small optimization, if the suffix is the same as the input
           -- then we don't need to create a new sequence for appended suffix
         xs_suf'' <- if xs_suf' == xs_1 then return xs
-          else appendSymSequence sym xs_suf' xs_2
+          else appendSymSequence' sym xs_suf' xs_2
         return $ (SymSequenceNil, xs_suf'', ys_suf)
-      acc'' <- appendSymSequence sym acc acc'
+      acc'' <- appendSymSequence' sym acc acc'
       return (acc'', xs_fin, ys_fin)
 
     handle_append _ _ _ = Nothing
@@ -368,6 +398,32 @@ evalWithFreshCache' f s_outer = getConst <$> evalWithFreshCache (\rec s -> Const
     do_wrap :: (SymSequence sym a -> m (Const b a)) -> (SymSequence sym a -> m b)
     do_wrap g = \s -> getConst <$> g s
 
+-- | Smarter version of 'appendSymSequence' that tries to
+--   avoid introducing and explicit 'SymSequenceAppend' if
+--   possible
+appendSymSequence' ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+appendSymSequence' sym = go
+  where
+    go :: SymSequence sym a -> SymSequence sym a -> m (SymSequence sym a)
+    go hd tl = case (hd,tl) of 
+      (SymSequenceNil, SymSequenceNil) -> return SymSequenceNil
+      (_,SymSequenceNil) -> return hd
+      (SymSequenceNil, _) -> return tl
+      (SymSequenceCons _ hd_a hd_as, _) -> do
+        tl' <- go hd_as tl
+        IO.liftIO $ consSymSequence sym hd_a tl'
+      (SymSequenceAppend _ hd_a1 hd_a2, _) -> do
+        hd_as' <- go hd_a2 tl
+        go hd_a1 hd_as'
+      _ -> IO.liftIO $ appendSymSequence sym hd tl
+
 mapConcatSeq ::
   forall sym m a b.
   IsExprBuilder sym =>
@@ -383,11 +439,11 @@ mapConcatSeq sym f s_a_outer = evalWithFreshCache' go s_a_outer
     go rec (SymSequenceCons _ a as) = do
       bs <- f a
       bs' <- rec as
-      IO.liftIO $ appendSymSequence sym bs bs'
+      appendSymSequence' sym bs bs'
     go rec (SymSequenceAppend _ as1 as2) = do
       bs1 <- rec as1
       bs2 <- rec as2
-      IO.liftIO $ appendSymSequence sym bs1 bs2
+      appendSymSequence' sym bs1 bs2
     go rec (SymSequenceMerge _ p asT asF) =
       muxSeqM sym p (rec asT) (rec asF)
 
@@ -434,9 +490,104 @@ takeMatchingPrefix2 sym f s_a_outer s_b_outer = do
   (zipped, as_suffix, bs_suffix) <- IO.liftIO $ zipSeq sym s_a_outer s_b_outer
   (matching_prefix, as_bs_suffix) <- takeMatchingPrefix sym (\(a,b) -> f a b) zipped
   (as_suffix', bs_suffix') <- IO.liftIO $ unzipSeq sym as_bs_suffix
-  as_suffix'' <- IO.liftIO $ appendSymSequence sym as_suffix' as_suffix
-  bs_suffix'' <- IO.liftIO $ appendSymSequence sym bs_suffix' bs_suffix
+  as_suffix'' <- IO.liftIO $ appendSymSequence' sym as_suffix' as_suffix
+  bs_suffix'' <- IO.liftIO $ appendSymSequence' sym bs_suffix' bs_suffix
   return (matching_prefix, as_suffix'', bs_suffix'')
+
+fromList :: 
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  Eq a =>
+  sym ->
+  [a] ->
+  m (SymSequence sym a)
+fromList _sym [] = return SymSequenceNil
+fromList sym (a: as) = do
+  as_seq <- fromList sym as
+  IO.liftIO $ consSymSequence sym a as_seq
+
+commonPrefix ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  Eq a =>
+  sym ->
+  SymSequence sym a ->
+  SymSequence sym a ->
+  m ([a], SymSequence sym a, SymSequence sym a)
+commonPrefix sym = go []
+  where
+    go :: [a] -> SymSequence sym a -> SymSequence sym a -> m ([a], SymSequence sym a, SymSequence sym a)
+    go acc s1 s2 = case (s1,s2) of
+      (SymSequenceNil,_) -> fin
+      (_, SymSequenceNil) -> fin
+      (SymSequenceCons _ a1 s1', SymSequenceCons _ a2 s2') ->
+        if a1 == a2 then
+          go (a1:acc) s1' s2'
+        else fin
+      (SymSequenceAppend _ s1_1 s1_2, _) -> do
+        (acc', suf1, suf2) <- go acc s1_1 s2
+        if length acc == length acc' then fin
+        else case suf1 of
+          SymSequenceNil -> go acc' s1_2 suf2
+          _ -> do
+            suf <- appendSymSequence' sym suf1 s1_2
+            return (acc', suf, suf2)
+      (_, SymSequenceAppend{}) -> go_swapped
+      (SymSequenceMerge _ p s1T s1F, _) -> do
+        (prefix_TF, s1T_suf, s1F_suf) <- commonPrefix sym s1T s1F
+        case prefix_TF of
+          [] -> fin
+          _ -> do
+            prefix_TF_seq <- fromList sym prefix_TF
+            s1_suf <- muxSymSequence' sym p s1T_suf s1F_suf
+            s1' <- appendSymSequence' sym prefix_TF_seq s1_suf
+            go acc s1' s2
+      (_,SymSequenceMerge{}) -> go_swapped
+      where
+        go_swapped = do
+          (acc',s2_suf, s1_suf) <- go acc s2 s1
+          return (acc', s1_suf, s2_suf)
+        fin = return (reverse acc, s1, s2)
+
+-- | Push mux structure further into the sequence f both branches
+--   share a prefix. i.e. (mux p [a,b,c] [a,d,e]) --> ([a] ++ (mux p [b,c] [d,e]))
+--   Applied recursively to all branches in the sequence.
+shareMuxPrefix ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  Eq a =>
+  sym ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+shareMuxPrefix sym s_outer = evalWithFreshCache go s_outer
+  where
+    go :: (SymSequence sym a -> m (SymSequence sym a)) -> SymSequence sym a -> m (SymSequence sym a)
+    go rec s = case s of
+      SymSequenceNil -> return SymSequenceNil
+      SymSequenceCons _ a s' -> do
+        s'' <- rec s'
+        if s' == s'' then return s else
+          IO.liftIO $ consSymSequence sym a s''
+      SymSequenceAppend _ s1 s2 -> do
+        s1' <- rec s1
+        s2' <- rec s2
+        if s1 == s1' && s2 == s2' then return s else
+          appendSymSequence' sym s1' s2'
+      SymSequenceMerge _ p sT sF -> do
+        sT' <- rec sT
+        sF' <- rec sF
+        (pref, sT_suf, sF_suf) <- commonPrefix sym sT' sF'
+        case pref of
+          [] | sT' == sT, sF' == sF -> return s
+          [] -> muxSymSequence' sym p sT' sF'
+          _ -> do
+            pref_seq <- fromList sym pref
+            s_suf <- muxSymSequence' sym p sT_suf sF_suf
+            appendSymSequence' sym pref_seq s_suf
+
 
 -- | Reverse the order of elements in a sequence
 reverseSeq ::
@@ -453,11 +604,11 @@ reverseSeq sym s_outer = evalWithFreshCache go s_outer
     go rec (SymSequenceAppend _ as bs) = do
       as_rev <- rec as
       bs_rev <- rec bs
-      appendSymSequence sym bs_rev as_rev
+      appendSymSequence' sym bs_rev as_rev
     go rec (SymSequenceMerge _ p sT sF) = do
-      sT_rev <- rec sT
-      sF_rev <- rec sF
-      muxSymSequence sym p sT_rev sF_rev
+      muxSeqM sym p (rec sT) (rec sF)
+
+
 
 -- | Concatenate the elements of a 'SymSequence' together
 --   using the provided combine and mux operations and
@@ -546,18 +697,18 @@ feasiblePaths sym with_asm dec_pred = go
         as2' <- go as2
         if as1' == as1 && as2' == as2
           then return s
-          else IO.liftIO $ appendSymSequence sym as1' as2'
+          else IO.liftIO $ appendSymSequence' sym as1' as2'
       SymSequenceMerge _ p asT asF -> do
         dec_pred p >>= \case
-          Just True -> return asT
-          Just False -> return asF
+          Just True -> go asT
+          Just False -> go asF
           Nothing -> do
             asT' <- with_asm p $ go asT
             not_p <- IO.liftIO $ W4.notPred sym p
             asF' <- with_asm not_p $ go asF
             if asT == asT' && asF == asF' then
               return s
-            else IO.liftIO $ muxSymSequence sym p asT asF
+            else IO.liftIO $ muxSymSequence sym p asT' asF'
 
 -----
 -- SymSequenceTree
@@ -581,14 +732,8 @@ ppSeqTree pp_es = go
       SymSequenceLeaf -> ""
       SymSequenceTree es SymSequenceLeaf SymSequenceLeaf -> pp_es es
       SymSequenceTree [] subT subF -> PP.vsep ["True:", PP.indent 2 (go subT), "False:", PP.indent 2 (go subF)]
-      SymSequenceTree es subT SymSequenceLeaf -> PP.vsep [pp_es es, "ONLY True:", PP.indent 2 (go subT)]
-      SymSequenceTree es SymSequenceLeaf subF -> PP.vsep [pp_es es, "ONLY False:", PP.indent 2 (go subF)]
       SymSequenceTree es subT subF -> 
         PP.vsep [pp_es es, "True:", PP.indent 2 (go subT), "False:", PP.indent 2 (go subF)]
-
-seqTreeSize :: SymSequenceTree e -> Int
-seqTreeSize SymSequenceLeaf = 0
-seqTreeSize (SymSequenceTree es tT tF) = length es + seqTreeSize tT + seqTreeSize tF
 
 -- | Ensures a 'SymSequenceTree' is in normal form:
 --   No empty single-sided branches (pulls the non-empty branch up)
@@ -610,7 +755,7 @@ normalTreeForm = go
       (SymSequenceTree{}, SymSequenceTree{}) ->
         let 
           tT' = go tT
-          tF' = go tF'
+          tF' = go tF
         in case drop_empty es tT' tF' of
             Just s' -> s'
             Nothing -> SymSequenceTree es tT' tF'
@@ -622,7 +767,7 @@ normalTreeForm = go
 -- tail sequence in both paths of the tree for the head sequence
 toSequenceTree ::
   SymSequence sym a -> SymSequenceTree a
-toSequenceTree s_outer = go s_outer
+toSequenceTree s_outer = normalTreeForm $ go s_outer
   where
     go :: SymSequence sym a -> SymSequenceTree a
     go = \case
@@ -638,8 +783,8 @@ toSequenceTree s_outer = go s_outer
     appendTrees as1 as2 = case (as1, as2) of
       (SymSequenceLeaf, _) -> as2
       (_, SymSequenceLeaf) -> as1
-      (SymSequenceTree as1_head as1_tailT as1_tailF, _) -> SymSequenceLeaf
-        -- (SymSequenceTree as1_head (appendTrees as1_tailT as2) (appendTrees as1_tailF SymSequenceLeaf))
+      (SymSequenceTree as1_head as1_tailT as1_tailF, _) ->
+        (SymSequenceTree as1_head (appendTrees as1_tailT as2) (appendTrees as1_tailF (appendTrees as1_tailF as2)))
 
     consTree :: a -> SymSequenceTree a -> SymSequenceTree a
     consTree a = \case

@@ -90,6 +90,7 @@ module Pate.TraceTree (
   , withTracingLabel
   , withNoTracing
   , mkTags
+  , mkTagsSummary
   , runNodeBuilderT
   , getNodeBuilder
   , noTracing
@@ -523,6 +524,14 @@ nodeToJSON lbl v =
 mkTags :: forall k nm a. IsTraceNode k nm => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
 mkTags tags = map (\tag -> (tag, prettyNode @_ @k @nm)) tags
 
+mkTagsSummary :: forall k nm a. (IsTraceNode k nm, PP.Pretty (TraceNodeLabel nm)) => [TraceTag] -> [(TraceTag, TraceNodeLabel nm -> TraceNodeType k nm -> PP.Doc a)]
+mkTagsSummary tags = 
+  if Simplified `elem` tags then
+    [(Simplified, \lbl _ -> PP.pretty lbl)]
+  else [] ++
+  [(Summary, \lbl _ -> PP.pretty lbl)] ++ 
+  map (\tag -> (tag, prettyNode @_ @k @nm)) tags
+
 prettySummary ::
   forall k nm a.
   IsTraceNode k nm =>
@@ -755,6 +764,11 @@ instance IsTraceNode k "message" where
   type TraceNodeType k "message" = String
   prettyNode () msg = PP.pretty msg
   nodeTags = mkTags @k @"message" [Summary, Simplified]
+
+instance IsTraceNode k "pretty" where
+  type TraceNodeType k "pretty" = Some (PP.Doc)
+  prettyNode () (Some msg) = PP.unAnnotate msg
+  nodeTags = mkTags @k @"pretty" [Summary, Simplified]
 
 instance IsTraceNode k "debug" where
   type TraceNodeType k "debug" = String
