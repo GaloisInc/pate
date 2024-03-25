@@ -101,6 +101,7 @@ muxTreeToSeq sym f mt = do
   where
     collect :: [(Pred sym, b)] -> IO (SymSequence sym b)
     collect [] = nilSymSequence sym
+    collect [(_,y)] = singleSeq sym y
     collect ((p,y):ys) = do
       y_seq <- singleSeq sym y
       ys_seq <- collect ys
