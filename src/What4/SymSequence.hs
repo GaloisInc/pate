@@ -546,8 +546,8 @@ feasiblePaths sym with_asm dec_pred = go
           else IO.liftIO $ appendSymSequence sym as1' as2'
       SymSequenceMerge _ p asT asF -> do
         dec_pred p >>= \case
-          Just True -> return asT
-          Just False -> return asF
+          Just True -> go asT
+          Just False -> go asF
           Nothing -> do
             asT' <- with_asm p $ go asT
             not_p <- IO.liftIO $ W4.notPred sym p
