@@ -30,6 +30,9 @@ module What4.SymSequence
 , muxTreeToSeq
 , appendSymSequence'
 , shareMuxPrefix
+, SymSequenceTree
+, toSequenceTree
+, ppSeqTree
 , module Lang.Crucible.Simulator.SymSequence
 ) where
 
@@ -678,4 +681,90 @@ feasiblePaths sym with_asm dec_pred = go
             asF' <- with_asm not_p $ go asF
             if asT == asT' && asF == asF' then
               return s
-            else IO.liftIO $ muxSymSequence sym p asT asF
+            else IO.liftIO $ muxSymSequence sym p asT' asF'
+
+-----
+-- SymSequenceTree
+-----
+
+
+data SymSequenceTree e =
+    SymSequenceTree [e] (SymSequenceTree e) (SymSequenceTree e)
+  | SymSequenceLeaf
+
+
+ppSeqTree ::
+  forall e a.
+  ([e] -> PP.Doc a) ->
+  SymSequenceTree e ->
+  PP.Doc a
+ppSeqTree pp_es = go
+  where
+    go :: SymSequenceTree e -> PP.Doc a
+    go = \case
+      SymSequenceLeaf -> ""
+      SymSequenceTree es SymSequenceLeaf SymSequenceLeaf -> pp_es es
+      SymSequenceTree [] subT subF -> PP.vsep ["True:", PP.indent 2 (go subT), "False:", PP.indent 2 (go subF)]
+      SymSequenceTree es subT subF -> 
+        PP.vsep [pp_es es, "True:", PP.indent 2 (go subT), "False:", PP.indent 2 (go subF)]
+
+-- | Ensures a 'SymSequenceTree' is in normal form:
+--   No empty single-sided branches (pulls the non-empty branch up)
+--   No trivial trees (converts a tree with empty branches and no contents into a leaf)
+normalTreeForm :: SymSequenceTree e -> SymSequenceTree e
+normalTreeForm = go
+  where
+    drop_empty :: [e] -> SymSequenceTree e -> SymSequenceTree e -> Maybe (SymSequenceTree e)
+    drop_empty es tT tF = case (tT, tF) of
+      (SymSequenceLeaf, SymSequenceTree esF tFT tFF) -> Just $ SymSequenceTree (es ++ esF) tFT tFF
+      (SymSequenceTree esT tTT tTF, SymSequenceLeaf) -> Just $ SymSequenceTree (es ++ esT) tTT tTF
+      (SymSequenceLeaf, SymSequenceLeaf) | [] <- es -> Just SymSequenceLeaf
+      _ -> Nothing
+
+    go :: SymSequenceTree e -> SymSequenceTree e
+    go SymSequenceLeaf = SymSequenceLeaf
+    go s@(SymSequenceTree es tT tF) = case (tT, tF) of
+      _ | Just s' <- drop_empty es tT tF -> go s'
+      (SymSequenceTree{}, SymSequenceTree{}) ->
+        let 
+          tT' = go tT
+          tF' = go tF
+        in case drop_empty es tT' tF' of
+            Just s' -> s'
+            Nothing -> SymSequenceTree es tT' tF'
+      _ -> s
+
+-- Expand a 'SymSequence' into an explicit tree, discarding
+-- the symbolic predicates at each merge point.
+-- Note that a SymSequenceAppend will duplicate the tree for the
+-- tail sequence in both paths of the tree for the head sequence
+toSequenceTree ::
+  SymSequence sym a -> SymSequenceTree a
+toSequenceTree s_outer = normalTreeForm $ go s_outer
+  where
+    go :: SymSequence sym a -> SymSequenceTree a
+    go = \case
+      SymSequenceNil -> SymSequenceLeaf
+      SymSequenceCons _ a as -> consTree a (go as)
+      SymSequenceAppend _ as1 as2 -> appendTrees (go as1) (go as2)
+      SymSequenceMerge _ _ asT asF -> case (go asT, go asF) of
+        (SymSequenceLeaf, asF_tree) ->  asF_tree
+        (asT_tree, SymSequenceLeaf) -> asT_tree
+        (asT_tree, asF_tree) -> SymSequenceTree [] asT_tree asF_tree
+
+    appendTrees :: SymSequenceTree a -> SymSequenceTree a -> SymSequenceTree a
+    appendTrees as1 as2 = case (as1, as2) of
+      (SymSequenceLeaf, _) -> as2
+      (_, SymSequenceLeaf) -> as1
+      (SymSequenceTree as1_head as1_tailT as1_tailF, _) ->
+        (SymSequenceTree as1_head (appendTrees as1_tailT as2) (appendTrees as1_tailF (appendTrees as1_tailF as2)))
+
+    consTree :: a -> SymSequenceTree a -> SymSequenceTree a
+    consTree a = \case
+      SymSequenceTree as asT asF -> SymSequenceTree (a:as) asT asF
+      SymSequenceLeaf -> SymSequenceTree [a] SymSequenceLeaf SymSequenceLeaf
+
+instance W4S.W4Serializable sym e => W4S.W4Serializable sym  (SymSequenceTree e) where
+  w4Serialize = \case
+    SymSequenceLeaf -> return $ JSON.Null
+    SymSequenceTree es esT esF -> W4S.object ["prefix" .= es, "suffix_true" .= esT, "suffix_false" .= esF]
