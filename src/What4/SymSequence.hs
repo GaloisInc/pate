@@ -30,6 +30,7 @@ module What4.SymSequence
 , muxTreeToSeq
 , appendSymSequence'
 , shareMuxPrefix
+, ppSeq
 , SymSequenceTree
 , toSequenceTree
 , ppSeqTree
@@ -62,6 +63,31 @@ import           Lang.Crucible.Simulator.SymSequence
 import qualified Pate.ExprMappable as PEM
 import qualified What4.JSON as W4S
 import           What4.JSON ( (.=) ) 
+
+ppSeq ::
+  forall sym e a.
+  ([e] -> PP.Doc a) ->
+  (W4.Pred sym -> PP.Doc a) ->
+  SymSequence sym e ->
+  PP.Doc a
+ppSeq pp_es pp_pred = go []
+  where
+    go :: [e] -> SymSequence sym e -> PP.Doc a
+    go es = \case 
+      SymSequenceNil -> pp_es (reverse es)
+      SymSequenceCons _ e es_seq ->
+        go (e:es) es_seq
+      SymSequenceAppend _ es1 es2 ->
+        go es es1 PP.<+> "++" PP.<+> go [] es2
+      SymSequenceMerge _ p esT esF ->
+        PP.vsep $
+          (case es of [] -> []; _ -> [ pp_es (reverse es)] ) ++ 
+          [ pp_pred p
+          , "True:"
+          , PP.indent 2 (go [] esT)
+          , "False:"
+          , PP.indent 2 (go [] esF)
+          ]
 
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
   mapExpr sym f = evalWithFreshCache $ \rec -> \case
