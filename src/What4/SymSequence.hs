@@ -33,13 +33,27 @@ module What4.SymSequence
 , SymSequenceTree
 , toSequenceTree
 , ppSeqTree
+, seqTreeElems
+, seqTreeElemsSet
 , module Lang.Crucible.Simulator.SymSequence
+, seqTreeHeads
+, seqTreeLasts
 ) where
 
 import           Control.Monad (forM)
 import qualified Control.Monad.IO.Class as IO
 
+import qualified Data.Set as Set
+import           Data.Functor.Const
+import           Data.Maybe (catMaybes)
+import qualified Data.IORef as IO
+import qualified Data.Map as Map
+import qualified Data.Aeson as JSON
+
 import qualified Prettyprinter as PP
+
+import           Data.Parameterized.Nonce
+import           Lang.Crucible.Utils.MuxTree
 
 import           What4.Interface as W4
 import           What4.Partial
@@ -48,13 +62,6 @@ import           Lang.Crucible.Simulator.SymSequence
 import qualified Pate.ExprMappable as PEM
 import qualified What4.JSON as W4S
 import           What4.JSON ( (.=) ) 
-import qualified Data.Aeson as JSON
-import Lang.Crucible.Utils.MuxTree
-import qualified Data.IORef as IO
-import qualified Data.Map as Map
-import Data.Parameterized.Nonce
-import Data.Functor.Const
-import Data.Maybe (catMaybes)
 
 instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) where
   mapExpr sym f = evalWithFreshCache $ \rec -> \case
@@ -707,6 +714,35 @@ ppSeqTree pp_es = go
       SymSequenceTree [] subT subF -> PP.vsep ["True:", PP.indent 2 (go subT), "False:", PP.indent 2 (go subF)]
       SymSequenceTree es subT subF -> 
         PP.vsep [pp_es es, "True:", PP.indent 2 (go subT), "False:", PP.indent 2 (go subF)]
+
+seqTreeHeads :: SymSequenceTree e -> [e]
+seqTreeHeads = \case
+  SymSequenceLeaf -> []
+  SymSequenceTree [] esT esF -> seqTreeHeads esT ++ seqTreeHeads esF
+  SymSequenceTree (e:_) _ _ -> [e]
+
+seqTreeLasts :: SymSequenceTree e -> [e]
+seqTreeLasts = \case
+  SymSequenceLeaf -> []
+  SymSequenceTree [] esT esF -> seqTreeLasts esT ++ seqTreeLasts esF
+  SymSequenceTree es esT esF -> 
+    let 
+      tails_esT = seqTreeLasts esT
+      tails_esF = seqTreeLasts esF
+    in case (tails_esT, tails_esF) of
+      ([],_) -> last es : tails_esF
+      (_, []) -> last es : tails_esT
+      _ -> tails_esT ++ tails_esF
+
+seqTreeElems :: SymSequenceTree e -> [e]
+seqTreeElems = \case
+  SymSequenceLeaf -> []
+  SymSequenceTree es esT esF -> es ++ seqTreeElems esT ++ seqTreeElems esF
+
+seqTreeElemsSet :: Ord e => SymSequenceTree e -> Set.Set e
+seqTreeElemsSet = \case
+  SymSequenceLeaf -> Set.empty
+  SymSequenceTree es esT esF -> Set.unions [Set.fromList es, seqTreeElemsSet esT, seqTreeElemsSet esF]
 
 -- | Ensures a 'SymSequenceTree' is in normal form:
 --   No empty single-sided branches (pulls the non-empty branch up)

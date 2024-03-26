@@ -64,7 +64,7 @@ import qualified Data.Parameterized.Context as Ctx
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
 import           What4.SatResult (SatResult(..))
-import           What4.SymSequence (compareSymSeq)
+import           What4.SymSequence (SymSequenceTree, reverseSeq, toSequenceTree, ppSeq, compareSymSeq, ppSeqTree, feasiblePaths, shareMuxPrefix, seqTreeElemsSet, seqTreeHeads, seqTreeLasts)
 
 import qualified Lang.Crucible.Backend as LCB
 import qualified Lang.Crucible.LLVM.MemModel as CLM
@@ -1224,8 +1224,14 @@ processBundle ::
   [(PPa.PatchPair (PB.BlockTarget arch))] ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-processBundle scope node bundle d exitPairs gr0 = do
+processBundle scope node bundle d exitPairs gr0 = withSym $ \sym -> do
   gr1 <- checkObservables node bundle d gr0
+  paths <- withTracing @"message" "All Instruction Paths" $ do
+    paths <- bundleToInstrTraces bundle
+    trees <- instrPathsToTrees paths
+    emitTrace @"instruction_trees" trees
+    return paths
+
   -- Follow all the exit pairs we found
   let initBranchState = BranchState { branchGraph = gr1, branchDesyncChoice = Nothing, branchHandled = []}
   st <- subTree @"blocktarget" "Block Exits" $ accM initBranchState (zip [0 ..] exitPairs) $ \st0 (idx,tgt) -> do
@@ -1233,7 +1239,7 @@ processBundle scope node bundle d exitPairs gr0 = do
     let st1 = st0 { branchGraph = pg1 }
     case checkNodeRequeued st1 node of
       True -> return st1
-      False -> subTrace tgt $ followExit scope bundle node d st1 (idx,tgt)
+      False -> subTrace tgt $ followExit scope bundle paths node d st1 (idx,tgt)
   -- confirm that all handled exits cover the set of possible exits
   let allHandled = length (branchHandled st) == length exitPairs
   let anyNonTotal = branchDesyncChoice st == Just AdmitNonTotal
@@ -2057,15 +2063,16 @@ checkNodeRequeued st node = fromMaybe False $ do
 followExit ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
+  InstructionPaths sym arch {- ^ all possible instruction paths (only used for logging) -} ->
   NodeEntry arch {- ^ current entry point -} ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   BranchState sym arch ->
   (Integer, PPa.PatchPair (PB.BlockTarget arch)) {- ^ next entry point -} ->
   EquivM sym arch (BranchState sym arch)
-followExit scope bundle currBlock d st (idx, pPair) = do
+followExit scope bundle paths currBlock d st (idx, pPair) = do
   let gr = branchGraph st
-  traceBundle bundle ("Handling proof case " ++ show idx) 
-  res <- manifestError $ triageBlockTarget scope bundle currBlock st d pPair
+  traceBundle bundle ("Handling proof case " ++ show idx)
+  res <- manifestError $ triageBlockTarget scope bundle paths currBlock st d pPair
   case res of
     Left err -> do
       emitEvent $ PE.ErrorEmitted err
@@ -2153,21 +2160,62 @@ getTargetReturn blkt = getFunctionStub (PB.targetCall blkt) >>= \case
   Just stub | PD.isAbortStub stub -> return Nothing
   _ -> return $ PB.targetReturn blkt
 
+data InstructionTrees arch = InstructionTrees (PPa.PatchPairC (SymSequenceTree (ET.InstructionEvent arch)))
+type InstructionPaths sym arch = PPa.PatchPairC (SymSequence sym (ET.InstructionEvent arch))
+
+ppSet :: PP.Pretty e => Set.Set e -> PP.Doc a
+ppSet s | [e] <- Set.toList s = PP.pretty e
+ppSet s =
+  "{" <> PP.hsep (PP.punctuate "," (map PP.pretty (Set.toList s))) <> "}"
+
+ppTreesSummary :: PA.ValidArch arch => InstructionTrees arch -> PP.Doc a
+ppTreesSummary (InstructionTrees trs) = 
+  PPa.ppPatchPair' (\(Const s) -> 
+    let hds = Set.fromList $ (map ET.instrAddr $ seqTreeHeads s)
+        lasts = Set.fromList $ (map ET.instrAddr $ seqTreeLasts s)
+    in 
+      "[" <> ppSet hds <> ".." <> ppSet lasts <> "]" 
+    ) trs 
+
+instrPathsToTrees ::
+  InstructionPaths sym arch ->
+  EquivM sym arch (InstructionTrees arch)
+instrPathsToTrees pathsPair = withSym $ \sym -> fmap InstructionTrees $ PPa.forBinsC $ \bin -> do
+  paths <- PPa.getC bin pathsPair
+  goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
+  paths' <- feasiblePaths sym (withAssumption) (concretePred goalTimeout) paths
+  return $ toSequenceTree paths'
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "instruction_trees" where
+  type TraceNodeType '(sym,arch) "instruction_trees" = InstructionTrees arch
+  prettyNode () (InstructionTrees ps) =
+    let ppEvs es = PP.vsep $ map (PP.pretty . ET.instrAddr) es 
+    in PPa.ppPatchPair' (\(Const s) -> ppSeqTree ppEvs s) ps 
+  nodeTags = 
+    [ (Summary, \_ v -> ppTreesSummary v)
+    , (Simplified, \_ v -> ppTreesSummary v)
+    ]
+  jsonNode sym () (InstructionTrees ps) = W4S.w4ToJSON sym ps
+
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
 triageBlockTarget ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
+  InstructionPaths sym arch {- ^ all possible instruction paths (only used for logging) -} ->
   NodeEntry arch {- ^ current entry point -} ->
   BranchState sym arch ->
   AbstractDomain sym arch v {- ^ current abstract domain -} ->
   PPa.PatchPair (PB.BlockTarget arch) {- ^ next entry point -} ->
   EquivM sym arch (BranchState sym arch)
-triageBlockTarget scope bundle' currBlock st d blkts = do
+triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> do
   let gr = branchGraph st
   stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
   matches <- PD.matchesBlockTarget bundle' blkts
   res <- withPathCondition matches $ do
+    withTracing @"message" "Instruction Paths to Exit" $ do
+      trees <- instrPathsToTrees paths
+      emitTrace @"instruction_trees" trees
     let (ecase1, ecase2) = PPa.view PB.targetEndCase blkts
     mrets <- PPa.toMaybeCases <$> 
       PPa.forBinsF (\bin -> PPa.get bin blkts >>= getTargetReturn) 
@@ -2623,7 +2671,9 @@ bundleToInstrTraces ::
 bundleToInstrTraces bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
   out_ <- PPa.get bin (simOut bundle)
   let evt = MT.memFullSeq (PS.simOutMem out_)
-  IO.liftIO $ ET.asInstructionTrace sym evt
+  tr <- IO.liftIO $ ET.asInstructionTrace sym evt
+  goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
+  feasiblePaths sym (withAssumption) (concretePred goalTimeout) tr
 
 data DesyncChoice =
     AdmitNonTotal
