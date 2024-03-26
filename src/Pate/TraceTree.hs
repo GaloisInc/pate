@@ -103,6 +103,7 @@ module Pate.TraceTree (
   , SomeChoice(..)
   , LazyIOAction(..)
   , nodeToJSON
+  , nodeToJSON'
   , resolveQuery
   , NodeQuery(..)
   , NodeIdentQuery(..)
@@ -510,12 +511,21 @@ nodeToJSON :: forall k nm. (IsTraceNode k nm, JSON.ToJSON (TraceNodeType k nm), 
            => TraceNodeLabel nm 
            -> TraceNodeType k nm 
            -> IO JSON.Value
-nodeToJSON lbl v =
-  let i1 = case JSON.toJSON lbl of
+nodeToJSON lbl v = nodeToJSON' @k @nm (JSON.toJSON lbl) (JSON.toJSON v)
+
+-- | Takes a serialized label and value for a given trace node type
+--   and wraps it in annotations about its type.
+nodeToJSON' :: forall k nm.
+              IsTraceNode k nm
+            => JSON.Value
+           -> JSON.Value
+           -> IO JSON.Value
+nodeToJSON' lbl v =
+  let i1 = case lbl of
         JSON.String "" -> [] 
         JSON.Null -> []
         x -> ["tag" JSON..= x]
-      i2 = case JSON.toJSON v of
+      i2 = case v of
         JSON.Null -> []
         x -> [ "trace_node" JSON..= x ]
   in return $ JSON.object $ i1 ++ i2 ++ [ "trace_node_kind" JSON..= symbolRepr (knownSymbol @nm) ]
