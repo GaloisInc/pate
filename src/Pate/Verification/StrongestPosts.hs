@@ -2195,7 +2195,9 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "instr
     [ (Summary, \_ v -> ppTreesSummary v)
     , (Simplified, \_ v -> ppTreesSummary v)
     ]
-  jsonNode sym () (InstructionTrees ps) = W4S.w4ToJSON sym ps
+  jsonNode sym () (InstructionTrees ps) = do
+    v <- W4S.w4ToJSON sym ps
+    nodeToJSON' @'(sym,arch) @"instruction_trees" JSON.Null v
 
 -- | Figure out what kind of control-flow transition we are doing
 --   here, and call into the relevant handlers.
