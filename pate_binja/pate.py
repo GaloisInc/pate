@@ -291,7 +291,7 @@ class PateWrapper:
             print('\nJSON {}:'.format(path))
             pp.pprint(rec)
 
-        # Hack to find counter-example trace. Really need to restructure this whole method.
+        # Hack to find counter-example trace for exit. Really need to restructure this whole method.
         if (len(path) == 4
             and len(rec.get('trace_node_contents', [])) >= 3
             and rec['trace_node_contents'][1].get('pretty') == 'Equivalence Counter-example'
@@ -363,6 +363,16 @@ class PateWrapper:
             child = tnc['content']
             if not child:
                 continue
+
+            if child.get('trace_node_kind') == 'instruction_trees':
+                # Process instruction trees. Do not descend into child.
+                if cfar_node and len(path) == 1:
+                    # Top level CFAR, attach instruction tree.
+                    cfar_node.instruction_trees = child['trace_node']
+                if cfar_parent and cfar_exit and len(path) > 1:
+                    # Exit CFAR
+                    cfar_parent.addExitMetaData(cfar_exit, 'instruction_trees_to_exit', child['trace_node'])
+
             # TODO: Ask Dan about this filter.
             if ((len(path) == 0 and child.get('trace_node_kind') in {'node'})
                     or (len(path) == 1 and child.get('subtree_kind') == '"blocktarget"')
@@ -563,6 +573,7 @@ class CFARNode:
         self.predicate = None
         self.trace_true = None
         self.trace_false = None
+        self.instruction_trees = None
 
     def update_node(self, desc: str, data: dict):
         self.desc = desc
@@ -604,6 +615,9 @@ class CFARNode:
             pprint_symbolic(sys.stdout, self.predicate)
             sys.stdout.write('\n')
         self.pprint_node_contents(pre, show_ce_trace=True)
+        if self.instruction_trees:
+            pprint_node_inst_tree(self.instruction_trees.get('original'), 'Original inst tree: ')
+            pprint_node_inst_tree(self.instruction_trees.get('patched'), 'Patched inst tree: ')
         print()
         #print('data:')
         #pp.pprint(self.data)
@@ -1211,6 +1225,24 @@ def pprint_event_trace_instructions(events: dict, pre: str = '', out: IO = sys.s
                     pprint_mem_op(op['memory_op'], pre + '    ', out)
                 elif op.get('register_op'):
                     pprint_reg_op(op['register_op']['reg_op'], pre + '    ', out)
+
+
+def pprint_node_inst_tree(inst_tree, pre: str = '', out: IO = sys.stdout):
+    if not inst_tree:
+        out.write(f'{pre}No instruction tree\n')
+        return
+
+    for i in inst_tree['prefix']:
+        out.write(pre)
+        out.write('S')
+        out.write(str(i['address']['base']))
+        out.write('+')
+        out.write(i['address']['offset'])
+        out.write('\n')
+    if inst_tree['suffix_true']:
+        pprint_node_inst_tree(inst_tree['suffix_true'], pre + 'T ', out)
+    if inst_tree['suffix_false']:
+        pprint_node_inst_tree(inst_tree['suffix_false'], pre + 'F ', out)
 
 
 def tokenize_sexp(s: str):
