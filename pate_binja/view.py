@@ -7,6 +7,7 @@ import os.path
 import re
 import signal
 import time
+from collections import OrderedDict
 from difflib import HtmlDiff
 from subprocess import Popen, TimeoutExpired
 from threading import Thread, Condition
@@ -119,6 +120,25 @@ class PateWidget(QWidget):
         self.cmd_field.setText('')
         self.cmd_field.setEnabled(True)
         self.cmd_field.setFocus()
+
+    def injectBinjaDissembly(self, original_lines, patched_lines):
+
+        def addDisassembly(l, bv):
+            m = re.fullmatch(r'(.*)S[0-9A-Fa-f]+\+(0x[0-9A-Fa-f]+)', l)
+            if m:
+                pre = m.group(1)
+                a = int(m.group(2), 16)
+                inst = next(bv.disassembly_text(a))[0]
+                return pre + hex(a) + " " + inst
+            else:
+                return l
+
+        with load(self.originalFilename) as bv:
+            original_lines = map(lambda l: addDisassembly(l, bv), original_lines)
+        with load(self.patchedFilename) as bv:
+            patched_lines = map(lambda l: addDisassembly(l, bv), patched_lines)
+
+        return original_lines, patched_lines
 
 
 class GuiUserInteraction(pate.PateUserInteraction):
@@ -261,21 +281,7 @@ class TraceWidget(QWidget):
         # Replace addr lines with binja disassembly
         pw = getAncestorInstanceOf(self, PateWidget)
         if pw:
-
-            def addDisassembly(l, bv):
-                m = re.fullmatch(r'(\s*)S[0-9A-Fa-f]+\+(0x[0-9A-Fa-f]+)', l)
-                if m:
-                    pre = m.group(1)
-                    a = int(m.group(2), 16)
-                    inst = next(bv.disassembly_text(a))[0]
-                    return pre + hex(a) + " " + inst
-                else:
-                    return l
-
-            with load(pw.originalFilename) as bv:
-                original_lines = map(lambda l: addDisassembly(l, bv), original_lines)
-            with load(pw.patchedFilename) as bv:
-                patched_lines = map(lambda l: addDisassembly(l, bv), patched_lines)
+            original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
 
         htmlDiff = HtmlDiff()
         html = htmlDiff.make_file(original_lines, patched_lines,
@@ -333,6 +339,59 @@ class PateCfarEqCondDialog(QDialog):
     def setFalseTrace(self, trace: dict, label: str):
         self.falseTraceWidget.setTrace(trace, label)
 
+
+class InstTreeWidget(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+
+        self.instDiffField = QTextEdit()
+        self.instDiffField.setReadOnly(True)
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(self.instDiffField)
+        self.setLayout(main_layout)
+
+    def setInstTree(self, instTrees: dict, label: str):
+        if not instTrees:
+            self.instDiffField.append("No Instruction Trees")
+            return
+
+        # collect trace text content, for formatting below
+        original_lines = []
+        patched_lines = []
+        if instTrees.get('original'):
+            with io.StringIO() as out:
+                pate.pprint_node_inst_tree(instTrees['original'], out=out)
+                original_lines = out.getvalue().splitlines()
+        if instTrees.get('patched'):
+            with io.StringIO() as out:
+                pate.pprint_node_inst_tree(instTrees['patched'], out=out)
+                patched_lines = out.getvalue().splitlines()
+
+        # Replace addr lines with binja disassembly
+        pw = getAncestorInstanceOf(self, PateWidget)
+        if pw:
+            original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
+
+        htmlDiff = HtmlDiff()
+        html = htmlDiff.make_file(original_lines, patched_lines,
+                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
+        self.instDiffField.setHtml(html)
+
+class PateCfarInstTreeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.resize(1100, 600)
+        self.setWindowTitle("CFAR Inst Trees")
+
+        self.instTreeWidget = InstTreeWidget(self)
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(self.instTreeWidget)
+        self.setLayout(main_layout)
+
+    def setInstTree(self, instTrees: dict, label: str):
+        self.instTreeWidget.setInstTree(instTrees, label)
 
 
 class MyFlowGraphWidget(FlowGraphWidget):
@@ -447,32 +506,36 @@ class MyFlowGraphWidget(FlowGraphWidget):
             super().mousePressEvent(event)
 
     def nodePopupMenu(self, event: QMouseEvent, node: FlowGraphNode):
+
         cfarNode = self.flowToCfar[node]
-        if cfarNode and (cfarNode.original_addr or cfarNode.patched_addr or cfarNode.predicate):
-            context = QMenu(self)
-            gotoOriginalAction = None
-            gotoPatchedAction = None
-            showEqCondAction = None
+
+        if cfarNode:
+
+            menu = QMenu(self)
+
             if cfarNode.original_addr:
-                gotoOriginalAction = QAction(f'Goto original address {hex(cfarNode.original_addr)}', self)
-                context.addAction(gotoOriginalAction)
+                action = QAction(f'Goto original address {hex(cfarNode.original_addr)}', self)
+                action.triggered.connect(lambda _: self.pate_widget.gotoOriginalAddress(cfarNode.original_addr))
+                menu.addAction(action)
+
             if cfarNode.patched_addr:
-                gotoPatchedAction = QAction(f'Goto patched address {hex(cfarNode.patched_addr)}', self)
-                context.addAction(gotoPatchedAction)
+                action = QAction(f'Goto patched address {hex(cfarNode.patched_addr)}', self)
+                action.triggered.connect(lambda _: self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr))
+                menu.addAction(action)
+
             if cfarNode.predicate:
-                #print('CFAR with pred:', cfarNode.id)
-                showEqCondAction = QAction(f'Show Equivalence Condition', self)
-                context.addAction(showEqCondAction)
-            choice = context.exec(event.globalPos())
-            #print('context choice:', choice)
-            if choice is None:
-                pass
-            elif choice == gotoOriginalAction:
-                self.pate_widget.gotoOriginalAddress(cfarNode.original_addr)
-            elif choice == gotoPatchedAction:
-                self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr)
-            elif choice == showEqCondAction:
-                self.showCfarEqCondDialog(cfarNode)
+                action = QAction('Show Equivalence Condition', self)
+                action.triggered.connect(lambda _: self.showCfarEqCondDialog(cfarNode))
+                menu.addAction(action)
+
+            if cfarNode.instruction_trees:
+                action = QAction('Show Inst Trees', self)
+                action.triggered.connect(lambda _: self.showInstTreeInfo(cfarNode.instruction_trees,
+                                                                         cfarNode.id))
+                menu.addAction(action)
+
+            if menu.actions():
+                menu.exec_(event.globalPos())
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
         d = PateCfarEqCondDialog(parent=self)
@@ -494,16 +557,25 @@ class MyFlowGraphWidget(FlowGraphWidget):
             sourceCfarNode = self.flowToCfar[edge.source]
             exitCfarNode = self.flowToCfar[edge.target]
 
-        if sourceCfarNode and exitCfarNode and self.showCfarExitInfo(sourceCfarNode, exitCfarNode, True):
-            # Just one menu item for an edge for now
-            context = QMenu(self)
-            showExitInfoAction = QAction(f'Show CFAR Exit Info', self)
-            context.addAction(showExitInfoAction)
-            choice = context.exec(event.globalPos())
-            if choice is None:
-                pass
-            elif choice == showExitInfoAction:
-                self.showCfarExitInfo(sourceCfarNode, exitCfarNode)
+        if sourceCfarNode and exitCfarNode:
+
+            exitMetaData = sourceCfarNode.exit_meta_data.get(exitCfarNode, {})
+
+            menu = QMenu(self)
+
+            if self.showCfarExitInfo(sourceCfarNode, exitCfarNode, True):
+                action = QAction(f'Show CFAR Exit Info', self)
+                action.triggered.connect(lambda _: self.showCfarExitInfo(sourceCfarNode, exitCfarNode))
+                menu.addAction(action)
+
+            if exitMetaData.get('instruction_trees_to_exit'):
+                action = QAction(f'Show Inst Trees to Exit', self)
+                action.triggered.connect(lambda _: self.showInstTreeInfo(exitMetaData['instruction_trees_to_exit'],
+                                                                         sourceCfarNode.id + " to exit " + exitCfarNode.id))
+                menu.addAction(action)
+
+            if menu.actions():
+                menu.exec_(event.globalPos())
 
     def showCfarExitInfo(self, sourceCfarNode: pate.CFARNode, exitCfarNode: pate.CFARNode, simulate: bool=False) -> bool:
 
@@ -527,6 +599,12 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d = PateCfarExitDialog(self)
         d.setTrace(trace, label)
         d.exec()
+
+    def showInstTreeInfo(self, instTrees: dict, label: str):
+        d = PateCfarInstTreeDialog(self)
+        d.setWindowTitle(d.windowTitle() + ' ' + label)
+        d.setInstTree(instTrees, '')
+        d.show()
 
 
 def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> QWidget | None:
