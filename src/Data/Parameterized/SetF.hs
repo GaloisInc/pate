@@ -43,6 +43,7 @@ module Data.Parameterized.SetF
   , union
   , unions
   , null
+  , toSet
   , ppSetF
   ) where
 
@@ -55,6 +56,7 @@ import           Prettyprinter ( (<+>) )
 
 import           Data.Set (Set)
 import qualified Data.Set as S
+import Unsafe.Coerce (unsafeCoerce)
 
 newtype AsOrd f tp where
   AsOrd :: { unAsOrd :: f tp } -> AsOrd f tp
@@ -129,6 +131,14 @@ lookupMin (SetF es) = fmap unAsOrd $ S.lookupMin es
 null ::
   SetF f tp -> Bool
 null (SetF es) = S.null es
+
+-- | Convert a 'SetF' to a 'Set', under the assumption
+--   that the 'OrdF' and 'Ord' instances are consistent.
+--   This uses coercion rather than re-building the set,
+--   which is sound given the above assumption.
+toSet ::
+  (OrdF f, Ord (f tp)) => SetF f tp -> Set (f tp)
+toSet (SetF s) = unsafeCoerce s
 
 ppSetF ::
   (f tp -> PP.Doc a) ->

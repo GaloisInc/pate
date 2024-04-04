@@ -25,6 +25,7 @@ module Pate.Verification.PairGraph.Node (
   , pattern GraphNodeEntry
   , pattern GraphNodeReturn
   , nodeContext
+  , graphNodeContext
   , divergePoint
   , graphNodeBlocks
   , mkNodeEntry
@@ -49,6 +50,13 @@ module Pate.Verification.PairGraph.Node (
   , eqUptoDivergePoint
   , mkMergedNodeEntry
   , mkMergedNodeReturn
+  , SingleNodeEntry
+  , singleEntryBin
+  , asSingleNodeEntry
+  , singleToNodeEntry
+  , combineSingleEntries
+  , singleNodeBlock
+  , singleNodeDivergence
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -64,6 +72,9 @@ import qualified Pate.Binary as PB
 import qualified Prettyprinter as PP
 import Data.Parameterized (Some(..), Pair (..))
 import qualified What4.JSON as W4S
+import Control.Monad (guard)
+import Data.Parameterized.Classes
+import Pate.Panic
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -91,28 +102,48 @@ instance PA.ValidArch arch => W4S.W4Serializable sym (GraphNode arch) where
 instance PA.ValidArch arch => W4S.W4Serializable sym (NodeEntry arch) where
   w4Serialize r = return $ JSON.toJSON r
 
--- A frozen binary 
-data NodeEntry arch =
-  NodeEntry { graphNodeContext :: CallingContext arch, nodeBlocks :: PB.BlockPair arch }
+data NodeContent arch e = 
+  NodeContent { nodeContentCtx :: CallingContext arch, nodeContent :: e }
   deriving (Eq, Ord)
 
-data NodeReturn arch =
-  NodeReturn { returnNodeContext :: CallingContext arch, nodeFuns :: PB.FunPair arch }
-  deriving (Eq, Ord)
+type NodeEntry arch = NodeContent arch (PB.BlockPair arch)
+
+pattern NodeEntry :: CallingContext arch -> PB.BlockPair arch -> NodeEntry arch
+pattern NodeEntry ctx bp = NodeContent ctx bp
+{-# COMPLETE NodeEntry #-}
+
+
+nodeBlocks :: NodeEntry arch -> PB.BlockPair arch
+nodeBlocks = nodeContent
+
+graphNodeContext :: NodeEntry arch -> CallingContext arch
+graphNodeContext = nodeContentCtx
+
+type NodeReturn arch = NodeContent arch (PB.FunPair arch)
+
+nodeFuns :: NodeReturn arch -> PB.FunPair arch
+nodeFuns = nodeContent
+
+returnNodeContext :: NodeReturn arch -> CallingContext arch
+returnNodeContext = nodeContentCtx
+
+pattern NodeReturn :: CallingContext arch -> PB.FunPair arch -> NodeReturn arch
+pattern NodeReturn ctx bp = NodeContent ctx bp
+{-# COMPLETE NodeReturn #-}
 
 graphNodeBlocks :: GraphNode arch -> PB.BlockPair arch
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
 graphNodeBlocks (ReturnNode ret) = TF.fmapF PB.functionEntryToConcreteBlock (nodeFuns ret)
 
 nodeContext :: GraphNode arch -> CallingContext arch
-nodeContext (GraphNode nd) = graphNodeContext nd
-nodeContext (ReturnNode ret) = returnNodeContext ret
+nodeContext (GraphNode nd) = nodeContentCtx nd
+nodeContext (ReturnNode ret) = nodeContentCtx ret
 
 pattern GraphNodeEntry :: PB.BlockPair arch -> GraphNode arch
-pattern GraphNodeEntry blks <- (GraphNode (NodeEntry _ blks))
+pattern GraphNodeEntry blks <- (GraphNode (NodeContent _ blks))
 
 pattern GraphNodeReturn :: PB.FunPair arch -> GraphNode arch
-pattern GraphNodeReturn blks <- (ReturnNode (NodeReturn _ blks))
+pattern GraphNodeReturn blks <- (ReturnNode (NodeContent _ blks))
 
 {-# COMPLETE GraphNodeEntry, GraphNodeReturn #-}
 
@@ -190,6 +221,7 @@ mkMergedNodeReturn ::
 mkMergedNodeReturn nd fnO fnP = NodeReturn (CallingContext cctx (Just nd)) (PPa.PatchPair fnO fnP)
   where
     CallingContext cctx _ = nodeContext nd
+
 
 -- | Project the given 'NodeReturn' into a singleton node for the given binary
 toSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> NodeReturn arch -> m (NodeReturn arch)
@@ -352,3 +384,66 @@ instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entryno
   prettyNode () = pretty
   nodeTags = mkTags @'(sym,arch) @"entrynode" [Simplified, Summary]
   jsonNode _ = nodeToJSON @'(sym,arch) @"entrynode"
+
+-- | Equivalent to a 'NodeEntry' but necessarily a single-sided node.
+--   Converting a 'SingleNodeEntry' to a 'NodeEntry' is always defined,
+--   while converting a 'NodeEntry' to a 'SingleNodeEntry' is partial.
+data SingleNodeEntry arch bin = 
+  SingleNodeEntry 
+    { singleEntryBin :: PB.WhichBinaryRepr bin
+    , _singleEntry :: NodeContent arch (PB.ConcreteBlock arch bin)
+    }
+
+instance TestEquality (SingleNodeEntry arch) where
+  testEquality se1 se2 | EQF <- compareF se1 se2 = Just Refl
+  testEquality _ _ = Nothing
+
+instance Eq (SingleNodeEntry arch bin) where
+  se1 == se2 = compare se1 se2 == EQ
+
+instance Ord (SingleNodeEntry arch bin) where
+  compare (SingleNodeEntry _ se1) (SingleNodeEntry _ se2) = compare se1 se2
+
+instance OrdF (SingleNodeEntry arch) where
+  compareF (SingleNodeEntry bin1 se1) (SingleNodeEntry bin2 se2) =
+    lexCompareF bin1 bin2 $ fromOrdering (compare se1 se2)
+
+instance PA.ValidArch arch => Show (SingleNodeEntry arch bin) where
+  show e = show (singleToNodeEntry e)
+
+asSingleNodeEntry :: PPa.PatchPairM m => NodeEntry arch -> m (Some (SingleNodeEntry arch))
+asSingleNodeEntry (NodeEntry cctx bPair) = do
+  Pair bin blk <- PPa.asSingleton bPair
+  case divergePoint cctx of
+    Just{} -> return $ Some (SingleNodeEntry bin (NodeContent cctx blk))
+    Nothing -> PPa.throwPairErr
+
+singleToNodeEntry :: SingleNodeEntry arch bin -> NodeEntry arch
+singleToNodeEntry (SingleNodeEntry bin (NodeContent cctx v)) = 
+  NodeEntry cctx (PPa.PatchPairSingle bin v)
+
+singleNodeBlock :: SingleNodeEntry arch bin -> PB.ConcreteBlock arch bin
+singleNodeBlock (SingleNodeEntry _ (NodeContent _ blk)) = blk
+
+singleNodeDivergence :: SingleNodeEntry arch bin -> GraphNode arch
+singleNodeDivergence (SingleNodeEntry _ (NodeContent cctx _)) = case divergePoint cctx of
+  Just dp -> dp
+  Nothing -> panic Verifier "singleNodeDivergence" ["Unexpected missing divergence point"]
+
+-- | Create a combined two-sided 'NodeEntry' based on
+--   a pair of single-sided entries. The given entries
+--   must have the same diverge point (returns 'Nothing' otherwise),
+--   and the calling context of the resulting node is inherited from
+--   that point (i.e. any additional context accumulated during
+--   the either single-sided analysis is discarded)
+combineSingleEntries :: 
+  SingleNodeEntry arch PB.Original -> 
+  SingleNodeEntry arch PB.Patched ->
+  Maybe (NodeEntry arch)
+combineSingleEntries (SingleNodeEntry _ eO) (SingleNodeEntry _ eP) = do
+  GraphNode divergeO <- divergePoint $ nodeContentCtx eO
+  GraphNode divergeP <- divergePoint $ nodeContentCtx eP
+  guard $ divergeO == divergeP
+  let blksO = nodeContent eO
+  let blksP = nodeContent eP
+  return $ mkNodeEntry divergeO (PPa.PatchPair blksO blksP)

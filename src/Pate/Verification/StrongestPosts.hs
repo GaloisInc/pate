@@ -117,7 +117,7 @@ import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, nodeFuns, toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn, NodeReturn, singleToNodeEntry, SingleNodeEntry, singleNodeBlock )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -382,12 +382,12 @@ handleDanglingReturns fnPairs pg = do
 
 
 handleSyncPoint ::
-  GraphNode arch ->
+  NodeEntry arch ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ withPG_ pg $ do
   divergeNode <- liftPG $ do
-    Just divergeNode <- return $ getDivergePoint nd
+    Just divergeNode <- return $ getDivergePoint (GraphNode nd)
     addSyncNode divergeNode nd
     return divergeNode
   liftEqM_ $ updateCombinedSyncPoint divergeNode
@@ -589,8 +589,8 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
   syncsP_ <- fmap Set.toList $ liftPG $ getSyncPoints PBi.PatchedRepr divergeNode
 
   -- collect all sync points that have been found and that have a pre-domain
-  syncsO <- fmap catMaybes $ mapM (\nd -> catchPG $ fmap (nd,) $ getCurrentDomainM nd) syncsO_
-  syncsP <- fmap catMaybes $ mapM (\nd -> catchPG $ fmap (nd,) $ getCurrentDomainM nd) syncsP_
+  syncsO <- fmap catMaybes $ mapM (\nd -> catchPG $ fmap (nd,) $ getCurrentDomainM (GraphNode (singleToNodeEntry nd))) syncsO_
+  syncsP <- fmap catMaybes $ mapM (\nd -> catchPG $ fmap (nd,) $ getCurrentDomainM (GraphNode (singleToNodeEntry nd))) syncsP_
 
   case syncsO of
     -- We have not completed a single-sided analysis for the
@@ -606,7 +606,7 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
           modify $ queueNode (priority PriorityDomainRefresh) divergeNodeO
           -- also re-queue the ancestors of any known sync points that are missing domains
           forM_ syncsO_ $ \syncO -> do
-            modify $ queueAncestors (priority PriorityHandleDesync) syncO
+            modify $ queueAncestors (priority PriorityHandleDesync) (GraphNode (singleToNodeEntry syncO))
     -- We have at least one completed one-sided analysis for the Original binary.
     -- The convention is that we find at least one Original sync point before
     -- moving on to the Patched one-sided analysis.
@@ -623,9 +623,9 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
             bundle <- lift $ noopBundle scope (graphNodeBlocks divergeNodeY)
             forM_ syncsO $ \(syncO, _) -> do
               liftPG $ (void $ getCurrentDomainM divergeNodeY) 
-                  <|> (modify $ \pg -> updateDomain' pg syncO divergeNodeY (PS.mkSimSpec scope domP) (priority PriorityWidening))
+                  <|> (modify $ \pg -> updateDomain' pg (GraphNode (singleToNodeEntry syncO)) divergeNodeY (PS.mkSimSpec scope domP) (priority PriorityWidening))
               liftEqM_ $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope bundle dom divergeNode pg $
-                widenAlongEdge scope bundle syncO domP pg divergeNodeY
+                widenAlongEdge scope bundle (GraphNode (singleToNodeEntry syncO)) domP pg divergeNodeY
 
       -- Finally, if we have any Patched one-sided results, we take all combinations
       -- of Original and Patched sync points and connect them to a "combined" two-sided node
@@ -637,8 +637,8 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
           Just combinedNode <- return $ combineNodes syncO syncP
           return combinedNode
         withTracingLabel @"node" "Merge Node" combinedNode $ do
-          emitTrace @"node" syncO
-          emitTrace @"node" syncP
+          emitTrace @"node" (GraphNode (singleToNodeEntry syncO))
+          emitTrace @"node" (GraphNode (singleToNodeEntry syncO))
         liftEqM_ $ mergeDualNodes syncO syncP domO_spec domP_spec combinedNode
 
 
@@ -716,15 +716,17 @@ addImmediateEqDomRefinementChoice nd preD gr0 = do
     mapM_ go [minBound..maxBound]
 
 mergeDualNodes ::
-  GraphNode arch {- ^ first program node -} ->
-  GraphNode arch {- ^ second program node -} ->
-  PAD.AbstractDomainSpec sym arch {- ^ first node domain -} ->
-  PAD.AbstractDomainSpec sym arch {- ^ second node domain -} ->
+  SingleNodeEntry arch PBi.Original {- ^ original program node -} ->
+  SingleNodeEntry arch PBi.Patched {- ^ patched program node -} ->
+  PAD.AbstractDomainSpec sym arch {- ^ original node domain -} ->
+  PAD.AbstractDomainSpec sym arch {- ^ patched node domain -} ->
   GraphNode arch {- ^  combined sync node -} ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-mergeDualNodes in1 in2 spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
+mergeDualNodes in1_single in2_single spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
   let gr2 = gr0
+  let in1 = GraphNode $ singleToNodeEntry in1_single
+  let in2 = GraphNode $ singleToNodeEntry in2_single
 
   let blkPair1 = graphNodeBlocks in1
   let blkPair2 = graphNodeBlocks in2
@@ -1361,7 +1363,7 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
               -- node as a merge point
               withPG_ gr2 $ do
                 (liftPG $ checkForNodeSync node exitPairs) >>= \case
-                  True -> liftEqM_ $ handleSyncPoint (GraphNode node)
+                  True -> liftEqM_ $ handleSyncPoint node
                   False -> liftEqM_ $ \pg -> do
                     handleSplitAnalysis scope node d pg >>= \case
                       Just pg' -> return pg'
@@ -1425,9 +1427,9 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
               liftEqM_ $ checkObservables scope node bundle d
               liftEqM_ $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
               (liftPG $ checkForReturnSync fPair node) >>= \case
-                True -> liftEqM_ $ handleSyncPoint (GraphNode node)
+                True -> liftEqM_ $ handleSyncPoint node
                 False -> return ()
-                
+
 -- | Construct a "dummy" simulation bundle that basically just
 --   immediately returns the prestate as the poststate.
 --   This is used to compute widenings that propagate abstract domain
