@@ -117,7 +117,7 @@ import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Simplify as PSi
 
 import           Pate.Verification.PairGraph
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, NodeReturn (nodeFuns), toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, mkNodeEntry, mkNodeReturn, nodeBlocks, addContext, returnToEntry, graphNodeBlocks, returnOfEntry, nodeFuns, toSingleReturn, rootEntry, rootReturn, getDivergePoint, toSingleNode, mkNodeEntry', functionEntryOf, eqUptoDivergePoint, toSingleGraphNode, isSingleNodeEntry, divergePoint, isSingleReturn, NodeReturn )
 import           Pate.Verification.Widening
 import qualified Pate.Verification.AbstractDomain as PAD
 import Data.Monoid (All(..), Any (..))
@@ -382,12 +382,12 @@ handleDanglingReturns fnPairs pg = do
 
 
 handleSyncPoint ::
-  GraphNode arch ->
+  NodeEntry arch ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ withPG_ pg $ do
   divergeNode <- liftPG $ do
-    Just divergeNode <- return $ getDivergePoint nd
+    Just divergeNode <- return $ getDivergePoint (GraphNode nd)
     addSyncNode divergeNode nd
     return divergeNode
   liftEqM_ $ updateCombinedSyncPoint divergeNode
@@ -1361,7 +1361,7 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
               -- node as a merge point
               withPG_ gr2 $ do
                 (liftPG $ checkForNodeSync node exitPairs) >>= \case
-                  True -> liftEqM_ $ handleSyncPoint (GraphNode node)
+                  True -> liftEqM_ $ handleSyncPoint node
                   False -> liftEqM_ $ \pg -> do
                     handleSplitAnalysis scope node d pg >>= \case
                       Just pg' -> return pg'
@@ -1425,9 +1425,9 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
               liftEqM_ $ checkObservables node bundle d
               liftEqM_ $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
               (liftPG $ checkForReturnSync fPair node) >>= \case
-                True -> liftEqM_ $ handleSyncPoint (GraphNode node)
+                True -> liftEqM_ $ handleSyncPoint node
                 False -> return ()
-                
+
 -- | Construct a "dummy" simulation bundle that basically just
 --   immediately returns the prestate as the poststate.
 --   This is used to compute widenings that propagate abstract domain

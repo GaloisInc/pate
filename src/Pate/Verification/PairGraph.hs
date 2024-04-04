@@ -158,7 +158,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, nodeBlocks, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNodeEntry, isSingleReturn )
+import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, nodeBlocks, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNodeEntry, isSingleReturn, SingleNodeEntry, singleToNodeEntry, asSingleNodeEntry, singleEntryBin )
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -172,6 +172,8 @@ import qualified Pate.Location as PL
 import qualified Pate.Address as PAd
 import Data.Foldable (find)
 import           Data.Parameterized.PairF
+import           Data.Parameterized.SetF (SetF)
+import qualified Data.Parameterized.SetF as SetF
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -537,8 +539,31 @@ getNextDomainRefinement nd pg = case Map.lookup nd (pairGraphDomainRefinements p
   _ -> Nothing
 
 
+data PendingAction sym arch (f :: PS.VarScope -> Type) = 
+  PendingAction { pactIdent :: Int, pactAction :: LazyIOAction (EquivEnv sym arch, Some f, PairGraph sym arch) (PairGraph sym arch)}
+
+-- TODO: After some refactoring I'm not sure if we actually need edge actions anymore, so this potentially can be simplified
+data ActionQueue sym arch =
+  ActionQueue 
+    { _edgeActions :: Map (GraphNode arch, GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, PS.SimBundle sym arch, AbstractDomain sym arch, AbstractDomain sym arch))]
+    , _nodeActions :: Map (GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, PS.SimBundle sym arch, AbstractDomain sym arch))]
+    , _refineActions :: Map (GraphNode arch) [PendingAction sym arch (TupleF '(PS.SimScope sym arch, AbstractDomain sym arch))]
+    , _queueActions :: Map () [PendingAction sym arch (Const ())]
+    , _latestPendingId :: Int
+    }
 
 
+data SyncPoint arch =
+  SyncPoint
+    -- each side of the analysis independently defines a set of
+    -- graph nodes, representing CFARs that can terminate
+    -- respectively on the cut addresses
+    -- The "merge" nodes are the cross product of these, since we
+    -- must assume that any combination of exits is possible
+    -- during the single-sided analysis
+    { syncStartNodes :: PPa.PatchPairC (Set (GraphNode arch))
+    , syncCutAddresses :: PPa.PatchPairC (PAd.ConcreteAddress arch) 
+    }
 
 ppProgramDomains ::
   forall sym arch a.
@@ -993,9 +1018,10 @@ getSyncPoints ::
   PBi.WhichBinaryRepr bin ->
   GraphNode arch ->
   PairGraphM sym arch (Set (GraphNode arch))
-getSyncPoints bin nd = fmap (fromMaybe Set.empty) $ tryPG $ do
-  (SyncPoint syncPair _ _) <- lookupPairGraph @sym pairGraphSyncPoints nd
-  PPa.getC bin syncPair
+getSyncPoints bin nd = do
+  (SyncPoint syncPair _) <- lookupPairGraph @sym pairGraphSyncPoints nd
+  s <- PPa.get bin syncPair
+  return $ Set.map (\sne -> GraphNode $ singleToNodeEntry sne) (SetF.toSet s)
 
 getSyncAddresses ::
   forall sym arch bin.
@@ -1012,9 +1038,13 @@ getCombinedSyncPoints ::
   GraphNode arch ->
   PairGraphM sym arch ([((GraphNode arch, GraphNode arch), GraphNode arch)], SyncPoint arch)
 getCombinedSyncPoints ndDiv = do
-  sync@(SyncPoint syncSet _ _) <- lookupPairGraph @sym pairGraphSyncPoints ndDiv
-  case syncSet of
-    PPa.PatchPairC ndsO ndsP -> do
+  sync <- lookupPairGraph @sym pairGraphSyncPoints ndDiv
+  mnds <- tryPG $ do
+    ndsO <- getSyncPoints PBi.OriginalRepr ndDiv
+    ndsP <- getSyncPoints PBi.PatchedRepr ndDiv
+    return (ndsO,ndsP)
+  case mnds of
+    (Just (ndsO, ndsP)) -> do
       all_pairs <- forM (Set.toList $ Set.cartesianProduct ndsO ndsP) $ \(ndO, ndP) -> do
         combined <- pgMaybe "failed to combine nodes" $ combineNodes ndO ndP
         return $ ((ndO, ndP), combined)

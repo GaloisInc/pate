@@ -41,6 +41,7 @@ module Pate.PatchPair (
   , ppPatchPair'
   , forBins
   , update
+  , insertWith
   , forBinsC
   , catBins
   , get
@@ -331,6 +332,23 @@ update src f = do
     (PatchPairOriginal a, PatchPairPatched b) -> return $ PatchPair a b
     (PatchPair _ b, PatchPairOriginal a) -> return $ PatchPair a b
     (PatchPair a _, PatchPairPatched b) -> return $ PatchPair a b
+
+-- | Add a value to a 'PatchPair', combining it with an existing entry if
+--   present using the given function (i.e. similar to Map.insertWith)
+insertWith ::
+  PB.WhichBinaryRepr bin -> 
+  f bin -> 
+  (f bin -> f bin -> f bin) ->
+  PatchPair f ->
+  PatchPair f
+insertWith bin v f = \case
+  PatchPair vO vP | PB.OriginalRepr <- bin -> PatchPair (f v vO) vP
+  PatchPair vO vP | PB.PatchedRepr <- bin -> PatchPair vO (f v vP)
+  PatchPairSingle bin' v' -> case (bin, bin') of
+    (PB.OriginalRepr, PB.OriginalRepr) -> PatchPairSingle bin (f v v')
+    (PB.PatchedRepr, PB.PatchedRepr) -> PatchPairSingle bin (f v v')
+    (PB.PatchedRepr, PB.OriginalRepr) -> PatchPair v' v
+    ( PB.OriginalRepr, PB.PatchedRepr) -> PatchPair v v'
 
 -- | Specialization of 'PatchPair' to types which are not indexed on 'PB.WhichBinary'
 type PatchPairC tp = PatchPair (Const tp)
