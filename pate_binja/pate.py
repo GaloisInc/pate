@@ -1239,10 +1239,12 @@ def pprint_node_inst_tree(inst_tree, pre: str = '', out: IO = sys.stdout):
         out.write('+')
         out.write(i['address']['offset'])
         out.write('\n')
+    # Dans says the branches in the tree are not necessarily the true and false arms of the branch. So we will just
+    # label them A/B for now. We may be able to get T/F from binja since it does show this in its basic block graphs.
     if inst_tree['suffix_true']:
-        pprint_node_inst_tree(inst_tree['suffix_true'], pre + 'T ', out)
+        pprint_node_inst_tree(inst_tree['suffix_true'], pre + 'A ', out)
     if inst_tree['suffix_false']:
-        pprint_node_inst_tree(inst_tree['suffix_false'], pre + 'F ', out)
+        pprint_node_inst_tree(inst_tree['suffix_false'], pre + 'B ', out)
 
 
 def tokenize_sexp(s: str):
