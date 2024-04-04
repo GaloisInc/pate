@@ -123,23 +123,12 @@ class PateWidget(QWidget):
 
     def injectBinjaDissembly(self, original_lines, patched_lines):
 
-        def addDisassembly(l, bv):
-            m = re.fullmatch(r'(.*)S[0-9A-Fa-f]+\+(0x[0-9A-Fa-f]+)', l)
-            if m:
-                pre = m.group(1)
-                a = int(m.group(2), 16)
-                inst = next(bv.disassembly_text(a))[0]
-                return pre + hex(a) + " " + inst
-            else:
-                return l
-
-        with load(self.originalFilename) as bv:
-            original_lines = map(lambda l: addDisassembly(l, bv), original_lines)
-        with load(self.patchedFilename) as bv:
-            patched_lines = map(lambda l: addDisassembly(l, bv), patched_lines)
+        with load(self.originalFilename) as obv:
+            original_lines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), original_lines))
+        with load(self.patchedFilename) as pbv:
+            patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
 
         return original_lines, patched_lines
-
 
 class GuiUserInteraction(pate.PateUserInteraction):
     def __init__(self, pate_widget: PateWidget):
@@ -279,7 +268,7 @@ class TraceWidget(QWidget):
             patched_lines = out.getvalue().splitlines()
 
         # Replace addr lines with binja disassembly
-        pw = getAncestorInstanceOf(self, PateWidget)
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
         if pw:
             original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
 
@@ -369,7 +358,7 @@ class InstTreeWidget(QWidget):
                 patched_lines = out.getvalue().splitlines()
 
         # Replace addr lines with binja disassembly
-        pw = getAncestorInstanceOf(self, PateWidget)
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
         if pw:
             original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
 
@@ -605,6 +594,21 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d.setWindowTitle(d.windowTitle() + ' ' + label)
         d.setInstTree(instTrees, '')
         d.show()
+
+
+# Pattern to match a pate address
+pateInstAddrPattern = re.compile(r'(.*)S[0-9A-Fa-f]+\+(0x[0-9A-Fa-f]+)$')
+
+
+def subDisassemblyForInstAddr(line, bv):
+    def subDisassemblyForMatch(m):
+        pre = m.group(1)
+        a = int(m.group(2), 16)
+        # Note: bv is available via lexical scope
+        inst = next(bv.disassembly_text(a))[0]
+        return pre + str(hex(a)) + " " + inst
+
+    return re.sub(pateInstAddrPattern, subDisassemblyForMatch, line)
 
 
 def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> QWidget | None:
