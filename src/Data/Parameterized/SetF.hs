@@ -44,10 +44,12 @@ module Data.Parameterized.SetF
   , unions
   , null
   , toSet
+  , map
   , ppSetF
   ) where
 
-import Prelude hiding (filter, null)
+import Prelude hiding (filter, null, map)
+import qualified Data.List as List
 import           Data.Parameterized.Classes
 import qualified Data.Foldable as Foldable
 
@@ -93,13 +95,13 @@ insert e (SetF es) = SetF (S.insert (AsOrd e) es)
 toList ::
   SetF f tp ->
   [f tp]
-toList (SetF es) = map unAsOrd $ S.toList es
+toList (SetF es) = List.map unAsOrd $ S.toList es
 
 fromList ::
   OrdF f =>
   [f tp] ->
   SetF f tp
-fromList es = SetF $ S.fromList (map AsOrd es)
+fromList es = SetF $ S.fromList (List.map AsOrd es)
 
 member ::
   OrdF f =>
@@ -139,6 +141,10 @@ null (SetF es) = S.null es
 toSet ::
   (OrdF f, Ord (f tp)) => SetF f tp -> Set (f tp)
 toSet (SetF s) = unsafeCoerce s
+
+map ::
+  (OrdF g) => (f tp -> g tp) -> SetF f tp -> SetF g tp
+map f (SetF s) = SetF (S.map (\(AsOrd v) -> AsOrd (f v)) s)  
 
 ppSetF ::
   (f tp -> PP.Doc a) ->
