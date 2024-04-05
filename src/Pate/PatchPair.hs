@@ -72,6 +72,7 @@ module Pate.PatchPair (
   , zip
   , jsonPatchPair
   , w4SerializePair
+  , WithBin(..)
   ) where
 
 import           Prelude hiding (zip)
@@ -125,6 +126,27 @@ pattern PatchPairPatched a = PatchPairSingle PB.PatchedRepr a
 
 {-# COMPLETE PatchPair, PatchPairSingle #-}
 {-# COMPLETE PatchPair, PatchPairOriginal, PatchPairPatched #-}
+
+-- | Tag any type with a 'PB.WhichBinary'
+data WithBin f (bin :: PB.WhichBinary) = 
+  WithBin { withBinRepr :: PB.WhichBinaryRepr bin, withBinValue :: f }
+
+instance Eq f => TestEquality (WithBin f) where
+  testEquality (WithBin bin1 f1) (WithBin bin2 f2)
+    | Just Refl <- testEquality bin1 bin2
+    , f1 == f2
+    = Just Refl
+  testEquality _ _ = Nothing
+
+instance Ord f => OrdF (WithBin f) where
+  compareF (WithBin bin1 f1) (WithBin bin2 f2) = 
+    lexCompareF bin1 bin2 $ fromOrdering (compare f1 f2) 
+
+instance Eq f => Eq (WithBin f bin) where
+  (WithBin _ f1) == (WithBin _ f2) = f1 == f2
+
+instance Ord f => Ord (WithBin f bin) where
+  compare (WithBin _ f1) (WithBin _ f2) = compare f1 f2
 
 -- | Select the value from the 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Returns 'Nothing' if the given 'PatchPair' does not contain a value for the given binary
