@@ -74,12 +74,13 @@ ppSeq ::
 ppSeq pp_es pp_pred = go []
   where
     go :: [e] -> SymSequence sym e -> PP.Doc a
-    go es = \case 
+    go es = \case
+      SymSequenceNil | [] <- es -> "[]"
       SymSequenceNil -> pp_es (reverse es)
       SymSequenceCons _ e es_seq ->
         go (e:es) es_seq
       SymSequenceAppend _ es1 es2 ->
-        go es es1 PP.<+> "++" PP.<+> go [] es2
+        PP.vsep [go es es1, "++", go [] es2]
       SymSequenceMerge _ p esT esF ->
         PP.vsep $
           (case es of [] -> []; _ -> [ pp_es (reverse es)] ) ++ 
