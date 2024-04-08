@@ -2667,15 +2667,21 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
         _ -> return pg
       return $ st'{ branchGraph = pg2 }
 
+ppMux :: (f -> PP.Doc a) -> MT.MuxTree sym f -> PP.Doc a
+ppMux ppf mt = case MT.viewMuxTree mt of
+  [] -> error "ppMux"
+  [(a,_)] -> ppf a
+  xs -> PP.hsep $ PP.punctuate "OR" (["("] ++ (map (\(a,_) -> ppf a) xs) ++ [")"])
+
 bundleToInstrTraces ::
   PS.SimBundle sym arch v ->
   EquivM sym arch (PPa.PatchPairC (ET.InstructionTrace sym arch))
 bundleToInstrTraces bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
   out_ <- PPa.get bin (simOut bundle)
-  let evt = MT.memFullSeq (PS.simOutMem out_)
-  tr <- IO.liftIO $ ET.asInstructionTrace sym evt
+  let evt = MT.memInstrSeq (PS.simOutMem out_)
   goalTimeout <- asks (PCfg.cfgGoalTimeout . envConfig)
-  feasiblePaths sym (withAssumption) (concretePred goalTimeout) tr
+  evt' <- feasiblePaths sym (withAssumption) (concretePred goalTimeout) evt
+  shareMuxPrefix sym evt'
 
 data DesyncChoice =
     AdmitNonTotal

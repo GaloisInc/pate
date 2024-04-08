@@ -29,6 +29,7 @@ module What4.SymSequence
 , mapConcatSeq
 , muxTreeToSeq
 , appendSymSequence'
+, snocSymSequence
 , shareMuxPrefix
 , ppSeq
 , SymSequenceTree
@@ -429,6 +430,19 @@ appendSymSequence' sym = go
         hd_as' <- go hd_a2 tl
         go hd_a1 hd_as'
       _ -> IO.liftIO $ appendSymSequence sym hd tl
+
+-- | Append an element to the end of a sequence
+snocSymSequence ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  a ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+snocSymSequence sym a s = do
+  a_seq <- IO.liftIO $ singleSeq sym a
+  appendSymSequence' sym s a_seq
 
 mapConcatSeq ::
   forall sym m a b.

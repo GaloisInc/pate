@@ -21,7 +21,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
-
+{-# LANGUAGE QuantifiedConstraints #-}
 
 #if __GLASGOW_HASKELL__ >= 805
 {-# LANGUAGE NoStarIsType #-}
@@ -71,6 +71,7 @@ module Pate.Memory.MemTrace
 , TraceEvent(..)
 , RegOp(..)
 , memFullSeq
+, memInstrSeq
 , addRegEvent
 , readChunk
 , module Pate.EventTrace
@@ -155,7 +156,7 @@ import Data.Data (Typeable, eqT)
 import qualified Data.Parameterized.TraversableF as TF
 import           Pate.EventTrace 
 import qualified Data.Parameterized.TraversableFC as TFC
-
+import           What4.SymSequence
 ------
 -- * Undefined pointers
 
@@ -656,15 +657,14 @@ addMemEvent ::
 addMemEvent sym ev mem = do
   let i = memCurrentInstr mem
   seq' <- liftIO (consSymSequence sym ev (memSeq mem))
-  fs <- case memFullSeq_  mem of
-    MemTraceFullSeq px s -> 
-      MemTraceFullSeq px <$> liftIO (consSymSequence sym (TraceMemEvent i ev) s)
+  fs <- forWrappedPtrM' (memFullSeq_  mem) $ \s -> liftIO $ consSymSequence sym (TraceMemEvent i ev) s
   return mem { memSeq = seq', memFullSeq_ = fs }
 
 addRegEvent ::
   forall sym arch ptrW.
   IsExprBuilder sym =>
   ArchAddrWidth arch ~ ptrW =>
+  RegisterInfo (ArchReg arch) =>
   Typeable arch =>
   sym ->
   RegOp sym arch ->
@@ -672,11 +672,7 @@ addRegEvent ::
   IO (MemTraceImpl sym ptrW)
 addRegEvent sym rop mem = do
   let i = memCurrentInstr mem
-  fs <- case memFullSeq_  mem of
-    MemTraceFullSeq (px :: Proxy arch') s -> case eqT @arch @arch' of
-      Just Refl -> 
-        MemTraceFullSeq px <$> liftIO (consSymSequence sym (RegOpEvent i rop) s)
-      Nothing -> error "addRegEvent: unexpected arch mismatch"
+  fs <- forWrappedPtrM (memFullSeq_  mem) $ \s -> liftIO $ consSymSequence sym (RegOpEvent i rop) s
   return mem { memFullSeq_ = fs }
 
 type MemTraceSeq sym ptrW = SymSequence sym (MemEvent sym ptrW)
@@ -686,33 +682,71 @@ prettyMemTraceSeq = prettySymSequence prettyMemEvent
 
 --   FIXME: existentially-quantified 'arch' parameter is a workaround for the
 --   fact that only 'ptrW' is available in 'MemTraceImpl'
-data MemTraceFullSeq sym ptrW = 
-  forall arch. (Typeable arch, ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => 
-    MemTraceFullSeq (Proxy arch) (EventTrace sym arch)
+data WrappedPtrW sym f ptrW = forall arch. (Typeable arch, ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => 
+  WrappedPtrW (Proxy arch) (SymSequence sym (f arch))
 
-instance PEM.ExprMappable sym (MemTraceFullSeq sym ptrW) where
-  mapExpr sym f (MemTraceFullSeq px s) = MemTraceFullSeq px <$> PEM.mapExpr sym f s
+forWrappedPtrM ::
+  forall arch sym m f g.
+  Functor m =>
+  Typeable arch =>
+  RegisterInfo (ArchReg arch) =>
+  WrappedPtrW sym f (ArchAddrWidth arch) ->
+  (SymSequence sym (f arch) -> m (SymSequence sym (g arch))) ->
+  m (WrappedPtrW sym g (ArchAddrWidth arch))
+forWrappedPtrM (WrappedPtrW (arch :: Proxy arch2) v) f =
+  case eqT @arch @arch2 of
+    Just Refl -> WrappedPtrW arch <$> (f v)
+    Nothing -> error "forWrappedPtrM: unexpected arch"
+
+forWrappedPtrM' ::
+  forall ptrW sym m f g.
+  Functor m =>
+  WrappedPtrW sym f ptrW ->
+  (forall arch. ptrW ~ ArchAddrWidth arch => RegisterInfo (ArchReg arch) => SymSequence sym (f arch) -> m (SymSequence sym (g arch))) ->
+  m (WrappedPtrW sym g ptrW)
+forWrappedPtrM' (WrappedPtrW (arch :: Proxy arch2) v) f = WrappedPtrW arch <$> (f v)
+
+muxWrappedPtrW ::
+  sym ->
+  Pred sym -> 
+  WrappedPtrW sym f ptrW ->
+  WrappedPtrW sym f ptrW ->
+  IO (WrappedPtrW sym f ptrW)
+muxWrappedPtrW sym p (WrappedPtrW (arch1 :: Proxy arch1) v1) (WrappedPtrW (_arch2 :: Proxy arch2) v2) = 
+  case eqT @arch1 @arch2 of
+    Just Refl -> WrappedPtrW arch1 <$> muxSymSequence sym p v1 v2
+    Nothing -> fail "muxWrappedPtrW: incompatible architectures"
+
+getWrappedPtrW :: 
+  forall sym arch f.
+  Typeable arch =>
+  WrappedPtrW sym f (ArchAddrWidth arch) -> 
+  SymSequence sym (f arch)
+getWrappedPtrW (WrappedPtrW (_arch2 :: Proxy arch2) v) =
+  case eqT @arch @arch2 of
+    Just Refl -> v
+    Nothing -> error "getWrappedPtrW: unexpected arch"
+
+instance (forall arch. (ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => PEM.ExprMappable sym (f arch)) => 
+  PEM.ExprMappable sym (WrappedPtrW sym f ptrW) where
+  mapExpr sym f (WrappedPtrW arch v) = WrappedPtrW arch <$> PEM.mapExpr sym f v
+
+type MemTraceFullSeq sym = WrappedPtrW sym (TraceEvent sym)
+type MemTraceInstrSeq sym = WrappedPtrW sym InstructionEvent
 
 memFullSeq ::
   forall sym arch.
   Typeable arch =>
   MemTraceImpl sym (ArchAddrWidth arch) -> 
-  SymSequence sym (TraceEvent sym arch)
-memFullSeq mem | MemTraceFullSeq (_ :: Proxy arch2) s <- memFullSeq_ mem =
-  case eqT @arch @arch2 of
-    Just Refl -> s
-    Nothing -> error "memFullSeq: unexpected architecture"
+  EventTrace sym arch
+memFullSeq mem = getWrappedPtrW (memFullSeq_ mem)
 
-muxFullSeq :: 
-  sym ->
-  Pred sym ->
-  MemTraceFullSeq sym ptrW ->
-  MemTraceFullSeq sym ptrW ->
-  IO (MemTraceFullSeq sym ptrW)
-muxFullSeq sym p (MemTraceFullSeq (px :: Proxy arch1) a) (MemTraceFullSeq (_ :: Proxy arch2) b) = 
-  case eqT @arch1 @arch2 of
-    Just Refl -> MemTraceFullSeq px <$> muxSymSequence sym p a b
-    Nothing -> fail "muxFullSeq: incompatible architectures"
+memInstrSeq ::
+  forall sym arch.
+  Typeable arch =>
+  MemTraceImpl sym (ArchAddrWidth arch) -> 
+  InstructionTrace sym arch
+memInstrSeq mem = getWrappedPtrW (memInstrSeq_ mem)
 
 data MemTraceImpl sym ptrW = MemTraceImpl
   { memSeq :: MemTraceSeq sym ptrW
@@ -728,6 +762,7 @@ data MemTraceImpl sym ptrW = MemTraceImpl
   --   derived from the same initial memory, so we can assume the base memories are identical.
   , memFullSeq_ :: MemTraceFullSeq sym ptrW
   -- ^ Full sequence of register and memory operations since the start of the block
+  , memInstrSeq_ :: MemTraceInstrSeq sym ptrW
 
   }
 
@@ -779,15 +814,16 @@ initMemTrace sym baseMem Addr32 = do
   arrBytes <- ioFreshConstant sym "InitMemBytes" knownRepr
   arrRegions <- ioFreshConstant sym "InitMemRegions" knownRepr
   sq <- nilSymSequence sym
-  fullsq <- MemTraceFullSeq (Proxy @arch) <$> nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem fullsq
+  fullsq <- WrappedPtrW (Proxy @arch) <$> nilSymSequence sym
+  instrsq <- WrappedPtrW (Proxy @arch) <$> nilSymSequence sym
+  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem fullsq instrsq
 initMemTrace sym baseMem Addr64 = do
   arrBytes <- ioFreshConstant sym "InitMemBytes" knownRepr
   arrRegions <- ioFreshConstant sym "InitMemRegions" knownRepr
   sq <- nilSymSequence sym
-  fullsq <- MemTraceFullSeq (Proxy @arch) <$> nilSymSequence sym
-  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem fullsq
-
+  fullsq <- WrappedPtrW (Proxy @arch) <$> nilSymSequence sym
+  instrsq <- WrappedPtrW (Proxy @arch) <$> nilSymSequence sym 
+  return $ MemTraceImpl sq (MemTraceState arrBytes arrRegions) (toMuxTree sym Nothing) baseMem fullsq instrsq
 
 mkMemoryBinding ::
   forall sym ptrW.
@@ -814,10 +850,11 @@ instance IsExprBuilder sym => IntrinsicClass sym "memory_trace" where
     memArrBytes'   <- baseTypeIte sym p (memArrBytes $ memState t) (memArrBytes $ memState f)
     memArrRegions'   <- baseTypeIte sym p (memArrRegions $ memState t) (memArrRegions $ memState f)
     memInstr' <- mergeMuxTree sym p (memCurrentInstr t) (memCurrentInstr f)
-    memFullSeq' <- muxFullSeq sym p (memFullSeq_ t) (memFullSeq_ f)
+    memFullSeq' <- muxWrappedPtrW sym p (memFullSeq_ t) (memFullSeq_ f)
+    memInstrSeq' <- muxWrappedPtrW sym p (memInstrSeq_ t) (memInstrSeq_ f)
     -- NB, we assume that the "base" memories are always the same, so we can arbitrarily choose
     -- one to use.
-    return $ MemTraceImpl memSeq' (MemTraceState memArrBytes' memArrRegions') memInstr' (memBaseMemory t) memFullSeq'
+    return $ MemTraceImpl memSeq' (MemTraceState memArrBytes' memArrRegions') memInstr' (memBaseMemory t) memFullSeq' memInstrSeq'
 
   muxIntrinsic _ _ _ _ _ _ _ = error "Unexpected operands in memory_trace mux"
 
@@ -885,7 +922,10 @@ execMacawStmtExtension (MacawArchEvalFn archStmtFn) mkundef syscallModel mvar gl
             mem <- get
             off_ptr <- liftIO $ segOffToPtr sym off
             mem' <- liftIO $ addRegEvent @_ @arch sym (RegOp (MapF.singleton ip_reg (PSr.MacawRegEntry (LLVMPointerRepr knownRepr) off_ptr))) mem
-            put $ mem'{ memCurrentInstr = toMuxTree sym (Just (off,dis)) }
+            mem'' <- liftIO $ do
+              is <- forWrappedPtrM @arch (memInstrSeq_ mem) $ \s -> liftIO $ snocSymSequence sym (InstructionEvent off dis) s
+              return $ mem' { memInstrSeq_ = is }
+            put $ mem''{ memCurrentInstr = toMuxTree sym (Just (off,dis)) }
 
         Nothing ->
           panic Verifier "execMacawExteions: MacawInstructionStart"
@@ -1511,9 +1551,10 @@ writeMemState ::
   IO (MemTraceState sym ptrW)
 writeMemState sym cond memSt ptr repr val = do
   sq <- nilSymSequence sym
-  fullsq <- MemTraceFullSeq (Proxy @arch) <$> nilSymSequence sym
-  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing) (emptyMemory (addrWidthRepr Proxy)) fullsq
-  MemTraceImpl _ memSt' _ _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
+  fullsq <- WrappedPtrW (Proxy @arch) <$> nilSymSequence sym
+  instrsq <- WrappedPtrW (Proxy @arch) <$> nilSymSequence sym
+  let mem = MemTraceImpl sq memSt (toMuxTree sym Nothing) (emptyMemory (addrWidthRepr Proxy)) fullsq instrsq
+  MemTraceImpl _ memSt' _ _ _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
 -- | Write to the memory array and set the dirty bits on
@@ -1902,7 +1943,8 @@ instance PEM.ExprMappable sym (MemTraceImpl sym w) where
     memState' <- PEM.mapExpr sym f $ memState mem
     memInstr' <- PEM.mapExpr sym f $ memCurrentInstr mem
     memFullSeq' <- PEM.mapExpr sym f $ memFullSeq_ mem
-    return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem) memFullSeq'
+    memInstrSeq' <- PEM.mapExpr sym f $ memInstrSeq_ mem
+    return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem) memFullSeq' memInstrSeq'
 
 instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do
