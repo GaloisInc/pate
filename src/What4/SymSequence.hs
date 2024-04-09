@@ -29,6 +29,7 @@ module What4.SymSequence
 , mapConcatSeq
 , muxTreeToSeq
 , appendSymSequence'
+, snocSymSequence
 , shareMuxPrefix
 , ppSeq
 , SymSequenceTree
@@ -73,12 +74,13 @@ ppSeq ::
 ppSeq pp_es pp_pred = go []
   where
     go :: [e] -> SymSequence sym e -> PP.Doc a
-    go es = \case 
+    go es = \case
+      SymSequenceNil | [] <- es -> "[]"
       SymSequenceNil -> pp_es (reverse es)
       SymSequenceCons _ e es_seq ->
         go (e:es) es_seq
       SymSequenceAppend _ es1 es2 ->
-        go es es1 PP.<+> "++" PP.<+> go [] es2
+        PP.vsep [go es es1, "++", go [] es2]
       SymSequenceMerge _ p esT esF ->
         PP.vsep $
           (case es of [] -> []; _ -> [ pp_es (reverse es)] ) ++ 
@@ -430,6 +432,19 @@ appendSymSequence' sym = go
         go hd_a1 hd_as'
       _ -> IO.liftIO $ appendSymSequence sym hd tl
 
+-- | Append an element to the end of a sequence
+snocSymSequence ::
+  forall sym m a.
+  IsExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  a ->
+  SymSequence sym a ->
+  m (SymSequence sym a)
+snocSymSequence sym a s = do
+  a_seq <- IO.liftIO $ singleSeq sym a
+  appendSymSequence' sym s a_seq
+
 mapConcatSeq ::
   forall sym m a b.
   IsExprBuilder sym =>
@@ -770,39 +785,13 @@ seqTreeElemsSet = \case
   SymSequenceLeaf -> Set.empty
   SymSequenceTree es esT esF -> Set.unions [Set.fromList es, seqTreeElemsSet esT, seqTreeElemsSet esF]
 
--- | Ensures a 'SymSequenceTree' is in normal form:
---   No empty single-sided branches (pulls the non-empty branch up)
---   No trivial trees (converts a tree with empty branches and no contents into a leaf)
-normalTreeForm :: SymSequenceTree e -> SymSequenceTree e
-normalTreeForm = go
-  where
-    drop_empty :: [e] -> SymSequenceTree e -> SymSequenceTree e -> Maybe (SymSequenceTree e)
-    drop_empty es tT tF = case (tT, tF) of
-      (SymSequenceLeaf, SymSequenceTree esF tFT tFF) -> Just $ SymSequenceTree (es ++ esF) tFT tFF
-      (SymSequenceTree esT tTT tTF, SymSequenceLeaf) -> Just $ SymSequenceTree (es ++ esT) tTT tTF
-      (SymSequenceLeaf, SymSequenceLeaf) | [] <- es -> Just SymSequenceLeaf
-      _ -> Nothing
-
-    go :: SymSequenceTree e -> SymSequenceTree e
-    go SymSequenceLeaf = SymSequenceLeaf
-    go s@(SymSequenceTree es tT tF) = case (tT, tF) of
-      _ | Just s' <- drop_empty es tT tF -> go s'
-      (SymSequenceTree{}, SymSequenceTree{}) ->
-        let 
-          tT' = go tT
-          tF' = go tF
-        in case drop_empty es tT' tF' of
-            Just s' -> s'
-            Nothing -> SymSequenceTree es tT' tF'
-      _ -> s
-
 -- Expand a 'SymSequence' into an explicit tree, discarding
 -- the symbolic predicates at each merge point.
 -- Note that a SymSequenceAppend will duplicate the tree for the
 -- tail sequence in both paths of the tree for the head sequence
 toSequenceTree ::
   SymSequence sym a -> SymSequenceTree a
-toSequenceTree s_outer = normalTreeForm $ go s_outer
+toSequenceTree s_outer = go s_outer
   where
     go :: SymSequence sym a -> SymSequenceTree a
     go = \case
@@ -810,16 +799,18 @@ toSequenceTree s_outer = normalTreeForm $ go s_outer
       SymSequenceCons _ a as -> consTree a (go as)
       SymSequenceAppend _ as1 as2 -> appendTrees (go as1) (go as2)
       SymSequenceMerge _ _ asT asF -> case (go asT, go asF) of
-        (SymSequenceLeaf, asF_tree) ->  asF_tree
-        (asT_tree, SymSequenceLeaf) -> asT_tree
+        (SymSequenceLeaf, SymSequenceLeaf) -> SymSequenceLeaf
         (asT_tree, asF_tree) -> SymSequenceTree [] asT_tree asF_tree
 
     appendTrees :: SymSequenceTree a -> SymSequenceTree a -> SymSequenceTree a
     appendTrees as1 as2 = case (as1, as2) of
       (SymSequenceLeaf, _) -> as2
       (_, SymSequenceLeaf) -> as1
+      (SymSequenceTree as1_head SymSequenceLeaf SymSequenceLeaf, 
+        SymSequenceTree as2_head as2_tailT as2_tailF) ->
+          SymSequenceTree (as1_head ++ as2_head) as2_tailT as2_tailF
       (SymSequenceTree as1_head as1_tailT as1_tailF, _) ->
-        (SymSequenceTree as1_head (appendTrees as1_tailT as2) (appendTrees as1_tailF (appendTrees as1_tailF as2)))
+        (SymSequenceTree as1_head (appendTrees as1_tailT as2) (appendTrees as1_tailF as2))
 
     consTree :: a -> SymSequenceTree a -> SymSequenceTree a
     consTree a = \case

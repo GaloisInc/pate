@@ -45,8 +45,6 @@ module Pate.EventTrace
 , prettyMemOp
 , prettyMemEvent
 , filterEvent
-, asInstructionTrace
-
 , groundExternalCallData
 , printExternalCallData
 , compareExternalCallData
@@ -512,47 +510,16 @@ type EventTrace sym arch = SymSequence sym (TraceEvent sym arch)
 data InstructionEvent arch = InstructionEvent { instrAddr :: ArchSegmentOff arch, instrDisassembled :: Text }
   deriving (Eq, Ord)
 
+-- trivial instance - no symbolic data
+instance PEM.ExprMappable sym (InstructionEvent arch) where
+  mapExpr _sym _f e = return e
+
 instance W4S.W4Serializable sym (InstructionEvent arch) where
   w4Serialize (InstructionEvent addr dis) = W4S.object ["address" .= addr, "disassembled" .= dis]
 
 deriving instance MemWidth (RegAddrWidth (ArchReg arch)) => Show (InstructionEvent arch)
 
 type InstructionTrace sym arch = SymSequence sym (InstructionEvent arch)
-
-asInstructionTrace ::
-  forall sym arch.
-  IsExprBuilder sym =>
-  sym ->
-  EventTrace sym arch ->
-  IO (InstructionTrace sym arch)
-asInstructionTrace sym e_seq = mapConcatSeq sym g e_seq >>= reverseSeq sym >>= shareMuxPrefix sym >>= drop_dups
-  where
-    -- drop repeated elements
-    drop_dups :: InstructionTrace sym arch -> IO (InstructionTrace sym arch)
-    drop_dups s = case s of
-      SymSequenceNil -> return SymSequenceNil
-      (SymSequenceCons _ a1 s'@(SymSequenceCons _ a2 _))
-        | a1 == a2 -> drop_dups s'
-      SymSequenceCons _ a s' -> do
-        s'' <- drop_dups s'
-        if s' == s'' then return s
-          else consSymSequence sym a s''
-      SymSequenceMerge _ p sT sF -> do
-        sT' <- drop_dups sT
-        sF' <- drop_dups sF
-        if sT == sT' && sF == sF' then return s
-          else muxSymSequence sym p sT' sF'
-      SymSequenceAppend _ s1 s2 -> do
-        s1' <- drop_dups s1
-        s2' <- drop_dups s2
-        if s1 == s1' && s2 == s2' then return s
-          else appendSymSequence' sym s1' s2'
-
-    g :: TraceEvent sym arch -> IO (InstructionTrace sym arch)
-    g e@RegOpEvent{} = muxTreeToSeq sym (\x -> return $ fmap (\(addr,dis) -> InstructionEvent addr dis) x) (traceInstr e)
-    -- NB: we ignore memory events under the assumption that every memory event will be paired with a register event
-    -- that at least updates the PC afterwards
-    g _ = nilSymSequence sym
 
 
 
