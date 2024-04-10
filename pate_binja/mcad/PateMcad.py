@@ -45,41 +45,6 @@ class PateMcad:
         self.annotate_inst_tree(inst_tree['suffix_true'], bv)
         self.annotate_inst_tree(inst_tree['suffix_false'], bv)
 
-    def getInstTreeLines(self, instTree, bv, pre: str='', cumu: int=0):
-
-        if not instTree:
-            return []
-
-        prefixLines = []
-        for instAddr in instTree['prefix']:
-            line = ''
-            if instAddr.get('cycleCount'):
-                cc: binja_pb2.CycleCounts.CycleCount = instAddr['cycleCount']
-                cycles = cc.executed - cc.ready
-                cumu += cycles
-                line += f'{cycles:2d}'
-                if cc.is_under_pressure:
-                    line += '!'
-                else:
-                    line += ' '
-                line += f' {cumu:4d}'
-            else:
-                line += ' ' * 8
-
-            # TODO: Ignore base for now. Ask Dan about this.
-            # base = int(instAddr['address']['base'], 16?)
-            offset = int(instAddr['address']['offset'], 16)
-            arch = view.getInstArch(offset, bv)
-            disassembly = next(bv.disassembly_text(offset, arch),['??????'])[0]
-            line += f' {pre}{offset:08x} {disassembly}'
-
-            prefixLines.append(line)
-
-        # Process the children. Note: true/false are not necessarily accurate.
-        trueBranchLines = self.getInstTreeLines(instTree['suffix_true'], bv, pre + '+', cumu)
-        falseBranchLines = self.getInstTreeLines(instTree['suffix_false'], bv, pre + '-', cumu)
-
-        return prefixLines + trueBranchLines + falseBranchLines
 
 
 

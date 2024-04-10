@@ -77,7 +77,7 @@ class PateWidget(QWidget):
         self.originalFilename = None
         self.patchedFilename = None
 
-        self.pateMcad = PateMcad.PateMcad()
+        self.pateMcad = None #PateMcad.PateMcad()
 
     def loadBinaryViews(self, config: dict):
         #print('config:', config)
@@ -352,20 +352,58 @@ class InstTreeDiffWidget(QWidget):
         if instTrees.get('original'):
             originalInstTree = instTrees['original']
             with load(pw.originalFilename) as obv:
-                pw.pateMcad.annotate_inst_tree(originalInstTree, obv)
-                original_lines = pw.pateMcad.getInstTreeLines(originalInstTree, obv)
+                if pw.pateMcad:
+                    pw.pateMcad.annotate_inst_tree(originalInstTree, obv)
+                original_lines = self.getInstTreeLines(originalInstTree, obv)
 
         patched_lines = []
         if instTrees.get('patched'):
             patchedInstTree = instTrees['patched']
             with load(pw.patchedFilename) as pbv:
-                pw.pateMcad.annotate_inst_tree(patchedInstTree, pbv)
-                patched_lines = pw.pateMcad.getInstTreeLines(patchedInstTree, pbv)
+                if pw.pateMcad:
+                    pw.pateMcad.annotate_inst_tree(patchedInstTree, pbv)
+                patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
 
         htmlDiff = HtmlDiff()
         html = htmlDiff.make_file(original_lines, patched_lines,
                                   fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
         self.instDiffField.setHtml(html)
+
+    def getInstTreeLines(self, instTree, bv, pre: str = '', cumu: int = 0):
+
+        if not instTree:
+            return []
+
+        prefixLines = []
+        for instAddr in instTree['prefix']:
+            line = ''
+            if instAddr.get('cycleCount'):
+                cc: mcad.binja_pb2.CycleCounts.CycleCount = instAddr['cycleCount']
+                cycles = cc.executed - cc.ready
+                cumu += cycles
+                line += f'{cycles:2d}'
+                if cc.is_under_pressure:
+                    line += '!'
+                else:
+                    line += ' '
+                line += f' {cumu:4d}'
+            #else:
+            #    line += ' ' * 8
+
+            # TODO: Ignore base for now. Ask Dan about this.
+            # base = int(instAddr['address']['base'], 16?)
+            offset = int(instAddr['address']['offset'], 16)
+            arch = getInstArch(offset, bv)
+            disassembly = next(bv.disassembly_text(offset, arch), ['??????'])[0]
+            line += f' {pre}{offset:08x} {disassembly}'
+
+            prefixLines.append(line)
+
+        # Process the children. Note: true/false are not necessarily accurate.
+        trueBranchLines = self.getInstTreeLines(instTree['suffix_true'], bv, pre + '+', cumu)
+        falseBranchLines = self.getInstTreeLines(instTree['suffix_false'], bv, pre + '-', cumu)
+
+        return prefixLines + trueBranchLines + falseBranchLines
 
 
 class InstTreeGraphWidget(FlowGraphWidget):
@@ -382,7 +420,7 @@ class InstTreeGraphWidget(FlowGraphWidget):
             return
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
-        if pw:
+        if pw and pw.pateMcad:
             pw.pateMcad.annotate_inst_tree(instTree, self.getData())
 
         _flowGraph = FlowGraph()
@@ -411,8 +449,8 @@ class InstTreeGraphWidget(FlowGraphWidget):
                     cyclesStr += ' '
                 tokens.append(ITT(ITTType.TextToken, cyclesStr))
                 tokens.append(ITT(ITTType.TextToken, f' {cumu:4d}'))
-            else:
-                tokens.append(ITT(ITTType.TextToken, ' ' * 8))
+            #else:
+            #    tokens.append(ITT(ITTType.TextToken, ' ' * 8))
 
             tokens.append(ITT(ITTType.TextToken, ' '))
 
