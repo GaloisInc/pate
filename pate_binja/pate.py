@@ -369,6 +369,9 @@ class PateWrapper:
                 if cfar_node and len(path) == 1:
                     # Top level CFAR, attach instruction tree.
                     cfar_node.instruction_trees = child['trace_node']
+                    # if cfar_node.id == 'S1+0x40d4 in S1+0x400c(transport_handler)':
+                    #     print('FNORT')
+                    #     pp.pprint(child['trace_node'])
                 if cfar_parent and cfar_exit and len(path) > 1:
                     # Exit CFAR
                     cfar_parent.addExitMetaData(cfar_exit, 'instruction_trees_to_exit', child['trace_node'])

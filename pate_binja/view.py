@@ -5,29 +5,28 @@ from __future__ import annotations
 import io
 import os.path
 import re
-import signal
-import time
-from collections import OrderedDict
 from difflib import HtmlDiff
-from subprocess import Popen, TimeoutExpired
 from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    load, execute_on_main_thread
+    load, DisassemblyTextLine, Architecture
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
+from binaryninja import InstructionTextToken as ITT
+from binaryninja.enums import InstructionTextTokenType as ITTType
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
     FlowGraphWidget, FileContext, UIContext, ViewFrame, ViewLocation
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QMouseEvent, QAction, QContextMenuEvent
+from PySide6.QtGui import QMouseEvent, QAction
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QDialogButtonBox, QSplitter, QMenu, QTextBrowser, QSizePolicy, QTextEdit
+    QSplitter, QMenu, QTextEdit
 
+from . import mcad
+from .mcad import PateMcad
 from . import pate
-
 
 class PateWidget(QWidget):
     context: UIContext | None
@@ -77,6 +76,8 @@ class PateWidget(QWidget):
 
         self.originalFilename = None
         self.patchedFilename = None
+
+        self.pateMcad = PateMcad.PateMcad()
 
     def loadBinaryViews(self, config: dict):
         #print('config:', config)
@@ -329,7 +330,7 @@ class PateCfarEqCondDialog(QDialog):
         self.falseTraceWidget.setTrace(trace, label)
 
 
-class InstTreeWidget(QWidget):
+class InstTreeDiffWidget(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
 
@@ -340,32 +341,117 @@ class InstTreeWidget(QWidget):
         main_layout.addWidget(self.instDiffField)
         self.setLayout(main_layout)
 
-    def setInstTree(self, instTrees: dict, label: str):
+    def setInstTrees(self, instTrees: dict, label: str):
         if not instTrees:
             self.instDiffField.append("No Instruction Trees")
             return
 
-        # collect trace text content, for formatting below
-        original_lines = []
-        patched_lines = []
-        if instTrees.get('original'):
-            with io.StringIO() as out:
-                pate.pprint_node_inst_tree(instTrees['original'], out=out)
-                original_lines = out.getvalue().splitlines()
-        if instTrees.get('patched'):
-            with io.StringIO() as out:
-                pate.pprint_node_inst_tree(instTrees['patched'], out=out)
-                patched_lines = out.getvalue().splitlines()
-
-        # Replace addr lines with binja disassembly
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
-        if pw:
-            original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
+
+        original_lines = []
+        if instTrees.get('original'):
+            originalInstTree = instTrees['original']
+            with load(pw.originalFilename) as obv:
+                pw.pateMcad.annotate_inst_tree(originalInstTree, obv)
+                original_lines = pw.pateMcad.getInstTreeLines(originalInstTree, obv)
+
+        patched_lines = []
+        if instTrees.get('patched'):
+            patchedInstTree = instTrees['patched']
+            with load(pw.patchedFilename) as pbv:
+                pw.pateMcad.annotate_inst_tree(patchedInstTree, pbv)
+                patched_lines = pw.pateMcad.getInstTreeLines(patchedInstTree, pbv)
 
         htmlDiff = HtmlDiff()
         html = htmlDiff.make_file(original_lines, patched_lines,
                                   fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
         self.instDiffField.setHtml(html)
+
+
+class InstTreeGraphWidget(FlowGraphWidget):
+
+    def __init__(self, parent: QWidget, view: BinaryView = None, graph: FlowGraph=None):
+        super().__init__(parent, view, graph)
+
+        # Disable context menu. We need a QMouseEvent to get nodes and edges at mose position, so we use
+        # mouse press event instead.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+
+    def setInstTree(self, instTree: dict):
+        if not instTree:
+            return
+
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+        if pw:
+            pw.pateMcad.annotate_inst_tree(instTree, self.getData())
+
+        _flowGraph = FlowGraph()
+        self._buildGraph(instTree, _flowGraph)
+        self.setGraph(_flowGraph)
+
+    def _buildGraph(self, instTree: dict,
+                    flowGraph: FlowGraph,
+                    parent: FlowGraphNode = None,
+                    cumu: int = 0):
+        if not instTree:
+            return
+
+        bv: BinaryView = self.getData()
+        prefixLines = []
+        for instAddr in instTree['prefix']:
+            tokens = []
+            if instAddr.get('cycleCount'):
+                cc: mcad.binja_pb2.CycleCounts.CycleCount = instAddr['cycleCount']
+                cycles = cc.executed - cc.ready
+                cumu += cycles
+                cyclesStr = f'{cycles:2d}'
+                if cc.is_under_pressure:
+                    cycles.Str += '!'
+                else:
+                    cyclesStr += ' '
+                tokens.append(ITT(ITTType.TextToken, cyclesStr))
+                tokens.append(ITT(ITTType.TextToken, f' {cumu:4d}'))
+            else:
+                tokens.append(ITT(ITTType.TextToken, ' ' * 8))
+
+            tokens.append(ITT(ITTType.TextToken, ' '))
+
+            # TODO: Ignore base for now. Ask Dan about this.
+            # base = int(instAddr['address']['base'], 16?)
+            offset = int(instAddr['address']['offset'], 16)
+            tokens.append(ITT(ITTType.AddressDisplayToken, f'{offset:08x}'))
+
+            tokens.append(ITT(ITTType.TextToken, ' '))
+
+            arch = getInstArch(offset, bv)
+
+            # #disassembly = next(bv.disassembly_text(offset, arch), ['??????'])[0]
+            # disassembly = bv.get_disassembly(offset, arch)
+            # if not disassembly:
+            #     disassembly = '??????'
+            # tokens.append(ITT(ITTType.TextToken, disassembly))
+            # print("Disassembly:", disassembly)
+
+            disassembly = next(bv.disassembly_tokens(offset, arch))[0]
+            for token in disassembly:
+                if token.type != ITTType.TagToken:
+                    tokens.append(token)
+
+            prefixLines.append(DisassemblyTextLine(tokens, offset))
+
+        flowNode = FlowGraphNode(flowGraph)
+        flowNode.lines = prefixLines
+        flowGraph.append(flowNode)
+
+        # EDGE
+        if parent:
+            edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.GraphNodeOutlineColor)
+            parent.add_outgoing_edge(BranchType.UserDefinedBranch, flowNode, edgeStyle)
+
+        # Process the children. Note: true/false are not necessarily accurate.
+        self._buildGraph(instTree['suffix_true'], flowGraph, flowNode, cumu)
+        self._buildGraph(instTree['suffix_false'], flowGraph, flowNode, cumu)
+
 
 class PateCfarInstTreeDialog(QDialog):
     def __init__(self, parent=None):
@@ -373,14 +459,38 @@ class PateCfarInstTreeDialog(QDialog):
         self.resize(1100, 600)
         self.setWindowTitle("CFAR Inst Trees")
 
-        self.instTreeWidget = InstTreeWidget(self)
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+
+        # TODO: Should we only load the obv once per pate widget?
+        obv = load(pw.originalFilename)
+        self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
+
+        # TODO: Should we only load the pbv once per pate widget?
+        pbv = load(pw.patchedFilename)
+        self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
+
+        hsplitter = QSplitter()
+        hsplitter.setOrientation(Qt.Orientation.Horizontal)
+        hsplitter.addWidget(self.originalInstTreeGraphWidget)
+        hsplitter.addWidget(self.patchedInstTreeGraphWidget)
+
+        self.instTreeDiffWidget = InstTreeDiffWidget(self)
+
+        vsplitter = QSplitter()
+        vsplitter.setOrientation(Qt.Orientation.Vertical)
+        vsplitter.addWidget(hsplitter)
+        vsplitter.addWidget(self.instTreeDiffWidget)
 
         main_layout = QHBoxLayout()
-        main_layout.addWidget(self.instTreeWidget)
+        main_layout.addWidget(vsplitter)
         self.setLayout(main_layout)
 
-    def setInstTree(self, instTrees: dict, label: str):
-        self.instTreeWidget.setInstTree(instTrees, label)
+    def setInstTrees(self, instTrees: dict, label: str):
+        if instTrees.get('original'):
+            self.originalInstTreeGraphWidget.setInstTree(instTrees['original'])
+        if instTrees.get('patched'):
+            self.patchedInstTreeGraphWidget.setInstTree(instTrees['patched'])
+        self.instTreeDiffWidget.setInstTrees(instTrees, label)
 
 
 class MyFlowGraphWidget(FlowGraphWidget):
@@ -592,8 +702,19 @@ class MyFlowGraphWidget(FlowGraphWidget):
     def showInstTreeInfo(self, instTrees: dict, label: str):
         d = PateCfarInstTreeDialog(self)
         d.setWindowTitle(d.windowTitle() + ' ' + label)
-        d.setInstTree(instTrees, '')
+        d.setInstTrees(instTrees, '')
         d.show()
+
+
+def getInstArch(offset: int, bv: BinaryView) -> Architecture:
+    # TODO: This is a hack. Could not find a better way to do this.
+    fs = bv.get_previous_function_start_before(offset + 1) # Need +1 or it finds prev function
+    #print("FS:", f'{fs:08x}')
+    f = bv.get_recent_function_at(fs)  # recent?
+    #print("F:", f)
+    farch = f.arch
+    #print("F-arch", farch)
+    return farch
 
 
 # Pattern to match a pate address
@@ -605,11 +726,11 @@ def subDisassemblyForInstAddr(line, bv):
         pre = m.group(1)
         a = int(m.group(2), 16)
         # Note: bv is available via lexical scope
-        inst = next(bv.disassembly_text(a))[0]
+        arch = getInstArch(a, bv)
+        inst = next(bv.disassembly_text(a, arch))[0]
         return pre + str(hex(a)) + " " + inst
 
     return re.sub(pateInstAddrPattern, subDisassemblyForMatch, line)
-
 
 def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> QWidget | None:
     """Find Tab for filename."""

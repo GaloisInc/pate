@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+service Binja {
+    rpc RequestCycleCounts (BinjaInstructions) returns (CycleCounts);
+}
+
+message BinjaInstructions {
+    repeated Instruction instruction = 1;
+
+    message Instruction {
+        bytes opcode = 1;
+    }
+}
+
+message CycleCounts {
+    repeated CycleCount cycle_count = 1;
+
+    message CycleCount {
+        uint64 ready = 1;
+        uint64 executed = 2;
+        bool is_under_pressure = 3;
+    }
+}
