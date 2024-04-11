@@ -744,9 +744,9 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d.show()
 
 
-def getInstArch(offset: int, bv: BinaryView) -> Architecture:
+def getInstArch(addr: int, bv: BinaryView) -> Architecture:
     # TODO: This is a hack. Could not find a better way to do this.
-    fs = bv.get_previous_function_start_before(offset + 1) # Need +1 or it finds prev function
+    fs = bv.get_previous_function_start_before(addr + 1) # Need +1 or it finds prev function
     #print("FS:", f'{fs:08x}')
     f = bv.get_recent_function_at(fs)  # recent?
     #print("F:", f)
