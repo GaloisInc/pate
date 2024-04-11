@@ -745,6 +745,14 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
 
 def getInstArch(addr: int, bv: BinaryView) -> Architecture:
+    # The following should work, but bv.get_functions_containing always returns [].
+    # flist = bv.get_functions_containing(addr)
+    # if flist:
+    #     arch = flist[0].arch
+    # else:
+    #     arch = bv.arch
+    # return arch
+
     # TODO: This is a hack. Could not find a better way to do this.
     fs = bv.get_previous_function_start_before(addr + 1) # Need +1 or it finds prev function
     #print("FS:", f'{fs:08x}')
