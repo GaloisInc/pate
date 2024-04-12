@@ -13,6 +13,10 @@ Function Entry "f"
             > 0x8054 (original)
             > 0x8054 (patched)
 
+0x8054 [ via: "f" (0x8048)
+    Handle observable difference:
+    > Emit warning and continue
+
 Verification Finished
 Continue verification?
     > Finish and view final result
