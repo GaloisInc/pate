@@ -24,7 +24,7 @@ class PateMcad:
         return bool(self.proc)
 
     def start(self):
-        if self.proc:
+        if self.isRunning():
             # MCAD server already started.
             return
 
@@ -65,17 +65,22 @@ class PateMcad:
         self.stub = binja_pb2_grpc.BinjaStub(self.channel)
 
     def stop(self) -> None:
-        if self.proc:
-            # Asking for cycle counts with empty instruction list should cause server to exit
-            print('STOPPING MCAD Process', self.proc)
-            self.request_cycle_counts([])
-            try:
-                self.pate_proc.wait(2)
-            except subprocess.TimeoutExpired:
-                # Orderly shutdown did not work, kill the process group
-                print('KILLING MCAD Process', self.proc)
-                os.killpg(self.proc.pid, signal.SIGKILL)
-            self.proc = None
+        if not self.isRunning():
+            return
+
+        # Asking for cycle counts with empty instruction list should cause server to exit
+        print('STOPPING MCAD Process', self.proc)
+        self.request_cycle_counts([])
+        try:
+            self.pate_proc.wait(2)
+        except subprocess.TimeoutExpired:
+            # Orderly shutdown did not work, kill the process group
+            print('KILLING MCAD Process', self.proc)
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        self.proc = None
+        self.channel.close()
+        self.channel = None
+        self.stub = None
 
     def _get_triple_and_cpu(self):
         if self.arch.name == "x86_64":
