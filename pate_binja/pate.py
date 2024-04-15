@@ -129,6 +129,7 @@ class PateWrapper:
                 # Orderly shutdown did not work, kill the process group
                 print('KILLING PATE Process')
                 os.killpg(self.pate_proc.pid, signal.SIGKILL)
+            self.pate_proc = None
 
 
     def next_line(self) -> str:

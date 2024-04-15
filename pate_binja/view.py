@@ -77,7 +77,9 @@ class PateWidget(QWidget):
         self.originalFilename = None
         self.patchedFilename = None
 
-        self.pateMcad = None #PateMcad.PateMcad()
+        # TODO: Manage a pool of MCAD servers, one for eay binja arch
+        self.pateMcad = PateMcad.PateMcad(Architecture['armv7'])
+        self.pateMcad.start()
 
     def loadBinaryViews(self, config: dict):
         #print('config:', config)
@@ -100,8 +102,17 @@ class PateWidget(QWidget):
         showLocationInFilename(self.context, self.patchedFilename, addr)
 
     def closeEvent(self, event):
+        # TODO: This is not called when the parent tab is closed.
+        print("Close Event PateWidget:", self)
         if self.pate_thread:
             self.pate_thread.cancel()
+        if self.pateMcad:
+            self.pateMcad.stop()
+
+    # def tabCloseRequested(self, index):
+    #     # TODO: Problem: Since we don't have the DockableTabWidget we cannot tell if index refers to the tab
+    #     #  associated with this PateWidget.
+    #     print("Handle Tab Close PateWidget:", self, "index:", index)
 
     def onPateCommandReturnPressed(self):
         user_response = self.cmd_field.text()
@@ -192,6 +203,13 @@ class PateThread(Thread):
         execute_on_main_thread_and_wait(
             lambda: self.pate_widget.context.createTabForWidget("PATE " + os.path.basename(self.filename),
                                                                 self.pate_widget))
+        # TODO: This is does not quite work. Several problems:
+        # - tabCloseRequests is called for every tab, not just the PateWidget tab
+        # - When tabs are moved, a new DockableTabWidget is crated taht will no have this signal connected.
+        # - When PateWidgit.tabCloeRequested is called, there is no ref to the DockableTabWidget
+        #ptw: DockableTabWidget = getAncestorInstanceOf(self.pate_widget, DockableTabWidget)
+        #print('TabWidget:', ptw)
+        #ptw.tabCloseRequested.connect(self.pate_widget.tabCloseRequested)
 
     def run(self):
         #self.progress = 'Pate running...'
@@ -814,6 +832,7 @@ def showLocationInFilename(context: UIContext, filename: str, addr: int):
 
 def getAncestorInstanceOf(w: QWidget, c: type) -> Optional[QWidget]:
     p = w.parent()
+    #print('parent:', p)
     if p is None:
         return None
     elif isinstance(p, c):
