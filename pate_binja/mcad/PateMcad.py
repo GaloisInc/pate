@@ -114,16 +114,9 @@ class PateMcad:
             return
 
         # Asking for cycle counts with empty instruction list should cause server to exit
-        print('STOPPING MCAD Process', self.proc)
+        print(f'MCAD {self.name}: Stopping server')
         self.request_cycle_counts([])
-        try:
-            self.pate_proc.wait(2)
-        except subprocess.TimeoutExpired:
-            # Orderly shutdown did not work, kill the process group
-            print('KILLING MCAD Process', self.proc)
-            os.killpg(self.proc.pid, signal.SIGKILL)
         self.proc = None
-        self.channel.close()
         self.channel = None
         self.stub = None
 

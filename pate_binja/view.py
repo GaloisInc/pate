@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os.path
 import re
+import time
 from difflib import HtmlDiff
 from threading import Thread, Condition
 from typing import Optional
@@ -19,7 +20,7 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
     FlowGraphWidget, FileContext, UIContext, ViewFrame, ViewLocation
 
 # PySide6 import MUST be after import of binaryninjaui
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QMouseEvent, QAction
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
     QSplitter, QMenu, QTextEdit
@@ -991,6 +992,9 @@ def launch_pate(context: UIActionContext):
 #     pate_window.setWindowState(pate_window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
 #     pate_window.raise_()
 
+def quitCleanup():
+    PateMcad.stopAllServers()
+
 def register():
     #PluginCommand.register('Run Pate ch10', 'Run Pate Verifier and show flow graph', run_pate_thread_may23_ch10)
     #PluginCommand.register('Run Pate t1', 'Run Pate Verifier and show flow graph', run_pate_thread_nov23_t1_room1018)
@@ -1013,6 +1017,8 @@ def register():
     UIAction.registerAction('Pate...')
     UIActionHandler.globalActions().bindAction('Pate...', UIAction(launch_pate))
     Menu.mainMenu('Plugins').addAction('Pate...', 'Pate', True)
+
+    QCoreApplication.instance().aboutToQuit.connect(quitCleanup)
 
 
 register()
