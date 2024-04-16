@@ -24,8 +24,7 @@ from PySide6.QtGui import QMouseEvent, QAction
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
     QSplitter, QMenu, QTextEdit
 
-from . import mcad
-from .mcad import PateMcad
+from .mcad.PateMcad import PateMcad, CycleCount
 from . import pate
 
 class PateWidget(QWidget):
@@ -77,10 +76,6 @@ class PateWidget(QWidget):
         self.originalFilename = None
         self.patchedFilename = None
 
-        # TODO: Manage a pool of MCAD servers, one for eay binja arch
-        self.pateMcad = PateMcad.PateMcad(Architecture['armv7'])
-        self.pateMcad.start()
-
     def loadBinaryViews(self, config: dict):
         #print('config:', config)
         cwd = config.get('cwd')
@@ -106,8 +101,6 @@ class PateWidget(QWidget):
         print("Close Event PateWidget:", self)
         if self.pate_thread:
             self.pate_thread.cancel()
-        if self.pateMcad:
-            self.pateMcad.stop()
 
     # def tabCloseRequested(self, index):
     #     # TODO: Problem: Since we don't have the DockableTabWidget we cannot tell if index refers to the tab
@@ -141,6 +134,51 @@ class PateWidget(QWidget):
             patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
 
         return original_lines, patched_lines
+
+    def mcad_annotate_inst_tree(self, inst_tree: Optional[dict], bv: BinaryView):
+        """Add MCAD cycle counts to instruction tree. NOOP if cycle counts all ready exist."""
+        if not inst_tree:
+            return
+
+        # TODO: Config paramater to enabel/disable MCAD intigration
+
+        # Look at first instruction to determine arch. We assume all instructions in prefix are same arch.
+        if inst_tree['prefix']:
+            instAddr = inst_tree['prefix'][0]
+            if instAddr.get('cycleCount'):
+                # We already got the cycle counts for this instruction tree.
+                return
+            offset = int(instAddr['address']['offset'], 16)
+            arch = getInstArch(offset, bv)
+            mcadServer = PateMcad.getServerForArch(arch.name)
+            if not mcadServer:
+                # Could not start MCAD server for arch
+                return
+
+        # Get the list of instruction bytes for the block
+        instructions = []
+        for instAddr in inst_tree['prefix']:
+            # TODO: Ignore base for now. Ask Dan about this.
+            # base = int(instAddr['address']['base'], 16?)
+            offset = int(instAddr['address']['offset'], 16)
+            instLen = bv.get_instruction_length(offset, arch)
+            instBytes = bv.read(offset, instLen)
+            instructions.append(instBytes)
+
+        if instructions:
+            # Get the cycle counts from MCAD
+            # TODO: Check for gRPC error
+            cycleCounts = mcadServer.request_cycle_counts(instructions)
+
+            if cycleCounts:
+                # Annotate the instruction tree with cycle counts
+                for (instAddr, cycleCount) in zip(inst_tree['prefix'], cycleCounts):
+                    instAddr['cycleCount'] = cycleCount
+
+        # Process the children. Note: true/false are not necessarily accurate.
+        self.mcad_annotate_inst_tree(inst_tree['suffix_true'], bv)
+        self.mcad_annotate_inst_tree(inst_tree['suffix_false'], bv)
+
 
 class GuiUserInteraction(pate.PateUserInteraction):
     def __init__(self, pate_widget: PateWidget):
@@ -203,6 +241,14 @@ class PateThread(Thread):
         execute_on_main_thread_and_wait(
             lambda: self.pate_widget.context.createTabForWidget("PATE " + os.path.basename(self.filename),
                                                                 self.pate_widget))
+
+        # Hack to pre-start MCAD server(s)
+        with load(self.pate_widget.originalFilename) as bv:
+            arch = bv.arch
+            PateMcad.getServerForArch(arch.name)
+            if arch.name == 'thumb2':
+                PateMcad.getServerForArch('armv7')
+
         # TODO: This is does not quite work. Several problems:
         # - tabCloseRequests is called for every tab, not just the PateWidget tab
         # - When tabs are moved, a new DockableTabWidget is crated taht will no have this signal connected.
@@ -370,16 +416,14 @@ class InstTreeDiffWidget(QWidget):
         if instTrees.get('original'):
             originalInstTree = instTrees['original']
             with load(pw.originalFilename) as obv:
-                if pw.pateMcad:
-                    pw.pateMcad.annotate_inst_tree(originalInstTree, obv)
+                pw.mcad_annotate_inst_tree(originalInstTree, obv)
                 original_lines = self.getInstTreeLines(originalInstTree, obv)
 
         patched_lines = []
         if instTrees.get('patched'):
             patchedInstTree = instTrees['patched']
             with load(pw.patchedFilename) as pbv:
-                if pw.pateMcad:
-                    pw.pateMcad.annotate_inst_tree(patchedInstTree, pbv)
+                pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
                 patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
 
         htmlDiff = HtmlDiff()
@@ -396,7 +440,7 @@ class InstTreeDiffWidget(QWidget):
         for instAddr in instTree['prefix']:
             line = ''
             if instAddr.get('cycleCount'):
-                cc: mcad.binja_pb2.CycleCounts.CycleCount = instAddr['cycleCount']
+                cc: CycleCount = instAddr['cycleCount']
                 cycles = cc.executed - cc.ready
                 cumu += cycles
                 line += f'{cycles:2d}'
@@ -438,8 +482,7 @@ class InstTreeGraphWidget(FlowGraphWidget):
             return
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
-        if pw and pw.pateMcad:
-            pw.pateMcad.annotate_inst_tree(instTree, self.getData())
+        pw.mcad_annotate_inst_tree(instTree, self.getData())
 
         _flowGraph = FlowGraph()
         self._buildGraph(instTree, _flowGraph)
@@ -457,12 +500,12 @@ class InstTreeGraphWidget(FlowGraphWidget):
         for instAddr in instTree['prefix']:
             tokens = []
             if instAddr.get('cycleCount'):
-                cc: mcad.binja_pb2.CycleCounts.CycleCount = instAddr['cycleCount']
+                cc: CycleCount = instAddr['cycleCount']
                 cycles = cc.executed - cc.ready
                 cumu += cycles
                 cyclesStr = f'{cycles:2d}'
                 if cc.is_under_pressure:
-                    cycles.Str += '!'
+                    cyclesStr += '!'
                 else:
                     cyclesStr += ' '
                 tokens.append(ITT(ITTType.TextToken, cyclesStr))
