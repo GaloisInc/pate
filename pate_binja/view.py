@@ -532,10 +532,12 @@ class InstTreeGraphWidget(FlowGraphWidget):
             # tokens.append(ITT(ITTType.TextToken, disassembly))
             # print("Disassembly:", disassembly)
 
-            disassembly = next(bv.disassembly_tokens(offset, arch))[0]
-            for token in disassembly:
-                if token.type != ITTType.TagToken:
-                    tokens.append(token)
+            disassemblyTokens = next(bv.disassembly_tokens(offset, arch), None)
+            if disassemblyTokens:
+                disassembly = disassemblyTokens[0]
+                for token in disassembly:
+                    if token.type != ITTType.TagToken:
+                        tokens.append(token)
 
             prefixLines.append(DisassemblyTextLine(tokens, offset))
 
