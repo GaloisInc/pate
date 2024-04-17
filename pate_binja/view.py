@@ -163,13 +163,23 @@ class PateWidget(QWidget):
             # base = int(instAddr['address']['base'], 16?)
             offset = int(instAddr['address']['offset'], 16)
             instLen = bv.get_instruction_length(offset, arch)
+            if instLen == 0:
+                break
             instBytes = bv.read(offset, instLen)
+            # disassembly = bv.get_disassembly(offset, arch)
+            # print('offset:', offset)
+            # print('len:', instLen)
+            # print('bytes:', instBytes)
+            # print('disassembly:', disassembly)
             instructions.append(instBytes)
 
         if instructions:
             # Get the cycle counts from MCAD
             # TODO: Check for gRPC error
+            # print('arch', arch)
+            # print('instructions', instructions)
             cycleCounts = mcadServer.request_cycle_counts(instructions)
+            # print('cycleCounts', cycleCounts)
 
             if cycleCounts:
                 # Annotate the instruction tree with cycle counts
