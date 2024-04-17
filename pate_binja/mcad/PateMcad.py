@@ -17,6 +17,9 @@ class CycleCount:
         self.executed = executed
         self.is_under_pressure = is_under_pressure
 
+    def __str__(self):
+        return f'CycleCount({self.ready}, {self.executed}, {self.is_under_pressure})'
+
 class PateMcad:
     # Static dict of servers
     _servers: dict[str, PateMcad] = {}
