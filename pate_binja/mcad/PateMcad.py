@@ -85,6 +85,9 @@ class PateMcad:
         args = ['/usr/local/bin/docker',  # TODO: Path is os specific
                 'run',
                 '-p', f'{self.port}:50052',
+                # Get rid of warning. We really want this platform, not native.
+                '--platform=linux/amd64',
+                # Remove the image from docker desktop on exit.
                 '--rm',
                 dockerName,
                 # TODO: Do I really want debug?
