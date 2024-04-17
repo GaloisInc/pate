@@ -1225,7 +1225,7 @@ processBundle ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 processBundle scope node bundle d exitPairs gr0 = withSym $ \sym -> do
-  gr1 <- checkObservables node bundle d gr0
+  gr1 <- checkObservables scope node bundle d gr0
   paths <- withTracing @"message" "All Instruction Paths" $ do
     paths <- bundleToInstrTraces bundle
     trees <- instrPathsToTrees paths
@@ -1430,7 +1430,7 @@ visitNode scope (ReturnNode fPair) d gr0 =  do
             -- (rather than once for each return edge)
             -- but it would require some refactoring to make the types match up correctly
             withPG_ gr0' $ do
-              liftEqM_ $ checkObservables node bundle d
+              liftEqM_ $ checkObservables scope node bundle d
               liftEqM_ $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
               (liftPG $ checkForReturnSync fPair node) >>= \case
                 True -> liftEqM_ $ handleSyncPoint (GraphNode node)
@@ -1530,45 +1530,50 @@ withPredomain scope bundle preD f = withSym $ \sym -> do
 
 
 checkObservables :: forall sym arch v.
+  PS.SimScope sym arch v ->
   NodeEntry arch ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-checkObservables bPair bundle preD gr =
-  considerObservableEvent gr bPair $
-    do res <- doCheckObservables bundle preD
-       withTracing @"observable_result" res $
-         case res of
-           CE.ObservableCheckEq ->
-             do traceBundle bundle "Observables agree"
-                return (Nothing, gr)
-           CE.ObservableCheckError msg ->
-             do let msg' = ("Error checking observables: " ++ msg)
-                err <- emitError' (PEE.ObservabilityError msg')
-                return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
-           CE.ObservableCheckCounterexample cex@(ObservableCounterexample _ oSeq pSeq) -> do
-             do traceBundle bundle ("Obserables disagree!")
-                traceBundle bundle ("== Original sequence ==")
-                traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
-                traceBundle bundle ("== Patched sequence ==")
-                traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
-                emitWarning $ PEE.ObservableDifferenceFound
-                return (Just cex, gr)
+checkObservables scope bPair bundle preD gr0 =
+  considerObservableEvent gr0 bPair $
+    do (mres, gr) <- doCheckObservables scope bPair bundle preD gr0
+       case mres of
+         Nothing -> return (Nothing, gr)
+         Just res -> withTracing @"observable_result" res $ case res of
+          CE.ObservableCheckEq -> do
+            traceBundle bundle "Observables agree"
+            return (Nothing, gr)
+          CE.ObservableCheckError msg -> do
+            let msg' = ("Error checking observables: " ++ msg)
+            err <- emitError' (PEE.ObservabilityError msg')
+            return (Nothing, recordMiscAnalysisError gr (GraphNode bPair) err)
+          CE.ObservableCheckCounterexample cex@(ObservableCounterexample _ oSeq pSeq) -> do
+            traceBundle bundle ("Obserables disagree!")
+            traceBundle bundle ("== Original sequence ==")
+            traceBundle bundle (show (vcat (map MT.prettyMemEvent oSeq)))
+            traceBundle bundle ("== Patched sequence ==")
+            traceBundle bundle (show (vcat (map MT.prettyMemEvent pSeq)))
+            emitWarning $ PEE.ObservableDifferenceFound
+            return (Just cex, gr)
 
 instance (forall tp. PEM.ExprMappable sym (f tp)) => 
   PEM.ExprMappable sym (MM.RegState r f) where
   mapExpr sym f r = MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) r
 
 doCheckObservables :: forall sym arch v.
+  PS.SimScope sym arch v ->
+  NodeEntry arch ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v ->
-  EquivM sym arch (CE.ObservableCheckResult sym arch)
-doCheckObservables bundle preD = case PS.simOut bundle of
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (CE.ObservableCheckResult sym arch), PairGraph sym arch)
+doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
   -- for singleton cases, we consider all events to be trivially
   -- observably equivalent, as we are collecting observable events
   -- for future analysis in the domain
-  PPa.PatchPairSingle _ _ -> return CE.ObservableCheckEq
+  PPa.PatchPairSingle _ _ -> return (Just CE.ObservableCheckEq, pg)
   PPa.PatchPair outO outP -> withSym $ \sym -> do
 
        oSeq <- getObservableEvents outO
@@ -1593,23 +1598,59 @@ doCheckObservables bundle preD = case PS.simOut bundle of
          , show (W4.printSymExpr eqSeq)
          ]
 -}
+       
+       priority <- thisPriority
        not_goal <- liftIO $ W4.notPred sym eqSeq
-       goalSat "checkObservableSequences" not_goal $ \res -> case res of
-         Unsat _ -> return CE.ObservableCheckEq
-         Unknown -> return (CE.ObservableCheckError "UNKNOWN result when checking observable sequences")
-         Sat evalFn' -> do
-          regsO <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outO)
-          regsP <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outP)
-          withGroundEvalFn evalFn' $ \evalFn -> do
-           -- NB, observable sequences are stored in reverse order, so we reverse them here to
-           -- display the counterexample in a more natural program order
-           oSeq'' <- reverse <$> CE.groundObservableSequence sym evalFn oSeq' -- (MT.memSeq oMem)
-           pSeq'' <- reverse <$> CE.groundObservableSequence sym evalFn pSeq' -- (MT.memSeq pMem)
+       mres <- withSatAssumption (PAS.fromPred not_goal) $ withTracing @"message" "Observable difference found" $  do
+        goalSat "checkObservableSequences" (W4.truePred sym) $ \res -> case res of
+          Unsat _ -> throwHere PEE.InconclusiveSAT -- should be impossible
+          Unknown -> return (CE.ObservableCheckError "UNKNOWN result when checking observable sequences")
+          Sat evalFn' -> do
+            withSym $ \sym -> do
+              regsO <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outO)
+              regsP <- MM.traverseRegsWith (\_ -> PEM.mapExpr sym (\x -> concretizeWithModel evalFn' x)) (PS.simOutRegs outP)
+              evs <- getTraceFromModel scope evalFn' bundle preD Nothing
+              emitTrace @"trace_events" evs
+              withGroundEvalFn evalFn' $ \evalFn -> do
+                -- NB, observable sequences are stored in reverse order, so we reverse them here to
+                -- display the counterexample in a more natural program order
+                oSeq'' <- reverse <$> CE.groundObservableSequence sym evalFn oSeq' -- (MT.memSeq oMem)
+                pSeq'' <- reverse <$> CE.groundObservableSequence sym evalFn pSeq' -- (MT.memSeq pMem)
 
+                let regsCE = RegsCounterExample regsO regsP
 
-           let regsCE = RegsCounterExample regsO regsP
-
-           return (CE.ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq'' pSeq''))
+                return (CE.ObservableCheckCounterexample (ObservableCounterexample regsCE oSeq'' pSeq''))
+       case mres of
+          Nothing -> return (Just CE.ObservableCheckEq, pg)
+          Just cex -> do
+            let msg = "Handle observable difference:"
+            mcondK <- choose @"()" msg $ \choice -> do
+              -- first (default) action is to keep the observable report but don't change
+              -- anything about the analysis
+              choice "Emit warning and continue" () $ return Nothing
+              -- NB: the only difference between the two assertion types is the priority that the propagation step occurs at
+              -- the verifier will finish any widening steps it has before processing any deferred propagation steps
+              choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, PriorityDeferredPropagation)
+              choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, PriorityPropagation)
+              choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, PriorityDeferredPropagation)
+              choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, PriorityDeferredPropagation)
+              
+            case mcondK of
+              Just (condK, p) ->  do
+                let do_propagate = shouldPropagate (getPropagationKind pg nd condK)
+                simplifier <- PSi.deepPredicateSimplifier
+                eqSeq_simp <- PSi.applySimplifier simplifier eqSeq
+                withPG pg $ do
+                  liftEqM_ $ addToEquivCondition scope nd condK eqSeq_simp
+                  liftPG $ do
+                    when do_propagate $
+                      modify $ queueAncestors (priority p) nd
+                    modify $ dropPostDomains nd (priority PriorityDomainRefresh)
+                    modify $ queueNode (raisePriority (priority PriorityNodeRecheck)) nd
+                  return Nothing
+              Nothing -> return $ (Just cex, pg)
+  where
+    nd = GraphNode ne
 
 -- | Right now, this requires the pointer and written value to be exactly equal.
 --   At some point, we may want to relax this in some way, but it's not immediately
@@ -2760,7 +2801,7 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
           nextSt <- liftIO $ f (PS.simOutState output)
           return $ output { PS.simOutState = nextSt }
       let bundle' = bundle { PS.simOut = outputs }
-      gr1 <- checkObservables currBlock bundle' d gr0
+      gr1 <- checkObservables scope currBlock bundle' d gr0
       case mpRetPair of
         Just pRetPair -> handleJump scope bundle' currBlock d gr1 (mkNodeEntry currBlock pRetPair)
         -- FIXME: unclear what to do here?

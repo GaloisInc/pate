@@ -131,6 +131,7 @@ data NodePriorityK =
   | PriorityNodeRecheck
   | PriorityPropagation
   | PriorityWidening
+  | PriorityDeferredPropagation
   | PriorityDomainRefresh
   | PriorityHandleReturn
   | PriorityMiscCleanup
@@ -149,6 +150,7 @@ printPriorityKind (NodePriority pk _ _ ) = case pk of
   PriorityNodeRecheck -> "Re-checking Block Exits"
   PriorityPropagation -> "Propagating Conditions"
   PriorityWidening -> "Widening Equivalence Domains"
+  PriorityDeferredPropagation -> "Propagating Deferred Conditions"
   PriorityDomainRefresh -> "Re-checking Equivalence Domains"
   PriorityHandleReturn -> "Handling Function Return"
   PriorityMiscCleanup -> "Proof Cleanup"
