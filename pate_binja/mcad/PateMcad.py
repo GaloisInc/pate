@@ -17,7 +17,7 @@ class CycleCount:
         self.executed = executed
         self.is_under_pressure = is_under_pressure
 
-    def __str__(self):
+    def __repr__(self):
         return f'CycleCount({self.ready}, {self.executed}, {self.is_under_pressure})'
 
 class PateMcad:
