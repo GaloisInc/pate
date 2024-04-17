@@ -574,12 +574,12 @@ class PateCfarInstTreeDialog(QDialog):
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
         # TODO: Should we only load the obv once per pate widget?
-        obv = load(pw.originalFilename)
-        self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
+        with load(pw.originalFilename) as obv:
+            self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
 
         # TODO: Should we only load the pbv once per pate widget?
-        pbv = load(pw.patchedFilename)
-        self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
+        with load(pw.patchedFilename) as pbv:
+            self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
 
         hsplitter = QSplitter()
         hsplitter.setOrientation(Qt.Orientation.Horizontal)
