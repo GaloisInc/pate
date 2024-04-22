@@ -9,7 +9,7 @@ from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    DisassemblyTextLine, Architecture
+    DisassemblyTextLine, Architecture, load
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja import InstructionTextToken as ITT
 from binaryninja.enums import InstructionTextTokenType as ITTType
@@ -78,7 +78,10 @@ class PateWidget(QWidget):
         self.originalFilename = None
         self.patchedFilename = None
 
-    def loadBinaryViews(self, config: dict):
+        self.originalBinaryView = None
+        self.patchedBinaryView = None
+
+    def loadBinaryFileTabs(self, config: dict):
         #print('config:', config)
         cwd = config.get('cwd')
         original = config.get('original')
@@ -91,6 +94,14 @@ class PateWidget(QWidget):
             getTabForFilename(self.context, self.originalFilename, True)
         if self.patchedFilename:
             getTabForFilename(self.context, self.patchedFilename, True)
+
+    def loadBinaryViews(self):
+        if self.originalFilename:
+            self.originalBinaryView = load(self.originalFilename)
+            self.originalBinaryView.update_analysis_and_wait()
+        if self.patchedFilename:
+            self.patchedBinaryView = load(self.patchedFilename)
+            self.patchedBinaryView.update_analysis_and_wait()
 
     def gotoOriginalAddress(self, addr: int):
         showLocationInFilename(self.context, self.originalFilename, addr)
@@ -130,10 +141,10 @@ class PateWidget(QWidget):
 
     def injectBinjaDissembly(self, original_lines, patched_lines):
 
-        obv = getElfBinaryViewForFilename(self.context, self.originalFilename)
+        obv = self.originalBinaryView
         original_lines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), original_lines))
 
-        pbv = getElfBinaryViewForFilename(self.context, self.patchedFilename)
+        pbv = self.originalBinaryView
         patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
 
         return original_lines, patched_lines
@@ -250,15 +261,15 @@ class PateThread(Thread):
 
     def _config_callback(self, config: dict):
         execute_on_main_thread_and_wait(
-            lambda: self.pate_widget.loadBinaryViews(config))
+            lambda: self.pate_widget.loadBinaryFileTabs(config))
         execute_on_main_thread_and_wait(
             lambda: self.pate_widget.context.createTabForWidget("PATE " + os.path.basename(self.filename),
                                                                 self.pate_widget))
 
-        # TODO: Also add load and analysis of obv an pbv? This call back is invoked from this threads run (spaghetti).
+        self.pate_widget.loadBinaryViews()
 
         # Hack to pre-start MCAD server(s)
-        bv = getElfBinaryViewForFilename(self.pate_widget.context, self.pate_widget.originalFilename)
+        bv = self.pate_widget.originalBinaryView
         arch = bv.arch
         PateMcad.getServerForArch(arch.name)
         if arch.name == 'thumb2':
@@ -430,14 +441,14 @@ class InstTreeDiffWidget(QWidget):
         original_lines = []
         if instTrees.get('original'):
             originalInstTree = instTrees['original']
-            obv = getElfBinaryViewForFilename(pw.context, pw.originalFilename)
+            obv = pw.originalBinaryView
             pw.mcad_annotate_inst_tree(originalInstTree, obv)
             original_lines = self.getInstTreeLines(originalInstTree, obv)
 
         patched_lines = []
         if instTrees.get('patched'):
             patchedInstTree = instTrees['patched']
-            pbv = getElfBinaryViewForFilename(pw.context, pw.patchedFilename)
+            pbv = pw.patchedBinaryView
             pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
             patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
 
@@ -577,10 +588,10 @@ class PateCfarInstTreeDialog(QDialog):
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
-        obv = getElfBinaryViewForFilename(pw.context, pw.originalFilename)
+        obv = pw.originalBinaryView
         self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
 
-        pbv = getElfBinaryViewForFilename(pw.context, pw.patchedFilename)
+        pbv = pw.patchedBinaryView
         self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
 
         hsplitter = QSplitter()
@@ -869,21 +880,18 @@ def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: boo
     return tab
 
 
-def getElfBinaryViewForTab(context: UIContext, tab: QWidget, update: bool = True) -> Optional[BinaryView]:
+def getElfBinaryViewForTab(context: UIContext, tab: QWidget) -> Optional[BinaryView]:
     vf: ViewFrame = context.getViewFrameForTab(tab)
     if vf:
         v = vf.getViewForType('Linear:ELF')
         if v:
-            bv = v.getData()
-            if update:
-                bv.update_analysis_and_wait()
-            return bv
+            return v.getData()
 
 
-def getElfBinaryViewForFilename(context: UIContext, filename: str, update: bool = True) -> Optional[BinaryView]:
+def getElfBinaryViewForFilename(context: UIContext, filename: str) -> Optional[BinaryView]:
     t = getTabForFilename(context, filename, True)
     if t:
-        return getElfBinaryViewForTab(context, t, update=update)
+        return getElfBinaryViewForTab(context, t)
 
 
 def showLocationInFilename(context: UIContext, filename: str, addr: int):
