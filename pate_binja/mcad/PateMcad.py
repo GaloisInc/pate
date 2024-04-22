@@ -8,6 +8,7 @@ import time
 from typing import Optional, IO, List
 
 import grpc
+from binaryninja import Settings
 
 from . import binja_pb2_grpc, binja_pb2
 
@@ -78,7 +79,10 @@ class PateMcad:
             return
 
         # TODO: Make this a config var?
-        dockerName = 'mcad-dev'
+        dockerName = Settings().get_string("pate.mcadDockerName")
+        if not dockerName:
+            return
+
         # TODO: This is dependent on arch of docker image (eg apple silicon vs x86_64)
         brokerPluginPath = '/work/LLVM-MCA-Daemon/build/plugins/binja-broker/libMCADBinjaBroker.so'
 
@@ -127,7 +131,7 @@ class PateMcad:
         self.stub = None
 
     def request_cycle_counts(self, instructions: list[bytes]) -> List[CycleCount]:
-        if not self.isRunning:
+        if not self.isRunning():
             return []
         pbInstructions = map(lambda b: binja_pb2.BinjaInstructions.Instruction(opcode=b), instructions)
         pbCycleCounts = self.stub.RequestCycleCounts(binja_pb2.BinjaInstructions(instruction=pbInstructions))

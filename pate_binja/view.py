@@ -9,7 +9,7 @@ from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    DisassemblyTextLine, Architecture, load
+    DisassemblyTextLine, Architecture, load, Settings
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja import InstructionTextToken as ITT
 from binaryninja.enums import InstructionTextTokenType as ITTType
@@ -943,19 +943,17 @@ def quitCleanup():
 
 def register():
 
-    # [JCC 20240216] If we want to use setting rather than env vars...
-    # Settings().register_group("pate", "PATE")
-    # Settings().register_setting("pate.source", """
-    # 	{
-    # 		"title" : "PATE Verifier Source Directory",
-    # 		"type" : "string",
-    # 		"default" : null,
-    # 		"description" : "If this is set, PATE will run as built in the source directory rather than using the docker image."
-    # 	}
-    # 	""")
-    #
-    # print("pate.source:", Settings().get_string("pate.source"))
-    # print("contains(pate.source):", Settings().contains("pate.source"))
+    Settings().register_group("pate", "PATE")
+
+    Settings().register_setting("pate.mcadDockerName", """
+    {
+        "title" : "MCAD Docker image name",
+        "type" : "string",
+        "default" : null,
+        "description" : "If this is set, PATE will run the MCAD docker image to analyze instruction timing."
+    }
+    """)
+    #print("pate.mcadDockerName:", Settings().get_string("pate.mcadDockerName"))
 
     UIAction.registerAction('Pate...')
     UIActionHandler.globalActions().bindAction('Pate...', UIAction(launch_pate))
