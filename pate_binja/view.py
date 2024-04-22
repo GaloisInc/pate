@@ -1,23 +1,21 @@
 # Copyright 2023-2024, Galois Inc. All rights reserved.
 
 from __future__ import annotations
-
 import io
 import os.path
 import re
-import time
 from difflib import HtmlDiff
 from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    load, DisassemblyTextLine, Architecture
+    DisassemblyTextLine, Architecture
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja import InstructionTextToken as ITT
 from binaryninja.enums import InstructionTextTokenType as ITTType
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
-from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, \
-    FlowGraphWidget, FileContext, UIContext, ViewFrame, ViewLocation
+from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, FlowGraphWidget, \
+    FileContext, UIContext, ViewFrame, ViewLocation
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt, QCoreApplication
@@ -28,6 +26,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlai
 from .mcad.PateMcad import PateMcad, CycleCount
 from . import pate
 
+
 class PateWidget(QWidget):
     context: UIContext | None
     config: dict
@@ -36,6 +35,8 @@ class PateWidget(QWidget):
 
     def __init__(self, context: UIContext, parent: QWidget) -> None:
         super().__init__(parent)
+
+        # TODO: Should not store this, I think there is one per top level window and they can come and go.
         self.context = context
 
         self.pate_thread = None
@@ -129,10 +130,11 @@ class PateWidget(QWidget):
 
     def injectBinjaDissembly(self, original_lines, patched_lines):
 
-        with load(self.originalFilename) as obv:
-            original_lines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), original_lines))
-        with load(self.patchedFilename) as pbv:
-            patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
+        obv = getElfBinaryViewForFilename(self.context, self.originalFilename)
+        original_lines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), original_lines))
+
+        pbv = getElfBinaryViewForFilename(self.context, self.patchedFilename)
+        patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
 
         return original_lines, patched_lines
 
@@ -253,12 +255,14 @@ class PateThread(Thread):
             lambda: self.pate_widget.context.createTabForWidget("PATE " + os.path.basename(self.filename),
                                                                 self.pate_widget))
 
+        # TODO: Also add load and analysis of obv an pbv? This call back is invoked from this threads run (spaghetti).
+
         # Hack to pre-start MCAD server(s)
-        with load(self.pate_widget.originalFilename) as bv:
-            arch = bv.arch
-            PateMcad.getServerForArch(arch.name)
-            if arch.name == 'thumb2':
-                PateMcad.getServerForArch('armv7')
+        bv = getElfBinaryViewForFilename(self.pate_widget.context, self.pate_widget.originalFilename)
+        arch = bv.arch
+        PateMcad.getServerForArch(arch.name)
+        if arch.name == 'thumb2':
+            PateMcad.getServerForArch('armv7')
 
         # TODO: This is does not quite work. Several problems:
         # - tabCloseRequests is called for every tab, not just the PateWidget tab
@@ -426,16 +430,16 @@ class InstTreeDiffWidget(QWidget):
         original_lines = []
         if instTrees.get('original'):
             originalInstTree = instTrees['original']
-            with load(pw.originalFilename) as obv:
-                pw.mcad_annotate_inst_tree(originalInstTree, obv)
-                original_lines = self.getInstTreeLines(originalInstTree, obv)
+            obv = getElfBinaryViewForFilename(pw.context, pw.originalFilename)
+            pw.mcad_annotate_inst_tree(originalInstTree, obv)
+            original_lines = self.getInstTreeLines(originalInstTree, obv)
 
         patched_lines = []
         if instTrees.get('patched'):
             patchedInstTree = instTrees['patched']
-            with load(pw.patchedFilename) as pbv:
-                pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
-                patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
+            pbv = getElfBinaryViewForFilename(pw.context, pw.patchedFilename)
+            pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
+            patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
 
         htmlDiff = HtmlDiff()
         html = htmlDiff.make_file(original_lines, patched_lines,
@@ -573,13 +577,11 @@ class PateCfarInstTreeDialog(QDialog):
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
-        # TODO: Should we only load the obv once per pate widget?
-        with load(pw.originalFilename) as obv:
-            self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
+        obv = getElfBinaryViewForFilename(pw.context, pw.originalFilename)
+        self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
 
-        # TODO: Should we only load the pbv once per pate widget?
-        with load(pw.patchedFilename) as pbv:
-            self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
+        pbv = getElfBinaryViewForFilename(pw.context, pw.patchedFilename)
+        self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
 
         hsplitter = QSplitter()
         hsplitter.setOrientation(Qt.Orientation.Horizontal)
@@ -819,22 +821,15 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
 
 def getInstArch(addr: int, bv: BinaryView) -> Architecture:
-    # The following should work, but bv.get_functions_containing always returns [].
-    # flist = bv.get_functions_containing(addr)
-    # if flist:
-    #     arch = flist[0].arch
-    # else:
-    #     arch = bv.arch
-    # return arch
-
-    # TODO: This is a hack. Could not find a better way to do this.
-    fs = bv.get_previous_function_start_before(addr + 1) # Need +1 or it finds prev function
-    #print("FS:", f'{fs:08x}')
-    f = bv.get_recent_function_at(fs)  # recent?
-    #print("F:", f)
-    farch = f.arch
-    #print("F-arch", farch)
-    return farch
+    flist = bv.get_functions_containing(addr)
+    if flist:
+        # Just use first function
+        f = flist[0]
+        arch = f.arch
+    else:
+        # No function found, use file arch
+        arch = bv.arch
+    return arch
 
 
 # Pattern to match a pate address
@@ -852,9 +847,10 @@ def subDisassemblyForInstAddr(line, bv):
 
     return re.sub(pateInstAddrPattern, subDisassemblyForMatch, line)
 
-def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> QWidget | None:
+def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: bool = True) -> Optional[QWidget]:
     """Find Tab for filename."""
     tab = None
+    c: UIContext
     for c in UIContext.allContexts():
         for t in c.getTabs():
             vf: ViewFrame = context.getViewFrameForTab(t)
@@ -869,8 +865,25 @@ def getTabForFilename(context: UIContext, filename: str, loadIfDoesNotExist: boo
         #view_frame = context.openFileContext(file_context)
         tab = getTabForFilename(context, filename, False)
         #print('Opened ViewFrame:', view_frame, "Tab:", tab)
-    #print('Found Tab:', tab, "for filename:", filename)
+    #print('Found Tab:', tab, "for filename:", filename, 'and bv: ', bv)
     return tab
+
+
+def getElfBinaryViewForTab(context: UIContext, tab: QWidget, update: bool = True) -> Optional[BinaryView]:
+    vf: ViewFrame = context.getViewFrameForTab(tab)
+    if vf:
+        v = vf.getViewForType('Linear:ELF')
+        if v:
+            bv = v.getData()
+            if update:
+                bv.update_analysis_and_wait()
+            return bv
+
+
+def getElfBinaryViewForFilename(context: UIContext, filename: str, update: bool = True) -> Optional[BinaryView]:
+    t = getTabForFilename(context, filename, True)
+    if t:
+        return getElfBinaryViewForTab(context, t, update=update)
 
 
 def showLocationInFilename(context: UIContext, filename: str, addr: int):
