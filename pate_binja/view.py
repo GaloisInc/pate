@@ -114,6 +114,10 @@ class PateWidget(QWidget):
         print("Close Event PateWidget:", self)
         if self.pate_thread:
             self.pate_thread.cancel()
+        if self.originalBinaryView:
+            self.originalBinaryView.file.close()
+        if self.patchedBinaryView:
+            self.patchedBinaryView.file.close()
 
     # def tabCloseRequested(self, index):
     #     # TODO: Problem: Since we don't have the DockableTabWidget we cannot tell if index refers to the tab
