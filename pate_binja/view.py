@@ -936,106 +936,12 @@ def launch_pate(context: UIActionContext):
     pate_widget.pate_thread = pt
     pt.start()  # This will call pate_widget.loadBinaryViews() once config is loaded
 
-# class PateConfigDialog(QDialog):
-#     def __init__(self, context: UIActionContext, parent=None):
-#         super().__init__(parent)
-#
-#         self.setWindowTitle("Pate Run Configuration")
-#
-#         orig_layout = QHBoxLayout()
-#         orig_layout.addWidget(QLabel("Original Binary"))
-#         self.orig_text = QLineEdit()
-#         orig_layout.addWidget(self.orig_text)
-#         orig_button = QPushButton("...")
-#         orig_layout.addWidget(orig_button)
-#
-#         patch_layout = QHBoxLayout()
-#         patch_layout.addWidget(QLabel("Patched Binary"))
-#         self.patch_text = QLineEdit()
-#         patch_layout.addWidget(self.patch_text)
-#         patch_button = QPushButton("...")
-#         patch_layout.addWidget(patch_button)
-#
-#         QBtn = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-#         self.buttonBox = QDialogButtonBox(QBtn)
-#         self.buttonBox.accepted.connect(self.accept)
-#
-#         self.layout = QVBoxLayout()
-#         message = QLabel("Something happened, is that OK?")
-#         self.layout.addLayout(orig_layout)
-#         self.layout.addLayout(patch_layout)
-#         self.layout.addWidget(self.buttonBox)
-#         self.setLayout(self.layout)
-
-
-# def launch_pate_experiment(context: UIActionContext):
-#     # Prompt for existing config or new
-#     # TODO:
-#     msgBox = QMessageBox()
-#     msgBox.setText('Pate Run Configuration')
-#     msgBox.setInformativeText('Open an existing PATE run configuration file or create a new one.')
-#     openButton = msgBox.addButton('Open...', QMessageBox.ActionRole)
-#     newButton = msgBox.addButton('New...', QMessageBox.ActionRole)
-#     cancelButton = msgBox.addButton(QMessageBox.Cancel)
-#     msgBox.setDefaultButton(openButton)
-#     msgBox.exec()
-#
-#     if openButton.clicked():
-#         print('open')
-#     elif newButton.clicked():
-#         print('new')
-#     elif cancelButton.clicked():
-#         print('cancel')
-#
-#     return
-#
-#     # Existing
-#     # - Open file dialog
-#     # - Show config dialog
-#     #   - allows config to be edited
-#     #   - buttons:
-#     #      - cancel - abort launch, close dialog
-#     #      - update - update config file, dialog remains open, bonus, only active if changes
-#     #      - run - run the configuration, save if changes (prompt?)
-#     #
-#     # New
-#     # - Save file dialog
-#     # - Show config dialog (empty config)
-#     #    - same behaviour as above, ut starts empty
-#
-#     fields = []
-#     fields.append(OpenFileNameField("Original"))
-#     fields.append(OpenFileNameField("Binary"))
-#     fields.append(MultilineTextField("Args"))
-#     fnort = interaction.get_form_input(fields, "Enter Pate Parameters")
-#     print(list(map(lambda x: x.result, fields)))
-#
-#     dlg = PateConfigDialog(context.widget)
-#     if dlg.exec():
-#         print("Success!")
-#     else:
-#         print("Cancel!")
-
-
-# pate_window = None
-#
-#
-# def launch_pate_old(context: UIActionContext):
-#     global pate_window
-#     if not pate_window:
-#         pate_window = PateWindow(context, parent=context.widget)
-#     pate_window.show()
-#     # Make sure window is not minimized
-#     pate_window.setWindowState(pate_window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-#     pate_window.raise_()
 
 def quitCleanup():
     PateMcad.stopAllServers()
 
+
 def register():
-    #PluginCommand.register('Run Pate ch10', 'Run Pate Verifier and show flow graph', run_pate_thread_may23_ch10)
-    #PluginCommand.register('Run Pate t1', 'Run Pate Verifier and show flow graph', run_pate_thread_nov23_t1_room1018)
-    #PluginCommand.register('Run Pate t4', 'Run Pate Verifier and show flow graph', run_pate_thread_nov23_t4_dendy1011)
 
     # [JCC 20240216] If we want to use setting rather than env vars...
     # Settings().register_group("pate", "PATE")
