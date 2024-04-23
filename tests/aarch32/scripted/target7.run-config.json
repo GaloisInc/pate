@@ -1,0 +1,14 @@
+{
+    "original": "target7.original.exe",
+    "patched": "target7.patched.exe",
+    "args": [
+             "-b target7.toml",
+             "--original-csv-function-hints target7.csv",
+             "--patched-csv-function-hints target7.csv",
+             "--save-macaw-cfgs target7_CFGs",
+             "-e ContinueAfterRecoverableFailures",
+             "-r AllowEqRescopeFailure",
+             "--ignore-segments 1",
+             "-s loop"
+           ]
+  }
