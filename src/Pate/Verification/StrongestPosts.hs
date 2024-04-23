@@ -387,6 +387,7 @@ handleSyncPoint ::
   EquivM sym arch (PairGraph sym arch)
 handleSyncPoint nd pg = withTracing @"message" "End of single-sided analysis" $ withPG_ pg $ do
   divergeNode <- liftPG $ do
+
     Just divergeNode <- return $ getDivergePoint nd
     addSyncNode divergeNode nd
     return divergeNode
@@ -617,15 +618,20 @@ updateCombinedSyncPoint divergeNode pg_top = withPG_ pg_top $ do
       (catchPG $ getCurrentDomainM divergeNode) >>= \case
         Nothing -> liftPG $ modify $ queueNode (priority PriorityHandleDesync) divergeNode
         Just dom_spec -> do
-          divergeNodeY <- toSingleGraphNode PBi.PatchedRepr divergeNode
-          fmap (\x -> PS.viewSpecBody x PS.unWS) $ PS.forSpec dom_spec $ \scope dom -> fmap PS.WithScope $ do
-            domP <- lift $ PAD.singletonDomain PBi.PatchedRepr dom
-            bundle <- lift $ noopBundle scope (graphNodeBlocks divergeNodeY)
-            forM_ syncsO $ \(syncO, _) -> do
-              liftPG $ (void $ getCurrentDomainM divergeNodeY) 
-                  <|> (modify $ \pg -> updateDomain' pg syncO divergeNodeY (PS.mkSimSpec scope domP) (priority PriorityWidening))
-              liftEqM_ $ \pg -> withPredomain scope bundle domP $ withConditionsAssumed scope bundle dom divergeNode pg $
-                widenAlongEdge scope bundle syncO domP pg divergeNodeY
+          divergeNodeP <- toSingleGraphNode PBi.PatchedRepr divergeNode
+          (catchPG $ getCurrentDomainM divergeNodeP) >>= \case
+            Just{} -> return ()
+            Nothing -> PS.viewSpec dom_spec $ \scope dom -> do
+              domY <- lift $ PAD.singletonDomain PBi.PatchedRepr dom
+              liftPG $ modify $ setDomain (priority PriorityDomainRefresh) divergeNodeP (PS.mkSimSpec scope domY)
+          forM_ syncsO $ \(syncO, _) -> do
+            domO_spec <- liftPG $ getCurrentDomainM syncO
+            PS.viewSpec domO_spec $ \scope domO -> do
+              blkO <- PPa.get PBi.OriginalRepr (graphNodeBlocks syncO)
+              blkP <- PPa.get PBi.PatchedRepr (graphNodeBlocks divergeNodeP)
+              bundle <- lift $ noopBundle scope (PPa.PatchPair blkO blkP)
+              liftEqM_ $ \pg -> withPredomain scope bundle domO $ withConditionsAssumed scope bundle domO syncO pg $
+                widenAlongEdge scope bundle syncO domO pg divergeNodeP
 
       -- Finally, if we have any Patched one-sided results, we take all combinations
       -- of Original and Patched sync points and connect them to a "combined" two-sided node
@@ -729,7 +735,11 @@ mergeDualNodes in1 in2 spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ wit
   let blkPair1 = graphNodeBlocks in1
   let blkPair2 = graphNodeBlocks in2
 
-  fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope (graphNodeBlocks syncNode) $ \scope -> fmap PS.WithScope $ 
+  spec <- case getCurrentDomain gr0 syncNode of
+    Just dom_spec -> PS.forSpec dom_spec $ \_ _ -> return (PS.WithScope ())
+    Nothing -> withFreshScope (graphNodeBlocks syncNode) $ \_ -> return (PS.WithScope ())
+
+  PS.viewSpec spec $ \scope _ ->
     withValidInit scope blkPair1 $ withValidInit scope blkPair2 $ do
       (_, dom1) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec1
       (_, dom2) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec2
@@ -1067,8 +1077,7 @@ withCurrentAbsDomain node gr f = do
       -- this handles the case where we need to find the domain for this
       -- node but we don't have a singleton variant of the entry point
       case getDivergePoint (GraphNode node) of
-        Just (GraphNode divergeNode) -> do
-          Just (Some bin) <- return $ singleNodeRepr (GraphNode node)
+        Just (GraphNode divergeNode) | Just (Some bin) <- singleNodeRepr (GraphNode node) -> do
           let fnNode_diverge = functionEntryOf divergeNode
           fnNode_diverge_single <- toSingleNode bin fnNode_diverge
           case getCurrentDomain gr (GraphNode fnNode_diverge) of
@@ -1363,19 +1372,28 @@ visitNode scope (GraphNode node@(nodeBlocks -> bPair)) d gr0 =
               priority <- thisPriority
               return $ queueNode (priority PriorityHandleActions) (GraphNode node) gr3
             Nothing -> withConditionsAssumed scope bundle d (GraphNode node) gr0 $ do
-              exitPairs <- PD.discoverPairs bundle
-              -- if a sync point is reachable then we don't want to do
-              -- further analysis, since we want to instead treat this
-              -- node as a merge point
+              priority <- thisPriority
               withPG_ gr2 $ do
-                (liftPG $ checkForNodeSync node exitPairs) >>= \case
-                  True -> liftEqM_ $ handleSyncPoint (GraphNode node)
-                  False -> liftEqM_ $ \pg -> do
-                    handleSplitAnalysis scope node d pg >>= \case
-                      Just pg' -> return pg'
-                      Nothing -> do
-                        pg' <- processBundle scope node bundle d exitPairs pg
-                        fromMaybe pg' <$> handleSplitAnalysis scope node d pg'
+                (liftPG $ checkTwoSidedSync (GraphNode node)) >>= \case
+                  Just node_single | Just{} <- isSingleNodeEntry node_single -> do
+                    {- dom_single <- PAD.singletonDomain bin d
+                    bundle_single <- PS.toSingleBundle bundle bin
+                    exitPairs <- PD.discoverPairs bundle_single
+                    processBundle scope node_single bundle_single dom_single exitPairs gr0 -}
+                    liftPG $ modify $ queueNode (priority PriorityHandleDesync) (GraphNode node_single)
+                  _ -> do
+                    exitPairs <- lift $ PD.discoverPairs bundle
+                    -- if a sync point is reachable then we don't want to do
+                    -- further analysis, since we want to instead treat this
+                    -- node as a merge point
+                    (liftPG $ checkForNodeSync node exitPairs) >>= \case
+                      True -> liftEqM_ $ handleSyncPoint (GraphNode node)
+                      False -> liftEqM_ $ \pg -> do
+                        handleSplitAnalysis scope node d pg >>= \case
+                          Just pg' -> return pg'
+                          Nothing -> do
+                            pg' <- processBundle scope node bundle d exitPairs pg
+                            fromMaybe pg' <$> handleSplitAnalysis scope node d pg'
 
 visitNode scope (ReturnNode fPair) d gr0 =  do
   -- propagate the abstract domain of the return node to
@@ -1968,9 +1986,9 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
           is_this_instr <- PAS.toPred sym eqInstr
           with_targets <- withAssumption is_this_instr $ do
             maybeZero >>= \case
-              True -> chooseBool ("Classifier Failure: Mark " ++ show instr_addr ++ " as return?") >>= \case
+              True -> return $ Map.insert instr_addr ReturnTarget tried {- chooseBool ("Classifier Failure: Mark " ++ show instr_addr ++ " as return?") >>= \case
                 True -> return $ Map.insert instr_addr ReturnTarget tried
-                False -> return tried
+                False -> return tried -}
               False -> do
                 targets <- findTargets Set.empty
                 retV_conc <- concretizeWithSolver retV
@@ -2263,9 +2281,15 @@ triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> d
     mrets <- PPa.toMaybeCases <$> 
       PPa.forBinsF (\bin -> PPa.get bin blkts >>= getTargetReturn) 
     case (combineCases ecase1 ecase2,mrets) of
-      (Nothing,_) -> handleDivergingPaths scope bundle' currBlock st d blkts
-      (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope bundle' currBlock st d blkts
-      _ | isMismatchedStubs stubPair -> handleDivergingPaths scope bundle' currBlock st d blkts
+      (Nothing,_) -> do
+        IO.liftIO $ IO.putStrLn $ "nocombinecases"
+        handleDivergingPaths scope bundle' currBlock st d blkts
+      (_,PPa.PatchPairMismatch{}) -> do
+        IO.liftIO $ IO.putStrLn $ "PatchPairMismatch"
+        handleDivergingPaths scope bundle' currBlock st d blkts
+      _ | isMismatchedStubs stubPair -> do
+        IO.liftIO $ IO.putStrLn $ ("mismatchedStubs: " ++ show stubPair)
+        handleDivergingPaths scope bundle' currBlock st d blkts
       (Just ecase, PPa.PatchPairJust rets) -> fmap (updateBranchGraph st blkts) $ do
         let pPair = TF.fmapF PB.targetCall blkts
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
@@ -2508,16 +2532,16 @@ getStubOverrideOne blk mstubSymbol = do
       emitTraceLabel @"fnstub" SkippedFn ""
       return Nothing
     Just stubSymbol | isIgnoredBlock blk -> do
-      emitTraceLabel @"fnstub" IgnoredFn (show stubSymbol)
+      emitTraceLabel @"fnstub" IgnoredFn (PB.fnSymPlain stubSymbol)
       return Nothing
     Just stubSymbol | Just f <- PA.lookupStubOverride archData stubSymbol -> do
-      emitTraceLabel @"fnstub" DefinedFn (show stubSymbol)
+      emitTraceLabel @"fnstub" DefinedFn (PB.fnSymPlain stubSymbol)
       return $ Just f
     Just stubSymbol | PD.isAbortStub stubSymbol -> do
-      emitTraceLabel @"fnstub" TerminalFn (show stubSymbol)
+      emitTraceLabel @"fnstub" TerminalFn (PB.fnSymPlain stubSymbol)
       return Nothing
     Nothing | isIgnoredBlock blk -> do
-      emitTraceLabel @"fnstub" IgnoredFn (show skippedFnSym)
+      emitTraceLabel @"fnstub" IgnoredFn (PB.fnSymPlain skippedFnSym)
       return $ Nothing
     _ -> do
       emitTraceLabel @"fnstub" DivergedJump (show (PP.pretty blk))

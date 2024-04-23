@@ -35,6 +35,7 @@ module Pate.Arch (
   mkClockOverride,
   mkWriteOverride,
   mkDefaultStubOverride,
+  mkDefaultStubOverride',
   mkDefaultStubOverrideArg,
   mkNOPStub,
   mkObservableOverride,
@@ -434,6 +435,23 @@ mkDefaultStubOverride ::
 mkDefaultStubOverride nm rOut = StubOverride $ \sym _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol nm) (W4.BaseBVRepr w)
+  return $ StateTransformer $ \st -> do
+    zero_nat <- W4.natLit sym 0
+    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
+    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+
+-- | Default override always returns the same arbitrary value
+mkDefaultStubOverride' ::
+  forall arch.
+  MS.SymArchConstraints arch =>
+  String -> 
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkDefaultStubOverride' nm rOut = StubOverride $ \sym _ -> do
+  let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  -- globally unique function
+  result_fn <- W4U.mkUninterpretedSymFn sym nm Ctx.empty (W4.BaseBVRepr w)
+  fresh_bv <- W4.applySymFn sym result_fn Ctx.empty
   return $ StateTransformer $ \st -> do
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)

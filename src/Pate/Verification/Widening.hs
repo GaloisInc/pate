@@ -119,6 +119,7 @@ import qualified Prettyprinter as PP
 import qualified What4.Expr.GroundEval as W4
 import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
+import qualified System.IO as IO
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -469,7 +470,8 @@ addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
         return $ queueNode (priority PriorityUserRequest) nd gr4
       choice "Drop and re-compute equivalence domain" $ \_ gr4 -> do
         priority <- thisPriority
-        return $ queueAncestors (priority PriorityUserRequest) nd $ dropDomain nd (priority PriorityDomainRefresh) gr4
+        return $ queueAncestors (priority PriorityUserRequest) nd $ 
+          dropDomain nd (priority PriorityDomainRefresh) gr4
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
 
@@ -585,20 +587,27 @@ domainToEquivCondition ::
   AbstractDomain sym arch v {- ^ post-domain -} ->
   (forall nm k. PL.Location sym arch nm k -> Bool) ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
-  postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case refine loc of
-    False -> return (PL.getLoc loc, p)
+domainToEquivCondition scope bundle preD postD refine = fnTrace "applyDomainRefinements" $ withSym $ \sym -> do
+  postD_eq' <- withTracing @"message" "Strengthen Domain" $ PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case refine loc of
+    False -> do
+      withTracing @"message" "Excluded" $ emitTrace @"loc" (PL.SomeLocation loc)
+      return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
-    True -> case loc of
-      PL.Cell{} -> return $ (PL.getLoc loc, W4.falsePred sym)
-      _ -> return $ (PL.getLoc loc, W4.truePred sym)
+    True -> do
+      emitTrace @"loc" (PL.SomeLocation loc)
+      case loc of
+        PL.Cell{} -> return $ (PL.getLoc loc, W4.falsePred sym)
+        _ -> return $ (PL.getLoc loc, W4.truePred sym)
 
   eqCtx <- equivalenceContext
   eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
   
-  PEC.fromLocationTraversable @sym @arch sym eqCond $ \loc eqPred -> case refine loc of
+  withTracing @"message" "Compute Condition" $ PEC.fromLocationTraversable @sym @arch sym eqCond $ \loc eqPred -> case refine loc of
     False -> return $ W4.truePred sym
-    True -> return eqPred
+    True -> do
+      emitTrace @"loc" (PL.SomeLocation loc)
+      emitTrace @"expr" (Some eqPred)
+      return eqPred
 
 {-
 -- | After widening an edge, insert an equivalence condition
@@ -672,6 +681,8 @@ data PickChoices sym arch = PickChoices
   , pickStack :: [Some (PMc.MemCell sym arch)]
   , pickGlobal :: [Some (PMc.MemCell sym arch)]
   }
+
+deriving instance (PSo.ValidSym sym, PA.ValidArch arch) => Show (PickChoices sym arch)
 
 instance Semigroup (PickChoices sym arch) where
   (PickChoices a b c) <> (PickChoices a' b' c') = PickChoices (a <> a') (b <> b') (c <> c')
@@ -752,6 +763,8 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
 
   picked <- pickMany pickIn
 
+  IO.liftIO $ IO.putStrLn (show picked)
+
   return $ \(PL.SomeLocation loc) ->
     case loc of
       PL.Register r -> elem (Some r) (pickRegs picked)
@@ -812,49 +825,38 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
         Nothing -> do
           emitTrace @"debug" "No condition to propagate"
           return Nothing
-        _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
-          emitTrace @"debug" "Condition not propagated"
-          return Nothing
+
         Just{} -> do
+          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
           -- take the condition of the target edge and bind it to
           -- the output state of the bundle
           cond <- getEquivPostCondition scope bundle to condK gr
-{-
-          let blks = graphNodeBlocks from
-          skip <- case (blks, graphNodeBlocks to) of
-            -- this is a synchronization edge, so we attempt to filter the equivalence condition
-            -- based on whether or not it has variables scoped to only the other side of the analysis
-            -- FIXME: we can likely do better than this and formally separate the conditions, but
-            -- this is sufficient for now, and avoids the obvious case
-            (PPa.PatchPairSingle bin _,PPa.PatchPair{}) -> isEqCondSingleSided scope blks (PBi.flipRepr bin) cond
-            _ -> return False
-          case skip of
-            True -> do
-              emitTrace @"message" "Skipping single-sided propagation"
-              return Nothing
-            False -> do
--}
-              -- check if the "to" condition is already satisifed, otherwise
-              -- we need to update our own condition
           cond_pred <- PEC.toPred sym cond
-          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-          not_cond <- liftIO $ W4.notPred sym cond_pred
-          isPredSat' goalTimeout not_cond >>= \case
-            -- equivalence condition for this path holds, we 
-            -- don't need any changes
+          isPredSat' goalTimeout cond_pred >>= \case
             Just False -> do
-              emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+              emitTrace @"debug" "Branch dropped due to infeasible condition"
+              Just <$> pruneCurrentBranch scope (from,to) condK gr
+            _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
+              emitTrace @"debug" "Condition not propagated"
               return Nothing
-            -- we need more assumptions for this condition to hold
-            Just True -> do
-              priority <- thisPriority
-              emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
-              let propK = getPropagationKind gr to condK
-              gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
-              return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
-                queueNode (priority PriorityNodeRecheck) from $ 
-                dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
-            Nothing -> throwHere $ PEE.InconclusiveSAT
+            _ -> do
+              not_cond <- liftIO $ W4.notPred sym cond_pred
+              isPredSat' goalTimeout not_cond >>= \case
+                -- equivalence condition for this path holds, we 
+                -- don't need any changes
+                Just False -> do
+                  emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+                  return Nothing
+                -- we need more assumptions for this condition to hold
+                Just True -> do
+                  priority <- thisPriority
+                  emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
+                  let propK = getPropagationKind gr to condK
+                  gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
+                  return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
+                    queueNode (priority PriorityNodeRecheck) from $ 
+                    dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
+                Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,

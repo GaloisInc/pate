@@ -187,3 +187,9 @@ ppCell cell =
 
 instance WI.IsExprBuilder sym => PP.Pretty (MemCell sym arch w) where
   pretty cell = ppCell cell
+
+instance WI.IsExprBuilder sym => Show (MemCell sym arch w) where
+  show cell = show (ppCell cell)
+
+instance WI.IsExprBuilder sym => PC.ShowF (MemCell sym arch) where
+  showF = show

@@ -9,6 +9,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -46,6 +47,9 @@ module Pate.Verification.PairGraph.Node (
   , splitGraphNode
   , getDivergePoint
   , eqUptoDivergePoint
+  , mkMergedNodeEntry
+  , mkMergedNodeReturn
+  , splitMergeNode
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -150,15 +154,43 @@ addContext newCtx ne@(NodeEntry (CallingContext ctx d) blks) =
     True -> ne
     False -> NodeEntry (CallingContext (newCtx:ctx) d) blks
 
+-- Strip diverge points from two-sided nodes. This is used so that
+-- merged nodes (which are two-sided) can meaningfully retain their
+-- diverge point, but it will be stripped on any subsequent nodes.
+mkNextContext :: PPa.PatchPair a -> CallingContext arch -> CallingContext arch
+mkNextContext (PPa.PatchPair{}) cctx = dropDivergePoint cctx
+mkNextContext _ cctx = cctx
+
+dropDivergePoint :: CallingContext arch -> CallingContext arch
+dropDivergePoint  (CallingContext cctx _) = CallingContext cctx Nothing
+
 mkNodeEntry :: NodeEntry arch -> PB.BlockPair arch -> NodeEntry arch
-mkNodeEntry node pPair = NodeEntry (graphNodeContext node) pPair
+mkNodeEntry node pPair = NodeEntry (mkNextContext pPair (graphNodeContext node)) pPair
 
 mkNodeEntry' :: GraphNode arch -> PB.BlockPair arch -> NodeEntry arch
-mkNodeEntry' (GraphNode node) pPair = NodeEntry (graphNodeContext node) pPair
-mkNodeEntry' (ReturnNode node) pPair = NodeEntry (returnNodeContext node) pPair
+mkNodeEntry' (GraphNode ne) pPair = mkNodeEntry ne pPair
+mkNodeEntry' (ReturnNode node) pPair = NodeEntry (mkNextContext pPair (returnNodeContext node)) pPair
 
 mkNodeReturn :: NodeEntry arch -> PB.FunPair arch -> NodeReturn arch
-mkNodeReturn node fPair = NodeReturn (graphNodeContext node) fPair
+mkNodeReturn node fPair = NodeReturn (mkNextContext fPair (graphNodeContext node)) fPair
+
+mkMergedNodeEntry :: 
+  GraphNode arch -> 
+  PB.ConcreteBlock arch PB.Original ->
+  PB.ConcreteBlock arch PB.Patched -> 
+  NodeEntry arch
+mkMergedNodeEntry nd blkO blkP = NodeEntry (CallingContext cctx (Just nd)) (PPa.PatchPair blkO blkP)
+  where
+    CallingContext cctx _ = nodeContext nd
+
+mkMergedNodeReturn :: 
+  GraphNode arch -> 
+  PB.FunctionEntry arch PB.Original ->
+  PB.FunctionEntry arch PB.Patched -> 
+  NodeReturn arch
+mkMergedNodeReturn nd fnO fnP = NodeReturn (CallingContext cctx (Just nd)) (PPa.PatchPair fnO fnP)
+  where
+    CallingContext cctx _ = nodeContext nd
 
 -- | Project the given 'NodeReturn' into a singleton node for the given binary
 toSingleReturn :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arch -> NodeReturn arch -> m (NodeReturn arch)
@@ -176,6 +208,12 @@ toSingleGraphNode :: PPa.PatchPairM m => PB.WhichBinaryRepr bin -> GraphNode arc
 toSingleGraphNode bin node = case node of
   GraphNode ne -> GraphNode <$> toSingleNode bin ne
   ReturnNode nr -> ReturnNode <$> toSingleReturn bin node nr  
+
+-- | Split a merge node back into its single-sided components
+splitMergeNode:: PPa.PatchPairM m => NodeEntry arch -> m (PPa.PatchPairC (NodeEntry arch))
+splitMergeNode (NodeEntry ctx@(divergePoint -> (Just{})) (PPa.PatchPair blkO blkP)) =
+  return $ PPa.PatchPairC (NodeEntry ctx (PPa.PatchPairSingle PB.OriginalRepr blkO)) (NodeEntry ctx (PPa.PatchPairSingle PB.PatchedRepr blkP))
+splitMergeNode _ = PPa.throwPairErr
 
 isSingleNodeEntry :: 
   PPa.PatchPairM m => 
@@ -228,16 +266,16 @@ splitGraphNode nd = do
 
 -- | Get the node corresponding to the entry point for the function
 returnToEntry :: NodeReturn arch -> NodeEntry arch
-returnToEntry (NodeReturn ctx fns) = NodeEntry ctx (TF.fmapF PB.functionEntryToConcreteBlock fns)
+returnToEntry (NodeReturn ctx fns) = NodeEntry (mkNextContext fns ctx) (TF.fmapF PB.functionEntryToConcreteBlock fns)
 
 -- | Get the return node that this entry would return to
 returnOfEntry :: NodeEntry arch -> NodeReturn arch
-returnOfEntry (NodeEntry ctx blks) = NodeReturn ctx (TF.fmapF PB.blockFunctionEntry blks)
+returnOfEntry (NodeEntry ctx blks) = NodeReturn (mkNextContext blks ctx) (TF.fmapF PB.blockFunctionEntry blks)
 
 -- | For an intermediate entry point in a function, find the entry point
 --   corresponding to the function start
 functionEntryOf :: NodeEntry arch -> NodeEntry arch
-functionEntryOf (NodeEntry ctx blks) = NodeEntry ctx (TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
+functionEntryOf (NodeEntry ctx blks) = NodeEntry (mkNextContext blks ctx) (TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
 
 instance PA.ValidArch arch => Show (CallingContext arch) where
   show c = show (pretty c)
@@ -308,7 +346,12 @@ instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "node" w
   type TraceNodeType '(sym, arch) "node" = GraphNode arch
   type TraceNodeLabel "node" = String
   prettyNode msg nd = tracePrettyNode nd msg
-  nodeTags = mkTags @'(sym,arch) @"node" [Simplified, Summary]
+  nodeTags = mkTags @'(sym,arch) @"node" [Simplified, Summary]  
+    ++ [("debug", \lbl v -> tracePrettyNode v lbl <+> case divergePoint (nodeContext v) of
+         Just dp -> "diverged: (" <> tracePrettyNode dp "" <> ")"
+         Nothing -> ""
+         )
+       ]
   jsonNode _ = nodeToJSON @'(sym,arch) @"node"
 
 instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entrynode" where

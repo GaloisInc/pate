@@ -280,7 +280,7 @@ data FunctionSymbol = FunctionSymbol
   , fnSymBase :: String
   -- ^ base symbol name. This is what is matched against
   -- when looking up stub definitions
-  }
+  } deriving Show
 
 
 instance Eq FunctionSymbol where
@@ -348,9 +348,6 @@ ppFullFnSymbol fs = PP.viaShow $ fnSymPlain fs
 
 ppBaseFnSymbol :: FunctionSymbol -> PP.Doc a
 ppBaseFnSymbol fs = PP.viaShow $ fnSymBase fs
-
-instance Show FunctionSymbol where
-  show = fnSymPlain
 
 instance forall arch bin. JSON.ToJSON (FunctionEntry arch bin) where
   toJSON cb = JSON.object 

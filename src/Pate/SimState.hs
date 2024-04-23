@@ -70,6 +70,7 @@ module Pate.SimState
   , simOutRegs
   , simPair
   , simSP
+  , toSingleBundle
   -- variable binding
   , SimVars(..)
   , bindSpec
@@ -374,6 +375,12 @@ bundleInVars scope bundle = let (stO,stP) = asStatePair scope (simIn bundle) sim
 
 simPair :: SimBundle sym arch v -> PB.BlockPair arch
 simPair bundle = TF.fmapF simInBlock (simIn bundle)
+
+toSingleBundle :: PPa.PatchPairM m => SimBundle sym arch v -> PBi.WhichBinaryRepr bin -> m (SimBundle sym arch v)
+toSingleBundle bundle bin = do
+  simIn_ <- PPa.get bin (simIn bundle)
+  simOut_ <- PPa.get bin (simOut bundle)
+  return $ SimBundle (PPa.PatchPairSingle bin simIn_) (PPa.PatchPairSingle bin simOut_)
 
 ---------------------------------------
 -- Variable binding
