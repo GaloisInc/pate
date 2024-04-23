@@ -15,7 +15,7 @@ scripted/challenge10.original.exe: ${CHALLENGE_10_BIN}
 endif
 
 
-TARGET_7_BIN=$(CHALLENGE_DIR)/Hackathon_Spring_24/GridIDPS/build/amp_challenge_arm.ino_unstripped.elf
+TARGET_7_BIN=$(CHALLENGE_DIR)/Hackathon_Spring_24/GridIDPS/build/amp_challenge_arm.ino_stripped.elf
 ifeq (,$(wildcard ${TARGET_7_BIN}))
 else
 EXTRA_TARGETS+=scripted/target7.original.exe
