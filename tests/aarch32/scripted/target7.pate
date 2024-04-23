@@ -1,61 +1,61 @@
 Choose Entry Point
     > Function Entry "loop"
 
-0x2e72
-    ...
-    ...
-    Classifier Failure: Mark 0x2e74 as return?
-        > True
-        > True
 
-0x2e7a
+0x2e72 [ via: "loop" (0x2e6c) ]
     ...
-    ...
-    Classifier Failure: Mark 0x2e90 as return?
-        > True
-        > True
+    Call to: "usb_serial_getchar" (0xe224) Returns to: "loop" (0x2e7a) (original) vs. Call to: "setModifyTime" (0x3ed0) Returns to: "loop" (0x3f08) (patched)
+        ...
+            ...
+            > Choose desynchronization points
 
-0x9da
-    ...
-    ...
-    Classifier Failure: Mark 0x9ea as return?
-        > True
-        > True
 
-0xd86
-    ...
-    ...
-    Classifier Failure: Mark 0xd96 as return?
-        > True
-        > True
+            Choose a desynchronization point:
+                > 0x2e76 (original)
+                > 0x2e76 (patched)
 
-0x2c24
-    ...
-    ...
-    Classifier Failure: Mark 0x2c26 as return?
-        > True
-        > True
 
-0x1d4c
+0x2e76 [ via: "loop" (0x2e6c) ]
     ...
-    ...
-    Classifier Failure: Mark 0x1d4e as return?
-        > True
-        > True
+    Call to: "usb_serial_getchar" (0xe224) Returns to: "loop" (0x2e7a) (original) vs. Call to: "setModifyTime" (0x3ed0) Returns to: "loop" (0x3f08) (patched)
+        ...
+            ...
+            > Choose synchronization points
 
-0x2e2e
-    ...
-    ...
-    Classifier Failure: Mark 0x2e14 as return?
-        > True
-        > True
+            Choose a synchronization point:
+                > 0x2e76 (original)
+                > 0x3f16 (patched)
 
-0x2ec2
+0x2e7a (original) vs. 0x3f1a (patched)
     ...
     ...
-    Classifier Failure: Mark 0x2ec4 as return?
-        > True
-        > True
+    ...
+    ? Control flow desynchronization found
+
+0x2e76 (original) vs. 0x3f16 (patched)
+    Modify Proof Node
+    ...
+    > 0: Assert condition
+
+Function Entry "setModifyTime" (0x3ed0) (patched)
+    ...
+    Call to: "usb_serial_available" (0xe19c)
+    ...
+    Modify Proof Node
+    ...
+    > Assume as equivalence condition that branch is infeasible 
+
+0x2e7a (original) vs. 0x3f1a (patched)
+    ...
+    ...
+    ...
+    Control flow desynchronization found
+    > Defer decision
+
+0x2e76 (original) vs. 0x3f16 (patched)
+    ...
+    > Include All Registers
+
 
 Verification Finished
     ...

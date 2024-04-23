@@ -1,6 +1,6 @@
 --ignore-segments 1
 -o target7.original.exe
--p target7.original.exe
+-p target7.patched.exe
 -e ContinueAfterRecoverableFailures
 -r AllowEqRescopeFailure
 -s loop
@@ -9,3 +9,4 @@
 --original-csv-function-hints target7.csv
 --patched-csv-function-hints target7.csv
 -b target7.toml
+--goal-timeout 30
