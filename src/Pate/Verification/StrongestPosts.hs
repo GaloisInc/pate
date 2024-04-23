@@ -2281,15 +2281,9 @@ triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> d
     mrets <- PPa.toMaybeCases <$> 
       PPa.forBinsF (\bin -> PPa.get bin blkts >>= getTargetReturn) 
     case (combineCases ecase1 ecase2,mrets) of
-      (Nothing,_) -> do
-        IO.liftIO $ IO.putStrLn $ "nocombinecases"
-        handleDivergingPaths scope bundle' currBlock st d blkts
-      (_,PPa.PatchPairMismatch{}) -> do
-        IO.liftIO $ IO.putStrLn $ "PatchPairMismatch"
-        handleDivergingPaths scope bundle' currBlock st d blkts
-      _ | isMismatchedStubs stubPair -> do
-        IO.liftIO $ IO.putStrLn $ ("mismatchedStubs: " ++ show stubPair)
-        handleDivergingPaths scope bundle' currBlock st d blkts
+      (Nothing,_) -> handleDivergingPaths scope bundle' currBlock st d blkts
+      (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope bundle' currBlock st d blkts
+      _ | isMismatchedStubs stubPair -> handleDivergingPaths scope bundle' currBlock st d blkts
       (Just ecase, PPa.PatchPairJust rets) -> fmap (updateBranchGraph st blkts) $ do
         let pPair = TF.fmapF PB.targetCall blkts
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)

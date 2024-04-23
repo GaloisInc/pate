@@ -763,8 +763,6 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
 
   picked <- pickMany pickIn
 
-  IO.liftIO $ IO.putStrLn (show picked)
-
   return $ \(PL.SomeLocation loc) ->
     case loc of
       PL.Register r -> elem (Some r) (pickRegs picked)
