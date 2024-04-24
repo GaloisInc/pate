@@ -734,10 +734,7 @@ def get_cfar_addr_1(cfar_id:str) -> Optional[int]:
 def get_addr_id(a: dict):
     base = a['base']
     offset = a['offset']
-    if base == 0:
-        return offset
-    else:
-        return 'S{}+{}'.format(base, offset)
+    return 'S{}+{}'.format(base, offset)
 
 
 def get_value_id(v):
