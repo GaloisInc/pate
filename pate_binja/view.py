@@ -97,10 +97,12 @@ class PateWidget(QWidget):
 
     def loadBinaryViews(self):
         if self.originalFilename:
-            self.originalBinaryView = load(self.originalFilename)
+            self.originalBinaryView = getElfBinaryViewForFilename(self.context, self.originalFilename)
+            #self.originalBinaryView = load(self.originalFilename)
             self.originalBinaryView.update_analysis_and_wait()
         if self.patchedFilename:
-            self.patchedBinaryView = load(self.patchedFilename)
+            self.patchedBinaryView = getElfBinaryViewForFilename(self.context, self.patchedFilename)
+            #self.patchedBinaryView = load(self.patchedFilename)
             self.patchedBinaryView.update_analysis_and_wait()
 
     def gotoOriginalAddress(self, addr: int):
