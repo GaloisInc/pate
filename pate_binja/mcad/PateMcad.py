@@ -99,9 +99,9 @@ class PateMcad:
                 f'-mtriple={self.triple}',
                 f'-mcpu={self.cpu}',
                 # TODO: Ask about these three
-                #'--use-call-inst',
-                #'--use-return-inst',
-                #'--noalias=false',
+                '--use-call-inst',
+                '--use-return-inst',
+                '--noalias=false',
                 f'-load-broker-plugin={brokerPluginPath}',
                 ]
         self.proc = subprocess.Popen(args,
