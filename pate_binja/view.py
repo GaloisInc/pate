@@ -272,8 +272,8 @@ class PateThread(Thread):
         # Hack to pre-start MCAD server(s)
         bv = self.pate_widget.getOriginalBinaryView()
         arch = bv.arch
-        PateMcad.getServerForArch(arch.name)
-        if arch.name == 'thumb2':
+        if arch.name in ['thumb2', 'armv7']:
+            PateMcad.getServerForArch('thumb2')
             PateMcad.getServerForArch('armv7')
 
         # TODO: This is does not quite work. Several problems:
