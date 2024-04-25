@@ -78,9 +78,6 @@ class PateWidget(QWidget):
         self.originalFilename = None
         self.patchedFilename = None
 
-        self.originalBinaryView = None
-        self.patchedBinaryView = None
-
     def loadBinaryFileTabs(self, config: dict):
         #print('config:', config)
         cwd = config.get('cwd')
@@ -95,15 +92,19 @@ class PateWidget(QWidget):
         if self.patchedFilename:
             getTabForFilename(self.context, self.patchedFilename, True)
 
-    def loadBinaryViews(self):
+    def getOriginalBinaryView(self):
         if self.originalFilename:
-            self.originalBinaryView = getElfBinaryViewForFilename(self.context, self.originalFilename)
+            # TODO: Really need to make sure analysis completes befoer usage, but thread issues make this difficult
+            return getElfBinaryViewForFilename(self.context, self.originalFilename)
             #self.originalBinaryView = load(self.originalFilename)
-            self.originalBinaryView.update_analysis_and_wait()
+            #self.originalBinaryView.update_analysis_and_wait()
+
+    def getPatchedBinaryView(self):
         if self.patchedFilename:
-            self.patchedBinaryView = getElfBinaryViewForFilename(self.context, self.patchedFilename)
+            # TODO: Really need to make sure analysis completes befoer usage, but thread issues make this difficult
+            return getElfBinaryViewForFilename(self.context, self.patchedFilename)
             #self.patchedBinaryView = load(self.patchedFilename)
-            self.patchedBinaryView.update_analysis_and_wait()
+            #self.patchedBinaryView.update_analysis_and_wait()
 
     def gotoOriginalAddress(self, addr: int):
         showLocationInFilename(self.context, self.originalFilename, addr)
@@ -116,10 +117,6 @@ class PateWidget(QWidget):
         print("Close Event PateWidget:", self)
         if self.pate_thread:
             self.pate_thread.cancel()
-        if self.originalBinaryView:
-            self.originalBinaryView.file.close()
-        if self.patchedBinaryView:
-            self.patchedBinaryView.file.close()
 
     # def tabCloseRequested(self, index):
     #     # TODO: Problem: Since we don't have the DockableTabWidget we cannot tell if index refers to the tab
@@ -147,10 +144,10 @@ class PateWidget(QWidget):
 
     def injectBinjaDissembly(self, original_lines, patched_lines):
 
-        obv = self.originalBinaryView
+        obv = self.getOriginalBinaryView()
         original_lines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), original_lines))
 
-        pbv = self.originalBinaryView
+        pbv = self.getPatchedBinaryView()
         patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
 
         return original_lines, patched_lines
@@ -272,10 +269,8 @@ class PateThread(Thread):
             lambda: self.pate_widget.context.createTabForWidget("PATE " + os.path.basename(self.filename),
                                                                 self.pate_widget))
 
-        self.pate_widget.loadBinaryViews()
-
         # Hack to pre-start MCAD server(s)
-        bv = self.pate_widget.originalBinaryView
+        bv = self.pate_widget.getOriginalBinaryView()
         arch = bv.arch
         PateMcad.getServerForArch(arch.name)
         if arch.name == 'thumb2':
@@ -447,14 +442,14 @@ class InstTreeDiffWidget(QWidget):
         original_lines = []
         if instTrees.get('original'):
             originalInstTree = instTrees['original']
-            obv = pw.originalBinaryView
+            obv = pw.getOriginalBinaryView()
             pw.mcad_annotate_inst_tree(originalInstTree, obv)
             original_lines = self.getInstTreeLines(originalInstTree, obv)
 
         patched_lines = []
         if instTrees.get('patched'):
             patchedInstTree = instTrees['patched']
-            pbv = pw.patchedBinaryView
+            pbv = pw.getPatchedBinaryView()
             pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
             patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
 
@@ -594,10 +589,10 @@ class PateCfarInstTreeDialog(QDialog):
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
-        obv = pw.originalBinaryView
+        obv = pw.getOriginalBinaryView()
         self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
 
-        pbv = pw.patchedBinaryView
+        pbv = pw.getPatchedBinaryView()
         self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
 
         hsplitter = QSplitter()
@@ -936,7 +931,7 @@ def launch_pate(context: UIActionContext):
     pate_widget = PateWidget(context.context, context.widget)
     pt = PateThread(f, pate_widget)
     pate_widget.pate_thread = pt
-    pt.start()  # This will call pate_widget.loadBinaryViews() once config is loaded
+    pt.start()
 
 
 def quitCleanup():
