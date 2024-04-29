@@ -18,6 +18,7 @@ module Pate.Verification.Simplify (
   , runSimplifier
   , getSimplifier
   , deepPredicateSimplifier
+  , prettySimplifier
   ) where
 
 import           Control.Monad (foldM)
@@ -121,8 +122,9 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (doSimp e)) a
 
 tracedSimpCheck :: forall sym arch. WEH.SimpCheck sym (EquivM_ sym arch)
-tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -> do
+tracedSimpCheck = WEH.SimpCheck (emitTrace @"debug") $ \ce_trace e_orig e_simp -> withValid $ withSym $ \sym -> do
   not_valid <- liftIO $ (W4.isEq sym e_orig e_simp >>= W4.notPred sym)
+  withTracing @"debug" "Goal" $ emitTrace @"expr" (Some not_valid)
   goalSat "tracedSimpCheck" not_valid $ \case
     W4R.Unsat{} -> return e_simp
     W4R.Unknown{} -> do
@@ -137,6 +139,9 @@ tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -
         emitTraceLabel @"expr" "simplified" (Some e_simp)
         e_orig_conc <- concretizeWithModel fn e_orig
         e_simp_conc <- concretizeWithModel fn e_simp
+        do
+          SymGroundEvalFn fn' <- return fn
+          WEH.runCETracer ce_trace fn'
         vars <- fmap Set.toList $ liftIO $ WEH.boundVars e_orig
         binds <- foldM (\asms (Some var) -> do
           conc <- concretizeWithModel fn (W4.varExpr sym var)
@@ -208,6 +213,12 @@ simplifyPred_deep p = withSym $ \sym -> do
 
 data Simplifier sym arch = Simplifier { runSimplifier :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp) }
 
+instance Semigroup (Simplifier sym arch) where
+  (Simplifier f1) <> (Simplifier f2) = Simplifier $ \e -> f1 e >>= f2
+
+instance Monoid (Simplifier sym arch) where
+  mempty = Simplifier pure
+
 applySimplifier ::
   PEM.ExprMappable sym v =>
   Simplifier sym arch ->
@@ -229,6 +240,12 @@ deepPredicateSimplifier = withSym $ \sym -> do
       W4.BaseBoolRepr -> simplifyPred_deep e2
       _ -> return e2
     applyCurrentAsms e4
+
+-- | Simplified that should only be used to display terms
+prettySimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
+prettySimplifier = return $ Simplifier $ \e0 -> withSym $ \sym -> do
+  simp_check <- getSimpCheck
+  WEH.bvPrettySimplify sym simp_check e0
 
 getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 getSimplifier = withSym $ \sym -> do
