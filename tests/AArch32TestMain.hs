@@ -9,7 +9,7 @@ main = do
         { testArchName = "aarch32"
         , testArchLoader = AArch32.archLoader
         , testExpectEquivalenceFailure =
-            [ "stack-struct", "unequal/stack-struct", "max-signed"
+            [ "stack-struct", "unequal/stack-struct", "max-signed", "desync-zerostep"
               -- missing interactive test support
             ]
         , testExpectSelfEquivalenceFailure = []
