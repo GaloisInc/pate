@@ -46,7 +46,7 @@ class PateWrapper:
                  ) -> None:
         self.debug_io = False
         self.debug_json = False
-        self.debug_cfar = True
+        self.debug_cfar = False
 
         self.filename = filename
         self.user = user
