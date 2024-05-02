@@ -266,21 +266,38 @@ class PateWrapper:
                             print('   Patched CFAR:', p_id)
 
     def prune_orphans(self, graph: CFARGraph):
-        while True:
-            orphans = []
-            for n in graph.nodes.values():
-                if not n.id.startswith('Function entry ') and not graph.get_parents(n):
-                    # Found an orphan
-                    orphans.append(n)
-            for n in orphans:
-                # TODO: move this to a delete method
-                if self.debug_cfar:
-                    print('CFAR prune: ', n.id)
-                n.exits = []
-                del graph.nodes[n.id]
-            if not orphans:
-                # Done
-                break
+        roots = [n for n in graph.nodes.values() if n.id.startswith('Function entry ')]
+        marked = {}
+        def mark(n: CFARNode):
+            if not marked.get(n):
+                marked[n] = True
+                for e in n.exits:
+                    mark(e)
+        for r in roots:
+            mark(r)
+        orphans = [n for n in graph.nodes.values() if not marked.get(n)]
+        for n in orphans:
+            # TODO: move this to a delete method
+            if self.debug_cfar:
+                print('CFAR prune: ', n.id)
+            n.exits = []
+            del graph.nodes[n.id]
+
+        # orphans = []
+        # while True:
+        #     for n in graph.nodes.values():
+        #         if not n.id.startswith('Function entry ') and not graph.get_parents(n):
+        #             # Found an orphan
+        #             orphans.append(n)
+        #     for n in orphans:
+        #         # TODO: move this to a delete method
+        #         if self.debug_cfar:
+        #             print('CFAR prune: ', n.id)
+        #         n.exits = []
+        #         del graph.nodes[n.id]
+        #     if not orphans:
+        #         # Done
+        #         break
 
     def extract_graph_rec(self,
                           rec: dict,
