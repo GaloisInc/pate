@@ -638,14 +638,14 @@ class CFARNode:
     def pprint(self, pre: str = ''):
         print(f'{pre}CFAR Node: {self.id}')
         print(f'{pre}desc: {self.desc}')
-        if self.predicate:
-            sys.stdout.write('Equivalence Condition: ')
-            pprint_symbolic(sys.stdout, self.predicate)
-            sys.stdout.write('\n')
+        # if self.predicate:
+        #     sys.stdout.write('Equivalence Condition: ')
+        #     pprint_symbolic(sys.stdout, self.predicate)
+        #     sys.stdout.write('\n')
         self.pprint_node_contents(pre, show_ce_trace=True)
-        if self.instruction_trees:
-            pprint_node_inst_tree(self.instruction_trees.get('original'), 'Original inst tree: ')
-            pprint_node_inst_tree(self.instruction_trees.get('patched'), 'Patched inst tree: ')
+        # if self.instruction_trees:
+        #     pprint_node_inst_tree(self.instruction_trees.get('original'), 'Original inst tree: ')
+        #     pprint_node_inst_tree(self.instruction_trees.get('patched'), 'Patched inst tree: ')
         print()
         #print('data:')
         #pp.pprint(self.data)
@@ -709,6 +709,7 @@ class CFARGraph:
         return node
 
     def pprint(self):
+        print('Dumping CFAR graph...')
         for n in self.nodes.values():
             n.pprint()
 
