@@ -70,8 +70,15 @@ class PateWrapper:
         if not self.config:
             self.user.show_message('ERROR: Failed to load PATE run config from', self.filename)
             return
-        original = self.config.get('original')
-        patched = self.config.get('patched')
+        original: str = self.config.get('original')
+        patched: str = self.config.get('patched')
+
+        # Pate needs the actual binary, not a binja db file. This is a hack that will only work when the exe is in the
+        # same directory as the db file and has teh same basename.
+        # TODO: Make this more robust. Either find the exe from the db file, or have the gui fond the db from the exe.
+        original = original.removesuffix(".bndb")
+        patched = patched.removesuffix(".bndb")
+
         raw_args = self.config.get('args')
         args = shlex.split(' '.join(raw_args))
         # We use a helper script to run logic in the user's shell environment.
