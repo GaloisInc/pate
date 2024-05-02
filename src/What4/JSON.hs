@@ -69,6 +69,7 @@ import Control.Monad.Reader
 import Control.Exception (tryJust)
 import What4.Utils.Process (filterAsync)
 import qualified What4.ExprHelpers as WEH
+import qualified Data.BitVector.Sized as BVS
 
 
 newtype ExprCache sym = ExprCache (Map (Some (W4.SymExpr sym)) JSON.Value)
@@ -139,6 +140,7 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
         v <- case W4.asConcrete e' of
           Just (W4.ConcreteInteger i) -> return $ JSON.toJSON i
           Just (W4.ConcreteBool b) -> return $ JSON.toJSON b
+          Just (W4.ConcreteBV w bv) -> return $ JSON.toJSON (BVS.ppHex w bv)
           Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e')))
           _ -> do
             sym <- asks w4sSym
