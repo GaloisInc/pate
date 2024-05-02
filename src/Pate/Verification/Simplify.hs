@@ -157,7 +157,9 @@ getSimpCheck :: EquivM sym arch (WEH.SimpCheck sym (EquivM_ sym arch))
 getSimpCheck = do
   shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
   case shouldCheck of
-    True -> return tracedSimpCheck
+    True -> withSym $ \sym -> do
+      cache_def_simp <- W4B.newIdxCache
+      return $ WEH.wrapSimpSolverCheck (WEH.unfoldDefinedFns sym (Just cache_def_simp)) tracedSimpCheck
     False -> return WEH.noSimpCheck
 
 
@@ -171,10 +173,12 @@ simplifyPred_deep ::
 simplifyPred_deep p = withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   cache <- W4B.newIdxCache
+  fn_cache <- W4B.newIdxCache
   let
     checkPred :: W4.Pred sym -> EquivM sym arch Bool
-    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $
-      Const <$> isPredTrue' heuristicTimeout p'
+    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $ do
+      p'' <- WEH.unfoldDefinedFns sym (Just fn_cache) p'
+      Const <$> isPredTrue' heuristicTimeout p''
   -- remove redundant atoms
   p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
   -- resolve array lookups across unrelated updates
@@ -185,8 +189,10 @@ simplifyPred_deep p = withSym $ \sym -> do
   p4 <- liftIO $ WEH.expandMuxEquality sym p3
   -- remove redundant conjuncts
   p_final <- WEH.simplifyConjuncts sym (\x -> checkPred x) p4
+  p_final' <- WEH.unfoldDefinedFns sym (Just fn_cache) p_final
+  p' <- WEH.unfoldDefinedFns sym (Just fn_cache) p
   -- TODO: redundant sanity check that simplification hasn't clobbered anything
-  validSimpl <- liftIO $ W4.isEq sym p p_final
+  validSimpl <- liftIO $ W4.isEq sym p' p_final'
   goal <- liftIO $ W4.notPred sym validSimpl
   r <- checkSatisfiableWithModel heuristicTimeout "SimplifierConsistent" goal $ \sr ->
     case sr of
