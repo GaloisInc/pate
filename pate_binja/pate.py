@@ -5,12 +5,12 @@ import abc
 import io
 import json
 import os
+import pathlib
 import pprint
 import re
 import shlex
 import signal
 import sys
-import warnings
 from json import JSONDecodeError
 from subprocess import Popen, PIPE, STDOUT, TimeoutExpired
 from typing import IO, Any, Optional
@@ -46,7 +46,7 @@ class PateWrapper:
                  ) -> None:
         self.debug_io = False
         self.debug_json = False
-        self.debug_cfar = False
+        self.debug_cfar = True
 
         self.filename = filename
         self.user = user
@@ -1556,14 +1556,11 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
 
 def get_demo_files():
     files = []
-    demos_dir = os.getenv('PATE_BINJA_DEMOS')
-    if demos_dir:
-        # TODO: Search dir for matching files rather than hardcoded list
-        for d in ['may23-challenge10', 'nov23-target1-room1018', 'nov23-target3-room1011-dendy', 'nov23-target4-room1011-dendy']:
-            for ext in ['.run-config.json', '.replay']:
-                f = os.path.join(demos_dir, d, d + ext)
-                if os.path.isfile(f):
-                    files.append(f)
+    demoDir = pathlib.Path(os.getenv('PATE_BINJA_DEMOS'))
+    included_extensions = ['run-config', 'replay']
+    allFiles = demoDir.rglob('*')
+    files = [str(fn) for fn in allFiles
+                  if any(fn.name.endswith(ext) for ext in included_extensions)]
     return files
 
 
