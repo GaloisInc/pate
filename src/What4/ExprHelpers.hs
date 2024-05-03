@@ -2115,35 +2115,43 @@ mkBVOp ::
 mkBVOp sym bvop e1 e2  = do
   case bvop of
     COrd EQ _ ct -> appBVOp sym bvop ct W4.isEq e1 e2
-    BVAdd _ ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvAdd e1 e2
-    BVAdd _ ct | W4.BaseIntegerRepr{} <- compatibleTypeRepr ct  -> appBVOp sym bvop ct W4.intAdd e1 e2
-    BVAdd _ ct -> case ct of
+    BVAdd _ ct -> case compatibleTypeRepr ct of
+      W4.BaseBVRepr{} -> appBVOp sym bvop ct W4.bvAdd e1 e2
+      W4.BaseIntegerRepr{} -> appBVOp sym bvop ct W4.intAdd e1 e2
+      _ -> case ct of
 
-    BVSub _ ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvSub e1 e2
-    BVSub _ ct | W4.BaseIntegerRepr{} <- compatibleTypeRepr ct  -> appBVOp sym bvop ct W4.intSub e1 e2
-    BVSub _ ct -> case ct of
+    BVSub _ ct -> case compatibleTypeRepr ct of
+      W4.BaseBVRepr{} -> appBVOp sym bvop ct W4.bvSub e1 e2
+      W4.BaseIntegerRepr{} -> appBVOp sym bvop ct W4.intSub e1 e2
+      _ -> case ct of
 
-    BVMul _ ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct  -> appBVOp sym bvop ct W4.bvMul e1 e2
-    BVMul _ ct | W4.BaseIntegerRepr{} <- compatibleTypeRepr ct  -> appBVOp sym bvop ct W4.intMul e1 e2
-    BVMul _ ct -> case ct of
+    BVMul _ ct -> case compatibleTypeRepr ct of
+      W4.BaseBVRepr{} -> appBVOp sym bvop ct W4.bvMul e1 e2
+      W4.BaseIntegerRepr{} -> appBVOp sym bvop ct W4.intMul e1 e2
+      _ -> case ct of
+    
+    COrd ord s ct -> case compatibleTypeRepr ct of
+      W4.BaseBVRepr{} -> case (ord, s) of
+        (LT, True) -> appBVOp sym bvop ct W4.bvSlt e1 e2
+        (LT, False) -> appBVOp sym bvop ct W4.bvUlt e1 e2
+        (GT, True) -> appBVOp sym bvop ct W4.bvSgt e1 e2
+        (GT, False) -> appBVOp sym bvop ct W4.bvUgt e1 e2
+      W4.BaseIntegerRepr{} -> case ord of
+        LT -> appBVOp sym bvop ct W4.intLt e1 e2
+        GT -> appBVOp sym bvop ct (\sym' e1' e2' -> W4.intLt sym' e2' e1') e1 e2
+      _ -> case ct of
 
-    COrd LT True ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvSlt e1 e2
-    COrd LT False ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvUlt e1 e2
-    COrd LT _ ct | W4.BaseIntegerRepr <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.intLt e1 e2
-    COrd GT True ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvSgt e1 e2
-    COrd GT False ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvUgt e1 e2
-    COrd GT _ ct | W4.BaseIntegerRepr <- compatibleTypeRepr ct -> appBVOp sym bvop ct (\sym' e1' e2' -> W4.intLe sym' e1' e2' >>= W4.notPred sym) e1 e2
-    COrd _ _ ct -> case ct of
+    GE s ct -> case compatibleTypeRepr ct of
+      W4.BaseBVRepr{} | s -> appBVOp sym bvop ct W4.bvSge e1 e2
+      W4.BaseBVRepr{} | False <- s -> appBVOp sym bvop ct W4.bvUge e1 e2
+      W4.BaseIntegerRepr{} -> appBVOp sym bvop ct (\sym' e1' e2' -> W4.intLe sym' e2' e1') e1 e2
+      _ -> case ct of
 
-    GE True ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvSge e1 e2
-    GE False ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvUge e1 e2
-    GE _ ct | W4.BaseIntegerRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct (\sym' e1' e2' -> W4.intLt sym' e1' e2' >>= W4.notPred sym) e1 e2
-    GE _ ct -> case ct of
-
-    LE True ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvSle e1 e2
-    LE False ct | W4.BaseBVRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.bvUle e1 e2
-    LE _ ct | W4.BaseIntegerRepr{} <- compatibleTypeRepr ct -> appBVOp sym bvop ct W4.intLe e1 e2
-    LE _ ct -> case ct of
+    LE s ct -> case compatibleTypeRepr ct of
+      W4.BaseBVRepr{} | s -> appBVOp sym bvop ct W4.bvSle e1 e2
+      W4.BaseBVRepr{} | False <- s -> appBVOp sym bvop ct W4.bvUle e1 e2
+      W4.BaseIntegerRepr{} -> appBVOp sym bvop ct W4.intLe e1 e2
+      _ -> case ct of
 
 
 -- | Wrap an operation in an applied defined function
