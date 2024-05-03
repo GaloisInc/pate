@@ -93,7 +93,7 @@ import           Unsafe.Coerce ( unsafeCoerce ) -- for mulMono axiom
 import           Control.Lens ( (.~), (&), (^.) )
 
 import           Control.Applicative
-import           Control.Monad (foldM)
+import           Control.Monad (foldM, MonadPlus)
 import           Control.Monad.Except
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Monad.IO.Class as IO
@@ -104,7 +104,7 @@ import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Trans.Reader as RWS hiding (ask, local)
 import qualified Control.Monad.Reader as RWS
 
-import           Control.Monad.Trans (lift)
+import           Control.Monad.Trans (lift, MonadTrans)
 import           Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import qualified System.IO as IO
 
