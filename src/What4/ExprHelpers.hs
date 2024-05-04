@@ -30,6 +30,7 @@ Helper functions for manipulating What4 expressions
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ViewPatterns   #-}
 {-# LANGUAGE EmptyCase #-}
+{-# LANGUAGE NoStarIsType #-}
 
 module What4.ExprHelpers (
     iteM
@@ -86,6 +87,7 @@ module What4.ExprHelpers (
   , CETracer(..)
   , unfoldDefinedFns
   , wrapSimpSolverCheck
+  , memReadPrettySimplify
   ) where
 
 import           GHC.TypeNats
@@ -147,6 +149,7 @@ import qualified What4.Utils.AbstractDomains as W4AD
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
 import Data.Maybe (fromMaybe)
+import qualified Data.Parameterized.Vector as V
 
 -- | Sets the abstract domain of the given integer to assume
 --   that it is positive. 
@@ -2198,6 +2201,148 @@ orFn ::
   W4.Pred sym ->
   IO (W4.Pred sym)
 orFn sym p1 p2 = wrapFn sym "OR" (Ctx.empty Ctx.:> p1 Ctx.:> p2) (W4.orPred sym)
+
+data BVConcatResult sym w_outer w_inner where
+  BVConcatResult :: forall n sym w_inner. (1 <= n, 1 <= w_inner) => 
+    W4.NatRepr n -> W4.NatRepr w_inner -> V.Vector n (W4.SymBV sym w_inner) -> BVConcatResult sym (n * w_inner) w_inner
+
+bvConcatResultWidth :: BVConcatResult sym w_outer w_inner -> W4.NatRepr w_inner
+bvConcatResultWidth = \case
+ BVConcatResult _ w _ -> w
+
+combineBVConcatResults ::
+  BVConcatResult sym w_outer1 w_inner ->
+  BVConcatResult sym w_outer2 w_inner ->
+  BVConcatResult sym (w_outer1 + w_outer2) w_inner
+combineBVConcatResults (BVConcatResult lhs_n_inner lhs_w_inner lhs_bvs) (BVConcatResult rhs_n_inner _ rhs_bvs) 
+  | Refl <- W4.addMulDistribRight lhs_n_inner rhs_n_inner lhs_w_inner
+    , W4.LeqProof <- W4.leqAddPos  lhs_n_inner rhs_n_inner
+    = BVConcatResult (W4.addNat lhs_n_inner rhs_n_inner) lhs_w_inner (V.append lhs_bvs rhs_bvs)
+
+-- Could be implemented as a pure/total function, since
+-- there is always a base case of no concatenations
+getBVConcats ::
+  Monad m =>
+  W4.SymBV sym w ->
+  SimpT sym m (Some (BVConcatResult sym w))
+getBVConcats e = withSym $ \_ -> do
+  W4B.BVConcat _ lhs rhs <- asApp e
+  getBVConcatsApp lhs rhs
+  <|> do
+    W4.BaseBVRepr w <- return $ W4.exprType e
+    return $ Some $ BVConcatResult (W4.knownNat @1) w (V.singleton e)
+
+getBVConcatsApp ::
+  Monad m =>
+  W4.SymBV sym w1 ->
+  W4.SymBV sym w2 ->
+  SimpT sym m (Some (BVConcatResult sym (w1 + w2)))
+getBVConcatsApp lhs rhs = do
+  Some lhs_result <- getBVConcats lhs
+  Some rhs_result <- getBVConcats rhs
+  lhs_inner_w <- return $ bvConcatResultWidth lhs_result
+  rhs_inner_w <- return $ bvConcatResultWidth rhs_result
+  Refl <- simpMaybe $ testEquality lhs_inner_w rhs_inner_w
+  return $ Some $ combineBVConcatResults lhs_result rhs_result
+
+
+asSequential ::
+  forall m sym w n.
+  IO.MonadIO m =>
+  Bool ->
+  W4.BoundVar sym (W4.BaseBVType w) ->
+  V.Vector n (W4.SymBV sym w) -> 
+  SimpT sym m (V.Vector n (W4.SymBV sym w))
+asSequential be var v_outer = go 0 v_outer
+  where
+    go :: forall n_. Integer -> V.Vector n_ (W4.SymBV sym w) -> SimpT sym m (V.Vector n_ (W4.SymBV sym w))
+    go offset v = withSym $ \sym -> do
+
+      let (x1, rest) = next_bv v
+      W4.BaseBVRepr w <- return $ W4.exprType x1
+      offset_bv <- IO.liftIO $ W4.bvLit sym w (BVS.mkBV w offset)
+      var_as_offset <- IO.liftIO $ W4.bvAdd sym (W4.varExpr sym var) offset_bv
+      x1_as_offset <- IO.liftIO $ W4.bvAdd sym first_bv offset_bv
+      check <- IO.liftIO $ W4.isEq sym x1_as_offset x1
+      case W4.asConstantPred check of
+        Just True -> case rest of
+          Left Refl -> return $ V.singleton var_as_offset
+          Right v' -> do
+            v_result <- go (offset + 1) v'
+            W4.LeqProof <- return $ V.nonEmpty v
+            Refl <- return $ W4.minusPlusCancel (V.length v) (W4.knownNat @1)
+            return $ mk_v var_as_offset v_result
+        _ -> fail $ "not sequential:" ++ show x1 ++ "vs. " ++ show x1_as_offset
+
+    mk_v :: tp -> V.Vector n_ tp -> V.Vector (n_+1) tp
+    mk_v x v_ = case be of
+      True -> V.cons x v_
+      False -> V.snoc v_ x
+
+    next_bv :: forall n_ tp. V.Vector n_ tp -> (tp, Either (n_ :~: 1) (V.Vector (n_-1) tp))
+    next_bv v_ = case be of
+      True -> V.uncons v_
+      False -> V.unsnoc v_
+
+    first_bv = fst (next_bv v_outer)
+
+concatBVs ::
+  W4.IsExprBuilder sym =>
+  sym -> 
+  V.Vector n (W4.SymBV sym w) -> 
+  IO (W4.SymBV sym (n*w))
+concatBVs sym v = do
+  let (x1, rest) = V.uncons v
+  W4.BaseBVRepr w <- return $ W4.exprType x1
+  case rest of
+    Left Refl -> return x1
+    Right v' -> do
+      W4.LeqProof <- return $ V.nonEmpty v
+      W4.LeqProof <- return $ V.nonEmpty v'
+      bv' <- concatBVs sym v'
+      -- W4.BaseBVRepr w' <- return $ W4.exprType bv'
+      W4.LeqProof <- return $ W4.leqMulPos (V.length v') w
+      Refl <- return $ W4.lemmaMul w (V.length v)
+      W4.bvConcat sym x1 bv'
+
+memReadPrettySimplifyApp ::
+  forall sym m tp.
+  IO.MonadIO m =>
+  W4B.App (W4.SymExpr sym) tp -> 
+  SimpT sym m (W4.SymExpr sym tp)
+memReadPrettySimplifyApp app = withSym $ \sym -> do
+  W4B.BVConcat _ lhs rhs <- return app
+  Some (BVConcatResult _ _ inner_bvs) <- getBVConcatsApp lhs rhs
+  let (fst_bv, _) = V.uncons inner_bvs
+  W4B.SelectArray _ arr (Ctx.Empty Ctx.:> fst_addr) <- asApp fst_bv
+  W4.BaseBVRepr (addr_w :: W4.NatRepr addr_w) <- return $ W4.exprType fst_addr
+  (addrs :: V.Vector n (W4.SymBV sym addr_w)) <- forM inner_bvs $ \inner_bv -> do
+    W4B.SelectArray _ arr' (Ctx.Empty Ctx.:> inner_addr) <- asApp inner_bv
+    Refl <- simpMaybe $ testEquality arr arr'
+    return inner_addr
+  tryAll [True,False] $ \b -> do
+    addr_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.BaseBVRepr addr_w)
+    addrs_seq <- asSequential b addr_var addrs
+    let index_addr = if b then fst (V.uncons addrs) else fst (V.unsnoc addrs)
+    arr_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType arr)
+    vals <- IO.liftIO $ mapM (\addr_ -> W4.arrayLookup sym (W4.varExpr sym arr_var) (Ctx.empty Ctx.:> addr_)) addrs_seq
+    new_val <- IO.liftIO $ concatBVs sym vals
+    let nm = (if b then "readBE" else "readLE") ++ show (W4.natValue (V.length addrs))
+    fn <- IO.liftIO $ W4.definedFn sym (W4.safeSymbol nm) (Ctx.Empty Ctx.:> arr_var Ctx.:> addr_var) new_val W4.NeverUnfold
+    IO.liftIO $ W4.applySymFn sym fn (Ctx.empty Ctx.:> arr Ctx.:> index_addr) 
+
+memReadPrettySimplify ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  SimpCheck sym m -> 
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+memReadPrettySimplify sym simp_check e = do
+  cache_app <- W4B.newIdxCache
+  e1 <- simplifyApp sym cache_app simp_check (\app -> runSimpT sym simp_check (memReadPrettySimplifyApp app)) e
+  runSimpCheck simp_check e e1  
 
 -- | Simplification rules that are for display purposes only,
 --   as they can make terms more difficult for the solver to handle.

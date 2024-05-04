@@ -251,7 +251,8 @@ deepPredicateSimplifier = withSym $ \sym -> do
 prettySimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 prettySimplifier = return $ Simplifier $ \e0 -> withSym $ \sym -> do
   simp_check <- getSimpCheck
-  WEH.bvPrettySimplify sym simp_check e0
+  e1 <- WEH.bvPrettySimplify sym simp_check e0
+  WEH.memReadPrettySimplify sym simp_check e1
 
 getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 getSimplifier = withSym $ \sym -> do
