@@ -60,6 +60,7 @@ module What4.ExprHelpers (
   , ppExprSet
   , getPredAtoms
   , abstractOver
+  , abstractOverN
   , resolveConcreteLookups
   , minimalPredAtoms
   , expandMuxEquality
@@ -847,6 +848,25 @@ abstractOver sym sub outer = do
         _ -> return e
   outer_abs <- go outer
   W4.definedFn sym W4.emptySymbol (Ctx.empty Ctx.:> sub_bv) outer_abs W4.AlwaysUnfold
+
+abstractOverN ::
+  forall sym t solver fs ctx tp2.
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  -- | subterms
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  -- | outer term
+  W4.SymExpr sym tp2 ->
+  IO (W4.SymFn sym ctx tp2)
+abstractOverN sym Ctx.Empty e = W4.definedFn sym W4.emptySymbol Ctx.empty e W4.AlwaysUnfold
+abstractOverN sym subs@(rest Ctx.:> sub) outer = do
+  let tps = TFC.fmapFC W4.exprType subs
+  fn1 <- abstractOverN sym rest outer
+  vars@(rest_vars Ctx.:> sub_var) <- TFC.traverseFC (W4.freshBoundVar sym W4.emptySymbol) tps
+  body1 <- W4.applySymFn sym fn1 (TFC.fmapFC (W4.varExpr sym) rest_vars)
+  fn2 <- abstractOver sym sub body1
+  body2 <- W4.applySymFn sym fn2 (Ctx.Empty Ctx.:> W4.varExpr sym sub_var)
+  W4.definedFn sym W4.emptySymbol vars body2 W4.AlwaysUnfold
 
 stripAnnotations ::
   forall sym t solver fs tp.
