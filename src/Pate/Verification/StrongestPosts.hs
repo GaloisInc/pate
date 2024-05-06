@@ -838,13 +838,15 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
           s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
             (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
             (tr, _) <- withGraphNode scope nd pg $ \bundle d -> do
-              simplifier <- PSi.deepPredicateSimplifier
-              cond_simplified <- PSi.applySimplifier simplifier cond
+              pred_simp <- PSi.deepPredicateSimplifier
+              cond_simplified <- PSi.applySimplifier pred_simp cond
               eqCond_pred <- PEC.toPred sym cond_simplified
               (mtraceT, mtraceF) <- getTracesForPred scope bundle d eqCond_pred
               case (mtraceT, mtraceF) of
-                (Just traceT, Just traceF) -> 
-                  return $ (Just (FinalEquivCond eqCond_pred traceT traceF), pg)
+                (Just traceT, Just traceF) -> do
+                  pretty_simp <- PSi.prettySimplifier
+                  cond_pretty <- PSi.applySimplifier pretty_simp eqCond_pred
+                  return $ (Just (FinalEquivCond cond_pretty traceT traceF), pg)
                 _ -> return (Nothing, pg)
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
@@ -1194,9 +1196,8 @@ getTracesForPred ::
   EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
-  s0 <- PSi.deepPredicateSimplifier
-  s1 <- PSi.prettySimplifier
-  p_pretty <- PSi.applySimplifier (s0 <> s1 <> s0 <> s1) p
+  pretty_simp <- PSi.prettySimplifier
+  p_pretty <- PSi.applySimplifier pretty_simp p
   withTracing @"expr" (Some p_pretty) $ do
     mtraceT <- withTracing @"message" "With condition assumed" $ 
       withSatAssumption (PAS.fromPred p) $ do

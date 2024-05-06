@@ -247,9 +247,18 @@ deepPredicateSimplifier = withSym $ \sym -> do
       _ -> return e2
     applyCurrentAsms e4
 
--- | Simplified that should only be used to display terms
+-- | Simplifier that should only be used to display terms.
+--   Interleaved with the deep predicate simplifier in order to
+--   drop any redundant terms that are introduced.
 prettySimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
-prettySimplifier = return $ Simplifier $ \e0 -> withSym $ \sym -> do
+prettySimplifier = do
+  deep_pred_simp <- deepPredicateSimplifier
+  pretty_simp <- prettySimplifierBase
+  return $ deep_pred_simp <> pretty_simp <> deep_pred_simp <> pretty_simp
+
+-- | Core implementation of pretty simplification rules
+prettySimplifierBase :: forall sym arch. EquivM sym arch (Simplifier sym arch)
+prettySimplifierBase = return $ Simplifier $ \e0 -> withSym $ \sym -> do
   simp_check <- getSimpCheck
   e1 <- WEH.bvPrettySimplify sym simp_check e0
   e2 <- WEH.memReadPrettySimplify sym simp_check e1
