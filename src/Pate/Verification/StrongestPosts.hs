@@ -1196,7 +1196,7 @@ getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
   s0 <- PSi.deepPredicateSimplifier
   s1 <- PSi.prettySimplifier
-  p_pretty <- PSi.applySimplifier (s0 <> s1 <> s0) p
+  p_pretty <- PSi.applySimplifier (s0 <> s1 <> s0 <> s1) p
   withTracing @"expr" (Some p_pretty) $ do
     mtraceT <- withTracing @"message" "With condition assumed" $ 
       withSatAssumption (PAS.fromPred p) $ do

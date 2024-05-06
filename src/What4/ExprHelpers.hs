@@ -89,6 +89,7 @@ module What4.ExprHelpers (
   , unfoldDefinedFns
   , wrapSimpSolverCheck
   , memReadPrettySimplify
+  , collapseBVOps
   ) where
 
 import           GHC.TypeNats
@@ -2082,15 +2083,30 @@ appBVOp sym bvop ct f e1 e2 = do
 
 data BVOp tp1 tp2 tp3 where
   COrd :: forall tp1 tp2 tp3. Ordering -> Bool -> CompatibleTypes tp1 tp2 tp3 -> BVOp tp1 tp2 W4.BaseBoolType
+  NEQ :: Bool -> CompatibleTypes tp1 tp2 tp3 -> BVOp tp1 tp2 W4.BaseBoolType
   LE :: Bool -> CompatibleTypes tp1 tp2 tp3 -> BVOp tp1 tp2 W4.BaseBoolType
   GE :: Bool -> CompatibleTypes tp1 tp2 tp3 ->  BVOp tp1 tp2 W4.BaseBoolType
   BVAdd :: Bool -> CompatibleTypes tp1 tp2 tp3 -> BVOp tp1 tp2 tp3
   BVSub :: Bool -> CompatibleTypes tp1 tp2 tp3 -> BVOp tp1 tp2 tp3
   BVMul :: Bool -> CompatibleTypes tp1 tp2 tp3 -> BVOp tp1 tp2 tp3
 
+notBVOp :: BVOp tp1 tp2 W4.BaseBoolType -> BVOp tp1 tp2 W4.BaseBoolType
+notBVOp = \case
+  COrd LT b ct -> GE b ct
+  COrd GT b ct -> LE b ct
+  COrd EQ b ct -> NEQ b ct
+  NEQ b ct -> COrd EQ b ct
+  LE b ct -> COrd GT b ct
+  GE b ct -> COrd LT b ct
+  -- arithmetic ops can't occur with bool result type
+  BVAdd _ ct -> case ct of
+  BVSub _ ct -> case ct of
+  BVMul _ ct -> case ct of
+
 getCompatibleTypes :: BVOp tp1 tp2 tp3 -> Some (CompatibleTypes tp1 tp2)
 getCompatibleTypes = \case
   COrd _ _ ct -> Some ct
+  NEQ _ ct -> Some ct
   LE _ ct -> Some ct
   GE _ ct -> Some ct
   BVAdd _ ct -> Some ct
@@ -2102,6 +2118,7 @@ simpleShowBVOp bvop = case bvop of
   COrd LT _ _ -> "LT" ++ suf
   COrd EQ _ _ -> "EQ" ++ suf
   COrd GT _ _ -> "GT" ++ suf
+  NEQ _ _ -> "NEQ" ++ suf
   LE _ _ -> "LE" ++ suf
   GE _ _ -> "GE" ++ suf
   BVAdd _ _ -> "ADD" ++ suf
@@ -2113,6 +2130,40 @@ simpleShowBVOp bvop = case bvop of
       True -> "s"
       False -> "u"
 
+parseBVOp ::
+  String -> 
+  W4.BaseTypeRepr tp1 -> 
+  W4.BaseTypeRepr tp2 -> 
+  W4.BaseTypeRepr tp3 ->
+  Maybe (BVOp tp1 tp2 tp3)
+parseBVOp nm tp1 tp2 tp3 = case compatibleTypes tp1 tp2 of
+  Just (Some ct) ->
+    case tp3 of
+      W4.BaseBoolRepr -> case nm of
+        "LTs" -> Just $ COrd LT True ct
+        "GTs" -> Just $ COrd GT True ct
+        "EQs" -> Just $ COrd EQ True ct
+        "LTu" -> Just $ COrd LT False ct
+        "GTu" -> Just $ COrd GT False ct
+        "EQu" -> Just $ COrd EQ False ct
+        "LEs" -> Just $ LE True ct
+        "GEs" -> Just $ GE True ct
+        "LEu" -> Just $ LE False ct
+        "GEu" -> Just $ GE False ct
+        "NEQu" -> Just $ NEQ False ct
+        "NEQs" -> Just $ NEQ True ct
+        _ -> Nothing
+      W4.BaseBVRepr{} | Just Refl <- testEquality (compatibleTypeRepr ct) tp3 -> case nm of
+        "ADDs" -> Just $ BVAdd True ct
+        "ADDu" -> Just $ BVAdd False ct
+        "MULs" -> Just $ BVMul True ct
+        "MULu" -> Just $ BVMul False ct
+        "SUBs" -> Just $ BVSub True ct
+        "SUBu" -> Just $ BVSub False ct
+        _ -> Nothing
+      _ -> Nothing
+  _ -> Nothing
+
 instance Show (BVOp tp1 tp2 tp3) where
   show bvop | Some ct <- getCompatibleTypes bvop = simpleShowBVOp bvop ++ show ct
 
@@ -2121,6 +2172,7 @@ isSignedOp = \case
   COrd LT b _ -> b
   COrd GT b _ -> b
   COrd EQ b _ -> b
+  NEQ b _ -> b
   LE b _ -> b
   GE b _ -> b
   BVAdd b _ -> b
@@ -2138,6 +2190,7 @@ mkBVOp ::
 mkBVOp sym bvop e1 e2  = do
   case bvop of
     COrd EQ _ ct -> appBVOp sym bvop ct W4.isEq e1 e2
+    NEQ _ ct -> appBVOp sym bvop ct (\sym' e1' e2' -> W4.isEq sym' e1' e2' >>= W4.notPred sym') e1 e2
     BVAdd _ ct -> case compatibleTypeRepr ct of
       W4.BaseBVRepr{} -> appBVOp sym bvop ct W4.bvAdd e1 e2
       W4.BaseIntegerRepr{} -> appBVOp sym bvop ct W4.intAdd e1 e2
@@ -2328,9 +2381,10 @@ concatBVs sym v = do
 memReadPrettySimplifyApp ::
   forall sym m tp.
   IO.MonadIO m =>
+  (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) ->
   W4B.App (W4.SymExpr sym) tp -> 
   SimpT sym m (W4.SymExpr sym tp)
-memReadPrettySimplifyApp app = withSym $ \sym -> do
+memReadPrettySimplifyApp rec app = withSym $ \sym -> do
   W4B.BVConcat _ lhs rhs <- return app
   Some (BVConcatResult _ _ inner_bvs) <- getBVConcatsApp lhs rhs
   let (fst_bv, _) = V.uncons inner_bvs
@@ -2349,7 +2403,27 @@ memReadPrettySimplifyApp app = withSym $ \sym -> do
     new_val <- IO.liftIO $ concatBVs sym vals
     let nm = (if b then "readBE" else "readLE") ++ show (W4.natValue (V.length addrs))
     fn <- IO.liftIO $ W4.definedFn sym (W4.safeSymbol nm) (Ctx.Empty Ctx.:> arr_var Ctx.:> addr_var) new_val W4.NeverUnfold
-    IO.liftIO $ W4.applySymFn sym fn (Ctx.empty Ctx.:> arr Ctx.:> index_addr) 
+    arr' <- lift $ rec arr
+    index_addr' <- lift $ rec index_addr
+    IO.liftIO $ W4.applySymFn sym fn (Ctx.empty Ctx.:> arr' Ctx.:> index_addr') 
+
+liftAppSimpT ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  (forall tp''. (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) -> 
+   W4B.App (W4.SymExpr sym) tp'' -> SimpT sym m (W4.SymExpr sym tp'')) ->
+  sym ->
+  SimpCheck sym m ->
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+liftAppSimpT f sym simp_check e = do
+  cache_app <- W4B.newIdxCache
+  let
+    go :: forall tp'.  W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
+    go = simplifyApp sym cache_app simp_check (\app -> runSimpT sym simp_check (f go app))
+  e1 <- go e
+  runSimpCheck simp_check e e1  
 
 memReadPrettySimplify ::
   forall m sym t solver fs tp.
@@ -2359,83 +2433,127 @@ memReadPrettySimplify ::
   SimpCheck sym m -> 
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-memReadPrettySimplify sym simp_check e = do
-  cache_app <- W4B.newIdxCache
-  e1 <- simplifyApp sym cache_app simp_check (\app -> runSimpT sym simp_check (memReadPrettySimplifyApp app)) e
-  runSimpCheck simp_check e e1  
+memReadPrettySimplify = liftAppSimpT memReadPrettySimplifyApp
+
+data SomeAppBVOp sym tp where
+  SomeAppBVOp :: forall sym tp1 tp2 tp3. BVOp tp1 tp2 tp3 -> W4.SymExpr sym tp1 -> W4.SymExpr sym tp2 -> SomeAppBVOp sym tp3
+
+asSomeAppBVOp ::
+  Monad m =>
+  W4.SymExpr sym tp -> 
+  SimpT sym m (SomeAppBVOp sym tp)
+asSomeAppBVOp e = withSym $ \_ -> do
+  W4B.FnApp fn (Ctx.Empty Ctx.:> arg1 Ctx.:> arg2) <- simpMaybe $ W4B.asNonceApp e
+  nm <- return $ show (W4B.symFnName fn)
+  case parseBVOp nm (W4.exprType arg1) (W4.exprType arg2) (W4.exprType e) of
+    Just bvop -> return $ (SomeAppBVOp bvop arg1 arg2)
+    Nothing -> fail $ "Failed to parse " ++ show nm ++ ": " ++ show e 
+
+collapseAppBVOps ::
+  forall sym m tp.
+  IO.MonadIO m =>
+  (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) ->
+  W4B.App (W4.SymExpr sym) tp -> 
+  SimpT sym m (W4.SymExpr sym tp)
+collapseAppBVOps rec app = case app of
+  W4B.NotPred e -> go e
+  W4B.ConjPred bm -> withSym $ \sym -> do
+    ps <- toSimpleConj sym bm
+    (p:ps') <- lift $ mapM rec ps 
+    IO.liftIO $ foldM (W4.andPred sym) p ps'
+  _ -> withSym $ \_ -> fail $ "not negated predicate" ++ show app
+  where
+    go :: W4.Pred sym -> SimpT sym m (W4.Pred sym)
+    go e = withSym $ \sym -> do
+      e' <- lift $ rec e
+      SomeAppBVOp bvop e1 e2 <- asSomeAppBVOp e'
+      let bvop' = notBVOp bvop
+      IO.liftIO $ mvBVOpFn sym bvop' e1 e2
+
+collapseBVOps ::
+  forall m sym t solver fs tp.
+  IO.MonadIO m =>
+  sym ~ (W4B.ExprBuilder t solver fs) =>
+  sym ->
+  SimpCheck sym m -> 
+  W4.SymExpr sym tp ->
+  m (W4.SymExpr sym tp)
+collapseBVOps = liftAppSimpT collapseAppBVOps 
 
 -- | Simplification rules that are for display purposes only,
 --   as they can make terms more difficult for the solver to handle.
 bvPrettySimplifyApp ::
   forall sym m tp.
   IO.MonadIO m =>
+  (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) ->
   W4B.App (W4.SymExpr sym) tp -> 
   SimpT sym m (W4.SymExpr sym tp)
-bvPrettySimplifyApp app = withSym $ \sym -> tryAll (appAlts @sym app) $ \app' -> do
-    W4B.BaseEq _ (isUInt @sym 0 -> True) (W4B.asApp -> Just (W4B.BVSelect idx n bv)) <- return app'
-    W4.BaseBVRepr bv_w <- return $ W4.exprType bv
-    Refl <- simpMaybe $ testEquality (W4.knownNat @1) n
-    let bv_dec = W4.decNat bv_w
-    Refl <- simpMaybe $ testEquality bv_dec idx
-    let bv_min_i = BVS.asSigned bv_w $ BVS.minSigned bv_w
+bvPrettySimplifyApp rec app = withSym $ \sym -> tryAll (appAlts @sym app) $ \app' -> do
+  W4B.BaseEq _ (isUInt @sym 0 -> True) (W4B.asApp -> Just (W4B.BVSelect idx n bv_)) <- return app'
+  W4.BaseBVRepr bv_w <- return $ W4.exprType bv_
+  Refl <- simpMaybe $ testEquality (W4.knownNat @1) n
+  let bv_dec = W4.decNat bv_w
+  Refl <- simpMaybe $ testEquality bv_dec idx
+  let bv_min_i = BVS.asSigned bv_w $ BVS.minSigned bv_w
+  bv_min_sym <- IO.liftIO $ W4.intLit sym bv_min_i
+  bv <- lift $ rec bv_
+  ss@[_,_] <- asSimpleSumM bv
+  tryAll (permutations ss) $ \ss' -> do
+    [bv_base, (W4.asConcrete -> Just (W4C.ConcreteBV _ bv_c))] <- return ss'
+    let bv_c_i = BVS.asSigned bv_w bv_c
+    guard $ bv_c_i < 0
+    let le = GE True (CompatibleBVToInt2 bv_w)
+    bv_c_i_sym <- IO.liftIO $ W4.intLit sym (-bv_c_i)
+    bounded <- IO.liftIO $ mvBVOpFn sym le bv_base bv_c_i_sym
+    let sub = BVSub True (CompatibleBVToInt2 bv_w)
+    new_sum <- IO.liftIO $ mvBVOpFn sym sub bv_base bv_c_i_sym
+    let lt = COrd LT True CompatibleInts
+    overflowed <- IO.liftIO $ mvBVOpFn sym lt new_sum bv_min_sym
+    IO.liftIO $ W4.orPred sym bounded overflowed
+  <|> do
+  simpLog $ "check app: " ++ show app'
+  W4B.BaseEq _ bv_sum1_ (W4B.asApp -> Just (W4B.BVSext sext_w bv_sum2)) <- return app'
+
+  simpLog $ "as_eq: " ++ show bv_sum1_ ++ " AND " ++ show bv_sum2
+  W4.BaseBVRepr bv_sum2_w <- return $ W4.exprType bv_sum2
+  Refl <- simpMaybe $ testEquality (W4.knownNat @65) sext_w
+
+  bv_sum2_sext <- transformSum bv_sum2 sext_w (\bv_ -> IO.liftIO $ W4.bvSext sym sext_w bv_)
+  sums_eq <- IO.liftIO $ W4.isEq sym bv_sum1_ bv_sum2_sext
+  simpLog $ "sums_eq: " ++ show sums_eq
+  Just True <- return $ W4.asConstantPred sums_eq
+  bv_sum1 <- lift $ rec bv_sum1_
+
+  -- bv_min <- IO.liftIO $ W4.bvLit sym bv_sum2_w (BVS.minSigned bv_sum2_w)
+  -- bv_max <- IO.liftIO $ W4.bvLit sym bv_sum2_w (BVS.maxSigned bv_sum2_w)
+
+  let bv_min_i = BVS.asSigned bv_sum2_w $ BVS.minSigned bv_sum2_w
+  let bv_max_i = BVS.asSigned bv_sum2_w $ BVS.maxSigned bv_sum2_w
+
+  ss@[_,_] <- asSimpleSumM bv_sum1
+  simpLog $ "simple sum:" ++ show ss
+  tryAll (permutations ss) $ \ss' -> do
+    [(W4B.asApp -> Just (W4B.BVSext _ bv_s1)), (W4.asConcrete -> Just (W4C.ConcreteBV _ bv_c))] <- return ss'
+    let bv_c_i = BVS.asSigned sext_w bv_c
+    
     bv_min_sym <- IO.liftIO $ W4.intLit sym bv_min_i
-    ss@[_,_] <- asSimpleSumM bv
-    tryAll (permutations ss) $ \ss' -> do
-      [bv_base, (W4.asConcrete -> Just (W4C.ConcreteBV _ bv_c))] <- return ss'
-      let bv_c_i = BVS.asSigned bv_w bv_c
-      case bv_c_i < 0 of
-        True -> do
-          let le = GE True (CompatibleBVToInt2 bv_w)
-          bv_c_i_sym <- IO.liftIO $ W4.intLit sym (-bv_c_i)
-          bounded <- IO.liftIO $ mvBVOpFn sym le bv_base bv_c_i_sym
-          let sub = BVSub True (CompatibleBVToInt2 bv_w)
-          new_sum <- IO.liftIO $ mvBVOpFn sym sub bv_base bv_c_i_sym
-          let lt = COrd LT True CompatibleInts
-          overflowed <- IO.liftIO $ mvBVOpFn sym lt new_sum bv_min_sym
-          IO.liftIO $ W4.orPred sym bounded overflowed
-        False -> fail "not a comparison"
-    <|> do
-    simpLog $ "check app: " ++ show app'
-    W4B.BaseEq _ bv_sum1 (W4B.asApp -> Just (W4B.BVSext sext_w bv_sum2)) <- return app'
-    simpLog $ "as_eq: " ++ show bv_sum1 ++ " AND " ++ show bv_sum2
-    W4.BaseBVRepr bv_sum2_w <- return $ W4.exprType bv_sum2
-    Refl <- simpMaybe $ testEquality (W4.knownNat @65) sext_w
-    bv_sum2_sext <- transformSum bv_sum2 sext_w (\bv_ -> IO.liftIO $ W4.bvSext sym sext_w bv_)
-    sums_eq <- IO.liftIO $ W4.isEq sym bv_sum1 bv_sum2_sext
-    simpLog $ "sums_eq: " ++ show sums_eq
-    Just True <- return $ W4.asConstantPred sums_eq
-
-    -- bv_min <- IO.liftIO $ W4.bvLit sym bv_sum2_w (BVS.minSigned bv_sum2_w)
-    -- bv_max <- IO.liftIO $ W4.bvLit sym bv_sum2_w (BVS.maxSigned bv_sum2_w)
-
-    let bv_min_i = BVS.asSigned bv_sum2_w $ BVS.minSigned bv_sum2_w
-    let bv_max_i = BVS.asSigned bv_sum2_w $ BVS.maxSigned bv_sum2_w
-
-    ss@[_,_] <- asSimpleSumM bv_sum1
-    simpLog $ "simple sum:" ++ show ss
-    tryAll (permutations ss) $ \ss' -> do
-      [(W4B.asApp -> Just (W4B.BVSext _ bv_s1)), (W4.asConcrete -> Just (W4C.ConcreteBV _ bv_c))] <- return ss'
-      let bv_c_i = BVS.asSigned sext_w bv_c
-      
-      bv_min_sym <- IO.liftIO $ W4.intLit sym bv_min_i
-      bv_max_sym <- IO.liftIO $ W4.intLit sym bv_max_i
-
-      e <- case bv_c_i < 0 of
-        True -> do
-          let sub = BVSub True (CompatibleBVToInt2 (W4.bvWidth bv_s1))
-          bv_c_i_sym <- IO.liftIO $ W4.intLit sym (-bv_c_i)
-          IO.liftIO $ mvBVOpFn sym sub bv_s1 bv_c_i_sym
-        False -> do
-          let add = BVAdd True (CompatibleBVToInt2 (W4.bvWidth bv_s1))
-          bv_c_i_sym <- IO.liftIO $ W4.intLit sym bv_c_i
-          IO.liftIO $ mvBVOpFn sym add bv_s1 bv_c_i_sym
-      
-      let le = LE True CompatibleInts
-      let ge = GE True CompatibleInts
-      upper_bound <- IO.liftIO $ mvBVOpFn sym le e bv_max_sym
-      lower_bound <- IO.liftIO $ mvBVOpFn sym ge e bv_min_sym
-      p <- IO.liftIO $ W4.andPred sym upper_bound lower_bound
-      return p
+    bv_max_sym <- IO.liftIO $ W4.intLit sym bv_max_i
+    e <- case bv_c_i < 0 of
+      True -> do
+        let sub = BVSub True (CompatibleBVToInt2 (W4.bvWidth bv_s1))
+        bv_c_i_sym <- IO.liftIO $ W4.intLit sym (-bv_c_i)
+        IO.liftIO $ mvBVOpFn sym sub bv_s1 bv_c_i_sym
+      False -> do
+        let add = BVAdd True (CompatibleBVToInt2 (W4.bvWidth bv_s1))
+        bv_c_i_sym <- IO.liftIO $ W4.intLit sym bv_c_i
+        IO.liftIO $ mvBVOpFn sym add bv_s1 bv_c_i_sym
+    
+    let le = LE True CompatibleInts
+    let ge = GE True CompatibleInts
+    upper_bound <- IO.liftIO $ mvBVOpFn sym le e bv_max_sym
+    lower_bound <- IO.liftIO $ mvBVOpFn sym ge e bv_min_sym
+    p <- IO.liftIO $ W4.andPred sym upper_bound lower_bound
+    return p
 
 bvPrettySimplify ::
   forall m sym t solver fs tp.
@@ -2445,12 +2563,7 @@ bvPrettySimplify ::
   SimpCheck sym m -> 
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-bvPrettySimplify sym simp_check e = do
-  cache_app_simp <- W4B.newIdxCache
-  --cache_def_simp <- W4B.newIdxCache
-  --let simp_check' = wrapSimpSolverCheck (unfoldDefinedFns sym (Just cache_def_simp)) simp_check
-  e1 <- simplifyApp sym cache_app_simp simp_check (\app -> runSimpT sym simp_check (bvPrettySimplifyApp app)) e
-  runSimpCheck simp_check e e1  
+bvPrettySimplify = liftAppSimpT bvPrettySimplifyApp 
 
 {-
 

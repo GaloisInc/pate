@@ -252,7 +252,8 @@ prettySimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 prettySimplifier = return $ Simplifier $ \e0 -> withSym $ \sym -> do
   simp_check <- getSimpCheck
   e1 <- WEH.bvPrettySimplify sym simp_check e0
-  WEH.memReadPrettySimplify sym simp_check e1
+  e2 <- WEH.memReadPrettySimplify sym simp_check e1
+  WEH.collapseBVOps sym simp_check e2
 
 getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
 getSimplifier = withSym $ \sym -> do
