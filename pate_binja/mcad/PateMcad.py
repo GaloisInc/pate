@@ -134,7 +134,11 @@ class PateMcad:
         if not self.isRunning():
             return []
         pbInstructions = map(lambda b: binja_pb2.BinjaInstructions.Instruction(opcode=b), instructions)
-        pbCycleCounts = self.stub.RequestCycleCounts(binja_pb2.BinjaInstructions(instruction=pbInstructions))
+        try:
+            pbCycleCounts = self.stub.RequestCycleCounts(binja_pb2.BinjaInstructions(instruction=pbInstructions))
+        except grpc.RpcError as rpc_error:
+            print("gRPC Call failure: %s", rpc_error)
+            return []
         return list(map(lambda cc: CycleCount(cc.ready, cc.executed, cc.is_under_pressure), pbCycleCounts.cycle_count))
 
 
