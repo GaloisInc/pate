@@ -97,7 +97,7 @@ import           Unsafe.Coerce ( unsafeCoerce ) -- for mulMono axiom
 import           Control.Lens ( (.~), (&), (^.) )
 
 import           Control.Applicative
-import           Control.Monad (foldM, MonadPlus(..), msum, forM)
+import           Control.Monad (foldM, MonadPlus(..), msum, forM, guard)
 import           Control.Monad.Except
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Monad.IO.Class as IO
