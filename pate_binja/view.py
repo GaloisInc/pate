@@ -327,14 +327,6 @@ class TraceWidget(QWidget):
         self.traceDiffField = QTextEdit()
         self.traceDiffField.setReadOnly(True)
 
-        # Add Labels?
-        # traceDiffBox = QVBoxLayout()
-        # traceDiffBox.addWidget(QLabel("Trace"))
-        # traceDiffBox.addWidget(self.traceDiffField)
-        #
-        # traceDiffWidget = QWidget()
-        # traceDiffWidget.setLayout(traceDiffBox)
-
         vsplitter = QSplitter()
         vsplitter.setOrientation(Qt.Orientation.Vertical)
         vsplitter.addWidget(self.domainField)
@@ -344,7 +336,7 @@ class TraceWidget(QWidget):
         main_layout.addWidget(vsplitter)
         self.setLayout(main_layout)
 
-    def setTrace(self, trace: dict, label: str):
+    def setTrace(self, trace: dict, label: str = None):
         with io.StringIO() as out:
             pate.pprint_node_event_trace_domain(trace, out=out)
             self.domainField.setPlainText(out.getvalue())
@@ -364,9 +356,15 @@ class TraceWidget(QWidget):
         if pw:
             original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
 
+        if label:
+            fromdesc = f'{label} (original)'
+            todesc = f'{label} (patched)'
+        else:
+            fromdesc = f'Original'
+            todesc = f'Patched'
+
         htmlDiff = HtmlDiff()
-        html = htmlDiff.make_file(original_lines, patched_lines,
-                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
+        html = htmlDiff.make_file(original_lines, patched_lines, fromdesc=fromdesc, todesc=todesc)
         self.traceDiffField.setHtml(html)
 
 
@@ -374,7 +372,7 @@ class PateCfarExitDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.resize(1100, 600)
-        self.setWindowTitle("CFAR Exit Info")
+        self.setWindowTitle("Exit Trace")
 
         self.traceWidget = TraceWidget(self)
 
@@ -382,7 +380,7 @@ class PateCfarExitDialog(QDialog):
         main_layout.addWidget(self.traceWidget)
         self.setLayout(main_layout)
 
-    def setTrace(self, trace: dict, label: str):
+    def setTrace(self, trace: dict, label: str = None):
         self.traceWidget.setTrace(trace, label)
 
 
@@ -391,33 +389,55 @@ class PateCfarEqCondDialog(QDialog):
         super().__init__(parent)
         self.resize(1500, 800)
 
-        self.setWindowTitle("CFAR Equivalence Condition")
+        self.setWindowTitle("Equivalence Condition")
 
-        self.commonField = QPlainTextEdit()
-        self.commonField.setReadOnly(True)
-        self.commonField.setMaximumBlockCount(1000)
+        # Equivalence Condition Box
+        self.eqCondField = QPlainTextEdit()
+        self.eqCondField.setReadOnly(True)
+        self.eqCondField.setMaximumBlockCount(1000)
+        eqCondBoxLayout = QVBoxLayout()
+        eqCondBoxLayout.addWidget(QLabel("Programs behave equivalently when:"))
+        eqCondBoxLayout.addWidget(self.eqCondField)
+        eqCondBox = QWidget()
+        eqCondBox.setLayout(eqCondBoxLayout)
 
+        # True Trace Box
         self.trueTraceWidget = TraceWidget(self)
-        self.falseTraceWidget = TraceWidget(self)
+        trueTraceBoxLayout = QVBoxLayout()
+        trueTraceBoxLayout.addWidget(QLabel("Trace showing EQUIVALENT behaviour:"))
+        trueTraceBoxLayout.addWidget(self.trueTraceWidget)
+        trueTraceBox = QWidget()
+        trueTraceBox.setLayout(trueTraceBoxLayout)
 
+        # False Trace Box
+        self.falseTraceWidget = TraceWidget(self)
+        falseTraceBoxLayout = QVBoxLayout()
+        falseTraceBoxLayout.addWidget(QLabel("Trace showing DIFFERENT behaviour:"))
+        falseTraceBoxLayout.addWidget(self.falseTraceWidget)
+        falseTraceBox = QWidget()
+        falseTraceBox.setLayout(falseTraceBoxLayout)
+
+        # True/False Splitter (horizontal)
         trueFalseSplitter = QSplitter()
         trueFalseSplitter.setOrientation(Qt.Orientation.Horizontal)
-        trueFalseSplitter.addWidget(self.trueTraceWidget)
-        trueFalseSplitter.addWidget(self.falseTraceWidget)
+        trueFalseSplitter.addWidget(trueTraceBox)
+        trueFalseSplitter.addWidget(falseTraceBox)
 
-        predSplitter = QSplitter()
-        predSplitter.setOrientation(Qt.Orientation.Vertical)
-        predSplitter.addWidget(self.commonField)
-        predSplitter.addWidget(trueFalseSplitter)
+        # Main Splitter (vertical)
+        mainSplitter = QSplitter()
+        mainSplitter.setOrientation(Qt.Orientation.Vertical)
+        mainSplitter.addWidget(eqCondBox)
+        mainSplitter.addWidget(trueFalseSplitter)
 
+        # Main Layout
         main_layout = QHBoxLayout()
-        main_layout.addWidget(predSplitter)
+        main_layout.addWidget(mainSplitter)
         self.setLayout(main_layout)
 
-    def setTrueTrace(self, trace: dict, label: str):
+    def setTrueTrace(self, trace: dict, label: str = None):
         self.trueTraceWidget.setTrace(trace, label)
 
-    def setFalseTrace(self, trace: dict, label: str):
+    def setFalseTrace(self, trace: dict, label: str = None):
         self.falseTraceWidget.setTrace(trace, label)
 
 
@@ -432,7 +452,7 @@ class InstTreeDiffWidget(QWidget):
         main_layout.addWidget(self.instDiffField)
         self.setLayout(main_layout)
 
-    def setInstTrees(self, instTrees: dict, label: str):
+    def setInstTrees(self, instTrees: dict, label: str = None):
         if not instTrees:
             self.instDiffField.append("No Instruction Trees")
             return
@@ -453,9 +473,15 @@ class InstTreeDiffWidget(QWidget):
             pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
             patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
 
+        if label:
+            fromdesc = f'{label} (original)'
+            todesc = f'{label} (patched)'
+        else:
+            fromdesc = f'Original'
+            todesc = f'Patched'
+
         htmlDiff = HtmlDiff()
-        html = htmlDiff.make_file(original_lines, patched_lines,
-                                  fromdesc=f'{label} (original)', todesc=f'{label} (patched)')
+        html = htmlDiff.make_file(original_lines, patched_lines, fromdesc=fromdesc, todesc=todesc)
         self.instDiffField.setHtml(html)
 
     def getInstTreeLines(self, instTree, bv, pre: str = '', cumu: int = 0):
@@ -585,33 +611,49 @@ class PateCfarInstTreeDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.resize(1100, 600)
-        self.setWindowTitle("CFAR Inst Trees")
+        self.setWindowTitle("Instruction Trees")
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
+        # Original Graph Box
         obv = pw.getOriginalBinaryView()
         self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
+        originalBoxLayout = QVBoxLayout()
+        originalBoxLayout.addWidget(QLabel("Original"))
+        originalBoxLayout.addWidget(self.originalInstTreeGraphWidget)
+        originalBox = QWidget()
+        originalBox.setLayout(originalBoxLayout)
 
+        # Patched Graph Box
         pbv = pw.getPatchedBinaryView()
         self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
+        patchedBoxLayout = QVBoxLayout()
+        patchedBoxLayout.addWidget(QLabel("Patched"))
+        patchedBoxLayout.addWidget(self.patchedInstTreeGraphWidget)
+        patchedBox = QWidget()
+        patchedBox.setLayout(patchedBoxLayout)
 
+        # Original/Patched Graph Splitter (horizontal)
         hsplitter = QSplitter()
         hsplitter.setOrientation(Qt.Orientation.Horizontal)
-        hsplitter.addWidget(self.originalInstTreeGraphWidget)
-        hsplitter.addWidget(self.patchedInstTreeGraphWidget)
+        hsplitter.addWidget(originalBox)
+        hsplitter.addWidget(patchedBox)
 
+        # Text Diff Widget
         self.instTreeDiffWidget = InstTreeDiffWidget(self)
 
-        vsplitter = QSplitter()
-        vsplitter.setOrientation(Qt.Orientation.Vertical)
-        vsplitter.addWidget(hsplitter)
-        vsplitter.addWidget(self.instTreeDiffWidget)
+        # Main Splitter (vertical)
+        mainSplitter = QSplitter()
+        mainSplitter.setOrientation(Qt.Orientation.Vertical)
+        mainSplitter.addWidget(hsplitter)
+        mainSplitter.addWidget(self.instTreeDiffWidget)
 
-        main_layout = QHBoxLayout()
-        main_layout.addWidget(vsplitter)
-        self.setLayout(main_layout)
+        # Main Layout
+        mainLayout = QHBoxLayout()
+        mainLayout.addWidget(mainSplitter)
+        self.setLayout(mainLayout)
 
-    def setInstTrees(self, instTrees: dict, label: str):
+    def setInstTrees(self, instTrees: dict, label: str = None):
         if instTrees.get('original'):
             self.originalInstTreeGraphWidget.setInstTree(instTrees['original'])
         if instTrees.get('patched'):
@@ -754,7 +796,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 menu.addAction(action)
 
             if cfarNode.instruction_trees:
-                action = QAction('Show Inst Trees', self)
+                action = QAction('Show Instruction Trees', self)
                 action.triggered.connect(lambda _: self.showInstTreeInfo(cfarNode.instruction_trees,
                                                                          cfarNode.id))
                 menu.addAction(action)
@@ -764,12 +806,12 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
         d = PateCfarEqCondDialog(parent=self)
-        d.commonField.appendPlainText(f'CFAR ID: {cfarNode.id}')
+        d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
         with io.StringIO() as out:
             pate.pprint_symbolic(out, cfarNode.predicate)
-            d.commonField.appendPlainText(out.getvalue())
-        d.setTrueTrace(cfarNode.trace_true, 'True Trace')
-        d.setFalseTrace(cfarNode.trace_true, 'False Trace')
+            d.eqCondField.appendPlainText(out.getvalue())
+        d.setTrueTrace(cfarNode.trace_true)
+        d.setFalseTrace(cfarNode.trace_true)
         d.exec()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
@@ -789,12 +831,12 @@ class MyFlowGraphWidget(FlowGraphWidget):
             menu = QMenu(self)
 
             if self.showCfarExitInfo(sourceCfarNode, exitCfarNode, True):
-                action = QAction(f'Show CFAR Exit Info', self)
+                action = QAction(f'Show Exit Trace', self)
                 action.triggered.connect(lambda _: self.showCfarExitInfo(sourceCfarNode, exitCfarNode))
                 menu.addAction(action)
 
             if exitMetaData.get('instruction_trees_to_exit'):
-                action = QAction(f'Show Inst Trees to Exit', self)
+                action = QAction(f'Show Exit Instruction Trees', self)
                 action.triggered.connect(lambda _: self.showInstTreeInfo(exitMetaData['instruction_trees_to_exit'],
                                                                          sourceCfarNode.id + " to exit " + exitCfarNode.id))
                 menu.addAction(action)
@@ -810,25 +852,29 @@ class MyFlowGraphWidget(FlowGraphWidget):
         trace = exitMetaData.get('event_trace')
         if ceTrace:
             if not simulate:
-                self.showExitTraceInfo(sourceCfarNode, ceTrace, 'Counter-Example Trace')
+                self.showExitTraceInfo(sourceCfarNode, exitCfarNode, ceTrace, 'Counter-Example Trace')
             return True
         elif trace:
             if not simulate:
-                self.showExitTraceInfo(sourceCfarNode, trace, 'Witness Trace')
+                self.showExitTraceInfo(sourceCfarNode, exitCfarNode, trace, 'Witness Trace')
             return True
         else:
             # TODO: dialog?
             return False
 
-    def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode, trace: dict, label: str):
+    def showExitTraceInfo(self, sourceCfarNode: pate.CFARNode,
+                          exitCfarNode: pate.CFARNode,
+                          trace: dict,
+                          label: str = None):
         d = PateCfarExitDialog(self)
+        d.setWindowTitle(f'{d.windowTitle()} - {sourceCfarNode.id} exit to {exitCfarNode.id}')
         d.setTrace(trace, label)
         d.exec()
 
     def showInstTreeInfo(self, instTrees: dict, label: str):
         d = PateCfarInstTreeDialog(self)
-        d.setWindowTitle(d.windowTitle() + ' ' + label)
-        d.setInstTrees(instTrees, '')
+        d.setWindowTitle(f'{d.windowTitle()} - {label}')
+        d.setInstTrees(instTrees)
         d.show()
 
 
