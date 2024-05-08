@@ -1329,6 +1329,15 @@ infix_op_map = {
     'bvsge': '>=',
     'andp': '&',
     'orp': '|',
+    'LTs' : '<',
+    'LTu' : '<_u',
+    'LEs' : '<=',
+    'LEu' : '<=_u',
+    'GTs' : '>',
+    'GTu' : '>_u',
+    'GEs' : '>=',
+    'GEu' : '>=_u',
+    'EQ' : '=',
     }
 
 
@@ -1344,6 +1353,18 @@ def simplify_sexp(sexp, env=None):
     # Normal expression
     op = sexp[0]
     arg = list(map(lambda x: simplify_sexp(x, env), sexp[1:]))
+
+    # Simplify call(F, args...) => F(args...)
+    if op == 'call' and len(arg) >= 1:
+        return [arg[0]] + arg[1:]
+
+    # Simplify select(InitMemBytes, 0) => memory
+    if op == 'select' and len(arg) == 2 and arg[0] == 'InitMemBytes' and arg[1] == 0:
+        return 'memory'
+
+    # Simplify read(memory, ADDR) -> read(ADDR)
+    if op == 'read' and len(arg) == 2 and arg[0] == 'memory':
+        return ['read' + arg[1]]
 
     # Simplify multiply by 1
     if op == 'bvmul' and len(arg) == 2:
@@ -1453,17 +1474,20 @@ def simplify_sexp_let(defs, body, env=None):
     return res
 
 
-def simple_sexp_to_str(sexp):
+def simple_sexp_to_str(sexp, isTop: bool = False):
     if not isinstance(sexp, list) or len(sexp) == 0:
         return str(sexp)
 
     if len(sexp) == 3 and infix_op_map.get(sexp[0]):
         x = simple_sexp_to_str(sexp[1])
         y = simple_sexp_to_str(sexp[2])
-        return f'({x} {infix_op_map[sexp[0]]} {y})'
+        result = f'{x} {infix_op_map[sexp[0]]} {y}'
+        if not isTop:
+            result = '(' + result + ')'
+    else:
+        result = str(sexp[0]) + "(" + ", ".join(map(simple_sexp_to_str, sexp[1:])) + ")"
 
-    # else
-    return str(sexp[0]) + "(" + ", ".join(map(simple_sexp_to_str, sexp[1:])) + ")"
+    return result
 
 
 def render_sexp(sexp, env=None):
@@ -1472,22 +1496,27 @@ def render_sexp(sexp, env=None):
     t = tokenize_sexp(sexp)
     s = parse_sexp(t)
     ss = simplify_sexp(s, env)
-    return simple_sexp_to_str(ss)
+    return simple_sexp_to_str(ss, True)
 
 
 def pprint_symbolic(out, v):
     if isinstance(v, dict) and v.get('symbolic'):
         env = list(map(lambda x: x[::-1], v['vars']))
+        fenv = list(map(lambda x: x[::-1], v['fns']))
+        # TODO: Pending question to Dan about variable and function namespaces. Do I need to keep them independent?
+        env = env + fenv
         s = render_sexp(v.get('symbolic'), env)
         out.write(s)
-        #pprint.PrettyPrinter(indent=4, stream=out).pprint(s)
 
+        # pprint.PrettyPrinter(indent=4, stream=out).pprint(s)
         # out.write('\n      ')
         # out.write(re.sub('\s+', ' ', v['symbolic']))
         # if v.get('vars'):
+        #     out.write(f'\n      env: {env}')
         #     out.write(f'\n      vars: {v["vars"]}')
         # if v.get('fns'):
-        #     out.write(f'\n      vars: {v["fns"]}')
+        #     out.write(f'\n      fenv: {fenv}\n')
+        #     out.write(f'\n      fns: {v["fns"]}')
 
     else:
         out.write(str(v))
