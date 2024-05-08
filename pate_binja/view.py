@@ -811,7 +811,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
             pate.pprint_symbolic(out, cfarNode.predicate)
             d.eqCondField.appendPlainText(out.getvalue())
         d.setTrueTrace(cfarNode.trace_true)
-        d.setFalseTrace(cfarNode.trace_true)
+        d.setFalseTrace(cfarNode.trace_false)
         d.exec()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
