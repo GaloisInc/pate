@@ -1368,9 +1368,9 @@ def simplify_sexp(sexp, env=None):
 
     # Simplify multiply by 1
     if op == 'bvmul' and len(arg) == 2:
-        if arg[0] == '#x00000001':
+        if re.fullmatch(r'#x0*1', arg[0]):
             return arg[1]
-        if arg[1] == '#x00000001':
+        if re.fullmatch(r'#x0*1', arg[1]):
             return arg[0]
 
     # Simplify not(#b1) => False
