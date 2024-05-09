@@ -1144,8 +1144,9 @@ def pprint_node_event_trace(trace, label: str, pre: str = '', out: IO = sys.stdo
 def pprint_node_event_trace_domain(trace, pre: str = '', out: IO = sys.stdout):
     precond = trace.get('precondition') if trace else None
     postcond = trace.get('postcondition') if trace else None
-    if not (precond or postcond):
-        out.write(f'{pre}No Pre/Post Condition:\n')
+    # [20240509 JCC] Dan says to only show the domain for a trace if postcondition is present.
+    if not (postcond):
+        out.write(f'{pre}No Pre/Post Condition.\n')
         return
 
     if precond:
