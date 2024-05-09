@@ -168,6 +168,8 @@ library
                        What4.UninterpFns,
                        What4.JSON,
                        What4.SymSequence,
+                       What4.Simplify,
+                       What4.Simplify.Bitvector,
                        Data.Parameterized.SetF,
                        Data.Parameterized.SetCtx,
                        Data.Parameterized.PairF,

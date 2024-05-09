@@ -64,12 +64,8 @@ module What4.ExprHelpers (
   , simplifyBVOps'
   , simplifyConjuncts
   , boundVars
-  , setProgramLoc
   , idxCacheEvalWriter
   , Tagged
-  , SimpCheck(..)
-  , noSimpCheck
-  , unliftSimpCheck
   , assumePositiveInt
   , integerToNat
   , asConstantOffset
@@ -78,23 +74,37 @@ module What4.ExprHelpers (
   , assertPositiveNat
   , printAtoms
   , iteToImp
+  , unfoldDefinedFns
+  -- re-exports from What4.Simplify
+  , setProgramLoc
+  , Simplifier(..)
+  , mkSimplifier
+  , SimpStrategy(..)
+  , joinStrategy
+  , mkSimpleStrategy
+  , SimpCheck(..)
+  , wrapSimpSolverCheck
+  , runSimpCheck
+  , noSimpCheck
+  -- re-exports from What4.Simplify.Bitvector
+  , W4SBV.bvPrettySimplify
+  , W4SBV.memReadPrettySimplify
+  , W4SBV.collapseBVOps
   ) where
 
 import           GHC.TypeNats
 import           Unsafe.Coerce ( unsafeCoerce ) -- for mulMono axiom
-import           Control.Lens ( (.~), (&), (^.) )
 
 import           Control.Applicative
 import           Control.Monad (foldM)
-import           Control.Monad.Except
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.ST ( RealWorld, stToIO )
 import qualified Control.Monad.Writer as CMW
-import qualified Control.Monad.State as CMS
-import           Control.Monad.Trans (lift)
-import           Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
+
+import           Control.Monad.Trans (lift, MonadTrans(..))
+import           Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import qualified System.IO as IO
 
 import qualified Prettyprinter as PP
@@ -121,7 +131,6 @@ import qualified Lang.Crucible.CFG.Core as CC
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 
 import qualified What4.Expr.Builder as W4B
-import qualified What4.ProgramLoc as W4PL
 import qualified What4.Expr.ArrayUpdateMap as AUM
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Expr.WeightedSum as WSum
@@ -131,10 +140,13 @@ import qualified What4.SemiRing as SR
 import qualified What4.Expr.BoolMap as BM
 import qualified What4.Symbol as WS
 import qualified What4.Utils.AbstractDomains as W4AD
+import           What4.Simplify
 
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
 import Data.Maybe (fromMaybe)
+import qualified What4.Simplify.Bitvector as W4SBV
+import           What4.Simplify.Bitvector (asSimpleSum)
 
 -- | Sets the abstract domain of the given integer to assume
 --   that it is positive. 
@@ -1413,81 +1425,27 @@ simplifyBVOps' sym simp_check outer = do
 
     inIO (go outer)
 
-
-asSimpleSum :: 
-  forall sym sr w.
-  sym ->
-  W4.NatRepr w ->
-  WSum.WeightedSum (W4.SymExpr sym) (SR.SemiRingBV sr w) -> 
-  Maybe ([W4.SymBV sym w], BVS.BV w)
-asSimpleSum _ _ ws = do
-  terms <- WSum.evalM 
-    (\x y -> return $ x ++ y)
-    (\c e -> case c == one of {True -> return [e]; False -> fail ""})
-    (\c -> case c == zero of { True -> return []; False -> fail ""})
-    (ws & WSum.sumOffset .~ zero)
-  return $ (terms, ws ^. WSum.sumOffset )
-  where
-    one :: BVS.BV w
-    one = SR.one (WSum.sumRepr ws)
-
-    zero :: BVS.BV w
-    zero = SR.zero (WSum.sumRepr ws)
-  
-
-
--- | An action for validating a simplification step.
--- After a step is taken, this function is given the original expression as the
--- first argument and the simplified expression as the second argument.
--- This action should check that the original and simplified expressions are equal,
--- and return the simplified expression if they are, or the original expression if they are not,
--- optionally raising any exceptions or warnings in the given monad.
-newtype SimpCheck sym m = SimpCheck
-  { runSimpCheck :: forall tp. W4.SymExpr sym tp -> W4.SymExpr sym tp -> m (W4.SymExpr sym tp) }
-
-
-noSimpCheck :: Applicative m => SimpCheck sym m
-noSimpCheck = SimpCheck (\_ e_patched -> pure e_patched)
-
-unliftSimpCheck :: IO.MonadUnliftIO m => SimpCheck sym m -> m (SimpCheck sym IO)
-unliftSimpCheck simp_check = IO.withRunInIO $ \inIO -> do
-  return $ SimpCheck (\e1 e2 -> inIO (runSimpCheck simp_check e1 e2))
-
-simplifyApp ::
+unfoldDefinedFns ::
   forall sym m t solver fs tp.
-  IO.MonadIO m =>
   sym ~ (W4B.ExprBuilder t solver fs) =>
+  IO.MonadIO m =>
   sym ->
-  W4B.IdxCache t (W4B.Expr t) ->
-  SimpCheck sym m {- ^ double-check simplification step -} ->
-  (forall tp'. W4B.App (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))) {- ^ app simplification -} ->
+  Maybe (W4B.IdxCache t (W4B.Expr t)) ->
   W4.SymExpr sym tp ->
   m (W4.SymExpr sym tp)
-simplifyApp sym cache simp_check simp_app outer = do
+unfoldDefinedFns sym mcache e_outer = do
+  cache <- fromMaybe W4B.newIdxCache (fmap return mcache) 
   let
-    else_ :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
-    else_ e = do
-      e' <- case e of
-        W4B.AppExpr a0 -> do
-          a0' <- W4B.traverseApp go (W4B.appExprApp a0)
-          if (W4B.appExprApp a0) == a0' then return e
-          else (liftIO $ W4B.sbMakeExpr sym a0') >>= go
-        W4B.NonceAppExpr a0 -> do
-          a0' <- TFC.traverseFC go (W4B.nonceExprApp a0)
-          if (W4B.nonceExprApp a0) == a0' then return e
-          else (liftIO $ W4B.sbNonceExpr sym a0') >>= go
-        _ -> return e
-      runSimpCheck simp_check e e'
+    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp') 
+    go = simplifyGenApp sym cache noSimpCheck (\_ -> return Nothing) goNonceApp
 
-    go :: forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')
-    go e = W4B.idxCacheEval cache e $ do
-      setProgramLoc sym e
-      case e of
-        W4B.AppExpr a0 -> simp_app (W4B.appExprApp a0) >>= \case
-          Just e' -> runSimpCheck simp_check e e'
-          Nothing -> else_ e
-        _ -> else_ e
-  go outer
+    goNonceApp :: forall tp'. W4B.NonceApp t (W4B.Expr t) tp' -> m (Maybe (W4.SymExpr sym tp'))
+    goNonceApp (W4B.FnApp fn args) | W4B.DefinedFnInfo vars body _ <- W4B.symFnInfo fn = do
+      fn' <- IO.liftIO $ W4.definedFn sym W4.emptySymbol vars body W4.AlwaysUnfold
+      e <- IO.liftIO $ W4.applySymFn sym fn' args
+      Just <$> go e
+    goNonceApp _ = return Nothing
+  go e_outer
 
 -- (if x then y else z) ==> (x -> y) AND (NOT(x) -> z)
 --   Truth table:
@@ -1634,16 +1592,7 @@ simplifyConjuncts sym provable p_outer = do
   go ConjunctFoldLeft (W4.truePred sym) p
 
 
-setProgramLoc ::
-  forall m sym t solver fs tp.
-  IO.MonadIO m =>
-  sym ~ (W4B.ExprBuilder t solver fs) =>
-  sym ->
-  W4.SymExpr sym tp ->
-  m ()
-setProgramLoc sym e = case W4PL.plSourceLoc (W4B.exprLoc e) of
-  W4PL.InternalPos -> return ()
-  _ -> liftIO $ W4.setCurrentProgramLoc sym (W4B.exprLoc e)
+
 
 data Tagged w f tp where
   Tagged :: w -> f tp -> Tagged w f tp
