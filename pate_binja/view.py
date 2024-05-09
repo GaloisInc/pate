@@ -341,31 +341,36 @@ class TraceWidget(QWidget):
             pate.pprint_node_event_trace_domain(trace, out=out)
             self.domainField.setPlainText(out.getvalue())
 
-        # collect trace text content, for formatting below
-        original_lines = []
-        patched_lines = []
+        originalTrace: bool = trace.get('traces', {}).get('original')
+        patchedTrace: bool = trace.get('traces', {}).get('original')
+
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+
+        # create diff
+        originalLines = []
+        patchedLines = []
         with io.StringIO() as out:
             pate.pprint_node_event_trace_original(trace, out=out)
-            original_lines = out.getvalue().splitlines()
+            originalLines = out.getvalue().splitlines()
         with io.StringIO() as out:
             pate.pprint_node_event_trace_patched(trace, out=out)
-            patched_lines = out.getvalue().splitlines()
+            patchedLines = out.getvalue().splitlines()
 
         # Replace addr lines with binja disassembly
-        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
         if pw:
-            original_lines, patched_lines = pw.injectBinjaDissembly(original_lines, patched_lines)
+            originalLines, patchedLines = pw.injectBinjaDissembly(originalLines, patchedLines)
 
-        if label:
-            fromdesc = f'{label} (original)'
-            todesc = f'{label} (patched)'
+        if originalTrace and patchedTrace:
+            # Both, show diff
+            html = generateHtmlDiff(originalLines, patchedLines, label)
+            self.traceDiffField.setHtml(html)
+        elif originalTrace:
+            # Only original
+            self.traceDiffField.setText('\n'.join(originalLines))
         else:
-            fromdesc = f'Original'
-            todesc = f'Patched'
+            # Only patched
+            self.traceDiffField.setText('\n'.join(patchedLines))
 
-        htmlDiff = HtmlDiff()
-        html = htmlDiff.make_file(original_lines, patched_lines, fromdesc=fromdesc, todesc=todesc)
-        self.traceDiffField.setHtml(html)
 
 
 class PateCfarExitDialog(QDialog):
@@ -459,29 +464,21 @@ class InstTreeDiffWidget(QWidget):
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
-        original_lines = []
+        originalLines = []
         if instTrees.get('original'):
             originalInstTree = instTrees['original']
             obv = pw.getOriginalBinaryView()
             pw.mcad_annotate_inst_tree(originalInstTree, obv)
-            original_lines = self.getInstTreeLines(originalInstTree, obv)
+            originalLines = self.getInstTreeLines(originalInstTree, obv)
 
-        patched_lines = []
+        patchedLines = []
         if instTrees.get('patched'):
             patchedInstTree = instTrees['patched']
             pbv = pw.getPatchedBinaryView()
             pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
-            patched_lines = self.getInstTreeLines(patchedInstTree, pbv)
+            patchedLines = self.getInstTreeLines(patchedInstTree, pbv)
 
-        if label:
-            fromdesc = f'{label} (original)'
-            todesc = f'{label} (patched)'
-        else:
-            fromdesc = f'Original'
-            todesc = f'Patched'
-
-        htmlDiff = HtmlDiff()
-        html = htmlDiff.make_file(original_lines, patched_lines, fromdesc=fromdesc, todesc=todesc)
+        html = generateHtmlDiff(originalLines, patchedLines, label)
         self.instDiffField.setHtml(html)
 
     def getInstTreeLines(self, instTree, bv, pre: str = '', cumu: int = 0):
@@ -876,6 +873,18 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d.setWindowTitle(f'{d.windowTitle()} - {label}')
         d.setInstTrees(instTrees)
         d.show()
+
+
+def generateHtmlDiff(originalLines: list[str], patchedLines: list[str], label: str = None) -> str:
+    if label:
+        fromdesc = f'{label} (original)'
+        todesc = f'{label} (patched)'
+    else:
+        fromdesc = f'Original'
+        todesc = f'Patched'
+
+    htmlDiff = HtmlDiff()
+    return htmlDiff.make_file(originalLines, patchedLines, fromdesc=fromdesc, todesc=todesc)
 
 
 def getInstArch(addr: int, bv: BinaryView) -> Architecture:
