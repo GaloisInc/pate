@@ -1356,15 +1356,15 @@ def simplify_sexp(sexp, env=None):
 
     # Simplify call(F, args...) => F(args...)
     if op == 'call' and len(arg) >= 1:
-        return [arg[0]] + arg[1:]
+        return simplify_sexp([arg[0]] + arg[1:], env)
 
     # Simplify select(InitMemBytes, 0) => memory
     if op == 'select' and len(arg) == 2 and arg[0] == 'InitMemBytes' and arg[1] == 0:
         return 'memory'
 
-    # Simplify read(memory, ADDR) -> read(ADDR)
-    if op == 'read' and len(arg) == 2 and arg[0] == 'memory':
-        return ['read' + arg[1]]
+    # Simplify read{LE|GE}N(memory, ADDR) -> read{LE|GE}N(ADDR)
+    if re.fullmatch(r'read(?:LE|GE)\d+', op) and len(arg) == 2 and arg[0] == 'memory':
+        return [op, arg[1]]
 
     # Simplify multiply by 1
     if op == 'bvmul' and len(arg) == 2:
