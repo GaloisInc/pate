@@ -1111,7 +1111,7 @@ def pprint_eq_domain_memory(mem_kind, pv, pre: str = '', out: IO = sys.stdout):
             region = pv["ptr"]["region"]
             offset = pv["ptr"]["offset"]
             out.write(f'{pre}{mem_kind}: ')
-            if region == 0 or (region == 1 and mem_kind =='Stack Slot'):
+            if region == 0 or (region == 1 and mem_kind in {'Stack', 'Stack Slot'}):
                 pprint_symbolic(out, pv["ptr"]["offset"])
             else:
                 out.write('(')
