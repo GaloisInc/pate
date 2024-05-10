@@ -1363,6 +1363,10 @@ def simplify_sexp(sexp, env=None):
     if op == 'select' and len(arg) == 2 and arg[0] == 'InitMemBytes' and arg[1] == 0:
         return 'memory'
 
+    # Simplify select(memory, ADDR) => read1(ADDR)
+    if op == 'select' and len(arg) == 2 and arg[0] == 'memory':
+        return ['read1', arg[1]]
+
     # Simplify read{LE|GE}N(memory, ADDR) -> read{LE|GE}N(ADDR)
     if re.fullmatch(r'read(?:LE|GE)\d+', op) and len(arg) == 2 and arg[0] == 'memory':
         return [op, arg[1]]
