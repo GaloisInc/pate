@@ -657,7 +657,7 @@ class PateCfarInstTreeDialog(QDialog):
             treeGraphBox.addWidget(patchedBox)
             # Text Diff Widget
             self.instTreeDiffWidget = InstTreeDiffWidget(self)
-            self.instTreeDiffWidget.setInstTrees(instTrees, label)
+            self.instTreeDiffWidget.setInstTrees(instTrees)
 
             # Main Splitter (vertical)
             mainSplitter = QSplitter()
