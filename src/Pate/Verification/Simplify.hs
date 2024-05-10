@@ -171,9 +171,8 @@ getSimpCheck = do
 -- Additionally, simplify array lookups across unrelated updates.
 simplifyPred_deep ::
   forall sym arch.
-  W4.Pred sym ->
-  EquivM sym arch (W4.Pred sym)
-simplifyPred_deep p = withSym $ \sym -> do
+  SimpStrategy sym (EquivM_ sym arch)
+simplifyPred_deep = WEH.SimpStrategy $ \_ simp_check -> withValid $ withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   cache <- W4B.newIdxCache
   fn_cache <- W4B.newIdxCache
@@ -182,40 +181,20 @@ simplifyPred_deep p = withSym $ \sym -> do
     checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $ do
       p'' <- WEH.unfoldDefinedFns sym (Just fn_cache) p'
       Const <$> isPredTrue' heuristicTimeout p''
-  -- remove redundant atoms
-  p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
-  -- resolve array lookups across unrelated updates
-  p2 <- WEH.resolveConcreteLookups sym (\p' -> return $ W4.asConstantPred p') p1
-  -- additional bitvector simplifications
-  p3 <- liftIO $ WEH.simplifyBVOps sym p2
-  -- drop any muxes across equality tests
-  p4 <- liftIO $ WEH.expandMuxEquality sym p3
-  -- remove redundant conjuncts
-  p_final <- WEH.simplifyConjuncts sym (\x -> checkPred x) p4
-  p_final' <- WEH.unfoldDefinedFns sym (Just fn_cache) p_final
-  p' <- WEH.unfoldDefinedFns sym (Just fn_cache) p
-  -- TODO: redundant sanity check that simplification hasn't clobbered anything
-  validSimpl <- liftIO $ W4.isEq sym p' p_final'
-  goal <- liftIO $ W4.notPred sym validSimpl
-  r <- checkSatisfiableWithModel heuristicTimeout "SimplifierConsistent" goal $ \sr ->
-    case sr of
-      W4R.Unsat _ -> return p_final
-      W4R.Sat _ -> do
-        traceM "ERROR: simplifyPred_deep: simplifier broken"
-        traceM "Original:"
-        traceM (show (W4.printSymExpr p))
-        traceM "Simplified:"
-        traceM (show (W4.printSymExpr p_final))
-        return p
-      W4R.Unknown -> do
-        traceM ("WARNING: simplifyPred_deep: simplifier timeout")
-        return p
-  case r of
-    Left exn -> do
-      traceM ("ERROR: simplifyPred_deep: exception " ++ show exn)
-      return p
-    Right r' -> return r'
-
+  return $ WEH.Simplifier $ \p -> case W4.exprType p of
+    W4.BaseBoolRepr -> do
+      -- remove redundant atoms
+      p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
+      -- resolve array lookups across unrelated updates
+      p2 <- WEH.resolveConcreteLookups sym (\p' -> return $ W4.asConstantPred p') p1
+      -- additional bitvector simplifications
+      p3 <- liftIO $ WEH.simplifyBVOps sym p2
+      -- drop any muxes across equality tests
+      p4 <- liftIO $ WEH.expandMuxEquality sym p3
+      -- remove redundant conjuncts
+      p_final <- WEH.simplifyConjuncts sym (\x -> checkPred x) p4
+      WEH.runSimpCheck simp_check p p_final
+    _ -> return p
 
 applySimplifier ::
   PEM.ExprMappable sym v =>
@@ -246,11 +225,8 @@ deepPredicateSimplifier :: SimpStrategy sym (EquivM_ sym arch)
 deepPredicateSimplifier = WEH.joinStrategy $ withValid $ do
   let 
     stripAnnStrat = WEH.mkSimpleStrategy $ \sym e -> liftIO $ WEH.stripAnnotations sym e
-    deepPredStrat = WEH.mkSimpleStrategy $ \_ e -> case W4.exprType e of
-        W4.BaseBoolRepr -> simplifyPred_deep e
-        _ -> return e
     applyAsmsStrat = WEH.mkSimpleStrategy $ \_ -> applyCurrentAsmsExpr
-  return $ stripAnnStrat <> coreStrategy <> deepPredStrat <> applyAsmsStrat
+  return $ stripAnnStrat <> coreStrategy <> simplifyPred_deep <> applyAsmsStrat
 
 
 -- | Simplifier that should only be used to display terms.
