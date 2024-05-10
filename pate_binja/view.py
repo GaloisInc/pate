@@ -367,9 +367,11 @@ class TraceWidget(QWidget):
             self.traceDiffField.setHtml(html)
         elif hasOriginalTrace:
             # Only original
+            originalLines.insert(0, 'Original')
             self.traceDiffField.setText('\n'.join(originalLines))
         else:
             # Only patched
+            patchedLines.insert(0, 'Patched')
             self.traceDiffField.setText('\n'.join(patchedLines))
 
 
