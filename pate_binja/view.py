@@ -326,6 +326,7 @@ class TraceWidget(QWidget):
 
         self.traceDiffField = QTextEdit()
         self.traceDiffField.setReadOnly(True)
+        self.traceDiffField.setFont({"Courier"});
 
         vsplitter = QSplitter()
         vsplitter.setOrientation(Qt.Orientation.Vertical)
@@ -341,17 +342,17 @@ class TraceWidget(QWidget):
             pate.pprint_node_event_trace_domain(trace, out=out)
             self.domainField.setPlainText(out.getvalue())
 
-        originalTrace: bool = trace.get('traces', {}).get('original')
-        patchedTrace: bool = trace.get('traces', {}).get('original')
-
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
-        # create diff
+        hasOriginalTrace: bool = 'original' in trace.get('traces', {})
+        hasPatchedTrace: bool = 'patched' in trace.get('traces', {})
+
         originalLines = []
-        patchedLines = []
         with io.StringIO() as out:
             pate.pprint_node_event_trace_original(trace, out=out)
             originalLines = out.getvalue().splitlines()
+
+        patchedLines = []
         with io.StringIO() as out:
             pate.pprint_node_event_trace_patched(trace, out=out)
             patchedLines = out.getvalue().splitlines()
@@ -360,11 +361,11 @@ class TraceWidget(QWidget):
         if pw:
             originalLines, patchedLines = pw.injectBinjaDissembly(originalLines, patchedLines)
 
-        if originalTrace and patchedTrace:
+        if hasOriginalTrace and hasPatchedTrace:
             # Both, show diff
             html = generateHtmlDiff(originalLines, patchedLines, label)
             self.traceDiffField.setHtml(html)
-        elif originalTrace:
+        elif hasOriginalTrace:
             # Only original
             self.traceDiffField.setText('\n'.join(originalLines))
         else:
@@ -452,6 +453,7 @@ class InstTreeDiffWidget(QWidget):
 
         self.instDiffField = QTextEdit()
         self.instDiffField.setReadOnly(True)
+        self.instDiffField.setFont({"Courier"});
 
         main_layout = QHBoxLayout()
         main_layout.addWidget(self.instDiffField)
@@ -463,6 +465,9 @@ class InstTreeDiffWidget(QWidget):
             return
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+
+        hasOriginalInstTree: bool = 'original' in instTrees
+        hasPatchedInstTree: bool = 'patched' in instTrees
 
         originalLines = []
         if instTrees.get('original'):
@@ -478,8 +483,16 @@ class InstTreeDiffWidget(QWidget):
             pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
             patchedLines = self.getInstTreeLines(patchedInstTree, pbv)
 
-        html = generateHtmlDiff(originalLines, patchedLines, label)
-        self.instDiffField.setHtml(html)
+        if hasOriginalInstTree and hasPatchedInstTree:
+            # Both, show diff
+            html = generateHtmlDiff(originalLines, patchedLines, label)
+            self.instDiffField.setHtml(html)
+        elif hasOriginalInstTree:
+            # Only original
+            self.instDiffField.setPlainText('\n'.join(originalLines))
+        else:
+            # Only patched
+            self.instDiffField.setPlainText('\n'.join(patchedLines))
 
     def getInstTreeLines(self, instTree, bv, pre: str = '', cumu: int = 0):
 
@@ -605,57 +618,60 @@ class InstTreeGraphWidget(FlowGraphWidget):
 
 
 class PateCfarInstTreeDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, instTrees: dict, label: str = None, parent=None):
         super().__init__(parent)
         self.resize(1100, 600)
-        self.setWindowTitle("Instruction Trees")
+        self.setWindowTitle(f'Instruction Trees - {label}')
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
         # Original Graph Box
-        obv = pw.getOriginalBinaryView()
-        self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
-        originalBoxLayout = QVBoxLayout()
-        originalBoxLayout.addWidget(QLabel("Original"))
-        originalBoxLayout.addWidget(self.originalInstTreeGraphWidget)
-        originalBox = QWidget()
-        originalBox.setLayout(originalBoxLayout)
+        if instTrees.get('original'):
+            obv = pw.getOriginalBinaryView()
+            self.originalInstTreeGraphWidget = InstTreeGraphWidget(self, obv)
+            self.originalInstTreeGraphWidget.setInstTree(instTrees['original'])
+            originalBoxLayout = QVBoxLayout()
+            originalBoxLayout.addWidget(QLabel("Original"))
+            originalBoxLayout.addWidget(self.originalInstTreeGraphWidget)
+            originalBox = QWidget()
+            originalBox.setLayout(originalBoxLayout)
 
         # Patched Graph Box
-        pbv = pw.getPatchedBinaryView()
-        self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
-        patchedBoxLayout = QVBoxLayout()
-        patchedBoxLayout.addWidget(QLabel("Patched"))
-        patchedBoxLayout.addWidget(self.patchedInstTreeGraphWidget)
-        patchedBox = QWidget()
-        patchedBox.setLayout(patchedBoxLayout)
+        if instTrees.get('patched'):
+            pbv = pw.getPatchedBinaryView()
+            self.patchedInstTreeGraphWidget = InstTreeGraphWidget(self, pbv)
+            self.patchedInstTreeGraphWidget.setInstTree(instTrees['patched'])
+            patchedBoxLayout = QVBoxLayout()
+            patchedBoxLayout.addWidget(QLabel("Patched"))
+            patchedBoxLayout.addWidget(self.patchedInstTreeGraphWidget)
+            patchedBox = QWidget()
+            patchedBox.setLayout(patchedBoxLayout)
 
-        # Original/Patched Graph Splitter (horizontal)
-        hsplitter = QSplitter()
-        hsplitter.setOrientation(Qt.Orientation.Horizontal)
-        hsplitter.addWidget(originalBox)
-        hsplitter.addWidget(patchedBox)
+        # Graph Box - Original or Patched or Splitter (horizontal)
+        if instTrees.get('original') and instTrees.get('patched'):
+            treeGraphBox = QSplitter()
+            treeGraphBox.setOrientation(Qt.Orientation.Horizontal)
+            treeGraphBox.addWidget(originalBox)
+            treeGraphBox.addWidget(patchedBox)
+            # Text Diff Widget
+            self.instTreeDiffWidget = InstTreeDiffWidget(self)
+            self.instTreeDiffWidget.setInstTrees(instTrees, label)
 
-        # Text Diff Widget
-        self.instTreeDiffWidget = InstTreeDiffWidget(self)
+            # Main Splitter (vertical)
+            mainSplitter = QSplitter()
+            mainSplitter.setOrientation(Qt.Orientation.Vertical)
+            mainSplitter.addWidget(treeGraphBox)
+            mainSplitter.addWidget(self.instTreeDiffWidget)
 
-        # Main Splitter (vertical)
-        mainSplitter = QSplitter()
-        mainSplitter.setOrientation(Qt.Orientation.Vertical)
-        mainSplitter.addWidget(hsplitter)
-        mainSplitter.addWidget(self.instTreeDiffWidget)
+        elif instTrees.get('original'):
+            mainSplitter = originalBox
+        else:
+            mainSplitter = patchedBox
 
         # Main Layout
         mainLayout = QHBoxLayout()
         mainLayout.addWidget(mainSplitter)
         self.setLayout(mainLayout)
-
-    def setInstTrees(self, instTrees: dict, label: str = None):
-        if instTrees.get('original'):
-            self.originalInstTreeGraphWidget.setInstTree(instTrees['original'])
-        if instTrees.get('patched'):
-            self.patchedInstTreeGraphWidget.setInstTree(instTrees['patched'])
-        self.instTreeDiffWidget.setInstTrees(instTrees, label)
 
 
 class MyFlowGraphWidget(FlowGraphWidget):
@@ -869,9 +885,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d.exec()
 
     def showInstTreeInfo(self, instTrees: dict, label: str):
-        d = PateCfarInstTreeDialog(self)
-        d.setWindowTitle(f'{d.windowTitle()} - {label}')
-        d.setInstTrees(instTrees)
+        d = PateCfarInstTreeDialog(instTrees, label=label, parent=self)
         d.show()
 
 
