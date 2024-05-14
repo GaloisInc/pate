@@ -10,8 +10,10 @@
 -- EquivM operations on a PairGraph
 module Pate.Monad.PairGraph 
   ( withPG
+  , evalPG
   , withPG_
   , liftPG
+  , liftPartEqM_
   , catchPG
   , liftEqM
   , liftEqM_
@@ -60,6 +62,12 @@ withPG ::
   EquivM sym arch (a, PairGraph sym arch)
 withPG pg f = runStateT f pg 
 
+evalPG :: 
+  PairGraph sym arch -> 
+  PairGraphM sym arch a ->
+  EquivM sym arch a
+evalPG pg f = fst <$> (withPG pg $ liftPG f) 
+
 withPG_ :: 
   PairGraph sym arch -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
@@ -88,6 +96,13 @@ liftEqM_ ::
   (PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) ()
 liftEqM_ f = liftEqM $ \pg -> ((),) <$> (f pg)
+
+liftPartEqM_ :: 
+  (PairGraph sym arch -> EquivM_ sym arch (Maybe (PairGraph sym arch))) -> 
+  StateT (PairGraph sym arch) (EquivM_ sym arch) Bool
+liftPartEqM_ f = liftEqM $ \pg -> f pg >>= \case
+  Just pg' -> return (True, pg')
+  Nothing -> return (False, pg)
 
 liftEqM :: 
   (PairGraph sym arch -> EquivM_ sym arch (a, PairGraph sym arch)) -> 
