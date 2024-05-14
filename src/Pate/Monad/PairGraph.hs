@@ -12,6 +12,8 @@ module Pate.Monad.PairGraph
   ( withPG
   , withPG_
   , liftPG
+  , evalPG
+  , runPG
   , catchPG
   , liftEqM
   , liftEqM_
@@ -52,21 +54,24 @@ import qualified Pate.Equivalence.Condition as PEC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Map as Map
 import qualified Pate.Equivalence.Error as PEE
+import GHC.Stack (HasCallStack)
 
 
 withPG :: 
+  HasCallStack =>
   PairGraph sym arch -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
   EquivM sym arch (a, PairGraph sym arch)
 withPG pg f = runStateT f pg 
 
 withPG_ :: 
+  HasCallStack =>
   PairGraph sym arch -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
   EquivM sym arch (PairGraph sym arch)
 withPG_ pg f = execStateT f pg
 
-liftPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) a
+liftPG :: HasCallStack => PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) a
 liftPG f = do
   pg <- get
   case runPairGraphM pg f of
@@ -75,7 +80,15 @@ liftPG f = do
       put pg'
       return a
 
-catchPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) (Maybe a)
+evalPG :: HasCallStack => PairGraph sym arch -> PairGraphM sym arch a -> EquivM_ sym arch a
+evalPG pg f = fst <$> runPG pg f
+
+runPG :: HasCallStack => PairGraph sym arch -> PairGraphM sym arch a -> EquivM_ sym arch (a, PairGraph sym arch)
+runPG pg f = case runPairGraphM pg f of
+  Left err -> throwHere $ PEE.PairGraphError err
+  Right a -> return a
+
+catchPG :: HasCallStack => PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) (Maybe a)
 catchPG f = do
   pg <- get
   case runPairGraphM pg f of
@@ -85,11 +98,13 @@ catchPG f = do
       return $ Just a
 
 liftEqM_ :: 
+  HasCallStack =>
   (PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) ()
 liftEqM_ f = liftEqM $ \pg -> ((),) <$> (f pg)
 
 liftEqM :: 
+  HasCallStack =>
   (PairGraph sym arch -> EquivM_ sym arch (a, PairGraph sym arch)) -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a
 liftEqM f = do
