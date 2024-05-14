@@ -159,7 +159,7 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.SimState as PS
 
 
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), NodeEntry, NodeReturn, nodeBlocks, nodeFuns, graphNodeBlocks, getDivergePoint, divergePoint, mkNodeEntry, mkNodeReturn, nodeContext, isSingleNodeEntry, isSingleReturn )
+import           Pate.Verification.PairGraph.Node
 import           Pate.Verification.StrongestPosts.CounterExample ( TotalityCounterexample(..), ObservableCounterexample(..) )
 
 import qualified Pate.Verification.AbstractDomain as PAD
@@ -973,20 +973,18 @@ combineNodes node1 node2 = do
   -- it only makes sense to combine nodes that share a divergence point,
   -- where that divergence point will be used as the calling context for the
   -- merged point
-  GraphNode divergeO <- divergePoint $ nodeContext nodeO
-  GraphNode divergeP <- divergePoint $ nodeContext nodeP
+  divergeO <- divergePoint $ nodeContext nodeO
+  divergeP <- divergePoint $ nodeContext nodeP
   guard $ divergeO == divergeP
   case (nodeO, nodeP) of
     (GraphNode nodeO', GraphNode nodeP') -> do
       blocksO <- PPa.get PBi.OriginalRepr (nodeBlocks nodeO')
       blocksP <- PPa.get PBi.PatchedRepr (nodeBlocks nodeP')
-      -- FIXME: retain calling context?
-      return $ GraphNode $ mkNodeEntry divergeO (PPa.PatchPair blocksO blocksP)
+      return $ GraphNode $ mkMergedNodeEntry divergeO blocksO blocksP
     (ReturnNode nodeO', ReturnNode nodeP') -> do
       fnsO <- PPa.get PBi.OriginalRepr (nodeFuns nodeO')
       fnsP <- PPa.get PBi.PatchedRepr (nodeFuns nodeP')
-      -- FIXME: retain calling context?
-      return $ ReturnNode $ mkNodeReturn divergeO (PPa.PatchPair fnsO fnsP)
+      return $ ReturnNode $ mkMergedNodeReturn divergeO fnsO fnsP
     _ -> Nothing
 
 singleNodeRepr :: GraphNode arch -> Maybe (Some (PBi.WhichBinaryRepr))
