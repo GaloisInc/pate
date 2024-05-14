@@ -159,7 +159,9 @@ getSimpCheck :: EquivM sym arch (WEH.SimpCheck sym (EquivM_ sym arch))
 getSimpCheck = do
   shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
   case shouldCheck of
-    True -> return tracedSimpCheck
+    True -> withSym $ \sym -> do
+      cache_def_simp <- W4B.newIdxCache
+      return $ WEH.wrapSimpSolverCheck (WEH.unfoldDefinedFns sym (Just cache_def_simp)) tracedSimpCheck
     False -> return WEH.noSimpCheck
 
 
