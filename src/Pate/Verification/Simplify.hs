@@ -15,9 +15,12 @@ module Pate.Verification.Simplify (
   , simplifyBVOps_trace
   , Simplifier
   , applySimplifier
-  , runSimplifier
-  , getSimplifier
+  , WEH.runSimplifier
+  , mkSimplifier
   , deepPredicateSimplifier
+  , prettySimplifier
+  , coreStrategy
+  , applySimpStrategy
   ) where
 
 import           Control.Monad (foldM)
@@ -38,6 +41,7 @@ import qualified Pate.ExprMappable as PEM
 import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
+import           What4.ExprHelpers (Simplifier, SimpStrategy)
 import           Pate.TraceTree
 import qualified Data.Set as Set
 import Pate.AssumptionSet
@@ -121,7 +125,7 @@ simplifyWithSolver a = withValid $ withSym $ \sym -> do
   IO.withRunInIO $ \runInIO -> PEM.mapExpr sym (\e -> runInIO (doSimp e)) a
 
 tracedSimpCheck :: forall sym arch. WEH.SimpCheck sym (EquivM_ sym arch)
-tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -> do
+tracedSimpCheck = WEH.SimpCheck (emitTrace @"debug") $ \ce_trace e_orig e_simp -> withValid $ withSym $ \sym -> do
   not_valid <- liftIO $ (W4.isEq sym e_orig e_simp >>= W4.notPred sym)
   goalSat "tracedSimpCheck" not_valid $ \case
     W4R.Unsat{} -> return e_simp
@@ -137,6 +141,9 @@ tracedSimpCheck = WEH.SimpCheck $ \e_orig e_simp -> withValid $ withSym $ \sym -
         emitTraceLabel @"expr" "simplified" (Some e_simp)
         e_orig_conc <- concretizeWithModel fn e_orig
         e_simp_conc <- concretizeWithModel fn e_simp
+        do
+          SymGroundEvalFn fn' <- return fn
+          ce_trace fn'
         vars <- fmap Set.toList $ liftIO $ WEH.boundVars e_orig
         binds <- foldM (\asms (Some var) -> do
           conc <- concretizeWithModel fn (W4.varExpr sym var)
@@ -161,81 +168,85 @@ getSimpCheck = do
 -- Additionally, simplify array lookups across unrelated updates.
 simplifyPred_deep ::
   forall sym arch.
-  W4.Pred sym ->
-  EquivM sym arch (W4.Pred sym)
-simplifyPred_deep p = withSym $ \sym -> do
+  SimpStrategy sym (EquivM_ sym arch)
+simplifyPred_deep = WEH.SimpStrategy $ \_ simp_check -> withValid $ withSym $ \sym -> do
   heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   cache <- W4B.newIdxCache
+  fn_cache <- W4B.newIdxCache
   let
     checkPred :: W4.Pred sym -> EquivM sym arch Bool
-    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $
-      Const <$> isPredTrue' heuristicTimeout p'
-  -- remove redundant atoms
-  p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
-  -- resolve array lookups across unrelated updates
-  p2 <- WEH.resolveConcreteLookups sym (\p' -> return $ W4.asConstantPred p') p1
-  -- additional bitvector simplifications
-  p3 <- liftIO $ WEH.simplifyBVOps sym p2
-  -- drop any muxes across equality tests
-  p4 <- liftIO $ WEH.expandMuxEquality sym p3
-  -- remove redundant conjuncts
-  p_final <- WEH.simplifyConjuncts sym (\x -> checkPred x) p4
-  -- TODO: redundant sanity check that simplification hasn't clobbered anything
-  validSimpl <- liftIO $ W4.isEq sym p p_final
-  goal <- liftIO $ W4.notPred sym validSimpl
-  r <- checkSatisfiableWithModel heuristicTimeout "SimplifierConsistent" goal $ \sr ->
-    case sr of
-      W4R.Unsat _ -> return p_final
-      W4R.Sat _ -> do
-        traceM "ERROR: simplifyPred_deep: simplifier broken"
-        traceM "Original:"
-        traceM (show (W4.printSymExpr p))
-        traceM "Simplified:"
-        traceM (show (W4.printSymExpr p_final))
-        return p
-      W4R.Unknown -> do
-        traceM ("WARNING: simplifyPred_deep: simplifier timeout")
-        return p
-  case r of
-    Left exn -> do
-      traceM ("ERROR: simplifyPred_deep: exception " ++ show exn)
-      return p
-    Right r' -> return r'
-
-
-
-
-
-data Simplifier sym arch = Simplifier { runSimplifier :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp) }
+    checkPred p' = fmap getConst $ W4B.idxCacheEval cache p' $ do
+      p'' <- WEH.unfoldDefinedFns sym (Just fn_cache) p'
+      Const <$> isPredTrue' heuristicTimeout p''
+  return $ WEH.Simplifier $ \p -> case W4.exprType p of
+    W4.BaseBoolRepr -> do
+      -- remove redundant atoms
+      p1 <- WEH.minimalPredAtoms sym (\x -> checkPred x) p
+      -- resolve array lookups across unrelated updates
+      p2 <- WEH.resolveConcreteLookups sym (\p' -> return $ W4.asConstantPred p') p1
+      -- additional bitvector simplifications
+      p3 <- liftIO $ WEH.simplifyBVOps sym p2
+      -- drop any muxes across equality tests
+      p4 <- liftIO $ WEH.expandMuxEquality sym p3
+      -- remove redundant conjuncts
+      p_final <- WEH.simplifyConjuncts sym (\x -> checkPred x) p4
+      WEH.runSimpCheck simp_check p p_final
+    _ -> return p
 
 applySimplifier ::
   PEM.ExprMappable sym v =>
-  Simplifier sym arch ->
+  Simplifier sym (EquivM_ sym arch) ->
   v ->
   EquivM sym arch v
 applySimplifier simplifier v = withSym $ \sym -> do
   shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
   case shouldCheck of
-    True -> withTracing @"debug_tree" "Simplifier" $ PEM.mapExpr sym (runSimplifier simplifier) v
-    False -> withNoTracing $ PEM.mapExpr sym (runSimplifier simplifier) v
+    True -> withTracing @"debug_tree" "Simplifier" $ PEM.mapExpr sym (WEH.runSimplifier simplifier) v
+    False -> withNoTracing $ PEM.mapExpr sym (WEH.runSimplifier simplifier) v
 
-deepPredicateSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
-deepPredicateSimplifier = withSym $ \sym -> do
-  Simplifier f <- getSimplifier
-  return $ Simplifier $ \e0 ->  do
-    e1 <- liftIO $ WEH.stripAnnotations sym e0
-    e2 <- f e1
-    e4 <- case W4.exprType e0 of
-      W4.BaseBoolRepr -> simplifyPred_deep e2
-      _ -> return e2
-    applyCurrentAsms e4
+applySimpStrategy ::
+  PEM.ExprMappable sym v =>
+  SimpStrategy sym (EquivM_ sym arch) ->
+  v ->
+  EquivM sym arch v
+applySimpStrategy strat v = do
+  simp <- mkSimplifier strat
+  applySimplifier simp v
 
-getSimplifier :: forall sym arch. EquivM sym arch (Simplifier sym arch)
-getSimplifier = withSym $ \sym -> do
-  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
+mkSimplifier :: SimpStrategy sym (EquivM_ sym arch) -> EquivM sym arch (Simplifier sym (EquivM_ sym arch))
+mkSimplifier strat = withSym $ \sym -> do
+  check <- getSimpCheck
+  WEH.mkSimplifier sym check strat
+
+deepPredicateSimplifier :: SimpStrategy sym (EquivM_ sym arch)
+deepPredicateSimplifier = WEH.joinStrategy $ withValid $ do
+  let 
+    stripAnnStrat = WEH.mkSimpleStrategy $ \sym e -> liftIO $ WEH.stripAnnotations sym e
+    applyAsmsStrat = WEH.mkSimpleStrategy $ \_ -> applyCurrentAsmsExpr
+  return $ stripAnnStrat <> coreStrategy <> simplifyPred_deep <> applyAsmsStrat
+
+
+-- | Simplifier that should only be used to display terms.
+--   Interleaved with the deep predicate simplifier in order to
+--   drop any redundant terms that are introduced.
+prettySimplifier :: forall sym arch. SimpStrategy sym (EquivM_ sym arch)
+prettySimplifier = deepPredicateSimplifier <> base <> deepPredicateSimplifier <> base
+  where
+    base :: SimpStrategy sym (EquivM_ sym arch)
+    base = WEH.joinStrategy $ withValid $ 
+      return $ WEH.bvPrettySimplify <> WEH.memReadPrettySimplify <> WEH.collapseBVOps
+
+-- TODO: the "core" simplification strategy that stitches together the main strategies
+-- from 'What4.ExprHelpers'. These are implemented in "old" style (i.e. as expression
+-- transformers instead of 'SimpStrategy's.) and so we lift them into a 'SimpStrategy' here.
+-- In general these should individually be implemented as strategies so that
+-- this glue code is just trivially combining them.
+
+coreStrategy :: forall sym arch. SimpStrategy sym (EquivM_ sym arch)
+coreStrategy = WEH.joinStrategy $ withValid $ return $ WEH.SimpStrategy $ \sym check -> do
+  ecache <- W4B.newIdxCache 
   conccache <- W4B.newIdxCache
-  ecache <- W4B.newIdxCache
-  
+  heuristicTimeout <- CMR.asks (PC.cfgHeuristicTimeout . envConfig)
   let
     concPred :: W4.Pred sym -> EquivM_ sym arch (Maybe Bool)
     concPred p | Just b <- W4.asConstantPred p = return $ Just b
@@ -251,12 +262,12 @@ getSimplifier = withSym $ \sym -> do
       shouldCheck <- CMR.asks (PC.cfgCheckSimplifier . envConfig)
       case shouldCheck of
         True -> withTracing @"debug_tree" "Simplifier Check" $ do
-          e'' <- WEH.runSimpCheck tracedSimpCheck e e'
+          e'' <- WEH.runSimpCheck check e e'
           case W4.testEquality e' e'' of
             Just W4.Refl -> return e''
             Nothing -> do
               -- re-run the simplifier with tracing enabled
-              _ <- simp tracedSimpCheck e
+              _ <- simp check e
               return e
         False -> return e'
 
@@ -272,7 +283,7 @@ getSimplifier = withSym $ \sym -> do
       e3 <- liftIO $ WEH.fixMux sym e2
       emitIfChanged "fixMux" e2 e3
       return e3
-  return $ Simplifier $ \v -> PEM.mapExpr sym simp_wrapped v
+  return $ WEH.Simplifier simp_wrapped
 
 emitIfChanged ::
   ExprLabel ->
