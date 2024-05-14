@@ -170,6 +170,7 @@ data InnerEquivalenceError arch
   | RequiresInvalidPointerOps
   | PairGraphError PairGraphErr
   | forall e. X.Exception e => UnhandledException e
+  | IncompatibleSingletonNodes (PB.ConcreteBlock arch PBi.Original) (PB.ConcreteBlock arch PBi.Patched)
   | SolverError X.SomeException
 
 errShortName :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> String

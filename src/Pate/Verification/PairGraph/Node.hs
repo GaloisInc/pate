@@ -30,6 +30,7 @@ module Pate.Verification.PairGraph.Node (
   , graphNodeBlocks
   , mkNodeEntry
   , mkNodeEntry'
+  , mkSingleNodeEntry
   , addContext
   , mkNodeReturn
   , rootEntry
@@ -52,11 +53,14 @@ module Pate.Verification.PairGraph.Node (
   , mkMergedNodeReturn
   , SingleNodeEntry
   , singleEntryBin
+  , singleNodeDivergePoint
   , asSingleNodeEntry
   , singleToNodeEntry
+  , singleNodeBlock
   , combineSingleEntries
   , singleNodeBlock
   , singleNodeDivergence
+  , toSingleNodeEntry
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -394,6 +398,9 @@ data SingleNodeEntry arch bin =
     , _singleEntry :: NodeContent arch (PB.ConcreteBlock arch bin)
     }
 
+mkSingleNodeEntry :: NodeEntry arch -> PB.ConcreteBlock arch bin -> SingleNodeEntry arch bin
+mkSingleNodeEntry node blk = SingleNodeEntry (PB.blockBinRepr blk) (NodeContent (graphNodeContext node) blk)
+
 instance TestEquality (SingleNodeEntry arch) where
   testEquality se1 se2 | EQF <- compareF se1 se2 = Just Refl
   testEquality _ _ = Nothing
@@ -411,6 +418,11 @@ instance OrdF (SingleNodeEntry arch) where
 instance PA.ValidArch arch => Show (SingleNodeEntry arch bin) where
   show e = show (singleToNodeEntry e)
 
+singleNodeDivergePoint :: SingleNodeEntry arch bin -> GraphNode arch
+singleNodeDivergePoint (SingleNodeEntry _ (NodeContent cctx _)) = case divergePoint cctx of
+  Just dp -> dp
+  Nothing -> panic Verifier "singleNodeDivergePoint" ["missing diverge point for SingleNodeEntry"]
+
 asSingleNodeEntry :: PPa.PatchPairM m => NodeEntry arch -> m (Some (SingleNodeEntry arch))
 asSingleNodeEntry (NodeEntry cctx bPair) = do
   Pair bin blk <- PPa.asSingleton bPair
@@ -418,17 +430,42 @@ asSingleNodeEntry (NodeEntry cctx bPair) = do
     Just{} -> return $ Some (SingleNodeEntry bin (NodeContent cctx blk))
     Nothing -> PPa.throwPairErr
 
+singleNodeBlock :: SingleNodeEntry arch bin -> PB.ConcreteBlock arch bin
+singleNodeBlock (SingleNodeEntry _ (NodeContent _ blk)) = blk
+
+-- | Returns a 'SingleNodeEntry' for a given 'NodeEntry' if it has an entry
+--   for the given 'bin'.
+--   Note that, in contrast to
+--   'asSingleNodeEntry' this does not require the given 'NodeEntry' to be a singleton
+toSingleNodeEntry :: 
+  PPa.PatchPairM m => 
+  PB.WhichBinaryRepr bin -> 
+  NodeEntry arch -> 
+  m (SingleNodeEntry arch bin)
+toSingleNodeEntry bin (NodeEntry cctx bPair) = do
+  blk <- PPa.get bin bPair
+  return $ SingleNodeEntry bin (NodeContent cctx blk)
+
 singleToNodeEntry :: SingleNodeEntry arch bin -> NodeEntry arch
 singleToNodeEntry (SingleNodeEntry bin (NodeContent cctx v)) = 
   NodeEntry cctx (PPa.PatchPairSingle bin v)
-
-singleNodeBlock :: SingleNodeEntry arch bin -> PB.ConcreteBlock arch bin
-singleNodeBlock (SingleNodeEntry _ (NodeContent _ blk)) = blk
 
 singleNodeDivergence :: SingleNodeEntry arch bin -> GraphNode arch
 singleNodeDivergence (SingleNodeEntry _ (NodeContent cctx _)) = case divergePoint cctx of
   Just dp -> dp
   Nothing -> panic Verifier "singleNodeDivergence" ["Unexpected missing divergence point"]
+
+combineSingleEntries' :: 
+  SingleNodeEntry arch PB.Original -> 
+  SingleNodeEntry arch PB.Patched ->
+  Maybe (NodeEntry arch)
+combineSingleEntries' (SingleNodeEntry _ eO) (SingleNodeEntry _ eP) = do
+  GraphNode divergeO <- divergePoint $ nodeContentCtx eO
+  GraphNode divergeP <- divergePoint $ nodeContentCtx eP
+  guard $ divergeO == divergeP
+  let blksO = nodeContent eO
+  let blksP = nodeContent eP
+  return $ mkNodeEntry divergeO (PPa.PatchPair blksO blksP)
 
 -- | Create a combined two-sided 'NodeEntry' based on
 --   a pair of single-sided entries. The given entries
@@ -437,13 +474,9 @@ singleNodeDivergence (SingleNodeEntry _ (NodeContent cctx _)) = case divergePoin
 --   that point (i.e. any additional context accumulated during
 --   the either single-sided analysis is discarded)
 combineSingleEntries :: 
-  SingleNodeEntry arch PB.Original -> 
-  SingleNodeEntry arch PB.Patched ->
+  SingleNodeEntry arch bin -> 
+  SingleNodeEntry arch (PB.OtherBinary bin) ->
   Maybe (NodeEntry arch)
-combineSingleEntries (SingleNodeEntry _ eO) (SingleNodeEntry _ eP) = do
-  GraphNode divergeO <- divergePoint $ nodeContentCtx eO
-  GraphNode divergeP <- divergePoint $ nodeContentCtx eP
-  guard $ divergeO == divergeP
-  let blksO = nodeContent eO
-  let blksP = nodeContent eP
-  return $ mkNodeEntry divergeO (PPa.PatchPair blksO blksP)
+combineSingleEntries sne1 sne2 = case singleEntryBin sne1 of
+  PB.OriginalRepr -> combineSingleEntries' sne1 sne2
+  PB.PatchedRepr -> combineSingleEntries' sne2 sne1

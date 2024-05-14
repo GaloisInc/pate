@@ -134,6 +134,8 @@ data NodePriorityK =
   | PriorityDeferredPropagation
   | PriorityDomainRefresh
   | PriorityHandleReturn
+  | PriorityHandleMerge
+  | PriorityFinalizeDivergence
   | PriorityMiscCleanup
   | PriorityDeferred
   deriving (Eq, Ord)
@@ -153,8 +155,13 @@ printPriorityKind (NodePriority pk _ _ ) = case pk of
   PriorityDeferredPropagation -> "Propagating Deferred Conditions"
   PriorityDomainRefresh -> "Re-checking Equivalence Domains"
   PriorityHandleReturn -> "Handling Function Return"
+  PriorityHandleMerge -> "Handling Control Flow Merge"
   PriorityMiscCleanup -> "Proof Cleanup"
   PriorityDeferred -> "Handling Deferred Decisions"
+  -- this should be lowest priority since we want to defer this
+  -- until any other analysis is complete
+  PriorityFinalizeDivergence -> "Finalizing Control Flow Divergence"
+
 
 instance IsTraceNode k "priority" where
   type TraceNodeType k "priority" = NodePriority
