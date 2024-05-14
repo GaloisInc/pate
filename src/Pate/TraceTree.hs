@@ -805,6 +805,9 @@ data ChoiceHeader k (nm_choice :: Symbol) a =
 
 data SomeChoiceHeader k = forall nm_choice nm_ret. SomeChoiceHeader (ChoiceHeader k nm_choice nm_ret)
 
+instance JSON.ToJSON (SomeChoiceHeader k) where
+  toJSON (SomeChoiceHeader ch) = JSON.toJSON (symbolRepr $ choiceType ch)
+
 instance IsTraceNode k "choiceTree" where
   type TraceNodeType k "choiceTree" = SomeChoiceHeader k
   type TraceNodeLabel "choiceTree" = String
@@ -814,6 +817,8 @@ instance IsTraceNode k "choiceTree" where
     ,(Simplified_Detail, \nm _ -> PP.pretty nm)
     ,(Simplified, \nm _ -> PP.pretty nm)
     ]
+  jsonNode _ = nodeToJSON @k @"choiceTree"
+  
 
 data Choice k (nm_choice :: Symbol) a = 
   Choice { choiceHeader :: ChoiceHeader k nm_choice a
