@@ -37,6 +37,12 @@ instance (OrdF a, OrdF b) => OrdF (PairF a b) where
   compareF (PairF a1 b1) (PairF a2 b2) = 
     lexCompareF a1 a2 $ compareF b1 b2
 
+instance (Eq (a tp), Eq (b tp)) => Eq ((PairF a b) tp) where
+  (PairF a1 b1) == (PairF a2 b2) = a1 == a2 && b1 == b2
+
+instance (Ord (a tp), Ord (b tp)) => Ord ((PairF a b) tp) where
+  compare (PairF a1 b1) (PairF a2 b2) = compare a1 a2 <> compare b1 b2
+
 {-# COMPLETE TupleF2 #-}
 
 pattern TupleF3 :: a k -> b k -> c k -> TupleF '(a,b,c) k

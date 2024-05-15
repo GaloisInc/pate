@@ -44,6 +44,7 @@ module Data.Parameterized.SetF
   , unions
   , null
   , toSet
+  , fromSet
   , map
   , ppSetF
   ) where
@@ -141,6 +142,13 @@ null (SetF es) = S.null es
 toSet ::
   (OrdF f, Ord (f tp)) => SetF f tp -> Set (f tp)
 toSet (SetF s) = unsafeCoerce s
+
+-- | Convert a 'Set' to a 'SetF', under the assumption
+--   that the 'OrdF' and 'Ord' instances are consistent.
+--   This uses coercion rather than re-building the set,
+--   which is sound given the above assumption.
+fromSet :: (OrdF f, Ord (f tp)) => Set (f tp) -> SetF f tp
+fromSet s = SetF (unsafeCoerce s)
 
 map ::
   (OrdF g) => (f tp -> g tp) -> SetF f tp -> SetF g tp

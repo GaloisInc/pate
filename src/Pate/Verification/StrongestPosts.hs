@@ -557,44 +557,42 @@ addImmediateEqDomRefinementChoice nd preD gr0 = do
     choice ("No refinements") () $ return gr1
     mapM_ go [minBound..maxBound]
 
-{-
+
 initSingleSidedDomain ::
   GraphNode arch ->
-  WhichBinaryRepr bin ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-initSingleSidedDomain nd bin pg = do
+initSingleSidedDomain nd pg0 = withPG_ pg0 $ do
+  priority <- lift $ thisPriority
+  let bin = PBi.OriginalRepr
   nd_single <- toSingleGraphNode bin nd
-  case getCurrentDomain nd pg of
-    Just dom_spec -> do
-      
-  case getCurrentDomain nd_single pg of
-    Just{} -> return pg
-    Nothing -> do
--}
+  dom_spec <- liftPG $ getCurrentDomainM nd
+  PS.forSpec dom_spec $ \scope dom -> do
+    case getCurrentDomain pg0 nd_single of
+      Just{} -> return ()
+      Nothing -> do
+        dom_single <- PAD.singletonDomain bin dom
+        let dom_single_spec = PS.mkSimSpec scope dom_single
+        liftPG $ modify $ \pg -> initDomain pg nd nd_single (priority PriorityHandleDesync) dom_single_spec
+    bundle <- lift $ noopBundle scope (graphNodeBlocks nd)
+    liftEqM_ $ \pg -> widenAlongEdge scope bundle nd dom pg nd_single
+    return (PS.WithScope ())
 
 workItemDomainSpec ::
   WorkItem arch ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (GraphNode arch, PAD.AbstractDomainSpec sym arch), PairGraph sym arch)
 workItemDomainSpec wi pg = withPG pg $ case wi of
-  FinalizeDivergence dp -> do
-    snePairs <- liftPG $ singleSidedReturns dp
-    forM_ snePairs $ \(sneO, sneP) -> do
-      void $ liftEqM $ mergeSingletons sneO sneP
-    return Nothing
   ProcessNode nd -> do
-    dom_spec <- liftPG $ getCurrentDomainM nd
     case isDivergeNode nd pg of
       True -> do
-        priority <- lift $ thisPriority
-        divergeNodeO <- toSingleGraphNode PBi.OriginalRepr nd
-        case getCurrentDomain pg divergeNodeO of
-          Just{} -> liftPG $ modify $ queueNode (priority PriorityHandleDesync) divergeNodeO
-          Nothing -> error "TODO"
-      False -> error "TODO"
-
-    return $ Just (nd, dom_spec)
+        liftEqM_ $ initSingleSidedDomain nd
+        -- single-sided node has been queued, so we skip
+        -- any further analysis here
+        return Nothing
+      False -> do
+        dom <- liftPG $ getCurrentDomainM nd
+        return $ Just (nd, dom)
   ProcessMerge sneO sneP -> do
     let
       ndO = GraphNode $ singleToNodeEntry sneO
@@ -611,7 +609,7 @@ workItemDomainSpec wi pg = withPG pg $ case wi of
             syncNode <- liftEqM $ mergeSingletons sneO sneP
             dom_spec <- liftPG $ getCurrentDomainM (GraphNode syncNode)
             return $ Just (GraphNode syncNode, dom_spec)
-          (Just ndO_dom_spec, Nothing) -> do
+          (Just{}, Nothing) -> do
             divergeNodeP <- toSingleGraphNode PBi.PatchedRepr divergeNode
             _ <- PS.forSpec diverge_dom_spec $ \scope diverge_dom -> do
               diverge_domP <- lift $ PAD.singletonDomain PBi.PatchedRepr diverge_dom
@@ -619,6 +617,8 @@ workItemDomainSpec wi pg = withPG pg $ case wi of
               -- if the current domain for the patched variant of the diverge node
               -- doesn't exist, then we initialize it as the "singletonDomain"
               -- otherwise we leave it unmodified, as it's potentially been widened
+              -- any updates that propagate from before this divergence will eventually 
+              -- be propagated here via the Original single-sided analysis
               liftPG $ (void $ getCurrentDomainM divergeNodeP) 
                 <|> (modify $ \pg_ -> updateDomain' pg_ ndO divergeNodeP (PS.mkSimSpec scope diverge_domP) (priority PriorityWidening))
               liftEqM_ $ \pg_ -> withPredomain scope bundle diverge_domP $ withConditionsAssumed scope bundle diverge_dom divergeNode pg_ $
@@ -663,34 +663,6 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
           emitTraceLabel @"domain" PAD.Predomain (Some dom)
           widenAlongEdge scope bundle ndP dom pg (GraphNode syncNode)
   return (syncNode, pg1)
-
-
-mergeDualNodes ::
-  SingleNodeEntry arch PBi.Original {- ^ original program node -} ->
-  SingleNodeEntry arch PBi.Patched {- ^ patched program node -} ->
-  PAD.AbstractDomainSpec sym arch {- ^ original node domain -} ->
-  PAD.AbstractDomainSpec sym arch {- ^ patched node domain -} ->
-  GraphNode arch {- ^  combined sync node -} ->
-  PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-mergeDualNodes in1_single in2_single spec1 spec2 syncNode gr0 = fnTrace "mergeDualNodes" $ withSym $ \sym -> do
-  let gr2 = gr0
-  let in1 = GraphNode $ singleToNodeEntry in1_single
-  let in2 = GraphNode $ singleToNodeEntry in2_single
-
-  let blkPair1 = graphNodeBlocks in1
-  let blkPair2 = graphNodeBlocks in2
-
-  fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope (graphNodeBlocks syncNode) $ \scope -> fmap PS.WithScope $ 
-    withValidInit scope blkPair1 $ withValidInit scope blkPair2 $ do
-      (_, dom1) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec1
-      (_, dom2) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec2
-      dom <- PAD.zipSingletonDomains sym dom1 dom2
-      bundle <- noopBundle scope (graphNodeBlocks syncNode)
-      withPredomain scope bundle dom $ withConditionsAssumed scope bundle dom2 in2 gr2 $ do
-        withTracing @"node" in2 $ do
-          emitTraceLabel @"domain" PAD.Predomain (Some dom)
-          widenAlongEdge scope bundle in2 dom gr2 syncNode
 
 -- | Choose some work item (optionally interactively)
 withWorkItem ::

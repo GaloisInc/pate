@@ -148,6 +148,22 @@ instance Eq f => Eq (WithBin f bin) where
 instance Ord f => Ord (WithBin f bin) where
   compare (WithBin _ f1) (WithBin _ f2) = compare f1 f2
 
+-- NB: not a Monoid because we don't have an empty value for <>
+instance (forall bin. Semigroup (f bin)) => Semigroup (PatchPair f) where
+  p1 <> p2 = case (p1,p2) of
+    (PatchPair a1 b1, PatchPair a2 b2) -> PatchPair (a1 <> a2) (b1 <> b2)
+    (PatchPairSingle bin1 v1, PatchPair a2 b2) -> case bin1 of
+      PB.OriginalRepr -> PatchPair (v1 <> a2) b2
+      PB.PatchedRepr -> PatchPair a2 (v1 <> b2)
+    (PatchPair a1 b1, PatchPairSingle bin2 v2) -> case bin2 of
+      PB.OriginalRepr -> PatchPair (a1 <> v2) b1
+      PB.PatchedRepr -> PatchPair a1 (b1 <> v2)
+    (PatchPairSingle bin1 v1, PatchPairSingle bin2 v2) -> case (bin1, bin2) of
+      (PB.OriginalRepr, PB.PatchedRepr) -> PatchPair v1 v2
+      (PB.OriginalRepr, PB.OriginalRepr) -> PatchPairSingle bin1 (v1 <> v2)
+      (PB.PatchedRepr, PB.OriginalRepr) -> PatchPair v2 v1
+      (PB.PatchedRepr, PB.PatchedRepr) ->PatchPairSingle bin1 (v1 <> v2)
+
 -- | Select the value from the 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Returns 'Nothing' if the given 'PatchPair' does not contain a value for the given binary
 --   (i.e. it is a singleton 'PatchPair' and the opposite binary repr is given)
@@ -158,19 +174,6 @@ getPair repr pPair = case pPair of
     PB.PatchedRepr -> Just patched
   PatchPairSingle repr' a | Just Refl <- testEquality repr repr' -> Just a
   _ -> Nothing
-
--- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
---   Returns 'Nothing' if the given 'PatchPair' does not contain a value for the given binary.
---   (n.b. this will not convert a singleton 'PatchPair' into a full 'PatchPair')
-setPair :: PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> Maybe (PatchPair tp))
-setPair PB.OriginalRepr pPair a = case pPair of
-  PatchPair _ patched -> Just $ PatchPair a patched
-  PatchPairOriginal _ -> Just $ PatchPairOriginal a
-  PatchPairPatched _ -> Nothing
-setPair PB.PatchedRepr pPair a = case pPair of
-  PatchPair orig _ -> Just $ PatchPair orig a
-  PatchPairPatched _ -> Just $ PatchPairPatched a
-  PatchPairOriginal _ -> Nothing
 
 -- {-# DEPRECATED handleSingletonStub "Missing implementation for handling singleton PatchPair values" #-}
 handleSingletonStub :: HasCallStack => a
@@ -246,11 +249,14 @@ fromMaybes = \case
   (Nothing, Nothing) -> throwPairErr
 
 
-
--- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
---   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
-set :: HasCallStack => PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
-set repr pPair a = liftPairErr (setPair repr pPair a)
+set :: PB.WhichBinaryRepr bin -> tp bin -> PatchPair tp -> PatchPair tp
+set repr v pPair = case pPair of
+  PatchPair a b -> case repr of
+    PB.OriginalRepr -> PatchPair v b
+    PB.PatchedRepr -> PatchPair a v
+  PatchPairSingle repr' v' -> case PB.binCases repr' repr of
+    Left Refl -> PatchPairSingle repr v
+    Right Refl -> mkPair repr v v'
 
 data InconsistentPatchPairAccess = InconsistentPatchPairAccess
   deriving (Show)

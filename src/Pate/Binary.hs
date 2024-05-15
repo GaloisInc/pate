@@ -29,6 +29,7 @@ module Pate.Binary
   , Patched
   , WhichBinaryRepr(..)
   , OtherBinary
+  , binCases
   , flipRepr
   , short)
 where
@@ -59,6 +60,13 @@ flipRepr :: WhichBinaryRepr bin -> WhichBinaryRepr (OtherBinary bin)
 flipRepr = \case
   OriginalRepr -> PatchedRepr
   PatchedRepr -> OriginalRepr
+
+binCases :: WhichBinaryRepr bin1 -> WhichBinaryRepr bin2 -> Either (bin1 :~: bin2) ('(bin1, bin2) :~: '(OtherBinary bin2, OtherBinary bin1))
+binCases bin1 bin2 = case (bin1, bin2) of
+  (OriginalRepr, OriginalRepr) -> Left Refl
+  (OriginalRepr, PatchedRepr) -> Right Refl
+  (PatchedRepr, PatchedRepr) -> Left Refl
+  (PatchedRepr, OriginalRepr) -> Right Refl
 
 short :: WhichBinaryRepr bin -> String
 short OriginalRepr = "O"

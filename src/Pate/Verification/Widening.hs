@@ -599,52 +599,6 @@ domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
     False -> return $ W4.truePred sym
     True -> return eqPred
 
-{-
--- | After widening an edge, insert an equivalence condition
---   into the pairgraph for candidate functions
-initializeCondition ::
-  PS.SimScope sym arch v ->
-  SimBundle sym arch v ->
-  AbstractDomain sym arch v {- ^ incoming source predomain -} ->
-  AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
-  GraphNode arch {- ^ from -} ->
-  GraphNode arch {- ^ to -} ->
-  PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-initializeCondition scope bundle preD postD from to gr = do
-  let edge = (from,to)
-  addLazyAction edge gr "Post-process equivalence domain?" $ \choice ->
-    choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
-
-
-      eqCondFns <- CMR.asks envEqCondFns
-      (mlocFilter, gr1) <- if
-        | Just sync <- asSyncPoint gr to -> case syncTerminal sync of
-            Just True -> do
-              locFilter <- refineEquivalenceDomain postD
-              return (Just locFilter, gr)
-            Just False -> return (Nothing, gr)
-            Nothing -> do
-              emitTraceLabel @"domain" PAD.ExternalPostDomain (Some postD)
-              chooseBool "Continue analysis after resynchronization?" >>= \case
-                True -> return (Nothing, updateSyncPoint gr to (\sync' -> sync'{syncTerminal = Just False}))
-                False -> do
-                  locFilter <- refineEquivalenceDomain postD
-                  return (Just locFilter, updateSyncPoint gr to (\sync' -> sync'{syncTerminal = Just True}))
-        | ReturnNode ret <- to
-        , Just locFilter <- Map.lookup (nodeFuns ret) eqCondFns -> 
-            return $ (Just locFilter, gr)
-        | otherwise -> return (Nothing, gr)
-      case mlocFilter of
-        Just locFilter -> do
-          eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
-          pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
-          eqCond' <- PEC.mux sym pathCond eqCond (PEC.universal sym)
-          let gr2 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr1
-          return $ dropDomain to (markEdge from to gr2)
-        Nothing -> return gr1
--}
-
 data PickManyChoice sym arch =
     forall tp. PickRegister (MM.ArchReg arch tp)
   | forall w. PickStack (PMc.MemCell sym arch w)
@@ -1676,7 +1630,7 @@ dropValueLoc wb loc postD = do
       PL.Unit -> vals
       _ -> error "unsupported location"
     locs = WidenLocs (Set.singleton (PL.SomeLocation loc))
-  vals' <- PPa.set wb (PAD.absDomVals postD) v
+  let vals' = PPa.set wb v (PAD.absDomVals postD) 
   return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 
 widenCells ::

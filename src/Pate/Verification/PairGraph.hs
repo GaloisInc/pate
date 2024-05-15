@@ -66,22 +66,24 @@ module Pate.Verification.PairGraph
   , dropReturns
   , dropPostDomains
   , markEdge
-  , getSyncPoints
   , getBackEdgesFrom
   , getCombinedSyncPoints
   , combineNodes
   , NodePriority(..)
   , addToWorkList
-  , WorkItem(FinalizeDivergence, ProcessNode)
+  , WorkItem(ProcessNode)
   , pattern ProcessMerge
   , workItemNode
-  , singleSidedReturns
   , getQueuedPriority
   , queueAncestors
   , queueNode
   , emptyWorkList
-  , SyncPoint(..)
-  , updateSyncPoint
+  , SyncPoint
+  , getSyncPoint
+  , modifySyncPoint
+  , syncMergeExitNodes
+  , syncCutAddresses
+  , syncExceptions
   , singleNodeRepr
   , edgeActions
   , nodeActions
@@ -108,7 +110,6 @@ module Pate.Verification.PairGraph
   , propagateOnce
   , getPropagationKind
   , propagateAction
-  , getSyncAddresses
   , addSyncAddress
   -- , filterSyncExits
   , pairGraphComputeVerdict
@@ -117,6 +118,8 @@ module Pate.Verification.PairGraph
   , handleSingleSidedReturnTo
   , filterSyncExits
   , isDivergeNode
+  , mkProcessMerge
+  , dropWorkItem
   ) where
 
 import           Prettyprinter
@@ -310,7 +313,6 @@ data WorkItem arch =
   | ProcessMergeCtor
       (SingleNodeEntry arch PBi.Original) 
       (SingleNodeEntry arch PBi.Patched)
-  | FinalizeDivergence (GraphNode arch)
   deriving (Eq, Ord)
 
 -- Use mkProcessMerge as a partial smart constructor, but
@@ -318,7 +320,7 @@ data WorkItem arch =
 pattern ProcessMerge :: SingleNodeEntry arch PBi.Original -> SingleNodeEntry arch PBi.Patched -> WorkItem arch
 pattern ProcessMerge sneO sneP <- ProcessMergeCtor sneO sneP
 
-{-# COMPLETE ProcessNode, ProcessMerge, FinalizeDivergence #-}
+{-# COMPLETE ProcessNode, ProcessMerge #-}
 
 -- TODO: After some refactoring I'm not sure if we actually need edge actions anymore, so this potentially can be simplified
 data ActionQueue sym arch =
@@ -380,7 +382,7 @@ data SyncPoint arch =
       -- | During single-sided analysis, if we encounter an edge
       -- that ends in a cut point, we
       -- mark it here as a node that needs to be considered for merging
-      _syncMergeNodes :: PPa.PatchPair (SetF (SingleNodeEntry arch))
+      _syncMergeExitNodes :: PPa.PatchPair (SetF (SingleNodeEntry arch))
       -- | Instruction addresses that, if reached during single-sided
       --   analysis (from the corresponding diverge point), 
       --   should trigger a merge back into a two-sided analysis
@@ -389,17 +391,78 @@ data SyncPoint arch =
       --   In these cases, the single-sided analysis continues instead, with the intention
       --   that another sync point is encountered after additional instructions are executed
     , _syncExceptions :: PPa.PatchPair (SetF (TupleF '(SingleNodeEntry arch, PB.BlockTarget arch)))
-      -- | The single-sided nodes that were
-      --   introduced when a single-sided analysis of a function returned
-      --   exactly to a cut point.
-    , _syncReturnTargets :: PPa.PatchPair (SetF (SingleNodeEntry arch))
-    
     }
+
+
+
+instance Semigroup (SyncPoint arch) where
+  (SyncPoint a1 b1 c1) <> (SyncPoint a2 b2 c2) = (SyncPoint (a1 <> a2) (b1 <> b2) (c1 <> c2))
+
+
+instance Monoid (SyncPoint arch) where
+  mempty = SyncPoint 
+    (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
+    (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
+    (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
 
 $(L.makeLenses ''SyncPoint)
 $(L.makeLenses ''ActionQueue)
 
 type ActionQueueLens sym arch k v = L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch v])
+
+getSyncPoint ::
+  forall sym arch x bin.
+  HasCallStack =>
+  (OrdF x, Ord (x bin)) =>
+  L.Lens' (SyncPoint arch) (PPa.PatchPair (SetF x)) ->
+  PBi.WhichBinaryRepr bin ->
+  GraphNode arch {- ^ The divergent node -}  ->
+  PairGraphM sym arch (Set (x bin))
+getSyncPoint lens bin nd = do
+  sp <- lookupPairGraph @sym pairGraphSyncPoints nd
+  let x = sp ^. lens
+  -- should be redundant, but no harm in checking
+  case PPa.get bin x of
+    Just x' -> return $ SetF.toSet x'
+    Nothing -> return Set.empty
+
+modifySyncPoint ::
+  forall sym arch x bin.
+  HasCallStack =>
+  (OrdF x, Ord (x bin)) =>
+  L.Lens' (SyncPoint arch) (PPa.PatchPair (SetF x)) ->
+  PBi.WhichBinaryRepr bin ->
+  GraphNode arch -> 
+  (Set (x bin) -> Set (x bin)) ->
+  PairGraphM sym arch ()
+modifySyncPoint lens bin dp f = do
+  msp <- tryPG $ lookupPairGraph pairGraphSyncPoints dp
+  let f' = \x -> SetF.fromSet (f (SetF.toSet x))
+  let sp' = case msp of
+        Nothing -> mempty & lens .~ (PPa.mkSingle bin (f' SetF.empty))
+        Just sp -> sp & lens %~ 
+          (\x -> PPa.set bin (f' $ fromMaybe SetF.empty (PPa.get bin x)) x)
+  modify $ \pg -> 
+    pg { pairGraphSyncPoints = Map.insert dp sp' (pairGraphSyncPoints pg)}
+
+addToSyncPoint ::
+  forall sym arch x bin.
+  (OrdF x, Ord (x bin)) =>
+  HasCallStack =>
+  L.Lens' (SyncPoint arch) (PPa.PatchPair (SetF x)) ->
+  PBi.WhichBinaryRepr bin ->
+  GraphNode arch {- ^ The divergent node -}  ->
+  x bin ->
+  PairGraphM sym arch ()
+addToSyncPoint lens bin nd x = modifySyncPoint lens bin nd (Set.insert x)
+
+addSyncAddress ::
+  forall sym arch bin.
+  GraphNode arch {- ^ The divergent node -}  ->
+  PBi.WhichBinaryRepr bin ->
+  PAd.ConcreteAddress arch ->
+  PairGraphM sym arch ()
+addSyncAddress nd bin syncAddr = addToSyncPoint syncCutAddresses bin nd (PPa.WithBin bin syncAddr)
 
 -- | Combine two single-sided nodes into a 'WorkItem' to process their
 --   merge. Returns 'Nothing' if the two single-sided nodes have different
@@ -422,8 +485,6 @@ workItemNode = \case
   ProcessMerge sneO sneP -> case combineSingleEntries sneO sneP of
     Just merged -> GraphNode merged
     Nothing -> panic Verifier "workItemNode" ["Unexpected mismatched single-sided nodes"]
-  FinalizeDivergence dp -> dp
-
 
 newtype PairGraphM sym arch a = PairGraphT { unpgT :: ExceptT PEE.PairGraphErr (State (PairGraph sym arch)) a }
   deriving (Functor
@@ -716,8 +777,23 @@ queueAncestors priority nd pg =
 queueNode :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
 queueNode priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
 
-queueWorkItem :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
-queueWorkItem priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
+-- | Calls 'queueNode' for 'ProcessNode' work items.
+--   For 'ProcessMerge' work items, queues up the merge if
+--   there exist domains for both single-sided nodes.
+--   Otherwise, queues up the single-sided nodes with missing domains.
+queueWorkItem :: NodePriority -> WorkItem arch -> PairGraph sym arch -> PairGraph sym arch
+queueWorkItem priority wi pg = case wi of
+  ProcessNode nd -> queueNode priority nd pg
+  ProcessMerge sneO sneP -> 
+    let 
+      neO = GraphNode (singleToNodeEntry sneO)
+      neP = GraphNode (singleToNodeEntry sneP)
+    in case (getCurrentDomain pg neO, getCurrentDomain pg neP) of
+      (Just{},Just{}) -> addItemToWorkList wi priority pg
+      (Just{}, Nothing) -> queueNode priority neP pg
+      (Nothing, Just{}) -> queueNode priority neO pg
+      (Nothing, Nothing) -> 
+        queueNode priority neP (queueNode priority neO pg)
 
 
 -- | Adds a node to the work list. If it doesn't have a domain, queue its ancestors.
@@ -1013,37 +1089,6 @@ pgMaybe :: String -> Maybe a -> PairGraphM sym arch a
 pgMaybe _ (Just a) = return a
 pgMaybe msg Nothing = throwError $ PEE.PairGraphErr msg
 
-getSyncPoints ::
-  forall sym arch bin.
-  HasCallStack =>
-  PBi.WhichBinaryRepr bin ->
-  GraphNode arch ->
-  PairGraphM sym arch (Set (SingleNodeEntry arch bin))
-getSyncPoints bin nd = do
-  (SyncPoint syncPair _ _ _) <- lookupPairGraph @sym pairGraphSyncPoints nd
-  SetF.toSet <$> PPa.get bin syncPair
-
-getSyncAddresses ::
-  forall sym arch bin.
-  HasCallStack =>
-  PBi.WhichBinaryRepr bin ->
-  GraphNode arch ->
-  PairGraphM sym arch (Set (PAd.ConcreteAddress arch))
-getSyncAddresses bin nd = fmap (fromMaybe Set.empty) $ tryPG $ do
-  (SyncPoint _ addrPair _ _) <- lookupPairGraph @sym pairGraphSyncPoints nd
-  (Set.map PPa.withBinValue . SetF.toSet) <$> PPa.get bin addrPair
-
-updateSyncPoint ::
-  forall sym arch.
-  GraphNode arch -> 
-  (SyncPoint arch -> SyncPoint arch) ->
-  PairGraphM sym arch ()
-updateSyncPoint nd f = do
-  dp <- pgMaybe "missing diverge point" $ getDivergePoint nd
-  sp <- lookupPairGraph pairGraphSyncPoints dp
-  modify $ \pg -> 
-    pg { pairGraphSyncPoints = Map.insert dp (f sp) (pairGraphSyncPoints pg)}
-
 -- | Returns all discovered merge points from the given diverge point
 getCombinedSyncPoints ::
   forall sym arch.
@@ -1051,7 +1096,7 @@ getCombinedSyncPoints ::
   GraphNode arch ->
   PairGraphM sym arch ([((SingleNodeEntry arch PBi.Original, SingleNodeEntry arch PBi.Patched), GraphNode arch)], SyncPoint arch)
 getCombinedSyncPoints ndDiv = do
-  sync@(SyncPoint syncSet _ _ _) <- lookupPairGraph @sym pairGraphSyncPoints ndDiv
+  sync@(SyncPoint syncSet _ _) <- lookupPairGraph @sym pairGraphSyncPoints ndDiv
   case syncSet of
     PPa.PatchPair ndsO ndsP -> do
       all_pairs <- forM (Set.toList $ Set.cartesianProduct (SetF.toSet ndsO) (SetF.toSet ndsP)) $ \(ndO, ndP) -> do
@@ -1084,17 +1129,6 @@ singleNodeRepr nd = case graphNodeBlocks nd of
 tryPG :: PairGraphM sym arch a -> PairGraphM sym arch (Maybe a)
 tryPG f = catchError (Just <$> f) (\_ -> return Nothing)
 
-getSyncPoint ::
-  forall sym arch x bin.
-  HasCallStack =>
-  L.Lens' (SyncPoint arch) (PPa.PatchPair x) ->
-  PBi.WhichBinaryRepr bin ->
-  GraphNode arch {- ^ The divergent node -}  ->
-  PairGraphM sym arch (x bin)
-getSyncPoint lens bin nd = do
-  sp <- lookupPairGraph @sym pairGraphSyncPoints nd
-  let x = sp ^. lens
-  PPa.get bin x
 
 -- | Retrive the 'SyncPoint' fields corresponding to
 --   the divergence point of the given single-sided node
@@ -1113,41 +1147,7 @@ getSingleNodeSync lens sne = do
   v2 <- PPa.get (PBi.flipRepr bin) x
   return (v1, v2)
 
--- | Initialize an empty sync point entry for the given node, if
--- one doesn't already exist
-initSyncPoint :: GraphNode arch -> PairGraphM sym arch ()
-initSyncPoint nd = do
-  pg <- get
-  case Map.member nd (pairGraphSyncPoints pg) of
-    True -> return ()
-    False -> do
-      let sp = SyncPoint (PPa.PatchPair SetF.empty SetF.empty) (PPa.PatchPair SetF.empty SetF.empty) (PPa.PatchPair SetF.empty SetF.empty) (PPa.PatchPair SetF.empty SetF.empty)
-      modify $ \pg_ -> pg_{ pairGraphSyncPoints = Map.insert nd sp (pairGraphSyncPoints pg) }
 
-addToSyncPoint ::
-  forall sym arch x bin.
-  OrdF x =>
-  HasCallStack =>
-  L.Lens' (SyncPoint arch) (PPa.PatchPair (SetF x)) ->
-  PBi.WhichBinaryRepr bin ->
-  GraphNode arch {- ^ The divergent node -}  ->
-  x bin ->
-  PairGraphM sym arch ()
-addToSyncPoint lens bin nd x = do
-  initSyncPoint nd
-  sp <-  lookupPairGraph @sym pairGraphSyncPoints nd
-  let sp' = sp & lens %~ PPa.insertWith bin (SetF.singleton x) SetF.union
-  -- make sure the other side has an empty set so that 'getSyncPoint' always succeeds
-  let sp'' = sp' & lens %~ PPa.insertWith (PBi.flipRepr bin) SetF.empty SetF.union
-  modify $ \pg -> pg{ pairGraphSyncPoints = Map.insert nd sp'' (pairGraphSyncPoints pg) }
-
-addSyncAddress ::
-  forall sym arch bin.
-  GraphNode arch {- ^ The divergent node -}  ->
-  PBi.WhichBinaryRepr bin ->
-  PAd.ConcreteAddress arch ->
-  PairGraphM sym arch ()
-addSyncAddress nd bin syncAddr = addToSyncPoint syncCutAddresses bin nd (PPa.WithBin bin syncAddr)
 
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.
@@ -1167,6 +1167,14 @@ addItemToWorkList ::
   PairGraph sym arch ->
   PairGraph sym arch
 addItemToWorkList wi priority gr = gr { pairGraphWorklist = RevMap.insertWith (min) wi priority (pairGraphWorklist gr) }
+
+-- | Drop a work item. Should only be used in cases where we are certain
+--   the work item is going to be handled after it is dropped.
+dropWorkItem ::
+  WorkItem arch ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+dropWorkItem wi gr = gr { pairGraphWorklist = RevMap.delete wi (pairGraphWorklist gr) }
 
 -- | Return the priority of the given 'GraphNode' if it is queued for
 --   normal processing
@@ -1301,33 +1309,13 @@ isSyncExit sne blkt@(PB.BlockTarget{}) = do
   let bin = singleEntryBin sne
   cuts <- getSyncPoint syncCutAddresses bin dp
   excepts <- getSyncPoint syncExceptions bin dp
-  let isExcept = SetF.member (TupleF2 sne blkt) excepts
+  let isExcept = Set.member (TupleF2 sne blkt) excepts
   case (not isExcept) &&
-    SetF.member (PPa.WithBin bin (PB.targetRawPC blkt)) cuts of
+    Set.member (PPa.WithBin bin (PB.targetRawPC blkt)) cuts of
       True -> return $ Just (PB.targetCall blkt)
       False -> return Nothing
 isSyncExit _ _ = return Nothing
 
--- | Get all possible merge targets from the given node
---   (i.e. all merge nodes for diverge point of the given
---    entry)
-otherMergeNodes :: 
-  SingleNodeEntry arch bin -> 
-  PairGraphM sym arch [SingleNodeEntry arch (PBi.OtherBinary bin)]
-otherMergeNodes sne = do
-  let bin = singleEntryBin sne
-  let dp = singleNodeDivergePoint sne
-  merges <- getSyncPoint syncMergeNodes (PBi.flipRepr bin) dp
-  return $ SetF.toList merges
-
-
-singleSidedReturns ::
-  GraphNode arch ->
-  PairGraphM sym arch [(SingleNodeEntry arch PBi.Original, SingleNodeEntry arch PBi.Patched)]
-singleSidedReturns nd = do
-  retsO <- getSyncPoint syncReturnTargets PBi.OriginalRepr nd
-  retsP <- getSyncPoint syncReturnTargets PBi.PatchedRepr nd
-  return $ [ (retO,retP) | retO <- SetF.toList retsO, retP <- SetF.toList retsP ]
 
 -- | Filter a list of reachable block exits to
 --   only those that should be handled for the given 'WorkItem'
@@ -1337,13 +1325,12 @@ singleSidedReturns nd = do
 --   possible merge nodes from the other side of the analysis and
 --   queued as a 'ProcessMerge' work item.
 filterSyncExits ::
-  (NodePriorityK -> NodePriority) -> {- ^ priority to queue new work items at -}
+  (NodePriorityK -> NodePriority) -> 
   WorkItem arch ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   PairGraphM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-filterSyncExits _priority (FinalizeDivergence{}) _ = fail "Unexpected FinalizeDivergence work item"
-filterSyncExits _priority (ProcessNode (ReturnNode{})) _ = fail "Unexpected ReturnNode work item"
-filterSyncExits _priority (ProcessMerge sneO sneP) blktPairs = do
+filterSyncExits _ (ProcessNode (ReturnNode{})) _ = fail "Unexpected ReturnNode work item"
+filterSyncExits _ (ProcessMerge sneO sneP) blktPairs = do
   let isSyncExitPair blktPair = do
         blktO <- PPa.get PBi.OriginalRepr blktPair
         blktP <- PPa.get PBi.PatchedRepr blktPair
@@ -1358,26 +1345,30 @@ filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleN
     let bin = singleEntryBin sne
     blkts <- mapM (PPa.get bin) blktPairs
     exitBlks <- catMaybes <$> mapM (isSyncExit sne) blkts
-    forM_ exitBlks $ \blk -> do
-      let nextNode = mkSingleNodeEntry ne blk
-      addToSyncPoint syncReturnTargets bin dp nextNode
     unless (null exitBlks) $ do
       -- if any of the exits from this node are sync exits,
       -- then we need to queue up processing this node as
       -- a merge against all known merge points
-      addToSyncPoint syncMergeNodes bin dp sne
-      -- make sure that the divergence itself is finalized after all
-      -- other processing is done
-      modify $ addItemToWorkList (FinalizeDivergence dp) (priority PriorityFinalizeDivergence)
+      addToSyncPoint syncMergeExitNodes bin dp sne
+      queueMerges priority sne
     return blktPairs
 
--- | For a given return -> entry transition, return a list of
---   entry nodes for all possible ways that control flow could
---   re-sync at the entry. i.e. if the given entry point is single-sided
---   but a sync address, then pair it with all possible merge nodes
---   from the other binary for the divergence point.
+queueMerges ::
+  (NodePriorityK -> NodePriority) -> 
+  SingleNodeEntry arch bin -> 
+  PairGraphM sym arch ()
+queueMerges priority sne = do
+  let dp = singleNodeDivergePoint sne
+  otherExits <- getSyncPoint syncMergeExitNodes (PBi.flipRepr (singleEntryBin sne)) dp
+  forM_ otherExits $ \otherExit -> do
+    wi <- pgMaybe "unexpected node merge failure" $ mkProcessMerge sne otherExit
+    modify $ queueWorkItem (priority PriorityHandleMerge) wi
+
+-- | This handles the special case where the sync point
+--   is the return site for a function.
+--   This will be handled specially
 handleSingleSidedReturnTo ::
-  (NodePriorityK -> NodePriority) -> {- ^ priority to queue new work items at -}
+  (NodePriorityK -> NodePriority) -> 
   NodeEntry arch ->
   PairGraphM sym arch ()
 handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
@@ -1386,10 +1377,9 @@ handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
     let dp = singleNodeDivergePoint sne
     syncAddrs <- getSyncPoint syncCutAddresses bin dp
     let blk = singleNodeBlock sne
-    case SetF.member (PPa.WithBin bin (PB.concreteAddress blk)) syncAddrs of
+    case Set.member (PPa.WithBin bin (PB.concreteAddress blk)) syncAddrs of
       True -> do
-        addToSyncPoint syncReturnTargets bin dp sne
-        -- need to re-check this as part of finalization
-        modify $ addItemToWorkList (FinalizeDivergence dp) (priority PriorityFinalizeDivergence)
+        addToSyncPoint syncMergeExitNodes bin dp sne
+        queueMerges priority sne
       False -> return ()
   Nothing -> return ()
