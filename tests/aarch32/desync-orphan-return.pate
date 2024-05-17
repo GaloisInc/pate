@@ -1,0 +1,37 @@
+Choose Entry Point
+    > Function Entry "_start"
+
+
+Function Entry "f"
+    ...
+    Call to: "clock" (0x100ec) Returns to: "f"
+        ...
+        ...
+        > Choose desynchronization points
+
+        ...
+        Choose a desynchronization point:
+            > 0x1014c (original)
+            > 0x1014c (patched)
+
+
+0x1014c [ via: "f"
+    ...
+    Call to: "clock" (0x100ec) Returns to: "f"
+        ...
+        ...
+        > Choose synchronization points
+
+        ...
+        Choose a synchronization point:
+            > 0x1014c (original)
+            > 0x10164 (patched)
+
+// TODO: we should assume that the additional 
+// return in the patched program isn't reachable,
+// however at the moment there is simply an error raised
+// about the orphaned singleton analysis
+
+Verification Finished
+Continue verification?
+    > Finish and view final result
