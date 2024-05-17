@@ -31,7 +31,9 @@ module Pate.Binary
   , OtherBinary
   , binCases
   , flipRepr
-  , short)
+  , short
+  , otherInvolutive
+  )
 where
 
 import           Data.Parameterized.WithRepr
@@ -51,10 +53,14 @@ data WhichBinaryRepr (bin :: WhichBinary) where
   OriginalRepr :: WhichBinaryRepr 'Original
   PatchedRepr :: WhichBinaryRepr 'Patched
 
-type family OtherBinary (bin :: WhichBinary) :: WhichBinary
+type family OtherBinary (bin :: WhichBinary) :: WhichBinary where
+  OtherBinary Original = Patched
+  OtherBinary Patched = Original
 
-type instance OtherBinary Original = Patched
-type instance OtherBinary Patched = Original
+otherInvolutive :: WhichBinaryRepr bin -> (OtherBinary (OtherBinary bin) :~: bin)
+otherInvolutive bin = case binCases bin (flipRepr bin) of
+  Left Refl -> Refl
+  Right Refl -> Refl
 
 flipRepr :: WhichBinaryRepr bin -> WhichBinaryRepr (OtherBinary bin)
 flipRepr = \case

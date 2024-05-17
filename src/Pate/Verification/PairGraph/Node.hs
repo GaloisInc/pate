@@ -58,7 +58,6 @@ module Pate.Verification.PairGraph.Node (
   , singleToNodeEntry
   , singleNodeBlock
   , combineSingleEntries
-  , singleNodeBlock
   , singleNodeDivergence
   , toSingleNodeEntry
   ) where
