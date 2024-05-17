@@ -1,0 +1,40 @@
+Choose Entry Point
+    > Function Entry "_start"
+
+Function Entry "f"
+    ...
+    Call to: "puts" (0x10108) Returns to: "f"
+        ...
+        ...
+        > Choose desynchronization points
+
+        ...
+        Choose a desynchronization point:
+            > 0x1014c (original)
+            > 0x1014c (patched)
+
+0x1014c [ via: "f"
+    ...
+    Call to: "puts" (0x10108) Returns to: "f"
+        ...
+        ...
+        > Choose synchronization points
+
+        ...
+        Choose a synchronization point:
+            > 0x1014c (original)
+            > 0x1015c (patched)
+
+// TODO: this is just to finish the analysis
+// so the test doesn't hang. We need to replace this
+// once this case is handled properly.
+0x1014c (original) vs. 0x10150 (patched)
+    ...
+    Call to: "puts" (0x10108) Returns to: "f"
+        ...
+        ...
+        > Ignore divergence
+
+Verification Finished
+Continue verification?
+    > Finish and view final result
