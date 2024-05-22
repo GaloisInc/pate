@@ -828,13 +828,13 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
           s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
             (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
             (tr, _) <- withGraphNode scope nd pg $ \bundle d -> do
-              simplifier <- PSi.deepPredicateSimplifier
-              cond_simplified <- PSi.applySimplifier simplifier cond
+              cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
               eqCond_pred <- PEC.toPred sym cond_simplified
               (mtraceT, mtraceF) <- getTracesForPred scope bundle d eqCond_pred
               case (mtraceT, mtraceF) of
-                (Just traceT, Just traceF) -> 
-                  return $ (Just (FinalEquivCond eqCond_pred traceT traceF), pg)
+                (Just traceT, Just traceF) -> do
+                  cond_pretty <- PSi.applySimpStrategy PSi.prettySimplifier eqCond_pred
+                  return $ (Just (FinalEquivCond cond_pretty traceT traceF), pg)
                 _ -> return (Nothing, pg)
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
@@ -1185,7 +1185,8 @@ getTracesForPred ::
   EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
-  withTracing @"expr" (Some p) $ do
+  p_pretty <- PSi.applySimpStrategy PSi.prettySimplifier p
+  withTracing @"expr" (Some p_pretty) $ do
     mtraceT <- withTracing @"message" "With condition assumed" $ 
       withSatAssumption (PAS.fromPred p) $ do
         traceT <- getSomeGroundTrace scope bundle dom Nothing
@@ -1291,8 +1292,7 @@ withSimBundle ::
   EquivM sym arch a
 withSimBundle pg vars node f = do
   bundle0 <- mkSimBundle pg node vars
-  simplifier <- PSi.getSimplifier
-  bundle1 <- PSi.applySimplifier simplifier bundle0
+  bundle1 <- PSi.applySimpStrategy PSi.coreStrategy bundle0
   bundle <- applyCurrentAsms bundle1
   emitTrace @"bundle" (Some bundle)
   f bundle
@@ -1638,7 +1638,7 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
             case mcondK of
               Just (condK, p) ->  do
                 let do_propagate = shouldPropagate (getPropagationKind pg nd condK)
-                simplifier <- PSi.deepPredicateSimplifier
+                simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
                 eqSeq_simp <- PSi.applySimplifier simplifier eqSeq
                 withPG pg $ do
                   liftEqM_ $ addToEquivCondition scope nd condK eqSeq_simp

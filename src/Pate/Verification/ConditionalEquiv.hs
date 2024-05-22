@@ -256,7 +256,7 @@ checkAndMinimizeEqCondition cond goal = fnTrace "checkAndMinimizeEqCondition" $ 
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- this check is not strictly necessary, as the incremental checks should guarantee it
   -- for the moment it's a sanity check on this process as well as the final simplifications
-  cond' <- PSi.simplifyPred_deep cond >>= \cond' -> (liftIO $ WEH.stripAnnotations sym cond')
+  cond' <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
   result <- withSatAssumption (PAS.fromPred cond') $ do
     isPredTrue' goalTimeout goal
   case result of
