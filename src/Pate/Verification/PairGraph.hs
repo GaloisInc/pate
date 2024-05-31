@@ -72,7 +72,7 @@ module Pate.Verification.PairGraph
   , combineNodes
   , NodePriority(..)
   , addToWorkList
-  , WorkItem(ProcessNode)
+  , WorkItem(ProcessNode, ProcessSplit)
   , pattern ProcessMerge
   , workItemNode
   , getQueuedPriority
@@ -122,6 +122,9 @@ module Pate.Verification.PairGraph
   , isDivergeNode
   , mkProcessMerge
   , dropWorkItem
+  , addDesyncExits
+  , queueSplitAnalysis
+  , handleKnownDesync
   ) where
 
 import           Prettyprinter
@@ -322,13 +325,23 @@ data WorkItem arch =
   | ProcessMergeAtEntryCtor
       (SingleNodeEntry arch PBi.Original) 
       (SingleNodeEntry arch PBi.Patched)
+  -- | Handle starting a split analysis from a diverging node.
+  | ProcessSplitCtor (Some (SingleNodeEntry arch)) 
   deriving (Eq, Ord)
+
+instance PA.ValidArch arch => Show (WorkItem arch) where
+  show = \case
+    ProcessNode nd -> "ProcessNode " ++ show nd
+    ProcessMergeAtEntry sneO sneP -> "ProcessMergeAtEntry " ++ show sneO ++ " vs. " ++ show sneP
+    ProcessMergeAtExits sneO sneP -> "ProcessMergeAtExits " ++ show sneO ++ " vs. " ++ show sneP
+    ProcessSplit sne -> "ProcessSplit " ++ show sne
 
 processMergeSinglePair :: WorkItem arch -> Maybe (SingleNodeEntry arch PBi.Original, SingleNodeEntry arch PBi.Patched)
 processMergeSinglePair wi = case wi of
   ProcessMergeAtExits sne1 sne2 -> Just (sne1,sne2)
   ProcessMergeAtEntry sne1 sne2 -> Just (sne1, sne2)
   ProcessNode{} -> Nothing
+  ProcessSplit{} -> Nothing
 
 -- Use mkProcessMerge as a partial smart constructor, but
 -- export this pattern so we can match on it
@@ -341,8 +354,12 @@ pattern ProcessMergeAtEntry sneO sneP <- ProcessMergeAtEntryCtor sneO sneP
 pattern ProcessMerge:: SingleNodeEntry arch PBi.Original -> SingleNodeEntry arch PBi.Patched -> WorkItem arch
 pattern ProcessMerge sneO sneP <- (processMergeSinglePair -> Just (sneO, sneP))
 
-{-# COMPLETE ProcessNode, ProcessMergeAtExits, ProcessMergeAtEntry #-}
-{-# COMPLETE ProcessNode, ProcessMerge #-}
+pattern ProcessSplit :: SingleNodeEntry arch bin -> WorkItem arch
+pattern ProcessSplit sne <- ProcessSplitCtor (Some sne)
+
+
+{-# COMPLETE ProcessNode, ProcessMergeAtExits, ProcessMergeAtEntry, ProcessSplit #-}
+{-# COMPLETE ProcessNode, ProcessMerge, ProcessSplit #-}
 
 -- TODO: After some refactoring I'm not sure if we actually need edge actions anymore, so this potentially can be simplified
 data ActionQueue sym arch =
@@ -413,6 +430,8 @@ data SyncData arch =
       --   In these cases, the single-sided analysis continues instead, with the intention
       --   that another sync point is encountered after additional instructions are executed
     , _syncExceptions :: PPa.PatchPair (SetF (TupleF '(SingleNodeEntry arch, PB.BlockTarget arch)))
+      -- Exits from the corresponding desync node that start the single-sided analysis
+    , _syncDesyncExits :: PPa.PatchPair (SetF (PB.BlockTarget arch))
     }
 
 data SyncPoint arch bin =
@@ -431,7 +450,7 @@ instance OrdF (SyncPoint arch) where
     fromOrdering (compare sp1 sp2)
 
 instance Semigroup (SyncData arch) where
-  (SyncData a1 b1 c1) <> (SyncData a2 b2 c2) = (SyncData (a1 <> a2) (b1 <> b2) (c1 <> c2))
+  (SyncData a1 b1 c1 d1) <> (SyncData a2 b2 c2 d2) = (SyncData (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2))
 
 
 instance Monoid (SyncData arch) where
@@ -439,6 +458,7 @@ instance Monoid (SyncData arch) where
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
+    (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty)
 
 $(L.makeLenses ''SyncData)
 $(L.makeLenses ''ActionQueue)
@@ -510,6 +530,33 @@ addSyncAddress ::
   PAd.ConcreteAddress arch ->
   PairGraphM sym arch ()
 addSyncAddress nd bin syncAddr = addToSyncData syncCutAddresses bin nd (PPa.WithBin bin syncAddr)
+
+addDesyncExits ::
+  forall sym arch.
+  GraphNode arch {- ^ The divergent node -}  ->
+  PPa.PatchPair (PB.BlockTarget arch) ->
+  PairGraphM sym arch ()
+addDesyncExits dp blktPair = do
+  PPa.catBins $ \bin -> do
+    blkt <- PPa.get bin blktPair
+    modifySyncData syncDesyncExits bin dp (Set.insert blkt)
+
+handleKnownDesync ::
+  (NodePriorityK -> NodePriority) ->
+  NodeEntry arch ->
+  PPa.PatchPair (PB.BlockTarget arch) ->
+  PairGraphM sym arch Bool
+handleKnownDesync priority ne blktPair = fmap (fromMaybe False) $ tryPG $ do
+  let dp = GraphNode ne
+  blktO <- PPa.get PBi.OriginalRepr blktPair
+  blktP <- PPa.get PBi.PatchedRepr blktPair
+  knownDesyncsO <- getSyncData syncDesyncExits PBi.OriginalRepr dp
+  knownDesyncsP <- getSyncData syncDesyncExits PBi.PatchedRepr dp
+  case Set.member blktO knownDesyncsO && Set.member blktP knownDesyncsP of
+    True -> do
+      queueSplitAnalysis (priority PriorityHandleDesync) ne
+      return True
+    False -> return False
 
 -- | Combine two single-sided nodes into a 'WorkItem' to process their
 --   merge. Returns 'Nothing' if the two single-sided nodes have different
@@ -867,6 +914,8 @@ queueNode priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
 --   For 'ProcessMerge' work items, queues up the merge if
 --   there exist domains for both single-sided nodes.
 --   Otherwise, queues up the single-sided nodes with missing domains.
+--   For 'ProcessSplit' work items, queues the given single-sided node if
+--   it has a domain, otherwise queues the source (two-sided) diverging node. 
 queueWorkItem :: NodePriority -> WorkItem arch -> PairGraph sym arch -> PairGraph sym arch
 queueWorkItem priority wi pg = case wi of
   ProcessNode nd -> queueNode priority nd pg
@@ -880,7 +929,18 @@ queueWorkItem priority wi pg = case wi of
       (Nothing, Just{}) -> queueNode priority neO pg
       (Nothing, Nothing) -> 
         queueNode priority neP (queueNode priority neO pg)
+  ProcessSplit sne -> case getCurrentDomain pg (singleNodeDivergence sne) of
+    Just{} -> addItemToWorkList wi priority pg
+    Nothing -> queueNode priority (singleNodeDivergence sne) pg
 
+queueSplitAnalysis :: NodePriority -> NodeEntry arch -> PairGraphM sym arch ()
+queueSplitAnalysis priority ne = do
+  sneO <- toSingleNodeEntry PBi.OriginalRepr ne
+  sneP <- toSingleNodeEntry PBi.PatchedRepr ne
+  wiO <- pgMaybe "invalid original split" $ mkProcessSplit sneO
+  wiP <- pgMaybe "invalid patched split" $ mkProcessSplit sneP
+  modify $ queueWorkItem priority wiO
+  modify $ queueWorkItem priority wiP
 
 -- | Adds a node to the work list. If it doesn't have a domain, queue its ancestors.
 --   Takes a set of nodes that have already been considerd, and returns all considered nodes
@@ -1229,11 +1289,11 @@ dropWorkItem ::
   PairGraph sym arch
 dropWorkItem wi gr = gr { pairGraphWorklist = RevMap.delete wi (pairGraphWorklist gr) }
 
--- | Return the priority of the given 'GraphNode' if it is queued for
---   normal processing
+-- | Return the priority of the given 'WorkItem'
 getQueuedPriority ::
-  GraphNode arch -> PairGraph sym arch -> Maybe NodePriority
-getQueuedPriority nd pg = RevMap.lookup (ProcessNode nd) (pairGraphWorklist pg)
+  WorkItem arch -> PairGraph sym arch -> Maybe NodePriority
+getQueuedPriority wi pg = RevMap.lookup wi (pairGraphWorklist pg)
+
 
 emptyWorkList :: PairGraph sym arch -> PairGraph sym arch
 emptyWorkList pg = pg { pairGraphWorklist = RevMap.empty }
@@ -1368,6 +1428,18 @@ isSyncExit sne blkt@(PB.BlockTarget{}) = do
       False -> return Nothing
 isSyncExit _ _ = return Nothing
 
+-- | True if the given node starts at exactly a sync point
+isZeroStepSync ::
+  forall sym arch bin.
+  SingleNodeEntry arch bin ->
+  PairGraphM sym arch Bool
+isZeroStepSync sne = do
+  cuts <- getSingleNodeData syncCutAddresses sne
+  logPG $ "isZeroStepSync cuts:" ++ show (Set.map PPa.withBinValue cuts)
+  let addr = PB.concreteAddress $ singleNodeBlock sne
+  logPG $ "isZeroStepSync addr:" ++ show addr
+  return $ Set.member (PPa.WithBin (singleEntryBin sne) addr) cuts
+
 -- | Filter a list of reachable block exits to
 --   only those that should be handled for the given 'WorkItem'
 --   For a 'ProcessNode' item, this is all exits for a 
@@ -1392,6 +1464,23 @@ filterSyncExits _ (ProcessMergeAtExits sneO sneP) blktPairs = do
 -- nothing to do for a merge at entry, since we're considering all exits
 -- to be synchronized
 filterSyncExits _ (ProcessMergeAtEntry{}) blktPairs = return blktPairs
+filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
+  logPG $ "filterSyncExits (ProcessSplit):" ++ show sne
+  isZeroStepSync sne >>= \case
+    True -> do
+      queueExitMerges priority (SyncAtStart sne)
+      return []
+    False -> do
+      let bin = singleEntryBin sne
+      desyncExits <- getSingleNodeData syncDesyncExits sne
+      logPG $ "allExits: " ++ show (pretty blktPairs)
+      logPG $ "desyncExits: " ++ show desyncExits
+      let isDesyncExitPair blktPair = do
+            blkt <- PPa.get bin blktPair
+            return $ Set.member blkt desyncExits
+      x <- filterM isDesyncExitPair blktPairs
+      logPG $ "result: " ++ show (pretty x)
+      return x
 filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleNodeEntry ne of
   Nothing -> return blktPairs
   Just (Some sne) -> do
@@ -1446,11 +1535,14 @@ handleSingleSidedReturnTo ::
   PairGraphM sym arch ()
 handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
   Just (Some sne) -> do
+    logPG $ "handleSingleSidedReturnTo"
     let bin = singleEntryBin sne
     let dp = singleNodeDivergePoint sne
     syncAddrs <- getSyncData syncCutAddresses bin dp
     let blk = singleNodeBlock sne
     case Set.member (PPa.WithBin bin (PB.concreteAddress blk)) syncAddrs of
-      True -> queueExitMerges priority (SyncAtStart sne)
+      True -> do
+        logPG $ "queueExitMerges"
+        queueExitMerges priority (SyncAtStart sne)
       False -> return ()
   Nothing -> return ()

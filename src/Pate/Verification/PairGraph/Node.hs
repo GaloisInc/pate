@@ -441,9 +441,12 @@ toSingleNodeEntry ::
   PB.WhichBinaryRepr bin -> 
   NodeEntry arch -> 
   m (SingleNodeEntry arch bin)
-toSingleNodeEntry bin (NodeEntry cctx bPair) = do
-  blk <- PPa.get bin bPair
-  return $ SingleNodeEntry bin (NodeContent cctx blk)
+toSingleNodeEntry bin ne = do
+  case toSingleNode bin ne of
+    Just (NodeEntry cctx bPair) -> do
+      blk <- PPa.get bin bPair
+      return $ SingleNodeEntry bin (NodeContent cctx blk)
+    _ -> PPa.throwPairErr
 
 singleToNodeEntry :: SingleNodeEntry arch bin -> NodeEntry arch
 singleToNodeEntry (SingleNodeEntry bin (NodeContent cctx v)) = 
