@@ -27,6 +27,7 @@ module Pate.Verification.PairGraph
   , PairGraph
   , PairGraphM
   , runPairGraphM
+  , runPairGraphMLog
   , execPairGraphM
   , evalPairGraphM
   , maybeUpdate
@@ -131,6 +132,8 @@ import           Control.Monad.State.Strict (MonadState (..), modify, State, get
 import           Control.Monad.Except (ExceptT, MonadError (..))
 import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Monad.Trans.State.Strict (runState)
+import           Control.Monad.Trans.Writer hiding (tell)
+import           Control.Monad.Writer
 
 import qualified Control.Lens as L
 import           Control.Lens ( (&), (.~), (^.), (%~) )
@@ -183,6 +186,8 @@ import           Data.Parameterized.PairF
 import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
 import GHC.Stack (HasCallStack)
+import Control.Monad.Reader
+
 
 -- | Gas is used to ensure that our fixpoint computation terminates
 --   in a reasonable amount of time.  Gas is expended each time
@@ -526,19 +531,37 @@ mkProcessMerge syncAtExits sne1 sne2
       False -> Just $ ProcessMergeAtEntryCtor sne2 sne1
 mkProcessMerge _ _ _ = Nothing
 
+-- | Can only mark a single node entry as a split if it is equal to
+--   its own divergence point
+mkProcessSplit :: SingleNodeEntry arch bin -> Maybe (WorkItem arch)
+mkProcessSplit sne = do
+  GraphNode dp_ne <- return $ singleNodeDivergePoint sne
+  sne_dp <- toSingleNodeEntry (singleEntryBin sne) dp_ne
+  guard (sne_dp == sne)
+  return (ProcessSplitCtor (Some sne))
+
+
 workItemNode :: WorkItem arch -> GraphNode arch
 workItemNode = \case
   ProcessNode nd -> nd
   ProcessMerge spO spP -> case combineSingleEntries spO spP of
     Just merged -> GraphNode merged
     Nothing -> panic Verifier "workItemNode" ["Unexpected mismatched single-sided nodes"]
+  ProcessSplit sne -> GraphNode (singleToNodeEntry sne)
 
-newtype PairGraphM sym arch a = PairGraphT { unpgT :: ExceptT PEE.PairGraphErr (State (PairGraph sym arch)) a }
+type PairGraphLog = [String]
+
+data PairGraphEnv sym arch where
+  PairGraphEnv :: forall sym arch. (PA.ValidArch arch) => PairGraphEnv sym arch
+
+newtype PairGraphM sym arch a = PairGraphM 
+  { unpgM ::(ExceptT PEE.PairGraphErr (WriterT PairGraphLog (ReaderT (PairGraphEnv sym arch) (State (PairGraph sym arch))))) a }
   deriving (Functor
            , Applicative
            , Monad
            , MonadState (PairGraph sym arch)
            , MonadError PEE.PairGraphErr
+           , MonadWriter PairGraphLog
            )
 
 instance PPa.PatchPairM (PairGraphM sym arch) where
@@ -552,19 +575,35 @@ instance Alternative (PairGraphM sym arch) where
   empty = throwError $ PEE.PairGraphErr "No more alternatives"
 
 instance MonadFail (PairGraphM sym arch) where
-  fail msg = throwError $ PEE.PairGraphErr ("fail: " ++ msg)
+  fail msg = do
+    logPG $ "fail: " ++ msg
+    throwError $ PEE.PairGraphErr ("fail: " ++ msg)
 
-runPairGraphM :: PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr (a, PairGraph sym arch)
-runPairGraphM pg f = case runState (runExceptT (unpgT f)) pg of
-  (Left err, _) -> Left err
-  (Right a, pg') -> Right (a, pg')
+logPG :: String -> PairGraphM sym arch ()
+logPG msg = tell [msg]
 
-execPairGraphM :: PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr (PairGraph sym arch)
+pgValid :: (PA.ValidArch arch => PairGraphM sym arch a) -> PairGraphM sym arch a
+pgValid f = do
+  PairGraphEnv <- PairGraphM ask
+  f
+
+runPairGraphMLog ::
+  forall sym arch a. 
+  PA.ValidArch arch => PairGraph sym arch -> PairGraphM sym arch a -> (PairGraphLog, Either PEE.PairGraphErr (a, PairGraph sym arch))
+runPairGraphMLog pg f = case runState (runReaderT (runWriterT (runExceptT (unpgM f))) (PairGraphEnv @sym @arch)) pg of
+  ((Left err,l), _) -> (l, Left err)
+  ((Right a,l), pg') -> (l, Right (a, pg'))
+
+
+runPairGraphM :: PA.ValidArch arch => PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr (a, PairGraph sym arch)
+runPairGraphM pg f = snd $ runPairGraphMLog pg f
+
+execPairGraphM :: PA.ValidArch arch => PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr (PairGraph sym arch)
 execPairGraphM pg f  = case runPairGraphM pg f of
   Left err -> Left err
   Right (_,pg') -> Right pg'
 
-evalPairGraphM :: PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr a
+evalPairGraphM :: PA.ValidArch arch => PairGraph sym arch -> PairGraphM sym arch a -> Either PEE.PairGraphErr a
 evalPairGraphM pg f  = case runPairGraphM pg f of
   Left err -> Left err
   Right (a,_) -> Right a
