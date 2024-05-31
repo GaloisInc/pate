@@ -1435,9 +1435,7 @@ isZeroStepSync ::
   PairGraphM sym arch Bool
 isZeroStepSync sne = do
   cuts <- getSingleNodeData syncCutAddresses sne
-  logPG $ "isZeroStepSync cuts:" ++ show (Set.map PPa.withBinValue cuts)
   let addr = PB.concreteAddress $ singleNodeBlock sne
-  logPG $ "isZeroStepSync addr:" ++ show addr
   return $ Set.member (PPa.WithBin (singleEntryBin sne) addr) cuts
 
 -- | Filter a list of reachable block exits to
@@ -1465,7 +1463,6 @@ filterSyncExits _ (ProcessMergeAtExits sneO sneP) blktPairs = do
 -- to be synchronized
 filterSyncExits _ (ProcessMergeAtEntry{}) blktPairs = return blktPairs
 filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
-  logPG $ "filterSyncExits (ProcessSplit):" ++ show sne
   isZeroStepSync sne >>= \case
     True -> do
       queueExitMerges priority (SyncAtStart sne)
@@ -1473,13 +1470,10 @@ filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
     False -> do
       let bin = singleEntryBin sne
       desyncExits <- getSingleNodeData syncDesyncExits sne
-      logPG $ "allExits: " ++ show (pretty blktPairs)
-      logPG $ "desyncExits: " ++ show desyncExits
       let isDesyncExitPair blktPair = do
             blkt <- PPa.get bin blktPair
             return $ Set.member blkt desyncExits
       x <- filterM isDesyncExitPair blktPairs
-      logPG $ "result: " ++ show (pretty x)
       return x
 filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleNodeEntry ne of
   Nothing -> return blktPairs
@@ -1535,14 +1529,11 @@ handleSingleSidedReturnTo ::
   PairGraphM sym arch ()
 handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
   Just (Some sne) -> do
-    logPG $ "handleSingleSidedReturnTo"
     let bin = singleEntryBin sne
     let dp = singleNodeDivergePoint sne
     syncAddrs <- getSyncData syncCutAddresses bin dp
     let blk = singleNodeBlock sne
     case Set.member (PPa.WithBin bin (PB.concreteAddress blk)) syncAddrs of
-      True -> do
-        logPG $ "queueExitMerges"
-        queueExitMerges priority (SyncAtStart sne)
+      True -> queueExitMerges priority (SyncAtStart sne)
       False -> return ()
   Nothing -> return ()
