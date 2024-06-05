@@ -765,14 +765,13 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
         Nothing -> do
           emitTrace @"debug" "No condition to propagate"
           return Nothing
-        _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
-          emitTrace @"debug" "Condition not propagated"
-          return Nothing
         Just{} -> do
           -- take the condition of the target edge and bind it to
           -- the output state of the bundle
           cond <- getEquivPostCondition scope bundle to condK gr
 {-
+
+
           let blks = graphNodeBlocks from
           skip <- case (blks, graphNodeBlocks to) of
             -- this is a synchronization edge, so we attempt to filter the equivalence condition
@@ -791,23 +790,31 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
               -- we need to update our own condition
           cond_pred <- PEC.toPred sym cond
           goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-          not_cond <- liftIO $ W4.notPred sym cond_pred
-          isPredSat' goalTimeout not_cond >>= \case
-            -- equivalence condition for this path holds, we 
-            -- don't need any changes
+          isPredSat' goalTimeout cond_pred >>= \case
             Just False -> do
-              emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+              emitTrace @"message" "Condition is infeasible, dropping branch."
+              Just <$> pruneCurrentBranch scope (from,to) condK gr
+            _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
+              emitTrace @"debug" "Condition not propagated"
               return Nothing
-            -- we need more assumptions for this condition to hold
-            Just True -> do
-              priority <- thisPriority
-              emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
-              let propK = getPropagationKind gr to condK
-              gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
-              return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
-                queueNode (priority PriorityNodeRecheck) from $ 
-                dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
-            Nothing -> throwHere $ PEE.InconclusiveSAT
+            _ -> do
+              not_cond <- liftIO $ W4.notPred sym cond_pred
+              isPredSat' goalTimeout not_cond >>= \case
+                -- equivalence condition for this path holds, we 
+                -- don't need any changes
+                Just False -> do
+                  emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+                  return Nothing
+                -- we need more assumptions for this condition to hold
+                Just True -> do
+                  priority <- thisPriority
+                  emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
+                  let propK = getPropagationKind gr to condK
+                  gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
+                  return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
+                    queueNode (priority PriorityNodeRecheck) from $ 
+                    dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
+                Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,

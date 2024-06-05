@@ -139,6 +139,7 @@ import qualified What4.JSON as W4S
 import qualified What4.Concrete as W4
 import Data.Parameterized.PairF (PairF(..))
 import qualified What4.Concrete as W4
+import Data.Parameterized (Pair(..))
 
 -- Overall module notes/thoughts
 --
@@ -407,11 +408,11 @@ chooseDesyncPoint nd pg0 = do
     pblks <- PD.lookupBlocks blk
     divergeSingle <- toSingleGraphNode bin nd
     return $ (divergeSingle, Some blk, pblks)
-  (_, Some syncBin) <- pickCutPoint syncMsg
+  [Some (PPa.WithBin syncBin _)] <- pickCutPoints False syncMsg
     [divergeO, divergeP]
   let otherBin = PBi.flipRepr syncBin
   diverge <- PPa.getC otherBin divergePair
-  _ <- pickCutPoint syncMsg [diverge]
+  _ <- pickCutPoints False syncMsg [diverge]
   return pg0
   where
     syncMsg = "Choose a desynchronization point:"
@@ -423,23 +424,14 @@ chooseSyncPoint ::
   PairGraph sym arch -> 
   EquivM sym arch (PairGraph sym arch)
 chooseSyncPoint nd pg0 = do
-  divergePair@(PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
+  (PPa.PatchPairC divergeO divergeP) <- PPa.forBinsC $ \bin -> do
     blk <- PPa.get bin (graphNodeBlocks nd)
     pblks <- PD.lookupBlocks blk
     divergeSingle <- toSingleGraphNode bin nd
     return $ (divergeSingle, Some blk, pblks)
-  (sync, Some syncBin) <- pickCutPoint syncMsg
-    [divergeO, divergeP]
-  let otherBin = PBi.flipRepr syncBin
-  
-  addr <- PB.concreteAddress <$> PPa.get syncBin (nodeBlocks sync)
-  withPG_ pg0 $ do 
-    liftPG $ addSyncAddress nd syncBin addr
-    diverge <- PPa.getC otherBin divergePair
-    syncOther <- lift $ fst <$> pickCutPoint syncMsg [diverge]
-    addrOther <- PB.concreteAddress <$> PPa.get otherBin (nodeBlocks syncOther) 
-    liftPG $ addSyncAddress nd otherBin addrOther
-    
+  cuts <- pickCutPoints True syncMsg [divergeO, divergeP]
+  execPG pg0 $ forM_ cuts $ \(Some (PPa.WithBin bin addr)) -> do
+    addSyncAddress nd bin addr
   where
     syncMsg = "Choose a synchronization point:"
 
@@ -498,22 +490,37 @@ getIntermediateAddrs pb =
 -- | Introduce a cut point (chosen from a list of nodes).
 --   Code discovery will consider any CFAR that reaches this cut point to end in a Jump
 --   to the next CFAR (i.e. splits a CFAR in two at the given address)
-pickCutPoint ::
+pickCutPoints ::
+  Bool {- ^ true if this should keep asking for cut points -} ->
   String ->
   [(GraphNode arch, Some (PB.ConcreteBlock arch), PD.ParsedBlocks arch)] -> 
-  EquivM sym arch (NodeEntry arch, Some PBi.WhichBinaryRepr)
-pickCutPoint msg inputs = do
-  (sync, Some bin, (addr, Some blk)) <- choose @"node" msg $ \choice -> do
-    forM_ inputs $ \(divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
-      let bin = PB.blockBinRepr blk
-      forM_ pblks $ \pblk -> forM_ (getIntermediateAddrs pblk) $ \addr -> do
-        -- FIXME: block entry kind is unused at the moment?
-        let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump addr
-        let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
-        choice "" (GraphNode node) $ do
-          return (node, Some bin, (addr, Some concBlk))
-  _ <- addIntraBlockCut addr blk
-  return (sync, Some bin)
+  EquivM sym arch [Some (PPa.WithBin (PAd.ConcreteAddress arch))]
+pickCutPoints pickMany msg inputs = go []
+  where
+    hasBin bin picked = 
+      any (\(Some (PPa.WithBin bin' _)) -> case testEquality bin bin' of Just Refl -> True; _ -> False) picked
+    go picked = do
+      mres <- choose @"()" msg $ \choice -> do
+        forM_ inputs $ \(_divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
+          let bin = PB.blockBinRepr blk
+          forM_ pblks $ \pblk -> forM_ (getIntermediateAddrs pblk) $ \addr -> do
+            -- FIXME: block entry kind is unused at the moment?
+            let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump addr
+            --let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
+            choice (show addr ++ " " ++ "(" ++ show bin ++ ")") () $ do
+              return $ Just $ (Pair concBlk (PPa.WithBin bin addr))
+          case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
+            True -> choice "Finish Choosing" () $ return Nothing 
+            False -> return ()
+      case mres of
+        Just (Pair blk (PPa.WithBin bin addr)) -> do
+          _ <- addIntraBlockCut addr blk
+          let x = Some (PPa.WithBin bin (PAd.segOffToAddr addr))
+          case pickMany of
+            True -> go (x:picked)
+            False -> return (x:picked)
+        Nothing -> return picked
+
 
 -- | Add an intra-block cut to *both* binaries after the given address.
 cutAfterAddress :: 
@@ -571,15 +578,37 @@ initSingleSidedDomain sne pg0 = withPG_ pg0 $ do
   let nd_single = GraphNode (singleToNodeEntry sne)
   dom_spec <- liftPG $ getCurrentDomainM nd
   PS.forSpec dom_spec $ \scope dom -> do
+    dom_single <- PAD.singletonDomain bin dom
+    {-
     case getCurrentDomain pg0 nd_single of
       Just{} -> return ()
       Nothing -> do
-        dom_single <- PAD.singletonDomain bin dom
+        emitTrace @"message" "init single-sided domain"
         let dom_single_spec = PS.mkSimSpec scope dom_single
         liftPG $ modify $ \pg -> initDomain pg nd nd_single (priority PriorityHandleDesync) dom_single_spec
+    -}
     bundle <- lift $ noopBundle scope (graphNodeBlocks nd)
-    liftEqM_ $ \pg -> widenAlongEdge scope bundle nd dom pg nd_single
+    liftEqM_ $ \pg -> do
+      pr <- currentPriority
+      atPriority (raisePriority pr) (Just "Starting Split Analysis") $
+        withGraphNode' scope nd bundle dom pg $ 
+          widenAlongEdge scope bundle nd dom_single pg nd_single
     return (PS.WithScope ())
+
+withGraphNode' ::
+  PS.SimScope sym arch v ->
+  GraphNode arch ->
+  PS.SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch) ->
+  EquivM sym arch (PairGraph sym arch)
+withGraphNode' scope nd bundle dom pg f = case nd of
+  GraphNode ne -> withPredomain scope bundle dom $ withAbsDomain ne dom pg $ withValidInit scope (nodeBlocks ne) $
+     withConditionsAssumed scope bundle dom nd pg $ f
+  ReturnNode nr -> withPredomain scope bundle dom $ withConditionsAssumed scope bundle dom (ReturnNode nr) pg $
+    f
+
 
 handleProcessSplit ::
   SingleNodeEntry arch bin ->
@@ -684,17 +713,19 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
   
   specO <- evalPG pg $ getCurrentDomainM ndO
   specP <- evalPG pg $ getCurrentDomainM ndP
-  
+
   pg1 <- fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blkPair $ \scope -> fmap PS.WithScope $ 
     withValidInit scope blkPairO $ withValidInit scope blkPairP $ do
       (_, domO) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specO
       (_, domP) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specP
       dom <- PAD.zipSingletonDomains sym domO domP
       bundle <- noopBundle scope (nodeBlocks syncNode)
-      withPredomain scope bundle dom $ withConditionsAssumed scope bundle domP ndP pg $ do
-        withTracing @"node" ndP $ do
+      withPredomain scope bundle dom $ 
+        withConditionsAssumed scope bundle domO ndO pg $ 
+        withConditionsAssumed scope bundle domP ndP pg $ do
           emitTraceLabel @"domain" PAD.Predomain (Some dom)
-          widenAlongEdge scope bundle ndP dom pg (GraphNode syncNode)
+          pg1 <- withTracing @"node" ndO $ widenAlongEdge scope bundle ndO dom pg (GraphNode syncNode)
+          withTracing @"node" ndP $ widenAlongEdge scope bundle ndP dom pg1 (GraphNode syncNode)
   return (syncNode, pg1)
 
 -- | Choose some work item (optionally interactively)
@@ -718,15 +749,22 @@ withWorkItem gr0 f = do
               runPendingActions refineActions nd' (TupleF2 scope d) gr1 >>= \case
                 Just gr2 -> return $ (Nothing, gr2)
                 Nothing -> return $ (Just nd', gr1)
-          ProcessSplit sne -> handleProcessSplit sne gr1
-          ProcessMerge sneO sneP -> handleProcessMerge sneO sneP gr1
+          ProcessSplit sne -> do
+            emitTrace @"debug" $ "ProcessSplit: " ++ show sne
+            handleProcessSplit sne gr1
+          ProcessMerge sneO sneP -> do
+            emitTrace @"debug" $ "ProcessMerge: " ++ show sneO ++ " vs. " ++ show sneP
+            handleProcessMerge sneO sneP gr1
         case (mnext, getCurrentDomain gr2 nd) of
           (Just next, Just spec) | next == nd -> fmap Right $ f (priority, gr2, wi, spec)
           _ -> return $ Left (mnext, gr2)
       case res of
-        (Left ((Just next), gr2)) -> subTraceLabel @"node" (printPriorityKind priority) next $ do
-          spec <- evalPG gr2 $ getCurrentDomainM next
-          atPriority priority Nothing $ (Just <$> (f (priority, gr2, wi, spec)))
+        (Left ((Just next), gr2)) -> do
+          case getCurrentDomain gr2 next of
+            Just spec -> subTraceLabel @"node" (printPriorityKind priority) next $ 
+              atPriority priority Nothing $ (Just <$> (f (priority, gr2, wi, spec)))
+            -- we are missing the expected domain, so we need to just try again
+            Nothing -> withWorkItem (queueWorkItem priority wi gr2) f 
         Left (Nothing, gr2) ->  withWorkItem gr2 f
         Right a -> return $ Just a
 
@@ -2208,6 +2246,7 @@ triageBlockTarget ::
   EquivM sym arch (BranchState sym arch)
 triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> do
   let gr = branchGraph st
+  priority <- thisPriority
   stubPair <- fnTrace "getFunctionStubPair" $ getFunctionStubPair blkts
   matches <- PD.matchesBlockTarget bundle' blkts
   res <- withPathCondition matches $ do
@@ -2230,7 +2269,9 @@ triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> d
         let isEquatedCallSite = any (PB.matchEquatedAddress pPair) (PMC.equatedFunctions ctx)
 
         if | isEquatedCallSite -> handleInlineCallee scope bundle currBlock d gr pPair rets
-           | hasStub stubPair -> handleStub scope bundle currBlock d gr pPair (Just rets) stubPair
+           | hasStub stubPair -> withPG_ gr $ do
+              liftEqM_ $ \gr_ -> handleStub scope bundle currBlock d gr_ pPair (Just rets) stubPair
+              liftPG $ addReturnPointSync priority currBlock blkts
            | otherwise -> handleOrdinaryFunCall scope bundle currBlock d gr pPair rets
 
       (Just ecase, PPa.PatchPairNothing) -> fmap (updateBranchGraph st blkts) $ do

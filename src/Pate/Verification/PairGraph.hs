@@ -78,6 +78,7 @@ module Pate.Verification.PairGraph
   , getQueuedPriority
   , queueAncestors
   , queueNode
+  , queueWorkItem
   , emptyWorkList
   , SyncData
   , SyncPoint(..)
@@ -125,6 +126,7 @@ module Pate.Verification.PairGraph
   , addDesyncExits
   , queueSplitAnalysis
   , handleKnownDesync
+  , addReturnPointSync
   ) where
 
 import           Prettyprinter
@@ -437,7 +439,7 @@ data SyncData arch =
 data SyncPoint arch bin =
     SyncAtExits { syncPointNode :: SingleNodeEntry arch bin , _syncPointExits :: Set (SingleNodeEntry arch bin) }
   | SyncAtStart { syncPointNode :: SingleNodeEntry arch bin }
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 syncPointBin :: SyncPoint arch bin -> PBi.WhichBinaryRepr bin
 syncPointBin sp = singleEntryBin $ syncPointNode sp
@@ -541,19 +543,21 @@ addDesyncExits dp blktPair = do
     blkt <- PPa.get bin blktPair
     modifySyncData syncDesyncExits bin dp (Set.insert blkt)
 
+-- | If this node is a known divergence point, queue a split
+-- analysis starting here, marking this as a diverging exit, and return True
+-- Otherwise do nothing and return 
 handleKnownDesync ::
   (NodePriorityK -> NodePriority) ->
   NodeEntry arch ->
   PPa.PatchPair (PB.BlockTarget arch) ->
   PairGraphM sym arch Bool
-handleKnownDesync priority ne blktPair = fmap (fromMaybe False) $ tryPG $ do
+handleKnownDesync priority ne blkt = fmap (fromMaybe False) $ tryPG $ do
   let dp = GraphNode ne
-  blktO <- PPa.get PBi.OriginalRepr blktPair
-  blktP <- PPa.get PBi.PatchedRepr blktPair
-  knownDesyncsO <- getSyncData syncDesyncExits PBi.OriginalRepr dp
-  knownDesyncsP <- getSyncData syncDesyncExits PBi.PatchedRepr dp
-  case Set.member blktO knownDesyncsO && Set.member blktP knownDesyncsP of
+  desyncExitsO <- getSyncData syncDesyncExits PBi.OriginalRepr dp
+  desyncExitsP <- getSyncData syncDesyncExits PBi.PatchedRepr dp
+  case not (Set.null desyncExitsO) && not (Set.null desyncExitsP) of
     True -> do
+      addDesyncExits dp blkt
       queueSplitAnalysis (priority PriorityHandleDesync) ne
       return True
     False -> return False
@@ -819,8 +823,7 @@ getCurrentDomainM ::
   PairGraphM sym arch (AbstractDomainSpec sym arch)
 getCurrentDomainM nd = do
   pg <- get
-  Just spec <- return $ getCurrentDomain pg nd
-  return spec
+  pgValid $ pgMaybe ("missing domain for: " ++ show nd) $ getCurrentDomain pg nd
 
 getEdgesFrom ::
   PairGraph sym arch ->
@@ -1421,9 +1424,12 @@ isSyncExit ::
 isSyncExit sne blkt@(PB.BlockTarget{}) = do
   cuts <- getSingleNodeData syncCutAddresses sne
   excepts <- getSingleNodeData syncExceptions sne
+  syncs <- getSingleNodeData syncPoints sne
   let isExcept = Set.member (TupleF2 sne blkt) excepts
-  case (not isExcept) &&
-    Set.member (PPa.WithBin (singleEntryBin sne) (PB.targetRawPC blkt)) cuts of
+  let isCutExit = Set.member (PPa.WithBin (singleEntryBin sne) (PB.targetRawPC blkt)) cuts
+  let exitSyncs = Set.fromList $ catMaybes $ map (\case SyncAtExits sne' _ -> Just sne'; _ -> Nothing) (Set.toList syncs)
+  let isAlreadySync = Set.member sne exitSyncs
+  case (not isExcept) && (isCutExit || isAlreadySync) of
       True -> return $ Just (mkSingleNodeEntry (singleToNodeEntry sne) (PB.targetCall blkt))
       False -> return Nothing
 isSyncExit _ _ = return Nothing
@@ -1487,6 +1493,31 @@ filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleN
       -- a merge against all known merge points
       queueExitMerges priority (SyncAtExits sne (Set.fromList syncExits))
     return blktPairs
+
+-- | Mark the return point of a target as a sync point, if
+--   it matches a cut address
+addReturnPointSync ::
+  (NodePriorityK -> NodePriority) -> 
+  NodeEntry arch ->
+  PPa.PatchPair (PB.BlockTarget arch) ->
+  PairGraphM sym arch ()
+addReturnPointSync priority ne blktPair = case asSingleNodeEntry ne of
+  Just (Some sne) -> do
+    let bin = singleEntryBin sne
+    blkt <- PPa.get bin blktPair
+    case PB.targetReturn blkt of
+      Just ret -> do
+        cuts <- getSingleNodeData syncCutAddresses sne
+        excepts <- getSingleNodeData syncExceptions sne
+        let isExcept = Set.member (TupleF2 sne blkt) excepts
+        case (not isExcept) &&
+          Set.member (PPa.WithBin (singleEntryBin sne) (PB.concreteAddress ret)) cuts of
+            True -> do
+              let syncExit = mkSingleNodeEntry (singleToNodeEntry sne) ret
+              queueExitMerges priority (SyncAtExits sne (Set.singleton syncExit))
+            False -> return ()
+      Nothing -> return ()
+  Nothing -> return ()
 
 
 queueSyncPoints ::
