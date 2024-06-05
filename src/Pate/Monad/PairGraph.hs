@@ -31,6 +31,7 @@ module Pate.Monad.PairGraph
   , addLazyAction
   , queuePendingNodes
   , runPG
+  , execPG
   , liftPartEqM_
   ) where
 
@@ -82,10 +83,14 @@ withPG ::
 withPG pg f = runStateT f pg 
 
 evalPG :: 
+  HasCallStack =>
   PairGraph sym arch -> 
   PairGraphM sym arch a ->
   EquivM sym arch a
 evalPG pg f = fst <$> (withPG pg $ liftPG f) 
+
+execPG :: HasCallStack => PairGraph sym arch -> PairGraphM sym arch a -> EquivM_ sym arch (PairGraph sym arch)
+execPG pg f = snd <$> runPG pg f
 
 withPG_ :: 
   HasCallStack =>
