@@ -928,10 +928,12 @@ queueWorkItem priority wi pg = case wi of
       neP = GraphNode (singleToNodeEntry spP)
     in case (getCurrentDomain pg neO, getCurrentDomain pg neP) of
       (Just{},Just{}) -> addItemToWorkList wi priority pg
-      (Just{}, Nothing) -> queueNode priority neP pg
-      (Nothing, Just{}) -> queueNode priority neO pg
+      (Just{}, Nothing) -> queueAncestors (raisePriority priority) neP (addItemToWorkList wi priority pg)
+      (Nothing, Just{}) -> queueAncestors (raisePriority priority) neO (addItemToWorkList wi priority pg)
       (Nothing, Nothing) -> 
-        queueNode priority neP (queueNode priority neO pg)
+          queueAncestors (raisePriority priority) neP
+        $ queueAncestors (raisePriority priority) neO
+        $ addItemToWorkList wi priority pg
   ProcessSplit sne -> case getCurrentDomain pg (singleNodeDivergence sne) of
     Just{} -> addItemToWorkList wi priority pg
     Nothing -> queueNode priority (singleNodeDivergence sne) pg
