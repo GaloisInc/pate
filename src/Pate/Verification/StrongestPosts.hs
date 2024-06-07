@@ -369,9 +369,9 @@ handleDanglingReturns fnPairs pg = do
           [] -> return pg0
           _ -> do
             let fn_single_ = PPa.mkSingle (PB.functionBinRepr fn_single) fn_single
-            err <- emitError' (PEE.OrphanedSingletonAnalysis fn_single_)
+            err <- emitError' (PEE.OrphanedSinglesidedAnalysis fn_single_)
             return $ recordMiscAnalysisError pg0 (ReturnNode ret) err
-         
+
   foldM go pg single_rets 
 
 
@@ -1241,7 +1241,7 @@ processBundle scope wi node bundle d exitPairs gr0_ = withSym $ \sym -> do
   st <- subTree @"blocktarget" "Block Exits" $ accM initBranchState (zip [0 ..] filteredPairs) $ \st0 (idx,tgt) -> do
     pg1 <- lift $ queuePendingNodes (branchGraph st0)
     let st1 = st0 { branchGraph = pg1 }
-    case checkNodeRequeued st1 wi of
+    case checkNodeRequeued gr1 st1 wi of
       True -> return st1
       False -> subTrace tgt $ followExit scope bundle paths node d st1 (idx,tgt)
   -- confirm that all handled exits cover the set of possible exits
@@ -1394,9 +1394,8 @@ visitNode scope (workItemNode -> (ReturnNode fPair)) d gr0 =  do
         Nothing -> withTracing @"message" "Toplevel Return" $ do
           withConditionsAssumed scope bundle d (ReturnNode fPair) gr0' $ do
             case isSingleReturn fPair of
-              Just{} -> void $ emitError' $ PEE.OrphanedSingletonAnalysis (nodeFuns fPair)
-              Nothing -> return ()
-            return gr0'
+              Just{} -> handleOrphanedSingleSidedReturn scope fPair gr0'
+              Nothing -> return gr0'
 
    -- Here, we're using a bit of a trick to propagate abstract domain information to call sites.
    -- We are making up a "dummy" simulation bundle that basically just represents a no-op, and
@@ -1428,6 +1427,26 @@ visitNode scope (workItemNode -> (ReturnNode fPair)) d gr0 =  do
               liftEqM_ $ checkObservables scope node bundle d
               liftEqM_ $ \pg -> widenAlongEdge scope bundle (ReturnNode fPair) d pg (GraphNode node)
               liftPG $ handleSingleSidedReturnTo priority node
+
+-- | Used to handle the case where a single-sided analysis
+--   has continued up to the top-level return.
+--   In most cases, this represents a control flow path that
+--   is only present in the patched program, and so we
+--   simply add as an equivalence condition that this
+--   single-sided return isn't taken.
+--   We emit a warning as well, however, since this is also potentially
+--   a result of some issue with the analysis (e.g. forgetting to
+--   provide one of the synchronization points)
+handleOrphanedSingleSidedReturn ::
+  PS.SimScope sym arch v ->
+  NodeReturn arch ->
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+handleOrphanedSingleSidedReturn scope nd pg = withSym $ \sym -> do
+  priority <- thisPriority
+  emitWarning $ PEE.OrphanedSinglesidedAnalysis (nodeFuns nd)
+  pg1 <- addToEquivCondition scope (ReturnNode nd) ConditionEquiv (W4.falsePred sym) pg
+  return $ queueAncestors (priority PriorityPropagation) (ReturnNode nd) pg1
 
 -- | Construct a "dummy" simulation bundle that basically just
 --   immediately returns the prestate as the poststate.
@@ -2086,13 +2105,17 @@ updateBranchGraph :: BranchState sym arch -> PPa.PatchPair (PB.BlockTarget arch)
 updateBranchGraph st blkt pg = st {branchGraph = pg, branchHandled = blkt : branchHandled st }
 
 checkNodeRequeued ::
+  PairGraph sym arch ->
   BranchState sym arch ->
   WorkItem arch ->
   Bool
-checkNodeRequeued st wi = fromMaybe False $ do
-  bc <- branchDesyncChoice st
+checkNodeRequeued stPre stPost wi = fromMaybe False $ do
+  bc <- branchDesyncChoice stPost
   return $ choiceRequiresRequeue bc
-  <|> (getQueuedPriority wi (branchGraph st) >> return True)
+  <|> do
+    Nothing <- return $ getQueuedPriority wi stPre
+    _ <- getQueuedPriority wi (branchGraph stPost)
+    return True
 
 followExit ::
   PS.SimScope sym arch v ->
