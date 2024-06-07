@@ -12,6 +12,7 @@ Function Entry "f"
         Choose a synchronization point:
             > 0x8054 (original)
             > 0x8054 (patched)
+            > Finish Choosing
 
 Verification Finished
 Continue verification?
