@@ -509,9 +509,9 @@ pickCutPoints pickMany msg inputs = go []
             --let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
             choice (show addr ++ " " ++ "(" ++ show bin ++ ")") () $ do
               return $ Just $ (Pair concBlk (PPa.WithBin bin addr))
-          case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
-            True -> choice "Finish Choosing" () $ return Nothing 
-            False -> return ()
+        case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
+          True -> choice "Finish Choosing" () $ return Nothing 
+          False -> return ()
       case mres of
         Just (Pair blk (PPa.WithBin bin addr)) -> do
           _ <- addIntraBlockCut addr blk
