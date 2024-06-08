@@ -28,8 +28,6 @@ Function Entry "f"
             > 0x10160 (patched)
             > Finish Choosing
 
-
-/*
 // TODO: we should assume that the additional 
 // return in the patched program isn't reachable,
 // however at the moment there is simply an error raised
