@@ -197,3 +197,10 @@ The verifier requires an SMT solver to be available in ``PATH``. The default is 
 Acknowledgements
 ============
 This material is based upon work supported by the Defense Advanced Research Projects Agency (DARPA) and Naval Information Warfare Center Pacific (NIWC Pacific) under Contract Number N66001-20-C-4027. Any opinions, findings and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the DARPA & NIWC Pacific.
+
+| SBIR DATA RIGHTS
+| Contract No. 140D0423C0063
+| Contractor Name: Galois, Inc.
+| Contractor Address: 421 SW Sixth Ave., Suite 300, Portland, OR 97204
+| Expiration of SBIR Data Protection Period: 06/07/2042
+| The Government's rights to use, modify, reproduce, release, perform, display, or disclose technical data or computer software marked with this legend are restricted during the period shown as provided in paragraph (b)(5) of the Rights in Noncommercial Technical Data and Computer Software-Small Business Innovation Research (SBIR) Program clause contained in the above identified contract. After the expiration date shown above, the Government has perpetual government purpose rights as provided in paragraph (b)(5) of that clause. Any reproduction of technical data, computer software, or portions thereof marked with this legend must also reproduce the markings.
