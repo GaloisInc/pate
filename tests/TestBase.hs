@@ -135,8 +135,8 @@ doTest mwb cfg _sv fp = do
   argFileExists <- doesFileExist (fp <.> "args")
   scriptFileExists <- doesFileExist (fp <.> "pate")
   expectFileExists <- doesFileExist (fp <.> "expect")
-  sv <- case expectFileExists of
-    True -> readFile (fp <.> "expect") >>= \case
+  sv <- case (expectFileExists, mwb) of
+    (True, Nothing) -> readFile (fp <.> "expect") >>= \case
       "Equivalent" -> return ShouldVerify
       "Inequivalent" -> return ShouldNotVerify
       "ConditionallyEquivalent" -> return ShouldConditionallyVerify
@@ -236,9 +236,7 @@ doTest mwb cfg _sv fp = do
       ShouldVerify -> failTest "Failed to prove equivalence."
       ShouldNotVerify -> return ()
       ShouldConditionallyVerify -> failTest "Failed to prove conditional equivalence."
-      _ -> failTest $ "Unhandled expected result: " ++ show sv
     PEq.ConditionallyEquivalent -> case sv of
       ShouldVerify -> failTest "Failed to prove equivalence."
       ShouldNotVerify -> failTest "Unexpectedly proved conditional equivalence."
       ShouldConditionallyVerify -> return ()
-      _ -> failTest $ "Unhandled expected result: " ++ show sv
