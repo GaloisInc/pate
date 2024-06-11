@@ -436,8 +436,9 @@ data SyncData arch =
     , _syncDesyncExits :: PPa.PatchPair (SetF (PB.BlockTarget arch))
     }
 
+-- sync exit point should *always* point to a cut address
 data SyncPoint arch bin =
-    SyncAtExits { syncPointNode :: SingleNodeEntry arch bin , _syncPointExits :: Set (SingleNodeEntry arch bin) }
+    SyncAtExit { syncPointNode :: SingleNodeEntry arch bin , _syncPointExit :: SingleNodeEntry arch bin }
   | SyncAtStart { syncPointNode :: SingleNodeEntry arch bin }
   deriving (Eq, Ord, Show)
 
@@ -570,14 +571,14 @@ mkProcessMerge ::
   SingleNodeEntry arch bin -> 
   SingleNodeEntry arch (PBi.OtherBinary bin) ->
   Maybe (WorkItem arch)
-mkProcessMerge syncAtExits sne1 sne2
+mkProcessMerge syncAtExit sne1 sne2
   | dp1 <- singleNodeDivergePoint sne1
   , dp2 <- singleNodeDivergePoint sne2
   , dp1 == dp2 = case singleEntryBin sne1 of
-    PBi.OriginalRepr -> case syncAtExits of
+    PBi.OriginalRepr -> case syncAtExit of
       True -> Just $ ProcessMergeAtExitsCtor sne1 sne2
       False -> Just $ ProcessMergeAtEntryCtor sne1 sne2
-    PBi.PatchedRepr -> case syncAtExits of
+    PBi.PatchedRepr -> case syncAtExit of
       True -> Just $ ProcessMergeAtExitsCtor sne2 sne1
       False -> Just $ ProcessMergeAtEntryCtor sne2 sne1
 mkProcessMerge _ _ _ = Nothing
@@ -1417,23 +1418,42 @@ getPendingActions lens = do
   pg <- get
   return $ (pairGraphPendingActs pg) ^. lens
 
+isCutAddressFor ::
+  SingleNodeEntry arch bin ->
+  PAd.ConcreteAddress arch ->
+  PairGraphM sym arch Bool
+isCutAddressFor sne addr = do
+  cuts <- getSingleNodeData syncCutAddresses sne
+  return $ Set.member (PPa.WithBin (singleEntryBin sne) addr) cuts
 
 isSyncExit :: 
   forall sym arch bin.
   SingleNodeEntry arch bin ->
   PB.BlockTarget arch bin ->
-  PairGraphM sym arch (Maybe (SingleNodeEntry arch bin))
+  PairGraphM sym arch (Maybe (SyncPoint arch bin))
 isSyncExit sne blkt@(PB.BlockTarget{}) = do
-  cuts <- getSingleNodeData syncCutAddresses sne
   excepts <- getSingleNodeData syncExceptions sne
   syncs <- getSingleNodeData syncPoints sne
-  let isExcept = Set.member (TupleF2 sne blkt) excepts
-  let isCutExit = Set.member (PPa.WithBin (singleEntryBin sne) (PB.targetRawPC blkt)) cuts
-  let exitSyncs = Set.fromList $ catMaybes $ map (\case SyncAtExits sne' _ -> Just sne'; _ -> Nothing) (Set.toList syncs)
-  let isAlreadySync = Set.member sne exitSyncs
-  case (not isExcept) && (isCutExit || isAlreadySync) of
-      True -> return $ Just (mkSingleNodeEntry (singleToNodeEntry sne) (PB.targetCall blkt))
-      False -> return Nothing
+  let isExcept = Set.member (TupleF2 sne blkt) excepts 
+  case isExcept of
+    True -> return Nothing
+    False -> isCutAddressFor sne (PB.targetRawPC blkt) >>= \case
+      True -> do
+        let sne_tgt = mkSingleNodeEntry (singleToNodeEntry sne) (PB.targetCall blkt)
+        return $ Just $ SyncAtExit sne sne_tgt
+      False -> case PB.targetReturn blkt of
+        Just ret -> do
+          let sne_tgt = mkSingleNodeEntry (singleToNodeEntry sne) ret
+          let sync = SyncAtExit sne sne_tgt
+          -- special case where this block target
+          -- has already been marked as a sync exit for this node, but
+          -- exiting to the return point of the target (rather than its call site)
+          -- (i.e. via 'addReturnPointSync' in order to handle a function stub)
+          -- In this case, we return that sync point.
+          case Set.member sync syncs of
+            True -> return $ Just sync
+            False -> return Nothing
+        Nothing -> return Nothing
 isSyncExit _ _ = return Nothing
 
 -- | True if the given node starts at exactly a sync point
@@ -1489,11 +1509,7 @@ filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleN
     let bin = singleEntryBin sne
     blkts <- mapM (PPa.get bin) blktPairs
     syncExits <- catMaybes <$> mapM (isSyncExit sne) blkts
-    unless (null syncExits) $ do
-      -- if any of the exits from this node are sync exits,
-      -- then we need to queue up processing this node as
-      -- a merge against all known merge points
-      queueExitMerges priority (SyncAtExits sne (Set.fromList syncExits))
+    forM_ syncExits $ \exit -> queueExitMerges priority exit
     return blktPairs
 
 -- | Mark the return point of a target as a sync point, if
@@ -1516,7 +1532,7 @@ addReturnPointSync priority ne blktPair = case asSingleNodeEntry ne of
           Set.member (PPa.WithBin (singleEntryBin sne) (PB.concreteAddress ret)) cuts of
             True -> do
               let syncExit = mkSingleNodeEntry (singleToNodeEntry sne) ret
-              queueExitMerges priority (SyncAtExits sne (Set.singleton syncExit))
+              queueExitMerges priority (SyncAtExit sne syncExit)
             False -> return ()
       Nothing -> return ()
   Nothing -> return ()
@@ -1528,11 +1544,11 @@ queueSyncPoints ::
   SyncPoint arch (PBi.OtherBinary bin) ->
   PairGraphM sym arch ()
 queueSyncPoints priority sp1 sp2 = case (sp1, sp2) of
-  (SyncAtExits _ exits1, SyncAtStart sne2) -> forM_ exits1 $ \exit1 -> do
-    wi <- pgMaybe "unexpected node merge failure" $ mkProcessMerge True exit1 sne2
+  (SyncAtExit _ exit1, SyncAtStart sne2) -> do
+    wi <- pgMaybe "unexpected node merge failure" $ mkProcessMerge False exit1 sne2
     modify $ queueWorkItem (priority PriorityHandleMerge) wi
-  (SyncAtStart{}, SyncAtExits{}) | Refl <- PBi.otherInvolutive bin -> queueSyncPoints priority sp2 sp1
-  (SyncAtExits{}, SyncAtExits{}) -> do
+  (SyncAtStart{}, SyncAtExit{}) | Refl <- PBi.otherInvolutive bin -> queueSyncPoints priority sp2 sp1
+  (SyncAtExit{}, SyncAtExit{}) -> do
     wi <- pgMaybe "unexpected node merge failure" $ mkProcessMerge True (syncPointNode sp1) (syncPointNode sp2)
     modify $ queueWorkItem (priority PriorityHandleMerge) wi
   (SyncAtStart{}, SyncAtStart{}) -> do
