@@ -599,52 +599,6 @@ domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
     False -> return $ W4.truePred sym
     True -> return eqPred
 
-{-
--- | After widening an edge, insert an equivalence condition
---   into the pairgraph for candidate functions
-initializeCondition ::
-  PS.SimScope sym arch v ->
-  SimBundle sym arch v ->
-  AbstractDomain sym arch v {- ^ incoming source predomain -} ->
-  AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
-  GraphNode arch {- ^ from -} ->
-  GraphNode arch {- ^ to -} ->
-  PairGraph sym arch ->
-  EquivM sym arch (PairGraph sym arch)
-initializeCondition scope bundle preD postD from to gr = do
-  let edge = (from,to)
-  addLazyAction edge gr "Post-process equivalence domain?" $ \choice ->
-    choice "Refine and generate equivalence condition" (\x y -> refineEqDomainForEdge edge x y)
-
-
-      eqCondFns <- CMR.asks envEqCondFns
-      (mlocFilter, gr1) <- if
-        | Just sync <- asSyncPoint gr to -> case syncTerminal sync of
-            Just True -> do
-              locFilter <- refineEquivalenceDomain postD
-              return (Just locFilter, gr)
-            Just False -> return (Nothing, gr)
-            Nothing -> do
-              emitTraceLabel @"domain" PAD.ExternalPostDomain (Some postD)
-              chooseBool "Continue analysis after resynchronization?" >>= \case
-                True -> return (Nothing, updateSyncPoint gr to (\sync' -> sync'{syncTerminal = Just False}))
-                False -> do
-                  locFilter <- refineEquivalenceDomain postD
-                  return (Just locFilter, updateSyncPoint gr to (\sync' -> sync'{syncTerminal = Just True}))
-        | ReturnNode ret <- to
-        , Just locFilter <- Map.lookup (nodeFuns ret) eqCondFns -> 
-            return $ (Just locFilter, gr)
-        | otherwise -> return (Nothing, gr)
-      case mlocFilter of
-        Just locFilter -> do
-          eqCond <- computeEquivCondition scope bundle preD postD (\l -> locFilter (PL.SomeLocation l))
-          pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
-          eqCond' <- PEC.mux sym pathCond eqCond (PEC.universal sym)
-          let gr2 = setEquivCondition to (PS.mkSimSpec scope eqCond') gr1
-          return $ dropDomain to (markEdge from to gr2)
-        Nothing -> return gr1
--}
-
 data PickManyChoice sym arch =
     forall tp. PickRegister (MM.ArchReg arch tp)
   | forall w. PickStack (PMc.MemCell sym arch w)
@@ -811,14 +765,13 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
         Nothing -> do
           emitTrace @"debug" "No condition to propagate"
           return Nothing
-        _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
-          emitTrace @"debug" "Condition not propagated"
-          return Nothing
         Just{} -> do
           -- take the condition of the target edge and bind it to
           -- the output state of the bundle
           cond <- getEquivPostCondition scope bundle to condK gr
 {-
+
+
           let blks = graphNodeBlocks from
           skip <- case (blks, graphNodeBlocks to) of
             -- this is a synchronization edge, so we attempt to filter the equivalence condition
@@ -837,23 +790,31 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
               -- we need to update our own condition
           cond_pred <- PEC.toPred sym cond
           goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-          not_cond <- liftIO $ W4.notPred sym cond_pred
-          isPredSat' goalTimeout not_cond >>= \case
-            -- equivalence condition for this path holds, we 
-            -- don't need any changes
+          isPredSat' goalTimeout cond_pred >>= \case
             Just False -> do
-              emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+              emitTrace @"message" "Condition is infeasible, dropping branch."
+              Just <$> pruneCurrentBranch scope (from,to) condK gr
+            _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
+              emitTrace @"debug" "Condition not propagated"
               return Nothing
-            -- we need more assumptions for this condition to hold
-            Just True -> do
-              priority <- thisPriority
-              emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
-              let propK = getPropagationKind gr to condK
-              gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
-              return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
-                queueNode (priority PriorityNodeRecheck) from $ 
-                dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
-            Nothing -> throwHere $ PEE.InconclusiveSAT
+            _ -> do
+              not_cond <- liftIO $ W4.notPred sym cond_pred
+              isPredSat' goalTimeout not_cond >>= \case
+                -- equivalence condition for this path holds, we 
+                -- don't need any changes
+                Just False -> do
+                  emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+                  return Nothing
+                -- we need more assumptions for this condition to hold
+                Just True -> do
+                  priority <- thisPriority
+                  emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
+                  let propK = getPropagationKind gr to condK
+                  gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
+                  return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
+                    queueNode (priority PriorityNodeRecheck) from $ 
+                    dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
+                Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -1676,7 +1637,7 @@ dropValueLoc wb loc postD = do
       PL.Unit -> vals
       _ -> error "unsupported location"
     locs = WidenLocs (Set.singleton (PL.SomeLocation loc))
-  vals' <- PPa.set wb (PAD.absDomVals postD) v
+  let vals' = PPa.set wb v (PAD.absDomVals postD) 
   return $ Widen WidenValue locs (postD { PAD.absDomVals = vals' })
 
 widenCells ::

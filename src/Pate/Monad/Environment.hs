@@ -134,6 +134,7 @@ data NodePriorityK =
   | PriorityDeferredPropagation
   | PriorityDomainRefresh
   | PriorityHandleReturn
+  | PriorityHandleMerge
   | PriorityMiscCleanup
   | PriorityDeferred
   deriving (Eq, Ord)
@@ -153,6 +154,7 @@ printPriorityKind (NodePriority pk _ _ ) = case pk of
   PriorityDeferredPropagation -> "Propagating Deferred Conditions"
   PriorityDomainRefresh -> "Re-checking Equivalence Domains"
   PriorityHandleReturn -> "Handling Function Return"
+  PriorityHandleMerge -> "Handling Control Flow Merge"
   PriorityMiscCleanup -> "Proof Cleanup"
   PriorityDeferred -> "Handling Deferred Decisions"
 

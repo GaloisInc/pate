@@ -24,6 +24,7 @@ Function Entry "f" (0x10158)
         Choose a synchronization point:
             > 0x10188 (original)
             > 0x10170 (patched)
+            > Finish Choosing
 
 0x101e8 (original) vs. 0x101d8 (patched)
     ...
@@ -49,6 +50,7 @@ Function Entry "f" (0x10158)
         Choose a synchronization point:
             > 0x101f4 (original)
             > 0x101ec (patched)
+            > Finish Choosing
 
 
 

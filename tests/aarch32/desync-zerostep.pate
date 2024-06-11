@@ -3,37 +3,40 @@ Choose Entry Point
 
 Function Entry "f"
     ...
-    Call to: "puts" (0x10108) Returns to: "f"
+    Call to: "puts" (0x10110) Returns to: "f"
         ...
         ...
         > Choose desynchronization points
 
         ...
         Choose a desynchronization point:
-            > 0x1014c (original)
-            > 0x1014c (patched)
+            > 0x1015c (original)
+            > 0x1015c (patched)
 
-0x1014c [ via: "f"
+
+
+0x1015c [ via: "f"
     ...
-    Call to: "puts" (0x10108) Returns to: "f"
+    Call to: "puts" (0x10110) Returns to: "f"
         ...
         ...
         > Choose synchronization points
 
         ...
         Choose a synchronization point:
-            > 0x1014c (original)
-            > 0x1015c (patched)
+            > 0x1015c (original)
+            > 0x1016c (patched)
+            > Finish Choosing
 
-// TODO: this is just to finish the analysis
-// so the test doesn't hang. We need to replace this
-// once this case is handled properly.
-0x1014c (original) vs. 0x10150 (patched)
+// verifier can't automatically figure out that
+// the pointer written by 'puts' is the same/unmodified
+0x1015c (original) vs. 0x1016c (patched)
     ...
-    Call to: "puts" (0x10108) Returns to: "f"
-        ...
-        ...
-        > Ignore divergence
+    ...
+    ...
+    ...
+    > Assert difference is infeasible (prove immediately)
+
 
 Verification Finished
 Continue verification?

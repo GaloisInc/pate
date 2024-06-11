@@ -43,10 +43,14 @@ module Data.Parameterized.SetF
   , union
   , unions
   , null
+  , toSet
+  , fromSet
+  , map
   , ppSetF
   ) where
 
-import Prelude hiding (filter, null)
+import Prelude hiding (filter, null, map)
+import qualified Data.List as List
 import           Data.Parameterized.Classes
 import qualified Data.Foldable as Foldable
 
@@ -55,6 +59,7 @@ import           Prettyprinter ( (<+>) )
 
 import           Data.Set (Set)
 import qualified Data.Set as S
+import Unsafe.Coerce (unsafeCoerce)
 
 newtype AsOrd f tp where
   AsOrd :: { unAsOrd :: f tp } -> AsOrd f tp
@@ -91,13 +96,13 @@ insert e (SetF es) = SetF (S.insert (AsOrd e) es)
 toList ::
   SetF f tp ->
   [f tp]
-toList (SetF es) = map unAsOrd $ S.toList es
+toList (SetF es) = List.map unAsOrd $ S.toList es
 
 fromList ::
   OrdF f =>
   [f tp] ->
   SetF f tp
-fromList es = SetF $ S.fromList (map AsOrd es)
+fromList es = SetF $ S.fromList (List.map AsOrd es)
 
 member ::
   OrdF f =>
@@ -129,6 +134,25 @@ lookupMin (SetF es) = fmap unAsOrd $ S.lookupMin es
 null ::
   SetF f tp -> Bool
 null (SetF es) = S.null es
+
+-- | Convert a 'SetF' to a 'Set', under the assumption
+--   that the 'OrdF' and 'Ord' instances are consistent.
+--   This uses coercion rather than re-building the set,
+--   which is sound given the above assumption.
+toSet ::
+  (OrdF f, Ord (f tp)) => SetF f tp -> Set (f tp)
+toSet (SetF s) = unsafeCoerce s
+
+-- | Convert a 'Set' to a 'SetF', under the assumption
+--   that the 'OrdF' and 'Ord' instances are consistent.
+--   This uses coercion rather than re-building the set,
+--   which is sound given the above assumption.
+fromSet :: (OrdF f, Ord (f tp)) => Set (f tp) -> SetF f tp
+fromSet s = SetF (unsafeCoerce s)
+
+map ::
+  (OrdF g) => (f tp -> g tp) -> SetF f tp -> SetF g tp
+map f (SetF s) = SetF (S.map (\(AsOrd v) -> AsOrd (f v)) s)  
 
 ppSetF ::
   (f tp -> PP.Doc a) ->

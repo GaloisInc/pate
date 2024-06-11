@@ -29,8 +29,11 @@ module Pate.Binary
   , Patched
   , WhichBinaryRepr(..)
   , OtherBinary
+  , binCases
   , flipRepr
-  , short)
+  , short
+  , otherInvolutive
+  )
 where
 
 import           Data.Parameterized.WithRepr
@@ -50,15 +53,26 @@ data WhichBinaryRepr (bin :: WhichBinary) where
   OriginalRepr :: WhichBinaryRepr 'Original
   PatchedRepr :: WhichBinaryRepr 'Patched
 
-type family OtherBinary (bin :: WhichBinary) :: WhichBinary
+type family OtherBinary (bin :: WhichBinary) :: WhichBinary where
+  OtherBinary Original = Patched
+  OtherBinary Patched = Original
 
-type instance OtherBinary Original = Patched
-type instance OtherBinary Patched = Original
+otherInvolutive :: WhichBinaryRepr bin -> (OtherBinary (OtherBinary bin) :~: bin)
+otherInvolutive bin = case binCases bin (flipRepr bin) of
+  Left Refl -> Refl
+  Right Refl -> Refl
 
 flipRepr :: WhichBinaryRepr bin -> WhichBinaryRepr (OtherBinary bin)
 flipRepr = \case
   OriginalRepr -> PatchedRepr
   PatchedRepr -> OriginalRepr
+
+binCases :: WhichBinaryRepr bin1 -> WhichBinaryRepr bin2 -> Either (bin1 :~: bin2) ('(bin1, bin2) :~: '(OtherBinary bin2, OtherBinary bin1))
+binCases bin1 bin2 = case (bin1, bin2) of
+  (OriginalRepr, OriginalRepr) -> Left Refl
+  (OriginalRepr, PatchedRepr) -> Right Refl
+  (PatchedRepr, PatchedRepr) -> Left Refl
+  (PatchedRepr, OriginalRepr) -> Right Refl
 
 short :: WhichBinaryRepr bin -> String
 short OriginalRepr = "O"

@@ -190,7 +190,7 @@ jobs:
     - name: Test
       if: runner.os == 'Linux'
       run: |
-        cabal test pkg:pate
+        cabal test pkg:pate --test-options="-t 1200s"
 
     - name: Docs
       run: cabal haddock pkg:pate

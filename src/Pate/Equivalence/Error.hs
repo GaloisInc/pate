@@ -166,10 +166,11 @@ data InnerEquivalenceError arch
   | UninterpretedInstruction
   | FailedToResolveAddress (MM.MemWord (MM.ArchAddrWidth arch))
   | forall tp. FailedToGroundExpr (SomeExpr tp)
-  | OrphanedSingletonAnalysis (PB.FunPair arch)
+  | OrphanedSinglesidedAnalysis (PB.FunPair arch)
   | RequiresInvalidPointerOps
   | PairGraphError PairGraphErr
   | forall e. X.Exception e => UnhandledException e
+  | IncompatibleSingletonNodes (PB.ConcreteBlock arch PBi.Original) (PB.ConcreteBlock arch PBi.Patched)
   | SolverError X.SomeException
 
 errShortName :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> String
@@ -230,7 +231,7 @@ isRecoverable' e = case e of
   BlockHasNoExit{} -> True
   OrphanedFunctionReturns{} -> True
   CallReturnsToFunctionEntry{} -> True
-  OrphanedSingletonAnalysis{} -> True
+  OrphanedSinglesidedAnalysis{} -> True
   UnsatisfiableEquivalenceCondition{} -> True
   _ -> False
 

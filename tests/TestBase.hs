@@ -67,7 +67,7 @@ runTests cfg = do
     [ T.testGroup "equivalence" $ map (mkTest cfg) equivTestFiles
     , T.testGroup "inequivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldNotVerify fp]) inequivTestFiles
     , T.testGroup "conditional equivalence" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) condequivTestFiles
-    , T.testGroup "scripted" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldExpect fp]) scriptedFiles
+    , T.testGroup "scripted" $ map (\fp -> T.testGroup fp $ [mkEquivTest cfg ShouldConditionallyVerify fp]) scriptedFiles
     ]
 
 expectSelfEquivalenceFailure :: TestConfig -> FilePath -> Bool
@@ -84,7 +84,6 @@ expectEquivalenceFailure cfg sv fp =
        ShouldVerify -> baseName'
        ShouldNotVerify -> "unequal/" ++ baseName'
        ShouldConditionallyVerify -> "conditional/" ++ baseName'
-       ShouldExpect -> "expect/" ++ baseName'
 
 mkTest :: TestConfig -> FilePath -> T.TestTree
 mkTest cfg fp =
@@ -97,7 +96,7 @@ mkTest cfg fp =
     wrap :: T.TestTree -> T.TestTree
     wrap t = if (expectSelfEquivalenceFailure cfg fp) then T.expectFail t else t    
 
-data ShouldVerify = ShouldVerify | ShouldNotVerify | ShouldConditionallyVerify | ShouldExpect
+data ShouldVerify = ShouldVerify | ShouldNotVerify | ShouldConditionallyVerify
   deriving Show
 
 mkEquivTest :: TestConfig -> ShouldVerify -> FilePath -> T.TestTree
@@ -135,8 +134,9 @@ doTest mwb cfg _sv fp = do
   infoCfgExists <- doesFileExist (fp <.> "toml")
   argFileExists <- doesFileExist (fp <.> "args")
   scriptFileExists <- doesFileExist (fp <.> "pate")
-  sv <- case _sv of
-    ShouldExpect -> readFile (fp <.> "expect") >>= \case
+  expectFileExists <- doesFileExist (fp <.> "expect")
+  sv <- case (expectFileExists, mwb) of
+    (True, Nothing) -> readFile (fp <.> "expect") >>= \case
       "Equivalent" -> return ShouldVerify
       "Inequivalent" -> return ShouldNotVerify
       "ConditionallyEquivalent" -> return ShouldConditionallyVerify
@@ -236,9 +236,7 @@ doTest mwb cfg _sv fp = do
       ShouldVerify -> failTest "Failed to prove equivalence."
       ShouldNotVerify -> return ()
       ShouldConditionallyVerify -> failTest "Failed to prove conditional equivalence."
-      _ -> failTest $ "Unhandled expected result: " ++ show sv
     PEq.ConditionallyEquivalent -> case sv of
       ShouldVerify -> failTest "Failed to prove equivalence."
       ShouldNotVerify -> failTest "Unexpectedly proved conditional equivalence."
       ShouldConditionallyVerify -> return ()
-      _ -> failTest $ "Unhandled expected result: " ++ show sv

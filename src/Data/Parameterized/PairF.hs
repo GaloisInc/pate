@@ -15,6 +15,7 @@ module Data.Parameterized.PairF
   ) where
 
 import           Data.Kind (Type)
+import Data.Parameterized.Classes
 
 data PairF tp1 tp2 k = PairF (tp1 k) (tp2 k)
 
@@ -25,6 +26,22 @@ type instance TupleF '(a,b,c,d) = PairF a (PairF b (PairF c d))
 
 pattern TupleF2 :: a k -> b k -> TupleF '(a,b) k
 pattern TupleF2 a b = PairF a b
+
+instance (TestEquality a, TestEquality b) => TestEquality (PairF a b) where
+  testEquality (PairF a1 b1) (PairF a2 b2) = 
+    case (testEquality a1 a2, testEquality b1 b2) of
+      (Just Refl, Just Refl) -> Just Refl
+      _ -> Nothing
+
+instance (OrdF a, OrdF b) => OrdF (PairF a b) where
+  compareF (PairF a1 b1) (PairF a2 b2) = 
+    lexCompareF a1 a2 $ compareF b1 b2
+
+instance (Eq (a tp), Eq (b tp)) => Eq ((PairF a b) tp) where
+  (PairF a1 b1) == (PairF a2 b2) = a1 == a2 && b1 == b2
+
+instance (Ord (a tp), Ord (b tp)) => Ord ((PairF a b) tp) where
+  compare (PairF a1 b1) (PairF a2 b2) = compare a1 a2 <> compare b1 b2
 
 {-# COMPLETE TupleF2 #-}
 

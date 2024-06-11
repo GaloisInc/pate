@@ -6,10 +6,17 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeFamilies #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE PolyKinds #-}
 
 -- EquivM operations on a PairGraph
 module Pate.Monad.PairGraph 
   ( withPG
+  , evalPG
   , withPG_
   , liftPG
   , catchPG
@@ -23,6 +30,9 @@ module Pate.Monad.PairGraph
   , considerDesyncEvent
   , addLazyAction
   , queuePendingNodes
+  , runPG
+  , execPG
+  , liftPartEqM_
   ) where
 
 import           Control.Monad.State.Strict
@@ -52,44 +62,93 @@ import qualified Pate.Equivalence.Condition as PEC
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Map as Map
 import qualified Pate.Equivalence.Error as PEE
+import GHC.Stack (HasCallStack)
+import qualified Prettyprinter as PP
 
+
+instance IsTraceNode (k :: l) "pg_trace" where
+  type TraceNodeType k "pg_trace" = [String]
+  prettyNode () msgs = PP.vsep (map PP.viaShow msgs)
+  nodeTags = mkTags @k @"pg_trace" [Custom "debug"]
+
+emitPGTrace :: [String] -> EquivM sym arch ()
+emitPGTrace [] = return ()
+emitPGTrace l = emitTrace @"pg_trace" l
 
 withPG :: 
+  HasCallStack =>
   PairGraph sym arch -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
   EquivM sym arch (a, PairGraph sym arch)
 withPG pg f = runStateT f pg 
 
+evalPG :: 
+  HasCallStack =>
+  PairGraph sym arch -> 
+  PairGraphM sym arch a ->
+  EquivM sym arch a
+evalPG pg f = fst <$> (withPG pg $ liftPG f) 
+
+execPG :: HasCallStack => PairGraph sym arch -> PairGraphM sym arch a -> EquivM_ sym arch (PairGraph sym arch)
+execPG pg f = snd <$> runPG pg f
+
 withPG_ :: 
+  HasCallStack =>
   PairGraph sym arch -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a ->
   EquivM sym arch (PairGraph sym arch)
 withPG_ pg f = execStateT f pg
 
-liftPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) a
+liftPG :: HasCallStack => PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) a
 liftPG f = do
   pg <- get
-  case runPairGraphM pg f of
-    Left err -> lift $ throwHere $ PEE.PairGraphError err
-    Right (a,pg') -> do
-      put pg'
-      return a
+  env <- lift $ ask
+  withValidEnv env $ 
+    case runPairGraphMLog pg f of
+      (l, Left err) -> do
+        lift $ emitPGTrace l
+        lift $ throwHere $ PEE.PairGraphError err
+      (l, Right (a,pg')) -> do
+        lift $ emitPGTrace l
+        put pg'
+        return a
 
-catchPG :: PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) (Maybe a)
+runPG :: HasCallStack => PairGraph sym arch -> PairGraphM sym arch a -> EquivM_ sym arch (a, PairGraph sym arch)
+runPG pg f = withValid $ case runPairGraphMLog pg f of
+  (l, Left err) -> do
+    emitPGTrace l
+    throwHere $ PEE.PairGraphError err
+  (l, Right a) -> do
+    emitPGTrace l
+    return a
+
+catchPG :: HasCallStack => PairGraphM sym arch a -> StateT (PairGraph sym arch) (EquivM_ sym arch) (Maybe a)
 catchPG f = do
   pg <- get
-  case runPairGraphM pg f of
-    Left{} -> return Nothing
-    Right (a,pg') -> do
-      put pg'
-      return $ Just a
+  env <- lift $ ask
+  withValidEnv env $ 
+    case runPairGraphMLog pg f of
+      (l, Left{}) -> (lift $ emitPGTrace l) >> return Nothing
+      (l, Right (a,pg')) -> do
+        lift $ emitPGTrace l
+        put pg'
+        return $ Just a
 
 liftEqM_ :: 
+  HasCallStack =>
   (PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) ()
 liftEqM_ f = liftEqM $ \pg -> ((),) <$> (f pg)
 
+liftPartEqM_ :: 
+  (PairGraph sym arch -> EquivM_ sym arch (Maybe (PairGraph sym arch))) -> 
+  StateT (PairGraph sym arch) (EquivM_ sym arch) Bool
+liftPartEqM_ f = liftEqM $ \pg -> f pg >>= \case
+  Just pg' -> return (True, pg')
+  Nothing -> return (False, pg)
+
 liftEqM :: 
+  HasCallStack =>
   (PairGraph sym arch -> EquivM_ sym arch (a, PairGraph sym arch)) -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) a
 liftEqM f = do

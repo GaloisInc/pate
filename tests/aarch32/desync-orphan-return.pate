@@ -25,7 +25,8 @@ Function Entry "f"
         ...
         Choose a synchronization point:
             > 0x1014c (original)
-            > 0x10164 (patched)
+            > 0x10160 (patched)
+            > Finish Choosing
 
 // TODO: we should assume that the additional 
 // return in the patched program isn't reachable,

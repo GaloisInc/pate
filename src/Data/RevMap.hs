@@ -1,4 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-|
 Module           : Data.RevMap
 Copyright        : (c) Galois, Inc 2023
@@ -19,9 +21,10 @@ module Data.RevMap
   , alter
   , insertWith
   , findFirst
+  , filter
   ) where
 
-import Prelude hiding (lookup)
+import Prelude hiding (lookup, filter)
 
 import qualified Data.Set as Set
 import           Data.Set (Set)
@@ -76,6 +79,13 @@ delete a m@(RevMap a_to_b b_to_a) = case Map.lookup a a_to_b of
   Just b -> reverseAdjust b (Set.delete a) (RevMap (Map.delete a a_to_b) b_to_a)
   Nothing -> m
 
+filter :: forall a b. (a -> b -> Bool) -> RevMap a b -> RevMap a b
+filter f (RevMap a_to_b b_to_a) = 
+  RevMap (Map.filterWithKey f a_to_b) (Map.mapMaybeWithKey g b_to_a)
+  where
+    g :: b -> Set a -> Maybe (Set a)
+    g b as = let as' = Set.filter (\a -> f a b) as
+      in if Set.null as' then Nothing else Just as'
 
 alter :: (Ord a, Ord b) => (Maybe b -> Maybe b) -> a -> RevMap a b -> RevMap a b
 alter f a m@(RevMap a_to_b b_to_as) = case Map.lookup a a_to_b of

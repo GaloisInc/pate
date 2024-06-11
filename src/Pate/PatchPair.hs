@@ -41,6 +41,7 @@ module Pate.PatchPair (
   , ppPatchPair'
   , forBins
   , update
+  , insertWith
   , forBinsC
   , catBins
   , get
@@ -71,6 +72,7 @@ module Pate.PatchPair (
   , zip
   , jsonPatchPair
   , w4SerializePair
+  , WithBin(..)
   ) where
 
 import           Prelude hiding (zip)
@@ -125,6 +127,43 @@ pattern PatchPairPatched a = PatchPairSingle PB.PatchedRepr a
 {-# COMPLETE PatchPair, PatchPairSingle #-}
 {-# COMPLETE PatchPair, PatchPairOriginal, PatchPairPatched #-}
 
+-- | Tag any type with a 'PB.WhichBinary'
+data WithBin f (bin :: PB.WhichBinary) = 
+  WithBin { withBinRepr :: PB.WhichBinaryRepr bin, withBinValue :: f }
+
+instance Eq f => TestEquality (WithBin f) where
+  testEquality (WithBin bin1 f1) (WithBin bin2 f2)
+    | Just Refl <- testEquality bin1 bin2
+    , f1 == f2
+    = Just Refl
+  testEquality _ _ = Nothing
+
+instance Ord f => OrdF (WithBin f) where
+  compareF (WithBin bin1 f1) (WithBin bin2 f2) = 
+    lexCompareF bin1 bin2 $ fromOrdering (compare f1 f2) 
+
+instance Eq f => Eq (WithBin f bin) where
+  (WithBin _ f1) == (WithBin _ f2) = f1 == f2
+
+instance Ord f => Ord (WithBin f bin) where
+  compare (WithBin _ f1) (WithBin _ f2) = compare f1 f2
+
+-- NB: not a Monoid because we don't have an empty value for <>
+instance (forall bin. Semigroup (f bin)) => Semigroup (PatchPair f) where
+  p1 <> p2 = case (p1,p2) of
+    (PatchPair a1 b1, PatchPair a2 b2) -> PatchPair (a1 <> a2) (b1 <> b2)
+    (PatchPairSingle bin1 v1, PatchPair a2 b2) -> case bin1 of
+      PB.OriginalRepr -> PatchPair (v1 <> a2) b2
+      PB.PatchedRepr -> PatchPair a2 (v1 <> b2)
+    (PatchPair a1 b1, PatchPairSingle bin2 v2) -> case bin2 of
+      PB.OriginalRepr -> PatchPair (a1 <> v2) b1
+      PB.PatchedRepr -> PatchPair a1 (b1 <> v2)
+    (PatchPairSingle bin1 v1, PatchPairSingle bin2 v2) -> case (bin1, bin2) of
+      (PB.OriginalRepr, PB.PatchedRepr) -> PatchPair v1 v2
+      (PB.OriginalRepr, PB.OriginalRepr) -> PatchPairSingle bin1 (v1 <> v2)
+      (PB.PatchedRepr, PB.OriginalRepr) -> PatchPair v2 v1
+      (PB.PatchedRepr, PB.PatchedRepr) ->PatchPairSingle bin1 (v1 <> v2)
+
 -- | Select the value from the 'PatchPair' according to the given 'PB.WhichBinaryRepr'
 --   Returns 'Nothing' if the given 'PatchPair' does not contain a value for the given binary
 --   (i.e. it is a singleton 'PatchPair' and the opposite binary repr is given)
@@ -135,19 +174,6 @@ getPair repr pPair = case pPair of
     PB.PatchedRepr -> Just patched
   PatchPairSingle repr' a | Just Refl <- testEquality repr repr' -> Just a
   _ -> Nothing
-
--- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
---   Returns 'Nothing' if the given 'PatchPair' does not contain a value for the given binary.
---   (n.b. this will not convert a singleton 'PatchPair' into a full 'PatchPair')
-setPair :: PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> Maybe (PatchPair tp))
-setPair PB.OriginalRepr pPair a = case pPair of
-  PatchPair _ patched -> Just $ PatchPair a patched
-  PatchPairOriginal _ -> Just $ PatchPairOriginal a
-  PatchPairPatched _ -> Nothing
-setPair PB.PatchedRepr pPair a = case pPair of
-  PatchPair orig _ -> Just $ PatchPair orig a
-  PatchPairPatched _ -> Just $ PatchPairPatched a
-  PatchPairOriginal _ -> Nothing
 
 -- {-# DEPRECATED handleSingletonStub "Missing implementation for handling singleton PatchPair values" #-}
 handleSingletonStub :: HasCallStack => a
@@ -223,11 +249,14 @@ fromMaybes = \case
   (Nothing, Nothing) -> throwPairErr
 
 
-
--- | Set the value in the given 'PatchPair' according to the given 'PB.WhichBinaryRepr'
---   Raises 'pairErr' if the given 'PatchPair' does not contain a value for the given binary.
-set :: HasCallStack => PatchPairM m => PB.WhichBinaryRepr bin -> (forall tp. PatchPair tp -> tp bin -> m (PatchPair tp))
-set repr pPair a = liftPairErr (setPair repr pPair a)
+set :: PB.WhichBinaryRepr bin -> tp bin -> PatchPair tp -> PatchPair tp
+set repr v pPair = case pPair of
+  PatchPair a b -> case repr of
+    PB.OriginalRepr -> PatchPair v b
+    PB.PatchedRepr -> PatchPair a v
+  PatchPairSingle repr' v' -> case PB.binCases repr' repr of
+    Left Refl -> PatchPairSingle repr v
+    Right Refl -> mkPair repr v v'
 
 data InconsistentPatchPairAccess = InconsistentPatchPairAccess
   deriving (Show)
@@ -331,6 +360,23 @@ update src f = do
     (PatchPairOriginal a, PatchPairPatched b) -> return $ PatchPair a b
     (PatchPair _ b, PatchPairOriginal a) -> return $ PatchPair a b
     (PatchPair a _, PatchPairPatched b) -> return $ PatchPair a b
+
+-- | Add a value to a 'PatchPair', combining it with an existing entry if
+--   present using the given function (i.e. similar to Map.insertWith)
+insertWith ::
+  PB.WhichBinaryRepr bin -> 
+  f bin -> 
+  (f bin -> f bin -> f bin) ->
+  PatchPair f ->
+  PatchPair f
+insertWith bin v f = \case
+  PatchPair vO vP | PB.OriginalRepr <- bin -> PatchPair (f v vO) vP
+  PatchPair vO vP | PB.PatchedRepr <- bin -> PatchPair vO (f v vP)
+  PatchPairSingle bin' v' -> case (bin, bin') of
+    (PB.OriginalRepr, PB.OriginalRepr) -> PatchPairSingle bin (f v v')
+    (PB.PatchedRepr, PB.PatchedRepr) -> PatchPairSingle bin (f v v')
+    (PB.PatchedRepr, PB.OriginalRepr) -> PatchPair v' v
+    ( PB.OriginalRepr, PB.PatchedRepr) -> PatchPair v v'
 
 -- | Specialization of 'PatchPair' to types which are not indexed on 'PB.WhichBinary'
 type PatchPairC tp = PatchPair (Const tp)
