@@ -1,18 +1,12 @@
 \section{Interacting with the Verifier}
 \label{sec:repl}
 
-Once the REPL (Read-EVAL-Print loop) has started, the first step of the
-analysis is to select an entry point to start from.  By default, the
-verifier starts verifying from the formal program entry point. This is
-often not very useful (and can be problematic for complex binaries with
-a large \texttt{\_start} that causes problem for our code discovery).
-Additionally, for changes with a known (or at least expected) scope of
-impact, analyzing just the affected functions is significantly
-faster. To instead specify an analysis entry point, passing the
-\texttt{-s <function\_symbol>} option will start the analysis from the
-function corresponding to the given symbol. Note that this requires
-function symbols to be provided for the binaries (either as embedded
-debug symbols or separately in one of the hint formats)::
+Once the REPL (Read-EVAL-Print loop) has started, the first step of the analysis is to select an entry point to start from.
+By default, the verifier starts verifying from the formal program entry point.
+This is often not very useful (and can be problematic for complex binaries with a large \texttt{\_start} that causes problem for our code discovery).
+Additionally, for changes with a known (or at least expected) scope of impact, analyzing just the affected functions is significantly faster.
+To instead specify an analysis entry point, passing the \texttt{-s <function\_symbol>} option will start the analysis from the function corresponding to the given symbol.
+Note that this requires function symbols to be provided for the binaries (either as embedded debug symbols or separately in one of the hint formats)::
 \begin{verbatim}
   docker run --rm -it -v`pwd`/tests:/tests/hints pate \
              --original /tests/01.elf \
@@ -30,33 +24,21 @@ The user can then select the desired entry point:
   ?> 1
 \end{verbatim}
 
-The top level of the interactive process (reachable via the\texttt{top}
-command) is a list of all analysis steps that were taken, starting from
-the selected entry point.  Each pair of address and calling contexts
-defines a unique toplevel proof "node". A given address and context may
-appear multiple times in the toplevel list, corresponding to each
-individual time that the address/context pair was analyzed. The latest
-(highest-numbered) entry corresponds to the most recent analysis of an
-address/context.
+The top level of the interactive process (reachable via the\texttt{top} command) is a list of all analysis steps that were taken, starting from the selected entry point.
+Each pair of address and calling contexts defines a unique toplevel proof "node".
+A given address and context may appear multiple times in the toplevel list, corresponding to each individual time that the address/context pair was analyzed.
+The latest (highest-numbered) entry corresponds to the most recent analysis of an address/context.
 
-Each entry point is associated with an equivalence domain: a set of
-locations (registers, stack slots and memory addresses) that are
-potentially not equal at this point. Locations outside of this set have
-been proven to be equal (ignoring skipped functions).  The analysis
-takes the equivalence domain of an entry point and computes an
-equivalence domain for each possible exit point (according to the
-semantics of the block).
+Each entry point is associated with an equivalence domain: a set of locations (registers, stack slots and memory addresses) that are potentially not equal at this point.
+Locations outside of this set have been proven to be equal (ignoring skipped functions).
+The analysis takes the equivalence domain of an entry point and computes an equivalence domain for each possible exit point (according to the semantics of the block).
 
 Differences between the two binaries may be reported into two ways:
 \begin{itemize}
-\item Observable trace differences -- library calls or writes to
-  distinguished memory regions which have different contents or occur in
-  different orders
-\item Control flow divergence --significant divergence in control flow
-  between the programs (i.e. one program returns while the other calls a
-  function)
+\item Observable trace differences -- library calls or writes to distinguished memory regions which have different contents or occur in different orders
+\item Control flow divergence -- significant divergence in control flow between the programs (i.e. one program returns while the other calls a function)
 \end{itemize}
-      
+
 % If we examine the first node (entering\texttt{1} at the prompt), we
 % might see the following output:
 % \begin{verbatim}
@@ -70,12 +52,11 @@ Differences between the two binaries may be reported into two ways:
 % \end{verbatim}
 
 % Element 5 indicates that, starting at the function entry
-% for\texttt{my\_fun}, the original and patched 
+% for\texttt{my\_fun}, the original and patched
 % binaries both necessarily call\texttt{my\_sub\_fun} next, returning to the
-% address\texttt{0xfeef} within\texttt{my\_sub}. 
+% address\texttt{0xfeef} within\texttt{my\_sub}.
 
-For example, if a function \texttt{my\_fun} calls \texttt{my\_sub\_fun},
-we might see the following toplevel output. 
+For example, if a function \texttt{my\_fun} calls \texttt{my\_sub\_fun}, we might see the following toplevel output.
 \begin{verbatim}
 0: Function Entry "my\_fun" (0xfeed) (User Request)
 1: Function Entry "my\_sub\_fun" (0xdeef) [ via: "my\_fun" (0xfeef) ]  (Widening Equivalence Domains)
@@ -84,21 +65,16 @@ we might see the following toplevel output.
 5: 0xfeef [ via: "my\_sub\_fun" (0xdeef) <- "my\_fun" (0xfeed) ] (Widening Equivalence Domains)
 6: Return "my\_fun" (0xfeed) (Widening Equivalence Domains)
 \end{verbatim}
-The contents of a node can be inspected by entering the corresponding
-number at the prompt. A toplevel node contains sub-nodes corresponding
-to each possible "exit" that was discovered.  For example suppose we
-entered \texttt{2} at the prompt above.  The components of that node as
-displayed are:
+The contents of a node can be inspected by entering the corresponding number at the prompt.
+A toplevel node contains sub-nodes corresponding to each possible "exit" that was discovered.
+For example suppose we entered \texttt{2} at the prompt above.
+The components of that node as displayed are:
 \begin{itemize}
-  \item\texttt{2:} - the number of this node, enter at the prompt to navigate to it
-    and see a detailed view of the analysis step
+  \item\texttt{2:} - the number of this node, enter at the prompt to navigate to it and see a detailed view of the analysis step
 \item\texttt{0xdeff} - the address that this analysis started from
 \item \texttt{[ via: "my\_sub\_fun" (0xdeef) <- "my\_fun" (0xfeed) ]} -
-    the calling context for this node, shown as the trace of function calls taken on the path
-    to it (most recent call is first, left-to-right).
-\item \texttt{(Widening Equivalence Domains)} - the reason this analysis
-  step was taken. This is provided by whichever previous analysis step
-  scheduled this node to be  processed. 
+    the calling context for this node, shown as the trace of function calls taken on the path to it (most recent call is first, left-to-right).
+\item \texttt{(Widening Equivalence Domains)} - the reason this analysis step was taken. This is provided by whichever previous analysis step scheduled this node to be  processed.
 \end{itemize}
 The \emph{prompt} indicates the status of the current node as follows:
 \begin{itemize}
@@ -108,8 +84,7 @@ The \emph{prompt} indicates the status of the current node as follows:
 \item \texttt{x>} current node has raised an error
 \item \texttt{>} current node, and all sub-nodes, have finished processing
 \end{itemize}
-Similar to the prompt, nodes may be printed with a suffix that indicates
-some additional status as follows:
+Similar to the prompt, nodes may be printed with a suffix that indicates some additional status as follows:
 \begin{itemize}
 \item \texttt{(*)} node still has some active task running
 \item \texttt{(?)} node requires user input
@@ -117,8 +92,7 @@ some additional status as follows:
 \item \texttt{(x)} node has raised an error
 \end{itemize}
 A status suffix indicates that the node, or some sub-node, has the given status.
-e.g. at the toplevel the prompt \texttt{x>} indicates that an error was thrown during
-some block analysis, while the corresponding node for the block will have a \texttt{(x)} suffix.
+e.g. at the toplevel the prompt \texttt{x>} indicates that an error was thrown during some block analysis, while the corresponding node for the block will have a \texttt{(x)} suffix.
 
 Navigation Commands:
 \begin{itemize}
@@ -137,9 +111,8 @@ Diagnostic Commands:
 the user provides any input
 \end{itemize}
 When the prompt is \texttt{?>}, the verifier is waiting for input at some sub-node.
-To select an option, simply navigate (i.e. by entering \texttt{\#}) to
-the desired choice.  For example, \texttt{goto\_prompt} - navigate to the
-first leaf node waiting for user input. 
+To select an option, simply navigate (i.e. by entering \texttt{\#}) to the desired choice.
+For example, \texttt{goto\_prompt} - navigate to the first leaf node waiting for user input.
 
 % At the top level in the verifier's analysis data structure there is a
 % list of block entry points that have been analyzed.  This includes:
@@ -167,11 +140,11 @@ first leaf node waiting for user input.
 % For example::
 % \begin{verbatim}
 %   Control flow desynchronization found at: GraphNode segment1+0x4114 [ via: "transport\_handler" (segment1+0x400c) ]
-%   0: Choose synchronization points 
-%   1: Assert divergence is infeasible 
-%   2: Assume divergence is infeasible 
-%   3: Remove divergence in equivalence condition 
-%   4: Defer decision 
+%   0: Choose synchronization points
+%   1: Assert divergence is infeasible
+%   2: Assume divergence is infeasible
+%   3: Remove divergence in equivalence condition
+%   4: Defer decision
 %   ?>
 % \end{verbatim}
 
@@ -183,7 +156,7 @@ first leaf node waiting for user input.
 % action and resume the analysis.
 
 % After input is provided for the prompt, the repl will implicitly
-% navigate back to the toplevel and\texttt{wait}. 
+% navigate back to the toplevel and\texttt{wait}.
 
 % Ad-hoc choices
 % ----

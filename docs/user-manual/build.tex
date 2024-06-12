@@ -2,9 +2,8 @@
 \section{Building the PATE Verifier}
 \label{sec:build-pate-verif}
 
-The pate tool is written in Haskell and requires the GHC compiler
-(version 8.6-8.10) and the cabal build tool to compile.  Building from
-source can be accomplished as follows:
+The pate tool is written in Haskell and requires the GHC compiler (version 8.6-8.10) and the cabal build tool to compile.
+Building from source can be accomplished as follows:
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
   cd pate
@@ -13,9 +12,9 @@ source can be accomplished as follows:
   cabal configure pkg:pate
   pate.sh --help
 \end{verbatim}
-The verifier also requires an SMT solver to be available in
-``PATH``. The default is ``yices``, but ``z3`` and ``cvc4`` are also
-supported.   The verifier can also be built as a Docker image:
+The verifier also requires an SMT solver to be available in ``PATH``.
+The default is ``yices``, but ``z3`` and ``cvc4`` are also supported.
+The verifier can also be built as a Docker image:
 \begin{verbatim}
   docker build . -t pate
 \end{verbatim}
