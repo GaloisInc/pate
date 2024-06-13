@@ -2014,9 +2014,11 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
           is_this_instr <- PAS.toPred sym eqInstr
           with_targets <- withAssumption is_this_instr $ do
             maybeZero >>= \case
-              True -> chooseBool ("Classifier Failure: Mark " ++ show instr_addr ++ " as return?") >>= \case
+              True -> asks (PCfg.cfgAlwaysClassifyReturn . envConfig) >>= \case
                 True -> return $ Map.insert instr_addr ReturnTarget tried
-                False -> return tried
+                False -> chooseBool ("Classifier Failure: Mark " ++ show instr_addr ++ " as return?") >>= \case
+                  True -> return $ Map.insert instr_addr ReturnTarget tried
+                  False -> return tried
               False -> do
                 targets <- findTargets Set.empty
                 retV_conc <- concretizeWithSolver retV
