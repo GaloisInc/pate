@@ -127,6 +127,10 @@ module Pate.Verification.PairGraph
   , queueSplitAnalysis
   , handleKnownDesync
   , addReturnPointSync
+  , getDomainRefinements
+  , addDomainRefinements
+  , isSyncNode
+  , queueExitMerges
   ) where
 
 import           Prettyprinter
@@ -743,6 +747,16 @@ getNextDomainRefinement nd pg = case Map.lookup nd (pairGraphDomainRefinements p
   Just (refine:rest) -> Just (refine, pg {pairGraphDomainRefinements = Map.insert nd rest (pairGraphDomainRefinements pg)})
   _ -> Nothing
 
+getDomainRefinements :: GraphNode arch -> PairGraph sym arch -> [DomainRefinement sym arch]
+getDomainRefinements nd pg = fromMaybe [] $ Map.lookup nd (pairGraphDomainRefinements pg)
+
+addDomainRefinements :: GraphNode arch -> [DomainRefinement sym arch] -> PairGraph sym arch -> PairGraph sym arch
+addDomainRefinements _ [] pg0 = pg0
+addDomainRefinements nd rs pg0 = 
+  let
+    pg1 = pg0 { pairGraphDomainRefinements = Map.insertWith (++) nd rs (pairGraphDomainRefinements pg0) }
+  in queueAncestors (normalPriority PriorityUserRequest) nd pg1
+
 ppProgramDomains ::
   forall sym arch a.
   ( PA.ValidArch arch
@@ -1122,7 +1136,7 @@ chooseWorkItem' = do
     Just (wi, p, wl) -> do
       modify $ \gr_ -> gr_ { pairGraphWorklist = wl }
       case wi of
-        ProcessNode (GraphNode ne) | Just (Some sne) <- asSingleNodeEntry ne -> do
+        {-  ProcessNode (GraphNode ne) | Just (Some sne) <- asSingleNodeEntry ne -> do
           let bin = singleEntryBin sne
           let sne_addr = PB.concreteAddress $ singleNodeBlock sne
           exceptEdges <- getSingleNodeData syncExceptions sne
@@ -1136,8 +1150,7 @@ chooseWorkItem' = do
             -- be handled as part of merging any nodes that reach this
             (True, False) -> chooseWorkItem'
             _ -> return $ Just (p,wi)
-        -- FIXME: handle diverge node?
-          
+        -- FIXME: handle diverge node? -}
         _ -> return $ Just (p,wi)
 
 -- | Update the abstract domain for the target graph node,
@@ -1457,14 +1470,13 @@ isSyncExit sne blkt@(PB.BlockTarget{}) = do
 isSyncExit _ _ = return Nothing
 
 -- | True if the given node starts at exactly a sync point
-isZeroStepSync ::
+isSyncNode ::
   forall sym arch bin.
   SingleNodeEntry arch bin ->
   PairGraphM sym arch Bool
-isZeroStepSync sne = do
+isSyncNode sne = do
   cuts <- getSingleNodeData syncCutAddresses sne
-  let addr = PB.concreteAddress $ singleNodeBlock sne
-  return $ Set.member (PPa.WithBin (singleEntryBin sne) addr) cuts
+  return $ Set.member (singleNodeAddr sne) cuts
 
 -- | Filter a list of reachable block exits to
 --   only those that should be handled for the given 'WorkItem'
@@ -1491,7 +1503,7 @@ filterSyncExits _ (ProcessMergeAtExits sneO sneP) blktPairs = do
 -- to be synchronized
 filterSyncExits _ (ProcessMergeAtEntry{}) blktPairs = return blktPairs
 filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
-  isZeroStepSync sne >>= \case
+  isSyncNode sne >>= \case
     True -> do
       queueExitMerges priority (SyncAtStart sne)
       return []

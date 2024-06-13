@@ -60,6 +60,7 @@ module Pate.Verification.PairGraph.Node (
   , combineSingleEntries
   , singleNodeDivergence
   , toSingleNodeEntry
+  , singleNodeAddr
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -78,6 +79,7 @@ import qualified What4.JSON as W4S
 import Control.Monad (guard)
 import Data.Parameterized.Classes
 import Pate.Panic
+import qualified Pate.Address as PAd
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -396,6 +398,9 @@ data SingleNodeEntry arch bin =
     { singleEntryBin :: PB.WhichBinaryRepr bin
     , _singleEntry :: NodeContent arch (PB.ConcreteBlock arch bin)
     }
+
+singleNodeAddr :: SingleNodeEntry arch bin -> PPa.WithBin (PAd.ConcreteAddress arch) bin
+singleNodeAddr se = PPa.WithBin (singleEntryBin se) (PB.concreteAddress (singleNodeBlock se))
 
 mkSingleNodeEntry :: NodeEntry arch -> PB.ConcreteBlock arch bin -> SingleNodeEntry arch bin
 mkSingleNodeEntry node blk = SingleNodeEntry (PB.blockBinRepr blk) (NodeContent (graphNodeContext node) blk)

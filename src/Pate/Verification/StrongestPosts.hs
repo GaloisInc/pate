@@ -619,7 +619,7 @@ handleProcessSplit sne pg = withPG pg $ do
   priority <- lift $ thisPriority
   case getCurrentDomain pg divergeNode of
     Nothing -> do
-      liftPG $ modify $ queueNode (priority PriorityDomainRefresh) divergeNode
+      liftPG $ modify $ queueAncestors (priority PriorityDomainRefresh) divergeNode
       return Nothing
     Just{} -> do
       let nd = GraphNode (singleToNodeEntry sne)
@@ -707,9 +707,11 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
     blkPairP = PPa.PatchPairSingle PBi.PatchedRepr blkP
     blkPair = PPa.PatchPair blkO blkP
 
-  syncNode <- case combineSingleEntries sneO sneP of
+  syncNodeEntry <- case combineSingleEntries sneO sneP of
     Just ne -> return ne
     Nothing -> throwHere $ PEE.IncompatibleSingletonNodes blkO blkP
+  
+  let syncNode = GraphNode syncNodeEntry
   
   specO <- evalPG pg $ getCurrentDomainM ndO
   specP <- evalPG pg $ getCurrentDomainM ndP
@@ -719,14 +721,23 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
       (_, domO) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specO
       (_, domP) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specP
       dom <- PAD.zipSingletonDomains sym domO domP
-      bundle <- noopBundle scope (nodeBlocks syncNode)
-      withPredomain scope bundle dom $ 
-        withConditionsAssumed scope bundle domO ndO pg $ 
-        withConditionsAssumed scope bundle domP ndP pg $ do
+      bundle <- noopBundle scope (nodeBlocks syncNodeEntry)
+      withPredomain scope bundle dom $ do
           emitTraceLabel @"domain" PAD.Predomain (Some dom)
-          pg1 <- withTracing @"node" ndO $ widenAlongEdge scope bundle ndO dom pg (GraphNode syncNode)
-          withTracing @"node" ndP $ widenAlongEdge scope bundle ndP dom pg1 (GraphNode syncNode)
-  return (syncNode, pg1)
+          let pre_refines = getDomainRefinements syncNode pg
+
+          pg1 <- 
+            withTracing @"node" ndO $
+            -- ensure we make any assumptions that have been added to only
+            -- one side of the analysis
+            withConditionsAssumed scope bundle dom ndO pg $
+              widenAlongEdge scope bundle ndO dom pg syncNode
+          let pg2 = addDomainRefinements syncNode pre_refines pg1
+          withTracing @"node" ndP $ 
+            withConditionsAssumed scope bundle dom ndP pg $
+            widenAlongEdge scope bundle ndP dom pg2 syncNode
+  return (syncNodeEntry, pg1)
+
 
 -- | Choose some work item (optionally interactively)
 withWorkItem ::
@@ -743,12 +754,13 @@ withWorkItem gr0 f = do
       let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ atPriority priority Nothing $ do
         (mnext, gr2) <- case wi of
-          ProcessNode nd' -> do
-            spec <- evalPG gr1 $ getCurrentDomainM nd
-            PS.viewSpec spec $ \scope d -> do
-              runPendingActions refineActions nd' (TupleF2 scope d) gr1 >>= \case
-                Just gr2 -> return $ (Nothing, gr2)
-                Nothing -> return $ (Just nd', gr1)
+          ProcessNode (GraphNode ne) | Just (Some sne) <- asSingleNodeEntry ne -> do
+            (evalPG gr1 $ isSyncNode sne) >>= \case
+              True -> do
+                gr2 <- execPG gr1 $ queueExitMerges (\pk -> mkPriority pk priority) (SyncAtStart sne)
+                return $ (Nothing, gr2)
+              False -> processNode (GraphNode ne) gr1
+          ProcessNode nd' -> processNode nd' gr1
           ProcessSplit sne -> do
             emitTrace @"debug" $ "ProcessSplit: " ++ show sne
             handleProcessSplit sne gr1
@@ -764,10 +776,25 @@ withWorkItem gr0 f = do
             Just spec -> subTraceLabel @"node" (printPriorityKind priority) next $ 
               atPriority priority Nothing $ (Just <$> (f (priority, gr2, wi, spec)))
             -- we are missing the expected domain, so we need to just try again
-            Nothing -> withWorkItem (queueWorkItem priority wi gr2) f 
+            Nothing -> do
+
+              withWorkItem (queueWorkItem priority wi gr2) f 
         Left (Nothing, gr2) ->  withWorkItem gr2 f
         Right a -> return $ Just a
-
+  where
+    processNode :: 
+      GraphNode arch -> 
+      PairGraph sym arch ->
+      EquivM sym arch (Maybe (GraphNode arch), PairGraph sym arch)  
+    processNode nd gr1 = do
+      spec <- evalPG gr1 $ getCurrentDomainM nd
+      PS.viewSpec spec $ \scope d -> do
+        emitTrace @"debug" $ "runPendingActions"
+        runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
+          Just gr2 -> do
+            emitTrace @"debug" $ "Actions Executed, returning..."
+            return $ (Nothing, gr2)
+          Nothing -> return $ (Just nd, gr1)
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -1154,7 +1181,14 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   eqCond <- getScopedCondition scope gr0 nd condK
   eqCond_pred <- PEC.toPred sym eqCond
   case W4.asConstantPred eqCond_pred of
-    Just True -> f
+    Just True -> do
+      gr1 <- f
+      -- clear out trivial conditions if possible
+      eqCond_post <- getScopedCondition scope gr1 nd condK
+      eqCond_pred_post <- PEC.toPred sym eqCond_post
+      case W4.asConstantPred eqCond_pred_post of
+        Just True -> return $ dropCondition nd condK gr1
+        _ -> return gr1
     _ -> do
       let msg = conditionPrefix condK
       (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred

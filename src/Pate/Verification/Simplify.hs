@@ -228,11 +228,16 @@ deepPredicateSimplifier = WEH.joinStrategy $ withValid $ do
   return $ stripAnnStrat <> coreStrategy <> simplifyPred_deep <> applyAsmsStrat
 
 
+unfoldDefsStrategy :: SimpStrategy sym (EquivM_ sym arch)
+unfoldDefsStrategy = WEH.joinStrategy $ withValid $ return $ WEH.SimpStrategy $ \sym _ -> do
+  fn_cache <- W4B.newIdxCache 
+  return $ WEH.Simplifier $ WEH.unfoldDefinedFns sym (Just fn_cache)
+
 -- | Simplifier that should only be used to display terms.
 --   Interleaved with the deep predicate simplifier in order to
 --   drop any redundant terms that are introduced.
 prettySimplifier :: forall sym arch. SimpStrategy sym (EquivM_ sym arch)
-prettySimplifier = deepPredicateSimplifier <> base <> deepPredicateSimplifier <> base
+prettySimplifier = deepPredicateSimplifier <> base <> unfoldDefsStrategy <> deepPredicateSimplifier <> unfoldDefsStrategy <> base
   where
     base :: SimpStrategy sym (EquivM_ sym arch)
     base = WEH.joinStrategy $ withValid $ 
