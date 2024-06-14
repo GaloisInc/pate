@@ -838,18 +838,33 @@ pairGraphComputeFixpoint entries gr_init = do
         Nothing -> showFinalResult gr2 >> return gr2
   go_outer gr_init
 
+clearTrivialCondition :: 
+  GraphNode arch -> 
+  ConditionKind -> 
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+clearTrivialCondition nd condK pg = case getCondition pg nd ConditionEquiv of
+  Just cond_spec -> PS.viewSpec cond_spec $ \scope cond -> withSym $ \sym -> do
+    ((), pg1) <- withNoTracing $ withGraphNode scope nd pg $ \_bundle _d -> do
+      heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
+      cond_pred <- PEC.toPred sym cond
+      isPredTrue' heuristicTimeout cond_pred >>= \case
+        True ->  return $ ((), dropCondition nd condK pg)
+        False -> return ((), pg)
+    return pg1
+  Nothing -> return pg
+
 showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
-showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
-  
-  
+showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
   subTree @"node" "Observable Counter-examples" $ do
-    forM_ (Map.toList (pairGraphObservableReports pg)) $ \(nd,report) -> 
+    forM_ (Map.toList (pairGraphObservableReports pg0)) $ \(nd,report) -> 
       subTrace (GraphNode nd) $ 
         emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
   eq_conds <- fmap catMaybes $ subTree @"node" "Assumed Equivalence Conditions" $ do
     
-    forM (getAllNodes pg) $ \nd -> do
-       case getCondition pg nd ConditionEquiv of
+    forM (getAllNodes pg0) $ \nd -> do
+      pg <- lift $ clearTrivialCondition nd ConditionEquiv pg0
+      case getCondition pg nd ConditionEquiv of
         Just cond_spec -> subTrace nd $ do
           s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
             (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
@@ -865,10 +880,10 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
         Nothing -> return Nothing
-  let result = pairGraphComputeVerdict pg
+  let result = pairGraphComputeVerdict pg0
   emitTrace @"equivalence_result" result
   let eq_conds_map = Map.fromList eq_conds
-  let toplevel_result = FinalResult result (pairGraphObservableReports pg) eq_conds_map
+  let toplevel_result = FinalResult result (pairGraphObservableReports pg0) eq_conds_map
   emitTrace @"toplevel_result" toplevel_result
 
 data FinalResult sym arch = FinalResult
@@ -1181,14 +1196,7 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   eqCond <- getScopedCondition scope gr0 nd condK
   eqCond_pred <- PEC.toPred sym eqCond
   case W4.asConstantPred eqCond_pred of
-    Just True -> do
-      gr1 <- f
-      -- clear out trivial conditions if possible
-      eqCond_post <- getScopedCondition scope gr1 nd condK
-      eqCond_pred_post <- PEC.toPred sym eqCond_post
-      case W4.asConstantPred eqCond_pred_post of
-        Just True -> return $ dropCondition nd condK gr1
-        _ -> return gr1
+    Just True -> f
     _ -> do
       let msg = conditionPrefix condK
       (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred
