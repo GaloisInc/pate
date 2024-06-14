@@ -1677,18 +1677,26 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
        case mres of
           Nothing -> return (Just CE.ObservableCheckEq, pg)
           Just cex -> do
-            let msg = "Handle observable difference:"
-            mcondK <- choose @"()" msg $ \choice -> do
-              -- first (default) action is to keep the observable report but don't change
-              -- anything about the analysis
-              choice "Emit warning and continue" () $ return Nothing
-              -- NB: the only difference between the two assertion types is the priority that the propagation step occurs at
-              -- the verifier will finish any widening steps it has before processing any deferred propagation steps
-              choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, PriorityDeferredPropagation)
-              choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, PriorityPropagation)
-              choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, PriorityDeferredPropagation)
-              choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, PriorityDeferredPropagation)
-              
+            heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
+            issat <- isPredSat' heuristicTimeout eqSeq >>= \case
+              Just False -> return False
+              _ -> return True
+
+            mcondK <- case issat of
+              True -> do
+                let msg = "Handle observable difference:"
+                choose @"()" msg $ \choice -> do
+                  -- first (default) action is to keep the observable report but don't change
+                  -- anything about the analysis
+                  choice "Emit warning and continue" () $ return Nothing
+                  -- NB: the only difference between the two assertion types is the priority that the propagation step occurs at
+                  -- the verifier will finish any widening steps it has before processing any deferred propagation steps
+                  choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, PriorityDeferredPropagation)
+                  choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, PriorityPropagation)
+                  choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, PriorityDeferredPropagation)
+                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, PriorityDeferredPropagation)
+              False -> return Nothing
+
             case mcondK of
               Just (condK, p) ->  do
                 let do_propagate = shouldPropagate (getPropagationKind pg nd condK)
