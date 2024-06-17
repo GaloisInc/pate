@@ -1,72 +1,22 @@
 
-\section{Running the PATE Verifier}
-\label{sec:runn-pate-verif}
+\section{Invoking the PATE Verifier}
+\label{sec:run-pate-verif}
 
-\subsection{Running From a Docker Container}
-\label{sec:running-from-docker}
+Once pate has been built as described in Section~\ref{sec:build-pate-verif}, use the docker container (or \texttt{pate.sh} script if building locally from source) to invoke pate.
 
-If you have a Docker image containing the verifier, load and run it:
-\begin{verbatim}
-  docker load -i /path/to/pate.tar 
-\end{verbatim}
-To run the verifier via Docker after this::
-\begin{verbatim}
-  docker run --rm -it pate --help
-\end{verbatim}
+Invoking pate via either docker or locally presents the user with an interactive terminal user interface for analyzing a pair of binaries.
+Users provide at least the paths to two (the ``original'' and ``patched'') binaries at the command line when invoking pate.
+Additionally, we recommend also specifying the desired entry point, using \texttt{-s <symbol>}.
+Providing the specific function of interest will enable pate to begin reasoning closer to the relevant functionality of interest, greatly reducing the total analysis time required compared to starting from the program entry point.
+Users may also wish to provide ``hint'' inputs that provide metadata mapping symbol names to addresses, easing analysis of stripped binaries.
 
-\subsection{Usage}
-\label{sec:usage-examples}
-
-To run the verifier on existing test binaries in the software release.
-From the root directory of the repository:
-\begin{verbatim}
-docker run --rm -it -v `pwd`/demos:/demos pate \
-    -o /demos/challenge09/static/challenge09.original.exe \
-    -p /demos/challenge09/static/challenge09.patched.exe \
-    --original-bsi-hints /demos/challenge09/static/challenge09.json \
-    --patched-bsi-hints /demos/challenge09/static/challenge09.json \
-    -e ContinueAfterFailure \
-    --save-macaw-cfgs /demos/challenge09/static/CFGs/ \
-    -s "main" \
-    -b /demos/challenge09/static/challenge09.toml
-\end{verbatim}
-
-
-%% Stuff below here is outdated?
-
-% To make use of the verifier with Docker, it is useful to map a directory
-% on your local filesystem into the Docker container to be able to save
-% output files. Assuming that your original and patched binaries are
-% \texttt{original.exe} and \texttt{patched.exe}, respectively: 
-
-% \begin{verbatim}
-%   mkdir VerifierData
-%   cp original.exe patched.exe VerifierData/
-%   docker run --rm -it -v `pwd`/VerifierData`:/VerifierData pate \
-%              --original /VerifierData/original.exe \
-%              --patched /VerifierData/patched.exe \
-%              --proof-summary-json /VerifierData/report.json \
-%              --log-file /VerifierData/pate.log \
-%              --save-macaw-cfgs /VerifierData/cfgs
-% \end{verbatim}
-
-% This command will run the verifier on the two binaries and drop you into
-% a read-eval-print loop, where you can interactively explore the
-% verifier's output.
-
-% See below in Section~\ref{sec:demonstr-scen} for how to run the verifier
-% from a docker container to perform a verification on a specific patched
-% binary.
-
-\subsection{Command Line Options}
-The verifier accepts the following command line arguments::
+The verifier accepts the following command line arguments:
 \begin{verbatim}
   -h,--help                Show this help text
   -o,--original EXE        Original binary
   -p,--patched EXE         Patched binary
   -b,--blockinfo FILENAME  Block information relating binaries
-  -s,--startsymbol ARG     Start analysis from the function with this symbol,
-                           otherwise start at the program entrypoint
+  -s,--startsymbol ARG     Start analysis from the function with this symbol
   -d,--nodiscovery         Don't dynamically discover function pairs based on
                            calls.
   --solver ARG             The SMT solver to use to solve verification
@@ -114,6 +64,20 @@ The verifier accepts the following command line arguments::
   -r,--rescopemode ARG     Variable rescoping failure handling mode
                            (default: ThrowOnEqRescopeFailure)
   --skip-unnamed-functions Skip analysis of functions without symbols
+  --skip-divergent-control-flow
+                           <DEPRECATED>
+  --target-equiv-regs ARG  Compute an equivalence condition sufficient to
+                           establish equality on the given registers after the
+                           toplevel entrypoint returns. <DEPRECATED>
+  --ignore-segments ARG    Skip segments (0-indexed) when loading ELF
+  --json-toplevel          Run toplevel in JSON-output mode (interactive mode
+                           only)
+  --read-only-segments ARG Mark segments as read-only (0-indexed) when loading
+                           ELF
+  --script FILENAME        Save macaw CFGs to the provided directory
+  --no-assume-stack-scope  Don't add additional assumptions about stack frame
+                           scoping
+  --ignore-warnings ARG    Don't raise any of the given warning types
 \end{verbatim}
 
 

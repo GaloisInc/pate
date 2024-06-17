@@ -1,4 +1,4 @@
-\documentclass{article}
+\documentclass[11pt]{article}
 
 \usepackage{acronym}
 \usepackage[pdftex]{graphicx}
@@ -11,6 +11,9 @@
 \usepackage[capitalise,noabbrev]{cleveref}
 \usepackage{hypernat}
 \usepackage{url}
+
+\usepackage[left=1in,right=1in,top=1in,bottom=1in]{geometry}
+\usepackage[skip=11pt]{parskip}
 
 \lstset{basicstyle=\ttfamily}
 
@@ -33,6 +36,7 @@
 {\let\newpage\relax\maketitle}
 
 \input{frontmatter}
+\newpage
 \tableofcontents
 \newpage
 
@@ -40,9 +44,10 @@
 
 \input{introduction}
 \input{build}
-\input{run}
-\input{repl}
-\input{demo}
+\input{invoking}
+\input{terminal-ui}
+% \input{repl} % out of date - needs updating
+% \input{demo} % out of date - needs updating
 \clearpage
 \input{ack}
 \end{document}

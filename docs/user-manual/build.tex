@@ -1,8 +1,45 @@
-
 \section{Building the PATE Verifier}
 \label{sec:build-pate-verif}
 
-The pate tool is written in Haskell and requires the GHC compiler (version 8.6-8.10) and the cabal build tool to compile.
+We recommending building the Docker image and use pate via Docker.
+
+\subsection{Building with Docker}
+
+If available, load the Docker image file from a file using:
+\begin{verbatim}
+  docker load -i /path/to/pate.tar
+\end{verbatim}
+
+Alternatively, build the Docker image with the command:
+
+\begin{verbatim}
+  git clone git@github.com:GaloisInc/pate.git
+  cd pate
+  git submodule update --init
+  docker build . -t pate
+\end{verbatim}
+
+Subsequently, pate may be used via Docker, such as:
+
+\begin{verbatim}
+  docker run --rm -it \
+    -v "$(pwd)"/tests:/tests pate \
+    --original /tests/aarch32/const-args.original.exe \
+    --patched /tests/aarch32/const-args.patched.exe
+\end{verbatim}
+
+Please see later sections for detailed usage information.
+
+\subsection{Building from Source}
+
+Alternatively, pate may be compiled from source and run locally.
+The pate tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and the cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.
+
+We have tested with GHC version 9.6.2 and cabal version 3.10.2.0.
+Additionally, the verifier requires an SMT solver to be available in \texttt{PATH}.
+We recommend \texttt{yices}.
+The \texttt{z3} and \texttt{cvc4} solvers may also work but are not regularly tested with pate.
+
 Building from source can be accomplished as follows:
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
@@ -10,21 +47,14 @@ Building from source can be accomplished as follows:
   git submodule update --init
   cp cabal.project.dist cabal.project
   cabal configure pkg:pate
-  pate.sh --help
-\end{verbatim}
-The verifier also requires an SMT solver to be available in ``PATH``.
-The default is ``yices``, but ``z3`` and ``cvc4`` are also supported.
-The verifier can also be built as a Docker image:
-\begin{verbatim}
-  docker build . -t pate
-\end{verbatim}
-The correctness of the build can be confirmed by
-\begin{verbatim}
-docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate \
-     --original /tests/aarch32/const-args.original.exe \
-     --patched /tests/aarch32/const-args.patched.exe
+  ./pate.sh --help
 \end{verbatim}
 
+Once built, invoke pate locally using the \texttt{pate.sh} script:
+
+\begin{verbatim}
+  ./pate.sh --help
+\end{verbatim}
 
 %%% Local Variables:
 %%% mode: latex
