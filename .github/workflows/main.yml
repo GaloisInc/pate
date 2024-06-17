@@ -101,7 +101,9 @@ jobs:
       name: Restore GHCup
       id: cache-ghcup
       with:
-        path: ~/.ghcup
+        path: | 
+          ~/.ghcup
+          ~/.cabal
         key: ${{ env.CACHE_VERSION }}-pate-ghcup-${{ runner.os }}-${{ matrix.ghc }}
 
     - uses: haskell-actions/setup@v2
@@ -114,7 +116,9 @@ jobs:
     - uses: actions/cache/save@v4
       name: Save GHCup
       with:
-        path: ~/.ghcup
+        path: | 
+          ~/.ghcup
+          ~/.cabal
         key: ${{ steps.cache-ghcup.outputs.cache-primary-key }}
 
     - name: System Dependencies
