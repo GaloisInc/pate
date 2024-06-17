@@ -1,7 +1,7 @@
-\section{Installing the PATE Verifier}
+\section{Installing the \pate{} Verifier}
 \label{sec:build-pate-verif}
 
-We recommending using pate via Docker.
+We recommending using \pate{} via Docker.
 
 \subsection{Loading a Docker Image File}
 
@@ -12,7 +12,7 @@ If available, load the Docker image file from a file using:
 
 \subsection{Building the Docker Container}
 
-To build the Docker image from the pate source repo, use the following commands:
+To build the Docker image from the \pate{} source repo, use the following commands:
 
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
@@ -21,7 +21,7 @@ To build the Docker image from the pate source repo, use the following commands:
   docker build . -t pate
 \end{verbatim}
 
-Subsequently, pate may be used via Docker, such as:
+Subsequently, \pate{} may be used via Docker, such as:
 
 \begin{verbatim}
   docker run --rm -it \
@@ -34,13 +34,13 @@ Please see later sections for detailed usage information.
 
 \subsection{(Optional): Building from Source}
 
-Alternatively, pate may be compiled from source and run locally.
-The pate tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and the cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.
+Alternatively, \pate{} may be compiled from source and run locally.
+The \pate{} tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and the cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.
 
 We have tested with GHC version 9.6.2 and cabal version 3.10.2.0.
 Additionally, the verifier requires an SMT solver to be available in \texttt{PATH}.
 We recommend \texttt{yices}.
-The \texttt{z3} and \texttt{cvc4} solvers may also work but are not regularly tested with pate.
+The \texttt{z3} and \texttt{cvc4} solvers may also work but are not regularly tested with \pate{}.
 
 Building from source can be accomplished as follows:
 \begin{verbatim}

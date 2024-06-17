@@ -1,13 +1,13 @@
 
-\section{Invoking the PATE Verifier}
+\section{Invoking the \pate{} Verifier}
 \label{sec:run-pate-verif}
 
-Once pate has been built as described in Section~\ref{sec:build-pate-verif}, use the docker container (or \texttt{pate.sh} script if building locally from source) to invoke pate.
+Once \pate{} has been built as described in Section~\ref{sec:build-pate-verif}, use the docker container (or \texttt{pate.sh} script if building locally from source) to invoke \pate{}.
 
-Invoking pate via either docker or locally presents the user with an interactive terminal user interface for analyzing a pair of binaries.
-Users provide at least the paths to two (the ``original'' and ``patched'') binaries at the command line when invoking pate.
+Invoking \pate{} via either docker or locally presents the user with an interactive terminal user interface for analyzing a pair of binaries.
+Users provide at least the paths to two (the ``original'' and ``patched'') binaries at the command line when invoking \pate{}.
 Additionally, we recommend also specifying the desired entry point, using \texttt{-s <symbol>}.
-Providing the specific function of interest will enable pate to begin reasoning closer to the relevant functionality of interest, greatly reducing the total analysis time required compared to starting from the program entry point.
+Providing the specific function of interest will enable \pate{} to begin reasoning closer to the relevant functionality of interest, greatly reducing the total analysis time required compared to starting from the program entry point.
 Users may also wish to provide ``hint'' inputs that provide metadata mapping symbol names to addresses, easing analysis of stripped binaries.
 
 The verifier accepts the following command line arguments:
