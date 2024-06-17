@@ -1,16 +1,18 @@
-\section{Building the PATE Verifier}
+\section{Installing the PATE Verifier}
 \label{sec:build-pate-verif}
 
-We recommending building the Docker image and use pate via Docker.
+We recommending using pate via Docker.
 
-\subsection{Building with Docker}
+\subsection{Loading a Docker Image File}
 
 If available, load the Docker image file from a file using:
 \begin{verbatim}
   docker load -i /path/to/pate.tar
 \end{verbatim}
 
-Alternatively, build the Docker image with the command:
+\subsection{Building the Docker Container}
+
+To build the Docker image from the pate source repo, use the following commands:
 
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
@@ -30,7 +32,7 @@ Subsequently, pate may be used via Docker, such as:
 
 Please see later sections for detailed usage information.
 
-\subsection{Building from Source}
+\subsection{(Optional): Building from Source}
 
 Alternatively, pate may be compiled from source and run locally.
 The pate tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and the cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.

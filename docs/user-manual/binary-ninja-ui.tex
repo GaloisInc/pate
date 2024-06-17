@@ -1,0 +1,102 @@
+\section{The PATE Binary Ninja Plugin}
+\label{sec:binary-ninja-ui}
+
+The pate Binary Ninja plugin enables user to invoke and interact with pate directly within the Binary Ninja reverse engineering platform.
+
+The pate plugin requires a commercially-licensed Binary Ninja installation.
+
+\subsection{Installation}
+
+First, install the \texttt{pate} Docker container as described in Section~\ref{sec:build-pate-verif}.
+
+Second, copy (or create a symlink from) the \texttt{pate\_binja/} directory from the pate source repo to your local Binary Ninja \texttt{plugins/} directory. Typically these are found in:
+\begin{description}
+\item[macOS] \texttt{\$HOME/Library/Application Support/Binary Ninja/plugins/}
+\item[Linux] \texttt{\$HOME/.binaryninja/plugins/}
+\end{description}
+
+The Binary Ninja plugin requires a relatively recent version of Python (3.10 or newer) and requires the \texttt{grpcio} package.
+If these are not present on the system, we recommend creating a Python \texttt{venv} or similar on your host, with something like:
+
+\begin{verbatim}
+  python -m venv /path/to/new/virtual/environment
+  source /path/to/new/virtual/environment/bin/activate
+  pip install grpcio
+\end{verbatim}
+
+and then modifying Binary Ninja Python settings appropriately in the Binary Ninja Preferences list to point to this new environment.
+Specifically, check the settings for:
+
+\begin{itemize}
+    \item Python Path Override
+    \item Python Interpreter
+    \item Python Virtual Environment Site-Packages
+\end{itemize}
+
+Once these steps have been completed, restart Binary Ninja.
+If the plugin is correctly installed and initialized, then the ``Plugins'' menu will now have a ``Pate...'' menu option.
+
+\subsection{Usage}
+
+Once installed, invoke the pate plugin from the Binary Ninja ``Plugins $\rightarrow$ Pate...'' menu option.
+
+The pate plugin opens a window to select a \emph{run configuration} file in JSON format.
+These files must end in the suffix \texttt{.run-config.json}.
+These JSON files contain a map with the following keys:
+\begin{description}
+    \item[original] file path to the original binary
+    \item[patched] file path to the patched binary
+    \item[args] a list additional arguments to pass to pate
+\end{description}
+
+For example:
+
+\begin{verbatim}
+  {
+    "original": "exe/packet.original.exe",
+    "patched": "exe/packet.patched.exe",
+    "args": [
+      "-s parse_packet"
+    ]
+  }
+\end{verbatim}
+
+After selecting a run configuration file, the pate plugin will open three Binary Ninja tabs: one for each of the original and patched binaries, and a third \emph{pate analysis} tab.
+
+The pate analysis tab is composed of two regions:
+The bottom portion is an interactive text view that corresponds to the terminal user interface described in Section~\ref{sec:terminal-ui}.
+The user interacts with this region through the text input field at the bottom of the window.
+
+The top portion of the pate analysis tab is a graph view showing the current state of the pate analysis.
+When pate analysis is complete (via interaction in the bottom portion), the pate graph shows rectangles for each slice of the program analyzed by pate.
+Default-colored rectangles represent a pair of programs slices that were able to matched up between the original and patched binary.
+Green rectangles represent slices present only in the original program.
+Pink rectangles represent slices present only in the patched program.
+Right click on a rectangle for options to jump directly to the relevant program location in the appropriate tab for the corresponding binary.
+
+A red rectangle represents the ``active'' region, where pate has found an equivalence condition.
+Right click and select ``Show Equivalence Condition'' to open the Equivalence Condition window, which reports:
+
+\begin{itemize}
+    \item the expression describing the conditions under which programs behave equivalently
+    \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is met
+    \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is not met
+\end{itemize}
+
+Right clicking on a rectangle in the pate analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
+At the bottom will be a linearized representation of the instruction trees in the original and patched progra, with colorized diff view.
+Instructions conditionally reachable through control flow edges are prefixed by \texttt{+} or \texttt{-} to differentiate instructions reachable via two different successors.
+
+\subsection{Replays}
+
+Executing a run configuration file with the pate plugin will produce a \emph{replay} in a file named \texttt{lastrun.replay}, which can be preserved by renaming to another filename on disk.
+These files cache the user input and verifier output, enabling the user to review a previous interaction with pate without having to re-execute the verifier analysis.
+If the user loads a replay rather than a run configuration, the process is mostly the same, except the command input field is already populated with the recorded user input, and the user just hits ``enter'' to proceed to the next step.
+Editing the input commands will have no effect, as the responses are recorded in the replay file.
+That is, the user cannot cause a deviation from the pre-recorded responses from the pate verifier to perform any analysis other than the one recorded.
+
+\subsection{MCAD Integration}
+
+MCAD is a performance analysis tool that performs static prediction of instruction timings for sequences of instructions such as those identified by pate.
+The details of the MCAD system is outside of the scope of this user guide, but if the MCAD docker container is available, the pate Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view.
+Use the pate plugin preference option ``MCAD Docker image name'' to specify the name of the MCAD docker container on the host in order to enable MCAD integration in the pate plugin.
