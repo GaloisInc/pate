@@ -1,11 +1,11 @@
 \section{Introduction}\label{sec:introduction}
 
-This is the User Manual for the PATE verifier, updated to be consistent with the software release as of the end of AMP Phase 2 (7/28/23).
+This is the User Manual for the PATE verifier, updated to be consistent with the software release as of the end of AMP Phase 3 (July 2024).
 This manual can be found within the repository snapshot comprising the code release, in the directory \texttt{docs/usermanual}.
 Much of the material in this document concerning how to build and run the verifier, as well as how to apply it to demonstration examples, can also be found within the repository.
 In the sections below, we provide pathnames for the corresponding documentation files to be found in the software release.
 
-Currently, the verifier supports PowerPC and AArch32 binaries (currently requiring statically linked ELF binaries).
+Currently, the verifier supports 32-bit ARM and 64-bit and 32-bit PowerPC binaries.
 
 The PATE verifier is a static relation verifier for binaries that builds assurance that micropatches have not had any adverse effects.
 The verifier is a static relational verifier that attempts to prove that two binaries have the same observable behaviors.
@@ -18,7 +18,7 @@ When the two binaries can exhibit different behaviors, the verifier provides the
 
 If DWARF information is available in either the original or patched binary, the verifier will use that information to improve diagnostics.
 Currently, function names, function argument names, local variable names, and global variable names can be used to make diagnostics more readable, for example, by replacing synthetic names with their source-level counterparts.
-If working with binaries that do not come with DWARF debug information natively, see the \lstinline{dwarf-writer}\footnote{https://github.com/immunant/dwarf-writer} tool for a possible approach to adding DWARF debug information.
+If working with binaries that do not come with DWARF debug information natively, see the \lstinline{dwarf-writer}\footnote{\url{https://github.com/immunant/dwarf-writer}} tool for a possible approach to adding DWARF debug information.
 
 Note that recompiling a binary with a source patch applied can work for the purposes of the analysis, but can introduce complexities in cases where the compiler substantially rearranges code in response to the patch (which is common).
 When the compiler re-arranges code, the verifier has a more difficult time aligning the code in the original and patched binaries, which can lead to confusing or unhelpful diagnostics.
