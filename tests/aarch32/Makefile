@@ -15,14 +15,24 @@ scripted/challenge10.original.exe: ${CHALLENGE_10_BIN}
 endif
 
 
-TARGET_7_BIN=$(CHALLENGE_DIR)/Hackathon_Spring_24/GridIDPS/build/amp_challenge_arm.ino_unstripped.elf
-ifeq (,$(wildcard ${TARGET_7_BIN}))
+TARGET_7_DIR=$(CHALLENGE_DIR)/tests/target7/
+ifeq (,$(wildcard ${TARGET_7_DIR}))
 else
-EXTRA_TARGETS+=scripted/target7.original.exe
-EXTRA_TARGETS+=scripted/target7.patched.exe
-scripted/target7.original.exe: ${TARGET_7_BIN}
-	cp $< $@
+
+EXTRA_TARGETS+=scripted/target7
+
+scripted/target7.%: .programtargets
+	(((cd $(CHALLENGE_DIR) && git show $(shell cat .programtargets):tests/target7/$(notdir $@)) > $@) || (rm -f $@ && exit 1))
+
 endif
+
+.PHONY: scripted/target7
+
+scripted/target7: scripted/target7.original.exe scripted/target7.patched.exe scripted/target7.args scripted/target7.csv scripted/target7.toml scripted/target7.pate
+
+scripted/target7.script_run: scripted/target7
+	cd scripted; \
+	../../../pate.sh $(shell cat scripted/target7.args)
 
 scripted/%.patched.exe: scripted/%.original.exe build/%.bsdiff
 	bspatch $< $@ $(word 2,$^)

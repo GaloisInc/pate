@@ -619,7 +619,7 @@ handleProcessSplit sne pg = withPG pg $ do
   priority <- lift $ thisPriority
   case getCurrentDomain pg divergeNode of
     Nothing -> do
-      liftPG $ modify $ queueNode (priority PriorityDomainRefresh) divergeNode
+      liftPG $ modify $ queueAncestors (priority PriorityDomainRefresh) divergeNode
       return Nothing
     Just{} -> do
       let nd = GraphNode (singleToNodeEntry sne)
@@ -707,9 +707,11 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
     blkPairP = PPa.PatchPairSingle PBi.PatchedRepr blkP
     blkPair = PPa.PatchPair blkO blkP
 
-  syncNode <- case combineSingleEntries sneO sneP of
+  syncNodeEntry <- case combineSingleEntries sneO sneP of
     Just ne -> return ne
     Nothing -> throwHere $ PEE.IncompatibleSingletonNodes blkO blkP
+  
+  let syncNode = GraphNode syncNodeEntry
   
   specO <- evalPG pg $ getCurrentDomainM ndO
   specP <- evalPG pg $ getCurrentDomainM ndP
@@ -719,14 +721,23 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
       (_, domO) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specO
       (_, domP) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specP
       dom <- PAD.zipSingletonDomains sym domO domP
-      bundle <- noopBundle scope (nodeBlocks syncNode)
-      withPredomain scope bundle dom $ 
-        withConditionsAssumed scope bundle domO ndO pg $ 
-        withConditionsAssumed scope bundle domP ndP pg $ do
+      bundle <- noopBundle scope (nodeBlocks syncNodeEntry)
+      withPredomain scope bundle dom $ do
           emitTraceLabel @"domain" PAD.Predomain (Some dom)
-          pg1 <- withTracing @"node" ndO $ widenAlongEdge scope bundle ndO dom pg (GraphNode syncNode)
-          withTracing @"node" ndP $ widenAlongEdge scope bundle ndP dom pg1 (GraphNode syncNode)
-  return (syncNode, pg1)
+          let pre_refines = getDomainRefinements syncNode pg
+
+          pg1 <- 
+            withTracing @"node" ndO $
+            -- ensure we make any assumptions that have been added to only
+            -- one side of the analysis
+            withConditionsAssumed scope bundle dom ndO pg $
+              widenAlongEdge scope bundle ndO dom pg syncNode
+          let pg2 = addDomainRefinements syncNode pre_refines pg1
+          withTracing @"node" ndP $ 
+            withConditionsAssumed scope bundle dom ndP pg $
+            widenAlongEdge scope bundle ndP dom pg2 syncNode
+  return (syncNodeEntry, pg1)
+
 
 -- | Choose some work item (optionally interactively)
 withWorkItem ::
@@ -743,12 +754,13 @@ withWorkItem gr0 f = do
       let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ atPriority priority Nothing $ do
         (mnext, gr2) <- case wi of
-          ProcessNode nd' -> do
-            spec <- evalPG gr1 $ getCurrentDomainM nd
-            PS.viewSpec spec $ \scope d -> do
-              runPendingActions refineActions nd' (TupleF2 scope d) gr1 >>= \case
-                Just gr2 -> return $ (Nothing, gr2)
-                Nothing -> return $ (Just nd', gr1)
+          ProcessNode (GraphNode ne) | Just (Some sne) <- asSingleNodeEntry ne -> do
+            (evalPG gr1 $ isSyncNode sne) >>= \case
+              True -> do
+                gr2 <- execPG gr1 $ queueExitMerges (\pk -> mkPriority pk priority) (SyncAtStart sne)
+                return $ (Nothing, gr2)
+              False -> processNode (GraphNode ne) gr1
+          ProcessNode nd' -> processNode nd' gr1
           ProcessSplit sne -> do
             emitTrace @"debug" $ "ProcessSplit: " ++ show sne
             handleProcessSplit sne gr1
@@ -764,10 +776,25 @@ withWorkItem gr0 f = do
             Just spec -> subTraceLabel @"node" (printPriorityKind priority) next $ 
               atPriority priority Nothing $ (Just <$> (f (priority, gr2, wi, spec)))
             -- we are missing the expected domain, so we need to just try again
-            Nothing -> withWorkItem (queueWorkItem priority wi gr2) f 
+            Nothing -> do
+
+              withWorkItem (queueWorkItem priority wi gr2) f 
         Left (Nothing, gr2) ->  withWorkItem gr2 f
         Right a -> return $ Just a
-
+  where
+    processNode :: 
+      GraphNode arch -> 
+      PairGraph sym arch ->
+      EquivM sym arch (Maybe (GraphNode arch), PairGraph sym arch)  
+    processNode nd gr1 = do
+      spec <- evalPG gr1 $ getCurrentDomainM nd
+      PS.viewSpec spec $ \scope d -> do
+        emitTrace @"debug" $ "runPendingActions"
+        runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
+          Just gr2 -> do
+            emitTrace @"debug" $ "Actions Executed, returning..."
+            return $ (Nothing, gr2)
+          Nothing -> return $ (Just nd, gr1)
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
@@ -811,18 +838,33 @@ pairGraphComputeFixpoint entries gr_init = do
         Nothing -> showFinalResult gr2 >> return gr2
   go_outer gr_init
 
+clearTrivialCondition :: 
+  GraphNode arch -> 
+  ConditionKind -> 
+  PairGraph sym arch ->
+  EquivM sym arch (PairGraph sym arch)
+clearTrivialCondition nd condK pg = case getCondition pg nd ConditionEquiv of
+  Just cond_spec -> PS.viewSpec cond_spec $ \scope cond -> withSym $ \sym -> do
+    ((), pg1) <- withNoTracing $ withGraphNode scope nd pg $ \_bundle _d -> do
+      heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
+      cond_pred <- PEC.toPred sym cond
+      isPredTrue' heuristicTimeout cond_pred >>= \case
+        True ->  return $ ((), dropCondition nd condK pg)
+        False -> return ((), pg)
+    return pg1
+  Nothing -> return pg
+
 showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
-showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
-  
-  
+showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
   subTree @"node" "Observable Counter-examples" $ do
-    forM_ (Map.toList (pairGraphObservableReports pg)) $ \(nd,report) -> 
+    forM_ (Map.toList (pairGraphObservableReports pg0)) $ \(nd,report) -> 
       subTrace (GraphNode nd) $ 
         emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
   eq_conds <- fmap catMaybes $ subTree @"node" "Assumed Equivalence Conditions" $ do
     
-    forM (getAllNodes pg) $ \nd -> do
-       case getCondition pg nd ConditionEquiv of
+    forM (getAllNodes pg0) $ \nd -> do
+      pg <- lift $ clearTrivialCondition nd ConditionEquiv pg0
+      case getCondition pg nd ConditionEquiv of
         Just cond_spec -> subTrace nd $ do
           s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
             (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
@@ -838,10 +880,10 @@ showFinalResult pg = withTracing @"final_result" () $ withSym $ \sym -> do
             return $ (Const (fmap (nd,) tr))
           return $ PS.viewSpec s (\_ -> getConst)
         Nothing -> return Nothing
-  let result = pairGraphComputeVerdict pg
+  let result = pairGraphComputeVerdict pg0
   emitTrace @"equivalence_result" result
   let eq_conds_map = Map.fromList eq_conds
-  let toplevel_result = FinalResult result (pairGraphObservableReports pg) eq_conds_map
+  let toplevel_result = FinalResult result (pairGraphObservableReports pg0) eq_conds_map
   emitTrace @"toplevel_result" toplevel_result
 
 data FinalResult sym arch = FinalResult
@@ -1635,18 +1677,26 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
        case mres of
           Nothing -> return (Just CE.ObservableCheckEq, pg)
           Just cex -> do
-            let msg = "Handle observable difference:"
-            mcondK <- choose @"()" msg $ \choice -> do
-              -- first (default) action is to keep the observable report but don't change
-              -- anything about the analysis
-              choice "Emit warning and continue" () $ return Nothing
-              -- NB: the only difference between the two assertion types is the priority that the propagation step occurs at
-              -- the verifier will finish any widening steps it has before processing any deferred propagation steps
-              choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, PriorityDeferredPropagation)
-              choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, PriorityPropagation)
-              choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, PriorityDeferredPropagation)
-              choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, PriorityDeferredPropagation)
-              
+            heuristicTimeout <- asks (PCfg.cfgHeuristicTimeout . envConfig)
+            issat <- isPredSat' heuristicTimeout eqSeq >>= \case
+              Just False -> return False
+              _ -> return True
+
+            mcondK <- case issat of
+              True -> do
+                let msg = "Handle observable difference:"
+                choose @"()" msg $ \choice -> do
+                  -- first (default) action is to keep the observable report but don't change
+                  -- anything about the analysis
+                  choice "Emit warning and continue" () $ return Nothing
+                  -- NB: the only difference between the two assertion types is the priority that the propagation step occurs at
+                  -- the verifier will finish any widening steps it has before processing any deferred propagation steps
+                  choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, PriorityDeferredPropagation)
+                  choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, PriorityPropagation)
+                  choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, PriorityDeferredPropagation)
+                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, PriorityDeferredPropagation)
+              False -> return Nothing
+
             case mcondK of
               Just (condK, p) ->  do
                 let do_propagate = shouldPropagate (getPropagationKind pg nd condK)
@@ -1980,9 +2030,11 @@ resolveClassifierErrors simIn_ simOut_ = withSym $ \sym -> do
           is_this_instr <- PAS.toPred sym eqInstr
           with_targets <- withAssumption is_this_instr $ do
             maybeZero >>= \case
-              True -> chooseBool ("Classifier Failure: Mark " ++ show instr_addr ++ " as return?") >>= \case
+              True -> asks (PCfg.cfgAlwaysClassifyReturn . envConfig) >>= \case
                 True -> return $ Map.insert instr_addr ReturnTarget tried
-                False -> return tried
+                False -> chooseBool ("Classifier Failure: Mark " ++ show instr_addr ++ " as return?") >>= \case
+                  True -> return $ Map.insert instr_addr ReturnTarget tried
+                  False -> return tried
               False -> do
                 targets <- findTargets Set.empty
                 retV_conc <- concretizeWithSolver retV

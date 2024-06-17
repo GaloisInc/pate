@@ -96,6 +96,7 @@ mkRunConfig archLoader opts rcfg mtt = let
         , PC.cfgTraceTree = fromMaybe noTraceTree mtt
         , PC.cfgStackScopeAssume = not $ noAssumeStackScope opts
         , PC.cfgIgnoreWarnings = ignoreWarnings opts
+        , PC.cfgAlwaysClassifyReturn = alwaysClassifyReturn opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = archLoader
@@ -147,6 +148,7 @@ data CLIOptions = CLIOptions
   , scriptPath :: Maybe FilePath
   , noAssumeStackScope :: Bool
   , ignoreWarnings :: [String]
+  , alwaysClassifyReturn :: Bool
   } deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -464,3 +466,7 @@ cliOptions = OA.info (OA.helper <*> parser)
         ( OA.long "ignore-warnings"
         <> OA.help "Don't raise any of the given warning types"
         ))
+    <*> OA.switch
+         ( OA.long "always-classify-return"
+         <> OA.help "Always resolve classifier failures by assuming function returns, if possible."
+         )

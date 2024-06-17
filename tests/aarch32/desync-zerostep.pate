@@ -28,16 +28,6 @@ Function Entry "f"
             > 0x1016c (patched)
             > Finish Choosing
 
-// verifier can't automatically figure out that
-// the pointer written by 'puts' is the same/unmodified
-0x1015c (original) vs. 0x1016c (patched)
-    ...
-    ...
-    ...
-    ...
-    > Assert difference is infeasible (prove immediately)
-
-
 Verification Finished
 Continue verification?
     > Finish and view final result

@@ -405,7 +405,7 @@ addRefinementChoice ::
   GraphNode arch ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-addRefinementChoice nd gr0 = withTracing @"message" "Modify Proof Node" $ do
+addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ show nd) $ do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- only assertions are propagated by default
   gr1 <- foldM (\gr_ condK -> addEqDomRefinementChoice condK nd gr_) gr0 
@@ -546,7 +546,7 @@ applyDomainRefinements scope (from,to) bundle preD postD gr0 = fnTrace "applyDom
   let next = applyDomainRefinements scope (from,to) bundle preD postD
   case getNextDomainRefinement to gr0 of
     Nothing -> do
-      emitTrace @"debug" "No refinements found"
+      emitTrace @"debug" ("No refinements found for: " ++ show to)
       return gr0
     Just (PruneBranch condK,gr1) -> withTracing @"debug" ("Applying PruneBranch to " ++ show to) $ do
       gr2 <- pruneCurrentBranch scope (from,to) condK gr1

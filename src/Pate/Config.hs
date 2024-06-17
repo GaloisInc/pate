@@ -284,6 +284,9 @@ data VerificationConfig validRepr =
     -- returning from a function (i.e. differences in these slots are implicitly ignored)
     , cfgScriptPath :: Maybe FilePath
     , cfgIgnoreWarnings :: [String]
+    , cfgAlwaysClassifyReturn :: Bool
+    -- ^ true if block classifier failures that can jump anywhere should be classified
+    -- as returns without asking. 
     }
 
 
@@ -309,4 +312,5 @@ defaultVerificationCfg =
                      , cfgStackScopeAssume = True
                      , cfgScriptPath = Nothing
                      , cfgIgnoreWarnings = []
+                     , cfgAlwaysClassifyReturn = False
                      }

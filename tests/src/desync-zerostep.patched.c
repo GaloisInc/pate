@@ -1,5 +1,5 @@
 #include "util.h"
-static const char HELLO[] = "hello";
+static const char HELLO[] __attribute__((section(".output"))) = "hello";
 
 void f();
 void _start() {
@@ -10,10 +10,7 @@ void _start() {
 int clock() { return 0; }
 int puts(const char *str) { return 0; }
 
-
 int NON_OBSERVE = -11;
-int OBSERVE __attribute__((section(".output"))) = -12;
-//int OBSERVE = -12;
 
 #pragma noinline
 int g() {
@@ -26,7 +23,7 @@ void f(char* msg) {
   NON_OBSERVE = g();
   // sync
   NON_OBSERVE = 1;
-  puts(msg);
+  puts(HELLO);
 }
 
 
