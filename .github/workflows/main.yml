@@ -36,17 +36,11 @@ jobs:
 
       # Pulls the latest image to try to re-use some layers
       - name: Pull Latest Docker image
-        run: |
-          docker pull artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} || \
-            docker pull artifactory.galois.com:5025/pate/pate:refs-heads-master || \
-            echo "No latest image found"
+        run: echo "No latest image found"
 
       - name: Build Docker Image
         run: |
-          docker build . \
-            --cache-from artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} \
-            --cache-from artifactory.galois.com:5025/pate/pate:refs-heads-master \
-            -t pate
+          docker build . -t pate
 
       - name: Test Docker Image
         run: |
@@ -101,7 +95,9 @@ jobs:
       name: Restore GHCup
       id: cache-ghcup
       with:
-        path: ~/.ghcup
+        path: | 
+          ~/.ghcup
+          ~/.cabal
         key: ${{ env.CACHE_VERSION }}-pate-ghcup-${{ runner.os }}-${{ matrix.ghc }}
 
     - uses: haskell-actions/setup@v2
@@ -114,7 +110,9 @@ jobs:
     - uses: actions/cache/save@v4
       name: Save GHCup
       with:
-        path: ~/.ghcup
+        path: | 
+          ~/.ghcup
+          ~/.cabal
         key: ${{ steps.cache-ghcup.outputs.cache-primary-key }}
 
     - name: System Dependencies
