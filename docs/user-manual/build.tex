@@ -1,18 +1,16 @@
 \section{Installing the \pate{} Verifier}
 \label{sec:build-pate-verif}
 
-We recommending using \pate{} via Docker.
+\subsection{Recommended: Docker Container Image}
 
-\subsection{Loading a Docker Image File}
+We recommending using \pate{} via Docker.
 
 If available, load the Docker image file from a file using:
 \begin{verbatim}
   docker load -i /path/to/pate.tar
 \end{verbatim}
 
-\subsection{Building the Docker Container}
-
-To build the Docker image from the \pate{} source repo, use the following commands:
+Otherwise, build the Docker image from the \pate{} source repo using the following commands:
 
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
@@ -21,7 +19,7 @@ To build the Docker image from the \pate{} source repo, use the following comman
   docker build . -t pate
 \end{verbatim}
 
-Subsequently, \pate{} may be used via Docker, such as:
+\pate{} may subsequently be used via Docker, such as:
 
 \begin{verbatim}
   docker run --rm -it \
@@ -32,13 +30,13 @@ Subsequently, \pate{} may be used via Docker, such as:
 
 Please see later sections for detailed usage information.
 
-\subsection{(Optional): Building from Source}
+\subsection{Alternative: Building from Source}
 
-Alternatively, \pate{} may be compiled from source and run locally.
-The \pate{} tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and the cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.
+Alternatively, \pate{} may be compiled from source and run on a host system.
+The \pate{} tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.
 
-We have tested with GHC version 9.6.2 and cabal version 3.10.2.0.
-Additionally, the verifier requires an SMT solver to be available in \texttt{PATH}.
+The current version of \pate{} is developed using GHC version 9.6.2 and cabal version 3.10.2.0.
+Additionally, the verifier requires a SMT solver to be available in \texttt{PATH}.
 We recommend \texttt{yices}.
 The \texttt{z3} and \texttt{cvc4} solvers may also work but are not regularly tested with \pate{}.
 
@@ -52,11 +50,9 @@ Building from source can be accomplished as follows:
   ./pate.sh --help
 \end{verbatim}
 
-Once built, invoke pate locally using the \texttt{pate.sh} script:
+Note that \texttt{./pate.sh} should be used to build \pate{} (not \texttt{cabal build} or similar).
 
-\begin{verbatim}
-  ./pate.sh --help
-\end{verbatim}
+Once built, invoke \pate{} locally using the \texttt{pate.sh} script.
 
 %%% Local Variables:
 %%% mode: latex

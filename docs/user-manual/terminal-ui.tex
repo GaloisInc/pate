@@ -3,7 +3,7 @@
 
 Once \pate{} has been invoked at the command line (see Section~\ref{sec:run-pate-verif}), the user is presented with an interactive terminal user interface.
 
-Internally, \pate{} builds a tree representing the state of the analysis.
+Internally, \pate{} maintains a tree representing the state of the analysis.
 The interactive interface allows users to inspect the tree by selecting from a list of options based on the users current ``location'' in the tree.
 The user makes a selection by entering a number representing the node of interest and hitting enter, or by entering a command.
 
@@ -49,7 +49,7 @@ Handle observable difference:
 \end{verbatim}
 
 \pate{} represents the analysis as a tree that can be navigated by the user.
-The top level of the interactive process (reachable via the\texttt{top} command) is a list of all analysis steps that were taken, starting from the selected entry point.
+The top level of the interactive process (reachable via the \texttt{top} command) is a list of all analysis steps that were taken, starting from the selected entry point.
 Each pair of address and calling contexts defines a unique toplevel proof ``node.''
 A given address and context may appear multiple times in the toplevel list, corresponding to each individual time that the address/context pair was analyzed.
 The latest (highest-numbered) entry corresponds to the most recent analysis of an address/context.
@@ -58,7 +58,7 @@ Each entry point is associated with an equivalence domain: a set of locations (r
 Locations outside of this set have been proven to be equal (ignoring skipped functions).
 The analysis takes the equivalence domain of an entry point and computes an equivalence domain for each possible exit point (according to the semantics of the block).
 
-Here \pate{} is asking how a detected observable difference should be handled.
+At this point in the example, \pate{} is asking how a detected observable difference should be handled.
 The user selects \texttt{4} to capture the difference in the equivalence condition, and \pate{} continues its analysis:
 
 \begin{verbatim}
