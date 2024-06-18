@@ -41,12 +41,12 @@ If the plugin is correctly installed and initialized, then the ``Plugins'' menu 
 Once installed, invoke the \pate{} plugin from the Binary Ninja ``Plugins $\rightarrow$ Pate...'' menu option.
 
 The \pate{} plugin opens a window to select a \emph{run configuration} file in JSON format.
-These files must end in the suffix \texttt{.run-config.json}.
-These JSON files contain a map with the following keys:
+This file must end in the suffix \texttt{.run-config.json}.
+The run configuration must contain a key-value map with the following keys:
 \begin{description}
-    \item[original] file path to the original binary
-    \item[patched] file path to the patched binary
-    \item[args] a list additional arguments to pass to \pate{}
+    \item[\texttt{original}] file path to the original binary
+    \item[\texttt{patched}] file path to the patched binary
+    \item[\texttt{args}] a list additional arguments to pass to \pate{}
 \end{description}
 
 For example:
@@ -84,19 +84,19 @@ Right click and select ``Show Equivalence Condition'' to open the Equivalence Co
 \end{itemize}
 
 Right clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
-At the bottom will be a linearized representation of the instruction trees in the original and patched progra, with colorized diff view.
-Instructions conditionally reachable through control flow edges are prefixed by \texttt{+} or \texttt{-} to differentiate instructions reachable via two different successors.
+At the bottom will be a linearized representation of the instruction trees in the original and patched program, with colorized diff view.
+Instructions conditionally reachable through control flow edges are prefixed by \texttt{+} or \texttt{-} to differentiate instructions in distinct branches.
 
 \subsection{Replays}
 
 Executing a run configuration file with the \pate{} plugin will produce a \emph{replay} in a file named \texttt{lastrun.replay}, which can be preserved by renaming to another filename on disk.
-These files cache the user input and verifier output, enabling the user to review a previous interaction with \pate{} without having to re-execute the verifier analysis.
+These files cache the user input and verifier output, enabling the user to load a previous interaction with \pate{} without having to re-execute the verifier analysis.
 If the user loads a replay rather than a run configuration, the process is mostly the same, except the command input field is already populated with the recorded user input, and the user just hits ``enter'' to proceed to the next step.
 Editing the input commands will have no effect, as the responses are recorded in the replay file.
-That is, the user cannot cause a deviation from the pre-recorded responses from the \pate{} verifier to perform any analysis other than the one recorded.
+That is, the user cannot deviate from the pre-recorded responses from the \pate{} verifier to perform any analysis other than the one recorded.
 
 \subsection{MCAD Integration}
 
-MCAD is a performance analysis tool that performs static prediction of instruction timings for sequences of instructions such as those identified by \pate{}.
-The details of the MCAD system is outside of the scope of this user guide, but if the MCAD docker container is available, the \pate{} Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view.
-Use the \pate{} plugin preference option ``MCAD Docker image name'' to specify the name of the MCAD docker container on the host in order to enable MCAD integration in the \pate{} plugin.
+MCAD\footnote{\url{https://github.com/securesystemslab/LLVM-MCA-Daemon}} is a performance analysis tool that performs static prediction of instruction timings for sequences of instructions such as those identified by \pate{}.
+The details of the MCAD system is outside of the scope of this user guide, but if the MCAD Docker container is available, the \pate{} Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view.
+Use the \pate{} plugin preference option ``MCAD Docker image name'' to specify the name of the MCAD Docker container on the host in order to enable MCAD integration in the \pate{} plugin.
