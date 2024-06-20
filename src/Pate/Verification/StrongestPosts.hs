@@ -972,12 +972,10 @@ orphanReturnBundle scope pPair = withSym $ \sym -> do
 
   wsolver <- getWrappedSolver
   simOut_ <- IO.withRunInIO $ \runInIO ->
-    PA.withStubOverride sym wsolver ov $ \f -> runInIO $ PPa.forBins $ \bin -> do
-      input <- PPa.get bin simIn_
-      let inSt = PS.simInState input
-      outSt <- liftIO $ f inSt
+    PA.withStubOverride sym wsolver ov $ \f -> runInIO $ do
+      outSt <- liftIO $ f (TF.fmapF PS.simInState simIn_)
       blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym MCS.MacawBlockEndReturn
-      return $ PS.SimOutput outSt blkend
+      return $ TF.fmapF (\st' -> PS.SimOutput st' blkend) outSt
 
   return $ PS.SimBundle simIn_ simOut_
 
@@ -2879,10 +2877,12 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
       wsolver <- getWrappedSolver
 
       outputs <- IO.withRunInIO $ \runInIO ->
-        PA.withStubOverride sym wsolver ov $ \f -> runInIO $ PPa.forBins $ \bin -> do
-          output <- PPa.get bin $ PS.simOut bundle
-          nextSt <- liftIO $ f (PS.simOutState output)
-          return $ output { PS.simOutState = nextSt }
+        PA.withStubOverride sym wsolver ov $ \f -> runInIO $ do
+          nextStPair <- liftIO $ f (TF.fmapF PS.simOutState (PS.simOut bundle))
+          PPa.forBins $ \bin -> do
+            nextSt <- PPa.get bin nextStPair
+            output <- PPa.get bin (PS.simOut bundle)
+            return $ output { PS.simOutState = nextSt }
       let bundle' = bundle { PS.simOut = outputs }
       gr1 <- checkObservables scope currBlock bundle' d gr0
       case mpRetPair of
