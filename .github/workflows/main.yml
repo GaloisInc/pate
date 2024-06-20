@@ -133,7 +133,7 @@ jobs:
         GITLAB_USER: ${{ env.GITLAB_USER }}
       run: |
         export CHALLENGE_DIR=${HOME}/programtargets
-        git clone --depth=1 https://${GITLAB_USER}:${GITLAB_TOKEN}@gitlab-ext.galois.com/pate/programtargets.git ${CHALLENGE_DIR}
+        git clone https://${GITLAB_USER}:${GITLAB_TOKEN}@gitlab-ext.galois.com/pate/programtargets.git ${CHALLENGE_DIR}
         cd tests
         make extras
 
