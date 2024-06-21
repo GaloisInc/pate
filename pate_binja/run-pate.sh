@@ -5,7 +5,7 @@ if [ "$PATE_BINJA_MODE" = "BUILD" ]
 then
     pate="$PATE/pate.sh"
 else
-    pate="docker run --rm -i -v .:/work --workdir=/work pate"
+    pate="docker run --platform linux/amd64 --rm -i -v .:/work --workdir=/work pate"
 fi
 
 exec $pate "$@"
