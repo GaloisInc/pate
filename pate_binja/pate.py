@@ -376,9 +376,7 @@ class PateWrapper:
             # Add block exit
             exit_id = get_exit_id(trace_node, context)
             # TODO: Better way to detect this?
-            if exit_id == 'None' or exit_id.startswith('return_target'):
-                pass
-            else:
+            if not(exit_id.startswith('None') or exit_id.startswith('return_target')):
                 exit_node = cfar_graph.add_node(exit_id, 'junk', {})
                 cfar_node.addExit(exit_node)
                 if self.debug_cfar:
@@ -1616,7 +1614,7 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
 def get_demo_files():
     files = []
     demoDir = pathlib.Path(os.getenv('PATE_BINJA_DEMOS'))
-    included_extensions = ['run-config', 'replay']
+    included_extensions = ['run-config.json', 'replay']
     allFiles = demoDir.rglob('*')
     files = [str(fn) for fn in allFiles
                   if any(fn.name.endswith(ext) for ext in included_extensions)]
