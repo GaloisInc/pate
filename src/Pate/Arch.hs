@@ -15,8 +15,11 @@
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Pate.Arch (
   SomeValidArch(..),
@@ -29,7 +32,8 @@ module Pate.Arch (
   RegisterDisplay(..),
   fromRegisterDisplay,
   StubOverride(..),
-  StateTransformer(..),
+  pattern StateTransformer,
+  StateTransformer2(..),
   ArchStubOverrides(..),
   mkMallocOverride,
   mkClockOverride,
@@ -102,6 +106,9 @@ import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Aeson as JSON
 import           Data.Aeson ( (.=) )
 import Data.Parameterized.Classes (ShowF(..))
+import qualified Pate.PatchPair as PPa
+import Data.Parameterized.WithRepr (withRepr)
+import Data.Parameterized.Classes
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -255,15 +262,33 @@ data StubOverride arch =
       LCB.IsSymInterface sym =>
       sym ->
       PVC.WrappedSolver sym IO ->
-      IO (StateTransformer sym arch))
+      IO (StateTransformer2 sym arch))
 
-data StateTransformer sym arch =
-  StateTransformer (forall v bin. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin))
+-- | In general the stub override may use both the original and patched states as its input, producing a pair
+--   of post-states representing the stub semantics. However the 'StateTransformer' pattern captures the
+--   typical case where a stub operates on each state independently.
+data StateTransformer2 sym arch =
+  StateTransformer2 (forall v. PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v)))
+
+asSingleTransformer :: 
+ (forall v. PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v))) ->
+ (forall bin v. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin))
+asSingleTransformer f (st :: PS.SimState sym arch v bin) = f (PPa.PatchPairSingle knownRepr st) >>= \stPair' ->
+  case PPa.get (knownRepr :: PB.WhichBinaryRepr bin) stPair' of
+    Just st' -> return st'
+    Nothing -> fail "asSingleTransformer: unexpectedly dropped from patch pair" 
+
+pattern StateTransformer :: (forall bin v. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) -> StateTransformer2 sym arch
+pattern StateTransformer f <- StateTransformer2 (asSingleTransformer -> f) where
+  StateTransformer f = StateTransformer2 $ \stPair -> case stPair of
+    PPa.PatchPair stO stP -> PPa.PatchPair <$> (f stO) <*> (f stP)
+    PPa.PatchPairSingle bin st -> withRepr bin $ PPa.PatchPairSingle bin <$> f st
+
 
 mkStubOverride :: forall arch.
   (forall sym bin v.W4.IsSymExprBuilder sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
   StubOverride arch
-mkStubOverride f = StubOverride $ \sym _ -> return $ StateTransformer (\st -> f sym st)
+mkStubOverride f = StubOverride $ \sym _ -> return $ StateTransformer $ \st -> f sym st
 
 idStubOverride :: StubOverride arch
 idStubOverride = mkStubOverride $ \_ -> return
@@ -273,12 +298,11 @@ withStubOverride ::
   sym ->
   PVC.WrappedSolver sym IO ->
   StubOverride arch ->
-  ((forall bin. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) -> IO a) ->
+  ((PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v))) -> IO a) ->
   IO a
 withStubOverride sym wsolver (StubOverride ov) f = do
-  StateTransformer ov' <- ov sym wsolver
+  StateTransformer2 ov' <- ov sym wsolver
   f ov'
-
 
 data ArchStubOverrides arch =
   ArchStubOverrides (StubOverride arch) (PB.FunctionSymbol -> Maybe (StubOverride arch))

@@ -1,5 +1,9 @@
 .PHONY: all extras
 
+define fetch
+(((cd $(CHALLENGE_DIR) && git show $(shell cat ../.programtargets):tests/$1/$(notdir $@)) > $@) || (rm -f $@ && exit 1))
+endef
+
 extras: ${EXTRA_TARGETS}
 
 all: $(notdir $(patsubst %original.c,%test,$(wildcard ../src/*.original.c))) $(addprefix ./build/,$(notdir $(patsubst %c,%i,$(wildcard ../src/*.c)))) extras
