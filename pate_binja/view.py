@@ -731,12 +731,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
             if cfar_node.id.find(' vs ') >= 0:
                 # Per discussion with Dan, it does not make sense to highlight these.
-                # flow_node.highlight = HighlightStandardColor.BlueHighlightColor
                 pass
             elif cfar_node.id.find('(original') >= 0:
                 flow_node.highlight = HighlightStandardColor.GreenHighlightColor
             elif cfar_node.id.find('(patched)') >= 0:
-                flow_node.highlight = HighlightStandardColor.MagentaHighlightColor
+                flow_node.highlight = HighlightStandardColor.BlueHighlightColor
 
             self.flowGraph.append(flow_node)
             self.cfarToFlow[cfar_node.id] = flow_node
