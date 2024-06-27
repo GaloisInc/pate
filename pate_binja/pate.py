@@ -1313,6 +1313,7 @@ neg_op_map = {
     'bvsle': 'bvsgt',
     'bvsgt': 'bvsle',
     'bvsge': 'bvslt',
+    'intle': 'intgt',
     '=': '!=',
     '!=': '='
 }
@@ -1326,6 +1327,10 @@ infix_op_map = {
     'bvsle': '<=',
     'bvsgt': '>',
     'bvsge': '>=',
+    'intlt': '<',
+    'intle': '<=',
+    'intgt': '>',
+    'intge': '>=',
     'andp': '&',
     'orp': '|',
     'LTs' : '<',
@@ -1368,6 +1373,10 @@ def simplify_sexp(sexp, env=None):
     # Simplify read{LE|GE}N(memory, ADDR) -> read{LE|GE}N(ADDR)
     if re.fullmatch(r'read(?:LE|GE)\d+', op) and len(arg) == 2 and arg[0] == 'memory':
         return [op, arg[1]]
+
+    # Simplify sbvToInteger(x) => x
+    if op == 'sbvToInteger' and len(arg) == 1:
+        return arg[0]
 
     # Simplify multiply by 1
     if op == 'bvmul' and len(arg) == 2:
