@@ -31,7 +31,7 @@ RUN find . -name .gitignore -exec rm {} \;
 
 ## Build project in image
 FROM --platform=linux/amd64 ubuntu:20.04
-ENV GHC_VERSION=9.6.2
+ENV GHC_VERSION=9.6.5
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 RUN apt update && \
