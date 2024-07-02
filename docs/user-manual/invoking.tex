@@ -8,7 +8,20 @@ Invoking \pate{} presents the user with an interactive terminal user interface f
 Users provide at least the paths to two (the ``original'' and ``patched'') binaries at the command line when invoking \pate{}.
 Additionally, we recommend also specifying the desired entry point, using \texttt{-s <symbol>}.
 Providing the specific function of interest will enable \pate{} to begin reasoning closer to the relevant functionality of interest, greatly reducing the total analysis time required compared to starting from the program entry point.
+An example invocation using Docker looks like:
+
+\begin{verbatim}
+  docker run --rm -it \
+    --platform linux/amd64 \
+    -v "$(pwd)"/z:/z \
+    pate \
+    --original /z/my.original.exe \
+    --patched /z/my.patched.exe \
+    -s start_function_name
+\end{verbatim}
+
 Users may also wish to provide ``hint'' inputs that provide metadata that maps symbol names to addresses, easing analysis of stripped binaries.
+Please see the listing below for details.
 
 The verifier accepts the following command line arguments:
 \begin{verbatim}

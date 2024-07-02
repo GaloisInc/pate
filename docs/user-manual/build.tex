@@ -10,7 +10,10 @@ If available, load the Docker image file from a file using:
   docker load -i /path/to/pate.tar
 \end{verbatim}
 
-Otherwise, build the Docker image from the \pate{} source repo using the following commands:
+Otherwise, build the Docker image from the \pate{} source repo.
+Building \pate{} is a memory-intensive process.
+We build the Docker image in an environment with 16GB of RAM available to Docker.
+Build the image using the following commands:
 
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
@@ -23,7 +26,9 @@ Otherwise, build the Docker image from the \pate{} source repo using the followi
 
 \begin{verbatim}
   docker run --rm -it \
-    -v "$(pwd)"/tests:/tests pate \
+    --platform linux/amd64 \
+    -v "$(pwd)"/tests:/tests \
+    pate \
     --original /tests/aarch32/const-args.original.exe \
     --patched /tests/aarch32/const-args.patched.exe
 \end{verbatim}
