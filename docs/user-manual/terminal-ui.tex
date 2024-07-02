@@ -10,17 +10,18 @@ The user makes a selection by entering a number representing the node of interes
 \subsection{Example Usage}
 
 After first starting \pate{}, the user is presented with a list of entry points and makes a selection:
-\begin{verbatim}
+\begin{lstlisting}
   Choose Entry Point
   0: Function Entry "_start" (segment1+0x435)
   1: Function Entry "parse_packet" (segment1+0x554)
-  ?>
-\end{verbatim}
+  ?> |\colorbox{yellow}{1}|
+\end{lstlisting}
 
-The user enters \texttt{1}, selecting \texttt{parse\_packet}.
+We indicate user input with a yellow highlight.
+Here the user enters \texttt{1}, selecting \texttt{parse\_packet}.
 This starts \pate{}'s analysis at this point, and the user sees output of:
 
-\begin{verbatim}
+\begin{lstlisting}
 ...........
 0: Function Entry "parse_packet" (segment1+0x554) (User Request).........
 1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
@@ -45,8 +46,8 @@ Handle observable difference:
 2: Assert difference is infeasible (prove immediately)
 3: Assume difference is infeasible
 4: Avoid difference with equivalence condition
-?>
-\end{verbatim}
+?> |\colorbox{yellow}{4}|
+\end{lstlisting}
 
 \pate{} represents the analysis as a tree that can be navigated by the user.
 The top level of the interactive process (reachable via the \texttt{top} command) is a list of all analysis steps that were taken, starting from the selected entry point.
@@ -61,7 +62,7 @@ The analysis takes the equivalence domain of an entry point and computes an equi
 At this point in the example, \pate{} is asking how a detected observable difference should be handled.
 The user selects \texttt{4} to capture the difference in the equivalence condition, and \pate{} continues its analysis:
 
-\begin{verbatim}
+\begin{lstlisting}
   0: Function Entry "parse_packet" (segment1+0x554) (User Request)
   1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
      (Widening Equivalence Domains)
@@ -90,13 +91,13 @@ The user selects \texttt{4} to capture the difference in the equivalence conditi
      [ via: "parse_packet" (segment1+0x554) ]
      (Widening Equivalence Domains)
   13: Return "parse_packet" (segment1+0x554)
-     (Widening Equivalence Domains)
+      (Widening Equivalence Domains)
   Continue verification?
   0: Finish and view final result
   1: Restart from entry point
   2: Handle pending refinements
-  ?>
-\end{verbatim}
+  ?> |\colorbox{yellow}{0}|
+\end{lstlisting}
 
 The user selects \texttt{0} to finish and view the final result.
 
@@ -104,22 +105,22 @@ The \pate{} analysis tree can be navigated by the user with \texttt{top} to move
 
 For example, to inspect the analysis results in the running example, the user may provide input as follows to view the equivalence condition:
 
-\begin{verbatim}
+\begin{lstlisting}
   ...
   15: Final Result
-  >15
+  > |\colorbox{yellow}{15}|
   Final Result
   0: Assumed Equivalence Conditions
   1:   segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
   2: Binaries are conditionally, observably equivalent
   3: Toplevel Result
-  >1
+  > |\colorbox{yellow}{1}|
   segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
   0: ------
   1:   original
   2:   patched
   3: let -- segment1+0x684.. in not v40494
-  >3
+  > |\colorbox{yellow}{3}|
   let -- segment1+0x684
       v40487 = select (select cInitMemBytes@40467:a 0) 0x11045:[32]
       -- segment1+0x684
@@ -134,18 +135,18 @@ For example, to inspect the analysis results in the running example, the user ma
   3:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
        segment1+0x644 .. segment1+0x664 (patched)
   >
-\end{verbatim}
+\end{lstlisting}
 
 Continuing on, the user may view, for example, an example trace showing where the equivalence condition above does not hold:
 
-\begin{verbatim}
+\begin{lstlisting}
   0: With condition assumed
   1:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
        segment1+0x644 .. segment1+0x664 (patched)
   2: With negation assumed
   3:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
        segment1+0x644 .. segment1+0x664 (patched)
-  >3
+  > |\colorbox{yellow}{3}|
   == Initial Original Registers ==
   pc <- 0x644:[32]
   r0 <- 0x0:[32]
@@ -175,7 +176,7 @@ Continuing on, the user may view, for example, an example trace showing where th
   (segment1+0x648)
     Read 0x11045:[32] -> 0x80:[8]
     r2 <- 0x80:[32]
-\end{verbatim}
+\end{lstlisting}
 
 See the following subsections for details about how to interpret and interact with the terminal user interface.
 
