@@ -9,17 +9,17 @@ from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    DisassemblyTextLine, Architecture, load, Settings
+    DisassemblyTextLine, Architecture, Settings
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja import InstructionTextToken as ITT
 from binaryninja.enums import InstructionTextTokenType as ITTType
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, FlowGraphWidget, \
-    FileContext, UIContext, ViewFrame, ViewLocation
+    FileContext, UIContext, ViewFrame, ViewLocation, getThemeColor
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt, QCoreApplication
-from PySide6.QtGui import QMouseEvent, QAction
+from PySide6.QtGui import QMouseEvent, QAction, QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
     QSplitter, QMenu, QTextEdit
 
@@ -487,6 +487,7 @@ class InstTreeDiffWidget(QWidget):
 
         if hasOriginalInstTree and hasPatchedInstTree:
             # Both, show diff
+            # Generate html with modified colors
             html = generateHtmlDiff(originalLines, patchedLines, label)
             self.instDiffField.setHtml(html)
         elif hasOriginalInstTree:
@@ -748,9 +749,13 @@ class MyFlowGraphWidget(FlowGraphWidget):
             for cfar_exit in cfar_node.exits:
                 flow_exit = self.cfarToFlow[cfar_exit.id]
                 if self.showCfarExitInfo(cfar_node, cfar_exit, simulate=True):
-                    edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.RedStandardHighlightColor)
+                    edgeStyle = EdgeStyle(width=1,
+                                          theme_color=ThemeColor.RedStandardHighlightColor,
+                                          )
                 else:
-                    edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.GraphNodeOutlineColor)
+                    edgeStyle = EdgeStyle(width=1,
+                                          theme_color=ThemeColor.GraphNodeOutlineColor
+                                          )
                 flow_node.add_outgoing_edge(BranchType.UserDefinedBranch, flow_exit, edgeStyle)
 
         self.setGraph(self.flowGraph)
@@ -899,7 +904,50 @@ def generateHtmlDiff(originalLines: list[str], patchedLines: list[str], label: s
         todesc = f'Patched'
 
     htmlDiff = HtmlDiff()
-    return htmlDiff.make_file(originalLines, patchedLines, fromdesc=fromdesc, todesc=todesc)
+    html = htmlDiff.make_file(originalLines, patchedLines, fromdesc=fromdesc, todesc=todesc)
+
+    # Adjust colors
+    addColor = highlightBackgroundColor(getThemeColor(ThemeColor.GreenStandardHighlightColor))
+    chgColor = highlightBackgroundColor(getThemeColor(ThemeColor.YellowStandardHighlightColor))
+    delColor = highlightBackgroundColor(getThemeColor(ThemeColor.RedStandardHighlightColor))
+    hedColor = highlightBackgroundColor(QColor(217, 217, 217))
+    nxtColor = highlightBackgroundColor(QColor(179, 179, 179))
+
+    addHexRgb = addColor.name(format=QColor.NameFormat.HexRgb)
+    chgHexRgb = chgColor.name(format=QColor.NameFormat.HexRgb)
+    delHexRgb = delColor.name(format=QColor.NameFormat.HexRgb)
+    hedHexRgb = hedColor.name(format=QColor.NameFormat.HexRgb)
+    nxtHexRgb = nxtColor.name(format=QColor.NameFormat.HexRgb)
+
+    html = re.sub(r'.diff_add {background-color:#aaffaa}',
+                  f'.diff_add {{background-color:{addHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_chg {background-color:#ffff77}',
+                  f'.diff_chg {{background-color:{chgHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_sub {background-color:#ffaaaa}',
+                  f'.diff_sub {{background-color:{delHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_header {background-color:#e0e0e0}',
+                  f'.diff_header {{background-color:{hedHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_next {background-color:#c0c0c0}',
+                  f'.diff_next {{background-color:{nxtHexRgb}}}',
+                  html)
+
+    return html
+
+
+def mixColor(color1: QColor, color2: QColor, r) -> QColor:
+    return QColor(color1.red() * (1-r) + color2.red() * r,
+                  color1.green() * (1-r) + color2.green() * r,
+                  color1.blue() * (1-r) + color2.blue() * r,
+                  255)
+
+
+def highlightBackgroundColor(color: QColor, mixRatio=80/255) -> QColor:
+    darkColor: QColor = getThemeColor(ThemeColor.BackgroundHighlightDarkColor)
+    return mixColor(darkColor, color, mixRatio)
 
 
 def getInstArch(addr: int, bv: BinaryView) -> Architecture:
