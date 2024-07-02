@@ -4,6 +4,7 @@
 The \pate{} Binary Ninja plugin enables user to invoke and interact with \pate{} directly within the Binary Ninja reverse engineering platform.
 
 The \pate{} plugin requires a commercially-licensed Binary Ninja installation.
+We have tested \pate{} with Binary Ninja stable version 4.0.5336.
 
 \subsection{Installation}
 
@@ -44,8 +45,8 @@ The \pate{} plugin opens a window to select a \emph{run configuration} file in J
 This file must end in the suffix \texttt{.run-config.json}.
 The run configuration must contain a key-value map with the following keys:
 \begin{description}
-    \item[\texttt{original}] file path to the original binary
-    \item[\texttt{patched}] file path to the patched binary
+    \item[\texttt{original}] (absolute or relative) file path to the original binary
+    \item[\texttt{patched}] (absolute or relative) file path to the patched binary
     \item[\texttt{args}] a list additional arguments to pass to \pate{}
 \end{description}
 
@@ -80,7 +81,7 @@ Right click and select ``Show Equivalence Condition'' to open the Equivalence Co
 \begin{itemize}
     \item the expression describing the conditions under which programs behave equivalently
     \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is met
-    \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is not met
+    \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is \emph{not} met
 \end{itemize}
 
 Right clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
