@@ -29,7 +29,7 @@ where
 
 import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
-import           Control.Applicative ( (<|>) )
+import           Control.Applicative ( (<|>), Const (..) )
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString.Char8 as BSC
@@ -265,22 +265,31 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
+-- FIXME: flags to make it equal?
+specializeSocketRead :: forall arch v. (arch ~ PPC.AnyPPC v, 16 <= SP.AddrWidth v, MS.SymArchConstraints arch) => PA.StubOverride arch
+specializeSocketRead = 
+    PA.mkReadOverride "OS_SocketRecvFrom" (PPa.PatchPairSingle PB.PatchedRepr (Const f)) (gpr 3) (gpr 4) (gpr 5) (gpr 3)
+    where
+      f :: PA.MemChunkModify (MC.ArchAddrWidth arch)
+      f = PA.noMemChunkModify -- PA.modifyConcreteChunk MC.LittleEndian WI.knownNat (0x300 :: Integer) 2 4
+
 -- FIXME: clagged directly from ARM, registers may not be correct
 stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
-stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 ) $ \fs ->
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r3 ) $ \fs ->
   lookup (PBl.fnSymBase fs) override_list
   where
     override_list =
-      [ ("malloc", PA.mkMallocOverride r0 r0)
+      [ ("malloc", PA.mkMallocOverride r3 r3)
       -- FIXME: arguments are interpreted differently for calloc
-      , ("calloc", PA.mkMallocOverride r0 r0)
+      , ("calloc", PA.mkMallocOverride r3 r3)
       -- FIXME: arguments are interpreted differently for reallolc
-      , ("realloc", PA.mkMallocOverride r0 r0)
-      , ("clock", PA.mkClockOverride r0)
-      , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
+      , ("realloc", PA.mkMallocOverride r3 r3)
+      , ("clock", PA.mkClockOverride r3)
+      , ("write", PA.mkWriteOverride "write" r3 r4 r5 r3)
       -- FIXME: fixup arguments for fwrite
-      , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
-      , ("printf", PA.mkObservableOverride "printf" r0 r1)
+      , ("fwrite", PA.mkWriteOverride "fwrite" r3 r4 r5 r3)
+      , ("printf", PA.mkObservableOverride "printf" r3 r4)
+      , ("OS_SocketRecvFrom", specializeSocketRead)
       -- FIXME: default stubs below here
       ] ++
       (map mkDefault $
@@ -328,11 +337,17 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
         ])
 
     mkNOPStub nm = (nm, PA.mkNOPStub nm)
-    mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
+    mkDefault nm = (nm, PA.mkDefaultStubOverride nm r3)
 
-    r0 = gpr 0
-    r1 = gpr 1
-    r2 = gpr 2
+    -- r0 = gpr 0
+    -- r1 = gpr 1
+    -- r2 = gpr 2
+    r3 = gpr 3
+    r4 = gpr 4
+    r5 = gpr 5
+    -- r6 = gpr 6
+    -- r7 = gpr 7
+
 
 instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case
