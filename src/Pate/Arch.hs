@@ -46,7 +46,11 @@ module Pate.Arch (
   withStubOverride,
   mergeLoaders,
   idStubOverride,
-  serializeRegister
+  serializeRegister,
+  mkReadOverride,
+  noMemChunkModify,
+  modifyConcreteChunk,
+  MemChunkModify
   ) where
 
 import           Control.Lens ( (&), (.~), (^.) )
@@ -108,6 +112,11 @@ import Data.Parameterized.Classes (ShowF(..))
 import qualified Pate.PatchPair as PPa
 import Data.Parameterized.WithRepr (withRepr)
 import Data.Parameterized.Classes
+import qualified Control.Monad.IO.Class as IO
+import Data.Functor.Const
+import qualified What4.ExprHelpers as WEH
+import Numeric.Natural
+import qualified What4.Expr.ArrayUpdateMap as AUM
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -264,18 +273,12 @@ data StubOverride arch =
       IO (StateTransformer sym arch))
 
 -- | In general the stub override may use both the original and patched states as its input, producing a pair
---   of post-states representing the stub semantics. However the 'StateTransformer' constructor captures the
+--   of post-states representing the stub semantics. However the 'StateTransformer' pattern captures the
 --   typical case where a stub operates on each state independently.
 data StateTransformer sym arch =
     StateTransformer2 (forall v. PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v)))
   | StateTransformer (forall bin v. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin))
 
-asPairTransformer :: StateTransformer sym arch ->
-  (forall v. PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v)))
-asPairTransformer (StateTransformer2 f) = f
-asPairTransformer (StateTransformer f) = \stPair -> case stPair of
-    PPa.PatchPair stO stP -> PPa.PatchPair <$> (f stO) <*> (f stP)
-    PPa.PatchPairSingle bin st -> withRepr bin $ PPa.PatchPairSingle bin <$> f st
 
 mkStubOverride :: forall arch.
   (forall sym bin v.W4.IsSymExprBuilder sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
@@ -293,8 +296,13 @@ withStubOverride ::
   ((PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v))) -> IO a) ->
   IO a
 withStubOverride sym wsolver (StubOverride ov) f = do
-  ov' <- ov sym wsolver
-  f (asPairTransformer ov')
+  ov sym wsolver >>= \case
+    StateTransformer2 ov' -> f ov'
+    StateTransformer ov' -> 
+      let ov'' stPair = case stPair of
+            PPa.PatchPair stO stP -> PPa.PatchPair <$> ov' stO <*> ov' stP
+            PPa.PatchPairSingle bin st  -> withRepr bin $ PPa.PatchPairSingle bin <$> ov' st 
+      in f ov''
 
 data ArchStubOverrides arch =
   ArchStubOverrides (StubOverride arch) (PB.FunctionSymbol -> Maybe (StubOverride arch))
@@ -379,6 +387,98 @@ mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _wsolver -> do
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue r0_reg) .~ ptr ) })
 
+newtype MemChunkModify ptrW =
+  MemChunkModify { mkMemChunk :: (forall sym. LCB.IsSymInterface sym => sym -> PMT.MemChunk sym ptrW -> IO (PMT.MemChunk sym ptrW)) }
+
+noMemChunkModify :: MemChunkModify ptrW
+noMemChunkModify = MemChunkModify $ \_ chunk -> return chunk
+
+modifyConcreteChunk ::
+  1 <= ptrW =>
+  Integral x =>
+  MC.Endianness ->
+  W4.NatRepr ptrW ->
+  x {- ^ concrete contents (clamped to number of bytes ) -} ->
+  Natural {- ^ number of bytes  -} ->
+  Natural {- ^ offset into base chunk  -} ->
+  MemChunkModify ptrW
+modifyConcreteChunk endianness ptrW x bytes offset = MemChunkModify $ \sym chunk -> do
+  offsetBV <- W4.bvLit sym ptrW (BVS.mkBV ptrW (fromIntegral offset))
+  chunk' <- PMT.concreteMemChunk sym endianness ptrW x bytes
+  PMT.copyMemChunkInto sym chunk offsetBV chunk' 
+
+-- | Stub that reads the same uninterpreted chunk into both
+--   original and patched programs, modulo optionally overwriting the uninterpreted
+--   bytes with contents. Does nothing if the number of available bytes is zero or less.
+mkReadOverride ::
+  forall arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  T.Text {- ^ name of call -} ->
+  PPa.PatchPairC (MemChunkModify (MC.ArchAddrWidth arch)) ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ source (i.e. file descriptor, socket, etc) -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkReadOverride _nm chunkOverrides src_reg buf_reg len_reg rOut = StubOverride $ \(sym :: sym) wsolver -> do
+  let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  let bv_repr = W4.BaseBVRepr w_mem
+  let byte_repr = W4.BaseBVRepr (W4.knownNat @8)
+  -- undefined number of actual available bytes from the read "source"
+  -- FIXME: formally this should be an interpreted function on the source register, not just an arbitrary shared value
+  -- FIXME: this does not capture the fact that usually the return value is signed, where negative values represent
+  -- various error conditions (aside from simply having no more content available).
+  available_bytes <- W4.freshConstant sym W4.emptySymbol bv_repr
+  let arr_repr = W4.BaseArrayRepr (Ctx.singleton bv_repr) byte_repr
+  chunk_arr <- IO.liftIO $ W4.freshConstant sym W4.emptySymbol arr_repr
+  zero <- IO.liftIO $ W4.bvLit sym w_mem (BVS.zero w_mem)
+  let chunk = PMT.MemChunk chunk_arr zero available_bytes
+  return $ readTransformer sym wsolver src_reg buf_reg len_reg rOut $ \bin _ -> case PPa.getC bin chunkOverrides of
+    Just mkr -> do
+      -- only apply the override if some content was returned 
+      -- NB: otherwise this override will force there to always be content available to
+      -- read, which incorrectly will cause this stub to avoid legitimate program paths
+      -- which handle reaching the end-of-input
+      return chunk
+      -- nonzero_contents <- W4.bvUlt sym zero available_bytes
+      -- chunk' <- mkMemChunk mkr sym chunk
+      -- PMT.muxMemChunk sym nonzero_contents chunk' chunk
+    Nothing -> return chunk
+
+
+readTransformer ::
+  forall sym arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  LCB.IsSymInterface sym =>
+  sym ->
+  PVC.WrappedSolver sym IO ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ source (i.e. file descriptor, socket, etc) -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  (forall bin.
+    PB.WhichBinaryRepr bin ->
+    PSR.MacawRegEntry sym (MT.BVType (MC.ArchAddrWidth arch)) {- ^ resolved source -} ->
+    IO (PMT.MemChunk sym (MC.ArchAddrWidth arch))) ->
+  StateTransformer sym arch
+readTransformer sym wsolver src_reg buf_reg len_reg rOut mkChunk = StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
+  let (bin :: PB.WhichBinaryRepr bin) = knownRepr
+  let src_val = (PS.simRegs st) ^. MC.boundValue src_reg
+  chunk <- mkChunk bin src_val
+  let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue len_reg
+  len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
+  let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
+  let mem = PS.simMem st
+  (written, mem') <- IO.liftIO $ PMT.writeChunk sym chunk buf_ptr len_bv' mem
+  zero_nat <- IO.liftIO $ W4.natLit sym 0
+  let written_result = PSR.ptrToEntry (CLM.LLVMPointer zero_nat written)
+  -- FIXME: currently these are all unsigned values, but likely this return value will be treated as signed
+  -- where negative values represent different error conditions
+  return (st { PS.simMem = mem', PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ written_result ) })
+
+--  SymExpr sym (BaseArrayType (Ctx.EmptyCtx Ctx.::> BaseBVType ptrW) (BaseBVType 8))
 mkWriteOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>

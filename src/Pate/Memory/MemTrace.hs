@@ -27,6 +27,7 @@
 {-# LANGUAGE NoStarIsType #-}
 #endif
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module Pate.Memory.MemTrace
 ( MemTraceImpl(..)
@@ -74,13 +75,16 @@ module Pate.Memory.MemTrace
 , memInstrSeq
 , addRegEvent
 , readChunk
+, writeChunk
 , module Pate.EventTrace
 ) where
 
 import Unsafe.Coerce
 import           Control.Applicative
 import           Control.Lens ((%~), (&), (^.), (.~))
+import           Control.Monad ( forM )
 import           Control.Monad.State
+import           Control.Monad.Trans.State ( modifyM )
 import qualified Data.BitVector.Sized as BV
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -157,6 +161,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import           Pate.EventTrace 
 import qualified Data.Parameterized.TraversableFC as TFC
 import           What4.SymSequence
+import qualified What4.Concrete as W4C
 ------
 -- * Undefined pointers
 
@@ -748,6 +753,7 @@ memInstrSeq ::
   InstructionTrace sym arch
 memInstrSeq mem = getWrappedPtrW (memInstrSeq_ mem)
 
+-- | TODO: document the implied invariants of this datatype
 data MemTraceImpl sym ptrW = MemTraceImpl
   { memSeq :: MemTraceSeq sym ptrW
   -- ^ The sequence of memory operations in reverse execution order;
@@ -1602,6 +1608,139 @@ writeMemBV sym mem_init ptr repr (LLVMPointer region val) = go 0 repr val mem_in
         (hd, tl) <- chunkBV sym endianness byteWidth bv
         mem1 <- go n reprHead hd mem
         go (n + 1) repr' tl mem1
+
+
+-- | Fetch a byte from the given 'MemChunk', with a predicate
+--   that determines if the byte is within the bounds of the chunk.
+getChunkByte ::
+  forall sym ptrW.
+  IsSymExprBuilder sym =>
+  1 <= ptrW =>
+  sym ->
+  MemChunk sym ptrW ->
+  SymBV sym ptrW ->
+  IO (SymBV sym 8, Pred sym)
+getChunkByte sym (MemChunk baseArray offset len) idx = do
+  index <- bvAdd sym offset idx
+  byte <- arrayLookup sym baseArray (Ctx.singleton index)
+  valid <- bvUlt sym index len
+  return (byte, valid)
+
+-- | Conditionally write a single byte to memory if it is within the
+--   bounds of the given MemChunk and write length.
+writeChunkByte ::
+  forall sym ptrW.
+  IsSymInterface sym =>
+  1 <= ptrW =>
+  MemWidth ptrW =>
+  sym ->
+  MemChunk sym ptrW ->
+  SymBV sym ptrW {- index into chunk -} ->
+  SymBV sym ptrW {- maximum write length -} ->
+  LLVMPtr sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+writeChunkByte sym chunk idx_bv write_len (LLVMPointer region offset) mem = do
+  let ptrW = bvWidth offset
+  (byte, in_chunk) <- getChunkByte sym chunk idx_bv
+  in_write <- bvUlt sym idx_bv write_len
+  valid <- andPred sym in_chunk in_write
+  let memRepr = BVMemRepr (knownNat @1) LittleEndian
+  zero_nat <- intLit sym 0 >>= integerToNat sym
+  offset' <- bvAdd sym offset idx_bv
+  let ptr = (LLVMPointer region offset')
+  execStateT (doCondWriteMem sym valid (addrWidthRepr ptrW) ptr (LLVMPointer zero_nat byte) memRepr) mem
+
+-- Write an array of bytes into memory. Returns the resulting memory state
+-- as well as the number of symbolic bytes written (minimum of memchunk length
+-- and requested length).
+-- This updates both the "bytes" array values with the given contents, as
+-- well as the "region" array to set the written bytes to have region zero
+-- (i.e. consider the written values to be absolute/raw bytes).
+-- FIXME: For symbolic-length writes
+-- only the first and laste bytes are included in the event stream.
+-- Additionally it is internally using 'arrayCopy' which is likely to
+-- hang the solver if there isn't some bound on the write length
+-- that can be inferred.
+writeChunkState :: forall sym ptrW.
+  MemWidth ptrW =>
+  IsSymInterface sym =>
+  MemWidth ptrW =>
+  sym ->
+  MemChunk sym ptrW ->
+  SymBV sym ptrW ->
+  LLVMPtr sym ptrW ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+writeChunkState sym chunk@(MemChunk writeBytes off_chunk chunk_len) write_len ptr mem = do
+  let memSt = memState mem
+  let ptrW = bvWidth chunk_len
+  (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr 0
+  len <- WEH.bvUMin sym chunk_len write_len
+  regArrayBytes <- arrayLookup sym (memArrBytes memSt) (Ctx.singleton reg)
+  regArrayBytes' <- arrayCopy sym regArrayBytes off writeBytes off_chunk len
+  memBytes' <- arrayUpdate sym (memArrBytes memSt) (Ctx.singleton reg) regArrayBytes'
+  zero_int <- intLit sym 0
+  regArrayRegs <- arrayLookup sym (memArrRegions memSt) (Ctx.singleton reg)
+  regArrayRegs' <- arraySet sym regArrayRegs off zero_int len
+  memRegions' <- arrayUpdate sym (memArrRegions memSt) (Ctx.singleton reg) regArrayRegs'
+  let memSt' = memSt { memArrBytes = memBytes', memArrRegions = memRegions' }
+  zero <- bvLit sym ptrW (BV.mkBV ptrW 0)
+  -- we explicitly write the first and last bytes of the chunk so they are included
+  -- in the event stream
+  -- this is a workaround in lieu of being able to include symbolic-width chunks
+  -- in events
+  -- NB: if the chunk or write length is zero then these writes do nothing, as
+  -- they are conditional on the index being within bounds
+  mem' <- writeChunkByte sym chunk zero write_len ptr (mem { memState = memSt' })
+  one <- bvLit sym ptrW (BV.mkBV ptrW 1)
+  -- NB: if len = 0 this will underflow. In this case the write will be a no-op since
+  -- end > len (out of bounds).
+  end <- bvSub sym len one
+  writeChunkByte sym chunk end write_len ptr mem'
+  -- below isn't quite right because it will then require all symbolic-length memory
+  -- writes to be exactly equal/considered observable
+  -- in general we need another memory event type to specifically handle symbolic-length
+  -- writes, which we then need to be able to extract a memory footprint from
+  {-
+  let chunk' = chunk { memChunkLen = len }
+  let event = ExternalCallEvent "writeChunkState" [ExternalCallDataChunk chunk']
+  addMemEvent sym event mem''
+  -}
+
+-- | Write a chunk out to memory. FIXME: see 'writeChunkState'
+writeChunk :: forall sym ptrW.
+  MemWidth ptrW =>
+  IsSymInterface sym =>
+  MemWidth ptrW =>
+  sym ->
+  MemChunk sym ptrW ->
+  LLVMPtr sym ptrW {- ^ address to write chunk into -} ->
+  SymBV sym ptrW {- ^ number of bytes to write -} ->
+  MemTraceImpl sym ptrW ->
+  IO (SymBV sym ptrW, MemTraceImpl sym ptrW)
+writeChunk sym chunk ptr writeLen mem = do
+  read_len <- WEH.bvUMin sym writeLen (memChunkLen chunk)
+  let ptrW = bvWidth read_len
+  mnumBytes <-
+    if | Just (W4C.ConcreteBV _ minC) <- asConcrete read_len -> return $ Just $ BV.asUnsigned minC
+       | Just (W4C.ConcreteBV _ writeLenC) <- asConcrete writeLen -> return $ Just $ BV.asUnsigned writeLenC
+       | Just (W4C.ConcreteBV _ chunkLenC) <- asConcrete (memChunkLen chunk) -> return $ Just $ BV.asUnsigned chunkLenC
+       | otherwise -> return Nothing
+  -- if we can come up with a concrete bound on the number of bytes, then we can represent this as a (conditional) 
+  -- collection of individual byte writes.
+  -- Note that if this concrete bound is higher than the actual symbolic bound, then any writes beyond that
+  -- bound will be no-ops, since 'writeChunkByte' is conditional on the given index being in-bounds.
+  -- otherwise, write a single symbolic-length write to memory. NB: without bounds on this length this will likely
+  -- hang the solver due to the use of arrayCopy
+  mem' <- case mnumBytes of
+    Just numBytes -> do
+      let go i = do
+            idx <- lift $ bvLit sym ptrW (BV.mkBV ptrW i)
+            modifyM (writeChunkByte sym chunk idx writeLen ptr)
+      execStateT (forM [0..numBytes] go) mem
+    Nothing -> writeChunkState sym chunk writeLen ptr mem
+  return $ (read_len, mem')
 
 ifCond ::
   IsSymInterface sym =>
