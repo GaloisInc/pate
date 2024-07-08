@@ -39,6 +39,13 @@ If the plugin is correctly installed and initialized, then the ``Plugins'' menu 
 
 \subsection{Usage}
 
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{pate-binja-overview.png}
+  \caption{The PATE Binary Ninja Plugin. The top region is the PATE analysis overview graph. The bottom panel is used by the operator to interact with the PATE verifier.}
+  \label{fig:overview}
+\end{figure}
+
 Once installed, invoke the \pate{} plugin from the Binary Ninja ``Plugins $\rightarrow$ Pate...'' menu option.
 
 The \pate{} plugin opens a window to select a \emph{run configuration} file in JSON format.
@@ -64,25 +71,34 @@ For example:
 
 After selecting a run configuration file, the \pate{} plugin will open three Binary Ninja tabs: one for each of the original and patched binaries, and a third \emph{\pate{} analysis} tab.
 
-The \pate{} analysis tab is composed of two regions:
+As shown in Figure~\ref{fig:overview}, the \pate{} analysis tab is composed of two primary regions.
 The bottom portion is an interactive text view that corresponds to the terminal user interface described in Section~\ref{sec:terminal-ui}.
 The user interacts with this region through the text input field at the bottom of the window.
 
 The top portion of the \pate{} analysis tab is a graph view showing the current state of the \pate{} analysis.
 When \pate{} analysis is complete (via interaction in the bottom portion), the \pate{} graph shows rectangles for each slice of the program analyzed by \pate{}.
 Default-colored rectangles represent a pair of programs slices that were able to matched up between the original and patched binary.
-Green rectangles represent slices present only in the original program.
-Pink rectangles represent slices present only in the patched program.
+Green rectangles represent slices present only in the original program, if any.
+Blue rectangles represent slices present only in the patched program, if any.
 Right click on a rectangle for options to jump directly to the relevant program location in the appropriate tab for the corresponding binary.
 
 A red rectangle represents the ``active'' region, where \pate{} has found an equivalence condition.
-Right click and select ``Show Equivalence Condition'' to open the Equivalence Condition window, which reports:
+Right click and select ``Show Equivalence Condition'' to open the Equivalence Condition window.
+Please see Figure~\ref{fig:equiv-cond} for an example screenshot of the equivalence condition window in the PATE Binary Ninja plugin.
+An equivalence condition window includes:
 
 \begin{itemize}
     \item the expression describing the conditions under which programs behave equivalently
     \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is met
     \item a generated (concretized) trace through the program(s) showing an example where the equivalence condition is \emph{not} met
 \end{itemize}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{pate-binja-equiv-cond.png}
+  \caption{The PATE Binary Ninja plugin equivalence condition window.}
+  \label{fig:equiv-cond}
+\end{figure}
 
 Right clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
 At the bottom will be a linearized representation of the instruction trees in the original and patched program, with colorized diff view.
