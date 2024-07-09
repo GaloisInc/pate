@@ -54,6 +54,10 @@ jobs:
           cat out.log
           grep -e "All .* tests passed" out.log || exit 1
 
+      - name: Docker Integration Test
+        run: |
+          docker run --rm --entrypoint tests/integration/packet/packet.exp pate
+
       - name: Push Docker image
         run: |
           CI_COMMIT_SHORT_SHA=$(git rev-parse --short $GITHUB_SHA)

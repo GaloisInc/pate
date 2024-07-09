@@ -147,7 +147,7 @@ RUN cabal v2-build pate-repl-base
 ENV PATH="/home/src/:/root/.ghcup/bin:${PATH}"
 
 COPY --from=gitbase /home/src/loadrepl.ghci /home/src/loadrepl.ghci
-RUN apt install -y libtinfo5 libtinfo-dev
+RUN apt install -y libtinfo5 libtinfo-dev expect-lite
 ENTRYPOINT ["/home/src/pate.sh"]
 
 

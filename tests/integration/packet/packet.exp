@@ -17,7 +17,7 @@
 
 spawn ./pate.sh --original tests/integration/packet/exe/packet.exe --patched tests/integration/packet/exe/packet.patched.exe -s parse_packet
 
-set timeout 120
+set timeout 480
 
 expect_before {
         timeout { send_user "\n\nFAILURE: timeout\n"; exit 1 }
