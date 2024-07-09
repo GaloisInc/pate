@@ -16,7 +16,7 @@ First, build the Docker image with the command::
 
 Next, run the verifier on an example from the test suite::
 
-  docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate --original /tests/aarch32/const-args.original.exe --patched /tests/aarch32/const-args.patched.exe
+  docker run --rm -it --platform linux/amd64 -v "$(pwd)"/tests:/tests pate --original /tests/aarch32/const-args.original.exe --patched /tests/aarch32/const-args.patched.exe
 
 
 Command Line Options
@@ -28,8 +28,7 @@ The verifier accepts the following command line arguments::
   -o,--original EXE        Original binary
   -p,--patched EXE         Patched binary
   -b,--blockinfo FILENAME  Block information relating binaries
-  -s,--startsymbol ARG     Start analysis from the function with this symbol,
-                           otherwise start at the program entrypoint
+  -s,--startsymbol ARG     Start analysis from the function with this symbol
   -d,--nodiscovery         Don't dynamically discover function pairs based on
                            calls.
   --solver ARG             The SMT solver to use to solve verification
@@ -77,6 +76,22 @@ The verifier accepts the following command line arguments::
   -r,--rescopemode ARG     Variable rescoping failure handling mode
                            (default: ThrowOnEqRescopeFailure)
   --skip-unnamed-functions Skip analysis of functions without symbols
+  --skip-divergent-control-flow
+                           <DEPRECATED>
+  --target-equiv-regs ARG  Compute an equivalence condition sufficient to
+                           establish equality on the given registers after the
+                           toplevel entrypoint returns. <DEPRECATED>
+  --ignore-segments ARG    Skip segments (0-indexed) when loading ELF
+  --json-toplevel          Run toplevel in JSON-output mode (interactive mode
+                           only)
+  --read-only-segments ARG Mark segments as read-only (0-indexed) when loading
+                           ELF
+  --script FILENAME        Save macaw CFGs to the provided directory
+  --no-assume-stack-scope  Don't add additional assumptions about stack frame
+                           scoping
+  --ignore-warnings ARG    Don't raise any of the given warning types
+  --always-classify-return Always resolve classifier failures by assuming
+                           function returns, if possible.
 
 Extended Examples
 -----------------
@@ -176,23 +191,23 @@ Development
 Requirements
 ------------
 
-- ghc (8.10.4 suggested)
+- ghc (9.6 suggested)
 - cabal
 - yices
 
 Build Steps
 -----------
 
-The pate tool is written in Haskell and requires the GHC compiler (version 8.6-8.10) and the cabal build tool to compile.  Building from source can be accomplished by::
+The pate tool is written in Haskell and requires the GHC compiler (we test with 9.6) and the cabal build tool to compile.  Building from source can be accomplished by::
 
   git clone git@github.com:GaloisInc/pate.git
   cd pate
   git submodule update --init
   cp cabal.project.dist cabal.project
   cabal configure pkg:pate
-  pate.sh --help
+  ./pate.sh --help
 
-The verifier requires an SMT solver to be available in ``PATH``. The default is ``yices``, but ``z3`` and ``cvc4`` are also supported.
+The verifier requires an SMT solver to be available in ``PATH``. The default is ``yices`` - ``z3`` and ``cvc4`` may also work but are not regularly tested with PATE.
 
 Acknowledgements
 ============
