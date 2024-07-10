@@ -1,0 +1,72 @@
+#!/usr/bin/env -S expect -f
+#
+# This is an expect script modeling the user interaction of PATE on the packet example.
+#
+# Beyond testing basic verifier functionality, this test is also intended to
+# provide an integration test of the 1) terminal user interaction, and 2)
+# resulting equivalence condition, in ways that the other automated tests do not.
+# The test for the "expected" equivalence condition is syntactic, so this test will
+# likely be more brittle (e.g. break if the term simplification changes such that
+# intermediate variable numbers change) and may need to be updated to reflect
+# intended subsequent changes to PATE verification details.
+#
+# This test is intended to be run from the root of the pate directory:
+#    ./tests/integration/packet/packet.exp
+#
+# Note that expected strings must be escaped: double-quotes (\") and brackets (\\\[)
+
+spawn ./pate.sh --original tests/integration/packet/exe/packet.exe --patched tests/integration/packet/exe/packet.patched.exe -s parse_packet
+
+set timeout 480
+
+expect_before {
+        timeout { send_user "\n\nFAILURE: timeout\n"; exit 1 }
+        eof     { send_user "\n\nFAILURE: eof\n";     exit 2 }
+}
+
+expect "Choose Entry Point"
+expect "1: Function Entry \"parse_packet\" (segment1+0x554)"
+expect "?>"
+send "1\r"
+
+expect "Handle observable difference:"
+expect "4: Avoid difference with equivalence condition"
+expect "?>"
+send "4\r"
+
+expect "Continue verification?"
+expect "0: Finish and view final result"
+expect "?>"
+send "0\r"
+
+expect "15: Final Result"
+expect ">"
+send "15\r"
+
+expect "0: Assumed Equivalence Conditions"
+expect "2: Binaries are conditionally, observably equivalent"
+expect ">"
+send "0\r"
+
+# Inspect the specific equivalence condition
+
+expect "0: segment1+0x644 \\\[ via: \"parse_packet\" (segment1+0x554) \\\]"
+expect ">"
+send "0\r"
+
+expect "3: let -- segment1+0x664.. in not v40591"
+expect ">"
+send "3\r"
+
+expect "v40591 = and (eq 0x80:\\\[8\\\] v40584) (not (eq v40587 (bvSum v40584 0x80:\\\[8\\\])))"
+expect "in not v40591"
+expect ">"
+send "\x04" ; # Ctrl-D (EOF)
+
+# remove EOF from expect_before, now that we're expecting it
+expect_before {
+        timeout { send_user "\n\nFAILURE: timeout\n"; exit 1 }
+}
+expect eof
+
+send_user "\nSUCCESS: packet integration test complete\n"
