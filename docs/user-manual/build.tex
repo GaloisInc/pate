@@ -27,10 +27,11 @@ Build the image using the following commands:
 \begin{verbatim}
   docker run --rm -it \
     --platform linux/amd64 \
-    -v "$(pwd)"/tests:/tests \
+    -v "$(pwd)"/tests/integration/packet/exe:/target \
     pate \
-    --original /tests/aarch32/const-args.original.exe \
-    --patched /tests/aarch32/const-args.patched.exe
+    --original /target/packet.exe \
+    --patched /target/packet.patched.exe \
+    -s parse_packet
 \end{verbatim}
 
 Please see later sections for detailed usage information.

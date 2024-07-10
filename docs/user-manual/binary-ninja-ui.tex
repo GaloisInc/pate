@@ -39,6 +39,9 @@ If the plugin is correctly installed and initialized, then the ``Plugins'' menu 
 
 \subsection{Usage}
 
+In Section~\ref{sec:terminal-ui} we examined the \texttt{packet.exe} example using the \pate{} terminal UI.
+In this section, we describe analyzing the same example using the \pate{} Binary Ninja plugin.
+
 \begin{figure}[h]
   \centering
   \includegraphics[width=\textwidth]{pate-binja-overview.png}
@@ -57,7 +60,7 @@ The run configuration must contain a key-value map with the following keys:
     \item[\texttt{args}] a list additional arguments to pass to \pate{}
 \end{description}
 
-For example:
+For example, the file \texttt{tests/integration/packet/packet.run-config.json} contains:
 
 \begin{verbatim}
   {
@@ -69,11 +72,12 @@ For example:
   }
 \end{verbatim}
 
-After selecting a run configuration file, the \pate{} plugin will open three Binary Ninja tabs: one for each of the original and patched binaries, and a third \emph{\pate{} analysis} tab.
+After selecting the run configuration file, the \pate{} plugin will open three Binary Ninja tabs: one for each of the original and patched binaries, and a third \emph{\pate{} analysis} tab.
 
 As shown in Figure~\ref{fig:overview}, the \pate{} analysis tab is composed of two primary regions.
-The bottom portion is an interactive text view that corresponds to the terminal user interface described in Section~\ref{sec:terminal-ui}.
+The bottom portion is an interactive text view that corresponds to the terminal user interface.
 The user interacts with this region through the text input field at the bottom of the window.
+In the \texttt{packet.exe} example, the user enters the same commands described in Section~\ref{sec:terminal-ui} through the \texttt{Finish and view final result} step, at which point results will be rendered in the interactive Binary Ninja view.
 
 The top portion of the \pate{} analysis tab is a graph view showing the current state of the \pate{} analysis.
 When \pate{} analysis is complete (via interaction in the bottom portion), the \pate{} graph shows rectangles for each slice of the program analyzed by \pate{}.
@@ -102,7 +106,7 @@ An equivalence condition window includes:
 
 Right clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
 At the bottom will be a linearized representation of the instruction trees in the original and patched program, with colorized diff view.
-Instructions conditionally reachable through control flow edges are prefixed by \texttt{+} or \texttt{-} to differentiate instructions in distinct branches.
+Instructions conditionally reachable through conditional control flow edges (if any) are prefixed by \texttt{+} or \texttt{-} to differentiate instructions in distinct branches.
 
 \subsection{Replays}
 

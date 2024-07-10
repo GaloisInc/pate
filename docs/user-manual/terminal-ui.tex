@@ -9,7 +9,19 @@ The user makes a selection by entering a number representing the node of interes
 
 \subsection{Example Usage}
 
-After first starting \pate{}, the user is presented with a list of entry points and makes a selection:
+Launch \pate{} on the binaries in the \texttt{tests/integration/packet/exe/} directory with:
+
+\begin{verbatim}
+   docker run --rm -it \
+     --platform linux/amd64 \
+     -v "$(pwd)"/tests/integration/packet/exe:/target \
+     pate \
+     --original /target/packet.exe \
+     --patched /target/packet.patched.exe \
+     -s parse_packet
+ \end{verbatim}
+
+Once launched, \pate{} presents the user is presented with a list of entry points and makes a selection:
 \begin{lstlisting}
   Choose Entry Point
   0: Function Entry "_start" (segment1+0x435)
