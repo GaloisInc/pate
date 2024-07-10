@@ -107,6 +107,7 @@ An equivalence condition window includes:
 Right clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
 At the bottom will be a linearized representation of the instruction trees in the original and patched program, with colorized diff view.
 Instructions conditionally reachable through conditional control flow edges (if any) are prefixed by \texttt{+} or \texttt{-} to differentiate instructions in distinct branches.
+See Figure~\ref{fig:mcad} for an example of the instruction tree view, with MCAD integration (described below).
 
 \subsection{Replays}
 
@@ -119,5 +120,12 @@ That is, the user cannot deviate from the pre-recorded responses from the \pate{
 \subsection{MCAD Integration}
 
 MCAD\footnote{\url{https://github.com/securesystemslab/LLVM-MCA-Daemon}} is a performance analysis tool that performs static prediction of instruction timings for sequences of instructions such as those identified by \pate{}.
-The details of the MCAD system is outside of the scope of this user guide, but if the MCAD Docker container is available, the \pate{} Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view.
+The details of the MCAD system is outside of the scope of this user guide, but if the MCAD Docker container is available, the \pate{} Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view, as shown in Figure~\ref{fig:mcad}.
 Use the \pate{} plugin preference option ``MCAD Docker image name'' to specify the name of the MCAD Docker container on the host in order to enable MCAD integration in the \pate{} plugin.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{pate-binja-mcad.png}
+  \caption{PATE Binary Ninja MCAD integration showing predicted cycle counts (per instruction, cumulative) for instructions in original (left) and patched (right) basic blocks.}
+  \label{fig:mcad}
+\end{figure}
