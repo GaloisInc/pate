@@ -14,9 +14,9 @@ First, build the Docker image with the command::
 
   docker build . -t pate
 
-Next, run the verifier on an example from the test suite::
+Next, run the verifier on an example::
 
-  docker run --rm -it --platform linux/amd64 -v "$(pwd)"/tests:/tests pate --original /tests/aarch32/const-args.original.exe --patched /tests/aarch32/const-args.patched.exe
+  docker run --rm -it --platform linux/amd64 -v "$(pwd)"/tests/integration/packet/exe:/target pate --original /target/packet.exe --patched /target/packet.patched.exe -s parse_packet
 
 
 Command Line Options
@@ -130,14 +130,7 @@ Controlling the Verifier Entry Point
 
 By default, the verifier starts verifying from the formal program entry point. This is often not very useful (and can be problematic for complex binaries with a large ``_start`` that causes problem for our code discovery).  Additionally, for changes with a known (or at least expected) scope of impact, analyzing just the affected functions is significantly faster. To instead specify an analysis entry point, passing the ``-s <function_symbol>`` option will start the analysis
 from the function corresponding to the given symbol. Note that this requires function symbols to be provided for the binaries (either as embedded debug
-symbols or separately in one of the hint formats)::
-
-  docker run --rm -it -v `pwd`/tests:/tests/hints pate \
-             --original /tests/01.elf \
-             --patched /tests/01.elf \
-             --original-anvill-hints /tests/01.anvill.json \
-             --patched-anvill-hints /tests/01.anvill.json \
-             -s main
+symbols or separately in one of the hint formats).
 
 Treating Functions As No-Ops
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
