@@ -1,0 +1,243 @@
+\section{The \pate{} Terminal UI}
+\label{sec:terminal-ui}
+
+Once \pate{} has been invoked at the command line (see Section~\ref{sec:run-pate-verif}), the user is presented with an interactive terminal user interface.
+
+Internally, \pate{} maintains a tree representing the state of the analysis.
+The interactive interface allows users to inspect the tree by selecting from a list of options based on the users current ``location'' in the tree.
+The user makes a selection by entering a number representing the node of interest and hitting enter, or by entering a command.
+
+\subsection{Example Usage}
+
+Launch \pate{} on the binaries in the \texttt{tests/integration/packet/exe/} directory with:
+
+\begin{verbatim}
+   docker run --rm -it \
+     --platform linux/amd64 \
+     -v "$(pwd)"/tests/integration/packet/exe:/target \
+     pate \
+     --original /target/packet.exe \
+     --patched /target/packet.patched.exe \
+     -s parse_packet
+ \end{verbatim}
+
+Once launched, \pate{} presents the user is presented with a list of entry points and makes a selection:
+\begin{lstlisting}
+  Choose Entry Point
+  0: Function Entry "_start" (segment1+0x435)
+  1: Function Entry "parse_packet" (segment1+0x554)
+  ?> |\colorbox{yellow}{1}|
+\end{lstlisting}
+
+We indicate user input with a yellow highlight.
+Here the user enters \texttt{1}, selecting \texttt{parse\_packet}.
+This starts \pate{}'s analysis at this point, and the user sees output of:
+
+\begin{lstlisting}
+...........
+0: Function Entry "parse_packet" (segment1+0x554) (User Request).........
+1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
+   (Widening Equivalence Domains).........
+2: segment1+0x5ac [ via: "parse_packet" (segment1+0x554) ]
+   (Widening Equivalence Domains)
+3: Return "parse_packet" (segment1+0x554)
+   (Widening Equivalence Domains)........
+4: segment1+0x5cc [ via: "parse_packet" (segment1+0x554) ]
+   (Widening Equivalence Domains).........
+5: segment1+0x5e0 [ via: "parse_packet" (segment1+0x554) ]
+   (Widening Equivalence Domains)........
+6: segment1+0x600 [ via: "parse_packet" (segment1+0x554) ]
+   (Widening Equivalence Domains)
+7: Return "parse_packet" (segment1+0x554)
+   (Widening Equivalence Domains).........
+8: segment1+0x624 [ via: "parse_packet" (segment1+0x554) ]
+   (Widening Equivalence Domains).........
+Handle observable difference:
+0: Emit warning and continue
+1: Assert difference is infeasible (defer proof)
+2: Assert difference is infeasible (prove immediately)
+3: Assume difference is infeasible
+4: Avoid difference with equivalence condition
+?> |\colorbox{yellow}{4}|
+\end{lstlisting}
+
+\pate{} represents the analysis as a tree that can be navigated by the user.
+The top level of the interactive process (reachable via the \texttt{top} command) is a list of all analysis steps that were taken, starting from the selected entry point.
+Each pair of address and calling contexts defines a unique toplevel proof ``node.''
+A given address and context may appear multiple times in the toplevel list, corresponding to each individual time that the address/context pair was analyzed.
+The latest (highest-numbered) entry corresponds to the most recent analysis of an address/context.
+
+Each entry point is associated with an equivalence domain: a set of locations (registers, stack slots and memory addresses) that are potentially not equal at this point.
+Locations outside of this set have been proven to be equal (ignoring skipped functions).
+The analysis takes the equivalence domain of an entry point and computes an equivalence domain for each possible exit point (according to the semantics of the block).
+
+At this point in the example, \pate{} is asking how a detected observable difference should be handled.
+The user selects \texttt{4} to capture the difference in the equivalence condition, and \pate{} continues its analysis:
+
+\begin{lstlisting}
+  0: Function Entry "parse_packet" (segment1+0x554) (User Request)
+  1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  2: segment1+0x5ac [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  3: Return "parse_packet" (segment1+0x554)
+     (Widening Equivalence Domains)
+  4: segment1+0x5cc [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  5: segment1+0x5e0 [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  6: segment1+0x600 [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  7: Return "parse_packet" (segment1+0x554)
+     (Widening Equivalence Domains)
+  8: segment1+0x624 [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  9: segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)........
+  10: segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
+     (Re-checking Block Exits)........
+  11: segment1+0x654 (original) vs. segment1+0x668 (patched)
+     [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)........
+  12: segment1+0x668 (original) vs. segment1+0x67c (patched)
+     [ via: "parse_packet" (segment1+0x554) ]
+     (Widening Equivalence Domains)
+  13: Return "parse_packet" (segment1+0x554)
+      (Widening Equivalence Domains)
+  Continue verification?
+  0: Finish and view final result
+  1: Restart from entry point
+  2: Handle pending refinements
+  ?> |\colorbox{yellow}{0}|
+\end{lstlisting}
+
+The user selects \texttt{0} to finish and view the final result.
+
+The \pate{} analysis tree can be navigated by the user with \texttt{top} to move to the top of the tree, numbers to navigate ``into'' nodes, \texttt{up} to move ``up'' a node, and \texttt{ls} to redisplay the nodes available at a current level.
+
+For example, to inspect the analysis results in the running example, the user may provide input as follows to view the equivalence condition:
+
+\begin{lstlisting}
+  ...
+  15: Final Result
+  > |\colorbox{yellow}{15}|
+  Final Result
+  0: Assumed Equivalence Conditions
+  1:   segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
+  2: Binaries are conditionally, observably equivalent
+  3: Toplevel Result
+  > |\colorbox{yellow}{1}|
+  segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
+  0: ------
+  1:   original
+  2:   patched
+  3: let -- segment1+0x684.. in not v40494
+  > |\colorbox{yellow}{3}|
+  let -- segment1+0x684
+      v40487 = select (select cInitMemBytes@40467:a 0) 0x11045:[32]
+      -- segment1+0x684
+      v40490 = select (select cInitMemBytes@40344:a 0) 0x11044:[32]
+      -- segment1+0x684
+      v40494 = and (eq 0x80:[8] v40487) (not (eq v40490 (bvSum v40487 0x80:[8])))
+   in not v40494
+  0: With condition assumed
+  1:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
+       segment1+0x644 .. segment1+0x664 (patched)
+  2: With negation assumed
+  3:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
+       segment1+0x644 .. segment1+0x664 (patched)
+  >
+\end{lstlisting}
+
+Continuing on, the user may view, for example, an example trace showing where the equivalence condition above does not hold:
+
+\begin{lstlisting}
+  0: With condition assumed
+  1:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
+       segment1+0x644 .. segment1+0x664 (patched)
+  2: With negation assumed
+  3:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
+       segment1+0x644 .. segment1+0x664 (patched)
+  > |\colorbox{yellow}{3}|
+  == Initial Original Registers ==
+  pc <- 0x644:[32]
+  r0 <- 0x0:[32]
+  r1 <- 0x1:[32]
+  r10 <- (3243, 0x0:[32])
+  r11 <- (3342, 0x0:[32])
+  r12 <- (2490, 0x0:[32])
+  ...
+  == Original sequence ==
+  (segment1+0x644)
+    Read 0x688:[32] -> 0x108:[32]
+    r0 <- 0x108:[32]
+  (segment1+0x648) r0 <- 0x758:[32]
+  ...
+  == Initial Patched Registers ==
+  pc <- 0x644:[32]
+  r0 <- 0x0:[32]
+  r1 <- 0x1:[32]
+  r10 <- (3243, 0x0:[32])
+  r11 <- (3342, 0x0:[32])
+  r12 <- (2490, 0x0:[32])
+  ...
+  == Patched sequence ==
+  (segment1+0x644)
+    Read 0x11044:[32] -> 0x80:[8]
+    r1 <- 0x80:[32]
+  (segment1+0x648)
+    Read 0x11045:[32] -> 0x80:[8]
+    r2 <- 0x80:[32]
+\end{lstlisting}
+
+See the following subsections for details about how to interpret and interact with the terminal user interface.
+
+\subsection{Status Indicators}
+
+The \emph{prompt} indicates the status of the current node as follows:
+\begin{itemize}
+\item \texttt{*>} current node still has some active task running
+\item \texttt{?>} current node requires user input
+\item \texttt{!>} current node has raised a warning
+\item \texttt{x>} current node has raised an error
+\item \texttt{>} current node, and all sub-nodes, have finished processing
+\end{itemize}
+
+Similar to the prompt, nodes may be printed with a suffix that indicates some additional status as follows:
+\begin{itemize}
+\item \texttt{(*)} node still has some active task running
+\item \texttt{(?)} node requires user input
+\item \texttt{(!)} node has raised a warning
+\item \texttt{(x)} node has raised an error
+\end{itemize}
+A status suffix indicates that the node, or some sub-node, has the given status.
+e.g. at the toplevel the prompt \texttt{x>} indicates that an error was thrown during some block analysis, while the corresponding node for the block will have a \texttt{(x)} suffix.
+
+\subsection{Navigation Commands}
+
+\begin{itemize}
+\item \texttt{\#} - navigate to a node, printing its contents
+\item \texttt{up} - navigate up one tree level
+\item \texttt{top} - navigate to the toplevel
+\item \texttt{goto\_err} - navigate to the first leaf node with an error status
+\item \texttt{next} - navigate to the highest-numbered node at the current level
+\end{itemize}
+
+\subsection{Diagnostic Commands}
+
+\begin{itemize}
+\item \texttt{status} - print the status of the current node
+\item \texttt{full\_status} - print the status of the current node, without truncating the output
+\item \texttt{ls} - print the list of nodes at the current level
+\item \texttt{wait} - wait at the current level for more results. Exits when the node finishes, or
+the user provides any input
+\end{itemize}
+When the prompt is \texttt{?>}, the verifier is waiting for input at some sub-node.
+To select an option, simply navigate (i.e. by entering \texttt{\#}) to the desired choice.
+For example, \texttt{goto\_prompt} - navigate to the first leaf node waiting for user input.
+
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "user-manual"
+%%% End:

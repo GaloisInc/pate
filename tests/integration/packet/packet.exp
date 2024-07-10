@@ -14,6 +14,9 @@
 #    ./tests/integration/packet/packet.exp
 #
 # Note that expected strings must be escaped: double-quotes (\") and brackets (\\\[)
+#
+# Also note this example is mentioned in the README.rst and used in the User Manual.
+# Major changes here likely warrant an update of the corresponding User Manual content.
 
 spawn ./pate.sh --original tests/integration/packet/exe/packet.exe --patched tests/integration/packet/exe/packet.patched.exe -s parse_packet
 
