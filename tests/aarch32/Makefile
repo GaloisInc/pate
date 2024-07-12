@@ -15,15 +15,13 @@ scripted/challenge10.original.exe: ${CHALLENGE_10_BIN}
 endif
 
 
-TARGET_7_DIR=$(CHALLENGE_DIR)/tests/target7/
-ifeq (,$(wildcard ${TARGET_7_DIR}))
+ifeq (,$(wildcard $(CHALLENGE_DIR)))
 else
 
 EXTRA_TARGETS+=scripted/target7
 
-scripted/target7.%: .programtargets
-	(((cd $(CHALLENGE_DIR) && git show $(shell cat .programtargets):tests/target7/$(notdir $@)) > $@) || (rm -f $@ && exit 1))
-
+scripted/target7.%: ../.programtargets
+	$(call fetch,target7)
 endif
 
 .PHONY: scripted/target7

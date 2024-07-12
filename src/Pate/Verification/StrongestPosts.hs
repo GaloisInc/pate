@@ -971,13 +971,18 @@ orphanReturnBundle scope pPair = withSym $ \sym -> do
     return $ PS.SimInput (PS.simVarState vars') blk absSt
 
   wsolver <- getWrappedSolver
+
+  -- FIXME: should we pass in the archInfo for each binary to each stub separately?
+  -- currently it's only used to get the architecture endianness, which realistically
+  -- shouldn't change between the patched and original binaries
+  origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
+  let archInfo = PA.binArchInfo origBinary
+
   simOut_ <- IO.withRunInIO $ \runInIO ->
-    PA.withStubOverride sym wsolver ov $ \f -> runInIO $ PPa.forBins $ \bin -> do
-      input <- PPa.get bin simIn_
-      let inSt = PS.simInState input
-      outSt <- liftIO $ f inSt
+    PA.withStubOverride sym archInfo wsolver ov $ \f -> runInIO $ do
+      outSt <- liftIO $ f (TF.fmapF PS.simInState simIn_)
       blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym MCS.MacawBlockEndReturn
-      return $ PS.SimOutput outSt blkend
+      return $ TF.fmapF (\st' -> PS.SimOutput st' blkend) outSt
 
   return $ PS.SimBundle simIn_ simOut_
 
@@ -1691,22 +1696,33 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
                   choice "Emit warning and continue" () $ return Nothing
                   -- NB: the only difference between the two assertion types is the priority that the propagation step occurs at
                   -- the verifier will finish any widening steps it has before processing any deferred propagation steps
-                  choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, PriorityDeferredPropagation)
-                  choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, PriorityPropagation)
-                  choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, PriorityDeferredPropagation)
-                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, PriorityDeferredPropagation)
+                  choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, RefineUsingExactEquality, PriorityDeferredPropagation)
+                  choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, RefineUsingExactEquality, PriorityPropagation)
+                  choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, RefineUsingExactEquality, PriorityDeferredPropagation)
+                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingExactEquality, PriorityDeferredPropagation)
+                  choice "Avoid difference with path-sensitive equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingIntraBlockPaths, PriorityPropagation)
               False -> return Nothing
 
             case mcondK of
-              Just (condK, p) ->  do
-                let do_propagate = shouldPropagate (getPropagationKind pg nd condK)
+              Just (condK, refineK, p) ->  do
+                let do_propagate = case p of
+                      PriorityPropagation -> True
+                      _ -> shouldPropagate (getPropagationKind pg nd condK)
+
                 simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
-                eqSeq_simp <- PSi.applySimplifier simplifier eqSeq
+                eqSeq_simp <- case refineK of
+                  RefineUsingExactEquality -> PSi.applySimplifier simplifier eqSeq
+                  RefineUsingIntraBlockPaths -> do
+                    eqSeq_paths <- strengthenPredicate [Some eqSeq] eqSeq
+                    PSi.applySimplifier simplifier eqSeq_paths
+
                 withPG pg $ do
                   liftEqM_ $ addToEquivCondition scope nd condK eqSeq_simp
                   liftPG $ do
-                    when do_propagate $
+                    when do_propagate $ do
                       modify $ queueAncestors (priority p) nd
+                      when ((condK, p) == (ConditionEquiv, PriorityPropagation)) $
+                        modify $ setPropagationKind nd ConditionEquiv PropagateOnce
                     modify $ dropPostDomains nd (priority PriorityDomainRefresh)
                     modify $ queueNode (raisePriority (priority PriorityNodeRecheck)) nd
                   return Nothing
@@ -2598,9 +2614,9 @@ combineOverrides ::
   PPa.PatchPairC (PA.StubOverride arch) ->
   PA.StubOverride arch
 combineOverrides (PPa.PatchPairSingle _ (Const f)) = f
-combineOverrides (PPa.PatchPairC (PA.StubOverride f1) (PA.StubOverride f2)) = PA.StubOverride $ \sym wsolver -> do
-  f1' <- f1 sym wsolver
-  f2' <- f2 sym wsolver
+combineOverrides (PPa.PatchPairC (PA.StubOverride f1) (PA.StubOverride f2)) = PA.StubOverride $ \sym archInfo wsolver -> do
+  f1' <- f1 sym archInfo wsolver
+  f2' <- f2 sym archInfo wsolver
   let fnPair = PPa.PatchPairC f1' f2'
   return $ PA.StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
     let (bin :: PBi.WhichBinaryRepr bin) = knownRepr
@@ -2877,12 +2893,24 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
     False -> do
       ov <- mergeStubOverrides archData stubPair ovPair
       wsolver <- getWrappedSolver
+      -- FIXME: should we pass in the archInfo for each binary to each stub separately?
+      -- currently it's only used to get the architecture endianness, which realistically
+      -- shouldn't change between the patched and original binaries
+      origBinary <- PMC.binary <$> getBinCtx' PBi.OriginalRepr
+      let archInfo = PA.binArchInfo origBinary
+      unfold_simplifier <- PSi.mkSimplifier PSi.unfoldDefsStrategy
+      pretty_simplifier <- PSi.mkSimplifier PSi.prettySimplifier
 
       outputs <- IO.withRunInIO $ \runInIO ->
-        PA.withStubOverride sym wsolver ov $ \f -> runInIO $ PPa.forBins $ \bin -> do
-          output <- PPa.get bin $ PS.simOut bundle
-          nextSt <- liftIO $ f (PS.simOutState output)
-          return $ output { PS.simOutState = nextSt }
+        PA.withStubOverride sym archInfo wsolver ov $ \f -> runInIO $ do
+          {- out <- PSi.applySimplifier unfold_simplifier (TF.fmapF PS.simOutState (PS.simOut bundle))
+          nextStPair_ <- liftIO $ f out
+          nextStPair <- PSi.applySimplifier unfold_simplifier nextStPair_ -}
+          nextStPair <- liftIO $ f (TF.fmapF PS.simOutState (PS.simOut bundle))
+          PPa.forBins $ \bin -> do
+            nextSt <- PPa.get bin nextStPair
+            output <- PPa.get bin (PS.simOut bundle)
+            return $ output { PS.simOutState = nextSt }
       let bundle' = bundle { PS.simOut = outputs }
       gr1 <- checkObservables scope currBlock bundle' d gr0
       case mpRetPair of

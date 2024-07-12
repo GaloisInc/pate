@@ -90,6 +90,8 @@ module What4.ExprHelpers (
   , W4SBV.bvPrettySimplify
   , W4SBV.memReadPrettySimplify
   , W4SBV.collapseBVOps
+  , bvUMax
+  , bvUMin
   ) where
 
 import           GHC.TypeNats
@@ -147,6 +149,30 @@ import qualified Data.Parameterized.SetF as SetF
 import Data.Maybe (fromMaybe)
 import qualified What4.Simplify.Bitvector as W4SBV
 import           What4.Simplify.Bitvector (asSimpleSum)
+
+bvUMax :: 
+  W4.IsExprBuilder sym =>
+  IO.MonadIO m =>
+  1 <= w =>
+  sym ->
+  W4.SymBV sym w ->
+  W4.SymBV sym w ->
+  m (W4.SymBV sym w)
+bvUMax sym bv1 bv2 = IO.liftIO $ do
+  ult <- W4.bvUlt sym bv1 bv2
+  W4.bvIte sym ult bv2 bv1
+
+bvUMin :: 
+  W4.IsExprBuilder sym =>
+  IO.MonadIO m =>
+  1 <= w =>
+  sym ->
+  W4.SymBV sym w ->
+  W4.SymBV sym w ->
+  m (W4.SymBV sym w)
+bvUMin sym bv1 bv2 = IO.liftIO $ do
+  ult <- W4.bvUlt sym bv1 bv2
+  W4.bvIte sym ult bv1 bv2
 
 -- | Sets the abstract domain of the given integer to assume
 --   that it is positive. 

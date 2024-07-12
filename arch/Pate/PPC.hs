@@ -29,7 +29,7 @@ where
 
 import           Control.Lens ( (^.), (^?) )
 import qualified Control.Lens as L
-import           Control.Applicative ( (<|>) )
+import           Control.Applicative ( (<|>), Const (..) )
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.ByteString.Char8 as BSC
@@ -85,6 +85,11 @@ import Data.Macaw.CFG.Core
 import qualified What4.JSON as W4S
 import qualified Data.Macaw.CFG as MC
 import qualified Pate.SimState as PS
+import qualified Data.Parameterized.Map as MapF
+import qualified Data.Macaw.AbsDomain.AbsState as MA
+import qualified Data.Set as Set
+import qualified Pate.Memory.MemTrace as PMT
+import Data.Data (Typeable)
 
 -- | There is just one dedicated register on ppc64
 data PPC64DedicatedRegister tp where
@@ -175,6 +180,7 @@ instance PA.ValidArch PPC.PPC32 where
     PPC.PPC_FPSCR -> True
     PPC.PPC_VSCR -> True
     PPC.PPC_XER -> True
+    PPC.PPC_LNK -> True
     _ -> False
   displayRegister = display
   argumentNameFrom = argumentNameFromGeneric
@@ -265,22 +271,64 @@ handleExternalCall = PVE.ExternalDomain $ \sym -> do
 argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
+
+specializedBufferWrite :: forall arch v. (arch ~ PPC.AnyPPC v, 16 <= SP.AddrWidth v, MS.SymArchConstraints arch) => PA.StubOverride arch
+specializedBufferWrite = 
+    PA.mkEventOverride "CFE_SB_TransmitBuffer" mkEvent 0x30 (gpr 3) (gpr 3)
+    where
+      mkEvent :: CB.IsSymInterface sym => sym -> PMT.MemChunk sym (MC.ArchAddrWidth arch) -> IO (WI.SymBV sym (MC.ArchAddrWidth arch))
+      mkEvent sym chunk = do
+        let ptrW = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+        let concreteExpect :: Integer = 0x300
+        offset <- WI.bvLit sym ptrW (BVS.mkBV ptrW 4)
+        let bytes = WI.knownNat @2
+        PMT.BytesBV _ bv <- PMT.readFromChunk sym MC.BigEndian chunk offset bytes
+        let bits = WI.bvWidth bv
+        expect_value <- WI.bvLit sym bits (BVS.mkBV bits concreteExpect)
+        is_expect <- WI.isEq sym bv expect_value
+        zero <- WI.bvLit sym ptrW (BVS.zero ptrW)
+        expect_value' <- WI.bvLit sym ptrW (BVS.mkBV ptrW concreteExpect)
+        -- if we the bytes are as expected then return them
+        -- otherise, return zero
+        WI.baseTypeIte sym is_expect expect_value' zero
+
+-- FIXME: flags to make it equal?
+specializeSocketRead :: forall arch v. (Typeable arch, arch ~ PPC.AnyPPC v, 16 <= SP.AddrWidth v, MS.SymArchConstraints arch) => PA.StubOverride arch
+specializeSocketRead = 
+    PA.mkReadOverride "OS_SocketRecvFrom" (PPa.PatchPairSingle PB.PatchedRepr (Const f)) addrs lengths (gpr 3) (gpr 4) (gpr 5) (gpr 3)
+    where
+      addrs :: PPa.PatchPairC (Maybe (PA.MemLocation (MC.ArchAddrWidth arch)))
+      addrs = PPa.PatchPairC (Just (PA.MemIndPointer (PA.MemPointer 0x00013044) 0x7c)) (Just (PA.MemIndPointer (PA.MemPointer 0x00013044) 0x7c))
+
+      lengths :: PPa.PatchPairC (Maybe (MC.MemWord (MC.ArchAddrWidth arch)))
+      lengths = PPa.PatchPairC (Just 0x30) (Just 0x30)
+
+      f :: PA.MemChunkModify (MC.ArchAddrWidth arch)
+      f = PA.modifyConcreteChunk MC.BigEndian WI.knownNat (0x300 :: Integer) 2 4
+
 -- FIXME: clagged directly from ARM, registers may not be correct
-stubOverrides :: (MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
-stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 ) $ \fs ->
+stubOverrides :: (Typeable (PPC.AnyPPC v), MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
+stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r3 ) $ \fs ->
   lookup (PBl.fnSymBase fs) override_list
   where
     override_list =
-      [ ("malloc", PA.mkMallocOverride r0 r0)
+      [ ("malloc", PA.mkMallocOverride r3 r3)
       -- FIXME: arguments are interpreted differently for calloc
-      , ("calloc", PA.mkMallocOverride r0 r0)
+      , ("calloc", PA.mkMallocOverride r3 r3)
       -- FIXME: arguments are interpreted differently for reallolc
-      , ("realloc", PA.mkMallocOverride r0 r0)
-      , ("clock", PA.mkClockOverride r0)
-      , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
+      , ("realloc", PA.mkMallocOverride r3 r3)
+      , ("clock", PA.mkClockOverride r3)
+      , ("write", PA.mkWriteOverride "write" r3 r4 r5 r3)
       -- FIXME: fixup arguments for fwrite
-      , ("fwrite", PA.mkWriteOverride "fwrite" r0 r1 r2 r0)
-      , ("printf", PA.mkObservableOverride "printf" r0 r1)
+      , ("fwrite", PA.mkWriteOverride "fwrite" r3 r4 r5 r3)
+      , ("printf", PA.mkObservableOverride "printf" r3 r4)
+      
+      -- FIXME: added for relaySAT challenge problem
+      , ("CFE_SB_AllocateMessageBuffer", PA.mkMallocOverride' (Just (PA.MemIndPointer (PA.MemPointer 0x00013044) 0x7c)) r3 r3)
+      , ("OS_SocketRecvFrom", specializeSocketRead)
+      , ("CFE_SB_TransmitBuffer", specializedBufferWrite)
+      -- END relaySAT
+
       -- FIXME: default stubs below here
       ] ++
       (map mkDefault $
@@ -325,14 +373,22 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r0 
         , "console_println" -- FIXME: observable?
         , "console_error" -- FIXME: observable?
         , "console_print" -- FIXME: observable?
+        , "CFE_EVS_SendEvent"
+        , "CFE_ES_PerfLogAdd"
         ])
 
     mkNOPStub nm = (nm, PA.mkNOPStub nm)
-    mkDefault nm = (nm, PA.mkDefaultStubOverride nm r0)
+    mkDefault nm = (nm, PA.mkDefaultStubOverride nm r3)
 
-    r0 = gpr 0
-    r1 = gpr 1
-    r2 = gpr 2
+    -- r0 = gpr 0
+    -- r1 = gpr 1
+    -- r2 = gpr 2
+    r3 = gpr 3
+    r4 = gpr 4
+    r5 = gpr 5
+    -- r6 = gpr 6
+    -- r7 = gpr 7
+
 
 instance MCS.HasArchTermEndCase (PPC.PPCTermStmt v) where
   archTermCase = \case

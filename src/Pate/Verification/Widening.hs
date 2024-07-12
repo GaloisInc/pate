@@ -32,6 +32,7 @@ module Pate.Verification.Widening
   , getSomeGroundTrace
   , getTraceFromModel
   , addToEquivCondition
+  , strengthenPredicate
   ) where
 
 import           GHC.Stack
@@ -768,7 +769,9 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
         Just{} -> do
           -- take the condition of the target edge and bind it to
           -- the output state of the bundle
-          cond <- getEquivPostCondition scope bundle to condK gr
+          cond_ <- getEquivPostCondition scope bundle to condK gr
+          simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
+          cond <- PSi.applySimplifier simplifier cond_
 {-
 
 
@@ -1171,8 +1174,6 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         -- in a loss of soundness; dropping an entry means that the resulting domain
         -- is effectively now assuming equality on that entry.
 
-        -- simplifier <- PSi.getSimplifier
-        --domEq_simplified <- PSi.applySimplifier simplifier (PAD.absDomEq postResult)
         let domEq = PAD.absDomEq postResult
         eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domEq) $ \loc (se :: PS.ScopedExpr sym tp pre) ->
            subTrace @"loc" (PL.SomeLocation loc) $ do
@@ -1188,6 +1189,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
                   se' <- liftIO $ PS.applyScopeCoercion sym pre_to_post se
                   e'' <- liftIO $ PS.applyScopeCoercion sym post_to_pre se'
                   curAsms <- currentAsm
+
                   case x of
                     PC.ThrowOnEqRescopeFailure -> do
                       void $ emitError $ PEE.InnerSymEquivalenceError $ PEE.RescopingFailure curAsms se e''
@@ -1195,8 +1197,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
                       void $ emitWarning $ PEE.InnerSymEquivalenceError $ PEE.RescopingFailure curAsms se e''
                   return Nothing
 
-        let evSeq = PAD.absDomEvents postResult
-        --nextSeq <- 
+        let evSeq = PAD.absDomEvents postResult 
         evSeq_post <- subTree "events" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre evSeq) $ \loc se ->
           subTrace @"loc" (PL.SomeLocation loc) $ do
             emitTraceLabel @"expr" "input" (Some (PS.unSE se))
@@ -1404,6 +1405,7 @@ widenPostcondition scope bundle preD postD0 = do
              _ -> panic Verifier "widenPostcondition" [ "Unexpected widening case"]
          Sat evalFn -> do
            emit PE.SolverFailure
+           emitTrace @"message" "equivalence failure"
            if i <= 0 then
              -- we ran out of gas
              do slice <- PP.simBundleToSlice scope bundle
@@ -1462,7 +1464,7 @@ widenPostcondition scope bundle preD postD0 = do
           liftIO $ PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
 
         res2 <- case postVals of
-          PPa.PatchPairSingle bin (Const valPost) -> 
+          PPa.PatchPairSingle bin (Const valPost) ->
             PL.foldLocation @sym @arch sym valPost (Left postD) (widenOnce WidenValue (Gas i) (Just (Some bin)))
           PPa.PatchPairC valPostO valPostP -> do
             res1 <- PL.foldLocation @sym @arch sym valPostO (Left postD) (widenOnce WidenValue (Gas i) (Just (Some PBi.OriginalRepr)))
@@ -1542,6 +1544,7 @@ getInitalAbsDomainVals bundle preDom = withTracing @"debug" "getInitalAbsDomainV
     out <- PPa.get bin (PS.simOut bundle)
     pre <- PPa.get bin (PAD.absDomVals preDom)
     PAD.initAbsDomainVals sym eqCtx getConcreteRange out pre
+
 
 widenUsingCounterexample ::
   sym ->

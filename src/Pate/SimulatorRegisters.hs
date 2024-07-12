@@ -9,13 +9,17 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Pate.SimulatorRegisters (
   CrucBaseTypes,
   MacawRegEntry(..),
   MacawRegVar(..),
   macawRegEntry,
-  ptrToEntry
+  macawRegBVWidth, 
+  ptrToEntry,
+  bvToEntry
   ) where
 
 import qualified Data.Macaw.Symbolic as MS
@@ -53,6 +57,13 @@ data MacawRegEntry sym (tp :: MT.Type) where
     , macawRegValue :: CS.RegValue sym (MS.ToCrucibleType tp)
     } ->
     MacawRegEntry sym tp
+
+
+macawRegBVWidth ::  MacawRegEntry sym (MT.BVType ptrW) -> WI.NatRepr ptrW
+macawRegBVWidth (MacawRegEntry repr _) = case repr of
+  CLM.LLVMPointerRepr ptrW -> ptrW
+  _ -> error $ "macawRegBVWidth: unexpected type:" ++ show repr
+
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MacawRegEntry sym tp) where
   w4Serialize (MacawRegEntry r v) = case r of
@@ -103,6 +114,17 @@ ptrToEntry ::
   MacawRegEntry sym (MT.BVType w)
 ptrToEntry ptr@(CLM.LLVMPointer _ bv) = case WI.exprType bv of
   WI.BaseBVRepr w -> MacawRegEntry (CLM.LLVMPointerRepr w) ptr
+
+bvToEntry ::
+  WI.IsExprBuilder sym =>
+  sym ->
+  WI.SymBV sym w ->
+  IO (MacawRegEntry sym (MT.BVType w))
+bvToEntry sym bv = do
+  zero <- WI.natLit sym 0
+  WI.BaseBVRepr w <- return $ WI.exprType bv
+  return $ MacawRegEntry (CLM.LLVMPointerRepr w) (CLM.LLVMPointer zero bv)
+
 
 instance PEM.ExprMappable sym (MacawRegEntry sym tp) where
   mapExpr sym f entry = do

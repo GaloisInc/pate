@@ -50,6 +50,9 @@ module Pate.EventTrace
 , compareExternalCallData
 , ExternalCallData(..)
 , MemChunk(..)
+, copyMemChunkInto
+, concreteMemChunk
+, muxMemChunk
 
 ) where
 
@@ -97,6 +100,9 @@ import qualified What4.Expr.ArrayUpdateMap as AUM
 import Data.Data (Typeable)
 import GHC.TypeLits
 import qualified Data.Macaw.Memory as MC
+import qualified What4.Concrete as W4C
+import Data.Foldable (foldlM)
+import Data.Parameterized (Some(..))
 
 -- Needed since SymBV is a type alias
 newtype SymBV' sym w = SymBV' { unSymBV :: SymBV sym w }
@@ -408,6 +414,81 @@ instance PEM.ExprMappable sym (MemChunk sym ptrW) where
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemChunk sym ptrW) where
   w4Serialize (MemChunk a b c) = W4S.object ["mem_arr" .== a, "base" .== b, "len" .== c]
+
+-- | Overwrite the contents of a base memory chunk with new contents at a
+--   given offset.
+copyMemChunkInto :: 
+  IsSymExprBuilder sym =>
+  1 <= ptrW =>
+  sym ->
+  MemChunk sym ptrW {- ^ base chunk -} ->
+  SymBV sym ptrW {- ^ index into base chunk to copy contents -} ->
+  MemChunk sym ptrW {- ^ new contents -} ->
+  IO (MemChunk sym ptrW)
+copyMemChunkInto sym baseChunk startIdx srcChunk = do
+  baseIdx <- bvAdd sym (memChunkBase baseChunk) startIdx
+  arr' <- case asConcrete (memChunkLen srcChunk) of
+    Just (W4C.ConcreteBV ptrW srcLenBV) -> do
+      let srcLen = BV.asUnsigned srcLenBV
+      upds <- forM [0 .. srcLen] $ \idx -> do
+        idxSym <- bvLit sym ptrW (BV.mkBV ptrW idx)
+        srcIdx <- bvAdd sym (memChunkBase srcChunk) idxSym
+        -- chunk base + starting index + byte index
+        baseIdx' <- bvAdd sym baseIdx idxSym
+        srcByte <- arrayLookup sym (memChunkArr srcChunk) (Ctx.singleton srcIdx)
+        return (Ctx.singleton baseIdx', srcByte)
+      foldlM (\a (baseIdx', srcByte) -> arrayUpdate sym a baseIdx' srcByte) (memChunkArr baseChunk) upds
+    _ ->
+      arrayCopy sym (memChunkArr baseChunk) baseIdx (memChunkArr baseChunk) (memChunkBase baseChunk) (memChunkLen srcChunk)
+  baseTop <- bvAdd sym baseIdx (memChunkLen srcChunk)
+  -- we may extend the size of the base chunk if we write bytes past the top of
+  -- its contents
+  len' <- WEH.bvUMax sym (memChunkLen baseChunk) baseTop
+  return $ baseChunk { memChunkArr = arr', memChunkLen = len'}
+
+
+-- | Create a 'MemChunk' with concrete contents.
+concreteMemChunk ::
+  IsSymExprBuilder sym =>
+  Integral x =>
+  1 <= ptrW =>
+  sym ->
+  MC.Endianness ->
+  NatRepr ptrW ->
+  x {- ^ concrete contents (clamped to number of bytes ) -} ->
+  Natural {- ^ number of bytes  -} ->
+  IO (MemChunk sym ptrW)
+concreteMemChunk sym endianness ptrW contents bytesLen = do
+  Some bitsLen <- return $ mkNatRepr (bytesLen * 8)
+  let contentsBV = BV.unsignedClamp bitsLen (fromIntegral contents)
+  let mbytes = case endianness of
+        MC.BigEndian -> BV.asBytesBE bitsLen contentsBV
+        MC.LittleEndian -> BV.asBytesLE bitsLen contentsBV
+  bytes <- case mbytes of
+    Just bytes -> return bytes
+    Nothing -> fail "concreteMemChunk: impossible"
+  let arrTp = Ctx.singleton (BaseBVRepr ptrW)
+  let indices = map (Ctx.singleton . BVIndexLit ptrW . BV.mkBV ptrW . fromIntegral) [0 .. bytesLen]
+  bytesSym <- mapM (bvLit sym (knownNat @8) . BV.word8) bytes
+  let contentsBytes = AUM.fromAscList (BaseBVRepr (knownNat @8)) (zip indices bytesSym)
+  zeroByte <- bvLit sym (knownNat @8) (BV.zero (knownNat @8))
+  arr <- arrayFromMap sym arrTp contentsBytes zeroByte
+  zeroIndex <- bvLit sym ptrW (BV.zero ptrW)
+  lenSymBV <- bvLit sym ptrW (BV.mkBV ptrW (fromIntegral bytesLen))
+  return $ MemChunk arr zeroIndex lenSymBV
+
+muxMemChunk ::
+  IsSymExprBuilder sym =>
+  sym ->
+  Pred sym ->
+  MemChunk sym ptrW ->
+  MemChunk sym ptrW ->
+  IO (MemChunk sym ptrW)
+muxMemChunk sym p chunkT chunkF = do
+  arr <- baseTypeIte sym p (memChunkArr chunkT) (memChunkArr chunkF)
+  base <- baseTypeIte sym p (memChunkBase chunkT) (memChunkBase chunkF)
+  len <- baseTypeIte sym p (memChunkLen chunkT) (memChunkLen chunkF)
+  return $ MemChunk arr base len
 
 compareTrees :: OrdF (SymExpr sym) => Ord tp => MuxTree sym tp -> MuxTree sym tp -> Ordering
 compareTrees mt1 mt2 = 
