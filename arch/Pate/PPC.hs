@@ -322,9 +322,13 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r3 
       -- FIXME: fixup arguments for fwrite
       , ("fwrite", PA.mkWriteOverride "fwrite" r3 r4 r5 r3)
       , ("printf", PA.mkObservableOverride "printf" r3 r4)
+      
+      -- FIXME: added for relaySAT challenge problem
       , ("CFE_SB_AllocateMessageBuffer", PA.mkMallocOverride' (Just (PA.MemIndPointer (PA.MemPointer 0x00013044) 0x7c)) r3 r3)
       , ("OS_SocketRecvFrom", specializeSocketRead)
       , ("CFE_SB_TransmitBuffer", specializedBufferWrite)
+      -- END relaySAT
+
       -- FIXME: default stubs below here
       ] ++
       (map mkDefault $

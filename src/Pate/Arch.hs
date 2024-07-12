@@ -618,7 +618,7 @@ mkReadOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkReadOverride _nm chunkOverrides bufferOverrides lenOverrides src_reg buf_reg len_reg rOut = StubOverride $ \(sym :: sym) archInfo wsolver -> return $ StateTransformer2 $ \ stPair -> do
+mkReadOverride nm chunkOverrides bufferOverrides lenOverrides src_reg buf_reg len_reg rOut = StubOverride $ \(sym :: sym) archInfo wsolver -> return $ StateTransformer2 $ \ stPair -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   let bv_repr = W4.BaseBVRepr w_mem
   let byte_repr = W4.BaseBVRepr (W4.knownNat @8)
@@ -626,7 +626,13 @@ mkReadOverride _nm chunkOverrides bufferOverrides lenOverrides src_reg buf_reg l
   -- FIXME: formally this should be an interpreted function on the source register, not just an arbitrary shared value
   -- FIXME: this does not capture the fact that usually the return value is signed, where negative values represent
   -- various error conditions (aside from simply having no more content available).
-  bytes_available <- W4.freshConstant sym (W4.safeSymbol "bytes_available") W4.BaseBoolRepr
+
+  -- FIXME: this makes "bytes_available" globally unique, which is not quite right. We need a model of
+  -- the input stream and have this be a function of reading a particular part of that stream.
+
+  bytes_available_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "_bytes_available") Ctx.empty W4.BaseBoolRepr
+  bytes_available <- W4.applySymFn sym bytes_available_fn Ctx.empty 
+  -- W4.freshConstant sym (W4.safeSymbol "bytes_available") W4.BaseBoolRepr
   zero <- IO.liftIO $ W4.bvLit sym w_mem (BVS.zero w_mem)
   -- for simplicity we assume that the symbolic chunk is exactly as large as the requested length (the max
   -- length of both sides)
@@ -643,7 +649,12 @@ mkReadOverride _nm chunkOverrides bufferOverrides lenOverrides src_reg buf_reg l
   available_bytes <- IO.liftIO $ PVC.resolveSingletonSymbolicAsDefault wsolver available_bytes_
     
   let arr_repr = W4.BaseArrayRepr (Ctx.singleton bv_repr) byte_repr
-  chunk_arr <- IO.liftIO $ W4.freshConstant sym (W4.safeSymbol "undefined_read")  arr_repr
+
+  -- FIXME: as with "bytes_available" this should not be globally unique, but rather a function
+  -- of where in the stream we're reading from
+  chunk_arr_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "_undefined_read") Ctx.empty arr_repr
+  chunk_arr <- IO.liftIO $ W4.applySymFn sym chunk_arr_fn Ctx.empty
+  --chunk_arr <- IO.liftIO $ W4.freshConstant sym (W4.safeSymbol "undefined_read")  arr_repr
   let chunk = PMT.MemChunk chunk_arr zero available_bytes
   PPa.runPatchPairT $ PPa.forBins $ \bin -> do
     --chunk_arr <- IO.liftIO $ W4.freshConstant sym W4.emptySymbol arr_repr

@@ -1696,8 +1696,8 @@ readFromChunk sym endianness (MemChunk baseArray chunk_offset _) start_offset nu
         Right LeqProof -> do
           rest <- go rest_len
           case endianness of
-            LittleEndian -> concatBytes sym (BytesBV (knownNat @1) byte) rest
-            BigEndian -> concatBytes sym rest (BytesBV (knownNat @1) byte)
+            BigEndian -> concatBytes sym (BytesBV (knownNat @1) byte) rest
+            LittleEndian -> concatBytes sym rest (BytesBV (knownNat @1) byte)
 
 
 -- | Fetch a byte from the given 'MemChunk', with a predicate
@@ -1803,7 +1803,7 @@ writeChunk :: forall sym ptrW.
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
-  Endianness ->
+  Endianness -> -- FIXME: endianness actually doesn't matter here
   MemChunk sym ptrW ->
   LLVMPtr sym ptrW {- ^ address to write chunk into -} ->
   Pred sym {- ^ symbolic condition for entire write -} ->
@@ -1821,6 +1821,8 @@ writeChunk sym endianness chunk ptr cond mem = do
         Right LeqProof -> do
           zero_nat <- natLit sym 0
           zero <- bvLit sym ptrW (BV.zero ptrW)
+          -- FIXME: we can actually just arbitrarily pick an endianness since it only matters that
+          -- the read and write are consistent
           BytesBV _ chunk_bv <- readFromChunk sym endianness chunk zero numBytes
           let memRepr = BVMemRepr numBytes endianness
           execStateT (doCondWriteMem sym cond (addrWidthRepr ptrW) ptr (LLVMPointer zero_nat chunk_bv) memRepr) mem

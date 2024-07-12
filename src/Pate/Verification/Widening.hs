@@ -1174,9 +1174,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
         -- in a loss of soundness; dropping an entry means that the resulting domain
         -- is effectively now assuming equality on that entry.
 
-        -- simplifier <- PSi.getSimplifier
-        --domEq_simplified <- PSi.applySimplifier simplifier (PAD.absDomEq postResult)
-        domEq <- applyCurrentAsms $ PAD.absDomEq postResult
+        let domEq = PAD.absDomEq postResult
         eq_post <- subTree "equivalence" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre domEq) $ \loc (se :: PS.ScopedExpr sym tp pre) ->
            subTrace @"loc" (PL.SomeLocation loc) $ do
             emitTraceLabel @"expr" "input" (Some (PS.unSE se))
@@ -1199,8 +1197,7 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
                       void $ emitWarning $ PEE.InnerSymEquivalenceError $ PEE.RescopingFailure curAsms se e''
                   return Nothing
 
-        evSeq <- applyCurrentAsms $ PAD.absDomEvents postResult
-        --nextSeq <- 
+        let evSeq = PAD.absDomEvents postResult 
         evSeq_post <- subTree "events" $ fmap PS.unWS $ PS.scopedLocWither @sym @arch sym (PS.WithScope @_ @pre evSeq) $ \loc se ->
           subTrace @"loc" (PL.SomeLocation loc) $ do
             emitTraceLabel @"expr" "input" (Some (PS.unSE se))

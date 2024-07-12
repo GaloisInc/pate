@@ -2903,9 +2903,10 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
 
       outputs <- IO.withRunInIO $ \runInIO ->
         PA.withStubOverride sym archInfo wsolver ov $ \f -> runInIO $ do
-          out <- PSi.applySimplifier unfold_simplifier (TF.fmapF PS.simOutState (PS.simOut bundle))
+          {- out <- PSi.applySimplifier unfold_simplifier (TF.fmapF PS.simOutState (PS.simOut bundle))
           nextStPair_ <- liftIO $ f out
-          nextStPair <- PSi.applySimplifier unfold_simplifier nextStPair_
+          nextStPair <- PSi.applySimplifier unfold_simplifier nextStPair_ -}
+          nextStPair <- liftIO $ f (TF.fmapF PS.simOutState (PS.simOut bundle))
           PPa.forBins $ \bin -> do
             nextSt <- PPa.get bin nextStPair
             output <- PPa.get bin (PS.simOut bundle)
