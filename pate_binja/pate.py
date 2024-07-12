@@ -376,9 +376,7 @@ class PateWrapper:
             # Add block exit
             exit_id = get_exit_id(trace_node, context)
             # TODO: Better way to detect this?
-            if exit_id == 'None' or exit_id.startswith('return_target'):
-                pass
-            else:
+            if not(exit_id.startswith('None') or exit_id.startswith('return_target')):
                 exit_node = cfar_graph.add_node(exit_id, 'junk', {})
                 cfar_node.addExit(exit_node)
                 if self.debug_cfar:
@@ -1315,6 +1313,7 @@ neg_op_map = {
     'bvsle': 'bvsgt',
     'bvsgt': 'bvsle',
     'bvsge': 'bvslt',
+    'intle': 'intgt',
     '=': '!=',
     '!=': '='
 }
@@ -1328,6 +1327,10 @@ infix_op_map = {
     'bvsle': '<=',
     'bvsgt': '>',
     'bvsge': '>=',
+    'intlt': '<',
+    'intle': '<=',
+    'intgt': '>',
+    'intge': '>=',
     'andp': '&',
     'orp': '|',
     'LTs' : '<',
@@ -1370,6 +1373,10 @@ def simplify_sexp(sexp, env=None):
     # Simplify read{LE|GE}N(memory, ADDR) -> read{LE|GE}N(ADDR)
     if re.fullmatch(r'read(?:LE|GE)\d+', op) and len(arg) == 2 and arg[0] == 'memory':
         return [op, arg[1]]
+
+    # Simplify sbvToInteger(x) => x
+    if op == 'sbvToInteger' and len(arg) == 1:
+        return arg[0]
 
     # Simplify multiply by 1
     if op == 'bvmul' and len(arg) == 2:
@@ -1616,7 +1623,7 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
 def get_demo_files():
     files = []
     demoDir = pathlib.Path(os.getenv('PATE_BINJA_DEMOS'))
-    included_extensions = ['run-config', 'replay']
+    included_extensions = ['run-config.json', 'replay']
     allFiles = demoDir.rglob('*')
     files = [str(fn) for fn in allFiles
                   if any(fn.name.endswith(ext) for ext in included_extensions)]

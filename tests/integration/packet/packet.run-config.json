@@ -1,0 +1,7 @@
+{
+  "original": "exe/packet.exe",
+  "patched": "exe/packet.patched.exe",
+  "args": [
+    "-s parse_packet"
+  ]
+}

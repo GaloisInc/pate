@@ -1,31 +1,64 @@
-
-\section{Building the PATE Verifier}
+\section{Installing the \pate{} Verifier}
 \label{sec:build-pate-verif}
 
-The pate tool is written in Haskell and requires the GHC compiler
-(version 8.6-8.10) and the cabal build tool to compile.  Building from
-source can be accomplished as follows:
+\subsection{Recommended: Docker Container Image}
+
+We recommending using \pate{} via Docker.
+
+If available, load the Docker image file from a file using:
+\begin{verbatim}
+  docker load -i /path/to/pate.tar
+\end{verbatim}
+
+Otherwise, build the Docker image from the \pate{} source repo.
+Building \pate{} is a memory-intensive process.
+We build the Docker image in an environment with 16GB of RAM available to Docker.
+Build the image using the following commands:
+
+\begin{verbatim}
+  git clone git@github.com:GaloisInc/pate.git
+  cd pate
+  git submodule update --init
+  docker build . -t pate
+\end{verbatim}
+
+\pate{} may subsequently be used via Docker, such as:
+
+\begin{verbatim}
+  docker run --rm -it \
+    --platform linux/amd64 \
+    -v "$(pwd)"/tests/integration/packet/exe:/target \
+    pate \
+    --original /target/packet.exe \
+    --patched /target/packet.patched.exe \
+    -s parse_packet
+\end{verbatim}
+
+Please see later sections for detailed usage information.
+
+\subsection{Alternative: Building from Source}
+
+Alternatively, \pate{} may be compiled from source and run on a host system.
+The \pate{} tool is written in Haskell and requires the GHC compiler\footnote{\url{https://www.haskell.org/ghc/}} and cabal\footnote{\url{https://www.haskell.org/cabal/}} to build.
+
+The current version of \pate{} is developed using GHC version 9.6.2 and cabal version 3.10.2.0.
+Additionally, the verifier requires a SMT solver to be available in \texttt{PATH}.
+We recommend \texttt{yices}.
+The \texttt{z3} and \texttt{cvc4} solvers may also work but are not regularly tested with \pate{}.
+
+Building from source can be accomplished as follows:
 \begin{verbatim}
   git clone git@github.com:GaloisInc/pate.git
   cd pate
   git submodule update --init
   cp cabal.project.dist cabal.project
   cabal configure pkg:pate
-  pate.sh --help
-\end{verbatim}
-The verifier also requires an SMT solver to be available in
-``PATH``. The default is ``yices``, but ``z3`` and ``cvc4`` are also
-supported.   The verifier can also be built as a Docker image:
-\begin{verbatim}
-  docker build . -t pate
-\end{verbatim}
-The correctness of the build can be confirmed by
-\begin{verbatim}
-docker run --rm -it -p 5000:5000 -v `pwd`/tests:/tests pate \
-     --original /tests/aarch32/const-args.original.exe \
-     --patched /tests/aarch32/const-args.patched.exe
+  ./pate.sh --help
 \end{verbatim}
 
+Note that \texttt{./pate.sh} should be used to build \pate{} (not \texttt{cabal build} or similar).
+
+Once built, invoke \pate{} locally using the \texttt{pate.sh} script.
 
 %%% Local Variables:
 %%% mode: latex

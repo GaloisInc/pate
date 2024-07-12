@@ -9,17 +9,17 @@ from threading import Thread, Condition
 from typing import Optional
 
 from binaryninja import execute_on_main_thread_and_wait, BinaryView, interaction, \
-    DisassemblyTextLine, Architecture, load, Settings
+    DisassemblyTextLine, Architecture, Settings
 from binaryninja.enums import BranchType, HighlightStandardColor, ThemeColor
 from binaryninja import InstructionTextToken as ITT
 from binaryninja.enums import InstructionTextTokenType as ITTType
 from binaryninja.flowgraph import FlowGraph, FlowGraphNode, FlowGraphEdge, EdgeStyle
 from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, FlowGraphWidget, \
-    FileContext, UIContext, ViewFrame, ViewLocation
+    FileContext, UIContext, ViewFrame, ViewLocation, getThemeColor
 
 # PySide6 import MUST be after import of binaryninjaui
 from PySide6.QtCore import Qt, QCoreApplication
-from PySide6.QtGui import QMouseEvent, QAction
+from PySide6.QtGui import QMouseEvent, QAction, QColor, QPaintEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
     QSplitter, QMenu, QTextEdit
 
@@ -316,6 +316,66 @@ class PateThread(Thread):
 #     pt.start()
 
 
+class DiffWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.linesA = None
+        self.labelA = None
+        self.linesB = None
+        self.labelB = None
+        self.theme = None
+
+        self.diffField = QTextEdit(self)
+        self.diffField.setReadOnly(True)
+        self.diffField.setFont({"Courier"})
+
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(self.diffField)
+        self.setLayout(main_layout)
+
+    def clear(self, msg):
+        self.linesA = None
+        self.labelA = None
+        self.linesB = None
+        self.labelB = None
+        self.redisplay()
+
+    def setLinesNoDiff(self, lines, label):
+        self.linesA = lines
+        self.labelA = label
+        self.linesB = None
+        self.labelB = None
+        self.redisplay()
+
+    def setLinesDiff(self, linesA, labelA, linesB, labelB):
+        self.linesA = linesA
+        self.labelA = labelA
+        self.linesB = linesB
+        self.labelB = labelB
+        self.redisplay()
+
+    def paintEvent(self, e: QPaintEvent):
+        # If the theme is different, redisplay
+        theme = Settings().get_string("ui.theme.name")
+        if self.theme != theme:
+            self.theme = theme
+            self.redisplay()
+
+    def redisplay(self):
+        if self.linesA is not None and self.linesB is not None:
+            # Show diff
+            html = generateHtmlDiff(self.linesA, self.labelA, self.linesB, self.labelB)
+            self.diffField.setHtml(html)
+        elif self.linesA is None and self.linesB is not None:
+            # Just linesA, no diff
+            text = self.labelA + "\n"
+            text += '\n'.join(self.lineA)
+            self.diffField.setText(text)
+        else:
+            # Nothing to show
+            self.diffField.setText("None")
+
 class TraceWidget(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
@@ -324,14 +384,12 @@ class TraceWidget(QWidget):
         self.domainField.setReadOnly(True)
         self.domainField.setMaximumBlockCount(1000)
 
-        self.traceDiffField = QTextEdit()
-        self.traceDiffField.setReadOnly(True)
-        self.traceDiffField.setFont({"Courier"});
+        self.traceDiff = DiffWidget(self)
 
         vsplitter = QSplitter()
         vsplitter.setOrientation(Qt.Orientation.Vertical)
         vsplitter.addWidget(self.domainField)
-        vsplitter.addWidget(self.traceDiffField)
+        vsplitter.addWidget(self.traceDiff)
 
         main_layout = QHBoxLayout()
         main_layout.addWidget(vsplitter)
@@ -361,19 +419,23 @@ class TraceWidget(QWidget):
         if pw:
             originalLines, patchedLines = pw.injectBinjaDissembly(originalLines, patchedLines)
 
+        if label is None:
+            originalLabel = 'Original'
+            patchedLabel = 'Patched'
+        else:
+            originalLabel = f'{label} (original)'
+            patchedLabel = f'{label} (patched)'
+
         if hasOriginalTrace and hasPatchedTrace:
             # Both, show diff
-            html = generateHtmlDiff(originalLines, patchedLines, label)
-            self.traceDiffField.setHtml(html)
+            self.traceDiff.setLinesDiff(originalLines, originalLabel,
+                                        patchedLines, patchedLabel)
         elif hasOriginalTrace:
             # Only original
-            originalLines.insert(0, 'Original')
-            self.traceDiffField.setText('\n'.join(originalLines))
+            self.traceDiff.setLinesNoDiff(originalLines, originalLabel)
         else:
             # Only patched
-            patchedLines.insert(0, 'Patched')
-            self.traceDiffField.setText('\n'.join(patchedLines))
-
+            self.traceDiff.setLinesNoDiff(patchedLines, patchedLabel)
 
 
 class PateCfarExitDialog(QDialog):
@@ -453,17 +515,15 @@ class InstTreeDiffWidget(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
 
-        self.instDiffField = QTextEdit()
-        self.instDiffField.setReadOnly(True)
-        self.instDiffField.setFont({"Courier"});
+        self.instDiff = DiffWidget(self)
 
         main_layout = QHBoxLayout()
-        main_layout.addWidget(self.instDiffField)
+        main_layout.addWidget(self.instDiff)
         self.setLayout(main_layout)
 
     def setInstTrees(self, instTrees: dict, label: str = None):
         if not instTrees:
-            self.instDiffField.append("No Instruction Trees")
+            self.instDiff.clear("No Instruction Trees")
             return
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
@@ -485,16 +545,22 @@ class InstTreeDiffWidget(QWidget):
             pw.mcad_annotate_inst_tree(patchedInstTree, pbv)
             patchedLines = self.getInstTreeLines(patchedInstTree, pbv)
 
+        if label is None:
+            originalLabel = 'Original'
+            patchedLabel = 'Patched'
+        else:
+            originalLabel = f'{label} (original)'
+            patchedLabel = f'{label} (patched)'
+
         if hasOriginalInstTree and hasPatchedInstTree:
             # Both, show diff
-            html = generateHtmlDiff(originalLines, patchedLines, label)
-            self.instDiffField.setHtml(html)
+            self.instDiff.setLinesDiff(originalLines, originalLabel, patchedLines, patchedLabel)
         elif hasOriginalInstTree:
             # Only original
-            self.instDiffField.setPlainText('\n'.join(originalLines))
+            self.instDiff.setLinesNoDiff(originalLines, originalLabel)
         else:
             # Only patched
-            self.instDiffField.setPlainText('\n'.join(patchedLines))
+            self.instDiff.setLinesNoDiff(patchedLines, patchedLabel)
 
     def getInstTreeLines(self, instTree, bv, pre: str = '', cumu: int = 0):
 
@@ -731,12 +797,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
             if cfar_node.id.find(' vs ') >= 0:
                 # Per discussion with Dan, it does not make sense to highlight these.
-                # flow_node.highlight = HighlightStandardColor.BlueHighlightColor
                 pass
             elif cfar_node.id.find('(original') >= 0:
                 flow_node.highlight = HighlightStandardColor.GreenHighlightColor
             elif cfar_node.id.find('(patched)') >= 0:
-                flow_node.highlight = HighlightStandardColor.MagentaHighlightColor
+                flow_node.highlight = HighlightStandardColor.BlueHighlightColor
 
             self.flowGraph.append(flow_node)
             self.cfarToFlow[cfar_node.id] = flow_node
@@ -749,9 +814,13 @@ class MyFlowGraphWidget(FlowGraphWidget):
             for cfar_exit in cfar_node.exits:
                 flow_exit = self.cfarToFlow[cfar_exit.id]
                 if self.showCfarExitInfo(cfar_node, cfar_exit, simulate=True):
-                    edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.RedStandardHighlightColor)
+                    edgeStyle = EdgeStyle(width=1,
+                                          theme_color=ThemeColor.RedStandardHighlightColor,
+                                          )
                 else:
-                    edgeStyle = EdgeStyle(width=1, theme_color=ThemeColor.GraphNodeOutlineColor)
+                    edgeStyle = EdgeStyle(width=1,
+                                          theme_color=ThemeColor.GraphNodeOutlineColor
+                                          )
                 flow_node.add_outgoing_edge(BranchType.UserDefinedBranch, flow_exit, edgeStyle)
 
         self.setGraph(self.flowGraph)
@@ -827,7 +896,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
             d.eqCondField.appendPlainText(out.getvalue())
         d.setTrueTrace(cfarNode.trace_true)
         d.setFalseTrace(cfarNode.trace_false)
-        d.exec()
+        d.show()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
         edge = edgeTuple[0]
@@ -884,23 +953,65 @@ class MyFlowGraphWidget(FlowGraphWidget):
         d = PateCfarExitDialog(self)
         d.setWindowTitle(f'{d.windowTitle()} - {sourceCfarNode.id} exit to {exitCfarNode.id}')
         d.setTrace(trace, label)
-        d.exec()
+        d.show()
 
     def showInstTreeInfo(self, instTrees: dict, label: str):
         d = PateCfarInstTreeDialog(instTrees, label=label, parent=self)
         d.show()
 
 
-def generateHtmlDiff(originalLines: list[str], patchedLines: list[str], label: str = None) -> str:
-    if label:
-        fromdesc = f'{label} (original)'
-        todesc = f'{label} (patched)'
-    else:
-        fromdesc = f'Original'
-        todesc = f'Patched'
-
+def generateHtmlDiff(originalLines: list[str],
+                     originalLabel: str,
+                     patchedLines: list[str],
+                     patchedLabel: str) -> str:
     htmlDiff = HtmlDiff()
-    return htmlDiff.make_file(originalLines, patchedLines, fromdesc=fromdesc, todesc=todesc)
+    html = htmlDiff.make_file(originalLines,
+                              patchedLines,
+                              fromdesc=originalLabel,
+                              todesc=patchedLabel)
+
+    # Adjust colors
+    addColor = highlightBackgroundColor(getThemeColor(ThemeColor.GreenStandardHighlightColor))
+    chgColor = highlightBackgroundColor(getThemeColor(ThemeColor.YellowStandardHighlightColor))
+    delColor = highlightBackgroundColor(getThemeColor(ThemeColor.RedStandardHighlightColor))
+    hedColor = highlightBackgroundColor(QColor(217, 217, 217))
+    nxtColor = highlightBackgroundColor(QColor(179, 179, 179))
+
+    addHexRgb = addColor.name(format=QColor.NameFormat.HexRgb)
+    chgHexRgb = chgColor.name(format=QColor.NameFormat.HexRgb)
+    delHexRgb = delColor.name(format=QColor.NameFormat.HexRgb)
+    hedHexRgb = hedColor.name(format=QColor.NameFormat.HexRgb)
+    nxtHexRgb = nxtColor.name(format=QColor.NameFormat.HexRgb)
+
+    html = re.sub(r'.diff_add {background-color:#aaffaa}',
+                  f'.diff_add {{background-color:{addHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_chg {background-color:#ffff77}',
+                  f'.diff_chg {{background-color:{chgHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_sub {background-color:#ffaaaa}',
+                  f'.diff_sub {{background-color:{delHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_header {background-color:#e0e0e0}',
+                  f'.diff_header {{background-color:{hedHexRgb}}}',
+                  html)
+    html = re.sub(r'.diff_next {background-color:#c0c0c0}',
+                  f'.diff_next {{background-color:{nxtHexRgb}}}',
+                  html)
+
+    return html
+
+
+def mixColor(color1: QColor, color2: QColor, r) -> QColor:
+    return QColor(color1.red() * (1-r) + color2.red() * r,
+                  color1.green() * (1-r) + color2.green() * r,
+                  color1.blue() * (1-r) + color2.blue() * r,
+                  255)
+
+
+def highlightBackgroundColor(color: QColor, mixRatio=80/255) -> QColor:
+    darkColor: QColor = getThemeColor(ThemeColor.BackgroundHighlightDarkColor)
+    return mixColor(darkColor, color, mixRatio)
 
 
 def getInstArch(addr: int, bv: BinaryView) -> Architecture:

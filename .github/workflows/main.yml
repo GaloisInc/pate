@@ -48,11 +48,9 @@ jobs:
             --cache-from artifactory.galois.com:5025/pate/pate:refs-heads-master \
             -t pate
 
-      - name: Test Docker Image
+      - name: Docker Integration Test
         run: |
-          docker run --rm --entrypoint cabal pate run pate-test-aarch32 -- -p args-equal > out.log
-          cat out.log
-          grep -e "All .* tests passed" out.log || exit 1
+          docker run --rm --entrypoint tests/integration/packet/packet.exp pate
 
       - name: Push Docker image
         run: |
@@ -133,7 +131,7 @@ jobs:
         GITLAB_USER: ${{ env.GITLAB_USER }}
       run: |
         export CHALLENGE_DIR=${HOME}/programtargets
-        git clone --depth=1 https://${GITLAB_USER}:${GITLAB_TOKEN}@gitlab-ext.galois.com/pate/programtargets.git ${CHALLENGE_DIR}
+        git clone https://${GITLAB_USER}:${GITLAB_TOKEN}@gitlab-ext.galois.com/pate/programtargets.git ${CHALLENGE_DIR}
         cd tests
         make extras
 
