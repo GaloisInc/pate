@@ -21,6 +21,7 @@ module Pate.Verification.Simplify (
   , prettySimplifier
   , coreStrategy
   , applySimpStrategy
+  , unfoldDefsStrategy
   ) where
 
 import           Control.Monad (foldM)
@@ -239,6 +240,9 @@ unfoldDefsStrategy = WEH.joinStrategy $ withValid $ return $ WEH.SimpStrategy $ 
 prettySimplifier :: forall sym arch. SimpStrategy sym (EquivM_ sym arch)
 prettySimplifier = deepPredicateSimplifier <> base <> unfoldDefsStrategy <> deepPredicateSimplifier <> unfoldDefsStrategy <> base
   where
+    mem :: SimpStrategy sym (EquivM_ sym arch)
+    mem = WEH.joinStrategy $ withValid $ return WEH.memReadPrettySimplify
+
     base :: SimpStrategy sym (EquivM_ sym arch)
     base = WEH.joinStrategy $ withValid $ 
       return $ WEH.bvPrettySimplify <> WEH.memReadPrettySimplify <> WEH.collapseBVOps

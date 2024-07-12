@@ -50,7 +50,12 @@ module Pate.Arch (
   mkReadOverride,
   noMemChunkModify,
   modifyConcreteChunk,
-  MemChunkModify
+  MemChunkModify,
+  mkEventOverride,
+  mkMallocOverride',
+  mkArgPassthroughOverride,
+  MemLocation(..),
+  freshAtLocation
   ) where
 
 import           Control.Lens ( (&), (.~), (^.) )
@@ -113,10 +118,14 @@ import qualified Pate.PatchPair as PPa
 import Data.Parameterized.WithRepr (withRepr)
 import Data.Parameterized.Classes
 import qualified Control.Monad.IO.Class as IO
+import qualified System.IO as IO
 import Data.Functor.Const
 import qualified What4.ExprHelpers as WEH
 import Numeric.Natural
 import qualified What4.Expr.ArrayUpdateMap as AUM
+import qualified Data.Parameterized.TraversableF as TF
+import Data.Maybe
+import Pate.Memory
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -269,6 +278,7 @@ data StubOverride arch =
     (forall sym.
       LCB.IsSymInterface sym =>
       sym ->
+      MI.ArchitectureInfo arch ->
       PVC.WrappedSolver sym IO ->
       IO (StateTransformer sym arch))
 
@@ -279,11 +289,10 @@ data StateTransformer sym arch =
     StateTransformer2 (forall v. PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v)))
   | StateTransformer (forall bin v. PB.KnownBinary bin => PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin))
 
-
 mkStubOverride :: forall arch.
-  (forall sym bin v.W4.IsSymExprBuilder sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
+  (forall sym bin v. LCB.IsSymInterface sym => PB.KnownBinary bin => sym -> PS.SimState sym arch v bin -> IO (PS.SimState sym arch v bin)) ->
   StubOverride arch
-mkStubOverride f = StubOverride $ \sym _ -> return $ StateTransformer $ \st -> f sym st
+mkStubOverride f = StubOverride $ \sym _ _ -> return $ StateTransformer $ \st -> f sym st
 
 idStubOverride :: StubOverride arch
 idStubOverride = mkStubOverride $ \_ -> return
@@ -291,12 +300,13 @@ idStubOverride = mkStubOverride $ \_ -> return
 withStubOverride ::
   LCB.IsSymInterface sym =>
   sym ->
+  MI.ArchitectureInfo arch ->
   PVC.WrappedSolver sym IO ->
   StubOverride arch ->
   ((PPa.PatchPair (PS.SimState sym arch v) -> IO (PPa.PatchPair (PS.SimState sym arch v))) -> IO a) ->
   IO a
-withStubOverride sym wsolver (StubOverride ov) f = do
-  ov sym wsolver >>= \case
+withStubOverride sym archInfo wsolver (StubOverride ov) f = do
+  ov sym archInfo wsolver >>= \case
     StateTransformer2 ov' -> f ov'
     StateTransformer ov' -> 
       let ov'' stPair = case stPair of
@@ -334,15 +344,73 @@ mkMallocOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ register for fresh pointer -} ->
   StubOverride arch
 mkMallocOverride _rLen rOut = mkStubOverride $ \sym st -> do
+  (fresh_ptr, st') <- freshAlloc sym Nothing st
+  return (st' { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
+
+mkMallocOverride' ::
+  forall arch.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  Typeable arch =>
+  Maybe (MemLocation (MC.ArchAddrWidth arch)) ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ write fresh pointer here -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ register for fresh pointer -} ->
+  StubOverride arch
+mkMallocOverride' bufOverride rPtrLoc rOut = StubOverride $ \sym archInfo _wsolver -> do
+  alloc_success <- W4.freshConstant sym (W4.safeSymbol "alloc_success") W4.BaseBoolRepr
+  return $ StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
+    let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+    let ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue rPtrLoc
+
+    (fresh_ptr, st') <- case bufOverride of
+      Just ov -> do
+        (fresh_ptr, st') <- freshAtLocation sym st (MI.archEndianness archInfo) (Just 4) ov
+        return (PSR.ptrToEntry fresh_ptr, st' )
+      Nothing -> freshAlloc sym Nothing st
+
+    -- IO.liftIO $ IO.putStrLn (show $ (PS.simRegs st) ^. MC.boundValue rPtrLoc)
+          --ptrOffset <- W4.bvLit sym w_mem (BVS.mkBV w_mem (toInteger bufferOv))
+          --region <- W4.natLit sym 0
+          --let ptr = (CLM.LLVMPointer region ptrOffset)
+    --let memRepr = PMT.memWidthMemRepr (MI.archEndianness archInfo)  w_mem 
+    --mem' <- PMT.writeMemState @_ @arch sym (W4.truePred sym) (PMT.memState $ PS.simMem st) ptr memRepr (PSR.macawRegValue fresh_ptr)
+    --return (st' { PS.simMem = (PS.simMem st){PMT.memState = mem'}, PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
+    
+    nullPtr <- IO.liftIO $ CLM.mkNullPointer sym w_mem
+
+    ptr' <- IO.liftIO $ PMT.muxPtr sym alloc_success (PSR.macawRegValue fresh_ptr) nullPtr
+    return (st' { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ (PSR.ptrToEntry ptr')) })
+
+  -- | Return a freshly-allocated pointer with an optional region override.
+--   New max region is set to the given region + 1 if it is greater than the current max
+--   region (i.e. the new max region is guaranted to not clash with the returned pointer)
+freshAlloc ::
+  forall sym arch v bin.
+  LCB.IsSymInterface sym =>
+  MS.SymArchConstraints arch =>
+  sym ->
+  Maybe Integer ->
+  PS.SimState sym arch v bin ->
+  IO (PSR.MacawRegEntry sym (MT.BVType (MC.ArchAddrWidth arch)), PS.SimState sym arch v bin)
+freshAlloc sym mregion st = do
   let mr = PS.simMaxRegion st
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  mr_nat <- W4.integerToNat sym (PS.unSE mr)
+  this_region <- case mregion of
+    Just region -> W4.intLit sym region
+    Nothing -> return $ PS.unSE mr
   zero <- W4.bvLit sym w (BVS.mkBV w 0)
-  let fresh_ptr = PSR.ptrToEntry (CLM.LLVMPointer mr_nat zero)
-  mr_inc <- PS.forScopedExpr sym mr $ \sym' mr' -> do
+  next_region_nat <- W4.integerToNat sym this_region
+  let fresh_ptr = PSR.ptrToEntry (CLM.LLVMPointer next_region_nat zero)
+  next_region <- PS.forScopedExpr sym mr $ \sym' mr' -> do
+    cur_max <- case mregion of
+      Just region -> do
+        region_sym <- W4.intLit sym' region
+        W4.intMax sym' mr' region_sym
+      Nothing -> return mr'
     one <- W4.intLit sym' 1
-    W4.intAdd sym' mr' one
-  return (st { PS.simMaxRegion = mr_inc, PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
+    W4.intAdd sym' cur_max one
+  return (fresh_ptr, st { PS.simMaxRegion = next_region })
+
 
 -- | Defines an override for @clock@ that returns a value representing the current time.
 --   Takes a single register used to store the return value.
@@ -355,13 +423,32 @@ mkClockOverride ::
   MS.SymArchConstraints arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkClockOverride rOut = StubOverride $ \sym _ -> do
+mkClockOverride rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "current_time") (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+
+applyConcreteOverride :: 
+  LCB.IsSymInterface sym =>
+  1 <= ptrW =>
+  MC.MemWidth ptrW =>
+  sym -> 
+  PB.WhichBinaryRepr bin ->
+  PPa.PatchPairC (Maybe (MC.MemWord ptrW)) ->
+  PSR.MacawRegEntry sym (MT.BVType ptrW) ->
+  IO (PSR.MacawRegEntry sym (MT.BVType ptrW))
+applyConcreteOverride sym bin overridePair e = case PPa.getC bin overridePair of
+  Just (Just override) -> do
+    let ptrW = PSR.macawRegBVWidth e
+    ptrOffset <- W4.bvLit sym ptrW (BVS.mkBV ptrW (toInteger override))
+    region <- W4.natLit sym 0
+    let ptr = (CLM.LLVMPointer region ptrOffset)
+    return $ e { PSR.macawRegValue = ptr }
+  _ -> return e
+
 
 mkObservableOverride ::
   forall arch.
@@ -371,10 +458,9 @@ mkObservableOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r0 -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r1 -} ->
   StubOverride arch
-mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _wsolver -> do
+mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _archInfo _wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   let bv_repr = W4.BaseBVRepr w_mem
-
   -- FIXME: this is wrong, since this value needs to read from memory
   bv_fn <- W4U.mkUninterpretedSymFn sym ("written_" ++ show nm) (Ctx.empty Ctx.:> bv_repr) (W4.BaseBVRepr w_mem)
   return $ StateTransformer $ \st -> do
@@ -386,6 +472,36 @@ mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _wsolver -> do
     fresh_bv <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> r1_val) 
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue r0_reg) .~ ptr ) })
+
+mkEventOverride ::
+  forall arch ptrW.
+  16 <= MC.ArchAddrWidth arch =>
+  MS.SymArchConstraints arch =>
+  ptrW ~ (MC.ArchAddrWidth arch) =>
+  T.Text {- ^ name of call -} ->
+  (forall sym. LCB.IsSymInterface sym => sym -> PMT.MemChunk sym ptrW -> IO (W4.SymBV sym ptrW)) {- ^ compute return value for read chunk -} ->
+  (MC.MemWord (MC.ArchAddrWidth arch)) {- ^ concrete length to read -} ->
+  MC.ArchReg arch (MT.BVType ptrW) {- ^ buf -} ->
+  MC.ArchReg arch (MT.BVType ptrW) {- ^ return register -} ->
+  StubOverride arch
+mkEventOverride nm readChunk len buf_reg rOut = StubOverride $ \(sym :: sym) _archInfo _wsolver -> return $ StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
+  -- let (bin :: PB.WhichBinaryRepr bin) = knownRepr
+  let ptrW = MC.memWidthNatRepr @ptrW
+  --(CLM.LLVMPointer _ len_bv) <- PSR.macawRegValue <$> (applyConcreteOverride sym bin lenOverridePair $ (PS.simRegs st) ^. MC.boundValue len_reg)
+  
+  --(fresh_buf, st') <- IO.liftIO $ freshAlloc sym (Just 4) st
+  let fresh_buf = (PS.simRegs st) ^. MC.boundValue buf_reg
+  let st' = st
+
+  let buf_ptr = PSR.macawRegValue fresh_buf
+  let mem = PS.simMem st
+  len_sym <- W4.bvLit sym ptrW (BVS.mkBV ptrW (fromIntegral len))
+  bytes_chunk <- PMT.readChunk sym (PMT.memState mem) buf_ptr len_sym
+  written <- readChunk sym bytes_chunk
+  mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> written) mem
+  result <- PSR.bvToEntry sym written 
+  return (st' { PS.simMem = mem', PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ result ) })
+
 
 newtype MemChunkModify ptrW =
   MemChunkModify { mkMemChunk :: (forall sym. LCB.IsSymInterface sym => sym -> PMT.MemChunk sym ptrW -> IO (PMT.MemChunk sym ptrW)) }
@@ -407,6 +523,84 @@ modifyConcreteChunk endianness ptrW x bytes offset = MemChunkModify $ \sym chunk
   chunk' <- PMT.concreteMemChunk sym endianness ptrW x bytes
   PMT.copyMemChunkInto sym chunk offsetBV chunk' 
 
+-- Indirect pointers with a concrete base
+data MemLocation ptrW =
+    MemPointer (MC.MemWord ptrW)
+  | MemIndPointer (MemLocation ptrW)  (MC.MemWord ptrW)
+
+-- Create an indirect pointer by creating a fresh allocation for each level of indirection 
+freshAtLocation ::
+  forall sym arch ptrW v bin.
+  LCB.IsSymInterface sym =>
+  MS.SymArchConstraints arch =>
+  Typeable arch =>
+  ptrW ~ MD.ArchAddrWidth arch =>
+  sym ->
+  PS.SimState sym arch v bin ->
+  MC.Endianness ->
+  Maybe Integer {- ^ override for starting region -} ->
+  MemLocation ptrW ->
+  IO ( CLM.LLVMPtr sym ptrW, PS.SimState sym arch v bin)
+freshAtLocation sym st endianness mregion loc = do
+  (base, st') <- freshAlloc sym mregion st
+  st'' <- go (fmap (+1) mregion) loc (PSR.macawRegValue base) st'
+  return (PSR.macawRegValue base, st'')
+  where
+    go :: 
+      Maybe Integer ->
+      MemLocation ptrW ->
+      CLM.LLVMPtr sym ptrW ->
+      PS.SimState sym arch v bin ->
+      IO (PS.SimState sym arch v bin)
+    go mregion' loc' val st' = case loc' of
+      MemPointer mw -> do
+        let w_mem = MC.memWidthNatRepr @ptrW
+        ptrOffset <- W4.bvLit sym w_mem (BVS.mkBV w_mem (fromIntegral mw))
+        region <- W4.natLit sym 0
+        let ptr = CLM.LLVMPointer region ptrOffset
+        let memRepr = PMT.memWidthMemRepr endianness w_mem 
+        mem' <- PMT.writeMem sym ptr val memRepr (PS.simMem st')
+        --mem' <- PMT.writeMemState @_ @arch sym (W4.truePred sym) (PMT.memState $ PS.simMem st) ptr memRepr val
+        return $ (st' { PS.simMem = mem' })
+      MemIndPointer loc'' locOffset -> do
+        let w_mem = MC.memWidthNatRepr @ptrW
+        (fresh_loc_ptr, st'') <- freshAlloc sym mregion' st'
+        st''' <- go (fmap (+1) mregion') loc'' (PSR.macawRegValue fresh_loc_ptr) st''
+        let (CLM.LLVMPointer region ptrOffset) = (PSR.macawRegValue fresh_loc_ptr)
+        offset_bv <- W4.bvLit sym w_mem (BVS.mkBV w_mem (fromIntegral locOffset))
+        ptrOffset' <- W4.bvAdd sym ptrOffset offset_bv
+        let ptr = (CLM.LLVMPointer region ptrOffset')
+        let memRepr = PMT.memWidthMemRepr endianness w_mem 
+        mem' <- PMT.writeMem sym ptr val memRepr (PS.simMem st''')
+        --mem' <- PMT.writeMemState @_ @arch sym (W4.truePred sym) (PMT.memState $ PS.simMem st''') ptr memRepr val
+        return $ st''' { PS.simMem = mem' }
+
+resolveMemLocation ::
+  forall sym ptrW.
+  W4.IsSymExprBuilder sym =>
+  MC.MemWidth ptrW =>
+  sym ->
+  PMT.MemTraceImpl sym ptrW ->
+  MC.Endianness ->
+  MemLocation ptrW ->
+  IO (CLM.LLVMPtr sym ptrW)
+resolveMemLocation sym mem endianness loc  = case loc of
+  MemPointer mw -> do
+    let w_mem = MC.memWidthNatRepr @ptrW
+    ptrOffset <- W4.bvLit sym w_mem (BVS.mkBV w_mem (fromIntegral mw))
+    region <- W4.natLit sym 0
+    let ptr = (CLM.LLVMPointer region ptrOffset)
+    let memRepr = PMT.memWidthMemRepr endianness w_mem 
+    PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) ptr memRepr
+  MemIndPointer loc' locOffset -> do
+    let w_mem = MC.memWidthNatRepr @ptrW
+    (CLM.LLVMPointer region ptrOffset) <- resolveMemLocation sym mem endianness loc'
+    offset_bv <- W4.bvLit sym w_mem (BVS.mkBV w_mem (fromIntegral locOffset))
+    ptrOffset' <- W4.bvAdd sym ptrOffset offset_bv
+    let ptr = (CLM.LLVMPointer region ptrOffset')
+    let memRepr = PMT.memWidthMemRepr endianness w_mem 
+    PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) ptr memRepr
+
 -- | Stub that reads the same uninterpreted chunk into both
 --   original and patched programs, modulo optionally overwriting the uninterpreted
 --   bytes with contents. Does nothing if the number of available bytes is zero or less.
@@ -414,14 +608,17 @@ mkReadOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
   MS.SymArchConstraints arch =>
+  Typeable arch =>
   T.Text {- ^ name of call -} ->
-  PPa.PatchPairC (MemChunkModify (MC.ArchAddrWidth arch)) ->
+  PPa.PatchPairC (MemChunkModify (MC.ArchAddrWidth arch)) {- ^ mutator for incoming symbolic data -} ->
+  PPa.PatchPairC (Maybe (MemLocation (MC.ArchAddrWidth arch))) {- ^ concrete override for buffer address (pointer to buffer pointer) -} ->
+    PPa.PatchPairC (Maybe (MC.MemWord (MC.ArchAddrWidth arch))) {- ^ concrete override for length -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ source (i.e. file descriptor, socket, etc) -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkReadOverride _nm chunkOverrides src_reg buf_reg len_reg rOut = StubOverride $ \(sym :: sym) wsolver -> do
+mkReadOverride _nm chunkOverrides bufferOverrides lenOverrides src_reg buf_reg len_reg rOut = StubOverride $ \(sym :: sym) archInfo wsolver -> return $ StateTransformer2 $ \ stPair -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   let bv_repr = W4.BaseBVRepr w_mem
   let byte_repr = W4.BaseBVRepr (W4.knownNat @8)
@@ -429,11 +626,55 @@ mkReadOverride _nm chunkOverrides src_reg buf_reg len_reg rOut = StubOverride $ 
   -- FIXME: formally this should be an interpreted function on the source register, not just an arbitrary shared value
   -- FIXME: this does not capture the fact that usually the return value is signed, where negative values represent
   -- various error conditions (aside from simply having no more content available).
-  available_bytes <- W4.freshConstant sym W4.emptySymbol bv_repr
-  let arr_repr = W4.BaseArrayRepr (Ctx.singleton bv_repr) byte_repr
-  chunk_arr <- IO.liftIO $ W4.freshConstant sym W4.emptySymbol arr_repr
+  bytes_available <- W4.freshConstant sym (W4.safeSymbol "bytes_available") W4.BaseBoolRepr
   zero <- IO.liftIO $ W4.bvLit sym w_mem (BVS.zero w_mem)
+  -- for simplicity we assume that the symbolic chunk is exactly as large as the requested length (the max
+  -- length of both sides)
+  -- we then make the entire write into memory conditional on the symbolic predicate 'bytes_available'
+  -- FIXME: this is an over-simplification to reduce the state explosion into exactly two cases: either
+  -- we get all of the requested bytes or we don't get any
+  -- One idea for representing the case where we have fewer than expected but nonzero bytes would be to
+  -- have each of the individual bytes written to memory conditionally either from the chunk or simply read
+  -- back from memory. This allows us to still represent this as a single large write.
+  available_bytes_ <- PPa.runPatchPairT $ PPa.joinPatchPred (\x y -> IO.liftIO $ WEH.bvUMax sym x y) $ \bin -> do
+      st <- PPa.get bin stPair
+      (CLM.LLVMPointer _ len_bv) <- IO.liftIO $ (PSR.macawRegValue <$> (applyConcreteOverride sym bin lenOverrides $ (PS.simRegs st) ^. MC.boundValue len_reg))
+      return len_bv
+  available_bytes <- IO.liftIO $ PVC.resolveSingletonSymbolicAsDefault wsolver available_bytes_
+    
+  let arr_repr = W4.BaseArrayRepr (Ctx.singleton bv_repr) byte_repr
+  chunk_arr <- IO.liftIO $ W4.freshConstant sym (W4.safeSymbol "undefined_read")  arr_repr
   let chunk = PMT.MemChunk chunk_arr zero available_bytes
+  PPa.runPatchPairT $ PPa.forBins $ \bin -> do
+    --chunk_arr <- IO.liftIO $ W4.freshConstant sym W4.emptySymbol arr_repr
+    --let chunk = PMT.MemChunk chunk_arr zero available_bytes
+    st <- PPa.get bin stPair
+    chunk' <- case PPa.getC bin chunkOverrides of
+      Just ov -> IO.liftIO $ mkMemChunk ov sym chunk
+      Nothing -> return chunk
+    let src = (PS.simRegs st) ^. MC.boundValue src_reg
+
+    -- FIXME: this region is picked arbitrarily and concretely so that we
+    -- can find this buffer again when we call the corresponding override
+
+
+    -- FIXME: we should be able to deduce the address by examining
+    -- the buffer expression itself
+    -- here we invent a fresh buffer pointer (instead of using the
+    -- given one) so we know that it's necessarily disjoint from anything else
+
+    -- fresh_buf, st') <- IO.liftIO $ freshAlloc sym (Just 4) st
+    (buf, st'') <- case PPa.getC bin bufferOverrides of
+      Just (Just bufferOv) -> IO.liftIO $ do
+        (fresh_buf, st') <- freshAtLocation sym st (MI.archEndianness archInfo) (Just 4) bufferOv
+        return $ (PSR.ptrToEntry fresh_buf, st')
+      _ -> do
+        return ((PS.simRegs st) ^. MC.boundValue buf_reg, st)
+
+    IO.liftIO $ readTransformer sym archInfo src buf rOut bytes_available chunk' st''
+
+
+{-
   return $ readTransformer sym wsolver src_reg buf_reg len_reg rOut $ \bin _ -> case PPa.getC bin chunkOverrides of
     Just mkr -> do
       -- only apply the override if some content was returned 
@@ -445,33 +686,36 @@ mkReadOverride _nm chunkOverrides src_reg buf_reg len_reg rOut = StubOverride $ 
       -- chunk' <- mkMemChunk mkr sym chunk
       -- PMT.muxMemChunk sym nonzero_contents chunk' chunk
     Nothing -> return chunk
-
+-}
 
 readTransformer ::
-  forall sym arch.
+  forall sym arch bin v.
   16 <= MC.ArchAddrWidth arch =>
   MS.SymArchConstraints arch =>
   LCB.IsSymInterface sym =>
   sym ->
-  PVC.WrappedSolver sym IO ->
-  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ source (i.e. file descriptor, socket, etc) -} ->
-  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
-  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
+  MI.ArchitectureInfo arch ->
+  PSR.MacawRegEntry sym (MT.BVType (MC.ArchAddrWidth arch)) {- ^ source (i.e. file descriptor, socket, etc) -} ->
+  PSR.MacawRegEntry sym (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
-  (forall bin.
-    PB.WhichBinaryRepr bin ->
-    PSR.MacawRegEntry sym (MT.BVType (MC.ArchAddrWidth arch)) {- ^ resolved source -} ->
-    IO (PMT.MemChunk sym (MC.ArchAddrWidth arch))) ->
-  StateTransformer sym arch
-readTransformer sym wsolver src_reg buf_reg len_reg rOut mkChunk = StateTransformer $ \(st :: PS.SimState sym arch v bin) -> do
-  let (bin :: PB.WhichBinaryRepr bin) = knownRepr
-  let src_val = (PS.simRegs st) ^. MC.boundValue src_reg
-  chunk <- mkChunk bin src_val
-  let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue len_reg
-  len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
-  let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
+  W4.Pred sym {- ^ condition for read -} ->
+  PMT.MemChunk sym (MC.ArchAddrWidth arch) ->
+  PS.SimState sym arch v bin ->
+  IO (PS.SimState sym arch v bin)
+readTransformer sym archInfo _src_val buf rOut cond chunk st = do
+  let ptrW = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
+  -- let (bin :: PB.WhichBinaryRepr bin) = knownRepr
+  -- let src_val = (PS.simRegs st) ^. MC.boundValue src_reg
+  -- chunk <- mkChunk bin src_val
+  -- let (CLM.LLVMPointer _ len_bv) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue len_reg
+  --len_bv' <- PVC.resolveSingletonSymbolicAsDefault wsolver len_bv
+  let buf_ptr = PSR.macawRegValue buf
+  -- let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
   let mem = PS.simMem st
-  (written, mem') <- IO.liftIO $ PMT.writeChunk sym chunk buf_ptr len_bv' mem
+  mem' <- IO.liftIO $ PMT.writeChunk sym (MI.archEndianness archInfo) chunk buf_ptr cond mem
+  zero <- IO.liftIO $ W4.bvLit sym ptrW (BVS.zero ptrW)
+  -- either the chunk is written or it's not and we return zero bytes written
+  written <- IO.liftIO $ W4.baseTypeIte sym cond (PMT.memChunkLen chunk) zero
   zero_nat <- IO.liftIO $ W4.natLit sym 0
   let written_result = PSR.ptrToEntry (CLM.LLVMPointer zero_nat written)
   -- FIXME: currently these are all unsigned values, but likely this return value will be treated as signed
@@ -489,7 +733,7 @@ mkWriteOverride ::
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ len -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
+mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym archInfo wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   return $ StateTransformer $ \st -> do
     let buf_ptr = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue buf_reg
@@ -504,7 +748,7 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
         , Just W4.LeqProof <- W4.isPosNat w -> do
         let mem = PS.simMem st
         -- endianness doesn't really matter, as long as we're consistent
-        let memrepr = MC.BVMemRepr w MC.LittleEndian
+        let memrepr = MC.BVMemRepr w (MI.archEndianness archInfo)
         (CLM.LLVMPointer region val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
         mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv Ctx.:> W4.natToIntegerPure region) mem
         -- globally-unique
@@ -514,7 +758,7 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym wsolver -> do
       _ -> do
         let mem = PS.simMem st
         bytes_chunk <- PMT.readChunk sym (PMT.memState mem) buf_ptr len_bv
-        let memrepr = MC.BVMemRepr (W4.knownNat @8) MC.LittleEndian
+        let memrepr = MC.BVMemRepr (W4.knownNat @8) (MI.archEndianness archInfo)
         (CLM.LLVMPointer _region first_byte) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
         one <- W4.bvLit sym w_mem (BVS.mkBV w_mem 1)
         len_minus_one <- W4.bvSub sym len_bv one
@@ -547,13 +791,24 @@ mkDefaultStubOverride ::
   String -> 
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkDefaultStubOverride nm rOut = StubOverride $ \sym _ -> do
+mkDefaultStubOverride nm rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol nm) (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
     zero_nat <- W4.natLit sym 0
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
     return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+
+-- | Default override returns the same arbitrary value for both binaries
+mkArgPassthroughOverride ::
+  forall arch.
+  MS.SymArchConstraints arch =>
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ argument register -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
+  StubOverride arch
+mkArgPassthroughOverride rArg rOut = StubOverride $ \_ _ _ -> return $ StateTransformer $ \st -> do
+  let arg = (PS.simRegs st) ^. MC.boundValue rArg
+  return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ arg) })
 
 -- | Default override returns the same arbitrary value for both binaries, based on the input
 --   registers
@@ -564,7 +819,7 @@ mkDefaultStubOverrideArg ::
   [Some (MC.ArchReg arch)] {- ^ argument registers -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ -> do
+mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
 
   return $ StateTransformer $ \st -> do
@@ -597,7 +852,7 @@ mkNOPStub ::
   MS.SymArchConstraints arch =>
   String ->
   StubOverride arch
-mkNOPStub _nm = StubOverride $ \_sym _ -> return $ StateTransformer $ \st -> return st
+mkNOPStub _nm = StubOverride $ \_sym _ _ -> return $ StateTransformer $ \st -> return st
 
 -- | A witness to the validity of an architecture, along with any
 -- architecture-specific data required for the verifier

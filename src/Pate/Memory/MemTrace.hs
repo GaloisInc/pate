@@ -77,6 +77,12 @@ module Pate.Memory.MemTrace
 , readChunk
 , writeChunk
 , module Pate.EventTrace
+, segOffToPtr
+, readFromChunk
+, BytesBV(..)
+, memWidthMemRepr
+, writeMem
+, muxPtr
 ) where
 
 import Unsafe.Coerce
@@ -1287,6 +1293,19 @@ doWriteMem ::
   StateT (MemTraceImpl sym ptrW) IO ()
 doWriteMem sym = doMemOpInternal sym Write Unconditional
 
+writeMem ::
+  IsSymInterface sym =>
+  MemWidth ptrW =>
+  sym ->
+  LLVMPtr sym ptrW ->
+  RegValue sym (MS.ToCrucibleType ty) ->
+  MemRepr ty ->
+  MemTraceImpl sym ptrW ->
+  IO (MemTraceImpl sym ptrW)
+writeMem sym ptr v repr mem = do
+  execStateT (doMemOpInternal sym Write Unconditional (addrWidthRepr ptr) ptr v repr) mem
+
+
 doCondWriteMem ::
   IsSymInterface sym =>
   MemWidth ptrW =>
@@ -1563,6 +1582,16 @@ writeMemState sym cond memSt ptr repr val = do
   MemTraceImpl _ memSt' _ _ _ _ <- execStateT (doMemOpInternal sym Write (Conditional cond) (addrWidthRepr mem) ptr val repr) mem
   return memSt'
 
+memWidthMemRepr ::
+  forall ptrW p.
+  MemWidth ptrW =>
+  Endianness ->
+  p ptrW ->
+  MemRepr (MT.BVType ptrW)
+memWidthMemRepr endianness proxy = case addrWidthRepr proxy of
+  Addr32 -> BVMemRepr (knownNat @4) endianness
+  Addr64 -> BVMemRepr (knownNat @8) endianness
+
 -- | Write to the memory array and set the dirty bits on
 -- any written addresses
 writeMemBV :: forall sym ptrW w.
@@ -1609,6 +1638,67 @@ writeMemBV sym mem_init ptr repr (LLVMPointer region val) = go 0 repr val mem_in
         mem1 <- go n reprHead hd mem
         go (n + 1) repr' tl mem1
 
+data BytesBV sym w where
+  BytesBV :: 1 <= bytes => NatRepr bytes -> SymBV sym (8 * bytes) -> BytesBV sym bytes
+
+concatBytes :: 
+  IsExprBuilder sym =>
+  sym ->
+  BytesBV sym w1 -> 
+  BytesBV sym w2 -> 
+  IO (BytesBV sym (w1 + w2))
+concatBytes sym (BytesBV bytes1 bv1) (BytesBV bytes2 bv2) 
+  | LeqProof <- mulMono (knownNat @8) bytes1
+  , LeqProof <- mulMono (knownNat @8) bytes2
+  , LeqProof <- leqAddPos bytes1 bytes2
+  , Refl <- addMulDistribRight bytes1 bytes2 (knownNat @8)
+  , Refl <- mulComm  (knownNat @8) (addNat bytes1 bytes2)
+  , Refl <- mulComm  (knownNat @8) bytes1
+  , Refl <- mulComm  (knownNat @8) bytes2
+  = do
+  result <- bvConcat sym bv1 bv2
+  return $ BytesBV (addNat bytes1 bytes2) result
+
+
+-- | Read a given number of bytes from the given MemChunk. Note that this ignores the
+--   actual length of the chunk and is therefore undefined if bytes past this length
+--   are accessed.
+readFromChunk ::
+  forall sym ptrW bytes.
+  IsSymExprBuilder sym =>
+  1 <= ptrW =>
+  1 <= bytes =>
+  sym ->
+  Endianness ->
+  MemChunk sym ptrW ->
+  SymBV sym ptrW ->
+  NatRepr bytes ->
+  IO (BytesBV sym bytes)
+readFromChunk sym endianness (MemChunk baseArray chunk_offset _) start_offset num_bytes = go num_bytes
+  where
+    go :: 
+      forall bytes'.
+      1 <= bytes' =>
+      NatRepr bytes' ->
+      IO (BytesBV sym bytes')
+    go num_bytes' = do
+      BaseBVRepr ptrW <- return $ exprType chunk_offset
+      offset_int <- intLit sym ((fromIntegral $ natValue num_bytes) - (fromIntegral $ natValue num_bytes'))
+      offset_bv <- integerToBV sym offset_int ptrW
+      
+      index <- bvAdd sym chunk_offset offset_bv >>= bvAdd sym start_offset
+      byte <- arrayLookup sym baseArray (Ctx.singleton index)
+      let rest_len = decNat num_bytes'
+      Refl <- return $ minusPlusCancel num_bytes' (knownNat @1)
+      Refl <- return $ plusComm (knownNat @1) rest_len
+      case isZeroOrGT1 rest_len of
+        Left Refl -> return $ BytesBV (knownNat @1) byte
+        Right LeqProof -> do
+          rest <- go rest_len
+          case endianness of
+            LittleEndian -> concatBytes sym (BytesBV (knownNat @1) byte) rest
+            BigEndian -> concatBytes sym rest (BytesBV (knownNat @1) byte)
+
 
 -- | Fetch a byte from the given 'MemChunk', with a predicate
 --   that determines if the byte is within the bounds of the chunk.
@@ -1626,6 +1716,7 @@ getChunkByte sym (MemChunk baseArray offset len) idx = do
   valid <- bvUlt sym index len
   return (byte, valid)
 
+{-
 -- | Conditionally write a single byte to memory if it is within the
 --   bounds of the given MemChunk and write length.
 writeChunkByte ::
@@ -1636,11 +1727,10 @@ writeChunkByte ::
   sym ->
   MemChunk sym ptrW ->
   SymBV sym ptrW {- index into chunk -} ->
-  SymBV sym ptrW {- maximum write length -} ->
   LLVMPtr sym ptrW ->
   MemTraceImpl sym ptrW ->
   IO (MemTraceImpl sym ptrW)
-writeChunkByte sym chunk idx_bv write_len (LLVMPointer region offset) mem = do
+writeChunkByte sym chunk idx_bv (LLVMPointer region offset) mem = do
   let ptrW = bvWidth offset
   (byte, in_chunk) <- getChunkByte sym chunk idx_bv
   in_write <- bvUlt sym idx_bv write_len
@@ -1650,6 +1740,7 @@ writeChunkByte sym chunk idx_bv write_len (LLVMPointer region offset) mem = do
   offset' <- bvAdd sym offset idx_bv
   let ptr = (LLVMPointer region offset')
   execStateT (doCondWriteMem sym valid (addrWidthRepr ptrW) ptr (LLVMPointer zero_nat byte) memRepr) mem
+
 
 -- Write an array of bytes into memory. Returns the resulting memory state
 -- as well as the number of symbolic bytes written (minimum of memchunk length
@@ -1668,15 +1759,13 @@ writeChunkState :: forall sym ptrW.
   MemWidth ptrW =>
   sym ->
   MemChunk sym ptrW ->
-  SymBV sym ptrW ->
   LLVMPtr sym ptrW ->
   MemTraceImpl sym ptrW ->
   IO (MemTraceImpl sym ptrW)
-writeChunkState sym chunk@(MemChunk writeBytes off_chunk chunk_len) write_len ptr mem = do
+writeChunkState sym chunk@(MemChunk writeBytes off_chunk len) ptr mem = do
   let memSt = memState mem
-  let ptrW = bvWidth chunk_len
+  let ptrW = bvWidth len
   (_ Ctx.:> reg Ctx.:> off) <- arrayIdx sym ptr 0
-  len <- WEH.bvUMin sym chunk_len write_len
   regArrayBytes <- arrayLookup sym (memArrBytes memSt) (Ctx.singleton reg)
   regArrayBytes' <- arrayCopy sym regArrayBytes off writeBytes off_chunk len
   memBytes' <- arrayUpdate sym (memArrBytes memSt) (Ctx.singleton reg) regArrayBytes'
@@ -1707,40 +1796,35 @@ writeChunkState sym chunk@(MemChunk writeBytes off_chunk chunk_len) write_len pt
   let event = ExternalCallEvent "writeChunkState" [ExternalCallDataChunk chunk']
   addMemEvent sym event mem''
   -}
+-}
 
--- | Write a chunk out to memory. FIXME: see 'writeChunkState'
 writeChunk :: forall sym ptrW.
   MemWidth ptrW =>
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
+  Endianness ->
   MemChunk sym ptrW ->
   LLVMPtr sym ptrW {- ^ address to write chunk into -} ->
-  SymBV sym ptrW {- ^ number of bytes to write -} ->
+  Pred sym {- ^ symbolic condition for entire write -} ->
   MemTraceImpl sym ptrW ->
-  IO (SymBV sym ptrW, MemTraceImpl sym ptrW)
-writeChunk sym chunk ptr writeLen mem = do
-  read_len <- WEH.bvUMin sym writeLen (memChunkLen chunk)
-  let ptrW = bvWidth read_len
-  mnumBytes <-
-    if | Just (W4C.ConcreteBV _ minC) <- asConcrete read_len -> return $ Just $ BV.asUnsigned minC
-       | Just (W4C.ConcreteBV _ writeLenC) <- asConcrete writeLen -> return $ Just $ BV.asUnsigned writeLenC
-       | Just (W4C.ConcreteBV _ chunkLenC) <- asConcrete (memChunkLen chunk) -> return $ Just $ BV.asUnsigned chunkLenC
-       | otherwise -> return Nothing
-  -- if we can come up with a concrete bound on the number of bytes, then we can represent this as a (conditional) 
-  -- collection of individual byte writes.
-  -- Note that if this concrete bound is higher than the actual symbolic bound, then any writes beyond that
-  -- bound will be no-ops, since 'writeChunkByte' is conditional on the given index being in-bounds.
-  -- otherwise, write a single symbolic-length write to memory. NB: without bounds on this length this will likely
-  -- hang the solver due to the use of arrayCopy
-  mem' <- case mnumBytes of
-    Just numBytes -> do
-      let go i = do
-            idx <- lift $ bvLit sym ptrW (BV.mkBV ptrW i)
-            modifyM (writeChunkByte sym chunk idx writeLen ptr)
-      execStateT (forM [0..numBytes] go) mem
-    Nothing -> writeChunkState sym chunk writeLen ptr mem
-  return $ (read_len, mem')
+  IO (MemTraceImpl sym ptrW)
+writeChunk sym endianness chunk ptr cond mem = do
+  let ptrW = memWidthNatRepr @ptrW
+  mnumBytes <- case asConcrete (memChunkLen chunk) of
+    Just (W4C.ConcreteBV _ chunkLenC) -> return $ Just $ BV.asUnsigned chunkLenC
+    Nothing -> return Nothing
+  case mnumBytes of
+    Just numBytes_int 
+      | Just (Some numBytes) <- someNat numBytes_int -> case isZeroOrGT1 numBytes of
+        Left Refl -> return mem
+        Right LeqProof -> do
+          zero_nat <- natLit sym 0
+          zero <- bvLit sym ptrW (BV.zero ptrW)
+          BytesBV _ chunk_bv <- readFromChunk sym endianness chunk zero numBytes
+          let memRepr = BVMemRepr numBytes endianness
+          execStateT (doCondWriteMem sym cond (addrWidthRepr ptrW) ptr (LLVMPointer zero_nat chunk_bv) memRepr) mem
+    _ -> fail "TODO: writeChunk: symbolic write lengths not supported"
 
 ifCond ::
   IsSymInterface sym =>

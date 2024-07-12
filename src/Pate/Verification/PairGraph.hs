@@ -131,6 +131,7 @@ module Pate.Verification.PairGraph
   , addDomainRefinements
   , isSyncNode
   , queueExitMerges
+  , setPropagationKind
   ) where
 
 import           Prettyprinter
@@ -1000,6 +1001,16 @@ setCondition ::
   PairGraph sym arch ->
   PairGraph sym arch
 setCondition nd condK propK cond pg = pg { pairGraphConditions = Map.insert (nd,condK) (propK, cond) (pairGraphConditions pg) }
+
+setPropagationKind :: 
+  GraphNode arch ->
+  ConditionKind ->
+  PropagateKind ->
+  PairGraph sym arch ->
+  PairGraph sym arch
+setPropagationKind nd condK propK pg = case Map.lookup (nd,condK) (pairGraphConditions pg) of
+  Just (_, cond) -> pg { pairGraphConditions = Map.insert (nd,condK) (propK, cond) (pairGraphConditions pg) }
+  _ -> pg
 
 dropCondition ::
   GraphNode arch ->
