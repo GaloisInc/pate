@@ -34,6 +34,7 @@ type class with a (distinct) symbol.
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Pate.TraceTree (
     TraceTree
@@ -112,6 +113,9 @@ module Pate.TraceTree (
   , forkTraceTreeHook
   , NodeFinalAction(..)
   , QueryResult(..)
+  , InputChoice
+  , giveChoiceInput
+  , chooseInput
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -1006,6 +1010,57 @@ chooseLazy treenm f = do
             getChoice choices
           False -> return Nothing
     DefaultChoice -> return $ LazyIOAction (return False) (\_ -> return Nothing)
+
+data InputChoice (k :: l) nm where
+  InputChoice :: (IsTraceNode k nm, TraceNodeLabel nm ~ ()) =>
+    { inputChoiceParse :: String -> Maybe (TraceNodeType k nm) -- FIXME: make this part of the type class?
+    , inputChoicePut :: (TraceNodeType k nm) -> IO Bool -- returns false if input has already been provided
+    , inputChoiceValue :: IO (Maybe (TraceNodeType k nm))
+    } -> InputChoice k nm
+
+giveChoiceInput :: InputChoice k nm -> String -> IO Bool
+giveChoiceInput ic input = inputChoiceValue ic >>= \case
+  Just{} -> return False
+  Nothing -> case inputChoiceParse ic input of
+    Just v -> inputChoicePut ic v
+    Nothing -> return False
+
+instance IsTraceNode k "choiceInput" where
+  type TraceNodeType k "choiceInput" = Some (InputChoice k)
+  type TraceNodeLabel "choiceInput" = String
+  prettyNode lbl _ = PP.pretty lbl
+  nodeTags = mkTags @k @"choiceInput" [Summary, Simplified]
+  jsonNode core lbl (Some (ic@InputChoice{} :: InputChoice k nm)) = do
+    v_json <- inputChoiceValue ic >>= \case
+      Just v -> jsonNode @_ @k @nm core () v
+      Nothing -> return JSON.Null
+    return $ JSON.object ["node_kind" JSON..= ("choiceInput" :: String), "value" JSON..= v_json, "prompt" JSON..= lbl]
+
+chooseInput ::
+  forall nm_choice a b k m e.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm_choice =>
+  IO.MonadUnliftIO m =>
+  TraceNodeLabel nm_choice ~ () =>
+  String ->
+  (String -> Maybe (TraceNodeType k nm_choice)) ->
+  (TraceNodeType k nm_choice -> b -> IO a) ->
+  m (LazyIOAction b a)
+chooseInput treenm parseInput f = do
+  builder <- getTreeBuilder
+  case interactionMode builder of
+    Interactive{} -> do
+      c <- liftIO $ newEmptyMVar
+      let getValue = tryReadMVar c
+      let putValue v = tryPutMVar c v
+      let isReady = not <$> isEmptyMVar c
+      let ichoice = InputChoice @k @nm_choice parseInput putValue getValue
+      emitTraceLabel @"choiceInput" @k treenm (Some ichoice)
+      return $ LazyIOAction (liftIO isReady) $ \inputVal -> getValue >>= \case
+        Just v -> Just <$> f v inputVal
+        Nothing -> return Nothing
+    DefaultChoice{} -> return $ LazyIOAction (return False) (\_ -> return Nothing)
+         
 
 choose ::
   forall nm_choice a k m e.
