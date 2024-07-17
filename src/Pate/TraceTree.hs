@@ -1012,17 +1012,17 @@ chooseLazy treenm f = do
     DefaultChoice -> return $ LazyIOAction (return False) (\_ -> return Nothing)
 
 data InputChoice (k :: l) nm where
-  InputChoice :: (IsTraceNode k nm, TraceNodeLabel nm ~ ()) =>
-    { inputChoiceParse :: String -> Maybe (TraceNodeType k nm) -- FIXME: make this part of the type class?
-    , inputChoicePut :: (TraceNodeType k nm) -> IO Bool -- returns false if input has already been provided
-    , inputChoiceValue :: IO (Maybe (TraceNodeType k nm))
+  InputChoice :: (IsTraceNode k nm) =>
+    { inputChoiceParse :: String -> Maybe (TraceNodeLabel nm, TraceNodeType k nm) -- FIXME: make this part of the type class?
+    , inputChoicePut :: TraceNodeLabel nm -> TraceNodeType k nm -> IO Bool -- returns false if input has already been provided
+    , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm))
     } -> InputChoice k nm
 
 giveChoiceInput :: InputChoice k nm -> String -> IO Bool
 giveChoiceInput ic input = inputChoiceValue ic >>= \case
   Just{} -> return False
   Nothing -> case inputChoiceParse ic input of
-    Just v -> inputChoicePut ic v
+    Just (lbl, v) -> inputChoicePut ic lbl v
     Nothing -> return False
 
 instance IsTraceNode k "choiceInput" where
@@ -1032,7 +1032,7 @@ instance IsTraceNode k "choiceInput" where
   nodeTags = mkTags @k @"choiceInput" [Summary, Simplified]
   jsonNode core lbl (Some (ic@InputChoice{} :: InputChoice k nm)) = do
     v_json <- inputChoiceValue ic >>= \case
-      Just v -> jsonNode @_ @k @nm core () v
+      Just (lbl', v) -> jsonNode @_ @k @nm core lbl' v
       Nothing -> return JSON.Null
     return $ JSON.object ["node_kind" JSON..= ("choiceInput" :: String), "value" JSON..= v_json, "prompt" JSON..= lbl]
 
@@ -1041,10 +1041,9 @@ chooseInput ::
   IsTreeBuilder k e m =>
   IsTraceNode k nm_choice =>
   IO.MonadUnliftIO m =>
-  TraceNodeLabel nm_choice ~ () =>
   String ->
-  (String -> Maybe (TraceNodeType k nm_choice)) ->
-  (TraceNodeType k nm_choice -> b -> IO a) ->
+  (String -> Maybe (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
+  (TraceNodeLabel nm_choice -> TraceNodeType k nm_choice -> b -> IO a) ->
   m (LazyIOAction b a)
 chooseInput treenm parseInput f = do
   builder <- getTreeBuilder
@@ -1052,15 +1051,14 @@ chooseInput treenm parseInput f = do
     Interactive{} -> do
       c <- liftIO $ newEmptyMVar
       let getValue = tryReadMVar c
-      let putValue v = tryPutMVar c v
+      let putValue lbl v = tryPutMVar c (lbl, v)
       let isReady = not <$> isEmptyMVar c
       let ichoice = InputChoice @k @nm_choice parseInput putValue getValue
       emitTraceLabel @"choiceInput" @k treenm (Some ichoice)
       return $ LazyIOAction (liftIO isReady) $ \inputVal -> getValue >>= \case
-        Just v -> Just <$> f v inputVal
+        Just (lbl, v) -> Just <$> f lbl v inputVal
         Nothing -> return Nothing
     DefaultChoice{} -> return $ LazyIOAction (return False) (\_ -> return Nothing)
-         
 
 choose ::
   forall nm_choice a k m e.
