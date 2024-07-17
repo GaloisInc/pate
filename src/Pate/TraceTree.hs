@@ -1011,19 +1011,26 @@ chooseLazy treenm f = do
           False -> return Nothing
     DefaultChoice -> return $ LazyIOAction (return False) (\_ -> return Nothing)
 
+data InputChoiceError = 
+    InputChoiceAlreadyMade
+  | InputChoiceParseError String
+  deriving Show
+
 data InputChoice (k :: l) nm where
   InputChoice :: (IsTraceNode k nm) =>
-    { inputChoiceParse :: String -> Maybe (TraceNodeLabel nm, TraceNodeType k nm) -- FIXME: make this part of the type class?
+    { inputChoiceParse :: String -> Either String (TraceNodeLabel nm, TraceNodeType k nm)
     , inputChoicePut :: TraceNodeLabel nm -> TraceNodeType k nm -> IO Bool -- returns false if input has already been provided
     , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm))
     } -> InputChoice k nm
 
-giveChoiceInput :: InputChoice k nm -> String -> IO Bool
+giveChoiceInput :: InputChoice k nm -> String -> IO (Maybe InputChoiceError)
 giveChoiceInput ic input = inputChoiceValue ic >>= \case
-  Just{} -> return False
+  Just{} -> return $ Just InputChoiceAlreadyMade
   Nothing -> case inputChoiceParse ic input of
-    Just (lbl, v) -> inputChoicePut ic lbl v
-    Nothing -> return False
+    Right (lbl, v) -> inputChoicePut ic lbl v >>= \case
+      True -> return Nothing
+      False -> return $ Just InputChoiceAlreadyMade 
+    Left err -> return $ Just $ InputChoiceParseError err
 
 instance IsTraceNode k "choiceInput" where
   type TraceNodeType k "choiceInput" = Some (InputChoice k)
@@ -1042,7 +1049,7 @@ chooseInput ::
   IsTraceNode k nm_choice =>
   IO.MonadUnliftIO m =>
   String ->
-  (String -> Maybe (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
+  (String -> Either String (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
   (TraceNodeLabel nm_choice -> TraceNodeType k nm_choice -> b -> IO a) ->
   m (LazyIOAction b a)
 chooseInput treenm parseInput f = do
