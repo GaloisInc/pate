@@ -114,8 +114,12 @@ module Pate.TraceTree (
   , NodeFinalAction(..)
   , QueryResult(..)
   , InputChoice
+  , InputChoiceError(InputChoiceError)
   , giveChoiceInput
+  , waitingForChoiceInput
   , chooseInput
+  , chooseInputLazy
+  , chooseInputFromList
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -128,7 +132,7 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
-import           Data.List ((!!), find, isPrefixOf)
+import           Data.List (isPrefixOf, findIndex)
 import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
@@ -1013,24 +1017,36 @@ chooseLazy treenm f = do
 
 data InputChoiceError = 
     InputChoiceAlreadyMade
-  | InputChoiceParseError String
+  | InputChoiceError String [String]
   deriving Show
+
+
+instance PP.Pretty InputChoiceError where
+  pretty = \case
+    InputChoiceAlreadyMade -> "INTERNAL ERROR: input choice has already been given!"
+    InputChoiceError msgHeader [] -> PP.pretty msgHeader
+    InputChoiceError msgHeader msgDetails -> PP.pretty msgHeader PP.<> PP.line PP.<> PP.vsep (map PP.pretty msgDetails)  
 
 data InputChoice (k :: l) nm where
   InputChoice :: (IsTraceNode k nm) =>
-    { inputChoiceParse :: String -> Either String (TraceNodeLabel nm, TraceNodeType k nm)
+    { inputChoiceParse :: String -> Either InputChoiceError (TraceNodeLabel nm, TraceNodeType k nm)
     , inputChoicePut :: TraceNodeLabel nm -> TraceNodeType k nm -> IO Bool -- returns false if input has already been provided
     , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm))
     } -> InputChoice k nm
 
+waitingForChoiceInput :: InputChoice k nm -> IO Bool
+waitingForChoiceInput ic = inputChoiceValue ic >>= \case
+  Just{} -> return False
+  Nothing -> return True
+
 giveChoiceInput :: InputChoice k nm -> String -> IO (Maybe InputChoiceError)
-giveChoiceInput ic input = inputChoiceValue ic >>= \case
-  Just{} -> return $ Just InputChoiceAlreadyMade
-  Nothing -> case inputChoiceParse ic input of
+giveChoiceInput ic input = waitingForChoiceInput ic >>= \case
+  False -> return $ Just InputChoiceAlreadyMade
+  True -> case inputChoiceParse ic input of
     Right (lbl, v) -> inputChoicePut ic lbl v >>= \case
       True -> return Nothing
       False -> return $ Just InputChoiceAlreadyMade 
-    Left err -> return $ Just $ InputChoiceParseError err
+    Left err -> return $ Just err
 
 instance IsTraceNode k "choiceInput" where
   type TraceNodeType k "choiceInput" = Some (InputChoice k)
@@ -1043,16 +1059,71 @@ instance IsTraceNode k "choiceInput" where
       Nothing -> return JSON.Null
     return $ JSON.object ["node_kind" JSON..= ("choiceInput" :: String), "value" JSON..= v_json, "prompt" JSON..= lbl]
 
+instance IsTraceNode k "opt_index" where
+  type TraceNodeType k "opt_index" = Int
+  type TraceNodeLabel "opt_index" = String
+  prettyNode msg _ = PP.pretty msg
+  nodeTags = (mkTags @k @"opt_index" [Summary, Simplified]) ++ 
+    [("debug", \msg lbl -> PP.pretty lbl PP.<> ":" PP.<+> PP.pretty msg)]
+
+-- | Wrapper for 'chooseInput' that just takes a list of labeled options
+--   and generates a parser for picking one option.
+chooseInputFromList ::
+  IsTreeBuilder k e m =>
+  IO.MonadUnliftIO m =>
+  String ->
+  [(String, a)] ->
+  m (Maybe a)
+chooseInputFromList treenm opts = do
+  let parseInput s = case findIndex (\(s',_) -> s == s') opts of
+        Just idx -> Right (s, idx)
+        Nothing -> Left (InputChoiceError "Invalid input. Valid options:" (map fst opts))
+  chooseInput @"opt_index" treenm parseInput >>= \case
+    Just (_, idx) -> return $ Just $ (snd (opts !! idx))
+    Nothing -> return Nothing
+
+-- | Take user input as a string. Returns 'Nothing' in the case where the trace tree
+--   is not running interactively. Otherwise, blocks the current thread until
+--   valid input is provided.
 chooseInput ::
+  forall nm_choice k m e.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm_choice =>
+  IO.MonadUnliftIO m =>
+  String ->
+  (String -> Either InputChoiceError (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
+  m (Maybe (TraceNodeLabel nm_choice, TraceNodeType k nm_choice))
+chooseInput treenm parseInput = do
+  builder <- getTreeBuilder
+  case interactionMode builder of
+    Interactive nextChoiceIdent -> do
+      newChoiceIdent <- liftIO $ nextChoiceIdent
+      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
+      let statusFinal = NodeStatus StatusSuccess True (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      c <- liftIO $ newEmptyMVar
+      let getValue = tryReadMVar c
+      let putValue lbl v = tryPutMVar c (lbl, v)
+      let ichoice = InputChoice @k @nm_choice parseInput putValue getValue
+      (lbl, v) <- withTracingLabel @"choiceInput" @k treenm (Some ichoice) $ do
+        builder' <- getTreeBuilder
+        liftIO $ updateTreeStatus builder' status
+        (lbl, v) <- liftIO $ readMVar c
+        emitTraceLabel @nm_choice lbl v
+        liftIO $ updateTreeStatus builder' statusFinal
+        return (lbl, v)
+      return $ Just (lbl, v)
+    DefaultChoice -> return Nothing
+
+chooseInputLazy ::
   forall nm_choice a b k m e.
   IsTreeBuilder k e m =>
   IsTraceNode k nm_choice =>
   IO.MonadUnliftIO m =>
   String ->
-  (String -> Either String (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
+  (String -> Either InputChoiceError (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
   (TraceNodeLabel nm_choice -> TraceNodeType k nm_choice -> b -> IO a) ->
   m (LazyIOAction b a)
-chooseInput treenm parseInput f = do
+chooseInputLazy treenm parseInput f = do
   builder <- getTreeBuilder
   case interactionMode builder of
     Interactive{} -> do
