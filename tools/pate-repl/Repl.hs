@@ -732,6 +732,32 @@ goto idx = execReplM $ do
     Just _ -> return ()
     Nothing -> PO.printErrLn "No such option"
 
+asInput :: forall sym arch nm. TraceNode sym arch nm -> ReplM sym arch (Maybe (Some (InputChoice '(sym,arch))))
+asInput (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (knownSymbol @"choiceInput")  of
+  Just Refl -> do
+    Some tr <- return $ v
+    (IO.liftIO $ waitingForChoiceInput tr) >>= \case
+      True -> return $ Just v
+      False -> return Nothing
+  Nothing -> return Nothing
+
+input' :: String -> ReplM sym arch (Maybe InputChoiceError)
+input' s = withCurrentNode $ \tr -> asInput tr >>= \case
+  Just (Some ic) -> (IO.liftIO $ giveChoiceInput ic s) >>= \case
+    Nothing -> do
+      IO.liftIO $ IO.threadDelay 100
+      top'
+      IO.liftIO $ wait
+      return Nothing
+    Just err -> return $ Just err
+  Nothing -> return $ Just (InputChoiceError "Not an input prompt" [])
+
+input :: String -> IO ()
+input s = execReplM $ do
+  input' s >>= \case
+    Just err -> PO.printErrLn (PP.pretty err)
+    Nothing -> return ()
+
 gotoIndex :: forall sym arch. Integer -> ReplM sym arch String
 gotoIndex idx = (goto' (fromIntegral idx)) >>= \case
   Just (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) -> do

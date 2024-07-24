@@ -500,25 +500,31 @@ pickCutPoints pickMany msg inputs = go []
     hasBin bin picked = 
       any (\(Some (PPa.WithBin bin' _)) -> case testEquality bin bin' of Just Refl -> True; _ -> False) picked
     go picked = do
-      mres <- choose @"()" msg $ \choice -> do
-        forM_ inputs $ \(_divergeSingle, Some blk, PD.ParsedBlocks pblks) -> do
-          let bin = PB.blockBinRepr blk
-          forM_ pblks $ \pblk -> forM_ (getIntermediateAddrs pblk) $ \addr -> do
-            -- FIXME: block entry kind is unused at the moment?
-            let concBlk = PB.mkConcreteBlock blk PB.BlockEntryJump addr
-            --let node = mkNodeEntry' divergeSingle (PPa.mkSingle bin concBlk)
-            choice (show addr ++ " " ++ "(" ++ show bin ++ ")") () $ do
-              return $ Just $ (Pair concBlk (PPa.WithBin bin addr))
-        case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
-          True -> choice "Finish Choosing" () $ return Nothing 
-          False -> return ()
+      let addr_opts = 
+           [ (show addr ++ " " ++ "(" ++ show bin ++ ")", Just $ Pair concBlk (PPa.WithBin bin addr))
+           | (_divergeSingle, Some blk, PD.ParsedBlocks pblks) <- inputs
+           , bin <- return $ PB.blockBinRepr blk
+           , pblk <- pblks
+           , addr <- getIntermediateAddrs pblk
+           , concBlk <- return $ PB.mkConcreteBlock blk PB.BlockEntryJump addr
+           ]
+      let opts = case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
+            True -> addr_opts ++ [("Finish Choosing", Nothing)]
+            False -> addr_opts
+      -- either generate a menu of alternatives or take text input, based on
+      -- the current configuration
+      mres <- asks (PCfg.cfgPreferTextInput . envConfig) >>= \case
+        True -> chooseInputFromList msg opts
+        False -> fmap Just $ 
+          choose @"()" msg $ \choice -> forM_ opts $ \(s,v) -> choice s () $ return v 
       case mres of
-        Just (Pair blk (PPa.WithBin bin addr)) -> do
+        Just (Just (Pair blk (PPa.WithBin bin addr))) -> do
           _ <- addIntraBlockCut addr blk
           let x = Some (PPa.WithBin bin (PAd.segOffToAddr addr))
           case pickMany of
             True -> go (x:picked)
             False -> return (x:picked)
+        Just Nothing -> return picked
         Nothing -> return picked
 
 

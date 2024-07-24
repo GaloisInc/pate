@@ -34,6 +34,7 @@ type class with a (distinct) symbol.
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Pate.TraceTree (
     TraceTree
@@ -109,9 +110,16 @@ module Pate.TraceTree (
   , NodeIdentQuery(..)
   , SomeTraceNode(..)
   , asChoice
+  , asInputChoice
   , forkTraceTreeHook
   , NodeFinalAction(..)
   , QueryResult(..)
+  , InputChoice
+  , InputChoiceError(InputChoiceError)
+  , giveChoiceInput
+  , waitingForChoiceInput
+  , chooseInput
+  , chooseInputFromList
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -124,7 +132,7 @@ import           Data.String
 import qualified Data.Map as Map
 import           Data.Map ( Map )
 import           Data.Default
-import           Data.List ((!!), find, isPrefixOf)
+import           Data.List (isPrefixOf, findIndex)
 import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
 import qualified Control.Monad.Reader as CMR
@@ -309,7 +317,14 @@ instance Show NodeIdentQuery where
 
 data NodeFinalAction = NodeFinalAction
   {
-    finalAct :: forall l (k :: l). SomeTraceNode k -> IO Bool
+    -- | Takes the node at the terminal position as well as the remaining
+    -- elements in the query. For a typical menu choice, this requires that the
+    -- remaining query elements be empty (i.e. the given trace node is the result
+    -- of resolving the entire original query).
+    -- This allows a "choiceInput" node to be matched with a single query element
+    -- still remaining. This element is then parsed as input to the node, rather than
+    -- used to match a menu element.
+    finalAct :: forall l (k :: l). [NodeIdentQuery] -> SomeTraceNode k -> IO Bool
   }
 
 -- context plus final selection
@@ -339,6 +354,14 @@ asChoice (SomeTraceNode nm _ v) |
   = Just v
 asChoice _ = Nothing
 
+
+asInputChoice :: forall k. SomeTraceNode k -> Maybe (Some (InputChoice k))
+asInputChoice (SomeTraceNode nm _ v) |
+    Just Refl <- testEquality nm (knownSymbol @"choiceInput")
+  = Just v
+asInputChoice _ = Nothing
+
+
 data QueryResult k = QueryResult [NodeIdentQuery] (SomeTraceNode k)
 
 resolveQuery :: forall k.
@@ -352,23 +375,29 @@ resolveQuery (NodeQuery (q_outer:qs_outer) fin_outer) t_outer =
 
     go :: [NodeIdentQuery]-> NodeIdentQuery -> NodeQuery -> TraceTree k -> IO (Maybe (QueryResult k))
     go acc q (NodeQuery qs fin) (TraceTree t) = do
-      -- IO.putStrLn $ "go 1:" ++ show q
       result <- withIOList t $ \nodes -> do
-        -- IO.putStrLn "go 2"
         matches <- get_matches q nodes
         check_matches acc (NodeQuery qs fin) matches
       case result of
         Left{} -> return Nothing
         Right a -> return $ Just a
+    
+    -- Check all of the matches at the current query level against the finalization action.
+    check_final :: [NodeIdentQuery] -> NodeQuery -> [(NodeIdentQuery, SomeTraceNode k, TraceTree k)] -> IO (Maybe (QueryResult k))
+    check_final acc (NodeQuery remaining fin) ((matched_q, x,_):xs) = finalAct fin remaining x >>= \case
+      True -> return $ Just (QueryResult ((reverse (matched_q:acc)) ++ remaining) x)
+      False -> check_final acc (NodeQuery remaining fin) xs
+    check_final _ _ [] = return Nothing
 
     check_matches :: [NodeIdentQuery] -> NodeQuery -> [(NodeIdentQuery, SomeTraceNode k, TraceTree k)] -> IO (Maybe (QueryResult k))
-    check_matches acc (NodeQuery [] fin) ((q, x,_):xs) = finalAct fin x >>= \case
-      True -> return $ Just (QueryResult (reverse (q:acc)) x)
-      False -> check_matches acc (NodeQuery [] fin) xs
-    check_matches _ _ [] = return Nothing
-    check_matches acc (NodeQuery (q:qs) fin) ((matched_q, _,t):xs) = go (matched_q:acc) q (NodeQuery qs fin) t >>= \case
+    check_matches acc nodeQuery@(NodeQuery remaining fin) matches@((matched_q, _,t):xs) = check_final acc nodeQuery matches >>= \case
       Just result -> return $ Just result
-      Nothing -> check_matches acc (NodeQuery (q:qs) fin) xs
+      Nothing -> case remaining of
+        q:qs -> go (matched_q:acc) q (NodeQuery qs fin) t >>= \case
+          Just result -> return $ Just result
+          Nothing -> check_matches acc (NodeQuery (q:qs) fin) xs
+        [] -> return Nothing
+    check_matches _ _ [] = return Nothing
 
     get_matches :: NodeIdentQuery -> [Some (TraceTreeNode k)] -> IO [(NodeIdentQuery, SomeTraceNode k, TraceTree k)]
     get_matches q  nodes = do
@@ -1006,6 +1035,128 @@ chooseLazy treenm f = do
             getChoice choices
           False -> return Nothing
     DefaultChoice -> return $ LazyIOAction (return False) (\_ -> return Nothing)
+
+data InputChoiceError = 
+    InputChoiceAlreadyMade
+  | InputChoiceError String [String]
+  deriving Show
+
+
+instance PP.Pretty InputChoiceError where
+  pretty = \case
+    InputChoiceAlreadyMade -> "INTERNAL ERROR: input choice has already been given!"
+    InputChoiceError msgHeader [] -> PP.pretty msgHeader
+    InputChoiceError msgHeader msgDetails -> PP.pretty msgHeader PP.<> PP.line PP.<> PP.vsep (map PP.pretty msgDetails)  
+
+data InputChoice (k :: l) nm where
+  InputChoice :: (IsTraceNode k nm) =>
+    { inputChoiceParse :: String -> Either InputChoiceError (TraceNodeLabel nm, TraceNodeType k nm)
+    , inputChoicePut :: TraceNodeLabel nm -> TraceNodeType k nm -> IO Bool -- returns false if input has already been provided
+    , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm)) 
+    } -> InputChoice k nm
+
+waitingForChoiceInput :: InputChoice k nm -> IO Bool
+waitingForChoiceInput ic = inputChoiceValue ic >>= \case
+  Just{} -> return False
+  Nothing -> return True
+
+giveChoiceInput :: InputChoice k nm -> String -> IO (Maybe InputChoiceError)
+giveChoiceInput ic input = waitingForChoiceInput ic >>= \case
+  False -> return $ Just InputChoiceAlreadyMade
+  True -> case inputChoiceParse ic input of
+    Right (lbl, v) -> inputChoicePut ic lbl v >>= \case
+      True -> return Nothing
+      False -> return $ Just InputChoiceAlreadyMade 
+    Left err -> return $ Just err
+
+instance IsTraceNode k "choiceInput" where
+  type TraceNodeType k "choiceInput" = Some (InputChoice k)
+  type TraceNodeLabel "choiceInput" = String
+  prettyNode lbl _ = PP.pretty lbl
+  nodeTags = mkTags @k @"choiceInput" [Summary, Simplified]
+  jsonNode core lbl (Some (ic@InputChoice{} :: InputChoice k nm)) = do
+    v_json <- inputChoiceValue ic >>= \case
+      Just (lbl', v) -> jsonNode @_ @k @nm core lbl' v
+      Nothing -> return JSON.Null
+    return $ JSON.object ["node_kind" JSON..= ("choiceInput" :: String), "value" JSON..= v_json, "prompt" JSON..= lbl]
+
+instance IsTraceNode k "opt_index" where
+  type TraceNodeType k "opt_index" = Int
+  type TraceNodeLabel "opt_index" = String
+  prettyNode msg _ = PP.pretty msg
+  nodeTags = (mkTags @k @"opt_index" [Summary, Simplified]) ++ 
+    [("debug", \msg lbl -> PP.pretty lbl PP.<> ":" PP.<+> PP.pretty msg)]
+
+-- | Wrapper for 'chooseInput' that just takes a list of labeled options
+--   and generates a parser for picking one option.
+chooseInputFromList ::
+  IsTreeBuilder k e m =>
+  IO.MonadUnliftIO m =>
+  String ->
+  [(String, a)] ->
+  m (Maybe a)
+chooseInputFromList treenm opts = do
+  let parseInput s = case findIndex (\(s',_) -> s == s') opts of
+        Just idx -> Right (s, idx)
+        Nothing -> Left (InputChoiceError "Invalid input. Valid options:" (map fst opts))
+  chooseInput @"opt_index" treenm parseInput >>= \case
+    Just (_, idx) -> return $ Just $ (snd (opts !! idx))
+    Nothing -> return Nothing
+
+-- | Take user input as a string. Returns 'Nothing' in the case where the trace tree
+--   is not running interactively. Otherwise, blocks the current thread until
+--   valid input is provided.
+chooseInput ::
+  forall nm_choice k m e.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm_choice =>
+  IO.MonadUnliftIO m =>
+  String ->
+  (String -> Either InputChoiceError (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
+  m (Maybe (TraceNodeLabel nm_choice, TraceNodeType k nm_choice))
+chooseInput treenm parseInput = do
+  builder <- getTreeBuilder
+  case interactionMode builder of
+    Interactive nextChoiceIdent -> do
+      newChoiceIdent <- liftIO $ nextChoiceIdent
+      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
+      let statusFinal = NodeStatus StatusSuccess False (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      c <- liftIO $ newEmptyMVar
+      choice_lock <- liftIO $ newMVar False
+      let getValue = withMVar choice_lock $ \case
+            False -> return Nothing
+            True -> Just <$> readMVar c
+      let putValue lbl v = modifyMVar choice_lock $ \case
+            False -> do
+              putMVar c (lbl, v)
+              -- we need to mark this builder as unblocked before returning
+              -- to avoid having an intermediate state where the script runner sees
+              -- this node is still blocked on input that was just provided by the script
+              updateTreeStatus builder statusFinal
+              return (True, True)
+            True -> return (True, False)
+      let ichoice = InputChoice @k @nm_choice parseInput putValue getValue
+      
+      (lbl, v) <- withTracingLabel @"choiceInput" @k treenm (Some ichoice) $ do
+        builder' <- getTreeBuilder
+        liftIO $ updateTreeStatus builder' status
+        -- this blocks until 'putValue' sets the 'c' mvar, which either comes from
+        -- user input (i.e. via the Repl or GUI) or the script runner
+        (lbl, v) <- liftIO $ readMVar c
+        emitTraceLabel @nm_choice lbl v
+        -- ideally this inner builder is the one that would be unblocked by 'putValue', but
+        -- expressing this is a bit convoluted (i.e. because this builder doesn't exist when
+        -- defining 'putValue')
+        -- this just means that there is a temporary intermediate state where the 'choiceInput' node is
+        -- considered blocked waiting for input, while its parent node is unblocked
+        -- I don't think this is an issue in practice, although there are likely pathological
+        -- cases where a script will fail if it tries to match on the above element.
+        -- It's unclear why this would ever be useful, since this element is just a record of the value that
+        -- was parsed from the input.
+        liftIO $ updateTreeStatus builder' statusFinal
+        return (lbl, v)
+      return $ Just (lbl, v)
+    DefaultChoice -> return Nothing
 
 choose ::
   forall nm_choice a k m e.

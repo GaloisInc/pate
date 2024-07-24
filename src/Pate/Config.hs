@@ -287,6 +287,9 @@ data VerificationConfig validRepr =
     , cfgAlwaysClassifyReturn :: Bool
     -- ^ true if block classifier failures that can jump anywhere should be classified
     -- as returns without asking. 
+    , cfgPreferTextInput :: Bool
+    -- ^ modifies some menus to take string input instead of providing
+    -- a menu selection
     }
 
 
@@ -313,4 +316,5 @@ defaultVerificationCfg =
                      , cfgScriptPath = Nothing
                      , cfgIgnoreWarnings = []
                      , cfgAlwaysClassifyReturn = False
+                     , cfgPreferTextInput = False
                      }
