@@ -509,9 +509,14 @@ pickCutPoints pickMany msg inputs = go []
            , concBlk <- return $ PB.mkConcreteBlock blk PB.BlockEntryJump addr
            ]
       let opts = case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
-            True -> addr_opts ++ [("Finish Choosing", Nothing), ("", Nothing)]
+            True -> addr_opts ++ [("Finish Choosing", Nothing)]
             False -> addr_opts
-      mres <- chooseInputFromList msg opts
+      -- either generate a menu of alternatives or take text input, based on
+      -- the current configuration
+      mres <- asks (PCfg.cfgPreferTextInput . envConfig) >>= \case
+        True -> chooseInputFromList msg opts
+        False -> fmap Just $ 
+          choose @"()" msg $ \choice -> forM_ opts $ \(s,v) -> choice s () $ return v 
       case mres of
         Just (Just (Pair blk (PPa.WithBin bin addr))) -> do
           _ <- addIntraBlockCut addr blk

@@ -149,6 +149,7 @@ data CLIOptions = CLIOptions
   , noAssumeStackScope :: Bool
   , ignoreWarnings :: [String]
   , alwaysClassifyReturn :: Bool
+  , preferTextInput :: Bool
   } deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -469,4 +470,8 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.switch
          ( OA.long "always-classify-return"
          <> OA.help "Always resolve classifier failures by assuming function returns, if possible."
+         )
+    <*> OA.switch
+         ( OA.long "prefer-text-input"
+         <> OA.help "Prefer taking text input over multiple choice menus where possible."
          )
