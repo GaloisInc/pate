@@ -509,7 +509,7 @@ pickCutPoints pickMany msg inputs = go []
            , concBlk <- return $ PB.mkConcreteBlock blk PB.BlockEntryJump addr
            ]
       let opts = case pickMany && hasBin PBi.OriginalRepr picked && hasBin PBi.PatchedRepr picked of
-            True -> addr_opts ++ [("Finished Choosing", Nothing), ("", Nothing)]
+            True -> addr_opts ++ [("Finish Choosing", Nothing), ("", Nothing)]
             False -> addr_opts
       mres <- chooseInputFromList msg opts
       case mres of

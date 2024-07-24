@@ -110,6 +110,7 @@ module Pate.TraceTree (
   , NodeIdentQuery(..)
   , SomeTraceNode(..)
   , asChoice
+  , asInputChoice
   , forkTraceTreeHook
   , NodeFinalAction(..)
   , QueryResult(..)
@@ -118,7 +119,6 @@ module Pate.TraceTree (
   , giveChoiceInput
   , waitingForChoiceInput
   , chooseInput
-  , chooseInputLazy
   , chooseInputFromList
   ) where
 
@@ -317,7 +317,14 @@ instance Show NodeIdentQuery where
 
 data NodeFinalAction = NodeFinalAction
   {
-    finalAct :: forall l (k :: l). SomeTraceNode k -> IO Bool
+    -- | Takes the node at the terminal position as well as the remaining
+    -- elements in the query. For a typical menu choice, this requires that the
+    -- remaining query elements be empty (i.e. the given trace node is the result
+    -- of resolving the entire original query).
+    -- This allows a "choiceInput" node to be matched with a single query element
+    -- still remaining. This element is then parsed as input to the node, rather than
+    -- used to match a menu element.
+    finalAct :: forall l (k :: l). [NodeIdentQuery] -> SomeTraceNode k -> IO Bool
   }
 
 -- context plus final selection
@@ -347,6 +354,14 @@ asChoice (SomeTraceNode nm _ v) |
   = Just v
 asChoice _ = Nothing
 
+
+asInputChoice :: forall k. SomeTraceNode k -> Maybe (Some (InputChoice k))
+asInputChoice (SomeTraceNode nm _ v) |
+    Just Refl <- testEquality nm (knownSymbol @"choiceInput")
+  = Just v
+asInputChoice _ = Nothing
+
+
 data QueryResult k = QueryResult [NodeIdentQuery] (SomeTraceNode k)
 
 resolveQuery :: forall k.
@@ -360,23 +375,29 @@ resolveQuery (NodeQuery (q_outer:qs_outer) fin_outer) t_outer =
 
     go :: [NodeIdentQuery]-> NodeIdentQuery -> NodeQuery -> TraceTree k -> IO (Maybe (QueryResult k))
     go acc q (NodeQuery qs fin) (TraceTree t) = do
-      -- IO.putStrLn $ "go 1:" ++ show q
       result <- withIOList t $ \nodes -> do
-        -- IO.putStrLn "go 2"
         matches <- get_matches q nodes
         check_matches acc (NodeQuery qs fin) matches
       case result of
         Left{} -> return Nothing
         Right a -> return $ Just a
+    
+    -- Check all of the matches at the current query level against the finalization action.
+    check_final :: [NodeIdentQuery] -> NodeQuery -> [(NodeIdentQuery, SomeTraceNode k, TraceTree k)] -> IO (Maybe (QueryResult k))
+    check_final acc (NodeQuery remaining fin) ((matched_q, x,_):xs) = finalAct fin remaining x >>= \case
+      True -> return $ Just (QueryResult ((reverse (matched_q:acc)) ++ remaining) x)
+      False -> check_final acc (NodeQuery remaining fin) xs
+    check_final _ _ [] = return Nothing
 
     check_matches :: [NodeIdentQuery] -> NodeQuery -> [(NodeIdentQuery, SomeTraceNode k, TraceTree k)] -> IO (Maybe (QueryResult k))
-    check_matches acc (NodeQuery [] fin) ((q, x,_):xs) = finalAct fin x >>= \case
-      True -> return $ Just (QueryResult (reverse (q:acc)) x)
-      False -> check_matches acc (NodeQuery [] fin) xs
-    check_matches _ _ [] = return Nothing
-    check_matches acc (NodeQuery (q:qs) fin) ((matched_q, _,t):xs) = go (matched_q:acc) q (NodeQuery qs fin) t >>= \case
+    check_matches acc nodeQuery@(NodeQuery remaining fin) matches@((matched_q, _,t):xs) = check_final acc nodeQuery matches >>= \case
       Just result -> return $ Just result
-      Nothing -> check_matches acc (NodeQuery (q:qs) fin) xs
+      Nothing -> case remaining of
+        q:qs -> go (matched_q:acc) q (NodeQuery qs fin) t >>= \case
+          Just result -> return $ Just result
+          Nothing -> check_matches acc (NodeQuery (q:qs) fin) xs
+        [] -> return Nothing
+    check_matches _ _ [] = return Nothing
 
     get_matches :: NodeIdentQuery -> [Some (TraceTreeNode k)] -> IO [(NodeIdentQuery, SomeTraceNode k, TraceTree k)]
     get_matches q  nodes = do
@@ -1031,7 +1052,7 @@ data InputChoice (k :: l) nm where
   InputChoice :: (IsTraceNode k nm) =>
     { inputChoiceParse :: String -> Either InputChoiceError (TraceNodeLabel nm, TraceNodeType k nm)
     , inputChoicePut :: TraceNodeLabel nm -> TraceNodeType k nm -> IO Bool -- returns false if input has already been provided
-    , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm))
+    , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm)) 
     } -> InputChoice k nm
 
 waitingForChoiceInput :: InputChoice k nm -> IO Bool
@@ -1099,44 +1120,43 @@ chooseInput treenm parseInput = do
     Interactive nextChoiceIdent -> do
       newChoiceIdent <- liftIO $ nextChoiceIdent
       let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
-      let statusFinal = NodeStatus StatusSuccess True (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      let statusFinal = NodeStatus StatusSuccess False (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
       c <- liftIO $ newEmptyMVar
-      let getValue = tryReadMVar c
-      let putValue lbl v = tryPutMVar c (lbl, v)
+      choice_lock <- liftIO $ newMVar False
+      let getValue = withMVar choice_lock $ \case
+            False -> return Nothing
+            True -> Just <$> readMVar c
+      let putValue lbl v = modifyMVar choice_lock $ \case
+            False -> do
+              putMVar c (lbl, v)
+              -- we need to mark this builder as unblocked before returning
+              -- to avoid having an intermediate state where the script runner sees
+              -- this node is still blocked on input that was just provided by the script
+              updateTreeStatus builder statusFinal
+              return (True, True)
+            True -> return (True, False)
       let ichoice = InputChoice @k @nm_choice parseInput putValue getValue
+      
       (lbl, v) <- withTracingLabel @"choiceInput" @k treenm (Some ichoice) $ do
         builder' <- getTreeBuilder
         liftIO $ updateTreeStatus builder' status
+        -- this blocks until 'putValue' sets the 'c' mvar, which either comes from
+        -- user input (i.e. via the Repl or GUI) or the script runner
         (lbl, v) <- liftIO $ readMVar c
         emitTraceLabel @nm_choice lbl v
+        -- ideally this inner builder is the one that would be unblocked by 'putValue', but
+        -- expressing this is a bit convoluted (i.e. because this builder doesn't exist when
+        -- defining 'putValue')
+        -- this just means that there is a temporary intermediate state where the 'choiceInput' node is
+        -- considered blocked waiting for input, while its parent node is unblocked
+        -- I don't think this is an issue in practice, although there are likely pathological
+        -- cases where a script will fail if it tries to match on the above element.
+        -- It's unclear why this would ever be useful, since this element is just a record of the value that
+        -- was parsed from the input.
         liftIO $ updateTreeStatus builder' statusFinal
         return (lbl, v)
       return $ Just (lbl, v)
     DefaultChoice -> return Nothing
-
-chooseInputLazy ::
-  forall nm_choice a b k m e.
-  IsTreeBuilder k e m =>
-  IsTraceNode k nm_choice =>
-  IO.MonadUnliftIO m =>
-  String ->
-  (String -> Either InputChoiceError (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
-  (TraceNodeLabel nm_choice -> TraceNodeType k nm_choice -> b -> IO a) ->
-  m (LazyIOAction b a)
-chooseInputLazy treenm parseInput f = do
-  builder <- getTreeBuilder
-  case interactionMode builder of
-    Interactive{} -> do
-      c <- liftIO $ newEmptyMVar
-      let getValue = tryReadMVar c
-      let putValue lbl v = tryPutMVar c (lbl, v)
-      let isReady = not <$> isEmptyMVar c
-      let ichoice = InputChoice @k @nm_choice parseInput putValue getValue
-      emitTraceLabel @"choiceInput" @k treenm (Some ichoice)
-      return $ LazyIOAction (liftIO isReady) $ \inputVal -> getValue >>= \case
-        Just (lbl, v) -> Just <$> f lbl v inputVal
-        Nothing -> return Nothing
-    DefaultChoice{} -> return $ LazyIOAction (return False) (\_ -> return Nothing)
 
 choose ::
   forall nm_choice a k m e.

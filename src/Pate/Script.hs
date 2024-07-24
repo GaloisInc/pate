@@ -68,6 +68,7 @@ the rest of the query.
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module Pate.Script (
     readScript
@@ -91,6 +92,9 @@ import           Text.Megaparsec ((<|>))
 import           Pate.TraceTree
 import Data.Void
 import Data.Maybe (fromMaybe)
+import Data.Parameterized (Some(..))
+import qualified System.IO as IO
+import qualified Prettyprinter as PP
 -- import qualified System.IO as IO
 
 data Script = Script [NodeQuery]
@@ -127,16 +131,30 @@ data ScriptStep =
  | ScriptTerminal NodeIdentQuery NodeFinalAction
 
 pickChoiceAct :: NodeFinalAction
-pickChoiceAct = NodeFinalAction $ \node -> case asChoice node of
-  Just (SomeChoice c) -> choiceChosen c >>= \case
+pickChoiceAct = NodeFinalAction $ \remaining node -> if
+  | Just (SomeChoice c) <- asChoice node
+  , [] <- remaining
+  -> choiceChosen c >>= \case
     True -> return False
     False -> choiceReady (choiceHeader c) >>= \case
       True -> return False
       False -> choicePick c >> return True
-  Nothing -> return False
+  | Just (Some ic) <- asInputChoice node
+    -- if we're at a choiceInput node and have exactly one string query remaining,
+    -- then we attempt to give this as input and match if it is accepted by the parser
+  , [QueryString s] <- remaining
+  -> giveChoiceInput ic s >>= \case
+    -- no error means the input was accepted, which indicates a successful match
+    Nothing -> return True
+    -- either an input parse error or input has already been provided to this node
+    -- in either case, this is a failed match
+    Just _err -> return False
+  | otherwise -> return False
 
+
+-- | Match any node provided it's the final node in the query
 matchAnyAct :: NodeFinalAction
-matchAnyAct = NodeFinalAction $ \_ -> return True
+matchAnyAct = NodeFinalAction $ \remaining _node  -> return (null remaining)
 
 parseIdentQuery :: Parser NodeIdentQuery
 parseIdentQuery =
