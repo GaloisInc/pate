@@ -104,7 +104,8 @@ library
                        Pate.CLI,
                        Pate.Discovery,
                        Pate.Discovery.PLT,
-                       Pate.Discovery.ParsedFunctions
+                       Pate.Discovery.ParsedFunctions,
+                       Pate.Expression,
                        Pate.Verification,
                        Pate.Verification.AbstractDomain,
                        Pate.Verification.Concretize,
