@@ -123,8 +123,7 @@ cacheToEnv sym (ExprCache m) = ExprEnv $ Map.fromList $ mapMaybe go (Map.keys m)
   where
     go (Some e)
       | Nothing <- W4.asConcrete e
-      , Just ann <- W4.getAnnotation sym e
-      = Just (fromIntegral $ hashF ann, Some e)
+      = Just (fromIntegral $ hashF e, Some e)
     go _ = Nothing
 
 w4ToJSONEnv :: forall sym a. (W4.IsExprBuilder sym, SerializableExprs sym) => W4Serializable sym a => sym -> a -> IO (JSON.Value, ExprEnv sym)
@@ -176,12 +175,10 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
           _ -> do
             sym <- asks w4sSym
             asks w4sUseIdents >>= \case
-              True -> case W4.getAnnotation sym e' of
-                Just ann -> do
-                  let tp_sexpr = W4S.serializeBaseType (W4.exprType e')
-                  let (ident :: Integer) = fromIntegral $ hashF ann
-                  return $ JSON.object [ "symbolic_ident" JSON..= ident, "type" JSON..= JSON.String (W4D.printSExpr mempty tp_sexpr) ]
-                Nothing -> return $ JSON.object [ "symbolic_serialize_err" JSON..= ("Missing expression annotation" :: String)]
+              True -> do
+                let tp_sexpr = W4S.serializeBaseType (W4.exprType e')
+                let (ident :: Integer) = fromIntegral $ hashF e'
+                return $ JSON.object [ "symbolic_ident" JSON..= ident, "type" JSON..= JSON.String (W4D.printSExpr mempty tp_sexpr) ]
               False -> do
                 e <- liftIO $ WEH.stripAnnotations sym e'
                 mv <- trySerialize $ do
