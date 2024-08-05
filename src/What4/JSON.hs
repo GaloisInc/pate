@@ -24,6 +24,7 @@ module What4.JSON
   , W4SerializableFC
   , SerializableExprs
   , w4ToJSON
+  , w4ToJSONEnv
   , object
   , w4SerializeString
   , (.=)
