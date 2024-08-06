@@ -56,6 +56,8 @@ import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Text.Lazy.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
@@ -547,7 +549,7 @@ getTraceConstraint scope bundle = withSym $ \sym -> do
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace_footprint" where
   type TraceNodeType '(sym,arch) "trace_footprint" = CE.TraceFootprint sym arch
   type TraceNodeLabel "trace_footprint" = JSON.Value
-  prettyNode json _ = PP.viaShow json
+  prettyNode json _ = PP.pretty $ Text.decodeUtf8With Text.lenientDecode $ JSON.encode json
   nodeTags = [(Summary, \_ _ -> "TODO"), (Simplified, \_ _ -> "TODO")]
   jsonNode _ json _ = return json
 
