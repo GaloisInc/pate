@@ -33,6 +33,7 @@ module Pate.Verification.Widening
   , getTraceFromModel
   , addToEquivCondition
   , strengthenPredicate
+  , getTraceFootprint
   ) where
 
 import           GHC.Stack
@@ -88,6 +89,7 @@ import qualified Pate.Proof.Instances ()
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.Simplify as PSi
+import qualified Pate.TraceConstraint as PTC
 
 import           Pate.Monad
 import           Pate.Monad.PairGraph
@@ -124,6 +126,7 @@ import qualified Prettyprinter as PP
 import qualified What4.Expr.GroundEval as W4
 import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
+import qualified Data.Parameterized.TraversableF as TF
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -507,44 +510,36 @@ getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
     let stackbase = PS.unSE $ PS.simStackBase (PS.simInState in_) 
     zero <- liftIO $ W4.bvLit sym CT.knownRepr (BVS.mkBV CT.knownRepr 0)
     PAs.fromPred <$> (liftIO $ W4.isEq sym zero stackbase)
-  
-  ptrAsserts_pred <- PAs.toPred sym (stacks_zero <> ptrAsserts)
-  trace_constraint <- getTraceConstraint scope bundle
 
-  tryWithAsms 
+  ptrAsserts_pred <- PAs.toPred sym (stacks_zero <> ptrAsserts)
+
+  tr <- tryWithAsms 
     [ (ptrAsserts_pred, PEE.RequiresInvalidPointerOps)
-    , (trace_constraint, PEE.UnsatisfiableAssumptions)
     ] $ \evalFn -> 
       getTraceFromModel scope evalFn bundle preD postCond
+
+  return tr
 
 getTraceFootprint ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  EquivM sym arch (PPa.PatchPairC (CE.TraceFootprint sym arch))
-getTraceFootprint _scope bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
-  out <- PPa.get bin (PS.simOut bundle)
-  in_ <- PPa.get bin (PS.simIn bundle)
-  let in_regs = PS.simInRegs in_
-  let rop = MT.RegOp (MM.regStateMap in_regs)
-  let mem = PS.simOutMem out
-  let s = (MT.memFullSeq @_ @arch mem)
-  s' <- PEM.mapExpr sym concretizeWithSolver s
-  liftIO $ CE.mkFootprint sym rop s'
-
-getTraceConstraint ::
-  forall sym arch v.
-  PS.SimScope sym arch v ->
-  SimBundle sym arch v ->
-  EquivM sym arch (W4.Pred sym)
-getTraceConstraint scope bundle = withSym $ \sym -> do
-  fps <- getTraceFootprint scope bundle
-  PPa.joinPatchPred (\a b -> liftIO $ W4.andPred sym a b) $ \bin -> withTracing @"binary" (Some bin) $ do
-    fp <- PPa.getC bin fps
-    (v',_eenv) <- liftIO $ W4S.w4ToJSONEnv sym fp
+  EquivM sym arch (PPa.PatchPairC (CE.TraceFootprint sym arch), W4S.ExprEnv sym)
+getTraceFootprint _scope bundle = withSym $ \sym -> do
+  fps <- PPa.forBinsC $ \bin -> withTracing @"binary" (Some bin) $ do
+    out <- PPa.get bin (PS.simOut bundle)
+    in_ <- PPa.get bin (PS.simIn bundle)
+    let in_regs = PS.simInRegs in_
+    let rop = MT.RegOp (MM.regStateMap in_regs)
+    let mem = PS.simOutMem out
+    let s = (MT.memFullSeq @_ @arch mem)
+    s' <- PEM.mapExpr sym concretizeWithSolver s
+    fp <- liftIO $ CE.mkFootprint sym rop s'
+    (v',eenv) <- liftIO $ W4S.w4ToJSONEnv sym fp
     emitTraceLabel @"trace_footprint" v' fp
-    -- FIXME: todo: get constraint from user
-    return $ W4.truePred sym
+    return (fp, eenv)
+  env <- PPa.joinPatchPred (\(_, a) (_, b) -> return $ W4S.mergeEnvs a b) $ \bin -> (PPa.getC bin fps)
+  return $ (TF.fmapF (\(Const(a,_)) -> Const a) fps, env)
 
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace_footprint" where
   type TraceNodeType '(sym,arch) "trace_footprint" = CE.TraceFootprint sym arch

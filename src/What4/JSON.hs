@@ -30,6 +30,11 @@ module What4.JSON
   , (.=)
   , (.==)
   , (.=~)
+  , ExprEnv
+  , mergeEnvs
+  , W4Deserializable(..)
+  , jsonToW4
+  , (.:)
   ) where
 
 import           Control.Monad.State (MonadState (..), State, modify, evalState, runState)
@@ -38,6 +43,7 @@ import qualified Data.Map.Ordered as OMap
 import           Data.List ( stripPrefix )
 import           Data.Maybe ( mapMaybe )
 import           Data.Map (Map)
+import qualified Data.Map.Merge.Strict as Map
 import           Data.Text (Text)
 import           Data.Data (Proxy(..), Typeable)
 import qualified Data.Aeson as JSON
@@ -117,6 +123,15 @@ w4ToJSON sym a = do
   runReaderT f env
 
 newtype ExprEnv sym = ExprEnv (Map Integer (Some (W4.SymExpr sym)))
+
+mergeEnvs :: TestEquality (W4.SymExpr sym) => ExprEnv sym -> ExprEnv sym -> ExprEnv sym
+mergeEnvs (ExprEnv env1) (ExprEnv env2) = ExprEnv (
+  Map.merge
+    Map.preserveMissing
+    Map.preserveMissing
+    (Map.zipWithMatched (\_ (Some e1) (Some e2) -> (case testEquality e1 e2 of Just Refl -> Some e1; Nothing -> error $ "Unexpected term hash clash")))
+    env1
+    env2)
 
 -- | Extract expressions with annotations
 cacheToEnv :: W4.IsExprBuilder sym => sym -> ExprCache sym -> ExprEnv sym
@@ -304,6 +319,13 @@ instance MonadFail (W4DS sym) where
 class W4Deserializable sym a where
   w4Deserialize :: JSON.Value -> W4DS sym a
 
+  default w4Deserialize :: JSON.FromJSON a => JSON.Value -> W4DS sym a
+  w4Deserialize v = fromJSON v
+
+instance W4Deserializable sym Integer
+instance W4Deserializable sym Bool
+instance W4Deserializable sym ()
+
 jsonToW4 :: (W4Deserializable sym a, W4.IsExprBuilder sym) => sym -> ExprEnv sym -> JSON.Value -> IO (Either String a)
 jsonToW4 sym env v = do
   let wenv = W4DSEnv env sym
@@ -320,9 +342,20 @@ liftParser f v = case JSON.parse f v of
   JSON.Success a -> return a
   JSON.Error msg -> fail msg
 
-(.:) :: JSON.FromJSON a => JSON.Object -> JSON.Key -> W4DS sym a
-(.:) o = liftParser ((JSON..:) o)
+(.:) :: W4Deserializable sym a => JSON.Object -> JSON.Key -> W4DS sym a
+(.:) o k = do
+  (v :: JSON.Value) <- liftParser ((JSON..:) o) k
+  w4Deserialize v
 
+instance (W4Deserializable sym a, W4Deserializable sym b) => W4Deserializable sym (a, b) where
+  w4Deserialize v = do
+    JSON.Object o <- return v
+    v1 <- o .: "fst"
+    v2 <- o .: "snd"
+    return (v1,v2)
+
+instance W4Deserializable sym f => W4Deserializable sym (Const f x) where
+  w4Deserialize v = Const <$> w4Deserialize v
 
 newtype ToDeserializable sym tp = ToDeserializable { _unDS :: W4.SymExpr sym tp }
 
