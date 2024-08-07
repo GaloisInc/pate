@@ -21,7 +21,8 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, Flow
 from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QMouseEvent, QAction, QColor, QPaintEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QSplitter, QMenu, QTextEdit
+    QSplitter, QMenu, QTextEdit, QComboBox, QPushButton, QListWidget, QListWidgetItem, QAbstractItemView, \
+    QDialogButtonBox, QMessageBox
 
 from .mcad.PateMcad import PateMcad, CycleCount
 from . import pate
@@ -471,10 +472,15 @@ class PateCfarEqCondDialog(QDialog):
         eqCondBox = QWidget()
         eqCondBox.setLayout(eqCondBoxLayout)
 
+        # Constrain True Trace Button
+        trueTraceConstraintButton = QPushButton("Constrain Trace")
+        trueTraceConstraintButton.clicked.connect(lambda _: self.showTrueTraceConstraintDialog())
+
         # True Trace Box
         self.trueTraceWidget = TraceWidget(self)
         trueTraceBoxLayout = QVBoxLayout()
         trueTraceBoxLayout.addWidget(QLabel("Trace showing EQUIVALENT behaviour:"))
+        trueTraceBoxLayout.addWidget(trueTraceConstraintButton)
         trueTraceBoxLayout.addWidget(self.trueTraceWidget)
         trueTraceBox = QWidget()
         trueTraceBox.setLayout(trueTraceBoxLayout)
@@ -509,6 +515,102 @@ class PateCfarEqCondDialog(QDialog):
 
     def setFalseTrace(self, trace: dict, label: str = None):
         self.falseTraceWidget.setTrace(trace, label)
+
+    def showTrueTraceConstraintDialog(self):
+        d = PateTraceConstraintDialog(parent=self)
+        #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
+        if d.exec():
+            QMessageBox.warning(self, "Warning", "TODO: process trace constraint")
+
+traceConstraintRelations = ["LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu", "NEQ", "EQ"]
+class PateTraceConstraintDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        #self.resize(1500, 800)
+        self.setWindowTitle("Trace Constraint")
+
+        self.varComboBox = QComboBox()
+        self.varComboBox.addItems(["var1", "var2"])
+        varLabel = QLabel("Variable:")
+        varLabel.setBuddy(self.varComboBox)
+
+        self.relComboBox = QComboBox()
+        self.relComboBox.addItems(traceConstraintRelations)
+        relLabel = QLabel("Relation:")
+        relLabel.setBuddy(self.relComboBox)
+
+        self.intTextLine = QLineEdit()
+        intLabel = QLabel("Integer:")
+        intLabel.setBuddy(self.intTextLine)
+
+        addButton = QPushButton("Add")
+        addButton.clicked.connect(lambda _: self.addConstraint())
+
+        addLayout = QHBoxLayout()
+        addLayout.addSpacing(15)
+        addLayout.addWidget(varLabel)
+        addLayout.addWidget(self.varComboBox)
+        addLayout.addSpacing(15)
+        addLayout.addWidget(relLabel)
+        addLayout.addWidget(self.relComboBox)
+        addLayout.addSpacing(15)
+        addLayout.addWidget(intLabel)
+        addLayout.addWidget(self.intTextLine)
+        addLayout.addSpacing(40)
+        addLayout.addStretch(1)
+        addLayout.addWidget(addButton)
+
+        self.constraintList = QListWidget()
+        self.constraintList.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+
+        removeButton = QPushButton("Remove Selected")
+        removeButton.clicked.connect(lambda _: self.removeSelectedConstraints())
+
+        cancelButton = QPushButton("Cancel")
+        cancelButton.clicked.connect(lambda _: self.cancel())
+
+        applyButton = QPushButton("Apply")
+        applyButton.clicked.connect(lambda _: self.apply())
+
+        buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttonBox.accepted.connect(self.accept)
+        buttonBox.rejected.connect(self.reject)
+
+        # Main Layout
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(addLayout)
+        main_layout.addWidget(self.constraintList)
+        main_layout.addWidget(removeButton)
+        main_layout.addWidget(buttonBox)
+        self.setLayout(main_layout)
+
+    def addConstraint(self):
+        var = self.varComboBox.currentText()
+        rel = self.relComboBox.currentText()
+        intStr = self.intTextLine.text()
+        if not intStr:
+            QMessageBox.critical(self, "Trace Constraint Error", "No integer specified.")
+            return
+        try:
+            intVal = int(intStr, 0)
+        except ValueError:
+            QMessageBox.critical(self, "Trace Constraint Error", f'Can\'t parse "{intStr}" as an integer.')
+            return
+
+        # TODO: Make sure intVal is in range for var type
+        # TODO: Prevent duplicates (wont hurt anything, but not useful to do and may mask entry error)
+        # TODO: Need data for constraint, associate with QListWidgetItem or subclass? Wait for var rep?
+
+        constraint = f'{var} {rel} {intVal}'
+        item = QListWidgetItem(constraint, self.constraintList)
+
+    def removeSelectedConstraints(self):
+        list = self.constraintList
+        listItems = list.selectedItems()
+        if not listItems: return
+        for item in listItems:
+            itemRow = list.row(item)
+            list.takeItem(itemRow)
 
 
 class InstTreeDiffWidget(QWidget):
