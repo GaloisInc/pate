@@ -73,6 +73,9 @@ import What4.JSON
 import Pate.Equivalence (StatePostCondition)
 import qualified Pate.Binary as PB
 import GHC.Stack (HasCallStack)
+import qualified Data.Aeson as JSON
+import qualified Data.Text.Lazy.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -253,6 +256,13 @@ data TraceFootprint sym arch = TraceFootprint
   , fpMem :: [(MM.ArchSegmentOff arch, (MT.MemOp sym (MM.ArchAddrWidth arch)))]
   }
 
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace_footprint" where
+  type TraceNodeType '(sym,arch) "trace_footprint" = TraceFootprint sym arch
+  type TraceNodeLabel "trace_footprint" = JSON.Value
+  prettyNode json _ = PP.pretty $ Text.decodeUtf8With Text.lenientDecode $ JSON.encode json
+  nodeTags = mkTags @'(sym,arch) @"trace_footprint" ["debug"]
+  jsonNode _ json _ = return json
+
 mkFootprint ::
   forall sym arch.
   W4.IsExprBuilder sym =>
@@ -275,7 +285,7 @@ mkFootprint sym init_regs s = do
       _ -> return []
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceFootprint sym arch) where
-  w4Serialize fp = W4S.object [ "fp_initial_regs" .= fpInitialRegs fp, "fp_mem" .= fpMem fp]
+  w4Serialize fp = W4S.object [  "fp_mem" .= fpMem fp, "fp_initial_regs" .= fpInitialRegs fp]
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEvents sym arch) where
   w4Serialize (TraceEvents p pre post) = do

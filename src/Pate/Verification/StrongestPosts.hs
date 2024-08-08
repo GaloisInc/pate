@@ -934,7 +934,13 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
               fmap fst $ withGraphNode scope nd pg $ \bundle d -> do
                 cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
                 eqCond_pred <- PEC.toPred sym cond_simplified
-                (fps, eenv) <- getTraceFootprint scope bundle
+                fps <- getTraceFootprint scope bundle
+                eenv <- PPa.joinPatchPred (\a b -> return $ W4S.mergeEnvs a b) $ \bin -> do
+                  fp <- PPa.getC bin fps
+                  (v, env) <- liftIO $ W4S.w4ToJSONEnv sym fp
+                  -- only visible with debug tag
+                  emitTraceLabel @"trace_footprint" v fp
+                  return env
                 asms <- currentAsm
                 let ieqc = IntermediateEqCond bundle fps eenv asms eqCond_pred d 
                 let interims = Map.insert nd (PS.mkSimSpec scope ieqc) (eqCondInterims rs)

@@ -524,9 +524,8 @@ getTraceFootprint ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
-  EquivM sym arch (PPa.PatchPairC (CE.TraceFootprint sym arch), W4S.ExprEnv sym)
-getTraceFootprint _scope bundle = withSym $ \sym -> do
-  fps <- PPa.forBinsC $ \bin -> withTracing @"binary" (Some bin) $ do
+  EquivM sym arch (PPa.PatchPairC (CE.TraceFootprint sym arch))
+getTraceFootprint _scope bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
     out <- PPa.get bin (PS.simOut bundle)
     in_ <- PPa.get bin (PS.simIn bundle)
     let in_regs = PS.simInRegs in_
@@ -534,19 +533,7 @@ getTraceFootprint _scope bundle = withSym $ \sym -> do
     let mem = PS.simOutMem out
     let s = (MT.memFullSeq @_ @arch mem)
     s' <- PEM.mapExpr sym concretizeWithSolver s
-    fp <- liftIO $ CE.mkFootprint sym rop s'
-    (v',eenv) <- liftIO $ W4S.w4ToJSONEnv sym fp
-    emitTraceLabel @"trace_footprint" v' fp
-    return (fp, eenv)
-  env <- PPa.joinPatchPred (\(_, a) (_, b) -> return $ W4S.mergeEnvs a b) $ \bin -> (PPa.getC bin fps)
-  return $ (TF.fmapF (\(Const(a,_)) -> Const a) fps, env)
-
-instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace_footprint" where
-  type TraceNodeType '(sym,arch) "trace_footprint" = CE.TraceFootprint sym arch
-  type TraceNodeLabel "trace_footprint" = JSON.Value
-  prettyNode json _ = PP.pretty $ Text.decodeUtf8With Text.lenientDecode $ JSON.encode json
-  nodeTags = [(Summary, \_ _ -> "TODO"), (Simplified, \_ _ -> "TODO")]
-  jsonNode _ json _ = return json
+    liftIO $ CE.mkFootprint sym rop s'
 
 -- | Compute a counter-example for a given predicate
 getTraceFromModel ::

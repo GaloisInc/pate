@@ -18,8 +18,7 @@
 
 module Pate.TraceConstraint
   (
-    TraceConstraint(..)
-  , readDeserializable
+    TraceConstraint
   , constraintToPred
   , TraceConstraintMap(..)
   , readConstraintMap
@@ -81,14 +80,7 @@ instance forall sym. W4S.W4Deserializable sym (TraceConstraint sym) where
         case (BVS.mkBVUnsigned w c) of
           Just bv -> return $ TraceConstraint var op (W4.ConcreteBV w bv)
           Nothing -> fail "Unexpected integer size"
-      _ -> fail "Unsupported expression type"
-
-{-
-instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch) "trace_constraint" where
-  type TraceNodeType '(sym,arch) "trace_constraint" = TraceConstraint sym
-  prettyNode _ _ = PP.pretty ("TODO" :: String)
-  nodeTags = mkTags @'(sym,arch) @"trace_constraint" [Summary, Simplified]
--}
+      _ -> fail ("Unsupported expression type:" ++ show (W4.exprType var))
 
 constraintToPred ::
   forall sym.
@@ -102,14 +94,19 @@ constraintToPred sym (TraceConstraint var op c) = case W4.exprType var of
     bvSym <- W4.bvLit sym w bv
     let go :: (forall w. 1 W4.<= w => sym -> W4.SymBV sym w -> W4.SymBV sym w -> IO (W4.Pred sym)) -> IO (W4.Pred sym)
         go f = f sym var bvSym
+    let goNot :: (forall w. 1 W4.<= w => sym -> W4.SymBV sym w -> W4.SymBV sym w -> IO (W4.Pred sym)) -> IO (W4.Pred sym)
+        goNot f = f sym var bvSym >>= W4.notPred sym
     case op of
       LTs -> go W4.bvSlt
       LTu -> go W4.bvUlt
       LEs -> go W4.bvSle
       LEu -> go W4.bvUle
       EQ -> go W4.isEq
-      _ -> fail "err"
-
+      GTs -> goNot W4.bvSle
+      GTu -> goNot W4.bvUle
+      GEs -> goNot W4.bvSlt
+      GEu -> goNot W4.bvUlt
+      NEQ -> goNot W4.isEq
   _ -> fail "Unexpected constraint "
 
 
@@ -121,7 +118,7 @@ newtype TraceConstraintMap sym arch =
 instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "trace_constraint_map" where
   type TraceNodeType '(sym,arch) "trace_constraint_map" = TraceConstraintMap sym arch
   prettyNode _ _ = PP.pretty ("TODO" :: String)
-  nodeTags = mkTags @'(sym,arch) @"trace_constraint_map" [Summary, Simplified]
+  nodeTags = []
 
 readConstraintMap ::
   W4.IsExprBuilder sym =>
@@ -136,15 +133,13 @@ readConstraintMap sym msg ndEnvs = do
   let parse s = case JSON.eitherDecode (fromString s) of
         Left err -> return $ Left $ InputChoiceError "Failed to decode JSON" [err]
         Right (v :: JSON.Value) -> runExceptT $ do
-          nodes <- runJSON $ do
-            JSON.Object o <- return v
-            (nodes :: [JSON.Value]) <- o JSON..: "trace_constraints"
-            return nodes
+          (nodes :: [[JSON.Value]]) <- runJSON $ JSON.parseJSON v
           let nds = zip ndEnvs nodes
-          fmap (TraceConstraintMap . Map.fromList) $ forM nds $ \((nd, env), constraint_json) -> do
-             (lift $ W4S.jsonToW4 sym env constraint_json) >>= \case
-               Left err -> throwError $ InputChoiceError "Failed to parse value" [err]
-               Right a -> return (nd, a)
+          fmap (TraceConstraintMap . Map.fromList . concat) $ 
+            forM nds $ \((nd, env), constraints_json) -> forM constraints_json $ \constraint_json ->
+                (lift $ W4S.jsonToW4 sym env constraint_json) >>= \case
+                  Left err -> throwError $ InputChoiceError "Failed to parse value" [err]
+                  Right a -> return (nd, a)
   chooseInput_ @"trace_constraint_map" msg parse >>= \case
     Nothing -> IO.liftIO $ fail "Unexpected trace map read"
     Just a -> return a
@@ -154,25 +149,3 @@ runJSON :: JSON.Parser a -> ExceptT InputChoiceError IO a
 runJSON p = ExceptT $ case JSON.parse (\() -> p) () of
   JSON.Success a -> return $ Right a
   JSON.Error err -> return $ Left $ InputChoiceError "Failed to parse value" [err]
-
-
-
--- FIXME: Move
-readDeserializable ::
-  forall nm_choice sym k e m.
-  W4S.W4Deserializable sym (TraceNodeLabel nm_choice, TraceNodeType k nm_choice) =>
-  W4.IsExprBuilder sym =>
-  IsTreeBuilder k e m =>
-  IsTraceNode k nm_choice =>
-  IO.MonadUnliftIO m =>
-  sym ->
-  W4S.ExprEnv sym ->
-  String ->
-  m (Maybe (TraceNodeLabel nm_choice, TraceNodeType k nm_choice))
-readDeserializable sym env msg = do
-  let parse s = case JSON.eitherDecode (fromString s) of
-        Left err -> return $ Left $ InputChoiceError "Failed to decode JSON" [err]
-        Right (v :: JSON.Value) -> W4S.jsonToW4 sym env v >>= \case
-          Left err -> return $ Left $ InputChoiceError "Failed to parse value" [err]
-          Right a -> return $ Right a
-  chooseInput @nm_choice msg parse

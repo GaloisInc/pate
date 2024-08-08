@@ -44,7 +44,7 @@ import           Control.Monad.State (MonadState (..), State, modify, evalState,
 
 import qualified Data.Map.Ordered as OMap
 import           Data.List ( stripPrefix )
-import           Data.Maybe ( mapMaybe )
+import           Data.Maybe ( mapMaybe, catMaybes )
 import           Data.Map (Map)
 import qualified Data.Map.Merge.Strict as Map
 import           Data.Text (Text)
@@ -137,13 +137,15 @@ mergeEnvs (ExprEnv env1) (ExprEnv env2) = ExprEnv (
     env2)
 
 -- | Extract expressions with annotations
-cacheToEnv :: W4.IsExprBuilder sym => sym -> ExprCache sym -> ExprEnv sym
-cacheToEnv sym (ExprCache m) = ExprEnv $ Map.fromList $ mapMaybe go (Map.keys m)
+cacheToEnv :: W4.IsExprBuilder sym => sym -> ExprCache sym -> IO (ExprEnv sym)
+cacheToEnv _sym (ExprCache m) = (ExprEnv . Map.fromList . catMaybes) <$> mapM go (Map.keys m)
   where
     go (Some e)
       | Nothing <- W4.asConcrete e
-      = Just (fromIntegral $ hashF e, Some e)
-    go _ = Nothing
+      = do
+        ident <- mkIdent e
+        return $ Just (ident, Some e)
+    go _ = return Nothing
 
 w4ToJSONEnv :: forall sym a. (W4.IsExprBuilder sym, SerializableExprs sym) => W4Serializable sym a => sym -> a -> IO (JSON.Value, ExprEnv sym)
 w4ToJSONEnv sym a = do
@@ -152,7 +154,8 @@ w4ToJSONEnv sym a = do
   let env = W4SEnv cacheRef sym True
   v <- runReaderT f env
   c <- IO.readIORef cacheRef
-  return $ (v, cacheToEnv sym c)
+  eenv <- cacheToEnv sym c
+  return $ (v, eenv)
 
 class W4SerializableF sym (f :: k -> Type) where
   withSerializable :: Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a
@@ -181,6 +184,19 @@ trySerialize (W4S f) = do
     Left err -> return $ Left (show err)
     Right x -> return $ Right x
 
+firstHashRef :: IO.IORef (Maybe Integer)
+firstHashRef = unsafePerformIO (IO.newIORef Nothing)
+
+-- | Makes hashes slightly more stable by fixing the first requested
+--   identifier and deriving all subsequent identifiers as offsets from it
+mkIdent :: HashableF t => t tp -> IO Integer
+mkIdent v = do
+  let (ident :: Integer) = fromIntegral $ hashF v
+  let f = \case
+        Just i -> (Just i, ident - i)
+        Nothing -> (Just ident, 0)
+  IO.atomicModifyIORef firstHashRef f
+
 instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) where
   w4Serialize e' = do
     ExprCache s <- get
@@ -196,7 +212,7 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
             asks w4sUseIdents >>= \case
               True -> do
                 let tp_sexpr = W4S.serializeBaseType (W4.exprType e')
-                let (ident :: Integer) = fromIntegral $ hashF e'
+                ident <- liftIO $ mkIdent e'
                 return $ JSON.object [ "symbolic_ident" JSON..= ident, "type" JSON..= JSON.String (W4D.printSExpr mempty tp_sexpr) ]
               False -> do
                 e <- liftIO $ WEH.stripAnnotations sym e'
