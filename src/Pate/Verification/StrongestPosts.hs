@@ -889,7 +889,7 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
     True -> 
       let loop st_ = chooseBool "Regenerate result with new trace constraints?" >>= \case
             True -> do
-              tcs <- PTC.readConstraintMap sym "Waiting for constraints.." (getExprEnvs st_)
+              tcs <- PTC.readConstraintMap sym "Waiting for constraints.." (Map.toAscList (getExprEnvs st_))
               go (st_ {eqCondConstraints = tcs}) >>= loop
             False -> return ()
       in loop st

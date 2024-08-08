@@ -34,7 +34,10 @@ module What4.JSON
   , mergeEnvs
   , W4Deserializable(..)
   , jsonToW4
+  , readJSON
   , (.:)
+  , SymDeserializable(..)
+  , symDeserializable
   ) where
 
 import           Control.Monad.State (MonadState (..), State, modify, evalState, runState)
@@ -317,11 +320,16 @@ instance MonadFail (W4DS sym) where
   fail msg = throwError msg
 
 class W4Deserializable sym a where
-  w4Deserialize :: JSON.Value -> W4DS sym a
+  w4Deserialize_ :: W4.IsExprBuilder sym => JSON.Value -> W4DS sym a
 
-  default w4Deserialize :: JSON.FromJSON a => JSON.Value -> W4DS sym a
-  w4Deserialize v = fromJSON v
+  default w4Deserialize_ :: (W4.IsExprBuilder sym, JSON.FromJSON a) => JSON.Value -> W4DS sym a
+  w4Deserialize_ v = fromJSON v
 
+w4Deserialize :: W4Deserializable sym a => JSON.Value -> W4DS sym a
+w4Deserialize v = ask >>= \W4DSEnv{} -> w4Deserialize_ v
+
+instance W4Deserializable sym JSON.Value
+instance W4Deserializable sym String
 instance W4Deserializable sym Integer
 instance W4Deserializable sym Bool
 instance W4Deserializable sym ()
@@ -342,25 +350,31 @@ liftParser f v = case JSON.parse f v of
   JSON.Success a -> return a
   JSON.Error msg -> fail msg
 
+readJSON :: forall a sym. Read a => JSON.Value -> W4DS sym a
+readJSON v = do
+  (vS :: String) <- fromJSON v
+  (a :: a,""):_ <- return $ readsPrec 0 vS
+  return a
+
 (.:) :: W4Deserializable sym a => JSON.Object -> JSON.Key -> W4DS sym a
 (.:) o k = do
   (v :: JSON.Value) <- liftParser ((JSON..:) o) k
   w4Deserialize v
 
 instance (W4Deserializable sym a, W4Deserializable sym b) => W4Deserializable sym (a, b) where
-  w4Deserialize v = do
+  w4Deserialize_ v = do
     JSON.Object o <- return v
     v1 <- o .: "fst"
     v2 <- o .: "snd"
     return (v1,v2)
 
 instance W4Deserializable sym f => W4Deserializable sym (Const f x) where
-  w4Deserialize v = Const <$> w4Deserialize v
+  w4Deserialize_ v = Const <$> w4Deserialize v
 
 newtype ToDeserializable sym tp = ToDeserializable { _unDS :: W4.SymExpr sym tp }
 
 instance W4Deserializable sym (Some (ToDeserializable sym)) where
-  w4Deserialize v = fmap (\(Some x) -> Some (ToDeserializable x)) $ ask >>= \W4DSEnv{} -> asks w4dsSym >>= \sym -> do
+  w4Deserialize_ v = fmap (\(Some x) -> Some (ToDeserializable x)) $ asks w4dsSym >>= \sym -> do
       (i :: Integer) <- fromJSON v
       Some <$> (liftIO $ W4.intLit sym i)
     <|> do
@@ -383,70 +397,20 @@ instance W4Deserializable sym (Some (ToDeserializable sym)) where
       return $ Some e
 
 instance forall tp sym. KnownRepr W4.BaseTypeRepr tp => W4Deserializable sym (ToDeserializable sym tp) where
-  w4Deserialize v = ask >>= \W4DSEnv{} -> do
+  w4Deserialize_ v = do
     Some (ToDeserializable e :: ToDeserializable sym tp') <- w4Deserialize v
     case testEquality (knownRepr @_ @_ @tp) (W4.exprType e) of
       Just Refl -> return $ ToDeserializable e
       Nothing -> fail $ "Unexpected type: " ++ show (W4.exprType e)
 
-newtype SymDeserializable sym f = SymDeserializable (forall tp a. ((KnownRepr W4.BaseTypeRepr tp => W4Deserializable sym (f tp)) => a) -> a)
+-- | Small hack to pretend that W4.SymExpr has a W4Deserializable instance, which haskell's
+-- type class mechanism doesn't support because W4.SymExpr is a type family
+data SymDeserializable sym f = W4Deserializable sym (Some f) => SymDeserializable
 
 symDeserializable ::
   forall sym.
-  sym ->
   SymDeserializable sym (W4.SymExpr sym)
-symDeserializable _sym = unsafeCoerce r
+symDeserializable = unsafeCoerce r
   where
     r :: SymDeserializable sym (ToDeserializable sym)
-    r = SymDeserializable (\a -> a)
-
-{-
-class (TestEquality g, KnownRepr g k) => W4DeserializableF sym (f :: k -> Type) where
-  withDeserializable :: Proxy sym -> p f -> q tp -> (W4Deserializable sym (f tp) => a) -> a
-
-  default withDeserializable :: W4Deserializable sym (f tp) => Proxy sym -> p f -> q tp -> (W4Deserializable sym (f tp) => a) -> a
-  withDeserializable _ _ _ x = x
-
-  w4DeserializeF :: forall tp. JSON.Value -> W4DS sym (f tp)
-  w4DeserializeF x = withDeserializable (Proxy :: Proxy sym) (Proxy :: Proxy f) (Proxy :: Proxy tp) (w4Deserialize x)
--}
-
-{-
-data WrappedBuilder sym = 
-    WrappedBuilder { wSym :: sym, wEnv :: MapF (W4.SymAnnotation sym) (W4.SymExpr sym)}
-
-data WSymExpr sym tp where
-  WSymExpr :: W4.SymAnnotation sym tp -> WSymExpr sym tp
-  WConc :: W4.ConcreteVal tp -> WSymExpr sym tp
-
-
-instance JSON.FromJSON (Some (W4.SymAnnotation sym)) => JSON.FromJSON (Some (WSymExpr sym)) where
-  parseJSON v = do
-    JSON.Object o <- return v
-    go o
-    where
-      go o = do 
-          Some (ann :: W4.SymAnnotation sym tp) <- o JSON..: "ann"
-          return $ Some (WSymExpr ann)
-        <|> do
-          (i :: Integer) <- o JSON..: "conc_int"
-          return $ Some $ WConc (W4.ConcreteInteger i)
-        <|> do
-          (i :: Bool) <- o JSON..: "conc_bool"
-          return $ Some $ WConc (W4.ConcreteBool i)
-        <|> fail "Unsupported value"
-
-
-instance JSON.ToJSON (W4.SymAnnotation sym tp) => JSON.ToJSON (WSymExpr sym tp) where
-  toJSON = 
-
-
-
-instance forall sym sym'. (sym ~ WrappedBuilder sym', W4.IsExprBuilder sym', W4Deserializable sym (Some (W4.SymAnnotation sym'))) => W4Deserializable sym (Some (WSymExpr sym)) where
-  w4Deserialize v = do
-    Some (ann :: W4.SymAnnotation sym' tp') <- w4Deserialize v
-    sym <- asks w4dsSym
-    case MapF.lookup ann (wEnv sym) of
-      Just e -> return $ Some $ WSymExpr e
-      Nothing -> fail "Missing annotation"
--}
+    r = SymDeserializable

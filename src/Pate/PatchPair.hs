@@ -617,7 +617,7 @@ instance W4S.W4SerializableF sym f => W4S.W4Serializable sym (PatchPair f) where
 
 
 instance (forall bin. PB.KnownBinary bin => W4Deserializable sym (f bin)) => W4Deserializable sym (PatchPair f) where
-  w4Deserialize v = do
+  w4Deserialize_ v = do
     JSON.Object o <- return v
     let
       case_pair = do
