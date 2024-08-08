@@ -517,20 +517,24 @@ class PateCfarEqCondDialog(QDialog):
         self.falseTraceWidget.setTrace(trace, label)
 
     def showTrueTraceConstraintDialog(self):
-        d = PateTraceConstraintDialog(parent=self)
+        d = PateTraceConstraintDialog(pate.traceVarsExample, parent=self)
         #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
         if d.exec():
             QMessageBox.warning(self, "Warning", "TODO: process trace constraint")
 
 traceConstraintRelations = ["LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu", "NEQ", "EQ"]
+
 class PateTraceConstraintDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, rawTraceVars, parent=None):
         super().__init__(parent)
+
+        self.traceVars = pate.extractTraceVars(rawTraceVars)
+
         #self.resize(1500, 800)
         self.setWindowTitle("Trace Constraint")
 
         self.varComboBox = QComboBox()
-        self.varComboBox.addItems(["var1", "var2"])
+        self.varComboBox.addItems(map(lambda tv: tv.pretty, self.traceVars))
         varLabel = QLabel("Variable:")
         varLabel.setBuddy(self.varComboBox)
 

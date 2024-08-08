@@ -522,7 +522,8 @@ class PateWrapper:
             if self.last_cfar_graph:
                 self.user.show_cfar_graph(self.last_cfar_graph)
 
-            return False
+            self._command('top')
+            return True #False
 
         # elif (isinstance(rec, dict) and rec.get('this')
         #         and rec.get('trace_node_contents') is not None
@@ -720,6 +721,38 @@ class CFARGraph:
                     parents.append(n)
         return parents
 
+
+class TraceVar:
+    def __init__(self, kind, raw):
+        self.kind = kind
+        self.raw = raw
+        self.pretty = 'unknown'
+        self.numBits = 0
+
+        match self.kind:
+            case 'reg_op':
+                with io.StringIO() as out:
+                    pprint_reg(self.raw, out=out)
+                    self.pretty = out.getvalue()
+                self.type = self.raw['val']['offset']['type']
+                # TODO: parse numBits from type
+                self.numBits = 32
+            case 'mem_op':
+                mem_op = raw['snd']
+                with io.StringIO() as out:
+                    out.write(f'{get_addr_id(raw["fst"])}: {mem_op["direction"]} {get_value_id(mem_op["addr"])} ')
+                    self.pretty = out.getvalue()
+                self.numBits = mem_op['size'] * 8
+
+def extractTraceVars(raw) -> list[TraceVar]:
+    traceVars = []
+    #for r in raw['fp_initial_regs']['reg_op']['map']:
+    #   traceVars.append(TraceVar('reg_op', r))
+    for r in raw['fp_mem']:
+        traceVars.append(TraceVar('mem_op', r))
+    # TODO: sort by instruction addr, but reverse seems to work for now
+    traceVars.reverse()
+    return traceVars
 
 def get_cfar_addr(cfar_id: str) -> tuple[Optional[int], Optional[int]]:
     """Get CFAR original and patched address"""
@@ -1185,50 +1218,57 @@ def pprint_event_trace_initial_reg(initial_regs: dict, pre: str = '', out: IO = 
 
 
 def pprint_reg_op(reg_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
-    for r in reg_op['map']:
-        val: dict = r['val']
-        ppval = get_value_id(val)
-        key: dict = r['key']
-        if (not isinstance(val, dict)
-                or not prune_zero
-                or not ppval.startswith('0x0:')):
-            match key:
-                case {'arch_reg': name}:
-                    if name == '_PC' and ppval.startswith('0x0:'):
-                        #  TODO: is this correct?
-                        out.write(f'{pre}pc <- return address\n')
-                    elif name in {'_PC', 'PSTATE_C', 'PSTATE_V', 'PSTATE_N', 'PSTATE_Z'}:
-                        out.write(f'{pre}{name} <- {ppval}\n')
-                case {'reg': name}:
+    for reg in reg_op['map']:
+        pprint_reg(reg, pre, out, prune_zero)
+
+
+def pprint_reg(reg: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
+    val: dict = reg['val']
+    ppval = get_value_id(val)
+    key: dict = reg['key']
+    if (not isinstance(val, dict)
+            or not prune_zero
+            or not ppval.startswith('0x0:')):
+        match key:
+            case {'arch_reg': name}:
+                if name == '_PC' and ppval.startswith('0x0:'):
+                    #  TODO: is this correct?
+                    out.write(f'{pre}pc <- return address\n')
+                elif name in {'_PC', 'PSTATE_C', 'PSTATE_V', 'PSTATE_N', 'PSTATE_Z'}:
                     out.write(f'{pre}{name} <- {ppval}\n')
-                case {'hidden_reg': name}:
-                    # drop for now
-                    #out.write(f'{pre}Hidden Reg: {name}')
-                    pass
-                case _:
-                    out.write(f'{pre}{key} <- {ppval}\n')
+            case {'reg': name}:
+                out.write(f'{pre}{name} <- {ppval}\n')
+            case {'hidden_reg': name}:
+                # drop for now
+                #out.write(f'{pre}Hidden Reg: {name}')
+                pass
+            case _:
+                out.write(f'{pre}{key} <- {ppval}\n')
+
+
+def pprint_memory_op(memory_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
+    if memory_op.get('mem_op'):
+        pprint_mem_op(memory_op['mem_op'], pre, out, prune_zero)
+    elif memory_op.get('external_call'):
+        out.write(f'{pre}{memory_op["external_call"]}({",".join(map(pretty_call_arg, memory_op["args"]))})\n')
+    else:
+        out.write(f'{pre}Unknown mem op: {memory_op}')
 
 
 def pprint_mem_op(mem_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
-    if mem_op.get('mem_op'):
-        mem_op = mem_op['mem_op']
-        out.write(f'{pre}{mem_op["direction"]} {get_value_id(mem_op["addr"])} ')
-        match mem_op["direction"]:
-            case 'Read':
-                out.write('->')
-            case 'Write':
-                out.write('<-')
-            case _:
-                out.write('??')
-        out.write(f' {get_value_id(mem_op["value"])}')
-        #out.write(f' {mem_op["endianness"]}[{mem_op["size"]}]')
-        if mem_op['condition'] != '"unconditional"':
-            out.write(f' condition: {mem_op["condition"]}')
-        out.write('\n')
-    elif mem_op.get('external_call'):
-        out.write(f'{pre}{mem_op["external_call"]}({",".join(map(pretty_call_arg, mem_op["args"]))})\n')
-    else:
-        out.write(f'{pre}Unknown mem op: {mem_op}')
+    out.write(f'{pre}{mem_op["direction"]} {get_value_id(mem_op["addr"])} ')
+    match mem_op["direction"]:
+        case 'Read':
+            out.write('->')
+        case 'Write':
+            out.write('<-')
+        case _:
+            out.write('??')
+    out.write(f' {get_value_id(mem_op["value"])}')
+    #out.write(f' {mem_op["endianness"]}[{mem_op["size"]}]')
+    if mem_op['condition'] != '"unconditional"':
+        out.write(f' condition: {mem_op["condition"]}')
+    out.write('\n')
 
 
 def pretty_call_arg(arg):
@@ -1247,7 +1287,7 @@ def pprint_event_trace_instructions(events: dict, pre: str = '', out: IO = sys.s
             out.write(f'{pre}  {get_addr_id(e["instruction_addr"])}\n')
             for op in e['events']:
                 if op.get('memory_op'):
-                    pprint_mem_op(op['memory_op'], pre + '    ', out)
+                    pprint_memory_op(op['memory_op'], pre + '    ', out)
                 elif op.get('register_op'):
                     pprint_reg_op(op['register_op']['reg_op'], pre + '    ', out)
 
@@ -1642,3 +1682,7 @@ def run_pate_demo():
     user = TtyUserInteraction(not replay)
     pate = PateWrapper(file, user)
     pate.run()
+
+with open('/Users/jcarciofi/Projects/pate/gui/trace-constraint-vars-example.json', 'r') as f:
+    traceVarsExample = json.load(f)
+
