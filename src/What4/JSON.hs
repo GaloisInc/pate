@@ -24,20 +24,35 @@ module What4.JSON
   , W4SerializableFC
   , SerializableExprs
   , w4ToJSON
+  , w4ToJSONEnv
   , object
   , w4SerializeString
   , (.=)
   , (.==)
   , (.=~)
+  , ExprEnv
+  , mergeEnvs
+  , W4Deserializable(..)
+  , jsonToW4
+  , readJSON
+  , (.:)
+  , SymDeserializable(..)
+  , symDeserializable
   ) where
 
 import           Control.Monad.State (MonadState (..), State, modify, evalState, runState)
 
 import qualified Data.Map.Ordered as OMap
+import           Data.List ( stripPrefix )
+import           Data.Maybe ( mapMaybe, catMaybes )
 import           Data.Map (Map)
+import qualified Data.Map.Merge.Strict as Map
 import           Data.Text (Text)
 import           Data.Data (Proxy(..), Typeable)
 import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Types as JSON
+import qualified Data.BitVector.Sized as BVS
+import qualified Numeric as N
 
 import           Data.Parameterized.Some (Some(..))
 
@@ -62,6 +77,8 @@ import qualified Lang.Crucible.Utils.MuxTree as MT
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.TraversableFC as TFC
 import qualified Data.Parameterized.SetF as SetF
+import qualified Data.Parameterized.SetF as SetF
+import           Data.Parameterized.Classes
 import Data.Functor.Const
 import Control.Monad.Trans.Reader hiding (asks,ask)
 import qualified Data.IORef as IO
@@ -69,6 +86,10 @@ import Control.Monad.Reader
 import Control.Exception (tryJust)
 import What4.Utils.Process (filterAsync)
 import qualified What4.ExprHelpers as WEH
+import Control.Monad.Except
+import Control.Applicative
+import GHC.Natural
+import Unsafe.Coerce (unsafeCoerce)
 
 
 newtype ExprCache sym = ExprCache (Map (Some (W4.SymExpr sym)) JSON.Value)
@@ -76,6 +97,7 @@ newtype ExprCache sym = ExprCache (Map (Some (W4.SymExpr sym)) JSON.Value)
 data W4SEnv sym = W4SEnv {
     w4sCache :: IO.IORef (ExprCache sym)
   , w4sSym :: sym
+  , w4sUseIdents :: Bool
 }
 
 newtype W4S sym a = W4S (ReaderT (W4SEnv sym) IO a)
@@ -100,8 +122,40 @@ w4ToJSON :: forall sym a. SerializableExprs sym => W4Serializable sym a => sym -
 w4ToJSON sym a = do
   cacheRef <- IO.newIORef (ExprCache Map.empty)
   W4S f <- return $ w4Serialize @sym a
-  let env = W4SEnv cacheRef sym
+  let env = W4SEnv cacheRef sym False
   runReaderT f env
+
+newtype ExprEnv sym = ExprEnv (Map Integer (Some (W4.SymExpr sym)))
+
+mergeEnvs :: TestEquality (W4.SymExpr sym) => ExprEnv sym -> ExprEnv sym -> ExprEnv sym
+mergeEnvs (ExprEnv env1) (ExprEnv env2) = ExprEnv (
+  Map.merge
+    Map.preserveMissing
+    Map.preserveMissing
+    (Map.zipWithMatched (\_ (Some e1) (Some e2) -> (case testEquality e1 e2 of Just Refl -> Some e1; Nothing -> error $ "Unexpected term hash clash")))
+    env1
+    env2)
+
+-- | Extract expressions with annotations
+cacheToEnv :: W4.IsExprBuilder sym => sym -> ExprCache sym -> IO (ExprEnv sym)
+cacheToEnv _sym (ExprCache m) = (ExprEnv . Map.fromList . catMaybes) <$> mapM go (Map.keys m)
+  where
+    go (Some e)
+      | Nothing <- W4.asConcrete e
+      = do
+        ident <- mkIdent e
+        return $ Just (ident, Some e)
+    go _ = return Nothing
+
+w4ToJSONEnv :: forall sym a. (W4.IsExprBuilder sym, SerializableExprs sym) => W4Serializable sym a => sym -> a -> IO (JSON.Value, ExprEnv sym)
+w4ToJSONEnv sym a = do
+  cacheRef <- IO.newIORef (ExprCache Map.empty)
+  W4S f <- return $ w4Serialize @sym a
+  let env = W4SEnv cacheRef sym True
+  v <- runReaderT f env
+  c <- IO.readIORef cacheRef
+  eenv <- cacheToEnv sym c
+  return $ (v, eenv)
 
 class W4SerializableF sym (f :: k -> Type) where
   withSerializable :: Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a
@@ -130,6 +184,19 @@ trySerialize (W4S f) = do
     Left err -> return $ Left (show err)
     Right x -> return $ Right x
 
+firstHashRef :: IO.IORef (Maybe Integer)
+firstHashRef = unsafePerformIO (IO.newIORef Nothing)
+
+-- | Makes hashes slightly more stable by fixing the first requested
+--   identifier and deriving all subsequent identifiers as offsets from it
+mkIdent :: HashableF t => t tp -> IO Integer
+mkIdent v = do
+  let (ident :: Integer) = fromIntegral $ hashF v
+  let f = \case
+        Just i -> (Just i, ident - i)
+        Nothing -> (Just ident, 0)
+  IO.atomicModifyIORef firstHashRef f
+
 instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) where
   w4Serialize e' = do
     ExprCache s <- get
@@ -142,16 +209,22 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
           Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e')))
           _ -> do
             sym <- asks w4sSym
-            e <- liftIO $ WEH.stripAnnotations sym e'
-            mv <- trySerialize $ do
-              let result = W4S.serializeExprWithConfig (W4S.Config True True) e
-              let var_env = map (\(Some bv, t) -> (show (W4B.bvarName bv), t)) $ OMap.toAscList $ W4S.resFreeVarEnv result
-              let fn_env = map (\(W4S.SomeExprSymFn fn, t) -> (show (W4B.symFnName fn), t)) $ OMap.toAscList $ W4S.resSymFnEnv result
-              let sexpr = W4S.resSExpr result
-              return $ JSON.object [ "symbolic" JSON..= JSON.String (W4D.printSExpr mempty sexpr), "vars" JSON..= var_env, "fns" JSON..= fn_env ]
-            case mv of
-              Left er -> return $ JSON.object [ "symbolic_serialize_err" JSON..= er]
-              Right v -> return v
+            asks w4sUseIdents >>= \case
+              True -> do
+                let tp_sexpr = W4S.serializeBaseType (W4.exprType e')
+                ident <- liftIO $ mkIdent e'
+                return $ JSON.object [ "symbolic_ident" JSON..= ident, "type" JSON..= JSON.String (W4D.printSExpr mempty tp_sexpr) ]
+              False -> do
+                e <- liftIO $ WEH.stripAnnotations sym e'
+                mv <- trySerialize $ do
+                  let result = W4S.serializeExprWithConfig (W4S.Config True True) e
+                  let var_env = map (\(Some bv, t) -> (show (W4B.bvarName bv), t)) $ OMap.toAscList $ W4S.resFreeVarEnv result
+                  let fn_env = map (\(W4S.SomeExprSymFn fn, t) -> (show (W4B.symFnName fn), t)) $ OMap.toAscList $ W4S.resSymFnEnv result
+                  let sexpr = W4S.resSExpr result
+                  return $ JSON.object [ "symbolic" JSON..= JSON.String (W4D.printSExpr mempty sexpr), "vars" JSON..= var_env, "fns" JSON..= fn_env ]
+                case mv of
+                  Left er -> return $ JSON.object [ "symbolic_serialize_err" JSON..= er]
+                  Right v -> return v
         modify $ \(ExprCache s') -> ExprCache (Map.insert (Some e') v s')
         return v
 
@@ -248,3 +321,112 @@ instance forall sym f tp. (W4Serializable sym f) => W4Serializable sym (Const f 
   w4Serialize (Const f) = w4Serialize f
 
 instance forall sym f. (W4Serializable sym f) => W4SerializableF sym (Const f)
+
+
+data W4DSEnv sym where
+   W4DSEnv :: W4.IsExprBuilder sym => {
+        w4dsEnv :: ExprEnv sym
+      , w4dsSym :: sym
+    } -> W4DSEnv sym 
+
+newtype W4DS sym a = W4DS (ExceptT String (ReaderT (W4DSEnv sym) IO) a)
+  deriving (Monad, Applicative, Functor, MonadReader (W4DSEnv sym), MonadIO, Alternative, MonadError String)
+
+instance MonadFail (W4DS sym) where
+  fail msg = throwError msg
+
+class W4Deserializable sym a where
+  w4Deserialize_ :: W4.IsExprBuilder sym => JSON.Value -> W4DS sym a
+
+  default w4Deserialize_ :: (W4.IsExprBuilder sym, JSON.FromJSON a) => JSON.Value -> W4DS sym a
+  w4Deserialize_ v = fromJSON v
+
+w4Deserialize :: W4Deserializable sym a => JSON.Value -> W4DS sym a
+w4Deserialize v = ask >>= \W4DSEnv{} -> w4Deserialize_ v
+
+instance W4Deserializable sym JSON.Value
+instance W4Deserializable sym String
+instance W4Deserializable sym Integer
+instance W4Deserializable sym Bool
+instance W4Deserializable sym ()
+
+jsonToW4 :: (W4Deserializable sym a, W4.IsExprBuilder sym) => sym -> ExprEnv sym -> JSON.Value -> IO (Either String a)
+jsonToW4 sym env v = do
+  let wenv = W4DSEnv env sym
+  let W4DS f = (w4Deserialize v)
+  runReaderT (runExceptT f) wenv
+
+fromJSON :: JSON.FromJSON a => JSON.Value -> W4DS sym a
+fromJSON v = case JSON.fromJSON v of
+  JSON.Success a -> return a
+  JSON.Error msg -> fail msg
+
+liftParser :: (b -> JSON.Parser a) -> b -> W4DS sym a
+liftParser f v = case JSON.parse f v of
+  JSON.Success a -> return a
+  JSON.Error msg -> fail msg
+
+readJSON :: forall a sym. Read a => JSON.Value -> W4DS sym a
+readJSON v = do
+  (vS :: String) <- fromJSON v
+  (a :: a,""):_ <- return $ readsPrec 0 vS
+  return a
+
+(.:) :: W4Deserializable sym a => JSON.Object -> JSON.Key -> W4DS sym a
+(.:) o k = do
+  (v :: JSON.Value) <- liftParser ((JSON..:) o) k
+  w4Deserialize v
+
+instance (W4Deserializable sym a, W4Deserializable sym b) => W4Deserializable sym (a, b) where
+  w4Deserialize_ v = do
+    JSON.Object o <- return v
+    v1 <- o .: "fst"
+    v2 <- o .: "snd"
+    return (v1,v2)
+
+instance W4Deserializable sym f => W4Deserializable sym (Const f x) where
+  w4Deserialize_ v = Const <$> w4Deserialize v
+
+newtype ToDeserializable sym tp = ToDeserializable { _unDS :: W4.SymExpr sym tp }
+
+instance W4Deserializable sym (Some (ToDeserializable sym)) where
+  w4Deserialize_ v = fmap (\(Some x) -> Some (ToDeserializable x)) $ asks w4dsSym >>= \sym -> do
+      (i :: Integer) <- fromJSON v
+      Some <$> (liftIO $ W4.intLit sym i)
+    <|> do
+      (b :: Bool) <- fromJSON v
+      Some <$> (return $ if b then W4.truePred sym else W4.falsePred sym)
+    <|> do
+      JSON.String s0 <- return v
+      Just s1 <- return $ stripPrefix "0x" (T.unpack s0)
+      ((i :: Integer,s2):_) <- return $ N.readHex s1
+      Just s3 <- return $ stripPrefix ":[" s2
+      ((w :: Natural,_s4):_) <- return $ readsPrec 0 s3
+      Just (Some repr) <- return $ W4.someNat w
+      Just W4.LeqProof <- return $ W4.isPosNat repr
+      Some <$> (liftIO $ W4.bvLit sym repr (BVS.mkBV repr i))
+    <|> do
+      JSON.Object o <- return v
+      (ident :: Integer) <- o .: "symbolic_ident"
+      ExprEnv env <- asks w4dsEnv
+      Just (Some e) <- return $ Map.lookup ident env
+      return $ Some e
+
+instance forall tp sym. KnownRepr W4.BaseTypeRepr tp => W4Deserializable sym (ToDeserializable sym tp) where
+  w4Deserialize_ v = do
+    Some (ToDeserializable e :: ToDeserializable sym tp') <- w4Deserialize v
+    case testEquality (knownRepr @_ @_ @tp) (W4.exprType e) of
+      Just Refl -> return $ ToDeserializable e
+      Nothing -> fail $ "Unexpected type: " ++ show (W4.exprType e)
+
+-- | Small hack to pretend that W4.SymExpr has a W4Deserializable instance, which haskell's
+-- type class mechanism doesn't support because W4.SymExpr is a type family
+data SymDeserializable sym f = W4Deserializable sym (Some f) => SymDeserializable
+
+symDeserializable ::
+  forall sym.
+  SymDeserializable sym (W4.SymExpr sym)
+symDeserializable = unsafeCoerce r
+  where
+    r :: SymDeserializable sym (ToDeserializable sym)
+    r = SymDeserializable

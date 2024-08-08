@@ -28,6 +28,8 @@ module Pate.Verification.StrongestPosts.CounterExample
   , groundTraceEvent
   , groundTraceEventSequence
   , groundRegOp
+  , TraceFootprint(..)
+  , mkFootprint
   ) where
 
 
@@ -61,6 +63,8 @@ import           Lang.Crucible.Simulator.SymSequence
 import qualified Lang.Crucible.Types as CT
 import qualified Data.Parameterized.TraversableF as TF
 import qualified What4.Concrete as W4
+import qualified What4.SymSequence as W4
+
 import Data.Functor.Const
 import qualified Data.Parameterized.Map as MapF
 import Data.Maybe (mapMaybe)
@@ -69,6 +73,9 @@ import What4.JSON
 import Pate.Equivalence (StatePostCondition)
 import qualified Pate.Binary as PB
 import GHC.Stack (HasCallStack)
+import qualified Data.Aeson as JSON
+import qualified Data.Text.Lazy.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text
 
 -- | A totality counterexample represents a potential control-flow situation that represents
 --   desynchronization of the original and patched program. The first tuple represents
@@ -242,6 +249,43 @@ data TraceEventsOne sym arch (bin :: PB.WhichBinary) = TraceEventsOne
   { initialRegs :: MT.RegOp sym arch
   , traceEventGroups :: [TraceEventGroup sym arch]
   }
+
+-- | Partial symbolic spec for the initial state
+data TraceFootprint sym arch = TraceFootprint
+  { fpInitialRegs :: MT.RegOp sym arch 
+  , fpMem :: [(MM.ArchSegmentOff arch, (MT.MemOp sym (MM.ArchAddrWidth arch)))]
+  }
+
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace_footprint" where
+  type TraceNodeType '(sym,arch) "trace_footprint" = TraceFootprint sym arch
+  type TraceNodeLabel "trace_footprint" = JSON.Value
+  prettyNode json _ = PP.pretty $ Text.decodeUtf8With Text.lenientDecode $ JSON.encode json
+  nodeTags = mkTags @'(sym,arch) @"trace_footprint" ["debug"]
+  jsonNode _ json _ = return json
+
+mkFootprint ::
+  forall sym arch.
+  W4.IsExprBuilder sym =>
+  sym ->
+  MT.RegOp sym arch ->
+  SymSequence sym (MT.TraceEvent sym arch) -> 
+  IO (TraceFootprint sym arch)
+mkFootprint sym init_regs s = do
+  init_mems <- W4.concatSymSequence sym go (\_ a b -> return $ a ++ b) (\a b -> return $ a ++ b) [] s
+  return $ TraceFootprint init_regs init_mems
+  where
+    go :: MT.TraceEvent sym arch -> IO [(MM.ArchSegmentOff arch, (MT.MemOp sym (MM.ArchAddrWidth arch)))]
+    go = \case
+      MT.TraceMemEvent instr (MT.MemOpEvent mop@(MT.MemOp ptr _ _ _ _ _))
+        | [(Just (instr1, _), _)] <- MT.viewMuxTree instr
+        , CLM.LLVMPointer reg off <- ptr
+        , Just{} <- W4.asNat reg
+        , Just{} <- W4.asConcrete off
+        -> return $ [(instr1, mop)]
+      _ -> return []
+
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceFootprint sym arch) where
+  w4Serialize fp = W4S.object [  "fp_mem" .= fpMem fp, "fp_initial_regs" .= fpInitialRegs fp]
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEvents sym arch) where
   w4Serialize (TraceEvents p pre post) = do

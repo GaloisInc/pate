@@ -33,6 +33,7 @@ module Pate.Verification.Widening
   , getTraceFromModel
   , addToEquivCondition
   , strengthenPredicate
+  , getTraceFootprint
   ) where
 
 import           GHC.Stack
@@ -56,6 +57,8 @@ import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Text.Lazy.Encoding as Text
+import qualified Data.Text.Encoding.Error as Text
 
 import qualified What4.Interface as W4
 import qualified What4.Expr.Builder as W4B
@@ -86,6 +89,7 @@ import qualified Pate.Proof.Instances ()
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.Simplify as PSi
+import qualified Pate.TraceConstraint as PTC
 
 import           Pate.Monad
 import           Pate.Monad.PairGraph
@@ -108,6 +112,8 @@ import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( WidenLocs(..) )
 import           Pate.TraceTree
 import qualified What4.ExprHelpers as WEH
+import qualified What4.JSON as W4S
+
 import Lang.Crucible.Simulator.SymSequence
 import qualified Pate.Monad.Context as PMC
 import Data.Functor.Const (Const(..))
@@ -120,6 +126,7 @@ import qualified Prettyprinter as PP
 import qualified What4.Expr.GroundEval as W4
 import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
+import qualified Data.Parameterized.TraversableF as TF
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -473,6 +480,20 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
 
+tryWithAsms :: 
+  [(W4.Pred sym, PEE.InnerEquivalenceError arch)] -> 
+  (SymGroundEvalFn sym -> EquivM_ sym arch a) ->
+  EquivM sym arch a
+tryWithAsms ((asm, err):asms) f = do
+  mresult <- withSatAssumption (PAs.fromPred asm) $ tryWithAsms asms f
+  case mresult of
+    Just a -> return a
+    Nothing -> emitWarning err >> tryWithAsms asms f
+tryWithAsms [] f = withSym $ \sym -> goalSat "tryWithAsms" (W4.truePred sym) $ \res -> case res of
+  Unsat _ -> throwHere PEE.InvalidSMTModel
+  Unknown -> throwHere PEE.InconclusiveSAT
+  Sat evalFn -> f evalFn
+
 getSomeGroundTrace ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
@@ -489,21 +510,30 @@ getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
     let stackbase = PS.unSE $ PS.simStackBase (PS.simInState in_) 
     zero <- liftIO $ W4.bvLit sym CT.knownRepr (BVS.mkBV CT.knownRepr 0)
     PAs.fromPred <$> (liftIO $ W4.isEq sym zero stackbase)
-  
+
   ptrAsserts_pred <- PAs.toPred sym (stacks_zero <> ptrAsserts)
-  -- first we try to see if we can make a model that doesn't
-  -- involve any invalid pointer operations
-  mevs <- goalSat "getCounterExample" ptrAsserts_pred $ \res -> case res of
-    Unsat _ -> emitWarning PEE.RequiresInvalidPointerOps >> return Nothing
-    Unknown -> emitWarning PEE.RequiresInvalidPointerOps >> return Nothing
-    Sat evalFn -> Just <$> getTraceFromModel scope evalFn bundle preD postCond
-  case mevs of
-    Just evs -> return evs
-    -- otherwise, just try to get any model
-    Nothing -> goalSat "getCounterExample" (W4.truePred sym) $ \res -> case res of
-      Unsat _ -> throwHere PEE.InvalidSMTModel
-      Unknown -> throwHere PEE.InconclusiveSAT
-      Sat evalFn -> getTraceFromModel scope evalFn bundle preD postCond
+
+  tr <- tryWithAsms 
+    [ (ptrAsserts_pred, PEE.RequiresInvalidPointerOps)
+    ] $ \evalFn -> 
+      getTraceFromModel scope evalFn bundle preD postCond
+
+  return tr
+
+getTraceFootprint ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  EquivM sym arch (PPa.PatchPairC (CE.TraceFootprint sym arch))
+getTraceFootprint _scope bundle = withSym $ \sym -> PPa.forBinsC $ \bin -> do
+    out <- PPa.get bin (PS.simOut bundle)
+    in_ <- PPa.get bin (PS.simIn bundle)
+    let in_regs = PS.simInRegs in_
+    let rop = MT.RegOp (MM.regStateMap in_regs)
+    let mem = PS.simOutMem out
+    let s = (MT.memFullSeq @_ @arch mem)
+    s' <- PEM.mapExpr sym concretizeWithSolver s
+    liftIO $ CE.mkFootprint sym rop s'
 
 -- | Compute a counter-example for a given predicate
 getTraceFromModel ::

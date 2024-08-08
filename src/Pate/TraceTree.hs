@@ -120,6 +120,7 @@ module Pate.TraceTree (
   , waitingForChoiceInput
   , chooseInput
   , chooseInputFromList
+  , chooseInput_
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -1050,7 +1051,7 @@ instance PP.Pretty InputChoiceError where
 
 data InputChoice (k :: l) nm where
   InputChoice :: (IsTraceNode k nm) =>
-    { inputChoiceParse :: String -> Either InputChoiceError (TraceNodeLabel nm, TraceNodeType k nm)
+    { inputChoiceParse :: String -> IO (Either InputChoiceError (TraceNodeLabel nm, TraceNodeType k nm))
     , inputChoicePut :: TraceNodeLabel nm -> TraceNodeType k nm -> IO Bool -- returns false if input has already been provided
     , inputChoiceValue :: IO (Maybe (TraceNodeLabel nm, TraceNodeType k nm)) 
     } -> InputChoice k nm
@@ -1063,7 +1064,7 @@ waitingForChoiceInput ic = inputChoiceValue ic >>= \case
 giveChoiceInput :: InputChoice k nm -> String -> IO (Maybe InputChoiceError)
 giveChoiceInput ic input = waitingForChoiceInput ic >>= \case
   False -> return $ Just InputChoiceAlreadyMade
-  True -> case inputChoiceParse ic input of
+  True -> inputChoiceParse ic input >>= \case
     Right (lbl, v) -> inputChoicePut ic lbl v >>= \case
       True -> return Nothing
       False -> return $ Just InputChoiceAlreadyMade 
@@ -1097,11 +1098,27 @@ chooseInputFromList ::
   m (Maybe a)
 chooseInputFromList treenm opts = do
   let parseInput s = case findIndex (\(s',_) -> s == s') opts of
-        Just idx -> Right (s, idx)
-        Nothing -> Left (InputChoiceError "Invalid input. Valid options:" (map fst opts))
+        Just idx -> return $ Right (s, idx)
+        Nothing -> return $ Left (InputChoiceError "Invalid input. Valid options:" (map fst opts))
   chooseInput @"opt_index" treenm parseInput >>= \case
     Just (_, idx) -> return $ Just $ (snd (opts !! idx))
     Nothing -> return Nothing
+
+chooseInput_ ::
+  forall nm_choice k m e.
+  IsTreeBuilder k e m =>
+  IsTraceNode k nm_choice =>
+  Default (TraceNodeLabel nm_choice) =>
+  IO.MonadUnliftIO m =>
+  String ->
+  (String -> IO (Either InputChoiceError (TraceNodeType k nm_choice))) ->
+  m (Maybe (TraceNodeType k nm_choice))
+chooseInput_ treenm parseInput = do
+  let parse s = parseInput s >>= \case
+        Left err -> return $ Left err
+        Right a -> return $ Right (def,a)
+  fmap snd <$> chooseInput @nm_choice treenm parse 
+
 
 -- | Take user input as a string. Returns 'Nothing' in the case where the trace tree
 --   is not running interactively. Otherwise, blocks the current thread until
@@ -1112,7 +1129,7 @@ chooseInput ::
   IsTraceNode k nm_choice =>
   IO.MonadUnliftIO m =>
   String ->
-  (String -> Either InputChoiceError (TraceNodeLabel nm_choice, TraceNodeType k nm_choice)) ->
+  (String -> IO (Either InputChoiceError (TraceNodeLabel nm_choice, TraceNodeType k nm_choice))) ->
   m (Maybe (TraceNodeLabel nm_choice, TraceNodeType k nm_choice))
 chooseInput treenm parseInput = do
   builder <- getTreeBuilder

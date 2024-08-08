@@ -109,6 +109,7 @@ import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.StrongestPosts.CounterExample as CE
 import qualified Pate.Register.Traversal as PRt
 import           Pate.Discovery.PLT (extraJumpClassifier, ExtraJumps(..), ExtraJumpTarget(..))
+import qualified Pate.TraceConstraint as PTC
 
 import           Pate.TraceTree
 import qualified Pate.Verification.Validity as PVV
@@ -860,37 +861,110 @@ clearTrivialCondition nd condK pg = case getCondition pg nd ConditionEquiv of
     return pg1
   Nothing -> return pg
 
-showFinalResult :: PairGraph sym arch -> EquivM sym arch ()
+-- | Context needed to re-generate traces when adding trace constraints
+data IntermediateEqCond sym arch v = 
+  IntermediateEqCond
+    { ieqBundle :: SimBundle sym arch v
+    , ieqFootprints:: PPa.PatchPairC (CE.TraceFootprint sym arch)
+    , ieqEnv :: W4S.ExprEnv sym
+    , ieqAsms :: PAS.AssumptionSet sym
+    , ieqCond :: W4.Pred sym
+    , ieqDom :: AbstractDomain sym arch v
+    }
+
+data EqCondCollector sym arch = EqCondCollector
+  { eqCondFinals :: Map.Map (GraphNode arch) (FinalEquivCond sym arch)
+  , eqCondInterims :: Map.Map (GraphNode arch) (PS.SimSpec sym arch (IntermediateEqCond sym arch))
+  , eqCondConstraints :: PTC.TraceConstraintMap sym arch
+  }
+
+getExprEnvs :: EqCondCollector sym arch -> Map.Map (GraphNode arch) (W4S.ExprEnv sym)
+getExprEnvs st = fmap (\spec -> PS.viewSpecBody spec ieqEnv) (eqCondInterims st)
+
+showFinalResult :: forall sym arch. PairGraph sym arch -> EquivM sym arch ()
 showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
-  subTree @"node" "Observable Counter-examples" $ do
-    forM_ (Map.toList (pairGraphObservableReports pg0)) $ \(nd,report) -> 
-      subTrace (GraphNode nd) $ 
-        emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
-  eq_conds <- fmap catMaybes $ subTree @"node" "Assumed Equivalence Conditions" $ do
-    
-    forM (getAllNodes pg0) $ \nd -> do
+  st <- go (EqCondCollector Map.empty Map.empty (PTC.TraceConstraintMap Map.empty))
+  add_constraints <- asks (PCfg.cfgTraceConstraints . envConfig)
+  case add_constraints of
+    True -> 
+      let loop st_ = chooseBool "Regenerate result with new trace constraints?" >>= \case
+            True -> do
+              tcs <- PTC.readConstraintMap sym "Waiting for constraints.." (Map.toAscList (getExprEnvs st_))
+              go (st_ {eqCondConstraints = tcs}) >>= loop
+            False -> return ()
+      in loop st
+    False -> return ()
+
+  where
+    mkEqCond ::
+      EqCondCollector sym arch ->
+      GraphNode arch -> 
+      NodeBuilderT '(sym,arch) "node" (EquivM_ sym arch) (EqCondCollector sym arch)
+    mkEqCond rs nd  = do
       pg <- lift $ clearTrivialCondition nd ConditionEquiv pg0
-      case getCondition pg nd ConditionEquiv of
-        Just cond_spec -> subTrace nd $ do
-          s <- withFreshScope (graphNodeBlocks nd) $ \scope -> do
-            (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
-            (tr, _) <- withGraphNode scope nd pg $ \bundle d -> do
-              cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
-              eqCond_pred <- PEC.toPred sym cond_simplified
-              (mtraceT, mtraceF) <- getTracesForPred scope bundle d eqCond_pred
-              case (mtraceT, mtraceF) of
-                (Just traceT, Just traceF) -> do
-                  cond_pretty <- PSi.applySimpStrategy PSi.prettySimplifier eqCond_pred
-                  return $ (Just (FinalEquivCond cond_pretty traceT traceF), pg)
-                _ -> return (Nothing, pg)
-            return $ (Const (fmap (nd,) tr))
-          return $ PS.viewSpec s (\_ -> getConst)
-        Nothing -> return Nothing
-  let result = pairGraphComputeVerdict pg0
-  emitTrace @"equivalence_result" result
-  let eq_conds_map = Map.fromList eq_conds
-  let toplevel_result = FinalResult result (pairGraphObservableReports pg0) eq_conds_map
-  emitTrace @"toplevel_result" toplevel_result
+      let PTC.TraceConstraintMap tcm = eqCondConstraints rs
+
+      
+      let
+        rest :: forall v. PS.SimScope sym arch v -> IntermediateEqCond sym arch v -> EquivM_ sym arch (Maybe (FinalEquivCond sym arch))
+        rest scope (IntermediateEqCond bundle fps _ _ cond d) =  withSym $ \sym -> do
+          trace_constraint <- case Map.lookup nd tcm of
+            Just tc -> IO.liftIO $ PTC.constraintToPred sym tc
+            Nothing -> return $ W4.truePred sym
+          mres <- withSatAssumption (PAS.fromPred trace_constraint) $ do
+            (mtraceT, mtraceF) <- getTracesForPred scope bundle d cond
+            case (mtraceT, mtraceF) of
+              (Just traceT, Just traceF) -> do
+                cond_pretty <- PSi.applySimpStrategy PSi.prettySimplifier cond
+                return $ Just (FinalEquivCond cond_pretty traceT traceF fps)
+              _ -> return Nothing
+          case mres of
+            Just res -> return res
+            Nothing -> emitWarning PEE.UnsatisfiableAssumptions >> return Nothing
+
+      case Map.lookup nd (eqCondInterims rs) of
+        Just ieqcspec -> subTrace nd $ PS.viewSpec ieqcspec $ \scope ieqc -> withAssumptionSet (ieqAsms ieqc) $ do
+          rest scope ieqc >>= \case
+            Just fcond -> return (rs { eqCondFinals = Map.insert nd fcond (eqCondFinals rs) })
+            Nothing -> return rs
+        Nothing -> case getCondition pg nd ConditionEquiv of
+          Just cond_spec -> subTrace nd $ withSym $ \sym -> do
+            spec <- withFreshScope (graphNodeBlocks nd) $ \scope -> fmap PS.WithScope $ do
+              (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
+              fmap fst $ withGraphNode scope nd pg $ \bundle d -> do
+                cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
+                eqCond_pred <- PEC.toPred sym cond_simplified
+                fps <- getTraceFootprint scope bundle
+                eenv <- PPa.joinPatchPred (\a b -> return $ W4S.mergeEnvs a b) $ \bin -> do
+                  fp <- PPa.getC bin fps
+                  (v, env) <- liftIO $ W4S.w4ToJSONEnv sym fp
+                  -- only visible with debug tag
+                  emitTraceLabel @"trace_footprint" v fp
+                  return env
+                asms <- currentAsm
+                let ieqc = IntermediateEqCond bundle fps eenv asms eqCond_pred d 
+                let interims = Map.insert nd (PS.mkSimSpec scope ieqc) (eqCondInterims rs)
+                rest scope ieqc >>= \case
+                  Just fcond -> return (rs { eqCondFinals = Map.insert nd fcond (eqCondFinals rs), eqCondInterims = interims }, pg)
+                  Nothing -> return (rs { eqCondInterims = interims }, pg)
+            return $ PS.viewSpecBody spec PS.unWS
+          Nothing -> return rs
+
+    go :: EqCondCollector sym arch -> EquivM sym arch (EqCondCollector sym arch)
+    go rs = do
+        subTree @"node" "Observable Counter-examples" $ do
+          forM_ (Map.toList (pairGraphObservableReports pg0)) $ \(nd,report) -> 
+            subTrace (GraphNode nd) $ 
+              emitTrace @"observable_result" (CE.ObservableCheckCounterexample report)
+        
+        rs' <- subTree @"node" "Assumed Equivalence Conditions" $ 
+          foldM mkEqCond (rs { eqCondFinals = Map.empty }) (getAllNodes pg0)
+        let result = pairGraphComputeVerdict pg0
+        emitTrace @"equivalence_result" result
+
+        let toplevel_result = FinalResult result (pairGraphObservableReports pg0) (eqCondFinals rs')
+        emitTrace @"toplevel_result" toplevel_result
+        return rs'
 
 data FinalResult sym arch = FinalResult
   { 
@@ -904,6 +978,7 @@ data FinalEquivCond sym arch = FinalEquivCond
     _finEqCondPred :: W4.Pred sym
   , _finEqCondTraceTrue :: CE.TraceEvents sym arch
   , _finEqCondTraceFalse :: CE.TraceEvents sym arch
+  , _finEqFootprints :: PPa.PatchPairC (CE.TraceFootprint sym arch)
   }
 
 
@@ -915,8 +990,8 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalR
     W4S.object [ "eq_status" W4S..= st, "observable_counterexamples" W4S..= obs, "eq_conditions" W4S..= conds ]
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalEquivCond sym arch) where
-  w4Serialize (FinalEquivCond p trT trF) = do
-    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF ]
+  w4Serialize (FinalEquivCond p trT trF fps) = do
+    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF, "trace_footprint" W4S..= fps ]
 
 
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "toplevel_result" where

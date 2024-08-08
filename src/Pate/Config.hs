@@ -290,6 +290,8 @@ data VerificationConfig validRepr =
     , cfgPreferTextInput :: Bool
     -- ^ modifies some menus to take string input instead of providing
     -- a menu selection
+    , cfgTraceConstraints :: Bool
+    -- ^ flag to determine if the user should be prompted to add constraints to traces
     }
 
 
@@ -317,4 +319,5 @@ defaultVerificationCfg =
                      , cfgIgnoreWarnings = []
                      , cfgAlwaysClassifyReturn = False
                      , cfgPreferTextInput = False
+                     , cfgTraceConstraints = False
                      }

@@ -635,31 +635,33 @@ reverseSeq sym s_outer = evalWithFreshCache go s_outer
 --   using the provided combine and mux operations and
 --   empty value.
 concatSymSequence ::
-  forall sym m c.
+  forall sym m a b.
   IsExprBuilder sym =>
   IO.MonadIO m =>
   sym ->
-  (Pred sym -> c -> c -> m c) {-^ mux for 'c' -} ->
-  (c -> c -> m c) {-^ combining 'c' values -} ->
-  c {-^ empty c -} ->
-  SymSequence sym c ->
-  m c
-concatSymSequence _sym f g c_init s_outer = getConst <$> evalWithFreshCache go s_outer
+  (a -> m b) {-^ produce atomic 'b' value from sequence element 'a' -} ->
+  (Pred sym -> b -> b -> m b) {-^ mux for 'b' -} ->
+  (b -> b -> m b) {-^ combining 'b' values -} ->
+  b {-^ empty 'b' -} ->
+  SymSequence sym a ->
+  m b
+concatSymSequence _sym h f g c_init s_outer = getConst <$> evalWithFreshCache go s_outer
   where
-    go :: (SymSequence sym c -> m ((Const c) c)) -> SymSequence sym c -> m ((Const c) c)
+    go :: (SymSequence sym a -> m ((Const b) a)) -> SymSequence sym a -> m ((Const b) a)
     go rec s = fmap Const $ case s of
       SymSequenceNil -> return $ c_init
-      SymSequenceCons _ c1 sa -> do
-        Const c2 <- rec sa
-        g c1 c2
+      SymSequenceCons _ a1 sa -> do
+        Const b2 <- rec sa
+        b1 <- h a1
+        g b1 b2
       SymSequenceAppend _ sa1 sa2 -> do
-        Const c1 <- rec sa1
-        Const c2 <- rec sa2
-        g c1 c2
+        Const b1 <- rec sa1
+        Const b2 <- rec sa2
+        g b1 b2
       SymSequenceMerge _ p' saT saF -> do
-        Const cT <- rec saT
-        Const cF <- rec saF
-        f p' cT cF
+        Const bT <- rec saT
+        Const bF <- rec saF
+        f p' bT bF
 
 -- | Pointwise comparison of two sequences. When they are (semantically) not
 --   the same length, the resulting predicate is False. Otherwise it is
@@ -685,6 +687,7 @@ compareSymSeq sym sa sb f = do
   nil_b <- IO.liftIO $ isNilSymSequence sym suf_b
 
   matching_head <- concatSymSequence sym
+    return
     (\p a b -> IO.liftIO $ baseTypeIte sym p a b)
     (\a b -> IO.liftIO $ andPred sym a b)
     (truePred sym)

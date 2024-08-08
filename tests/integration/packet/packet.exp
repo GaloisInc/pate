@@ -18,7 +18,7 @@
 # Also note this example is mentioned in the README.rst and used in the User Manual.
 # Major changes here likely warrant an update of the corresponding User Manual content.
 
-spawn ./pate.sh --original tests/integration/packet/exe/packet.exe --patched tests/integration/packet/exe/packet.patched.exe -s parse_packet
+spawn ./pate.sh --original tests/integration/packet/exe/packet.exe --patched tests/integration/packet/exe/packet.patched.exe -s parse_packet --add-trace-constraints
 
 set timeout 480
 
@@ -42,6 +42,17 @@ expect "0: Finish and view final result"
 expect "?>"
 send "0\r"
 
+expect "Regenerate result with new trace constraints?"
+expect "0: True"
+send "0\r"
+expect "Waiting for constraints.."
+send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : -6 }, \\\"op\\\" : \\\"NEQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
+
+expect "Regenerate result with new trace constraints?"
+expect "1: False"
+send "1\r"
+
+
 expect "15: Final Result"
 expect ">"
 send "15\r"
@@ -51,19 +62,38 @@ expect "2: Binaries are conditionally, observably equivalent"
 expect ">"
 send "0\r"
 
+
+
 # Inspect the specific equivalence condition
 
 expect "0: segment1+0x644 \\\[ via: \"parse_packet\" (segment1+0x554) \\\]"
 expect ">"
 send "0\r"
 
-expect "3: let -- segment1+0x664.. in not v40591"
+expect -re {3: let -- segment1\+0x664.. in not v(\d)+}
 expect ">"
 send "3\r"
 
-expect "v40591 = and (eq 0x80:\\\[8\\\] v40584) (not (eq v40587 (bvSum v40584 0x80:\\\[8\\\])))"
-expect "in not v40591"
+expect -re {v((\d)+) = and \(eq 0x80:\[8\] v((\d)+)\) \(not \(eq v((\d)+) \(bvSum v((\d)+) 0x80:\[8\]\)\)\)}
+expect -re {in not v((\d)+)}
 expect ">"
+
+send "up\r"
+expect ">"
+send "up\r"
+expect ">"
+send "up\r"
+expect "5: Assumed Equivalence Conditions"
+expect ">"
+send "5\r"
+
+expect "0: segment1+0x644 \\\[ via: \"parse_packet\" (segment1+0x554) \\\]"
+expect ">"
+send "0\r"
+
+# constraint has made the equivalence condition satisified
+expect "0: true"
+
 send "\x04" ; # Ctrl-D (EOF)
 
 # remove EOF from expect_before, now that we're expecting it
