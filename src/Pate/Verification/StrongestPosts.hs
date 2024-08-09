@@ -865,7 +865,7 @@ clearTrivialCondition nd condK pg = case getCondition pg nd ConditionEquiv of
 data IntermediateEqCond sym arch v = 
   IntermediateEqCond
     { ieqBundle :: SimBundle sym arch v
-    , ieqFootprints:: PPa.PatchPairC (CE.TraceFootprint sym arch)
+    , ieqFootprints:: PPa.PatchPairC (CE.TraceFootprint sym arch, JSON.Value)
     , ieqEnv :: W4S.ExprEnv sym
     , ieqAsms :: PAS.AssumptionSet sym
     , ieqCond :: W4.Pred sym
@@ -935,14 +935,19 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
                 cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
                 eqCond_pred <- PEC.toPred sym cond_simplified
                 fps <- getTraceFootprint scope bundle
-                eenv <- PPa.joinPatchPred (\a b -> return $ W4S.mergeEnvs a b) $ \bin -> do
+                vs <- PPa.forBinsC $ \bin -> do
                   fp <- PPa.getC bin fps
                   (v, env) <- liftIO $ W4S.w4ToJSONEnv sym fp
                   -- only visible with debug tag
                   emitTraceLabel @"trace_footprint" v fp
-                  return env
+                  return (v, env)
+                eenv <- PPa.joinPatchPred (\a b -> return $ W4S.mergeEnvs a b) $ \bin -> snd <$> (PPa.getC bin vs)
+                fpvs <- PPa.forBinsC $ \bin -> do
+                  fp <- PPa.getC bin fps
+                  (v,_) <- PPa.getC bin vs
+                  return (fp,v)
                 asms <- currentAsm
-                let ieqc = IntermediateEqCond bundle fps eenv asms eqCond_pred d 
+                let ieqc = IntermediateEqCond bundle fpvs eenv asms eqCond_pred d 
                 let interims = Map.insert nd (PS.mkSimSpec scope ieqc) (eqCondInterims rs)
                 rest scope ieqc >>= \case
                   Just fcond -> return (rs { eqCondFinals = Map.insert nd fcond (eqCondFinals rs), eqCondInterims = interims }, pg)
@@ -978,7 +983,8 @@ data FinalEquivCond sym arch = FinalEquivCond
     _finEqCondPred :: W4.Pred sym
   , _finEqCondTraceTrue :: CE.TraceEvents sym arch
   , _finEqCondTraceFalse :: CE.TraceEvents sym arch
-  , _finEqFootprints :: PPa.PatchPairC (CE.TraceFootprint sym arch)
+  -- small hack to include the footprint serialized according to the expression environment
+  , _finEqFootprints :: PPa.PatchPairC (CE.TraceFootprint sym arch, JSON.Value)
   }
 
 
@@ -991,7 +997,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalR
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalEquivCond sym arch) where
   w4Serialize (FinalEquivCond p trT trF fps) = do
-    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF, "trace_footprint" W4S..= fps ]
+    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF, "trace_footprint" W4S..= (TF.fmapF (\(Const(_,v)) -> Const v) fps) ]
 
 
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "toplevel_result" where
