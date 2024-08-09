@@ -456,11 +456,15 @@ class PateCfarExitDialog(QDialog):
 
 
 class PateCfarEqCondDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, cfarNode, parent=None):
         super().__init__(parent)
+
+        self.cfarNode = cfarNode
+
         self.resize(1500, 800)
 
-        self.setWindowTitle("Equivalence Condition")
+        self.setWindowTitle("")
+        self.setWindowTitle(f'Equivalence Condition - {self.cfarNode.id}')
 
         # Equivalence Condition Box
         self.eqCondField = QPlainTextEdit()
@@ -510,31 +514,37 @@ class PateCfarEqCondDialog(QDialog):
         main_layout.addWidget(mainSplitter)
         self.setLayout(main_layout)
 
-    def setTrueTrace(self, trace: dict, label: str = None):
-        self.trueTraceWidget.setTrace(trace, label)
-
-    def setFalseTrace(self, trace: dict, label: str = None):
-        self.falseTraceWidget.setTrace(trace, label)
+        with io.StringIO() as out:
+            pate.pprint_symbolic(out, self.cfarNode.predicate)
+            self.eqCondField.appendPlainText(out.getvalue())
+        self.trueTraceWidget.setTrace(self.cfarNode.trace_true)
+        self.falseTraceWidget.setTrace(self.cfarNode.trace_false)
 
     def showTrueTraceConstraintDialog(self):
-        d = PateTraceConstraintDialog(pate.traceVarsExample, parent=self)
+        d = PateTraceConstraintDialog(self.cfarNode, parent=self)
         #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
         if d.exec():
+            print(d.getConstraints())
             QMessageBox.warning(self, "Warning", "TODO: process trace constraint")
 
 traceConstraintRelations = ["LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu", "NEQ", "EQ"]
 
 class PateTraceConstraintDialog(QDialog):
-    def __init__(self, rawTraceVars, parent=None):
+    def __init__(self, cfarNode: pate.CFARNode, parent=None):
         super().__init__(parent)
 
+        self.cfarNode = cfarNode
+
+        # TODO: Handle original AND patched
+        rawTraceVars = self.cfarNode.trace_footprint['original']
         self.traceVars = pate.extractTraceVars(rawTraceVars)
 
         #self.resize(1500, 800)
         self.setWindowTitle("Trace Constraint")
 
         self.varComboBox = QComboBox()
-        self.varComboBox.addItems(map(lambda tv: tv.pretty, self.traceVars))
+        for tv in self.traceVars:
+            self.varComboBox.addItem(tv.pretty, userData=tv)
         varLabel = QLabel("Variable:")
         varLabel.setBuddy(self.varComboBox)
 
@@ -590,6 +600,7 @@ class PateTraceConstraintDialog(QDialog):
 
     def addConstraint(self):
         var = self.varComboBox.currentText()
+        traceVar = self.varComboBox.currentData()
         rel = self.relComboBox.currentText()
         intStr = self.intTextLine.text()
         if not intStr:
@@ -605,16 +616,21 @@ class PateTraceConstraintDialog(QDialog):
         # TODO: Prevent duplicates (wont hurt anything, but not useful to do and may mask entry error)
         # TODO: Need data for constraint, associate with QListWidgetItem or subclass? Wait for var rep?
 
-        constraint = f'{var} {rel} {intVal}'
+        constraint = f'{traceVar.pretty} {rel} {intVal}'
         item = QListWidgetItem(constraint, self.constraintList)
+        item.setData(Qt.UserRole, (traceVar, rel, intVal))
 
     def removeSelectedConstraints(self):
-        list = self.constraintList
-        listItems = list.selectedItems()
+        clist = self.constraintList
+        listItems = clist.selectedItems()
         if not listItems: return
         for item in listItems:
-            itemRow = list.row(item)
-            list.takeItem(itemRow)
+            itemRow = clist.row(item)
+            clist.takeItem(itemRow)
+
+    def getConstraints(self) -> list[tuple[pate.TraceVar, str, str]]:
+        lw = self.constraintList
+        return [lw.item(x).data(Qt.UserRole) for x in range(lw.count())]
 
 
 class InstTreeDiffWidget(QWidget):
@@ -995,13 +1011,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 menu.exec_(event.globalPos())
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
-        d = PateCfarEqCondDialog(parent=self)
-        d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
-        with io.StringIO() as out:
-            pate.pprint_symbolic(out, cfarNode.predicate)
-            d.eqCondField.appendPlainText(out.getvalue())
-        d.setTrueTrace(cfarNode.trace_true)
-        d.setFalseTrace(cfarNode.trace_false)
+        d = PateCfarEqCondDialog(cfarNode, parent=self)
         d.show()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):

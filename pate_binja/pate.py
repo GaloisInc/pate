@@ -499,6 +499,7 @@ class PateWrapper:
                             predicate = eqcond['predicate']
                             trace_true = eqcond['trace_true']
                             trace_false = eqcond['trace_false']
+                            trace_footprint = eqcond['trace_footprint']
 
                             #print('CFAR id:', node_id)
 
@@ -517,6 +518,7 @@ class PateWrapper:
                                 cfar_node.predicate = predicate
                                 cfar_node.trace_true = trace_true
                                 cfar_node.trace_false = trace_false
+                                cfar_node.trace_footprint = trace_footprint
 
                 self.user.show_message(out.getvalue())
             if self.last_cfar_graph:
@@ -600,6 +602,7 @@ class CFARNode:
         self.predicate = None
         self.trace_true = None
         self.trace_false = None
+        self.trace_footprint = None
         self.instruction_trees = None
 
     def update_node(self, desc: str, data: dict):
@@ -1649,7 +1652,8 @@ def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
     # We use a helper script to run logic in the user's shell environment.
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
     # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
-    return Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel'] + args,
+    return Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched,
+                  '--json-toplevel', '--add-trace-constraints'] + args,
                  cwd=cwd,
                  stdin=PIPE, stdout=PIPE,
                  stderr=STDOUT,
