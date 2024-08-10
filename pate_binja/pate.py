@@ -85,7 +85,7 @@ class PateWrapper:
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
         # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
         with open(os.path.join(cwd, "lastrun.replay"), "w", encoding='utf-8') as trace:
-            with Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel'] + args,
+            with Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel', '--add-trace-constraints'] + args,
                        cwd=cwd,
                        stdin=PIPE, stdout=PIPE,
                        stderr=STDOUT,
@@ -464,30 +464,14 @@ class PateWrapper:
             print('\nProcessing JSON:')
             pp.pprint(rec)
 
-        if isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
-            # Prompt User
-            # TODO: Heuristic for when to update graph. Ask Dan. Maybe add flag to JSON?
-            if rec['this'].startswith('Control flow desynchronization found at') \
-                    or rec['this'].startswith('Continue verification?'):
-                # Extract flow graph
-                cfar_graph = self.extract_graph()
-                if cfar_graph:
-                    self.last_cfar_graph = cfar_graph
-                    self.user.show_cfar_graph(cfar_graph)
-                # Go back to prompt
-                self._command('goto_prompt')
-                rec = self.next_json()
-            choice = self._ask_user_rec(rec)
-            self._command(choice)
-
-        elif isinstance(rec, list) and len(rec) > 0 and rec[-1].get('content') == {'node_kind': 'final_result'}:
+        if isinstance(rec, dict) and rec.get('this') == 'Regenerate result with new trace constraints?':
             # Finish detected
+            self._command('up')
+            rec = self.next_json()
+            #isinstance(rec, dict) and rec.get('trace_node_kind') == 'final_result':
             self.user.show_message('\nProcessing verification results.\n')
-            cmd = rec[-1]['index']
-            self._command(str(cmd))
-            result = self.next_json()
             with io.StringIO() as out:
-                for tnc in result['trace_node_contents']:
+                for tnc in rec['trace_node_contents']:
                     eqconds = tnc.get('content', {}).get('eq_conditions', {}).get('map')
                     if eqconds:
                         # Found eq conditions
@@ -524,8 +508,25 @@ class PateWrapper:
             if self.last_cfar_graph:
                 self.user.show_cfar_graph(self.last_cfar_graph)
 
-            self._command('top')
-            return True #False
+            self._command('goto_prompt')
+            # Exit for now, but this is where we want to enter loop to handle trace constraints.
+            return False
+
+        elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
+            # Prompt User
+            # TODO: Heuristic for when to update graph. Ask Dan. Maybe add flag to JSON?
+            if rec['this'].startswith('Control flow desynchronization found at') \
+                    or rec['this'].startswith('Continue verification?'):
+                # Extract flow graph
+                cfar_graph = self.extract_graph()
+                if cfar_graph:
+                    self.last_cfar_graph = cfar_graph
+                    self.user.show_cfar_graph(cfar_graph)
+                # Go back to prompt
+                self._command('goto_prompt')
+                rec = self.next_json()
+            choice = self._ask_user_rec(rec)
+            self._command(choice)
 
         # elif (isinstance(rec, dict) and rec.get('this')
         #         and rec.get('trace_node_contents') is not None
@@ -1622,13 +1623,6 @@ class TtyUserInteraction(PateUserInteraction):
             print('Prompt Node:', promptNode.id)
 
 
-def run_replay(file: str) -> Popen:
-    return Popen(
-        ['cat', file],
-        stdin=None, stdout=PIPE, text=True, encoding='utf-8'
-        )
-
-
 def load_run_config(file: os.PathLike) -> Optional[dict]:
     try:
         with open(file, 'r') as f:
@@ -1636,32 +1630,6 @@ def load_run_config(file: os.PathLike) -> Optional[dict]:
         return config
     except OSError:
         return None
-
-
-def run_config(config: dict):
-    cwd = config.get('cwd')
-    original = config.get('original')
-    patched = config.get('patched')
-    rawargs = config.get('args')
-    args = shlex.split(' '.join(rawargs))
-    # TODO: Error checking
-    return run_pate(cwd, original, patched, args)
-
-
-def run_pate(cwd: str, original: str, patched: str, args: list[str]) -> Popen:
-    # We use a helper script to run logic in the user's shell environment.
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
-    # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
-    return Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched,
-                  '--json-toplevel', '--add-trace-constraints'] + args,
-                 cwd=cwd,
-                 stdin=PIPE, stdout=PIPE,
-                 stderr=STDOUT,
-                 text=True, encoding='utf-8',
-                 close_fds=True,
-                 # Create a new process group, so we can kill it cleanly
-                 preexec_fn=os.setsid
-                 )
 
 
 def get_demo_files():
@@ -1687,6 +1655,4 @@ def run_pate_demo():
     pate = PateWrapper(file, user)
     pate.run()
 
-with open('/Users/jcarciofi/Projects/pate/gui/trace-constraint-vars-example.json', 'r') as f:
-    traceVarsExample = json.load(f)
 
