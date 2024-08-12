@@ -97,6 +97,7 @@ mkRunConfig archLoader opts rcfg mtt = let
         , PC.cfgStackScopeAssume = not $ noAssumeStackScope opts
         , PC.cfgIgnoreWarnings = ignoreWarnings opts
         , PC.cfgAlwaysClassifyReturn = alwaysClassifyReturn opts
+        , PC.cfgTraceConstraints = traceConstraints opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = archLoader
@@ -150,6 +151,7 @@ data CLIOptions = CLIOptions
   , ignoreWarnings :: [String]
   , alwaysClassifyReturn :: Bool
   , preferTextInput :: Bool
+  , traceConstraints :: Bool
   } deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -474,4 +476,8 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.switch
          ( OA.long "prefer-text-input"
          <> OA.help "Prefer taking text input over multiple choice menus where possible."
+         )
+    <*> OA.switch
+         ( OA.long "add-trace-constraints"
+         <> OA.help "Prompt to add additional constraints when generating traces."
          )

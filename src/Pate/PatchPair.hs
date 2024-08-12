@@ -101,6 +101,7 @@ import qualified What4.JSON as W4S
 import What4.JSON
 import Control.Monad.State.Strict (StateT (..), put)
 import qualified Control.Monad.State.Strict as CMS
+import           Control.Applicative ( (<|>) )
 
 -- | A pair of values indexed based on which binary they are associated with (either the
 --   original binary or the patched binary).
@@ -613,3 +614,20 @@ w4SerializePair ppair f = case ppair of
 
 instance W4S.W4SerializableF sym f => W4S.W4Serializable sym (PatchPair f) where
   w4Serialize ppair = w4SerializePair ppair w4SerializeF
+
+
+instance (forall bin. PB.KnownBinary bin => W4Deserializable sym (f bin)) => W4Deserializable sym (PatchPair f) where
+  w4Deserialize_ v = do
+    JSON.Object o <- return v
+    let
+      case_pair = do
+        (vo :: f PB.Original) <- o .: "original"
+        (vp :: f PB.Patched) <- o .: "patched"
+        return $ PatchPair vo vp
+      case_orig = do
+        (vo :: f PB.Original) <- o .: "original"
+        return $ PatchPairOriginal vo
+      case_patched = do
+        (vp :: f PB.Patched) <- o .: "patched"
+        return $ PatchPairPatched vp
+    case_pair <|> case_orig <|> case_patched
