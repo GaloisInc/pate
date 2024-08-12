@@ -46,7 +46,7 @@ expect "Regenerate result with new trace constraints?"
 expect "0: True"
 send "0\r"
 expect "Waiting for constraints.."
-send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : -6 }, \\\"op\\\" : \\\"NEQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
+send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : 0 }, \\\"op\\\" : \\\"EQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
 
 expect "Regenerate result with new trace constraints?"
 expect "1: False"
@@ -61,8 +61,6 @@ expect "0: Assumed Equivalence Conditions"
 expect "2: Binaries are conditionally, observably equivalent"
 expect ">"
 send "0\r"
-
-
 
 # Inspect the specific equivalence condition
 
@@ -91,8 +89,14 @@ expect "0: segment1+0x644 \\\[ via: \"parse_packet\" (segment1+0x554) \\\]"
 expect ">"
 send "0\r"
 
-# constraint has made the equivalence condition satisified
-expect "0: true"
+expect -re {0: let -- segment1\+0x664.. in not v(\d)+}
+expect ">"
+send "0\r"
+
+expect -re {v(\d)+ = eq 0x80:\[8\] \(select \(select cInitMemBytes@(\d)+:a 0\) 0x11045:\[32\]\)}
+expect -re {in not v((\d)+)}
+expect ">"
+
 
 send "\x04" ; # Ctrl-D (EOF)
 
