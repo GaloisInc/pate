@@ -514,6 +514,9 @@ class PateCfarEqCondDialog(QDialog):
         main_layout.addWidget(mainSplitter)
         self.setLayout(main_layout)
 
+        self.updateFromCfarNode()
+
+    def updateFromCfarNode(self):
         with io.StringIO() as out:
             pate.pprint_symbolic(out, self.cfarNode.predicate)
             self.eqCondField.appendPlainText(out.getvalue())
@@ -525,9 +528,21 @@ class PateCfarEqCondDialog(QDialog):
         #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
         if d.exec():
             print(d.getConstraints())
+            # TODO:
+            #  - Get constraint form dialog
+            #  - Send constraint to pate
+            #  - Wait for pate to compute
+            #  - Get new result node form pate
+            # TODO: Spin dialog?
+            pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+            # TODO: Better way to do this?
+            pw.pate_thread.pate_wrapper.processTraceConstraints(d.getConstraints())
+            #  - update traces widgit
+            self.updateFromCfarNode()
+            # TODO: report failed constraint?
             QMessageBox.warning(self, "Warning", "TODO: process trace constraint")
 
-traceConstraintRelations = ["LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu", "NEQ", "EQ"]
+traceConstraintRelations = ["EQ", "NEQ", "LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu"]
 
 class PateTraceConstraintDialog(QDialog):
     def __init__(self, cfarNode: pate.CFARNode, parent=None):
@@ -535,9 +550,10 @@ class PateTraceConstraintDialog(QDialog):
 
         self.cfarNode = cfarNode
 
-        # TODO: Handle original AND patched
-        rawTraceVars = self.cfarNode.trace_footprint['original']
-        self.traceVars = pate.extractTraceVars(rawTraceVars)
+        self.traceVars = pate.extractTraceVars(self.cfarNode.trace_footprint)
+
+        # Prune TraceVars with no symbolic_ident
+        self.traceVars = [tv for tv in self.traceVars if tv.symbolic_ident is not None]
 
         #self.resize(1500, 800)
         self.setWindowTitle("Trace Constraint")
