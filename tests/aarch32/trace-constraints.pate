@@ -1,0 +1,29 @@
+Choose Entry Point
+    > Function Entry "_start"
+
+Function Entry "_start"
+    Handle observable difference:
+    > Avoid difference with equivalence condition
+
+Verification Finished
+    Continue verification?
+    > Finish and view final result
+
+
+Final Result
+    Assumed Equivalence Conditions
+        ? Function Entry "_start"
+
+    Regenerate result with new trace constraints?
+        > True
+    
+    Waiting for constraints..
+        > [ [ { "var": { "symbolic_ident" : 239 }, "op" : "EQ", "const" : "0" }, { "var": { "symbolic_ident" : -904 }, "op" : "EQ", "const" : "0" }, { "var": { "symbolic_ident" : 190 }, "op" : "EQ", "const" : "0" }, { "var": { "symbolic_ident" : 223 }, "op" : "EQ", "const" : "0" } ] ]
+
+    // above constraint satisfies the equivalence relation
+    Assumed Equivalence Conditions
+        Function Entry "_start"
+        ? true
+    
+    Regenerate result with new trace constraints?
+        > False
