@@ -484,7 +484,6 @@ class PateCfarEqCondDialog(QDialog):
         self.trueTraceWidget = TraceWidget(self)
         trueTraceBoxLayout = QVBoxLayout()
         trueTraceBoxLayout.addWidget(QLabel("Trace showing EQUIVALENT behaviour:"))
-        trueTraceBoxLayout.addWidget(trueTraceConstraintButton)
         trueTraceBoxLayout.addWidget(self.trueTraceWidget)
         trueTraceBox = QWidget()
         trueTraceBox.setLayout(trueTraceBoxLayout)
@@ -510,13 +509,15 @@ class PateCfarEqCondDialog(QDialog):
         mainSplitter.addWidget(trueFalseSplitter)
 
         # Main Layout
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
         main_layout.addWidget(mainSplitter)
+        main_layout.addWidget(trueTraceConstraintButton)
         self.setLayout(main_layout)
 
         self.updateFromCfarNode()
 
     def updateFromCfarNode(self):
+        self.eqCondField.clear()
         with io.StringIO() as out:
             pate.pprint_symbolic(out, self.cfarNode.predicate)
             self.eqCondField.appendPlainText(out.getvalue())
@@ -527,22 +528,16 @@ class PateCfarEqCondDialog(QDialog):
         d = PateTraceConstraintDialog(self.cfarNode, parent=self)
         #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
         if d.exec():
-            print(d.getConstraints())
-            # TODO:
-            #  - Get constraint form dialog
-            #  - Send constraint to pate
-            #  - Wait for pate to compute
-            #  - Get new result node form pate
-            # TODO: Spin dialog?
+            traceConstraints = d.getConstraints()
+            #print(traceConstraints)
             pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
             # TODO: Better way to do this?
-            pw.pate_thread.pate_wrapper.processTraceConstraints(d.getConstraints())
-            #  - update traces widgit
+            pw.pate_thread.pate_wrapper.processTraceConstraints(traceConstraints)
             self.updateFromCfarNode()
             # TODO: report failed constraint?
-            QMessageBox.warning(self, "Warning", "TODO: process trace constraint")
 
 traceConstraintRelations = ["EQ", "NEQ", "LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu"]
+
 
 class PateTraceConstraintDialog(QDialog):
     def __init__(self, cfarNode: pate.CFARNode, parent=None):

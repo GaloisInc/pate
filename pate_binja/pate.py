@@ -603,8 +603,8 @@ class PateWrapper:
             out.write(r']"')
             verifierTraceConstraintInput = out.getvalue()
 
-        print('verifierTraceConstraintInput:', verifierTraceConstraintInput)
-        self.debug_io = True
+        #print('verifierTraceConstraintInput:', verifierTraceConstraintInput)
+        #self.debug_io = True
         self._command('0')
         # TODO: Consider generalizing command_loop rather than this processing?
         while True:
@@ -772,7 +772,7 @@ class CFARGraph:
 
 
 class TraceVar:
-    def __init__(self, kind, raw):
+    def __init__(self, prefix, kind, raw):
         self.kind = kind
         self.raw = raw
         self.pretty = 'unknown'
@@ -783,6 +783,8 @@ class TraceVar:
         match self.kind:
             case 'reg_op':
                 with io.StringIO() as out:
+                    out.write(prefix)
+                    out.write(" ")
                     pprint_reg(self.raw, out=out)
                     self.pretty = out.getvalue()
                 self.type = self.raw['val']['offset']['type']
@@ -791,6 +793,8 @@ class TraceVar:
             case 'mem_op':
                 mem_op = raw['snd']
                 with io.StringIO() as out:
+                    out.write(prefix)
+                    out.write(" ")
                     out.write(f'{get_addr_id(raw["fst"])}: {mem_op["direction"]} {get_value_id(mem_op["addr"])} ')
                     self.pretty = out.getvalue()
                 offset = mem_op['value']['offset']
@@ -804,9 +808,9 @@ def extractTraceVars(rawFootprint) -> list[TraceVar]:
     #for r in raw['fp_initial_regs']['reg_op']['map']:
     #   traceVars.append(TraceVar('reg_op', r))
     for r in rawFootprint['original']['fp_mem']:
-        traceVars.append(TraceVar('mem_op', r))
+        traceVars.append(TraceVar('original', 'mem_op', r))
     for r in rawFootprint['patched']['fp_mem']:
-        traceVars.append(TraceVar('mem_op', r))
+        traceVars.append(TraceVar('patched', 'mem_op', r))
     # TODO: sort by instruction addr, but reverse seems to work for now
     traceVars.reverse()
     return traceVars
