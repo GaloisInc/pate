@@ -535,7 +535,7 @@ class PateWrapper:
 
         return True
 
-    def processFinalResult(self):
+    def processFinalResult(self, traceConstraints: list[tuple[TraceVar, str, str]] = None):
         self._command('up')
         rec = self.next_json()
         # isinstance(rec, dict) and rec.get('trace_node_kind') == 'final_result':
@@ -569,10 +569,13 @@ class PateWrapper:
 
                         if self.last_cfar_graph:
                             cfar_node = self.last_cfar_graph.get(node_id)
+                            if cfar_node.predicate is None:
+                                cfar_node.unconstrainedPredicate = predicate
                             cfar_node.predicate = predicate
                             cfar_node.trace_true = trace_true
                             cfar_node.trace_false = trace_false
                             cfar_node.trace_footprint = trace_footprint
+                            cfar_node.traceConstraints = traceConstraints
 
             self.user.show_message(out.getvalue())
         if self.last_cfar_graph:
@@ -588,7 +591,9 @@ class PateWrapper:
             out.write(r'input "[')
             # TODO: Handle multiple eq conds
             out.write(r'[')
-            for tc in traceConstraints:
+            for i, tc in enumerate(traceConstraints):
+                if i > 0:
+                    out.write(r',')
                 out.write(r'{\"var\":{\"symbolic_ident\":')
                 # symbolic_ident
                 out.write(str(tc[0].symbolic_ident))
@@ -616,7 +621,7 @@ class PateWrapper:
             rec = self.next_json()
             if isinstance(rec, dict) and rec['this'] == 'Regenerate result with new trace constraints?':
                 break
-        self.processFinalResult()
+        self.processFinalResult(traceConstraints)
 
     def show_message(self, rec: Any):
         if isinstance(rec, list):
@@ -645,10 +650,12 @@ class CFARNode:
         self.external_postdomain = None
         self.addr = None
         self.finished = True
+        self.unconstrainedPredicate = None
         self.predicate = None
         self.trace_true = None
         self.trace_false = None
         self.trace_footprint = None
+        self.traceConstraints = None
         self.instruction_trees = None
 
     def update_node(self, desc: str, data: dict):

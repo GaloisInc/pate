@@ -460,6 +460,7 @@ class PateCfarEqCondDialog(QDialog):
         super().__init__(parent)
 
         self.cfarNode = cfarNode
+        self.traceConstraints = None
 
         self.resize(1500, 800)
 
@@ -519,7 +520,17 @@ class PateCfarEqCondDialog(QDialog):
     def updateFromCfarNode(self):
         self.eqCondField.clear()
         with io.StringIO() as out:
-            pate.pprint_symbolic(out, self.cfarNode.predicate)
+            pate.pprint_symbolic(out, self.cfarNode.unconstrainedPredicate)
+            out.write('\n')
+            if self.cfarNode.traceConstraints:
+                #print(self.cfarNode.traceConstraints)
+                out.write('\nUser-supplied trace constraints:\n')
+                for tc in self.cfarNode.traceConstraints:
+                    out.write(f'{tc[0].pretty} {tc[1]} {tc[2]}\n')
+                out.write('\nEffective equivalence condition after adding user-provided constraints::\n')
+                pate.pprint_symbolic(out, self.cfarNode.predicate)
+            else:
+                out.write('\nNo user-supplied trace constraints.\n')
             self.eqCondField.appendPlainText(out.getvalue())
         self.trueTraceWidget.setTrace(self.cfarNode.trace_true)
         self.falseTraceWidget.setTrace(self.cfarNode.trace_false)
@@ -528,11 +539,11 @@ class PateCfarEqCondDialog(QDialog):
         d = PateTraceConstraintDialog(self.cfarNode, parent=self)
         #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
         if d.exec():
-            traceConstraints = d.getConstraints()
-            #print(traceConstraints)
+            self.traceConstraints = d.getConstraints()
+            #print(self.traceConstraints)
             pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
             # TODO: Better way to do this?
-            pw.pate_thread.pate_wrapper.processTraceConstraints(traceConstraints)
+            pw.pate_thread.pate_wrapper.processTraceConstraints(self.traceConstraints)
             self.updateFromCfarNode()
             # TODO: report failed constraint?
 
