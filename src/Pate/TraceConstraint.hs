@@ -81,6 +81,10 @@ instance forall sym. W4S.W4Deserializable sym (TraceConstraint sym) where
         case (BVS.mkBVUnsigned w c) of
           Just bv -> return $ TraceConstraint var op (W4.ConcreteBV w bv)
           Nothing -> fail "Unexpected integer size"
+      W4.BaseIntegerRepr -> do
+        (cS :: String) <- o .: "const"
+        ((c :: Integer),""):_ <- return $ Num.readDec cS
+        return $ TraceConstraint var op (W4.ConcreteInteger c)
       _ -> fail ("Unsupported expression type:" ++ show (W4.exprType var))
 
 constraintToPred ::
