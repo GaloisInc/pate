@@ -20,6 +20,7 @@ module Pate.TraceConstraint
   (
     TraceConstraint
   , constraintToPred
+  , constraintListToPred
   , TraceConstraintMap(..)
   , readConstraintMap
   ) where
@@ -27,7 +28,7 @@ module Pate.TraceConstraint
 import           Prelude hiding (EQ)
 
 import qualified Control.Monad.IO.Unlift as IO
-import           Control.Monad ( forM )
+import           Control.Monad ( forM, foldM )
 import           Control.Monad.Except
 import           Control.Monad.Trans
 import qualified Data.Aeson as JSON
@@ -80,6 +81,10 @@ instance forall sym. W4S.W4Deserializable sym (TraceConstraint sym) where
         case (BVS.mkBVUnsigned w c) of
           Just bv -> return $ TraceConstraint var op (W4.ConcreteBV w bv)
           Nothing -> fail "Unexpected integer size"
+      W4.BaseIntegerRepr -> do
+        (cS :: String) <- o .: "const"
+        ((c :: Integer),""):_ <- return $ Num.readDec cS
+        return $ TraceConstraint var op (W4.ConcreteInteger c)
       _ -> fail ("Unsupported expression type:" ++ show (W4.exprType var))
 
 constraintToPred ::
@@ -107,12 +112,36 @@ constraintToPred sym (TraceConstraint var op c) = case W4.exprType var of
       GEs -> goNot W4.bvSlt
       GEu -> goNot W4.bvUlt
       NEQ -> goNot W4.isEq
+  W4.BaseIntegerRepr -> do
+    let W4.ConcreteInteger i = c
+    intSym <- W4.intLit sym i
+    let go :: (sym -> W4.SymExpr sym W4.BaseIntegerType -> W4.SymExpr sym W4.BaseIntegerType -> IO (W4.Pred sym)) -> IO (W4.Pred sym)
+        go f = f sym var intSym
+    let goNot :: (sym -> W4.SymExpr sym W4.BaseIntegerType -> W4.SymExpr sym W4.BaseIntegerType -> IO (W4.Pred sym)) -> IO (W4.Pred sym)
+        goNot f = f sym var intSym >>= W4.notPred sym
+    case op of
+      LTs -> go W4.intLt
+      LTu -> fail "LTu: unsigned int comparison not supported"
+      LEs -> go W4.intLe
+      LEu -> fail "LEu: unsigned int comparison not supported"
+      EQ -> go W4.isEq
+      GTs -> goNot W4.intLe
+      GTu -> fail "GTu: unsigned int comparison not supported"
+      GEs -> goNot W4.intLt
+      GEu -> fail "GEu: unsigned int comparison not supported"
+      NEQ -> goNot W4.isEq
   _ -> fail "Unexpected constraint "
 
-
+constraintListToPred ::
+  forall sym.
+  W4.IsExprBuilder sym =>
+  sym ->
+  [TraceConstraint sym] -> 
+  IO (W4.Pred sym)
+constraintListToPred sym trs = foldM (\p tc -> constraintToPred sym tc >>= W4.andPred sym p) (W4.truePred sym) trs
 
 newtype TraceConstraintMap sym arch = 
-  TraceConstraintMap (Map (GraphNode arch) (TraceConstraint sym))
+  TraceConstraintMap (Map (GraphNode arch) [TraceConstraint sym])
 
 
 instance forall sym arch. IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "trace_constraint_map" where
@@ -135,11 +164,11 @@ readConstraintMap sym msg ndEnvs = do
         Right (v :: JSON.Value) -> runExceptT $ do
           (nodes :: [[JSON.Value]]) <- runJSON $ JSON.parseJSON v
           let nds = zip ndEnvs nodes
-          fmap (TraceConstraintMap . Map.fromList . concat) $ 
-            forM nds $ \((nd, env), constraints_json) -> forM constraints_json $ \constraint_json ->
+          constraints <- forM nds $ \((nd, env), constraints_json) -> forM constraints_json $ \constraint_json ->
                 (lift $ W4S.jsonToW4 sym env constraint_json) >>= \case
                   Left err -> throwError $ InputChoiceError "Failed to parse value" [err]
                   Right a -> return (nd, a)
+          return $ TraceConstraintMap $ foldl (\m (k,a) -> Map.insertWith (++) k [a] m) Map.empty (concat constraints)
   chooseInput_ @"trace_constraint_map" msg parse >>= \case
     Nothing -> IO.liftIO $ fail "Unexpected trace map read"
     Just a -> return a

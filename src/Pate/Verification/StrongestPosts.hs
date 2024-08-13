@@ -909,7 +909,7 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
         rest :: forall v. PS.SimScope sym arch v -> IntermediateEqCond sym arch v -> EquivM_ sym arch (Maybe (FinalEquivCond sym arch))
         rest scope (IntermediateEqCond bundle fps _ _ cond d) =  withSym $ \sym -> do
           trace_constraint <- case Map.lookup nd tcm of
-            Just tc -> IO.liftIO $ PTC.constraintToPred sym tc
+            Just tc -> IO.liftIO $ PTC.constraintListToPred sym tc
             Nothing -> return $ W4.truePred sym
           mres <- withSatAssumption (PAS.fromPred trace_constraint) $ do
             (mtraceT, mtraceF) <- getTracesForPred scope bundle d cond
