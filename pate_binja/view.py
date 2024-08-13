@@ -458,6 +458,7 @@ class PateCfarExitDialog(QDialog):
 class PateCfarEqCondDialog(QDialog):
     def __init__(self, cfarNode, parent=None):
         super().__init__(parent)
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
         self.cfarNode = cfarNode
         self.traceConstraints = None
@@ -478,7 +479,13 @@ class PateCfarEqCondDialog(QDialog):
         eqCondBox.setLayout(eqCondBoxLayout)
 
         # Constrain True Trace Button
-        trueTraceConstraintButton = QPushButton("Constrain Trace")
+        if pw.pate_thread.pate_wrapper.trace_file is None:
+            # Replay mode
+            trueTraceConstraintButton = QPushButton("Constrain Trace (disabled in replay mode)")
+            trueTraceConstraintButton.setEnabled(False)
+        else:
+            # Live Mode
+            trueTraceConstraintButton = QPushButton("Constrain Trace")
         trueTraceConstraintButton.clicked.connect(lambda _: self.showTrueTraceConstraintDialog())
 
         # True Trace Box
