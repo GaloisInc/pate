@@ -914,10 +914,11 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
           mres <- withSatAssumption (PAS.fromPred trace_constraint) $ do
             (mtraceT, mtraceF) <- getTracesForPred scope bundle d cond
             case (mtraceT, mtraceF) of
-              (Just traceT, Just traceF) -> do
+              (Nothing, Nothing) -> return Nothing
+              _ -> do
                 cond_pretty <- PSi.applySimpStrategy PSi.prettySimplifier cond
-                return $ Just (FinalEquivCond cond_pretty traceT traceF fps)
-              _ -> return Nothing
+                return $ Just (FinalEquivCond cond_pretty mtraceT mtraceF fps)
+              
           case mres of
             Just res -> return res
             Nothing -> emitWarning PEE.UnsatisfiableAssumptions >> return Nothing
@@ -981,8 +982,8 @@ data FinalResult sym arch = FinalResult
 data FinalEquivCond sym arch = FinalEquivCond
   { 
     _finEqCondPred :: W4.Pred sym
-  , _finEqCondTraceTrue :: CE.TraceEvents sym arch
-  , _finEqCondTraceFalse :: CE.TraceEvents sym arch
+  , _finEqCondTraceTrue :: Maybe (CE.TraceEvents sym arch)
+  , _finEqCondTraceFalse :: Maybe (CE.TraceEvents sym arch)
   -- small hack to include the footprint serialized according to the expression environment
   , _finEqFootprints :: PPa.PatchPairC (CE.TraceFootprint sym arch, JSON.Value)
   }
