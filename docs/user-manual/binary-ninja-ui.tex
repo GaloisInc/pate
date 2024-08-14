@@ -109,6 +109,57 @@ At the bottom will be a linearized representation of the instruction trees in th
 Instructions conditionally reachable through conditional control flow edges (if any) are prefixed by \texttt{+} or \texttt{-} to differentiate instructions in distinct branches.
 See Figure~\ref{fig:mcad} for an example of the instruction tree view, with MCAD integration (described below).
 
+\subsection{Trace Constraints}
+
+The concretized traces shown in the equivalence condition window (see Figure~\ref{fig:equiv-cond}) show a pair of \emph{possible} traces
+through the program slices where the equivalence condition is either met or not met. In general there may be multiple paths through
+the program that may satisfy (or contradict) the equivalence condition. To observe alternative concrete traces, the final equivalence
+condition may be provided \emph{trace constraints}, which restrict the values that \pate{} may choose when generating a concrete trace.
+When viewing the final equivalence condition, after the verifier has finished and the user has requested the final result, the window
+now shows an addition button at the bottom that allows for providing constraints to the given trace (see Figure~\ref{fig:equiv-cond-full}).
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.95\textwidth]{pate-binja-traces1.png}
+  \caption{Equivalence condition window with button to constrain trace.}
+  \label{fig:equiv-cond-full}
+\end{figure}
+
+When "Constrain Trace" is clicked, the "Trace Constraint" window (see Figure~\ref{fig:trace-constr-empty}) appears. The
+"Variable" dropdown is populated with the memory reads from both the original and patched programs. Notably each read
+is prefixed with the instruction address that the read occurred at, indicating that the constraint applies to the content
+of memory at that specific program point. The user then selects a relation and enters an integer value to compare the
+memory content against. Clicking "Add" will then add the specified constraint to the list below (see Figure~\ref{fig:trace-constr-one}).
+
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\textwidth]{pate-binja-traces2.png}
+  \caption{Empty trace constraint dialogue.}
+  \label{fig:trace-constr-empty}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\textwidth]{pate-binja-traces3.png}
+  \caption{Trace constraint dialogue with added constraint.}
+  \label{fig:trace-constr-one}
+\end{figure}
+
+Multiple constraints may be added at this point, or removed via the "Remove Constraint" button. Once the desired set of constraints
+has been provided, clicking "OK" will close the dialogue and present an updated equivalence condition window containing the
+now-constrained traces (see Figure~\ref{fig:equiv-cond-constrained}). Notably the equivalence condition itself has also been
+simplified under the trace constraints. This may, for example, remove some clauses that are now necessarily true under the
+given constraint, or simplify the entire condition to simply \emph{true} if the given constraints imply that the
+equivalence condition holds.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{pate-binja-traces4.png}
+  \caption{Expanded equivalence condition window with constrained traces.}
+  \label{fig:equiv-cond-constrained}
+\end{figure}
+
 \subsection{Replays}
 
 Executing a run configuration file with the \pate{} plugin will produce a \emph{replay} in a file named \texttt{lastrun.replay}, which can be preserved by renaming to another filename on disk.
