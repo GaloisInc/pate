@@ -401,7 +401,7 @@ class TraceWidget(QWidget):
         self.setLayout(main_layout)
 
     def setTrace(self, trace: dict, label: str = None):
-        if trace is False:
+        if not trace:
             # Unsat
             self.domainField.setPlainText('Unsatisfiable')
             self.traceDiff.clear('Unsatisfiable')
