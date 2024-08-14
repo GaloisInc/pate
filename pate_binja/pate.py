@@ -12,7 +12,7 @@ import shlex
 import signal
 import sys
 import threading
-from json import JSONDecodeError
+from json import JSONDecodeError, JSONEncoder, JSONDecoder
 from subprocess import Popen, PIPE, STDOUT, TimeoutExpired
 from typing import IO, Any, Optional
 
@@ -471,6 +471,7 @@ class PateWrapper:
 
         if isinstance(rec, dict) and rec.get('this') == 'Regenerate result with new trace constraints?':
             # Finish detected
+            self.user.show_message('\nProcessing verification results ...\n')
             self.processFinalResult()
             return False
 
@@ -482,6 +483,7 @@ class PateWrapper:
                 # Extract flow graph
                 cfar_graph = self.extract_graph()
                 if cfar_graph:
+                    print('Update last cfar graph')
                     self.last_cfar_graph = cfar_graph
                     self.user.show_cfar_graph(cfar_graph)
                 # Go back to prompt
@@ -535,14 +537,21 @@ class PateWrapper:
 
         return True
 
-    def processFinalResult(self, traceConstraints: list[tuple[TraceVar, str, str]] = None):
+    def processFinalResult(self, traceConstraints: list[tuple[TraceVar, str, str]] = None, cfarNode: CFARNode = None):
+        # TODO: add option to do with respect to a cfar node in which case missing should clear eq cond data?
         self._command('up')
         rec = self.next_json()
         # isinstance(rec, dict) and rec.get('trace_node_kind') == 'final_result':
-        self.user.show_message('\nProcessing verification results.\n')
+        # Find the last "Toplevel Result"
+        lastTopLevelResult = None
+        for tnc in rec['trace_node_contents']:
+            if tnc.get('pretty') == "Toplevel Result":
+                lastTopLevelResult = tnc
         with io.StringIO() as out:
-            for tnc in rec['trace_node_contents']:
-                eqconds = tnc.get('content', {}).get('eq_conditions', {}).get('map')
+            if not lastTopLevelResult:
+                out.write(f'No equivalence conditions found\n')
+            else:
+                eqconds = lastTopLevelResult.get('content', {}).get('eq_conditions', {}).get('map')
                 if eqconds:
                     # Found eq conditions
                     for item in eqconds:
@@ -569,7 +578,8 @@ class PateWrapper:
 
                         if self.last_cfar_graph:
                             cfar_node = self.last_cfar_graph.get(node_id)
-                            if cfar_node.predicate is None:
+                            # Hack to get unconstrainedPredicate from first top level result
+                            if cfar_node.unconstrainedPredicate is None:
                                 cfar_node.unconstrainedPredicate = predicate
                             cfar_node.predicate = predicate
                             cfar_node.trace_true = trace_true
@@ -577,13 +587,47 @@ class PateWrapper:
                             cfar_node.trace_footprint = trace_footprint
                             cfar_node.traceConstraints = traceConstraints
 
+                else:
+                    # no eq conditions - unsat constraints
+                    cfarNode.trace_true = False
+                    cfarNode.trace_false = False
+                    cfarNode.traceConstraints = traceConstraints
+                    cfarNode.predicate = cfarNode.unconstrainedPredicate
+
             self.user.show_message(out.getvalue())
         if self.last_cfar_graph:
             self.user.show_cfar_graph(self.last_cfar_graph)
         self._command('goto_prompt')
         rec = self.next_json()
 
-    def processTraceConstraints(self, traceConstraints: list[tuple[TraceVar, str, str]]):
+    def getReplayTraceConstraints(self) -> Optional[list[tuple[TraceVar, str, str]]]:
+        if self.trace_file is None:
+            # Read constraints from replay file
+            # Replay need to do this ahead of time to populate trace constraint dialog.
+            # Doing it here for now so replay works for debugging.
+            replay_line = self.pate_proc.stdout.readline()
+            if replay_line.startswith('Trace Constraints: '):
+                replay_line = replay_line[len('Trace Constraints: '):].strip()
+                # Parse JSON and return it
+                traceConstraints = json.loads(replay_line, object_hook=traceConstraintsJSONObjectHook)
+                # TODO: replace top level list[3] with tuple[3]
+                traceConstraints = [tuple(x) for x in traceConstraints]
+                print('Replay constraints:', traceConstraints)
+                return traceConstraints
+        return None
+
+    def processTraceConstraints(self, traceConstraints: list[tuple[TraceVar, str, str]], cfarNode: CFARNode) -> None:
+
+        self.user.show_message('\nProcessing trace constraints ...\n')
+
+        if self.trace_file:
+            # Write constraints to trace file for use in replay mode
+            tcl = [f'{tc[0].pretty} {tc[1]} {tc[2]}' for tc in traceConstraints]
+            self.trace_file.write('Trace Constraints: ')
+            json.dump(traceConstraints, self.trace_file, cls=TraceConstraintsJSONEncoder)
+            self.trace_file.write('\n')
+            self.trace_file.flush()
+
         # TODO: infrastructure to do this in the background on same thread as command loop
         with io.StringIO() as out:
             # input "[ [ { \"var\" : { \"symbolic_ident\" : 0 }, \"op\" : \"EQ\", \"const\" : \"128\"} ] ]"
@@ -612,16 +656,23 @@ class PateWrapper:
         #self.debug_io = True
         self._command('0')
         # TODO: Consider generalizing command_loop rather than this processing?
+        print('waiting for constraint prompt')
         while True:
             rec = self.next_json()
             if isinstance(rec, dict) and rec['this'] == 'Waiting for constraints..':
                 break
+            else:
+                self.show_message(rec)
         self._command(verifierTraceConstraintInput)
+        print('waiting for regenerate result prompt')
         while True:
             rec = self.next_json()
             if isinstance(rec, dict) and rec['this'] == 'Regenerate result with new trace constraints?':
                 break
-        self.processFinalResult(traceConstraints)
+            else:
+                self.show_message(rec)
+        print('waiting for constraint prompt')
+        self.processFinalResult(traceConstraints, cfarNode)
 
     def show_message(self, rec: Any):
         if isinstance(rec, list):
@@ -779,7 +830,8 @@ class CFARGraph:
 
 
 class TraceVar:
-    def __init__(self, prefix, kind, raw):
+    def __init__(self, prefix: str, kind: str, raw: dict):
+        self.prefix = prefix
         self.kind = kind
         self.raw = raw
         self.pretty = 'unknown'
@@ -809,6 +861,25 @@ class TraceVar:
                     self.symbolic_ident = offset['symbolic_ident']
                     self.type = offset['type']
                 self.numBits = mem_op['size'] * 8
+
+
+class TraceConstraintsJSONEncoder(JSONEncoder):
+    def default(self, o):
+        if isinstance(o, TraceVar):
+            return {'class': 'TraceVar',
+                    'prefix': o.prefix,
+                    'kind': o.kind,
+                    'raw': o.raw}
+        else:
+            return super().default(o)
+
+
+def traceConstraintsJSONObjectHook(d: dict):
+    if d.get('class') == 'TraceVar':
+        return TraceVar(d['prefix'], d['kind'], d['raw'])
+    else:
+        return d
+
 
 def extractTraceVars(rawFootprint) -> list[TraceVar]:
     traceVars = []

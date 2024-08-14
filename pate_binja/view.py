@@ -239,9 +239,11 @@ class GuiUserInteraction(pate.PateUserInteraction):
         promptNode = graph.getPromptNode()
         eqCondNodes = graph.getEqCondNodes()
         if promptNode:
+            print('promptNode:', promptNode)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars([promptNode]))
         elif eqCondNodes:
+            print('eqCondNodes:', eqCondNodes)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars(eqCondNodes))
 
@@ -336,7 +338,7 @@ class DiffWidget(QWidget):
         self.setLayout(main_layout)
 
     def clear(self, msg):
-        self.linesA = None
+        self.linesA = [msg]
         self.labelA = None
         self.linesB = None
         self.labelB = None
@@ -368,10 +370,12 @@ class DiffWidget(QWidget):
             # Show diff
             html = generateHtmlDiff(self.linesA, self.labelA, self.linesB, self.labelB)
             self.diffField.setHtml(html)
-        elif self.linesA is None and self.linesB is not None:
+        elif self.linesA is not None and self.linesB is None:
             # Just linesA, no diff
-            text = self.labelA + "\n"
-            text += '\n'.join(self.lineA)
+            text = ''
+            if self.labelA is not None:
+                text += self.labelA + "\n"
+            text += '\n'.join(self.linesA)
             self.diffField.setText(text)
         else:
             # Nothing to show
@@ -397,6 +401,12 @@ class TraceWidget(QWidget):
         self.setLayout(main_layout)
 
     def setTrace(self, trace: dict, label: str = None):
+        if trace is False:
+            # Unsat
+            self.domainField.setPlainText('Unsatisfiable')
+            self.traceDiff.clear('Unsatisfiable')
+            return
+
         with io.StringIO() as out:
             pate.pprint_node_event_trace_domain(trace, out=out)
             self.domainField.setPlainText(out.getvalue())
@@ -481,8 +491,7 @@ class PateCfarEqCondDialog(QDialog):
         # Constrain True Trace Button
         if pw.pate_thread.pate_wrapper.trace_file is None:
             # Replay mode
-            trueTraceConstraintButton = QPushButton("Constrain Trace (disabled in replay mode)")
-            trueTraceConstraintButton.setEnabled(False)
+            trueTraceConstraintButton = QPushButton("Constrain Trace (replay)")
         else:
             # Live Mode
             trueTraceConstraintButton = QPushButton("Constrain Trace")
@@ -534,8 +543,9 @@ class PateCfarEqCondDialog(QDialog):
                 out.write('\nUser-supplied trace constraints:\n')
                 for tc in self.cfarNode.traceConstraints:
                     out.write(f'{tc[0].pretty} {tc[1]} {tc[2]}\n')
-                out.write('\nEffective equivalence condition after adding user-provided constraints::\n')
-                pate.pprint_symbolic(out, self.cfarNode.predicate)
+                if self.cfarNode.trace_true or self.cfarNode.trace_false:
+                    out.write('\nEffective equivalence condition after adding user-provided constraints::\n')
+                    pate.pprint_symbolic(out, self.cfarNode.predicate)
             else:
                 out.write('\nNo user-supplied trace constraints.\n')
             self.eqCondField.appendPlainText(out.getvalue())
@@ -543,16 +553,23 @@ class PateCfarEqCondDialog(QDialog):
         self.falseTraceWidget.setTrace(self.cfarNode.trace_false)
 
     def showTrueTraceConstraintDialog(self):
-        d = PateTraceConstraintDialog(self.cfarNode, parent=self)
-        #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
-        if d.exec():
-            self.traceConstraints = d.getConstraints()
-            #print(self.traceConstraints)
-            pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
-            # TODO: Better way to do this?
-            pw.pate_thread.pate_wrapper.processTraceConstraints(self.traceConstraints)
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+        replayTraceConstraints = pw.pate_thread.pate_wrapper.getReplayTraceConstraints()
+        if replayTraceConstraints is None:
+            # Live - show dialog
+            d = PateTraceConstraintDialog(self.cfarNode, parent=self)
+            #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
+            if d.exec():
+                self.traceConstraints = d.getConstraints()
+                #print(self.traceConstraints)
+                # TODO: Better way to do this?
+                pw.pate_thread.pate_wrapper.processTraceConstraints(self.traceConstraints, self.cfarNode)
+                self.updateFromCfarNode()
+                # TODO: report failed constraint?
+        else:
+            # Replay - skip dialog and replay constraints
+            pw.pate_thread.pate_wrapper.processTraceConstraints(replayTraceConstraints, self.cfarNode)
             self.updateFromCfarNode()
-            # TODO: report failed constraint?
 
 traceConstraintRelations = ["EQ", "NEQ", "LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu"]
 
@@ -986,6 +1003,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #print('focusCfar.id', focusCfar.id)
         #print('focusFlowNode', focusFlow)
         if focusFlow:
+            print('focus:', focusFlow)
             self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -1025,7 +1043,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 action.triggered.connect(lambda _: self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr))
                 menu.addAction(action)
 
-            if cfarNode.predicate:
+            if cfarNode.unconstrainedPredicate:
                 action = QAction('Show Equivalence Condition', self)
                 action.triggered.connect(lambda _: self.showCfarEqCondDialog(cfarNode))
                 menu.addAction(action)
