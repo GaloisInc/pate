@@ -116,7 +116,7 @@ through the program slices where the equivalence condition is either met or not 
 the program that may satisfy (or contradict) the equivalence condition. To observe alternative concrete traces, the final equivalence
 condition may be provided \emph{trace constraints}, which restrict the values that \pate{} may choose when generating a concrete trace.
 When viewing the final equivalence condition, after the verifier has finished and the user has requested the final result, the window
-now shows an addition button at the bottom that allows for providing constraints to the given trace (see Figure~\ref{fig:equiv-cond-full}).
+shows an additional button at the bottom that allows for providing constraints to the given trace (see Figure~\ref{fig:equiv-cond-full}).
 
 \begin{figure}[h]
   \centering
@@ -125,11 +125,11 @@ now shows an addition button at the bottom that allows for providing constraints
   \label{fig:equiv-cond-full}
 \end{figure}
 
-When "Constrain Trace" is clicked, the "Trace Constraint" window (see Figure~\ref{fig:trace-constr-empty}) appears. The
-"Variable" dropdown is populated with the memory reads from both the original and patched programs. Notably each read
+When ``Constrain Trace'' is clicked, the ``Trace Constraint'' window (see Figure~\ref{fig:trace-constr-empty}) appears. The
+``Variable'' dropdown is populated with the memory reads from both the original and patched programs. Notably each read
 is prefixed with the instruction address that the read occurred at, indicating that the constraint applies to the content
 of memory at that specific program point. The user then selects a relation and enters an integer value to compare the
-memory content against. Clicking "Add" will then add the specified constraint to the list below (see Figure~\ref{fig:trace-constr-one}).
+memory content against. Clicking ``Add'' will then add the specified constraint to the list below (see Figure~\ref{fig:trace-constr-one}).
 
 
 \begin{figure}[h]
@@ -146,12 +146,9 @@ memory content against. Clicking "Add" will then add the specified constraint to
   \label{fig:trace-constr-one}
 \end{figure}
 
-Multiple constraints may be added at this point, or removed via the "Remove Constraint" button. Once the desired set of constraints
-has been provided, clicking "OK" will close the dialogue and present an updated equivalence condition window containing the
-now-constrained traces (see Figure~\ref{fig:equiv-cond-constrained}). Notably the equivalence condition itself has also been
-simplified under the trace constraints. This may, for example, remove some clauses that are now necessarily true under the
-given constraint, or simplify the entire condition to simply \emph{true} if the given constraints imply that the
-equivalence condition holds.
+Multiple constraints may be added at this point, or removed via the ``Remove Constraint'' button. Once the desired set of constraints
+has been provided, clicking ``OK'' will close the dialogue and present an updated equivalence condition window containing the
+now-constrained traces (see Figure~\ref{fig:equiv-cond-constrained}). The equivalence condition text area lists the original equivalence condition, the user-supplied trace constraints, and the effective equivalence condition as a result of incorporating the user-provided constraints.
 
 \begin{figure}[h]
   \centering
