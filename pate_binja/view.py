@@ -239,11 +239,11 @@ class GuiUserInteraction(pate.PateUserInteraction):
         promptNode = graph.getPromptNode()
         eqCondNodes = graph.getEqCondNodes()
         if promptNode:
-            print('promptNode:', promptNode)
+            #print('promptNode:', promptNode)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars([promptNode]))
         elif eqCondNodes:
-            print('eqCondNodes:', eqCondNodes)
+            #print('eqCondNodes:', eqCondNodes)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars(eqCondNodes))
 
@@ -1003,7 +1003,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #print('focusCfar.id', focusCfar.id)
         #print('focusFlowNode', focusFlow)
         if focusFlow:
-            print('focus:', focusFlow)
+            #print('focus:', focusFlow)
             self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):

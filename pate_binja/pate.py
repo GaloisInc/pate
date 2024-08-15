@@ -483,7 +483,7 @@ class PateWrapper:
                 # Extract flow graph
                 cfar_graph = self.extract_graph()
                 if cfar_graph:
-                    print('Update last cfar graph')
+                    #print('Update last cfar graph')
                     self.last_cfar_graph = cfar_graph
                     self.user.show_cfar_graph(cfar_graph)
                 # Go back to prompt
@@ -612,7 +612,7 @@ class PateWrapper:
                 traceConstraints = json.loads(replay_line, object_hook=traceConstraintsJSONObjectHook)
                 # TODO: replace top level list[3] with tuple[3]
                 traceConstraints = [tuple(x) for x in traceConstraints]
-                print('Replay constraints:', traceConstraints)
+                #print('Replay constraints:', traceConstraints)
                 return traceConstraints
         return None
 
@@ -656,7 +656,7 @@ class PateWrapper:
         #self.debug_io = True
         self._command('0')
         # TODO: Consider generalizing command_loop rather than this processing?
-        print('waiting for constraint prompt')
+        #print('waiting for constraint prompt')
         while True:
             rec = self.next_json()
             if isinstance(rec, dict) and rec['this'] == 'Waiting for constraints..':
@@ -664,14 +664,14 @@ class PateWrapper:
             else:
                 self.show_message(rec)
         self._command(verifierTraceConstraintInput)
-        print('waiting for regenerate result prompt')
+        #print('waiting for regenerate result prompt')
         while True:
             rec = self.next_json()
             if isinstance(rec, dict) and rec['this'] == 'Regenerate result with new trace constraints?':
                 break
             else:
                 self.show_message(rec)
-        print('waiting for constraint prompt')
+        #print('waiting for constraint prompt')
         self.processFinalResult(traceConstraints, cfarNode)
 
     def show_message(self, rec: Any):
