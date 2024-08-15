@@ -21,7 +21,8 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, Flow
 from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QMouseEvent, QAction, QColor, QPaintEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
-    QSplitter, QMenu, QTextEdit
+    QSplitter, QMenu, QTextEdit, QComboBox, QPushButton, QListWidget, QListWidgetItem, QAbstractItemView, \
+    QDialogButtonBox, QMessageBox
 
 from .mcad.PateMcad import PateMcad, CycleCount
 from . import pate
@@ -238,9 +239,11 @@ class GuiUserInteraction(pate.PateUserInteraction):
         promptNode = graph.getPromptNode()
         eqCondNodes = graph.getEqCondNodes()
         if promptNode:
+            #print('promptNode:', promptNode)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars([promptNode]))
         elif eqCondNodes:
+            #print('eqCondNodes:', eqCondNodes)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
             execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars(eqCondNodes))
 
@@ -335,7 +338,7 @@ class DiffWidget(QWidget):
         self.setLayout(main_layout)
 
     def clear(self, msg):
-        self.linesA = None
+        self.linesA = [msg]
         self.labelA = None
         self.linesB = None
         self.labelB = None
@@ -367,10 +370,12 @@ class DiffWidget(QWidget):
             # Show diff
             html = generateHtmlDiff(self.linesA, self.labelA, self.linesB, self.labelB)
             self.diffField.setHtml(html)
-        elif self.linesA is None and self.linesB is not None:
+        elif self.linesA is not None and self.linesB is None:
             # Just linesA, no diff
-            text = self.labelA + "\n"
-            text += '\n'.join(self.lineA)
+            text = ''
+            if self.labelA is not None:
+                text += self.labelA + "\n"
+            text += '\n'.join(self.linesA)
             self.diffField.setText(text)
         else:
             # Nothing to show
@@ -396,6 +401,12 @@ class TraceWidget(QWidget):
         self.setLayout(main_layout)
 
     def setTrace(self, trace: dict, label: str = None):
+        if not trace:
+            # Unsat
+            self.domainField.setPlainText('Unsatisfiable')
+            self.traceDiff.clear('Unsatisfiable')
+            return
+
         with io.StringIO() as out:
             pate.pprint_node_event_trace_domain(trace, out=out)
             self.domainField.setPlainText(out.getvalue())
@@ -455,11 +466,17 @@ class PateCfarExitDialog(QDialog):
 
 
 class PateCfarEqCondDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, cfarNode, parent=None):
         super().__init__(parent)
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+
+        self.cfarNode = cfarNode
+        self.traceConstraints = None
+
         self.resize(1500, 800)
 
-        self.setWindowTitle("Equivalence Condition")
+        self.setWindowTitle("")
+        self.setWindowTitle(f'Equivalence Condition - {self.cfarNode.id}')
 
         # Equivalence Condition Box
         self.eqCondField = QPlainTextEdit()
@@ -470,6 +487,15 @@ class PateCfarEqCondDialog(QDialog):
         eqCondBoxLayout.addWidget(self.eqCondField)
         eqCondBox = QWidget()
         eqCondBox.setLayout(eqCondBoxLayout)
+
+        # Constrain True Trace Button
+        if pw.pate_thread.pate_wrapper.trace_file is None:
+            # Replay mode
+            trueTraceConstraintButton = QPushButton("Constrain Trace (replay)")
+        else:
+            # Live Mode
+            trueTraceConstraintButton = QPushButton("Constrain Trace")
+        trueTraceConstraintButton.clicked.connect(lambda _: self.showTrueTraceConstraintDialog())
 
         # True Trace Box
         self.trueTraceWidget = TraceWidget(self)
@@ -500,15 +526,157 @@ class PateCfarEqCondDialog(QDialog):
         mainSplitter.addWidget(trueFalseSplitter)
 
         # Main Layout
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
         main_layout.addWidget(mainSplitter)
+        main_layout.addWidget(trueTraceConstraintButton)
         self.setLayout(main_layout)
 
-    def setTrueTrace(self, trace: dict, label: str = None):
-        self.trueTraceWidget.setTrace(trace, label)
+        self.updateFromCfarNode()
 
-    def setFalseTrace(self, trace: dict, label: str = None):
-        self.falseTraceWidget.setTrace(trace, label)
+    def updateFromCfarNode(self):
+        self.eqCondField.clear()
+        with io.StringIO() as out:
+            pate.pprint_symbolic(out, self.cfarNode.unconstrainedPredicate)
+            out.write('\n')
+            if self.cfarNode.traceConstraints:
+                #print(self.cfarNode.traceConstraints)
+                out.write('\nUser-supplied trace constraints:\n')
+                for tc in self.cfarNode.traceConstraints:
+                    out.write(f'{tc[0].pretty} {tc[1]} {tc[2]}\n')
+                if self.cfarNode.trace_true or self.cfarNode.trace_false:
+                    out.write('\nEffective equivalence condition after adding user-provided constraints::\n')
+                    pate.pprint_symbolic(out, self.cfarNode.predicate)
+            else:
+                out.write('\nNo user-supplied trace constraints.\n')
+            self.eqCondField.appendPlainText(out.getvalue())
+        self.trueTraceWidget.setTrace(self.cfarNode.trace_true)
+        self.falseTraceWidget.setTrace(self.cfarNode.trace_false)
+
+    def showTrueTraceConstraintDialog(self):
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+        replayTraceConstraints = pw.pate_thread.pate_wrapper.getReplayTraceConstraints()
+        if replayTraceConstraints is None:
+            # Live - show dialog
+            d = PateTraceConstraintDialog(self.cfarNode, parent=self)
+            #d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
+            if d.exec():
+                self.traceConstraints = d.getConstraints()
+                #print(self.traceConstraints)
+                # TODO: Better way to do this?
+                pw.pate_thread.pate_wrapper.processTraceConstraints(self.traceConstraints, self.cfarNode)
+                self.updateFromCfarNode()
+                # TODO: report failed constraint?
+        else:
+            # Replay - skip dialog and replay constraints
+            pw.pate_thread.pate_wrapper.processTraceConstraints(replayTraceConstraints, self.cfarNode)
+            self.updateFromCfarNode()
+
+traceConstraintRelations = ["EQ", "NEQ", "LTs", "LTu", "GTs", "GTu", "LEs", "LEu", "GEs", "GEu"]
+
+
+class PateTraceConstraintDialog(QDialog):
+    def __init__(self, cfarNode: pate.CFARNode, parent=None):
+        super().__init__(parent)
+
+        self.cfarNode = cfarNode
+
+        self.traceVars = pate.extractTraceVars(self.cfarNode.trace_footprint)
+
+        # Prune TraceVars with no symbolic_ident
+        self.traceVars = [tv for tv in self.traceVars if tv.symbolic_ident is not None]
+
+        #self.resize(1500, 800)
+        self.setWindowTitle("Trace Constraint")
+
+        self.varComboBox = QComboBox()
+        for tv in self.traceVars:
+            self.varComboBox.addItem(tv.pretty, userData=tv)
+        varLabel = QLabel("Variable:")
+        varLabel.setBuddy(self.varComboBox)
+
+        self.relComboBox = QComboBox()
+        self.relComboBox.addItems(traceConstraintRelations)
+        relLabel = QLabel("Relation:")
+        relLabel.setBuddy(self.relComboBox)
+
+        self.intTextLine = QLineEdit()
+        intLabel = QLabel("Integer:")
+        intLabel.setBuddy(self.intTextLine)
+
+        addButton = QPushButton("Add")
+        addButton.clicked.connect(lambda _: self.addConstraint())
+
+        addLayout = QHBoxLayout()
+        addLayout.addSpacing(15)
+        addLayout.addWidget(varLabel)
+        addLayout.addWidget(self.varComboBox)
+        addLayout.addSpacing(15)
+        addLayout.addWidget(relLabel)
+        addLayout.addWidget(self.relComboBox)
+        addLayout.addSpacing(15)
+        addLayout.addWidget(intLabel)
+        addLayout.addWidget(self.intTextLine)
+        addLayout.addSpacing(40)
+        addLayout.addStretch(1)
+        addLayout.addWidget(addButton)
+
+        self.constraintList = QListWidget()
+        self.constraintList.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+
+        removeButton = QPushButton("Remove Selected")
+        removeButton.clicked.connect(lambda _: self.removeSelectedConstraints())
+
+        cancelButton = QPushButton("Cancel")
+        cancelButton.clicked.connect(lambda _: self.cancel())
+
+        applyButton = QPushButton("Apply")
+        applyButton.clicked.connect(lambda _: self.apply())
+
+        buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttonBox.accepted.connect(self.accept)
+        buttonBox.rejected.connect(self.reject)
+
+        # Main Layout
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(addLayout)
+        main_layout.addWidget(self.constraintList)
+        main_layout.addWidget(removeButton)
+        main_layout.addWidget(buttonBox)
+        self.setLayout(main_layout)
+
+    def addConstraint(self):
+        var = self.varComboBox.currentText()
+        traceVar = self.varComboBox.currentData()
+        rel = self.relComboBox.currentText()
+        intStr = self.intTextLine.text()
+        if not intStr:
+            QMessageBox.critical(self, "Trace Constraint Error", "No integer specified.")
+            return
+        try:
+            intVal = int(intStr, 0)
+        except ValueError:
+            QMessageBox.critical(self, "Trace Constraint Error", f'Can\'t parse "{intStr}" as an integer.')
+            return
+
+        # TODO: Make sure intVal is in range for var type
+        # TODO: Prevent duplicates (wont hurt anything, but not useful to do and may mask entry error)
+        # TODO: Need data for constraint, associate with QListWidgetItem or subclass? Wait for var rep?
+
+        constraint = f'{traceVar.pretty} {rel} {intVal}'
+        item = QListWidgetItem(constraint, self.constraintList)
+        item.setData(Qt.UserRole, (traceVar, rel, intVal))
+
+    def removeSelectedConstraints(self):
+        clist = self.constraintList
+        listItems = clist.selectedItems()
+        if not listItems: return
+        for item in listItems:
+            itemRow = clist.row(item)
+            clist.takeItem(itemRow)
+
+    def getConstraints(self) -> list[tuple[pate.TraceVar, str, str]]:
+        lw = self.constraintList
+        return [lw.item(x).data(Qt.UserRole) for x in range(lw.count())]
 
 
 class InstTreeDiffWidget(QWidget):
@@ -835,6 +1003,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
         #print('focusCfar.id', focusCfar.id)
         #print('focusFlowNode', focusFlow)
         if focusFlow:
+            #print('focus:', focusFlow)
             self.showNode(focusFlow)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -874,7 +1043,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 action.triggered.connect(lambda _: self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr))
                 menu.addAction(action)
 
-            if cfarNode.predicate:
+            if cfarNode.unconstrainedPredicate:
                 action = QAction('Show Equivalence Condition', self)
                 action.triggered.connect(lambda _: self.showCfarEqCondDialog(cfarNode))
                 menu.addAction(action)
@@ -889,13 +1058,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 menu.exec_(event.globalPos())
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
-        d = PateCfarEqCondDialog(parent=self)
-        d.setWindowTitle(f'{d.windowTitle()} - {cfarNode.id}')
-        with io.StringIO() as out:
-            pate.pprint_symbolic(out, cfarNode.predicate)
-            d.eqCondField.appendPlainText(out.getvalue())
-        d.setTrueTrace(cfarNode.trace_true)
-        d.setFalseTrace(cfarNode.trace_false)
+        d = PateCfarEqCondDialog(cfarNode, parent=self)
         d.show()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
