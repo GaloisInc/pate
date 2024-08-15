@@ -72,6 +72,7 @@ import           What4.Expr.Builder as W4B
 import Unsafe.Coerce(unsafeCoerce)
 
 import qualified Output as PO
+import qualified Control.Concurrent as MVar
 
 maxSubEntries :: Int
 maxSubEntries = 5
@@ -145,8 +146,6 @@ data ValidSymArchRepr sym arch symExt archExt where
 
 data ReplIOStore =
     NoTreeLoaded
-  -- main thread has started but hasn't yet produced a tree
-  | WaitingForToplevel IO.ThreadId (SomeTraceTree PA.ValidRepr) LoadOpts
   -- we've started navigating the resulting tree
   | forall sym arch. (PA.ValidArch arch, PS.ValidSym sym) => SomeReplState IO.ThreadId (ReplState sym arch)
 
@@ -162,9 +161,6 @@ runReplM f = do
   t <- IO.readIORef ref
   case t of
     NoTreeLoaded -> return Nothing
-    WaitingForToplevel tid tree opts -> loadSomeTree tid tree opts >>= \case
-      True -> runReplM f
-      False -> return Nothing
     SomeReplState tid (st :: ReplState sym arch) -> do
       (a, st') <- runStateT (unReplM @sym @arch f) st
       IO.writeIORef ref (SomeReplState tid st')
@@ -244,28 +240,39 @@ run rawOpts = do
   case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
     OA.Success opts -> do
       setJSONMode $ CLI.jsonToplevel opts
-      topTraceTree' <- someTraceTree
+      topTraceTree_ <- someTraceTree
+      tree_ready <- MVar.newEmptyMVar
+      topTraceTree' <- forkTraceTreeHook (\tr -> 
+        (runWhenFinishedOrBlocked tr (MVar.putMVar tree_ready ()))) topTraceTree_
+
       cfgE <- CLI.mkRunConfig PAL.archLoader opts PSc.noRunConfig (Just topTraceTree')
       case cfgE of
         Left err -> PO.printErrLn (PP.viaShow err)
         Right cfg -> do
           let topTraceTree = PC.cfgTraceTree (PL.verificationCfg cfg)
-          tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \case
-            Left err -> do
-              killWaitThread
-              let msg = show err
-              case msg of
-                "thread killed" -> return ()
-                _ -> do
-                  IO.writeIORef ref NoTreeLoaded
-                  IO.hPutStrLn IO.stderr (show err)
-                  exitFailure
-              IO.writeIORef finalResult (Just (Left msg))
-            Right a -> IO.writeIORef finalResult (Just (Right a))
-          IO.writeIORef ref (WaitingForToplevel tid topTraceTree (LoadOpts (CLI.jsonToplevel opts)))
-          -- give some time for the verifier to start
-          IO.threadDelay 100000
-          wait_initial
+          tid <- IO.forkFinally (PL.runEquivConfig cfg) $ \status -> do
+            case status of 
+              Left err -> do
+                killWaitThread
+                let msg = show err
+                case msg of
+                  "thread killed" -> return ()
+                  _ -> do
+                    IO.writeIORef ref NoTreeLoaded
+                    PO.printErrLn (PP.viaShow err)
+                IO.writeIORef finalResult (Just (Left msg))
+              Right a -> do
+                case a of
+                  PEq.Errored err -> PO.printErrLn (PP.pretty err)
+                  _ -> return ()
+                IO.writeIORef finalResult (Just (Right a))
+            -- make sure we've unblocked the initial 'run' call
+            MVar.tryPutMVar tree_ready ()
+            return ()
+
+          IO.takeMVar tree_ready
+          loadSomeTree tid topTraceTree (LoadOpts (CLI.jsonToplevel opts))
+          startup
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn
@@ -477,7 +484,6 @@ stop :: IO ()
 stop = do
   IO.readIORef ref >>= \case
     NoTreeLoaded -> return ()
-    WaitingForToplevel tid _ _ -> IO.killThread tid
     SomeReplState tid _ -> IO.killThread tid
 
 up :: IO ()
@@ -510,11 +516,6 @@ status' mlimit = do
   tr <- IO.readIORef ref
   case tr of
     NoTreeLoaded -> PO.printMsgLn "No tree loaded"
-    WaitingForToplevel{} -> do
-      fin <- IO.liftIO $ IO.readIORef finalResult
-      case fin of
-        Just r -> PO.printMsgLn (PP.pretty (show r))
-        _ -> PO.printMsgLn "Waiting for verifier..."
     SomeReplState {} -> execReplM $ do
       (Some (TraceNode _ _ t))  <- gets replNode
       st <- IO.liftIO $ getTreeStatus t
@@ -701,22 +702,20 @@ waitIO verbose = do
   t <- IO.readIORef ref
   case t of
     NoTreeLoaded -> return ()
-    WaitingForToplevel{} -> do
-      IO.readIORef finalResult >>= \case
-        Just (Left msg) -> PO.printMsgLn ("Error:\n" <> PP.pretty msg) >> return ()
-        Just (Right r) -> PO.printMsgLn (PP.pretty (show r))
-        Nothing -> do
-          PO.printMsgLn "Verifier is starting..."
-          IO.threadDelay 1000000 >> (waitIO verbose)
     SomeReplState{} -> execReplM $ waitRepl n
 
 wait :: IO ()
 wait = wait_verbosity True
 
-wait_initial :: IO ()
-wait_initial = do
-  tid <- IO.forkFinally (waitIO False) (\_ -> killWaitThread)
-  IO.writeIORef waitThread (WaitThread (Just (tid)) 2)
+startup :: IO ()
+startup = execReplM $ do
+    updateNextNodes
+    (Some (TraceNode _ _ t))  <- gets replNode
+    isBlocked >>= \case
+      True -> PO.printBreak >> goto_status' isBlockedStatus >> ls'
+      False -> do
+        PO.printBreak
+        prettyNextNodes 0 False >>= PO.printOutputLn
 
 wait_verbosity :: Bool -> IO ()
 wait_verbosity verbose = do

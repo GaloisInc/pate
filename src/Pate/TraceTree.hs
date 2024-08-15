@@ -121,6 +121,7 @@ module Pate.TraceTree (
   , chooseInput
   , chooseInputFromList
   , chooseInput_
+  , runWhenFinishedOrBlocked
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -728,6 +729,20 @@ forkTraceTreeHook f (SomeTraceTree ref g) = do
     Left (SomeException e) -> IO.throwTo tid e
     Right () -> return ()
   return $ SomeTraceTree ref (\t -> g t >> putMVar mv (Some t))
+
+-- | Runs the given action once the given 'TraceTree' has either finished executing
+--   or is blocked waiting for user input
+runWhenFinishedOrBlocked :: TraceTree k ->
+  IO () ->
+  IO ()
+runWhenFinishedOrBlocked (TraceTree l) f = do
+  let go = withIOList l (\_ -> return Nothing) >>= \_ -> f
+  tid <- IO.myThreadId
+  _ <- IO.forkFinally go $ \case
+    Left (SomeException e) -> IO.throwTo tid e
+    Right () -> return ()
+  return ()
+
 
 someTraceTree :: forall tp. IO (SomeTraceTree tp)
 someTraceTree = do
