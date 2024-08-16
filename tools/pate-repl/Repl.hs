@@ -235,12 +235,17 @@ instance IsTraceNode k "toplevel" where
 
 run :: String -> IO ()
 run rawOpts = do
+  IO.hFlush IO.stdout
   PIRH.setLastRunCmd rawOpts
   let optsList = filter (\s -> s /= "") $ map (concat . map (\case '\\' -> []; x -> [x])) (splitOn "\\n" rawOpts)
   case OA.execParserPure OA.defaultPrefs CLI.cliOptions optsList of
     OA.Success opts -> do
       setJSONMode $ CLI.jsonToplevel opts
       topTraceTree_ <- someTraceTree
+
+      -- 'tree_ready' is unlocked once the TraceTree is either blocked waiting for
+      -- input (i.e. the initial prompt to select the symbol to start the analysis from)
+      -- or has somehow finished executing 
       tree_ready <- MVar.newEmptyMVar
       topTraceTree' <- forkTraceTreeHook (\tr -> 
         (runWhenFinishedOrBlocked tr (MVar.putMVar tree_ready ()))) topTraceTree_
@@ -266,13 +271,38 @@ run rawOpts = do
                   PEq.Errored err -> PO.printErrLn (PP.pretty err)
                   _ -> return ()
                 IO.writeIORef finalResult (Just (Right a))
-            -- make sure we've unblocked the initial 'run' call
+            -- Make sure we've unblocked the call to 'run' once the verifier
+            -- thread exits. Normally this will already be unblocked if the
+            -- verifier successfully started up, but if anything went wrong
+            -- then we need to make sure that 'run' still terminates so that
+            -- the rest of the GHCI bootstrapping script can finish running
+            -- (which will kill the GHCI session if the verifier thread 
+            -- was not successfully started)
             MVar.tryPutMVar tree_ready ()
             return ()
 
+          -- wait until the TraceTree has prompted for some input (see above)
           IO.takeMVar tree_ready
           loadSomeTree tid topTraceTree (LoadOpts (CLI.jsonToplevel opts))
-          startup
+          case isJust (CLI.scriptPath opts) && not (CLI.jsonToplevel opts) of
+            True ->
+              -- If we're running a script and not hosting
+              -- the GUI (i.e. non-JSON output) then we expect the initial
+              -- prompt to be answered by the script itself.
+              -- Since the script likely provides input for the initial prompt
+              -- (i.e. picking the symbol to start the analysis from),
+              -- we don't want to display it to the user at all.
+              -- Instead, we delay to wait for the script to make that
+              -- initial choice, and then 'wait' to start printing
+              -- the nodes as they are processed.
+              execReplM $ IO.liftIO $ IO.threadDelay 1000000 >> wait
+            False ->
+              -- In all other cases, we just print the initial prompt.
+              -- The 'tree_ready' lock ensures that we only get to this point
+              -- once the prompt is actually ready, so we don't need to
+              -- add any explicit delays here.
+              startup
+          
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn
