@@ -87,8 +87,8 @@ The verifier accepts the following command line arguments::
   --read-only-segments ARG Mark segments as read-only (0-indexed) when loading
                            ELF
   --script FILENAME        Save macaw CFGs to the provided directory
-  --no-assume-stack-scope  Don't add additional assumptions about stack frame
-                           scoping
+  --assume-stack-scope     Add additional assumptions about stack frame scoping 
+                           during function calls (unsafe)
   --ignore-warnings ARG    Don't raise any of the given warning types
   --always-classify-return Always resolve classifier failures by assuming
                            function returns, if possible.
