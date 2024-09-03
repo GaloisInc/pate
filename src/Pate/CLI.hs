@@ -94,7 +94,7 @@ mkRunConfig archLoader opts rcfg mtt = let
         , PC.cfgRescopingFailureMode = rerrMode opts
         , PC.cfgScriptPath = scriptPath opts
         , PC.cfgTraceTree = fromMaybe noTraceTree mtt
-        , PC.cfgStackScopeAssume = not $ noAssumeStackScope opts
+        , PC.cfgStackScopeAssume = assumeStackScope opts
         , PC.cfgIgnoreWarnings = ignoreWarnings opts
         , PC.cfgAlwaysClassifyReturn = alwaysClassifyReturn opts
         , PC.cfgTraceConstraints = traceConstraints opts
@@ -147,7 +147,7 @@ data CLIOptions = CLIOptions
   , jsonToplevel :: Bool
   , readOnlySegments :: [Int]
   , scriptPath :: Maybe FilePath
-  , noAssumeStackScope :: Bool
+  , assumeStackScope :: Bool
   , ignoreWarnings :: [String]
   , alwaysClassifyReturn :: Bool
   , preferTextInput :: Bool
@@ -462,8 +462,8 @@ cliOptions = OA.info (OA.helper <*> parser)
          <> OA.help "Save macaw CFGs to the provided directory"
          ))
     <*> OA.switch
-         ( OA.long "no-assume-stack-scope"
-         <> OA.help "Don't add additional assumptions about stack frame scoping"
+         ( OA.long "assume-stack-scope"
+         <> OA.help "Add additional assumptions about stack frame scoping during function calls (unsafe)"
          )
     <*> OA.many (OA.strOption
         ( OA.long "ignore-warnings"

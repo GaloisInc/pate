@@ -9,3 +9,4 @@
 -r AllowEqRescopeFailure
 -s transport_handler
 --script challenge10.pate
+--assume-stack-scope

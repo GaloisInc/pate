@@ -88,10 +88,24 @@ The verifier accepts the following command line arguments:
   --read-only-segments ARG Mark segments as read-only (0-indexed) when loading
                            ELF
   --script FILENAME        Save macaw CFGs to the provided directory
-  --no-assume-stack-scope  Don't add additional assumptions about stack frame
-                           scoping
+  --assume-stack-scope     Add additional assumptions about stack frame 
+                           scoping during function calls (unsafe)
   --ignore-warnings ARG    Don't raise any of the given warning types
 \end{verbatim}
+
+\subsection{--assume-stack-scope}
+
+This flag causes \pate{} to assume that out-of-scope stack slots 
+(i.e. slots that are past the current stack pointer) are always equal between
+the two binaries.
+Although in actuality they may have differing out-of-scope stack
+contents, programs that exercise proper stack hygiene should never
+access those values. By assuming they are equal, \pate{} avoids 
+creating spurious counter-examples where under-specified pointers
+alias inequivalent, but out-of-scope, stack slots.
+This is a fairly strong assumption that can have unintended side-effects,
+including assuming \emph{false} when out-of-scope stack contents are
+\emph{provably} inequivalent.
 
 
 %%% Local Variables:
