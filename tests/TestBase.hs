@@ -159,7 +159,7 @@ doTest mwb cfg _sv fp = do
       logs <- IOR.readIORef logsRef
       T.assertFailure (msg ++ "\n" ++ (intercalate "\n" (reverse logs)))
 
-  (dir, rcfg) <- case argFileExists of
+  (dir, rcfg) <- case argFileExists && not (isJust mwb) of
     True -> do
       rawOpts <- readFile (fp <.> "args")
       let optsList = filter (\s -> s /= "") $ (concat ((map (splitOn " ") (splitOn "\n" rawOpts))))

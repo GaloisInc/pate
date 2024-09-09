@@ -1,0 +1,1 @@
+observable-memory = [ { start-address = 0x0003f000, length=4000 } ]

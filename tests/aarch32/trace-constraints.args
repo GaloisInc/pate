@@ -1,0 +1,5 @@
+-o trace-constraints.original.exe
+-p trace-constraints.patched.exe
+-b trace-constraints.toml
+--script trace-constraints.pate
+--add-trace-constraints

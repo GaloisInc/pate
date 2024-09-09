@@ -44,9 +44,11 @@ malloc-%.exe: ./build/malloc-%.s ./build/link.ld
 	diff ./dumps/$(basename $@).original.dump ./dumps/$(basename $@).patched-bad.dump || true
 
 %.test_run: %.original.exe %.patched.exe
-	../../pate.sh -o $(basename $@).original.exe -p $(basename $@).patched.exe \
-		`( (test -f $(basename $@).toml && echo "-b $(basename $@).toml") || echo "")` \
-		`( (test -f $(basename $@).pate && echo "--script $(basename $@).pate") || echo "")` \
+	../../pate.sh \
+	    `( (!(test -f $(basename $@).args) && echo "-o $(basename $@).original.exe -p $(basename $@).patched.exe") || echo "")` \
+		`( (!(test -f $(basename $@).args) && (test -f $(basename $@).toml && echo "-b $(basename $@).toml")) || echo "")` \
+		`( (!(test -f $(basename $@).args) && (test -f $(basename $@).pate && echo "--script $(basename $@).pate")) || echo "")` \
+		`( (test -f $(basename $@).args && cat $(basename $@).args) || echo "")` \
 		--no-assume-stack-scope
 
 .PRECIOUS: ./build/%.s ./build/%.i %.exe malloc-%.exe ./unequal/%.original.exe ./unequal/%.patched.exe
