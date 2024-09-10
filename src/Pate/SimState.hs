@@ -76,6 +76,7 @@ module Pate.SimState
   , ScopeCoercion
   , getScopeCoercion
   , applyScopeCoercion
+  , PartialScopeCoercion(..)
   , asStatePair
   , bundleOutVars
   , bundleInVars
@@ -467,6 +468,9 @@ instance OrdF (W4.SymExpr sym) => Monoid (ExprRewrite sym v v') where
   
 data ScopeCoercion sym v v' =
   ScopeCoercion (VarBindCache sym) (ExprRewrite sym v v')
+
+data PartialScopeCoercion m sym v v' =
+  PartialScopeCoercion { applyPartialScopeCoercion :: forall tp. ScopedExpr sym tp v -> m (Maybe (ScopedExpr sym tp v')) }
 
 
 -- UNSAFE: assumes that the incoming expressions adhere to the given scopes
