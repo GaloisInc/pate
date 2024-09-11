@@ -1578,10 +1578,8 @@ handleOrphanedSingleSidedReturn ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 handleOrphanedSingleSidedReturn scope nd pg = withSym $ \sym -> do
-  priority <- thisPriority
   emitWarning $ PEE.OrphanedSinglesidedAnalysis (nodeFuns nd)
-  pg1 <- addToEquivCondition scope (ReturnNode nd) ConditionEquiv (W4.falsePred sym) pg
-  return $ queueAncestors (priority PriorityPropagation) (ReturnNode nd) pg1
+  addToEquivCondition scope (ReturnNode nd) ConditionEquiv (W4.falsePred sym) pg
 
 -- | Construct a "dummy" simulation bundle that basically just
 --   immediately returns the prestate as the poststate.
@@ -1811,7 +1809,6 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
                       modify $ queueAncestors (priority p) nd
                       when ((condK, p) == (ConditionEquiv, PriorityPropagation)) $
                         modify $ setPropagationKind nd ConditionEquiv PropagateOnce
-                    modify $ dropPostDomains nd (priority PriorityDomainRefresh)
                     modify $ queueNode (raisePriority (priority PriorityNodeRecheck)) nd
                   return Nothing
               Nothing -> return $ (Just cex, pg)
@@ -2887,10 +2884,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
               -- with simplification, but the sequence comparison introduces them
               -- at each branch point, so we convert them into implications
               traces_eq <- IO.liftIO $ WEH.iteToImp sym traces_eq_
-              pg1 <- addToEquivCondition scope (GraphNode currBlock) condK traces_eq pg
-              -- drop all post domains from this node since they all need to be re-computed
-              -- under this additional assumption/assertion
-              return $ dropPostDomains (GraphNode currBlock) (priority PriorityDomainRefresh) pg1
+              addToEquivCondition scope (GraphNode currBlock) condK traces_eq pg
             _ -> return pg
           return $ st'{ branchGraph = pg2 }
 
