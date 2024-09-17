@@ -69,6 +69,7 @@ import qualified Pate.Binary as PB
 import qualified Pate.Block as PBl
 import qualified Pate.Discovery as PD
 import qualified Pate.Discovery.PLT as PLT
+import qualified Pate.ExprMappable as PEM
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -171,6 +172,12 @@ instance forall v sym tp. SP.KnownVariant v => W4S.W4Serializable sym (PPC.PPCRe
 
 instance SP.KnownVariant v => W4S.W4SerializableF sym (PPC.PPCReg v) where
 instance SP.KnownVariant v => W4S.W4SerializableFC (PPC.PPCReg v) where
+
+instance SP.KnownVariant v =>  PEM.ExprFoldable sym (PPC.PPCReg v tp) where
+  foldExpr _ _ _ = return
+
+instance SP.KnownVariant v => PEM.ExprFoldableF sym (PPC.PPCReg v) where
+instance SP.KnownVariant v => (PEM.ExprFoldableFC (PPC.PPCReg v)) where
 
 instance PA.ValidArch PPC.PPC32 where
   type ArchConfigOpts PPC.PPC32 = ()

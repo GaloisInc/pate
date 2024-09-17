@@ -15,6 +15,8 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
@@ -22,7 +24,12 @@
 
 module Pate.ExprMappable (
     ExprMappable(..)
+  , ExprMappableFC
   , ExprFoldable(..)
+  , ExprFoldableF(..)
+  , withExprFoldable
+  , ExprFoldableFC
+  , ExprFoldableIO(..)
   , SkipTransformation(..)
   , ToExprMappable(..)
   , SymExprMappable(..)
@@ -60,10 +67,14 @@ import Unsafe.Coerce(unsafeCoerce)
 import Lang.Crucible.Simulator.SymSequence
 import Data.Maybe (fromMaybe)
 import qualified Lang.Crucible.Utils.MuxTree as MT
-import Data.Parameterized.Map (MapF)
+import           Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
 import Data.Text
-import Control.Monad (forM)
+import Control.Monad (forM, foldM)
+import Data.Kind (Type)
+import Data.Proxy
+
 
 -- Expression binding
 
@@ -101,16 +112,35 @@ class ExprMappable2 sym sym' f f' where
 
 class ExprFoldable sym f where
   foldExpr ::
+    Monad m => 
     WI.IsSymExprBuilder sym =>
-    IO.MonadIO m =>
     sym ->
     (forall tp. WI.SymExpr sym tp -> b -> m b) ->
     f ->
     b ->
     m b
 
-instance ExprMappable sym f => ExprFoldable sym f where
-  foldExpr sym f e b =
+-- Constrainted variant of 'ExprFoldable' that uses 'ExprMappable'
+-- instance by default
+class ExprFoldableIO sym f where
+  foldExprIO ::
+    IO.MonadIO m => 
+    WI.IsSymExprBuilder sym =>
+    sym ->
+    (forall tp. WI.SymExpr sym tp -> b -> m b) ->
+    f ->
+    b ->
+    m b
+  default foldExprIO :: 
+    ExprMappable sym f =>
+    IO.MonadIO m => 
+    WI.IsSymExprBuilder sym =>
+    sym ->
+    (forall tp. WI.SymExpr sym tp -> b -> m b) ->
+    f ->
+    b ->
+    m b
+  foldExprIO sym f e b = 
     CMS.execStateT (mapExpr sym (\e' -> CMS.get >>= \s -> lift (f e' s) >>= CMS.put >> return e') e) b
 
 instance (ExprMappable sym a, ExprMappable sym b) => ExprMappable sym (a, b) where
@@ -200,6 +230,12 @@ instance
 
 instance ExprMappable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
   mapExpr sym f e = applyExprMappable sym f e
+
+instance ExprFoldable (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
+  foldExpr _sym f e = f e
+
+instance ExprFoldableIO (W4B.ExprBuilder t st fs) (W4B.Expr t tp) where
+  foldExprIO _sym f e = f e
 
 -- | This is a bit redundant, but it forces the function to be evaluated
 --   according to the 'ToExprMappable' instance for 'ExprMappable', which
@@ -363,6 +399,23 @@ instance ExprMappable sym () where
 instance ExprMappable sym Text where
   mapExpr _ _ = return
 
+class (forall sym tp. ExprMappable sym (f tp)) => ExprMappableFC f
+
+class ExprFoldableF (sym :: Type) (f :: k -> Type) where
+  withExprFoldable_ :: p sym -> q f -> r tp -> (ExprFoldable sym (f tp) => a) -> a
+
+  default withExprFoldable_ :: ExprFoldable sym (f tp) => p sym -> q f -> r tp -> (ExprFoldable sym (f tp) => a) -> a
+  withExprFoldable_ _ _ _ x = x
+
+-- instantiates proxies (assumes TypeApplications)
+withExprFoldable :: 
+  forall sym f tp a.
+   ExprFoldableF sym f =>
+  (ExprFoldable sym (f tp) => a) -> a
+withExprFoldable f = withExprFoldable_ (Proxy @sym) (Proxy @f) (Proxy @tp) f
+
+class (forall sym. ExprFoldableF sym f) => ExprFoldableFC f where
+
 instance (Ord f, ExprMappable sym f) => ExprMappable sym (MT.MuxTree sym f) where
   mapExpr sym (f :: forall tp. WI.SymExpr sym tp -> m (WI.SymExpr sym tp)) mt = do
     go (MT.viewMuxTree @sym mt)
@@ -382,3 +435,43 @@ newtype ExprMapFElems a b = ExprMapFElems { unExprMapFElems :: (MapF a b) }
 
 instance (forall tp. ExprMappable sym (f tp)) => ExprMappable sym (ExprMapFElems a f) where
   mapExpr sym f (ExprMapFElems m) = ExprMapFElems <$> TF.traverseF (mapExpr sym f) m
+
+
+instance forall sym a b. (ExprFoldableF sym a, ExprFoldableF sym b) => ExprFoldable sym (MapF a b) where
+  foldExpr sym f m b = 
+    MapF.foldlMWithKey (\b_ (k :: a tp) (v :: b tp) -> 
+      withExprFoldable @sym @a @tp $ withExprFoldable @sym @b @tp $
+       foldExpr sym f k b_ >>= foldExpr sym f v) b m
+
+instance ExprFoldable sym a => ExprFoldable sym [a] where
+  foldExpr sym f m b = foldM (\b_ a -> foldExpr sym f a b_) b m
+
+instance ExprFoldable sym Text where
+  foldExpr _ _ _ = return
+
+instance (ExprFoldable sym f, ExprFoldable sym g) => ExprFoldable sym (f, g) where
+  foldExpr sym f (a,b) b0 = foldExpr sym f a b0 >>= foldExpr sym f b
+
+instance ExprFoldable sym f => ExprFoldable sym (Maybe f) where
+  foldExpr sym f (Just e) b0 = foldExpr sym f e b0
+  foldExpr _ _ Nothing b0 = return b0
+
+instance (ExprFoldable sym f) => ExprFoldable sym (MT.MuxTree sym f) where
+  foldExpr sym f mt b0 | SymExprFoldable aEF <- symExprFoldable sym = aEF @WI.BaseBoolType $ foldExpr sym f (MT.viewMuxTree mt) b0
+
+newtype ToExprFoldable sym tp = ToExprFoldable { unEF :: WI.SymExpr sym tp }
+
+instance ExprFoldable sym (ToExprFoldable sym tp) where
+  foldExpr _sym f (ToExprFoldable e) b = f e b
+
+newtype SymExprFoldable sym f = SymExprFoldable (forall tp a. ((ExprFoldable sym (f tp)) => a) -> a)
+
+-- Same approach for 'symExprMappable' to create ExprFoldable instances for SymExpr
+symExprFoldable ::
+  forall sym.
+  sym ->
+  SymExprFoldable sym (WI.SymExpr sym)
+symExprFoldable _sym =
+  unsafeCoerce r
+  where r :: SymExprFoldable sym (ToExprFoldable sym)
+        r = SymExprFoldable (\a -> a)

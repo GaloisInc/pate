@@ -64,7 +64,7 @@ import qualified Data.Map as Map
 import qualified Pate.Equivalence.Error as PEE
 import GHC.Stack (HasCallStack)
 import qualified Prettyprinter as PP
-
+import qualified What4.Interface as W4
 
 instance IsTraceNode (k :: l) "pg_trace" where
   type TraceNodeType k "pg_trace" = [String]

@@ -112,6 +112,19 @@ instance PEM.ExprMappable sym a => PEM.ExprMappable sym (SymSequence sym a) wher
             ys' <- rec ys
             IO.liftIO $ muxSymSequence sym p' xs' ys'
 
+instance PEM.ExprFoldable sym a => PEM.ExprFoldable sym (SymSequence sym a) where
+  foldExpr sym f e b = case e of
+    SymSequenceNil -> return b
+    SymSequenceCons _ x xs -> PEM.foldExpr sym f x b >>= PEM.foldExpr sym f xs
+    SymSequenceAppend _ xs ys -> PEM.foldExpr sym f xs b >>= PEM.foldExpr sym f ys
+    SymSequenceMerge _ p xs ys -> do
+      b' <- f p b
+      case asConstantPred p of
+        Just True -> PEM.foldExpr sym f xs b'
+        Just False -> PEM.foldExpr sym f ys b'
+        Nothing -> do
+          b'' <- PEM.foldExpr sym f xs b'
+          PEM.foldExpr sym f xs b''
 
 singleSeq ::
   forall sym a.

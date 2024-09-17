@@ -389,8 +389,7 @@ instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemoryCondition sy
 memPreCondToPred ::
   forall sym arch v.
   IsSymInterface sym =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
-  Typeable arch =>
+  PA.ValidArch arch =>
   sym ->
   SimScope sym arch v ->
   MemRegionEquality sym arch ->
