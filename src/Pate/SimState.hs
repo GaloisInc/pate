@@ -492,6 +492,9 @@ data ScopedExpr sym tp (v :: VarScope) =
 instance PEM.ExprMappable sym (ScopedExpr sym tp v) where
   mapExpr _sym f (ScopedExpr e) = ScopedExpr <$> f e
 
+instance PEM.ExprFoldable sym (ScopedExpr sym tp v) where
+  foldExpr _sym f (ScopedExpr e) = f e
+
 instance W4.IsExpr (W4.SymExpr sym) => PP.Pretty (ScopedExpr sym tp v) where
   pretty (ScopedExpr e) = W4.printSymExpr e
 
@@ -800,6 +803,14 @@ instance PEM.ExprMappable sym (SimState sym arch v bin) where
     <*> PEM.mapExpr sym f sb
     <*> PEM.mapExpr sym f scb
     <*> PEM.mapExpr sym f mr
+
+instance PEM.ExprFoldableF sym (MM.ArchReg arch) => PEM.ExprFoldable sym (SimState sym arch v bin) where
+  foldExpr sym f (SimState mem regs sb scb mr) b0 =
+        PEM.foldExpr sym f mem b0
+    >>= PEM.foldExpr sym f (MM.regStateMap regs)
+    >>= PEM.foldExpr sym f sb
+    >>= PEM.foldExpr sym f scb
+    >>= PEM.foldExpr sym f mr
 
 instance PEM.ExprMappable sym (SimInput sym arch v bin) where
   mapExpr sym f (SimInput st blk absSt) = SimInput

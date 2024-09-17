@@ -34,6 +34,7 @@ module Pate.Memory.MemTrace
 , MemTraceState
 , MemTrace
 , MemTraceSeq
+, MemTraceValidArch
 , llvmPtrEq
 , readMemState
 , writeMemState
@@ -168,6 +169,7 @@ import           Pate.EventTrace
 import qualified Data.Parameterized.TraversableFC as TFC
 import           What4.SymSequence
 import qualified What4.Concrete as W4C
+import qualified Control.Monad.IO.Class as IO
 ------
 -- * Undefined pointers
 
@@ -693,7 +695,7 @@ prettyMemTraceSeq = prettySymSequence prettyMemEvent
 
 --   FIXME: existentially-quantified 'arch' parameter is a workaround for the
 --   fact that only 'ptrW' is available in 'MemTraceImpl'
-data WrappedPtrW sym f ptrW = forall arch. (Typeable arch, ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => 
+data WrappedPtrW sym f ptrW = forall arch. (Typeable arch, ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch), PEM.ExprFoldableFC (ArchReg arch)) => 
   WrappedPtrW (Proxy arch) (SymSequence sym (f arch))
 
 forWrappedPtrM ::
@@ -741,6 +743,11 @@ getWrappedPtrW (WrappedPtrW (_arch2 :: Proxy arch2) v) =
 instance (forall arch. (ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch)) => PEM.ExprMappable sym (f arch)) => 
   PEM.ExprMappable sym (WrappedPtrW sym f ptrW) where
   mapExpr sym f (WrappedPtrW arch v) = WrappedPtrW arch <$> PEM.mapExpr sym f v
+
+instance (forall arch. (ptrW ~ ArchAddrWidth arch, RegisterInfo (ArchReg arch), PEM.ExprFoldableFC (ArchReg arch)) => PEM.ExprFoldable sym (f arch)) => 
+  PEM.ExprFoldable sym (WrappedPtrW sym f ptrW) where
+  foldExpr sym f (WrappedPtrW _arch v) = PEM.foldExpr sym f v
+
 
 type MemTraceFullSeq sym = WrappedPtrW sym (TraceEvent sym)
 type MemTraceInstrSeq sym = WrappedPtrW sym InstructionEvent
@@ -813,10 +820,12 @@ mkMemTraceVar ::
   IO (GlobalVar (MemTrace arch))
 mkMemTraceVar ha = freshGlobalVar ha (pack "llvm_memory_trace") knownRepr
 
+type MemTraceValidArch arch = (Typeable arch, SymArchConstraints arch, PEM.ExprFoldableFC (ArchReg arch))
+
 initMemTrace ::
   forall sym arch ptrW.
   ptrW ~ ArchAddrWidth arch =>
-  (Typeable arch, SymArchConstraints arch) =>
+  MemTraceValidArch arch =>
   IsSymExprBuilder sym =>
   sym ->
   Memory ptrW ->
@@ -1564,7 +1573,7 @@ doStaticReadAddr mem addr w end = do
 writeMemState ::
   forall sym arch ptrW ty.
   ptrW ~ ArchAddrWidth arch =>
-  (Typeable arch, RegisterInfo (ArchReg arch)) =>
+  MemTraceValidArch arch =>
   IsSymInterface sym =>
   MemWidth ptrW =>
   sym ->
@@ -2171,11 +2180,24 @@ instance PEM.ExprMappable sym (MemTraceImpl sym w) where
     memInstrSeq' <- PEM.mapExpr sym f $ memInstrSeq_ mem
     return $ MemTraceImpl memSeq' memState' memInstr' (memBaseMemory mem) memFullSeq' memInstrSeq'
 
+instance PEM.ExprFoldable sym (MemTraceImpl sym w) where
+  foldExpr sym f mem b0 = do
+     b1 <- PEM.foldExpr sym f (memSeq mem) b0
+     b2 <- PEM.foldExpr sym f (memState mem) b1
+     b3 <- PEM.foldExpr sym f (memCurrentInstr mem) b2
+     b4 <- PEM.foldExpr sym f (memFullSeq_ mem) b3
+     PEM.foldExpr sym f (memInstrSeq_ mem) b4
+
 instance PEM.ExprMappable sym (MemTraceState sym w) where
   mapExpr _sym f memSt = do
     memArrBytes' <- f $ memArrBytes memSt
     memArrRegions' <- f $ memArrRegions memSt
     return $ MemTraceState memArrBytes' memArrRegions'
+
+instance PEM.ExprFoldable sym (MemTraceState sym w) where
+  foldExpr _sym f memSt b0 = do
+    b1 <- f (memArrBytes memSt) b0
+    f (memArrRegions memSt) b1
 
 instance PEM.ExprMappable sym (MemFootprint sym arch) where
   mapExpr sym f (MemFootprint ptr w dir cond end) = do

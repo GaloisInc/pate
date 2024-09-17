@@ -162,7 +162,7 @@ readMemCell sym mem cell@(MemCell{}) = do
 writeMemCell ::
   forall sym arch w.
   IsSymInterface sym =>
-  MC.RegisterInfo (MC.ArchReg arch) =>
+  PMT.MemTraceValidArch arch =>
   Typeable arch =>
   sym ->
   -- | write condition

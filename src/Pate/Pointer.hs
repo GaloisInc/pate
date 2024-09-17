@@ -41,6 +41,7 @@ import qualified What4.JSON as W4S
 import qualified Lang.Crucible.LLVM.MemModel as CLM
 import qualified Data.Aeson as JSON
 import Data.Aeson ((.=))
+import qualified Pate.ExprMappable as PEM
 
 
 newtype Pointer sym w = PointerC { unPtr :: (CLM.LLVMPtr sym w) }
@@ -113,3 +114,6 @@ instance W4S.SerializableExprs sym => W4S.W4Serializable sym (Pointer sym w) whe
     return $ JSON.object ["region" .= reg_v, "offset" .= off_v]
 
 instance W4S.SerializableExprs sym => W4S.W4SerializableF sym (Pointer sym) where
+
+instance PEM.ExprFoldable sym (Pointer sym w) where
+  foldExpr _sym f (Pointer reg1 off1) b = f (W4.natToIntegerPure reg1) b >>= f off1

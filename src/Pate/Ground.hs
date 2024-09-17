@@ -71,6 +71,7 @@ import qualified What4.Partial as W4P
 import qualified SemMC.Util as SU
 
 import qualified Pate.Panic as PP
+import qualified Control.Monad.IO.Class as IO
 
 -- | This module allows a model from What4 to be captured with respect to
 -- some expression-containing type. This is used to ground concrete counter-examples
@@ -216,7 +217,7 @@ integerToNat i
 ground ::
   forall sym a.
   PS.ValidSym sym =>
-  PEM.ExprMappable sym (a sym) =>
+  PEM.ExprFoldableIO sym (a sym) =>
   sym ->
   -- | stack region
   W4.SymNat sym ->
@@ -239,7 +240,7 @@ ground sym stackRegion mkinfo a = do
       Nothing -> do
         upd <- MapF.updatedValue <$> MapF.updateAtKey e (Just <$> mkinfo e) (\_ -> return $ MapF.Keep) (grndInfoMap gdata)
         return $ gdata { grndInfoMap = upd }
-  gdata <- PEM.foldExpr sym f' a initGround
+  gdata <- PEM.foldExprIO sym f' a initGround
   return $ Grounded a gdata
 
 -- trivial instance - grounded values should not be modified
