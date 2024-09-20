@@ -28,6 +28,8 @@ Functionality for handling the inputs and outputs of crucible.
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RoleAnnotations   #-}
+{-# LANGUAGE ViewPatterns   #-}
 -- must come after TypeFamilies, see also https://gitlab.haskell.org/ghc/ghc/issues/18006
 {-# LANGUAGE NoMonoLocalBinds #-}
 
@@ -41,21 +43,31 @@ module Pate.SimState
   , SimInput(..)
   , SimOutput(..)
   , type VarScope
+  , type GlobalScope
   , SimScope
   , scopeAsm
   , scopeVars
   , scopeVarsPair
   , Scoped(..)
+  , PopScope
+  , pattern PopScope
   , ScopedExpr
+  , mkScopedExpr
+  , fromGlobalScope
   , unSE
   , scopedExprMap
   , scopedLocWither
   , WithScope(..)
   , liftScope0
+  , liftScope0Ret
   , forScopedExpr
+  , forScopedExprRet
   , liftScope2
+  , liftScope3
   , concreteScope
   , SimSpec
+  , AbsT(..)
+  , PopT(..)
   , mkSimSpec
   , freshSimSpec
   , forSpec
@@ -84,6 +96,7 @@ module Pate.SimState
 import           GHC.Stack ( HasCallStack )
 import qualified Data.Kind as DK
 import           Data.Proxy
+import           Data.Coerce
 
 import qualified Control.Monad.IO.Class as IO
 import           Control.Lens ( (^.) )
@@ -155,6 +168,8 @@ simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
   PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
 simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
 
+instance Scoped (PopT (SimState sym arch) bin) where
+  unsafeCoerceScope (PopF s) = PopF (coerce s)
 
 data SimInput sym arch v bin = SimInput
   {
@@ -203,11 +218,18 @@ simOutRegs = simRegs . simOutState
 -- from one type to another via 'unsafeCoerceScope'.
 -- TODO: A safe variant of 'unsafeCoerceScope' could perform a runtime check to
 -- ensure that the resulting value is well-scoped.
-data VarScope
+data VarScope = 
+      GlobalScope {- ^ scope for terms with no bound variables -}
+    | ArbitraryScope DK.Type {- ^ all other scopes (this constructor is not actually used) -}
+
+type GlobalScope = 'GlobalScope
+
+
 
 -- | A 'Scoped' type is parameterized by a phantom 'VarScope' type variable, used
 -- to track the scope of its inner bound variables.
-class Scoped f where
+--   This class explicitly tells us that the implementation of 'f' doesn't depend on 'v'
+class (forall (v :: VarScope) (v' :: VarScope). Coercible (f v) (f v')) => Scoped f where
   -- | Unsafely change the variable scope parameter for an instance of 'f'.
   -- This should be a no-op and only used to make types match up where needed.
   -- It is the responsibility of the user to ensure that this is only applied
@@ -215,6 +237,7 @@ class Scoped f where
   -- in the target scope.
   -- TODO: We can check this statically to add a safe variant.
   unsafeCoerceScope :: forall (v :: VarScope) v'. f v -> f v'
+  unsafeCoerceScope a = coerce a
 
 -- | A lambda abstraction over 'f', which is parameterized by a variable scope.
 -- A 'SimSpec' can be interpreted via 'viewSpec' or modified via 'forSpec'.
@@ -230,6 +253,32 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
     , _specBody :: f v
     }
 
+-- TODO: probably defined somewhere already
+-- can be used for types that abstract over 'bin' and 'v' to expose the
+-- 'bin' parameter in a 'SimSpec'
+newtype AbsT (f :: k -> DK.Type) (tp1 :: l -> k) (tp2 :: l) = AbsT { unAbsT :: f (tp1 tp2) }
+
+newtype PopT (f :: l -> k -> DK.Type) (tp1 :: k) (tp2 :: l) = PopF { unPopF :: f tp2 tp1 }
+
+-- Some trickery to let us use PopT while maintaining that VarScope is phantom
+newtype PopScope (f :: l -> VarScope -> DK.Type) (v :: VarScope) (tp :: l) = PopScopeC (f tp GlobalScope)
+type role PopScope representational phantom nominal
+
+unPopScope :: Scoped (f tp) => PopScope f v tp -> f tp v
+unPopScope (PopScopeC f) = coerce f
+
+mkPopScope :: Scoped (f tp) => f tp v -> PopScope f v tp
+mkPopScope f = PopScopeC (coerce f)
+
+pattern PopScope ::  Scoped (f tp) => f tp v -> PopScope f v tp
+pattern PopScope f <- (unPopScope -> f) where
+  PopScope f = mkPopScope f
+{-# COMPLETE PopScope #-}
+
+
+instance PEM.ExprMappable sym (f tp1 tp2) => PEM.ExprMappable sym (PopT f tp2 tp1) where
+  mapExpr sym f (PopF a) = PopF <$> PEM.mapExpr sym f a
+
 mkSimSpec :: SimScope sym arch v -> f v -> SimSpec sym arch f
 mkSimSpec scope body = SimSpec scope body
 
@@ -242,11 +291,8 @@ data SimScope sym arch v =
     , scopeAsm :: AssumptionSet sym
     }
 
-instance Scoped (SimScope sym arch) where
-  unsafeCoerceScope scope = coerce scope
-
-instance Scoped (Const x) where
-  unsafeCoerceScope scope = coerce scope
+instance Scoped (SimScope sym arch)
+instance Scoped (Const x)
 
 scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
 scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
@@ -340,8 +386,7 @@ data SimBundle sym arch v = SimBundle
   }
 
 
-instance Scoped (SimBundle sym arch) where
-  unsafeCoerceScope bundle = coerce bundle
+instance Scoped (SimBundle sym arch)
 
 instance (W4.IsSymExprBuilder sym,  MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym,arch) "bundle" where
   type TraceNodeType '(sym,arch) "bundle" = Some (SimBundle sym arch)
@@ -486,8 +531,19 @@ asScopeCoercion rew = ScopeCoercion <$> freshVarBindCache <*> pure rew
 
 -- | An expr tagged with a scoped parameter (representing the fact that the
 -- expression is valid under the scope 'v')
-data ScopedExpr sym tp (v :: VarScope) =
+newtype ScopedExpr sym tp (v :: VarScope) =
   ScopedExpr { unSE :: W4.SymExpr sym tp }
+
+-- | Make a ScopedExpr with an unknown scope
+mkScopedExpr :: W4.SymExpr sym tp -> Some (ScopedExpr sym tp)
+mkScopedExpr e = Some (ScopedExpr e)
+
+-- | The global scope indicates no bound variables, and so this can
+--   be safely converted into any scope
+fromGlobalScope :: Scoped f => f GlobalScope -> f v
+fromGlobalScope f = coerce f
+
+instance Scoped (ScopedExpr sym tp)
 
 instance PEM.ExprMappable sym (ScopedExpr sym tp v) where
   mapExpr _sym f (ScopedExpr e) = ScopedExpr <$> f e
@@ -505,6 +561,11 @@ instance TestEquality (W4.SymExpr sym) => Eq (ScopedExpr sym tp v) where
   e1 == e2 = case testEquality (unSE e1) (unSE e2) of
     Just _ -> True
     Nothing -> False
+
+instance TestEquality (W4.SymExpr sym) => TestEquality (PopScope (ScopedExpr sym) v) where
+  testEquality (PopScope (ScopedExpr e1)) (PopScope (ScopedExpr e2)) = case testEquality e1 e2 of
+    Just Refl -> Just Refl
+    Nothing -> Nothing
 
 {-
 newtype ScopedAssertion sym (v :: VarScope) = ScopedAssertion { unSA :: ScopedExpr sym v W4.BaseBoolType }
@@ -585,12 +646,26 @@ applyScopeCoercion sym (ScopeCoercion cache (ExprRewrite binds)) (ScopedExpr e) 
 -- incidentally include bound variables from other scopes)
 liftScope2 ::
   W4.IsSymExprBuilder sym =>
+  IO.MonadIO m =>
   sym ->
-  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> W4.SymExpr sym' tp2 -> IO (W4.SymExpr sym' tp3)) ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> W4.SymExpr sym' tp2 -> m (W4.SymExpr sym' tp3)) ->
   ScopedExpr sym tp1 v ->
   ScopedExpr sym tp2 v ->
-  IO (ScopedExpr sym tp3 v)
+  m (ScopedExpr sym tp3 v)
 liftScope2 sym f (ScopedExpr e1) (ScopedExpr e2) = ScopedExpr <$> f sym e1 e2
+
+-- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
+-- incidentally include bound variables from other scopes)
+liftScope3 ::
+  W4.IsSymExprBuilder sym =>
+  IO.MonadIO m =>
+  sym ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> W4.SymExpr sym' tp2 -> W4.SymExpr sym' tp3 -> m (W4.SymExpr sym' tp4)) ->
+  ScopedExpr sym tp1 v ->
+  ScopedExpr sym tp2 v ->
+  ScopedExpr sym tp3 v ->
+  m (ScopedExpr sym tp4 v)
+liftScope3 sym f (ScopedExpr e1) (ScopedExpr e2) (ScopedExpr e3) = ScopedExpr <$> f sym e1 e2 e3
 
 forScopedExpr ::
   W4.IsSymExprBuilder sym =>
@@ -599,6 +674,17 @@ forScopedExpr ::
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> IO (W4.SymExpr sym' tp2)) ->
   IO (ScopedExpr sym tp2 v)
 forScopedExpr sym (ScopedExpr e1) f = ScopedExpr <$> f sym e1
+
+-- | Similar to 'forScopedExpr' but may return a value as well
+forScopedExprRet ::
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  ScopedExpr sym tp1 v ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> W4.SymExpr sym' tp1 -> IO (f sym', W4.SymExpr sym' tp2)) ->
+  IO (f sym, ScopedExpr sym tp2 v)
+forScopedExprRet sym (ScopedExpr e1) f = do
+  (a, e2) <- f sym e1
+  return (a, ScopedExpr e2)
 
 -- | An operation is scope-preserving if it is valid for all builders (i.e. we can't
 -- incidentally include bound variables from other scopes)
@@ -609,6 +695,16 @@ liftScope0 ::
   (forall sym'. W4.IsSymExprBuilder sym' => sym' -> IO (W4.SymExpr sym' tp)) ->
   IO (ScopedExpr sym tp v)
 liftScope0 sym f = ScopedExpr <$> f sym
+
+liftScope0Ret ::
+  forall f v sym tp.
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> IO (f sym', W4.SymExpr sym' tp)) ->
+  IO (f sym, ScopedExpr sym tp v)
+liftScope0Ret sym f = do
+  (a, e) <- f sym
+  return (a, ScopedExpr e)
 
 -- | A concrete value is valid in all scopes
 concreteScope ::
