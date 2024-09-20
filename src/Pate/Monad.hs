@@ -128,7 +128,7 @@ import qualified Data.Set as S
 import qualified Data.IORef as IO
 import qualified Data.Text as T
 import qualified Data.Time as TM
-import           Data.Kind ( Type )
+import           Data.Kind ( Type, Constraint )
 import           Data.Typeable
 import           Data.Default
 import           Data.String ( IsString(..) )

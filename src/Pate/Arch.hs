@@ -126,6 +126,7 @@ import qualified What4.Expr.ArrayUpdateMap as AUM
 import qualified Data.Parameterized.TraversableF as TF
 import Data.Maybe
 import Pate.Memory
+import qualified Pate.ExprMappable as PEM
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -188,6 +189,7 @@ class
   , MCS.HasArchEndCase arch
   , Integral (EEP.ElfWordType (MC.ArchAddrWidth arch))
   , W4S.W4SerializableFC (MC.ArchReg arch)
+  , PEM.ExprFoldableFC (MC.ArchReg arch)
   ) => ValidArch arch where
   
   type ArchConfigOpts arch

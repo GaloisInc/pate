@@ -136,6 +136,8 @@ instance PEM.ExprMappable sym (InequivalenceResultSym arch sym) where
     <*> PEM.mapExpr sym f a3
     <*> pure a4
 
+instance PEM.ExprFoldableIO sym (InequivalenceResultSym arch sym) where
+
 -- | An 'InequivalenceResultSym' once it has been grounded to a particular
 -- model (representing the counter-example for an inequivalence proof)
 type InequivalenceResult arch = PG.Grounded (InequivalenceResultSym arch)

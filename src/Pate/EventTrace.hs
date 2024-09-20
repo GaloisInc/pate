@@ -28,6 +28,7 @@ symbolic execution.
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 module Pate.EventTrace
 ( MemEvent(..)
@@ -175,6 +176,11 @@ instance PEM.ExprMappable sym (MemOpCondition sym) where
     Conditional p -> Conditional <$> f p
     Unconditional -> return Unconditional
 
+instance PEM.ExprFoldable sym (MemOpCondition sym) where
+  foldExpr _sym f mc b = case mc of
+    Conditional p -> f p b
+    Unconditional -> return b
+
 data MemOpDirection =
     Read
   | Write
@@ -234,6 +240,12 @@ instance PEM.ExprMappable sym (MemOp sym w) where
       cond' <- PEM.mapExpr sym f cond
       return $ MemOp ptr' dir cond' w val' endian
 
+instance PEM.ExprFoldable sym (MemOp sym w) where
+  foldExpr sym f (MemOp ptr _dir cond _w val _endian) b0 = do
+    b1 <- PEM.foldExpr sym f (Ptr.fromLLVMPointer ptr) b0
+    b2 <- PEM.foldExpr sym f (Ptr.fromLLVMPointer val) b1
+    PEM.foldExpr sym f cond b2
+
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemOp sym ptrW) where
   w4Serialize (MemOp addr dir cond n val end) =
     W4S.object
@@ -272,6 +284,9 @@ instance (W4S.W4SerializableFC (ArchReg arch), W4S.SerializableExprs sym)
 instance PEM.ExprMappable sym (RegOp sym arch) where
   mapExpr sym f (RegOp m) = (RegOp . PEM.unExprMapFElems) <$> PEM.mapExpr sym f (PEM.ExprMapFElems m)
 
+instance PEM.ExprFoldableFC (ArchReg arch) => PEM.ExprFoldable sym (RegOp sym arch) where
+  foldExpr sym f (RegOp m) b = PEM.foldExpr sym f m b
+
 
 data MemEvent sym ptrW where
   MemOpEvent :: MemOp sym ptrW -> MemEvent sym ptrW
@@ -295,6 +310,11 @@ instance PEM.ExprMappable sym (ExternalCallData sym ptrW) where
   mapExpr sym f = \case
     ExternalCallDataExpr e -> ExternalCallDataExpr <$> f e
     ExternalCallDataChunk c -> ExternalCallDataChunk <$> PEM.mapExpr sym f c
+
+instance PEM.ExprFoldable sym (ExternalCallData sym ptrW) where
+  foldExpr sym f ec b = case ec of
+    ExternalCallDataExpr e -> f e b
+    ExternalCallDataChunk c -> PEM.foldExpr sym f c b
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (ExternalCallData sym ptrW) where
   w4Serialize (ExternalCallDataExpr e) = W4S.object ["data_expr" .== e]
@@ -411,6 +431,9 @@ instance OrdF (SymExpr sym) => Eq (MemEvent sym ptrW) where
 
 instance PEM.ExprMappable sym (MemChunk sym ptrW) where
   mapExpr _sym f (MemChunk a b c) = MemChunk <$> f a <*> f b <*> f c
+
+instance PEM.ExprFoldable sym (MemChunk sym ptrW) where
+  foldExpr _sym f (MemChunk a b c) s = f a s >>= f b >>= f c
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemChunk sym ptrW) where
   w4Serialize (MemChunk a b c) = W4S.object ["mem_arr" .== a, "base" .== b, "len" .== c]
@@ -531,8 +554,15 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
     MemOpEvent op -> MemOpEvent <$> PEM.mapExpr sym f op
     SyscallEvent i arg -> SyscallEvent i <$> f arg
     -- MuxTree is unmodified since it has no symbolic expressions
+    -- FIXME: shouldn't we still check the booleans?
     ExternalCallEvent nm vs -> ExternalCallEvent nm <$> PEM.mapExpr sym f vs
 
+instance PEM.ExprFoldable sym (MemEvent sym w) where
+  foldExpr sym f ev b = case ev of
+    MemOpEvent op -> PEM.foldExpr sym f op b
+    -- FIXME: see above
+    SyscallEvent _i arg -> f arg b
+    ExternalCallEvent _nm vs -> PEM.foldExpr sym f vs b
 
 filterEvent ::
   IsExprBuilder sym =>
@@ -567,10 +597,18 @@ instance W4S.W4Serializable sym  (MemSegmentOff w) where
 instance PEM.ExprMappable sym (MemSegmentOff w) where
   mapExpr _ _ = return
 
+instance PEM.ExprFoldable sym (MemSegmentOff w) where
+  foldExpr _ _ _ = return
+
 instance PEM.ExprMappable sym (TraceEvent sym arch) where
   mapExpr sym f e = case e of
     RegOpEvent i rop -> RegOpEvent <$> PEM.mapExpr sym f i <*> PEM.mapExpr sym f rop
     TraceMemEvent i mop -> TraceMemEvent <$> PEM.mapExpr sym f i <*> PEM.mapExpr sym f mop
+
+instance PEM.ExprFoldableFC (ArchReg arch) => PEM.ExprFoldable sym (TraceEvent sym arch) where
+  foldExpr sym f te b0 = case te of
+    RegOpEvent i rop -> PEM.foldExpr sym f i b0 >>= PEM.foldExpr sym f rop
+    TraceMemEvent i mop -> PEM.foldExpr sym f i b0 >>= PEM.foldExpr sym f mop
 
 instance W4S.W4Serializable sym  (MemAddr w) where
   w4Serialize addr = do
@@ -594,6 +632,9 @@ data InstructionEvent arch = InstructionEvent { instrAddr :: ArchSegmentOff arch
 -- trivial instance - no symbolic data
 instance PEM.ExprMappable sym (InstructionEvent arch) where
   mapExpr _sym _f e = return e
+
+instance PEM.ExprFoldable sym (InstructionEvent arch) where
+  foldExpr _ _ _ = return
 
 instance W4S.W4Serializable sym (InstructionEvent arch) where
   w4Serialize (InstructionEvent addr dis) = W4S.object ["address" .= addr, "disassembled" .= dis]

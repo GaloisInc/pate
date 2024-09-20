@@ -112,6 +112,7 @@ library
                        Pate.Verification.DemandDiscovery,
                        Pate.Verification.Domain,
                        Pate.Verification.ExternalCall,
+                       Pate.Verification.FnBindings,
                        Pate.Verification.InlineCallee,
                        Pate.Verification.MemoryLog,
                        Pate.Verification.Override,

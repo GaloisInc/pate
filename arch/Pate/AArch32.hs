@@ -57,6 +57,7 @@ import qualified Language.ASL.Globals as ASL
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.Discovery.PLT as PLT
+import qualified Pate.ExprMappable as PEM
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PED
@@ -123,6 +124,12 @@ instance W4S.W4Serializable sym (ARMReg.ARMReg tp) where
 
 instance W4S.W4SerializableF sym ARMReg.ARMReg where
 instance (W4S.W4SerializableFC ARMReg.ARMReg) where
+
+instance PEM.ExprFoldable sym (ARMReg.ARMReg tp) where
+  foldExpr _ _ _ = return
+
+instance PEM.ExprFoldableF sym ARMReg.ARMReg where
+instance (PEM.ExprFoldableFC ARMReg.ARMReg) where
 
 instance PA.ValidArch SA.AArch32 where
   type ArchConfigOpts SA.AArch32 = AArch32Opts SA.AArch32

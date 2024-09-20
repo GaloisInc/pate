@@ -106,7 +106,8 @@ getInequivalenceResult defaultReason pre post slice fn = do
     return $ groundResult { PF.ineqReason = reason }
 
 ground ::
-  PEM.ExprMappable sym (a sym) =>
+  forall sym arch a.
+  PEM.ExprFoldableIO sym (a sym) =>
   SymGroundEvalFn sym ->
   a sym ->
   EquivM sym arch (PG.Grounded a)
@@ -173,7 +174,7 @@ getCondEquivalenceBindings eqCond fn = withValid $ do
 
 getGenPathCondition ::
   forall sym arch f.
-  PEM.ExprMappable sym f =>
+  (PEM.ExprMappable sym f, PEM.ExprFoldable sym f) =>
   SymGroundEvalFn sym ->
   f ->
   EquivM sym arch (W4.Pred sym)
@@ -194,7 +195,7 @@ getGenPathCondition fn f = withSym $ \sym -> do
 getGenPathConditionIO ::
   forall sym  t st fs f.
   sym ~ W4B.ExprBuilder t st fs =>
-  PEM.ExprMappable sym f =>
+  PEM.ExprFoldable sym f =>
   sym ->
   W4G.GroundEvalFn t ->
   (W4.Pred sym -> IO (Maybe Bool)) ->

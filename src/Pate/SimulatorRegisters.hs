@@ -140,3 +140,15 @@ instance PEM.ExprMappable sym (MacawRegEntry sym tp) where
         -- possible (an it isn't even a base type)
         return entry
       rep -> error ("mapExpr: unsupported macaw type " ++ show rep)
+
+instance PEM.ExprFoldable sym (MacawRegEntry sym tp) where
+  foldExpr _sym f entry b = do
+    case macawRegRepr entry of
+      CLM.LLVMPointerRepr{} -> do
+        let CLM.LLVMPointer reg off = macawRegValue entry
+        f (WI.natToIntegerPure reg) b >>= f off
+      CT.BoolRepr -> f (macawRegValue entry) b
+      CT.StructRepr Ctx.Empty -> return b
+      rep -> error ("foldExpr: unsupported macaw type " ++ show rep)
+
+instance forall sym. PEM.ExprFoldableF sym (MacawRegEntry sym)
