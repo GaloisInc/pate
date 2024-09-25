@@ -148,6 +148,13 @@ instance PEM.ExprMappable sym (EquivalenceCondition sym arch v) where
     <*> PEM.mapExpr sym f c
     <*> PEM.mapExpr sym f d
 
+instance PEM.ExprFoldableF sym (MM.ArchReg arch) => PEM.ExprFoldable sym (EquivalenceCondition sym arch v) where
+  foldExpr sym f (EquivalenceCondition a b c d) acc =
+        PEM.foldExpr sym f a acc
+    >>= PEM.foldExpr sym f b
+    >>= PEM.foldExpr sym f c
+    >>= PEM.foldExpr sym f d
+
 instance PS.Scoped (EquivalenceCondition sym arch) where
   unsafeCoerceScope (EquivalenceCondition a b c d) = EquivalenceCondition a (PS.unsafeCoerceScope b) c d
 
@@ -233,6 +240,10 @@ instance PS.Scoped (RegisterCondition sym arch) where
 
 instance PEM.ExprMappable sym (RegisterCondition sym arch v) where
   mapExpr sym f (RegisterCondition cond) = RegisterCondition <$> MM.traverseRegsWith (\_ -> PEM.mapExpr sym f) cond
+
+instance PEM.ExprFoldableF sym (MM.ArchReg arch) => PEM.ExprFoldable sym (RegisterCondition sym arch v) where
+  foldExpr sym f (RegisterCondition cond) = PEM.foldExpr sym f (MM.regStateMap cond)
+
 
 trueRegCond ::
   W4.IsSymExprBuilder sym =>

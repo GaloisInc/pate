@@ -28,6 +28,7 @@ module Pate.PatchPair (
   , PatchPairT
   , PatchPairC
   , pattern PatchPairC
+  , lensC
   , runPatchPairT
   , runPatchPairT'
   , handleSingletonStub
@@ -47,6 +48,7 @@ module Pate.PatchPair (
   , get
   , set
   , view
+  , lens
   , asTuple
   , fromTuple
   , fromMaybes
@@ -54,6 +56,7 @@ module Pate.PatchPair (
   , LiftF(..)
   , PatchPairF
   , pattern PatchPairF
+  , lensF
   , PatchPairMaybeCases(..)
   , toMaybeCases
   , forBins2
@@ -102,6 +105,7 @@ import What4.JSON
 import Control.Monad.State.Strict (StateT (..), put)
 import qualified Control.Monad.State.Strict as CMS
 import           Control.Applicative ( (<|>) )
+import qualified Control.Lens as L
 
 -- | A pair of values indexed based on which binary they are associated with (either the
 --   original binary or the patched binary).
@@ -124,6 +128,20 @@ pattern PatchPairOriginal a = PatchPairSingle PB.OriginalRepr a
 
 pattern PatchPairPatched :: tp PB.Patched -> PatchPair tp
 pattern PatchPairPatched a = PatchPairSingle PB.PatchedRepr a
+
+lens ::
+  PB.WhichBinaryRepr bin ->
+  k bin {- ^ default value -} ->
+  L.Lens' (PatchPair k) (k bin)
+lens bin default_ f ppair = case (bin, ppair) of
+  (PB.OriginalRepr, PatchPair a b) -> fmap (\k -> PatchPair k b) (f a)
+  (PB.PatchedRepr, PatchPair a b) -> fmap (\k -> PatchPair a k) (f b)
+  (PB.OriginalRepr, PatchPairOriginal a) -> fmap (\k -> PatchPairOriginal k) (f a)
+  (PB.PatchedRepr, PatchPairPatched b) -> fmap (\k -> PatchPairPatched k) (f b)
+  (PB.OriginalRepr, PatchPairPatched b) -> fmap (\k -> PatchPair k b) (f default_)
+  (PB.PatchedRepr, PatchPairOriginal a) -> fmap (\k -> PatchPair a k) (f default_)
+
+
 
 {-# COMPLETE PatchPair, PatchPairSingle #-}
 {-# COMPLETE PatchPair, PatchPairOriginal, PatchPairPatched #-}
@@ -385,6 +403,12 @@ type PatchPairC tp = PatchPair (Const tp)
 pattern PatchPairC :: tp -> tp -> PatchPair (Const tp)
 pattern PatchPairC a b = PatchPairCtor (Const a) (Const b)
 
+lensC ::
+  PB.WhichBinaryRepr bin ->
+  k {- ^ default value -} ->
+  L.Lens' (PatchPairC k) k
+lensC bin default_ = (lens bin (Const default_) . (\f -> fmap Const . f . getConst))
+
 {-# COMPLETE PatchPairC, PatchPairSingle #-}
 {-# COMPLETE PatchPairC, PatchPairOriginal, PatchPairPatched #-}
 
@@ -395,6 +419,9 @@ forBinsC f = forBins $ \bin -> Const <$> f bin
 
 newtype LiftF (t :: l -> DK.Type) (f :: k -> l) (tp :: k) = LiftF { unLiftF :: (t (f tp)) }
 
+liftFLens :: L.Lens' (LiftF k tp bin) (k (tp bin))
+liftFLens f (LiftF v) = fmap LiftF (f v)
+
 -- | Specialization of 'PatchPair' to lift inner types over the 'bin' parameter.
 type PatchPairF t tp = PatchPair (LiftF t tp)
 
@@ -404,6 +431,11 @@ pattern PatchPairF a b = PatchPairCtor (LiftF a) (LiftF b)
 {-# COMPLETE PatchPairF, PatchPairSingle #-}
 {-# COMPLETE PatchPairF, PatchPairOriginal, PatchPairPatched #-}
 
+lensF ::
+  PB.WhichBinaryRepr bin ->
+  k (tp bin) {- ^ default value -} ->
+  L.Lens' (PatchPairF k tp) (k (tp bin))
+lensF bin default_ = (lens bin (LiftF default_) . liftFLens)
 
 forBinsF :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (t (f bin))) -> m (PatchPairF t f)
 forBinsF f = forBins $ \bin -> LiftF <$> f bin

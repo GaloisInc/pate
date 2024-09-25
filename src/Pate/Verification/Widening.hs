@@ -34,6 +34,7 @@ module Pate.Verification.Widening
   , addToEquivCondition
   , strengthenPredicate
   , getTraceFootprint
+  , propagateCondition
   ) where
 
 import           GHC.Stack

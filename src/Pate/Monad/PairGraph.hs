@@ -42,8 +42,10 @@ import           Control.Monad (foldM, forM_)
 import qualified Control.Monad.IO.Unlift as IO
 import           Data.Functor.Const
 import           Data.Maybe (fromMaybe)
+import           Control.Lens ( (&), (.~), (^.), (%~) )
 
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import           SemMC.Formula.Env (SomeSome(..))
@@ -65,6 +67,8 @@ import qualified Pate.Equivalence.Error as PEE
 import GHC.Stack (HasCallStack)
 import qualified Prettyprinter as PP
 import qualified What4.Interface as W4
+import qualified Pate.Verification.FnBindings as PFn
+import qualified What4.Concrete as W4
 
 instance IsTraceNode (k :: l) "pg_trace" where
   type TraceNodeType k "pg_trace" = [String]

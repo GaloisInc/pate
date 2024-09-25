@@ -20,6 +20,8 @@ Representation of post-hoc definitions for uninterpreted functions.
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Pate.Verification.FnBindings
   ( FnBindings
@@ -28,26 +30,32 @@ module Pate.Verification.FnBindings
   , merge
   , toScopedPred
   , toPred
+  , addUsedFns
   ) where
 
 import           Prelude hiding (init)
 import           Control.Monad.Reader
 import           Control.Monad.Trans.State
+import           Data.Functor.Identity
 
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Parameterized.Map ( MapF )
 import qualified Data.Parameterized.Map as MapF
+import qualified Data.Set as Set
+import           Data.Set ( Set )
 
 import qualified What4.Interface as W4
+import qualified What4.Expr.Builder as W4B
 
 import qualified Pate.Binary as PBi
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.SimState as PS
+import qualified Data.Parameterized.TraversableF as TF
+import qualified What4.ExprHelpers as WEH
 
-
-data BoundFn sym tp = BoundFn (W4.SymFn sym Ctx.EmptyCtx tp)
+newtype BoundFn sym tp = BoundFn (W4.SymFn sym Ctx.EmptyCtx tp)
 
 -- | By convention we know that a 'BoundFn' is uninterpreted, so it
 --   can be lifted to the global scope
@@ -95,8 +103,13 @@ instance W4.IsSymFn (W4.SymFn sym) => OrdF (BoundFn sym) where
 --   bindings belong to. Specifically, these functions define the
 --   semantics for a single-sided transition that may occur in terms
 --   in the other side of the analysis.
-newtype FnBindings sym (bin :: PBi.WhichBinary) (v :: PS.VarScope) = 
-  FnBindings (MapF (BoundFn sym) (PS.PopScope (PS.ScopedExpr sym) v))
+data FnBindings sym (bin :: PBi.WhichBinary) (v :: PS.VarScope) =
+  FnBindings
+    { fnBindings :: MapF (BoundFn sym) (PS.PopScope (PS.ScopedExpr sym) v)
+    , fnBindingsUsed :: Set (Some (BoundFn sym))
+    }
+
+
 
 type FnBindingsSpec sym arch = PS.AbsT (PS.SimSpec sym arch) (FnBindings sym)
 
@@ -111,7 +124,7 @@ init ::
   sym ->
   f v ->
   IO (f PS.GlobalScope, FnBindings sym bin v)
-init sym e = runStateT (PS.scopedExprMap sym e (mkFreshFns sym)) (FnBindings MapF.empty)
+init sym e = runStateT (PS.scopedExprMap sym e (mkFreshFns sym)) (FnBindings MapF.empty Set.empty)
 
 mkFreshFns ::
   W4.IsSymExprBuilder sym =>
@@ -119,11 +132,11 @@ mkFreshFns ::
   PS.ScopedExpr sym tp v ->
   StateT (FnBindings sym bin v) IO (PS.ScopedExpr sym tp PS.GlobalScope)
 mkFreshFns sym_ e_scoped = do
-  (PS.PopF fn, e_global) <- lift $ PS.liftScope0Ret sym_ $ \sym -> do
+  (PS.PopT fn, e_global) <- lift $ PS.liftScope0Ret sym_ $ \sym -> do
     fn <- W4.freshTotalUninterpFn sym W4.emptySymbol Ctx.empty (W4.exprType (PS.unSE e_scoped))
     e' <- W4.applySymFn sym fn Ctx.empty
-    return (PS.PopF (BoundFn fn), e')
-  modify $ \(FnBindings binds) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds)
+    return (PS.PopT (BoundFn fn), e')
+  modify $ \(FnBindings binds s) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds) s
   return e_global
 
 -- | Merge the two given function bindings, muxing the individual bindings
@@ -137,10 +150,10 @@ merge ::
   FnBindings sym bin v ->
   FnBindings sym bin v ->
   IO (FnBindings sym bin v)
-merge sym p (FnBindings binds1) (FnBindings binds2) = do
-  FnBindings <$> MapF.mergeWithKeyM go return return binds1 binds2
-  where 
-    go :: forall tp. 
+merge sym p (FnBindings binds1 s1) (FnBindings binds2 s2) = do
+  FnBindings <$> MapF.mergeWithKeyM go return return binds1 binds2 <*> (return $ Set.union s1 s2)
+  where
+    go :: forall tp.
         BoundFn sym tp ->
         PS.PopScope (PS.ScopedExpr sym) v tp -> 
         PS.PopScope (PS.ScopedExpr sym) v tp -> 
@@ -156,7 +169,7 @@ toScopedPred ::
   sym ->
   FnBindings sym bin v ->
   IO (PS.ScopedExpr sym W4.BaseBoolType v)
-toScopedPred sym (FnBindings binds) = do
+toScopedPred sym (FnBindings binds _) = do
   true_ <- PS.liftScope0 sym $ \sym_ -> return $ W4.truePred sym_
   MapF.foldlMWithKey go true_ binds
     where
@@ -177,3 +190,25 @@ toPred ::
   FnBindings sym bin v ->
   IO (W4.Pred sym)
 toPred sym binds = PS.unSE <$> toScopedPred sym binds
+
+
+
+-- Note we don't require that 'f' has the same scope as
+-- the bindings, since we can collect used bindings from any scope
+addUsedFns ::
+  PEM.ExprFoldable sym f =>
+  (W4B.ExprBuilder t st fs ~ sym) =>
+  sym ->
+  f ->
+  FnBindings sym bin v ->
+  FnBindings sym bin v
+addUsedFns sym a (FnBindings fns used) =
+  let
+    collected = runIdentity $ PEM.foldExpr sym (\e coll -> Identity $ WEH.collectSymFns e coll) a mempty
+    usedNew = Set.fromList $ filter (\(Some (BoundFn fn)) -> Set.member (Some (W4.SymFnWrapper fn)) (WEH.colSymFns collected)) (MapF.keys fns)
+  in FnBindings fns (Set.union used usedNew)
+
+
+instance PEM.ExprMappable sym (FnBindings sym bin v) where
+  mapExpr sym f (FnBindings binds s) =
+    FnBindings <$> TF.traverseF (\(PS.PopScope se) -> PS.PopScope <$> PEM.mapExpr sym f se) binds <*> return s
