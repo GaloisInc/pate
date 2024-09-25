@@ -55,27 +55,26 @@ import qualified Pate.SimState as PS
 import qualified Data.Parameterized.TraversableF as TF
 import qualified What4.ExprHelpers as WEH
 
-newtype BoundFn sym tp = BoundFn (W4.SymFn sym Ctx.EmptyCtx tp)
+newtype BoundFn sym tp = BoundFn (W4.BoundVar sym tp)
 
 -- | By convention we know that a 'BoundFn' is uninterpreted, so it
 --   can be lifted to the global scope
 evalBoundFn :: 
   W4.IsSymExprBuilder sym =>
   sym ->
-  BoundFn sym tp -> 
+  BoundFn sym tp ->
   IO (PS.ScopedExpr sym tp PS.GlobalScope)
-evalBoundFn sym (BoundFn f) = do
-  e <- W4.applySymFn sym f Ctx.empty
-  Some e_scoped <- return $ PS.mkScopedExpr e
+evalBoundFn sym (BoundFn bv) = do
+  Some e_scoped <- return $ PS.mkScopedExpr (W4.varExpr sym bv)
   return $ PS.unsafeCoerceScope e_scoped
 
-instance W4.IsSymFn (W4.SymFn sym) => W4.TestEquality (BoundFn sym) where
-  testEquality (BoundFn fn1) (BoundFn fn2) = case W4.fnTestEquality fn1 fn2 of
+instance W4.IsSymExprBuilder sym => W4.TestEquality (BoundFn sym) where
+  testEquality (BoundFn fn1) (BoundFn fn2) = case W4.testEquality fn1 fn2 of
     Just Refl -> Just Refl
     Nothing -> Nothing
 
-instance W4.IsSymFn (W4.SymFn sym) => OrdF (BoundFn sym) where
-  compareF (BoundFn fn1) (BoundFn fn2) = case W4.fnCompare fn1 fn2 of
+instance W4.IsSymExprBuilder sym => OrdF (BoundFn sym) where
+  compareF (BoundFn fn1) (BoundFn fn2) = case compareF fn1 fn2 of
     LTF -> LTF
     EQF -> EQF
     GTF -> GTF
@@ -133,9 +132,8 @@ mkFreshFns ::
   StateT (FnBindings sym bin v) IO (PS.ScopedExpr sym tp PS.GlobalScope)
 mkFreshFns sym_ e_scoped = do
   (PS.PopT fn, e_global) <- lift $ PS.liftScope0Ret sym_ $ \sym -> do
-    fn <- W4.freshTotalUninterpFn sym W4.emptySymbol Ctx.empty (W4.exprType (PS.unSE e_scoped))
-    e' <- W4.applySymFn sym fn Ctx.empty
-    return (PS.PopT (BoundFn fn), e')
+    bv <- W4.freshBoundVar sym W4.emptySymbol (W4.exprType (PS.unSE e_scoped))
+    return (PS.PopT (BoundFn bv), W4.varExpr sym bv)
   modify $ \(FnBindings binds s) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds) s
   return e_global
 
@@ -204,8 +202,8 @@ addUsedFns ::
   FnBindings sym bin v
 addUsedFns sym a (FnBindings fns used) =
   let
-    collected = runIdentity $ PEM.foldExpr sym (\e coll -> Identity $ WEH.collectSymFns e coll) a mempty
-    usedNew = Set.fromList $ filter (\(Some (BoundFn fn)) -> Set.member (Some (W4.SymFnWrapper fn)) (WEH.colSymFns collected)) (MapF.keys fns)
+    collected = runIdentity $ PEM.foldExpr sym (\e coll -> Identity $ WEH.collectVars e coll) a mempty
+    usedNew = Set.fromList $ filter (\(Some (BoundFn v)) -> Set.member (Some v) (WEH.colVars collected))  (MapF.keys fns)
   in FnBindings fns (Set.union used usedNew)
 
 

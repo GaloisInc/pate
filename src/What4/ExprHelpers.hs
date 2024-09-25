@@ -94,6 +94,8 @@ module What4.ExprHelpers (
   , bvUMin
   , SymFnCollector(..)
   , collectSymFns
+  , VarCollector(..)
+  , collectVars
   ) where
 
 import           GHC.TypeNats
@@ -662,6 +664,55 @@ collectSymFns = go
         napp -> TFC.foldrFC go coll napp
       where
         coll = coll_ { colVisited = S.insert (Some e) (colVisited coll_) }
+
+
+data VarCollector sym =
+  VarCollector
+    { colVars :: Set (Some (W4.BoundVar sym))
+    , colVarsVisited :: Set (Some (W4.SymExpr sym))
+    }
+
+instance (OrdF (W4.SymExpr sym), OrdF (W4.BoundVar sym)) => Semigroup (VarCollector sym) where
+  (VarCollector a1 b1) <> (VarCollector a2 b2) = VarCollector (a1 <> a2) (b1 <> b2)
+
+instance (OrdF (W4.SymExpr sym), OrdF (W4.BoundVar sym)) => Monoid (VarCollector sym) where
+  mempty = VarCollector mempty mempty
+
+-- | Collects all unbound vars used anywhere in the expression.
+--   (similar to existing interface function but retains cache).
+--   Descends into function definitions, but discards variables scoped to them.
+collectVars ::
+  forall sym t st fs tp.
+  sym ~ W4B.ExprBuilder t st fs => W4B.Expr t tp -> VarCollector sym -> VarCollector sym
+collectVars = go
+  where
+    goFn :: forall args tp'. W4.SymFn sym args tp' -> VarCollector sym -> VarCollector sym
+    goFn fn coll = case W4B.symFnInfo fn of
+      W4B.DefinedFnInfo args_vars body _ ->
+        let
+          coll_body = go body coll
+          args_vars_set = TFC.foldrFC (\v s -> S.insert (Some v) s) S.empty args_vars
+        in coll_body { colVars = S.difference (colVars coll_body) args_vars_set }
+      _ -> coll
+
+    go :: forall tp'. W4.SymExpr sym tp' -> VarCollector sym -> VarCollector sym
+    go e coll_ = case e of
+      W4B.SemiRingLiteral{} -> coll_
+      W4B.BoolExpr{} -> coll_
+      W4B.FloatExpr{} -> coll_
+      W4B.StringExpr{} -> coll_
+      W4B.BoundVarExpr bv -> coll { colVars = S.insert (Some bv) (colVars coll) }
+
+      _ | S.member (Some e) (colVarsVisited coll_) -> coll_
+      W4B.AppExpr a0 -> TFC.foldrFC go coll (W4B.appExprApp a0)
+      W4B.NonceAppExpr a0 -> case W4B.nonceExprApp a0 of
+        W4B.FnApp fn args -> TFC.foldrFC go (goFn fn coll) args
+        W4B.ArrayFromFn fn -> goFn fn coll
+        napp -> TFC.foldrFC go coll napp
+      where
+        coll = coll_ { colVarsVisited = S.insert (Some e) (colVarsVisited coll_) }
+
+
 
 -- | Return an 'ExprFilter' that is filters expressions which are bound variables
 -- that appear somewhere in the given expression.
