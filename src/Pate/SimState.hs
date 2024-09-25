@@ -169,7 +169,7 @@ simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
 simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
 
 instance Scoped (PopT (SimState sym arch) bin) where
-  unsafeCoerceScope (PopF s) = PopF (coerce s)
+  unsafeCoerceScope (PopT s) = PopT (coerce s)
 
 data SimInput sym arch v bin = SimInput
   {
@@ -253,12 +253,18 @@ data SimSpec sym arch (f :: VarScope -> DK.Type) = forall v.
     , _specBody :: f v
     }
 
+instance (PEM.ExprFoldableF sym (MM.ArchReg arch), PEM.ExprFoldableF sym f) => PEM.ExprFoldable sym (SimSpec sym arch f) where
+  foldExpr sym f (SimSpec (scope :: SimScope sym arch v) body) b =
+    PEM.withExprFoldable @sym @f @v $ PEM.foldExpr sym f scope b >>=  PEM.foldExpr sym f body
+
 -- TODO: probably defined somewhere already
 -- can be used for types that abstract over 'bin' and 'v' to expose the
 -- 'bin' parameter in a 'SimSpec'
 newtype AbsT (f :: k -> DK.Type) (tp1 :: l -> k) (tp2 :: l) = AbsT { unAbsT :: f (tp1 tp2) }
 
-newtype PopT (f :: l -> k -> DK.Type) (tp1 :: k) (tp2 :: l) = PopF { unPopF :: f tp2 tp1 }
+newtype PopT (f :: l -> k -> DK.Type) (tp1 :: k) (tp2 :: l) = PopT { unPopT :: f tp2 tp1 }
+
+instance (forall (v :: VarScope) (v' :: VarScope). Coercible (f v tp) (f v' tp)) => Scoped (PopT f tp)
 
 -- Some trickery to let us use PopT while maintaining that VarScope is phantom
 newtype PopScope (f :: l -> VarScope -> DK.Type) (v :: VarScope) (tp :: l) = PopScopeC (f tp GlobalScope)
@@ -277,7 +283,7 @@ pattern PopScope f <- (unPopScope -> f) where
 
 
 instance PEM.ExprMappable sym (f tp1 tp2) => PEM.ExprMappable sym (PopT f tp2 tp1) where
-  mapExpr sym f (PopF a) = PopF <$> PEM.mapExpr sym f a
+  mapExpr sym f (PopT a) = PopT <$> PEM.mapExpr sym f a
 
 mkSimSpec :: SimScope sym arch v -> f v -> SimSpec sym arch f
 mkSimSpec scope body = SimSpec scope body
@@ -293,6 +299,10 @@ data SimScope sym arch v =
 
 instance Scoped (SimScope sym arch)
 instance Scoped (Const x)
+
+instance PEM.ExprFoldableF sym (MM.ArchReg arch) => PEM.ExprFoldable sym (SimScope sym arch v) where
+  foldExpr sym f (SimScope varsO varsP asm) b =
+    PEM.foldExpr sym f varsO b >>= PEM.foldExpr sym f varsP >>= PEM.foldExpr sym f asm
 
 scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
 scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
@@ -432,6 +442,9 @@ data SimBoundVars sym arch v bin = SimBoundVars
     simBoundVarRegs :: MM.RegState (MM.ArchReg arch) (PSR.MacawRegVar sym)
   , simBoundVarState :: SimState sym arch v bin
   }
+
+instance PEM.ExprFoldableF sym (MM.ArchReg arch) => PEM.ExprFoldable sym (SimBoundVars sym arch v bin) where
+  foldExpr sym f (SimBoundVars regs st) b = PEM.foldExpr sym f (MapF.elems (MM.regStateMap regs)) b >>= PEM.foldExpr sym f st
 
 -- | A value assignment for the bound variables of a 'SimSpec'. These may
 -- contain arbitrary What4 expressions (e.g. the result of symbolic execution).

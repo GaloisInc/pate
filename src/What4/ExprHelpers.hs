@@ -92,6 +92,8 @@ module What4.ExprHelpers (
   , W4SBV.collapseBVOps
   , bvUMax
   , bvUMin
+  , SymFnCollector(..)
+  , collectSymFns
   ) where
 
 import           GHC.TypeNats
@@ -617,6 +619,49 @@ boundVars e0 = do
   boundVars' visited e0
 
 newtype ExprFilter sym = ExprFilter (forall tp'. W4.SymExpr sym tp' -> IO Bool)
+
+data SymFnCollector sym =
+  SymFnCollector
+    { colSymFns :: Set (Some (W4.SymFnWrapper sym))
+    , colVisited :: Set (Some (W4.SymExpr sym))
+    }
+
+instance (OrdF (W4.SymExpr sym), W4.IsSymFn (W4.SymFn sym)) => Semigroup (SymFnCollector sym) where
+  (SymFnCollector a1 b1) <> (SymFnCollector a2 b2) = SymFnCollector (a1 <> a2) (b1 <> b2)
+
+instance (OrdF (W4.SymExpr sym), W4.IsSymFn (W4.SymFn sym)) => Monoid (SymFnCollector sym) where
+  mempty = SymFnCollector mempty mempty
+
+-- | Collects all functions used anywhere in the given expression.
+--   The 'SymFnCollector' caches visited expressions to avoid redundant
+--   traversals.
+collectSymFns ::
+  forall sym t st fs tp.
+  sym ~ W4B.ExprBuilder t st fs => W4B.Expr t tp -> SymFnCollector sym -> SymFnCollector sym
+collectSymFns = go
+  where
+    goFn :: forall args tp'. W4.SymFn sym args tp' -> SymFnCollector sym -> SymFnCollector sym
+    goFn fn coll_ = case W4B.symFnInfo fn of
+      W4B.DefinedFnInfo _ fnBody _ -> go fnBody coll
+      _ -> coll
+      where
+        coll = coll_ { colSymFns = S.insert (Some (W4.SymFnWrapper fn)) (colSymFns coll_) }
+
+    go :: forall tp'. W4.SymExpr sym tp' -> SymFnCollector sym -> SymFnCollector sym
+    go e coll_ = case e of
+      W4B.SemiRingLiteral{} -> coll_
+      W4B.BoolExpr{} -> coll_
+      W4B.FloatExpr{} -> coll_
+      W4B.StringExpr{} -> coll_
+      W4B.BoundVarExpr{} -> coll_
+      _ | S.member (Some e) (colVisited coll_) -> coll_
+      W4B.AppExpr a0 -> TFC.foldrFC go coll (W4B.appExprApp a0)
+      W4B.NonceAppExpr a0 -> case W4B.nonceExprApp a0 of
+        W4B.FnApp fn args -> TFC.foldrFC go (goFn fn coll) args
+        W4B.ArrayFromFn fn -> goFn fn coll
+        napp -> TFC.foldrFC go coll napp
+      where
+        coll = coll_ { colVisited = S.insert (Some e) (colVisited coll_) }
 
 -- | Return an 'ExprFilter' that is filters expressions which are bound variables
 -- that appear somewhere in the given expression.

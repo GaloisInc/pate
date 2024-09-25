@@ -29,7 +29,7 @@ import           GHC.Stack ( HasCallStack )
 
 import           Control.Applicative
 import qualified Control.Concurrent.MVar as MVar
-import           Control.Lens ( view, (^.) )
+import           Control.Lens ( view, (^.), (&), (%~) )
 import           Control.Monad (foldM, forM, unless, void, when, guard)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
@@ -61,6 +61,7 @@ import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Quant as Qu
+import qualified Data.Parameterized.Map as MapF
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -142,6 +143,7 @@ import qualified What4.Concrete as W4
 import Data.Parameterized.PairF (PairF(..))
 import qualified What4.Concrete as W4
 import Data.Parameterized (Pair(..))
+import qualified Pate.Verification.FnBindings as PFn
 
 -- Overall module notes/thoughts
 --
@@ -653,6 +655,7 @@ handleProcessMerge sneO sneP pg = withPG pg $ do
       case (getCurrentDomain pg ndO, getCurrentDomain pg ndP) of
         (Just{}, Just{}) -> do
           syncNode <- liftEqM $ mergeSingletons sneO sneP
+
           return $ Just $ GraphNode syncNode
         _ -> do
           liftPG $ modify $ queueNode (priority PriorityDomainRefresh) divergeNode
@@ -701,6 +704,7 @@ workItemDomainSpec wi pg = withPG pg $ case wi of
 -}
 
 mergeSingletons ::
+  forall sym arch.
   SingleNodeEntry arch PBi.Original ->
   SingleNodeEntry arch PBi.Patched ->
   PairGraph sym arch ->
@@ -709,43 +713,53 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
   let 
     blkO = singleNodeBlock sneO
     blkP = singleNodeBlock sneP
-    ndO = GraphNode $ singleToNodeEntry sneO
-    ndP = GraphNode $ singleToNodeEntry sneP
-    blkPairO = PPa.PatchPairSingle PBi.OriginalRepr blkO
-    blkPairP = PPa.PatchPairSingle PBi.PatchedRepr blkP
     blkPair = PPa.PatchPair blkO blkP
 
   syncNodeEntry <- case combineSingleEntries sneO sneP of
     Just ne -> return ne
     Nothing -> throwHere $ PEE.IncompatibleSingletonNodes blkO blkP
   
-  let syncNode = GraphNode syncNodeEntry
+  let dp = singleNodeDivergence sneO
   
-  specO <- evalPG pg $ getCurrentDomainM ndO
-  specP <- evalPG pg $ getCurrentDomainM ndP
+  let syncNode = GraphNode syncNodeEntry
 
-  pg1 <- fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blkPair $ \scope -> fmap PS.WithScope $ 
-    withValidInit scope blkPairO $ withValidInit scope blkPairP $ do
-      (_, domO) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specO
-      (_, domP) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) specP
-      dom <- PAD.zipSingletonDomains sym domO domP
-      bundle <- noopBundle scope (nodeBlocks syncNodeEntry)
-      withPredomain scope bundle dom $ do
-          emitTraceLabel @"domain" PAD.Predomain (Some dom)
-          let pre_refines = getDomainRefinements syncNode pg
+  let snePair = PPa.PatchPair sneO sneP
+  pg1 <- fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blkPair $ \(scope :: PS.SimScope sym arch v) -> fmap PS.WithScope $ do
+    (bundles, pg') <- mergeBundles scope snePair pg
+    let pre_refines = getDomainRefinements syncNode pg
 
-          pg1 <- 
-            withTracing @"node" ndO $
-            -- ensure we make any assumptions that have been added to only
-            -- one side of the analysis
-            withConditionsAssumed scope bundle dom ndO pg $
-              widenAlongEdge scope bundle ndO dom pg syncNode
-          let pg2 = addDomainRefinements syncNode pre_refines pg1
-          withTracing @"node" ndP $ 
-            withConditionsAssumed scope bundle dom ndP pg $
-            widenAlongEdge scope bundle ndP dom pg2 syncNode
+    let go :: forall bin. PairGraph sym arch -> SingleNodeEntry arch bin -> EquivM_ sym arch (PairGraph sym arch)
+        go pg0 sne = do
+          let bin = singleEntryBin sne
+          let bin_other = PBi.flipRepr bin
+          sne_other <- PPa.get bin_other snePair
+          let nd = GraphNode $ singleToNodeEntry sne
+          domSpec <- evalPG pg $ getCurrentDomainM nd
+          (_, dom) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) domSpec
+          (SingleBundle bundle binds) <- PPa.get bin bundles
+          withTracing @"node" nd $ do
+            emitTraceLabel @"domain" PAD.Predomain (Some dom)
+            withGraphNode' scope nd bundle dom pg0 $ do
+              let
+                collectCondition :: ConditionKind -> PFn.FnBindings sym (PBi.OtherBinary bin) v -> PFn.FnBindings sym (PBi.OtherBinary bin) v
+                collectCondition condK binds_acc = do
+                  case getCondition pg0 nd condK of
+                    Just condSpec -> PS.viewSpecBody condSpec $ \cond -> PFn.addUsedFns sym cond binds_acc
+                    Nothing -> binds_acc
+
+              pg2 <- propagateCondition scope bundle nd syncNode pg0 >>= \case
+                Just pg1 -> do
+                  let binds_other = foldr collectCondition binds [minBound .. maxBound]
+                  return $ pg1 & (syncData dp . syncBindings) %~ MapF.insert sne_other (PS.AbsT $ PS.mkSimSpec scope binds_other)
+                Nothing -> return pg0
+
+              -- re-apply any refinements that we processed for the other binary
+              let pg3 = case getDomainRefinements syncNode pg2 of
+                    [] -> addDomainRefinements syncNode pre_refines pg2
+                    _ -> pg2
+              widenAlongEdge scope bundle nd dom pg3 syncNode
+    TF.foldlMF go pg' snePair
   return (syncNodeEntry, pg1)
-
 
 -- | Choose some work item (optionally interactively)
 withWorkItem ::
@@ -1114,6 +1128,30 @@ noopBundle scope pPair = withSym $ \sym -> do
 
   return $ SimBundle simIn_ simOut_
 
+-- | Bundle that transitions from a single-sided analysis to a two-sided analysis.
+--   FIXME: do we actually need the bindings here?
+data SingleBundle sym arch v bin = SingleBundle
+  { singleBundle :: SimBundle sym arch v, singleBundleBinds :: PFn.FnBindings sym (PBi.OtherBinary bin) v }
+
+-- | Similar to 'noopBundle' but produces a pair of bundles, each specialized
+--   for the single-sided node to two-sided node
+mergeBundles ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  PPa.PatchPair (SingleNodeEntry arch) ->
+  PairGraph sym arch ->
+  EquivM sym arch (PPa.PatchPair (SingleBundle sym arch v), PairGraph sym arch)
+mergeBundles scope snePair pg = withSym $ \sym -> do
+  blks <- PPa.forBins $ \bin -> singleNodeBlock <$> PPa.get bin snePair
+  bundle <- noopBundle scope blks
+  withPG pg $ do
+    PPa.forBins $ \bin -> do
+      let bin_other = PBi.flipRepr bin
+      sne_other <- PPa.get bin_other snePair
+      (st_other,binds) <- liftEqM $ \pg_ -> liftIO $ initFnBindings sym scope sne_other pg_
+      output <- PPa.get bin_other (simOut bundle)
+      PS.PopT output' <- return $ PS.fromGlobalScope $ PS.PopT (output { PS.simOutState = st_other })
+      return $ SingleBundle (bundle { simOut = PPa.set bin_other output' (simOut bundle) }) binds
 
 -- | For a given 'PSR.MacawRegEntry' (representing the initial state of a register)
 -- and a corresponding 'MAS.AbsValue' (its initial abstract value according to Macaw),

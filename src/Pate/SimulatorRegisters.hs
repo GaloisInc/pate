@@ -151,4 +151,10 @@ instance PEM.ExprFoldable sym (MacawRegEntry sym tp) where
       CT.StructRepr Ctx.Empty -> return b
       rep -> error ("foldExpr: unsupported macaw type " ++ show rep)
 
+instance forall sym. PEM.ExprFoldableF sym (MacawRegVar sym)
+
+instance PEM.ExprFoldable sym (MacawRegVar sym tp) where
+  foldExpr sym f (MacawRegVar e vs) b =
+    PEM.withSymExprFoldable sym $ PEM.foldExpr sym f e b >>= PEM.foldExpr sym f vs
+
 instance forall sym. PEM.ExprFoldableF sym (MacawRegEntry sym)

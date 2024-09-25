@@ -47,12 +47,14 @@ module Data.Parameterized.SetF
   , fromSet
   , map
   , ppSetF
+  , asSet
   ) where
 
 import Prelude hiding (filter, null, map)
 import qualified Data.List as List
 import           Data.Parameterized.Classes
 import qualified Data.Foldable as Foldable
+import qualified Control.Lens as L
 
 import qualified Prettyprinter as PP
 import           Prettyprinter ( (<+>) )
@@ -149,6 +151,11 @@ toSet (SetF s) = unsafeCoerce s
 --   which is sound given the above assumption.
 fromSet :: (OrdF f, Ord (f tp)) => Set (f tp) -> SetF f tp
 fromSet s = SetF (unsafeCoerce s)
+
+asSet ::
+  (OrdF f, Ord (f tp)) =>
+  L.Lens' (SetF f tp) (Set (f tp))
+asSet f sf = fmap fromSet (f (toSet sf))
 
 map ::
   (OrdF g) => (f tp -> g tp) -> SetF f tp -> SetF g tp

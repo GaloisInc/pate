@@ -41,6 +41,7 @@ module What4.PredMap (
   , collapse
   , predOpUnit
   , isPredOpUnit
+  , foldMWithKey
   ) where
 
 import           Prelude hiding ( lookup, traverse )
@@ -230,6 +231,14 @@ traverse ::
   (f -> W4.Pred sym -> m (W4.Pred sym)) ->
   m (PredMap sym f k)
 traverse pm f = PredMap <$> pure (typeRepr pm) <*> Map.traverseWithKey f (predMap pm)
+
+foldMWithKey ::
+  Monad m =>
+  PredMap sym f k ->
+  (f -> W4.Pred sym -> b -> m b) ->
+  b ->
+  m b
+foldMWithKey (PredMap _ pm) f b = foldM (\b_ (k,v) -> f k v b_) b (Map.toAscList pm)
 
 -- | Alter the key-predicate pairs in a 'PredMap'.
 -- When any keys are modified, the map is safely rebuilt according
