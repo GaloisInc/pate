@@ -295,7 +295,11 @@ run rawOpts = do
               -- Instead, we delay to wait for the script to make that
               -- initial choice, and then 'wait' to start printing
               -- the nodes as they are processed.
-              execReplM $ IO.liftIO $ IO.threadDelay 1000000 >> wait
+              execReplM $ IO.liftIO $ do
+                IO.hFlush IO.stdout
+                IO.threadDelay 500000
+                IO.hFlush IO.stdout
+                wait
             False ->
               -- In all other cases, we just print the initial prompt.
               -- The 'tree_ready' lock ensures that we only get to this point
