@@ -102,6 +102,7 @@ import qualified Control.Monad.IO.Class as IO
 import           Control.Lens ( (^.) )
 import           Control.Monad.Trans.Maybe ( MaybeT(..), runMaybeT )
 import           Control.Monad.Trans ( lift )
+import           Control.Monad ( foldM )
 
 import qualified Prettyprinter as PP
 
