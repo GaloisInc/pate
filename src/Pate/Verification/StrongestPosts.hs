@@ -728,6 +728,13 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
     (bundles, pg') <- mergeBundles scope snePair pg
     let pre_refines = getDomainRefinements syncNode pg
 
+    --TODO: this isn't quite right, because the transition from single to two sided analysis immediately
+    -- results in everything getting dumped from the equivalence domain (since the "other" single-sided state
+    -- has now changed arbitrarily)
+    -- We need to give an interpretation for this state via the other side of the analysis, which means we
+    -- need to include both the original and patched pre-domains (and corresponding assumptions about the
+    -- uninterpreted functions) when widening both sides
+
     let go :: forall bin. PairGraph sym arch -> SingleNodeEntry arch bin -> EquivM_ sym arch (PairGraph sym arch)
         go pg0 sne = do
           let bin = singleEntryBin sne
