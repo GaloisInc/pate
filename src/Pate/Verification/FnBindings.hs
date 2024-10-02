@@ -55,7 +55,7 @@ import qualified Pate.SimState as PS
 import qualified Data.Parameterized.TraversableF as TF
 import qualified What4.ExprHelpers as WEH
 
-newtype BoundFn sym tp = BoundFn (W4.BoundVar sym tp)
+newtype BoundFn sym tp = BoundFn (W4.SymExpr sym tp)
 
 -- | By convention we know that a 'BoundFn' is uninterpreted, so it
 --   can be lifted to the global scope
@@ -64,8 +64,8 @@ evalBoundFn ::
   sym ->
   BoundFn sym tp ->
   IO (PS.ScopedExpr sym tp PS.GlobalScope)
-evalBoundFn sym (BoundFn bv) = do
-  Some e_scoped <- return $ PS.mkScopedExpr (W4.varExpr sym bv)
+evalBoundFn _sym (BoundFn bv) = do
+  Some e_scoped <- return $ PS.mkScopedExpr bv
   return $ PS.unsafeCoerceScope e_scoped
 
 instance W4.IsSymExprBuilder sym => W4.TestEquality (BoundFn sym) where
@@ -132,8 +132,8 @@ mkFreshFns ::
   StateT (FnBindings sym bin v) IO (PS.ScopedExpr sym tp PS.GlobalScope)
 mkFreshFns sym_ e_scoped = do
   (PS.PopT fn, e_global) <- lift $ PS.liftScope0Ret sym_ $ \sym -> do
-    bv <- W4.freshBoundVar sym W4.emptySymbol (W4.exprType (PS.unSE e_scoped))
-    return (PS.PopT (BoundFn bv), W4.varExpr sym bv)
+    v <- W4.freshConstant sym W4.emptySymbol (W4.exprType (PS.unSE e_scoped))
+    return (PS.PopT (BoundFn v), v)
   modify $ \(FnBindings binds s) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds) s
   return e_global
 
@@ -194,6 +194,7 @@ toPred sym binds = PS.unSE <$> toScopedPred sym binds
 -- Note we don't require that 'f' has the same scope as
 -- the bindings, since we can collect used bindings from any scope
 addUsedFns ::
+  forall sym t st fs f bin v.
   PEM.ExprFoldable sym f =>
   (W4B.ExprBuilder t st fs ~ sym) =>
   sym ->
@@ -203,7 +204,13 @@ addUsedFns ::
 addUsedFns sym a (FnBindings fns used) =
   let
     collected = runIdentity $ PEM.foldExpr sym (\e coll -> Identity $ WEH.collectVars e coll) a mempty
-    usedNew = Set.fromList $ filter (\(Some (BoundFn v)) -> Set.member (Some v) (WEH.colVars collected))  (MapF.keys fns)
+
+    is_boundfn :: Some (BoundFn sym) -> Bool
+    is_boundfn (Some (BoundFn e)) = case e of
+      W4B.BoundVarExpr bv -> Set.member (Some bv) (WEH.colVars collected)
+      _ -> False
+
+    usedNew = Set.fromList $ filter is_boundfn (MapF.keys fns)
   in FnBindings fns (Set.union used usedNew)
 
 
