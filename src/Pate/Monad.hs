@@ -103,6 +103,7 @@ module Pate.Monad
   , fnTrace
   , getWrappedSolver
   , joinPatchPred
+  , withSharedEnvEmit
   , module PME
   , atPriority, currentPriority, thisPriority)
   where
@@ -111,7 +112,7 @@ import           GHC.Stack ( HasCallStack, callStack )
 
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
-import           Control.Monad (void)
+import           Control.Monad (void, forM)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
@@ -120,6 +121,7 @@ import           Control.Monad.Catch
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Reader ( asks, ask )
 import           Control.Monad.Except
+import           Control.Monad.State (StateT(..), get, put, evalStateT, modify, execStateT)
 
 import           Data.Maybe ( fromMaybe )
 import qualified Data.Map as M
@@ -197,6 +199,9 @@ import Data.Functor.Const (Const(..))
 import Unsafe.Coerce (unsafeCoerce)
 import Debug.Trace
 import Data.List
+import Data.Parameterized.SymbolRepr
+import qualified What4.JSON as W4S
+import qualified Data.Aeson as JSON
 
 atPriority :: 
   NodePriority ->
@@ -402,7 +407,62 @@ printExprTruncated (ExprLabel lbl) (Some e) =
     [] -> pfx
     [a] -> pfx <> PP.pretty a
     (a:as) -> pfx <> PP.pretty a <> ".." <> PP.pretty (last as)
-              
+
+type IsSerializableNode sym arch nm = (IsTraceNode '(sym, arch) nm, W4S.W4Serializable sym (TraceNodeLabel nm), W4S.W4Serializable sym (TraceNodeType '(sym, arch) nm))
+
+data W4SerializableNode sym arch nm = IsSerializableNode sym arch nm => 
+  W4SerializableNode (SymbolRepr nm) (TraceNodeLabel nm) (TraceNodeType '(sym, arch) nm)
+
+-- | List of trace nodes (of any type) that share the same expression binding
+--   environment when serialized
+newtype SharedExprEnv sym arch = SharedExprEnv [Some (W4SerializableNode sym arch)]
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "shared_env" where
+  type TraceNodeType '(sym,arch) "shared_env" = SharedExprEnv sym arch
+  type TraceNodeLabel "shared_env" = String
+
+  prettyNode top_lbl (SharedExprEnv nds) = 
+    PP.vsep $ (PP.pretty top_lbl <> ": "):(map (\(Some (W4SerializableNode (_ :: SymbolRepr nm) lbl nd)) -> prettyNode @_ @'(sym,arch) @nm lbl nd) nds)
+
+  jsonNode sym top_lbl (SharedExprEnv nds) = do
+    (\f -> evalStateT f W4S.emptyExprCache) $ do
+      contents <- forM nds $ \(Some (W4SerializableNode nm lbl nd)) -> do
+        cache0 <- get
+        (lbl_json, cache1) <- liftIO $ W4S.w4ToJSONWithCache sym cache0 lbl
+        (nd_json, cache2) <- liftIO $ W4S.w4ToJSONWithCache sym cache1 nd
+        put cache2
+        return $ JSON.object [ "type" JSON..= symbolRepr nm, "label" JSON..= lbl_json, "value" JSON..= nd_json ]
+      cache <- get
+      env <- liftIO $ W4S.cacheToEnv sym cache
+      env_json <- liftIO $ W4S.serializeExprEnv sym env
+      return $ JSON.object [ "name" JSON..= top_lbl, "shared_env" JSON..= env_json, "contents" JSON..= contents]
+
+-- | Emit multiple values to the tracetree with a common expression binding environment
+--   This will ultimately result in a single composite value, where all of the given values are serialized
+--   using the same expression binding cache.
+--
+--
+--   FIXME: this is a bit of a gross hack to work around the fact that we can't supply
+--   an expression binding environment when emitting a value via 'emitTrace'.
+--   What we need is a common datatype for expression binding environments that both
+--   TraceTree and W4Serializable use so we can do this more sensibly (i.e. have a IsTreeBuilder primitive that
+--   collects all of the inner traces and builds a common binding environment from them)
+--
+--   For now we can at least abstract away the details of this packaging by just taking
+--   an arbitrary monadic operation that collects the individual traces.
+
+withSharedEnvEmit ::
+  forall sym arch.
+  String ->
+  (forall m. Monad m => (forall nm. (IsSerializableNode sym arch nm) => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> m ()) -> m ()) ->
+  EquivM sym arch ()
+withSharedEnvEmit top_nm f = do
+  env <- execStateT (f g) (SharedExprEnv [])
+  emitTraceLabel @"shared_env" @'(sym,arch) top_nm env
+  where 
+    g :: forall (nm :: Symbol). IsSerializableNode sym arch nm => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> StateT (SharedExprEnv sym arch) (EquivM_ sym arch) ()
+    g nm lbl v = modify $ \(SharedExprEnv vs) -> SharedExprEnv ((Some (W4SerializableNode nm lbl v)):vs)
+
 withBinary ::
   forall bin sym arch a.
   PBi.KnownBinary bin =>
