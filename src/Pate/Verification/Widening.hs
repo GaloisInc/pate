@@ -100,6 +100,7 @@ import qualified Pate.PatchPair as PPa
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Config as PC
+import qualified Pate.TraceCollection as PTc
 
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
@@ -481,30 +482,27 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
         return $ emptyWorkList gr4
 
 tryWithAsms :: 
-  [(W4.Pred sym, PEE.InnerEquivalenceError arch)] -> 
-  (SymGroundEvalFn sym -> EquivM_ sym arch a) ->
+  [(W4.Pred sym, PEE.InnerEquivalenceError arch)] ->
+  W4.Pred sym ->
+  (SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
-tryWithAsms ((asm, err):asms) f = do
-  mresult <- withSatAssumption (PAs.fromPred asm) $ tryWithAsms asms f
+tryWithAsms ((asm, err):asms) p f = do
+  mresult <- withSatAssumption (PAs.fromPred asm) $ tryWithAsms asms p f
   case mresult of
     Just a -> return a
-    Nothing -> emitWarning err >> tryWithAsms asms f
-tryWithAsms [] f = withSym $ \sym -> goalSat "tryWithAsms" (W4.truePred sym) $ \res -> case res of
-  Unsat _ -> throwHere PEE.InvalidSMTModel
-  Unknown -> throwHere PEE.InconclusiveSAT
-  Sat evalFn -> f evalFn
+    Nothing -> emitWarning err >> tryWithAsms asms p f
+tryWithAsms [] p f = goalSat "tryWithAsms" p f
 
-getSomeGroundTrace ::
-  PS.SimScope sym arch v ->
+-- | Check the predicate for satisfiability, attempting to
+--   constrain the model to valid pointers and zero-offset stacks
+--   if possible.
+withTraceAssumptions ::
   SimBundle sym arch v ->
-  AbstractDomain sym arch v ->
-  Maybe (StatePostCondition sym arch v) ->
-  EquivM sym arch (CE.TraceEvents sym arch)
-getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
+  W4.Pred sym ->
+  (SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
+  EquivM sym arch a
+withTraceAssumptions bundle p f = withSym $ \sym -> do
   (_, ptrAsserts) <- PVV.collectPointerAssertions bundle
-  
-  -- try to ground the model with a zero stack base, so calculated stack offsets
-  -- are the same as stack slots
   stacks_zero <- PPa.catBins $ \bin -> do
     in_ <- PPa.get bin (PS.simIn bundle)
     let stackbase = PS.unSE $ PS.simStackBase (PS.simInState in_) 
@@ -513,12 +511,21 @@ getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
 
   ptrAsserts_pred <- PAs.toPred sym (stacks_zero <> ptrAsserts)
 
-  tr <- tryWithAsms 
+  tryWithAsms
     [ (ptrAsserts_pred, PEE.RequiresInvalidPointerOps)
-    ] $ \evalFn -> 
-      getTraceFromModel scope evalFn bundle preD postCond
+    ] p f
 
-  return tr
+getSomeGroundTrace ::
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  Maybe (StatePostCondition sym arch v) ->
+  EquivM sym arch (CE.TraceEvents sym arch)
+getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
+  withTraceAssumptions bundle (W4.truePred sym) $ \case
+    Unsat{} -> throwHere PEE.InvalidSMTModel
+    Unknown -> throwHere PEE.InconclusiveSAT
+    Sat evalFn -> getTraceFromModel scope evalFn bundle preD postCond
 
 getTraceFootprint ::
   forall sym arch v.
@@ -1333,7 +1340,35 @@ tryWidenings (x:xs) =
     NoWideningRequired -> tryWidenings xs
     res -> return res
 
-type WidenState sym arch v = Either (AbstractDomain sym arch v) (WidenResult sym arch v)
+
+data WidenCase =
+    WidenCaseStart
+  | WidenCaseStep WidenKind
+  | WidenCaseErr String
+
+
+data WidenState sym arch v = WidenState
+  { 
+    stDomain :: AbstractDomain sym arch v
+  , stLocs :: WidenLocs sym arch
+  , stWidenCase :: WidenCase
+    -- ^ starting equivalence domain or accumulated widening result
+  , stTracesEq :: PTc.TraceCollection sym arch
+    -- ^ collected traces for equality widening steps
+  , stTracesVal :: PTc.TraceCollection sym arch
+    --- ^ collected traces for value widening steps
+  }
+
+initWidenState :: AbstractDomain sym arch v -> WidenState sym arch v
+initWidenState d = WidenState d (WidenLocs Set.empty) WidenCaseStart PTc.empty PTc.empty
+
+
+-- Compute a final 'WidenResult' from an (intermediate) 'WidenState' (surjective)
+widenStateToResult :: WidenState sym arch v -> WidenResult sym arch v
+widenStateToResult st = case stWidenCase st of
+  WidenCaseStart -> NoWideningRequired
+  WidenCaseStep k -> Widen k (stLocs st) (stDomain st)
+  WidenCaseErr msg -> WideningError msg (stLocs st) (stDomain st)
 
 -- | This gives a fixed amount of gas for traversing the
 --   widening loop. Setting this value too low seems to
@@ -1363,27 +1398,19 @@ widenPostcondition ::
   AbstractDomain sym arch v {- ^ postdomain -} ->
   EquivM sym arch (WidenResult sym arch v)
 widenPostcondition scope bundle preD postD0 = do
-  r <- withTracing @"debug" "widenPostcondition" $ withSym $ \sym -> do
+  st <- withTracing @"debug" "widenPostcondition" $ withSym $ \sym -> do
     eqCtx <- equivalenceContext
     traceBundle bundle "Entering widening loop"
     subTree @"domain" "Widening Steps" $
-      widenLoop sym localWideningGas eqCtx postD0 Nothing
-  case r of
-    -- since widening was required, we show why it was needed
-    Widen WidenEquality _ _postD1 -> withSym $ \sym -> do
-      eqCtx <- equivalenceContext
-      eqPost <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) (PAD.absDomEq postD0)
-      eqPost_pred <- liftIO $ postCondPredicate sym eqPost
-      withTracing @"message" "Equivalence Counter-example" $ do
-        not_eqPost_pred <- liftIO $ W4.notPred sym eqPost_pred
-        mres <- withSatAssumption (PAs.fromPred not_eqPost_pred) $ do
-          res <- getSomeGroundTrace scope bundle preD (Just eqPost)
-          emitTrace @"trace_events" res
-        case mres of
-          Just () -> return ()
-          Nothing -> emitWarning (PEE.WideningError "Couldn't find widening counter-example")
-        return r
-    _ -> return r
+      widenLoop sym localWideningGas eqCtx (initWidenState postD0)
+    
+  case stWidenCase st of
+    WidenCaseStep _ -> withSharedEnvEmit "Equivalence Counter-example Traces" $ \emit -> do
+      emit (CT.knownSymbol @"trace_collection") "Equality" (stTracesEq st)
+      emit (CT.knownSymbol @"trace_collection") "Value" (stTracesVal st)
+      emit (CT.knownSymbol @"domain") PAD.Postdomain (Some (stDomain st))
+    _ -> return ()
+  return $ widenStateToResult st
  where
    widenOnce ::
      WidenKind ->
@@ -1393,17 +1420,13 @@ widenPostcondition scope bundle preD postD0 = do
      PL.Location sym arch nm k ->
      W4.Pred sym ->
      EquivM_ sym arch (WidenState sym arch v)
-   widenOnce widenK (Gas i) mwb prevState loc goal = case prevState of
-     Right NoWideningRequired -> return prevState
-     Right (WideningError{}) -> return prevState
+   widenOnce widenK (Gas i) mwb prevState loc goal = case stWidenCase prevState of
+     WidenCaseErr{} -> return prevState
      _ -> startTimer $ withSym $ \sym -> do
        eqCtx <- equivalenceContext
-       (prevLocs, postD) <- case prevState of
-             Left prevDom -> return (mempty, prevDom)
-             --FIXME: we're dropping the widening Kind now since we're
-             --potentially doing multiple widenings in one iteration
-             Right (Widen _ locs prevDom) -> return (locs, prevDom)
-             -- NOTE: spurious missing case on some ghc versions
+       let 
+        this_loc = WidenLocs (Set.singleton (PL.SomeLocation loc))
+        postD = stDomain prevState
        curAsms <- currentAsm
        let emit r =
              withValid @() $ emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
@@ -1413,7 +1436,7 @@ widenPostcondition scope bundle preD postD0 = do
        
        --(not_goal', ptrAsms) <- PVV.collectPointerAssertions not_goal
        emitTraceLabel @"expr" "goal" (Some goal)
-       goalSat "prove postcondition" not_goal $ \case
+       withTraceAssumptions bundle not_goal $ \case
          Unsat _ -> do
            emit PE.SolverSuccess
            return prevState
@@ -1425,12 +1448,12 @@ widenPostcondition scope bundle preD postD0 = do
            -- under analysis as inequivalent in the resulting domain
 
            case widenK of
-             WidenValue | Just (Some wb) <- mwb -> Right <$> dropValueLoc wb loc postD
+             WidenValue | Just (Some wb) <- mwb -> result <$> dropValueLoc wb loc postD
              WidenEquality ->
                case loc of
-                 PL.Cell c -> Right <$> widenCells [Some c] postD
-                 PL.Register r -> Right <$> widenRegs [Some r] postD
-                 PL.Unit -> return $ Right $ WideningError msg prevLocs postD
+                 PL.Cell c -> result <$> widenCells [Some c] postD
+                 PL.Register r -> result <$> widenRegs [Some r] postD
+                 PL.Unit -> return $ result $ WideningError msg this_loc postD
                  _ -> throwHere $ PEE.UnsupportedLocation
              _ -> panic Verifier "widenPostcondition" [ "Unexpected widening case"]
          Sat evalFn -> do
@@ -1443,17 +1466,17 @@ widenPostcondition scope bundle preD postD0 = do
                 let msg = unlines [ "Ran out of gas performing local widenings"
                                   , show (pretty ineqRes)
                                   ]
-                return $ Right $ WideningError msg prevLocs postD
+                return $ result $ WideningError msg this_loc postD
            else do
              -- The current execution does not satisfy the postcondition, and we have
              -- a counterexample.
              -- FIXME: postCondAsm doesn't exist anymore, but needs to be factored
              -- out still
-             res <- widenUsingCounterexample sym scope evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postD) preD prevLocs postD
+             res <- widenUsingCounterexample sym scope evalFn bundle eqCtx (W4.truePred sym) (PAD.absDomEq postD) preD postD
              case res of
                -- this location was made equivalent by a previous widening in this same loop
-               NoWideningRequired -> case prevState of
-                 Left{} ->  do
+               NoWideningRequired -> case stWidenCase prevState of
+                 WidenCaseStart ->  do
                    -- if we haven't performed any widenings yet, then this is an error
                    slice <- PP.simBundleToSlice scope bundle
                    ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
@@ -1463,9 +1486,30 @@ widenPostcondition scope bundle preD postD0 = do
                                      , show (pretty ineqRes)
                                      ]
                    
-                   return $ Right $ WideningError msg prevLocs postD
-                 Right{} -> return prevState
-               _ -> return $ Right res
+                   return $ result $ WideningError msg this_loc postD
+                 _ -> return prevState
+               Widen widenk (WidenLocs locs) d -> do
+                -- FIXME: should we make a post condition here?
+                tr <- getTraceFromModel scope evalFn bundle preD Nothing
+                let st' = foldr (addLoc widenk tr) prevState locs 
+                return $ st' { stWidenCase = WidenCaseStep widenk, stLocs = WidenLocs locs <> stLocs prevState, stDomain = d }
+               _ -> return $ result res
+    where
+      addLoc :: WidenKind -> CE.TraceEvents sym arch -> PL.SomeLocation sym arch ->  WidenState sym arch v -> WidenState sym arch v
+      addLoc wk te (PL.SomeLocation l)  st = case (wk,l) of
+        (WidenEquality, PL.Register r) -> st { stTracesEq = PTc.insertReg r te (stTracesEq st) }
+        (WidenEquality, PL.Cell c) -> st { stTracesEq = PTc.insertCell c te (stTracesEq st) }
+        (WidenValue, PL.Register r) -> st { stTracesVal = PTc.insertReg r te (stTracesVal st) }
+        (WidenValue, PL.Cell c) -> st { stTracesVal = PTc.insertCell c te (stTracesVal st) }
+        -- other kinds of locations we can ignore for now: since this is just for reporting purposes we
+        -- only need to index the traces by locations the user actually knows about
+        _ -> st
+
+      result :: WidenResult sym arch v -> WidenState sym arch v
+      result r = case r of
+        NoWideningRequired -> prevState
+        WideningError err locs d -> prevState { stWidenCase = WidenCaseErr err, stLocs = locs <> stLocs prevState, stDomain = d }
+        Widen widenk locs d -> prevState { stWidenCase = WidenCaseStep widenk, stLocs = locs <> stLocs prevState, stDomain = d }
    
    -- The main widening loop. For now, we constrain it's iteration with a Gas parameter.
    -- In principle, I think this shouldn't be necessary, so we should revisit at some point.
@@ -1479,13 +1523,12 @@ widenPostcondition scope bundle preD postD0 = do
      sym ->
      Gas ->
      EquivContext sym arch ->
-     AbstractDomain sym arch v ->
-     Maybe (WidenResult sym arch v)
-     {- ^ A summary of any widenings that were done in previous iterations.
-          If @Nothing@, than no previous widenings have been performed. -} ->
-     NodeBuilderT '(sym,arch) "domain" (EquivM_ sym arch) (WidenResult sym arch v)
-   widenLoop sym (Gas i) eqCtx postD mPrevRes = subTraceLabel' PAD.Postdomain  (Some postD) $ \unlift ->
-     do
+     WidenState sym arch v
+     {- ^ A summary of any widenings that were done in previous iterations. -} ->
+     NodeBuilderT '(sym,arch) "domain" (EquivM_ sym arch) (WidenState sym arch v)
+   widenLoop sym (Gas i) eqCtx prevRes = 
+    let postD = stDomain prevRes
+    in subTraceLabel' PAD.Postdomain  (Some (stDomain prevRes)) $ \unlift -> do
         let (stO, stP) = PS.asStatePair scope (simOut bundle) PS.simOutState
         
         postVals <- PPa.forBinsC $ \bin -> do
@@ -1493,11 +1536,15 @@ widenPostcondition scope bundle preD postD0 = do
           st <- PPa.get bin $ PPa.PatchPair stO stP
           liftIO $ PAD.absDomainValsToPostCond sym eqCtx st Nothing vals
 
+        -- we reset the widen case so we can capture if this
+        -- step did anything
+        let res0 = prevRes { stWidenCase = WidenCaseStart }
+
         res2 <- case postVals of
           PPa.PatchPairSingle bin (Const valPost) ->
-            PL.foldLocation @sym @arch sym valPost (Left postD) (widenOnce WidenValue (Gas i) (Just (Some bin)))
+            PL.foldLocation @sym @arch sym valPost res0 (widenOnce WidenValue (Gas i) (Just (Some bin)))
           PPa.PatchPairC valPostO valPostP -> do
-            res1 <- PL.foldLocation @sym @arch sym valPostO (Left postD) (widenOnce WidenValue (Gas i) (Just (Some PBi.OriginalRepr)))
+            res1 <- PL.foldLocation @sym @arch sym valPostO res0 (widenOnce WidenValue (Gas i) (Just (Some PBi.OriginalRepr)))
             PL.foldLocation @sym @arch sym valPostP res1 (widenOnce WidenValue (Gas i) (Just (Some PBi.PatchedRepr)))
         
         -- for single-sided verification the equality condition is that the updated value is equal to the
@@ -1513,42 +1560,30 @@ widenPostcondition scope bundle preD postD0 = do
         -- was done in previous iterations (i.e., this is the first iteration)
         -- return `NoWideningRequired`.  Otherwise return the new abstract domain
         -- and a summary of the widenings we did.
-        case res of
-
+        case stWidenCase res of
           -- Some kind of error occured while widening.
-          Right er@(WideningError msg locs _postD') ->
+          WidenCaseErr msg ->
             do traceBundle bundle "== Widening error! =="
                traceBundle bundle msg
                traceBundle bundle "Partial widening at locations:"
-               traceBundle bundle (show locs)
+               traceBundle bundle (show (stLocs res))
 {-
                traceBundle bundle "===== PREDOMAIN ====="
                traceBundle bundle (show (PEE.ppEquivalenceDomain W4.printSymExpr (PS.specBody preD)))
                traceBundle bundle "===== POSTDOMAIN ====="
                traceBundle bundle (show (PEE.ppEquivalenceDomain W4.printSymExpr (PS.specBody postD')))
 -}
-               return er
+               return res
 
           -- In this iteration, no additional widening was done, and we can exit the loop.
           -- The ultimate result we return depends on if we did any widening steps in
-          -- previous iterations.
-          Right NoWideningRequired ->
-            case mPrevRes of
-              Nothing   -> return NoWideningRequired
-              Just prevRes -> return prevRes
-          -- no widening happened
-          Left{} ->
-            case mPrevRes of
-              Nothing   -> return NoWideningRequired
-              Just prevRes -> return prevRes
+          -- previous iterations (i.e. we restore the previous widen case)
+          WidenCaseStart -> return $ res { stWidenCase = stWidenCase prevRes }
           -- We had to do some widening in this iteration, so reenter the loop.
-          Right (Widen widenK locs postD') ->
+          WidenCaseStep{} ->
             do traceBundle bundle "== Found a widening, returning into the loop =="
-               traceBundle bundle (show locs)
-               let newlocs = case mPrevRes of
-                     Just (Widen _ prevLocs _) -> locs <> prevLocs
-                     _ -> locs
-               unlift $ widenLoop sym (Gas (i-1)) eqCtx postD' (Just $ Widen widenK newlocs postD')
+               traceBundle bundle (show (stLocs res))
+               unlift $ widenLoop sym (Gas (i-1)) eqCtx res
 
 
 -- | Refine a given 'AbstractDomainBody' to contain concrete values for the
@@ -1585,10 +1620,9 @@ widenUsingCounterexample ::
   W4.Pred sym ->
   PEE.EquivalenceDomain sym arch ->
   AbstractDomain sym arch v ->
-  WidenLocs sym arch {- ^ previous widening -}   ->
   AbstractDomain sym arch v ->
   EquivM sym arch (WidenResult sym arch v)
-widenUsingCounterexample sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD _prevLocs postD =
+widenUsingCounterexample sym scope evalFn bundle eqCtx postCondAsm postCondStatePred preD postD =
   tryWidenings
     [ -- First check for any disagreement in the constant values
       widenValues sym evalFn bundle postD
