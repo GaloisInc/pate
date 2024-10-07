@@ -1491,19 +1491,23 @@ widenPostcondition scope bundle preD postD0 = do
                Widen widenk (WidenLocs locs) d -> do
                 -- FIXME: should we make a post condition here?
                 tr <- getTraceFromModel scope evalFn bundle preD Nothing
-                let st' = foldr (addLoc widenk tr) prevState locs 
+                let (regs,cells) = getTracedLocs (Set.toList locs)
+                let st' = case widenk of
+                      WidenEquality -> prevState { stTracesEq = PTc.insert regs cells tr (stTracesEq prevState) }
+                      WidenValue -> prevState { stTracesVal = PTc.insert regs cells tr (stTracesVal prevState) }
                 return $ st' { stWidenCase = WidenCaseStep widenk, stLocs = WidenLocs locs <> stLocs prevState, stDomain = d }
                _ -> return $ result res
     where
-      addLoc :: WidenKind -> CE.TraceEvents sym arch -> PL.SomeLocation sym arch ->  WidenState sym arch v -> WidenState sym arch v
-      addLoc wk te (PL.SomeLocation l)  st = case (wk,l) of
-        (WidenEquality, PL.Register r) -> st { stTracesEq = PTc.insertReg r te (stTracesEq st) }
-        (WidenEquality, PL.Cell c) -> st { stTracesEq = PTc.insertCell c te (stTracesEq st) }
-        (WidenValue, PL.Register r) -> st { stTracesVal = PTc.insertReg r te (stTracesVal st) }
-        (WidenValue, PL.Cell c) -> st { stTracesVal = PTc.insertCell c te (stTracesVal st) }
+      getTracedLocs :: [PL.SomeLocation sym arch] -> ([Some (MM.ArchReg arch)], [Some (PMc.MemCell sym arch)])
+      getTracedLocs [] = ([],[])
+      getTracedLocs ((PL.SomeLocation l):locs) =
+        let (regs,cells) = getTracedLocs locs
+        in case l of
+          PL.Register r -> (Some r:regs,cells)
+          PL.Cell c -> (regs,Some c:cells)
         -- other kinds of locations we can ignore for now: since this is just for reporting purposes we
         -- only need to index the traces by locations the user actually knows about
-        _ -> st
+          _ -> (regs,cells)
 
       result :: WidenResult sym arch v -> WidenState sym arch v
       result r = case r of
