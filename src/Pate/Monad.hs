@@ -202,6 +202,8 @@ import Data.List
 import Data.Parameterized.SymbolRepr
 import qualified What4.JSON as W4S
 import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Text as JSON
+import qualified GHC.IO.Unsafe as IO
 
 atPriority :: 
   NodePriority ->
@@ -415,16 +417,16 @@ data W4SerializableNode sym arch nm = IsSerializableNode sym arch nm =>
 
 -- | List of trace nodes (of any type) that share the same expression binding
 --   environment when serialized
-newtype SharedExprEnv sym arch = SharedExprEnv [Some (W4SerializableNode sym arch)]
+data SharedExprEnv sym arch = SharedExprEnv sym [Some (W4SerializableNode sym arch)]
 
 instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "shared_env" where
   type TraceNodeType '(sym,arch) "shared_env" = SharedExprEnv sym arch
   type TraceNodeLabel "shared_env" = String
 
-  prettyNode top_lbl (SharedExprEnv nds) = 
+  prettyNode top_lbl (SharedExprEnv _ nds) =
     PP.vsep $ (PP.pretty top_lbl <> ": "):(map (\(Some (W4SerializableNode (_ :: SymbolRepr nm) lbl nd)) -> prettyNode @_ @'(sym,arch) @nm lbl nd) nds)
 
-  jsonNode sym top_lbl (SharedExprEnv nds) = do
+  jsonNode sym top_lbl (SharedExprEnv _ nds) = do
     (\f -> evalStateT f W4S.emptyExprCache) $ do
       contents <- forM nds $ \(Some (W4SerializableNode nm lbl nd)) -> do
         cache0 <- get
@@ -436,6 +438,16 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "shared_env" where
       env <- liftIO $ W4S.cacheToEnv sym cache
       env_json <- liftIO $ W4S.serializeExprEnv sym env
       return $ JSON.object [ "name" JSON..= top_lbl, "shared_env" JSON..= env_json, "contents" JSON..= contents]
+
+  nodeTags = [(Summary, prettyNode @_ @'(sym,arch) @"shared_env")
+              -- fixme: quick hack to get JSON out without needing to run the entire
+              -- toplevel in JSON mode. Ideally this would be something that the Repl could
+              -- do itself.
+              , ("JSON", \top_lbl env@(SharedExprEnv sym _) ->
+                  let v = IO.unsafePerformIO $ jsonNode @_ @'(sym,arch) @"shared_env" sym top_lbl env
+                  in PP.pretty $ JSON.encodeToLazyText v)
+             ]
+
 
 -- | Emit multiple values to the tracetree with a common expression binding environment
 --   This will ultimately result in a single composite value, where all of the given values are serialized
@@ -456,12 +468,12 @@ withSharedEnvEmit ::
   String ->
   (forall m. Monad m => (forall nm. (IsSerializableNode sym arch nm) => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> m ()) -> m ()) ->
   EquivM sym arch ()
-withSharedEnvEmit top_nm f = do
-  env <- execStateT (f g) (SharedExprEnv [])
+withSharedEnvEmit top_nm f = withSym $ \sym -> do
+  env <- execStateT (f g) (SharedExprEnv sym [])
   emitTraceLabel @"shared_env" @'(sym,arch) top_nm env
   where 
     g :: forall (nm :: Symbol). IsSerializableNode sym arch nm => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> StateT (SharedExprEnv sym arch) (EquivM_ sym arch) ()
-    g nm lbl v = modify $ \(SharedExprEnv vs) -> SharedExprEnv ((Some (W4SerializableNode nm lbl v)):vs)
+    g nm lbl v = modify $ \(SharedExprEnv sym vs) -> SharedExprEnv sym ((Some (W4SerializableNode nm lbl v)):vs)
 
 withBinary ::
   forall bin sym arch a.

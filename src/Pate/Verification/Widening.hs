@@ -1400,11 +1400,14 @@ widenPostcondition ::
 widenPostcondition scope bundle preD postD0 = do
   st <- withTracing @"debug" "widenPostcondition" $ withSym $ \sym -> do
     eqCtx <- equivalenceContext
+    initSt <- initWidenState bundle postD0
     traceBundle bundle "Entering widening loop"
     subTree @"domain" "Widening Steps" $
-      widenLoop sym localWideningGas eqCtx (initWidenState postD0)
+      widenLoop sym localWideningGas eqCtx initSt
     
   case stWidenCase st of
+    -- we use 'withSharedEnvEmit' so that the underlying 'TraceCollection's are serialized
+    -- in a shared environment with the domain.
     WidenCaseStep _ -> withSharedEnvEmit "Equivalence Counter-example Traces" $ \emit -> do
       emit (CT.knownSymbol @"trace_collection") "Equality" (stTracesEq st)
       emit (CT.knownSymbol @"trace_collection") "Value" (stTracesVal st)
