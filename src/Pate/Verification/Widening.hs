@@ -481,27 +481,62 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
       choice "Clear work list (unsafe!)" $ \_ gr4 ->
         return $ emptyWorkList gr4
 
-tryWithAsms :: 
-  [(W4.Pred sym, PEE.InnerEquivalenceError arch)] ->
+-- | Predicates which we attempt to assume when generating a model, but raise
+--   the corresponding warning when this is not possible.
+type WeakAssumptions sym arch = [(W4.Pred sym, Maybe (PEE.InnerEquivalenceError arch))]
+
+-- | Given a satisfiable predicate 'p', call the given continuation
+--   with a model where a maximal subset of the given assumptions are also
+--   satisfied.
+--   Throws the given error for each assumption that is not satisfied in the model, and
+--   ultimately returns 'Nothing' if 'p' is unsatisfiable (or unknown) on its own.
+
+-- | Check the given predicate 'p' for satisfiability, while computing a model
+--   where as many of the given assumptions are true as possible (when 'p' is satisfiable).
+tryWithAsms ::
+  forall sym arch a.
+  WeakAssumptions sym arch ->
   W4.Pred sym ->
   (SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
   EquivM sym arch a
-tryWithAsms ((asm, err):asms) p f = do
-  mresult <- withSatAssumption (PAs.fromPred asm) $ tryWithAsms asms p f
+tryWithAsms asms_ p f = do
+  -- NOTE: we avoid 'withSatAssumption' here since that's somewhat more
+  -- expensive than just 'goalSat', and we'd prefer to fail quickly
+  mresult <- goalSat "check" p $ \case
+    Unsat () -> Just <$> f (Unsat ())
+    Unknown -> Just <$> f Unknown
+    -- ideally we could just call 'go asms_' from here directly,
+    -- but nested solver calls seem to break What4, so there's a
+    -- bit of redundancy here
+    Sat{} -> return Nothing
   case mresult of
     Just a -> return a
-    Nothing -> emitWarning err >> tryWithAsms asms p f
-tryWithAsms [] p f = goalSat "tryWithAsms" p f
+    Nothing -> withAssumption p $ go asms_
+  where
+    maybeEmit :: Maybe (PEE.InnerEquivalenceError arch) -> EquivM_ sym arch ()
+    maybeEmit Nothing = return ()
+    maybeEmit (Just err) = emitWarning err
 
--- | Check the predicate for satisfiability, attempting to
---   constrain the model to valid pointers and zero-offset stacks
---   if possible.
-withTraceAssumptions ::
-  SimBundle sym arch v ->
-  W4.Pred sym ->
-  (SatResult (SymGroundEvalFn sym) () -> EquivM_ sym arch a) ->
-  EquivM sym arch a
-withTraceAssumptions bundle p f = withSym $ \sym -> do
+    go ::
+      [(W4.Pred sym, Maybe (PEE.InnerEquivalenceError arch))] ->
+      EquivM_ sym arch a
+    go [] = withSym $ \sym -> goalSat "go" (W4.truePred sym) f
+    go [(asm, err)] = do
+      mresult <- goalSat "go" asm $ \case
+        Sat evalFn -> Just <$> f (Sat evalFn)
+        Unsat () -> return Nothing
+        Unknown -> return Nothing
+      case mresult of
+        Nothing -> maybeEmit err >> go []
+        Just a -> return a
+    go ((asm, err):asms) = do
+      mresult <- withSatAssumption (PAs.fromPred asm) $ go asms
+      case mresult of
+        Nothing -> maybeEmit err >> go asms
+        Just a -> return a
+
+mkTraceAssumptions :: SimBundle sym arch v -> EquivM sym arch (WeakAssumptions sym arch)
+mkTraceAssumptions bundle = withSym $ \sym -> do
   (_, ptrAsserts) <- PVV.collectPointerAssertions bundle
   stacks_zero <- PPa.catBins $ \bin -> do
     in_ <- PPa.get bin (PS.simIn bundle)
@@ -509,11 +544,12 @@ withTraceAssumptions bundle p f = withSym $ \sym -> do
     zero <- liftIO $ W4.bvLit sym CT.knownRepr (BVS.mkBV CT.knownRepr 0)
     PAs.fromPred <$> (liftIO $ W4.isEq sym zero stackbase)
 
-  ptrAsserts_pred <- PAs.toPred sym (stacks_zero <> ptrAsserts)
-
-  tryWithAsms
-    [ (ptrAsserts_pred, PEE.RequiresInvalidPointerOps)
-    ] p f
+  stacks_zero_pred <- PAs.toPred sym stacks_zero
+  ptrAsserts_pred <- PAs.toPred sym ptrAsserts
+  return $
+    [ (stacks_zero_pred, Nothing )
+    , (ptrAsserts_pred, Just PEE.RequiresInvalidPointerOps)
+    ]
 
 getSomeGroundTrace ::
   PS.SimScope sym arch v ->
@@ -522,7 +558,8 @@ getSomeGroundTrace ::
   Maybe (StatePostCondition sym arch v) ->
   EquivM sym arch (CE.TraceEvents sym arch)
 getSomeGroundTrace scope bundle preD postCond = withSym $ \sym -> do
-  withTraceAssumptions bundle (W4.truePred sym) $ \case
+  trace_asms <- mkTraceAssumptions bundle
+  tryWithAsms trace_asms (W4.truePred sym) $ \case
     Unsat{} -> throwHere PEE.InvalidSMTModel
     Unknown -> throwHere PEE.InconclusiveSAT
     Sat evalFn -> getTraceFromModel scope evalFn bundle preD postCond
@@ -1356,11 +1393,18 @@ data WidenState sym arch v = WidenState
   , stTracesEq :: PTc.TraceCollection sym arch
     -- ^ collected traces for equality widening steps
   , stTracesVal :: PTc.TraceCollection sym arch
-    --- ^ collected traces for value widening steps
+    -- ^ collected traces for value widening steps
+  , stTraceAsms :: WeakAssumptions sym arch
+    -- ^ pre-computed assumptions to try to add when generating traces (i.e. from withTraceAssumptions)
   }
 
-initWidenState :: AbstractDomain sym arch v -> WidenState sym arch v
-initWidenState d = WidenState d (WidenLocs Set.empty) WidenCaseStart PTc.empty PTc.empty
+initWidenState ::
+  SimBundle sym arch v ->
+  AbstractDomain sym arch v ->
+  EquivM sym arch (WidenState sym arch v)
+initWidenState bundle d = do
+  traceAsms <- mkTraceAssumptions bundle
+  return $ WidenState d (WidenLocs Set.empty) WidenCaseStart PTc.empty PTc.empty traceAsms
 
 
 -- Compute a final 'WidenResult' from an (intermediate) 'WidenState' (surjective)
@@ -1425,21 +1469,26 @@ widenPostcondition scope bundle preD postD0 = do
      EquivM_ sym arch (WidenState sym arch v)
    widenOnce widenK (Gas i) mwb prevState loc goal = case stWidenCase prevState of
      WidenCaseErr{} -> return prevState
-     _ -> startTimer $ withSym $ \sym -> do
+     _ -> withSym $ \sym -> do
        eqCtx <- equivalenceContext
        let 
         this_loc = WidenLocs (Set.singleton (PL.SomeLocation loc))
         postD = stDomain prevState
+
+       {-
        curAsms <- currentAsm
        let emit r =
              withValid @() $ emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
        emit PE.SolverStarted
+       -}
+       let emit _r = return ()
+
 
        not_goal <- liftIO $ W4.notPred sym goal
        
        --(not_goal', ptrAsms) <- PVV.collectPointerAssertions not_goal
        emitTraceLabel @"expr" "goal" (Some goal)
-       withTraceAssumptions bundle not_goal $ \case
+       tryWithAsms (stTraceAsms prevState) not_goal $ \case
          Unsat _ -> do
            emit PE.SolverSuccess
            return prevState
@@ -1492,13 +1541,15 @@ widenPostcondition scope bundle preD postD0 = do
                    return $ result $ WideningError msg this_loc postD
                  _ -> return prevState
                Widen widenk (WidenLocs locs) d -> do
-                -- FIXME: should we make a post condition here?
-                tr <- getTraceFromModel scope evalFn bundle preD Nothing
-                let (regs,cells) = getTracedLocs (Set.toList locs)
-                let st' = case widenk of
-                      WidenEquality -> prevState { stTracesEq = PTc.insert regs cells tr (stTracesEq prevState) }
-                      WidenValue -> prevState { stTracesVal = PTc.insert regs cells tr (stTracesVal prevState) }
-                return $ st' { stWidenCase = WidenCaseStep widenk, stLocs = WidenLocs locs <> stLocs prevState, stDomain = d }
+                 let nextState = prevState
+                      { stWidenCase = WidenCaseStep widenk
+                      , stLocs = WidenLocs locs <> stLocs prevState
+                      , stDomain = d }
+                 tr <- getTraceFromModel scope evalFn bundle preD Nothing
+                 let (regs,cells) = getTracedLocs (Set.toList locs)
+                 return $ case widenk of
+                   WidenEquality -> nextState { stTracesEq = PTc.insert regs cells tr (stTracesEq nextState) }
+                   WidenValue -> nextState { stTracesVal = PTc.insert regs cells tr (stTracesVal nextState) }
                _ -> return $ result res
     where
       getTracedLocs :: [PL.SomeLocation sym arch] -> ([Some (MM.ArchReg arch)], [Some (PMc.MemCell sym arch)])
