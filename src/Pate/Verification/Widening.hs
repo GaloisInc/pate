@@ -485,14 +485,11 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
 --   the corresponding warning when this is not possible.
 type WeakAssumptions sym arch = [(W4.Pred sym, Maybe (PEE.InnerEquivalenceError arch))]
 
--- | Given a satisfiable predicate 'p', call the given continuation
---   with a model where a maximal subset of the given assumptions are also
+-- | Given a predicate 'p', call the given continuation 'f'
+--   with a model where a maximal subset of the given 'WeakAssumptions' are also
 --   satisfied.
---   Throws the given error for each assumption that is not satisfied in the model, and
---   ultimately returns 'Nothing' if 'p' is unsatisfiable (or unknown) on its own.
-
--- | Check the given predicate 'p' for satisfiability, while computing a model
---   where as many of the given assumptions are true as possible (when 'p' is satisfiable).
+--   If 'p' is not satisfiable (or inconclusive) on its own then the given assumptions are ignored,
+--   and 'f' is called with the result of checking just 'p' (either 'Unsat' or 'Unknown').
 tryWithAsms ::
   forall sym arch a.
   WeakAssumptions sym arch ->
@@ -1475,14 +1472,10 @@ widenPostcondition scope bundle preD postD0 = do
         this_loc = WidenLocs (Set.singleton (PL.SomeLocation loc))
         postD = stDomain prevState
 
-       {-
        curAsms <- currentAsm
        let emit r =
              withValid @() $ emitEvent (PE.SolverEvent (PS.simPair bundle) PE.EquivalenceProof r curAsms goal)
        emit PE.SolverStarted
-       -}
-       let emit _r = return ()
-
 
        not_goal <- liftIO $ W4.notPred sym goal
        
