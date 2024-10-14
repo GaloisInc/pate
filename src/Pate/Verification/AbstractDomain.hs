@@ -141,6 +141,9 @@ instance forall sym arch v. (PSo.ValidSym sym, PA.ValidArch arch) => W4S.W4Seria
     eq_dom <- W4S.w4Serialize (absDomEq abs_dom)
     return $ JSON.object [ "eq_domain" .= eq_dom, "val_domain" .= JSON.String "TODO" ]
 
+instance forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => W4S.W4SerializableF sym (AbstractDomain sym arch)
+
+
 -- | Restrict an abstract domain to a single binary.
 singletonDomain ::
   PPa.PatchPairM m =>
@@ -887,6 +890,11 @@ ppDomainKind = \case
   Predomain -> "Predomain"
   Postdomain -> "Intermediate postdomain"
   ExternalPostDomain -> "Postdomain"
+
+instance JSON.ToJSON DomainKind where
+  toJSON dk = JSON.toJSON (show dk)
+
+instance W4S.W4Serializable sym DomainKind
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
   type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)
