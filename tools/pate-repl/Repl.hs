@@ -74,6 +74,9 @@ import Unsafe.Coerce(unsafeCoerce)
 import qualified Output as PO
 import qualified Control.Concurrent as MVar
 
+import Data.Time
+import Data.Fixed
+
 maxSubEntries :: Int
 maxSubEntries = 5
 
@@ -409,12 +412,12 @@ ppSuffix nesting s nm = do
 ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
 ppStatusTag st = case st of
   _ | isBlockedStatus st -> Just "?"
-  NodeStatus StatusSuccess False _ -> Just "*"
-  NodeStatus (StatusWarning _) False _ -> Just "!*"
-  NodeStatus (StatusWarning _) True _ -> Just "!"
-  NodeStatus (StatusError _) False _ -> Just "*x"
-  NodeStatus (StatusError _) True _ -> Just "x"
-  NodeStatus StatusSuccess True _ -> Nothing
+  NodeStatus StatusSuccess Nothing _ -> Just "*"
+  NodeStatus (StatusWarning _) Nothing _ -> Just "!*"
+  NodeStatus (StatusWarning _) (Just{}) _ -> Just "!"
+  NodeStatus (StatusError _) Nothing _ -> Just "*x"
+  NodeStatus (StatusError _) (Just{}) _ -> Just "x"
+  NodeStatus StatusSuccess (Just{}) _ -> Nothing
 
 maybeSubNodes ::
   forall sym arch nm a.
@@ -454,15 +457,22 @@ prettyNextNodes startAt onlyFinished = do
        mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
                 json <- IO.liftIO $ jsonNode @_ @'(sym, arch) @nm sym lbl v
+
+                let duration = case finishedAt b of
+                      Just fin | elem "time" tags -> Just $ (PP.viaShow $ 
+                        let t = diffUTCTime fin (traceTreeStartTime subtree)
+                        in (round (t * 1000))) <> "ms"
+                      _ -> Nothing
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
                     suf <- ppSuffix nesting b (knownSymbol @nm)
                     let indent = abs(nesting)*2
+
                     return $ PO.OutputElem 
                       { PO.outIdx = 0
                       , PO.outIndent = indent
                       , PO.outPP = pp
-                      , PO.outFinished = isFinished b
+                      , PO.outDuration = duration
                       , PO.outSuffix = suf
                       , PO.outMoreResults = nesting < 0
                       , PO.outJSON = json
@@ -476,7 +486,7 @@ prettyNextNodes startAt onlyFinished = do
                       { PO.outIdx = 0
                       , PO.outIndent = 0
                       , PO.outPP = "<ERROR: Unexpected missing printer>"
-                      , PO.outFinished = isFinished b
+                      , PO.outDuration = duration
                       , PO.outSuffix = Nothing
                       , PO.outMoreResults = nesting < 0
                       , PO.outJSON = json
@@ -557,8 +567,8 @@ status' mlimit = do
         _ | isBlockedStatus st -> PO.printMsgLn $ "Waiting for input.."
         NodeStatus (StatusWarning e) _ _ -> PO.printMsgLn $ "Warning: \n" <> (PP.pretty (chopMsg mlimit (show e)))
         NodeStatus (StatusError e) _ _ ->  PO.printMsgLn $ "Error: \n" <> (PP.pretty (chopMsg mlimit (show e)))
-        NodeStatus StatusSuccess False _ ->  PO.printMsgLn $ "In progress.."
-        NodeStatus StatusSuccess True _ -> PO.printMsgLn $ "Finalized"
+        NodeStatus StatusSuccess Nothing _ ->  PO.printMsgLn $ "In progress.."
+        NodeStatus StatusSuccess (Just{}) _ -> PO.printMsgLn $ "Finalized"
       prevNodes <- gets replPrev
       fin <- IO.liftIO $ IO.readIORef finalResult
       case (prevNodes, fin) of
@@ -642,8 +652,8 @@ goto_status' f = do
 
 isErrStatus :: NodeStatus -> Bool
 isErrStatus = \case
-  NodeStatus StatusSuccess True _ -> False
-  NodeStatus _ False _ -> False
+  NodeStatus StatusSuccess (Just{}) _ -> False
+  NodeStatus _ Nothing _ -> False
   _ -> True
 
 goto_err :: IO ()

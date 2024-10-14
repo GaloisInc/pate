@@ -9,6 +9,7 @@ module Output
   , outputList
   , outputMsg
   , outputErr
+  , outFinished
   , printMsg
   , printErr
   , printMsgLn
@@ -39,18 +40,20 @@ import qualified GHC.IO as IO hiding (liftIO)
 import qualified Data.ByteString.Lazy as BS
 import Data.Maybe
 
-
 data OutputElem = 
   OutputElem 
     { outIdx :: Int
     , outIndent :: Int
-    , outFinished :: Bool
+    , outDuration :: Maybe (PP.Doc ())
     , outPP :: PP.Doc ()
     , outJSON :: JSON.Value
     , outSuffix :: Maybe (PP.Doc ())
     , outMoreResults :: Bool
     -- ^ more results at this nesting level that were omitted
     }
+
+outFinished :: OutputElem -> Bool
+outFinished e = isJust (outDuration e)
 
 data Output_ =
     OutputElemList [OutputElem]
@@ -140,7 +143,10 @@ ppOutputElem nd =
       p' = case outMoreResults nd of
         True -> p <+> "more results..."
         False -> p
-  in PP.pretty (outIdx nd) <> ":" <+> (PP.indent (outIndent nd) p')
+      p'' = case outDuration nd of
+        Just dur -> p' <+> dur
+        _ -> p'
+  in PP.pretty (outIdx nd) <> ":" <+> (PP.indent (outIndent nd) p'')
 
 tagOutput :: Maybe (PP.Doc ()) -> Maybe (Text.Text) -> Output -> Output
 tagOutput msg tag o = Output (outputC o) msg tag
