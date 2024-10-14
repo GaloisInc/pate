@@ -446,6 +446,7 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "shared_env" where
               , ("JSON", \top_lbl env@(SharedExprEnv sym _) ->
                   let v = IO.unsafePerformIO $ jsonNode @_ @'(sym,arch) @"shared_env" sym top_lbl env
                   in PP.pretty $ JSON.encodeToLazyText v)
+              , (Simplified, \top_lbl _ -> PP.pretty top_lbl)
              ]
 
 
