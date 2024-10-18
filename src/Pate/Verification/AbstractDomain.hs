@@ -434,6 +434,19 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym 
 instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
   mempty = WidenLocs mempty
 
+joinMemCellAbsValues ::
+  W4.IsSymExprBuilder sym =>
+  MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s) ->
+  MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s) ->
+  MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s)
+joinMemCellAbsValues = MapF.mergeWithKey 
+ (\_cell (MemAbstractValue v1) (MemAbstractValue v2) -> Just $ MemAbstractValue $ combineAbsVals v1 v2) 
+ id 
+ id
+
+collapseMemCellVals :: W4.IsSymExprBuilder sym => [MapF.Pair (PMC.MemCell sym arch)  (MemAbstractValue s)] -> MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s)
+collapseMemCellVals = foldr (\(MapF.Pair k v) m -> joinMemCellAbsValues (MapF.singleton k v) m) MapF.empty
+
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
 initAbsDomainVals ::
@@ -450,19 +463,33 @@ initAbsDomainVals ::
   AbstractDomainVals sym arch bin {- ^ values from pre-domain -} ->
   m (AbstractDomainVals sym arch bin)
 initAbsDomainVals sym eqCtx f stOut preVals = do
-  foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
+  traceOps <- fmap S.toList $ IO.liftIO $ MT.traceFootprintOps sym (PS.simOutMem stOut)
   -- NOTE: We need to include any cells from the pre-domain to ensure that we
   -- propagate forward any value constraints for memory that is not accessed in this
   -- slice
-  let prevCells = map fstPair $ filter (\(MapF.Pair _ (MemAbstractValue v)) -> not (isUnconstrained v)) (MapF.toList (absMemVals preVals))
-  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
-  subTree @"loc" "Initial Domain" $ do
-    regVals <- MM.traverseRegsWith (\r v -> subTrace (PL.SomeLocation (PL.Register r)) $ getRegAbsVal r v) (PS.simOutRegs stOut)
-    memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
-      absVal <- subTrace (PL.SomeLocation (PL.Cell cell)) $ getMemAbsVal cell
-      return (MapF.Pair cell absVal)
-    mr <- subTrace (PL.SomeLocation (PL.Named (knownSymbol @"maxRegion"))) $ f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
-    return (AbstractDomainVals regVals memVals mr)
+  let prevCells = (S.toList . S.fromList) $ map fstPair $ filter (\(MapF.Pair _ (MemAbstractValue v)) -> not (isUnconstrained v)) (MapF.toList (absMemVals preVals))
+
+  regVals <- subTree @"loc" "Initial Domain 1" $ do
+    MM.traverseRegsWith (\r v -> subTrace (PL.SomeLocation (PL.Register r)) $ getRegAbsVal r v) (PS.simOutRegs stOut)
+  
+  memPreVals <- subTree @"loc" "Initial Domain 2" $ do
+    -- collect models for any cells in the abstract domain with known
+    -- concrete values first
+    forM prevCells $ \(Some cell) -> subTrace (PL.SomeLocation (PL.Cell cell)) $ do
+        absVal <- getMemAbsVal cell
+        return $ MapF.Pair cell absVal
+    
+  -- next we check if the written value was actually concrete, otherwise we can skip these writes
+  memTracePrevVals <- subTree @"loc" "Initial Domain 3" $ fmap collapseMemCellVals $ forM traceOps $ \mop@(MT.MemOp ptr _dir _cond (w :: MT.NatRepr w) _val end) -> do
+    let cell = PMC.MemCell ptr w end
+    subTrace (PL.SomeLocation (PL.Cell cell)) $ getMemOpAbsVal mop
+  
+  memTraceVals <- subTree @"loc" "Initial Domain 4" $  MapF.traverseWithKey (\cell mv -> subTrace (PL.SomeLocation (PL.Cell cell)) $ getCellWithPrevAbsVal cell mv) memTracePrevVals
+
+  let memVals = joinMemCellAbsValues (MapF.fromList memPreVals) memTraceVals
+
+  mr <- subTree @"loc" "Initial Domain 5" $  subTrace (PL.SomeLocation (PL.Named (knownSymbol @"maxRegion"))) $ f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
+  return (AbstractDomainVals regVals memVals mr)
   where
     getMemAbsVal ::
       PMC.MemCell sym arch w ->
@@ -489,6 +516,39 @@ initAbsDomainVals sym eqCtx f stOut preVals = do
             MacawAbstractValue (Ctx.Empty Ctx.:> _ Ctx.:> AbsUnconstrained _) <- v -> return $ noAbsVal (MT.typeRepr r)
           _ -> return v
       _ -> getAbsVal sym f e
+
+    getMemOpAbsVal ::
+      MT.MemOp sym (MC.ArchAddrWidth arch) ->
+      m (MapF.Pair (PMC.MemCell sym arch) (MemAbstractValue sym))
+    getMemOpAbsVal (MT.MemOp ptr _dir _cond (w :: MT.NatRepr w) val end) = do
+      let CLM.LLVMPointer region offset = val
+      regAbs <- f (W4.natToIntegerPure region)
+      offsetAbs <- f offset
+      return $ MapF.Pair cell (MemAbstractValue $ MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs))
+
+      where
+        cell :: PMC.MemCell sym arch w
+        cell = PMC.MemCell ptr w end
+
+    -- extract a final abstract value from a first-pass check
+    getCellWithPrevAbsVal ::
+      PMC.MemCell sym arch w ->
+      MemAbstractValue sym w  ->
+      m (MemAbstractValue sym w)
+    getCellWithPrevAbsVal cell (MemAbstractValue (MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs))) = do
+      CLM.LLVMPointer mem_region mem_offset <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
+      -- we avoid checking the actual memory model for concrete values if we didn't originally
+      -- write/read a concrete value, since it's unlikely to succeed (outside of strange memory aliasing cases)
+      -- since this is an under-approximation it's safe to just leave them as unconstrained
+      memRegAbs <- case regAbs of
+        AbsUnconstrained tp -> return $ AbsUnconstrained tp
+        _ -> f (W4.natToIntegerPure mem_region)
+      
+      memOffsetAbs <- case offsetAbs of
+        AbsUnconstrained tp -> return $ AbsUnconstrained tp
+        _ -> f mem_offset
+      
+      return $ MemAbstractValue $ MacawAbstractValue (Ctx.Empty Ctx.:> memRegAbs Ctx.:> memOffsetAbs)
 
 -- | Convert the abstract domain from an expression into an equivalent 'AbsRange'
 -- TODO: Currently this only extracts concrete values

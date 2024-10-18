@@ -128,6 +128,7 @@ import qualified What4.Expr.GroundEval as W4
 import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.IORef as IO
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -1647,13 +1648,23 @@ getInitalAbsDomainVals ::
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
 getInitalAbsDomainVals bundle preDom = withTracing @"debug" "getInitalAbsDomainVals" $ withSym $ \sym -> do
   PEM.SymExprMappable asEM <- return $ PEM.symExprMappable sym
+
+  (ref :: IO.IORef (MapF.MapF (W4.SymExpr sym) (PAD.AbsRange)))  <- IO.liftIO $ IO.newIORef MapF.empty
+
+
   let
     getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
     getConcreteRange e = do
-      e' <- asEM @tp $ applyCurrentAsms e
-      e'' <- concretizeWithSolver e'
-      emitTraceLabel @"expr" "output" (Some e'')
-      return $ PAD.extractAbsRange sym e''
+      m <- (IO.liftIO $ IO.readIORef ref)
+      case MapF.lookup e m of
+        Just a -> return a
+        Nothing -> do
+          -- e' <- asEM @tp $ applyCurrentAsms e
+          e'' <- concretizeWithSolver e
+          emitTraceLabel @"expr" "output" (Some e'')
+          let a = PAD.extractAbsRange sym e''
+          IO.liftIO $ IO.modifyIORef ref (MapF.insert e a)
+          return a
 
   eqCtx <- equivalenceContext
   PPa.forBins $ \bin -> do
