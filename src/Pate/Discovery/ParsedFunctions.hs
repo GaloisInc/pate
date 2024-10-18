@@ -220,7 +220,9 @@ addOverrides ::
 addOverrides defaultInit pfm ovs = do
   let new_ovs = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (mergeOverrides l r))) ovs (absStateOverrides pfm)
   let new_init = PB.MkInitialAbsState $ \mem segOff -> mergeOverrides (PB.mkInitAbs defaultInit mem segOff) (PB.mkInitAbs (defaultInitState pfm) mem segOff) 
-  return $ pfm { absStateOverrides = new_ovs, defaultInitState = new_init }
+  let pfm' = pfm { absStateOverrides = new_ovs, defaultInitState = new_init }
+  flushCache pfm'
+  return pfm'
 
 addExtraEdges ::
   forall arch bin.
@@ -231,7 +233,9 @@ addExtraEdges ::
 addExtraEdges pfm es = do
   mapM_ addTgt (Map.elems es)
   IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
-    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (l <> r))) es (extraEdges st')}
+    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (l <> r))) es (extraEdges st')
+        , parsedFunctionCache = Map.empty
+        }
   where
     addTgt :: ExtraJumpTarget arch -> IO ()
     addTgt = \case
@@ -531,7 +535,10 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
       -- IORef that might be evaluated multiple times if there is a lot of
       -- contention. If that becomes a problem, we may want to change this
       -- to an MVar where we fully evaluate each result before updating it.
-      (_, Some dfi) <- atomicAnalysis faddr st
+      (st', Some dfi) <- atomicAnalysis faddr st
+      IORef.modifyIORef pfmRef $ \st_ -> 
+        st_ { parsedFunctionCache = parsedFunctionCache st', discoveryState = discoveryState st'}
+
       --IORef.writeIORef pfmRef pfm'
       saveCFG mCFGDir (PB.blockBinRepr blk) dfi
       return (Just (Some dfi))
