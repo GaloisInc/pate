@@ -129,10 +129,6 @@ import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.IORef as IO
-<<<<<<< Updated upstream
-=======
-import qualified Data.Parameterized.Context as Ctx
->>>>>>> Stashed changes
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
