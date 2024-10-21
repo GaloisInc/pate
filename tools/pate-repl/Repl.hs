@@ -441,8 +441,17 @@ maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
 
 
 
-
-
+ppDuration ::
+  [TraceTag] ->
+  TraceTree '(sym,arch) ->
+  ReplM sym arch (Maybe (PP.Doc ()))
+ppDuration tags subtree = do
+  b <- IO.liftIO $ getTreeStatus subtree
+  return $ case finishedAt b of
+    Just fin | elem "time" tags -> Just $ (PP.viaShow $ 
+      let t = diffUTCTime fin (traceTreeStartTime subtree)
+      in (round (t * 1000))) <> "ms"
+    _ -> Nothing
 
 prettyNextNodes ::
   forall sym arch.
@@ -457,12 +466,7 @@ prettyNextNodes startAt onlyFinished = do
        mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
                 json <- IO.liftIO $ jsonNode @_ @'(sym, arch) @nm sym lbl v
-
-                let duration = case finishedAt b of
-                      Just fin | elem "time" tags -> Just $ (PP.viaShow $ 
-                        let t = diffUTCTime fin (traceTreeStartTime subtree)
-                        in (round (t * 1000))) <> "ms"
-                      _ -> Nothing
+                duration <- ppDuration tags subtree
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
                     suf <- ppSuffix nesting b (knownSymbol @nm)
@@ -563,12 +567,18 @@ status' mlimit = do
     SomeReplState {} -> execReplM $ do
       (Some (TraceNode _ _ t))  <- gets replNode
       st <- IO.liftIO $ getTreeStatus t
-      case st of
-        _ | isBlockedStatus st -> PO.printMsgLn $ "Waiting for input.."
-        NodeStatus (StatusWarning e) _ _ -> PO.printMsgLn $ "Warning: \n" <> (PP.pretty (chopMsg mlimit (show e)))
-        NodeStatus (StatusError e) _ _ ->  PO.printMsgLn $ "Error: \n" <> (PP.pretty (chopMsg mlimit (show e)))
-        NodeStatus StatusSuccess Nothing _ ->  PO.printMsgLn $ "In progress.."
-        NodeStatus StatusSuccess (Just{}) _ -> PO.printMsgLn $ "Finalized"
+
+      let pp = case st of
+            _ | isBlockedStatus st -> "Waiting for input.."
+            NodeStatus (StatusWarning e) _ _ -> "Warning: \n" <> (PP.pretty (chopMsg mlimit (show e)))
+            NodeStatus (StatusError e) _ _ ->  "Error: \n" <> (PP.pretty (chopMsg mlimit (show e)))
+            NodeStatus StatusSuccess Nothing _ ->  "In progress.."
+            NodeStatus StatusSuccess (Just{}) _ -> "Finalized"
+      tags <- gets replTags
+      duration <- ppDuration tags t
+      case duration of
+        Just pp' -> PO.printMsgLn $ pp <+> pp'
+        Nothing -> PO.printMsgLn pp
       prevNodes <- gets replPrev
       fin <- IO.liftIO $ IO.readIORef finalResult
       case (prevNodes, fin) of
