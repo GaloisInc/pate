@@ -105,7 +105,11 @@ module Pate.Monad
   , joinPatchPred
   , withSharedEnvEmit
   , module PME
-  , atPriority, currentPriority, thisPriority)
+  , atPriority, currentPriority, thisPriority
+  , concretizeWithSolverGen
+  , concretizeWithMap
+  , ConcreteMap, emptyConcreteMap
+  )
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
@@ -162,6 +166,7 @@ import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
+import qualified What4.Concrete as W4
 import qualified What4.SatResult as W4R
 import qualified What4.Symbol as WS
 import           What4.Utils.Process (filterAsync)
@@ -204,6 +209,7 @@ import qualified What4.JSON as W4S
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Text as JSON
 import qualified GHC.IO.Unsafe as IO
+import qualified Data.Parameterized.TraversableFC as TFC
 
 atPriority :: 
   NodePriority ->
@@ -1022,7 +1028,122 @@ getWrappedSolver = withSym $ \sym -> do
         case r of
           Left _err -> safeIO PEE.SolverError $ k W4R.Unknown
           Right a -> return a
+
+
+-- | Mapping from expressions to (maybe) concrete values
+--   If an expression is missing from the map, it may be symbolic or concrete.
+--   If an expression is present in the map with a concrete value, this value *may* hold in all cases
+--   If an expression is present in the map with a 'Nothing' entry, it is considered symbolic
+--   (either proven to have multiple models or assumed symbolic due to timeout)
+--   FIXME: includes path condition predicate which is used internally by 'concretizeWithSolverGen'
+--   but should be factored out.
+data ConcreteMap sym = 
+    ConcreteMap (MapF.MapF (W4.SymExpr sym) (PPa.LiftF Maybe W4.ConcreteVal)) (W4.Pred sym)
+
+emptyConcreteMap :: EquivM sym arch (ConcreteMap sym)
+emptyConcreteMap = withSym $ \sym -> return (ConcreteMap MapF.empty (W4.truePred sym))
+
+-- | Use the given 'ConcreteMap' to concretize an expression. Returns the original expression
+--   if it is known to be symbolic, the concretized expression if it is in the map, or 'Nothing' if
+--   it is not in the map.
+concretizeWithMap ::
+  ConcreteMap sym ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch (Maybe (W4.SymExpr sym tp))
+concretizeWithMap (ConcreteMap cm _) e = withSym $ \sym -> case MapF.lookup e cm of
+  Just (PPa.LiftF (Just c)) -> Just <$> (IO.liftIO $ W4.concreteToSym sym c)
+  Just (PPa.LiftF Nothing) -> return $ Just e
+  Nothing -> return Nothing
+
+concretizeOne ::
+  W4.SymExpr sym tp ->
+  ConcreteMap sym ->
+  EquivM sym arch (W4.SymExpr sym tp, ConcreteMap sym)
+concretizeOne e (ConcreteMap cm p) = do
+  e' <- concretizeWithSolver e
+  case W4.asConcrete e' of
+    Just c -> return $ (e', ConcreteMap (MapF.insert e (PPa.LiftF (Just c)) cm) p)
+    Nothing -> return $ (e, ConcreteMap (MapF.insert e (PPa.LiftF Nothing) cm) p)
+
+concretizeWithSolverGen ::
+  forall sym arch ctx.
+  ConcreteMap sym ->
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  EquivM sym arch (Ctx.Assignment (W4.SymExpr sym) ctx, ConcreteMap sym)
+concretizeWithSolverGen cm_outer (Ctx.Empty Ctx.:> e) =  do
+  (e', cm) <- concretizeOne e cm_outer
+  return $ (Ctx.Empty Ctx.:> e', cm)
+concretizeWithSolverGen cm_outer a = withSym $ \sym -> do
+  let
+    go :: forall tp. SymGroundEvalFn sym -> W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
+    go evalFn e (ConcreteMap m p) = case W4.asConcrete e of
+      -- value is already concrete, nothing to do
+      Just{} -> return (ConcreteMap m p) 
+      Nothing -> (W4.asConcrete <$> concretizeWithModel evalFn e) >>= \case
+        -- failed to concretize with this model, so we'll conservatively mark this
+        -- as symbolic
+        Nothing -> return $ ConcreteMap (MapF.insert e (PPa.LiftF Nothing) m) p
+        Just conc1 -> do
+          conc1_as_sym <- IO.liftIO $ W4.concreteToSym sym conc1
+          e_is_conc1 <- IO.liftIO $ W4.isEq sym e conc1_as_sym
+          case MapF.lookup e m of
+            -- value has been seen before and still may be concrete
+            Just (PPa.LiftF (Just conc2)) -> do
+              case testEquality conc1 conc2 of
+                Just Refl -> do
+                  p' <- IO.liftIO $ W4.andPred sym p e_is_conc1
+                  return $ ConcreteMap m p'
+                -- ground value may disagree with cached value, so we conservatively assume symbolic
+                Nothing -> return $ ConcreteMap (MapF.insert e (PPa.LiftF Nothing) m) p
+            -- value has been seen before and is known not-concrete, nothing to do
+            Just (PPa.LiftF Nothing) -> return $ ConcreteMap m p
+            -- first time seeing this value, insert concretized version into cache
+            Nothing -> do
+              p' <- IO.liftIO $ W4.andPred sym p e_is_conc1
+              return $ ConcreteMap (MapF.insert e (PPa.LiftF (Just conc1)) m) p'
+        
   
+    loop :: W4.Pred sym -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym, Bool)
+    loop not_prev_model (ConcreteMap cm p) = do
+      mresult <- heuristicSat "concretize" not_prev_model $ \case
+        W4R.Sat evalFn -> 
+          W4R.Sat <$> TFC.foldrMFC (go evalFn) (ConcreteMap cm (W4.truePred sym)) a
+        W4R.Unsat () -> return $ W4R.Unsat ()
+        W4R.Unknown -> return $ W4R.Unknown
+      case mresult of
+        W4R.Sat (ConcreteMap cm' p') -> do
+          not_this <- IO.liftIO $ W4.notPred sym p'
+          withAssumption not_prev_model $ do
+            loop not_this (ConcreteMap cm' (W4.truePred sym))
+          
+        -- predicate is unsatisfiable, so there are no models that disprove all of the
+        -- current cached values
+        W4R.Unsat () -> return $ (ConcreteMap cm p, True)
+        W4R.Unknown -> return (ConcreteMap cm p, False)
+
+  (cm, complete) <- loop (W4.truePred sym) cm_outer
+  (ConcreteMap cm_ _) <- case complete of
+    True -> return cm
+    False -> do
+      -- finish the 'ConcreteMap' by double checking each map
+      let
+        upd :: forall tp. W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
+        upd e cm_ = concretizeWithMap cm_ e >>= \case
+          Just e' -> case W4.asConcrete e' of
+            -- e is possibly concrete, double check it
+            Just{} -> snd <$> concretizeOne e cm_
+            -- e is known-symbolic, nothing to do
+            Nothing -> return cm_
+          -- e is missing from map entirely, so check it here
+          Nothing -> snd <$> concretizeOne e cm_
+      TFC.foldrMFC' upd cm a
+  let cm' = ConcreteMap cm_ (W4.truePred sym)
+  let
+    conc :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+    conc e = fromMaybe e <$> concretizeWithMap cm' e
+
+  a' <- TFC.traverseFC conc a
+  return (a', cm')
 
 concretizeWithModel ::
   SymGroundEvalFn sym ->
