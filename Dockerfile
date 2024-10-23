@@ -46,7 +46,7 @@ RUN apt-get install -y yices2
 
 RUN curl https://downloads.haskell.org/~ghcup/x86_64-linux-ghcup -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
 RUN mkdir -p /root/.ghcup && ghcup install-cabal
-RUN ghcup install ghc ${GHC_VERSION} && ghcup set ghc ${GHC_VERSION} 
+RUN ghcup install ghc ${GHC_VERSION} && ghcup set ghc ${GHC_VERSION}
 
 RUN apt install locales
 RUN locale-gen en_US.UTF-8
@@ -85,7 +85,7 @@ RUN cabal v2-build what4
 # crucible
 COPY --from=gitbase /home/src/submodules/crucible /home/src/submodules/crucible
 RUN cabal v2-build crucible
- 
+
 # arm-asl-parser
 COPY --from=gitbase /home/src/submodules/arm-asl-parser /home/src/submodules/arm-asl-parser
 RUN cabal v2-build asl-parser
@@ -117,7 +117,7 @@ RUN cabal v2-build binary-symbols flexdis86
 #mutual dependency between these submodules
 # macaw
 COPY --from=gitbase /home/src/submodules/macaw /home/src/submodules/macaw
- 
+
 # macaw-loader
 COPY --from=gitbase /home/src/submodules/macaw-loader /home/src/submodules/macaw-loader
 RUN cabal v2-build macaw-base macaw-loader macaw-semmc
