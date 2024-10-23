@@ -2,7 +2,7 @@
 FROM ubuntu:20.04 AS gitbase
 
 ARG TARGETPLATFORM
-RUN if [ "${TARGETPLATFORM}" != "linux/amd64" ]; then echo "Only linux/amd64 is supported, use '--platform linux/amd64'"; exit 1; fi
+RUN if [ "${TARGETPLATFORM}" != "linux/amd64" ]; then echo "TARGETPLATFORM '${TARGETPLATFORM}' is not supported, use '--platform linux/amd64'"; exit 1; fi
 
 RUN apt update && apt install -y ssh
 RUN apt install -y git
