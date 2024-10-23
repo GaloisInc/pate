@@ -1,5 +1,8 @@
 ## Clone git into image
-FROM --platform=linux/amd64 ubuntu:20.04 AS gitbase
+FROM ubuntu:20.04 AS gitbase
+
+ARG TARGETPLATFORM
+RUN if [ "${TARGETPLATFORM}" != "linux/amd64" ]; then echo "Only linux/amd64 is supported, use '--platform linux/amd64'"; exit 1; fi
 
 RUN apt update && apt install -y ssh
 RUN apt install -y git
@@ -30,7 +33,7 @@ RUN find . -name .gitignore -exec rm {} \;
 
 
 ## Build project in image
-FROM --platform=linux/amd64 ubuntu:20.04
+FROM ubuntu:20.04
 ENV GHC_VERSION=9.6.2
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
