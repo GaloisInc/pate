@@ -1,5 +1,5 @@
 ## Clone git into image
-FROM --platform=linux/amd64 ubuntu:20.04 as gitbase
+FROM --platform=linux/amd64 ubuntu:20.04 AS gitbase
 
 RUN apt update && apt install -y ssh
 RUN apt install -y git
