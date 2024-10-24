@@ -1319,8 +1319,11 @@ getTracesForPred ::
   EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
-  p_pretty <- PSi.applySimpStrategy PSi.prettySimplifier p
-  withTracing @"expr" (Some p_pretty) $ do
+  -- p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
+  withTracing @"message" "Traces" $ do
+    withTracing @"message" "Condition" $ withForkedSolver $ do
+      p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
+      emitTrace @"expr" (Some p_pretty)
     mtraceT <- withTracing @"message" "With condition assumed" $ 
       withSatAssumption (PAS.fromPred p) $ do
         traceT <- getSomeGroundTrace scope bundle dom Nothing

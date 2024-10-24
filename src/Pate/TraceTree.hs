@@ -62,6 +62,7 @@ module Pate.TraceTree (
   , noTraceTree
   , viewSomeTraceTree
   , NodeStatus(..)
+  , isFinished
   , isBlockedStatus
   , BlockedStatus(..)
   , NodeStatusLevel(..)
@@ -122,6 +123,7 @@ module Pate.TraceTree (
   , chooseInputFromList
   , chooseInput_
   , runWhenFinishedOrBlocked
+  , traceTreeStartTime
   ) where
 
 import           GHC.TypeLits ( Symbol, KnownSymbol )
@@ -163,6 +165,7 @@ import qualified System.IO as IO
 import Data.Maybe (catMaybes)
 import Control.Concurrent (threadDelay)
 import Control.Monad.State.Strict (StateT (..), MonadState (..))
+import Data.Time
 
 data TraceTag =
     Summary
@@ -212,7 +215,10 @@ joinStatusLevels lvlHi lvlLo = case (lvlHi, lvlLo) of
 
 -- TODO: We could expose the error type here with some plumbing
 data NodeStatus = NodeStatus { nodeStatusLevel :: NodeStatusLevel, 
-  isFinished :: Bool, blockStatus :: BlockedStatus }
+  finishedAt :: Maybe UTCTime, blockStatus :: BlockedStatus }
+
+isFinished :: NodeStatus -> Bool
+isFinished st = isJust (finishedAt st)
 
 -- | A blocked node means that it (or a subnode) is waiting for input
 isBlockedStatus :: NodeStatus -> Bool
@@ -230,10 +236,10 @@ instance IsString TraceTag where
 data IOList' a = IOList' { ioList :: [a], ioListStatus :: NodeStatus }
 -- The Mvar is used to signal when updates are made, for clients to
 -- block on updates (rather than busy-waiting)
-data IOList a = IOList (IO.IORef (IOList' a)) (MVar ())
+data IOList a = IOList (IO.IORef (IOList' a)) (MVar ()) UTCTime
 
 evalIOList' :: IOList a -> IO (IOList' a)
-evalIOList' (IOList ref _) = IO.readIORef ref
+evalIOList' (IOList ref _ _) = IO.readIORef ref
 
 evalIOList :: IOList a -> IO [a]
 evalIOList l = ioList <$> evalIOList' l
@@ -244,7 +250,7 @@ evalIOList l = ioList <$> evalIOList' l
 -- IOList each time it is executed.
 -- The result is either the computer 'b' or the final contents of the list
 withIOList :: forall a b. IOList a -> ([a] -> IO (Maybe b)) -> IO (Either [a] b)
-withIOList (IOList ref mv) f = go
+withIOList (IOList ref mv _) f = go
   where
     go :: IO (Either [a] b)
     go = do
@@ -259,17 +265,18 @@ withIOList (IOList ref mv) f = go
 
 mkStaticIOList :: [a] -> IO (IOList a)
 mkStaticIOList xs = do
-  ref <- IO.newIORef (IOList' xs (NodeStatus StatusSuccess True mempty))
+  now <- getCurrentTime
+  ref <- IO.newIORef (IOList' xs (NodeStatus StatusSuccess (Just now) mempty))
   mv <- newMVar ()
-  return $ IOList ref mv
+  return $ IOList ref mv now
 
 addIOList :: a -> IOList a -> IO ()
-addIOList a (IOList ref mv) = do
+addIOList a (IOList ref mv _) = do
   IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' (a : as) st,()))
   void $ tryPutMVar mv ()
 
 modifyIOListStatus :: (NodeStatus -> NodeStatus) -> IOList a -> IO ()
-modifyIOListStatus f (IOList ref mv) = do
+modifyIOListStatus f (IOList ref mv _) = do
   b <- IO.atomicModifyIORef' ref (\(IOList' as st) -> (IOList' as (f st),isFinished st && (isFinished $ f st)))
   unless b $ void $ tryPutMVar mv ()
 
@@ -282,7 +289,7 @@ propagateStatus stNew stOld =
         True -> stOld 
         False -> case joinStatusLevels (nodeStatusLevel stNew) (nodeStatusLevel stOld) of
           Just stLvlMerged -> stNew { nodeStatusLevel = stLvlMerged }
-          Nothing -> stOld { isFinished = isFinished stNew }
+          Nothing -> stOld { finishedAt = finishedAt stNew }
   in stNew' { blockStatus = (blockStatus stOld) <> (blockStatus stNew) }
 
 getIOListStatus :: IOList a -> IO NodeStatus
@@ -290,13 +297,14 @@ getIOListStatus l = ioListStatus <$> evalIOList' l
 
 emptyIOList :: IO (IOList a)
 emptyIOList = do
-  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess False mempty))
+  r <- IO.liftIO $ IO.newIORef (IOList' [] (NodeStatus StatusSuccess Nothing mempty))
   mv <- newMVar ()
-  return $ IOList r mv
+  now <- getCurrentTime
+  return $ IOList r mv now
 
 resetIOList :: IOList a -> IO ()
-resetIOList (IOList r mv) = do
-  IO.atomicWriteIORef r (IOList' [] (NodeStatus StatusSuccess False mempty))
+resetIOList (IOList r mv _) = do
+  IO.atomicWriteIORef r (IOList' [] (NodeStatus StatusSuccess Nothing mempty))
   void $ tryPutMVar mv ()
   return ()
 
@@ -435,7 +443,7 @@ data TreeBuilder k where
     } -> TreeBuilder k
 
 asBlockedStatus :: NodeStatus -> NodeStatus
-asBlockedStatus st = NodeStatus StatusSuccess False (blockStatus st)
+asBlockedStatus st = NodeStatus StatusSuccess Nothing (blockStatus st)
 
 addNodeDependency :: NodeBuilder k nm -> TreeBuilder k -> TreeBuilder k
 addNodeDependency nodeBuilder treeBuilder =
@@ -498,6 +506,9 @@ data TraceTreeNode (k :: l) nm where
 -- | A heterogenous list of 'TraceTreeNode' elements, representing
 --   all of the tracing context that was emitted at this level
 newtype TraceTree k = TraceTree (IOList (Some (TraceTreeNode k)))
+
+traceTreeStartTime :: TraceTree k -> UTCTime
+traceTreeStartTime (TraceTree (IOList _ _ t)) = t 
 
 isTraceNode :: TraceTreeNode k nm -> (IsTraceNode k nm => a) -> a
 isTraceNode TraceTreeNode{} a = a
@@ -910,10 +921,12 @@ addStatusBlocker header = do
   (setBlock, setUnblock) <- case interactionMode builder of
     Interactive nextChoiceIdent -> do
       newChoiceIdent <- liftIO $ nextChoiceIdent
-      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
+      let status = NodeStatus StatusSuccess Nothing (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
       let setBlock = liftIO $ updateTreeStatus builder status
-      let statusFinal = NodeStatus StatusSuccess True (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
-      let setUnblock = liftIO $ updateTreeStatus builder statusFinal
+      let statusFinal = \t -> NodeStatus StatusSuccess (Just t) (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      let setUnblock = liftIO $ do
+            now <- getCurrentTime
+            updateTreeStatus builder (statusFinal now)
       return (setBlock, setUnblock)
     DefaultChoice -> return (return (), return ())
   return $ 
@@ -1151,8 +1164,8 @@ chooseInput treenm parseInput = do
   case interactionMode builder of
     Interactive nextChoiceIdent -> do
       newChoiceIdent <- liftIO $ nextChoiceIdent
-      let status = NodeStatus StatusSuccess False (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
-      let statusFinal = NodeStatus StatusSuccess False (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
+      let status = NodeStatus StatusSuccess Nothing (BlockedStatus (Set.singleton newChoiceIdent) Set.empty)
+      let statusFinal = NodeStatus StatusSuccess Nothing (BlockedStatus Set.empty (Set.singleton newChoiceIdent))
       c <- liftIO $ newEmptyMVar
       choice_lock <- liftIO $ newMVar False
       let getValue = withMVar choice_lock $ \case
@@ -1390,8 +1403,8 @@ withSubTraces f = do
   let nodeBuilder = addTreeDependency treeBuilder nodeBuilder'
   IO.liftIO $ addNode treeBuilder node  
   r <- catchError
-        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus StatusSuccess True mempty)) >> return r)
-        (\e -> (IO.liftIO $ updateNodeStatus nodeBuilder (NodeStatus (StatusError e) True mempty)) >> throwError e)
+        (runNodeBuilderT f nodeBuilder >>= \r -> (IO.liftIO $ getCurrentTime >>= \t -> updateNodeStatus nodeBuilder (NodeStatus StatusSuccess (Just t) mempty)) >> return r)
+        (\e -> (IO.liftIO $ getCurrentTime >>= \t -> updateNodeStatus nodeBuilder (NodeStatus (StatusError e) (Just t) mempty)) >> throwError e)
   return r
 
 subTraceLabel' ::
@@ -1408,8 +1421,8 @@ subTraceLabel' lbl v f = do
   IO.liftIO $ addNodeValue nodeBuilder lbl v subtree
   r <- catchError
         (liftTreeBuilder treeBuilder (f (\g -> runNodeBuilderT g nodeBuilder))
-          >>= \r -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus StatusSuccess True mempty)) >> return r)
-        (\e -> (IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) True mempty)) >> throwError e)
+          >>= \r -> (IO.liftIO $ getCurrentTime >>= \t -> updateTreeStatus treeBuilder (NodeStatus StatusSuccess (Just t) mempty)) >> return r)
+        (\e -> (IO.liftIO $ getCurrentTime >>= \t -> updateTreeStatus treeBuilder (NodeStatus (StatusError e) (Just t) mempty)) >> throwError e)
   return r
 
 subTraceLabel ::
@@ -1429,7 +1442,7 @@ emitTraceWarning ::
   m ()
 emitTraceWarning e = do
   treeBuilder <- getTreeBuilder
-  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusWarning e) False mempty)
+  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusWarning e) Nothing mempty)
 
 -- | Tag the current sub-computation as having raised an error
 emitTraceError ::
@@ -1439,12 +1452,12 @@ emitTraceError ::
   m ()
 emitTraceError e = do
   treeBuilder <- getTreeBuilder
-  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) False mempty)
+  IO.liftIO $ updateTreeStatus treeBuilder (NodeStatus (StatusError e) Nothing mempty)
 
 finalizeTree ::
   TreeBuilder k ->
   IO ()
-finalizeTree treeBuilder = updateTreeStatus treeBuilder (NodeStatus StatusSuccess True mempty)
+finalizeTree treeBuilder = getCurrentTime >>= \t -> updateTreeStatus treeBuilder (NodeStatus StatusSuccess (Just t) mempty)
 
 traceAlternatives' ::
   IsTreeBuilder k e m =>

@@ -38,10 +38,12 @@ module Pate.Memory.MemTrace
 , llvmPtrEq
 , readMemState
 , writeMemState
-, MemFootprint(..)
+, MemFootprint
+, pattern MemFootprint
 , isDir
 , MemTraceK
 , traceFootprint
+, traceFootprintOps
 , observableEvents
 , UndefPtrOpTag
 , UndefPtrOpTags
@@ -1230,7 +1232,7 @@ ptrPredOp mkundef regconstraint f bak reg1 off1 reg2 off2  = do
       getConst <$> mkBinUndef mkundef sym (AssertedResult cond (Const result)) (LLVMPointer reg1 off1) (LLVMPointer reg2 off2)
 
 muxPtr ::
-  IsSymInterface sym =>
+  IsExprBuilder sym =>
   sym ->
   Pred sym ->
   LLVMPtr sym w ->
@@ -1949,131 +1951,194 @@ oneSubEq w = unsafeCoerce (leqRefl w)
 
 -- | A wrapped value indicating that the given memory address has been modified
 -- by a given write sequence, with a given word size (in bytes)
-data MemFootprint sym ptrW where
-  MemFootprint ::
+data MemFootprintSized sym ptrW w where
+  MemFootprintSized ::
     1 <= w =>
     LLVMPtr sym ptrW ->
     NatRepr w ->
     MemOpDirection ->
     MemOpCondition sym ->
     Endianness ->
-    MemFootprint sym ptrW
+    MemFootprintSized sym ptrW w
 
+type MemFootprint sym ptrW = Some (MemFootprintSized sym ptrW)
 
-instance TestEquality (SymExpr sym) => Eq (MemFootprint sym ptrW) where
-  (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) == (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
-   | reg1 == reg2
-   , Just Refl <- testEquality off1 off2
+pattern MemFootprint :: forall sym ptrW. 
+  () => (forall w. 1 <= w => 
+  LLVMPtr sym ptrW ->
+  NatRepr w ->
+  MemOpDirection ->
+  MemOpCondition sym ->
+  Endianness ->
+  MemFootprint sym ptrW)
+pattern MemFootprint ptr w dir cond end = (Some (MemFootprintSized ptr w dir cond end))
+
+{-# COMPLETE MemFootprint #-}
+
+instance TestEquality (SymExpr sym) => TestEquality (MemFootprintSized sym ptrW) where
+  testEquality (MemFootprintSized (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) (MemFootprintSized (LLVMPointer reg2 off2) sz2 dir2 cond2 end2)
+   | Just Refl <- testEquality off1 off2
    , Just Refl <- testEquality sz1 sz2
-   = cond1 == cond2 && dir1 == dir2 && end1 == end2
-  _ == _ = False
+   , reg1 == reg2
+   , cond1 == cond2
+   , dir1 == dir2
+   , end1 == end2
+   = Just Refl
+  testEquality _ _ = Nothing
 
-instance OrdF (SymExpr sym) => Ord (MemFootprint sym ptrW) where
-  compare (MemFootprint (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) (MemFootprint (LLVMPointer reg2 off2) sz2 dir2 cond2 end2) =
-    compare dir1 dir2 <>
-    (compare reg1 reg2) <>
-    (toOrdering $ compareF off1 off2) <>
-    (toOrdering $ compareF sz1 sz2) <>
+instance OrdF (SymExpr sym) => OrdF (MemFootprintSized sym ptrW) where
+  compareF (MemFootprintSized (LLVMPointer reg1 off1) sz1 dir1 cond1 end1) (MemFootprintSized (LLVMPointer reg2 off2) sz2 dir2 cond2 end2) =
+    lexCompareF off1 off2 $ 
+    lexCompareF sz1 sz2 $ fromOrdering $ 
+    compare reg1 reg2 <>
     compare cond1 cond2 <>
+    compare dir1 dir2 <>
     compare end1 end2
-
 
 isDir :: MemOpDirection -> MemFootprint sym ptrW -> Bool
 isDir dir (MemFootprint _ _ dir' _ _) = dir == dir'
+
 
 memOpFootprint ::
   IsExprBuilder sym =>
   sym ->
   MemOp sym ptrW ->
-  (MemFootprint sym ptrW, Pred sym)
-memOpFootprint sym (MemOp ptr dir cond w _ end) =
-  (MemFootprint ptr w dir Unconditional end, getCond sym cond)
+  MemFootprint sym ptrW
+memOpFootprint _sym (MemOp ptr dir cond w _val end) = MemFootprint ptr w dir cond end
+
+data MemFootprintVal sym w = MemFootprintVal (Pred sym) (LLVMPtr sym (8*w))
+
+memOpFootprintVal ::
+  IsExprBuilder sym =>
+  sym ->
+  MemOp sym ptrW ->
+  MapF.Pair (MemFootprintSized sym ptrW) (MemFootprintVal sym)
+memOpFootprintVal sym (MemOp ptr dir cond w val end) = MapF.Pair
+  (MemFootprintSized ptr w dir Unconditional end) (MemFootprintVal (getCond sym cond) val)
+
+mergeFootprintVals :: 
+  IsSymExprBuilder sym => 
+  sym -> 
+  MemFootprintVal sym w ->
+  MemFootprintVal sym w ->
+  IO (MemFootprintVal sym w)
+mergeFootprintVals sym (MemFootprintVal p1 ptr1) (MemFootprintVal p2 ptr2) = do
+  p <- orPred sym p1 p2
+  ptrs_eq <- llvmPtrEq sym ptr1 ptr2
+  ptr <- case asConstantPred ptrs_eq of
+    Just True -> return ptr1
+    _ -> do
+      p1_and_p2 <- andPred sym p1 p2
+      fresh_p <- freshConstant sym emptySymbol BaseBoolRepr
+      ptr1_or_ptr2 <- muxPtr sym fresh_p ptr1 ptr2
+      ptr <- muxPtr sym p1 ptr1 ptr2
+      -- if both conditions are true then we nondeterministically select one of the
+      -- values
+      -- otherwise we pick based on which is true
+      muxPtr sym p1_and_p2 ptr1_or_ptr2 ptr
+  return $ MemFootprintVal p ptr
+
+muxFootprintVals ::
+  IsExprBuilder sym => 
+  sym -> 
+  Pred sym ->
+  MemFootprintVal sym w ->
+  MemFootprintVal sym w ->
+  IO (MemFootprintVal sym w)
+muxFootprintVals sym p_mux (MemFootprintVal p1 ptr1) (MemFootprintVal p2 ptr2) = do
+  p <- itePred sym p_mux p1 p2
+  ptr <- muxPtr sym p ptr1 ptr2
+  return $ MemFootprintVal p ptr
+
+newtype MemFootprintMap sym ptrW =
+  MemFootprintMap (MapF.MapF (MemFootprintSized sym ptrW) (MemFootprintVal sym))
 
 unionFootprintMap ::
-  IsExprBuilder sym =>
-  OrdF (SymExpr sym) =>
+  IsSymExprBuilder sym =>
   sym ->
-  Map (MemFootprint sym ptrW) (Pred sym) ->
-  Map (MemFootprint sym ptrW) (Pred sym) ->
-  IO (Map (MemFootprint sym ptrW) (Pred sym))
-unionFootprintMap sym =
-  Map.mergeA
-    Map.preserveMissing
-    Map.preserveMissing
-    (Map.zipWithAMatched (\_k p1 p2 -> orPred sym p1 p2))
+  MemFootprintMap sym ptrW ->
+  MemFootprintMap sym ptrW  ->
+  IO (MemFootprintMap sym ptrW )
+unionFootprintMap sym (MemFootprintMap m1) (MemFootprintMap m2) = MemFootprintMap <$> 
+  MapF.mergeWithKeyM
+  (\_k v1 v2 -> Just <$> mergeFootprintVals sym v1 v2)
+  return
+  return
+  m1 m2
 
 muxFootprintMap ::
   IsExprBuilder sym =>
   OrdF (SymExpr sym) =>
   sym ->
   Pred sym ->
-  Map (MemFootprint sym ptrW) (Pred sym) ->
-  Map (MemFootprint sym ptrW) (Pred sym) ->
-  IO (Map (MemFootprint sym ptrW) (Pred sym))
-muxFootprintMap sym p =
-  Map.mergeA
-    (Map.traverseMissing (\_k x -> andPred sym x p))
-    (Map.traverseMissing (\_k y -> andPred sym y =<< notPred sym p))
-    (Map.zipWithAMatched (\_k x y -> itePred sym p x y))
+  MemFootprintMap sym ptrW ->
+  MemFootprintMap sym ptrW ->
+  IO (MemFootprintMap sym ptrW)
+muxFootprintMap sym p_mux (MemFootprintMap m1) (MemFootprintMap m2) = MemFootprintMap <$> 
+  MapF.mergeWithKeyM
+  -- footprints shared between branches are muxed according to the condition
+  (\_k v1 v2 -> Just <$> muxFootprintVals sym p_mux v1 v2)
+  -- all footprints unique to the true branch are made conditional on the mux condition being true
+  (TF.traverseF (\(MemFootprintVal p v) -> MemFootprintVal <$> andPred sym p p_mux <*> pure v))
+  -- all footprints unique to the false branch are made conditional on the mux condition being false
+  (TF.traverseF (\(MemFootprintVal p v) -> MemFootprintVal <$> (andPred sym p =<< notPred sym p_mux) <*> pure v))
+  m1 m2
 
--- This is basically an internal function called
--- from "trace footprint", but is broken out here.
--- The "Const" in the return type is an artifact
--- of how the evalWithFreshCache operator works,
--- as it requires an applicative functor over
--- the sequence type.
---
--- We compute on the intermediate Map type because
--- it is more convenient for computing mux and union
--- operations than @Set Footprint@ type that is eventually
--- returned by `traceFootprint`.
 traceFootprintMap ::
-  IsExprBuilder sym =>
+  IsSymExprBuilder sym =>
   OrdF (SymExpr sym) =>
   sym ->
   MemTraceSeq sym ptrW ->
-  IO (Const (Map (MemFootprint sym ptrW) (Pred sym)) (MemEvent sym ptrW))
+  IO (Const (MemFootprintMap sym ptrW) (MemEvent sym ptrW))
 traceFootprintMap sym =
-  evalWithFreshCache $ \rec -> \case
-    SymSequenceNil -> return (Const mempty)
+ evalWithFreshCache $ \rec -> \case
+   SymSequenceNil -> return (Const (MemFootprintMap MapF.empty))
 
-    SymSequenceCons _ (MemOpEvent x) xs ->
-      do let (fp,p) = memOpFootprint sym x
-         let m1 = Map.insert fp p mempty
-         Const m2 <- rec xs
-         Const <$> unionFootprintMap sym m1 m2
-    SymSequenceCons _ _ xs -> rec xs
+   SymSequenceCons _ (MemOpEvent x) xs -> do
+     MapF.Pair fp v <- return $ memOpFootprintVal sym x
+     let m1 = MemFootprintMap (MapF.singleton fp v)
+     Const m2 <- rec xs
+     Const <$> unionFootprintMap sym m1 m2
 
-    SymSequenceAppend _ xs ys ->
-      do Const m1 <- rec xs
-         Const m2 <- rec ys
-         Const <$> unionFootprintMap sym m1 m2
+   SymSequenceCons _ _ xs -> rec xs
+   SymSequenceAppend _ xs ys ->
+     do Const m1 <- rec xs
+        Const m2 <- rec ys
+        Const <$> unionFootprintMap sym m1 m2
 
-    SymSequenceMerge _ p xs ys ->
-      do Const m1 <- rec xs
-         Const m2 <- rec ys
-         Const <$> muxFootprintMap sym p m1 m2
+   SymSequenceMerge _ p xs ys ->
+     do Const m1 <- rec xs
+        Const m2 <- rec ys
+        Const <$> muxFootprintMap sym p m1 m2
 
+-- | Collapse all memory operations in a memory trace into a set, where each 'MemOp' is
+--   conditional on the branch condition leading to it
+traceFootprintOps ::
+  forall sym ptrW.
+  IsSymExprBuilder sym =>
+  OrdF (SymExpr sym) =>
+  sym ->
+  MemTraceImpl sym ptrW ->
+  IO (Set (MemOp sym ptrW))
+traceFootprintOps sym mem = do
+  Const (MemFootprintMap m) <- traceFootprintMap sym (memSeq mem)
+  Set.fromList <$> mapM (\(MapF.Pair a b) -> go a b) (MapF.toList m)
+  where
+    go :: MemFootprintSized sym ptrW w -> MemFootprintVal sym w -> IO (MemOp sym ptrW)
+    go (MemFootprintSized ptr w dir cond end) (MemFootprintVal p val) = case cond of
+      Unconditional | Just True <- asConstantPred p -> return $ MemOp ptr dir Unconditional w val end
+      _ -> do
+        let condp = getCond sym cond
+        p' <- andPred sym condp p
+        return $ MemOp ptr dir (Conditional p') w val end
 
--- | Compute the set of "footprint" values
---   that correspond to the reads and writes
---   generated by this trace memory.
-traceFootprint ::
-  IsExprBuilder sym =>
+traceFootprint :: 
+  IsSymExprBuilder sym =>
   OrdF (SymExpr sym) =>
   sym ->
   MemTraceImpl sym ptrW ->
   IO (Set (MemFootprint sym ptrW))
-traceFootprint sym mem = do
-   do Const m <- traceFootprintMap sym (memSeq mem)
-      let xs = do (MemFootprint ptr w dir _ end, cond) <- Map.toList m
-                  case asConstantPred cond of
-                    Nothing    -> [MemFootprint ptr w dir (Conditional cond) end]
-                    Just True  -> [MemFootprint ptr w dir Unconditional end]
-                    Just False -> []
-      return $ Set.fromList xs
-
-
+traceFootprint sym mem = Set.map (memOpFootprint sym) <$> traceFootprintOps sym mem 
 
 -- | Filter the memory event traces to leave just the observable
 --   events.  This currently includes all system call events,
