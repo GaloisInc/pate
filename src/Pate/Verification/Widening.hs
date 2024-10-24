@@ -1652,7 +1652,7 @@ getInitalAbsDomainVals bundle preDom = withTracing @"debug" "getInitalAbsDomainV
   getConcreteRange <- PAD.mkGetAbsRange (\es -> TFC.fmapFC (PAD.extractAbsRange sym) <$> concretizeWithSolverBatch es)
   
   eqCtx <- equivalenceContext
-  PPa.forBins $ \bin -> do
+  forkBins $ \bin -> do
     out <- PPa.get bin (PS.simOut bundle)
     pre <- PPa.get bin (PAD.absDomVals preDom)
 

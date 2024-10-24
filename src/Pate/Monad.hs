@@ -106,7 +106,10 @@ module Pate.Monad
   , withSharedEnvEmit
   , module PME
   , atPriority, currentPriority, thisPriority
-  , concretizeWithSolverBatch
+  , concretizeWithSolverBatch 
+  , withFreshSolver
+  , forkBins
+  , withForkedSolver
   )
   where
 
@@ -1611,3 +1614,52 @@ equivalenceContext = withValid $ do
   PA.SomeValidArch d <- CMR.asks envValidArch
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion (\x -> x)
+
+
+-- | Run the given continuation with a fresh solver process (without affecting the
+--   current solver process). The new process will inherit the current assumption
+--   context.
+withFreshSolver ::
+  EquivM_ sym arch a ->
+  EquivM sym arch a
+withFreshSolver f = do
+  vcfg <- CMR.asks envConfig
+  let solver = PC.cfgSolver vcfg
+  PSo.Sym n sym _ <- CMR.asks envValidSym
+  asm <- currentAsm
+  PSo.withOnlineSolver solver Nothing sym $ \bak ->
+    CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak, envCurrentFrame = mempty }) $ 
+      withAssumptionSet asm $ f
+
+-- | Run the given computation in a forked thread with a fresh solver process.
+--   This is non-blocking and the current solver process is left unmodified.
+withForkedSolver ::
+  EquivM_ sym arch () ->
+  EquivM sym arch ()
+withForkedSolver f = do
+  thistid <- IO.liftIO $ IO.myThreadId
+  _ <- IO.withRunInIO $ \runInIO -> 
+    IO.forkFinally (runInIO $ withFreshSolver f)
+      (\case Left err -> IO.throwTo thistid err; Right () -> return ())
+  return ()
+
+-- | Similar to 'forBins' but runs the 'Patched' process in a separate thread
+--   concurrently with a fresh solver process.
+forkBins ::
+   (forall bin. PBi.WhichBinaryRepr bin -> EquivM_ sym arch (f bin)) ->
+   EquivM sym arch (PPa.PatchPair f)
+forkBins f = do
+  (resO, resP) <- do
+    thistid <- IO.liftIO $ IO.myThreadId
+    outVar2 <- IO.liftIO $ IO.newEmptyMVar
+    _ <- IO.withRunInIO $ \runInIO -> 
+      IO.forkFinally (runInIO $ withFreshSolver $ (PPa.catchPairErr (Just <$> f PBi.PatchedRepr) (return Nothing)))
+        (\case Left err -> IO.throwTo thistid err; Right a -> IO.putMVar outVar2 a)
+    resO <- PPa.catchPairErr (Just <$> f PBi.OriginalRepr) (return Nothing)
+    resP <- IO.liftIO $ IO.readMVar outVar2
+    return (resO, resP)
+  case (resO, resP) of
+    (Just vO, Just vP) -> return $ PPa.PatchPair vO vP
+    (Nothing, Just vP) -> return $ PPa.PatchPairPatched vP
+    (Just vO, Nothing) -> return $ PPa.PatchPairOriginal vO
+    (Nothing, Nothing) -> PPa.throwPairErr
