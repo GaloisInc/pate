@@ -41,9 +41,12 @@ jobs:
             docker pull artifactory.galois.com:5025/pate/pate:refs-heads-master || \
             echo "No latest image found"
 
+      # Docker on our self-hosted runners doesn't populate TARGETPLATFORM so we
+      # set it manually via build-arg. We need this to pass our platform check
+      # in the Dockerfile.
       - name: Build Docker Image
         run: |
-          docker build . \
+          docker build --platform linux/amd64 --build-arg TARGETPLATFORM=linux/amd64 . \
             --cache-from artifactory.galois.com:5025/pate/pate:${GITHUB_REF//\//\-} \
             --cache-from artifactory.galois.com:5025/pate/pate:refs-heads-master \
             -t pate
