@@ -129,6 +129,7 @@ import qualified Lang.Crucible.Utils.MuxTree as MT
 import Pate.Verification.Domain (universalDomain)
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.IORef as IO
+import qualified Data.Parameterized.TraversableFC as TFC
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -1647,37 +1648,16 @@ getInitalAbsDomainVals ::
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
 getInitalAbsDomainVals bundle preDom = withTracing @"debug" "getInitalAbsDomainVals" $ withSym $ \sym -> do
-  PEM.SymExprMappable asEM <- return $ PEM.symExprMappable sym
 
-  (ref :: IO.IORef (MapF.MapF (W4.SymExpr sym) (PAD.AbsRange)))  <- IO.liftIO $ IO.newIORef MapF.empty
-
-
-  let
-    getConcreteRange :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (PAD.AbsRange tp)
-    getConcreteRange e = do
-      m <- (IO.liftIO $ IO.readIORef ref)
-      case MapF.lookup e m of
-        Just a -> return a
-        Nothing -> do
-          -- e' <- asEM @tp $ applyCurrentAsms e
-          e'' <- concretizeWithSolver e
-          emitTraceLabel @"expr" "output" (Some e'')
-          let a = PAD.extractAbsRange sym e''
-          IO.liftIO $ IO.modifyIORef ref (MapF.insert e a)
-          return a
-
+  getConcreteRange <- PAD.mkGetAbsRange (\es -> TFC.fmapFC (PAD.extractAbsRange sym) <$> concretizeWithSolverBatch es)
+  
   eqCtx <- equivalenceContext
   PPa.forBins $ \bin -> do
     out <- PPa.get bin (PS.simOut bundle)
     pre <- PPa.get bin (PAD.absDomVals preDom)
-    {-
-    _ <- PAD.initAbsDomainVals sym eqCtx collectExpr out pre
-    Some exprs <- (Ctx.fromList . Set.toList) <$> (IO.liftIO $ IO.readIORef exprsRef)
-    cm_empty <- emptyConcreteMap
-    (_, cm) <- concretizeWithSolverGen cm_empty exprs
-    PAD.initAbsDomainVals sym eqCtx (concFromCache cm) out pre
-    -}
-    PAD.initAbsDomainVals sym eqCtx getConcreteRange out pre
+
+    PAD.batchGetAbsRange getConcreteRange $ \getConcreteRangeBatch -> 
+      PAD.initAbsDomainVals sym eqCtx getConcreteRangeBatch out pre
 
 
 widenUsingCounterexample ::

@@ -106,9 +106,7 @@ module Pate.Monad
   , withSharedEnvEmit
   , module PME
   , atPriority, currentPriority, thisPriority
-  , concretizeWithSolverGen
-  , concretizeWithMap
-  , ConcreteMap, emptyConcreteMap
+  , concretizeWithSolverBatch
   )
   where
 
@@ -1065,15 +1063,15 @@ concretizeOne e (ConcreteMap cm p) = do
     Just c -> return $ (e', ConcreteMap (MapF.insert e (PPa.LiftF (Just c)) cm) p)
     Nothing -> return $ (e, ConcreteMap (MapF.insert e (PPa.LiftF Nothing) cm) p)
 
-concretizeWithSolverGen ::
+concretizeWithSolverGen' ::
   forall sym arch ctx.
   ConcreteMap sym ->
   Ctx.Assignment (W4.SymExpr sym) ctx ->
   EquivM sym arch (Ctx.Assignment (W4.SymExpr sym) ctx, ConcreteMap sym)
-concretizeWithSolverGen cm_outer (Ctx.Empty Ctx.:> e) =  do
+concretizeWithSolverGen' cm_outer (Ctx.Empty Ctx.:> e) =  do
   (e', cm) <- concretizeOne e cm_outer
   return $ (Ctx.Empty Ctx.:> e', cm)
-concretizeWithSolverGen cm_outer a = withSym $ \sym -> do
+concretizeWithSolverGen' cm_outer a = withSym $ \sym -> do
   let
     go :: forall tp. SymGroundEvalFn sym -> W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
     go evalFn e (ConcreteMap m p) = case W4.asConcrete e of
@@ -1144,6 +1142,16 @@ concretizeWithSolverGen cm_outer a = withSym $ \sym -> do
 
   a' <- TFC.traverseFC conc a
   return (a', cm')
+
+-- | Similar to 'concretizeWithSolver' but uses a widening strategy to
+--   attempt to concretize all of the given expressions simultaneously.
+concretizeWithSolverBatch ::
+  forall sym arch ctx.
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  EquivM sym arch (Ctx.Assignment (W4.SymExpr sym) ctx)
+concretizeWithSolverBatch es = do
+  emptyCM <- emptyConcreteMap
+  fst <$> concretizeWithSolverGen' emptyCM es
 
 concretizeWithModel ::
   SymGroundEvalFn sym ->
