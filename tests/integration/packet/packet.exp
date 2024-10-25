@@ -93,6 +93,12 @@ expect -re {0: let -- segment1\+0x664.. in not v(\d)+}
 expect ">"
 send "0\r"
 
+expect "0: Simplified Condition"
+send "0\r"
+
+expect -re {0: let -- segment1\+0x664.. in not v(\d)+}
+send "0\r"
+
 expect -re {v(\d)+ = eq 0x80:\[8\] \(select \(select cInitMemBytes@(\d)+:a 0\) 0x11045:\[32\]\)}
 expect -re {in not v((\d)+)}
 expect ">"
