@@ -110,6 +110,7 @@ module Pate.Monad
   , withFreshSolver
   , forkBins
   , withForkedSolver
+  , withForkedSolver_
   )
   where
 
@@ -1627,21 +1628,39 @@ withFreshSolver f = do
   let solver = PC.cfgSolver vcfg
   PSo.Sym n sym _ <- CMR.asks envValidSym
   asm <- currentAsm
-  PSo.withOnlineSolver solver Nothing sym $ \bak ->
-    CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak, envCurrentFrame = mempty }) $ 
-      withAssumptionSet asm $ f
+  PSo.withOnlineSolver solver Nothing sym $ \bak -> do
+    unsatCacheRef <- asks envUnsatCacheRef
+    satCache <- asks envSatCacheRef
 
--- | Run the given computation in a forked thread with a fresh solver process.
---   This is non-blocking and the current solver process is left unmodified.
-withForkedSolver ::
+    CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak, envCurrentFrame = mempty }) $ 
+      withAssumptionSet asm $ CMR.local (\env -> env { envUnsatCacheRef = unsatCacheRef, envSatCacheRef = satCache }) f
+
+
+-- | Similar to 'withForkedSolver' but does not return a result.
+withForkedSolver_ ::
   EquivM_ sym arch () ->
   EquivM sym arch ()
-withForkedSolver f = do
+withForkedSolver_ f = do
   thistid <- IO.liftIO $ IO.myThreadId
   _ <- IO.withRunInIO $ \runInIO -> 
     IO.forkFinally (runInIO $ withFreshSolver f)
       (\case Left err -> IO.throwTo thistid err; Right () -> return ())
   return ()
+
+-- | Run the given function in a forked thread with a fresh solver process.
+--   This is non-blocking and the current solver process is left unmodified.
+--   The returned IO action will block until the given function has finished.
+withForkedSolver ::
+  EquivM_ sym arch a ->
+  EquivM sym arch (IO a)
+withForkedSolver f = do
+  thistid <- IO.liftIO $ IO.myThreadId
+  outVar <- IO.liftIO $ IO.newEmptyMVar
+  _ <- IO.withRunInIO $ \runInIO -> 
+    IO.forkFinally (runInIO $ withFreshSolver f)
+      (\case Left err -> IO.throwTo thistid err; Right a -> IO.putMVar outVar a)
+  return $ IO.readMVar outVar
+
 
 -- | Similar to 'forBins' but runs the 'Patched' process in a separate thread
 --   concurrently with a fresh solver process.

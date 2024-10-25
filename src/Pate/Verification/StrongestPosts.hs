@@ -1320,7 +1320,7 @@ getTracesForPred ::
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
   withTracing @"expr" (Some p) $ do
-    withTracing @"message" "Simplified Condition" $ withForkedSolver $ do
+    withTracing @"message" "Simplified Condition" $ withForkedSolver_ $ do
       p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
       emitTrace @"expr" (Some p_pretty)
     mtraceT <- withTracing @"message" "With condition assumed" $ 
