@@ -1236,9 +1236,9 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
               , ("simpleStackOffsetO", simpleStackOffset PBi.OriginalRepr se)
               , ("simpleStackOffsetP", simpleStackOffset PBi.PatchedRepr se)
               -- solver-based strategies now
-              , ("asScopedConst", asScopedConst (W4.truePred sym) se)
               , ("asSimpleAssign", asSimpleAssign se)
               ] ++ asStackOffsetStrats
+              ++ [ ("asScopedConst", asScopedConst (W4.truePred sym) se) ] 
 
             lift $ emitEvent (PE.ScopeAbstractionResult (PS.simPair bundle) se se')
             return se'
