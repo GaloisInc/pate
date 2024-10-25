@@ -451,8 +451,19 @@ joinMemCellAbsValues = MapF.mergeWithKey
  id 
  id
 
-collapseMemCellVals :: W4.IsSymExprBuilder sym => [MapF.Pair (PMC.MemCell sym arch)  (MemAbstractValue s)] -> MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s)
-collapseMemCellVals = foldr (\(MapF.Pair k v) m -> joinMemCellAbsValues (MapF.singleton k v) m) MapF.empty
+-- Track if we ever write a concrete value to a given cell
+collapseMemCellVals :: 
+  forall sym arch.
+  W4.IsSymExprBuilder sym => 
+  [MapF.Pair (PMC.MemCell sym arch) (MemAbstractValue sym)] -> 
+  MapF.MapF (PMC.MemCell sym arch) (Const (Bool, Bool))
+collapseMemCellVals = foldr go MapF.empty
+  where
+    go :: MapF.Pair (PMC.MemCell sym arch)  (MemAbstractValue s) -> MapF.MapF (PMC.MemCell sym arch) (Const (Bool, Bool)) -> MapF.MapF (PMC.MemCell sym arch) (Const (Bool, Bool)) 
+    go (MapF.Pair k (MemAbstractValue (MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs)))) m = 
+      MapF.insertWith (\(Const (a,b)) (Const (c, d)) -> Const (a || c, b || d)) k 
+        (Const (case regAbs of AbsUnconstrained{} -> False; _ -> True, case offsetAbs of AbsUnconstrained{} -> False; _ -> True)) m
+
 
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
@@ -491,7 +502,8 @@ initAbsDomainVals sym eqCtx getAbs stOut preVals = do
     let cell = PMC.MemCell ptr w end
     subTrace (PL.SomeLocation (PL.Cell cell)) $ getMemOpAbsVal mop
   
-  memTraceVals <- subTree @"loc" "Initial Domain 4" $  MapF.traverseWithKey (\cell mv -> subTrace (PL.SomeLocation (PL.Cell cell)) $ getCellWithPrevAbsVal cell mv) memTracePrevVals
+  memTraceVals <- subTree @"loc" "Initial Domain 4" $  
+    MapF.traverseWithKey (\cell (Const (b1, b2)) -> subTrace (PL.SomeLocation (PL.Cell cell)) $ getCellWithPrevAbsVal cell b1 b2) memTracePrevVals
 
   let memVals = joinMemCellAbsValues (MapF.fromList memPreVals) memTraceVals
 
@@ -543,20 +555,21 @@ initAbsDomainVals sym eqCtx getAbs stOut preVals = do
     -- extract a final abstract value from a first-pass check
     getCellWithPrevAbsVal ::
       PMC.MemCell sym arch w ->
-      MemAbstractValue sym w  ->
+      Bool ->
+      Bool ->
       m (MemAbstractValue sym w)
-    getCellWithPrevAbsVal cell (MemAbstractValue (MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs))) = do
+    getCellWithPrevAbsVal cell regMaybeConcrete offMaybeConcrete = do
       CLM.LLVMPointer mem_region mem_offset <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
       -- we avoid checking the actual memory model for concrete values if we didn't originally
       -- write/read a concrete value, since it's unlikely to succeed (outside of strange memory aliasing cases)
       -- since this is an under-approximation it's safe to just leave them as unconstrained
-      memRegAbs <- case regAbs of
-        AbsUnconstrained tp -> return $ AbsUnconstrained tp
-        _ -> f (W4.natToIntegerPure mem_region)
-      
-      memOffsetAbs <- case offsetAbs of
-        AbsUnconstrained tp -> return $ AbsUnconstrained tp
-        _ -> f mem_offset
+      memRegAbs <- case regMaybeConcrete of
+        False -> return $ AbsUnconstrained W4.BaseIntegerRepr
+        True -> f (W4.natToIntegerPure mem_region)
+
+      memOffsetAbs <- case offMaybeConcrete of
+        False -> return $ AbsUnconstrained (W4.exprType mem_offset)
+        True -> f mem_offset
       
       return $ MemAbstractValue $ MacawAbstractValue (Ctx.Empty Ctx.:> memRegAbs Ctx.:> memOffsetAbs)
 
