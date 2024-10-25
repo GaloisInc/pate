@@ -44,6 +44,7 @@ data OutputElem =
   OutputElem 
     { outIdx :: Int
     , outIndent :: Int
+    , outFinished :: Bool
     , outDuration :: Maybe (PP.Doc ())
     , outPP :: PP.Doc ()
     , outJSON :: JSON.Value
@@ -51,9 +52,6 @@ data OutputElem =
     , outMoreResults :: Bool
     -- ^ more results at this nesting level that were omitted
     }
-
-outFinished :: OutputElem -> Bool
-outFinished e = isJust (outDuration e)
 
 data Output_ =
     OutputElemList [OutputElem]
