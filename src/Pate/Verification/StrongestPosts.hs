@@ -1435,7 +1435,8 @@ withSimBundle ::
   EquivM sym arch a
 withSimBundle pg vars node f = do
   bundle0 <- mkSimBundle pg node vars
-  bundle1 <- PSi.applySimpStrategy PSi.coreStrategy bundle0
+  let bundle1 = bundle0
+  --bundle1 <- withTracing @"debug" "simpBundle" $ PSi.applySimpStrategy PSi.coreStrategy bundle0
   bundle <- applyCurrentAsms bundle1
   emitTrace @"bundle" (Some bundle)
   f bundle
