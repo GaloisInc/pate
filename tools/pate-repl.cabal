@@ -53,5 +53,6 @@ library
                        macaw-aarch32,
                        macaw-aarch32-symbolic,
                        macaw-aarch32,
-                       dismantle-arm-xml
+                       dismantle-arm-xml,
+                       time
                        

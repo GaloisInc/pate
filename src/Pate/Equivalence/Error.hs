@@ -172,6 +172,7 @@ data InnerEquivalenceError arch
   | forall e. X.Exception e => UnhandledException e
   | IncompatibleSingletonNodes (PB.ConcreteBlock arch PBi.Original) (PB.ConcreteBlock arch PBi.Patched)
   | SolverError X.SomeException
+  | ConcretizationFailure String
 
 errShortName :: MS.SymArchConstraints arch => InnerEquivalenceError arch -> String
 errShortName = \case

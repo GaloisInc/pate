@@ -78,8 +78,62 @@ import Data.List (isPrefixOf)
 
 data ParsedBlocks arch = forall ids. ParsedBlocks [MD.ParsedBlock arch ids]
 
+data CachedFunInfo arch (bin :: PBi.WhichBinary) = CachedFunInfo
+  { 
+    cachedDfi :: Some (MD.DiscoveryFunInfo arch)
+  -- we take a snapshot of any state that affects macaw's code discovery so
+  -- we can check if the cached result is still valid on a hit
+  , cachedOverride :: Maybe (PB.AbsStateOverride arch)
+  -- FIXME: technically we can scope these to the current function body, but
+  -- these are added infrequently enough that it's probably not worth it
+  , cachedExtraJumps :: ExtraJumps arch
+  , cachedExtraTargets :: Set.Set (MM.ArchSegmentOff arch)
+  }
+
+cachedFunInfo ::
+  forall arch bin ids.
+  ParsedFunctionMap arch bin ->
+  ParsedFunctionState arch bin -> 
+  MD.DiscoveryFunInfo arch ids -> 
+  CachedFunInfo arch bin
+cachedFunInfo pfm st dfi = CachedFunInfo (Some dfi) (Map.lookup addr (absStateOverrides pfm)) (extraEdges st) (extraTargets st)
+  where
+    addr :: MM.ArchSegmentOff arch
+    addr = MD.discoveredFunAddr dfi
+
+-- | Add a function entry to the cache, taking a snapshot of any relevant
+--  state so we can validate the cached entry on retrieval
+addFunctionEntry ::
+  ParsedFunctionMap arch bin ->
+  PB.FunctionEntry arch bin ->
+  MD.DiscoveryFunInfo arch ids ->
+  ParsedFunctionState arch bin ->
+  ParsedFunctionState arch bin
+addFunctionEntry pfm fe dfi st = st { parsedFunctionCache = Map.insert fe (cachedFunInfo pfm st dfi) (parsedFunctionCache st ) }
+
+
+-- | Fetch a cached discovery result for a function entry. Returns 'Nothing' if any relevant state in either the 'ParsedFunctionMap'
+--   or the 'ParsedFunctionState' has changed since the entry was computed (i.e. the cached entry is potentially invalid and
+--   needs to be re-computed).
+lookupFunctionEntry ::
+  MM.ArchConstraints arch =>
+  ParsedFunctionMap arch bin ->
+  ParsedFunctionState arch bin ->
+  PB.FunctionEntry arch bin ->
+  Maybe (Some (MD.DiscoveryFunInfo arch))
+lookupFunctionEntry pfm st fe = case Map.lookup fe (parsedFunctionCache st) of
+  Just cachedInfo | 
+      Some dfi <- cachedDfi cachedInfo
+    , mov <- Map.lookup (MD.discoveredFunAddr dfi) (absStateOverrides pfm)
+    , mov == cachedOverride cachedInfo
+    , extraEdges st == cachedExtraJumps cachedInfo
+    , extraTargets st == cachedExtraTargets cachedInfo
+    -> Just (Some dfi)
+  _ -> Nothing
+
+
 data ParsedFunctionState arch bin =
-  ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (Some (MD.DiscoveryFunInfo arch))
+  ParsedFunctionState { parsedFunctionCache :: Map.Map (PB.FunctionEntry arch bin) (CachedFunInfo arch bin)
                       , discoveryState :: MD.DiscoveryState arch
                       , extraTargets :: Set.Set (MM.ArchSegmentOff arch)
                       , extraEdges :: ExtraJumps arch
@@ -132,7 +186,6 @@ addExtraTarget pfm tgt = do
     False -> do
       IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
         st' { extraTargets = Set.insert tgt (extraTargets st')}
-      flushCache pfm
 
 getExtraTargets ::
   ParsedFunctionMap arch bin ->
@@ -140,16 +193,6 @@ getExtraTargets ::
 getExtraTargets pfm = do
   st <- IORef.readIORef (parsedStateRef pfm)
   return $ extraTargets st
-
-flushCache ::
-  MM.ArchConstraints arch =>
-  ParsedFunctionMap arch bin ->
-  IO ()
-flushCache pfm = do
-  st <- IORef.readIORef (parsedStateRef pfm)
-  let ainfo = MD.archInfo (discoveryState st)
-  IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
-    st' { parsedFunctionCache = mempty, discoveryState = initDiscoveryState pfm ainfo }
 
 isUnsupportedErr :: T.Text -> Bool
 isUnsupportedErr err = 
@@ -231,16 +274,12 @@ addExtraEdges ::
 addExtraEdges pfm es = do
   mapM_ addTgt (Map.elems es)
   IORef.modifyIORef' (parsedStateRef pfm) $ \st' -> 
-    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (l <> r))) es (extraEdges st')}
+    st' { extraEdges = Map.merge Map.preserveMissing Map.preserveMissing (Map.zipWithMaybeMatched (\_ l r -> Just (l <> r))) es (extraEdges st') }
   where
     addTgt :: ExtraJumpTarget arch -> IO ()
     addTgt = \case
       DirectTargets es' -> mapM_ (addExtraTarget pfm) (Set.toList es')
-      -- we need to flush the cache here to ensure that we re-check the block at the
-      -- call site(s) after adding this as a return
-      ReturnTarget -> flushCache pfm
-      -- a call shouldn't require special treatment since it won't introduce
-      -- any edges
+      ReturnTarget -> return ()
       DirectCall{} -> return ()
 
 -- | Apply the various overrides to the architecture definition before returning the discovery state
@@ -518,7 +557,7 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
   st <- getParsedFunctionState faddr pfm
 
   -- First, check if we have a cached set of blocks for this state
-  case Map.lookup (PB.blockFunctionEntry blk) (parsedFunctionCache st) of
+  case lookupFunctionEntry pfm st (PB.blockFunctionEntry blk) of
     Just sdfi -> return (Just sdfi)
     Nothing -> do
       -- Otherwise, run code discovery at this address
@@ -531,7 +570,10 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
       -- IORef that might be evaluated multiple times if there is a lot of
       -- contention. If that becomes a problem, we may want to change this
       -- to an MVar where we fully evaluate each result before updating it.
-      (_, Some dfi) <- atomicAnalysis faddr st
+      (st', Some dfi) <- atomicAnalysis faddr st
+      IORef.modifyIORef pfmRef $ \st_ -> 
+        st_ { parsedFunctionCache = parsedFunctionCache st' }
+
       --IORef.writeIORef pfmRef pfm'
       saveCFG mCFGDir (PB.blockBinRepr blk) dfi
       return (Just (Some dfi))
@@ -557,11 +599,10 @@ parsedFunctionContaining blk pfm@(ParsedFunctionMap pfmRef mCFGDir _pd _ _ _ _ _
         False -> do
           let rsn = MD.CallTarget faddr
           case incCompResult (MD.discoverFunction MD.defaultDiscoveryOptions faddr rsn (discoveryState st) []) of
-            (ds2, Some dfi) -> do
+            (_, Some dfi) -> do
                 entry <- resolveFunctionEntry (funInfoToFunEntry (PB.blockBinRepr blk) dfi pfm) pfm
-                return $ (st { parsedFunctionCache = Map.insert entry (Some dfi) (parsedFunctionCache st)
-                             , discoveryState = ds2
-                             }, Some dfi)
+                let st' = addFunctionEntry pfm entry dfi st
+                return $ (st', Some dfi)
     bin :: PBi.WhichBinaryRepr bin
     bin = PB.blockBinRepr blk
 
