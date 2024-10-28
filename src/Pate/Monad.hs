@@ -212,6 +212,7 @@ import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Text as JSON
 import qualified GHC.IO.Unsafe as IO
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified What4.Utils.AbstractDomains as W4AD
 
 atPriority :: 
   NodePriority ->
@@ -1102,50 +1103,75 @@ concretizeWithSolverGen' cm_outer a = withSym $ \sym -> do
             -- first time seeing this value, insert concretized version into cache
             Nothing -> do
               p' <- IO.liftIO $ W4.andPred sym p e_is_conc1
+              emitTraceLabel @"expr" "p'" (Some p')
               return $ ConcreteMap (MapF.insert e (PPa.LiftF (Just conc1)) m) p'
         
   
     loop :: W4.Pred sym -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym, Bool)
     loop not_prev_model (ConcreteMap cm p) = do
-      mresult <- heuristicSat "concretize" not_prev_model $ \case
-        W4R.Sat evalFn -> 
+      mresult <- withTracing @"debug" "loop" $ heuristicSat "concretize" not_prev_model $ \case
+        W4R.Sat evalFn -> do
+          emitTrace @"debug" "Sat"
+          emitTrace @"expr" (Some not_prev_model)
           W4R.Sat <$> TFC.foldrMFC (go evalFn) (ConcreteMap cm (W4.truePred sym)) a
         W4R.Unsat () -> return $ W4R.Unsat ()
         W4R.Unknown -> return $ W4R.Unknown
       case mresult of
         W4R.Sat (ConcreteMap cm' p') -> do
           not_this <- IO.liftIO $ W4.notPred sym p'
-          withAssumption not_prev_model $ do
-            loop not_this (ConcreteMap cm' (W4.truePred sym))
+          case W4.asConstantPred not_this of
+            Just True -> throwHere $ PEE.ConcretizationFailure "Previous computed model is unsatisfiable" 
+            _ -> withAssumption not_prev_model $ do
+              loop not_this (ConcreteMap cm' (W4.truePred sym))
           
         -- predicate is unsatisfiable, so there are no models that disprove all of the
         -- current cached values
         W4R.Unsat () -> return $ (ConcreteMap cm p, True)
         W4R.Unknown -> return (ConcreteMap cm p, False)
+    
+    -- this is a workaround for the fact that we're manually setting the
+    -- abstract domains for any integers coming out of the memory model to be positive.
+    -- What4's bookkeeping sometimes neglects to introduce this assumption into the solver state, so
+    -- we re-add it here explicitly.
+    explicit_nat_asm :: forall tp. W4.SymExpr sym tp -> W4.Pred sym -> EquivM_ sym arch (W4.Pred sym)
+    explicit_nat_asm e p =  do
+      case W4.exprType e of
+        W4.BaseIntegerRepr -> case W4AD.rangeLowBound (W4.integerBounds e)  of
+          W4AD.Inclusive i -> do
+            i_sym <- IO.liftIO $ W4.intLit sym i
+            -- we add an annotation to prevent the expression builder simplification rules from turning this
+            -- into just 'true' if there is a cached result for this comparison
+            (_, e') <- IO.liftIO $ W4.annotateTerm sym (W4.unsafeSetAbstractValue W4AD.unboundedRange e)
+            p' <- IO.liftIO $ W4.intLe sym i_sym e'
+            IO.liftIO $ W4.andPred sym p p'
+          _ -> return p
+        _ -> return p
+  
+  nat_asms <- TFC.foldrMFC explicit_nat_asm (W4.truePred sym) a
+  withAssumption nat_asms $ do
+    (cm, complete) <- loop (W4.truePred sym) cm_outer
+    (ConcreteMap cm_ _) <- case complete of
+      True -> return cm
+      False -> do
+        -- finish the 'ConcreteMap' by double checking each map
+        let
+          upd :: forall tp. W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
+          upd e cm_ = concretizeWithMap cm_ e >>= \case
+            Just e' -> case W4.asConcrete e' of
+              -- e is possibly concrete, double check it
+              Just{} -> snd <$> concretizeOne e cm_
+              -- e is known-symbolic, nothing to do
+              Nothing -> return cm_
+            -- e is missing from map entirely, so check it here
+            Nothing -> snd <$> concretizeOne e cm_
+        TFC.foldrMFC' upd cm a
+    let cm' = ConcreteMap cm_ (W4.truePred sym)
+    let
+      conc :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+      conc e = fromMaybe e <$> concretizeWithMap cm' e
 
-  (cm, complete) <- loop (W4.truePred sym) cm_outer
-  (ConcreteMap cm_ _) <- case complete of
-    True -> return cm
-    False -> do
-      -- finish the 'ConcreteMap' by double checking each map
-      let
-        upd :: forall tp. W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
-        upd e cm_ = concretizeWithMap cm_ e >>= \case
-          Just e' -> case W4.asConcrete e' of
-            -- e is possibly concrete, double check it
-            Just{} -> snd <$> concretizeOne e cm_
-            -- e is known-symbolic, nothing to do
-            Nothing -> return cm_
-          -- e is missing from map entirely, so check it here
-          Nothing -> snd <$> concretizeOne e cm_
-      TFC.foldrMFC' upd cm a
-  let cm' = ConcreteMap cm_ (W4.truePred sym)
-  let
-    conc :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
-    conc e = fromMaybe e <$> concretizeWithMap cm' e
-
-  a' <- TFC.traverseFC conc a
-  return (a', cm')
+    a' <- TFC.traverseFC conc a
+    return (a', cm')
 
 -- | Similar to 'concretizeWithSolver' but uses a widening strategy to
 --   attempt to concretize all of the given expressions simultaneously.
@@ -1630,7 +1656,10 @@ withFreshSolver f = do
   st <- withOnlineBackend $ \bak -> safeIO PEE.SolverError $ LCB.saveAssumptionState bak
   PSo.withOnlineSolver solver Nothing sym $ \bak -> do
     CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak }) $ do
-      safeIO PEE.SolverError $ LCBO.restoreSolverState bak st
+      -- we need to ensure that the solver process is started, since otherwise
+      -- restoreSolverState does nothing
+      withSolverProcess $ \_sp ->
+        safeIO PEE.SolverError $ LCBO.restoreSolverState bak st
       f
 
 -- | Similar to 'withForkedSolver' but does not return a result.
