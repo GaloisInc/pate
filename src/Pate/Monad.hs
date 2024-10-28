@@ -1627,14 +1627,11 @@ withFreshSolver f = do
   vcfg <- CMR.asks envConfig
   let solver = PC.cfgSolver vcfg
   PSo.Sym n sym _ <- CMR.asks envValidSym
-  asm <- currentAsm
+  st <- withOnlineBackend $ \bak -> safeIO PEE.SolverError $ LCB.saveAssumptionState bak
   PSo.withOnlineSolver solver Nothing sym $ \bak -> do
-    unsatCacheRef <- asks envUnsatCacheRef
-    satCache <- asks envSatCacheRef
-
-    CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak, envCurrentFrame = mempty }) $ 
-      withAssumptionSet asm $ CMR.local (\env -> env { envUnsatCacheRef = unsatCacheRef, envSatCacheRef = satCache }) f
-
+    CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak }) $ do
+      safeIO PEE.SolverError $ LCBO.restoreSolverState bak st
+      f
 
 -- | Similar to 'withForkedSolver' but does not return a result.
 withForkedSolver_ ::
